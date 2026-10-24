@@ -53,9 +53,10 @@ flowchart LR
     Page[Страница сайта]
     Ext[Расширение OpenNCALayer<br/>шим WebSocket]
   end
+  NMH[nmhost — native messaging relay<br/>отдельный процесс вне каталога current Velopack, D27]
   subgraph Daemon[openncalayer — пользовательский процесс]
     WSS[WSS-сервер 127.0.0.1:13579<br/>TLS: сертификат пользователя]
-    NMH[Native messaging relay<br/>openncalayer --native-messaging]
+    IPC[Локальный IPC<br/>named pipe / Unix socket]
     Router[Реестр модулей<br/>module → обработчик]
     Builtin[Встроенные модули<br/>basics · commonUtils · Applet · accessory]
     Wasm[WASM-хост wasmi<br/>порты плагинов]
@@ -65,7 +66,7 @@ flowchart LR
     Upd[Апдейтер<br/>Velopack · oncl-update · minisign]
   end
   Page -- wss --> WSS
-  Page -. WebSocket .-> Ext -- native messaging --> NMH -- IPC --> Router
+  Page -. WebSocket .-> Ext -- native messaging --> NMH --> IPC --> Router
   WSS --> Router --> Builtin & Wasm
   Builtin & Wasm --> PKI --> GOST
   Builtin & Wasm --> UI
