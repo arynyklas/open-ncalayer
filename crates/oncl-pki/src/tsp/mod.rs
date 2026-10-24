@@ -67,6 +67,13 @@ impl TspHash {
         }
     }
 
+    /// The hash with algorithm OID `oid`.
+    pub fn from_oid(oid: &ObjectIdentifier) -> Option<TspHash> {
+        [TspHash::Streebog512, TspHash::Sha256, TspHash::Gost34311]
+            .into_iter()
+            .find(|h| h.oid() == *oid)
+    }
+
     /// Hash of `data`.
     pub fn digest(self, data: &[u8]) -> Vec<u8> {
         let alg = match self {
@@ -268,6 +275,23 @@ pub fn verify_token(token: &[u8]) -> Result<TstInfo, TspError> {
         return Err(TspError::NoTsaCertificate);
     }
     tst_info(content.as_bytes())
+}
+
+/// [`verify_token`] for the token of a CMS signer whose `SignerInfo.signature` value is
+/// `signature`: the token's message imprint must also be the hash of `signature` (with the
+/// token's own imprint algorithm), as [`timestamp_signer`] requests it.
+///
+/// # Errors
+///
+/// Errors of [`verify_token`]; [`TspError::ImprintMismatch`] if the imprint algorithm is
+/// unknown or the imprint is not the hash of `signature`.
+pub fn verify_token_for(token: &[u8], signature: &[u8]) -> Result<TstInfo, TspError> {
+    let tst = verify_token(token)?;
+    let hash = TspHash::from_oid(&tst.imprint_alg).ok_or(TspError::ImprintMismatch)?;
+    if tst.imprint != hash.digest(signature) {
+        return Err(TspError::ImprintMismatch);
+    }
+    Ok(tst)
 }
 
 /// Time-stamps signer `signer_index` of a DER or BER `ContentInfo{SignedData}`: requests a

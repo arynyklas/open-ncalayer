@@ -7,10 +7,10 @@ use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
 use oncl_basics::RecentPathStore;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
-use oncl_pki::cms::verify;
+use oncl_pki::cms::{SignOptions, sign, verify};
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
-use oncl_pki::tsp::{MockTsa, verify_token};
+use oncl_pki::tsp::{MockTsa, TsaProfile, timestamp_signer, verify_token};
 use oncl_testkit::{read, synthetic};
 use oncl_tls::TlsFiles;
 use openncalayer::cli::cms_verify_report;
@@ -265,6 +265,21 @@ async fn e2e_accepts_40_mib_request() {
     assert!(pem.starts_with("-----BEGIN CMS-----"));
 }
 
+/// Releases the scripted dialog's barrier when dropped, also while a test unwinds: a server
+/// thread left in `Barrier::wait` would keep the runtime from shutting down, so a failing
+/// test would hang. The waiting happens on a detached thread, so dropping never blocks, also
+/// if the dialog reaches the barrier only later or never.
+struct Release(Arc<Barrier>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        let barrier = Arc::clone(&self.0);
+        std::thread::spawn(move || {
+            barrier.wait();
+        });
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_second_connection_not_blocked_by_open_dialog() {
     let signal = Arc::new(Barrier::new(2));
@@ -280,6 +295,9 @@ async fn e2e_second_connection_not_blocked_by_open_dialog() {
 
     let mut first = connect_from(&srv, "https://first.test").await;
     next_text(&mut first).await;
+    // From here on the first dialog will wait on the barrier: release it on every path out
+    // of this test, including panics and a first prompt arriving after the deadline.
+    let release = Release(signal.clone());
     send(&mut first, &request).await;
     let deadline = Instant::now() + PATIENCE;
     while srv.prompter.storage_prompts().is_empty() && Instant::now() < deadline {
@@ -289,8 +307,7 @@ async fn e2e_second_connection_not_blocked_by_open_dialog() {
     // the first dialog is "open" until the signal.
     let first_shown = !srv.prompter.storage_prompts().is_empty();
 
-    // Observe everything first, release the dialog, assert afterwards: a failed assertion
-    // must not leave the first request blocked on the barrier.
+    // Observe everything first, release the dialog, assert afterwards.
     let second = async {
         let started = Instant::now();
         let mut c = connect_from(&srv, "https://second.test").await;
@@ -305,12 +322,7 @@ async fn e2e_second_connection_not_blocked_by_open_dialog() {
     let (mut second, greeting, heartbeat, elapsed) = second.await;
     let storage_prompts_while_open = srv.prompter.storage_prompts().len();
     let key_prompts_while_open = srv.prompter.key_prompts().len();
-    if first_shown {
-        let signal = signal.clone();
-        tokio::task::spawn_blocking(move || signal.wait())
-            .await
-            .unwrap();
-    }
+    drop(release);
 
     assert!(first_shown, "the first dialog never opened");
     assert_eq!(
@@ -426,6 +438,54 @@ async fn cms_verify_reports_signers() {
     assert!(!ok);
     assert!(
         report.lines().last().unwrap().starts_with("FAIL: "),
+        "{report}"
+    );
+}
+
+#[test]
+fn cms_verify_rejects_a_token_of_another_signature() {
+    // Two GOST signatures of the same content with the same signed attributes differ only
+    // in the signature value (random k). Time-stamp the first, then put the second's
+    // signature value in its place: every signature still verifies, but the token covers a
+    // signature the CMS no longer has.
+    let key = entry("user-gost2015-sign");
+    let opts = SignOptions {
+        encapsulate: true,
+        digested: false,
+        signing_time: OffsetDateTime::now_utc(),
+    };
+    let first = sign(&key, b"doc", &opts).unwrap();
+    let second = sign(&key, b"doc", &opts).unwrap();
+    let tsa = MockTsa::new(entry("tsa-gost2015"));
+    let stamped = timestamp_signer(&first, 0, &TsaProfile::basics_default(), &tsa).unwrap();
+    let (report, ok) = cms_verify_report(&stamped, None);
+    assert!(ok, "{report}");
+    assert!(report.contains("\ntimestamp: yes\nOK\n"), "{report}");
+
+    let old = verify(&first, None).unwrap().swap_remove(0).signature;
+    let new = verify(&second, None).unwrap().swap_remove(0).signature;
+    assert_eq!(old.len(), new.len());
+    assert_ne!(old, new);
+    let at: Vec<usize> = stamped
+        .windows(old.len())
+        .enumerate()
+        .filter(|(_, w)| *w == old.as_slice())
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(at.len(), 1);
+    let mut forged = stamped.clone();
+    forged[at[0]..at[0] + new.len()].copy_from_slice(&new);
+    assert_eq!(
+        verify(&forged, None).unwrap().len(),
+        1,
+        "the signature itself verifies"
+    );
+
+    let (report, ok) = cms_verify_report(&forged, None);
+    assert!(!ok, "{report}");
+    assert_eq!(
+        report.lines().last(),
+        Some("FAIL: time-stamp of signer 0 does not cover its signature"),
         "{report}"
     );
 }

@@ -10,7 +10,7 @@ use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::{
     HttpReply, HttpTransport, MockTamper, MockTsa, TsaMethod, TsaProfile, TspError, TspHash,
-    UreqTransport, parse_response, request_der, timestamp_signer, verify_token,
+    UreqTransport, parse_response, request_der, timestamp_signer, verify_token, verify_token_for,
 };
 use oncl_testkit::{ncanode, read, synthetic};
 use std::sync::Mutex;
@@ -244,6 +244,45 @@ fn timestamp_roundtrip_with_mock() {
     let age = time::OffsetDateTime::now_utc() - tst.gen_time;
     assert!(age.whole_minutes().abs() < 5, "{}", tst.gen_time);
     assert_eq!(unsigned_attrs(&cms, 0), [(TIME_STAMP_TOKEN.to_owned(), 1)]);
+}
+
+#[test]
+fn token_is_bound_to_its_signature() {
+    let mock = tsa();
+    let profiles = [
+        TsaProfile::basics_default(),
+        TsaProfile {
+            hash: TspHash::Sha256,
+            ..TsaProfile::basics_default()
+        },
+    ];
+    for profile in profiles {
+        let cms = timestamp_signer(&signed("user-gost2015-sign"), 0, &profile, &mock).unwrap();
+        let s = verify(&cms, None).unwrap();
+        assert_eq!(s[0].signature, signer_signature(&cms, 0));
+        let token = s[0].timestamp_token.as_ref().unwrap();
+        let tst = verify_token_for(token, &s[0].signature).unwrap();
+        assert_eq!(tst.imprint_alg, profile.hash.oid());
+
+        // The token of another signature (the same content and key, a fresh random k).
+        let other = verify(&signed("user-gost2015-sign"), None).unwrap();
+        assert_ne!(other[0].signature, s[0].signature);
+        assert_eq!(
+            verify_token_for(token, &other[0].signature),
+            Err(TspError::ImprintMismatch)
+        );
+    }
+}
+
+#[test]
+fn hash_from_oid() {
+    for h in [TspHash::Streebog512, TspHash::Sha256, TspHash::Gost34311] {
+        assert_eq!(TspHash::from_oid(&h.oid()), Some(h));
+    }
+    assert_eq!(
+        TspHash::from_oid(&ObjectIdentifier::new_unwrap("1.3.14.3.2.26")),
+        None
+    );
 }
 
 #[test]

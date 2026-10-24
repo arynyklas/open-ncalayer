@@ -16,7 +16,7 @@ use base64::engine::general_purpose::STANDARD;
 use clap::{Parser, Subcommand};
 use oncl_pki::cms;
 use oncl_pki::info::cert_info;
-use oncl_pki::tsp::verify_token;
+use oncl_pki::tsp::{TspError, verify_token_for};
 use oncl_tls::{
     RENEW_BEFORE, TargetOs, TlsFiles, TlsInfo, TlsSource, TlsWarning, instructions, load_info,
     server_config, sha1_grouped,
@@ -208,7 +208,10 @@ fn tls_init(files: &TlsFiles, force: bool) -> Result<ExitCode, ExitCode> {
         Ok(previous) => previous,
         // A damaged tls.json is replaced with --force.
         Err(e) if force => {
-            warn!(error = %e, "replacing unreadable TLS metadata");
+            eprintln!(
+                "Не удалось прочитать {}: {e}; файлы будут перезаписаны.",
+                files.info().display()
+            );
             None
         }
         Err(e) => {
@@ -375,10 +378,10 @@ pub fn cms_verify(file: &Path, content: Option<&Path>) -> ExitCode {
 ///
 /// The report has a block per signer (numbered from 0, as in error messages):
 /// `signer <n>: CN=<cn>, IIN=<iin|->, alg=<SigAlg>, signingTime=<RFC 3339|->` and
-/// `timestamp: yes|no`; its last line is `OK` if every signature (including the time-stamp
-/// tokens) verifies, otherwise `FAIL: <error>`. Returns the report and whether it is `OK`.
-/// Certificate chains, validity and revocation are not checked, nor that a time-stamp
-/// token covers its signature.
+/// `timestamp: yes|no` (whether the signer carries a time-stamp token); its last line is
+/// `OK` if every signature verifies and every token verifies and covers its signer's
+/// signature, otherwise `FAIL: <error>`. Returns the report and whether it is `OK`.
+/// Certificate chains, validity and revocation are not checked.
 pub fn cms_verify_report(input: &[u8], content: Option<&[u8]>) -> (String, bool) {
     let mut report = String::new();
     match describe(input, content, &mut report) {
@@ -414,8 +417,13 @@ fn describe(input: &[u8], content: Option<&[u8]>, report: &mut String) -> Result
         );
         let timestamp = match &signer.timestamp_token {
             Some(token) => {
-                if let Err(e) = verify_token(token) {
-                    failure.get_or_insert_with(|| format!("time-stamp of signer {n}: {e}"));
+                if let Err(e) = verify_token_for(token, &signer.signature) {
+                    failure.get_or_insert_with(|| match e {
+                        TspError::ImprintMismatch => {
+                            format!("time-stamp of signer {n} does not cover its signature")
+                        }
+                        e => format!("time-stamp of signer {n}: {e}"),
+                    });
                 }
                 "yes"
             }

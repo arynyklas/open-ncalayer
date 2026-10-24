@@ -25,6 +25,9 @@ pub struct VerifiedSigner {
     pub sig_alg: SigAlg,
     /// signingTime attribute, if present.
     pub signing_time: Option<OffsetDateTime>,
+    /// The `signature` value of the `SignerInfo`: what a time-stamp token of this signer
+    /// covers (see [`crate::tsp::verify_token_for`]).
+    pub signature: Vec<u8>,
     /// DER of the timeStampToken unsigned attribute (a `ContentInfo`), if present.
     pub timestamp_token: Option<Vec<u8>>,
 }
@@ -173,6 +176,7 @@ impl Signer<'_> {
             cert: cert.clone(),
             sig_alg: alg,
             signing_time,
+            signature: self.info.signature.as_bytes().to_vec(),
             timestamp_token: self.timestamp_token()?,
         })
     }

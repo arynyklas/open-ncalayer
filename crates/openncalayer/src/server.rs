@@ -125,7 +125,9 @@ fn ws_error(e: tungstenite::Error) -> io::Error {
     }
 }
 
-/// One connection: TLS, the request head, then WebSocket or plain HTTP.
+/// One connection: TLS, the request head, then WebSocket or plain HTTP. TLS and WebSocket
+/// handshake failures (an untrusted certificate shows up here) are logged as warnings;
+/// the returned error is a failure after the handshakes.
 async fn connection(
     tcp: TcpStream,
     peer: SocketAddr,
@@ -134,9 +136,17 @@ async fn connection(
 ) -> io::Result<()> {
     // Small replies (heartbeat) should not wait for Nagle.
     tcp.set_nodelay(true)?;
-    let mut tls = timeout(cfg.idle_timeout, acceptor.accept(tcp))
+    let accepted = timeout(cfg.idle_timeout, acceptor.accept(tcp))
         .await
-        .map_err(timed_out)??;
+        .map_err(timed_out)
+        .flatten();
+    let mut tls = match accepted {
+        Ok(tls) => tls,
+        Err(e) => {
+            warn!(%peer, error = %e, "TLS handshake failed");
+            return Ok(());
+        }
+    };
     let head = timeout(cfg.idle_timeout, read_head(&mut tls))
         .await
         .map_err(timed_out)??;
@@ -159,13 +169,20 @@ async fn connection(
         .max_frame_size(Some(cfg.max_message));
     // tungstenite reads the handshake itself: give it back the bytes already read.
     let stream = Replay::new(head, tls);
-    let ws = timeout(
+    let accepted = timeout(
         cfg.idle_timeout,
         tokio_tungstenite::accept_async_with_config(stream, Some(config)),
     )
     .await
-    .map_err(timed_out)?
-    .map_err(ws_error)?;
+    .map_err(timed_out)
+    .and_then(|r| r.map_err(ws_error));
+    let ws = match accepted {
+        Ok(ws) => ws,
+        Err(e) => {
+            warn!(%peer, error = %e, "WebSocket handshake failed");
+            return Ok(());
+        }
+    };
     info!(%peer, origin = request.origin.as_deref().unwrap_or("-"), "websocket connected");
     websocket(
         ws,
