@@ -344,6 +344,35 @@ fn unreadable_storages_reprompt_with_error() {
     assert_eq!(s.recent.saved(), None);
 }
 
+#[test]
+fn keyless_store_reprompts_with_no_keys() {
+    let p12 = write(
+        &[],
+        "Qwerty12",
+        &WriteOptions::default(),
+        &mut |buf: &mut [u8]| buf.fill(3),
+    );
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("oncl-basics-keyless.p12");
+    std::fs::write(&path, p12).unwrap();
+    let s = setup(
+        script![
+            storage_at(&path, "Qwerty12"),
+            storage("user-gost2015-sign", "Qwerty12"),
+            key(0)
+        ],
+        None,
+    );
+    let r = json(
+        s.basics
+            .process(&req(raw_args(json!("x"), json!({}))), &origin("o")),
+    );
+    assert_eq!(r["status"], true, "{r}");
+    let prompts = s.prompter.storage_prompts();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[1].error, Some(OpenError::NoKeys));
+    assert_eq!(prompts[1].recent_path, Some(path));
+}
+
 /// Answers `JKS` first, then a working PKCS#12, then key 0.
 struct JksFirst {
     storage_prompts: Mutex<Vec<StoragePrompt>>,
@@ -639,7 +668,8 @@ fn tsp_failure_code() {
     ));
     assert_eq!(r["status"], false);
     assert_eq!(r["code"], "TIMESTAMP_CREATION_FAILURE");
-    assert!(r.get("message").is_none(), "{r}");
+    assert_eq!(r["message"], "HTTP request to the TSA failed: down", "{r}");
+    assert_eq!(r["details"], r["message"]);
 }
 
 #[test]
@@ -731,7 +761,7 @@ fn param_errors() {
         assert_eq!(r["message"], "An invoked method threw an exception.");
         assert_eq!(
             r["details"],
-            format!("JSONObject[\"{field}\"] not found."),
+            format!("org.json.JSONException: JSONObject[\"{field}\"] not found."),
             "{r}"
         );
     };
@@ -769,7 +799,8 @@ fn param_errors() {
         ));
         assert_eq!(r["status"], false);
         assert_eq!(r["code"], "INVALID_SIGNING_PARAMS");
-        assert!(r.get("message").is_none(), "{r}");
+        assert_eq!(r["message"], "Invalid signing parameters provided.", "{r}");
+        assert!(r.get("details").is_none(), "{r}");
     }
 
     // Invalid base64 with `decode`: SIGNING_FAILURE before any dialog.
@@ -803,6 +834,34 @@ fn param_errors() {
             "{bad:?}"
         );
     }
+
+    // Other Java exceptions from argument reading: INVOCATION_ERROR with the exception.
+    let details = |args: Value| {
+        let (b, p) = basics(script![]);
+        let r = json(b.process(&req(args), &origin("o")));
+        assert_eq!(r["code"], "INVOCATION_ERROR", "{r}");
+        assert!(p.storage_prompts().is_empty());
+        r["details"].as_str().unwrap().to_owned()
+    };
+    let mut args = raw_args(json!("x"), json!({}));
+    args["allowedStorages"] = json!(["PKCS12", 5]);
+    assert_eq!(
+        details(args),
+        "java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String"
+    );
+    let mut args = raw_args(json!("x"), json!({}));
+    args["signerParams"]["extKeyUsageOids"] = json!([null]);
+    assert_eq!(details(args), "java.lang.NullPointerException");
+    assert_eq!(
+        details(
+            json!({"format": 1, "data": "x", "signingParams": {}, "signerParams": {"extKeyUsageOids": []}})
+        ),
+        "org.json.JSONException: JSONObject[\"format\"] is not a string."
+    );
+    assert_eq!(
+        details(raw_args(json!(["a", 1]), json!({}))),
+        "org.json.JSONException: JSONArray[1] is not a string."
+    );
 }
 
 #[test]
@@ -868,7 +927,7 @@ fn cosign_detached_cms_error_code() {
     ));
     assert_eq!(r["status"], false);
     assert_eq!(r["code"], "CMS_NO_ENCAPSULATED_DATA");
-    assert!(r.get("message").is_none(), "{r}");
+    assert_eq!(r["message"], "CMS_NO_ENCAPSULATED_DATA", "{r}");
 }
 
 /// Replaces sha256WithRSAEncryption (1.2.840.113549.1.1.11) by sha1WithRSAEncryption
@@ -921,7 +980,7 @@ fn sha1_with_rsa_certificate_is_not_upgraded() {
     let r = json(b.process(&req(cms_args(json!("x"), json!({}))), &origin("o")));
     assert_eq!(r["status"], false, "{r}");
     assert_eq!(r["code"], "UNKNOWN_ALGORITHM");
-    assert!(r.get("message").is_none(), "{r}");
+    assert_eq!(r["message"], "UNKNOWN_ALGORITHM", "{r}");
 }
 
 #[test]
@@ -929,10 +988,14 @@ fn unknown_storages_dropped_and_recent_path_used() {
     let recent = PathBuf::from("C:/keys/old.p12");
     let s = setup(script![Step::CancelStorage], Some(recent.clone()));
     let mut args = raw_args(json!("x"), json!({}));
-    args["allowedStorages"] = json!(["PKCS12", "FOO", "pkcs12", 5]);
+    args["allowedStorages"] = json!(["PKCS12", "FOO", "pkcs12", null, "JKS", "PKCS12"]);
     s.basics.process(&req(args), &origin("o"));
     let prompt = &s.prompter.storage_prompts()[0];
-    assert_eq!(prompt.storages, [StorageKind::Pkcs12]);
+    // Unknown names and null are dropped; duplicates stay, as in the original.
+    assert_eq!(
+        prompt.storages,
+        [StorageKind::Pkcs12, StorageKind::Jks, StorageKind::Pkcs12]
+    );
     assert_eq!(prompt.recent_path, Some(recent.clone()));
     assert_eq!(s.recent.saved(), None);
 
@@ -1025,16 +1088,24 @@ fn sign_flows_are_serialized() {
 
     let a = run("a");
     let deadline = Instant::now() + Duration::from_secs(30);
-    while prompter.storage_prompts().is_empty() {
-        assert!(Instant::now() < deadline, "A never showed its dialog");
+    while prompter.storage_prompts().is_empty() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
+    // A records its prompt before it takes the `Wait` step, so once it is seen A will reach
+    // the barrier. Observe now, release A, assert after: a failed assertion must not leave
+    // A blocked on the barrier.
+    let a_shown = !prompter.storage_prompts().is_empty();
     let b = run("b");
     // B waits for A's flow instead of showing a second dialog.
     thread::sleep(Duration::from_millis(300));
-    assert_eq!(prompter.storage_prompts().len(), 1);
-    assert!(prompter.key_prompts().is_empty());
-    barrier.wait();
+    let storage_prompts_while_a_open = prompter.storage_prompts().len();
+    let key_prompts_while_a_open = prompter.key_prompts().len();
+    if a_shown {
+        barrier.wait();
+    }
+    assert!(a_shown, "A never showed its dialog");
+    assert_eq!(storage_prompts_while_a_open, 1);
+    assert_eq!(key_prompts_while_a_open, 0);
 
     assert_eq!(a.join().unwrap()["status"], true);
     assert_eq!(b.join().unwrap()["status"], true);

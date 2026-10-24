@@ -3,7 +3,7 @@
 
 use der::asn1::{AnyRef, ObjectIdentifier};
 use der::{Decode, Encode, Reader, SliceReader, Tagged};
-use oncl_pki::cms::{CmsError, SignOptions, sign, to_pem, verify};
+use oncl_pki::cms::{CmsError, SignOptions, sign, signer_count, to_pem, verify};
 use oncl_pki::info::cert_info;
 use oncl_pki::key::{KeyError, SigAlg};
 use oncl_pki::pkcs12::{KeyEntry, load};
@@ -491,4 +491,20 @@ fn pem_shape() {
     let expected =
         format!("-----BEGIN CMS-----{nl}{line}{nl}{line}{nl}AAAAAA=={nl}-----END CMS-----{nl}");
     assert_eq!(p, expected);
+}
+
+#[test]
+fn signer_counts() {
+    let one = sign(&entry("user-gost2015-sign"), b"d", &opts(true)).unwrap();
+    assert_eq!(signer_count(&one), Ok(1));
+    let two = sign(&entry("user-rsa-sign"), &one, &opts(true)).unwrap();
+    assert_eq!(signer_count(&two), Ok(2));
+    // BER from the original NCALayer is accepted.
+    assert_eq!(
+        signer_count(&read(ncanode("cades-test-signed-b.p7s"))),
+        Ok(1)
+    );
+    assert!(matches!(signer_count(b"d"), Err(CmsError::Malformed(_))));
+    let cert = entry("user-rsa-sign").cert.to_der().unwrap();
+    assert!(matches!(signer_count(&cert), Err(CmsError::Malformed(_))));
 }

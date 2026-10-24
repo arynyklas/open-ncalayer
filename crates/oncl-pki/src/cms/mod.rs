@@ -15,18 +15,42 @@
 //!   ones unless already there).
 
 pub(crate) mod asn1;
-mod pem;
 mod sign;
 mod verify;
 
-use crate::ber::BerError;
+use crate::ber::{self, BerError};
 use crate::key::KeyError;
+use crate::oid;
+use asn1::{ContentInfo, SignedData};
+use der::Decode;
 
-pub use pem::to_pem;
 #[cfg(feature = "testing")]
 pub(crate) use sign::sign_content;
 pub use sign::{SignOptions, sign};
 pub use verify::{VerifiedSigner, verify};
+
+/// A DER CMS as `-----BEGIN CMS-----` PEM ([`crate::pem::encode`]).
+pub fn to_pem(der: &[u8]) -> String {
+    crate::pem::encode("CMS", der)
+}
+
+/// Number of signers (`signerInfos` elements) of a DER or BER `ContentInfo{SignedData}`.
+///
+/// # Errors
+///
+/// [`CmsError::Malformed`] if `cms` is not a readable `ContentInfo{SignedData}`.
+pub fn signer_count(cms: &[u8]) -> Result<usize, CmsError> {
+    let der = ber::to_der(cms)?;
+    let content_info = ContentInfo::from_der(&der)?;
+    if content_info.content_type != oid::SIGNED_DATA {
+        return Err(CmsError::Malformed(format!(
+            "content type {} is not signedData",
+            content_info.content_type
+        )));
+    }
+    let signed_data: SignedData<'_> = content_info.content.decode_as()?;
+    Ok(signed_data.signer_infos.tlvs()?.len())
+}
 
 /// Error of a CMS operation. `usize` values are signer indexes in `signerInfos`.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]

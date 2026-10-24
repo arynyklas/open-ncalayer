@@ -11,24 +11,24 @@ use base64::Engine;
 use base64::alphabet;
 use base64::engine::general_purpose::STANDARD;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-use der::asn1::AnyRef;
-use der::{Decode, Encode, Reader, SliceReader};
-use oncl_pki::cert::Certificate;
+use der::Encode;
 use oncl_pki::cms::{self, CmsError, SignOptions};
 use oncl_pki::info::cert_info;
 use oncl_pki::key::{KeyAlg, KeyError, SigAlg};
 use oncl_pki::pkcs12::{self, KeyEntry, Pkcs12Error};
-use oncl_pki::tsp;
+use oncl_pki::{pem, tsp};
 use oncl_protocol::AddInfo;
 use oncl_protocol::invoker::{CallResult, Failure};
 use serde_json::{Map, Value, json};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::fmt::Display;
 use std::sync::{Mutex, PoisonError};
 
 const SIGNING_FAILURE: &str = "SIGNING_FAILURE";
 const SIGNING_FAILURE_MESSAGE: &str = "Signing has failed.";
 const INVALID_SIGNING_PARAMS: &str = "INVALID_SIGNING_PARAMS";
+const INVALID_SIGNING_PARAMS_MESSAGE: &str = "Invalid signing parameters provided.";
 const CMS_NO_ENCAPSULATED_DATA: &str = "CMS_NO_ENCAPSULATED_DATA";
 const UNKNOWN_ALGORITHM: &str = "UNKNOWN_ALGORITHM";
 const TIMESTAMP_CREATION_FAILURE: &str = "TIMESTAMP_CREATION_FAILURE";
@@ -56,9 +56,6 @@ const PADDED: GeneralPurpose = GeneralPurpose::new(
         .with_decode_padding_mode(DecodePaddingMode::RequireCanonical)
         .with_decode_allow_trailing_bits(true),
 );
-
-/// Line separator of the PEM writer (Java's `line.separator`), as in `cms::to_pem`.
-const NL: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 
 /// What to produce.
 enum Format {
@@ -120,16 +117,16 @@ pub(crate) fn sign(basics: &Basics, args: &Map<String, Value>, add_info: &AddInf
 impl<'a> SignRequest<'a> {
     /// Reads the arguments in the original's order, so the first missing one is reported.
     fn parse(args: &'a Map<String, Value>, add_info: &AddInfo) -> Result<Self, Failure> {
+        // `(String) e` on each entry: a non-string is a ClassCastException; null and unknown
+        // names are dropped (`Storage.get` finds nothing); duplicates stay.
         let storages = match args.get("allowedStorages") {
             Some(Value::Array(names)) => {
-                let mut storages = Vec::new();
-                for kind in names
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .filter_map(StorageKind::from_name)
-                {
-                    if !storages.contains(&kind) {
-                        storages.push(kind);
+                let mut storages = Vec::with_capacity(names.len());
+                for name in names {
+                    match name {
+                        Value::String(name) => storages.extend(StorageKind::from_name(name)),
+                        Value::Null => {}
+                        other => return Err(class_cast(other)),
                     }
                 }
                 storages
@@ -158,7 +155,7 @@ impl<'a> SignRequest<'a> {
             _ => {
                 return Err(Failure::Custom {
                     code: INVALID_SIGNING_PARAMS.to_owned(),
-                    message: None,
+                    message: Some(INVALID_SIGNING_PARAMS_MESSAGE.to_owned()),
                     details: None,
                 });
             }
@@ -169,22 +166,25 @@ impl<'a> SignRequest<'a> {
                 .iter()
                 .enumerate()
                 .map(|(i, item)| {
-                    item.as_str().ok_or_else(|| {
-                        Failure::Invocation(Some(format!("JSONArray[{i}] is not a string.")))
-                    })
+                    item.as_str()
+                        .ok_or_else(|| json_exception(format!("JSONArray[{i}] is not a string.")))
                 })
                 .collect::<Result<_, _>>()?,
             _ => vec![get_string(args, "data")?],
         };
 
         let signer_params = get_object(args, "signerParams")?;
+        // `toList().stream().map(Object::toString)`: a null entry is a NullPointerException.
         let ext_key_usages = get_array(signer_params, "extKeyUsageOids")?
             .iter()
             .map(|oid| match oid {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
+                Value::String(s) => Ok(s.clone()),
+                Value::Null => Err(Failure::Invocation(Some(
+                    "java.lang.NullPointerException".to_owned(),
+                ))),
+                other => Ok(other.to_string()),
             })
-            .collect::<BTreeSet<_>>();
+            .collect::<Result<BTreeSet<_>, _>>()?;
         let action = if ext_key_usages.contains(CLIENT_AUTH) {
             Action::Authenticate
         } else {
@@ -311,18 +311,12 @@ fn sign_cms(
 ) -> Result<String, Failure> {
     let mut der = cms::sign(entry, data, opts).map_err(cms_failure)?;
     if timestamp {
-        let last = signer_count(&der)
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .ok_or_else(|| signing_failure("signed CMS has no readable signers"))?;
-        der =
-            tsp::timestamp_signer(&der, last, &basics.tsa, basics.http.as_ref()).map_err(|e| {
-                Failure::Custom {
-                    code: TIMESTAMP_CREATION_FAILURE.to_owned(),
-                    message: None,
-                    details: Some(e.to_string()),
-                }
-            })?;
+        let last = cms::signer_count(&der)
+            .map_err(cms_failure)?
+            .checked_sub(1)
+            .ok_or_else(|| signing_failure("signed CMS has no signers"))?;
+        der = tsp::timestamp_signer(&der, last, &basics.tsa, basics.http.as_ref())
+            .map_err(|e| provider_failure(TIMESTAMP_CREATION_FAILURE, e.to_string(), &e))?;
     }
     Ok(cms::to_pem(&der))
 }
@@ -346,54 +340,13 @@ fn sign_raw(entry: &KeyEntry, data: &[Cow<'_, [u8]>], output_cert: bool) -> Call
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(if output_cert {
-        json!({ "signatures": signatures, "certificate": certificate_pem(&entry.cert)? })
+        let cert = entry.cert.to_der().map_err(signing_failure)?;
+        json!({ "signatures": signatures, "certificate": pem::encode("CERTIFICATE", &cert) })
     } else if signatures.len() == 1 {
         Value::String(signatures.swap_remove(0))
     } else {
         Value::from(signatures)
     })
-}
-
-/// Number of `signerInfos` of a DER `ContentInfo{SignedData}`: the last element of the
-/// `SignedData` SEQUENCE.
-fn signer_count(cms: &[u8]) -> der::Result<usize> {
-    let content_info = AnyRef::from_der(cms)?;
-    let mut fields = SliceReader::new(content_info.value())?;
-    let _content_type: AnyRef<'_> = fields.decode()?;
-    let explicit: AnyRef<'_> = fields.decode()?;
-    let signed_data = AnyRef::from_der(explicit.value())?;
-    let signer_infos = elements(signed_data)?
-        .pop()
-        .ok_or_else(|| der::Error::from(der::ErrorKind::Failed))?;
-    Ok(elements(signer_infos)?.len())
-}
-
-/// Elements of a constructed value.
-fn elements(any: AnyRef<'_>) -> der::Result<Vec<AnyRef<'_>>> {
-    let mut reader = SliceReader::new(any.value())?;
-    let mut out = Vec::new();
-    while !reader.is_finished() {
-        out.push(reader.decode()?);
-    }
-    Ok(out)
-}
-
-/// The certificate as Kalkan's `PEMWriter` writes it.
-fn certificate_pem(cert: &Certificate) -> Result<String, Failure> {
-    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
-    const END: &str = "-----END CERTIFICATE-----";
-    let der = cert.to_der().map_err(signing_failure)?;
-    let body = STANDARD.encode(der);
-    let mut pem = String::with_capacity(BEGIN.len() + END.len() + body.len() * 33 / 32 + 8);
-    pem.push_str(BEGIN);
-    pem.push_str(NL);
-    for line in body.as_bytes().chunks(64) {
-        pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
-        pem.push_str(NL);
-    }
-    pem.push_str(END);
-    pem.push_str(NL);
-    Ok(pem)
 }
 
 fn decode_base64(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
@@ -406,9 +359,11 @@ fn decode_base64(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
 
 fn cms_failure(e: CmsError) -> Failure {
     match e {
-        CmsError::NoEncapsulatedData => custom(CMS_NO_ENCAPSULATED_DATA, &e),
+        CmsError::NoEncapsulatedData => {
+            provider_failure(CMS_NO_ENCAPSULATED_DATA, CMS_NO_ENCAPSULATED_DATA, &e)
+        }
         CmsError::UnknownAlgorithm(_) | CmsError::Key(KeyError::UnsupportedAlgorithm) => {
-            custom(UNKNOWN_ALGORITHM, &e)
+            provider_failure(UNKNOWN_ALGORITHM, UNKNOWN_ALGORITHM, &e)
         }
         e => signing_failure(e),
     }
@@ -416,21 +371,24 @@ fn cms_failure(e: CmsError) -> Failure {
 
 fn key_failure(e: KeyError) -> Failure {
     match e {
-        KeyError::UnsupportedAlgorithm => custom(UNKNOWN_ALGORITHM, &e),
+        KeyError::UnsupportedAlgorithm => {
+            provider_failure(UNKNOWN_ALGORITHM, UNKNOWN_ALGORITHM, &e)
+        }
         e => signing_failure(e),
     }
 }
 
-/// A failure whose original message is unknown: the message is omitted.
-fn custom(code: &str, details: &dyn std::fmt::Display) -> Failure {
+/// The original's `ProviderUtilFailure`: the `ProviderUtilExceptionCode` name, the provider
+/// exception's message, and our error as details.
+fn provider_failure(code: &str, message: impl Into<String>, cause: &dyn Display) -> Failure {
     Failure::Custom {
         code: code.to_owned(),
-        message: None,
-        details: Some(details.to_string()),
+        message: Some(message.into()),
+        details: Some(cause.to_string()),
     }
 }
 
-fn signing_failure(details: impl std::fmt::Display) -> Failure {
+fn signing_failure(details: impl Display) -> Failure {
     Failure::Custom {
         code: SIGNING_FAILURE.to_owned(),
         message: Some(SIGNING_FAILURE_MESSAGE.to_owned()),
@@ -488,11 +446,41 @@ fn opt_bool(obj: &Map<String, Value>, key: &str, default: bool) -> bool {
 }
 
 fn not_found(key: &str) -> Failure {
-    Failure::Invocation(Some(format!("JSONObject[\"{key}\"] not found.")))
+    json_exception(format!("JSONObject[\"{key}\"] not found."))
 }
 
 fn wrong_type(key: &str, what: &str) -> Failure {
-    Failure::Invocation(Some(format!("JSONObject[\"{key}\"] is not {what}.")))
+    json_exception(format!("JSONObject[\"{key}\"] is not {what}."))
+}
+
+/// An org.json error escaping the method: INVOCATION_ERROR with the exception as details.
+fn json_exception(message: String) -> Failure {
+    Failure::Invocation(Some(format!("org.json.JSONException: {message}")))
+}
+
+/// `(String) value` on a JSON value that is not a string.
+fn class_cast(value: &Value) -> Failure {
+    Failure::Invocation(Some(format!(
+        "java.lang.ClassCastException: class {} cannot be cast to class java.lang.String",
+        java_class(value)
+    )))
+}
+
+/// Java class of a value of org.json's `JSONArray.toList()`.
+fn java_class(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "org.json.JSONObject$Null",
+        Value::Bool(_) => "java.lang.Boolean",
+        Value::Number(n) if n.as_i64().is_some_and(|n| i32::try_from(n).is_ok()) => {
+            "java.lang.Integer"
+        }
+        Value::Number(n) if n.is_i64() => "java.lang.Long",
+        Value::Number(n) if n.is_u64() => "java.math.BigInteger",
+        Value::Number(_) => "java.lang.Double",
+        Value::String(_) => "java.lang.String",
+        Value::Array(_) => "java.util.ArrayList",
+        Value::Object(_) => "java.util.HashMap",
+    }
 }
 
 #[cfg(test)]
@@ -505,18 +493,19 @@ mod tests {
             Failure::Custom { code, message, .. } => (code, message),
             other => panic!("{other:?}"),
         };
+        let own = |c: &str| (c.to_owned(), Some(c.to_owned()));
         assert_eq!(
             code(CmsError::NoEncapsulatedData),
-            (CMS_NO_ENCAPSULATED_DATA.to_owned(), None)
+            own(CMS_NO_ENCAPSULATED_DATA)
         );
         assert_eq!(
             code(CmsError::UnknownAlgorithm("1.2.3".to_owned())),
-            (UNKNOWN_ALGORITHM.to_owned(), None)
+            own(UNKNOWN_ALGORITHM)
         );
         // A sha1WithRSA signer certificate: refused, never upgraded to SHA-256.
         assert_eq!(
             code(CmsError::Key(KeyError::UnsupportedAlgorithm)),
-            (UNKNOWN_ALGORITHM.to_owned(), None)
+            own(UNKNOWN_ALGORITHM)
         );
         assert_eq!(
             code(CmsError::Malformed("x".to_owned())),
@@ -542,13 +531,13 @@ mod tests {
         assert_eq!(
             get_string(obj, "n"),
             Err(Failure::Invocation(Some(
-                "JSONObject[\"n\"] is not a string.".to_owned()
+                "org.json.JSONException: JSONObject[\"n\"] is not a string.".to_owned()
             )))
         );
         assert_eq!(
             get_string(obj, "x"),
             Err(Failure::Invocation(Some(
-                "JSONObject[\"x\"] not found.".to_owned()
+                "org.json.JSONException: JSONObject[\"x\"] not found.".to_owned()
             )))
         );
         assert!(get_object(obj, "o").is_ok());
@@ -560,5 +549,20 @@ mod tests {
         assert!(opt_bool(obj, "b", false));
         assert!(!opt_bool(obj, "n", false));
         assert!(opt_bool(obj, "x", true));
+    }
+
+    #[test]
+    fn java_classes() {
+        let class = |v: Value| java_class(&v);
+        assert_eq!(class(json!(5)), "java.lang.Integer");
+        assert_eq!(class(json!(-2_147_483_648_i64)), "java.lang.Integer");
+        assert_eq!(class(json!(2_147_483_648_i64)), "java.lang.Long");
+        assert_eq!(class(json!(u64::MAX)), "java.math.BigInteger");
+        assert_eq!(class(json!(1.5)), "java.lang.Double");
+        assert_eq!(class(json!(true)), "java.lang.Boolean");
+        assert_eq!(class(json!([])), "java.util.ArrayList");
+        assert_eq!(class(json!({})), "java.util.HashMap");
+        assert_eq!(class(json!("s")), "java.lang.String");
+        assert_eq!(class(Value::Null), "org.json.JSONObject$Null");
     }
 }
