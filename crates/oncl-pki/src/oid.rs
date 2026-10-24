@@ -36,6 +36,20 @@ pub const DATA: Oid = Oid::new_unwrap("1.2.840.113549.1.7.1");
 /// id-encryptedData.
 pub const ENCRYPTED_DATA: Oid = Oid::new_unwrap("1.2.840.113549.1.7.6");
 
+// Subject name attributes.
+/// commonName (CN).
+pub const COMMON_NAME: Oid = Oid::new_unwrap("2.5.4.3");
+/// serialNumber (SERIALNUMBER): `IIN…` in NCA certificates.
+pub const SERIAL_NUMBER: Oid = Oid::new_unwrap("2.5.4.5");
+/// organizationName (O).
+pub const ORGANIZATION: Oid = Oid::new_unwrap("2.5.4.10");
+/// organizationalUnitName (OU): `BIN…` in NCA certificates.
+pub const ORGANIZATIONAL_UNIT: Oid = Oid::new_unwrap("2.5.4.11");
+
+// Extended key usages.
+/// id-kp-clientAuth.
+pub const CLIENT_AUTH: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.3.2");
+
 // PKCS#12 bags and attributes.
 /// keyBag.
 pub const KEY_BAG: Oid = Oid::new_unwrap("1.2.840.113549.1.12.10.1.1");

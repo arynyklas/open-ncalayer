@@ -27,9 +27,11 @@ sha1.workspace = true
 sha2.workspace = true
 spki.workspace = true
 thiserror.workspace = true
+time.workspace = true
 x509-cert.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 hex-literal.workspace = true
 oncl-testkit.workspace = true
+time = { workspace = true, features = ["macros"] }

@@ -40,6 +40,7 @@ sha2 = "0.11.1"
 spki = { version = "0.8.1", features = ["alloc"] }
 streebog = { version = "0.11.0", default-features = false }
 thiserror = "2.0.21"
+time = "0.3.55"
 toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 x509-cert = "0.3.0"
