@@ -1,0 +1,12 @@
+OpenNCALayer
+Copyright 2026 The OpenNCALayer Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+OpenNCALayer is an independent reimplementation of the NCALayer protocol. It is
+not affiliated with or endorsed by the National Certification Authority of the
+Republic of Kazakhstan. "NCALayer" is used only to describe compatibility.
+
+Test fixtures fetched by `cargo xtask fetch-fixtures` come from NCANode
+(https://github.com/ncanode-kz/NCANode) and are not redistributed in this
+repository.

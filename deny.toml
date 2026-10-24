@@ -1,0 +1,43 @@
+[graph]
+all-features = true
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa used only by xtask to generate public test fixtures" },
+]
+
+[licenses]
+# Covers the whole planned dependency stack; the Slint license is added together
+# with the UI crate. Any dependency outside this list fails `cargo deny check`.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0", # webpki-roots (ureq `rustls`)
+]
+confidence-threshold = 0.93
+unused-allowed-license = "allow"
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    { crate = "aws-lc-rs", reason = "ring is the only crypto provider" },
+    { crate = "aws-lc-sys", reason = "ring is the only crypto provider" },
+    { crate = "openssl", reason = "ring is the only crypto provider" },
+    { crate = "openssl-sys", reason = "ring is the only crypto provider" },
+    { crate = "native-tls", reason = "rustls on ring is the only TLS stack" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
