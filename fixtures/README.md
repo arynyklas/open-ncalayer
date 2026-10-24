@@ -13,9 +13,11 @@
   - Имена файлов совпадают с алиасами в JKS: `ncagost18.der` — алиас `ncagost18` и т. д.
 - **Целостность.** `nca/SHA256SUMS` — суммы sha256 в формате `sha256sum`. Проверка из каталога `fixtures/nca`: `sha256sum -c SHA256SUMS`.
 - **Лицензионный статус.** Сертификаты УЦ — публичные документы. Они содержат только открытые ключи и предназначены для свободного распространения: без них нельзя проверить ни одну подпись НУЦ. Секретов в них нет. Права на сами сертификаты принадлежат НУЦ РК; под лицензию Apache-2.0 этого репозитория они не попадают.
-- **Назначение.** Interop-векторы для ГОСТ-кода: тест `crates/oncl-gost/tests/kz.rs` проверяет подпись каждого ГОСТ-сертификата ключом его издателя. Всего 9 сертификатов:
-  - ГОСТ 34.310-2004: `prod/ncagost`, `prod/ncagost18`, `prod/rcagost`, `test/ncagosttest2018`, `test/rcagosttest2018`;
-  - ГОСТ 34.10-2015-512: `prod/ncagost22`, `prod/rcagost22`, `test/ncagosttest2022`, `test/rcagosttest2022`.
+- **Назначение.** Interop-векторы:
+  - `crates/oncl-gost/tests/kz.rs` проверяет подпись каждого из 9 ГОСТ-сертификатов ключом его издателя:
+    - ГОСТ 34.310-2004: `prod/ncagost`, `prod/ncagost18`, `prod/rcagost`, `test/ncagosttest2018`, `test/rcagosttest2018`;
+    - ГОСТ 34.10-2015-512: `prod/ncagost22`, `prod/rcagost22`, `test/ncagosttest2022`, `test/rcagosttest2022`.
+  - `crates/oncl-pki/tests/cert_verify.rs` проверяет через `cert::verify_signature` все 16 сертификатов, ГОСТ и RSA. Издатель ищется по DN.
 
 ## `target/fixtures/ncanode/` — фикстуры NCANode (не коммитятся)
 
@@ -28,3 +30,5 @@
 ## Синтетические ключи (генерируются)
 
 Ключи и контейнеры, которые генерируют `cargo xtask gen-fixtures` и `fixtures/openssl/make.sh`. Это синтетические данные проекта, они распространяются под лицензией репозитория (Apache-2.0). Настоящих пользовательских ключей в репозитории нет и не будет.
+
+- `openssl/` — RSA-ключ и три контейнера PKCS#12 от OpenSSL: кириллический пароль, пустой пароль, PBES2 с явным PRF. Состав и пересоздание описаны в [`openssl/README.md`](openssl/README.md).
