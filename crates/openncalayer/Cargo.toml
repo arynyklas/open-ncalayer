@@ -1,0 +1,38 @@
+[package]
+name = "openncalayer"
+description = "OpenNCALayer daemon: NCALayer-compatible wss/https server on 127.0.0.1 and its command line"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+oncl-basics.workspace = true
+oncl-pki.workspace = true
+oncl-protocol.workspace = true
+oncl-tls.workspace = true
+
+base64.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+httparse.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# `testing`: `ScriptedPrompter`, `MemoryRecentPath` and `tsp::MockTsa`.
+oncl-basics = { path = "../oncl-basics", features = ["testing"] }
+oncl-pki = { path = "../oncl-pki", features = ["testing"] }
+oncl-testkit.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros"] }

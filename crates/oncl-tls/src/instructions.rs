@@ -19,7 +19,7 @@ pub enum TargetOs {
 }
 
 /// Re-issue the server certificate this long before it expires.
-const RENEW_BEFORE: Duration = Duration::days(60);
+pub const RENEW_BEFORE: Duration = Duration::days(60);
 /// NSS nickname of the CA in `certutil -d sql:<nssdb>` commands.
 const NSS_NICKNAME: &str = "OpenNCALayer Local CA";
 

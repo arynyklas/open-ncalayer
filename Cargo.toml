@@ -26,10 +26,12 @@ clap = { version = "4.6.7", features = ["derive"] }
 crypto-bigint = { version = "0.7.7", default-features = false, features = ["alloc", "zeroize"] }
 der = { version = "0.8.2", features = ["alloc", "derive", "oid", "zeroize"] }
 des = "0.9.0"
+futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"] }
 getrandom = "0.4.3"
 gost94 = { version = "0.11.0", default-features = false }
 hex-literal = "1.1.0"
 hmac = "0.13.0"
+httparse = "1.10.1"
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 pkcs8 = { version = "0.11.0", features = ["alloc"] }
 # Only in xtask (synthetic fixtures): `rsa` 0.9 and `rand_chacha` 0.3 share `rand_core` 0.6.
@@ -46,9 +48,16 @@ sha1 = "0.11.0"
 sha2 = "0.11.1"
 spki = { version = "0.8.1", features = ["alloc"] }
 streebog = { version = "0.11.0", default-features = false }
+tempfile = "3.27.0"
 thiserror = "2.0.21"
 time = "0.3.55"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "io-util", "time"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse"] }
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 x509-cert = "0.3.0"
 zeroize = "1.9.1"
@@ -58,4 +67,8 @@ zeroize = "1.9.1"
 [profile.dev.package.rsa]
 opt-level = 3
 [profile.dev.package.num-bigint-dig]
+opt-level = 3
+# GOST 34.11-2015 hashing of the 40 MiB document makes the openncalayer e2e test take over a
+# minute and a half unoptimized, a few seconds optimized.
+[profile.dev.package.streebog]
 opt-level = 3

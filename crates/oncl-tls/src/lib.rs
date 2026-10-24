@@ -24,7 +24,7 @@ use zeroize::Zeroizing;
 pub use files::{TlsFiles, load_info, save, server_config};
 pub use generate::generate;
 pub use import::import;
-pub use instructions::{TargetOs, instructions, sha1_grouped};
+pub use instructions::{RENEW_BEFORE, TargetOs, instructions, sha1_grouped};
 
 /// Where the TLS material came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
