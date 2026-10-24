@@ -1,6 +1,6 @@
 [package]
 name = "oncl-gost"
-description = "GOST R 34.10 elliptic-curve arithmetic for OpenNCALayer"
+description = "GOST R 34.10 signatures, KZ encodings and GOST hashes for OpenNCALayer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,4 +10,12 @@ publish.workspace = true
 
 [dependencies]
 crypto-bigint.workspace = true
+getrandom.workspace = true
+gost94.workspace = true
+streebog.workspace = true
+thiserror.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+oncl-testkit.workspace = true
+x509-cert.workspace = true

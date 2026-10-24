@@ -8,7 +8,7 @@
 //! `p` (256 or 512 bits for the GOST curves).
 
 use crate::point::{Curve, Point, fit};
-use crypto_bigint::{BoxedUint, CtSelect};
+use crypto_bigint::{BoxedUint, CtLt, CtSelect};
 use zeroize::Zeroizing;
 
 /// Short Weierstrass curve `y² = x³ + a·x + b (mod p)` with a base point `G = (gx, gy)` of prime
@@ -102,10 +102,22 @@ pub fn is_on_curve(c: &CurveParams, x: &BoxedUint, y: &BoxedUint) -> bool {
     c.curve().affine(x, y).is_some()
 }
 
+/// `true` if `1 ≤ x ≤ q − 1`, i.e. `x` is usable as a private key or nonce as is.
+///
+/// Constant time in the value of `x`; only its precision may leak.
+pub fn is_valid_scalar(c: &CurveParams, x: &BoxedUint) -> bool {
+    let Some(x) = fit(x, c.precision()).map(Zeroizing::new) else {
+        return false;
+    };
+    let q = c.field("q", &c.q);
+    (!x.is_zero() & x.ct_lt(&q)).to_bool()
+}
+
 /// GOST R 34.10 signature with a caller-chosen nonce `k`:
 /// `e ← e mod q` (`1` if that is `0`), `r = x(k·G) mod q`, `s = (r·d + k·e) mod q`.
 ///
-/// Returns `None` if `r = 0` or `s = 0` (including `k ≡ 0`); the caller retries with a new `k`.
+/// `k` must lie in `[1, q − 1]`; it is never reduced. Returns `None` if it does not (see
+/// [`is_valid_scalar`]), or if `r = 0` or `s = 0`; the caller retries with a new `k`.
 pub fn sign_with_k(
     c: &CurveParams,
     d: &BoxedUint,
@@ -116,6 +128,9 @@ pub fn sign_with_k(
     let g = c.base_point(&curve);
     let fq = &curve.fq;
 
+    if !is_valid_scalar(c, k) {
+        return None;
+    }
     let k = fq.reduce(k);
     let point = curve.mul(&g, &k);
     let r = fq.reduce(&*curve.affine_x(&point)?);
