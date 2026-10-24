@@ -1,0 +1,13 @@
+[package]
+name = "oncl-gost"
+description = "GOST R 34.10 elliptic-curve arithmetic for OpenNCALayer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto-bigint.workspace = true
+zeroize.workspace = true
