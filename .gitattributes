@@ -1,0 +1,2 @@
+# `cargo xtask gen-fixtures --check` compares bytes: no end-of-line conversion.
+fixtures/synthetic/** -text

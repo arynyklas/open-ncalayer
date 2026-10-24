@@ -9,10 +9,19 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+oncl-gost.workspace = true
+oncl-pki = { workspace = true, features = ["write"] }
 oncl-testkit.workspace = true
 
 anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
+der.workspace = true
+pkcs8.workspace = true
+rand_chacha.workspace = true
+rsa.workspace = true
+sha1.workspace = true
 sha2.workspace = true
+spki.workspace = true
 ureq.workspace = true
+x509-cert.workspace = true

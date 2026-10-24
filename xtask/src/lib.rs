@@ -2,3 +2,4 @@
 //! so xtask integration tests can call them as `xtask::…`.
 
 pub mod fetch;
+pub mod fixtures;

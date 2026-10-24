@@ -32,3 +32,22 @@
 Ключи и контейнеры, которые генерируют `cargo xtask gen-fixtures` и `fixtures/openssl/make.sh`. Это синтетические данные проекта, они распространяются под лицензией репозитория (Apache-2.0). Настоящих пользовательских ключей в репозитории нет и не будет.
 
 - `openssl/` — RSA-ключ и три контейнера PKCS#12 от OpenSSL: кириллический пароль, пустой пароль, PBES2 с явным PRF. Состав и пересоздание описаны в [`openssl/README.md`](openssl/README.md).
+- `synthetic/` — синтетический PKI по образцу НУЦ, генерирует `cargo xtask gen-fixtures` (код — `xtask/src/fixtures/`). Вся случайность берётся из одного `ChaCha20Rng` с фиксированным зерном, поэтому файлы воспроизводятся байт в байт. `cargo xtask gen-fixtures --check` (и тест `xtask/tests/fixtures_fresh.rs`) пересобирает их в памяти и сравнивает с закоммиченными. Файлы не редактируются вручную: правится генератор, затем `cargo xtask gen-fixtures`.
+  - Корни (самоподписанные `.cer`): `root-gost2015` (ГОСТ 34.10-2015-512), `root-gost2004` (ГОСТ 34.310-2004), `root-rsa` (RSA-2048, sha256WithRSA).
+  - Контейнеры PKCS#12 (пароль `Qwerty12`, alias = hex(SKI) сертификата, как у Kalkan), у каждого свои ключи:
+
+    | Файл | Корень | Содержимое |
+    |---|---|---|
+    | `user-gost2015-sign.p12` | `root-gost2015` | физлицо, подпись: EKU emailProtection + `1.2.398.3.3.4.1.1`, KU digitalSignature + nonRepudiation |
+    | `user-gost2015-auth.p12` | `root-gost2015` | физлицо, аутентификация: EKU clientAuth + `1.2.398.3.3.4.1.1`, KU digitalSignature + keyAgreement |
+    | `legacy-gost2015-auth.p12` | `root-gost2015` | как `user-gost2015-auth`, но EKU только `1.2.398.3.3.4.1.1` |
+    | `user-gost2004-sign.p12` | `root-gost2004` | профиль `user-gost2015-sign` на ГОСТ 34.310-2004 |
+    | `user-rsa-sign.p12` | `root-rsa` | профиль `user-gost2015-sign` на RSA-2048 |
+    | `legal-gost2015-sign.p12` | `root-gost2015` | руководитель юрлица (`O`, `OU=BIN…`), EKU `1.2.398.3.3.4.1.2.1`; серийник со старшим битом (DER INTEGER начинается с `00`) |
+    | `expired-gost2015-sign.p12` | `root-gost2015` | профиль `user-gost2015-sign`, срок 2020-01-01…2021-01-01 |
+    | `multi-gost2015.p12` | `root-gost2015` | два entry: профили `user-gost2015-sign` и `user-gost2015-auth` |
+    | `tsa-gost2015.p12` | `root-gost2015` | служба меток времени: EKU timeStamping (critical), KU digitalSignature |
+    | `pbes2-noprf-gost2015.p12` | `root-gost2015` | профиль `user-gost2015-sign`; ключ и сертификаты под PBES2 без PRF (Kalkan читает как HMAC-SHA256) и AES-256-CBC |
+
+    Остальные контейнеры — в профиле Kalkan: ключи 3DES, сертификаты RC2-40, 1024 итерации. Срок действия, кроме `expired-…`, — 2025-01-01…2099-12-31.
+  - `fixtures.toml` — описание контейнеров (пароль, корень, alias в порядке загрузки) для `oncl_testkit::synthetic` и `synthetic_all`.

@@ -29,13 +29,25 @@ hex-literal = "1.1.0"
 hmac = "0.13.0"
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 pkcs8 = { version = "0.11.0", features = ["alloc"] }
+# Only in xtask (synthetic fixtures): `rsa` 0.9 and `rand_chacha` 0.3 share `rand_core` 0.6.
+rand_chacha = "0.3.1"
 rc2 = "0.9.0"
 ring = "0.17.14"
+rsa = { version = "0.9.10", features = ["sha2"] }
+serde = { version = "1.0.229", features = ["derive"] }
 sha1 = "0.11.0"
 sha2 = "0.11.1"
 spki = { version = "0.8.1", features = ["alloc"] }
 streebog = { version = "0.11.0", default-features = false }
 thiserror = "2.0.21"
+toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 x509-cert = "0.3.0"
 zeroize = "1.9.1"
+
+# RSA key generation for `cargo xtask gen-fixtures` (also run by xtask tests) is very slow
+# unoptimized.
+[profile.dev.package.rsa]
+opt-level = 3
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
