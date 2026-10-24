@@ -11,6 +11,7 @@ use crate::oid;
 use der::asn1::{AnyRef, GeneralizedTime, ObjectIdentifier, OctetStringRef, UtcTime};
 use der::{Decode, Encode, Tag, TagNumber, Tagged};
 use sha2::Digest;
+use std::cell::OnceCell;
 use time::OffsetDateTime;
 use x509_cert::Certificate;
 use x509_cert::ext::pkix::SubjectKeyIdentifier;
@@ -35,7 +36,8 @@ pub struct VerifiedSigner {
 /// # Errors
 ///
 /// [`CmsError::NoEncapsulatedData`] without content; [`CmsError::Malformed`] for invalid
-/// encodings or missing mandatory attributes; for the first failing signer:
+/// encodings, missing messageDigest, or a repeated contentType, messageDigest, signingTime
+/// or signingCertificateV2 attribute; for the first failing signer:
 /// [`CmsError::UnknownAlgorithm`], [`CmsError::CertNotFound`],
 /// [`CmsError::DigestMismatch`], [`CmsError::SigningCertificateMismatch`],
 /// [`CmsError::BadSignature`] or [`CmsError::Key`].
@@ -69,6 +71,7 @@ pub fn verify(cms: &[u8], detached: Option<&[u8]>) -> Result<Vec<VerifiedSigner>
     if signers.is_empty() {
         return Err(CmsError::Malformed("no signers".to_owned()));
     }
+    let digests = ContentDigests::new(content);
     signers
         .into_iter()
         .enumerate()
@@ -77,18 +80,44 @@ pub fn verify(cms: &[u8], detached: Option<&[u8]>) -> Result<Vec<VerifiedSigner>
                 index,
                 info: SignerInfo::from_der(tlv)?,
                 content_type: encap.e_content_type,
-                content,
+                digests: &digests,
             };
             signer.verify(&certs)
         })
         .collect()
 }
 
+/// Digests of the signed content, each computed at most once per algorithm however many
+/// signers share it, so a document is hashed at most once per [`SigAlg`].
+struct ContentDigests<'a> {
+    content: &'a [u8],
+    by_alg: [OnceCell<Vec<u8>>; 4],
+}
+
+impl<'a> ContentDigests<'a> {
+    fn new(content: &'a [u8]) -> Self {
+        ContentDigests {
+            content,
+            by_alg: Default::default(),
+        }
+    }
+
+    fn get(&self, alg: SigAlg) -> &[u8] {
+        let slot = match alg {
+            SigAlg::Gost2004 => 0,
+            SigAlg::Gost2015_512 => 1,
+            SigAlg::RsaSha256 => 2,
+            SigAlg::RsaSha1 => 3,
+        };
+        self.by_alg[slot].get_or_init(|| alg.digest(self.content))
+    }
+}
+
 struct Signer<'a> {
     index: usize,
     info: SignerInfo<'a>,
     content_type: ObjectIdentifier,
-    content: &'a [u8],
+    digests: &'a ContentDigests<'a>,
 }
 
 /// `SignerIdentifier`.
@@ -129,7 +158,7 @@ impl Signer<'_> {
                 signed_attrs = attrs.to_der()?;
                 &signed_attrs[..]
             }
-            None => self.content,
+            None => self.digests.content,
         };
         key.verify(alg, message, self.info.signature.as_bytes())
             .map_err(|e| match e {
@@ -184,31 +213,36 @@ impl Signer<'_> {
     }
 
     /// Checks contentType, messageDigest and signingCertificateV2; returns signingTime.
+    /// Each of these and signingTime may appear once (RFC 5652 §11, RFC 5035 §5.4).
     fn check_signed_attrs(
         &self,
         attrs: RawSet<'_>,
         alg: SigAlg,
         cert_der: &[u8],
     ) -> Result<Option<OffsetDateTime>, CmsError> {
-        let mut digest_seen = false;
+        let (mut content_type_seen, mut digest_seen) = (false, false);
+        let (mut time_seen, mut signing_cert_seen) = (false, false);
         let mut signing_time = None;
         for tlv in attrs.tlvs()? {
             let attr = Attribute::from_der(tlv)?;
             let attr_type = attr.attr_type;
             let value = || single_value(attr, self.index);
             if attr_type == oid::CONTENT_TYPE {
+                self.first(&mut content_type_seen, "contentType")?;
                 if value()?.decode_as::<ObjectIdentifier>()? != self.content_type {
                     return Err(self.malformed("contentType differs from eContentType"));
                 }
             } else if attr_type == oid::MESSAGE_DIGEST {
+                self.first(&mut digest_seen, "messageDigest")?;
                 let digest = value()?.decode_as::<&OctetStringRef>()?;
-                if digest.as_bytes() != alg.digest(self.content) {
+                if digest.as_bytes() != self.digests.get(alg) {
                     return Err(CmsError::DigestMismatch(self.index));
                 }
-                digest_seen = true;
             } else if attr_type == oid::SIGNING_TIME {
+                self.first(&mut time_seen, "signingTime")?;
                 signing_time = Some(decode_time(value()?)?);
             } else if attr_type == oid::SIGNING_CERTIFICATE_V2 {
+                self.first(&mut signing_cert_seen, "signingCertificateV2")?;
                 let signing_cert: SigningCertificateV2<'_> = value()?.decode_as()?;
                 let first = signing_cert
                     .certs
@@ -224,6 +258,14 @@ impl Signer<'_> {
             return Err(self.malformed("no messageDigest attribute"));
         }
         Ok(signing_time)
+    }
+
+    /// Marks a single-instance attribute as seen; [`CmsError::Malformed`] if it already was.
+    fn first(&self, seen: &mut bool, name: &str) -> Result<(), CmsError> {
+        if std::mem::replace(seen, true) {
+            return Err(self.malformed(&format!("more than one {name} attribute")));
+        }
+        Ok(())
     }
 
     fn timestamp_token(&self) -> Result<Option<Vec<u8>>, CmsError> {
@@ -329,17 +371,28 @@ mod tests {
         );
     }
 
-    /// One-signer CMS whose signed attributes name `attrs_cert` and are signed by `e`.
-    fn cms_with_attrs_for(e: &KeyEntry, attrs_cert: &Certificate, content: &[u8]) -> Vec<u8> {
+    /// Contents of the profile's signed attributes for `content`, naming `attrs_cert`.
+    fn attrs_for(e: &KeyEntry, attrs_cert: &Certificate, content: &[u8]) -> Vec<u8> {
         let alg = crate::info::cert_info(&e.cert).signing_alg().unwrap();
-        let attrs = signed_attributes(
+        signed_attributes(
             &oid::DATA,
             opts().signing_time,
             &alg.digest(content),
             &attrs_cert.to_der().unwrap(),
         )
-        .unwrap();
-        let signature = e.key.sign(alg, &RawSet(&attrs).to_der().unwrap()).unwrap();
+        .unwrap()
+    }
+
+    /// One-signer CMS whose signed attributes name `attrs_cert` and are signed by `e`.
+    fn cms_with_attrs_for(e: &KeyEntry, attrs_cert: &Certificate, content: &[u8]) -> Vec<u8> {
+        cms_signed_over(e, &attrs_for(e, attrs_cert, content), content)
+    }
+
+    /// One-signer CMS of `content` with a valid signature by `e` over `attrs` (contents of
+    /// the signed attributes `SET OF`).
+    fn cms_signed_over(e: &KeyEntry, attrs: &[u8], content: &[u8]) -> Vec<u8> {
+        let alg = crate::info::cert_info(&e.cert).signing_alg().unwrap();
+        let signature = e.key.sign(alg, &RawSet(attrs).to_der().unwrap()).unwrap();
         let tbs = e.cert.tbs_certificate();
         let sid = IssuerAndSerialNumber {
             issuer: tbs.issuer().clone(),
@@ -355,7 +408,7 @@ mod tests {
             version: 1,
             sid: AnyRef::from_der(&sid).unwrap(),
             digest_algorithm: alg_id(alg.digest_oid()),
-            signed_attrs: Some(RawSet(&attrs)),
+            signed_attrs: Some(RawSet(attrs)),
             signature_algorithm: alg_id(alg.signature_oid()),
             signature: OctetStringRef::new(&signature).unwrap(),
             unsigned_attrs: None,
@@ -392,6 +445,88 @@ mod tests {
     }
 
     #[test]
+    fn single_instance_attributes_may_not_repeat() {
+        let e = entry("user-gost2015-sign");
+        let attrs = attrs_for(&e, &e.cert, b"c");
+        let tlvs = RawSet(&attrs).tlvs().unwrap();
+        for repeated in [
+            oid::CONTENT_TYPE,
+            oid::MESSAGE_DIGEST,
+            oid::SIGNING_TIME,
+            oid::SIGNING_CERTIFICATE_V2,
+        ] {
+            let mut doubled: Vec<Vec<u8>> = tlvs.iter().map(|t| t.to_vec()).collect();
+            let original = tlvs
+                .iter()
+                .find(|t| Attribute::from_der(t).unwrap().attr_type == repeated)
+                .unwrap();
+            doubled.push(original.to_vec());
+            // Validly signed, so only the repetition can make it fail.
+            let cms = cms_signed_over(&e, &der_set_contents(doubled), b"c");
+            match verify(&cms, None) {
+                Err(CmsError::Malformed(m)) => assert!(m.contains("more than one"), "{m}"),
+                other => panic!("{repeated}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn content_is_hashed_once_per_algorithm() {
+        let digests = ContentDigests::new(b"document");
+        let algs = [
+            SigAlg::Gost2004,
+            SigAlg::Gost2015_512,
+            SigAlg::RsaSha256,
+            SigAlg::RsaSha1,
+        ];
+        for alg in algs {
+            let first = digests.get(alg);
+            assert_eq!(first, alg.digest(b"document"));
+            // The same buffer comes back: the digest was not recomputed.
+            assert!(std::ptr::eq(first, digests.get(alg)), "{alg:?}");
+        }
+        assert_eq!(
+            digests.by_alg.iter().filter(|c| c.get().is_some()).count(),
+            4
+        );
+    }
+
+    #[test]
+    fn cosigners_share_one_digest_per_algorithm() {
+        // Two GOST 2015 signers and one RSA signer: two digests of the content in total.
+        let gost = entry("user-gost2015-sign");
+        let rsa = entry("user-rsa-sign");
+        let a = crate::cms::sign(&gost, b"shared", &opts()).unwrap();
+        let b = crate::cms::sign(&gost, &a, &opts()).unwrap();
+        let c = crate::cms::sign(&rsa, &b, &opts()).unwrap();
+        let ci = ContentInfo::from_der(&c).unwrap();
+        let sd: SignedData<'_> = ci.content.decode_as().unwrap();
+        let digests = ContentDigests::new(b"shared");
+        let certs: Vec<(Certificate, &[u8])> = sd
+            .certificates
+            .unwrap()
+            .tlvs()
+            .unwrap()
+            .into_iter()
+            .map(|t| (Certificate::from_der(t).unwrap(), t))
+            .collect();
+        for (index, tlv) in sd.signer_infos.tlvs().unwrap().into_iter().enumerate() {
+            Signer {
+                index,
+                info: SignerInfo::from_der(tlv).unwrap(),
+                content_type: oid::DATA,
+                digests: &digests,
+            }
+            .verify(&certs)
+            .unwrap();
+        }
+        let computed: Vec<usize> = (0..4)
+            .filter(|&i| digests.by_alg[i].get().is_some())
+            .collect();
+        assert_eq!(computed, [1, 2], "Streebog-512 and SHA-256 only, once each");
+    }
+
+    #[test]
     fn plain_rsa_encryption_signature_algorithm() {
         let rsa = SignerInfo {
             version: 1,
@@ -408,11 +543,12 @@ mod tests {
             signature: OctetStringRef::new(&[]).unwrap(),
             unsigned_attrs: None,
         };
+        let digests = ContentDigests::new(b"");
         let signer = |info| Signer {
             index: 0,
             info,
             content_type: oid::DATA,
-            content: b"",
+            digests: &digests,
         };
         assert_eq!(signer(rsa).algorithm(), Ok(SigAlg::RsaSha256));
         let mismatched = SignerInfo {
