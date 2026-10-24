@@ -1,3 +1,13 @@
+# open-ncalayer: local-only artifacts (original NCALayer copies, RE output, binaries)
+/_work/
+/target/
+*.exe
+*.dll
+*.dylib
+*.jar
+*.zip
+/.worktrees/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
