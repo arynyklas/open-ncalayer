@@ -153,8 +153,11 @@ fn build(
     }
     signer_infos.extend_from_slice(&signer_info);
 
+    // RFC 5652 §5.1: v3 when eContentType is not id-data (e.g. a TSTInfo), else v1; a
+    // co-signature never lowers the existing version.
+    let version = if *content_type == oid::DATA { 1 } else { 3 };
     let signed_data = SignedData {
-        version: base.map_or(1, |b| b.version.max(1)),
+        version: base.map_or(version, |b| b.version.max(version)),
         digest_algorithms: RawSet(&digest_algorithms),
         encap_content_info: EncapsulatedContentInfo {
             e_content_type: *content_type,
@@ -237,5 +240,33 @@ mod tests {
             encode_time(datetime!(1969-12-31 23:59:59 UTC)),
             Err(CmsError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn signed_data_version_follows_content_type() {
+        use crate::pkcs12::load;
+        use oncl_testkit::{read, synthetic};
+        use time::macros::datetime;
+
+        let key = synthetic("tsa-gost2015");
+        let e = load(&read(&key.path), &key.password)
+            .unwrap()
+            .swap_remove(0);
+        let opts = SignOptions {
+            encapsulate: true,
+            digested: false,
+            signing_time: datetime!(2026-03-01 10:00 UTC),
+        };
+        let version = |cms: &[u8]| {
+            let ci = super::super::asn1::ContentInfo::from_der(cms).unwrap();
+            ci.content.decode_as::<SignedData<'_>>().unwrap().version
+        };
+        // RFC 5652 §5.1: v1 for id-data, v3 for any other eContentType.
+        let data = sign_content(&e, &oid::DATA, b"x", true, &opts).unwrap();
+        assert_eq!(version(&data), 1);
+        let tst = sign_content(&e, &oid::TST_INFO, b"x", true, &opts).unwrap();
+        assert_eq!(version(&tst), 3);
+        // A co-signature keeps v3.
+        assert_eq!(version(&sign(&e, &tst, &opts).unwrap()), 3);
     }
 }
