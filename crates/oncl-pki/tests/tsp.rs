@@ -209,7 +209,12 @@ fn get_url_is_percent_encoded() {
     let req = decode_timestamp_req(&der);
     assert_eq!(req.policy, BASICS_POLICY);
     assert_eq!(req.imprint, streebog512(&signer_signature(&cms, 0)));
-    assert_eq!(req.nonce.len(), 8 + usize::from(req.nonce[0] == 0));
+    // 8 random bytes as a minimal non-negative INTEGER: at most 9 octets, never negative,
+    // a leading 00 only before a set top bit — for any random value, leading zeros included.
+    let n = &req.nonce;
+    assert!(!n.is_empty() && n.len() <= 9, "{n:02x?}");
+    assert_eq!(n[0] & 0x80, 0, "negative nonce {n:02x?}");
+    assert!(n.len() == 1 || n[0] != 0 || n[1] & 0x80 != 0, "{n:02x?}");
 }
 
 #[test]
@@ -430,6 +435,28 @@ fn replayed_reply_is_rejected() {
         &t,
     );
     assert_eq!(r, Err(TspError::NonceMismatch));
+}
+
+#[test]
+fn token_with_two_signers_is_rejected_before_verification() {
+    let (token, _) = parse_response(&mock_reply()).unwrap();
+    // A co-signature by the same TSA: still a TSTInfo, now with two valid signers.
+    let two = sign(&entry("tsa-gost2015"), &token, &opts(true)).unwrap();
+    assert_eq!(verify(&two, None).unwrap().len(), 2);
+    let expected = TspError::Malformed("time-stamp token has 2 signers".to_owned());
+    assert_eq!(verify_token(&two), Err(expected.clone()));
+
+    // Break the second signature: if signatures were checked first, this would be a
+    // `BadSignature(1)` CMS error; the count rejects the token before any verification.
+    let signature = signer_signature(&two, 1);
+    let at = two
+        .windows(signature.len())
+        .position(|w| w == signature)
+        .unwrap();
+    let mut broken = two.clone();
+    broken[at + signature.len() - 1] ^= 1;
+    assert!(verify(&broken, None).is_err());
+    assert_eq!(verify_token(&broken), Err(expected));
 }
 
 #[test]

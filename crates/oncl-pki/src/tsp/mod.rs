@@ -221,6 +221,9 @@ pub fn parse_response(resp: &[u8]) -> Result<(Vec<u8>, TstInfo), TspError> {
 /// certificate, carried in the token, has the timeStamping extended key usage. The TSA
 /// certificate chain is not checked.
 ///
+/// The structure (one signer, TSTInfo content) is checked before any signature, so a
+/// hostile token with many signers costs no signature verification.
+///
 /// # Errors
 ///
 /// [`TspError::NoTsaCertificate`] if the signer certificate is missing or lacks the key
@@ -228,24 +231,20 @@ pub fn parse_response(resp: &[u8]) -> Result<(Vec<u8>, TstInfo), TspError> {
 /// another number of signers, another content type or an invalid `TSTInfo`.
 pub fn verify_token(token: &[u8]) -> Result<TstInfo, TspError> {
     let der = ber::to_der(token)?;
-    let signers = cms::verify(&der, None).map_err(|e| match e {
-        CmsError::CertNotFound(_) => TspError::NoTsaCertificate,
-        e => TspError::Cms(e),
-    })?;
-    let [signer] = signers.as_slice() else {
+    let content_info = ContentInfo::from_der(&der)?;
+    if content_info.content_type != oid::SIGNED_DATA {
         return Err(TspError::Malformed(format!(
-            "time-stamp token has {} signers",
-            signers.len()
+            "time-stamp token content type is {}",
+            content_info.content_type
         )));
-    };
-    let time_stamping = oid::TIME_STAMPING.to_string();
-    if !cert_info(&signer.cert)
-        .ext_key_usages
-        .contains(&time_stamping)
-    {
-        return Err(TspError::NoTsaCertificate);
     }
-    let signed_data: SignedData<'_> = ContentInfo::from_der(&der)?.content.decode_as()?;
+    let signed_data: SignedData<'_> = content_info.content.decode_as()?;
+    let signer_count = signed_data.signer_infos.tlvs()?.len();
+    if signer_count != 1 {
+        return Err(TspError::Malformed(format!(
+            "time-stamp token has {signer_count} signers"
+        )));
+    }
     let encap = signed_data.encap_content_info;
     if encap.e_content_type != oid::TST_INFO {
         return Err(TspError::Malformed(format!(
@@ -253,10 +252,21 @@ pub fn verify_token(token: &[u8]) -> Result<TstInfo, TspError> {
             encap.e_content_type
         )));
     }
-    // `cms::verify` refuses a token without encapsulated content.
     let content = encap
         .e_content
         .ok_or(TspError::Cms(CmsError::NoEncapsulatedData))?;
+
+    let signers = cms::verify(&der, None).map_err(|e| match e {
+        CmsError::CertNotFound(_) => TspError::NoTsaCertificate,
+        e => TspError::Cms(e),
+    })?;
+    let time_stamping = oid::TIME_STAMPING.to_string();
+    if !signers
+        .iter()
+        .all(|s| cert_info(&s.cert).ext_key_usages.contains(&time_stamping))
+    {
+        return Err(TspError::NoTsaCertificate);
+    }
     tst_info(content.as_bytes())
 }
 
