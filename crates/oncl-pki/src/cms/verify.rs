@@ -33,11 +33,16 @@ pub struct VerifiedSigner {
 /// content, or over `detached` when it has none. Certificates are not checked beyond the
 /// signingCertificateV2 hash: no chain, validity or revocation.
 ///
+/// Every signer must have signed attributes (with messageDigest), as NCALayer writes them:
+/// a signer without them is refused, which also hashes the content at most once per
+/// algorithm however many signers there are.
+///
 /// # Errors
 ///
 /// [`CmsError::NoEncapsulatedData`] without content; [`CmsError::Malformed`] for invalid
-/// encodings, missing messageDigest, or a repeated contentType, messageDigest, signingTime
-/// or signingCertificateV2 attribute; for the first failing signer:
+/// encodings, a signer without signed attributes, missing messageDigest, or a repeated
+/// contentType, messageDigest, signingTime or signingCertificateV2 attribute; for the first
+/// failing signer:
 /// [`CmsError::UnknownAlgorithm`], [`CmsError::CertNotFound`],
 /// [`CmsError::DigestMismatch`], [`CmsError::SigningCertificateMismatch`],
 /// [`CmsError::BadSignature`] or [`CmsError::Key`].
@@ -144,23 +149,21 @@ impl Sid<'_> {
 
 impl Signer<'_> {
     fn verify(&self, certs: &[(Certificate, &[u8])]) -> Result<VerifiedSigner, CmsError> {
+        // Without signed attributes the signature covers the whole content, which would be
+        // hashed again for every such signer; NCALayer always writes signed attributes.
+        let attrs = self
+            .info
+            .signed_attrs
+            .ok_or_else(|| self.malformed("no signed attributes"))?;
         let alg = self.algorithm()?;
         let (cert, cert_der) = self.find_cert(certs)?;
         let key = PublicKey::from_spki(cert.tbs_certificate().subject_public_key_info())
             .map_err(CmsError::Key)?;
 
-        let mut signing_time = None;
-        let signed_attrs;
-        let message = match self.info.signed_attrs {
-            Some(attrs) => {
-                signing_time = self.check_signed_attrs(attrs, alg, cert_der)?;
-                // Signed over the DER `SET OF`, not the `[0] IMPLICIT` encoding.
-                signed_attrs = attrs.to_der()?;
-                &signed_attrs[..]
-            }
-            None => self.digests.content,
-        };
-        key.verify(alg, message, self.info.signature.as_bytes())
+        let signing_time = self.check_signed_attrs(attrs, alg, cert_der)?;
+        // Signed over the DER `SET OF`, not the `[0] IMPLICIT` encoding.
+        let message = attrs.to_der()?;
+        key.verify(alg, &message, self.info.signature.as_bytes())
             .map_err(|e| match e {
                 KeyError::BadSignature => CmsError::BadSignature(self.index),
                 e => CmsError::Key(e),
@@ -385,14 +388,18 @@ mod tests {
 
     /// One-signer CMS whose signed attributes name `attrs_cert` and are signed by `e`.
     fn cms_with_attrs_for(e: &KeyEntry, attrs_cert: &Certificate, content: &[u8]) -> Vec<u8> {
-        cms_signed_over(e, &attrs_for(e, attrs_cert, content), content)
+        cms_signed_over(e, Some(&attrs_for(e, attrs_cert, content)), content)
     }
 
     /// One-signer CMS of `content` with a valid signature by `e` over `attrs` (contents of
-    /// the signed attributes `SET OF`).
-    fn cms_signed_over(e: &KeyEntry, attrs: &[u8], content: &[u8]) -> Vec<u8> {
+    /// the signed attributes `SET OF`), or over the content itself without `attrs`.
+    fn cms_signed_over(e: &KeyEntry, attrs: Option<&[u8]>, content: &[u8]) -> Vec<u8> {
         let alg = crate::info::cert_info(&e.cert).signing_alg().unwrap();
-        let signature = e.key.sign(alg, &RawSet(attrs).to_der().unwrap()).unwrap();
+        let signed = match attrs {
+            Some(attrs) => RawSet(attrs).to_der().unwrap(),
+            None => content.to_vec(),
+        };
+        let signature = e.key.sign(alg, &signed).unwrap();
         let tbs = e.cert.tbs_certificate();
         let sid = IssuerAndSerialNumber {
             issuer: tbs.issuer().clone(),
@@ -408,7 +415,7 @@ mod tests {
             version: 1,
             sid: AnyRef::from_der(&sid).unwrap(),
             digest_algorithm: alg_id(alg.digest_oid()),
-            signed_attrs: Some(RawSet(attrs)),
+            signed_attrs: attrs.map(RawSet),
             signature_algorithm: alg_id(alg.signature_oid()),
             signature: OctetStringRef::new(&signature).unwrap(),
             unsigned_attrs: None,
@@ -429,6 +436,21 @@ mod tests {
             signer_infos: RawSet(&si),
         };
         SignedContentInfo { signed_data: &sd }.to_der().unwrap()
+    }
+
+    #[test]
+    fn signer_without_signed_attributes_is_refused() {
+        for name in ["user-gost2015-sign", "user-rsa-sign"] {
+            let e = entry(name);
+            // The signature over the bare content is valid; only the missing attributes fail.
+            let cms = cms_signed_over(&e, None, b"c");
+            match verify(&cms, None) {
+                Err(CmsError::Malformed(m)) => {
+                    assert!(m.contains("no signed attributes"), "{name}: {m}");
+                }
+                other => panic!("{name}: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -462,7 +484,7 @@ mod tests {
                 .unwrap();
             doubled.push(original.to_vec());
             // Validly signed, so only the repetition can make it fail.
-            let cms = cms_signed_over(&e, &der_set_contents(doubled), b"c");
+            let cms = cms_signed_over(&e, Some(&der_set_contents(doubled)), b"c");
             match verify(&cms, None) {
                 Err(CmsError::Malformed(m)) => assert!(m.contains("more than one"), "{m}"),
                 other => panic!("{repeated}: {other:?}"),
