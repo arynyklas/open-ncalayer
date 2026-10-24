@@ -460,13 +460,16 @@ fn json_exception(message: String) -> Failure {
 
 /// `(String) value` on a JSON value that is not a string.
 fn class_cast(value: &Value) -> Failure {
+    // JRE 8 (bundled with the original) words it without "class " or module details.
     Failure::Invocation(Some(format!(
-        "java.lang.ClassCastException: class {} cannot be cast to class java.lang.String",
+        "java.lang.ClassCastException: {} cannot be cast to java.lang.String",
         java_class(value)
     )))
 }
 
-/// Java class of a value of org.json's `JSONArray.toList()`.
+/// Java class of a value of org.json's `JSONArray.toList()` (org.json 20211205
+/// `stringToNumber`): integers are the narrowest of Integer, Long, BigInteger; numbers in
+/// decimal notation are BigDecimal, except negative zero (`-0`, `-0.0`, …), a Double.
 fn java_class(value: &Value) -> &'static str {
     match value {
         Value::Null => "org.json.JSONObject$Null",
@@ -476,7 +479,11 @@ fn java_class(value: &Value) -> &'static str {
         }
         Value::Number(n) if n.is_i64() => "java.lang.Long",
         Value::Number(n) if n.is_u64() => "java.math.BigInteger",
-        Value::Number(_) => "java.lang.Double",
+        // serde_json parses `-0` to the f64 −0.0 as well.
+        Value::Number(n) if n.as_f64().is_some_and(|f| f == 0.0 && f.is_sign_negative()) => {
+            "java.lang.Double"
+        }
+        Value::Number(_) => "java.math.BigDecimal",
         Value::String(_) => "java.lang.String",
         Value::Array(_) => "java.util.ArrayList",
         Value::Object(_) => "java.util.HashMap",
@@ -558,7 +565,18 @@ mod tests {
         assert_eq!(class(json!(-2_147_483_648_i64)), "java.lang.Integer");
         assert_eq!(class(json!(2_147_483_648_i64)), "java.lang.Long");
         assert_eq!(class(json!(u64::MAX)), "java.math.BigInteger");
-        assert_eq!(class(json!(1.5)), "java.lang.Double");
+        assert_eq!(class(json!(1.5)), "java.math.BigDecimal");
+        assert_eq!(class(json!(0.0)), "java.math.BigDecimal");
+        assert_eq!(class(json!(-0.0)), "java.lang.Double");
+        for text in ["-0", "-0.0", "-0e3", "1e2", "2.5"] {
+            let v: Value = serde_json::from_str(text).unwrap();
+            let expected = if text.starts_with("-0") {
+                "java.lang.Double"
+            } else {
+                "java.math.BigDecimal"
+            };
+            assert_eq!(java_class(&v), expected, "{text}");
+        }
         assert_eq!(class(json!(true)), "java.lang.Boolean");
         assert_eq!(class(json!([])), "java.util.ArrayList");
         assert_eq!(class(json!({})), "java.util.HashMap");

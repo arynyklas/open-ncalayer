@@ -847,7 +847,13 @@ fn param_errors() {
     args["allowedStorages"] = json!(["PKCS12", 5]);
     assert_eq!(
         details(args),
-        "java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String"
+        "java.lang.ClassCastException: java.lang.Integer cannot be cast to java.lang.String"
+    );
+    let mut args = raw_args(json!("x"), json!({}));
+    args["allowedStorages"] = json!([1.5]);
+    assert_eq!(
+        details(args),
+        "java.lang.ClassCastException: java.math.BigDecimal cannot be cast to java.lang.String"
     );
     let mut args = raw_args(json!("x"), json!({}));
     args["signerParams"]["extKeyUsageOids"] = json!([null]);
