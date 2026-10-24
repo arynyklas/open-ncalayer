@@ -1,0 +1,32 @@
+[package]
+name = "oncl-basics"
+description = "The kz.gov.pki.knca.basics module of OpenNCALayer: PKIExtras.sign (cms, raw) behind a Prompter UI abstraction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# `testing`: `ScriptedPrompter` and `MemoryRecentPath` for tests of this crate and its users.
+testing = []
+
+[dependencies]
+base64.workspace = true
+der.workspace = true
+oncl-pki.workspace = true
+oncl-protocol.workspace = true
+serde_json.workspace = true
+time.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# `testing`: `tsp::MockTsa`; `write`: a PKCS#12 with a sha1WithRSA certificate.
+oncl-pki = { path = "../oncl-pki", features = ["testing", "write"] }
+oncl-testkit.workspace = true
+time = { workspace = true, features = ["macros"] }
+
+[[test]]
+name = "sign"
+required-features = ["testing"]

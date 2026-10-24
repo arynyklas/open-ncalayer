@@ -11,6 +11,7 @@ repository = "https://github.com/arynyklas/open-ncalayer"
 publish = false
 
 [workspace.dependencies]
+oncl-basics = { path = "crates/oncl-basics" }
 oncl-gost = { path = "crates/oncl-gost" }
 oncl-pki = { path = "crates/oncl-pki" }
 oncl-protocol = { path = "crates/oncl-protocol" }

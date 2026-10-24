@@ -1,0 +1,1065 @@
+//! `kz.gov.pki.knca.basics` / `PKIExtras.sign`: argument parsing, the storage → key → sign
+//! flow driven by a scripted prompter, cms and raw results, TSP and error codes.
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use der::Encode;
+use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+use oncl_basics::{
+    Action, Availability, Basics, DisabledReason, KeyFilter, KeyPrompt, Locale, MODULE_NAME,
+    OpenError, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt,
+};
+use oncl_pki::cms::{SignOptions, verify};
+use oncl_pki::info::cert_info;
+use oncl_pki::key::{PublicKey, SigAlg};
+use oncl_pki::pkcs12::{KeyEntry, WriteEntry, WriteOptions, load, write};
+use oncl_pki::tsp::{MockTsa, verify_token};
+use oncl_protocol::{AddInfo, Module};
+use oncl_testkit::{fixture, read, synthetic};
+use serde_json::{Value, json};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+use time::OffsetDateTime;
+use time::macros::datetime;
+use zeroize::Zeroizing;
+
+const CLIENT_AUTH: &str = "1.3.6.1.5.5.7.3.2";
+const EMAIL_PROTECTION: &str = "1.3.6.1.5.5.7.3.4";
+const BASICS_POLICY: &str = "1.2.398.3.3.2.6.4";
+
+macro_rules! script {
+    ($($step:expr),* $(,)?) => { vec![$($step),*] };
+}
+
+fn storage(name: &str, password: &str) -> Step {
+    Step::Storage {
+        path: synthetic(name).path,
+        password: password.to_owned(),
+    }
+}
+
+fn storage_at(path: impl Into<PathBuf>, password: &str) -> Step {
+    Step::Storage {
+        path: path.into(),
+        password: password.to_owned(),
+    }
+}
+
+fn key(index: usize) -> Step {
+    Step::Key(index)
+}
+
+fn entry(name: &str) -> KeyEntry {
+    let key = synthetic(name);
+    load(&read(&key.path), &key.password)
+        .unwrap()
+        .swap_remove(0)
+}
+
+struct Setup {
+    basics: Basics,
+    prompter: Arc<ScriptedPrompter>,
+    recent: Arc<MemoryRecentPath>,
+    tsa: Arc<MockTsa>,
+}
+
+fn setup(steps: Vec<Step>, recent: Option<PathBuf>) -> Setup {
+    let prompter = Arc::new(ScriptedPrompter::new(steps));
+    let recent = Arc::new(MemoryRecentPath::new(recent));
+    let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
+    let basics = Basics::new(prompter.clone(), recent.clone(), tsa.clone());
+    Setup {
+        basics,
+        prompter,
+        recent,
+        tsa,
+    }
+}
+
+fn basics(steps: Vec<Step>) -> (Basics, Arc<ScriptedPrompter>) {
+    let s = setup(steps, None);
+    (s.basics, s.prompter)
+}
+
+fn req(args: Value) -> String {
+    json!({"module": MODULE_NAME, "method": "sign", "args": args}).to_string()
+}
+
+fn origin(o: &str) -> AddInfo {
+    AddInfo {
+        origin: Some(o.to_owned()),
+    }
+}
+
+fn json(reply: String) -> Value {
+    serde_json::from_str(&reply).unwrap()
+}
+
+/// The failure `code` of a request answered without any prompt.
+fn code(args: Value) -> String {
+    let (b, p) = basics(script![]);
+    let r = json(b.process(&req(args), &origin("https://x.kz")));
+    assert_eq!(r["status"], false, "{r}");
+    assert!(p.storage_prompts().is_empty(), "no dialog before the error");
+    r["code"].as_str().unwrap().to_owned()
+}
+
+fn pem_to_der(pem: &str) -> Vec<u8> {
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .flat_map(|l| l.trim().chars())
+        .collect();
+    STANDARD.decode(body).unwrap()
+}
+
+fn cms_args(data: Value, signing_params: Value) -> Value {
+    json!({
+        "format": "cms",
+        "data": data,
+        "signingParams": signing_params,
+        "signerParams": {"extKeyUsageOids": []},
+    })
+}
+
+fn raw_args(data: Value, signing_params: Value) -> Value {
+    json!({
+        "format": "raw",
+        "data": data,
+        "signingParams": signing_params,
+        "signerParams": {"extKeyUsageOids": []},
+    })
+}
+
+fn public_key(e: &KeyEntry) -> PublicKey {
+    PublicKey::from_spki(e.cert.tbs_certificate().subject_public_key_info()).unwrap()
+}
+
+#[test]
+fn cms_attached_happy_path() {
+    let (b, p) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+    let r = json(b.process(
+        &req(json!({"format":"cms","data":"aGVsbG8=","signingParams":{"decode":true},"signerParams":{"extKeyUsageOids":[]}})),
+        &origin("https://x.kz"),
+    ));
+    assert_eq!(r["status"], true);
+    let pem = r["body"]["result"][0].as_str().unwrap();
+    assert!(pem.starts_with("-----BEGIN CMS-----"));
+    let der = pem_to_der(pem);
+    let signers = verify(&der, None).unwrap();
+    assert_eq!(signers.len(), 1);
+    assert_eq!(signers[0].sig_alg, SigAlg::Gost2015_512);
+    assert!(signers[0].timestamp_token.is_none());
+    assert_eq!(p.storage_prompts()[0].origin, "https://x.kz");
+    assert_eq!(p.storage_prompts()[0].locale, Locale::Kk);
+    assert_eq!(p.storage_prompts()[0].action, Action::Sign);
+    assert_eq!(p.storage_prompts()[0].error, None);
+    let kp = &p.key_prompts()[0];
+    assert_eq!(kp.origin, "https://x.kz");
+    assert_eq!(kp.candidates.len(), 1);
+    assert_eq!(
+        kp.candidates[0].alias,
+        synthetic("user-gost2015-sign").aliases[0]
+    );
+    assert_eq!(kp.candidates[0].availability, Availability::Enabled);
+}
+
+#[test]
+fn cms_content_detached_and_digested() {
+    // The content is the UTF-8 text when `decode` is off; detached signatures verify over it.
+    let (b, _) = basics(script![storage("user-gost2004-sign", "Qwerty12"), key(0)]);
+    let r = json(b.process(
+        &req(cms_args(json!("привет"), json!({"encapsulate": false}))),
+        &origin("o"),
+    ));
+    let der = pem_to_der(r["body"]["result"][0].as_str().unwrap());
+    assert_eq!(
+        verify(&der, None),
+        Err(oncl_pki::cms::CmsError::NoEncapsulatedData)
+    );
+    let signers = verify(&der, Some("привет".as_bytes())).unwrap();
+    assert_eq!(signers[0].sig_alg, SigAlg::Gost2004);
+
+    // `digested`: the data is the hash; the detached signature verifies over the document.
+    let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+    let hash = STANDARD.encode(SigAlg::Gost2015_512.digest(b"doc"));
+    let r = json(b.process(
+        &req(cms_args(
+            json!(hash),
+            json!({"decode": true, "digested": true, "encapsulate": false}),
+        )),
+        &origin("o"),
+    ));
+    let der = pem_to_der(r["body"]["result"][0].as_str().unwrap());
+    assert_eq!(verify(&der, Some(b"doc")).unwrap().len(), 1);
+
+    // Several data items: one PEM each, always an array; RSA keys sign too.
+    let (b, _) = basics(script![storage("user-rsa-sign", "Qwerty12"), key(0)]);
+    let r = json(b.process(
+        &req(cms_args(json!(["YQ==", "Yg=="]), json!({"decode": true}))),
+        &origin("o"),
+    ));
+    let results = r["body"]["result"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    for (pem, content) in results.iter().zip([b"a", b"b"]) {
+        let der = pem_to_der(pem.as_str().unwrap());
+        let signers = verify(&der, None).unwrap();
+        assert_eq!(signers[0].sig_alg, SigAlg::RsaSha256);
+        assert_eq!(verify(&der, Some(content)).unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn cms_signing_time_comes_from_the_clock() {
+    fn clock() -> OffsetDateTime {
+        datetime!(2030-05-06 07:08:09 UTC)
+    }
+    let s = setup(
+        script![storage("user-gost2015-sign", "Qwerty12"), key(0)],
+        None,
+    );
+    let b = s.basics.with_clock(clock);
+    let r = json(b.process(&req(cms_args(json!("x"), json!({}))), &origin("o")));
+    let der = pem_to_der(r["body"]["result"][0].as_str().unwrap());
+    assert_eq!(verify(&der, None).unwrap()[0].signing_time, Some(clock()));
+}
+
+#[test]
+fn cosign_appends_a_signer() {
+    let first = oncl_pki::cms::sign(
+        &entry("user-gost2004-sign"),
+        b"doc",
+        &SignOptions {
+            encapsulate: true,
+            digested: false,
+            signing_time: OffsetDateTime::now_utc(),
+        },
+    )
+    .unwrap();
+    let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+    let r = json(b.process(
+        &req(cms_args(
+            json!(STANDARD.encode(&first)),
+            json!({"decode": true, "tsaProfile": {}}),
+        )),
+        &origin("o"),
+    ));
+    assert_eq!(r["status"], true, "{r}");
+    let signers = verify(&pem_to_der(r["body"]["result"][0].as_str().unwrap()), None).unwrap();
+    assert_eq!(signers.len(), 2);
+    // The time-stamp goes to the new signer, the last one.
+    assert!(signers[0].timestamp_token.is_none());
+    assert!(signers[1].timestamp_token.is_some());
+    assert_eq!(signers[1].sig_alg, SigAlg::Gost2015_512);
+}
+
+#[test]
+fn cancel_returns_empty_body() {
+    let (b, p) = basics(script![Step::CancelStorage]);
+    assert_eq!(
+        b.process(&req(cms_args(json!("x"), json!({}))), &origin("o")),
+        r#"{"status":true,"body":{}}"#
+    );
+    assert_eq!(p.storage_prompts().len(), 1);
+    assert!(p.key_prompts().is_empty());
+
+    let (b, p) = basics(script![
+        storage("user-gost2015-sign", "Qwerty12"),
+        Step::CancelKey
+    ]);
+    assert_eq!(
+        b.process(&req(cms_args(json!("x"), json!({}))), &origin("o")),
+        r#"{"status":true,"body":{}}"#
+    );
+    assert_eq!(p.key_prompts().len(), 1);
+
+    // An exhausted script cancels.
+    let (b, _) = basics(script![]);
+    assert_eq!(
+        b.process(&req(raw_args(json!("x"), json!({}))), &origin("o")),
+        r#"{"status":true,"body":{}}"#
+    );
+}
+
+#[test]
+fn wrong_password_reprompts_with_error() {
+    let s = setup(
+        script![
+            storage("user-gost2015-sign", "bad"),
+            storage("user-gost2015-sign", "Qwerty12"),
+            key(0)
+        ],
+        None,
+    );
+    let r = json(
+        s.basics
+            .process(&req(cms_args(json!("x"), json!({}))), &origin("o")),
+    );
+    assert_eq!(r["status"], true);
+    let prompts = s.prompter.storage_prompts();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0].error, None);
+    assert_eq!(prompts[1].error, Some(OpenError::WrongPassword));
+    // The retry keeps the path the user typed.
+    assert_eq!(
+        prompts[1].recent_path,
+        Some(synthetic("user-gost2015-sign").path)
+    );
+}
+
+#[test]
+fn unreadable_storages_reprompt_with_error() {
+    let missing = synthetic("user-gost2015-sign")
+        .path
+        .with_extension("missing");
+    let s = setup(
+        script![
+            storage_at(&missing, "Qwerty12"),
+            storage_at(fixture("synthetic/root-gost2015.cer"), "Qwerty12"),
+        ],
+        None,
+    );
+    let r = s
+        .basics
+        .process(&req(cms_args(json!("x"), json!({}))), &origin("o"));
+    assert_eq!(r, r#"{"status":true,"body":{}}"#);
+    let errors: Vec<_> = s
+        .prompter
+        .storage_prompts()
+        .iter()
+        .map(|p| p.error)
+        .collect();
+    assert_eq!(
+        errors,
+        [
+            None,
+            Some(OpenError::FileNotFound),
+            Some(OpenError::NotPkcs12)
+        ]
+    );
+    // Nothing opened: nothing saved.
+    assert_eq!(s.recent.saved(), None);
+}
+
+/// Answers `JKS` first, then a working PKCS#12, then key 0.
+struct JksFirst {
+    storage_prompts: Mutex<Vec<StoragePrompt>>,
+}
+
+impl Prompter for JksFirst {
+    fn storage(&self, p: &StoragePrompt) -> Prompt<StorageAnswer> {
+        let mut prompts = self.storage_prompts.lock().unwrap();
+        prompts.push(p.clone());
+        let kind = if prompts.len() == 1 {
+            StorageKind::Jks
+        } else {
+            StorageKind::Pkcs12
+        };
+        let key = synthetic("user-gost2015-sign");
+        Prompt::Answer(StorageAnswer {
+            storage: kind,
+            path: key.path,
+            password: Zeroizing::new(key.password),
+        })
+    }
+
+    fn key(&self, _: &KeyPrompt) -> Prompt<usize> {
+        Prompt::Answer(0)
+    }
+}
+
+#[test]
+fn unsupported_storage_reprompts() {
+    let prompter = Arc::new(JksFirst {
+        storage_prompts: Mutex::new(Vec::new()),
+    });
+    let b = Basics::new(
+        prompter.clone(),
+        Arc::new(MemoryRecentPath::new(None)),
+        Arc::new(MockTsa::new(entry("tsa-gost2015"))),
+    );
+    let r = json(b.process(&req(raw_args(json!("x"), json!({}))), &origin("o")));
+    assert_eq!(r["status"], true);
+    let prompts = prompter.storage_prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[1].error, Some(OpenError::UnsupportedStorage));
+}
+
+#[test]
+fn ekus_iin_bin_serial_filters() {
+    let multi = synthetic("multi-gost2015");
+    let infos: Vec<_> = load(&read(&multi.path), &multi.password)
+        .unwrap()
+        .iter()
+        .map(|e| cert_info(&e.cert))
+        .collect();
+    let is_auth: Vec<bool> = infos
+        .iter()
+        .map(|i| i.ext_key_usages.contains(CLIENT_AUTH))
+        .collect();
+    assert_eq!(is_auth.iter().filter(|a| **a).count(), 1, "one auth key");
+
+    // clientAuth requested: only the auth key is enabled, and the dialog says "authenticate".
+    let (b, p) = basics(script![
+        storage("multi-gost2015", "Qwerty12"),
+        Step::CancelKey
+    ]);
+    b.process(
+        &req(json!({"format":"cms","data":"x","signingParams":{},"signerParams":{"extKeyUsageOids":[CLIENT_AUTH]}})),
+        &origin("o"),
+    );
+    let kp = &p.key_prompts()[0];
+    assert_eq!(kp.action, Action::Authenticate);
+    assert_eq!(p.storage_prompts()[0].action, Action::Authenticate);
+    assert_eq!(
+        kp.candidates
+            .iter()
+            .map(|c| c.alias.clone())
+            .collect::<Vec<_>>(),
+        multi.aliases
+    );
+    for (c, auth) in kp.candidates.iter().zip(&is_auth) {
+        let expected = if *auth {
+            Availability::Enabled
+        } else {
+            Availability::Disabled(vec![DisabledReason::ExtKeyUsage])
+        };
+        assert_eq!(c.availability, expected, "{}", c.alias);
+    }
+
+    // A foreign IIN disables every key.
+    let (b, p) = basics(script![
+        storage("multi-gost2015", "Qwerty12"),
+        Step::CancelKey
+    ]);
+    b.process(
+        &req(json!({"format":"cms","data":"x","signingParams":{},"signerParams":{"extKeyUsageOids":[],"iin":"999999999999"}})),
+        &origin("o"),
+    );
+    for c in &p.key_prompts()[0].candidates {
+        assert_eq!(
+            c.availability,
+            Availability::Disabled(vec![DisabledReason::Iin])
+        );
+    }
+    assert_eq!(p.key_prompts()[0].action, Action::Sign);
+
+    // Everything matches a legal entity's key; the serial compares case-insensitively.
+    let legal = cert_info(&entry("legal-gost2015-sign").cert);
+    let serial = legal.serial_hex.to_uppercase();
+    let (b, p) = basics(script![
+        storage("legal-gost2015-sign", "Qwerty12"),
+        Step::CancelKey
+    ]);
+    b.process(
+        &req(json!({"format":"raw","data":"x","signingParams":{},"signerParams":{
+            "extKeyUsageOids":[], "iin":"123456789022", "bin":"123456789021", "serialNumber": serial}})),
+        &origin("o"),
+    );
+    assert_eq!(
+        p.key_prompts()[0].candidates[0].availability,
+        Availability::Enabled
+    );
+
+    // Nothing matches: every reason, in order.
+    let (b, p) = basics(script![
+        storage("user-gost2015-sign", "Qwerty12"),
+        Step::CancelKey
+    ]);
+    b.process(
+        &req(
+            json!({"format":"raw","data":"x","signingParams":{},"signerParams":{
+            "extKeyUsageOids":[CLIENT_AUTH], "iin":"1", "bin":"2", "serialNumber":"3"}}),
+        ),
+        &origin("o"),
+    );
+    assert_eq!(
+        p.key_prompts()[0].candidates[0].availability,
+        Availability::Disabled(vec![
+            DisabledReason::ExtKeyUsage,
+            DisabledReason::Iin,
+            DisabledReason::Bin,
+            DisabledReason::SerialNumber,
+        ])
+    );
+}
+
+#[test]
+fn key_filter_availability() {
+    let info = cert_info(&entry("user-gost2015-sign").cert);
+    let filter = |ekus: &[&str], allow_expired: bool| KeyFilter {
+        ext_key_usages: ekus
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect::<BTreeSet<_>>(),
+        iin: String::new(),
+        bin: String::new(),
+        serial_number: String::new(),
+        allow_expired,
+    };
+    let inside = datetime!(2026-01-01 0:00 UTC);
+    let after = datetime!(2100-01-01 0:00 UTC);
+    assert_eq!(
+        filter(&[], false).availability(&info, inside),
+        Availability::Enabled
+    );
+    assert_eq!(
+        filter(&[], false).availability(&info, after),
+        Availability::Expired
+    );
+    assert_eq!(
+        filter(&[], true).availability(&info, after),
+        Availability::Enabled
+    );
+    let requested: Vec<&str> = info.ext_key_usages.iter().map(String::as_str).collect();
+    assert_eq!(
+        filter(&requested, false).availability(&info, inside),
+        Availability::Enabled
+    );
+    // Disabled wins over expired.
+    assert_eq!(
+        filter(&[EMAIL_PROTECTION, CLIENT_AUTH], false).availability(&info, after),
+        Availability::Disabled(vec![DisabledReason::ExtKeyUsage])
+    );
+    // The obsolete-auth rule: a GOST 2015 key with keyAgreement counts as clientAuth.
+    let legacy = cert_info(&entry("legacy-gost2015-auth").cert);
+    assert!(!legacy.ext_key_usages.contains(CLIENT_AUTH));
+    assert_eq!(
+        filter(&[CLIENT_AUTH], false).availability(&legacy, inside),
+        Availability::Enabled
+    );
+}
+
+#[test]
+fn expired_key_cannot_be_chosen() {
+    let (b, p) = basics(script![
+        storage("expired-gost2015-sign", "Qwerty12"),
+        key(0),
+        key(0)
+    ]);
+    let r = b.process(&req(cms_args(json!("x"), json!({}))), &origin("o"));
+    assert_eq!(r, r#"{"status":true,"body":{}}"#);
+    let kps = p.key_prompts();
+    assert_eq!(kps.len(), 3, "two refused picks, then the exhausted script");
+    assert_eq!(kps[0].candidates[0].availability, Availability::Expired);
+    assert_eq!(kps[0], kps[2]);
+}
+
+#[test]
+fn out_of_range_key_index_reprompts() {
+    let (b, p) = basics(script![
+        storage("user-gost2015-sign", "Qwerty12"),
+        key(5),
+        key(0)
+    ]);
+    let r = json(b.process(&req(raw_args(json!("x"), json!({}))), &origin("o")));
+    assert_eq!(r["status"], true);
+    assert_eq!(p.key_prompts().len(), 2);
+}
+
+#[test]
+fn tsa_profile_adds_timestamp() {
+    let s = setup(
+        script![storage("user-gost2015-sign", "Qwerty12"), key(0)],
+        None,
+    );
+    let r = json(s.basics.process(
+        &req(cms_args(
+            json!("aGVsbG8="),
+            json!({"decode": true, "tsaProfile": {}}),
+        )),
+        &origin("o"),
+    ));
+    assert_eq!(r["status"], true, "{r}");
+    let der = pem_to_der(r["body"]["result"][0].as_str().unwrap());
+    let signers = verify(&der, None).unwrap();
+    let token = signers[0].timestamp_token.as_ref().unwrap();
+    assert_eq!(
+        verify_token(token).unwrap().policy.to_string(),
+        BASICS_POLICY
+    );
+    let calls = s.tsa.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].starts_with("http://tsp.pki.gov.kz/"),
+        "{}",
+        calls[0]
+    );
+
+    // The profile's contents are ignored; another profile comes from `with_tsa`.
+    let s = setup(
+        script![storage("user-gost2015-sign", "Qwerty12"), key(0)],
+        None,
+    );
+    let mut profile = oncl_pki::tsp::TsaProfile::basics_default();
+    profile.url = "http://tsa.test/x".to_owned();
+    let b = s.basics.with_tsa(profile);
+    let r = json(b.process(
+        &req(cms_args(
+            json!("x"),
+            json!({"tsaProfile": {"url": "http://ignored"}}),
+        )),
+        &origin("o"),
+    ));
+    assert_eq!(r["status"], true, "{r}");
+    assert!(s.tsa.calls()[0].starts_with("http://tsa.test/x/"));
+}
+
+#[test]
+fn tsp_failure_code() {
+    struct Down;
+    impl oncl_pki::tsp::HttpTransport for Down {
+        fn get(&self, _: &str) -> Result<oncl_pki::tsp::HttpReply, oncl_pki::tsp::TspError> {
+            Err(oncl_pki::tsp::TspError::Http("down".to_owned()))
+        }
+        fn post(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[u8],
+        ) -> Result<oncl_pki::tsp::HttpReply, oncl_pki::tsp::TspError> {
+            Err(oncl_pki::tsp::TspError::Http("down".to_owned()))
+        }
+    }
+    let prompter = Arc::new(ScriptedPrompter::new(script![
+        storage("user-gost2015-sign", "Qwerty12"),
+        key(0)
+    ]));
+    let b = Basics::new(
+        prompter,
+        Arc::new(MemoryRecentPath::new(None)),
+        Arc::new(Down),
+    );
+    let r = json(b.process(
+        &req(cms_args(json!("x"), json!({"tsaProfile": {}}))),
+        &origin("o"),
+    ));
+    assert_eq!(r["status"], false);
+    assert_eq!(r["code"], "TIMESTAMP_CREATION_FAILURE");
+    assert!(r.get("message").is_none(), "{r}");
+}
+
+#[test]
+fn raw_result_shapes() {
+    let signer = entry("user-gost2015-sign");
+    let public = public_key(&signer);
+    let raw = |data: Value, params: Value| {
+        let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+        let r = json(b.process(&req(raw_args(data, params)), &origin("o")));
+        assert_eq!(r["status"], true, "{r}");
+        r["body"]["result"].clone()
+    };
+    let sig = |v: &Value| STANDARD.decode(v.as_str().unwrap()).unwrap();
+
+    // One data item: a single string.
+    let one = raw(json!("aGVsbG8="), json!({"decode": true}));
+    assert_eq!(
+        public.verify(SigAlg::Gost2015_512, b"hello", &sig(&one)),
+        Ok(())
+    );
+
+    // A one-element array is still one signature: a string.
+    let one = raw(json!(["a"]), json!({}));
+    assert!(one.is_string());
+
+    // Several: an array, in order.
+    let two = raw(json!(["a", "b"]), json!({}));
+    let two = two.as_array().unwrap();
+    assert_eq!(two.len(), 2);
+    assert_eq!(
+        public.verify(SigAlg::Gost2015_512, b"a", &sig(&two[0])),
+        Ok(())
+    );
+    assert_eq!(
+        public.verify(SigAlg::Gost2015_512, b"b", &sig(&two[1])),
+        Ok(())
+    );
+
+    // outputCert: signatures and the certificate PEM.
+    let with_cert = raw(json!("a"), json!({"outputCert": true}));
+    let certificate = with_cert["certificate"].as_str().unwrap();
+    assert!(certificate.starts_with("-----BEGIN CERTIFICATE-----"));
+    assert!(
+        certificate
+            .trim_end()
+            .ends_with("-----END CERTIFICATE-----")
+    );
+    assert_eq!(pem_to_der(certificate), signer.cert.to_der().unwrap());
+    let signatures = with_cert["signatures"].as_array().unwrap();
+    assert_eq!(signatures.len(), 1);
+    assert_eq!(
+        public.verify(SigAlg::Gost2015_512, b"a", &sig(&signatures[0])),
+        Ok(())
+    );
+}
+
+#[test]
+fn raw_gost2004_verifies() {
+    let (b, _) = basics(script![storage("user-gost2004-sign", "Qwerty12"), key(0)]);
+    let r = json(b.process(
+        &req(raw_args(json!("aGVsbG8="), json!({"decode": true}))),
+        &origin("o"),
+    ));
+    let sig = STANDARD
+        .decode(r["body"]["result"].as_str().unwrap())
+        .unwrap();
+    let public = public_key(&entry("user-gost2004-sign"));
+    assert_eq!(public.verify(SigAlg::Gost2004, b"hello", &sig), Ok(()));
+}
+
+#[test]
+fn raw_rsa_is_sha256() {
+    let (b, _) = basics(script![storage("user-rsa-sign", "Qwerty12"), key(0)]);
+    let r = json(b.process(&req(raw_args(json!("hello"), json!({}))), &origin("o")));
+    let sig = STANDARD
+        .decode(r["body"]["result"].as_str().unwrap())
+        .unwrap();
+    let public = public_key(&entry("user-rsa-sign"));
+    assert_eq!(public.verify(SigAlg::RsaSha256, b"hello", &sig), Ok(()));
+}
+
+#[test]
+fn param_errors() {
+    // Missing required fields: INVOCATION_ERROR with org.json's details.
+    let invocation = |args: Value, field: &str| {
+        let (b, _) = basics(script![]);
+        let r = json(b.process(&req(args), &origin("o")));
+        assert_eq!(r["code"], "INVOCATION_ERROR", "{r}");
+        assert_eq!(r["message"], "An invoked method threw an exception.");
+        assert_eq!(
+            r["details"],
+            format!("JSONObject[\"{field}\"] not found."),
+            "{r}"
+        );
+    };
+    assert_eq!(
+        code(json!({"data":"x","signingParams":{},"signerParams":{"extKeyUsageOids":[]}})),
+        "INVOCATION_ERROR"
+    );
+    invocation(
+        json!({"data":"x","signingParams":{},"signerParams":{"extKeyUsageOids":[]}}),
+        "format",
+    );
+    invocation(
+        json!({"format":"cms","data":"x","signerParams":{"extKeyUsageOids":[]}}),
+        "signingParams",
+    );
+    invocation(
+        json!({"format":"cms","signingParams":{},"signerParams":{"extKeyUsageOids":[]}}),
+        "data",
+    );
+    invocation(
+        json!({"format":"raw","data":"x","signingParams":{}}),
+        "signerParams",
+    );
+    invocation(
+        json!({"format":"raw","data":"x","signingParams":{},"signerParams":{}}),
+        "extKeyUsageOids",
+    );
+
+    // Unsupported formats.
+    for format in ["xml", "CMS", ""] {
+        let (b, _) = basics(script![]);
+        let r = json(b.process(
+            &req(json!({"format":format,"data":"x","signingParams":{},"signerParams":{"extKeyUsageOids":[]}})),
+            &origin("o"),
+        ));
+        assert_eq!(r["status"], false);
+        assert_eq!(r["code"], "INVALID_SIGNING_PARAMS");
+        assert!(r.get("message").is_none(), "{r}");
+    }
+
+    // Invalid base64 with `decode`: SIGNING_FAILURE before any dialog.
+    assert_eq!(
+        code(
+            json!({"format":"cms","data":"не base64","signingParams":{"decode":true},"signerParams":{"extKeyUsageOids":[]}})
+        ),
+        "SIGNING_FAILURE"
+    );
+    let (b, _) = basics(script![]);
+    let r = json(b.process(
+        &req(raw_args(json!(["YQ==", "YQ= ="]), json!({"decode": true}))),
+        &origin("o"),
+    ));
+    assert_eq!(r["code"], "SIGNING_FAILURE");
+    assert_eq!(r["message"], "Signing has failed.");
+    // Java's basic decoder: padding optional, no whitespace.
+    for ok in ["YQ", "YQ==", "aGVsbG8"] {
+        let (b, p) = basics(script![Step::CancelStorage]);
+        let r = b.process(
+            &req(raw_args(json!(ok), json!({"decode": true}))),
+            &origin("o"),
+        );
+        assert_eq!(r, r#"{"status":true,"body":{}}"#, "{ok}");
+        assert_eq!(p.storage_prompts().len(), 1);
+    }
+    for bad in ["YQ=", "YQ==\n", " YQ==", "Y", "YQ===", "YQ-_"] {
+        assert_eq!(
+            code(raw_args(json!(bad), json!({"decode": true}))),
+            "SIGNING_FAILURE",
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn missing_args_is_a_general_error() {
+    for request in [
+        json!({"module": MODULE_NAME, "method": "sign"}),
+        json!({"module": MODULE_NAME, "method": "sign", "args": ["x"]}),
+        json!({"module": MODULE_NAME, "class": "PKIExtras", "method": "sign", "args": null}),
+    ] {
+        let (b, p) = basics(script![]);
+        assert_eq!(
+            b.process(&request.to_string(), &origin("o")),
+            r#"{"status":false,"code":"GENERAL_ERROR","message":"General error.","details":"sign demands arguments"}"#
+        );
+        assert!(p.storage_prompts().is_empty());
+    }
+}
+
+#[test]
+fn classes() {
+    let (b, _) = basics(script![]);
+    let r = json(b.process(
+        &json!({"module": MODULE_NAME, "class": "PKIEssentials", "method": "generateCsr", "args": {}})
+            .to_string(),
+        &origin("o"),
+    ));
+    assert_eq!(r["code"], "GENERAL_ERROR");
+    assert_eq!(r["details"], "generateCsr is not defined in PKIEssentials");
+    let r = json(
+        b.process(
+            &json!({"module": MODULE_NAME, "class": "PKIEssentials", "method": "sign", "args": {}})
+                .to_string(),
+            &origin("o"),
+        ),
+    );
+    assert_eq!(r["details"], "sign is not defined in PKIEssentials");
+    let r = json(b.process(
+        &json!({"module": MODULE_NAME, "method": "generateCsr", "args": {}}).to_string(),
+        &origin("o"),
+    ));
+    assert_eq!(r["details"], "generateCsr is not defined in PKIExtras");
+}
+
+#[test]
+fn cosign_detached_cms_error_code() {
+    let detached = oncl_pki::cms::sign(
+        &entry("user-gost2004-sign"),
+        b"doc",
+        &SignOptions {
+            encapsulate: false,
+            digested: false,
+            signing_time: OffsetDateTime::now_utc(),
+        },
+    )
+    .unwrap();
+    let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+    let r = json(b.process(
+        &req(cms_args(
+            json!(STANDARD.encode(&detached)),
+            json!({"decode": true}),
+        )),
+        &origin("o"),
+    ));
+    assert_eq!(r["status"], false);
+    assert_eq!(r["code"], "CMS_NO_ENCAPSULATED_DATA");
+    assert!(r.get("message").is_none(), "{r}");
+}
+
+/// Replaces sha256WithRSAEncryption (1.2.840.113549.1.1.11) by sha1WithRSAEncryption
+/// (…1.1.5) in a DER certificate: same length, signature left as is.
+fn as_sha1_with_rsa(cert: &[u8]) -> Vec<u8> {
+    const SHA256_RSA: [u8; 11] = [6, 9, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 0x0b];
+    let mut out = cert.to_vec();
+    let mut patched = 0;
+    for i in 0..=out.len() - SHA256_RSA.len() {
+        if out[i..i + SHA256_RSA.len()] == SHA256_RSA {
+            out[i + SHA256_RSA.len() - 1] = 5;
+            patched += 1;
+        }
+    }
+    assert_eq!(
+        patched, 2,
+        "tbsCertificate.signature and signatureAlgorithm"
+    );
+    out
+}
+
+#[test]
+fn sha1_with_rsa_certificate_is_not_upgraded() {
+    let cert_der = as_sha1_with_rsa(&read(fixture("openssl/rsa.cer")));
+    let p12 = write(
+        &[WriteEntry {
+            alias: "sha1".to_owned(),
+            pkcs8_der: read(fixture("openssl/rsa.pk8.der")),
+            cert_der,
+        }],
+        "Qwerty12",
+        &WriteOptions::default(),
+        &mut |buf: &mut [u8]| buf.fill(7),
+    );
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("oncl-basics-sha1-rsa.p12");
+    std::fs::write(&path, p12).unwrap();
+    let entries = load(&read(&path), "Qwerty12").unwrap();
+    assert_eq!(
+        cert_info(&entries[0].cert).signing_alg(),
+        Ok(SigAlg::RsaSha1)
+    );
+
+    fn inside_validity() -> OffsetDateTime {
+        let cert = oncl_pki::cert::parse(&read(fixture("openssl/rsa.cer"))).unwrap();
+        let info = cert_info(&cert);
+        info.not_before + (info.not_after - info.not_before) / 2
+    }
+    let s = setup(script![storage_at(&path, "Qwerty12"), key(0)], None);
+    let b = s.basics.with_clock(inside_validity);
+    let r = json(b.process(&req(cms_args(json!("x"), json!({}))), &origin("o")));
+    assert_eq!(r["status"], false, "{r}");
+    assert_eq!(r["code"], "UNKNOWN_ALGORITHM");
+    assert!(r.get("message").is_none(), "{r}");
+}
+
+#[test]
+fn unknown_storages_dropped_and_recent_path_used() {
+    let recent = PathBuf::from("C:/keys/old.p12");
+    let s = setup(script![Step::CancelStorage], Some(recent.clone()));
+    let mut args = raw_args(json!("x"), json!({}));
+    args["allowedStorages"] = json!(["PKCS12", "FOO", "pkcs12", 5]);
+    s.basics.process(&req(args), &origin("o"));
+    let prompt = &s.prompter.storage_prompts()[0];
+    assert_eq!(prompt.storages, [StorageKind::Pkcs12]);
+    assert_eq!(prompt.recent_path, Some(recent.clone()));
+    assert_eq!(s.recent.saved(), None);
+
+    for allowed in [None, Some(Value::Null)] {
+        let s = setup(script![Step::CancelStorage], None);
+        let mut args = raw_args(json!("x"), json!({}));
+        if let Some(v) = allowed {
+            args["allowedStorages"] = v;
+        }
+        s.basics.process(&req(args), &origin("o"));
+        let prompt = &s.prompter.storage_prompts()[0];
+        assert_eq!(prompt.storages, StorageKind::all());
+        assert_eq!(prompt.recent_path, None);
+    }
+
+    // After a successful open the path is saved.
+    let s = setup(
+        script![storage("user-gost2015-sign", "Qwerty12"), key(0)],
+        Some(recent),
+    );
+    let mut args = raw_args(json!("x"), json!({}));
+    args["allowedStorages"] = json!(["AKKaztokenStore", "PKCS12"]);
+    let r = json(s.basics.process(&req(args), &origin("o")));
+    assert_eq!(r["status"], true);
+    assert_eq!(
+        s.prompter.storage_prompts()[0].storages,
+        [StorageKind::Token("AKKaztokenStore"), StorageKind::Pkcs12]
+    );
+    assert_eq!(s.recent.saved(), Some(synthetic("user-gost2015-sign").path));
+}
+
+#[test]
+fn storage_kinds() {
+    let names: Vec<_> = StorageKind::all().iter().map(StorageKind::name).collect();
+    assert_eq!(
+        names,
+        [
+            "AKKaztokenStore",
+            "AKKZIDCardStore",
+            "AKEToken72KStore",
+            "AKEToken5110Store",
+            "AKJaCartaStore",
+            "AKAKEYStore",
+            "PKCS12",
+            "JKS",
+            "ABCloudServiceStore",
+        ]
+    );
+    for kind in StorageKind::all() {
+        assert_eq!(StorageKind::from_name(kind.name()), Some(kind));
+        assert_eq!(kind.supported(), kind == StorageKind::Pkcs12);
+    }
+    assert_eq!(StorageKind::from_name("PKCS12"), Some(StorageKind::Pkcs12));
+    assert_eq!(StorageKind::from_name("JKS"), Some(StorageKind::Jks));
+    assert_eq!(StorageKind::from_name("pkcs12"), None);
+    assert_eq!(StorageKind::from_name("AKEToken"), None);
+}
+
+#[test]
+fn origin_and_locale_reach_the_prompts() {
+    let (b, p) = basics(script![Step::CancelStorage]);
+    let mut args = raw_args(json!("x"), json!({}));
+    args["locale"] = json!("ru");
+    b.process(&req(args), &AddInfo { origin: None });
+    assert_eq!(p.storage_prompts()[0].origin, "UNIDENTIFIED");
+    assert_eq!(p.storage_prompts()[0].locale, Locale::Ru);
+}
+
+#[test]
+fn sign_flows_are_serialized() {
+    let barrier = Arc::new(Barrier::new(2));
+    let s = setup(
+        script![
+            Step::Wait(barrier.clone()),
+            storage("user-gost2015-sign", "Qwerty12"),
+            key(0),
+            storage("user-gost2015-sign", "Qwerty12"),
+            key(0),
+        ],
+        None,
+    );
+    let basics = Arc::new(s.basics);
+    let prompter = s.prompter;
+    let run = |o: &'static str| {
+        let basics = Arc::clone(&basics);
+        thread::spawn(move || {
+            json(basics.process(&req(cms_args(json!("x"), json!({}))), &origin(o)))
+        })
+    };
+
+    let a = run("a");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while prompter.storage_prompts().is_empty() {
+        assert!(Instant::now() < deadline, "A never showed its dialog");
+        thread::sleep(Duration::from_millis(5));
+    }
+    let b = run("b");
+    // B waits for A's flow instead of showing a second dialog.
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(prompter.storage_prompts().len(), 1);
+    assert!(prompter.key_prompts().is_empty());
+    barrier.wait();
+
+    assert_eq!(a.join().unwrap()["status"], true);
+    assert_eq!(b.join().unwrap()["status"], true);
+    let storage_origins: Vec<String> = prompter
+        .storage_prompts()
+        .into_iter()
+        .map(|p| p.origin)
+        .collect();
+    let key_origins: Vec<String> = prompter
+        .key_prompts()
+        .into_iter()
+        .map(|p| p.origin)
+        .collect();
+    assert_eq!(storage_origins, ["a", "b"]);
+    assert_eq!(key_origins, ["a", "b"]);
+}
+
+#[test]
+fn locale_mapping() {
+    assert_eq!(Locale::from_arg(Some("ru")), Locale::Ru);
+    assert_eq!(Locale::from_arg(Some("kk")), Locale::Kk);
+    assert_eq!(Locale::from_arg(Some("de")), Locale::En);
+    assert_eq!(Locale::from_arg(Some("en")), Locale::En);
+    assert_eq!(Locale::from_arg(Some("")), Locale::En);
+    // Java's `new Locale(…)` lower-cases the language.
+    assert_eq!(Locale::from_arg(Some("RU")), Locale::Ru);
+    assert_eq!(Locale::from_arg(None), Locale::Kk);
+}
