@@ -615,6 +615,7 @@ name = "oncl-pki"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "base64",
  "cbc",
  "der 0.8.2",
  "des",
@@ -1340,6 +1341,7 @@ dependencies = [
  "sha1",
  "sha2 0.11.1",
  "spki 0.8.1",
+ "time",
  "ureq",
  "x509-cert",
 ]

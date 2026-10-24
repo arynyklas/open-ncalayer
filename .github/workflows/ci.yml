@@ -58,6 +58,9 @@ jobs:
       - name: Test
         shell: bash
         run: cargo xtask fetch-fixtures && cargo test --workspace --all-features -- --include-ignored --skip live_
+      - name: CMS interop with OpenSSL
+        if: runner.os == 'Linux'
+        run: cargo xtask interop-openssl
 
   deny:
     if: github.event_name == 'push' || github.event_name == 'pull_request'

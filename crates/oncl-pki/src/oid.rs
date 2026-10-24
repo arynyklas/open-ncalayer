@@ -27,14 +27,34 @@ pub const GOST_34311: Oid = Oid::new_unwrap("1.2.398.3.10.1.3.1");
 pub const STREEBOG_512: Oid = Oid::new_unwrap("1.2.398.3.10.1.3.3");
 /// id-sha256.
 pub const SHA256: Oid = Oid::new_unwrap("2.16.840.1.101.3.4.2.1");
+/// id-sha384.
+pub const SHA384: Oid = Oid::new_unwrap("2.16.840.1.101.3.4.2.2");
+/// id-sha512.
+pub const SHA512: Oid = Oid::new_unwrap("2.16.840.1.101.3.4.2.3");
 /// id-sha1.
 pub const SHA1: Oid = Oid::new_unwrap("1.3.14.3.2.26");
 
-// PKCS#7 content types.
+// PKCS#7 / CMS content types.
 /// id-data.
 pub const DATA: Oid = Oid::new_unwrap("1.2.840.113549.1.7.1");
+/// id-signedData.
+pub const SIGNED_DATA: Oid = Oid::new_unwrap("1.2.840.113549.1.7.2");
 /// id-encryptedData.
 pub const ENCRYPTED_DATA: Oid = Oid::new_unwrap("1.2.840.113549.1.7.6");
+/// id-ct-TSTInfo (RFC 3161 time-stamp token content).
+pub const TST_INFO: Oid = Oid::new_unwrap("1.2.840.113549.1.9.16.1.4");
+
+// CMS attributes.
+/// id-contentType.
+pub const CONTENT_TYPE: Oid = Oid::new_unwrap("1.2.840.113549.1.9.3");
+/// id-messageDigest.
+pub const MESSAGE_DIGEST: Oid = Oid::new_unwrap("1.2.840.113549.1.9.4");
+/// id-signingTime.
+pub const SIGNING_TIME: Oid = Oid::new_unwrap("1.2.840.113549.1.9.5");
+/// id-aa-signingCertificateV2 (RFC 5035).
+pub const SIGNING_CERTIFICATE_V2: Oid = Oid::new_unwrap("1.2.840.113549.1.9.16.2.47");
+/// id-aa-timeStampToken (RFC 3161 unsigned attribute).
+pub const TIME_STAMP_TOKEN: Oid = Oid::new_unwrap("1.2.840.113549.1.9.16.2.14");
 
 // Subject name attributes.
 /// commonName (CN).

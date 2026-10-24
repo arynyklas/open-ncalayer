@@ -3,3 +3,4 @@
 
 pub mod fetch;
 pub mod fixtures;
+pub mod interop;

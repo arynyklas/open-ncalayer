@@ -18,11 +18,14 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Sign with the synthetic RSA key and check the CMS with `openssl cms -verify`.
+    InteropOpenssl,
 }
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::FetchFixtures => xtask::fetch::fetch_fixtures(),
+        Command::InteropOpenssl => xtask::interop::interop_openssl(&oncl_testkit::workspace_root()),
         Command::GenFixtures { check: false } => {
             xtask::fixtures::gen_fixtures(&oncl_testkit::workspace_root())
         }

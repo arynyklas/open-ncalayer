@@ -23,5 +23,6 @@ rsa.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 spki.workspace = true
+time.workspace = true
 ureq.workspace = true
 x509-cert.workspace = true
