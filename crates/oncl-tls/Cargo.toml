@@ -1,0 +1,25 @@
+[package]
+name = "oncl-tls"
+description = "Local TLS wizard backend for OpenNCALayer: name-constrained local CA, certificate import, rustls server config and trust instructions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+der = { workspace = true, features = ["pem"] }
+rcgen.workspace = true
+ring.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
+x509-cert.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+rustls-webpki.workspace = true
+time = { workspace = true, features = ["formatting", "parsing", "macros"] }
