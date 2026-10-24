@@ -1,6 +1,6 @@
 [package]
 name = "oncl-pki"
-description = "BER normalization, keys, PKCS#8/PKCS#12 and certificate checks for OpenNCALayer"
+description = "BER normalization, keys, PKCS#8/PKCS#12, certificate checks, CMS and RFC 3161 time-stamping for OpenNCALayer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,8 @@ publish.workspace = true
 [features]
 # PKCS#12 writer (test fixtures, xtask).
 write = []
+# `tsp::MockTsa`, an in-process time-stamping authority for tests.
+testing = []
 
 [dependencies]
 aes.workspace = true
@@ -18,6 +20,7 @@ base64.workspace = true
 cbc.workspace = true
 der.workspace = true
 des.workspace = true
+getrandom.workspace = true
 hmac.workspace = true
 oncl-gost.workspace = true
 pbkdf2.workspace = true
@@ -30,9 +33,14 @@ spki.workspace = true
 thiserror.workspace = true
 time.workspace = true
 x509-cert.workspace = true
+ureq.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 hex-literal.workspace = true
 oncl-testkit.workspace = true
 time = { workspace = true, features = ["macros"] }
+
+[[test]]
+name = "tsp"
+required-features = ["testing"]

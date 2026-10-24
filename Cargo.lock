@@ -619,6 +619,7 @@ dependencies = [
  "cbc",
  "der 0.8.2",
  "des",
+ "getrandom 0.4.3",
  "hex-literal",
  "hmac",
  "oncl-gost",
@@ -632,6 +633,7 @@ dependencies = [
  "spki 0.8.1",
  "thiserror",
  "time",
+ "ureq",
  "x509-cert",
  "zeroize",
 ]

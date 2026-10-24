@@ -1,0 +1,508 @@
+//! RFC 3161 time-stamping with the NCA GET binding: the request, the mock TSA, checks of the
+//! reply, a response of the NCA test TSA saved by NCANode and the live NCA test TSA.
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use der::asn1::{AnyRef, ObjectIdentifier};
+use der::{Decode, Encode, Reader, SliceReader, Tag, Tagged};
+use oncl_pki::cms::{SignOptions, sign, verify};
+use oncl_pki::key::SigAlg;
+use oncl_pki::pkcs12::{KeyEntry, load};
+use oncl_pki::tsp::{
+    HttpReply, HttpTransport, MockTamper, MockTsa, TsaMethod, TsaProfile, TspError, TspHash,
+    UreqTransport, parse_response, request_der, timestamp_signer, verify_token,
+};
+use oncl_testkit::{ncanode, read, synthetic};
+use std::sync::Mutex;
+use time::macros::datetime;
+
+const STREEBOG_512: &str = "1.2.398.3.10.1.3.3";
+const BASICS_POLICY: &str = "1.2.398.3.3.2.6.4";
+const TIME_STAMP_TOKEN: &str = "1.2.840.113549.1.9.16.2.14";
+
+fn entry(name: &str) -> KeyEntry {
+    let key = synthetic(name);
+    load(&read(&key.path), &key.password)
+        .unwrap()
+        .swap_remove(0)
+}
+
+fn opts(encapsulate: bool) -> SignOptions {
+    SignOptions {
+        encapsulate,
+        digested: false,
+        signing_time: datetime!(2026-03-01 10:20:30 UTC),
+    }
+}
+
+fn tsa() -> MockTsa {
+    MockTsa::new(entry("tsa-gost2015"))
+}
+
+fn signed(name: &str) -> Vec<u8> {
+    sign(&entry(name), b"d", &opts(true)).unwrap()
+}
+
+fn streebog512(data: &[u8]) -> Vec<u8> {
+    SigAlg::Gost2015_512.digest(data)
+}
+
+/// Elements of a constructed value.
+fn children(any: AnyRef<'_>) -> Vec<AnyRef<'_>> {
+    let mut reader = SliceReader::new(any.value()).unwrap();
+    let mut out = Vec::new();
+    while !reader.is_finished() {
+        out.push(reader.decode::<AnyRef<'_>>().unwrap());
+    }
+    out
+}
+
+fn oid(any: AnyRef<'_>) -> String {
+    any.decode_as::<ObjectIdentifier>().unwrap().to_string()
+}
+
+/// `SignerInfo` elements of signer `index` of a DER `ContentInfo{SignedData}`.
+fn signer_info(cms: &[u8], index: usize) -> Vec<AnyRef<'_>> {
+    let ci = children(AnyRef::from_der(cms).unwrap());
+    let sd = children(children(ci[1])[0]);
+    let signers = children(*sd.last().unwrap());
+    children(signers[index])
+}
+
+/// The `signature` OCTET STRING contents of signer `index`.
+fn signer_signature(cms: &[u8], index: usize) -> Vec<u8> {
+    signer_info(cms, index)
+        .into_iter()
+        .find(|e| e.tag() == Tag::OctetString)
+        .unwrap()
+        .value()
+        .to_vec()
+}
+
+/// `[1] IMPLICIT` unsigned attributes of signer `index`, as `(type, values)`.
+fn unsigned_attrs(cms: &[u8], index: usize) -> Vec<(String, usize)> {
+    let si = signer_info(cms, index);
+    let Some(attrs) = si
+        .iter()
+        .find(|e| e.tag().is_context_specific() && e.tag().number() == der::TagNumber(1))
+    else {
+        return Vec::new();
+    };
+    children(*attrs)
+        .into_iter()
+        .map(|a| {
+            let a = children(a);
+            (oid(a[0]), children(a[1]).len())
+        })
+        .collect()
+}
+
+fn percent_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+            out.push(u8::from_str_radix(hex, 16).unwrap());
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn base64_decode(b: &[u8]) -> Vec<u8> {
+    STANDARD.decode(b).unwrap()
+}
+
+/// Fields of a `TimeStampReq`.
+#[derive(Debug)]
+struct Req {
+    version: u8,
+    alg: String,
+    alg_params: Vec<u8>,
+    imprint: Vec<u8>,
+    policy: String,
+    /// Contents of the nonce INTEGER.
+    nonce: Vec<u8>,
+    cert_req: bool,
+}
+
+fn decode_timestamp_req(der: &[u8]) -> Req {
+    let req = children(AnyRef::from_der(der).unwrap());
+    assert_eq!(
+        req.len(),
+        5,
+        "version, messageImprint, reqPolicy, nonce, certReq"
+    );
+    let imprint = children(req[1]);
+    let alg = children(imprint[0]);
+    assert_eq!(alg.len(), 2);
+    assert_eq!(req[3].tag(), Tag::Integer);
+    Req {
+        version: req[0].decode_as().unwrap(),
+        alg: oid(alg[0]),
+        alg_params: alg[1].to_der().unwrap(),
+        imprint: imprint[1]
+            .decode_as::<&der::asn1::OctetStringRef>()
+            .unwrap()
+            .as_bytes()
+            .to_vec(),
+        policy: oid(req[2]),
+        nonce: req[3].value().to_vec(),
+        cert_req: req[4].decode_as().unwrap(),
+    }
+}
+
+#[test]
+fn request_structure() {
+    let der = request_der(&TsaProfile::basics_default(), &[7; 64], &[42]);
+    let req = decode_timestamp_req(&der);
+    assert_eq!(req.version, 1);
+    assert_eq!(req.alg, STREEBOG_512);
+    assert_eq!(req.alg_params, [0x05, 0x00], "NULL parameters");
+    assert_eq!(req.imprint, [7; 64]);
+    assert_eq!(req.policy, BASICS_POLICY);
+    assert_eq!(req.nonce, [42]);
+    assert!(req.cert_req);
+
+    // The nonce is an unsigned number: a set top bit gets a leading zero, leading zeros go.
+    let der = request_der(&TsaProfile::basics_default(), &[7; 64], &[0x80, 0]);
+    assert_eq!(decode_timestamp_req(&der).nonce, [0, 0x80, 0]);
+    let der = request_der(&TsaProfile::basics_default(), &[7; 64], &[0, 0, 5]);
+    assert_eq!(decode_timestamp_req(&der).nonce, [5]);
+}
+
+#[test]
+fn basics_default_profile() {
+    let p = TsaProfile::basics_default();
+    assert_eq!(p.url, "http://tsp.pki.gov.kz");
+    assert_eq!(p.method, TsaMethod::Get);
+    assert_eq!(p.hash, TspHash::Streebog512);
+    assert_eq!(p.policy.to_string(), BASICS_POLICY);
+}
+
+#[test]
+fn get_url_is_percent_encoded() {
+    let t = tsa();
+    let cms = timestamp_signer(
+        &signed("user-gost2015-sign"),
+        0,
+        &TsaProfile::basics_default(),
+        &t,
+    )
+    .unwrap();
+    let calls = t.calls();
+    assert_eq!(calls.len(), 1);
+    let url = &calls[0];
+    let tail = url.strip_prefix("http://tsp.pki.gov.kz/").unwrap();
+    assert!(!tail.contains(['+', '/', '=']), "{tail}");
+    assert!(
+        tail.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~%".contains(&b)),
+        "{tail}"
+    );
+    let der = base64_decode(&percent_decode(tail));
+    let req = decode_timestamp_req(&der);
+    assert_eq!(req.policy, BASICS_POLICY);
+    assert_eq!(req.imprint, streebog512(&signer_signature(&cms, 0)));
+    assert_eq!(req.nonce.len(), 8 + usize::from(req.nonce[0] == 0));
+}
+
+#[test]
+fn timestamp_roundtrip_with_mock() {
+    let mock = tsa();
+    let e2015 = entry("user-gost2015-sign");
+    let cms = timestamp_signer(
+        &sign(&e2015, b"d", &opts(true)).unwrap(),
+        0,
+        &TsaProfile::basics_default(),
+        &mock,
+    )
+    .unwrap();
+    let s = verify(&cms, None).unwrap();
+    let tst = verify_token(s[0].timestamp_token.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        tst.imprint,
+        streebog512(&signer_signature(&cms, 0)).to_vec()
+    );
+    assert_eq!(tst.imprint_alg.to_string(), STREEBOG_512);
+    assert_eq!(tst.policy.to_string(), BASICS_POLICY);
+    assert!(
+        tst.nonce
+            .as_ref()
+            .is_some_and(|n| !n.is_empty() && n[0] != 0)
+    );
+    let age = time::OffsetDateTime::now_utc() - tst.gen_time;
+    assert!(age.whole_minutes().abs() < 5, "{}", tst.gen_time);
+    assert_eq!(unsigned_attrs(&cms, 0), [(TIME_STAMP_TOKEN.to_owned(), 1)]);
+}
+
+#[test]
+fn post_binding_with_mock() {
+    let mock = tsa();
+    let profile = TsaProfile {
+        method: TsaMethod::Post,
+        ..TsaProfile::basics_default()
+    };
+    let cms = timestamp_signer(&signed("user-gost2015-sign"), 0, &profile, &mock).unwrap();
+    assert_eq!(mock.calls(), ["http://tsp.pki.gov.kz"]);
+    let s = verify(&cms, None).unwrap();
+    verify_token(s[0].timestamp_token.as_ref().unwrap()).unwrap();
+}
+
+#[test]
+fn imprint_follows_profile_hash() {
+    for (hash, alg, digest) in [
+        (TspHash::Sha256, "2.16.840.1.101.3.4.2.1", SigAlg::RsaSha256),
+        (TspHash::Gost34311, "1.2.398.3.10.1.3.1", SigAlg::Gost2004),
+        (TspHash::Streebog512, STREEBOG_512, SigAlg::Gost2015_512),
+    ] {
+        let profile = TsaProfile {
+            hash,
+            ..TsaProfile::basics_default()
+        };
+        let cms = timestamp_signer(&signed("user-rsa-sign"), 0, &profile, &tsa()).unwrap();
+        let s = verify(&cms, None).unwrap();
+        let tst = verify_token(s[0].timestamp_token.as_ref().unwrap()).unwrap();
+        assert_eq!(tst.imprint_alg.to_string(), alg);
+        assert_eq!(tst.imprint, digest.digest(&signer_signature(&cms, 0)));
+    }
+}
+
+#[test]
+fn nonce_mismatch_rejected() {
+    let mock = tsa().with_tamper(MockTamper::Nonce);
+    let r = timestamp_signer(
+        &signed("user-gost2015-sign"),
+        0,
+        &TsaProfile::basics_default(),
+        &mock,
+    );
+    assert_eq!(r, Err(TspError::NonceMismatch));
+}
+
+#[test]
+fn tsa_certificate_needs_time_stamping_eku() {
+    let mock = MockTsa::new(entry("user-gost2015-sign"));
+    let r = timestamp_signer(
+        &signed("user-gost2015-sign"),
+        0,
+        &TsaProfile::basics_default(),
+        &mock,
+    );
+    assert_eq!(r, Err(TspError::NoTsaCertificate));
+}
+
+#[test]
+fn timestamps_the_requested_cosigner_only() {
+    let a = signed("user-gost2015-sign");
+    let b = sign(&entry("user-rsa-sign"), &a, &opts(true)).unwrap();
+    let cms = timestamp_signer(&b, 1, &TsaProfile::basics_default(), &tsa()).unwrap();
+    let s = verify(&cms, None).unwrap();
+    assert_eq!(s.len(), 2);
+    assert_eq!(s[0].timestamp_token, None);
+    let tst = verify_token(s[1].timestamp_token.as_ref().unwrap()).unwrap();
+    assert_eq!(tst.imprint, streebog512(&signer_signature(&cms, 1)));
+    // Signer 0 is kept byte for byte.
+    assert_eq!(
+        signer_info(&cms, 0)
+            .iter()
+            .map(|e| e.to_der().unwrap())
+            .collect::<Vec<_>>(),
+        signer_info(&b, 0)
+            .iter()
+            .map(|e| e.to_der().unwrap())
+            .collect::<Vec<_>>()
+    );
+
+    assert!(matches!(
+        timestamp_signer(&b, 2, &TsaProfile::basics_default(), &tsa()),
+        Err(TspError::Malformed(_))
+    ));
+}
+
+#[test]
+fn timestamping_again_replaces_the_token() {
+    let mock = tsa();
+    let once = timestamp_signer(
+        &signed("user-gost2015-sign"),
+        0,
+        &TsaProfile::basics_default(),
+        &mock,
+    )
+    .unwrap();
+    let twice = timestamp_signer(&once, 0, &TsaProfile::basics_default(), &mock).unwrap();
+    assert_eq!(
+        unsigned_attrs(&twice, 0),
+        [(TIME_STAMP_TOKEN.to_owned(), 1)]
+    );
+    let s = verify(&twice, None).unwrap();
+    let first = verify(&once, None).unwrap()[0].timestamp_token.clone();
+    assert_ne!(s[0].timestamp_token, first);
+    verify_token(s[0].timestamp_token.as_ref().unwrap()).unwrap();
+}
+
+/// A transport answering every request with a fixed reply, recording the requests.
+struct Fixed {
+    reply: HttpReply,
+    seen: Mutex<Vec<Vec<u8>>>,
+}
+
+impl Fixed {
+    fn new(status: u16, content_type: Option<&str>, body: Vec<u8>) -> Self {
+        Fixed {
+            reply: HttpReply {
+                status,
+                content_type: content_type.map(str::to_owned),
+                body,
+            },
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl HttpTransport for Fixed {
+    fn get(&self, url: &str) -> Result<HttpReply, TspError> {
+        self.seen.lock().unwrap().push(url.as_bytes().to_vec());
+        Ok(self.reply.clone())
+    }
+
+    fn post(&self, _url: &str, _content_type: &str, body: &[u8]) -> Result<HttpReply, TspError> {
+        self.seen.lock().unwrap().push(body.to_vec());
+        Ok(self.reply.clone())
+    }
+}
+
+/// A complete reply of the mock TSA (for some other request).
+fn mock_reply() -> Vec<u8> {
+    let mock = tsa();
+    let der = request_der(&TsaProfile::basics_default(), &[1; 64], &[9]);
+    let profile = TsaProfile {
+        method: TsaMethod::Post,
+        ..TsaProfile::basics_default()
+    };
+    mock.post(&profile.url, "application/timestamp-query", &der)
+        .unwrap()
+        .body
+}
+
+const REPLY: &str = "application/timestamp-reply";
+
+#[test]
+fn http_status_and_content_type_are_checked() {
+    let cms = signed("user-gost2015-sign");
+    let p = TsaProfile::basics_default();
+    let t = Fixed::new(503, Some(REPLY), mock_reply());
+    assert_eq!(
+        timestamp_signer(&cms, 0, &p, &t),
+        Err(TspError::Status(503))
+    );
+    let t = Fixed::new(200, Some("text/html"), mock_reply());
+    assert_eq!(
+        timestamp_signer(&cms, 0, &p, &t),
+        Err(TspError::ContentType(Some("text/html".to_owned())))
+    );
+    let t = Fixed::new(200, None, mock_reply());
+    assert_eq!(
+        timestamp_signer(&cms, 0, &p, &t),
+        Err(TspError::ContentType(None))
+    );
+    // Parameters and case do not matter.
+    let t = Fixed::new(200, Some("Application/Timestamp-Reply; x=1"), mock_reply());
+    assert_eq!(
+        timestamp_signer(&cms, 0, &p, &t),
+        Err(TspError::NonceMismatch)
+    );
+}
+
+#[test]
+fn replayed_reply_is_rejected() {
+    // A valid token for another request: the nonce gives it away first.
+    let t = Fixed::new(200, Some(REPLY), mock_reply());
+    let r = timestamp_signer(
+        &signed("user-gost2015-sign"),
+        0,
+        &TsaProfile::basics_default(),
+        &t,
+    );
+    assert_eq!(r, Err(TspError::NonceMismatch));
+}
+
+#[test]
+fn rejection_status_is_reported() {
+    // TimeStampResp { PKIStatusInfo { rejection(2), failInfo badAlg } } without a token.
+    let body = vec![
+        0x30, 0x09, 0x30, 0x07, 0x02, 0x01, 0x02, 0x03, 0x02, 0x07, 0x80,
+    ];
+    let t = Fixed::new(200, Some(REPLY), body.clone());
+    let r = timestamp_signer(
+        &signed("user-gost2015-sign"),
+        0,
+        &TsaProfile::basics_default(),
+        &t,
+    );
+    assert_eq!(r, Err(TspError::Rejected(2)));
+    assert_eq!(parse_response(&body), Err(TspError::Rejected(2)));
+}
+
+#[test]
+fn hostile_replies_are_errors_not_panics() {
+    let good = mock_reply();
+    parse_response(&good).unwrap();
+    for len in 0..good.len() {
+        assert!(parse_response(&good[..len]).is_err(), "truncated to {len}");
+    }
+    // Every header byte near the start, then a sample (each flip that reaches the
+    // signature costs a GOST verification).
+    for i in (0..good.len()).filter(|i| *i < 64 || i % 7 == 0) {
+        let mut bad = good.clone();
+        bad[i] ^= 0x41;
+        // Anything but a panic; most flips are errors.
+        let _ = parse_response(&bad);
+    }
+    assert!(matches!(
+        parse_response(b"<html>gateway timeout</html>"),
+        Err(TspError::Malformed(_))
+    ));
+    // Granted, but without a token.
+    assert!(matches!(
+        parse_response(&[0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x00]),
+        Err(TspError::Malformed(_))
+    ));
+}
+
+#[test]
+#[ignore = "needs cargo xtask fetch-fixtures"]
+fn parses_ncanode_tsp_response() {
+    let (tok, tst) = parse_response(&read(ncanode("tsp_response.bin"))).unwrap();
+    assert_eq!(verify_token(&tok).unwrap(), tst);
+    assert_eq!(tok, read(ncanode("tsp_token.bin")));
+    assert_eq!(tst.policy.to_string(), "1.2.398.3.3.2.6.1");
+    assert_eq!(tst.imprint_alg.to_string(), "1.3.14.3.2.26");
+    assert_eq!(
+        tst.nonce.as_deref(),
+        Some(&[0x01, 0x83, 0x50, 0xc0, 0x22, 0xd7][..])
+    );
+    assert_eq!(tst.gen_time, datetime!(2022-09-18 13:20:14 UTC));
+}
+
+#[test]
+#[ignore = "network"]
+fn live_test_tsa() {
+    for method in [TsaMethod::Get, TsaMethod::Post] {
+        let profile = TsaProfile {
+            url: "http://test.pki.gov.kz/tsp".to_owned(),
+            method,
+            ..TsaProfile::basics_default()
+        };
+        let cms =
+            timestamp_signer(&signed("user-gost2015-sign"), 0, &profile, &UreqTransport).unwrap();
+        let s = verify(&cms, None).unwrap();
+        let tst = verify_token(s[0].timestamp_token.as_ref().unwrap()).unwrap();
+        println!("{method:?}: {tst:?}");
+    }
+}

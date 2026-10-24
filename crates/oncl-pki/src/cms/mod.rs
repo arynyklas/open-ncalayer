@@ -4,7 +4,8 @@
 //!
 //! Profile of a signature:
 //!
-//! - `ContentInfo{id-signedData}` → `SignedData` v1, `sid` = `IssuerAndSerialNumber`;
+//! - `ContentInfo{id-signedData}` → `SignedData` v1 (v3 when the content type is not
+//!   id-data, as for a time-stamp token), `sid` = `IssuerAndSerialNumber`;
 //! - the algorithm is the signer certificate's own signature algorithm; digest and signature
 //!   `AlgorithmIdentifier`s carry `NULL` parameters;
 //! - signed attributes, a DER `SET OF`: contentType, signingTime (UTCTime before 2050, else
@@ -13,7 +14,7 @@
 //! - `certificates` holds the signer certificate only (a co-signature adds it to the existing
 //!   ones unless already there).
 
-mod asn1;
+pub(crate) mod asn1;
 mod pem;
 mod sign;
 mod verify;
@@ -22,7 +23,7 @@ use crate::ber::BerError;
 use crate::key::KeyError;
 
 pub use pem::to_pem;
-#[allow(unused_imports, reason = "used by the TSP mock")]
+#[cfg(feature = "testing")]
 pub(crate) use sign::sign_content;
 pub use sign::{SignOptions, sign};
 pub use verify::{VerifiedSigner, verify};

@@ -69,6 +69,8 @@ pub const ORGANIZATIONAL_UNIT: Oid = Oid::new_unwrap("2.5.4.11");
 // Extended key usages.
 /// id-kp-clientAuth.
 pub const CLIENT_AUTH: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.3.2");
+/// id-kp-timeStamping.
+pub const TIME_STAMPING: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.3.8");
 
 // PKCS#12 bags and attributes.
 /// keyBag.
