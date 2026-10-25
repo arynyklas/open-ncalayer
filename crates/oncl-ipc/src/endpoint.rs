@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -27,19 +27,46 @@ impl fmt::Display for Endpoint {
 
 /// The endpoint of the current user and session for the data directory `data_dir`.
 ///
+/// `data_dir` is made absolute and normalized first: repeated and trailing separators and
+/// `.` components are dropped, and on Windows a verbatim prefix (`\\?\C:\`,
+/// `\\?\UNC\server\share`) is turned into its plain form. Spellings of one directory that
+/// differ only in that way give one endpoint.
+///
 /// - Windows: `\\.\pipe\OpenNCALayer-<hex16>`, `hex16` being the first 8 bytes of SHA-256
-///   of `<user SID>|<session id>|<absolute data_dir>`.
-/// - Linux: `$XDG_RUNTIME_DIR/openncalayer-<hex16>.sock` (`hex16` of
-///   `<uid>|<absolute data_dir>`) if `XDG_RUNTIME_DIR` is set, otherwise
-///   `<data_dir>/daemon.sock`; macOS: always `<data_dir>/daemon.sock`.
+///   of `<user SID>|<session id>|<data_dir>`.
+/// - Linux: `$XDG_RUNTIME_DIR/openncalayer-<hex16>.sock` (`hex16` of `<uid>|<data_dir>`) if
+///   `XDG_RUNTIME_DIR` is set, otherwise `<data_dir>/daemon.sock`; macOS: always
+///   `<data_dir>/daemon.sock`.
 /// - Unix paths longer than 100 bytes become `/tmp/openncalayer-<uid>/<hex16>.sock`.
 ///
 /// # Errors
 ///
 /// Failures to make `data_dir` absolute or (Windows) to query the user SID or session.
 pub fn endpoint(data_dir: &Path) -> io::Result<Endpoint> {
-    let data_dir = std::path::absolute(data_dir)?;
+    let data_dir = normalize(&std::path::absolute(data_dir)?);
     sys::endpoint(&data_dir).map(Endpoint)
+}
+
+/// `path` rebuilt from its components, with verbatim Windows prefixes made plain.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::VerbatimDisk(drive) => out.push(format!("{}:", char::from(drive))),
+                Prefix::VerbatimUNC(server, share) => {
+                    let mut unc = std::ffi::OsString::from(r"\\");
+                    unc.push(server);
+                    unc.push(r"\");
+                    unc.push(share);
+                    out.push(unc);
+                }
+                _ => out.push(prefix.as_os_str()),
+            },
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The first 8 bytes of SHA-256 of `prefix` followed by `path`, as 16 lowercase hex digits.
@@ -54,7 +81,8 @@ pub(crate) fn hex16(prefix: &str, path: &Path) -> String {
         .collect()
 }
 
-/// Listens on an [`Endpoint`]; created by [`bind`].
+/// Listens on an [`Endpoint`]; created by [`bind`]. Dropping it frees the endpoint (on Unix
+/// it also removes its socket and lock files).
 #[derive(Debug)]
 pub struct IpcListener(sys::Listener);
 
@@ -62,12 +90,16 @@ pub struct IpcListener(sys::Listener);
 ///
 /// On Windows the pipe is created as the first instance, with a DACL granting access only
 /// to the current user and `SYSTEM`, and remote clients are rejected. On Unix the socket
-/// directory is checked (or created) to be at most 0700 and owned by the user, a stale
-/// socket file left by a dead server is replaced, and the socket gets mode 0600.
+/// directory is checked (or created) to be at most 0700 and owned by the user; then an
+/// exclusive lock on `<socket>.lock` (0600) is taken for the listener's life, a stale socket
+/// file left by a dead server is replaced, and the socket gets mode 0600.
 ///
 /// # Errors
 ///
-/// - [`io::ErrorKind::AddrInUse`] if a live server already holds `ep`;
+/// - [`io::ErrorKind::AddrInUse`] if a live server already holds `ep` (Unix: holds the lock
+///   or answers on the socket);
+/// - [`io::ErrorKind::AlreadyExists`] (Unix) if something other than a socket sits at the
+///   socket path; it is left alone;
 /// - [`io::ErrorKind::PermissionDenied`] (Unix) if the socket directory belongs to another
 ///   user or is accessible to others and cannot be tightened;
 /// - other I/O and OS errors.
@@ -90,6 +122,10 @@ impl IpcListener {
 }
 
 /// A connection over an [`Endpoint`].
+///
+/// Drop the stream to close the connection. `shutdown()` half-closes it on Unix but does
+/// nothing on Windows (tokio named pipes), so the peer cannot rely on it to see the end of
+/// the stream.
 #[derive(Debug)]
 pub struct IpcStream(sys::Stream);
 
@@ -169,5 +205,47 @@ mod tests {
         let relative = endpoint(Path::new("oncl-ipc-rel")).unwrap();
         let absolute = endpoint(&std::env::current_dir().unwrap().join("oncl-ipc-rel")).unwrap();
         assert_eq!(relative, absolute);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spellings_of_one_dir_give_one_endpoint() {
+        for spelling in ["/data/", "/data//", "/data/.", "//data"] {
+            // `Path` equality ignores trailing separators: compare the raw strings.
+            assert_eq!(
+                normalize(Path::new(spelling)).as_os_str(),
+                "/data",
+                "{spelling}"
+            );
+            assert_eq!(
+                endpoint(Path::new(spelling)).unwrap(),
+                endpoint(Path::new("/data")).unwrap(),
+                "{spelling}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spellings_of_one_dir_give_one_endpoint() {
+        for spelling in [
+            r"C:\Data\",
+            r"C:\\Data",
+            r"C:\Data\.",
+            "C:/Data/",
+            r"\\?\C:\Data",
+        ] {
+            let normalized = normalize(Path::new(spelling));
+            assert_eq!(normalized.as_os_str(), r"C:\Data", "{spelling}");
+            assert_eq!(
+                endpoint(Path::new(spelling)).unwrap(),
+                endpoint(Path::new(r"C:\Data")).unwrap(),
+                "{spelling}"
+            );
+        }
+        for spelling in [r"\\?\UNC\server\share\Data", r"\\server\share\Data\"] {
+            let normalized = normalize(Path::new(spelling));
+            assert_eq!(normalized.as_os_str(), r"\\server\share\Data", "{spelling}");
+        }
     }
 }

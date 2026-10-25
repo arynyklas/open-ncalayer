@@ -7,9 +7,34 @@ use tempfile::TempDir;
 
 /// An endpoint of a fresh data directory, unique per test.
 fn unique_endpoint() -> (TempDir, Endpoint) {
+    #[cfg(unix)]
+    isolate_runtime_dir();
     let dir = tempfile::tempdir().expect("tempdir");
     let ep = endpoint(dir.path()).expect("endpoint");
     (dir, ep)
+}
+
+/// Points `XDG_RUNTIME_DIR` at a private directory under `target/` so that sockets never
+/// land in the user's real runtime directory. Runs once, before any test of this binary
+/// reads the environment.
+#[cfg(unix)]
+fn isolate_runtime_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::LazyLock;
+
+    static RUNTIME_DIR: LazyLock<TempDir> = LazyLock::new(|| {
+        let dir = tempfile::Builder::new()
+            .prefix("rt")
+            .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+            .expect("runtime tempdir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("chmod 0700");
+        // SAFETY: every test forces this first and `LazyLock` blocks the others until the
+        // variable is set, so no other thread of this binary reads the environment meanwhile.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        dir
+    });
+    LazyLock::force(&RUNTIME_DIR);
 }
 
 #[tokio::test]
@@ -67,4 +92,20 @@ async fn rebind_after_listener_drop() {
     let (_dir, ep) = unique_endpoint();
     drop(bind(&ep).await.expect("first bind"));
     let _again = bind(&ep).await.expect("bind after drop");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_stays_out_of_real_runtime_dir_and_is_removed() {
+    let (_dir, ep) = unique_endpoint();
+    let socket = std::path::PathBuf::from(ep.to_string());
+    assert!(
+        socket.starts_with(env!("CARGO_TARGET_TMPDIR")),
+        "{}",
+        socket.display()
+    );
+    let listener = bind(&ep).await.expect("bind");
+    assert!(socket.exists());
+    drop(listener);
+    assert!(!socket.exists());
 }

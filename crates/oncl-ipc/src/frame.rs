@@ -23,6 +23,13 @@ pub const NM_OUT_LIMIT: usize = 1024 * 1024;
 /// - [`io::ErrorKind::UnexpectedEof`] if the stream ends inside a frame;
 /// - [`io::ErrorKind::InvalidData`] if the frame is longer than [`MAX_FRAME`];
 /// - any error of `r`.
+///
+/// # Cancel safety
+///
+/// Not cancel safe. If the future is dropped before it completes (e.g. as a losing
+/// `tokio::select!` branch), the part of the frame read so far is lost and the stream is out
+/// of sync: drop the stream. Keep one `read_frame` future alive across `select!` iterations
+/// instead, or read in a dedicated task.
 pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
     read_prefixed(r, u32::from_le_bytes).await
 }
@@ -32,6 +39,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Ve
 /// # Errors
 ///
 /// [`io::ErrorKind::InvalidInput`] if `payload` is longer than [`MAX_FRAME`]; any error of `w`.
+///
+/// # Cancel safety
+///
+/// Not cancel safe: dropping the future may leave a partial frame on the stream.
 pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, payload: &[u8]) -> io::Result<()> {
     write_prefixed(w, payload, MAX_FRAME, u32::to_le_bytes).await
 }
@@ -43,6 +54,10 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, payload: &[u8]) -> io
 /// # Errors
 ///
 /// As [`read_frame`].
+///
+/// # Cancel safety
+///
+/// Not cancel safe, as [`read_frame`].
 pub async fn read_nm_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
     read_prefixed(r, u32::from_ne_bytes).await
 }
@@ -54,6 +69,10 @@ pub async fn read_nm_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option
 ///
 /// [`io::ErrorKind::InvalidInput`] if `payload` is longer than [`NM_OUT_LIMIT`]: the browser
 /// would drop the relay; any error of `w`.
+///
+/// # Cancel safety
+///
+/// Not cancel safe, as [`write_frame`].
 pub async fn write_nm_frame<W: AsyncWrite + Unpin>(w: &mut W, payload: &[u8]) -> io::Result<()> {
     write_prefixed(w, payload, NM_OUT_LIMIT, u32::to_ne_bytes).await
 }

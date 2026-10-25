@@ -264,8 +264,17 @@ fn sid_string(sid: PSID) -> io::Result<String> {
     }
     let wide = LocalBox(wide.cast());
     // SAFETY: the string is NUL-terminated and stays alive while `wide` is.
+    unsafe { wide_to_string(wide.0.cast()) }
+}
+
+/// Copies the NUL-terminated UTF-16 string at `start`.
+///
+/// # Safety
+///
+/// `start` points to a readable, NUL-terminated UTF-16 string.
+unsafe fn wide_to_string(start: *const u16) -> io::Result<String> {
+    // SAFETY: guaranteed by the caller.
     let units = unsafe {
-        let start = wide.0.cast::<u16>();
         let len = (0..).take_while(|&i| *start.add(i) != 0).count();
         std::slice::from_raw_parts(start, len)
     };
@@ -353,5 +362,67 @@ mod tests {
         let sid = current_user_sid().unwrap();
         assert!(sid.starts_with("S-1-"), "{sid}");
         current_session().unwrap();
+    }
+
+    /// The DACL of the kernel object `handle` in SDDL.
+    fn dacl_sddl(handle: HANDLE) -> String {
+        use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
+        };
+        use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: `handle` is a live handle with READ_CONTROL; on success `descriptor`
+        // receives a LocalAlloc'ed security descriptor.
+        let status = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        let descriptor = LocalBox(descriptor);
+        let mut text = ptr::null_mut();
+        // SAFETY: `descriptor` is valid; on success `text` receives a LocalAlloc'ed string.
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor.0,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, FALSE, "{}", io::Error::last_os_error());
+        let text = LocalBox(text.cast());
+        // SAFETY: the string is NUL-terminated and stays alive while `text` is.
+        unsafe { wide_to_string(text.0.cast()) }.unwrap()
+    }
+
+    #[tokio::test]
+    async fn pipe_dacl_allows_only_user_and_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let sid = current_user_sid().unwrap();
+        let addr = address(dir.path(), &sid, current_session().unwrap());
+        let mut listener = bind(&addr).await.unwrap();
+        // Protected (`P`: no inherited ACEs), GENERIC_ALL mapped to FILE_ALL_ACCESS (`FA`).
+        let expected = format!("D:P(A;;FA;;;{sid})(A;;FA;;;SY)");
+        assert_eq!(dacl_sddl(listener.next.as_raw_handle()), expected);
+
+        // Instances created after an accept carry the same DACL.
+        let (accepted, connected) = tokio::join!(listener.accept(), connect(&addr));
+        let Stream::Server(first) = accepted.unwrap() else {
+            panic!("accept returns the server end");
+        };
+        connected.unwrap();
+        assert_eq!(dacl_sddl(first.as_raw_handle()), expected);
+        assert_eq!(dacl_sddl(listener.next.as_raw_handle()), expected);
     }
 }
