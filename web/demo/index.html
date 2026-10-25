@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenNCALayer — демо подписи CMS</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #1b1b1b; }
+  h1 { font-size: 1.5rem; }
+  fieldset { border: 1px solid #ccc; margin: 0 0 1rem; padding: .5rem 1rem 1rem; }
+  legend { font-weight: 600; }
+  label { display: block; }
+  textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; }
+  button { margin: .5rem .5rem 0 0; padding: .3rem 1rem; }
+  code, pre { background: #f2f2f2; }
+  code { padding: 0 .25rem; }
+  pre { padding: .5rem; overflow-x: auto; }
+  .ok { color: #1a7f37; }
+  .fail { color: #c62828; }
+</style>
+</head>
+<body>
+<h1>Демо подписи CMS</h1>
+<p>Страница работает через <a href="https://github.com/sigex-kz/ncalayer-js-client">ncalayer-js-client</a> 1.6.1 так же, как сайты с оригинальным NCALayer: <code>new NCALayerClient()</code> подключается к <code>wss://127.0.0.1:13579</code>. <a href="/">Самопроверка</a>.</p>
+<p>Соединение: <span id="conn">подключение…</span></p>
+
+<fieldset>
+  <legend>Данные</legend>
+  <label><input type="radio" name="source" value="text" checked> Текст (подписываются байты UTF-8)</label>
+  <textarea id="text" rows="4">Привет, OpenNCALayer!</textarea>
+  <label><input type="radio" name="source" value="file"> Файл <input type="file" id="file"></label>
+</fieldset>
+
+<fieldset>
+  <legend>Параметры подписи</legend>
+  <label><input type="radio" name="mode" value="attached" checked> С вложенными данными (attached)</label>
+  <label><input type="radio" name="mode" value="detached"> Без вложенных данных (detached)</label>
+  <label><input type="checkbox" id="tsp" checked> С меткой времени (TSP)</label>
+  <p>signingParams: <code id="params-name"></code></p>
+  <pre id="params"></pre>
+</fieldset>
+
+<fieldset>
+  <legend>Выбор ключа</legend>
+  <label><input type="radio" name="signer" value="basicsSignerAny" checked> Любой ключ (<code>basicsSignerAny</code>)</label>
+  <label><input type="radio" name="signer" value="basicsSignerSignAny"> Только ключ подписи (<code>basicsSignerSignAny</code>)</label>
+</fieldset>
+
+<button id="sign" type="button">Подписать</button>
+<p id="status"></p>
+
+<label for="result">Подпись (как её вернул NCALayer):</label>
+<textarea id="result" rows="12" readonly></textarea>
+<button id="save-sig" type="button" disabled>Скачать .p7s</button>
+<button id="save-data" type="button" disabled>Скачать подписанные данные</button>
+<p>Проверка: <code>openncalayer cms-verify signature.p7s</code>, для подписи без вложенных данных — <code>openncalayer cms-verify signature.p7s --content &lt;файл данных&gt;</code>.</p>
+
+<script src="vendor/ncalayer-client.js"></script>
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var client = null;
+  var signedBytes = null;
+  var signedName = 'data.txt';
+  var signatureDer = null;
+  var connecting = null;
+
+  function checked(name) {
+    return document.querySelector('input[name="' + name + '"]:checked').value;
+  }
+
+  function show(id, ok, text) {
+    $(id).textContent = text;
+    $(id).className = ok === null ? '' : (ok ? 'ok' : 'fail');
+  }
+
+  // The ncalayer-js-client constant for the chosen mode; attached without a time-stamp has no
+  // constant, so it is basicsCMSParamsAttached without tsaProfile.
+  function signingParams() {
+    var attached = checked('mode') === 'attached';
+    var tsp = $('tsp').checked;
+    if (attached && tsp) {
+      return { name: 'basicsCMSParamsAttached', params: NCALayerClient.basicsCMSParamsAttached };
+    }
+    if (!attached && tsp) {
+      return { name: 'basicsCMSParamsDetached', params: NCALayerClient.basicsCMSParamsDetached };
+    }
+    if (!attached) {
+      return { name: 'basicsCMSParamsDetachedNoTSP', params: NCALayerClient.basicsCMSParamsDetachedNoTSP };
+    }
+    var params = NCALayerClient.basicsCMSParamsAttached;
+    delete params.tsaProfile;
+    return { name: 'basicsCMSParamsAttached без tsaProfile', params: params };
+  }
+
+  function showParams() {
+    var chosen = signingParams();
+    $('params-name').textContent = chosen.name;
+    $('params').textContent = JSON.stringify(chosen.params);
+  }
+
+  function short(text) {
+    return text.length > 2000 ? text.slice(0, 2000) + '… (' + text.length + ' символов)' : text;
+  }
+
+  // One client for the page; a closed connection is replaced, concurrent callers share an
+  // attempt in progress.
+  function connected() {
+    if (client && client.wsConnection && client.wsConnection.readyState === WebSocket.OPEN) {
+      return Promise.resolve(client);
+    }
+    if (connecting) {
+      return connecting;
+    }
+    var fresh = new NCALayerClient();
+    fresh.onRequestReady = function (request) { console.log('→ NCALayer', short(request)); };
+    fresh.onResponseReady = function (response) { console.log('← NCALayer', short(response)); };
+    show('conn', null, 'подключение…');
+    connecting = fresh.connect().then(function (version) {
+      client = fresh;
+      show('conn', true, 'подключено, версия протокола ' + version);
+      return fresh;
+    }, function (e) {
+      show('conn', false, String(e && e.message ? e.message : e));
+      throw e;
+    }).finally(function () {
+      connecting = null;
+    });
+    return connecting;
+  }
+
+  // A signature as returned (PEM or bare base64) → DER bytes.
+  function signatureToDer(signature) {
+    var b64 = signature.replace(/-----(BEGIN|END) [A-Z0-9 ]+-----/g, '').replace(/\s+/g, '');
+    var binary = atob(b64);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+
+  function download(bytes, name, type) {
+    var url = URL.createObjectURL(new Blob([bytes], { type: type }));
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  async function sign() {
+    $('sign').disabled = true;
+    $('save-sig').disabled = true;
+    $('save-data').disabled = true;
+    $('result').value = '';
+    signatureDer = null;
+    try {
+      if (checked('source') === 'file') {
+        var file = $('file').files[0];
+        if (!file) {
+          show('status', false, 'Выберите файл.');
+          return;
+        }
+        signedBytes = new Uint8Array(await file.arrayBuffer());
+        signedName = file.name;
+      } else {
+        signedBytes = new TextEncoder().encode($('text').value);
+        signedName = 'data.txt';
+      }
+      var data = signedBytes.buffer;
+      var chosen = signingParams();
+      var signer = NCALayerClient[checked('signer')];
+      var ncalayer = await connected();
+      show('status', null, 'ожидание подписи в окне OpenNCALayer…');
+      var signature = await ncalayer.basicsSignCMS(
+        NCALayerClient.basicsStorageAll, data, chosen.params, signer);
+      $('result').value = signature;
+      signatureDer = signatureToDer(signature);
+      $('save-sig').disabled = false;
+      $('save-data').disabled = false;
+      show('status', true, 'Подпись получена: ' + chosen.name + ', ' + signatureDer.length + ' байт DER.');
+    } catch (e) {
+      if (e && e.canceledByUser) {
+        show('status', null, 'Отменено пользователем.');
+      } else {
+        show('status', false, 'Ошибка: ' + (e && e.message ? e.message : e));
+      }
+    } finally {
+      $('sign').disabled = false;
+    }
+  }
+
+  document.querySelectorAll('input[name="mode"], #tsp').forEach(function (input) {
+    input.addEventListener('change', showParams);
+  });
+  $('file').addEventListener('change', function () {
+    document.querySelector('input[name="source"][value="file"]').checked = true;
+  });
+  $('sign').addEventListener('click', sign);
+  $('save-sig').addEventListener('click', function () {
+    download(signatureDer, 'signature.p7s', 'application/pkcs7-signature');
+  });
+  $('save-data').addEventListener('click', function () {
+    download(signedBytes, signedName, 'application/octet-stream');
+  });
+  showParams();
+  connected().catch(function () { /* shown in #conn */ });
+})();
+</script>
+</body>
+</html>

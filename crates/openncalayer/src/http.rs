@@ -1,8 +1,12 @@
-//! Plain HTTPS requests (everything that is not a WebSocket upgrade): the self-test page.
+//! Plain HTTPS requests (everything that is not a WebSocket upgrade): the self-test page
+//! and the demo page with its vendored ncalayer-js-client.
 
 use std::borrow::Cow;
 
 const SELFTEST: &str = include_str!("../../../web/selftest/index.html");
+const DEMO: &[u8] = include_bytes!("../../../web/demo/index.html");
+/// ncalayer-js-client 1.6.1 as published on npm (MIT, see `web/demo/vendor/LICENSE`).
+const NCALAYER_CLIENT: &[u8] = include_bytes!("../../../web/demo/vendor/ncalayer-client.js");
 
 /// A complete HTTP/1.1 response; the connection is closed after it.
 pub(crate) struct Response {
@@ -22,6 +26,17 @@ impl Response {
             content_type: "text/plain; charset=utf-8",
             allow_get: false,
             body: Cow::Borrowed(body.as_bytes()),
+        }
+    }
+
+    /// 200 with a static body.
+    fn ok(content_type: &'static str, body: &'static [u8]) -> Self {
+        Response {
+            status: 200,
+            reason: "OK",
+            content_type,
+            allow_get: false,
+            body: Cow::Borrowed(body),
         }
     }
 
@@ -89,6 +104,10 @@ pub(crate) fn respond(method: &str, target: &str) -> Response {
                     .into_bytes(),
             ),
         },
+        "/demo/" => Response::ok("text/html; charset=utf-8", DEMO),
+        "/demo/vendor/ncalayer-client.js" => {
+            Response::ok("text/javascript; charset=utf-8", NCALAYER_CLIENT)
+        }
         _ => Response::text(404, "Not Found", "Not Found"),
     }
 }
@@ -102,6 +121,12 @@ mod tests {
         assert_eq!(respond("GET", "/").status(), 200);
         assert_eq!(respond("GET", "/?check=1").status(), 200);
         assert_eq!(respond("GET", "/demo").status(), 404);
+        assert_eq!(respond("GET", "/demo/").status(), 200);
+        assert_eq!(
+            respond("GET", "/demo/vendor/ncalayer-client.js").status(),
+            200
+        );
+        assert_eq!(respond("GET", "/demo/vendor/LICENSE").status(), 404);
         assert_eq!(respond("HEAD", "/").status(), 405);
         let bytes = respond("PUT", "/x").to_bytes();
         let text = String::from_utf8(bytes).unwrap();

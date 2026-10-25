@@ -35,5 +35,6 @@ zeroize.workspace = true
 oncl-basics = { path = "../oncl-basics", features = ["testing"] }
 oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 oncl-testkit.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros"] }

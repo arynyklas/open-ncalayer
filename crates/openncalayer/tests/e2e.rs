@@ -18,6 +18,7 @@ use openncalayer::{JsonSettings, ServerConfig, build_registry, listen_port_from,
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
@@ -370,8 +371,9 @@ async fn invalid_json_drops_connection_without_close_frame() {
     }
 }
 
-/// Sends a raw HTTP request over TLS and returns the status code and the body.
-async fn http(srv: &Srv, request: &str) -> (u16, String) {
+/// Sends a raw HTTP request over TLS and returns the status code, the response head and
+/// the body.
+async fn http_raw(srv: &Srv, request: &str) -> (u16, String, Vec<u8>) {
     let mut stream = tls_connect(srv).await;
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = Vec::new();
@@ -379,10 +381,16 @@ async fn http(srv: &Srv, request: &str) -> (u16, String) {
         .await
         .unwrap()
         .unwrap();
-    let response = String::from_utf8(response).unwrap();
-    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let end = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8(response[..end].to_vec()).unwrap();
     let status = head.split(' ').nth(1).unwrap().parse().unwrap();
-    (status, body.to_owned())
+    (status, head, response[end + 4..].to_vec())
+}
+
+/// Sends a raw HTTP request over TLS and returns the status code and the body as text.
+async fn http(srv: &Srv, request: &str) -> (u16, String) {
+    let (status, _, body) = http_raw(srv, request).await;
+    (status, String::from_utf8(body).unwrap())
 }
 
 #[tokio::test]
@@ -404,6 +412,40 @@ async fn http_selftest_and_methods() {
 
     let (status, _) = http(&srv, "GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await;
     assert_eq!(status, 404);
+}
+
+/// sha256 of `package/ncalayer-client.js` in the npm package `ncalayer-js-client@1.6.1`.
+const NCALAYER_CLIENT_SHA256: &str =
+    "bdf2015c3e422eed70ccf38eef3246af67a0d38639e6b70fe6b8655a2fa03489";
+
+#[tokio::test]
+async fn demo_assets_served() {
+    let srv = start(vec![]).await;
+    let (status, head, body) =
+        http_raw(&srv, "GET /demo/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await;
+    assert_eq!(status, 200);
+    assert!(
+        head.contains("\r\nContent-Type: text/html; charset=utf-8\r\n"),
+        "{head}"
+    );
+    let page = String::from_utf8(body).unwrap();
+    assert!(page.contains("vendor/ncalayer-client.js"), "{page}");
+
+    let (status, head, body) = http_raw(
+        &srv,
+        "GET /demo/vendor/ncalayer-client.js HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        head.contains("\r\nContent-Type: text/javascript; charset=utf-8\r\n"),
+        "{head}"
+    );
+    let digest: String = Sha256::digest(&body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(digest, NCALAYER_CLIENT_SHA256);
 }
 
 #[tokio::test]

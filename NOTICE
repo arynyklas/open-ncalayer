@@ -10,3 +10,7 @@ Republic of Kazakhstan. "NCALayer" is used only to describe compatibility.
 Test fixtures fetched by `cargo xtask fetch-fixtures` come from NCANode
 (https://github.com/ncanode-kz/NCANode) and are not redistributed in this
 repository.
+
+web/demo/vendor/ncalayer-client.js is ncalayer-js-client 1.6.1
+(https://github.com/sigex-kz/ncalayer-js-client), Copyright (c) 2020 SIGEX,
+distributed under the MIT License (see web/demo/vendor/LICENSE).
