@@ -18,8 +18,9 @@ jobs:
   fmt:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - run: cargo fmt --all --check
@@ -27,8 +28,9 @@ jobs:
   clippy:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install system libraries
         run: |
           sudo apt-get update
@@ -36,7 +38,7 @@ jobs:
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
@@ -45,8 +47,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2025, macos-15]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install system libraries
         if: runner.os == 'Linux'
         run: |
@@ -58,6 +61,10 @@ jobs:
       - name: Test
         shell: bash
         run: cargo xtask fetch-fixtures && cargo test --workspace --all-features -- --include-ignored --skip live_
+      # The `clippy` job runs on Linux and never sees `cfg(windows)` code (oncl-ui foreground).
+      - name: Clippy (Windows-only code)
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: CMS interop with OpenSSL
         if: runner.os == 'Linux'
         run: cargo xtask interop-openssl
@@ -65,8 +72,9 @@ jobs:
   deny:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   # Windows 7 lane (roadmap D14). Non-blocking in P1: a red import gate records the starting
@@ -74,9 +82,10 @@ jobs:
   win7-canary:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: windows-2025
+    timeout-minutes: 90
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchains (rust-toolchain.toml for xtask, pinned nightly for Win7)
         run: |
           rustup toolchain install
@@ -102,8 +111,9 @@ jobs:
   live:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install system libraries
         run: |
           sudo apt-get update

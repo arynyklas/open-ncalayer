@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use der::DateTime;
 use der::asn1::{GeneralizedTime, ObjectIdentifier};
 use issue::{CertSpec, Issuer, Key, KeyKind, extension, issue};
@@ -371,8 +371,8 @@ pub fn generate() -> BTreeMap<String, Vec<u8>> {
     files
 }
 
-/// Regenerates `fixtures/synthetic/` under the workspace `root`, removing files that are no
-/// longer generated.
+/// Regenerates `fixtures/synthetic/` under the workspace `root`, removing generated-kind
+/// files (see [`existing_files`]) that are no longer generated.
 ///
 /// # Errors
 ///
@@ -426,7 +426,9 @@ pub fn check(root: &Path) -> anyhow::Result<bool> {
     Ok(fresh)
 }
 
-/// File names in `dir`; an absent directory has none.
+/// Names of the files in `dir` that `gen-fixtures` owns: `*.p12`, `*.cer` and the manifest.
+/// Anything else (OS or editor files, notes, directories) is not ours and is ignored. An
+/// absent directory has none.
 fn existing_files(dir: &Path) -> anyhow::Result<Vec<String>> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -434,14 +436,16 @@ fn existing_files(dir: &Path) -> anyhow::Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
         let path: PathBuf = entry?.path();
-        if !path.is_file() {
-            bail!("unexpected non-file {} in {DIR}", path.display());
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let generated_kind = name == MANIFEST
+            || Path::new(name)
+                .extension()
+                .is_some_and(|e| e == "p12" || e == "cer");
+        if generated_kind && path.is_file() {
+            names.push(name.to_owned());
         }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .with_context(|| format!("non-UTF-8 file name {}", path.display()))?;
-        names.push(name.to_owned());
     }
     Ok(names)
 }
@@ -507,4 +511,35 @@ fn oid(dotted: &str) -> ObjectIdentifier {
 /// Lowercase hex, as Kalkan writes aliases.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreign_files_are_left_alone() {
+        let root = std::env::temp_dir().join(format!("oncl-gen-fixtures-{}", std::process::id()));
+        let dir = root.join(DIR);
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(dir.join("scratch")).unwrap();
+        for junk in [".DS_Store", "notes.txt", "user-gost2015-sign.p12.swp"] {
+            fs::write(dir.join(junk), b"junk").unwrap();
+        }
+        fs::write(dir.join("retired.p12"), b"stale").unwrap();
+        fs::write(dir.join("retired.cer"), b"stale").unwrap();
+
+        gen_fixtures(&root).unwrap();
+        assert!(check(&root).unwrap(), "foreign files make the check fail");
+        for junk in [".DS_Store", "notes.txt", "user-gost2015-sign.p12.swp"] {
+            assert_eq!(fs::read(dir.join(junk)).unwrap(), b"junk", "{junk}");
+        }
+        assert!(dir.join("scratch").is_dir());
+        assert!(!dir.join("retired.p12").exists());
+        assert!(!dir.join("retired.cer").exists());
+
+        fs::write(dir.join("retired.cer"), b"stale").unwrap();
+        assert!(!check(&root).unwrap(), "a stale certificate is reported");
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

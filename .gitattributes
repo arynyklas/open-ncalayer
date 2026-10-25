@@ -1,4 +1,7 @@
-# `cargo xtask gen-fixtures --check` compares bytes: no end-of-line conversion.
-fixtures/synthetic/** -text
+# Fixtures are compared byte for byte (`cargo xtask gen-fixtures --check`, sha256 sums,
+# DER parsers): no end-of-line conversion.
+fixtures/** -text
+# Shell scripts run under bash, which rejects CRLF (`bad interpreter`).
+*.sh text eol=lf
 # Vendored as published (sha256 pinned in the e2e tests): no end-of-line conversion.
 web/demo/vendor/** -text
