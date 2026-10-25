@@ -3641,6 +3641,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-nmhost"
+version = "0.1.0"
+dependencies = [
+ "oncl-ipc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "oncl-pki"
 version = "0.1.0"
 dependencies = [
@@ -5508,6 +5520,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

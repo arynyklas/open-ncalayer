@@ -1,0 +1,30 @@
+[package]
+name = "oncl-nmhost"
+description = "Native messaging host of OpenNCALayer: relays the browser extension's frames to the daemon over local IPC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nmhost"
+path = "src/main.rs"
+
+[dependencies]
+oncl-ipc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-std", "macros", "process", "rt", "sync"] }
+
+[target.'cfg(windows)'.dependencies]
+# Detached daemon start: creation flags, and the relay's stdio kept out of the daemon.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
