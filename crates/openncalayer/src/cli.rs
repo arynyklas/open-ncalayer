@@ -102,8 +102,8 @@ pub struct Daemon {
 /// Prepares `run`: data paths and logging, the IPC endpoint, then TLS and the port. On
 /// failure the message is already printed and the exit code returned:
 /// [`EXIT_ALREADY_RUNNING`], [`EXIT_TLS_NOT_CONFIGURED`], [`EXIT_PORT_BUSY`] or 1. With
-/// `allow_no_wss` TLS not set up and a busy port only turn the wss server off, with a
-/// warning in the log.
+/// `allow_no_wss` any failure to start the wss server (TLS not set up or unusable, the port
+/// busy or not bindable) only turns it off, with a warning in the log.
 pub async fn prepare_run(allow_no_wss: bool) -> Result<Daemon, ExitCode> {
     let paths = data_paths()?;
     if let Err(e) = crate::logging::init(&paths.logs()) {
@@ -112,10 +112,12 @@ pub async fn prepare_run(allow_no_wss: bool) -> Result<Daemon, ExitCode> {
     let ipc = bind_ipc(&paths.data).await?;
     let wss = match open_wss(&paths) {
         Ok(wss) => Some(wss),
-        Err(failure)
-            if allow_no_wss && matches!(failure.code, EXIT_TLS_NOT_CONFIGURED | EXIT_PORT_BUSY) =>
-        {
-            warn!(reason = %failure.message, "wss is off; serving the browser extension only");
+        Err(failure) if allow_no_wss => {
+            warn!(
+                code = failure.code,
+                reason = %failure.message,
+                "wss is off; serving the browser extension only"
+            );
             None
         }
         Err(failure) => return Err(failure.report()),

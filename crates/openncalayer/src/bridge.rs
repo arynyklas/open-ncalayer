@@ -10,13 +10,14 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use oncl_ipc::{IpcListener, IpcStream, read_frame, write_frame};
+use oncl_ipc::{IpcListener, read_frame, write_frame};
 use oncl_protocol::{AddInfo, COMPAT_VERSION, HEARTBEAT, Registry, greeting};
 use serde::Serialize;
 use serde_json::Value;
-use tokio::io::{ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::timeout;
@@ -54,8 +55,12 @@ pub async fn serve_ipc(mut listener: IpcListener, registry: Arc<Registry>) -> io
         };
         let registry = Arc::clone(&registry);
         tokio::spawn(async move {
-            match connection(stream, registry).await {
+            match connection(stream, registry, Limits::DAEMON).await {
                 Ok(()) => debug!("bridge connection closed"),
+                // A relay speaking another protocol: every socket of it is gone.
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                    warn!(error = %e, "bridge connection dropped: protocol error");
+                }
                 Err(e) => debug!(error = %e, "bridge connection ended"),
             }
         });
@@ -254,11 +259,86 @@ fn writer_gone<T>(_: mpsc::error::SendError<T>) -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "the bridge writer stopped")
 }
 
+/// Limits of a connection and its sockets.
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    /// Largest assembled message.
+    max_message: usize,
+    /// Most bytes of inbound messages a connection holds at once: queued for its sockets,
+    /// being assembled or being answered.
+    budget: usize,
+    /// A socket without a frame for this long is closed.
+    idle: Duration,
+}
+
+impl Limits {
+    /// [`MAX_MESSAGE`], a budget of two such messages and [`IDLE_TIMEOUT`].
+    const DAEMON: Limits = Limits {
+        max_message: MAX_MESSAGE,
+        budget: 2 * MAX_MESSAGE,
+        idle: IDLE_TIMEOUT,
+    };
+}
+
+/// The inbound bytes a connection holds, against [`Limits::budget`].
+#[derive(Clone)]
+struct Budget {
+    held: Arc<AtomicUsize>,
+    limit: usize,
+}
+
+impl Budget {
+    fn new(limit: usize) -> Self {
+        Budget {
+            held: Arc::new(AtomicUsize::new(0)),
+            limit,
+        }
+    }
+
+    /// Reserves `len` bytes, or `None` if they do not fit.
+    fn take(&self, len: usize) -> Option<Held> {
+        self.held
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                held.checked_add(len).filter(|&total| total <= self.limit)
+            })
+            .ok()?;
+        Some(Held {
+            held: Arc::clone(&self.held),
+            len,
+        })
+    }
+}
+
+/// Bytes reserved from a [`Budget`], returned on drop.
+struct Held {
+    held: Arc<AtomicUsize>,
+    len: usize,
+}
+
+impl Held {
+    /// Takes over the bytes of `other`.
+    fn absorb(&mut self, mut other: Held) {
+        self.len += std::mem::take(&mut other.len);
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.held.fetch_sub(self.len, Ordering::AcqRel);
+    }
+}
+
+/// A piece queued for a socket with its share of the connection's budget.
+struct Queued {
+    piece: Piece,
+    held: Held,
+}
+
 /// A socket of the extension: the queue of its message pieces and its task. Dropping it
-/// stops the task; a module call already running finishes on the blocking pool, its reply
-/// is dropped.
+/// stops the task and frees its queue; a module call already running finishes on the
+/// blocking pool, its reply is dropped.
 struct Socket {
-    pieces: mpsc::UnboundedSender<Piece>,
+    pieces: mpsc::UnboundedSender<Queued>,
     task: AbortHandle,
 }
 
@@ -270,14 +350,18 @@ impl Drop for Socket {
 
 /// One IPC connection: a reader task, a writer task fed through a queue, and a task per
 /// socket. Ends when the relay closes the connection or reading or writing fails.
-async fn connection(stream: IpcStream, registry: Arc<Registry>) -> io::Result<()> {
+async fn connection<S>(stream: S, registry: Arc<Registry>, limits: Limits) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
     let (reader, writer) = tokio::io::split(stream);
     let (out, out_rx) = mpsc::channel(OUT_QUEUE);
     let mut writer = tokio::spawn(write_frames(writer, out_rx));
-    // One frame read ahead at most: a busy connection waits in the pipe, not in memory.
+    // At most one frame waits here; the pieces handed on to sockets count against the
+    // connection's budget until their message is answered.
     let (frames_tx, frames) = mpsc::channel(1);
     let reader = tokio::spawn(read_frames(reader, frames_tx));
-    let result = relay_frames(frames, &out, &mut writer, &registry).await;
+    let result = relay_frames(frames, &out, &mut writer, &registry, limits).await;
     // Both halves must go for the pipe to close.
     reader.abort();
     writer.abort();
@@ -290,6 +374,7 @@ async fn relay_frames(
     out: &mpsc::Sender<String>,
     writer: &mut JoinHandle<io::Result<()>>,
     registry: &Arc<Registry>,
+    limits: Limits,
 ) -> io::Result<()> {
     let hello = Outbound::Hello {
         v: PROTOCOL_VERSION,
@@ -297,6 +382,7 @@ async fn relay_frames(
         compat: COMPAT_VERSION,
     };
     out.send(hello.to_json()).await.map_err(writer_gone)?;
+    let budget = Budget::new(limits.budget);
     let mut sockets: HashMap<u32, Socket> = HashMap::new();
     loop {
         // Both branches are cancel safe: the frames are read in their own task.
@@ -312,16 +398,14 @@ async fn relay_frames(
         };
         match request {
             Request::Open { sid, origin } => {
+                let shown = origin.as_deref().unwrap_or("-");
                 // Sockets that the daemon closed may be opened again.
                 sockets.retain(|_, socket| !socket.pieces.is_closed());
                 if sockets.remove(&sid).is_some() {
-                    info!(sid, "socket opened twice; closing it");
-                    out.send(Outbound::Close { sid }.to_json())
-                        .await
-                        .map_err(writer_gone)?;
+                    info!(sid, origin = %shown, "socket opened twice; closing it");
+                    send_close(out, sid).await?;
                     continue;
                 }
-                let shown = origin.as_deref().unwrap_or("-");
                 info!(sid, origin = %shown, "bridge socket opened");
                 out.send(Outbound::Open { sid }.to_json())
                     .await
@@ -336,6 +420,7 @@ async fn relay_frames(
                     out.clone(),
                     Arc::clone(registry),
                     AddInfo { origin },
+                    limits,
                 ));
                 sockets.insert(
                     sid,
@@ -345,14 +430,32 @@ async fn relay_frames(
                     },
                 );
             }
-            Request::Msg { sid, piece } => match sockets.get(&sid) {
-                Some(socket) if socket.pieces.send(piece).is_ok() => {}
-                Some(_) => {
+            Request::Msg { sid, piece } => {
+                let Some(socket) = sockets.get(&sid) else {
+                    debug!(sid, "message for an unknown socket ignored");
+                    continue;
+                };
+                if socket.pieces.is_closed() {
+                    debug!(sid, "message for a closed socket ignored");
+                    sockets.remove(&sid);
+                    continue;
+                }
+                // A socket that sends more than the connection may hold is closed; the
+                // others go on.
+                let Some(held) = budget.take(piece.data.len()) else {
+                    warn!(
+                        sid,
+                        "too much data waiting on the connection; closing the socket"
+                    );
+                    sockets.remove(&sid);
+                    send_close(out, sid).await?;
+                    continue;
+                };
+                if socket.pieces.send(Queued { piece, held }).is_err() {
                     debug!(sid, "message for a closed socket ignored");
                     sockets.remove(&sid);
                 }
-                None => debug!(sid, "message for an unknown socket ignored"),
-            },
+            }
             Request::Close { sid } => match sockets.remove(&sid) {
                 Some(_) => debug!(sid, "socket closed by the extension"),
                 None => debug!(sid, "close of an unknown socket ignored"),
@@ -362,9 +465,18 @@ async fn relay_frames(
     }
 }
 
+async fn send_close(out: &mpsc::Sender<String>, sid: u32) -> io::Result<()> {
+    out.send(Outbound::Close { sid }.to_json())
+        .await
+        .map_err(writer_gone)
+}
+
 /// Reads frames into `frames` until the stream ends (the channel closes) or fails (the error
 /// is the last item).
-async fn read_frames(mut reader: ReadHalf<IpcStream>, frames: mpsc::Sender<io::Result<Vec<u8>>>) {
+async fn read_frames<R: AsyncRead>(
+    mut reader: ReadHalf<R>,
+    frames: mpsc::Sender<io::Result<Vec<u8>>>,
+) {
     loop {
         let frame = match read_frame(&mut reader).await {
             Ok(Some(frame)) => Ok(frame),
@@ -379,8 +491,8 @@ async fn read_frames(mut reader: ReadHalf<IpcStream>, frames: mpsc::Sender<io::R
 }
 
 /// Writes the frames of `out` until it closes.
-async fn write_frames(
-    mut writer: WriteHalf<IpcStream>,
+async fn write_frames<W: AsyncWrite>(
+    mut writer: WriteHalf<W>,
     mut out: mpsc::Receiver<String>,
 ) -> io::Result<()> {
     while let Some(frame) = out.recv().await {
@@ -391,23 +503,30 @@ async fn write_frames(
 
 /// A socket: assembles messages from `pieces` and answers them in order. The daemon closes
 /// the socket (a `close` frame) on a request that is not a JSON object, a message over
-/// [`MAX_MESSAGE`], a failed module call or [`IDLE_TIMEOUT`] without a frame.
+/// [`Limits::max_message`], a failed module call or [`Limits::idle`] without a frame.
 async fn socket(
     sid: u32,
-    mut pieces: mpsc::UnboundedReceiver<Piece>,
+    mut pieces: mpsc::UnboundedReceiver<Queued>,
     out: mpsc::Sender<String>,
     registry: Arc<Registry>,
     add_info: AddInfo,
+    limits: Limits,
 ) {
     let mut message = String::new();
+    // The budget share of `message`, kept until it is answered.
+    let mut message_held: Option<Held> = None;
     let reason = loop {
-        let piece = match timeout(IDLE_TIMEOUT, pieces.recv()).await {
+        let Queued { piece, held } = match timeout(limits.idle, pieces.recv()).await {
             Err(_) => break "idle timeout",
             Ok(None) => return,
-            Ok(Some(piece)) => piece,
+            Ok(Some(queued)) => queued,
         };
-        if message.len() + piece.data.len() > MAX_MESSAGE {
+        if message.len() + piece.data.len() > limits.max_message {
             break "message too large";
+        }
+        match &mut message_held {
+            Some(all) => all.absorb(held),
+            None => message_held = Some(held),
         }
         if message.is_empty() {
             message = piece.data;
@@ -440,11 +559,17 @@ async fn socket(
                 }
             }
         };
-        if send_message(&out, sid, &reply).await.is_err() {
+        let sent = send_message(&out, sid, &reply).await;
+        message_held = None;
+        if sent.is_err() {
             return;
         }
     };
     debug!(sid, reason, "closing the socket");
+    // Closed before the `close` frame goes out: the connection sees the socket as closed
+    // and never sends a second `close` for it.
+    drop(pieces);
+    drop(message_held);
     // The connection may be gone already: nothing to tell then.
     let _ = out.send(Outbound::Close { sid }.to_json()).await;
 }
@@ -508,6 +633,129 @@ mod tests {
     #[should_panic(expected = "leaves no room")]
     fn split_refuses_a_limit_without_room() {
         split_message(1, "x", 30);
+    }
+
+    /// The relay's end of a connection served with `limits`.
+    struct Relay(tokio::io::DuplexStream);
+
+    impl Relay {
+        async fn start(registry: Registry, limits: Limits) -> Relay {
+            let (relay, daemon) = tokio::io::duplex(1 << 16);
+            tokio::spawn(connection(daemon, Arc::new(registry), limits));
+            let mut relay = Relay(relay);
+            assert!(relay.next().await.starts_with(r#"{"t":"hello""#));
+            relay
+        }
+
+        async fn send(&mut self, frame: Value) {
+            write_frame(&mut self.0, frame.to_string().as_bytes())
+                .await
+                .unwrap();
+        }
+
+        async fn next(&mut self) -> String {
+            let frame = timeout(Duration::from_secs(60), read_frame(&mut self.0))
+                .await
+                .expect("no frame in time")
+                .unwrap()
+                .expect("connection closed");
+            String::from_utf8(frame).unwrap()
+        }
+
+        async fn open(&mut self, sid: u32) {
+            self.send(serde_json::json!({"t": "open", "sid": sid, "origin": "https://t.test"}))
+                .await;
+            assert_eq!(self.next().await, format!(r#"{{"t":"open","sid":{sid}}}"#));
+            assert!(self.next().await.contains("version"));
+        }
+
+        async fn piece(&mut self, sid: u32, data: &str, more: bool) {
+            let mut frame = serde_json::json!({"t": "msg", "sid": sid, "data": data});
+            if more {
+                frame["more"] = Value::Bool(true);
+            }
+            self.send(frame).await;
+        }
+
+        async fn heartbeat(&mut self, sid: u32) {
+            self.piece(sid, HEARTBEAT, false).await;
+            assert_eq!(
+                self.next().await,
+                format!(r#"{{"t":"msg","sid":{sid},"data":"--heartbeat--"}}"#)
+            );
+        }
+    }
+
+    const SMALL: Limits = Limits {
+        max_message: 100,
+        budget: 150,
+        idle: Duration::from_secs(600),
+    };
+
+    #[tokio::test]
+    async fn message_over_the_limit_closes_only_its_socket() {
+        let mut relay = Relay::start(Registry::default(), SMALL).await;
+        relay.open(1).await;
+        relay.open(2).await;
+        relay.piece(1, &"a".repeat(60), true).await;
+        relay.piece(1, &"a".repeat(41), false).await;
+        assert_eq!(relay.next().await, r#"{"t":"close","sid":1}"#);
+        relay.heartbeat(2).await;
+        // Exactly the limit is accepted (and answered: not a JSON object closes it).
+        relay.piece(2, &"b".repeat(60), true).await;
+        relay.piece(2, &"b".repeat(40), false).await;
+        assert_eq!(relay.next().await, r#"{"t":"close","sid":2}"#);
+    }
+
+    /// Answers once the test lets it.
+    struct Gate(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
+
+    impl oncl_protocol::Module for Gate {
+        fn process(&self, _request: &str, _add_info: &AddInfo) -> String {
+            let _ = self.0.lock().unwrap().recv();
+            r#"{"gate":"open"}"#.to_owned()
+        }
+    }
+
+    #[tokio::test]
+    async fn socket_over_the_budget_is_closed_others_go_on() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let mut registry = Registry::default();
+        registry.register("gate", Arc::new(Gate(std::sync::Mutex::new(gate))));
+        let mut relay = Relay::start(registry, SMALL).await;
+        for sid in 1..=3 {
+            relay.open(sid).await;
+        }
+        // 86 bytes held while the module waits.
+        let request = format!(r#"{{"module":"gate","pad":"{}"}}"#, "x".repeat(60));
+        relay.piece(1, &request, false).await;
+        // 86 + 70 > 150: sid 2 is closed.
+        relay.piece(2, &"y".repeat(70), true).await;
+        assert_eq!(relay.next().await, r#"{"t":"close","sid":2}"#);
+        // 86 + 13 fits.
+        relay.heartbeat(3).await;
+        release.send(()).unwrap();
+        assert_eq!(
+            relay.next().await,
+            r#"{"t":"msg","sid":1,"data":"{\"gate\":\"open\"}"}"#
+        );
+        // The answered request no longer counts: 90 bytes fit (86 + 90 would not). Had sid 3
+        // been closed, its `close` would come before the heartbeat's reply.
+        relay.piece(3, &"z".repeat(90), true).await;
+        relay.heartbeat(1).await;
+    }
+
+    #[test]
+    fn budget_returns_bytes_on_drop() {
+        let budget = Budget::new(10);
+        let mut a = budget.take(6).unwrap();
+        assert!(budget.take(5).is_none());
+        let b = budget.take(4).unwrap();
+        a.absorb(b);
+        assert!(budget.take(1).is_none());
+        drop(a);
+        assert!(budget.take(10).is_some());
+        assert_eq!(budget.held.load(Ordering::Acquire), 0);
     }
 
     #[test]

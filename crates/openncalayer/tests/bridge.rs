@@ -81,8 +81,8 @@ fn data_dir() -> TempDir {
 }
 
 /// Points `XDG_RUNTIME_DIR` at a private test directory (also for the daemons the tests
-/// start) so that sockets never land in the user's real runtime directory. Runs once,
-/// before any test of this binary reads the environment.
+/// start) so that sockets never land in the user's real runtime directory. Runs once, before
+/// any endpoint of this binary is computed.
 #[cfg(unix)]
 fn isolate_runtime_dir() {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -101,8 +101,10 @@ fn isolate_runtime_dir() {
                 dir.display()
             );
         }
-        // SAFETY: every test forces this first and `LazyLock` blocks the others until the
-        // variable is set, so no other thread of this binary reads the environment meanwhile.
+        // SAFETY: other tests may run meanwhile, but this binary reads and inherits the
+        // environment only through std (`env::var_os`, `env::temp_dir`, `Command`), which
+        // takes the same environment lock as `set_var`; nothing calls libc `getenv` directly.
+        // Every endpoint is computed after this ran (`data_dir` forces it).
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
     });
     LazyLock::force(&ISOLATED);
@@ -518,6 +520,31 @@ async fn invalid_json_closes_only_that_sid() {
     assert_eq!(c.call(2, HEARTBEAT).await, HEARTBEAT);
 }
 
+/// A module that panics.
+struct Panics;
+
+impl Module for Panics {
+    fn process(&self, _request: &str, _add_info: &AddInfo) -> String {
+        panic!("test module panics on purpose");
+    }
+}
+
+#[tokio::test]
+async fn module_panic_closes_only_that_sid() {
+    let mut registry = Registry::default();
+    registry.register("test.panics", Arc::new(Panics));
+    let (_dir, ep) = start_ipc(Arc::new(registry)).await;
+    let mut c = Client::connect(&ep).await;
+    c.open(1, "https://a.test").await;
+    c.open(2, "https://b.test").await;
+    c.send_text(1, r#"{"module":"test.panics"}"#).await;
+    assert_eq!(c.next_raw().await, r#"{"t":"close","sid":1}"#);
+    assert_eq!(c.call(2, HEARTBEAT).await, HEARTBEAT);
+    // The daemon goes on: sid 1 may be opened again.
+    c.open(1, "https://a.test").await;
+    assert_eq!(c.call(1, HEARTBEAT).await, HEARTBEAT);
+}
+
 /// Releases the scripted dialog's barrier when dropped, also while a test unwinds, from a
 /// detached thread so that dropping never blocks.
 struct Release(Arc<Barrier>);
@@ -655,6 +682,7 @@ mod binary {
     use std::io::Read;
     use std::path::Path;
     use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::sync::atomic::{AtomicU16, Ordering};
 
     /// A data directory for a daemon: no TLS, an empty dialog script.
     fn daemon_dir() -> TempDir {
@@ -678,7 +706,8 @@ mod binary {
     }
 
     /// `openncalayer <args>` on `data`, listening on `port` if it serves wss, answering
-    /// dialogs from `<data>/steps.json`.
+    /// dialogs from `<data>/steps.json`. Its output goes nowhere: assertions read the log
+    /// files, and an undrained pipe would block the daemon once full.
     fn daemon(data: &Path, port: u16, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_openncalayer"));
         command
@@ -688,18 +717,21 @@ mod binary {
             .env("ONCL_E2E_PROMPTER", data.join("steps.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::null());
         command
     }
 
     /// Ports of the range `NCALAYERPORT` accepts, never 13579 (a real NCALayer may run).
-    const PORTS: std::ops::RangeInclusive<u16> = 13580..=13679;
+    const FIRST_PORT: u16 = 13580;
+    const PORTS: u16 = 100;
 
-    /// A free port of [`PORTS`], held.
+    /// A free port of 13580..=13679 that no other test of this binary got, held. Ports are
+    /// handed out in turn, so tests running at the same time never share one.
     fn hold_port() -> (u16, std::net::TcpListener) {
-        PORTS
-            .into_iter()
-            .find_map(|port| {
+        static NEXT: AtomicU16 = AtomicU16::new(0);
+        (0..PORTS)
+            .find_map(|_| {
+                let port = FIRST_PORT + NEXT.fetch_add(1, Ordering::Relaxed) % PORTS;
                 std::net::TcpListener::bind(("127.0.0.1", port))
                     .ok()
                     .map(|l| (port, l))
@@ -707,13 +739,21 @@ mod binary {
             .expect("a free port in 13580..=13679")
     }
 
+    /// A port of [`hold_port`], released for a daemon to bind.
     fn free_port() -> u16 {
         hold_port().0
     }
 
     /// Runs `command` to its end (at most [`PATIENCE`]); its exit code and stderr.
     fn exit_of(mut command: Command) -> (ExitStatus, String) {
-        let mut child = command.spawn().unwrap();
+        let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
+        // Drained while the daemon runs, so that it never blocks on a full pipe.
+        let mut pipe = child.stderr.take().unwrap();
+        let stderr = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = pipe.read_to_string(&mut text);
+            text
+        });
         let deadline = Instant::now() + PATIENCE;
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
@@ -725,15 +765,7 @@ mod binary {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        (status, stderr_of(&mut child))
-    }
-
-    fn stderr_of(child: &mut Child) -> String {
-        let mut stderr = String::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
-        }
-        stderr
+        (status, stderr.join().unwrap())
     }
 
     /// A running daemon, killed on drop.
@@ -767,10 +799,7 @@ mod binary {
         let deadline = Instant::now() + PATIENCE;
         loop {
             if let Some(status) = running.child.try_wait().unwrap() {
-                panic!(
-                    "the daemon exited with {status}: {}",
-                    stderr_of(&mut running.child)
-                );
+                panic!("the daemon exited with {status}; its log:\n{}", logs(data));
             }
             if let Ok(stream) = connect(&ep).await {
                 let mut c = Client(stream);
@@ -854,10 +883,44 @@ mod binary {
 
     /// The text of the daemon's log files under `data`.
     fn logs(data: &Path) -> String {
-        std::fs::read_dir(data.join("logs"))
-            .unwrap()
+        let Ok(entries) = std::fs::read_dir(data.join("logs")) else {
+            return String::new();
+        };
+        entries
             .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn broken_tls_exits_1_with_flag_serves_ipc() {
+        // A corrupt `tls.json`; a corrupt server key under a valid `tls.json`.
+        let breakages = [
+            ("tls.json", "{garbage"),
+            ("server.key", "-----BEGIN PRIVATE KEY-----\nAAAA\n"),
+        ];
+        for (broken, content) in breakages {
+            let dir = daemon_dir();
+            configure_tls(dir.path());
+            std::fs::write(dir.path().join("tls").join(broken), content).unwrap();
+            let port = free_port();
+            let (status, stderr) = exit_of(daemon(dir.path(), port, &["run"]));
+            assert_eq!(status.code(), Some(1), "{broken}: {stderr}");
+            assert!(stderr.contains("Не удалось"), "{broken}: {stderr}");
+            runtime().block_on(async {
+                let (_daemon, mut c) = start(
+                    daemon(dir.path(), port, &["run", "--allow-no-wss"]),
+                    dir.path(),
+                )
+                .await;
+                c.open(1, "https://a.test").await;
+                assert_eq!(c.call(1, HEARTBEAT).await, HEARTBEAT);
+                // Nothing listens on the port.
+                assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
+            });
+            let log = logs(dir.path());
+            assert!(log.contains("wss is off"), "{broken}: {log}");
+            assert!(log.contains("code=1"), "{broken}: {log}");
+        }
     }
 
     #[test]
