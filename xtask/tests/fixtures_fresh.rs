@@ -11,8 +11,8 @@ use oncl_testkit::{read, synthetic, synthetic_all, synthetic_cert, workspace_roo
 use x509_cert::Certificate;
 use x509_cert::ext::pkix::name::{DistributionPointName, GeneralName};
 use x509_cert::ext::pkix::{
-    AuthorityInfoAccessSyntax, BasicConstraints, CrlDistributionPoints, ExtendedKeyUsage, KeyUsage,
-    KeyUsages,
+    AuthorityInfoAccessSyntax, AuthorityKeyIdentifier, BasicConstraints, CrlDistributionPoints,
+    ExtendedKeyUsage, KeyUsage, KeyUsages, SubjectKeyIdentifier,
 };
 
 const OCSP_URL: &str = "http://ocsp.synthetic.test";
@@ -33,7 +33,7 @@ fn committed_fixtures_are_fresh() {
 #[test]
 fn every_p12_loads_and_chains_through_its_issuer_to_its_root() {
     let all = synthetic_all();
-    assert_eq!(all.len(), 17);
+    assert_eq!(all.len(), 18);
     for f in all {
         let entries =
             pkcs12::load(&read(&f.path), &f.password).unwrap_or_else(|e| panic!("{}: {e}", f.name));
@@ -116,39 +116,102 @@ fn intermediate_and_twin_are_constrained_cas_under_root_gost2015() {
 
 #[test]
 fn leaves_under_intermediate_point_to_ocsp_and_crl() {
+    let inter = parse(&synthetic_cert("inter-gost2015"));
     let mut serials = Vec::new();
     for name in [
         "inter-user-gost2015-sign",
         "inter-revoked-gost2015-sign",
         "inter-expired-gost2015-sign",
+        "inter-noaki-gost2015-sign",
     ] {
         let cert = leaf(name);
+        assert_eq!(
+            cert.tbs_certificate().issuer(),
+            inter.tbs_certificate().subject(),
+            "{name}"
+        );
         let (critical, aia) = ext::<AuthorityInfoAccessSyntax>(&cert).unwrap();
         assert!(!critical, "{name}");
         assert_eq!(aia.0.len(), 1, "{name}");
         assert_eq!(aia.0[0].access_method.to_string(), ID_AD_OCSP, "{name}");
         assert_eq!(aia.0[0].access_location, uri(OCSP_URL), "{name}");
         assert_eq!(crl_urls(&cert), [INTER_CRL_URL], "{name}");
-        serials.push(cert.tbs_certificate().serial_number().clone());
+        serials.push(cert.tbs_certificate().serial_number().as_bytes().to_vec());
     }
-    assert_ne!(serials[0], serials[1]);
+    serials.sort();
+    serials.dedup();
+    assert_eq!(serials.len(), 4, "serial numbers are distinct");
+}
+
+/// The expired leaf lies inside the validity of its CAs, so its chain builds at its
+/// `notAfter`.
+#[test]
+fn expired_leaf_is_inside_ca_validity() {
     let expired = leaf("inter-expired-gost2015-sign");
     let validity = expired.tbs_certificate().validity();
-    assert_eq!(validity.not_before.to_string(), "2020-01-01T00:00:00Z");
-    assert_eq!(validity.not_after.to_string(), "2021-01-01T00:00:00Z");
+    assert_eq!(validity.not_before.to_string(), "2025-01-01T00:00:00Z");
+    assert_eq!(validity.not_after.to_string(), "2026-01-01T00:00:00Z");
+    for ca in ["inter-gost2015", "root-gost2015"] {
+        let ca = parse(&synthetic_cert(ca));
+        let ca_validity = ca.tbs_certificate().validity();
+        assert!(
+            ca_validity.not_before.to_unix_duration() <= validity.not_before.to_unix_duration()
+        );
+        assert!(validity.not_after.to_unix_duration() < ca_validity.not_after.to_unix_duration());
+    }
+}
+
+/// Every leaf under the intermediate names it by AuthorityKeyIdentifier except
+/// `inter-noaki-…`, which only its signature ties to `inter-gost2015` rather than the twin.
+#[test]
+fn noaki_leaf_is_told_from_the_twin_only_by_signature() {
+    let inter = parse(&synthetic_cert("inter-gost2015"));
+    let twin = parse(&synthetic_cert("inter-gost2015-twin"));
+    let (_, inter_ski) = ext::<SubjectKeyIdentifier>(&inter).unwrap();
+    for name in [
+        "inter-user-gost2015-sign",
+        "inter-revoked-gost2015-sign",
+        "inter-expired-gost2015-sign",
+    ] {
+        let (_, aki) = ext::<AuthorityKeyIdentifier>(&leaf(name)).unwrap();
+        assert_eq!(aki.key_identifier, Some(inter_ski.0.clone()), "{name}");
+    }
+    let noaki = leaf("inter-noaki-gost2015-sign");
+    assert!(ext::<AuthorityKeyIdentifier>(&noaki).is_none());
+    assert_eq!(
+        noaki.tbs_certificate().issuer(),
+        twin.tbs_certificate().subject()
+    );
+    cert::verify_signature(&noaki, &inter).unwrap();
+    assert!(cert::verify_signature(&noaki, &twin).is_err());
 }
 
 #[test]
 fn ocsp_responders_differ_only_in_nocheck() {
-    for (name, nocheck) in [
-        ("ocsp-gost2015", true),
-        ("ocsp-nocheckless-gost2015", false),
+    let with = leaf("ocsp-gost2015");
+    let without = leaf("ocsp-nocheckless-gost2015");
+    assert_eq!(
+        with.tbs_certificate().subject(),
+        without.tbs_certificate().subject()
+    );
+    assert_eq!(
+        with.tbs_certificate().issuer(),
+        without.tbs_certificate().issuer()
+    );
+    assert_eq!(
+        with.tbs_certificate().issuer(),
+        parse(&synthetic_cert("inter-gost2015"))
+            .tbs_certificate()
+            .subject()
+    );
+    for (name, cert, nocheck) in [
+        ("ocsp-gost2015", &with, true),
+        ("ocsp-nocheckless-gost2015", &without, false),
     ] {
-        let cert = leaf(name);
-        let (critical, ku) = ext::<KeyUsage>(&cert).unwrap();
+        let (critical, ku) = ext::<KeyUsage>(cert).unwrap();
         assert!(critical, "{name}");
         assert_eq!(ku, KeyUsage(KeyUsages::DigitalSignature.into()), "{name}");
-        let (_, eku) = ext::<ExtendedKeyUsage>(&cert).unwrap();
+        let (_, eku) = ext::<ExtendedKeyUsage>(cert).unwrap();
         let eku: Vec<String> = eku.0.iter().map(ToString::to_string).collect();
         assert_eq!(eku, [EKU_OCSP_SIGNING], "{name}");
         let found = cert
@@ -165,7 +228,8 @@ fn ocsp_responders_differ_only_in_nocheck() {
             }
             None => assert!(!nocheck, "{name} lacks id-pkix-ocsp-nocheck"),
         }
-        assert!(ext::<AuthorityInfoAccessSyntax>(&cert).is_none(), "{name}");
+        assert!(ext::<AuthorityInfoAccessSyntax>(cert).is_none(), "{name}");
+        assert!(ext::<CrlDistributionPoints>(cert).is_none(), "{name}");
     }
 }
 

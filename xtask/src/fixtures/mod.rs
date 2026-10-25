@@ -245,6 +245,9 @@ enum Period {
     Normal,
     /// 2020-01-01T00:00:00Z … 2021-01-01T00:00:00Z.
     Expired,
+    /// 2025-01-01T00:00:00Z … 2026-01-01T00:00:00Z: expired, but inside the validity of the
+    /// CAs (which start with [`Period::Normal`]), so the chain builds at its `notAfter`.
+    ExpiredUnderCa,
 }
 
 impl Period {
@@ -252,6 +255,7 @@ impl Period {
         let (from, to) = match self {
             Period::Normal => ((2025, 1, 1, 0, 0, 0), (2099, 12, 31, 23, 59, 59)),
             Period::Expired => ((2020, 1, 1, 0, 0, 0), (2021, 1, 1, 0, 0, 0)),
+            Period::ExpiredUnderCa => ((2025, 1, 1, 0, 0, 0), (2026, 1, 1, 0, 0, 0)),
         };
         Validity::new(time(from), time(to))
     }
@@ -289,9 +293,12 @@ struct Container {
     profiles: &'static [Profile],
     period: Period,
     encryption: Encryption,
+    /// Whether the entries carry AuthorityKeyIdentifier.
+    authority_key_id: bool,
 }
 
-/// A container valid for the normal period, in the Kalkan profile.
+/// A container valid for the normal period, in the Kalkan profile, with
+/// AuthorityKeyIdentifier.
 const fn container(name: &'static str, root: Root, profiles: &'static [Profile]) -> Container {
     Container {
         name,
@@ -299,6 +306,7 @@ const fn container(name: &'static str, root: Root, profiles: &'static [Profile])
         profiles,
         period: Period::Normal,
         encryption: Encryption::Kalkan,
+        authority_key_id: true,
     }
 }
 
@@ -330,9 +338,9 @@ const CONTAINERS: &[Container] = &[
     },
 ];
 
-/// Containers issued by the intermediate CA [`INTER`]. Entries other than OCSP responders
-/// point to [`OCSP_URL`] and [`INTER_CRL_URL`]; `inter-revoked-…` is the one the tests report
-/// as revoked.
+/// Containers issued by the intermediate CA [`INTER`] (all under `root-gost2015`, so their
+/// `root` is [`Root::Gost2015`]). Entries other than OCSP responders point to [`OCSP_URL`]
+/// and [`INTER_CRL_URL`]; `inter-revoked-…` is the one the tests report as revoked.
 const INTER_CONTAINERS: &[Container] = &[
     container("inter-user-gost2015-sign", Root::Gost2015, &[Profile::Sign]),
     container(
@@ -341,7 +349,7 @@ const INTER_CONTAINERS: &[Container] = &[
         &[Profile::Sign],
     ),
     Container {
-        period: Period::Expired,
+        period: Period::ExpiredUnderCa,
         ..container(
             "inter-expired-gost2015-sign",
             Root::Gost2015,
@@ -355,6 +363,17 @@ const INTER_CONTAINERS: &[Container] = &[
         &[Profile::OcspNoCheckless],
     ),
 ];
+
+/// Issued by [`INTER`] like `inter-user-…`, but without AuthorityKeyIdentifier: only the
+/// signature tells [`INTER`] from its same-subject twin. Drawn after the CA key containers.
+const INTER_NOAKI: Container = Container {
+    authority_key_id: false,
+    ..container(
+        "inter-noaki-gost2015-sign",
+        Root::Gost2015,
+        &[Profile::Sign],
+    )
+};
 
 /// A generated CA: its `.cer` name without extension, subject, key and certificate.
 struct IssuedCa {
@@ -421,6 +440,33 @@ impl Output {
         )
         .expect("writing to a String");
     }
+
+    /// Writes `container`, issued by the intermediate `inter` under `root` with the
+    /// revocation `pointers`.
+    fn add_inter_p12(
+        &mut self,
+        container: &Container,
+        root: &IssuedCa,
+        inter: &IssuedCa,
+        pointers: &[Extension],
+        rng: &mut ChaCha20Rng,
+    ) {
+        assert_eq!(
+            container.root,
+            Root::Gost2015,
+            "{}: the intermediate is under root-gost2015",
+            container.name
+        );
+        let entries = issue_entries(container, inter, pointers, rng);
+        self.add_p12(
+            container.name,
+            root,
+            inter,
+            &entries,
+            container.encryption,
+            rng,
+        );
+    }
 }
 
 /// Generates every file of `fixtures/synthetic/`: file name → contents.
@@ -469,15 +515,7 @@ pub fn generate() -> BTreeMap<String, Vec<u8>> {
     out.add_cer(&twin);
     let pointers = [ocsp_access(OCSP_URL), crl_distribution_point(INTER_CRL_URL)];
     for container in INTER_CONTAINERS {
-        let entries = issue_entries(container, &inter, &pointers, &mut rng);
-        out.add_p12(
-            container.name,
-            root,
-            &inter,
-            &entries,
-            container.encryption,
-            &mut rng,
-        );
+        out.add_inter_p12(container, root, &inter, &pointers, &mut rng);
     }
     for ca in [&inter, root] {
         out.add_p12(
@@ -489,6 +527,7 @@ pub fn generate() -> BTreeMap<String, Vec<u8>> {
             &mut rng,
         );
     }
+    out.add_inter_p12(&INTER_NOAKI, root, &inter, &pointers, &mut rng);
 
     out.files
         .insert(MANIFEST.to_owned(), out.manifest.into_bytes());
@@ -508,6 +547,7 @@ fn self_signed_root(root: Root, rng: &mut ChaCha20Rng) -> IssuedCa {
         validity: Period::Normal.validity(),
         serial: serial(rng, false),
         extensions: ca_extensions(None),
+        authority_key_id: false,
     };
     let cert = issue(spec, &key, None, rng);
     IssuedCa {
@@ -531,6 +571,7 @@ fn intermediate(file: &'static str, root: &IssuedCa, rng: &mut ChaCha20Rng) -> I
         validity: Period::Normal.validity(),
         serial: serial(rng, false),
         extensions,
+        authority_key_id: true,
     };
     let cert = issue(spec, &key, Some(root.issuer()), rng);
     IssuedCa {
@@ -577,6 +618,7 @@ fn issue_entries(
                 validity: container.period.validity(),
                 serial: serial(rng, profile == Profile::LegalSign),
                 extensions,
+                authority_key_id: container.authority_key_id,
             };
             let cert_der = issue(spec, &key, Some(ca.issuer()), rng);
             WriteEntry {

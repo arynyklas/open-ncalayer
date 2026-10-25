@@ -119,3 +119,10 @@ password = "Qwerty12"
 root = "root-gost2015.cer"
 issuer = "root-gost2015.cer"
 aliases = ["e1e0588ff97fa6f541ab36457d10f7de4a6c7517"]
+
+[[p12]]
+name = "inter-noaki-gost2015-sign"
+password = "Qwerty12"
+root = "root-gost2015.cer"
+issuer = "inter-gost2015.cer"
+aliases = ["a246e5b0e616ce8f58ae01277becf1038f05ce4d"]

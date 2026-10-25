@@ -60,9 +60,10 @@
       |---|---|---|
       | `inter-user-gost2015-sign.p12` | `inter-gost2015` | профиль `user-gost2015-sign`; AIA OCSP `http://ocsp.synthetic.test`, CDP `http://crl.synthetic.test/inter-gost2015.crl` |
       | `inter-revoked-gost2015-sign.p12` | `inter-gost2015` | как `inter-user-gost2015-sign`, свой ключ и серийник; тесты объявляют его отозванным в ответах OCSP и в CRL |
-      | `inter-expired-gost2015-sign.p12` | `inter-gost2015` | как `inter-user-gost2015-sign`, срок 2020-01-01…2021-01-01 |
+      | `inter-expired-gost2015-sign.p12` | `inter-gost2015` | как `inter-user-gost2015-sign`, срок 2025-01-01…2026-01-01: уже истёк, но лежит внутри срока CA, поэтому цепочка строится на момент `notAfter` |
       | `ocsp-gost2015.p12` | `inter-gost2015` | ответчик OCSP: KU digitalSignature (critical), EKU OCSPSigning, `id-pkix-ocsp-nocheck` (значение — DER NULL `05 00`) |
       | `ocsp-nocheckless-gost2015.p12` | `inter-gost2015` | как `ocsp-gost2015`, но без `id-pkix-ocsp-nocheck` |
       | `inter-gost2015.key.p12` | `root-gost2015` | ключ и сертификат `inter-gost2015.cer`: им тесты подписывают CRL промежуточного CA |
       | `root-gost2015.key.p12` | `root-gost2015` | ключ и сертификат `root-gost2015.cer` (самоподписанный): им тесты подписывают CRL корня |
+      | `inter-noaki-gost2015-sign.p12` | `inter-gost2015` | как `inter-user-gost2015-sign`, но без `authorityKeyIdentifier`: от одноимённого `inter-gost2015-twin` издателя отличает только подпись. Генерируется последним |
   - `fixtures.toml` — описание контейнеров (пароль, корень, издатель — `.cer` выпустившего CA, alias в порядке загрузки) для `oncl_testkit::synthetic` и `synthetic_all`. Сертификаты `.cer` читает `oncl_testkit::synthetic_cert`.

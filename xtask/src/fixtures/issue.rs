@@ -200,6 +200,9 @@ pub(super) struct CertSpec {
     pub serial: Vec<u8>,
     /// Extensions other than SubjectKeyIdentifier and AuthorityKeyIdentifier.
     pub extensions: Vec<Extension>,
+    /// Whether a certificate with an issuer carries AuthorityKeyIdentifier (self-signed ones
+    /// never do).
+    pub authority_key_id: bool,
 }
 
 /// Issuer of a certificate: its name and key.
@@ -211,7 +214,7 @@ pub(super) struct Issuer<'a> {
 
 /// Issues a v3 certificate for `subject_key`, signed by `issuer` (self-signed when `None`).
 /// The extensions are `spec.extensions`, then SubjectKeyIdentifier, then — unless
-/// self-signed — AuthorityKeyIdentifier.
+/// self-signed or `!spec.authority_key_id` — AuthorityKeyIdentifier.
 pub(super) fn issue(
     spec: CertSpec,
     subject_key: &Key,
@@ -228,7 +231,7 @@ pub(super) fn issue(
         false,
         &SubjectKeyIdentifier(octets(&subject_key.ski)),
     ));
-    if !self_signed {
+    if !self_signed && spec.authority_key_id {
         extensions.push(extension(
             false,
             &AuthorityKeyIdentifier {
