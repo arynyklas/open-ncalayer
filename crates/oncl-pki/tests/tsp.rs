@@ -13,6 +13,7 @@ use oncl_pki::tsp::{
     UreqTransport, parse_response, request_der, timestamp_signer, verify_token, verify_token_for,
 };
 use oncl_testkit::{ncanode, read, synthetic};
+use sha1::Digest as _;
 use std::sync::Mutex;
 use time::macros::datetime;
 
@@ -554,6 +555,80 @@ fn parses_ncanode_tsp_response() {
         Some(&[0x01, 0x83, 0x50, 0xc0, 0x22, 0xd7][..])
     );
     assert_eq!(tst.gen_time, datetime!(2022-09-18 13:20:14 UTC));
+
+    // NCANode's TspServiceTest asked for a SHA-1 imprint of CA FE BA BE: the original's
+    // SHA-1 tokens verify (bound to the stamped bytes), and other bytes are a mismatch.
+    assert_eq!(
+        verify_token_for(&tok, &[0xca, 0xfe, 0xba, 0xbe]).unwrap(),
+        tst
+    );
+    assert_eq!(
+        verify_token_for(&tok, &[1, 2, 3]),
+        Err(TspError::ImprintMismatch)
+    );
+}
+
+/// DER TLV; `content` is shorter than 128 bytes.
+fn short_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+    let len = u8::try_from(content.len())
+        .ok()
+        .filter(|l| *l < 0x80)
+        .unwrap();
+    [&[tag, len][..], content].concat()
+}
+
+/// A token of the mock TSA for a request with `imprint` under the hash algorithm `alg`, as
+/// another client (e.g. one asking for SHA-1) gets it. Our own requests cannot use SHA-1.
+fn token_with_imprint(alg: &str, imprint: &[u8]) -> Vec<u8> {
+    let alg = ObjectIdentifier::new_unwrap(alg).to_der().unwrap();
+    let alg_id = short_tlv(0x30, &[&alg[..], &[0x05, 0x00]].concat());
+    let message_imprint = short_tlv(0x30, &[alg_id, short_tlv(0x04, imprint)].concat());
+    let policy = ObjectIdentifier::new_unwrap(BASICS_POLICY)
+        .to_der()
+        .unwrap();
+    let request = short_tlv(
+        0x30,
+        &[
+            short_tlv(0x02, &[1]),
+            message_imprint,
+            policy,
+            short_tlv(0x02, &[9]),
+            short_tlv(0x01, &[0xff]),
+        ]
+        .concat(),
+    );
+    let reply = tsa()
+        .post("http://tsa", "application/timestamp-query", &request)
+        .unwrap();
+    assert_eq!(reply.status, 200);
+    parse_response(&reply.body).unwrap().0
+}
+
+#[test]
+fn sha1_imprints_verify_but_are_never_requested() {
+    const SHA1: &str = "1.3.14.3.2.26";
+    assert_eq!(TspHash::from_oid(&ObjectIdentifier::new_unwrap(SHA1)), None);
+
+    let signature = signer_signature(&signed("user-gost2015-sign"), 0);
+    let sha1 = sha1::Sha1::digest(&signature).to_vec();
+    let token = token_with_imprint(SHA1, &sha1);
+    let tst = verify_token_for(&token, &signature).unwrap();
+    assert_eq!(tst.imprint_alg.to_string(), SHA1);
+    assert_eq!(tst.imprint, sha1);
+    assert_eq!(
+        verify_token_for(&token, b"another signature"),
+        Err(TspError::ImprintMismatch)
+    );
+
+    // An imprint hash nobody here computes is reported as such, not as a mismatch.
+    const MD5: &str = "1.2.840.113549.2.5";
+    let token = token_with_imprint(MD5, &[0; 16]);
+    assert_eq!(
+        verify_token_for(&token, &signature),
+        Err(TspError::UnsupportedImprintAlgorithm(
+            ObjectIdentifier::new_unwrap(MD5)
+        ))
+    );
 }
 
 #[test]

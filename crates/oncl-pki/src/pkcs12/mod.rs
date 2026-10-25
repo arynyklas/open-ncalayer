@@ -204,9 +204,20 @@ fn params<T: for<'a> Choice<'a> + for<'a> DecodeValue<'a, Error = der::Error>>(
     Ok(params.decode_as()?)
 }
 
+/// Largest iteration count accepted for the MAC KDF, PKCS#12 PBE and PBKDF2, as the JDK's
+/// `PKCS12KeyStore` caps it. Real key stores use a few thousand; a hostile or corrupt count
+/// near 2³² would keep the KDF busy for hours.
+pub const MAX_ITERATIONS: u32 = 5_000_000;
+
+/// `iterations` if it is in `1..=MAX_ITERATIONS`; checked before any KDF work.
 fn check_iterations(iterations: u32) -> Result<u32, Pkcs12Error> {
     if iterations == 0 {
         return Err(Pkcs12Error::Malformed("iteration count 0".to_owned()));
+    }
+    if iterations > MAX_ITERATIONS {
+        return Err(Pkcs12Error::Unsupported(format!(
+            "iteration count {iterations} (at most {MAX_ITERATIONS})"
+        )));
     }
     Ok(iterations)
 }
@@ -325,4 +336,28 @@ pub(crate) fn decrypt(
 /// Lowercase hex.
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iteration_bounds() {
+        assert!(matches!(
+            check_iterations(0),
+            Err(Pkcs12Error::Malformed(_))
+        ));
+        assert_eq!(check_iterations(1).ok(), Some(1));
+        assert_eq!(check_iterations(2048).ok(), Some(2048));
+        assert_eq!(check_iterations(MAX_ITERATIONS).ok(), Some(MAX_ITERATIONS));
+        assert!(matches!(
+            check_iterations(MAX_ITERATIONS + 1),
+            Err(Pkcs12Error::Unsupported(_))
+        ));
+        assert!(matches!(
+            check_iterations(u32::MAX),
+            Err(Pkcs12Error::Unsupported(_))
+        ));
+    }
 }

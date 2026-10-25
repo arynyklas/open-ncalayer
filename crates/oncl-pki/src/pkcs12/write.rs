@@ -3,8 +3,8 @@
 use super::kdf::{self, Prf, Purpose};
 use super::{
     Attribute, CertBag, ContentInfo, DigestInfo, EncryptedContentInfo, EncryptedData,
-    EncryptedPrivateKeyInfo, MacData, Passwords, Pbes2Params, Pbkdf2Params, Pfx, Pkcs12PbeParams,
-    SafeBag,
+    EncryptedPrivateKeyInfo, MAX_ITERATIONS, MacData, Passwords, Pbes2Params, Pbkdf2Params, Pfx,
+    Pkcs12PbeParams, SafeBag,
 };
 use crate::oid;
 use cbc::cipher::block_padding::Pkcs7;
@@ -79,7 +79,8 @@ impl Drop for WriteEntry {
 ///
 /// # Panics
 ///
-/// If a `cert_der` is not a DER certificate or `opts.iterations` is 0.
+/// If a `cert_der` is not a DER certificate or `opts.iterations` is not in
+/// `1..=`[`MAX_ITERATIONS`] (the reader refuses other counts).
 pub fn write(
     entries: &[WriteEntry],
     password: &str,
@@ -87,8 +88,8 @@ pub fn write(
     fill_random: &mut dyn FnMut(&mut [u8]),
 ) -> Vec<u8> {
     assert!(
-        opts.iterations > 0,
-        "PKCS#12 iteration count must be positive"
+        (1..=MAX_ITERATIONS).contains(&opts.iterations),
+        "PKCS#12 iteration count must be in 1..={MAX_ITERATIONS}"
     );
     let passwords = Passwords::new(password);
     let mut key_bags = Vec::with_capacity(entries.len());

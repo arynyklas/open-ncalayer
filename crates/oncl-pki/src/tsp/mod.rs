@@ -46,7 +46,8 @@ pub enum TsaMethod {
     Post,
 }
 
-/// Hash of the message imprint.
+/// Hash of the message imprint we request. SHA-1 is deliberately absent: it is only
+/// accepted when verifying tokens others requested (see [`verify_token_for`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TspHash {
     /// GOST 34.11-2015, 512 bits.
@@ -147,6 +148,9 @@ pub enum TspError {
     /// The token's message imprint (algorithm or value) differs from the request's.
     #[error("time-stamp message imprint does not match the request")]
     ImprintMismatch,
+    /// The token's message imprint uses a hash this implementation cannot compute.
+    #[error("time-stamp message imprint algorithm {0} is not supported")]
+    UnsupportedImprintAlgorithm(ObjectIdentifier),
     /// The token's policy differs from the requested one.
     #[error("time-stamp policy does not match the request")]
     PolicyMismatch,
@@ -281,14 +285,26 @@ pub fn verify_token(token: &[u8]) -> Result<TstInfo, TspError> {
 /// `signature`: the token's message imprint must also be the hash of `signature` (with the
 /// token's own imprint algorithm), as [`timestamp_signer`] requests it.
 ///
+/// Besides the [`TspHash`] algorithms, a SHA-1 imprint is accepted here: the NCA TSA stamps
+/// SHA-1 imprints for clients that ask for them, and CAdES-T made by such clients must
+/// verify. Requests never use SHA-1.
+///
 /// # Errors
 ///
-/// Errors of [`verify_token`]; [`TspError::ImprintMismatch`] if the imprint algorithm is
-/// unknown or the imprint is not the hash of `signature`.
+/// Errors of [`verify_token`]; [`TspError::UnsupportedImprintAlgorithm`] if the imprint
+/// algorithm is none of those; [`TspError::ImprintMismatch`] if the imprint is not the hash
+/// of `signature`.
 pub fn verify_token_for(token: &[u8], signature: &[u8]) -> Result<TstInfo, TspError> {
     let tst = verify_token(token)?;
-    let hash = TspHash::from_oid(&tst.imprint_alg).ok_or(TspError::ImprintMismatch)?;
-    if tst.imprint != hash.digest(signature) {
+    let expected = match TspHash::from_oid(&tst.imprint_alg) {
+        Some(hash) => hash.digest(signature),
+        None if tst.imprint_alg == oid::SHA1 => {
+            use sha1::Digest as _;
+            sha1::Sha1::digest(signature).to_vec()
+        }
+        None => return Err(TspError::UnsupportedImprintAlgorithm(tst.imprint_alg)),
+    };
+    if tst.imprint != expected {
         return Err(TspError::ImprintMismatch);
     }
     Ok(tst)

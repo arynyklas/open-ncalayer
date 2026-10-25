@@ -1,7 +1,8 @@
 //! PKCS#12 reading (Kalkan rules) against NCANode and OpenSSL containers, and the writer.
 
 use oncl_pki::key::{KeyAlg, PublicKey, SigAlg};
-use oncl_pki::pkcs12::{KeyEntry, Pkcs12Error, load};
+use oncl_pki::oid;
+use oncl_pki::pkcs12::{KeyEntry, MAX_ITERATIONS, Pkcs12Error, load};
 use oncl_testkit::{fixture, ncanode, read};
 
 /// Signs with the entry's key using the certificate's signature algorithm and verifies the
@@ -103,6 +104,103 @@ fn garbage_is_malformed() {
     ));
     let cert = read(fixture("openssl/rsa.cer"));
     assert!(matches!(load(&cert, "x"), Err(Pkcs12Error::Malformed(_))));
+}
+
+/// DER TLV with a definite length.
+fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let len = content.len();
+    if len < 0x80 {
+        out.push(len as u8);
+    } else {
+        let bytes = len.to_be_bytes();
+        let skip = bytes.iter().take_while(|b| **b == 0).count();
+        out.push(0x80 | (bytes.len() - skip) as u8);
+        out.extend_from_slice(&bytes[skip..]);
+    }
+    out.extend_from_slice(content);
+    out
+}
+
+fn seq(parts: &[&[u8]]) -> Vec<u8> {
+    tlv(0x30, &parts.concat())
+}
+
+fn oid_tlv(oid: der::asn1::ObjectIdentifier) -> Vec<u8> {
+    tlv(0x06, oid.as_bytes())
+}
+
+/// Unsigned INTEGER.
+fn int(n: u32) -> Vec<u8> {
+    let mut bytes = vec![0];
+    bytes.extend_from_slice(&n.to_be_bytes());
+    let skip = bytes
+        .windows(2)
+        .take_while(|w| w[0] == 0 && w[1] < 0x80)
+        .count();
+    tlv(0x02, &bytes[skip..])
+}
+
+/// A PFX whose authenticated safe is `infos` (`ContentInfo`s), with `mac` as its `MacData`.
+fn pfx(infos: &[&[u8]], mac: Option<&[u8]>) -> Vec<u8> {
+    let auth_safe = seq(infos);
+    let data = seq(&[&oid_tlv(oid::DATA), &tlv(0xa0, &tlv(0x04, &auth_safe))]);
+    seq(&[&int(3), &data, mac.unwrap_or_default()])
+}
+
+/// A SHA-1 `MacData` with `iterations` and an all-zero MAC.
+fn mac_data(iterations: u32) -> Vec<u8> {
+    let digest_info = seq(&[
+        &seq(&[&oid_tlv(oid::SHA1), &[0x05, 0x00]]),
+        &tlv(0x04, &[0; 20]),
+    ]);
+    seq(&[&digest_info, &tlv(0x04, &[7; 8]), &int(iterations)])
+}
+
+/// An encryptedData `ContentInfo` encrypted with `alg` (a DER `AlgorithmIdentifier`).
+fn encrypted_data(alg: &[u8]) -> Vec<u8> {
+    let eci = seq(&[&oid_tlv(oid::DATA), alg, &tlv(0x80, &[0x55; 16])]);
+    let encrypted = seq(&[&int(0), &eci]);
+    seq(&[&oid_tlv(oid::ENCRYPTED_DATA), &tlv(0xa0, &encrypted)])
+}
+
+fn assert_too_many_iterations(r: Result<Vec<KeyEntry>, Pkcs12Error>, n: u32) {
+    match r {
+        Err(Pkcs12Error::Unsupported(e)) => {
+            assert!(e.contains(&format!("iteration count {n}")), "{e}");
+        }
+        other => panic!("{n} iterations: {:?}", other.map(|e| e.len())),
+    }
+}
+
+/// Hostile iteration counts are refused before the KDF runs: without the cap, 2³² − 1 rounds
+/// of the MAC KDF, the PKCS#12 PBE or PBKDF2 would keep `load` busy for hours.
+#[test]
+fn iteration_counts_are_capped() {
+    let salt = tlv(0x04, &[7; 8]);
+    for n in [MAX_ITERATIONS + 1, u32::MAX] {
+        assert_too_many_iterations(load(&pfx(&[], Some(&mac_data(n))), ""), n);
+
+        let pbe = seq(&[&oid_tlv(oid::PBE_SHA_3DES), &seq(&[&salt, &int(n)])]);
+        assert_too_many_iterations(load(&pfx(&[&encrypted_data(&pbe)], None), ""), n);
+
+        let pbkdf2 = seq(&[
+            &oid_tlv(oid::PBKDF2),
+            &seq(&[
+                &salt,
+                &int(n),
+                &seq(&[&oid_tlv(oid::HMAC_SHA256), &[0x05, 0x00]]),
+            ]),
+        ]);
+        let aes = seq(&[&oid_tlv(oid::AES_256_CBC), &tlv(0x04, &[0; 16])]);
+        let pbes2 = seq(&[&oid_tlv(oid::PBES2), &seq(&[&pbkdf2, &aes])]);
+        assert_too_many_iterations(load(&pfx(&[&encrypted_data(&pbes2)], None), ""), n);
+    }
+    // The crafted header is otherwise readable: a small count gets as far as the MAC.
+    assert!(matches!(
+        load(&pfx(&[], Some(&mac_data(1))), "x"),
+        Err(Pkcs12Error::WrongPassword)
+    ));
 }
 
 #[cfg(feature = "write")]
