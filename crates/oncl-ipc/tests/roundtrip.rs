@@ -14,27 +14,37 @@ fn unique_endpoint() -> (TempDir, Endpoint) {
     (dir, ep)
 }
 
-/// Points `XDG_RUNTIME_DIR` at a private directory under `target/` so that sockets never
-/// land in the user's real runtime directory. Runs once, before any test of this binary
-/// reads the environment.
+/// Points `XDG_RUNTIME_DIR` at a private test directory so that sockets never land in the
+/// user's real runtime directory, and returns the real one. Runs once, before any test of
+/// this binary reads the environment.
+///
+/// The directory, `<temp dir>/oncl-ipc-rt-<uid>` (0700), is short so that Linux socket paths
+/// stay on the XDG branch instead of the 100-byte `/tmp` fallback, and stable so that runs
+/// do not pile up directories: each listener removes its own files on drop.
 #[cfg(unix)]
-fn isolate_runtime_dir() {
-    use std::os::unix::fs::PermissionsExt;
+fn isolate_runtime_dir() -> Option<&'static std::path::Path> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    use std::path::PathBuf;
     use std::sync::LazyLock;
 
-    static RUNTIME_DIR: LazyLock<TempDir> = LazyLock::new(|| {
-        let dir = tempfile::Builder::new()
-            .prefix("rt")
-            .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
-            .expect("runtime tempdir");
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("chmod 0700");
+    static REAL_RUNTIME_DIR: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+        let real = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        // The owner of a fresh directory is this process's uid (no libc in dev-deps).
+        let probe = tempfile::tempdir().expect("probe tempdir");
+        let uid = std::fs::metadata(probe.path())
+            .expect("probe metadata")
+            .uid();
+        let dir = std::env::temp_dir().join(format!("oncl-ipc-rt-{uid}"));
+        if let Err(e) = std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            assert_eq!(e.kind(), ErrorKind::AlreadyExists, "{}: {e}", dir.display());
+        }
+        // `bind` itself refuses the directory unless it is ours and at most 0700.
         // SAFETY: every test forces this first and `LazyLock` blocks the others until the
         // variable is set, so no other thread of this binary reads the environment meanwhile.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
-        dir
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
+        real
     });
-    LazyLock::force(&RUNTIME_DIR);
+    REAL_RUNTIME_DIR.as_deref()
 }
 
 #[tokio::test]
@@ -96,16 +106,39 @@ async fn rebind_after_listener_drop() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn socket_stays_out_of_real_runtime_dir_and_is_removed() {
+async fn socket_stays_out_of_real_dirs_and_is_removed() {
+    use std::path::PathBuf;
+
+    let real_runtime_dir = isolate_runtime_dir();
     let (_dir, ep) = unique_endpoint();
-    let socket = std::path::PathBuf::from(ep.to_string());
-    assert!(
-        socket.starts_with(env!("CARGO_TARGET_TMPDIR")),
-        "{}",
-        socket.display()
-    );
+    // Wherever the endpoint resolved to (XDG dir, data dir or `/tmp` fallback; macOS
+    // ignores XDG), it is not in the user's real runtime or data directory.
+    let socket = PathBuf::from(ep.to_string());
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let real_data_dir = if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/OpenNCALayer")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map_or_else(|| home.join(".local/share"), PathBuf::from)
+            .join("openncalayer")
+    };
+    for real in real_runtime_dir
+        .into_iter()
+        .chain([real_data_dir.as_path()])
+    {
+        assert!(
+            !socket.starts_with(real),
+            "{} is under {}",
+            socket.display(),
+            real.display()
+        );
+    }
+
+    let lock = PathBuf::from(format!("{}.lock", socket.display()));
     let listener = bind(&ep).await.expect("bind");
     assert!(socket.exists());
+    assert!(lock.exists());
     drop(listener);
     assert!(!socket.exists());
+    assert!(!lock.exists());
 }

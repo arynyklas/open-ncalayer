@@ -340,6 +340,9 @@ impl AsyncWrite for Stream {
 
 #[cfg(test)]
 mod tests {
+    use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+
     use super::*;
 
     #[test]
@@ -364,31 +367,10 @@ mod tests {
         current_session().unwrap();
     }
 
-    /// The DACL of the kernel object `handle` in SDDL.
-    fn dacl_sddl(handle: HANDLE) -> String {
-        use windows_sys::Win32::Foundation::ERROR_SUCCESS;
-        use windows_sys::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
-        };
-        use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
-
-        let mut descriptor = ptr::null_mut();
-        // SAFETY: `handle` is a live handle with READ_CONTROL; on success `descriptor`
-        // receives a LocalAlloc'ed security descriptor.
-        let status = unsafe {
-            GetSecurityInfo(
-                handle,
-                SE_KERNEL_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                &mut descriptor,
-            )
-        };
-        assert_eq!(status, ERROR_SUCCESS);
-        let descriptor = LocalBox(descriptor);
+    /// The DACL part of `descriptor` in SDDL, as Windows writes it: well-known accounts
+    /// become aliases (`SY`, and `LA` for the built-in Administrator) and generic rights are
+    /// shown as mapped.
+    fn dacl_text(descriptor: &LocalBox) -> String {
         let mut text = ptr::null_mut();
         // SAFETY: `descriptor` is valid; on success `text` receives a LocalAlloc'ed string.
         let ok = unsafe {
@@ -406,14 +388,67 @@ mod tests {
         unsafe { wide_to_string(text.0.cast()) }.unwrap()
     }
 
+    /// `sddl` parsed and written back by Windows, so that it compares equal to a readback
+    /// whatever aliases the accounts in it have.
+    fn normalized_sddl(sddl: &str) -> String {
+        let wide: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated; on success `descriptor` is LocalAlloc'ed.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, FALSE, "{sddl}: {}", io::Error::last_os_error());
+        dacl_text(&LocalBox(descriptor))
+    }
+
+    /// The DACL of the kernel object `handle` in SDDL.
+    fn dacl_sddl(handle: HANDLE) -> String {
+        use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+        use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: `handle` is a live handle with READ_CONTROL; on success `descriptor`
+        // receives a LocalAlloc'ed security descriptor.
+        let status = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        dacl_text(&LocalBox(descriptor))
+    }
+
+    #[test]
+    fn normalized_sddl_uses_aliases() {
+        assert_eq!(
+            normalized_sddl("D:P(A;;GA;;;S-1-5-18)"),
+            normalized_sddl("D:P(A;;GA;;;SY)")
+        );
+        assert_eq!(normalized_sddl("D:P(A;;GA;;;S-1-5-18)"), "D:P(A;;GA;;;SY)");
+    }
+
     #[tokio::test]
     async fn pipe_dacl_allows_only_user_and_system() {
         let dir = tempfile::tempdir().unwrap();
         let sid = current_user_sid().unwrap();
         let addr = address(dir.path(), &sid, current_session().unwrap());
         let mut listener = bind(&addr).await.unwrap();
-        // Protected (`P`: no inherited ACEs), GENERIC_ALL mapped to FILE_ALL_ACCESS (`FA`).
-        let expected = format!("D:P(A;;FA;;;{sid})(A;;FA;;;SY)");
+        // Protected (`P`: no inherited ACEs); GENERIC_ALL reads back mapped to
+        // FILE_ALL_ACCESS (`FA`) for the pipe. The user may read back as an alias (`LA` for
+        // the built-in Administrator, e.g. on CI runners), hence the normalization.
+        let expected = normalized_sddl(&format!("D:P(A;;FA;;;{sid})(A;;FA;;;SY)"));
         assert_eq!(dacl_sddl(listener.next.as_raw_handle()), expected);
 
         // Instances created after an accept carry the same DACL.

@@ -81,8 +81,12 @@ pub(crate) fn hex16(prefix: &str, path: &Path) -> String {
         .collect()
 }
 
-/// Listens on an [`Endpoint`]; created by [`bind`]. Dropping it frees the endpoint (on Unix
-/// it also removes its socket and lock files).
+/// Listens on an [`Endpoint`]; created by [`bind`].
+///
+/// On Unix, dropping it frees the endpoint and removes its socket and lock files. On
+/// Windows the pipe name lives while any instance is open, accepted [`IpcStream`]s
+/// included: [`bind`] returns `AddrInUse` until the listener and every accepted stream are
+/// dropped.
 #[derive(Debug)]
 pub struct IpcListener(sys::Listener);
 
