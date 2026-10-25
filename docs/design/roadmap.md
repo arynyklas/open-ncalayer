@@ -134,7 +134,7 @@ flowchart LR
 | P3 Валидация | Встроенные корни НУЦ, PKIX, OCSP (GET-биндинг), CRL, семантика `chain`/`allowRevoked` | P1 |
 | P4 Протокол полностью | XMLDSig, basics `xml`/`generateCsr`/`importCertificate`, commonUtils, подмножество Applet, accessory, запись PKCS#12, расширение KeyStoreInfo | P1, P3 |
 | P5 Рабочий стол | Трей, настройки, GUI-мастер TLS с проверкой доверия и кнопками установки (D5), mkcert и свой CA, напоминания о ротации, отключение и возврат оригинала (D13), AboutSlint | P1 |
-| P6 Win7 | Таргеты win7 (x64/x86), форвардер ole32, пины windows-sys, гейт импортов blocking | P1, P5 |
+| P6 Win7 | Таргеты win7 (x64/x86) с `-C target-feature=+crt-static` (без VC++ redist), форвардер ole32/combase, обход `api-ms-win-core-winrt-*` и `user32!SystemParametersInfoForDpi` (их тянут Slint/winit), пины windows-sys. Гейт импортов становится **allowlist**: каждый импорт `dll!function` сверяется с экспортами Win7 SP1, снятыми один раз с VM лаборатории и закоммиченными текстом; гейт blocking | P1, P5, P9 |
 | P7 Апдейтер и релизы | `oncl-update` (индекс, minisign, `seq`, раскатка, отзыв, `UpdateSource`, health-check и откат), интеграция `velopack`; workflow сборки (флейворы, vpk pack, дельты, provenance, SBOM), публикации и PR индекса; `cargo xtask sign`; проверка `index-check`; деплой индекса на Pages; шаги подписи кода | P1 (гейт `vm-smoke` включается с P9) |
 | P8 Установщики | vpk: `Setup.exe` win/win7 x64/x86 с хуками (HKCU Run, NM-манифесты и раскладка `nmhost` по D27, отключение оригинала), macOS `.pkg`/`.zip` + LaunchAgent, Linux AppImage (контейнер glibc 2.28), AUR `-bin` с CI-ботом | P2, P7 |
 | P9 Лаборатория | Изолированная лаборатория по D18 (инфраструктура приватная): 5 VM, агент `oncl-agent` (D19), рекордер эталонов оригинала, VM-smoke. Нужны от мейнтейнера: образы Windows и их активация | — (параллельно) |
@@ -151,7 +151,7 @@ flowchart LR
 flowchart LR
   P1 --> P2 & P3 & P5 & P7
   P3 --> P4
-  P5 --> P6
+  P5 & P9 --> P6
   P2 & P7 --> P8
   P4 --> P10 & P11 & P14
   P9 --> P10
