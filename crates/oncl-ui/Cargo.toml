@@ -13,7 +13,10 @@ oncl-basics.workspace = true
 rfd.workspace = true
 # `raw-window-handle-06`: the file dialog is owned by (and stays above) the storage dialog,
 # and on Windows the dialog's HWND is brought to the foreground.
-slint = { workspace = true, features = ["raw-window-handle-06"] }
+# `unstable-winit-030`: a dialog window destroyed behind Slint's back (xkill, a compositor
+# restart) is seen as winit's `Destroyed` event and counts as cancelled. The API follows
+# winit 0.30 and may change in a Slint minor release, hence `~` in the workspace version.
+slint = { workspace = true, features = ["raw-window-handle-06", "unstable-winit-030"] }
 time.workspace = true
 tracing.workspace = true
 zeroize.workspace = true

@@ -51,8 +51,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
 sha2 = "0.11.1"
-slint = { version = "1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "accessibility"] }
-slint-build = "1.18.1"
+# `~`: oncl-ui uses `unstable-winit-030`, which may change in a minor release.
+slint = { version = "~1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "accessibility"] }
+slint-build = "~1.18.1"
 spki = { version = "0.8.1", features = ["alloc"] }
 streebog = { version = "0.11.0", default-features = false }
 tempfile = "3.27.0"
