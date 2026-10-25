@@ -69,6 +69,31 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # Windows 7 lane (roadmap D14). Non-blocking in P1: a red import gate records the starting
+  # point for P6 and does not fail the workflow.
+  win7-canary:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: windows-2025
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchains (rust-toolchain.toml for xtask, pinned nightly for Win7)
+        run: |
+          rustup toolchain install
+          rustup toolchain install nightly-2026-08-12 --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@v2
+      - name: Build for Windows 7
+        # The pinned nightly is 1.99.0-nightly, below the workspace rust-version 1.99.1.
+        run: cargo +nightly-2026-08-12 build -Zbuild-std=std,panic_abort --target x86_64-win7-windows-msvc --release --ignore-rust-version -p openncalayer
+      - name: Check imports
+        shell: bash
+        run: |
+          { echo '## Win7 import gate'; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          cargo -q xtask check-imports target/x86_64-win7-windows-msvc/release/openncalayer.exe | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
   live:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
