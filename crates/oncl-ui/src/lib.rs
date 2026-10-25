@@ -6,6 +6,7 @@
 //! translated through the bundled `po/<lang>` catalogs; texts Rust composes are in
 //! [`view`].
 
+mod foreground;
 mod prompter;
 pub mod view;
 

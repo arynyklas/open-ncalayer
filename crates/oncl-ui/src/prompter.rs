@@ -1,5 +1,6 @@
 //! [`SlintPrompter`]: the dialogs of the signing flow on the Slint event loop.
 
+use crate::foreground;
 use crate::ui::{KeyDialog, KeyItem, StorageDialog, StorageRow};
 use crate::view;
 use oncl_basics::{
@@ -170,13 +171,14 @@ fn show_storage(
 }
 
 /// Picks the key store file with the system file dialog, starting in the current file's
-/// directory.
+/// directory. The directory is not checked here (no file system access on the UI thread):
+/// the system dialog falls back to its default folder if it is gone.
 fn browse(ui: &StorageDialog) {
     let mut dialog = rfd::AsyncFileDialog::new()
         .add_filter("PKCS#12", &["p12", "pfx"])
         .set_parent(&ui.window().window_handle());
     let current = PathBuf::from(ui.get_path().as_str());
-    if let Some(dir) = current.parent().filter(|d| d.is_dir()) {
+    if let Some(dir) = current.parent().filter(|d| !d.as_os_str().is_empty()) {
         dialog = dialog.set_directory(dir);
     }
     let weak = ui.as_weak();
@@ -266,7 +268,10 @@ fn show<C: Dialog, T: 'static>(ui: &C, pending: Rc<Pending<C, T>>) -> Result<(),
             CloseRequestResponse::HideWindow
         }
     });
-    ui.show().inspect_err(|_| pending.finish(Prompt::Cancelled))
+    ui.show()
+        .inspect_err(|_| pending.finish(Prompt::Cancelled))?;
+    foreground::take(ui);
+    Ok(())
 }
 
 /// An open dialog and where its outcome goes. The first outcome is sent; then the window is

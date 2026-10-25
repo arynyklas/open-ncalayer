@@ -11,11 +11,22 @@ publish.workspace = true
 [dependencies]
 oncl-basics.workspace = true
 rfd.workspace = true
-# `raw-window-handle-06`: the file dialog is owned by (and stays above) the storage dialog.
+# `raw-window-handle-06`: the file dialog is owned by (and stays above) the storage dialog,
+# and on Windows the dialog's HWND is brought to the foreground.
 slint = { workspace = true, features = ["raw-window-handle-06"] }
 time.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle.workspace = true
+# user32/kernel32 only: the Windows 7 build must keep working.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 slint-build.workspace = true

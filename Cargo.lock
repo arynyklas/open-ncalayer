@@ -3686,11 +3686,13 @@ version = "0.1.0"
 dependencies = [
  "oncl-basics",
  "oncl-pki",
+ "raw-window-handle",
  "rfd",
  "slint",
  "slint-build",
  "time",
  "tracing",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
