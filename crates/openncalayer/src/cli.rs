@@ -1,4 +1,5 @@
-//! The command line: `run` (the default), `tls init|import|status` and `cms-verify`.
+//! The command line: `run` (the default), `tls init|import|status`, `cms-verify` and
+//! `nm install|uninstall|status`.
 //!
 //! Messages for the user are in Russian, like the rest of the user-facing text.
 
@@ -27,6 +28,7 @@ use time::format_description::well_known::Rfc3339;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
+use crate::nm::{self, Item, NmLayout, Report, State};
 use crate::paths::Paths;
 use crate::server::listen_port;
 
@@ -70,6 +72,11 @@ pub enum Command {
         #[arg(long, help = "Подписанные данные для подписи без вложенных данных")]
         content: Option<PathBuf>,
     },
+    #[command(about = "Хост native messaging для расширения браузера")]
+    Nm {
+        #[command(subcommand)]
+        command: NmCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -88,6 +95,33 @@ pub enum TlsCommand {
     },
     #[command(about = "Показать состояние сертификата сервера")]
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NmCommand {
+    #[command(about = "Установить relay и зарегистрировать его в браузерах")]
+    Install {
+        #[arg(
+            long,
+            help = "Исполняемый файл relay (по умолчанию nmhost рядом с openncalayer)"
+        )]
+        relay: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Установить в каталог-песочницу, без реестра и профилей браузеров"
+        )]
+        sandbox: Option<PathBuf>,
+    },
+    #[command(about = "Удалить relay и его регистрацию в браузерах")]
+    Uninstall {
+        #[arg(long, help = "Каталог-песочница из `nm install --sandbox`")]
+        sandbox: Option<PathBuf>,
+    },
+    #[command(about = "Показать, установлен ли relay и где он зарегистрирован")]
+    Status {
+        #[arg(long, help = "Каталог-песочница из `nm install --sandbox`")]
+        sandbox: Option<PathBuf>,
+    },
 }
 
 /// Everything `run` sets up before the servers start: data paths, logging, the bound IPC
@@ -477,6 +511,121 @@ fn tls_status(files: &TlsFiles) -> Result<ExitCode, ExitCode> {
 fn ru_date(t: OffsetDateTime) -> String {
     let t = t.to_offset(time::UtcOffset::UTC);
     format!("{:02}.{:02}.{:04}", t.day(), u8::from(t.month()), t.year())
+}
+
+/// `nm install|uninstall|status`: exit code 0 on success, otherwise 1 (for `status`: when
+/// a part is missing or broken).
+pub fn nm(command: NmCommand) -> ExitCode {
+    let result = match command {
+        NmCommand::Install { relay, sandbox } => nm_install(relay, sandbox.as_deref()),
+        NmCommand::Uninstall { sandbox } => nm_uninstall(sandbox.as_deref()),
+        NmCommand::Status { sandbox } => nm_status(sandbox.as_deref()),
+    };
+    result.unwrap_or_else(|code| code)
+}
+
+/// The sandbox under `sandbox`, otherwise the layout of this user.
+fn nm_layout(sandbox: Option<&Path>) -> Result<NmLayout, ExitCode> {
+    match sandbox {
+        Some(root) => Ok(NmLayout::sandbox(root)),
+        None => NmLayout::detect(&data_paths()?).map_err(|e| {
+            eprintln!("Не удалось определить, куда устанавливать хост native messaging: {e}");
+            ExitCode::FAILURE
+        }),
+    }
+}
+
+fn nm_install(relay: Option<PathBuf>, sandbox: Option<&Path>) -> Result<ExitCode, ExitCode> {
+    // The relay reaches the daemon of this data directory, in a sandbox too.
+    let paths = data_paths()?;
+    let layout = nm_layout(sandbox)?;
+    let daemon = std::env::current_exe().map_err(|e| {
+        eprintln!("Не удалось определить путь к openncalayer: {e}");
+        ExitCode::FAILURE
+    })?;
+    let relay = relay.unwrap_or_else(|| daemon.with_file_name(nm::relay_file_name()));
+    if !relay.is_file() {
+        eprintln!(
+            "Relay не найден: {}. Укажите его через --relay",
+            relay.display()
+        );
+        return Err(ExitCode::FAILURE);
+    }
+    let report = nm::install(&layout, &relay, &daemon, &paths.data).map_err(|e| {
+        eprintln!("Не удалось установить хост native messaging: {e}");
+        ExitCode::FAILURE
+    })?;
+    print_nm_report(&report);
+    println!("Каталог данных демона: {}", paths.data.display());
+    warn_if_no_browser(&report, State::Written);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn nm_uninstall(sandbox: Option<&Path>) -> Result<ExitCode, ExitCode> {
+    let layout = nm_layout(sandbox)?;
+    let report = nm::uninstall(&layout).map_err(|e| {
+        eprintln!("Не удалось удалить хост native messaging: {e}");
+        if e.kind() == io::ErrorKind::PermissionDenied {
+            eprintln!(
+                "Возможно, relay запущен браузером: закройте браузер и повторите \
+                 `openncalayer nm uninstall`"
+            );
+        }
+        ExitCode::FAILURE
+    })?;
+    print_nm_report(&report);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn nm_status(sandbox: Option<&Path>) -> Result<ExitCode, ExitCode> {
+    let layout = nm_layout(sandbox)?;
+    let report = nm::status(&layout);
+    print_nm_report(&report);
+    if !report.is_healthy() {
+        eprintln!(
+            "Хост native messaging не установлен или повреждён: выполните `openncalayer nm install`"
+        );
+        return Err(ExitCode::FAILURE);
+    }
+    warn_if_no_browser(&report, State::Present);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Says so if no manifest of `report` is in `state`.
+fn warn_if_no_browser(report: &Report, state: State) {
+    let any = report
+        .entries
+        .iter()
+        .any(|entry| matches!(entry.item, Item::Manifest { .. }) && entry.state == state);
+    if !any {
+        println!(
+            "Не найден ни один браузер: запустите браузер хотя бы раз и повторите \
+             `openncalayer nm install`"
+        );
+    }
+}
+
+/// One line per entry: what, where, its state.
+fn print_nm_report(report: &Report) {
+    for entry in &report.entries {
+        let item: Cow<'_, str> = match &entry.item {
+            Item::Relay => "Relay".into(),
+            Item::RelayConfig => "Файл настроек relay".into(),
+            Item::OldRelay => "Старый файл relay".into(),
+            Item::Manifest { browser } => format!("Манифест для {browser}").into(),
+            Item::RegistryKey => "Ключ реестра".into(),
+        };
+        let state: Cow<'_, str> = match &entry.state {
+            State::Written => "записан".into(),
+            State::Removed => "удалён".into(),
+            State::Present => "на месте".into(),
+            State::Missing => "отсутствует".into(),
+            State::Skipped => "пропущен: каталог браузера не найден".into(),
+            State::InUse => "занят, будет удалён при следующей установке".into(),
+            State::Invalid(why) => format!("ошибка: {why}").into(),
+        };
+        println!("{item}: {} — {state}", entry.location);
+    }
 }
 
 /// `cms-verify <file> [--content <file>]`: prints [`cms_verify_report`]; exit code 0 when

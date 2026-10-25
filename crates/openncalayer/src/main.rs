@@ -28,6 +28,7 @@ fn main() -> ExitCode {
         Command::Run { allow_no_wss } => run(allow_no_wss),
         Command::Tls { command } => cli::tls(command),
         Command::CmsVerify { file, content } => cli::cms_verify(&file, content.as_deref()),
+        Command::Nm { command } => cli::nm(command),
     }
 }
 
