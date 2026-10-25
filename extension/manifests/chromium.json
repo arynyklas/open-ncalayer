@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "OpenNCALayer",
+  "version": "{{VERSION}}",
+  "description": "Connects sites built for NCALayer to OpenNCALayer through native messaging.",
+  "key": "{{KEY}}",
+  "minimum_chrome_version": "109",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["nativeMessaging", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["bridge.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ]
+}

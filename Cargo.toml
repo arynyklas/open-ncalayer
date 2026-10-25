@@ -74,6 +74,8 @@ ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 windows-sys = "0.61.2"
 x509-cert = "0.3.0"
 zeroize = "1.9.1"
+# Only in xtask (`ext build`): the extension zip/xpi, deflate through pure-Rust zlib-rs.
+zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # RSA key generation for `cargo xtask gen-fixtures` (also run by xtask tests) is very slow
 # unoptimized.

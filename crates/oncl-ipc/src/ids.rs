@@ -9,13 +9,12 @@ pub const HOST_NAME: &str = "io.github.arynyklas.openncalayer";
 pub const FIREFOX_EXTENSION_ID: &str = "openncalayer@arynyklas.github.io";
 
 /// Public key of the Chromium extension (`key` of its manifest): base64 of the DER
-/// `SubjectPublicKeyInfo` of an RSA-2048 key.
-// Throwaway test key; the real one replaces it (and `CHROMIUM_EXTENSION_ID`) later.
-pub const CHROMIUM_EXTENSION_KEY: &str = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqNd7JGONbeHlhBYnkOXF1Y75qHD3mecgF72v7G37xpdyw08vruPkaNmMJu46zWCYYZfgsud7rKR2kCgO3gGypF4WUZ91oxHysCnM7whfiDF7xQ1df4L1bgkZ/ia9S08LqRxvkm+xE7h1C+ilyRnhRiiHhz+bfDQoYzJ6m5OkC14w3+utj1bBMhwswAM+JYq5IwEPlMawjzkALW4Po8vnboPEkAlC30smOutipbTo3QID//OvhsIzVuURb4xCGl4Dn2kSdDk5tEDmAZYkJfifUFMayIISRvH9XbKlE+fqDaEifvKfBsKta5zvwzZHESAwzc8UeK6Z3V/n6/1kOdp77QIDAQAB";
+/// `SubjectPublicKeyInfo` of an RSA-2048 key. The private key is not in the repository: the
+/// maintainer keeps it offline.
+pub const CHROMIUM_EXTENSION_KEY: &str = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtA1RArNKIbf7QgEmVhkdqrT+32IwrFQbSvv9TlvHHMeR6n2Ni2OJTtFBhnugMeqva+/jithJsr5upPV+ReVW2bVdPceu/bPdiHzgpIfeuUE3s54HOg10Vd6IWKYwedU8Xp0hXcdaOhq/U87oM1abUYnmkbSDol66dZw4WUStE9NcA9d1CVbjMFoQiqx2zXMflQH061Qu2rqWmwblNmwK/fgKY8iXe/wXt9TPVI3m+HkfasRNn7046df4copAjsaQl1q8682Se48z38ko34hSUohDuleih2mAv7EAHTCPa/epblWcdT38q93IxuT2xS4A3WO91gmZ7SZ7zt5ppbtSJwIDAQAB";
 
 /// Chromium extension id derived from [`CHROMIUM_EXTENSION_KEY`] by [`chromium_extension_id`].
-// Throwaway test key id, replaced later together with `CHROMIUM_EXTENSION_KEY`.
-pub const CHROMIUM_EXTENSION_ID: &str = "pmhfibnacapcmnoabggpgmafjbkellac";
+pub const CHROMIUM_EXTENSION_ID: &str = "cmdaoegbcpdhoamhgmibpgpnlojopcal";
 
 /// Chromium extension id of a public key: the first 16 bytes of SHA-256 of the DER
 /// `SubjectPublicKeyInfo`, each nibble `n` written as the letter `'a' + n`.

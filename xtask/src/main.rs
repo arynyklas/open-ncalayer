@@ -17,6 +17,11 @@ enum Command {
         #[arg(required = true)]
         exes: Vec<PathBuf>,
     },
+    /// Browser extension tasks.
+    Ext {
+        #[command(subcommand)]
+        command: ExtCommand,
+    },
     /// Download pinned NCANode test fixtures into `target/fixtures/ncanode/`.
     FetchFixtures,
     /// Generate the deterministic synthetic PKI in `fixtures/synthetic/`.
@@ -29,12 +34,33 @@ enum Command {
     InteropOpenssl,
 }
 
+#[derive(Subcommand)]
+enum ExtCommand {
+    /// Build the unpacked extensions and their zip/xpi into `target/extension/`.
+    Build,
+}
+
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::CheckImports { exes } => match xtask::imports::check_imports(&exes)? {
             0 => Ok(()),
             found => anyhow::bail!("{found} imports are missing on Windows 7"),
         },
+        Command::Ext {
+            command: ExtCommand::Build,
+        } => {
+            let root = oncl_testkit::workspace_root();
+            let out = root.join("target").join("extension");
+            for package in xtask::ext::build(&root, &out)? {
+                println!(
+                    "{}: {} and {}",
+                    package.browser,
+                    package.dir.display(),
+                    package.archive.display()
+                );
+            }
+            Ok(())
+        }
         Command::FetchFixtures => xtask::fetch::fetch_fixtures(),
         Command::InteropOpenssl => xtask::interop::interop_openssl(&oncl_testkit::workspace_root()),
         Command::GenFixtures { check: false } => {
