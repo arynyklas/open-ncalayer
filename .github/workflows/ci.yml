@@ -114,7 +114,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ext-e2e-logs
+          name: ext-e2e-logs-${{ github.run_attempt }}
           path: |
             target/ext-e2e/*/driver.log
             target/ext-e2e/*/data/logs/

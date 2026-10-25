@@ -22,6 +22,7 @@
 
 pub mod browsers;
 mod page;
+mod processes;
 mod webdriver;
 
 use std::fs;
@@ -42,6 +43,7 @@ use serde_json::{Value, json};
 
 pub use browsers::Browser;
 use oncl_ipc::ids::FIREFOX_EXTENSION_ID;
+use processes::{daemon_pids, kill};
 use webdriver::{Driver, Session};
 
 /// Which browsers `ext-e2e` runs.
@@ -84,6 +86,10 @@ const CLOSE_WITHIN: Duration = Duration::from_secs(5);
 const SHIM_PATIENCE: Duration = Duration::from_secs(30);
 /// Longest page step (the signature included).
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(240);
+/// The file in a sandbox that names its browsers' `TMPDIR`.
+const TMP_RECORD: &str = "tmpdir";
+/// The name prefix of that `TMPDIR`, in the system temp directory.
+const TMP_PREFIX: &str = "oncl-e2e-";
 /// What Chrome appends to `$TMPDIR` for its process-singleton socket.
 const CHROME_SINGLETON: &str = "/org.chromium.Chromium.XXXXXX/SingletonSocket";
 /// `sizeof(sockaddr_un.sun_path)` on Linux: the path and its NUL.
@@ -111,6 +117,7 @@ pub fn run(root: &Path, selection: Selection, download: bool) -> anyhow::Result<
         println!("e2e расширения запускается в Linux");
         return Ok(());
     }
+    processes::cleanup_on_signals();
     let target = root.join("target");
     let release = target.join("release");
     let inputs = Inputs {
@@ -150,6 +157,7 @@ pub fn run(root: &Path, selection: Selection, download: bool) -> anyhow::Result<
         columns.push((browser, outcomes));
     }
 
+    processes::finish();
     print_table(&columns);
     let mut failures = 0;
     for (browser, outcomes) in &columns {
@@ -201,6 +209,25 @@ fn print_table(columns: &[(Browser, Outcomes)]) {
     }
 }
 
+/// Removes the `TMPDIR` a killed run of the sandbox at `root` left, if it is one of ours.
+fn remove_stale_tmp(root: &Path) {
+    let Ok(recorded) = fs::read(root.join(TMP_RECORD)) else {
+        return;
+    };
+    let Ok(recorded) = String::from_utf8(recorded) else {
+        return;
+    };
+    let recorded = Path::new(&recorded);
+    let ours = recorded.parent() == Some(std::env::temp_dir().as_path())
+        && recorded
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(TMP_PREFIX));
+    if ours && recorded.is_dir() {
+        let _ = fs::remove_dir_all(recorded);
+    }
+}
+
 /// One browser: sandbox, host registration, browser, scenarios, cleanup.
 fn run_browser(
     inputs: &Inputs,
@@ -210,20 +237,23 @@ fn run_browser(
     page_port: u16,
 ) -> anyhow::Result<Vec<Result<(), String>>> {
     let root = target.join("ext-e2e").join(browser.name());
-    // A daemon left by an interrupted run would keep serving the sandbox's endpoint.
-    for pid in daemon_pids(&inputs.daemon, &root.join("data")) {
-        kill(pid);
+    let data = root.join("data");
+    // What a killed run left (driver, browser, relay, daemon) would keep the sandbox busy.
+    processes::sweep(&data);
+    remove_stale_tmp(&root);
+    let mut tmp = tempfile::Builder::new();
+    tmp.prefix(TMP_PREFIX);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tmp.permissions(fs::Permissions::from_mode(0o700));
     }
-    let tmp = tempfile::Builder::new()
-        .prefix("oncl-e2e-")
-        .tempdir()
-        .context("creating the browser's TMPDIR")?;
+    let tmp = tmp.tempdir().context("creating the browser's TMPDIR")?;
+    let _tracked = processes::track_sandbox(&data, tmp.path());
     let sandbox = Sandbox::create(&root, tmp.path()).context("sandbox")?;
     let outcomes = start_browser(inputs, browser, binaries, &sandbox, page_port);
     // Sessions and drivers are gone; a daemon outlives its relay.
-    for pid in daemon_pids(&inputs.daemon, &sandbox.data) {
-        kill(pid);
-    }
+    processes::sweep(&sandbox.data);
     outcomes
 }
 
@@ -408,6 +438,8 @@ impl Sandbox {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&sandbox.runtime, fs::Permissions::from_mode(0o700))?;
         }
+        // For the next run, should this one be killed before it removes the directory.
+        fs::write(root.join(TMP_RECORD), tmp.as_os_str().as_encoded_bytes())?;
         let key = oncl_testkit::synthetic(SIGNING_KEY);
         let storage = json!({"storage": {"path": key.path, "password": key.password}});
         let steps = json!([storage, {"key": 0}, storage, {"key": 0}]);
@@ -791,50 +823,6 @@ fn unix_ms() -> u64 {
         .unwrap_or_default()
 }
 
-/// Live `openncalayer` processes (`daemon`'s file name, also once the binary was rebuilt
-/// under them) with `ONCL_DATA_DIR=<data>`.
-fn daemon_pids(daemon: &Path, data: &Path) -> Vec<u32> {
-    let Some(name) = daemon.file_name().and_then(|n| n.to_str()) else {
-        return Vec::new();
-    };
-    let mut needles = vec![format!("ONCL_DATA_DIR={}", data.display()).into_bytes()];
-    if let Ok(canonical) = fs::canonicalize(data) {
-        needles.push(format!("ONCL_DATA_DIR={}", canonical.display()).into_bytes());
-    }
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
-            // A zombie has no `exe`.
-            let exe = fs::read_link(entry.path().join("exe")).ok()?;
-            if exe_name(&exe)? != name {
-                return None;
-            }
-            let environ = fs::read(entry.path().join("environ")).ok()?;
-            environ
-                .split(|&b| b == 0)
-                .any(|var| needles.iter().any(|needle| var == needle.as_slice()))
-                .then_some(pid)
-        })
-        .collect()
-}
-
-/// The file name of a `/proc/<pid>/exe` target, without the ` (deleted)` the kernel appends
-/// once the file was replaced.
-fn exe_name(exe: &Path) -> Option<&str> {
-    let name = exe.file_name()?.to_str()?;
-    Some(name.strip_suffix(" (deleted)").unwrap_or(name))
-}
-
-fn kill(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
-        .status();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -865,19 +853,5 @@ mod tests {
     fn test_data_matches_the_page() {
         // The page: `bytes[i] = i % 251`.
         assert_eq!(test_data(253)[250..], [250, 0, 1]);
-    }
-
-    #[test]
-    fn exe_name_ignores_deleted_marker() {
-        let name = |p: &str| exe_name(Path::new(p)).map(str::to_owned);
-        assert_eq!(
-            name("/x/release/openncalayer").as_deref(),
-            Some("openncalayer")
-        );
-        assert_eq!(
-            name("/x/release/openncalayer (deleted)").as_deref(),
-            Some("openncalayer")
-        );
-        assert_eq!(name("/").as_deref(), None);
     }
 }

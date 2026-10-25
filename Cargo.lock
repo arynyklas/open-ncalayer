@@ -6844,6 +6844,7 @@ dependencies = [
  "base64",
  "clap",
  "der 0.8.2",
+ "libc",
  "object",
  "oncl-gost",
  "oncl-ipc",

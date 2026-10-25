@@ -125,17 +125,18 @@ fn download_chrome(dir: &Path) -> anyhow::Result<Binaries> {
     let versions: Value = serde_json::from_str(&get_text(CFT_VERSIONS)?)
         .with_context(|| format!("{CFT_VERSIONS} is not JSON"))?;
     let (version, chrome_url, driver_url) = cft_stable(&versions)?;
-    let chrome = unpacked(&dir.join(format!("chrome-{version}")), |to| {
+    let browser = unpacked(dir, "chrome", &version, "chrome-linux64/chrome", |to| {
         unzip(&download_to(&chrome_url, to)?, to)
     })?;
-    let driver = unpacked(&dir.join(format!("chromedriver-{version}")), |to| {
-        unzip(&download_to(&driver_url, to)?, to)
-    })?;
+    let driver = unpacked(
+        dir,
+        "chromedriver",
+        &version,
+        "chromedriver-linux64/chromedriver",
+        |to| unzip(&download_to(&driver_url, to)?, to),
+    )?;
     println!("Chrome for Testing {version}");
-    Ok(Binaries {
-        browser: chrome.join("chrome-linux64").join("chrome"),
-        driver: driver.join("chromedriver-linux64").join("chromedriver"),
-    })
+    Ok(Binaries { browser, driver })
 }
 
 /// The Stable version of the Chrome for Testing list and its linux64 chrome and chromedriver
@@ -175,7 +176,7 @@ fn download_firefox(dir: &Path) -> anyhow::Result<Binaries> {
         .with_context(|| format!("unexpected Firefox version {version:?}"))?
         .to_owned();
     let tag = geckodriver_tag()?;
-    let firefox = unpacked(&dir.join(format!("firefox-{version}")), |to| {
+    let browser = unpacked(dir, "firefox", &version, "firefox/firefox", |to| {
         let file = firefox_tarball(&version);
         let sums_url = format!("{FIREFOX_RELEASES}/{version}/SHA256SUMS");
         let sums = get_text(&sums_url)?;
@@ -187,17 +188,14 @@ fn download_firefox(dir: &Path) -> anyhow::Result<Binaries> {
         println!("sha256 of {file} matches {sums_url}");
         untar(&tarball, to)
     })?;
-    let driver = unpacked(&dir.join(format!("geckodriver-{tag}")), |to| {
+    let driver = unpacked(dir, "geckodriver", &tag, "geckodriver", |to| {
         let url = format!(
             "https://github.com/mozilla/geckodriver/releases/download/{tag}/geckodriver-{tag}-linux64.tar.gz"
         );
         untar(&download_to(&url, to)?, to)
     })?;
     println!("Firefox {version}, geckodriver {tag}");
-    Ok(Binaries {
-        browser: firefox.join("firefox").join("firefox"),
-        driver: driver.join("geckodriver"),
-    })
+    Ok(Binaries { browser, driver })
 }
 
 /// The linux-x86_64 en-US tarball of Firefox `version`, as named in `SHA256SUMS`.
@@ -251,13 +249,29 @@ pub fn path_component(value: &str) -> Option<&str> {
     valid.then_some(value)
 }
 
-/// `dir` once `fill` has populated it. `fill` works in `<dir>.partial`, renamed to `dir` on
-/// success, so an interrupted download is never taken for a finished one.
-fn unpacked(dir: &Path, fill: impl FnOnce(&Path) -> anyhow::Result<()>) -> anyhow::Result<PathBuf> {
-    if dir.is_dir() {
-        return Ok(dir.to_owned());
+/// The executable `<dir>/<name>-<version>/<executable>`, unpacking it first unless it is
+/// already there.
+///
+/// Only the executable proves an earlier unpack: a cache of `target/` (rust-cache) keeps the
+/// directories but deletes the files in them. `fill` works in `<name>-<version>.partial`,
+/// renamed into place on success, so an interrupted download is never taken for a finished
+/// one. After a new unpack, other versions (`<name>-*`) are removed.
+fn unpacked(
+    dir: &Path,
+    name: &str,
+    version: &str,
+    executable: &str,
+    fill: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> anyhow::Result<PathBuf> {
+    let target = dir.join(format!("{name}-{version}"));
+    let path = target.join(executable);
+    if is_executable(&path) {
+        return Ok(path);
     }
-    let mut partial = dir.as_os_str().to_owned();
+    if target.exists() {
+        fs::remove_dir_all(&target).with_context(|| format!("removing {}", target.display()))?;
+    }
+    let mut partial = target.as_os_str().to_owned();
     partial.push(".partial");
     let partial = PathBuf::from(partial);
     if partial.exists() {
@@ -265,8 +279,53 @@ fn unpacked(dir: &Path, fill: impl FnOnce(&Path) -> anyhow::Result<()>) -> anyho
     }
     fs::create_dir_all(&partial).with_context(|| format!("creating {}", partial.display()))?;
     fill(&partial)?;
-    fs::rename(&partial, dir).with_context(|| format!("renaming to {}", dir.display()))?;
-    Ok(dir.to_owned())
+    ensure!(
+        is_executable(&partial.join(executable)),
+        "{executable} is not an executable file after unpacking into {}",
+        partial.display()
+    );
+    fs::rename(&partial, &target).with_context(|| format!("renaming to {}", target.display()))?;
+    remove_other_versions(dir, name, version);
+    Ok(path)
+}
+
+/// `path` is a file with an execute bit (Unix) or just a file elsewhere.
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
+}
+
+/// Removes `<dir>/<name>-<other version>` (also unfinished `.partial` ones), best effort.
+fn remove_other_versions(dir: &Path, name: &str, version: &str) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{name}-");
+    let keep = format!("{name}-{version}");
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        // `chrome-` does not take `chromedriver-…`: the prefix includes the dash.
+        if !file_name.starts_with(&prefix) || file_name == keep || !entry.path().is_dir() {
+            continue;
+        }
+        match fs::remove_dir_all(entry.path()) {
+            Ok(()) => println!("removed {}", entry.path().display()),
+            Err(error) => eprintln!("cannot remove {}: {error}", entry.path().display()),
+        }
+    }
 }
 
 fn get_text(url: &str) -> anyhow::Result<String> {
@@ -416,6 +475,85 @@ mod tests {
             release_tag("https://github.com/x/releases/tag/../../evil"),
             None
         );
+    }
+
+    /// Writes an executable file at `path`.
+    fn executable(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn unpacked_trusts_the_executable_not_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let fills = std::cell::Cell::new(0);
+        let fill = |to: &Path| {
+            fills.set(fills.get() + 1);
+            executable(&to.join("bin/tool"));
+            Ok(())
+        };
+        let expected = dir.path().join("tool-1.0/bin/tool");
+
+        // A cache restored the directory without its files: unpack again.
+        fs::create_dir_all(dir.path().join("tool-1.0/bin")).unwrap();
+        assert_eq!(
+            unpacked(dir.path(), "tool", "1.0", "bin/tool", fill).unwrap(),
+            expected
+        );
+        assert_eq!(fills.get(), 1);
+        assert!(is_executable(&expected));
+        assert!(!dir.path().join("tool-1.0.partial").exists());
+
+        // Complete: nothing to do.
+        assert_eq!(
+            unpacked(dir.path(), "tool", "1.0", "bin/tool", fill).unwrap(),
+            expected
+        );
+        assert_eq!(fills.get(), 1);
+
+        // A file that is not executable does not count either.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&expected, fs::Permissions::from_mode(0o644)).unwrap();
+            unpacked(dir.path(), "tool", "1.0", "bin/tool", fill).unwrap();
+            assert_eq!(fills.get(), 2);
+            assert!(is_executable(&expected));
+        }
+
+        // A fill that does not produce the executable fails and installs nothing.
+        let empty = |_: &Path| Ok(());
+        assert!(unpacked(dir.path(), "other", "1", "bin/other", empty).is_err());
+        assert!(!dir.path().join("other-1").exists());
+    }
+
+    #[test]
+    fn a_new_version_removes_the_old_ones_only() {
+        let dir = tempfile::tempdir().unwrap();
+        for old in [
+            "chrome-1.0",
+            "chrome-2.0.partial",
+            "chromedriver-1.0",
+            "firefox-1",
+        ] {
+            fs::create_dir_all(dir.path().join(old)).unwrap();
+        }
+        let fill = |to: &Path| {
+            executable(&to.join("chrome"));
+            Ok(())
+        };
+        unpacked(dir.path(), "chrome", "3.0", "chrome", fill).unwrap();
+        let mut left: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["chrome-3.0", "chromedriver-1.0", "firefox-1"]);
     }
 
     #[test]

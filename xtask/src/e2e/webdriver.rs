@@ -10,6 +10,8 @@ use anyhow::{Context, bail};
 use serde_json::{Value, json};
 use ureq::Agent;
 
+use super::processes;
+
 /// How long the driver gets to answer `/status`.
 const DRIVER_START: Duration = Duration::from_secs(30);
 /// Longest single WebDriver command (session start, a scenario step).
@@ -51,6 +53,8 @@ impl Driver {
             command.env_remove(name);
         }
         command.envs(env.iter().map(|(k, v)| (k, v)));
+        // Its own group, so that the browser it starts can be killed with it. Ctrl+C then
+        // reaches the xtask only, which kills the group (`processes::cleanup_on_signals`).
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -59,6 +63,7 @@ impl Driver {
         let child = command
             .spawn()
             .with_context(|| format!("starting {}", program.display()))?;
+        processes::track_group(child.id());
         let agent: Agent = Agent::config_builder()
             .http_status_as_error(false)
             .timeout_global(Some(COMMAND_TIMEOUT))
@@ -147,13 +152,10 @@ impl Driver {
 impl Drop for Driver {
     fn drop(&mut self) {
         // The group is the driver's pid: the browser it started is in it too.
-        #[cfg(unix)]
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", self.child.id())])
-            .stderr(Stdio::null())
-            .status();
+        processes::kill_group(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
+        processes::untrack_group(self.child.id());
     }
 }
 

@@ -34,3 +34,7 @@ tungstenite.workspace = true
 ureq.workspace = true
 x509-cert.workspace = true
 zip.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# `ext-e2e`: signal handling and killing process groups.
+libc.workspace = true
