@@ -70,6 +70,8 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 # `tracing-log`: messages of `log`-based crates (rfd, winit, rustls) reach the log files.
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "tracing-log"] }
+# Only in xtask (`ext-e2e`): the stand-in original NCALayer, a blocking WebSocket server.
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 windows-sys = "0.61.2"
 x509-cert = "0.3.0"

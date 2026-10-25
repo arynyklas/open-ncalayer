@@ -93,6 +93,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask ext build
 
+  # The extension in Chrome for Testing and Firefox, over native messaging to the daemon.
+  ext-e2e:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev openssl
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p openncalayer --features e2e-prompter -p oncl-nmhost
+      - run: cargo xtask fetch-fixtures
+      - run: cargo xtask ext build
+      - run: cargo xtask ext-e2e --download
+
   # Windows 7 lane (roadmap D14). Non-blocking in P1: a red import gate records the starting
   # point for P6 and does not fail the workflow.
   win7-canary:

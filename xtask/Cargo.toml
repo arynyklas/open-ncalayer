@@ -12,6 +12,7 @@ publish.workspace = true
 oncl-gost.workspace = true
 oncl-ipc.workspace = true
 oncl-pki = { workspace = true, features = ["write"] }
+oncl-protocol.workspace = true
 oncl-testkit.workspace = true
 
 anyhow.workspace = true
@@ -27,6 +28,7 @@ sha1.workspace = true
 sha2.workspace = true
 spki.workspace = true
 time.workspace = true
+tungstenite.workspace = true
 ureq.workspace = true
 x509-cert.workspace = true
 zip.workspace = true

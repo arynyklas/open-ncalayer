@@ -22,6 +22,17 @@ enum Command {
         #[command(subcommand)]
         command: ExtCommand,
     },
+    /// Browser e2e of the extension over native messaging (Linux only).
+    ExtE2e {
+        /// Browsers to run.
+        #[arg(long, value_enum, default_value_t = xtask::e2e::Selection::All)]
+        browser: xtask::e2e::Selection,
+        /// Download Chrome for Testing, Firefox and their drivers into `target/browsers/`
+        /// instead of taking them from ONCL_CHROME, ONCL_CHROMEDRIVER, ONCL_FIREFOX and
+        /// ONCL_GECKODRIVER.
+        #[arg(long)]
+        download: bool,
+    },
     /// Download pinned NCANode test fixtures into `target/fixtures/ncanode/`.
     FetchFixtures,
     /// Generate the deterministic synthetic PKI in `fixtures/synthetic/`.
@@ -60,6 +71,9 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             Ok(())
+        }
+        Command::ExtE2e { browser, download } => {
+            xtask::e2e::run(&oncl_testkit::workspace_root(), browser, download)
         }
         Command::FetchFixtures => xtask::fetch::fetch_fixtures(),
         Command::InteropOpenssl => xtask::interop::interop_openssl(&oncl_testkit::workspace_root()),
