@@ -105,4 +105,6 @@ cargo deny check
 
 ## Лицензия
 
+© 2026 Aryn Yklas.
+
 [Apache-2.0](LICENSE), см. также [NOTICE](NOTICE). `web/demo/vendor/ncalayer-client.js` — MIT, см. [`web/demo/vendor/LICENSE`](web/demo/vendor/LICENSE).
