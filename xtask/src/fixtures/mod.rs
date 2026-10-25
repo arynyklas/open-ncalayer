@@ -2,8 +2,13 @@
 //!
 //! Three self-signed roots (GOST 2015-512, GOST 34.310-2004, RSA-2048) issue PKCS#12 key
 //! stores in the Kalkan profile: alias = hex(SKI), user subjects with IIN/BIN, NCA key usages,
-//! extended key usages and policies. All randomness comes from one [`ChaCha20Rng`] with a fixed
-//! seed, so the files are reproducible and `--check` regenerates them in memory and compares.
+//! extended key usages and policies. For certificate validation, `root-gost2015` also issues
+//! an intermediate CA (and a same-subject twin with another key); the intermediate issues user
+//! keys that point to an OCSP responder and a CRL, and the OCSP responders themselves. The
+//! keys of the intermediate and of `root-gost2015` are stored too, for tests that sign CRLs.
+//! All randomness comes from one [`ChaCha20Rng`] with a fixed seed, so the files are
+//! reproducible and `--check` regenerates them in memory and compares. New objects are drawn
+//! after all earlier ones, so adding them leaves the earlier files byte for byte unchanged.
 //! `fixtures.toml` describes the containers for `oncl_testkit::synthetic`.
 
 mod issue;
@@ -16,7 +21,8 @@ use std::str::FromStr;
 
 use anyhow::Context;
 use der::DateTime;
-use der::asn1::{GeneralizedTime, ObjectIdentifier};
+use der::Encode;
+use der::asn1::{GeneralizedTime, Ia5String, Null, ObjectIdentifier, OctetString};
 use issue::{CertSpec, Issuer, Key, KeyKind, extension, issue};
 use oncl_gost::GostAlg;
 use oncl_pki::pkcs12::{self, Pbe, WriteEntry, WriteOptions};
@@ -24,8 +30,11 @@ use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use x509_cert::ext::Extension;
 use x509_cert::ext::pkix::certpolicy::PolicyInformation;
+use x509_cert::ext::pkix::crl::dp::DistributionPoint;
+use x509_cert::ext::pkix::name::{DistributionPointName, GeneralName};
 use x509_cert::ext::pkix::{
-    BasicConstraints, CertificatePolicies, ExtendedKeyUsage, KeyUsage, KeyUsages,
+    AccessDescription, AuthorityInfoAccessSyntax, BasicConstraints, CertificatePolicies,
+    CrlDistributionPoints, ExtendedKeyUsage, KeyUsage, KeyUsages,
 };
 use x509_cert::name::Name;
 use x509_cert::time::{Time, Validity};
@@ -49,6 +58,7 @@ const SERIAL_LEN: usize = 16;
 const EKU_CLIENT_AUTH: &str = "1.3.6.1.5.5.7.3.2";
 const EKU_EMAIL_PROTECTION: &str = "1.3.6.1.5.5.7.3.4";
 const EKU_TIME_STAMPING: &str = "1.3.6.1.5.5.7.3.8";
+const EKU_OCSP_SIGNING: &str = "1.3.6.1.5.5.7.3.9";
 /// NCA RK: individual.
 const EKU_NCA_INDIVIDUAL: &str = "1.2.398.3.3.4.1.1";
 /// NCA RK: legal entity, first head.
@@ -57,6 +67,23 @@ const EKU_NCA_LEGAL_HEAD: &str = "1.2.398.3.3.4.1.2.1";
 // Certificate policies.
 const POLICY_SIGN: &str = "1.2.398.3.3.2.3";
 const POLICY_AUTH: &str = "1.2.398.3.3.2.4";
+
+/// id-ad-ocsp: the OCSP access method of AuthorityInfoAccess.
+const AD_OCSP: &str = "1.3.6.1.5.5.7.48.1";
+/// id-pkix-ocsp-nocheck: the responder's own certificate is not checked for revocation.
+const OCSP_NOCHECK: &str = "1.3.6.1.5.5.7.48.1.5";
+
+// Revocation sources of the intermediate PKI (`.test` names never resolve).
+const OCSP_URL: &str = "http://ocsp.synthetic.test";
+const ROOT_CRL_URL: &str = "http://crl.synthetic.test/root-gost2015.crl";
+const INTER_CRL_URL: &str = "http://crl.synthetic.test/inter-gost2015.crl";
+
+/// Intermediate CA under `root-gost2015` and its twin (same subject, other key): `.cer` names
+/// without extension.
+const INTER: &str = "inter-gost2015";
+const INTER_TWIN: &str = "inter-gost2015-twin";
+/// Common name of the intermediate CA and of its twin.
+const INTER_CN: &str = "SYNTHETIC NCA (GOST) 2015";
 
 // Name attributes (dotted OIDs: `x509-cert` picks PrintableString for C and SERIALNUMBER,
 // UTF8String for the rest).
@@ -119,6 +146,10 @@ enum Profile {
     LegalSign,
     /// Time-stamping authority.
     Tsa,
+    /// OCSP responder: EKU OCSPSigning and id-pkix-ocsp-nocheck.
+    Ocsp,
+    /// OCSP responder without id-pkix-ocsp-nocheck.
+    OcspNoCheckless,
 }
 
 /// Who the certificate is issued to.
@@ -126,6 +157,7 @@ enum Subject {
     Individual,
     Legal,
     Tsa,
+    Ocsp,
 }
 
 impl Profile {
@@ -134,7 +166,13 @@ impl Profile {
             Profile::Sign | Profile::Auth | Profile::LegacyAuth => Subject::Individual,
             Profile::LegalSign => Subject::Legal,
             Profile::Tsa => Subject::Tsa,
+            Profile::Ocsp | Profile::OcspNoCheckless => Subject::Ocsp,
         }
+    }
+
+    /// Whether this is an OCSP responder, whose own status is not published.
+    fn ocsp_responder(self) -> bool {
+        matches!(self, Profile::Ocsp | Profile::OcspNoCheckless)
     }
 
     fn extensions(self) -> Vec<Extension> {
@@ -166,6 +204,12 @@ impl Profile {
                 true,
                 None,
             ),
+            Profile::Ocsp | Profile::OcspNoCheckless => (
+                KeyUsages::DigitalSignature.into(),
+                &[EKU_OCSP_SIGNING][..],
+                false,
+                None,
+            ),
         };
         let mut extensions = vec![
             extension(true, &KeyUsage(key_usage)),
@@ -182,6 +226,13 @@ impl Profile {
                     policy_qualifiers: None,
                 }]),
             ));
+        }
+        if self == Profile::Ocsp {
+            extensions.push(Extension {
+                extn_id: oid(OCSP_NOCHECK),
+                critical: false,
+                extn_value: OctetString::new(Null.to_der().expect("NULL")).expect("extnValue"),
+            });
         }
         extensions
     }
@@ -232,6 +283,7 @@ impl Encryption {
 struct Container {
     /// File name without `.p12`.
     name: &'static str,
+    /// Root the entries chain to; their key type is the root's.
     root: Root,
     /// One entry per profile, in this order.
     profiles: &'static [Profile],
@@ -250,6 +302,7 @@ const fn container(name: &'static str, root: Root, profiles: &'static [Profile])
     }
 }
 
+/// Containers issued directly by their root.
 const CONTAINERS: &[Container] = &[
     container("user-gost2015-sign", Root::Gost2015, &[Profile::Sign]),
     container("user-gost2015-auth", Root::Gost2015, &[Profile::Auth]),
@@ -277,98 +330,289 @@ const CONTAINERS: &[Container] = &[
     },
 ];
 
-/// A generated root: its kind, name and key.
-struct IssuedRoot {
-    root: Root,
+/// Containers issued by the intermediate CA [`INTER`]. Entries other than OCSP responders
+/// point to [`OCSP_URL`] and [`INTER_CRL_URL`]; `inter-revoked-…` is the one the tests report
+/// as revoked.
+const INTER_CONTAINERS: &[Container] = &[
+    container("inter-user-gost2015-sign", Root::Gost2015, &[Profile::Sign]),
+    container(
+        "inter-revoked-gost2015-sign",
+        Root::Gost2015,
+        &[Profile::Sign],
+    ),
+    Container {
+        period: Period::Expired,
+        ..container(
+            "inter-expired-gost2015-sign",
+            Root::Gost2015,
+            &[Profile::Sign],
+        )
+    },
+    container("ocsp-gost2015", Root::Gost2015, &[Profile::Ocsp]),
+    container(
+        "ocsp-nocheckless-gost2015",
+        Root::Gost2015,
+        &[Profile::OcspNoCheckless],
+    ),
+];
+
+/// A generated CA: its `.cer` name without extension, subject, key and certificate.
+struct IssuedCa {
+    file: &'static str,
     name: Name,
     key: Key,
+    cert: Vec<u8>,
+}
+
+impl IssuedCa {
+    fn issuer(&self) -> Issuer<'_> {
+        Issuer {
+            name: &self.name,
+            key: &self.key,
+        }
+    }
+
+    /// The CA's own key and certificate as a container entry.
+    fn entry(&self) -> WriteEntry {
+        WriteEntry {
+            alias: hex(&self.key.ski),
+            pkcs8_der: self.key.pkcs8_der.clone(),
+            cert_der: self.cert.clone(),
+        }
+    }
+}
+
+/// The generated files and the manifest describing the containers among them.
+struct Output {
+    files: BTreeMap<String, Vec<u8>>,
+    manifest: String,
+}
+
+impl Output {
+    fn add_cer(&mut self, ca: &IssuedCa) {
+        self.files
+            .insert(format!("{}.cer", ca.file), ca.cert.clone());
+    }
+
+    /// Writes the container `name` with `entries`, issued by `issuer` under `root`, and its
+    /// manifest record.
+    fn add_p12(
+        &mut self,
+        name: &str,
+        root: &IssuedCa,
+        issuer: &IssuedCa,
+        entries: &[WriteEntry],
+        encryption: Encryption,
+        rng: &mut ChaCha20Rng,
+    ) {
+        let p12 = pkcs12::write(entries, PASSWORD, &encryption.write_options(), &mut |buf| {
+            rng.fill_bytes(buf)
+        });
+        self.files.insert(format!("{name}.p12"), p12);
+
+        let aliases: Vec<String> = entries.iter().map(|e| format!("\"{}\"", e.alias)).collect();
+        write!(
+            self.manifest,
+            "\n[[p12]]\nname = \"{name}\"\npassword = \"{PASSWORD}\"\nroot = \"{}.cer\"\n\
+             issuer = \"{}.cer\"\naliases = [{}]\n",
+            root.file,
+            issuer.file,
+            aliases.join(", "),
+        )
+        .expect("writing to a String");
+    }
 }
 
 /// Generates every file of `fixtures/synthetic/`: file name → contents.
 pub fn generate() -> BTreeMap<String, Vec<u8>> {
     let mut rng = ChaCha20Rng::from_seed(SEED);
-    let mut files = BTreeMap::new();
+    let mut out = Output {
+        files: BTreeMap::new(),
+        manifest: String::from(
+            "# Generated by `cargo xtask gen-fixtures`: do not edit.\n\
+             # Synthetic PKCS#12 containers for `oncl_testkit::synthetic`; aliases in load order.\n",
+        ),
+    };
 
-    let mut roots = Vec::new();
-    for root in Root::ALL {
-        let key = Key::generate(root.key_kind(), &mut rng);
-        let name = name(&[
-            (CN, root.common_name()),
-            (ORGANIZATION, "OpenNCALayer"),
-            (COUNTRY, "KZ"),
-        ]);
-        let spec = CertSpec {
-            subject: name.clone(),
-            validity: Period::Normal.validity(),
-            serial: serial(&mut rng, false),
-            extensions: vec![
-                extension(
-                    true,
-                    &BasicConstraints {
-                        ca: true,
-                        path_len_constraint: None,
-                    },
-                ),
-                extension(true, &KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign)),
-            ],
-        };
-        let cert = issue(spec, &key, None, &mut rng);
-        files.insert(format!("{}.cer", root.name()), cert);
-        roots.push(IssuedRoot { root, name, key });
+    let roots: Vec<(Root, IssuedCa)> = Root::ALL
+        .into_iter()
+        .map(|root| (root, self_signed_root(root, &mut rng)))
+        .collect();
+    let root_ca = |root: Root| {
+        &roots
+            .iter()
+            .find(|(r, _)| *r == root)
+            .expect("every root is generated")
+            .1
+    };
+    for (_, ca) in &roots {
+        out.add_cer(ca);
     }
-
-    let mut manifest = String::from(
-        "# Generated by `cargo xtask gen-fixtures`: do not edit.\n\
-         # Synthetic PKCS#12 containers for `oncl_testkit::synthetic`; aliases in load order.\n",
-    );
     for container in CONTAINERS {
-        let root = roots
-            .iter()
-            .find(|r| r.root == container.root)
-            .expect("every root is generated");
-        let issuer = Issuer {
-            name: &root.name,
-            key: &root.key,
-        };
-        let entries: Vec<WriteEntry> = container
-            .profiles
-            .iter()
-            .map(|&profile| {
-                let key = Key::generate(container.root.key_kind(), &mut rng);
-                let spec = CertSpec {
-                    subject: subject(profile.subject()),
-                    validity: container.period.validity(),
-                    serial: serial(&mut rng, profile == Profile::LegalSign),
-                    extensions: profile.extensions(),
-                };
-                let cert_der = issue(spec, &key, Some(issuer), &mut rng);
-                WriteEntry {
-                    alias: hex(&key.ski),
-                    pkcs8_der: key.pkcs8_der.clone(),
-                    cert_der,
-                }
-            })
-            .collect();
-        let p12 = pkcs12::write(
-            &entries,
-            PASSWORD,
-            &container.encryption.write_options(),
-            &mut |buf| rng.fill_bytes(buf),
-        );
-        files.insert(format!("{}.p12", container.name), p12);
-
-        let aliases: Vec<String> = entries.iter().map(|e| format!("\"{}\"", e.alias)).collect();
-        write!(
-            manifest,
-            "\n[[p12]]\nname = \"{}\"\npassword = \"{PASSWORD}\"\nroot = \"{}.cer\"\naliases = [{}]\n",
+        let root = root_ca(container.root);
+        let entries = issue_entries(container, root, &[], &mut rng);
+        out.add_p12(
             container.name,
-            container.root.name(),
-            aliases.join(", "),
-        )
-        .expect("writing to a String");
+            root,
+            root,
+            &entries,
+            container.encryption,
+            &mut rng,
+        );
     }
-    files.insert(MANIFEST.to_owned(), manifest.into_bytes());
-    files
+
+    // The validation PKI is drawn after everything above, which therefore stays unchanged.
+    let root = root_ca(Root::Gost2015);
+    let inter = intermediate(INTER, root, &mut rng);
+    let twin = intermediate(INTER_TWIN, root, &mut rng);
+    out.add_cer(&inter);
+    out.add_cer(&twin);
+    let pointers = [ocsp_access(OCSP_URL), crl_distribution_point(INTER_CRL_URL)];
+    for container in INTER_CONTAINERS {
+        let entries = issue_entries(container, &inter, &pointers, &mut rng);
+        out.add_p12(
+            container.name,
+            root,
+            &inter,
+            &entries,
+            container.encryption,
+            &mut rng,
+        );
+    }
+    for ca in [&inter, root] {
+        out.add_p12(
+            &format!("{}.key", ca.file),
+            root,
+            root,
+            &[ca.entry()],
+            Encryption::Kalkan,
+            &mut rng,
+        );
+    }
+
+    out.files
+        .insert(MANIFEST.to_owned(), out.manifest.into_bytes());
+    out.files
+}
+
+/// The self-signed `root`: `cA` without a path length, keyCertSign and cRLSign.
+fn self_signed_root(root: Root, rng: &mut ChaCha20Rng) -> IssuedCa {
+    let key = Key::generate(root.key_kind(), rng);
+    let name = name(&[
+        (CN, root.common_name()),
+        (ORGANIZATION, "OpenNCALayer"),
+        (COUNTRY, "KZ"),
+    ]);
+    let spec = CertSpec {
+        subject: name.clone(),
+        validity: Period::Normal.validity(),
+        serial: serial(rng, false),
+        extensions: ca_extensions(None),
+    };
+    let cert = issue(spec, &key, None, rng);
+    IssuedCa {
+        file: root.name(),
+        name,
+        key,
+        cert,
+    }
+}
+
+/// A GOST 2015-512 intermediate CA `file` issued by `root`: subject [`INTER_CN`], `cA` with
+/// path length 0, keyCertSign and cRLSign, the root's CRL at [`ROOT_CRL_URL`]. Each call
+/// draws a new key and serial number under the same subject.
+fn intermediate(file: &'static str, root: &IssuedCa, rng: &mut ChaCha20Rng) -> IssuedCa {
+    let key = Key::generate(KeyKind::Gost(GostAlg::Gost3410_2015_512), rng);
+    let name = name(&[(CN, INTER_CN), (COUNTRY, "KZ")]);
+    let mut extensions = ca_extensions(Some(0));
+    extensions.push(crl_distribution_point(ROOT_CRL_URL));
+    let spec = CertSpec {
+        subject: name.clone(),
+        validity: Period::Normal.validity(),
+        serial: serial(rng, false),
+        extensions,
+    };
+    let cert = issue(spec, &key, Some(root.issuer()), rng);
+    IssuedCa {
+        file,
+        name,
+        key,
+        cert,
+    }
+}
+
+/// Critical basicConstraints (`cA`, `path_len`) and keyUsage keyCertSign + cRLSign.
+fn ca_extensions(path_len: Option<u8>) -> Vec<Extension> {
+    vec![
+        extension(
+            true,
+            &BasicConstraints {
+                ca: true,
+                path_len_constraint: path_len,
+            },
+        ),
+        extension(true, &KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign)),
+    ]
+}
+
+/// One entry per profile of `container`, issued by `ca`. `pointers` (revocation sources)
+/// follow the profile's extensions, except in OCSP responders.
+fn issue_entries(
+    container: &Container,
+    ca: &IssuedCa,
+    pointers: &[Extension],
+    rng: &mut ChaCha20Rng,
+) -> Vec<WriteEntry> {
+    container
+        .profiles
+        .iter()
+        .map(|&profile| {
+            let key = Key::generate(container.root.key_kind(), rng);
+            let mut extensions = profile.extensions();
+            if !profile.ocsp_responder() {
+                extensions.extend_from_slice(pointers);
+            }
+            let spec = CertSpec {
+                subject: subject(profile.subject()),
+                validity: container.period.validity(),
+                serial: serial(rng, profile == Profile::LegalSign),
+                extensions,
+            };
+            let cert_der = issue(spec, &key, Some(ca.issuer()), rng);
+            WriteEntry {
+                alias: hex(&key.ski),
+                pkcs8_der: key.pkcs8_der.clone(),
+                cert_der,
+            }
+        })
+        .collect()
+}
+
+/// AuthorityInfoAccess with the OCSP responder at `url`.
+fn ocsp_access(url: &str) -> Extension {
+    extension(
+        false,
+        &AuthorityInfoAccessSyntax(vec![AccessDescription {
+            access_method: oid(AD_OCSP),
+            access_location: uri(url),
+        }]),
+    )
+}
+
+/// CRLDistributionPoints with one `fullName` URI.
+fn crl_distribution_point(url: &str) -> Extension {
+    extension(
+        false,
+        &CrlDistributionPoints(vec![DistributionPoint {
+            distribution_point: Some(DistributionPointName::FullName(vec![uri(url)])),
+            reasons: None,
+            crl_issuer: None,
+        }]),
+    )
+}
+
+fn uri(url: &str) -> GeneralName {
+    GeneralName::UniformResourceIdentifier(Ia5String::new(url).expect("ASCII URL"))
 }
 
 /// Regenerates `fixtures/synthetic/` under the workspace `root`, removing generated-kind
@@ -470,6 +714,7 @@ fn subject(subject: Subject) -> Name {
             (ORGANIZATIONAL_UNIT, "BIN123456789021"),
         ]),
         Subject::Tsa => name(&[(CN, "OpenNCALayer Synthetic TSA"), (COUNTRY, "KZ")]),
+        Subject::Ocsp => name(&[(CN, "OpenNCALayer Synthetic OCSP"), (COUNTRY, "KZ")]),
     }
 }
 

@@ -50,4 +50,19 @@
     | `pbes2-noprf-gost2015.p12` | `root-gost2015` | профиль `user-gost2015-sign`; ключ и сертификаты под PBES2 без PRF (Kalkan читает как HMAC-SHA256) и AES-256-CBC |
 
     Остальные контейнеры — в профиле Kalkan: ключи 3DES, сертификаты RC2-40, 1024 итерации. Срок действия, кроме `expired-…`, — 2025-01-01…2099-12-31.
-  - `fixtures.toml` — описание контейнеров (пароль, корень, alias в порядке загрузки) для `oncl_testkit::synthetic` и `synthetic_all`.
+  - PKI для проверки сертификатов (PKIX, OCSP, CRL). Генерируется после всех объектов выше, поэтому они от неё не меняются. Адреса в домене `.test` не разрешаются: тесты подменяют транспорт.
+    - Промежуточные CA (`.cer`, ГОСТ 34.10-2015-512), выпущены `root-gost2015`:
+      - `inter-gost2015.cer` — subject `CN=SYNTHETIC NCA (GOST) 2015, C=KZ` (в DER порядок CN, C, как у НУЦ); `basicConstraints` cA, pathLen 0 (critical); KU keyCertSign + cRLSign (critical); CDP `http://crl.synthetic.test/root-gost2015.crl`.
+      - `inter-gost2015-twin.cer` — тот же subject и те же расширения, другой ключ и серийник: для построения цепочки при одноимённых CA.
+    - Контейнеры PKCS#12 (пароль `Qwerty12`, профиль Kalkan):
+
+      | Файл | Издатель | Содержимое |
+      |---|---|---|
+      | `inter-user-gost2015-sign.p12` | `inter-gost2015` | профиль `user-gost2015-sign`; AIA OCSP `http://ocsp.synthetic.test`, CDP `http://crl.synthetic.test/inter-gost2015.crl` |
+      | `inter-revoked-gost2015-sign.p12` | `inter-gost2015` | как `inter-user-gost2015-sign`, свой ключ и серийник; тесты объявляют его отозванным в ответах OCSP и в CRL |
+      | `inter-expired-gost2015-sign.p12` | `inter-gost2015` | как `inter-user-gost2015-sign`, срок 2020-01-01…2021-01-01 |
+      | `ocsp-gost2015.p12` | `inter-gost2015` | ответчик OCSP: KU digitalSignature (critical), EKU OCSPSigning, `id-pkix-ocsp-nocheck` (значение — DER NULL `05 00`) |
+      | `ocsp-nocheckless-gost2015.p12` | `inter-gost2015` | как `ocsp-gost2015`, но без `id-pkix-ocsp-nocheck` |
+      | `inter-gost2015.key.p12` | `root-gost2015` | ключ и сертификат `inter-gost2015.cer`: им тесты подписывают CRL промежуточного CA |
+      | `root-gost2015.key.p12` | `root-gost2015` | ключ и сертификат `root-gost2015.cer` (самоподписанный): им тесты подписывают CRL корня |
+  - `fixtures.toml` — описание контейнеров (пароль, корень, издатель — `.cer` выпустившего CA, alias в порядке загрузки) для `oncl_testkit::synthetic` и `synthetic_all`. Сертификаты `.cer` читает `oncl_testkit::synthetic_cert`.

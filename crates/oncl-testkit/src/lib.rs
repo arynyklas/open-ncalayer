@@ -54,8 +54,11 @@ pub struct SyntheticKey {
     pub password: String,
     /// Aliases of all entries, in the order `pkcs12::load` returns them.
     pub aliases: Vec<String>,
-    /// Path of the `.cer` of the root that issued the entries.
+    /// Path of the `.cer` of the self-signed root the entries chain to.
     pub root: PathBuf,
+    /// Path of the `.cer` of the CA that issued the entries: the root itself, an intermediate
+    /// CA, or — for a self-signed root's own key — that root.
+    pub issuer: PathBuf,
 }
 
 /// `fixtures.toml` as written by `cargo xtask gen-fixtures`.
@@ -71,6 +74,7 @@ struct SyntheticEntry {
     name: String,
     password: String,
     root: String,
+    issuer: String,
     aliases: Vec<String>,
 }
 
@@ -91,6 +95,7 @@ pub fn synthetic_all() -> Vec<SyntheticKey> {
         .map(|e| SyntheticKey {
             path: fixture(&format!("synthetic/{}.p12", e.name)),
             root: fixture(&format!("synthetic/{}", e.root)),
+            issuer: fixture(&format!("synthetic/{}", e.issuer)),
             name: e.name,
             password: e.password,
             aliases: e.aliases,
@@ -112,6 +117,15 @@ pub fn synthetic(name: &str) -> SyntheticKey {
         })
 }
 
+/// DER of the synthetic certificate `fixtures/synthetic/<name>.cer`, e.g. `inter-gost2015`.
+///
+/// # Panics
+///
+/// If the file is missing.
+pub fn synthetic_cert(name: &str) -> Vec<u8> {
+    read(fixture(&format!("synthetic/{name}.cer")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +142,16 @@ mod tests {
             fixture("a/b.der"),
             workspace_root().join("fixtures").join("a/b.der")
         );
+    }
+
+    #[test]
+    fn synthetic_issuer_and_cert_resolve() {
+        let leaf = synthetic("inter-user-gost2015-sign");
+        assert_eq!(leaf.issuer, fixture("synthetic/inter-gost2015.cer"));
+        assert_eq!(leaf.root, fixture("synthetic/root-gost2015.cer"));
+        assert_eq!(read(&leaf.issuer), synthetic_cert("inter-gost2015"));
+        let user = synthetic("user-gost2015-sign");
+        assert_eq!(user.issuer, user.root);
     }
 
     #[test]

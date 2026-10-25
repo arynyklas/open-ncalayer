@@ -5,58 +5,117 @@
 name = "user-gost2015-sign"
 password = "Qwerty12"
 root = "root-gost2015.cer"
+issuer = "root-gost2015.cer"
 aliases = ["a3c1901ac6b0bfaed7b9b4b0610ac07243210e31"]
 
 [[p12]]
 name = "user-gost2015-auth"
 password = "Qwerty12"
 root = "root-gost2015.cer"
+issuer = "root-gost2015.cer"
 aliases = ["9082511e490470203a525e8acce56ca5340b9894"]
 
 [[p12]]
 name = "legacy-gost2015-auth"
 password = "Qwerty12"
 root = "root-gost2015.cer"
+issuer = "root-gost2015.cer"
 aliases = ["c321a03cfb4e783fed254dd756a60d45e137d19c"]
 
 [[p12]]
 name = "user-gost2004-sign"
 password = "Qwerty12"
 root = "root-gost2004.cer"
+issuer = "root-gost2004.cer"
 aliases = ["f4885e3d71aced56b851b3b2dacadf52fea59a44"]
 
 [[p12]]
 name = "user-rsa-sign"
 password = "Qwerty12"
 root = "root-rsa.cer"
+issuer = "root-rsa.cer"
 aliases = ["460569d78dda2a142a2d8f23389bba378ccd7e53"]
 
 [[p12]]
 name = "legal-gost2015-sign"
 password = "Qwerty12"
 root = "root-gost2015.cer"
+issuer = "root-gost2015.cer"
 aliases = ["d2302867f70443c0738c6bf6280100cebb30b29e"]
 
 [[p12]]
 name = "expired-gost2015-sign"
 password = "Qwerty12"
 root = "root-gost2015.cer"
+issuer = "root-gost2015.cer"
 aliases = ["a61ec5dcf2f91eca2eeee4cd35e9d1229ca14a2f"]
 
 [[p12]]
 name = "multi-gost2015"
 password = "Qwerty12"
 root = "root-gost2015.cer"
+issuer = "root-gost2015.cer"
 aliases = ["2174a152307df0e311ee3c01e07f7ecad448780c", "b8a0dd2f7728b2381484dd51a0ee85785b1f5343"]
 
 [[p12]]
 name = "tsa-gost2015"
 password = "Qwerty12"
 root = "root-gost2015.cer"
+issuer = "root-gost2015.cer"
 aliases = ["db78f35ad4bc389c5ae5fe920db4554bb4694b14"]
 
 [[p12]]
 name = "pbes2-noprf-gost2015"
 password = "Qwerty12"
 root = "root-gost2015.cer"
+issuer = "root-gost2015.cer"
 aliases = ["e7dd1ac59fa7a8e474061c336b701ce8185576ff"]
+
+[[p12]]
+name = "inter-user-gost2015-sign"
+password = "Qwerty12"
+root = "root-gost2015.cer"
+issuer = "inter-gost2015.cer"
+aliases = ["12b7b48afc0ff6b6ffd5c0e2f3362cc551fdddd6"]
+
+[[p12]]
+name = "inter-revoked-gost2015-sign"
+password = "Qwerty12"
+root = "root-gost2015.cer"
+issuer = "inter-gost2015.cer"
+aliases = ["f14c1ba1ac36124fbb60b76b3b055c321a255213"]
+
+[[p12]]
+name = "inter-expired-gost2015-sign"
+password = "Qwerty12"
+root = "root-gost2015.cer"
+issuer = "inter-gost2015.cer"
+aliases = ["c38ea881b73d21a3cc8a0e6d3d6940f5dff430f5"]
+
+[[p12]]
+name = "ocsp-gost2015"
+password = "Qwerty12"
+root = "root-gost2015.cer"
+issuer = "inter-gost2015.cer"
+aliases = ["6fbe575c4ced243539de83795e093efd38eb20a9"]
+
+[[p12]]
+name = "ocsp-nocheckless-gost2015"
+password = "Qwerty12"
+root = "root-gost2015.cer"
+issuer = "inter-gost2015.cer"
+aliases = ["268fda321c7bffc5d3b0032e4b4e7635ee264c51"]
+
+[[p12]]
+name = "inter-gost2015.key"
+password = "Qwerty12"
+root = "root-gost2015.cer"
+issuer = "root-gost2015.cer"
+aliases = ["93a4ea2c1814cef6adb70665d4e66e9f6fe79946"]
+
+[[p12]]
+name = "root-gost2015.key"
+password = "Qwerty12"
+root = "root-gost2015.cer"
+issuer = "root-gost2015.cer"
+aliases = ["e1e0588ff97fa6f541ab36457d10f7de4a6c7517"]
