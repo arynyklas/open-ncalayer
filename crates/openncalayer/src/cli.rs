@@ -557,6 +557,19 @@ fn nm_install(relay: Option<PathBuf>, sandbox: Option<&Path>) -> Result<ExitCode
     })?;
     print_nm_report(&report);
     println!("Каталог данных демона: {}", paths.data.display());
+    if report.has_in_use() {
+        println!(
+            "Старые файлы relay заняты запущенным браузером и будут удалены при следующей \
+             установке"
+        );
+    }
+    if report.has_errors() {
+        eprintln!(
+            "Не все браузеры зарегистрированы: исправьте ошибки выше и повторите \
+             `openncalayer nm install`"
+        );
+        return Err(ExitCode::FAILURE);
+    }
     warn_if_no_browser(&report, State::Written);
     Ok(ExitCode::SUCCESS)
 }
@@ -565,15 +578,20 @@ fn nm_uninstall(sandbox: Option<&Path>) -> Result<ExitCode, ExitCode> {
     let layout = nm_layout(sandbox)?;
     let report = nm::uninstall(&layout).map_err(|e| {
         eprintln!("Не удалось удалить хост native messaging: {e}");
-        if e.kind() == io::ErrorKind::PermissionDenied {
-            eprintln!(
-                "Возможно, relay запущен браузером: закройте браузер и повторите \
-                 `openncalayer nm uninstall`"
-            );
-        }
         ExitCode::FAILURE
     })?;
     print_nm_report(&report);
+    if report.has_in_use() {
+        eprintln!(
+            "Relay запущен браузером: закройте браузер и повторите `openncalayer nm uninstall`"
+        );
+    }
+    if report.has_errors() {
+        eprintln!("Не всё удалось удалить: см. ошибки выше");
+    }
+    if report.has_in_use() || report.has_errors() {
+        return Err(ExitCode::FAILURE);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -614,6 +632,7 @@ fn print_nm_report(report: &Report) {
             Item::OldRelay => "Старый файл relay".into(),
             Item::Manifest { browser } => format!("Манифест для {browser}").into(),
             Item::RegistryKey => "Ключ реестра".into(),
+            Item::TempFile => "Временный файл".into(),
         };
         let state: Cow<'_, str> = match &entry.state {
             State::Written => "записан".into(),
@@ -621,7 +640,7 @@ fn print_nm_report(report: &Report) {
             State::Present => "на месте".into(),
             State::Missing => "отсутствует".into(),
             State::Skipped => "пропущен: каталог браузера не найден".into(),
-            State::InUse => "занят, будет удалён при следующей установке".into(),
+            State::InUse => "занят запущенным процессом".into(),
             State::Invalid(why) => format!("ошибка: {why}").into(),
         };
         println!("{item}: {} — {state}", entry.location);

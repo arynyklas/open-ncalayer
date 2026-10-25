@@ -83,8 +83,21 @@ pub struct ManifestTarget {
     pub family: Family,
     /// The manifest's directory.
     pub dir: PathBuf,
-    /// The browser's config directory: no manifest is written unless it exists.
-    pub requires: PathBuf,
+    /// The browser's config directories: no manifest is written unless one of them exists.
+    pub requires: Vec<PathBuf>,
+}
+
+impl ManifestTarget {
+    /// Whether the browser is there: one of [`ManifestTarget::requires`] exists.
+    pub fn browser_present(&self) -> bool {
+        self.requires.iter().any(|dir| dir.exists())
+    }
+
+    /// [`ManifestTarget::requires`] for a report.
+    fn shown_requires(&self) -> String {
+        let dirs: Vec<String> = self.requires.iter().map(|dir| shown(dir)).collect();
+        dirs.join(" | ")
+    }
 }
 
 /// Where `nm install` puts the relay, its config and the host manifests.
@@ -127,8 +140,12 @@ impl NmLayout {
     ///   (`chromium.json`, `firefox.json`), found through HKCU `Software\…`;
     /// - Linux: the relay in the data directory, `<HOST_NAME>.json` in the
     ///   `NativeMessagingHosts` directory of each Chromium-family browser in
-    ///   `${XDG_CONFIG_HOME:-~/.config}` and in `~/.mozilla/native-messaging-hosts`;
-    /// - macOS: the same under `~/Library/Application Support`.
+    ///   `${XDG_CONFIG_HOME:-~/.config}` and in `~/.mozilla/native-messaging-hosts` (Firefox
+    ///   counts as present with `~/.mozilla` or, since Firefox 147, the XDG
+    ///   `${XDG_CONFIG_HOME:-~/.config}/mozilla`; it reads host manifests from `~/.mozilla`
+    ///   only);
+    /// - macOS: the same under `~/Library/Application Support`, Firefox present with its
+    ///   `Firefox` or `Mozilla` directory there.
     ///
     /// # Errors
     ///
@@ -147,7 +164,7 @@ impl NmLayout {
             browser,
             family,
             dir,
-            requires: root.to_path_buf(),
+            requires: vec![root.to_path_buf()],
         };
         NmLayout {
             relay_dir: root.join("relay"),
@@ -214,12 +231,12 @@ fn layout_for(os: Os, data: &Path, var: impl Fn(&str) -> Option<OsString>) -> io
         browsers
             .into_iter()
             .map(|(browser, dir)| {
-                let requires = base.join(dir);
+                let config_dir = base.join(dir);
                 ManifestTarget {
                     browser,
                     family: Family::Chromium,
-                    dir: requires.join("NativeMessagingHosts"),
-                    requires,
+                    dir: config_dir.join("NativeMessagingHosts"),
+                    requires: vec![config_dir],
                 }
             })
             .collect()
@@ -233,7 +250,7 @@ fn layout_for(os: Os, data: &Path, var: impl Fn(&str) -> Option<OsString>) -> io
                 dir: relay_dir.join("nm"),
                 // The registry, not a directory, tells whether a browser is there: the keys
                 // of every browser are written.
-                requires: relay_dir.clone(),
+                requires: vec![relay_dir.clone()],
             };
             Ok(NmLayout {
                 manifests: vec![
@@ -261,7 +278,7 @@ fn layout_for(os: Os, data: &Path, var: impl Fn(&str) -> Option<OsString>) -> io
                 browser: "Firefox",
                 family: Family::Firefox,
                 dir: mozilla.join("NativeMessagingHosts"),
-                requires: mozilla,
+                requires: vec![support.join("Firefox"), mozilla],
             });
             Ok(NmLayout {
                 relay_dir: data.to_path_buf(),
@@ -285,12 +302,15 @@ fn layout_for(os: Os, data: &Path, var: impl Fn(&str) -> Option<OsString>) -> io
                     ("Yandex Browser", "yandex-browser"),
                 ],
             );
+            // Firefox 147+ keeps new profiles in `<config>/mozilla` and creates no
+            // `~/.mozilla`, yet reads host manifests from `~/.mozilla` only (Mozilla bugs
+            // 2001887, 2050007).
             let mozilla = home.join(".mozilla");
             manifests.push(ManifestTarget {
                 browser: "Firefox",
                 family: Family::Firefox,
                 dir: mozilla.join("native-messaging-hosts"),
-                requires: mozilla,
+                requires: vec![mozilla, config.join("mozilla")],
             });
             Ok(NmLayout {
                 relay_dir: data.to_path_buf(),
@@ -337,6 +357,8 @@ pub enum Item {
     Manifest { browser: &'static str },
     /// An HKCU key pointing a browser at a manifest.
     RegistryKey,
+    /// A temporary file of an interrupted install (`*.new`, `*.tmp`).
+    TempFile,
 }
 
 /// The state of a report entry.
@@ -350,11 +372,11 @@ pub enum State {
     Present,
     /// Not there.
     Missing,
-    /// The browser's config directory does not exist; the location is that directory.
+    /// None of the browser's config directories exists; the location lists them.
     Skipped,
-    /// A replaced relay that is still running; a later install removes it.
+    /// Cannot be removed: a running process holds it (Windows: a relay the browser runs).
     InUse,
-    /// There but not usable: why, for the user.
+    /// Not usable, or the operation on it failed: why, for the user.
     Invalid(String),
 }
 
@@ -376,10 +398,21 @@ pub struct Report {
 impl Report {
     /// For [`status`]: nothing is missing or invalid (skipped browsers are fine).
     pub fn is_healthy(&self) -> bool {
-        !self
-            .entries
-            .iter()
-            .any(|entry| matches!(entry.state, State::Missing | State::Invalid(_)))
+        !self.any(|state| matches!(state, State::Missing | State::Invalid(_)))
+    }
+
+    /// Some entry failed ([`State::Invalid`]).
+    pub fn has_errors(&self) -> bool {
+        self.any(|state| matches!(state, State::Invalid(_)))
+    }
+
+    /// Some file could not be removed because it is in use ([`State::InUse`]).
+    pub fn has_in_use(&self) -> bool {
+        self.any(|state| *state == State::InUse)
+    }
+
+    fn any(&self, f: impl Fn(&State) -> bool) -> bool {
+        self.entries.iter().any(|entry| f(&entry.state))
     }
 
     fn push(&mut self, item: Item, location: impl Into<String>, state: State) {
@@ -399,16 +432,20 @@ struct RelayConfig {
 }
 
 /// Installs the relay copied from `relay_src`, its config (the daemon `daemon` with the data
-/// directory `data_dir`, both made absolute), the manifests of the browsers whose config
-/// directory exists and the registry keys. Every file is written to a temporary name and
-/// renamed into place, so a running relay keeps running: on Windows, which cannot replace a
-/// running executable, the installed relay is first renamed to `nmhost.old-<unix-ms>.exe`.
-/// Replaced relays that no longer run are removed.
+/// directory `data_dir`, both made absolute), the manifests of the browsers that are present
+/// and the registry keys. Every file is written to a temporary name and renamed into place,
+/// so a running relay keeps running: on Windows, which cannot replace a running executable,
+/// the installed relay is first renamed to `nmhost.old-<unix-ms>.exe`. Replaced relays that
+/// no longer run are removed.
+///
+/// A manifest or registry key that cannot be written is recorded as [`State::Invalid`] and
+/// the others are still written ([`Report::has_errors`]).
 ///
 /// # Errors
 ///
-/// The first failure, with the path concerned; nothing is changed if `relay_src` cannot be
-/// read.
+/// The relay or its config cannot be installed, or a path is not UTF-8 (manifests hold the
+/// relay path as a string); nothing is changed if `relay_src` cannot be read or a path is
+/// refused.
 pub fn install(
     layout: &NmLayout,
     relay_src: &Path,
@@ -421,23 +458,22 @@ pub fn install(
         daemon: std::path::absolute(daemon)?,
     };
     let relay = std::path::absolute(layout.relay())?;
-    if relay.to_str().is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "{}: a manifest cannot hold a path that is not UTF-8",
-                relay.display()
-            ),
-        ));
+    for path in [&relay, &config.data_dir, &config.daemon] {
+        if path.to_str().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{}: the path is not UTF-8", path.display()),
+            ));
+        }
     }
     let config = serde_json::to_vec_pretty(&config)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
     let mut report = Report::default();
     fs::create_dir_all(&layout.relay_dir).map_err(|e| at(&layout.relay_dir, e))?;
-    replace_relay(&relay, &relay_bytes)?;
+    replace_relay(&relay, &relay_bytes, |from, to| fs::rename(from, to))?;
     report.push(Item::Relay, shown(&relay), State::Written);
-    remove_old_relays(&layout.relay_dir, &mut report);
+    remove_old_relays(&layout.relay_dir, &mut report)?;
     let config_path = layout.relay_config();
     write_atomic(&config_path, &config)?;
     report.push(Item::RelayConfig, shown(&config_path), State::Written);
@@ -447,79 +483,85 @@ pub fn install(
         let item = Item::Manifest {
             browser: target.browser,
         };
-        if !target.requires.exists() {
-            report.push(item, shown(&target.requires), State::Skipped);
+        if !target.browser_present() {
+            report.push(item, target.shown_requires(), State::Skipped);
             continue;
         }
-        fs::create_dir_all(&target.dir).map_err(|e| at(&target.dir, e))?;
-        let path = std::path::absolute(layout.manifest_path(target))?;
-        write_atomic(&path, &manifest_bytes(target.family, &relay))?;
-        report.push(item, shown(&path), State::Written);
-        written.push((target.family, path));
+        let path = layout.manifest_path(target);
+        let write = || {
+            fs::create_dir_all(&target.dir).map_err(|e| at(&target.dir, e))?;
+            let path = std::path::absolute(&path)?;
+            write_atomic(&path, &manifest_bytes(target.family, &relay))?;
+            Ok::<_, io::Error>(path)
+        };
+        match write() {
+            Ok(path) => {
+                report.push(item, shown(&path), State::Written);
+                written.push((target.family, path));
+            }
+            Err(e) => report.push(item, shown(&path), State::Invalid(e.to_string())),
+        }
     }
 
     if let Some(base) = &layout.registry_base {
         for (family, manifest) in &written {
-            let value = manifest.to_str().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("{}: the registry value must be UTF-8", manifest.display()),
-                )
-            })?;
             for sub in family.registry_keys() {
                 let key = registry_key(base, sub);
-                registry::set_default(&key, value)
-                    .map_err(|e| io::Error::new(e.kind(), format!("HKCU\\{key}: {e}")))?;
-                report.push(Item::RegistryKey, format!("HKCU\\{key}"), State::Written);
+                let state = match manifest.to_str() {
+                    Some(value) => match registry::set_default(&key, value) {
+                        Ok(()) => State::Written,
+                        Err(e) => State::Invalid(e.to_string()),
+                    },
+                    None => {
+                        State::Invalid(format!("путь манифеста {} не в UTF-8", manifest.display()))
+                    }
+                };
+                report.push(Item::RegistryKey, format!("HKCU\\{key}"), state);
             }
         }
     }
     Ok(report)
 }
 
-/// Removes the registry keys, the manifests, the relay and its config and the replaced
-/// relays that no longer run. Data in the relay directory (it is the data directory on
-/// Linux and macOS) and the manifest directories stay.
+/// Removes the registry keys, the manifests, the relay and its config, the replaced relays
+/// and the temporary files of interrupted installs. Data in the relay directory (it is the
+/// data directory on Linux and macOS) and the manifest directories stay.
+///
+/// Whatever cannot be removed is recorded and the rest is still removed: a running relay as
+/// [`State::InUse`] (Windows), other failures as [`State::Invalid`].
 ///
 /// # Errors
 ///
-/// The first failure, with the path concerned (on Windows: the relay is running).
+/// The relay directory cannot be listed.
 pub fn uninstall(layout: &NmLayout) -> io::Result<Report> {
     let mut report = Report::default();
     if let Some(base) = &layout.registry_base {
         for family in layout.families() {
             for sub in family.registry_keys() {
                 let key = registry_key(base, sub);
-                let existed = registry::delete_tree(&key)
-                    .map_err(|e| io::Error::new(e.kind(), format!("HKCU\\{key}: {e}")))?;
-                report.push(
-                    Item::RegistryKey,
-                    format!("HKCU\\{key}"),
-                    removed_or_missing(existed),
-                );
+                let state = match registry::delete_tree(&key) {
+                    Ok(existed) => removed_or_missing(existed),
+                    Err(e) => State::Invalid(e.to_string()),
+                };
+                report.push(Item::RegistryKey, format!("HKCU\\{key}"), state);
             }
         }
     }
     for target in &layout.manifests {
         let path = layout.manifest_path(target);
-        let existed = remove_file(&path)?;
         let item = Item::Manifest {
             browser: target.browser,
         };
-        report.push(item, shown(&path), removed_or_missing(existed));
+        report.push(item, shown(&path), removal(&path));
+        remove_temp(&with_suffix(&path, ".tmp"), &mut report);
     }
     let relay = layout.relay();
-    let existed = remove_file(&relay)?;
-    report.push(Item::Relay, shown(&relay), removed_or_missing(existed));
-    remove_file(&with_suffix(&relay, ".new"))?;
+    report.push(Item::Relay, shown(&relay), removal(&relay));
+    remove_temp(&with_suffix(&relay, ".new"), &mut report);
     let config = layout.relay_config();
-    let existed = remove_file(&config)?;
-    report.push(
-        Item::RelayConfig,
-        shown(&config),
-        removed_or_missing(existed),
-    );
-    remove_old_relays(&layout.relay_dir, &mut report);
+    report.push(Item::RelayConfig, shown(&config), removal(&config));
+    remove_temp(&with_suffix(&config, ".tmp"), &mut report);
+    remove_old_relays(&layout.relay_dir, &mut report)?;
     Ok(report)
 }
 
@@ -542,23 +584,37 @@ pub fn status(layout: &NmLayout) -> Report {
     report.push(Item::Relay, shown(&relay), state);
     let config = layout.relay_config();
     report.push(Item::RelayConfig, shown(&config), config_state(&config));
-    for old in old_relays(&layout.relay_dir) {
-        report.push(Item::OldRelay, shown(&old), State::Present);
+    match old_relays(&layout.relay_dir) {
+        Ok(olds) => {
+            for old in olds {
+                report.push(Item::OldRelay, shown(&old), State::Present);
+            }
+        }
+        Err(e) => report.push(
+            Item::OldRelay,
+            shown(&layout.relay_dir),
+            State::Invalid(e.to_string()),
+        ),
     }
+    let mut temps = vec![with_suffix(&relay, ".new"), with_suffix(&config, ".tmp")];
 
     for target in &layout.manifests {
         let item = Item::Manifest {
             browser: target.browser,
         };
         let path = layout.manifest_path(target);
+        temps.push(with_suffix(&path, ".tmp"));
         if path.exists() {
             let state = manifest_state(&path, &target.family.manifest(&relay));
             report.push(item, shown(&path), state);
-        } else if target.requires.exists() {
+        } else if target.browser_present() {
             report.push(item, shown(&path), State::Missing);
         } else {
-            report.push(item, shown(&target.requires), State::Skipped);
+            report.push(item, target.shown_requires(), State::Skipped);
         }
+    }
+    for temp in temps.iter().filter(|temp| temp.exists()) {
+        report.push(Item::TempFile, shown(temp), State::Present);
     }
 
     if let Some(base) = &layout.registry_base {
@@ -638,26 +694,34 @@ fn config_state(path: &Path) -> State {
 
 /// Puts `bytes` at `relay`: written as `<relay>.new`, then renamed over it (Unix), or (Windows,
 /// where a running executable can be renamed but not replaced) the old relay is renamed to
-/// `nmhost.old-<unix-ms>.exe` first.
-fn replace_relay(relay: &Path, bytes: &[u8]) -> io::Result<()> {
+/// `nmhost.old-<unix-ms>.exe` first. Renames go through `rename`. On failure the previous
+/// relay stays in place (best effort on Windows) and `<relay>.new` is removed.
+fn replace_relay(
+    relay: &Path,
+    bytes: &[u8],
+    rename: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     let new = with_suffix(relay, ".new");
     write_synced(&new, bytes, true)?;
-    let replaced = if cfg!(windows) && relay.exists() {
-        let old = old_relay_name(relay)?;
-        fs::rename(relay, &old).map_err(|e| at(relay, e))?;
-        Some(old)
-    } else {
-        None
+    let swap = || {
+        let replaced = if cfg!(windows) && relay.exists() {
+            let old = old_relay_name(relay)?;
+            rename(relay, &old).map_err(|e| at(relay, e))?;
+            Some(old)
+        } else {
+            None
+        };
+        rename(&new, relay).map_err(|e| {
+            if let Some(old) = replaced {
+                // Keep a relay in place for the browsers.
+                let _ = rename(&old, relay);
+            }
+            at(relay, e)
+        })
     };
-    if let Err(e) = fs::rename(&new, relay) {
-        if let Some(old) = replaced {
-            // Best effort: keep a relay in place for the browsers.
-            let _ = fs::rename(old, relay);
-        }
+    swap().inspect_err(|_| {
         let _ = fs::remove_file(&new);
-        return Err(at(relay, e));
-    }
-    Ok(())
+    })
 }
 
 /// A free `nmhost.old-<unix-ms><EXE_SUFFIX>` next to `relay`.
@@ -676,38 +740,71 @@ fn old_relay_name(relay: &Path) -> io::Result<PathBuf> {
     }
 }
 
-/// The replaced relays in `dir`, sorted.
-fn old_relays(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
+/// The replaced relays in `dir`, sorted; none if `dir` does not exist.
+fn old_relays(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(at(dir, e)),
     };
-    let mut olds: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(OLD_RELAY_PREFIX))
-        })
-        .map(|entry| entry.path())
-        .collect();
+    let mut olds = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| at(dir, e))?;
+        let old = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(OLD_RELAY_PREFIX));
+        if old {
+            olds.push(entry.path());
+        }
+    }
     olds.sort();
-    olds
+    Ok(olds)
 }
 
 /// Removes the replaced relays in `dir`; those still running stay ([`State::InUse`]).
-fn remove_old_relays(dir: &Path, report: &mut Report) {
-    for old in old_relays(dir) {
-        let state = match fs::remove_file(&old) {
-            Ok(()) => State::Removed,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(_) => State::InUse,
-        };
-        report.push(Item::OldRelay, shown(&old), state);
+fn remove_old_relays(dir: &Path, report: &mut Report) -> io::Result<()> {
+    for old in old_relays(dir)? {
+        match removal(&old) {
+            // Gone meanwhile (another install).
+            State::Missing => {}
+            state => report.push(Item::OldRelay, shown(&old), state),
+        }
+    }
+    Ok(())
+}
+
+/// Removes the temporary file `path` if it exists, recording it.
+fn remove_temp(path: &Path, report: &mut Report) {
+    match removal(path) {
+        State::Missing => {}
+        state => report.push(Item::TempFile, shown(path), state),
     }
 }
 
-/// Writes `bytes` to `path` through `<path>.tmp` and a rename.
+/// Removes the file `path`: [`State::Removed`], [`State::Missing`] if it did not exist,
+/// [`State::InUse`] or [`State::Invalid`].
+fn removal(path: &Path) -> State {
+    match fs::remove_file(path) {
+        Ok(()) => State::Removed,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => State::Missing,
+        Err(e) if in_use(&e) => State::InUse,
+        Err(e) => State::Invalid(e.to_string()),
+    }
+}
+
+/// Whether removing a file failed because a process holds it: Windows refuses to delete a
+/// running executable (access denied) or a file opened without delete sharing (sharing
+/// violation). Unix deletes such files.
+fn in_use(e: &io::Error) -> bool {
+    /// `ERROR_SHARING_VIOLATION`.
+    const SHARING_VIOLATION: i32 = 32;
+    cfg!(windows)
+        && (e.kind() == io::ErrorKind::PermissionDenied
+            || e.raw_os_error() == Some(SHARING_VIOLATION))
+}
+
+/// Writes `bytes` to `path` through `<path>.tmp` and a rename; no `.tmp` stays on failure.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = with_suffix(path, ".tmp");
     write_synced(&tmp, bytes, false)?;
@@ -718,15 +815,25 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Creates or truncates `path` with `bytes`, mode 0755 on Unix if `executable`, and flushes
-/// it to disk.
+/// it to disk. On failure the file is removed.
 fn write_synced(path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> {
     let write = || {
         let mut file = File::create(path)?;
-        file.write_all(bytes)?;
-        if executable {
-            make_executable(&file)?;
+        let result = file
+            .write_all(bytes)
+            .and_then(|()| {
+                if executable {
+                    make_executable(&file)
+                } else {
+                    Ok(())
+                }
+            })
+            .and_then(|()| file.sync_all());
+        if result.is_err() {
+            drop(file);
+            let _ = fs::remove_file(path);
         }
-        file.sync_all()
+        result
     };
     write().map_err(|e| at(path, e))
 }
@@ -740,15 +847,6 @@ fn make_executable(file: &File) -> io::Result<()> {
 #[cfg(not(unix))]
 fn make_executable(_: &File) -> io::Result<()> {
     Ok(())
-}
-
-/// Removes `path`; `false` if it did not exist.
-fn remove_file(path: &Path) -> io::Result<bool> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(at(path, e)),
-    }
 }
 
 fn removed_or_missing(existed: bool) -> State {
@@ -904,13 +1002,13 @@ mod tests {
             (
                 Family::Chromium,
                 requires.join("NativeMessagingHosts").join(&host),
-                requires,
+                vec![requires],
             )
         })
         .chain([(
             Family::Firefox,
             home.join(".mozilla/native-messaging-hosts").join(&host),
-            home.join(".mozilla"),
+            vec![home.join(".mozilla"), config.join("mozilla")],
         )])
         .collect();
         let found: Vec<_> = linux
@@ -923,10 +1021,17 @@ mod tests {
         let xdg = tmp.path().join("xdg");
         let with_xdg = [("HOME", home.clone()), ("XDG_CONFIG_HOME", xdg.clone())];
         let linux = layout_for(Os::Linux, &data, env(&with_xdg)).unwrap();
-        assert_eq!(linux.manifests[0].requires, xdg.join("google-chrome"));
+        assert_eq!(linux.manifests[0].requires, [xdg.join("google-chrome")]);
+        // Firefox reads host manifests from `~/.mozilla` only, whatever XDG_CONFIG_HOME says.
+        let firefox = &linux.manifests[5];
+        assert_eq!(firefox.dir, home.join(".mozilla/native-messaging-hosts"));
+        assert_eq!(
+            firefox.requires,
+            [home.join(".mozilla"), xdg.join("mozilla")]
+        );
         let relative = [("HOME", home.clone()), ("XDG_CONFIG_HOME", "rel".into())];
         let linux = layout_for(Os::Linux, &data, env(&relative)).unwrap();
-        assert_eq!(linux.manifests[0].requires, config.join("google-chrome"));
+        assert_eq!(linux.manifests[0].requires, [config.join("google-chrome")]);
 
         let macos = layout_for(Os::Mac, &data, env(&vars)).unwrap();
         let support = home.join("Library/Application Support");
@@ -950,13 +1055,13 @@ mod tests {
             (
                 Family::Chromium,
                 requires.join("NativeMessagingHosts").join(&host),
-                requires,
+                vec![requires],
             )
         })
         .chain([(
             Family::Firefox,
             support.join("Mozilla/NativeMessagingHosts").join(&host),
-            support.join("Mozilla"),
+            vec![support.join("Firefox"), support.join("Mozilla")],
         )])
         .collect();
         assert_eq!(found, expected);
@@ -1031,6 +1136,147 @@ mod tests {
         );
     }
 
+    /// Firefox 147+ creates its profiles in `${XDG_CONFIG_HOME:-~/.config}/mozilla` and no
+    /// `~/.mozilla`; it still reads host manifests from `~/.mozilla/native-messaging-hosts`.
+    #[test]
+    fn firefox_with_xdg_profiles_only_gets_its_manifest() {
+        let host = format!("{HOST_NAME}.json");
+        let firefox_written = |report: &Report| {
+            report.entries.iter().any(|e| {
+                e.item == Item::Manifest { browser: "Firefox" } && e.state == State::Written
+            })
+        };
+        let daemon = Path::new("/opt/openncalayer");
+
+        // Default XDG config directory.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(home.join(".config/mozilla/firefox")).unwrap();
+        let src = tmp.path().join("relay-src");
+        fs::write(&src, b"relay").unwrap();
+        let data = tmp.path().join("data");
+        let layout = layout_for(Os::Linux, &data, env(&[("HOME", home.clone())])).unwrap();
+        let report = install(&layout, &src, daemon, &data).unwrap();
+        assert!(firefox_written(&report), "{report:?}");
+        assert!(
+            home.join(".mozilla/native-messaging-hosts")
+                .join(&host)
+                .is_file()
+        );
+        assert!(!home.join(".config/mozilla/native-messaging-hosts").exists());
+
+        // A custom XDG_CONFIG_HOME.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let xdg = tmp.path().join("xdg");
+        fs::create_dir_all(xdg.join("mozilla/firefox")).unwrap();
+        let src = tmp.path().join("relay-src");
+        fs::write(&src, b"relay").unwrap();
+        let vars = [("HOME", home.clone()), ("XDG_CONFIG_HOME", xdg.clone())];
+        let layout = layout_for(Os::Linux, &data, env(&vars)).unwrap();
+        let report = install(&layout, &src, daemon, &tmp.path().join("data")).unwrap();
+        assert!(firefox_written(&report), "{report:?}");
+        assert!(
+            home.join(".mozilla/native-messaging-hosts")
+                .join(&host)
+                .is_file()
+        );
+
+        // macOS: the profile root `Firefox` without `Mozilla`.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let support = home.join("Library/Application Support");
+        fs::create_dir_all(support.join("Firefox/Profiles")).unwrap();
+        let src = tmp.path().join("relay-src");
+        fs::write(&src, b"relay").unwrap();
+        let layout = layout_for(Os::Mac, &data, env(&[("HOME", home.clone())])).unwrap();
+        let report = install(&layout, &src, daemon, &tmp.path().join("data")).unwrap();
+        assert!(firefox_written(&report), "{report:?}");
+        assert!(
+            support
+                .join("Mozilla/NativeMessagingHosts")
+                .join(&host)
+                .is_file()
+        );
+
+        // Neither directory: skipped, the location names both.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let src = tmp.path().join("relay-src");
+        fs::write(&src, b"relay").unwrap();
+        let layout = layout_for(Os::Linux, &data, env(&[("HOME", home.clone())])).unwrap();
+        let report = install(&layout, &src, daemon, &tmp.path().join("data")).unwrap();
+        let firefox = report
+            .entries
+            .iter()
+            .find(|e| e.item == Item::Manifest { browser: "Firefox" })
+            .unwrap();
+        assert_eq!(firefox.state, State::Skipped);
+        assert_eq!(
+            firefox.location,
+            format!(
+                "{} | {}",
+                shown(&home.join(".mozilla")),
+                shown(&home.join(".config").join("mozilla"))
+            )
+        );
+        assert!(!home.join(".mozilla").exists());
+    }
+
+    #[test]
+    fn failed_relay_replacement_keeps_the_old_relay() {
+        let tmp = TempDir::new().unwrap();
+        let relay = tmp.path().join(relay_file_name());
+        let new = with_suffix(&relay, ".new");
+        let leftovers = || {
+            let mut names: Vec<_> = fs::read_dir(tmp.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let only_relay = [OsString::from(relay_file_name())];
+        fs::write(&relay, b"old").unwrap();
+
+        // The last rename fails: on Windows the old relay, already renamed away, comes back.
+        let failing_last = |from: &Path, to: &Path| {
+            if from == new {
+                Err(io::Error::other("injected"))
+            } else {
+                fs::rename(from, to)
+            }
+        };
+        let err = replace_relay(&relay, b"new", failing_last).unwrap_err();
+        assert!(err.to_string().contains("injected"), "{err}");
+        assert_eq!(fs::read(&relay).unwrap(), b"old");
+        assert_eq!(leftovers(), only_relay);
+
+        // The first rename fails (Windows: moving the old relay away; Unix: the only one).
+        let failing_all = |_: &Path, _: &Path| Err(io::Error::other("injected"));
+        replace_relay(&relay, b"new", failing_all).unwrap_err();
+        assert_eq!(fs::read(&relay).unwrap(), b"old");
+        assert_eq!(leftovers(), only_relay);
+
+        replace_relay(&relay, b"new", |from, to| fs::rename(from, to)).unwrap();
+        assert_eq!(fs::read(&relay).unwrap(), b"new");
+    }
+
+    #[test]
+    fn failed_write_leaves_no_temp_file() {
+        let tmp = TempDir::new().unwrap();
+        // A directory where the file should go: the rename fails on every platform.
+        let path = tmp.path().join("manifest.json");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("inside"), b"x").unwrap();
+        write_atomic(&path, b"{}").unwrap_err();
+        assert!(!with_suffix(&path, ".tmp").exists());
+        // The file cannot even be created.
+        let path = tmp.path().join("missing").join("manifest.json");
+        write_atomic(&path, b"{}").unwrap_err();
+        assert!(!with_suffix(&path, ".tmp").exists());
+    }
+
     #[cfg(windows)]
     #[test]
     fn registry_values_under_test_base() {
@@ -1056,7 +1302,7 @@ mod tests {
             browser,
             family,
             dir: tmp.path().join("nm"),
-            requires: tmp.path().to_path_buf(),
+            requires: vec![tmp.path().to_path_buf()],
         };
         let layout = NmLayout {
             relay_dir: tmp.path().join("relay"),

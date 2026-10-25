@@ -6,7 +6,7 @@ use std::env::consts::EXE_SUFFIX;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 use oncl_ipc::ids::HOST_NAME;
 use openncalayer::nm::{
@@ -18,6 +18,45 @@ use tempfile::TempDir;
 
 /// Set for a copy of this test executable started as a stand-in for a running relay.
 const STAND_IN_VAR: &str = "ONCL_NM_TEST_STAND_IN";
+
+// A copy of this executable started with `STAND_IN_VAR` plays a relay the browser runs,
+// until its stdin closes. It runs before `main`, from the platform's list of initializers
+// (as the `ctor` crate does), so it never reaches libtest.
+#[used]
+#[cfg_attr(
+    all(unix, not(target_vendor = "apple")),
+    unsafe(link_section = ".init_array")
+)]
+#[cfg_attr(
+    target_vendor = "apple",
+    unsafe(link_section = "__DATA,__mod_init_func")
+)]
+#[cfg_attr(windows, unsafe(link_section = ".CRT$XCU"))]
+static BEFORE_MAIN: extern "C" fn() = before_main;
+
+extern "C" fn before_main() {
+    if std::env::var_os(STAND_IN_VAR).is_some() {
+        let _ = std::io::stdin().read_to_end(&mut Vec::new());
+        std::process::exit(0);
+    }
+}
+
+/// Runs the relay installed at `relay`, a copy of this executable, as a stand-in until its
+/// stdin is closed.
+fn run_stand_in(relay: &Path) -> Child {
+    Command::new(relay)
+        .env(STAND_IN_VAR, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+fn stop_stand_in(mut child: Child) {
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+}
 
 fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
@@ -68,13 +107,13 @@ fn data_dir_layout(tmp: &Path, data: &Path) -> NmLayout {
                 browser: "Chromium",
                 family: Family::Chromium,
                 dir: chromium.join("NativeMessagingHosts"),
-                requires: chromium,
+                requires: vec![chromium],
             },
             ManifestTarget {
                 browser: "Firefox",
                 family: Family::Firefox,
                 dir: mozilla.join("native-messaging-hosts"),
-                requires: mozilla,
+                requires: vec![mozilla],
             },
         ],
         registry_base: None,
@@ -243,15 +282,6 @@ fn status_reports_missing_and_tampered_parts() {
     );
 }
 
-/// Not a real test: a copy of this executable started with [`STAND_IN_VAR`] plays a relay
-/// the browser is running, until its stdin closes.
-#[test]
-fn stand_in_relay() {
-    if std::env::var_os(STAND_IN_VAR).is_some() {
-        let _ = std::io::stdin().read_to_end(&mut Vec::new());
-    }
-}
-
 #[test]
 fn reinstall_replaces_relay_by_rename_and_cleans_old() {
     let tmp = TempDir::new().unwrap();
@@ -263,14 +293,7 @@ fn reinstall_replaces_relay_by_rename_and_cleans_old() {
     let this = std::env::current_exe().unwrap();
     nm::install(&layout, &this, &daemon, &data).unwrap();
     let relay = layout.relay();
-    let mut running = Command::new(&relay)
-        .args(["stand_in_relay", "--exact", "--nocapture", "-q"])
-        .env(STAND_IN_VAR, "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut running = run_stand_in(&relay);
 
     let new = relay_source(tmp.path(), "relay-v2", b"relay v2");
     let report = nm::install(&layout, &new, &daemon, &data).unwrap();
@@ -297,8 +320,7 @@ fn reinstall_replaces_relay_by_rename_and_cleans_old() {
         assert!(olds.is_empty(), "{olds:?}");
     }
 
-    drop(running.stdin.take());
-    assert!(running.wait().unwrap().success());
+    stop_stand_in(running);
 
     let newer = relay_source(tmp.path(), "relay-v3", b"relay v3");
     let report = nm::install(&layout, &newer, &daemon, &data).unwrap();
@@ -347,6 +369,28 @@ fn uninstall_removes_manifests_and_relay_keeps_data() {
             [&State::Removed]
         );
     }
+
+    // Temporary files of an interrupted install: status lists them, uninstall removes them.
+    nm::install(&layout, &src, &tmp.path().join("openncalayer"), &data).unwrap();
+    let mut temps = vec![
+        with_suffix(&layout.relay(), ".new"),
+        with_suffix(&layout.relay_config(), ".tmp"),
+    ];
+    temps.extend(manifests.iter().map(|path| with_suffix(path, ".tmp")));
+    for temp in &temps {
+        fs::write(temp, b"partial").unwrap();
+    }
+    let status = nm::status(&layout);
+    assert_eq!(
+        states(&status, &Item::TempFile),
+        vec![&State::Present; temps.len()]
+    );
+    let report = nm::uninstall(&layout).unwrap();
+    assert_eq!(
+        states(&report, &Item::TempFile),
+        vec![&State::Removed; temps.len()]
+    );
+    assert!(temps.iter().all(|temp| !temp.exists()));
 
     // Uninstalling again finds nothing and is no error.
     let again = nm::uninstall(&layout).unwrap();
@@ -415,4 +459,167 @@ fn cli_installs_into_a_sandbox() {
     let out = run(&["nm", "status"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stdout).contains("отсутствует"));
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    name.into()
+}
+
+#[test]
+fn unwritable_manifest_dir_fails_only_that_browser() {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    let mut layout = data_dir_layout(tmp.path(), &data);
+    // Present, but its manifest directory cannot be created: a file is in the way.
+    let blocked = tmp.path().join("config").join("blocked");
+    fs::create_dir_all(&blocked).unwrap();
+    fs::write(blocked.join("file"), b"").unwrap();
+    layout.manifests.insert(
+        0,
+        ManifestTarget {
+            browser: "Blocked",
+            family: Family::Chromium,
+            dir: blocked.join("file").join("NativeMessagingHosts"),
+            requires: vec![blocked.clone()],
+        },
+    );
+    let src = relay_source(tmp.path(), "relay-src", b"relay");
+    let report = nm::install(&layout, &src, &tmp.path().join("openncalayer"), &data).unwrap();
+    assert!(report.has_errors());
+    assert!(matches!(
+        states(&report, &Item::Manifest { browser: "Blocked" })[..],
+        [State::Invalid(_)]
+    ));
+    for browser in ["Chromium", "Firefox"] {
+        assert_eq!(
+            states(&report, &Item::Manifest { browser }),
+            [&State::Written]
+        );
+    }
+
+    // The CLI: the sandbox's Chromium directory is a file.
+    let root = tmp.path().join("sbx");
+    fs::create_dir_all(root.join("chromium")).unwrap();
+    fs::write(root.join("chromium").join("NativeMessagingHosts"), b"").unwrap();
+    let out = openncalayer(
+        &data,
+        &[
+            "nm".as_ref(),
+            "install".as_ref(),
+            "--relay".as_ref(),
+            src.as_os_str(),
+            "--sandbox".as_ref(),
+            root.as_os_str(),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stdout}\n{stderr}");
+    assert!(stdout.contains("ошибка"), "{stdout}");
+    assert!(stderr.contains("Не все браузеры"), "{stderr}");
+    let sandbox = NmLayout::sandbox(&root);
+    assert!(sandbox.manifest_path(&sandbox.manifests[1]).is_file());
+}
+
+#[test]
+fn install_refuses_non_utf8_paths() {
+    #[cfg(unix)]
+    let name = {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(b"sbx-\xff".to_vec())
+    };
+    #[cfg(windows)]
+    let name = {
+        use std::os::windows::ffi::OsStringExt;
+        // An unpaired surrogate.
+        std::ffi::OsString::from_wide(&[u16::from(b's'), 0xD800])
+    };
+    let tmp = TempDir::new().unwrap();
+    let src = relay_source(tmp.path(), "relay-src", b"relay");
+    let daemon = tmp.path().join("openncalayer");
+    let data = tmp.path().join("data");
+
+    let root = tmp.path().join(&name);
+    let err = nm::install(&NmLayout::sandbox(&root), &src, &daemon, &data).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+    let err = nm::install(
+        &NmLayout::sandbox(&tmp.path().join("sbx")),
+        &src,
+        &daemon,
+        &tmp.path().join(&name),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+    let names: Vec<_> = fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["relay-src"], "nothing is created");
+}
+
+/// A running relay, current or replaced, keeps uninstall from finishing on Windows; the
+/// rest is removed and the user is told to close the browser.
+#[test]
+fn cli_uninstall_with_running_relay_asks_to_close_the_browser() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("sbx");
+    let data = tmp.path().join("data");
+    let layout = NmLayout::sandbox(&root);
+    let this = std::env::current_exe().unwrap();
+    let uninstall = || {
+        openncalayer(
+            &data,
+            &[
+                "nm".as_ref(),
+                "uninstall".as_ref(),
+                "--sandbox".as_ref(),
+                root.as_os_str(),
+            ],
+        )
+    };
+    let manifests_gone = || {
+        layout
+            .manifests
+            .iter()
+            .all(|target| !layout.manifest_path(target).exists())
+    };
+    const HINT: &str = "закройте браузер";
+
+    // The current relay runs.
+    nm::install(&layout, &this, &this, &data).unwrap();
+    let running = run_stand_in(&layout.relay());
+    let out = uninstall();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(manifests_gone());
+    assert!(!layout.relay_config().exists());
+    if cfg!(windows) {
+        assert_eq!(out.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains(HINT), "{stderr}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("занят"));
+        assert!(layout.relay().exists());
+    } else {
+        assert!(out.status.success(), "{stderr}");
+        assert!(!layout.relay().exists());
+    }
+
+    // A replaced relay runs (Windows: renamed to `nmhost.old-*`).
+    let src = relay_source(tmp.path(), "relay-v2", b"relay v2");
+    nm::install(&layout, &src, &this, &data).unwrap();
+    let out = uninstall();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(manifests_gone() && !layout.relay().exists());
+    if cfg!(windows) {
+        assert_eq!(out.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains(HINT), "{stderr}");
+        assert_eq!(old_relays(&layout).len(), 1);
+    } else {
+        assert!(out.status.success(), "{stderr}");
+    }
+
+    stop_stand_in(running);
+    let out = uninstall();
+    assert!(out.status.success());
+    assert!(old_relays(&layout).is_empty());
 }
