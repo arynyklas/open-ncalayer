@@ -1,0 +1,32 @@
+[package]
+name = "oncl-ipc"
+description = "Local IPC between the OpenNCALayer daemon and its native messaging relay: endpoint, framing, peer checks and extension ids"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sha2.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# kernel32/advapi32 only, functions Windows 7 SP1 has.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+base64.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros"] }

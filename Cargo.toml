@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 oncl-basics = { path = "crates/oncl-basics" }
 oncl-gost = { path = "crates/oncl-gost" }
+oncl-ipc = { path = "crates/oncl-ipc" }
 oncl-pki = { path = "crates/oncl-pki" }
 oncl-protocol = { path = "crates/oncl-protocol" }
 oncl-testkit = { path = "crates/oncl-testkit" }
@@ -33,6 +34,7 @@ gost94 = { version = "0.11.0", default-features = false }
 hex-literal = "1.1.0"
 hmac = "0.13.0"
 httparse = "1.10.1"
+libc = "0.2.191"
 log = "0.4.34"
 # Only in xtask (`check-imports`): PE reading only.
 object = { version = "0.40.0", default-features = false, features = ["read_core", "pe", "std"] }
