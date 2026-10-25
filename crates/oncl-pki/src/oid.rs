@@ -71,10 +71,18 @@ pub const ORGANIZATIONAL_UNIT: Oid = Oid::new_unwrap("2.5.4.11");
 pub const CLIENT_AUTH: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.3.2");
 /// id-kp-timeStamping.
 pub const TIME_STAMPING: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.3.8");
+/// id-kp-OCSPSigning.
+pub const OCSP_SIGNING: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.3.9");
 
 // Certificate extensions without an `x509-cert` type.
 /// id-pkix-ocsp-nocheck (RFC 6960 §4.2.2.2.1).
 pub const OCSP_NOCHECK: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1.5");
+
+// OCSP (RFC 6960).
+/// id-ad-ocsp: the OCSP access method of AuthorityInfoAccess.
+pub const AD_OCSP: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1");
+/// id-pkix-ocsp-basic: the `BasicOCSPResponse` response type.
+pub const OCSP_BASIC: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1.1");
 
 // PKCS#12 bags and attributes.
 /// keyBag.

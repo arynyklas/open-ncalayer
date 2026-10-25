@@ -12,7 +12,8 @@ publish.workspace = true
 # PKCS#12 writer (test fixtures, xtask).
 write = []
 # Test helpers: `tsp::MockTsa` (an in-process time-stamping authority),
-# `http::RouteTransport` and `testing::issue_cert`.
+# `ocsp::MockOcsp` (an in-process OCSP responder), `http::RouteTransport` and
+# `testing::issue_cert`.
 testing = []
 
 [dependencies]
@@ -48,4 +49,8 @@ required-features = ["testing"]
 
 [[test]]
 name = "pkix"
+required-features = ["testing"]
+
+[[test]]
+name = "ocsp"
 required-features = ["testing"]

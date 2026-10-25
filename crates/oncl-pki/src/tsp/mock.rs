@@ -158,7 +158,8 @@ impl HttpTransport for MockTsa {
     }
 }
 
-fn text_reply(status: u16, text: &str) -> HttpReply {
+/// A reply of `status` with a `text/plain` body.
+pub(crate) fn text_reply(status: u16, text: &str) -> HttpReply {
     HttpReply {
         status,
         content_type: Some("text/plain".to_owned()),
@@ -167,7 +168,7 @@ fn text_reply(status: u16, text: &str) -> HttpReply {
 }
 
 /// Decodes `%XX` escapes; `None` for a broken one.
-fn percent_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn percent_decode(s: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len());
     let mut bytes = s.bytes();
     while let Some(b) = bytes.next() {

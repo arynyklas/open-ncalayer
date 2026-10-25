@@ -12,9 +12,9 @@
 //!   certificate chain is not checked.
 //! - The token goes into the signer's unsigned attributes as id-aa-timeStampToken.
 
-mod asn1;
+pub(crate) mod asn1;
 #[cfg(feature = "testing")]
-mod mock;
+pub(crate) mod mock;
 
 #[cfg(feature = "testing")]
 pub use mock::{MockTamper, MockTsa};
@@ -27,13 +27,11 @@ use crate::cms::{self, CmsError};
 use crate::http::{HttpError, HttpTransport};
 use crate::info::cert_info;
 use crate::key::SigAlg;
+use crate::ocsp::get_url;
 use crate::oid;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use der::asn1::{AnyRef, ObjectIdentifier, OctetStringRef, UintRef};
 use der::{Decode, Encode};
 use spki::AlgorithmIdentifierRef;
-use std::fmt::Write;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 /// Policy `kz.gov.pki.knca.basics` asks the NCA TSA for.
@@ -385,25 +383,6 @@ pub fn timestamp_signer(
     .map_err(CmsError::from)?)
 }
 
-/// URL of the GET binding of the NCA TSA: `base/` and the base64 of the DER request with
-/// every character but the unreserved ones (RFC 3986) percent-encoded.
-fn get_url(base: &str, request: &[u8]) -> String {
-    let encoded = STANDARD.encode(request);
-    let base = base.strip_suffix('/').unwrap_or(base);
-    let mut url = String::with_capacity(base.len() + 1 + encoded.len() + encoded.len() / 8);
-    url.push_str(base);
-    url.push('/');
-    for b in encoded.bytes() {
-        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-            url.push(char::from(b));
-        } else {
-            // Writing to a `String` cannot fail.
-            let _ = write!(url, "%{b:02X}");
-        }
-    }
-    url
-}
-
 /// Whether a `Content-Type` is `application/timestamp-reply`, ignoring case and parameters.
 fn is_timestamp_reply(content_type: Option<&str>) -> bool {
     content_type
@@ -475,15 +454,16 @@ fn tst_info(der: &[u8]) -> Result<TstInfo, TspError> {
 }
 
 /// An unsigned big-endian number without leading zeros (zero is empty).
-fn unsigned(mut bytes: &[u8]) -> &[u8] {
+pub(crate) fn unsigned(mut bytes: &[u8]) -> &[u8] {
     while let [0, rest @ ..] = bytes {
         bytes = rest;
     }
     bytes
 }
 
-/// genTime: `YYYYMMDDhhmmss[.f…]Z` (RFC 3161 §2.4.2), fractions down to nanoseconds.
-fn gen_time(value: &[u8]) -> Result<OffsetDateTime, TspError> {
+/// genTime: `YYYYMMDDhhmmss[.f…]Z` (RFC 3161 §2.4.2), fractions down to nanoseconds. OCSP
+/// times (RFC 6960) are read with it too.
+pub(crate) fn gen_time(value: &[u8]) -> Result<OffsetDateTime, TspError> {
     let bad = || TspError::Malformed(format!("genTime {:?}", String::from_utf8_lossy(value)));
     let Some((&b'Z', body)) = value.split_last() else {
         return Err(bad());
@@ -524,16 +504,6 @@ mod tests {
             nonce: Some(nonce.to_vec()),
             gen_time: datetime!(2026-03-01 10:00 UTC),
         }
-    }
-
-    #[test]
-    fn get_url_encodes_all_but_unreserved() {
-        // base64 "+/8=" for [0xfb, 0xff].
-        assert_eq!(
-            get_url("http://h/tsp", &[0xfb, 0xff]),
-            "http://h/tsp/%2B%2F8%3D"
-        );
-        assert_eq!(get_url("http://h/", &[0xfb, 0xff]), "http://h/%2B%2F8%3D");
     }
 
     #[test]
