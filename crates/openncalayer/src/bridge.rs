@@ -34,6 +34,9 @@ pub const NM_FRAME_LIMIT: usize = 1_000_000;
 const PROTOCOL_VERSION: u32 = 1;
 /// Frames of a connection waiting for its writer.
 const OUT_QUEUE: usize = 16;
+/// Most live sockets of a connection: the browser's own WebSocket limits, for every tab of
+/// a profile together, with room to spare.
+const MAX_SOCKETS: usize = 4096;
 /// Longest JSON-escaped form of one character inside a string (`\u0001`).
 const MAX_ESCAPED_CHAR: usize = 6;
 
@@ -280,14 +283,17 @@ struct Limits {
     budget: usize,
     /// A socket without a frame for this long is closed.
     idle: Duration,
+    /// Most live sockets of a connection; an `open` over it is answered with `close`.
+    max_sockets: usize,
 }
 
 impl Limits {
-    /// [`MAX_MESSAGE`], a budget of two such messages and [`IDLE_TIMEOUT`].
+    /// [`MAX_MESSAGE`], a budget of two such messages, [`IDLE_TIMEOUT`] and [`MAX_SOCKETS`].
     const DAEMON: Limits = Limits {
         max_message: MAX_MESSAGE,
         budget: 2 * MAX_MESSAGE,
         idle: IDLE_TIMEOUT,
+        max_sockets: MAX_SOCKETS,
     };
 }
 
@@ -395,13 +401,21 @@ async fn relay_frames(
     out.send(hello.to_json()).await.map_err(writer_gone)?;
     let budget = Budget::new(limits.budget);
     let mut sockets: HashMap<u32, Socket> = HashMap::new();
+    // Socket tasks report their sid here when they end, so their entries go at once.
+    let (ended_tx, mut ended) = mpsc::unbounded_channel();
     loop {
-        // Both branches are cancel safe: the frames are read in their own task.
+        // Every branch is cancel safe: the frames are read in their own task. Ended sockets
+        // go first, so they never count against `max_sockets`.
         let frame = tokio::select! {
-            frame = frames.recv() => frame,
+            biased;
+            Some(sid) = ended.recv() => {
+                forget_ended(&mut sockets, sid);
+                continue;
+            }
             written = &mut *writer => {
                 return written.map_err(io::Error::other).flatten();
             }
+            frame = frames.recv() => frame,
         };
         let request = match frame {
             None => return Ok(()),
@@ -410,10 +424,16 @@ async fn relay_frames(
         match request {
             Request::Open { sid, origin } => {
                 let shown = origin.as_deref().unwrap_or("-");
-                // Sockets that the daemon closed may be opened again.
-                sockets.retain(|_, socket| !socket.pieces.is_closed());
-                if sockets.remove(&sid).is_some() {
+                // A socket that the daemon closed may be opened again.
+                if let Some(old) = sockets.remove(&sid)
+                    && !old.pieces.is_closed()
+                {
                     info!(sid, origin = %shown, "socket opened twice; closing it");
+                    send_close(out, sid).await?;
+                    continue;
+                }
+                if sockets.len() >= limits.max_sockets {
+                    warn!(sid, origin = %shown, "too many sockets on the connection; closing the new one");
                     send_close(out, sid).await?;
                     continue;
                 }
@@ -425,14 +445,22 @@ async fn relay_frames(
                     .await
                     .map_err(writer_gone)?;
                 let (pieces, pieces_rx) = mpsc::unbounded_channel();
-                let task = tokio::spawn(socket(
-                    sid,
-                    pieces_rx,
-                    out.clone(),
-                    Arc::clone(registry),
-                    AddInfo { origin },
-                    limits,
-                ));
+                let task = tokio::spawn({
+                    let run = socket(
+                        sid,
+                        pieces_rx,
+                        out.clone(),
+                        Arc::clone(registry),
+                        AddInfo { origin },
+                        limits,
+                    );
+                    let ended = ended_tx.clone();
+                    async move {
+                        run.await;
+                        // The connection may be gone already.
+                        let _ = ended.send(sid);
+                    }
+                });
                 sockets.insert(
                     sid,
                     Socket {
@@ -480,6 +508,17 @@ async fn send_close(out: &mpsc::Sender<String>, sid: u32) -> io::Result<()> {
     out.send(Outbound::Close { sid }.to_json())
         .await
         .map_err(writer_gone)
+}
+
+/// Drops the entry of `sid` once its task has ended: the task drops its queue first, so an
+/// entry with an open queue belongs to a socket opened again under the same sid.
+fn forget_ended(sockets: &mut HashMap<u32, Socket>, sid: u32) {
+    if sockets
+        .get(&sid)
+        .is_some_and(|socket| socket.pieces.is_closed())
+    {
+        sockets.remove(&sid);
+    }
 }
 
 /// Reads frames into `frames` until the stream ends (the channel closes) or fails (the error
@@ -580,7 +619,7 @@ async fn socket(
     drop(message_held);
     // The `close` is queued while `pieces` is still open: until then the connection keeps
     // the socket (pieces for it are queued and dropped with `pieces`). Were `pieces` closed
-    // first, a frame for this sid or any `open` could drop the socket and abort this task
+    // first, a frame or an `open` for this sid could drop the socket and abort this task
     // while it waits for room in a full queue, and the `close` would be lost. The
     // connection may be gone already: nothing to tell then.
     let _ = out.send(Outbound::Close { sid }.to_json()).await;
@@ -703,7 +742,38 @@ mod tests {
         max_message: 100,
         budget: 150 + 2 * PIECE_OVERHEAD,
         idle: Duration::from_secs(600),
+        max_sockets: 3,
     };
+
+    #[tokio::test]
+    async fn open_over_the_socket_cap_is_closed_freed_slots_are_reused() {
+        let mut relay = Relay::start(Registry::default(), SMALL).await;
+        for sid in 1..=3 {
+            relay.open(sid).await;
+        }
+        // Over the cap: refused, the open sockets go on.
+        relay
+            .send(serde_json::json!({"t": "open", "sid": 4, "origin": "https://t.test"}))
+            .await;
+        assert_eq!(relay.next().await, r#"{"t":"close","sid":4}"#);
+        relay.heartbeat(1).await;
+        // A socket closed by the extension frees its slot.
+        relay
+            .send(serde_json::json!({"t": "close", "sid": 1}))
+            .await;
+        relay.open(4).await;
+        // So does one the daemon closed: its entry goes without a frame for it.
+        relay.piece(2, "nope", false).await;
+        assert_eq!(relay.next().await, r#"{"t":"close","sid":2}"#);
+        relay.open(5).await;
+        relay
+            .send(serde_json::json!({"t": "open", "sid": 6, "origin": "https://t.test"}))
+            .await;
+        assert_eq!(relay.next().await, r#"{"t":"close","sid":6}"#);
+        relay.heartbeat(3).await;
+        relay.heartbeat(4).await;
+        relay.heartbeat(5).await;
+    }
 
     /// A request of exactly `len` bytes for a module that does not exist.
     fn unknown_module_request(len: usize) -> String {

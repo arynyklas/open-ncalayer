@@ -1,8 +1,9 @@
 // OpenNCALayer background (Chromium MV3 service worker, Firefox MV2 background page).
 //
 // Owns one native messaging port to the relay (`nmhost`), opened on first need and shared by
-// every bridge. Maps each bridge's local sids to global sids (1, 2, …, never reused) and stamps
-// `open` with the origin the browser reports for the bridge's frame; the page never chooses it.
+// every bridge. Maps each bridge's local sids to global sids (1, 2, … per native session, never
+// reused while live) and stamps `open` with the origin the browser reports for the bridge's
+// frame; the page never chooses it. A tab holds at most `MAX_TAB_SOCKETS` live sockets.
 // When the relay or the daemon is unavailable, sockets the daemon has not accepted yet get
 // `fallback` (the page's own WebSocket takes over) and accepted ones get `close`.
 if (typeof importScripts === 'function') importScripts('host.js');
@@ -13,6 +14,10 @@ if (typeof importScripts === 'function') importScripts('host.js');
   const PORT_NAME = 'oncl';
   // How long a failed connection to the relay/daemon answers `fallback` without retrying.
   const FAILURE_MEMORY_MS = 2000;
+  // Live sockets of one tab, across its frames; browsers cap a page's own WebSockets similarly.
+  const MAX_TAB_SOCKETS = 256;
+  // Global sids are u32 values above 0, as the daemon expects.
+  const MAX_SID = 0xffffffff;
   // Chromium: the page shim is registered at run time (a static MAIN-world content script needs
   // Chrome 111; `registerContentScripts` with `world` works from 109).
   const SHIM_SCRIPT = {
@@ -81,10 +86,10 @@ if (typeof importScripts === 'function') importScripts('host.js');
 
   function createBackground(chrome, hostName) {
     const runtime = chrome.runtime;
-    let native = null; // { port, relay, hello } of the live native port
+    let native = null; // { port, relay, hello, nextSid } of the live native session
     let failedAt = -Infinity;
-    let nextSid = 1;
     const sockets = new Map(); // global sid → { bridge, sid (local), accepted }
+    const tabs = new Map(); // tab id → Set of the tab's bridges
     let probeWaiters = []; // bridges waiting for the relay frame, one entry per probe
 
     // --- Native side ----------------------------------------------------------------------
@@ -100,7 +105,8 @@ if (typeof importScripts === 'function') importScripts('host.js');
         failedAt = Date.now();
         return null;
       }
-      const session = { port, relay: false, hello: false };
+      // Global sids need only be unique within a session.
+      const session = { port, relay: false, hello: false, nextSid: 1 };
       native = session;
       port.onMessage.addListener((frame) => fromNative(session, frame));
       port.onDisconnect.addListener(() => {
@@ -109,6 +115,14 @@ if (typeof importScripts === 'function') importScripts('host.js');
         endNative(session);
       });
       return session;
+    }
+
+    /** A free global sid of `session`: counts up within u32, skipping live sids. */
+    function allocateSid(session) {
+      let sid = session.nextSid;
+      while (sockets.has(sid)) sid = sid === MAX_SID ? 1 : sid + 1;
+      session.nextSid = sid === MAX_SID ? 1 : sid + 1;
+      return sid;
     }
 
     function toNative(frame) {
@@ -195,6 +209,13 @@ if (typeof importScripts === 'function') importScripts('host.js');
       toNative({ t: 'close', sid: global });
     }
 
+    /** Live sockets of the tab `bridge` belongs to. */
+    function tabSockets(bridge) {
+      let live = 0;
+      for (const member of bridge.tab) live += member.sids.size;
+      return live;
+    }
+
     function fromBridge(bridge, frame) {
       if (frame === null || typeof frame !== 'object') return;
       switch (frame.t) {
@@ -208,12 +229,17 @@ if (typeof importScripts === 'function') importScripts('host.js');
             bridge.post({ t: 'close', sid: frame.sid });
             return;
           }
+          if (tabSockets(bridge) >= MAX_TAB_SOCKETS) {
+            // Refused like a failed connection; nothing reaches the daemon.
+            bridge.post({ t: 'close', sid: frame.sid });
+            return;
+          }
           const session = connectNative();
           if (!session) {
             bridge.post({ t: 'fallback', sid: frame.sid });
             return;
           }
-          const sid = nextSid++;
+          const sid = allocateSid(session);
           bridge.sids.set(frame.sid, sid);
           sockets.set(sid, { bridge, sid: frame.sid, accepted: false });
           // `origin` from the browser; whatever the frame carried is ignored.
@@ -261,12 +287,23 @@ if (typeof importScripts === 'function') importScripts('host.js');
           }
         },
       };
+      // Frames of one tab share its socket cap; a port without a tab is a tab of its own.
+      const tabId = port.sender?.tab?.id;
+      if (tabId === undefined) {
+        bridge.tab = new Set([bridge]);
+      } else {
+        if (!tabs.has(tabId)) tabs.set(tabId, new Set());
+        bridge.tab = tabs.get(tabId);
+        bridge.tab.add(bridge);
+      }
       port.onMessage.addListener((frame) => fromBridge(bridge, frame));
       port.onDisconnect.addListener(() => {
         void runtime.lastError; // read, so it is not reported as unchecked
         bridge.connected = false;
         for (const sid of [...bridge.sids.keys()]) closeLocal(bridge, sid);
         probeWaiters = probeWaiters.filter((waiter) => waiter !== bridge);
+        bridge.tab.delete(bridge);
+        if (tabId !== undefined && bridge.tab.size === 0) tabs.delete(tabId);
       });
     });
 

@@ -128,10 +128,11 @@ test('relay error before open → fallback; after open → close; next open reco
   a.deliver({ t: 'open', sid: 3, url: URL_13579 });
   assert.equal(env.natives.length, 2);
   const second = env.natives[1];
-  assert.deepEqual(second.posted, [{ t: 'open', sid: 3, origin: SITE.origin, url: URL_13579 }]);
+  // Global sids start over with every native session.
+  assert.deepEqual(second.posted, [{ t: 'open', sid: 1, origin: SITE.origin, url: URL_13579 }]);
   second.deliver({ t: 'relay', v: 1, version: '0.1.0' });
   second.deliver({ t: 'hello', v: 1, version: '0.1.0', compat: '1.4' });
-  second.deliver({ t: 'open', sid: 3 });
+  second.deliver({ t: 'open', sid: 1 });
   a.deliver({ t: 'open', sid: 4, url: URL_13579 });
   // The browser drops the native port (relay crashed) without an `error` frame.
   second.drop(env.runtime, 'Native host has exited.');
@@ -144,7 +145,7 @@ test('relay error before open → fallback; after open → close; next open reco
   assert.equal(second.posted.length, 2);
   a.deliver({ t: 'open', sid: 5, url: URL_13579 });
   assert.equal(env.natives.length, 3);
-  assert.equal(env.natives[2].posted[0].sid, 5);
+  assert.deepEqual(env.natives[2].posted, [{ t: 'open', sid: 1, origin: SITE.origin, url: URL_13579 }]);
 });
 
 test('probe ok on relay frame; negative result cached 2 s', (t) => {
@@ -215,6 +216,46 @@ test('closing one bridge port closes only its sids', () => {
   native.deliver({ t: 'relay', v: 1, version: '0.1.0' });
   assert.deepEqual(native.posted.at(-1), { t: 'close', sid: 3 });
   assert.equal(received(b).length, 2);
+});
+
+test('a tab holds at most 256 live sockets across its frames; over the cap → close, nothing to native', () => {
+  const env = setup();
+  const top = env.connectBridge({ ...SITE, tab: { id: 7 } });
+  const frame = env.connectBridge({ ...OTHER, tab: { id: 7 } });
+  for (let sid = 1; sid <= 200; sid++) top.deliver({ t: 'open', sid, url: URL_13579 });
+  for (let sid = 1; sid <= 56; sid++) frame.deliver({ t: 'open', sid, url: URL_13579 });
+  const native = env.natives[0];
+  assert.equal(native.posted.length, 256);
+
+  frame.deliver({ t: 'open', sid: 57, url: URL_13579 });
+  top.deliver({ t: 'open', sid: 201, url: URL_13579 });
+  assert.deepEqual(received(frame), [{ t: 'close', sid: 57 }]);
+  assert.deepEqual(received(top), [{ t: 'close', sid: 201 }]);
+  assert.equal(native.posted.length, 256, 'refused opens never reach the daemon');
+  assert.equal(env.natives.length, 1);
+
+  // Another tab has its own cap.
+  const other = env.connectBridge({ ...OTHER, tab: { id: 8 } });
+  other.deliver({ t: 'open', sid: 1, url: URL_13579 });
+  assert.deepEqual(native.posted.at(-1), { t: 'open', sid: 257, origin: OTHER.origin, url: URL_13579 });
+
+  // A socket closed by the page or by the daemon frees a slot of its tab.
+  top.deliver({ t: 'close', sid: 1 });
+  frame.deliver({ t: 'open', sid: 57, url: URL_13579 });
+  assert.deepEqual(native.posted.slice(-2), [
+    { t: 'close', sid: 1 },
+    { t: 'open', sid: 258, origin: OTHER.origin, url: URL_13579 },
+  ]);
+  native.deliver({ t: 'close', sid: 2 });
+  top.deliver({ t: 'open', sid: 201, url: URL_13579 });
+  assert.deepEqual(native.posted.at(-1), { t: 'open', sid: 259, origin: SITE.origin, url: URL_13579 });
+
+  // A closed frame's sockets leave the tab.
+  frame.drop(env.runtime);
+  for (let sid = 202; sid <= 258; sid++) top.deliver({ t: 'open', sid, url: URL_13579 });
+  assert.deepEqual(received(top).slice(1), [{ t: 'close', sid: 2 }]);
+  top.deliver({ t: 'open', sid: 259, url: URL_13579 });
+  assert.deepEqual(received(top).at(-1), { t: 'close', sid: 259 });
 });
 
 test('registers the MAIN-world shim at install and startup, once', async () => {

@@ -69,7 +69,7 @@ Exit codes of `run`:
 - 3 — the port is taken, for example by the original NCALayer;
 - 4 — OpenNCALayer with the same data directory is already running in this session.
 
-With `--allow-no-wss` (how the extension's relay starts the daemon) codes 2 and 3 do not occur: the daemon logs a warning and serves only the extension.
+With `--allow-no-wss` (how the extension's relay starts the daemon) no wss startup failure (codes 2, 3 and 1) stops the daemon: it logs a warning and serves only the extension.
 
 The original and OpenNCALayer cannot both serve `wss` at the same time: both need port 13579. The extension does not need the port.
 
@@ -106,10 +106,10 @@ Installation:
 
 Good to know:
 - `nm install` resolves the data directory like `run` does, honouring `ONCL_DATA_DIR`. After moving the `openncalayer` binary or changing the data directory, run `nm install` again.
-- A repeated `nm install` replaces the relay by renaming: relays the browser is running keep working with the old file. Old `nmhost.old-*` files are removed by the next `nm install`. `nm uninstall` cannot delete a relay the browser is holding: close the browser and run the command again.
+- A repeated `nm install` replaces the relay by renaming: relays the browser is running keep working with the old file. Old `nmhost.old-*` files are removed by the next `nm install`. On Windows `nm uninstall` cannot delete a relay the browser is holding (the relay line says «занят запущенным процессом», exit code 1): close the browser and run the command again. On macOS and Linux the file is removed at once.
 - A daemon started by the relay runs until the session ends. If TLS is set up and port 13579 is free, the same daemon serves `wss` too; otherwise the log has a warning and the daemon serves only the extension.
 - Through the extension, the site origin that modules see comes from the browser, not from the page.
-- If the host is not installed or the daemon does not start, the extension gives the page its own `WebSocket`, i.e. the original NCALayer if it is running. While the host is installed, sites go to OpenNCALayer even when the original is running: to return to the original, run `nm uninstall` or disable the extension.
+- If the host is not installed or the daemon does not start, the extension gives the page its own `WebSocket`, i.e. the original NCALayer if it is running. While the host is installed, sites go to OpenNCALayer even when the original is running. To return to the original, run `nm uninstall` and restart the browser (or stop the daemon), or disable the extension: right after `nm uninstall` the browser keeps using the relay and daemon already running.
 
 Linux, Firefox from snap and Flatpak:
 - `nm install` detects Firefox by `~/.mozilla` or `~/.config/mozilla`. Snap Firefox keeps its profile under `~/snap/firefox/`, so the command may skip Firefox ("пропущен"). Then create the directory with `mkdir -p ~/.mozilla` and run `nm install` again: the manifest goes to `~/.mozilla/native-messaging-hosts/`, where snap Firefox 135 or later reads it through xdg-desktop-portal.
@@ -122,6 +122,7 @@ Linux, Firefox from snap and Flatpak:
 - Chrome 109 (the last Chrome for Windows 7) is the declared minimum but has not been tested.
 - Safari is not supported.
 - Sockets a site opens from a Web Worker are not replaced: they still need `wss` and the CA.
+- Through the extension, one tab holds at most 256 open sockets and all tabs of a profile together at most 4096 (the daemon's limit). A socket over the limit is closed at once with code 1006, like a refused connection.
 - The native messaging paths of Yandex Browser and Opera are untested. On Windows they read Chrome's registry key; on Linux the Yandex Browser manifest goes to `~/.config/yandex-browser/NativeMessagingHosts/`.
 
 ## Development
