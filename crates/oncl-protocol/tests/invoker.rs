@@ -131,6 +131,8 @@ fn error_field_order_is_exact() {
     );
 }
 
+/// `CommonInvoker` reads `obj.optInt("apiVersion", 2)`: null and non-numbers default to 2,
+/// numbers and numeric strings truncate toward zero.
 #[test]
 fn api_version() {
     assert_eq!(
@@ -141,7 +143,28 @@ fn api_version() {
         run(r#"{"method":"ok"}"#),
         r#"{"status":true,"body":{"result":1}}"#
     );
-    for bad in [r#""3""#, "1", "2.5", "null", "true", "[]"] {
+    for good in [
+        "null",
+        r#""2""#,
+        "2.0",
+        "2.9",
+        r#""2.9""#,
+        r#""abc""#,
+        r#"" 2""#,
+        r#""02""#,
+        r#""""#,
+        "true",
+        "[]",
+        "{}",
+        "4294967298",
+    ] {
+        assert_eq!(
+            run(&format!(r#"{{"method":"ok","apiVersion":{good}}}"#)),
+            r#"{"status":true,"body":{"result":1}}"#,
+            "apiVersion {good}"
+        );
+    }
+    for bad in ["1", "3", r#""3""#, "-0.5", "1.99", "3.1", r#""1e1""#, "-2"] {
         let reply = run(&format!(r#"{{"method":"ok","apiVersion":{bad}}}"#));
         assert_json_eq(
             reply,
