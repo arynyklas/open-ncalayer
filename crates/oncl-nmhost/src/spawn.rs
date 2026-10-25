@@ -4,12 +4,13 @@ use std::io;
 use std::path::Path;
 use std::process::Stdio;
 
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 
 /// Starts `<daemon> run --allow-no-wss` with the relay's environment plus `ONCL_DATA_DIR`,
 /// detached: the daemon outlives the relay and the browser, has no console, and holds none
-/// of the browser's pipes (its stdio is the null device). It is not waited for.
-pub fn daemon(daemon: &Path, data_dir: &Path) -> io::Result<()> {
+/// of the browser's pipes (its stdio is the null device). The child is only watched for an
+/// early exit, never killed.
+pub fn daemon(daemon: &Path, data_dir: &Path) -> io::Result<Child> {
     let mut command = Command::new(daemon);
     command
         .args(["run", "--allow-no-wss"])
@@ -21,60 +22,26 @@ pub fn daemon(daemon: &Path, data_dir: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn start(command: &mut Command) -> io::Result<()> {
+fn start(command: &mut Command) -> io::Result<Child> {
     // Out of the browser's process group: signals to the browser's group miss the daemon.
-    command.process_group(0).spawn().map(drop)
+    command.process_group(0).spawn()
 }
 
 #[cfg(windows)]
-fn start(command: &mut Command) -> io::Result<()> {
-    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
-    use windows_sys::Win32::System::Threading::{
-        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
+fn start(command: &mut Command) -> io::Result<Child> {
+    use oncl_ipc::process::{
+        CREATE_BREAKAWAY_FROM_JOB, DETACHED_CREATION_FLAGS, breakaway_refused,
+        prepare_detached_spawn,
     };
 
-    keep_stdio_from_children();
-    let detached = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
-    // Out of the browser's job too, so that closing the browser does not kill the daemon.
+    if let Err(e) = prepare_detached_spawn() {
+        eprintln!("nmhost: the daemon may inherit the browser's pipes: {e}");
+    }
     match command
-        .creation_flags(detached | CREATE_BREAKAWAY_FROM_JOB)
+        .creation_flags(DETACHED_CREATION_FLAGS | CREATE_BREAKAWAY_FROM_JOB)
         .spawn()
     {
-        Ok(_) => Ok(()),
-        // The job forbids breakaway.
-        Err(e) if e.raw_os_error() == i32::try_from(ERROR_ACCESS_DENIED).ok() => {
-            command.creation_flags(detached).spawn().map(drop)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Makes the relay's standard handles non-inheritable.
-///
-/// Children inherit every inheritable handle of the process (std passes `bInheritHandles`),
-/// not only the stdio set up for them, and the browser hands the relay inheritable pipe
-/// ends. A daemon holding them would keep the browser's pipes open after the relay exits.
-#[cfg(windows)]
-fn keep_stdio_from_children() {
-    use windows_sys::Win32::Foundation::{
-        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-    };
-    use windows_sys::Win32::System::Console::{
-        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-    };
-
-    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-        // SAFETY: plain call; the result is checked before use.
-        let handle = unsafe { GetStdHandle(id) };
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            continue;
-        }
-        // SAFETY: `handle` is a standard handle of this process, open for its lifetime.
-        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
-            eprintln!(
-                "nmhost: cannot keep a standard handle from the daemon: {}",
-                io::Error::last_os_error()
-            );
-        }
+        Err(e) if breakaway_refused(&e) => command.creation_flags(DETACHED_CREATION_FLAGS).spawn(),
+        spawned => spawned,
     }
 }

@@ -27,6 +27,9 @@ const CONFIG_FILE: &str = "nmhost.json";
 const RETRY_EVERY: Duration = Duration::from_millis(200);
 /// How long a daemon the relay has started gets to open its endpoint.
 const START_PATIENCE: Duration = Duration::from_secs(15);
+/// Exit code of a daemon that found the endpoint taken (`openncalayer`'s
+/// `EXIT_ALREADY_RUNNING`): another daemon is starting, the relay keeps waiting for it.
+const EXIT_ALREADY_RUNNING: i32 = 4;
 
 /// `nmhost.json`, written next to the relay by `openncalayer nm install`.
 #[derive(Debug, Deserialize)]
@@ -164,28 +167,45 @@ async fn reach_daemon(config: &RelayConfig) -> Result<IpcStream, Failure> {
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {}
         Err(e) => return Err(refused(&ep, &e)),
     }
-    spawn::daemon(&config.daemon, &config.data_dir).map_err(|e| {
-        Failure::new(
-            Code::DaemonUnavailable,
-            format!("cannot start {}: {e}", config.daemon.display()),
-        )
-    })?;
+    let mut started = Some(
+        spawn::daemon(&config.daemon, &config.data_dir).map_err(|e| {
+            Failure::new(
+                Code::DaemonUnavailable,
+                format!("cannot start {}: {e}", config.daemon.display()),
+            )
+        })?,
+    );
     let deadline = Instant::now() + START_PATIENCE;
     loop {
         sleep(RETRY_EVERY).await;
-        match connect(&ep).await {
+        let e = match connect(&ep).await {
             Ok(stream) => return Ok(stream),
             Err(e) if e.kind() == ErrorKind::PermissionDenied => return Err(refused(&ep, &e)),
-            Err(e) if Instant::now() >= deadline => {
-                return Err(Failure::new(
-                    Code::DaemonUnavailable,
-                    format!(
-                        "the daemon did not open {ep} within {} s: {e}",
-                        START_PATIENCE.as_secs()
-                    ),
-                ));
+            Err(e) => e,
+        };
+        // A daemon that died at startup is not waited for; one that found another daemon
+        // starting (exit 4) leaves the wait to that one.
+        if let Some(child) = &mut started {
+            match child.try_wait() {
+                Ok(None) => {}
+                Ok(Some(status)) if status.code() == Some(EXIT_ALREADY_RUNNING) => started = None,
+                Ok(Some(status)) => {
+                    return Err(Failure::new(
+                        Code::DaemonUnavailable,
+                        format!("{} exited at startup: {status}", config.daemon.display()),
+                    ));
+                }
+                Err(_) => started = None,
             }
-            Err(_) => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(Failure::new(
+                Code::DaemonUnavailable,
+                format!(
+                    "the daemon did not open {ep} within {} s: {e}",
+                    START_PATIENCE.as_secs()
+                ),
+            ));
         }
     }
 }

@@ -25,7 +25,8 @@ use tokio::time::timeout;
 const PATIENCE: Duration = Duration::from_secs(60);
 
 /// Set on the relay, which passes its environment on to the daemon it starts: makes this
-/// executable a fake daemon. `1`: serve; `exit`: exit 2 without listening.
+/// executable a fake daemon. `1`: serve; `mute`: live [`fake_daemon::MUTE`] without
+/// listening, then exit 0; `exit:<code>`: exit with `code` at once, without listening.
 const FAKE_DAEMON_VAR: &str = "ONCL_FAKE_DAEMON";
 
 /// The first frame of every connection to the daemon inside the test.
@@ -261,12 +262,13 @@ async fn read_ipc(stream: &mut IpcStream) -> Option<Vec<u8>> {
         .expect("frame from the relay")
 }
 
-/// A relay of a fresh sandbox connected to the daemon inside the test, past the `relay` and
-/// `hello` frames.
-async fn connected() -> (Sandbox, IpcListener, Relay, IpcStream) {
+/// A relay of a fresh sandbox started with the browser arguments `args`, connected to the
+/// daemon inside the test; checks that the relay's first frames are its `relay` frame and the
+/// daemon's `hello`.
+async fn connected(args: &[&str]) -> (Sandbox, IpcListener, Relay, IpcStream) {
     let sandbox = Sandbox::new();
     let mut listener = sandbox.listen().await;
-    let mut relay = sandbox.relay();
+    let mut relay = sandbox.relay_with(args, &[]);
     assert_eq!(
         relay.recv().await.as_deref(),
         Some(relay_frame().as_bytes())
@@ -334,34 +336,18 @@ fn this_exe() -> PathBuf {
 
 #[tokio::test]
 async fn relay_frame_comes_first() {
-    let sandbox = Sandbox::new();
-    let mut listener = sandbox.listen().await;
-    let mut relay = sandbox.relay();
-    assert_eq!(
-        relay.recv().await.as_deref(),
-        Some(relay_frame().as_bytes())
-    );
-    let _daemon = accept(&mut listener).await;
-    assert_eq!(relay.recv().await.as_deref(), Some(HELLO.as_bytes()));
+    let (_sandbox, _listener, mut relay, _daemon) = connected(&[]).await;
     relay.close_stdin();
     assert_eq!(relay.finish().await.0, 0);
 }
 
 #[tokio::test]
 async fn browser_arguments_are_logged_and_ignored() {
-    let sandbox = Sandbox::new();
-    let mut listener = sandbox.listen().await;
     let args = [
         "chrome-extension://abcdefghijklmnopabcdefghijklmnop/",
         "--parent-window=0",
     ];
-    let mut relay = sandbox.relay_with(&args, &[]);
-    assert_eq!(
-        relay.recv().await.as_deref(),
-        Some(relay_frame().as_bytes())
-    );
-    let _daemon = accept(&mut listener).await;
-    assert_eq!(relay.recv().await.as_deref(), Some(HELLO.as_bytes()));
+    let (_sandbox, _listener, mut relay, _daemon) = connected(&args).await;
     relay.close_stdin();
     let (code, stderr) = relay.finish().await;
     assert_eq!(code, 0);
@@ -372,7 +358,7 @@ async fn browser_arguments_are_logged_and_ignored() {
 
 #[tokio::test]
 async fn frames_pass_through_both_ways_unchanged() {
-    let (_sandbox, _listener, mut relay, mut daemon) = connected().await;
+    let (_sandbox, _listener, mut relay, mut daemon) = connected(&[]).await;
     for len in [0, 1024, 900_000] {
         let payload = pattern(len);
         let ((), got) = tokio::join!(relay.send(&payload), read_ipc(&mut daemon));
@@ -400,7 +386,7 @@ async fn frames_pass_through_both_ways_unchanged() {
 
 #[tokio::test]
 async fn stdin_eof_exits_0() {
-    let (_sandbox, _listener, mut relay, mut daemon) = connected().await;
+    let (_sandbox, _listener, mut relay, mut daemon) = connected(&[]).await;
     relay.close_stdin();
     assert_eq!(relay.recv().await, None, "no error frame");
     assert_eq!(relay.finish().await.0, 0);
@@ -413,7 +399,7 @@ async fn stdin_eof_exits_0() {
 
 #[tokio::test]
 async fn daemon_eof_sends_daemon_gone() {
-    let (_sandbox, _listener, mut relay, daemon) = connected().await;
+    let (_sandbox, _listener, mut relay, daemon) = connected(&[]).await;
     drop(daemon);
     let frame = relay.recv_json().await;
     assert_eq!(error_code(&frame), "DAEMON_GONE");
@@ -423,7 +409,7 @@ async fn daemon_eof_sends_daemon_gone() {
 
 #[tokio::test]
 async fn oversized_daemon_frame_sends_protocol_error() {
-    let (_sandbox, _listener, mut relay, mut daemon) = connected().await;
+    let (_sandbox, _listener, mut relay, mut daemon) = connected(&[]).await;
     let at_limit = pattern(NM_OUT_LIMIT);
     let (sent, got) = tokio::join!(write_frame(&mut daemon, &at_limit), relay.recv());
     sent.expect("daemon writes");
@@ -438,8 +424,24 @@ async fn oversized_daemon_frame_sends_protocol_error() {
 }
 
 #[tokio::test]
+async fn daemon_header_over_max_frame_sends_protocol_error() {
+    let (_sandbox, _listener, mut relay, mut daemon) = connected(&[]).await;
+    // Only the header: the relay must refuse the length without waiting for the payload.
+    let len = u32::try_from(MAX_FRAME + 1).expect("fits u32");
+    daemon
+        .write_all(&len.to_le_bytes())
+        .await
+        .expect("daemon writes");
+    daemon.flush().await.expect("daemon flushes");
+    let frame = relay.recv_json().await;
+    assert_eq!(error_code(&frame), "PROTOCOL");
+    assert_eq!(relay.recv().await, None);
+    assert_eq!(relay.finish().await.0, 1);
+}
+
+#[tokio::test]
 async fn oversized_browser_frame_sends_protocol_error() {
-    let (_sandbox, _listener, mut relay, _daemon) = connected().await;
+    let (_sandbox, _listener, mut relay, _daemon) = connected(&[]).await;
     let len = u32::try_from(MAX_FRAME + 1).expect("fits u32");
     relay.send_raw(&len.to_ne_bytes()).await;
     let frame = relay.recv_json().await;
@@ -500,6 +502,12 @@ async fn missing_daemon_is_spawned_then_connected() {
     let start: Value = serde_json::from_str(&marks["start"]).expect("start record");
     assert_eq!(start["args"], json!(["run", "--allow-no-wss"]));
     assert_eq!(start["data_dir"], json!(sandbox.data));
+    // Detached: the daemon leads a process group of its own.
+    #[cfg(target_os = "linux")]
+    {
+        let pid = seen.keys().next().expect("one daemon");
+        assert_eq!(start["pgrp"], json!(pid.parse::<u32>().expect("pid")));
+    }
 
     relay.close_stdin();
     // The daemon holds none of the browser's pipes: the relay's output ends with the relay,
@@ -516,37 +524,56 @@ async fn missing_daemon_is_spawned_then_connected() {
 
 #[tokio::test]
 async fn unspawnable_daemon_gives_daemon_unavailable_within_16_s() {
-    /// Runs a relay of `sandbox` to its `DAEMON_UNAVAILABLE`; the time that took.
-    async fn unavailable(sandbox: &Sandbox, envs: &[(&str, &str)]) -> Duration {
-        let started = Instant::now();
+    /// Runs a relay of `sandbox` to its `DAEMON_UNAVAILABLE`: the time from its `relay` frame
+    /// to the error, and the error message.
+    async fn unavailable(sandbox: &Sandbox, envs: &[(&str, &str)]) -> (Duration, String) {
         let mut relay = sandbox.relay_with(&[], envs);
         assert_eq!(
             relay.recv().await.as_deref(),
             Some(relay_frame().as_bytes())
         );
+        let started = Instant::now();
         let frame = relay.recv_json().await;
         let took = started.elapsed();
         assert_eq!(error_code(&frame), "DAEMON_UNAVAILABLE", "{frame}");
         assert_eq!(relay.recv().await, None);
         assert_eq!(relay.finish().await.0, 1);
-        took
+        (
+            took,
+            frame["message"].as_str().unwrap_or_default().to_owned(),
+        )
     }
 
+    let at_once = Duration::from_secs(5);
+    let full_wait = Duration::from_secs(15)..Duration::from_secs(16);
     // No daemon executable: nothing to wait for.
     let missing = Sandbox::new();
+    // A daemon that exits at startup: not waited for, its exit status is reported.
+    let crashing = Sandbox::with_daemon(&this_exe());
     // A daemon that starts but never listens gets 15 s.
     let mute = Sandbox::with_daemon(&this_exe());
-    let (at_once, waited) = tokio::join!(
+    // A daemon that exits 4 (another one is starting): the relay waits for that other one.
+    let busy = Sandbox::with_daemon(&this_exe());
+    let (missing_end, crashing_end, mute_end, busy_end) = tokio::join!(
         unavailable(&missing, &[]),
-        unavailable(&mute, &[(FAKE_DAEMON_VAR, "exit")])
+        unavailable(&crashing, &[(FAKE_DAEMON_VAR, "exit:2")]),
+        unavailable(&mute, &[(FAKE_DAEMON_VAR, "mute")]),
+        unavailable(&busy, &[(FAKE_DAEMON_VAR, "exit:4")]),
     );
-    assert!(at_once < Duration::from_secs(15), "{at_once:?}");
+    assert!(missing_end.0 < at_once, "{missing_end:?}");
+    assert!(crashing_end.0 < at_once, "{crashing_end:?}");
     assert!(
-        waited >= Duration::from_secs(15) && waited < Duration::from_secs(16),
-        "{waited:?}"
+        crashing_end.1.contains("exited at startup") && crashing_end.1.ends_with('2'),
+        "{crashing_end:?}"
     );
-    let records = wait_for_records(&mute.data, all_exited).await;
-    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(full_wait.contains(&mute_end.0), "{mute_end:?}");
+    assert!(full_wait.contains(&busy_end.0), "{busy_end:?}");
+    for (sandbox, code) in [(&crashing, "2"), (&mute, "0"), (&busy, "4")] {
+        let seen = wait_for_records(&sandbox.data, all_exited).await;
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        let marks = seen.values().next().expect("one daemon");
+        assert_eq!(marks["exited"], code, "{seen:?}");
+    }
 }
 
 #[tokio::test]
@@ -613,6 +640,8 @@ mod fake_daemon {
     /// Lifetime after the last client left: lets a test see that the relay's output ends
     /// while the daemon it started still runs.
     const LINGER: Duration = Duration::from_secs(3);
+    /// Lifetime of a daemon that never listens: beyond the relay's 15 s of waiting.
+    pub const MUTE: Duration = Duration::from_secs(18);
 
     // libtest rejects the daemon's command line (`run --allow-no-wss`), so the fake daemon
     // runs before `main`, from the platform's list of initializers, as the `ctor` crate does.
@@ -651,10 +680,14 @@ mod fake_daemon {
         let args: Vec<String> = std::env::args().skip(1).collect();
         mark(
             "start",
-            &json!({"args": args, "data_dir": data}).to_string(),
+            &json!({"args": args, "data_dir": data, "pgrp": process_group()}).to_string(),
         );
-        let code = if mode == "exit" {
-            2
+        let mode = mode.to_string_lossy();
+        let code = if let Some(code) = mode.strip_prefix("exit:") {
+            code.parse().unwrap_or(1)
+        } else if mode == "mute" {
+            std::thread::sleep(MUTE);
+            0
         } else {
             std::thread::sleep(START_DELAY);
             match tokio::runtime::Builder::new_current_thread()
@@ -670,6 +703,17 @@ mod fake_daemon {
         };
         mark("exited", &code.to_string());
         code
+    }
+
+    /// The process group of this process (Linux, from `/proc/self/stat`: the fields after
+    /// the parenthesized command name are state, ppid, pgrp).
+    fn process_group() -> Option<u32> {
+        if !cfg!(target_os = "linux") {
+            return None;
+        }
+        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+        let (_, fields) = stat.rsplit_once(')')?;
+        fields.split_whitespace().nth(2)?.parse().ok()
     }
 
     async fn serve(data: &Path, mark: &dyn Fn(&str, &str)) -> i32 {

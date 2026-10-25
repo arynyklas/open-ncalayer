@@ -7,10 +7,13 @@
 //! - [`read_frame`]/[`write_frame`] frame IPC messages (`u32` little-endian length);
 //!   [`read_nm_frame`]/[`write_nm_frame`] frame the browser's native messaging stdio.
 //! - [`ids`] holds the native messaging host name and the extension ids.
+//! - `process` (Windows only) helps the relay start the daemon detached from the browser.
 
 mod endpoint;
 mod frame;
 pub mod ids;
+#[cfg(windows)]
+pub mod process;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
