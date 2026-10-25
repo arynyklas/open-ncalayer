@@ -24,14 +24,50 @@ if (typeof importScripts === 'function') importScripts('host.js');
     world: 'MAIN',
     persistAcrossSessions: true,
   };
+
+  // <oncl-common> Kept identical in shim.js, bridge.js and background.js (test/common.test.mjs).
+  const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]'];
+  const FIRST_PORT = 13579;
+  const LAST_PORT = 13679;
+  // Longest socket URL the extension carries; longer ones stay with the page's own WebSocket.
+  const MAX_URL_LENGTH = 2048;
+  // Largest `msg` piece towards the daemon (UTF-16 code units): the bridge cuts, the background checks.
+  const PIECE = 8 * 1024 * 1024;
   const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
+  /** A socket id: a positive safe integer. */
   const isSid = (value) => Number.isSafeInteger(value) && value > 0;
 
-  /** The bridges cut well-formed text; a lone surrogate would cost the daemon connection. */
+  /**
+   * `text` with lone surrogates replaced by U+FFFD, as a browser's WebSocket sends it. The
+   * daemon cannot parse JSON with lone surrogates and drops the whole connection on them.
+   */
   function wellFormed(text) {
     return typeof text.toWellFormed === 'function' ? text.toWellFormed() : text.replace(LONE_SURROGATE, '\uFFFD');
   }
+
+  /** `url` (a parsed `URL`) is an NCALayer endpoint with one of `schemes`. */
+  function isNcaLayer(url, schemes) {
+    if (!schemes.includes(url.protocol) || !LOOPBACK.includes(url.hostname)) return false;
+    const port = Number(url.port);
+    return port >= FIRST_PORT && port <= LAST_PORT;
+  }
+
+  /**
+   * The normalized `href` of an NCALayer WebSocket URL of at most `MAX_URL_LENGTH` code units;
+   * `null` for anything else (not a string, too long, lone surrogates, another endpoint).
+   */
+  function socketUrl(text) {
+    if (typeof text !== 'string' || text.length > MAX_URL_LENGTH || wellFormed(text) !== text) return null;
+    let url;
+    try {
+      url = new URL(text);
+    } catch {
+      return null;
+    }
+    return url.href.length <= MAX_URL_LENGTH && isNcaLayer(url, ['ws:', 'wss:']) ? url.href : null;
+  }
+  // </oncl-common>
 
   /** Origin of the frame behind a port, as reported by the browser. */
   function senderOrigin(sender) {
@@ -76,11 +112,15 @@ if (typeof importScripts === 'function') importScripts('host.js');
     }
 
     function toNative(frame) {
-      if (!native) return;
+      const session = native;
+      if (!session) return;
       try {
-        native.port.postMessage(frame);
-      } catch {
-        endNative(native);
+        session.port.postMessage(frame);
+      } catch (error) {
+        console.warn('OpenNCALayer: cannot write to the native host:', error);
+        // Stop the relay too, so the daemon closes this session's sids now.
+        session.port.disconnect();
+        endNative(session);
       }
     }
 
@@ -159,8 +199,15 @@ if (typeof importScripts === 'function') importScripts('host.js');
       if (frame === null || typeof frame !== 'object') return;
       switch (frame.t) {
         case 'open': {
-          if (!isSid(frame.sid) || typeof frame.url !== 'string') return;
+          if (!isSid(frame.sid)) return;
           closeLocal(bridge, frame.sid);
+          // The bridge checks this too; a bad URL reaching the daemon would cost every tab
+          // its connection (lone surrogates: unparsable JSON; huge: over the frame limit).
+          const url = socketUrl(frame.url);
+          if (url === null) {
+            bridge.post({ t: 'close', sid: frame.sid });
+            return;
+          }
           const session = connectNative();
           if (!session) {
             bridge.post({ t: 'fallback', sid: frame.sid });
@@ -170,12 +217,18 @@ if (typeof importScripts === 'function') importScripts('host.js');
           bridge.sids.set(frame.sid, sid);
           sockets.set(sid, { bridge, sid: frame.sid, accepted: false });
           // `origin` from the browser; whatever the frame carried is ignored.
-          toNative({ t: 'open', sid, origin: bridge.origin, url: frame.url });
+          toNative({ t: 'open', sid, origin: bridge.origin, url });
           break;
         }
         case 'msg': {
           const sid = bridge.sids.get(frame.sid);
           if (sid === undefined || typeof frame.data !== 'string') return;
+          if (frame.data.length > PIECE) {
+            // The bridge cuts messages into pieces; an oversized one would exceed the frame limit.
+            closeLocal(bridge, frame.sid);
+            bridge.post({ t: 'close', sid: frame.sid });
+            return;
+          }
           const data = wellFormed(frame.data);
           toNative(frame.more === true ? { t: 'msg', sid, data, more: true } : { t: 'msg', sid, data });
           break;

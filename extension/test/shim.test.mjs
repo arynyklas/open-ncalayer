@@ -44,6 +44,8 @@ test('non-loopback and out-of-range ports use the native WebSocket', () => {
     'ws://10.0.0.1:13579/',
     'wss://127.0.0.1/',
     'https://127.0.0.1:13579/',
+    // Longer than the extension carries.
+    `wss://127.0.0.1:13579/${'a'.repeat(2048)}`,
   ];
   for (const url of passThrough) {
     const ws = new window.WebSocket(url, ['p']);

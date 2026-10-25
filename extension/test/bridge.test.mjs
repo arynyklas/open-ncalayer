@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { contentWindow, loadScript, pageEnd, pageWindow } from './env.mjs';
+import { contentWindow, loadScript, pageEnd, pageWindow, until, withoutToWellFormed } from './env.mjs';
 
 const installBridge = loadScript('bridge.js');
 const installShim = loadScript('shim.js');
@@ -150,4 +150,80 @@ test('bridge port loss closes all page sockets with 1006', () => {
     assert.equal(env.ports.length, 2);
     assert.deepEqual(pageSide.nativeSockets.at(-1).args, [URL_13579, ['p']]);
   });
+});
+
+/** `open` frames a page could forge; none may reach the background. */
+const BAD_URLS = [
+  ['lone surrogate', `${URL_13579}\uD800`],
+  ['oversized', `${URL_13579}${'a'.repeat(4096)}`],
+  ['non-loopback', 'wss://example.com:13579/'],
+  ['port out of range', 'wss://127.0.0.1:13680/'],
+  ['not a WebSocket URL', 'https://127.0.0.1:13579/'],
+  ['not a string', 42],
+  ['missing', undefined],
+];
+
+test('bridge closes forged opens with bad URLs and keeps other sockets working', () => {
+  const env = setup();
+  const port = open(env, 1);
+  port.deliver({ t: 'open', sid: 1 });
+  BAD_URLS.forEach(([, url], i) => env.page.send({ t: 'open', sid: 10 + i, url }));
+  assert.deepEqual(
+    env.page.frames.slice(2),
+    BAD_URLS.map((_, i) => ({ t: 'close', sid: 10 + i })),
+  );
+  env.page.send({ t: 'msg', sid: 10, data: 'to a rejected sid' });
+  assert.deepEqual(port.posted, [{ t: 'open', sid: 1, url: URL_13579 }]);
+
+  // The accepted socket and the port are untouched.
+  env.page.send({ t: 'msg', sid: 1, data: 'still here' });
+  port.deliver({ t: 'msg', sid: 1, data: 'reply' });
+  assert.deepEqual(port.posted.at(-1), { t: 'msg', sid: 1, data: 'still here' });
+  assert.deepEqual(env.page.frames.at(-1), { t: 'msg', sid: 1, data: 'reply' });
+  assert.equal(env.ports.length, 1);
+
+  // A valid URL is forwarded in normalized form.
+  env.page.send({ t: 'open', sid: 2, url: 'WSS://LOCALHOST:13600' });
+  assert.deepEqual(port.posted.at(-1), { t: 'open', sid: 2, url: 'wss://localhost:13600/' });
+  // Reusing a live sid with a bad URL closes that socket at the background too.
+  env.page.send({ t: 'open', sid: 2, url: 'wss://evil.example:13579/' });
+  assert.deepEqual(port.posted.at(-1), { t: 'close', sid: 2 });
+  assert.deepEqual(env.page.frames.at(-1), { t: 'close', sid: 2 });
+});
+
+test('bridge without String.prototype.toWellFormed (Chrome 109–110)', () => {
+  withoutToWellFormed(() => {
+    assert.equal(''.toWellFormed, undefined);
+    const env = setup();
+    const port = open(env, 1);
+    env.page.send({ t: 'msg', sid: 1, data: 'x\uD800y\uDC00z😀\uDBFF' });
+    assert.deepEqual(port.posted.at(-1), { t: 'msg', sid: 1, data: 'x\uFFFDy\uFFFDz😀\uFFFD' });
+    env.page.send({ t: 'open', sid: 2, url: `${URL_13579}\uDC00` });
+    assert.deepEqual(env.page.frames.at(-1), { t: 'close', sid: 2 });
+    assert.equal(port.posted.length, 2);
+  });
+});
+
+test('a probe made by a close handler during port loss gets the new port answer', { timeout: 5000 }, async () => {
+  const document = new EventTarget();
+  const pageSide = pageWindow({ document });
+  const env = contentWindow({ document });
+  installShim(pageSide.window);
+  installBridge(env.window, env.runtime);
+
+  const ws = new pageSide.window.WebSocket(URL_13579);
+  env.ports[0].deliver({ t: 'open', sid: 1 });
+  const stale = pageSide.window.fetch('https://127.0.0.1:13579/');
+  let retry;
+  ws.onclose = () => {
+    retry = pageSide.window.fetch('https://127.0.0.1:13579/');
+  };
+  env.ports[0].drop(env.runtime);
+  assert.equal(await stale, 'native fetch response');
+  assert.equal(env.ports.length, 2);
+  await until(() => env.ports[1].posted.length === 1);
+  assert.deepEqual(env.ports[1].posted, [{ t: 'probe' }]);
+  env.ports[1].deliver({ t: 'probe', ok: true });
+  assert.equal((await retry).status, 200);
+  assert.equal(pageSide.fetchCalls.length, 1);
 });

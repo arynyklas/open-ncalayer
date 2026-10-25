@@ -10,9 +10,6 @@
 
   const TO_EXT = '__oncl_to_ext';
   const TO_PAGE = '__oncl_to_page';
-  const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]'];
-  const FIRST_PORT = 13579;
-  const LAST_PORT = 13679;
   const CONNECTING = 0;
   const OPEN = 1;
   const CLOSING = 2;
@@ -21,12 +18,49 @@
   // RFC 6455 §5.5: a close frame body is at most 125 bytes, 2 of them the code.
   const MAX_CLOSE_REASON = 123;
 
+  // <oncl-common> Kept identical in shim.js, bridge.js and background.js (test/common.test.mjs).
+  const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]'];
+  const FIRST_PORT = 13579;
+  const LAST_PORT = 13679;
+  // Longest socket URL the extension carries; longer ones stay with the page's own WebSocket.
+  const MAX_URL_LENGTH = 2048;
+  // Largest `msg` piece towards the daemon (UTF-16 code units): the bridge cuts, the background checks.
+  const PIECE = 8 * 1024 * 1024;
+  const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+  /** A socket id: a positive safe integer. */
+  const isSid = (value) => Number.isSafeInteger(value) && value > 0;
+
+  /**
+   * `text` with lone surrogates replaced by U+FFFD, as a browser's WebSocket sends it. The
+   * daemon cannot parse JSON with lone surrogates and drops the whole connection on them.
+   */
+  function wellFormed(text) {
+    return typeof text.toWellFormed === 'function' ? text.toWellFormed() : text.replace(LONE_SURROGATE, '\uFFFD');
+  }
+
   /** `url` (a parsed `URL`) is an NCALayer endpoint with one of `schemes`. */
   function isNcaLayer(url, schemes) {
     if (!schemes.includes(url.protocol) || !LOOPBACK.includes(url.hostname)) return false;
     const port = Number(url.port);
     return port >= FIRST_PORT && port <= LAST_PORT;
   }
+
+  /**
+   * The normalized `href` of an NCALayer WebSocket URL of at most `MAX_URL_LENGTH` code units;
+   * `null` for anything else (not a string, too long, lone surrogates, another endpoint).
+   */
+  function socketUrl(text) {
+    if (typeof text !== 'string' || text.length > MAX_URL_LENGTH || wellFormed(text) !== text) return null;
+    let url;
+    try {
+      url = new URL(text);
+    } catch {
+      return null;
+    }
+    return url.href.length <= MAX_URL_LENGTH && isNcaLayer(url, ['ws:', 'wss:']) ? url.href : null;
+  }
+  // </oncl-common>
 
   /** Byte-ish values `send` encodes as UTF-8 text, by kind; `null` for everything else. */
   function binaryKind(data) {
@@ -81,7 +115,7 @@
         const resolve = probes.shift();
         if (resolve) resolve(frame.ok === true);
       } else {
-        const onFrame = sockets.get(frame.sid);
+        const onFrame = isSid(frame.sid) ? sockets.get(frame.sid) : undefined;
         if (onFrame) onFrame(frame);
       }
     });
@@ -340,7 +374,7 @@
       }
       const args = Array.prototype.slice.call(arguments, 0, 2);
       const parsed = args.length > 0 ? parse(url) : null;
-      if (parsed === null || !isNcaLayer(parsed, ['ws:', 'wss:'])) {
+      if (parsed === null || socketUrl(parsed.href) === null) {
         return Reflect.construct(NativeWebSocket, args, new.target);
       }
       return new VirtualWebSocket(parsed, args);

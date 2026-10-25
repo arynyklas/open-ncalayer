@@ -4,7 +4,7 @@
 //! native messaging manifests name the same host. Each browser then gets, under the output
 //! directory (`target/extension/` from the CLI):
 //! - `<browser>/`: the unpacked extension, `manifest.json` rendered from
-//!   `extension/manifests/<browser>.json` plus every file of `extension/src/`;
+//!   `extension/manifests/<browser>.json` plus the [`SCRIPTS`] of `extension/src/`;
 //! - `openncalayer-chromium-<version>.zip` / `openncalayer-firefox-<version>.xpi` (unsigned):
 //!   the same files.
 
@@ -27,6 +27,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Browsers and the extension of their archive.
 const BROWSERS: [(&str, &str); 2] = [("chromium", "zip"), ("firefox", "xpi")];
+
+/// Files of `extension/src/` that both packages ship, and nothing else from there.
+pub const SCRIPTS: [&str; 4] = ["background.js", "bridge.js", "host.js", "shim.js"];
 
 /// One built extension.
 #[derive(Debug)]
@@ -52,7 +55,14 @@ pub fn build(root: &Path, out: &Path) -> anyhow::Result<Vec<Package>> {
     let extension = root.join("extension");
     let src = extension.join("src");
     refresh(&src.join("host.js"), &host_js())?;
-    let scripts = read_files(&src)?;
+    let scripts = SCRIPTS
+        .iter()
+        .map(|name| {
+            let path = src.join(name);
+            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            Ok((name.to_string(), bytes))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     let mut packages = Vec::new();
     for (browser, archive_extension) in BROWSERS {
@@ -150,24 +160,6 @@ fn refresh(path: &Path, contents: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
-}
-
-/// Every file directly in `dir` as (name, bytes), sorted by name.
-fn read_files(dir: &Path) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
-    let mut files = Vec::new();
-    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|name| anyhow::anyhow!("non-UTF-8 file name {}", name.display()))?;
-        files.push((name, fs::read(entry.path())?));
-    }
-    files.sort();
-    Ok(files)
 }
 
 /// A deflated zip of `files` with fixed timestamps, so equal inputs give equal archives.

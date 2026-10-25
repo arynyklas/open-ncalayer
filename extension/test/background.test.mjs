@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { HOST_NAME, backgroundChrome, loadScript } from './env.mjs';
+import { HOST_NAME, backgroundChrome, loadScript, withoutToWellFormed } from './env.mjs';
 
 const createBackground = loadScript('background.js');
 const URL_13579 = 'wss://127.0.0.1:13579/';
@@ -238,4 +238,95 @@ test('registers the MAIN-world shim at install and startup, once', async () => {
     ['get', 'register', 'get', 'update'],
   );
   assert.deepEqual([...env.registered.values()], [shim]);
+});
+
+test('background drops bad opens and oversized pieces, other sockets keep working', () => {
+  const env = setup();
+  const a = env.connectBridge(SITE);
+  const b = env.connectBridge(OTHER);
+  a.deliver({ t: 'open', sid: 1, url: URL_13579 });
+  b.deliver({ t: 'open', sid: 1, url: URL_13579 });
+  const native = env.natives[0];
+  native.deliver({ t: 'relay', v: 1, version: '0.1.0' });
+  native.deliver({ t: 'hello', v: 1, version: '0.1.0', compat: '1.4' });
+  native.deliver({ t: 'open', sid: 1 });
+  native.deliver({ t: 'open', sid: 2 });
+
+  const bad = [`${URL_13579}\uD800`, `${URL_13579}${'a'.repeat(4096)}`, 'wss://example.com:13579/', 'ws://10.0.0.1:13579/', 7];
+  bad.forEach((url, i) => a.deliver({ t: 'open', sid: 10 + i, url }));
+  assert.deepEqual(
+    received(a).slice(1),
+    bad.map((_, i) => ({ t: 'close', sid: 10 + i })),
+  );
+  assert.equal(native.posted.length, 2, 'nothing reached the daemon');
+
+  // A piece over the limit (the bridge never sends one) closes just that socket.
+  b.deliver({ t: 'msg', sid: 1, data: 'x'.repeat(8 * 1024 * 1024 + 1) });
+  assert.deepEqual(native.posted.at(-1), { t: 'close', sid: 2 });
+  assert.deepEqual(received(b).at(-1), { t: 'close', sid: 1 });
+
+  // The native connection is intact: the other socket still works both ways.
+  assert.equal(native.disconnectedByOwner, false);
+  a.deliver({ t: 'msg', sid: 1, data: 'still here' });
+  native.deliver({ t: 'msg', sid: 1, data: 'reply' });
+  assert.deepEqual(native.posted.at(-1), { t: 'msg', sid: 1, data: 'still here' });
+  assert.deepEqual(received(a).at(-1), { t: 'msg', sid: 1, data: 'reply' });
+  // Normalized URLs go to the daemon.
+  a.deliver({ t: 'open', sid: 2, url: 'WS://[::1]:13579' });
+  assert.deepEqual(native.posted.at(-1), { t: 'open', sid: 3, origin: SITE.origin, url: 'ws://[::1]:13579/' });
+  assert.equal(env.natives.length, 1);
+});
+
+test('RELAY_CONFIG as the first native frame: probe refused, open falls back', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 5_000_000 });
+  const env = setup();
+  const a = env.connectBridge(SITE);
+  a.deliver({ t: 'probe' });
+  a.deliver({ t: 'open', sid: 1, url: URL_13579 });
+  const native = env.natives[0];
+  native.deliver({ t: 'error', code: 'RELAY_CONFIG', message: 'nmhost.json is missing' });
+  assert.ok(native.disconnectedByOwner);
+  assert.deepEqual(received(a), [
+    { t: 'probe', ok: false },
+    { t: 'fallback', sid: 1 },
+  ]);
+  // A connection failure: remembered for 2 s.
+  t.mock.timers.tick(1000);
+  a.deliver({ t: 'open', sid: 2, url: URL_13579 });
+  assert.deepEqual(received(a).at(-1), { t: 'fallback', sid: 2 });
+  assert.equal(env.natives.length, 1);
+});
+
+test('a failed native write disconnects the native port', () => {
+  const env = setup();
+  const a = env.connectBridge(SITE);
+  a.deliver({ t: 'open', sid: 1, url: URL_13579 });
+  a.deliver({ t: 'open', sid: 2, url: URL_13579 });
+  const native = env.natives[0];
+  native.deliver({ t: 'relay', v: 1, version: '0.1.0' });
+  native.deliver({ t: 'hello', v: 1, version: '0.1.0', compat: '1.4' });
+  native.deliver({ t: 'open', sid: 1 });
+  native.failPost = true;
+  a.deliver({ t: 'msg', sid: 1, data: 'too big for the browser' });
+  assert.ok(native.disconnectedByOwner, 'the relay is stopped, so the daemon closes the sids');
+  assert.deepEqual(received(a).slice(1), [
+    { t: 'close', sid: 1 },
+    { t: 'fallback', sid: 2 },
+  ]);
+  // The daemon had said hello: the next open reconnects at once.
+  a.deliver({ t: 'open', sid: 3, url: URL_13579 });
+  assert.equal(env.natives.length, 2);
+});
+
+test('background without String.prototype.toWellFormed (Chrome 109–110)', () => {
+  withoutToWellFormed(() => {
+    const env = setup();
+    const a = env.connectBridge(SITE);
+    a.deliver({ t: 'open', sid: 1, url: URL_13579 });
+    a.deliver({ t: 'msg', sid: 1, data: '😀\uDC00x\uD800' });
+    a.deliver({ t: 'open', sid: 2, url: `${URL_13579}\uD800` });
+    const native = env.natives[0];
+    assert.deepEqual(native.posted.slice(1), [{ t: 'msg', sid: 1, data: '😀\uFFFDx\uFFFD' }]);
+    assert.deepEqual(received(a), [{ t: 'close', sid: 2 }]);
+  });
 });

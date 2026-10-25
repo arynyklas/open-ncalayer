@@ -12,9 +12,18 @@
   const TO_EXT = '__oncl_to_ext';
   const TO_PAGE = '__oncl_to_page';
   const PORT_NAME = 'oncl';
+
+  // <oncl-common> Kept identical in shim.js, bridge.js and background.js (test/common.test.mjs).
+  const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]'];
+  const FIRST_PORT = 13579;
+  const LAST_PORT = 13679;
+  // Longest socket URL the extension carries; longer ones stay with the page's own WebSocket.
+  const MAX_URL_LENGTH = 2048;
+  // Largest `msg` piece towards the daemon (UTF-16 code units): the bridge cuts, the background checks.
   const PIECE = 8 * 1024 * 1024;
   const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
+  /** A socket id: a positive safe integer. */
   const isSid = (value) => Number.isSafeInteger(value) && value > 0;
 
   /**
@@ -24,6 +33,29 @@
   function wellFormed(text) {
     return typeof text.toWellFormed === 'function' ? text.toWellFormed() : text.replace(LONE_SURROGATE, '\uFFFD');
   }
+
+  /** `url` (a parsed `URL`) is an NCALayer endpoint with one of `schemes`. */
+  function isNcaLayer(url, schemes) {
+    if (!schemes.includes(url.protocol) || !LOOPBACK.includes(url.hostname)) return false;
+    const port = Number(url.port);
+    return port >= FIRST_PORT && port <= LAST_PORT;
+  }
+
+  /**
+   * The normalized `href` of an NCALayer WebSocket URL of at most `MAX_URL_LENGTH` code units;
+   * `null` for anything else (not a string, too long, lone surrogates, another endpoint).
+   */
+  function socketUrl(text) {
+    if (typeof text !== 'string' || text.length > MAX_URL_LENGTH || wellFormed(text) !== text) return null;
+    let url;
+    try {
+      url = new URL(text);
+    } catch {
+      return null;
+    }
+    return url.href.length <= MAX_URL_LENGTH && isNcaLayer(url, ['ws:', 'wss:']) ? url.href : null;
+  }
+  // </oncl-common>
 
   /** Cuts well-formed `text` into pieces of at most `PIECE` code units, never inside a pair. */
   function split(text) {
@@ -75,8 +107,11 @@
       port = null;
       const sids = [...sockets.keys()];
       sockets.clear();
+      // Snapshot first: page handlers run inside `toPage` and may probe on a new port.
+      const refused = pendingProbes;
+      pendingProbes = 0;
       for (const sid of sids) toPage({ t: 'close', sid });
-      for (; pendingProbes > 0; pendingProbes--) toPage({ t: 'probe', ok: false });
+      for (let i = 0; i < refused; i++) toPage({ t: 'probe', ok: false });
     }
 
     function toBackground(frame) {
@@ -94,13 +129,21 @@
           toPage({ t: 'ready' });
           break;
         case 'open': {
-          if (!isSid(frame.sid) || typeof frame.url !== 'string') return;
+          if (!isSid(frame.sid)) return;
+          const url = socketUrl(frame.url);
+          if (url === null) {
+            // Only a page forging frames gets here (the shim sends valid URLs only). Nothing
+            // goes to the daemon: the socket is reset, as if the connection failed.
+            if (sockets.delete(frame.sid)) toBackground({ t: 'close', sid: frame.sid });
+            toPage({ t: 'close', sid: frame.sid });
+            return;
+          }
           if (!connect()) {
             toPage({ t: 'fallback', sid: frame.sid });
             return;
           }
           sockets.set(frame.sid, []);
-          toBackground({ t: 'open', sid: frame.sid, url: frame.url });
+          toBackground({ t: 'open', sid: frame.sid, url });
           break;
         }
         case 'msg': {

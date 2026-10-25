@@ -32,6 +32,17 @@ export async function until(predicate) {
   throw new Error('condition not reached');
 }
 
+/** Runs `fn` without `String.prototype.toWellFormed`, as in Chrome 109–110. */
+export function withoutToWellFormed(fn) {
+  const descriptor = Object.getOwnPropertyDescriptor(String.prototype, 'toWellFormed');
+  delete String.prototype.toWellFormed;
+  try {
+    return fn();
+  } finally {
+    if (descriptor) Object.defineProperty(String.prototype, 'toWellFormed', descriptor);
+  }
+}
+
 // Node 22 has no global `CloseEvent`.
 export const CloseEvent =
   globalThis.CloseEvent ??
@@ -162,9 +173,12 @@ export class FakePort {
     this.posted = [];
     this.connected = true;
     this.disconnectedByOwner = false;
+    // Set to make `postMessage` throw, as for a message over the browser's size limit.
+    this.failPost = false;
   }
   postMessage(message) {
     if (!this.connected) throw new Error('Attempting to use a disconnected port object');
+    if (this.failPost) throw new Error('Message exceeds maximum allowed size of 64MB.');
     this.posted.push(structuredClone(message));
   }
   disconnect() {

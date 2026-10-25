@@ -120,3 +120,51 @@ fn builds_both_extensions_from_the_shared_ids() {
     assert_eq!(gecko["id"], FIREFOX_EXTENSION_ID);
     assert_eq!(gecko["strict_min_version"], "128.0");
 }
+
+/// Copies the files directly in `from` to `to`.
+fn copy_files(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
+#[test]
+fn ships_only_the_listed_scripts() {
+    let root = tempfile::tempdir().unwrap();
+    let extension = workspace_root().join("extension");
+    for dir in ["manifests", "src"] {
+        copy_files(
+            &extension.join(dir),
+            &root.path().join("extension").join(dir),
+        );
+    }
+    let src = root.path().join("extension/src");
+    fs::write(src.join("stray.js"), "// an untracked leftover\n").unwrap();
+    fs::remove_file(src.join("host.js")).ok();
+
+    let out = root.path().join("out");
+    for package in xtask::ext::build(root.path(), &out).unwrap() {
+        assert!(
+            !package.dir.join("stray.js").exists(),
+            "{}",
+            package.browser
+        );
+        let archive = zip::ZipArchive::new(File::open(&package.archive).unwrap()).unwrap();
+        let names: Vec<_> = archive
+            .file_names()
+            .map(|n| n.unwrap().into_owned())
+            .collect();
+        assert_eq!(names, FILES, "{}", package.browser);
+    }
+    // `host.js` is generated even when missing.
+    assert!(src.join("host.js").is_file());
+
+    // A listed script that is missing fails the build.
+    fs::remove_file(src.join("shim.js")).unwrap();
+    let error = xtask::ext::build(root.path(), &out).unwrap_err();
+    assert!(format!("{error:#}").contains("shim.js"), "{error:#}");
+}
