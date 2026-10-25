@@ -95,10 +95,10 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask ext build
-      # Unlisted AMO signing (roadmap D6). Skipped without the secrets; tags only, because AMO
-      # refuses a version it has already signed.
+      # Unlisted AMO signing (roadmap D6). Skipped without the secrets; release tags (`v*`)
+      # only, because AMO refuses a version it has already signed.
       - name: Sign the Firefox add-on (AMO, unlisted)
-        if: env.AMO_SIGNING == 'true' && startsWith(github.ref, 'refs/tags/')
+        if: env.AMO_SIGNING == 'true' && startsWith(github.ref, 'refs/tags/v')
         env:
           WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
           WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
@@ -106,7 +106,7 @@ jobs:
           npx --yes web-ext@10.8.0 sign --channel unlisted
           --source-dir target/extension/firefox --artifacts-dir target/extension/signed
       - name: Keep the signed add-on
-        if: env.AMO_SIGNING == 'true' && startsWith(github.ref, 'refs/tags/')
+        if: env.AMO_SIGNING == 'true' && startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: openncalayer-firefox-signed
