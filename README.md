@@ -16,7 +16,7 @@ OpenNCALayer — независимый проект и не связан с Н�
 - подпись с вложенными данными и без, со-подпись, метка времени НУЦ (TSP);
 - окна выбора хранилища и ключа (русский, казахский, английский);
 - мастер TLS в командной строке: `openncalayer tls init|import|status` ([инструкция](docs/user/tls.md));
-- проверка подписи: `openncalayer cms-verify`;
+- проверка подписи: `openncalayer cms-verify` — подписи и метки времени; цепочки сертификатов, сроки действия и отзыв не проверяются;
 - страница самопроверки `https://127.0.0.1:13579/` и демо-страница `https://127.0.0.1:13579/demo/`.
 
 Результаты ручной проверки в браузерах — [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md).
@@ -42,6 +42,10 @@ OpenNCALayer — независимый проект и не связан с Н�
 
 Нужен `rustup`: версия Rust закреплена в `rust-toolchain.toml` и ставится автоматически. На Linux для окон нужны пакеты разработки fontconfig, xkbcommon, Wayland и GTK 3 (в Debian и Ubuntu: `libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev`).
 
+Для запуска на Linux нужны:
+- `libxkbcommon-x11-0` — без неё окна подписи не открываются, и `openncalayer run` завершается с ошибкой (`libxkbcommon-dev` её не ставит);
+- `xdg-desktop-portal` с бэкендом (например, `xdg-desktop-portal-gtk`) или `zenity` — для кнопки «Обзор…»; без них системный диалог выбора файла не открывается (в журнале — ошибка rfd), путь к файлу ключа можно ввести вручную.
+
 ```sh
 cargo build --release -p openncalayer
 ```
@@ -56,7 +60,7 @@ openncalayer run        # запустить сервер; `openncalayer` без
 1. После `tls init` установите CA по напечатанной инструкции. Подробности по каждой ОС — в [`docs/user/tls.md`](docs/user/tls.md).
 2. Запустите `openncalayer run` и откройте `https://127.0.0.1:13579/`: страница должна открыться без предупреждения о сертификате.
 3. На `https://127.0.0.1:13579/demo/` можно подписать текст или файл и скачать `.p7s`.
-4. Проверить подпись: `openncalayer cms-verify signature.p7s`, для подписи без вложенных данных — `openncalayer cms-verify signature.p7s --content <файл данных>`.
+4. Проверить подпись: `openncalayer cms-verify signature.p7s`, для подписи без вложенных данных — `openncalayer cms-verify signature.p7s --content <файл данных>`. `OK` значит, что подписи и метки времени математически верны; цепочки сертификатов, сроки действия и отзыв не проверяются (строка `not checked: …` перед `OK`).
 
 Коды выхода `run`:
 - 2 — TLS не настроен;
@@ -93,11 +97,11 @@ cargo test --workspace --all-features -- --ignored live_
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo deny check
 ```
 
-`web/demo/vendor/ncalayer-client.js` — файл `package/ncalayer-client.js` из npm-пакета `ncalayer-js-client@1.6.1` без изменений (MIT, sha256 `bdf2015c3e422eed70ccf38eef3246af67a0d38639e6b70fe6b8655a2fa03489`). Тест `demo_assets_served` сверяет sha256 файла, который отдаёт сервер.
+`web/demo/vendor/ncalayer-client.js` — файл `package/ncalayer-client.js` из npm-пакета `ncalayer-js-client@1.6.1` без изменений (MIT, sha256 `bdf2015c3e422eed70ccf38eef3246af67a0d38639e6b70fe6b8655a2fa03489`). Тест `demo_assets_served` сверяет sha256 файла, который отдаёт сервер. Лицензию клиента сервер отдаёт рядом с ним: `/demo/vendor/LICENSE`.
 
 ## Лицензия
 

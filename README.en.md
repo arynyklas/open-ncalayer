@@ -16,7 +16,7 @@ P1 provides:
 - attached and detached signatures, co-signing, NCA timestamps (TSP);
 - storage and key selection dialogs (Russian, Kazakh, English);
 - a command-line TLS wizard: `openncalayer tls init|import|status` ([guide, in Russian](docs/user/tls.md));
-- signature checking: `openncalayer cms-verify`;
+- signature checking: `openncalayer cms-verify` — signatures and timestamps; certificate chains, validity periods and revocation are not checked;
 - a self-test page at `https://127.0.0.1:13579/` and a demo page at `https://127.0.0.1:13579/demo/`.
 
 Manual browser test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md) (in Russian).
@@ -42,6 +42,10 @@ Documentation is written in Russian:
 
 You need `rustup`: the Rust version is pinned in `rust-toolchain.toml` and installed automatically. On Linux the dialogs need the fontconfig, xkbcommon, Wayland and GTK 3 development packages (Debian and Ubuntu: `libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev`).
 
+To run on Linux you also need:
+- `libxkbcommon-x11-0`: without it the signing dialogs cannot open and `openncalayer run` exits with an error (`libxkbcommon-dev` does not install it);
+- `xdg-desktop-portal` with a backend (for example `xdg-desktop-portal-gtk`) or `zenity` for the «Обзор…» (Browse) button; without them the system file dialog does not open (the log has the rfd error), and the key file path can still be typed in.
+
 ```sh
 cargo build --release -p openncalayer
 ```
@@ -56,7 +60,7 @@ openncalayer run        # start the server; plain `openncalayer` does the same
 1. After `tls init`, trust the CA as the printed instructions say. Per-OS details are in [`docs/user/tls.md`](docs/user/tls.md).
 2. Start `openncalayer run` and open `https://127.0.0.1:13579/`: the page must load without a certificate warning.
 3. At `https://127.0.0.1:13579/demo/` you can sign a text or a file and download the `.p7s`.
-4. To check a signature: `openncalayer cms-verify signature.p7s`; for a detached signature, `openncalayer cms-verify signature.p7s --content <data file>`.
+4. To check a signature: `openncalayer cms-verify signature.p7s`; for a detached signature, `openncalayer cms-verify signature.p7s --content <data file>`. `OK` means the signatures and timestamps are mathematically valid; certificate chains, validity periods and revocation are not checked (the `not checked: …` line before `OK`).
 
 Exit codes of `run`:
 - 2 — TLS is not set up;
@@ -93,11 +97,11 @@ Before submitting changes:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo deny check
 ```
 
-`web/demo/vendor/ncalayer-client.js` is `package/ncalayer-client.js` from the npm package `ncalayer-js-client@1.6.1`, unmodified (MIT, sha256 `bdf2015c3e422eed70ccf38eef3246af67a0d38639e6b70fe6b8655a2fa03489`). The `demo_assets_served` test checks the sha256 of the file the server sends.
+`web/demo/vendor/ncalayer-client.js` is `package/ncalayer-client.js` from the npm package `ncalayer-js-client@1.6.1`, unmodified (MIT, sha256 `bdf2015c3e422eed70ccf38eef3246af67a0d38639e6b70fe6b8655a2fa03489`). The `demo_assets_served` test checks the sha256 of the file the server sends. The server sends the client's license next to it: `/demo/vendor/LICENSE`.
 
 ## License
 
