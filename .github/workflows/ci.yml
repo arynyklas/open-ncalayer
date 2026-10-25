@@ -108,9 +108,17 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p openncalayer --features e2e-prompter -p oncl-nmhost
-      - run: cargo xtask fetch-fixtures
       - run: cargo xtask ext build
       - run: cargo xtask ext-e2e --download
+      - name: Keep the driver and daemon logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ext-e2e-logs
+          path: |
+            target/ext-e2e/*/driver.log
+            target/ext-e2e/*/data/logs/
+          if-no-files-found: ignore
 
   # Windows 7 lane (roadmap D14). Non-blocking in P1: a red import gate records the starting
   # point for P6 and does not fail the workflow.

@@ -2,8 +2,8 @@
 //!
 //! For each browser, everything lives in a fresh sandbox `target/ext-e2e/<browser>/`:
 //! - `home/` (`HOME`, Firefox finds the host manifest in `home/.mozilla/`), `run/`
-//!   (`XDG_RUNTIME_DIR`, the daemon's IPC socket), `tmp/` (`TMPDIR`, the Firefox profile),
-//!   `chromium/` (Chromium `--user-data-dir`, with `NativeMessagingHosts/`), `relay/`;
+//!   (`XDG_RUNTIME_DIR`, the daemon's IPC socket), `chromium/` (Chromium `--user-data-dir`,
+//!   with `NativeMessagingHosts/`), `profiles/` (geckodriver `--profile-root`), `relay/`;
 //! - `data/` (`ONCL_DATA_DIR`): the daemon's data and logs; `steps.json`
 //!   (`ONCL_E2E_PROMPTER`): the dialog answers.
 //!
@@ -15,14 +15,22 @@
 //!
 //! Inputs: `target/release/{openncalayer,nmhost}` (`openncalayer` with feature
 //! `e2e-prompter`), `target/extension/{chromium,firefox}/` (`cargo xtask ext build`).
+//!
+//! `TMPDIR` is a short throwaway directory under the system temp directory instead: Chrome
+//! binds its process-singleton socket in `$TMPDIR`, and a Unix socket path must fit in 108
+//! bytes, which a checkout path like a CI runner's leaves no room for under `target/`.
 
 pub mod browsers;
 mod page;
 mod webdriver;
 
 use std::fs;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail, ensure};
@@ -33,6 +41,7 @@ use der::{Decode, SliceReader};
 use serde_json::{Value, json};
 
 pub use browsers::Browser;
+use oncl_ipc::ids::FIREFOX_EXTENSION_ID;
 use webdriver::{Driver, Session};
 
 /// Which browsers `ext-e2e` runs.
@@ -61,7 +70,7 @@ pub const SCENARIOS: [&str; 7] = [
     "4. basics.sign CMS over 1.5 MiB",
     "5. origin set by the browser, not the page",
     "6. daemon killed: close 1006, restart",
-    "7. no host: page's own WebSocket",
+    "7. no host: page's own WebSocket and fetch",
 ];
 
 /// Size of the document signed in scenario 4: 1.5 MiB.
@@ -75,6 +84,12 @@ const CLOSE_WITHIN: Duration = Duration::from_secs(5);
 const SHIM_PATIENCE: Duration = Duration::from_secs(30);
 /// Longest page step (the signature included).
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(240);
+/// What Chrome appends to `$TMPDIR` for its process-singleton socket.
+const CHROME_SINGLETON: &str = "/org.chromium.Chromium.XXXXXX/SingletonSocket";
+/// `sizeof(sockaddr_un.sun_path)` on Linux: the path and its NUL.
+const SUN_PATH: usize = 108;
+/// The NCALayer port, served by a TCP sink in scenario 7.
+const NCALAYER_PORT: u16 = 13579;
 
 /// Variables of this process the browser must not inherit: a display (the browsers run
 /// headless), the user's session bus, a daemon port other than the default.
@@ -199,7 +214,11 @@ fn run_browser(
     for pid in daemon_pids(&inputs.daemon, &root.join("data")) {
         kill(pid);
     }
-    let sandbox = Sandbox::create(&root).context("sandbox")?;
+    let tmp = tempfile::Builder::new()
+        .prefix("oncl-e2e-")
+        .tempdir()
+        .context("creating the browser's TMPDIR")?;
+    let sandbox = Sandbox::create(&root, tmp.path()).context("sandbox")?;
     let outcomes = start_browser(inputs, browser, binaries, &sandbox, page_port);
     // Sessions and drivers are gone; a daemon outlives its relay.
     for pid in daemon_pids(&inputs.daemon, &sandbox.data) {
@@ -223,8 +242,24 @@ fn start_browser(
         Some(&inputs.relay),
     )
     .context("nm install")?;
+    let driver_args = match browser {
+        Browser::Chromium => {
+            let singleton = sandbox.tmp.display().to_string().len() + CHROME_SINGLETON.len();
+            ensure!(
+                singleton < SUN_PATH,
+                "TMPDIR {} is too long for Chrome's singleton socket ({singleton} bytes, \
+                 at most {} allowed)",
+                sandbox.tmp.display(),
+                SUN_PATH - 1
+            );
+            Vec::new()
+        }
+        // The Firefox profile stays under `target/`, not in the short TMPDIR.
+        Browser::Firefox => vec![format!("--profile-root={}", sandbox.profiles.display())],
+    };
     let driver = Driver::start(
         &binaries.driver,
+        &driver_args,
         &env,
         &UNSET,
         &sandbox.root.join("driver.log"),
@@ -233,9 +268,13 @@ fn start_browser(
     let session = driver.session(capabilities(browser, binaries, &extension, sandbox)?)?;
     session.set_script_timeout(SCRIPT_TIMEOUT)?;
     if browser == Browser::Firefox {
-        session
+        let id = session
             .install_temporary_addon(&extension)
             .context("installing the add-on")?;
+        ensure!(
+            id == FIREFOX_EXTENSION_ID,
+            "the add-on was installed as {id:?}, not {FIREFOX_EXTENSION_ID}"
+        );
     }
     let scenarios = Scenarios {
         session: &session,
@@ -336,12 +375,14 @@ struct Sandbox {
     data: PathBuf,
     home: PathBuf,
     runtime: PathBuf,
+    profiles: PathBuf,
+    /// The short `TMPDIR`, outside the sandbox.
     tmp: PathBuf,
     steps: PathBuf,
 }
 
 impl Sandbox {
-    fn create(root: &Path) -> anyhow::Result<Sandbox> {
+    fn create(root: &Path, tmp: &Path) -> anyhow::Result<Sandbox> {
         if root.exists() {
             fs::remove_dir_all(root).with_context(|| format!("removing {}", root.display()))?;
         }
@@ -350,10 +391,16 @@ impl Sandbox {
             data: root.join("data"),
             home: root.join("home"),
             runtime: root.join("run"),
-            tmp: root.join("tmp"),
+            profiles: root.join("profiles"),
+            tmp: tmp.to_owned(),
             steps: root.join("steps.json"),
         };
-        for dir in [&sandbox.data, &sandbox.home, &sandbox.runtime, &sandbox.tmp] {
+        for dir in [
+            &sandbox.data,
+            &sandbox.home,
+            &sandbox.runtime,
+            &sandbox.profiles,
+        ] {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         #[cfg(unix)]
@@ -593,8 +640,10 @@ impl Scenarios<'_> {
         Ok(())
     }
 
-    /// 7. Without the host registration and the daemon, NCALayer sockets are the browser's
-    ///    own: the stand-in original greets, nothing answers on 13579.
+    /// 7. Without the host registration and the daemon, NCALayer sockets and the NCALayer
+    ///    `fetch` are the browser's own: the stand-in original greets; on 13579 a TCP sink
+    ///    accepts and drops the browser's connections, so the page sees `error` + `close` and
+    ///    a rejected `fetch`, and the sink proves those requests left the browser.
     fn no_host(&self) -> anyhow::Result<()> {
         nm(self.inputs, self.sandbox, &["uninstall"], None).context("nm uninstall")?;
         for pid in self.daemons() {
@@ -605,6 +654,7 @@ impl Scenarios<'_> {
             ensure!(Instant::now() < deadline, "the daemon did not die");
             std::thread::sleep(Duration::from_millis(50));
         }
+        let sink = TcpSink::bind(NCALAYER_PORT)?;
         let result = self.step("fallback", Value::Null)?;
         expect_text(
             &result["original"],
@@ -618,10 +668,77 @@ impl Scenarios<'_> {
             "wss://127.0.0.1:13579/ events: {events:?}"
         );
         ensure!(
+            sink.accepted() > 0,
+            "wss://127.0.0.1:13579/ never reached the port: the socket was not the browser's own"
+        );
+
+        let before = sink.accepted();
+        let result = self.step("fallback_fetch", Value::Null)?;
+        ensure!(
+            result["rejected"] == true && result["name"] == "TypeError",
+            "fetch(\"https://127.0.0.1:13579/\") without the host: {result}"
+        );
+        ensure!(
+            sink.accepted() > before,
+            "fetch(\"https://127.0.0.1:13579/\") never reached the port: it was not the browser's own"
+        );
+        ensure!(
             self.daemons().is_empty(),
             "a daemon was started without the host"
         );
         Ok(())
+    }
+}
+
+/// Accepts TCP connections on `127.0.0.1:<port>` and closes them at once, counting them,
+/// until dropped.
+struct TcpSink {
+    accepted: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl TcpSink {
+    fn bind(port: u16) -> anyhow::Result<TcpSink> {
+        let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| {
+            format!("binding 127.0.0.1:{port} (is NCALayer or OpenNCALayer running?)")
+        })?;
+        listener.set_nonblocking(true)?;
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (accepted, stop) = (Arc::clone(&accepted), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        // Counted before the close, which is what the page waits for.
+                        Ok((stream, _)) => {
+                            accepted.fetch_add(1, Ordering::SeqCst);
+                            drop(stream);
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                }
+            })
+        };
+        Ok(TcpSink {
+            accepted,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for TcpSink {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -674,9 +791,12 @@ fn unix_ms() -> u64 {
         .unwrap_or_default()
 }
 
-/// Live `openncalayer` processes (`daemon`'s file name) with `ONCL_DATA_DIR=<data>`.
+/// Live `openncalayer` processes (`daemon`'s file name, also once the binary was rebuilt
+/// under them) with `ONCL_DATA_DIR=<data>`.
 fn daemon_pids(daemon: &Path, data: &Path) -> Vec<u32> {
-    let name = daemon.file_name();
+    let Some(name) = daemon.file_name().and_then(|n| n.to_str()) else {
+        return Vec::new();
+    };
     let mut needles = vec![format!("ONCL_DATA_DIR={}", data.display()).into_bytes()];
     if let Ok(canonical) = fs::canonicalize(data) {
         needles.push(format!("ONCL_DATA_DIR={}", canonical.display()).into_bytes());
@@ -690,7 +810,7 @@ fn daemon_pids(daemon: &Path, data: &Path) -> Vec<u32> {
             let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
             // A zombie has no `exe`.
             let exe = fs::read_link(entry.path().join("exe")).ok()?;
-            if exe.file_name() != name {
+            if exe_name(&exe)? != name {
                 return None;
             }
             let environ = fs::read(entry.path().join("environ")).ok()?;
@@ -700,6 +820,13 @@ fn daemon_pids(daemon: &Path, data: &Path) -> Vec<u32> {
                 .then_some(pid)
         })
         .collect()
+}
+
+/// The file name of a `/proc/<pid>/exe` target, without the ` (deleted)` the kernel appends
+/// once the file was replaced.
+fn exe_name(exe: &Path) -> Option<&str> {
+    let name = exe.file_name()?.to_str()?;
+    Some(name.strip_suffix(" (deleted)").unwrap_or(name))
 }
 
 fn kill(pid: u32) {
@@ -738,5 +865,19 @@ mod tests {
     fn test_data_matches_the_page() {
         // The page: `bytes[i] = i % 251`.
         assert_eq!(test_data(253)[250..], [250, 0, 1]);
+    }
+
+    #[test]
+    fn exe_name_ignores_deleted_marker() {
+        let name = |p: &str| exe_name(Path::new(p)).map(str::to_owned);
+        assert_eq!(
+            name("/x/release/openncalayer").as_deref(),
+            Some("openncalayer")
+        );
+        assert_eq!(
+            name("/x/release/openncalayer (deleted)").as_deref(),
+            Some("openncalayer")
+        );
+        assert_eq!(name("/").as_deref(), None);
     }
 }

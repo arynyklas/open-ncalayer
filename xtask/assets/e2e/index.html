@@ -187,6 +187,16 @@
       const events = await ncalayer.untilClose();
       return { original: originalFirst, ncalayer: events };
     },
+
+    /** Without the native host: the NCALayer check of sites goes out as a real request. */
+    async fallback_fetch() {
+      try {
+        const response = await within(WAIT_MS, 'fetch', fetch('https://127.0.0.1:13579/', { mode: 'no-cors' }));
+        return { rejected: false, status: response.status };
+      } catch (error) {
+        return { rejected: true, name: error && error.name, message: String(error) };
+      }
+    },
   };
 
   window.oncl_e2e = {

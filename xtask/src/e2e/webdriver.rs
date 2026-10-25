@@ -17,7 +17,8 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 /// Largest WebDriver response read (a signed 1.5 MiB document comes back as ~2 MiB).
 const RESPONSE_LIMIT: u64 = 256 << 20;
 
-/// A running driver, killed on drop.
+/// A running driver in its own process group, killed with the group (the browser and its
+/// helpers) on drop.
 pub struct Driver {
     child: Child,
     base: String,
@@ -25,10 +26,12 @@ pub struct Driver {
 }
 
 impl Driver {
-    /// Starts `program --port=<free port>` with `env` set (and `unset` removed) on top of
-    /// this process's environment, its output appended to `log`, and waits until it is ready.
+    /// Starts `program --port=<free port> <args>` with `env` set (and `unset` removed) on top
+    /// of this process's environment, its output written to `log`, and waits until it is
+    /// ready.
     pub fn start(
         program: &Path,
+        args: &[String],
         env: &[(String, String)],
         unset: &[&str],
         log: &Path,
@@ -40,6 +43,7 @@ impl Driver {
         let mut command = Command::new(program);
         command
             .arg(format!("--port={port}"))
+            .args(args)
             .stdin(Stdio::null())
             .stdout(log_file.try_clone()?)
             .stderr(log_file);
@@ -47,6 +51,11 @@ impl Driver {
             command.env_remove(name);
         }
         command.envs(env.iter().map(|(k, v)| (k, v)));
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let child = command
             .spawn()
             .with_context(|| format!("starting {}", program.display()))?;
@@ -137,6 +146,12 @@ impl Driver {
 
 impl Drop for Driver {
     fn drop(&mut self) {
+        // The group is the driver's pid: the browser it started is in it too.
+        #[cfg(unix)]
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", self.child.id())])
+            .stderr(Stdio::null())
+            .status();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
