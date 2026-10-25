@@ -1,43 +1,41 @@
 //! `openncalayer`: see [`openncalayer::cli`].
 
+use std::io;
+use std::net::TcpListener;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+use oncl_basics::Prompter;
+use oncl_ipc::IpcListener;
 use oncl_pki::tsp::UreqTransport;
+use oncl_protocol::Registry;
 use oncl_ui::SlintPrompter;
 use openncalayer::cli::{self, Cli, Command};
-use openncalayer::{JsonSettings, ServerConfig, build_registry, serve};
+use openncalayer::{JsonSettings, ServerConfig, build_registry, serve, serve_ipc};
 use tokio::runtime::Runtime;
 
 /// How long `run` waits for the server thread once the dialogs' event loop has ended.
 const SERVER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
-    match Cli::parse().command.unwrap_or(Command::Run) {
-        Command::Run => run(),
+    let command = Cli::parse().command.unwrap_or(Command::Run {
+        allow_no_wss: false,
+    });
+    match command {
+        Command::Run { allow_no_wss } => run(allow_no_wss),
         Command::Tls { command } => cli::tls(command),
         Command::CmsVerify { file, content } => cli::cms_verify(&file, content.as_deref()),
     }
 }
 
-/// The server runs on a tokio runtime in a background thread; the main thread runs the
-/// dialogs' event loop, as windowing systems require. A stopped server ends the loop.
-fn run() -> ExitCode {
-    let daemon = match cli::prepare_run() {
-        Ok(daemon) => daemon,
-        Err(code) => return code,
-    };
-    // Panics (e.g. of the windowing libraries) go to the log, not as raw text to stderr only.
-    std::panic::set_hook(Box::new(|info| tracing::error!(%info, "panic")));
-    let registry = build_registry(
-        Arc::new(SlintPrompter::new()),
-        Arc::new(JsonSettings::new(daemon.paths.settings())),
-        Arc::new(UreqTransport),
-    );
-    let cfg = ServerConfig::new(daemon.tls, Arc::new(registry));
+/// The servers run on a tokio runtime in a background thread; the main thread runs the
+/// dialogs' event loop, as windowing systems require. A stopped server ends the loop. With
+/// feature `e2e-prompter` and its script set, there are no windows: the main thread only
+/// waits for the servers.
+fn run(allow_no_wss: bool) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -48,17 +46,32 @@ fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let listener = daemon.listener;
+    let daemon = match runtime.block_on(cli::prepare_run(allow_no_wss)) {
+        Ok(daemon) => daemon,
+        Err(code) => return code,
+    };
+    // Panics (e.g. of the windowing libraries) go to the log, not as raw text to stderr only.
+    std::panic::set_hook(Box::new(|info| tracing::error!(%info, "panic")));
+    let scripted = match scripted_prompter() {
+        Ok(scripted) => scripted,
+        Err(code) => return code,
+    };
+    let windows = scripted.is_none();
+    let registry = build_registry(
+        scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new())),
+        Arc::new(JsonSettings::new(daemon.paths.settings())),
+        Arc::new(UreqTransport),
+    );
+    let (ipc, wss) = (daemon.ipc, daemon.wss);
     let server = thread::Builder::new().name("server".into()).spawn(move || {
-        let result = runtime.block_on(async {
-            let listener = tokio::net::TcpListener::from_std(listener)?;
-            serve(listener, cfg).await
-        });
+        let result = runtime.block_on(serve_all(ipc, wss, Arc::new(registry)));
         if let Err(e) = &result {
             tracing::error!(error = %e, "server stopped");
         }
         stop_runtime(runtime);
-        oncl_ui::quit();
+        if windows {
+            oncl_ui::quit();
+        }
         result
     });
     let server = match server {
@@ -68,6 +81,12 @@ fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if !windows {
+        return match server.join() {
+            Ok(Ok(())) => ExitCode::SUCCESS,
+            Ok(Err(_)) | Err(_) => ExitCode::FAILURE,
+        };
+    }
     if let Err(e) = oncl_ui::run_event_loop() {
         tracing::error!(error = %e, "signing dialogs are unavailable");
         eprintln!("Не удалось показать окна подписи: {e}");
@@ -86,6 +105,32 @@ fn run() -> ExitCode {
             tracing::error!("the dialog event loop ended while the server is running");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// The prompter of the `e2e-prompter` script, if the feature is on and the script set.
+fn scripted_prompter() -> Result<Option<Arc<dyn Prompter>>, ExitCode> {
+    #[cfg(feature = "e2e-prompter")]
+    let scripted = cli::e2e_prompter()?.map(|p| Arc::new(p) as Arc<dyn Prompter>);
+    #[cfg(not(feature = "e2e-prompter"))]
+    let scripted = None;
+    Ok(scripted)
+}
+
+/// The bridge and, unless it is off, the wss server, until either stops.
+async fn serve_all(
+    ipc: IpcListener,
+    wss: Option<(Arc<rustls::ServerConfig>, TcpListener)>,
+    registry: Arc<Registry>,
+) -> io::Result<()> {
+    let Some((tls, listener)) = wss else {
+        return serve_ipc(ipc, registry).await;
+    };
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    let cfg = ServerConfig::new(tls, Arc::clone(&registry));
+    tokio::select! {
+        result = serve_ipc(ipc, registry) => result,
+        result = serve(listener, cfg) => result,
     }
 }
 

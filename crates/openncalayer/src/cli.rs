@@ -14,6 +14,7 @@ use std::sync::Arc;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::{Parser, Subcommand};
+use oncl_ipc::IpcListener;
 use oncl_pki::cms;
 use oncl_pki::info::cert_info;
 use oncl_pki::tsp::{TspError, verify_token_for};
@@ -33,6 +34,8 @@ use crate::server::listen_port;
 pub const EXIT_TLS_NOT_CONFIGURED: u8 = 2;
 /// Exit code: the port is taken.
 pub const EXIT_PORT_BUSY: u8 = 3;
+/// Exit code: another OpenNCALayer of this user, session and data directory is running.
+pub const EXIT_ALREADY_RUNNING: u8 = 4;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -48,7 +51,13 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     #[command(about = "Запустить сервер (по умолчанию)")]
-    Run,
+    Run {
+        #[arg(
+            long,
+            help = "Если TLS не настроен или порт занят, работать только для расширения браузера"
+        )]
+        allow_no_wss: bool,
+    },
     #[command(about = "Сертификат HTTPS/WSS-сервера")]
     Tls {
         #[command(subcommand)]
@@ -81,50 +90,112 @@ pub enum TlsCommand {
     Status,
 }
 
-/// Everything `run` sets up before the server starts: data paths, logging, the TLS
-/// configuration and the bound listening socket (non-blocking, for tokio).
+/// Everything `run` sets up before the servers start: data paths, logging, the bound IPC
+/// endpoint of the browser extension bridge and, unless it is off, the wss server's TLS
+/// configuration and bound listening socket (non-blocking, for tokio).
 pub struct Daemon {
     pub paths: Paths,
-    pub tls: Arc<rustls::ServerConfig>,
-    pub listener: TcpListener,
+    pub ipc: IpcListener,
+    pub wss: Option<(Arc<rustls::ServerConfig>, TcpListener)>,
 }
 
-/// Prepares `run`. On failure the message is already printed and the exit code returned:
-/// [`EXIT_TLS_NOT_CONFIGURED`], [`EXIT_PORT_BUSY`] or 1.
-pub fn prepare_run() -> Result<Daemon, ExitCode> {
+/// Prepares `run`: data paths and logging, the IPC endpoint, then TLS and the port. On
+/// failure the message is already printed and the exit code returned:
+/// [`EXIT_ALREADY_RUNNING`], [`EXIT_TLS_NOT_CONFIGURED`], [`EXIT_PORT_BUSY`] or 1. With
+/// `allow_no_wss` TLS not set up and a busy port only turn the wss server off, with a
+/// warning in the log.
+pub async fn prepare_run(allow_no_wss: bool) -> Result<Daemon, ExitCode> {
     let paths = data_paths()?;
     if let Err(e) = crate::logging::init(&paths.logs()) {
         warn!(dir = %paths.logs().display(), error = %e, "file logging is disabled");
     }
+    let ipc = bind_ipc(&paths.data).await?;
+    let wss = match open_wss(&paths) {
+        Ok(wss) => Some(wss),
+        Err(failure)
+            if allow_no_wss && matches!(failure.code, EXIT_TLS_NOT_CONFIGURED | EXIT_PORT_BUSY) =>
+        {
+            warn!(reason = %failure.message, "wss is off; serving the browser extension only");
+            None
+        }
+        Err(failure) => return Err(failure.report()),
+    };
+    info!(data = %paths.data.display(), "daemon started");
+    Ok(Daemon { paths, ipc, wss })
+}
+
+/// Binds the IPC endpoint of `data`.
+async fn bind_ipc(data: &Path) -> Result<IpcListener, ExitCode> {
+    let endpoint = oncl_ipc::endpoint(data).map_err(|e| {
+        eprintln!("Не удалось определить канал для расширения браузера: {e}");
+        ExitCode::FAILURE
+    })?;
+    match oncl_ipc::bind(&endpoint).await {
+        Ok(listener) => {
+            info!(%endpoint, "bridge listening");
+            Ok(listener)
+        }
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+            eprintln!("OpenNCALayer уже запущен");
+            Err(ExitCode::from(EXIT_ALREADY_RUNNING))
+        }
+        Err(e) => {
+            eprintln!("Не удалось открыть канал {endpoint} для расширения браузера: {e}");
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// The wss server's TLS configuration and listening socket.
+fn open_wss(paths: &Paths) -> Result<(Arc<rustls::ServerConfig>, TcpListener), Failure> {
     let files = paths.tls();
     configured(&files)?;
     let tls = server_config(&files).map_err(|e| {
-        eprintln!(
-            "Не удалось загрузить сертификат сервера из {}: {e}",
-            files.dir.display()
-        );
-        ExitCode::FAILURE
+        Failure::new(
+            1,
+            format!(
+                "Не удалось загрузить сертификат сервера из {}: {e}",
+                files.dir.display()
+            ),
+        )
     })?;
     let port = listen_port();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| {
         if port_busy(&e) {
-            eprintln!("Порт {port} занят (возможно, запущен оригинальный NCALayer)");
-            ExitCode::from(EXIT_PORT_BUSY)
+            Failure::new(
+                EXIT_PORT_BUSY,
+                format!("Порт {port} занят (возможно, запущен оригинальный NCALayer)"),
+            )
         } else {
-            eprintln!("Не удалось открыть порт 127.0.0.1:{port}: {e}");
-            ExitCode::FAILURE
+            Failure::new(1, format!("Не удалось открыть порт 127.0.0.1:{port}: {e}"))
         }
     })?;
     listener.set_nonblocking(true).map_err(|e| {
-        eprintln!("Не удалось настроить порт 127.0.0.1:{port}: {e}");
-        ExitCode::FAILURE
+        Failure::new(
+            1,
+            format!("Не удалось настроить порт 127.0.0.1:{port}: {e}"),
+        )
     })?;
-    info!(data = %paths.data.display(), "listening on 127.0.0.1:{port}");
-    Ok(Daemon {
-        paths,
-        tls: Arc::new(tls),
-        listener,
-    })
+    info!("listening on 127.0.0.1:{port}");
+    Ok((Arc::new(tls), listener))
+}
+
+/// A failed step of a command: the message for the user and the exit code.
+struct Failure {
+    code: u8,
+    message: String,
+}
+
+impl Failure {
+    fn new(code: u8, message: String) -> Self {
+        Failure { code, message }
+    }
+
+    /// Prints the message; returns the exit code.
+    fn report(self) -> ExitCode {
+        eprintln!("{}", self.message);
+        ExitCode::from(self.code)
+    }
 }
 
 /// Whether binding failed because another socket holds the port. A Java server (such as
@@ -142,19 +213,68 @@ fn data_paths() -> Result<Paths, ExitCode> {
     })
 }
 
-/// The stored [`TlsInfo`], or the "not configured" message and exit code.
-fn configured(files: &TlsFiles) -> Result<TlsInfo, ExitCode> {
+/// The stored [`TlsInfo`], or why there is none.
+fn configured(files: &TlsFiles) -> Result<TlsInfo, Failure> {
     match load_info(files) {
         Ok(Some(info)) => Ok(info),
-        Ok(None) => {
-            eprintln!("TLS не настроен: выполните `openncalayer tls init`");
-            Err(ExitCode::from(EXIT_TLS_NOT_CONFIGURED))
-        }
-        Err(e) => {
-            eprintln!("Не удалось прочитать {}: {e}", files.info().display());
-            Err(ExitCode::FAILURE)
-        }
+        Ok(None) => Err(Failure::new(
+            EXIT_TLS_NOT_CONFIGURED,
+            "TLS не настроен: выполните `openncalayer tls init`".to_owned(),
+        )),
+        Err(e) => Err(Failure::new(
+            1,
+            format!("Не удалось прочитать {}: {e}", files.info().display()),
+        )),
     }
+}
+
+/// With feature `e2e-prompter`: a JSON file of dialog answers that `run` uses instead of
+/// windows, e.g. `[{"storage":{"path":"…","password":"…"}},{"key":0},{"cancel_storage":null}]`
+/// (also `{"cancel_key":null}`).
+#[cfg(feature = "e2e-prompter")]
+pub const E2E_PROMPTER_VAR: &str = "ONCL_E2E_PROMPTER";
+
+/// The scripted prompter of the file in [`E2E_PROMPTER_VAR`], if the variable is set. On
+/// failure the message is already printed and exit code 1 returned.
+#[cfg(feature = "e2e-prompter")]
+pub fn e2e_prompter() -> Result<Option<oncl_basics::testing::ScriptedPrompter>, ExitCode> {
+    let Some(path) = std::env::var_os(E2E_PROMPTER_VAR) else {
+        return Ok(None);
+    };
+    let steps = fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|text| parse_steps(&text))
+        .map_err(|e| {
+            eprintln!("{E2E_PROMPTER_VAR}: {}: {e}", Path::new(&path).display());
+            ExitCode::FAILURE
+        })?;
+    Ok(Some(oncl_basics::testing::ScriptedPrompter::new(steps)))
+}
+
+/// The steps of an [`E2E_PROMPTER_VAR`] file.
+#[cfg(feature = "e2e-prompter")]
+fn parse_steps(text: &str) -> Result<Vec<oncl_basics::testing::Step>, String> {
+    use oncl_basics::testing::Step;
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum StepSpec {
+        Storage { path: PathBuf, password: String },
+        CancelStorage,
+        Key(usize),
+        CancelKey,
+    }
+
+    let specs: Vec<StepSpec> = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    Ok(specs
+        .into_iter()
+        .map(|spec| match spec {
+            StepSpec::Storage { path, password } => Step::Storage { path, password },
+            StepSpec::CancelStorage => Step::CancelStorage,
+            StepSpec::Key(index) => Step::Key(index),
+            StepSpec::CancelKey => Step::CancelKey,
+        })
+        .collect())
 }
 
 /// `tls init|import|status`.
@@ -295,7 +415,7 @@ fn save_and_explain(
 }
 
 fn tls_status(files: &TlsFiles) -> Result<ExitCode, ExitCode> {
-    let info = configured(files)?;
+    let info = configured(files).map_err(Failure::report)?;
     println!("Каталог: {}", files.dir.display());
     println!(
         "Источник: {}",
@@ -489,5 +609,40 @@ mod tests {
         let cli =
             Cli::try_parse_from(["openncalayer", "cms-verify", "a.p7s", "--content", "a"]).unwrap();
         assert!(matches!(cli.command, Some(Command::CmsVerify { .. })));
+        let cli = Cli::try_parse_from(["openncalayer", "run"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run {
+                allow_no_wss: false
+            })
+        ));
+        let cli = Cli::try_parse_from(["openncalayer", "run", "--allow-no-wss"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run { allow_no_wss: true })
+        ));
+    }
+
+    #[cfg(feature = "e2e-prompter")]
+    #[test]
+    fn e2e_steps_parse() {
+        use oncl_basics::testing::Step;
+
+        let steps = parse_steps(
+            r#"[{"storage":{"path":"k.p12","password":"pw"}},{"key":1},
+                {"cancel_storage":null},{"cancel_key":null}]"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            steps.as_slice(),
+            [
+                Step::Storage { path, password },
+                Step::Key(1),
+                Step::CancelStorage,
+                Step::CancelKey,
+            ] if path == Path::new("k.p12") && password == "pw"
+        ));
+        assert!(parse_steps(r#"[{"wait":null}]"#).is_err());
+        assert!(parse_steps("{}").is_err());
     }
 }

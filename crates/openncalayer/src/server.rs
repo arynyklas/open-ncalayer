@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use oncl_basics::{Basics, MODULE_NAME, Prompter, RecentPathStore};
 use oncl_pki::tsp::HttpTransport;
-use oncl_protocol::{AddInfo, HEARTBEAT, Registry, Route, greeting, module_not_found};
+use oncl_protocol::{AddInfo, HEARTBEAT, Registry, greeting};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -22,6 +22,7 @@ use tokio_tungstenite::tungstenite::{self, Message, Utf8Bytes};
 use tracing::{debug, info, warn};
 
 use crate::http::{self, Response};
+use crate::session::process;
 
 /// The NCALayer port.
 pub const DEFAULT_PORT: u16 = 13579;
@@ -234,23 +235,9 @@ where
             ws.send(Message::Text(text)).await.map_err(ws_error)?;
             continue;
         }
-        let registry = Arc::clone(&cfg.registry);
-        let add_info = add_info.clone();
         let len = text.len();
-        // Routing parses the whole request (possibly tens of megabytes), so it runs on the
-        // blocking pool together with the module call.
-        let answer = tokio::task::spawn_blocking(move || dispatch(&registry, &text, &add_info))
-            .await
-            .map_err(io::Error::other)?;
-        match answer {
-            Some(reply) => {
-                debug!(
-                    request_len = len,
-                    reply_len = reply.len(),
-                    "request answered"
-                );
-                ws.send(Message::text(reply)).await.map_err(ws_error)?;
-            }
+        match process(&cfg.registry, text, &add_info).await? {
+            Some(reply) => ws.send(Message::text(reply)).await.map_err(ws_error)?,
             None => {
                 // As the original: drop the TCP connection, no close frame.
                 info!(
@@ -260,16 +247,6 @@ where
                 return Ok(());
             }
         }
-    }
-}
-
-/// The reply to a request, or `None` to drop the connection.
-fn dispatch(registry: &Registry, text: &str, add_info: &AddInfo) -> Option<String> {
-    match registry.route(text) {
-        Route::Heartbeat => Some(text.to_owned()),
-        Route::Module(module) => Some(module.process(text, add_info)),
-        Route::NotFound => Some(module_not_found()),
-        Route::InvalidJson => None,
     }
 }
 
