@@ -1,0 +1,25 @@
+[package]
+name = "oncl-ui"
+description = "OpenNCALayer signing dialogs in Slint: storage, file and password; key choice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+oncl-basics.workspace = true
+rfd.workspace = true
+# `raw-window-handle-06`: the file dialog is owned by (and stays above) the storage dialog.
+slint = { workspace = true, features = ["raw-window-handle-06"] }
+time.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+
+[dev-dependencies]
+oncl-pki.workspace = true
+time = { workspace = true, features = ["macros"] }

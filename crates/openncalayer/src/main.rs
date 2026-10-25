@@ -2,10 +2,11 @@
 
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::thread;
 
 use clap::Parser;
-use oncl_basics::{KeyPrompt, Prompt, Prompter, StorageAnswer, StoragePrompt};
 use oncl_pki::tsp::UreqTransport;
+use oncl_ui::SlintPrompter;
 use openncalayer::cli::{self, Cli, Command};
 use openncalayer::{JsonSettings, ServerConfig, build_registry, serve};
 
@@ -17,13 +18,15 @@ fn main() -> ExitCode {
     }
 }
 
+/// The server runs on a tokio runtime in a background thread; the main thread runs the
+/// dialogs' event loop, as windowing systems require. A stopped server ends the loop.
 fn run() -> ExitCode {
     let daemon = match cli::prepare_run() {
         Ok(daemon) => daemon,
         Err(code) => return code,
     };
     let registry = build_registry(
-        Arc::new(NoDialogs),
+        Arc::new(SlintPrompter::new()),
         Arc::new(JsonSettings::new(daemon.paths.settings())),
         Arc::new(UreqTransport),
     );
@@ -38,39 +41,32 @@ fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = runtime.block_on(async {
-        let listener = tokio::net::TcpListener::from_std(daemon.listener)?;
-        serve(listener, cfg).await
-    });
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
+    let listener = daemon.listener;
+    let server = thread::Builder::new().name("server".into()).spawn(move || {
+        let result = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::from_std(listener)?;
+            serve(listener, cfg).await
+        });
+        if let Err(e) = &result {
             tracing::error!(error = %e, "server stopped");
-            ExitCode::FAILURE
         }
+        oncl_ui::quit();
+        result
+    });
+    let server = match server {
+        Ok(server) => server,
+        Err(e) => {
+            eprintln!("Не удалось запустить сервер: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = oncl_ui::run_event_loop() {
+        tracing::error!(error = %e, "signing dialogs are unavailable");
+        eprintln!("Не удалось показать окна подписи: {e}");
+        return ExitCode::FAILURE;
     }
-}
-
-/// The signing dialogs are not part of this build yet: every dialog is cancelled, so
-/// sites get the original's "cancelled" answer.
-struct NoDialogs;
-
-impl NoDialogs {
-    fn cancelled<T>(origin: &str) -> Prompt<T> {
-        tracing::warn!(
-            origin,
-            "signing dialogs are not available in this build: cancelled"
-        );
-        Prompt::Cancelled
-    }
-}
-
-impl Prompter for NoDialogs {
-    fn storage(&self, p: &StoragePrompt) -> Prompt<StorageAnswer> {
-        Self::cancelled(&p.origin)
-    }
-
-    fn key(&self, p: &KeyPrompt) -> Prompt<usize> {
-        Self::cancelled(&p.origin)
+    match server.join() {
+        Ok(Ok(())) => ExitCode::SUCCESS,
+        Ok(Err(_)) | Err(_) => ExitCode::FAILURE,
     }
 }

@@ -1,0 +1,124 @@
+// The key dialog: one row per key of the opened store.
+
+import { Button, ListView, Palette, VerticalBox } from "std-widgets.slint";
+
+// A key in the list.
+export struct KeyItem {
+    title: string,
+    details: string,
+    // Only enabled keys may sign.
+    enabled: bool,
+    // Why the key may not sign; empty if it may.
+    note: string,
+}
+
+export component KeyDialog inherits Window {
+    title: "OpenNCALayer";
+    always-on-top: true;
+    min-width: 520px;
+    min-height: 320px;
+
+    // The requesting page's origin.
+    in property <string> origin;
+    // Authentication rather than signing.
+    in property <bool> authenticate;
+    in property <[KeyItem]> keys;
+    // Whether any key is enabled.
+    in property <bool> has-enabled;
+    // Index of the chosen key, -1 for none.
+    in-out property <int> selected: -1;
+
+    callback sign();
+    callback cancel();
+
+    private property <bool> can-sign: root.selected >= 0 && root.keys[root.selected].enabled;
+
+    VerticalBox {
+        Text {
+            text: @tr("Request from: {}", root.origin);
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: root.authenticate ? @tr("Action: authentication") : @tr("Action: signing");
+            font-weight: 700;
+        }
+
+        Text {
+            text: root.has-enabled ? @tr("Choose a key") : @tr("No suitable key found");
+            color: root.has-enabled ? Palette.foreground : #c42b1c;
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            min-height: 160px;
+            for row[i] in root.keys: Rectangle {
+                border-radius: 4px;
+                background: i == root.selected ? Palette.selection-background : transparent;
+                accessible-role: list-item;
+                accessible-label: row.title;
+                accessible-description: row.note.is-empty ? row.details : row.details + "\n" + row.note;
+                accessible-item-selectable: true;
+                accessible-item-selected: i == root.selected;
+                accessible-item-index: i;
+                accessible-item-count: root.keys.length;
+                accessible-action-default => {
+                    root.selected = i;
+                }
+                TouchArea {
+                    clicked => {
+                        root.selected = i;
+                    }
+                    double-clicked => {
+                        root.selected = i;
+                        if (root.can-sign) {
+                            root.sign();
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 2px;
+                    Text {
+                        text: row.title;
+                        font-weight: 700;
+                        color: !row.enabled ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                    }
+
+                    Text {
+                        text: row.details;
+                        wrap: word-wrap;
+                        color: !row.enabled ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                    }
+                }
+            }
+        }
+
+        if root.selected >= 0 && !root.keys[root.selected].enabled: Text {
+            text: root.keys[root.selected].note;
+            wrap: word-wrap;
+            color: #c42b1c;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Button {
+                text: @tr("Sign");
+                primary: true;
+                enabled: root.can-sign;
+                clicked => {
+                    root.sign();
+                }
+            }
+
+            Button {
+                text: @tr("Cancel");
+                clicked => {
+                    root.cancel();
+                }
+            }
+        }
+    }
+}

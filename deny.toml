@@ -4,11 +4,17 @@ all-features = true
 [advisories]
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa used only by xtask to generate public test fixtures" },
+    # Unmaintained (no vulnerability, no maintained release yet) deep in Slint's winit
+    # backend on Linux: Wayland title bar fonts, and the zbus split crates of AT-SPI.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: transitive via winit/sctk-adwaita, unmaintained only" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: transitive via zbus (accesskit_unix, slint winit), unmaintained only" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: transitive via zbus (accesskit_unix, slint winit), unmaintained only" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: transitive via zbus (accesskit_unix, slint winit), unmaintained only" },
 ]
 
 [licenses]
-# Covers the whole planned dependency stack; the Slint license is added together
-# with the UI crate. Any dependency outside this list fails `cargo deny check`.
+# Covers the whole dependency stack. Any dependency outside this list fails
+# `cargo deny check`.
 allow = [
     "Apache-2.0",
     "MIT",
@@ -18,6 +24,9 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "CDLA-Permissive-2.0", # webpki-roots (ureq `rustls`)
+    "BSL-1.0", # clipboard-win, error-code (Slint's winit backend)
+    # Slint (oncl-ui), under its royalty-free license: the storage dialog shows AboutSlint.
+    "LicenseRef-Slint-Royalty-free-2.0",
 ]
 confidence-threshold = 0.93
 unused-allowed-license = "allow"

@@ -17,6 +17,7 @@ oncl-pki = { path = "crates/oncl-pki" }
 oncl-protocol = { path = "crates/oncl-protocol" }
 oncl-testkit = { path = "crates/oncl-testkit" }
 oncl-tls = { path = "crates/oncl-tls" }
+oncl-ui = { path = "crates/oncl-ui" }
 
 aes = "0.9.0"
 anyhow = "1.0.104"
@@ -38,6 +39,7 @@ pkcs8 = { version = "0.11.0", features = ["alloc"] }
 rand_chacha = "0.3.1"
 rc2 = "0.9.0"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto", "zeroize"] }
+rfd = "0.17.2"
 ring = "0.17.14"
 rsa = { version = "0.9.10", features = ["sha2"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
@@ -46,6 +48,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
 sha2 = "0.11.1"
+slint = { version = "1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "accessibility"] }
+slint-build = "1.18.1"
 spki = { version = "0.8.1", features = ["alloc"] }
 streebog = { version = "0.11.0", default-features = false }
 tempfile = "3.27.0"

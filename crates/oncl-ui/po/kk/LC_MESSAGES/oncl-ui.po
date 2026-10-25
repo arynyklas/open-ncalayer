@@ -1,0 +1,54 @@
+# Kazakh texts of the OpenNCALayer dialogs (the @tr strings of crates/oncl-ui/ui).
+msgid ""
+msgstr ""
+"Project-Id-Version: oncl-ui\n"
+"Language: kk\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Request from: {}"
+msgstr "Сұрау жіберген: {}"
+
+msgid "Action: signing"
+msgstr "Әрекет: қол қою"
+
+msgid "Action: authentication"
+msgstr "Әрекет: аутентификация"
+
+msgid "Key storage"
+msgstr "Кілттер қоймасы"
+
+msgid "not supported yet"
+msgstr "әзірге қолдау көрсетілмейді"
+
+msgid "Key store file"
+msgstr "Қойма файлы"
+
+msgid "Browse…"
+msgstr "Шолу…"
+
+msgid "Password"
+msgstr "Құпиясөз"
+
+msgid "Show password"
+msgstr "Құпиясөзді көрсету"
+
+msgid "Open"
+msgstr "Ашу"
+
+msgid "Cancel"
+msgstr "Бас тарту"
+
+msgid "Close"
+msgstr "Жабу"
+
+msgid "Choose a key"
+msgstr "Кілтті таңдаңыз"
+
+msgid "No suitable key found"
+msgstr "Сәйкес кілт табылмады"
+
+msgid "Sign"
+msgstr "Қол қою"
