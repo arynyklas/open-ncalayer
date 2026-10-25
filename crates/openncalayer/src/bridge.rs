@@ -160,6 +160,17 @@ struct Piece {
     more: bool,
 }
 
+/// What a queued piece costs besides its data: empty pieces are not free.
+const PIECE_OVERHEAD: usize = std::mem::size_of::<Queued>();
+
+impl Piece {
+    /// The bytes of the connection's budget the piece takes while queued: its data and
+    /// [`PIECE_OVERHEAD`].
+    fn cost(&self) -> usize {
+        self.data.len() + PIECE_OVERHEAD
+    }
+}
+
 /// Parses a frame from the extension. Only the fields of known frame types are looked at.
 ///
 /// # Errors
@@ -442,7 +453,7 @@ async fn relay_frames(
                 }
                 // A socket that sends more than the connection may hold is closed; the
                 // others go on.
-                let Some(held) = budget.take(piece.data.len()) else {
+                let Some(held) = budget.take(piece.cost()) else {
                     warn!(
                         sid,
                         "too much data waiting on the connection; closing the socket"
@@ -566,11 +577,12 @@ async fn socket(
         }
     };
     debug!(sid, reason, "closing the socket");
-    // Closed before the `close` frame goes out: the connection sees the socket as closed
-    // and never sends a second `close` for it.
-    drop(pieces);
     drop(message_held);
-    // The connection may be gone already: nothing to tell then.
+    // The `close` is queued while `pieces` is still open: until then the connection keeps
+    // the socket (pieces for it are queued and dropped with `pieces`). Were `pieces` closed
+    // first, a frame for this sid or any `open` could drop the socket and abort this task
+    // while it waits for room in a full queue, and the `close` would be lost. The
+    // connection may be gone already: nothing to tell then.
     let _ = out.send(Outbound::Close { sid }.to_json()).await;
 }
 
@@ -686,25 +698,40 @@ mod tests {
         }
     }
 
+    /// The budget holds 150 bytes of data in two pieces.
     const SMALL: Limits = Limits {
         max_message: 100,
-        budget: 150,
+        budget: 150 + 2 * PIECE_OVERHEAD,
         idle: Duration::from_secs(600),
     };
+
+    /// A request of exactly `len` bytes for a module that does not exist.
+    fn unknown_module_request(len: usize) -> String {
+        let head = r#"{"module":"none","pad":""#;
+        let request = format!(r#"{head}{}"}}"#, "p".repeat(len - head.len() - 2));
+        assert_eq!(request.len(), len);
+        request
+    }
 
     #[tokio::test]
     async fn message_over_the_limit_closes_only_its_socket() {
         let mut relay = Relay::start(Registry::default(), SMALL).await;
         relay.open(1).await;
         relay.open(2).await;
-        relay.piece(1, &"a".repeat(60), true).await;
-        relay.piece(1, &"a".repeat(41), false).await;
+        // 101 bytes of a valid request: refused for its size alone.
+        let over = unknown_module_request(101);
+        relay.piece(1, &over[..60], true).await;
+        relay.piece(1, &over[60..], false).await;
         assert_eq!(relay.next().await, r#"{"t":"close","sid":1}"#);
         relay.heartbeat(2).await;
-        // Exactly the limit is accepted (and answered: not a JSON object closes it).
-        relay.piece(2, &"b".repeat(60), true).await;
-        relay.piece(2, &"b".repeat(40), false).await;
-        assert_eq!(relay.next().await, r#"{"t":"close","sid":2}"#);
+        // Exactly the limit is accepted and answered.
+        let exact = unknown_module_request(100);
+        relay.piece(2, &exact[..60], true).await;
+        relay.piece(2, &exact[60..], false).await;
+        assert_eq!(
+            relay.next().await,
+            r#"{"t":"msg","sid":2,"data":"{\"success\":false,\"errorCode\":\"MODULE_NOT_FOUND\"}"}"#
+        );
     }
 
     /// Answers once the test lets it.
@@ -745,6 +772,30 @@ mod tests {
         relay.heartbeat(1).await;
     }
 
+    #[tokio::test]
+    async fn empty_pieces_count_against_the_budget() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let mut registry = Registry::default();
+        registry.register("gate", Arc::new(Gate(std::sync::Mutex::new(gate))));
+        let mut relay = Relay::start(registry, SMALL).await;
+        for sid in 1..=3 {
+            relay.open(sid).await;
+        }
+        let request = format!(r#"{{"module":"gate","pad":"{}"}}"#, "x".repeat(60));
+        relay.piece(1, &request, false).await;
+        // Empty pieces hold no data but still fill the budget: sid 2 is closed.
+        for _ in 0..10 {
+            relay.piece(2, "", true).await;
+        }
+        assert_eq!(relay.next().await, r#"{"t":"close","sid":2}"#);
+        relay.heartbeat(3).await;
+        release.send(()).unwrap();
+        assert_eq!(
+            relay.next().await,
+            r#"{"t":"msg","sid":1,"data":"{\"gate\":\"open\"}"}"#
+        );
+    }
+
     #[test]
     fn budget_returns_bytes_on_drop() {
         let budget = Budget::new(10);
@@ -756,6 +807,61 @@ mod tests {
         drop(a);
         assert!(budget.take(10).is_some());
         assert_eq!(budget.held.load(Ordering::Acquire), 0);
+    }
+
+    /// Replies with `len` bytes.
+    struct Big(usize);
+
+    impl oncl_protocol::Module for Big {
+        fn process(&self, _request: &str, _add_info: &AddInfo) -> String {
+            "b".repeat(self.0)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn close_survives_a_full_out_queue() {
+        let mut registry = Registry::default();
+        // More frames than the out queue and the duplex buffer hold together.
+        registry.register("big", Arc::new(Big((OUT_QUEUE + 8) * NM_FRAME_LIMIT)));
+        let mut relay = Relay::start(registry, Limits::DAEMON).await;
+        relay.open(1).await;
+        relay.open(2).await;
+        // The relay reads nothing: sid 1's reply fills the out queue.
+        relay.piece(1, r#"{"module":"big"}"#, false).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // sid 2 ends while its `close` cannot be queued yet...
+        relay.piece(2, "nope", false).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // ...and the connection meanwhile sees a frame for it and an `open`.
+        relay.piece(2, HEARTBEAT, false).await;
+        relay
+            .send(serde_json::json!({"t": "open", "sid": 3, "origin": "https://t.test"}))
+            .await;
+        // Read everything up to sid 3's greeting.
+        let mut closes = 0;
+        loop {
+            let frame: Value = serde_json::from_str(&relay.next().await).unwrap();
+            if frame == serde_json::json!({"t": "close", "sid": 2}) {
+                closes += 1;
+            }
+            if frame["sid"] == 3 && frame["t"] == "msg" {
+                break;
+            }
+        }
+        assert_eq!(closes, 1, "sid 2 must be closed exactly once");
+        // sid 3 works; the rest of sid 1's reply may come in between.
+        relay.piece(3, HEARTBEAT, false).await;
+        loop {
+            let frame: Value = serde_json::from_str(&relay.next().await).unwrap();
+            assert_ne!(frame["sid"], 2, "{frame}");
+            if frame["sid"] == 3 {
+                assert_eq!(
+                    frame,
+                    serde_json::json!({"t": "msg", "sid": 3, "data": HEARTBEAT})
+                );
+                break;
+            }
+        }
     }
 
     #[test]
