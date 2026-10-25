@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use oncl_basics::{Basics, MODULE_NAME, Prompter, RecentPathStore};
-use oncl_pki::tsp::HttpTransport;
+use oncl_pki::http::HttpTransport;
 use oncl_protocol::{AddInfo, HEARTBEAT, Registry, greeting};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};

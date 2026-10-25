@@ -16,7 +16,8 @@ pub use prompt::{
     StorageAnswer, StorageKind, StoragePrompt,
 };
 
-use oncl_pki::tsp::{HttpTransport, TsaProfile};
+use oncl_pki::http::HttpTransport;
+use oncl_pki::tsp::TsaProfile;
 use oncl_protocol::invoker::{self, CallResult, Failure, NlClass};
 use oncl_protocol::{AddInfo, Module};
 use serde_json::{Map, Value};

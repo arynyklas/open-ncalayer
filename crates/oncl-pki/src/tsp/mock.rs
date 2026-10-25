@@ -1,9 +1,9 @@
 //! An in-process TSA for tests.
 
 use super::asn1::{PkiStatusInfo, RawGeneralizedTime, TimeStampReq, TimeStampResp, TstInfo};
-use super::http::{TIMESTAMP_QUERY, TIMESTAMP_REPLY};
-use super::{BASICS_POLICY, HttpReply, HttpTransport, TspError};
+use super::{BASICS_POLICY, TIMESTAMP_QUERY, TIMESTAMP_REPLY};
 use crate::cms::{SignOptions, sign_content};
+use crate::http::{HttpError, HttpReply, HttpTransport};
 use crate::oid;
 use crate::pkcs12::KeyEntry;
 use base64::Engine;
@@ -138,7 +138,7 @@ impl MockTsa {
 }
 
 impl HttpTransport for MockTsa {
-    fn get(&self, url: &str) -> Result<HttpReply, TspError> {
+    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
         let serial = self.record(url);
         let encoded = url.rsplit('/').next().unwrap_or_default();
         Ok(
@@ -149,7 +149,7 @@ impl HttpTransport for MockTsa {
         )
     }
 
-    fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, TspError> {
+    fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
         let serial = self.record(url);
         if content_type != TIMESTAMP_QUERY {
             return Ok(text_reply(415, content_type));

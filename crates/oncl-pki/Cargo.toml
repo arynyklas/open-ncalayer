@@ -11,7 +11,8 @@ publish.workspace = true
 [features]
 # PKCS#12 writer (test fixtures, xtask).
 write = []
-# `tsp::MockTsa`, an in-process time-stamping authority for tests.
+# Test helpers: `tsp::MockTsa` (an in-process time-stamping authority),
+# `http::RouteTransport` and `testing::issue_cert`.
 testing = []
 
 [dependencies]
@@ -43,4 +44,8 @@ time = { workspace = true, features = ["macros"] }
 
 [[test]]
 name = "tsp"
+required-features = ["testing"]
+
+[[test]]
+name = "pkix"
 required-features = ["testing"]

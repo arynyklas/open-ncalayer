@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use oncl_basics::Prompter;
 use oncl_ipc::IpcListener;
-use oncl_pki::tsp::UreqTransport;
+use oncl_pki::http::UreqTransport;
 use oncl_protocol::Registry;
 use oncl_ui::SlintPrompter;
 use openncalayer::cli::{self, Cli, Command};

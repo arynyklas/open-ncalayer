@@ -13,11 +13,9 @@
 //! - The token goes into the signer's unsigned attributes as id-aa-timeStampToken.
 
 mod asn1;
-mod http;
 #[cfg(feature = "testing")]
 mod mock;
 
-pub use http::{HttpReply, HttpTransport, MAX_RESPONSE_LEN, UreqTransport};
 #[cfg(feature = "testing")]
 pub use mock::{MockTamper, MockTsa};
 
@@ -26,16 +24,25 @@ use crate::cms::asn1::{
     Attribute, ContentInfo, RawSet, SignedContentInfo, SignedData, SignerInfo, der_set_contents,
 };
 use crate::cms::{self, CmsError};
+use crate::http::{HttpError, HttpTransport};
 use crate::info::cert_info;
 use crate::key::SigAlg;
 use crate::oid;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use der::asn1::{AnyRef, ObjectIdentifier, OctetStringRef, UintRef};
 use der::{Decode, Encode};
 use spki::AlgorithmIdentifierRef;
+use std::fmt::Write;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 /// Policy `kz.gov.pki.knca.basics` asks the NCA TSA for.
 const BASICS_POLICY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.398.3.3.2.6.4");
+
+/// Media type of a POSTed `TimeStampReq` (RFC 3161 §3.4).
+const TIMESTAMP_QUERY: &str = "application/timestamp-query";
+/// Media type of a `TimeStampResp` (RFC 3161 §3.4).
+const TIMESTAMP_REPLY: &str = "application/timestamp-reply";
 
 /// How a request reaches the TSA.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,7 +139,7 @@ pub struct TstInfo {
 pub enum TspError {
     /// No HTTP response from the TSA.
     #[error("HTTP request to the TSA failed: {0}")]
-    Http(String),
+    Http(#[from] HttpError),
     /// The TSA answered with an HTTP status other than 200.
     #[error("TSA answered HTTP status {0}")]
     Status(u16),
@@ -352,13 +359,13 @@ pub fn timestamp_signer(
     getrandom::fill(&mut nonce).expect("operating system RNG failed");
     let request = request_der(profile, &imprint, &nonce);
     let reply = match profile.method {
-        TsaMethod::Get => http.get(&http::get_url(&profile.url, &request))?,
-        TsaMethod::Post => http.post(&profile.url, http::TIMESTAMP_QUERY, &request)?,
+        TsaMethod::Get => http.get(&get_url(&profile.url, &request))?,
+        TsaMethod::Post => http.post(&profile.url, TIMESTAMP_QUERY, &request)?,
     };
     if reply.status != 200 {
         return Err(TspError::Status(reply.status));
     }
-    if !http::is_timestamp_reply(reply.content_type.as_deref()) {
+    if !is_timestamp_reply(reply.content_type.as_deref()) {
         return Err(TspError::ContentType(reply.content_type));
     }
     let (token, tst) = parse_response(&reply.body)?;
@@ -376,6 +383,32 @@ pub fn timestamp_signer(
     }
     .to_der()
     .map_err(CmsError::from)?)
+}
+
+/// URL of the GET binding of the NCA TSA: `base/` and the base64 of the DER request with
+/// every character but the unreserved ones (RFC 3986) percent-encoded.
+fn get_url(base: &str, request: &[u8]) -> String {
+    let encoded = STANDARD.encode(request);
+    let base = base.strip_suffix('/').unwrap_or(base);
+    let mut url = String::with_capacity(base.len() + 1 + encoded.len() + encoded.len() / 8);
+    url.push_str(base);
+    url.push('/');
+    for b in encoded.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            url.push(char::from(b));
+        } else {
+            // Writing to a `String` cannot fail.
+            let _ = write!(url, "%{b:02X}");
+        }
+    }
+    url
+}
+
+/// Whether a `Content-Type` is `application/timestamp-reply`, ignoring case and parameters.
+fn is_timestamp_reply(content_type: Option<&str>) -> bool {
+    content_type
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case(TIMESTAMP_REPLY))
 }
 
 /// Whether `tst` answers a request with `imprint` (hashed with `profile.hash`), `nonce` and
@@ -491,6 +524,27 @@ mod tests {
             nonce: Some(nonce.to_vec()),
             gen_time: datetime!(2026-03-01 10:00 UTC),
         }
+    }
+
+    #[test]
+    fn get_url_encodes_all_but_unreserved() {
+        // base64 "+/8=" for [0xfb, 0xff].
+        assert_eq!(
+            get_url("http://h/tsp", &[0xfb, 0xff]),
+            "http://h/tsp/%2B%2F8%3D"
+        );
+        assert_eq!(get_url("http://h/", &[0xfb, 0xff]), "http://h/%2B%2F8%3D");
+    }
+
+    #[test]
+    fn timestamp_reply_media_type() {
+        assert!(is_timestamp_reply(Some("application/timestamp-reply")));
+        assert!(is_timestamp_reply(Some(
+            " APPLICATION/TimeStamp-Reply ; q=1"
+        )));
+        assert!(!is_timestamp_reply(Some("application/timestamp-query")));
+        assert!(!is_timestamp_reply(Some("")));
+        assert!(!is_timestamp_reply(None));
     }
 
     #[test]

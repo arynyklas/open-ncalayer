@@ -640,17 +640,17 @@ fn tsa_profile_adds_timestamp() {
 #[test]
 fn tsp_failure_code() {
     struct Down;
-    impl oncl_pki::tsp::HttpTransport for Down {
-        fn get(&self, _: &str) -> Result<oncl_pki::tsp::HttpReply, oncl_pki::tsp::TspError> {
-            Err(oncl_pki::tsp::TspError::Http("down".to_owned()))
+    impl oncl_pki::http::HttpTransport for Down {
+        fn get(&self, _: &str) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+            Err(oncl_pki::http::HttpError("down".to_owned()))
         }
         fn post(
             &self,
             _: &str,
             _: &str,
             _: &[u8],
-        ) -> Result<oncl_pki::tsp::HttpReply, oncl_pki::tsp::TspError> {
-            Err(oncl_pki::tsp::TspError::Http("down".to_owned()))
+        ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+            Err(oncl_pki::http::HttpError("down".to_owned()))
         }
     }
     let prompter = Arc::new(ScriptedPrompter::new(script![

@@ -6,11 +6,12 @@ use base64::engine::general_purpose::STANDARD;
 use der::asn1::{AnyRef, ObjectIdentifier};
 use der::{Decode, Encode, Reader, SliceReader, Tag, Tagged};
 use oncl_pki::cms::{SignOptions, sign, verify};
+use oncl_pki::http::{HttpError, HttpReply, HttpTransport, UreqTransport};
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::{
-    HttpReply, HttpTransport, MockTamper, MockTsa, TsaMethod, TsaProfile, TspError, TspHash,
-    UreqTransport, parse_response, request_der, timestamp_signer, verify_token, verify_token_for,
+    MockTamper, MockTsa, TsaMethod, TsaProfile, TspError, TspHash, parse_response, request_der,
+    timestamp_signer, verify_token, verify_token_for,
 };
 use oncl_testkit::{ncanode, read, synthetic};
 use sha1::Digest as _;
@@ -411,12 +412,12 @@ impl Fixed {
 }
 
 impl HttpTransport for Fixed {
-    fn get(&self, url: &str) -> Result<HttpReply, TspError> {
+    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
         self.seen.lock().unwrap().push(url.as_bytes().to_vec());
         Ok(self.reply.clone())
     }
 
-    fn post(&self, _url: &str, _content_type: &str, body: &[u8]) -> Result<HttpReply, TspError> {
+    fn post(&self, _url: &str, _content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
         self.seen.lock().unwrap().push(body.to_vec());
         Ok(self.reply.clone())
     }
