@@ -11,6 +11,8 @@
 
 OpenNCALayer **сам ничего не устанавливает** в хранилища сертификатов Windows, macOS или браузеров. Он печатает инструкцию, а установку выполняете вы.
 
+Сертификат не нужен сайтам в браузере с расширением OpenNCALayer: расширение передаёт сообщения через native messaging, без `wss` (см. раздел «Расширение браузера» в [README](../../README.md#расширение-браузера)).
+
 ## Где лежат файлы
 
 Каталог данных:
@@ -105,7 +107,7 @@ certutil -d sql:<nssdb> -A -t "C,," -n "OpenNCALayer Local CA" \
 
 Здесь `<nssdb>`:
 - для Chrome и Chromium — `$HOME/.pki/nssdb`;
-- для Firefox — каталог профиля `~/.mozilla/firefox/<профиль>`;
+- для Firefox — каталог профиля: `~/.mozilla/firefox/<профиль>`, а у профилей, созданных Firefox 147 и новее, — `~/.config/mozilla/firefox/<профиль>` (адрес каталога показан в `about:profiles`);
 - для Firefox из snap — `~/snap/firefox/common/.mozilla/firefox/<профиль>`.
 
 ### Firefox вручную

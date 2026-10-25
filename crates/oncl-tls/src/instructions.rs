@@ -214,7 +214,8 @@ fn linux(s: &mut String, ca_pem: &str) {
     let _ = writeln!(
         s,
         "где <nssdb> — $HOME/.pki/nssdb для Chrome и Chromium или каталог профиля Firefox \
-         (~/.mozilla/firefox/<профиль>, для snap — \
+         (~/.mozilla/firefox/<профиль>; профили, созданные Firefox 147 и новее, — \
+         ~/.config/mozilla/firefox/<профиль>; для snap — \
          ~/snap/firefox/common/.mozilla/firefox/<профиль>). Браузер перед этим закройте."
     );
     let _ = writeln!(s);

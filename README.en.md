@@ -19,7 +19,9 @@ P1 provides:
 - signature checking: `openncalayer cms-verify` — signatures and timestamps; certificate chains, validity periods and revocation are not checked;
 - a self-test page at `https://127.0.0.1:13579/` and a demo page at `https://127.0.0.1:13579/demo/`.
 
-Manual browser test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md) (in Russian).
+The second phase (P2) adds a browser extension: with it, sites work with OpenNCALayer without a trusted CA (see [Browser extension](#browser-extension)).
+
+Manual browser test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md) and [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md) (in Russian).
 
 ### Deviations of P1 from the original
 
@@ -64,9 +66,12 @@ openncalayer run        # start the server; plain `openncalayer` does the same
 
 Exit codes of `run`:
 - 2 — TLS is not set up;
-- 3 — the port is taken, for example by the original NCALayer.
+- 3 — the port is taken, for example by the original NCALayer;
+- 4 — OpenNCALayer with the same data directory is already running in this session.
 
-The original and OpenNCALayer cannot run at the same time: both need port 13579.
+With `--allow-no-wss` (how the extension's relay starts the daemon) codes 2 and 3 do not occur: the daemon logs a warning and serves only the extension.
+
+The original and OpenNCALayer cannot both serve `wss` at the same time: both need port 13579. The extension does not need the port.
 
 Data lives in `%APPDATA%\OpenNCALayer` (Windows), `~/Library/Application Support/OpenNCALayer` (macOS) or `${XDG_DATA_HOME:-~/.local/share}/openncalayer` (Linux). Inside:
 - `tls/` — certificates;
@@ -74,6 +79,50 @@ Data lives in `%APPDATA%\OpenNCALayer` (Windows), `~/Library/Application Support
 - `settings.json` — the path of the last chosen key file.
 
 The `ONCL_DATA_DIR` variable overrides the data directory. Set it during development (for example `ONCL_DATA_DIR=target/oncl-data`) so your real profile stays untouched.
+
+## Browser extension
+
+The extension replaces a page's `WebSocket` to `127.0.0.1`, `localhost` and `[::1]` on ports 13579–13679 and passes the messages to OpenNCALayer over native messaging. The browser starts a small relay, `nmhost`, and the relay starts the daemon (`openncalayer run --allow-no-wss`) unless it is already running. This path needs neither the certificate nor port 13579: `wss` and a trusted CA are now needed only for sites in browsers without the extension.
+
+There are no packages yet; build the extension from source:
+
+```sh
+cargo build --release -p openncalayer -p oncl-nmhost
+cargo xtask ext build   # → target/extension/
+```
+
+`ext build` writes the unpacked extensions `chromium/` and `firefox/` to `target/extension/`, next to `openncalayer-chromium-<version>.zip` and the unsigned `openncalayer-firefox-<version>.xpi`.
+
+Installation:
+1. `openncalayer nm install` registers the native messaging host `io.github.arynyklas.openncalayer`:
+   - copies the `nmhost` relay (by default the one next to `openncalayer`; another file with `--relay <file>`) to `%LOCALAPPDATA%\OpenNCALayer\nmhost.exe` (Windows) or into the data directory (macOS, Linux);
+   - writes `nmhost.json` next to it with the absolute paths of the data directory and the `openncalayer` binary;
+   - writes the host manifests: on macOS and Linux for the browsers it finds (Chrome, Chromium, Edge, Brave, Yandex Browser, Firefox); on Windows always `%LOCALAPPDATA%\OpenNCALayer\nm\{chromium,firefox}.json` and the keys `HKCU\Software\{Google\Chrome,Chromium,Microsoft\Edge,Mozilla}\NativeMessagingHosts\io.github.arynyklas.openncalayer`.
+
+   The command never touches certificates. Check with `openncalayer nm status` (exit code 1 if anything is missing); remove with `openncalayer nm uninstall` (the data directory stays).
+2. Chrome, Edge, Yandex Browser: the extensions page (`chrome://extensions`, `edge://extensions`) → "Developer mode" → "Load unpacked" → the `target/extension/chromium` directory or the unpacked `openncalayer-chromium-<version>.zip`. The extension id must be `cmdaoegbcpdhoamhgmibpgpnlojopcal`: the host accepts no other id.
+3. Firefox (128 or later): for now only a temporary install — `about:debugging` → "This Firefox" → "Load Temporary Add-on…" → `target/extension/firefox/manifest.json`; the add-on is gone after a Firefox restart. Only an AMO-signed (unlisted) XPI installs permanently: Firefox refuses the unsigned `.xpi`.
+4. Reload the open tabs of the sites.
+
+Good to know:
+- `nm install` resolves the data directory like `run` does, honouring `ONCL_DATA_DIR`. After moving the `openncalayer` binary or changing the data directory, run `nm install` again.
+- A repeated `nm install` replaces the relay by renaming: relays the browser is running keep working with the old file. Old `nmhost.old-*` files are removed by the next `nm install`. `nm uninstall` cannot delete a relay the browser is holding: close the browser and run the command again.
+- A daemon started by the relay runs until the session ends. If TLS is set up and port 13579 is free, the same daemon serves `wss` too; otherwise the log has a warning and the daemon serves only the extension.
+- Through the extension, the site origin that modules see comes from the browser, not from the page.
+- If the host is not installed or the daemon does not start, the extension gives the page its own `WebSocket`, i.e. the original NCALayer if it is running. While the host is installed, sites go to OpenNCALayer even when the original is running: to return to the original, run `nm uninstall` or disable the extension.
+
+Linux, Firefox from snap and Flatpak:
+- `nm install` detects Firefox by `~/.mozilla` or `~/.config/mozilla`. Snap Firefox keeps its profile under `~/snap/firefox/`, so the command may skip Firefox ("пропущен"). Then create the directory with `mkdir -p ~/.mozilla` and run `nm install` again: the manifest goes to `~/.mozilla/native-messaging-hosts/`, where snap Firefox 135 or later reads it through xdg-desktop-portal.
+- Flatpak Firefox starts native messaging hosts only through `xdg-native-messaging-proxy` on the host system. OpenNCALayer neither installs it nor changes Flatpak permissions: set this up by hand.
+- Neither has been tested.
+
+### Deviations and limits of the extension (P2)
+
+- Firefox ESR 115 (the last Firefox for Windows 7) is not supported until P6: the shim needs `world: "MAIN"` in content scripts, available since Firefox 128.
+- Chrome 109 (the last Chrome for Windows 7) is the declared minimum but has not been tested.
+- Safari is not supported.
+- Sockets a site opens from a Web Worker are not replaced: they still need `wss` and the CA.
+- The native messaging paths of Yandex Browser and Opera are untested. On Windows they read Chrome's registry key; on Linux the Yandex Browser manifest goes to `~/.config/yandex-browser/NativeMessagingHosts/`.
 
 ## Development
 
@@ -92,6 +141,23 @@ Tests prefixed with `live_` call real NCA services and are skipped by default:
 ```sh
 cargo test --workspace --all-features -- --ignored live_
 ```
+
+The browser extension:
+
+```sh
+node --test "extension/test/*.test.mjs"   # extension tests, Node 22 or later
+cargo xtask ext build                     # → target/extension/
+```
+
+End-to-end check of the extension in Chrome for Testing and Firefox (Linux only; browsers and drivers are downloaded to `target/browsers/`):
+
+```sh
+cargo build --release -p openncalayer --features e2e-prompter -p oncl-nmhost
+cargo xtask ext build
+cargo xtask ext-e2e --download
+```
+
+Without `--download` the paths come from `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX` and `ONCL_GECKODRIVER`. The browsers run with throwaway profiles in `target/ext-e2e/`, and the host is registered there too (`nm install --sandbox`). The `e2e-prompter` feature replaces the signing dialogs with a script from the `ONCL_E2E_PROMPTER` file; regular builds do not have it.
 
 Before submitting changes:
 

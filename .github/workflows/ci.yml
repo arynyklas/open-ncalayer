@@ -81,6 +81,9 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # Only whether the AMO secrets exist: the secrets themselves reach the signing step alone.
+      AMO_SIGNING: ${{ secrets.AMO_JWT_ISSUER != '' && secrets.AMO_JWT_SECRET != '' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -92,6 +95,23 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask ext build
+      # Unlisted AMO signing (roadmap D6). Skipped without the secrets; tags only, because AMO
+      # refuses a version it has already signed.
+      - name: Sign the Firefox add-on (AMO, unlisted)
+        if: env.AMO_SIGNING == 'true' && startsWith(github.ref, 'refs/tags/')
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: >-
+          npx --yes web-ext@10.8.0 sign --channel unlisted
+          --source-dir target/extension/firefox --artifacts-dir target/extension/signed
+      - name: Keep the signed add-on
+        if: env.AMO_SIGNING == 'true' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: openncalayer-firefox-signed
+          path: target/extension/signed/*.xpi
+          if-no-files-found: error
 
   # The extension in Chrome for Testing and Firefox, over native messaging to the daemon.
   ext-e2e:
@@ -141,13 +161,13 @@ jobs:
         # bash: pwsh splits the unquoted `-Zbuild-std=std,panic_abort` at the comma.
         # The pinned nightly is 1.99.0-nightly, below the workspace rust-version 1.99.1.
         shell: bash
-        run: cargo +nightly-2026-08-12 build -Zbuild-std=std,panic_abort --target x86_64-win7-windows-msvc --release --ignore-rust-version -p openncalayer
+        run: cargo +nightly-2026-08-12 build -Zbuild-std=std,panic_abort --target x86_64-win7-windows-msvc --release --ignore-rust-version -p openncalayer -p oncl-nmhost
       - name: Check imports
         shell: bash
         run: |
           { echo '## Win7 import gate'; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           status=0
-          cargo -q xtask check-imports target/x86_64-win7-windows-msvc/release/openncalayer.exe | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          cargo -q xtask check-imports target/x86_64-win7-windows-msvc/release/openncalayer.exe target/x86_64-win7-windows-msvc/release/nmhost.exe | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
