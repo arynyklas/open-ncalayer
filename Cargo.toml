@@ -33,6 +33,7 @@ gost94 = { version = "0.11.0", default-features = false }
 hex-literal = "1.1.0"
 hmac = "0.13.0"
 httparse = "1.10.1"
+log = "0.4.34"
 # Only in xtask (`check-imports`): PE reading only.
 object = { version = "0.40.0", default-features = false, features = ["read_core", "pe", "std"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
@@ -65,7 +66,8 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
-tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
+# `tracing-log`: messages of `log`-based crates (rfd, winit, rustls) reach the log files.
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "tracing-log"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 windows-sys = "0.61.2"
 x509-cert = "0.3.0"

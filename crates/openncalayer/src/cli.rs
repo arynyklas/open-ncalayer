@@ -374,6 +374,9 @@ pub fn cms_verify(file: &Path, content: Option<&Path>) -> ExitCode {
     }
 }
 
+/// The line before `OK` in a [`cms_verify_report`]: what `OK` does not mean.
+pub const NOT_CHECKED: &str = "not checked: certificate chains, validity periods, revocation";
+
 /// Verifies a CMS signature, PEM or DER/BER, over its encapsulated content or `content`.
 ///
 /// The report has a block per signer (numbered from 0, as in error messages):
@@ -381,12 +384,13 @@ pub fn cms_verify(file: &Path, content: Option<&Path>) -> ExitCode {
 /// `timestamp: yes|no` (whether the signer carries a time-stamp token); its last line is
 /// `OK` if every signature verifies and every token verifies and covers its signer's
 /// signature, otherwise `FAIL: <error>`. Returns the report and whether it is `OK`.
-/// Certificate chains, validity and revocation are not checked.
+/// Certificate chains, validity and revocation are not checked, and an `OK` report says
+/// so in the line [`NOT_CHECKED`] before `OK`.
 pub fn cms_verify_report(input: &[u8], content: Option<&[u8]>) -> (String, bool) {
     let mut report = String::new();
     match describe(input, content, &mut report) {
         Ok(()) => {
-            report.push_str("OK\n");
+            let _ = writeln!(report, "{NOT_CHECKED}\nOK");
             (report, true)
         }
         Err(e) => {

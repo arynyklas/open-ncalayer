@@ -46,3 +46,28 @@ pub fn init(dir: &Path) -> io::Result<()> {
         .init();
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The only test that installs the global subscriber in this test binary.
+    #[test]
+    fn log_records_reach_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path()).unwrap();
+        log::error!(target: "rfd", "Failed to pick file with zenity: test record");
+        log::debug!(target: "rfd", "below the level: not written");
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        let text = std::fs::read_to_string(&files[0]).unwrap();
+        assert!(
+            text.contains("ERROR rfd: Failed to pick file with zenity: test record"),
+            "{text}"
+        );
+        assert!(!text.contains("below the level"), "{text}");
+    }
+}

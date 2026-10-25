@@ -1,12 +1,14 @@
 //! Plain HTTPS requests (everything that is not a WebSocket upgrade): the self-test page
-//! and the demo page with its vendored ncalayer-js-client.
+//! and the demo page with its vendored ncalayer-js-client and that client's MIT notice.
 
 use std::borrow::Cow;
 
 const SELFTEST: &str = include_str!("../../../web/selftest/index.html");
 const DEMO: &[u8] = include_bytes!("../../../web/demo/index.html");
-/// ncalayer-js-client 1.6.1 as published on npm (MIT, see `web/demo/vendor/LICENSE`).
+/// ncalayer-js-client 1.6.1 as published on npm (MIT, see [`NCALAYER_CLIENT_LICENSE`]).
 const NCALAYER_CLIENT: &[u8] = include_bytes!("../../../web/demo/vendor/ncalayer-client.js");
+/// The MIT notice of ncalayer-js-client, served next to it: the published file has none.
+const NCALAYER_CLIENT_LICENSE: &str = include_str!("../../../web/demo/vendor/LICENSE");
 
 /// A complete HTTP/1.1 response; the connection is closed after it.
 pub(crate) struct Response {
@@ -108,6 +110,10 @@ pub(crate) fn respond(method: &str, target: &str) -> Response {
         "/demo/vendor/ncalayer-client.js" => {
             Response::ok("text/javascript; charset=utf-8", NCALAYER_CLIENT)
         }
+        "/demo/vendor/LICENSE" => Response::ok(
+            "text/plain; charset=utf-8",
+            NCALAYER_CLIENT_LICENSE.as_bytes(),
+        ),
         _ => Response::text(404, "Not Found", "Not Found"),
     }
 }
@@ -126,7 +132,12 @@ mod tests {
             respond("GET", "/demo/vendor/ncalayer-client.js").status(),
             200
         );
-        assert_eq!(respond("GET", "/demo/vendor/LICENSE").status(), 404);
+        let license = respond("GET", "/demo/vendor/LICENSE").to_bytes();
+        let license = String::from_utf8(license).unwrap();
+        assert!(license.starts_with("HTTP/1.1 200 OK\r\n"), "{license}");
+        assert!(license.contains("\r\nContent-Type: text/plain; charset=utf-8\r\n"));
+        assert!(license.ends_with(NCALAYER_CLIENT_LICENSE), "{license}");
+        assert!(NCALAYER_CLIENT_LICENSE.contains("MIT License"));
         assert_eq!(respond("HEAD", "/").status(), 405);
         let bytes = respond("PUT", "/x").to_bytes();
         let text = String::from_utf8(bytes).unwrap();

@@ -13,7 +13,7 @@ use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::{MockTsa, TsaProfile, timestamp_signer, verify_token};
 use oncl_testkit::{read, synthetic};
 use oncl_tls::TlsFiles;
-use openncalayer::cli::cms_verify_report;
+use openncalayer::cli::{NOT_CHECKED, cms_verify_report};
 use openncalayer::{JsonSettings, ServerConfig, build_registry, listen_port_from, serve};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
@@ -465,7 +465,7 @@ async fn cms_verify_reports_signers() {
         let (report, ok) = cms_verify_report(&input, None);
         let lines: Vec<&str> = report.lines().collect();
         assert!(ok, "{report}");
-        assert_eq!(lines.len(), 3, "{report}");
+        assert_eq!(lines.len(), 4, "{report}");
         assert!(lines[0].starts_with("signer 0: CN="), "{report}");
         assert!(lines[0].contains(", IIN="), "{report}");
         assert!(
@@ -473,7 +473,9 @@ async fn cms_verify_reports_signers() {
             "{report}"
         );
         assert_eq!(lines[1], "timestamp: yes");
-        assert_eq!(lines[2], "OK");
+        assert_eq!(lines[2], NOT_CHECKED);
+        assert!(lines[2].contains("chains") && lines[2].contains("revocation"));
+        assert_eq!(lines[3], "OK");
     }
 
     let (report, ok) = cms_verify_report(b"not a CMS", None);
@@ -502,7 +504,10 @@ fn cms_verify_rejects_a_token_of_another_signature() {
     let stamped = timestamp_signer(&first, 0, &TsaProfile::basics_default(), &tsa).unwrap();
     let (report, ok) = cms_verify_report(&stamped, None);
     assert!(ok, "{report}");
-    assert!(report.contains("\ntimestamp: yes\nOK\n"), "{report}");
+    assert!(
+        report.contains(&format!("\ntimestamp: yes\n{NOT_CHECKED}\nOK\n")),
+        "{report}"
+    );
 
     let old = verify(&first, None).unwrap().swap_remove(0).signature;
     let new = verify(&second, None).unwrap().swap_remove(0).signature;

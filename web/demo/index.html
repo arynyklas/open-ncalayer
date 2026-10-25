@@ -21,7 +21,7 @@
 </head>
 <body>
 <h1>Демо подписи CMS</h1>
-<p>Страница работает через <a href="https://github.com/sigex-kz/ncalayer-js-client">ncalayer-js-client</a> 1.6.1 так же, как сайты с оригинальным NCALayer: <code>new NCALayerClient()</code> подключается к <code>wss://127.0.0.1:13579</code>. <a href="/">Самопроверка</a>.</p>
+<p>Страница работает через <a href="https://github.com/sigex-kz/ncalayer-js-client">ncalayer-js-client</a> 1.6.1 (<a href="vendor/LICENSE">лицензия MIT</a>) так же, как сайты с оригинальным NCALayer, но подключается именно к этому OpenNCALayer: <code>new NCALayerClient('wss://' + location.host + '/', false)</code> — адрес и порт, с которых открыта страница, без HTTP API KAZTOKEN. Сайты обычно вызывают <code>new NCALayerClient()</code>, то есть <code>wss://127.0.0.1:13579</code>. <a href="/">Самопроверка</a>.</p>
 <p>Соединение: <span id="conn">подключение…</span></p>
 
 <fieldset>
@@ -113,7 +113,9 @@
     if (connecting) {
       return connecting;
     }
-    var fresh = new NCALayerClient();
+    // This daemon's own address (NCALAYERPORT may move it off 13579), and no KAZTOKEN HTTP
+    // API: the signature must come from OpenNCALayer, not from other software on the machine.
+    var fresh = new NCALayerClient('wss://' + location.host + '/', false);
     fresh.onRequestReady = function (request) { console.log('→ NCALayer', short(request)); };
     fresh.onResponseReady = function (response) { console.log('← NCALayer', short(response)); };
     show('conn', null, 'подключение…');
