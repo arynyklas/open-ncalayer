@@ -11,10 +11,15 @@ use object::{FileKind, NameOrOrdinal, Object as _};
 /// DLLs that do not exist on Windows 7: any import from them fails the gate.
 const FORBIDDEN_DLLS: &[&str] = &["combase.dll", "api-ms-win-core-synch-l1-2-0.dll"];
 
+/// DLL name prefixes of API sets that Windows 7 does not have.
+const FORBIDDEN_DLL_PREFIXES: &[&str] = &["api-ms-win-core-winrt-"];
+
 /// Functions that Windows 7 versions of these DLLs do not export.
 const FORBIDDEN_FUNCTIONS: &[(&str, &str)] = &[
     ("bcryptprimitives.dll", "ProcessPrng"),
     ("kernel32.dll", "GetSystemTimePreciseAsFileTime"),
+    // Windows 10 1607+.
+    ("user32.dll", "SystemParametersInfoForDpi"),
 ];
 
 /// One imported function of a PE image, from the regular or the delay-load import table.
@@ -62,7 +67,13 @@ pub fn violations(imports: &[Import]) -> Vec<String> {
             let missing = if FORBIDDEN_DLLS
                 .iter()
                 .any(|dll| import.dll.eq_ignore_ascii_case(dll))
-            {
+                || FORBIDDEN_DLL_PREFIXES.iter().any(|prefix| {
+                    import
+                        .dll
+                        .as_bytes()
+                        .get(..prefix.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+                }) {
                 "DLL"
             } else if FORBIDDEN_FUNCTIONS.iter().any(|(dll, function)| {
                 import.dll.eq_ignore_ascii_case(dll) && import.symbol.as_deref() == Some(*function)
@@ -134,6 +145,12 @@ mod tests {
             imp("API-MS-WIN-CORE-SYNCH-L1-2-0.dll", "WaitOnAddress"),
             imp("BCryptPrimitives.dll", "ProcessPrng"),
             imp("KERNEL32.DLL", "GetSystemTimePreciseAsFileTime"),
+            imp("USER32.dll", "SystemParametersInfoForDpi"),
+            imp(
+                "api-ms-win-core-winrt-error-l1-1-0.dll",
+                "RoOriginateErrorW",
+            ),
+            imp("API-MS-WIN-CORE-WINRT-L1-1-0.DLL", "RoInitialize"),
         ]);
         assert_eq!(
             v,
@@ -142,6 +159,9 @@ mod tests {
                 "API-MS-WIN-CORE-SYNCH-L1-2-0.dll!WaitOnAddress: DLL is missing on Windows 7",
                 "BCryptPrimitives.dll!ProcessPrng: function is missing on Windows 7",
                 "KERNEL32.DLL!GetSystemTimePreciseAsFileTime: function is missing on Windows 7",
+                "USER32.dll!SystemParametersInfoForDpi: function is missing on Windows 7",
+                "api-ms-win-core-winrt-error-l1-1-0.dll!RoOriginateErrorW: DLL is missing on Windows 7",
+                "API-MS-WIN-CORE-WINRT-L1-1-0.DLL!RoInitialize: DLL is missing on Windows 7",
             ]
         );
     }
@@ -158,6 +178,12 @@ mod tests {
                 "AcquireSRWLockExclusive",
             ),
             imp("ole32.dll", "CoTaskMemFree"),
+            imp("user32.dll", "SystemParametersInfoW"),
+            imp("api-ms-win-core-winrt", "RoInitialize"),
+            imp(
+                "ext-ms-win-core-winrt-error-l1-1-0.dll",
+                "RoOriginateErrorW",
+            ),
         ]);
         assert!(v.is_empty(), "{v:?}");
     }

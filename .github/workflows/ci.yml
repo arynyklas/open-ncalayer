@@ -82,8 +82,13 @@ jobs:
           rustup toolchain install
           rustup toolchain install nightly-2026-08-12 --profile minimal --component rust-src
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The job is expected to fail in P1; still keep the build cache.
+          cache-on-failure: true
       - name: Build for Windows 7
+        # bash: pwsh splits the unquoted `-Zbuild-std=std,panic_abort` at the comma.
         # The pinned nightly is 1.99.0-nightly, below the workspace rust-version 1.99.1.
+        shell: bash
         run: cargo +nightly-2026-08-12 build -Zbuild-std=std,panic_abort --target x86_64-win7-windows-msvc --release --ignore-rust-version -p openncalayer
       - name: Check imports
         shell: bash
