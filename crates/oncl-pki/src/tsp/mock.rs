@@ -25,12 +25,14 @@ pub enum MockTamper {
 
 /// A TSA answering GET (NCA binding) and POST requests with a granted `TimeStampResp`: a
 /// `TSTInfo` with the request's policy (or the basics one), message imprint and nonce, the
-/// current time and a serial counting the requests, signed with `entry` through
-/// `cms::sign_content` as id-ct-TSTInfo. Unreadable requests get HTTP 400, a POST of another
-/// content type HTTP 415. Every requested URL is recorded.
+/// current time (or the one set with [`MockTsa::with_gen_time`]) and a serial counting the
+/// requests, signed with `entry` through `cms::sign_content` as id-ct-TSTInfo. Unreadable
+/// requests get HTTP 400, a POST of another content type HTTP 415. Every requested URL is
+/// recorded.
 pub struct MockTsa {
     entry: KeyEntry,
     tamper: MockTamper,
+    gen_time: Option<OffsetDateTime>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -40,6 +42,7 @@ impl MockTsa {
         MockTsa {
             entry,
             tamper: MockTamper::None,
+            gen_time: None,
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -48,6 +51,16 @@ impl MockTsa {
     #[must_use]
     pub fn with_tamper(self, tamper: MockTamper) -> Self {
         MockTsa { tamper, ..self }
+    }
+
+    /// The same TSA with a stopped clock: every token has `gen_time` (to the second) as its
+    /// genTime and signingTime.
+    #[must_use]
+    pub fn with_gen_time(self, gen_time: OffsetDateTime) -> Self {
+        MockTsa {
+            gen_time: Some(gen_time),
+            ..self
+        }
     }
 
     /// URLs requested so far, in order.
@@ -86,7 +99,7 @@ impl MockTsa {
         {
             *last ^= 1;
         }
-        let now = OffsetDateTime::now_utc();
+        let now = self.gen_time.unwrap_or_else(OffsetDateTime::now_utc);
         let gen_time = format_generalized_time(now);
         // A leading 01 keeps the INTEGER positive and minimal.
         let mut serial_number = vec![1];

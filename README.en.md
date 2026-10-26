@@ -16,7 +16,7 @@ P1 provides:
 - attached and detached signatures, co-signing, NCA timestamps (TSP);
 - storage and key selection dialogs (Russian, Kazakh, English);
 - a command-line TLS wizard: `openncalayer tls init|import|status` ([guide, in Russian](docs/user/tls.md));
-- signature checking: `openncalayer cms-verify` — signatures and timestamps; certificate chains, validity periods and revocation are not checked;
+- signature checking: `openncalayer cms-verify` — signatures, timestamps, certificate chains up to the NCA roots, validity periods and revocation (OCSP, CRL);
 - a self-test page at `https://127.0.0.1:13579/` and a demo page at `https://127.0.0.1:13579/demo/`.
 
 The second phase (P2) adds a browser extension: with it, sites work with OpenNCALayer without a trusted CA (see [Browser extension](#browser-extension)).
@@ -72,7 +72,7 @@ openncalayer run        # start the server; plain `openncalayer` does the same
 1. After `tls init`, trust the CA as the printed instructions say. Per-OS details are in [`docs/user/tls.md`](docs/user/tls.md).
 2. Start `openncalayer run` and open `https://127.0.0.1:13579/`: the page must load without a certificate warning.
 3. At `https://127.0.0.1:13579/demo/` you can sign a text or a file and download the `.p7s`.
-4. To check a signature: `openncalayer cms-verify signature.p7s`; for a detached signature, `openncalayer cms-verify signature.p7s --content <data file>`. `OK` means the signatures and timestamps are mathematically valid; certificate chains, validity periods and revocation are not checked (the `not checked: …` line before `OK`).
+4. To check a signature: `openncalayer cms-verify signature.p7s`; for a detached signature, `openncalayer cms-verify signature.p7s --content <data file>`. It checks the signatures and timestamps, the signer's certificate chain through the embedded NCA certificates (`--chain <CA file>`, repeatable, replaces them), the validity period at the timestamp's time (without one, at `signingTime`) and revocation: the signer by OCSP, intermediate CAs by CRL (cached in `crl/` of the data directory). The last line is `OK`, `FAIL: <reason>`, or `INDETERMINATE: revocation data unavailable`: everything else holds, but no revocation data could be obtained. The exit code is 0 only for `OK`. With `--offline` revocation is not checked and the line `not checked: revocation` precedes `OK`.
 
 Exit codes of `run`:
 - 2 — TLS is not set up;

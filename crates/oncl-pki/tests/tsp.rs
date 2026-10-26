@@ -263,8 +263,9 @@ fn token_is_bound_to_its_signature() {
         let s = verify(&cms, None).unwrap();
         assert_eq!(s[0].signature, signer_signature(&cms, 0));
         let token = s[0].timestamp_token.as_ref().unwrap();
-        let tst = verify_token_for(token, &s[0].signature).unwrap();
+        let (tst, tsa) = verify_token_for(token, &s[0].signature).unwrap();
         assert_eq!(tst.imprint_alg, profile.hash.oid());
+        assert_eq!(tsa, entry("tsa-gost2015").cert);
 
         // The token of another signature (the same content and key, a fresh random k).
         let other = verify(&signed("user-gost2015-sign"), None).unwrap();
@@ -560,7 +561,7 @@ fn parses_ncanode_tsp_response() {
     // NCANode's TspServiceTest asked for a SHA-1 imprint of CA FE BA BE: the original's
     // SHA-1 tokens verify (bound to the stamped bytes), and other bytes are a mismatch.
     assert_eq!(
-        verify_token_for(&tok, &[0xca, 0xfe, 0xba, 0xbe]).unwrap(),
+        verify_token_for(&tok, &[0xca, 0xfe, 0xba, 0xbe]).unwrap().0,
         tst
     );
     assert_eq!(
@@ -613,7 +614,7 @@ fn sha1_imprints_verify_but_are_never_requested() {
     let signature = signer_signature(&signed("user-gost2015-sign"), 0);
     let sha1 = sha1::Sha1::digest(&signature).to_vec();
     let token = token_with_imprint(SHA1, &sha1);
-    let tst = verify_token_for(&token, &signature).unwrap();
+    let (tst, _) = verify_token_for(&token, &signature).unwrap();
     assert_eq!(tst.imprint_alg.to_string(), SHA1);
     assert_eq!(tst.imprint, sha1);
     assert_eq!(

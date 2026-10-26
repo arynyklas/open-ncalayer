@@ -21,6 +21,7 @@ pub use mock::{MockTamper, MockTsa};
 
 use crate::asn1util::{generalized_time, unsigned};
 use crate::ber::{self, BerError};
+use crate::cert::Certificate;
 use crate::cms::asn1::{
     Attribute, ContentInfo, RawSet, SignedContentInfo, SignedData, SignerInfo, der_set_contents,
 };
@@ -246,6 +247,11 @@ pub fn parse_response(resp: &[u8]) -> Result<(Vec<u8>, TstInfo), TspError> {
 /// usage; [`TspError::Cms`] if the signature does not verify; [`TspError::Malformed`] for
 /// another number of signers, another content type or an invalid `TSTInfo`.
 pub fn verify_token(token: &[u8]) -> Result<TstInfo, TspError> {
+    verify_token_signed(token).map(|(tst, _)| tst)
+}
+
+/// [`verify_token`], also returning the TSA certificate that signed the token.
+fn verify_token_signed(token: &[u8]) -> Result<(TstInfo, Certificate), TspError> {
     let der = ber::to_der(token)?;
     let content_info = ContentInfo::from_der(&der)?;
     if content_info.content_type != oid::SIGNED_DATA {
@@ -276,19 +282,25 @@ pub fn verify_token(token: &[u8]) -> Result<TstInfo, TspError> {
         CmsError::CertNotFound(_) => TspError::NoTsaCertificate,
         e => TspError::Cms(e),
     })?;
-    let time_stamping = oid::TIME_STAMPING.to_string();
-    if !signers
-        .iter()
-        .all(|s| cert_info(&s.cert).ext_key_usages.contains(&time_stamping))
+    // One signer: the count is checked above.
+    let tsa = signers
+        .into_iter()
+        .next()
+        .ok_or(TspError::NoTsaCertificate)?
+        .cert;
+    if !cert_info(&tsa)
+        .ext_key_usages
+        .contains(&oid::TIME_STAMPING.to_string())
     {
         return Err(TspError::NoTsaCertificate);
     }
-    tst_info(content.as_bytes())
+    Ok((tst_info(content.as_bytes())?, tsa))
 }
 
 /// [`verify_token`] for the token of a CMS signer whose `SignerInfo.signature` value is
 /// `signature`: the token's message imprint must also be the hash of `signature` (with the
-/// token's own imprint algorithm), as [`timestamp_signer`] requests it.
+/// token's own imprint algorithm), as [`timestamp_signer`] requests it. Returns the
+/// `TSTInfo` and the TSA certificate that signed the token (its chain is up to the caller).
 ///
 /// Besides the [`TspHash`] algorithms, a SHA-1 imprint is accepted here: the NCA TSA stamps
 /// SHA-1 imprints for clients that ask for them, and CAdES-T made by such clients must
@@ -299,8 +311,11 @@ pub fn verify_token(token: &[u8]) -> Result<TstInfo, TspError> {
 /// Errors of [`verify_token`]; [`TspError::UnsupportedImprintAlgorithm`] if the imprint
 /// algorithm is none of those; [`TspError::ImprintMismatch`] if the imprint is not the hash
 /// of `signature`.
-pub fn verify_token_for(token: &[u8], signature: &[u8]) -> Result<TstInfo, TspError> {
-    let tst = verify_token(token)?;
+pub fn verify_token_for(
+    token: &[u8],
+    signature: &[u8],
+) -> Result<(TstInfo, Certificate), TspError> {
+    let (tst, tsa) = verify_token_signed(token)?;
     let expected = match TspHash::from_oid(&tst.imprint_alg) {
         Some(hash) => hash.digest(signature),
         None if tst.imprint_alg == oid::SHA1 => {
@@ -312,7 +327,7 @@ pub fn verify_token_for(token: &[u8], signature: &[u8]) -> Result<TstInfo, TspEr
     if tst.imprint != expected {
         return Err(TspError::ImprintMismatch);
     }
-    Ok(tst)
+    Ok((tst, tsa))
 }
 
 /// Time-stamps signer `signer_index` of a DER or BER `ContentInfo{SignedData}`: requests a

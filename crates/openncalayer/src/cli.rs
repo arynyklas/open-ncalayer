@@ -16,8 +16,13 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::{Parser, Subcommand};
 use oncl_ipc::IpcListener;
-use oncl_pki::cms;
+use oncl_pki::cert::{self, Certificate};
+use oncl_pki::cms::{self, VerifiedSigner};
+use oncl_pki::crl::{self, CrlCache, CrlStatus};
+use oncl_pki::http::{HttpTransport, UreqTransport};
 use oncl_pki::info::cert_info;
+use oncl_pki::ocsp::{self, CertStatus};
+use oncl_pki::pkix::{CaSet, PathError, build_path, validation_time};
 use oncl_pki::tsp::{TspError, verify_token_for};
 use oncl_tls::{
     RENEW_BEFORE, TargetOs, TlsFiles, TlsInfo, TlsSource, TlsWarning, instructions, load_info,
@@ -65,12 +70,20 @@ pub enum Command {
         #[command(subcommand)]
         command: TlsCommand,
     },
-    #[command(about = "Проверить CMS-подпись (PEM или DER)")]
+    #[command(about = "Проверить CMS-подпись (PEM или DER): подписи, цепочки, сроки, отзыв")]
     CmsVerify {
         #[arg(help = "Файл подписи (.p7s, .cms, PEM или DER)")]
         file: PathBuf,
         #[arg(long, help = "Подписанные данные для подписи без вложенных данных")]
         content: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "Сертификат CA (PEM или DER) вместо встроенных сертификатов НУЦ; можно указать несколько раз"
+        )]
+        chain: Vec<PathBuf>,
+        #[arg(long, help = "Не проверять отзыв: без запросов OCSP и CRL")]
+        offline: bool,
     },
     #[command(about = "Хост native messaging для расширения браузера")]
     Nm {
@@ -647,13 +660,47 @@ fn print_nm_report(report: &Report) {
     }
 }
 
-/// `cms-verify <file> [--content <file>]`: prints [`cms_verify_report`]; exit code 0 when
-/// it ends with `OK`, otherwise 1.
-pub fn cms_verify(file: &Path, content: Option<&Path>) -> ExitCode {
+/// `cms-verify <file> [--content <file>] [--chain <file>]... [--offline]`: prints
+/// [`cms_verify_report_with`] against the CAs of `chain` (PEM or DER, one certificate per
+/// file) or, without any, the embedded NCA set, over the network ([`UreqTransport`]) with
+/// the CRL cache in `<data_dir>/crl`. Exit code 0 when the report ends with `OK`,
+/// otherwise 1.
+pub fn cms_verify(
+    file: &Path,
+    content: Option<&Path>,
+    chain: &[PathBuf],
+    offline: bool,
+) -> ExitCode {
+    let paths = match data_paths() {
+        Ok(paths) => paths,
+        Err(code) => return code,
+    };
     let read = |path: &Path| fs::read(path).map_err(|e| format!("{}: {e}", path.display()));
-    let inputs = read(file).and_then(|cms| Ok((cms, content.map(read).transpose()?)));
+    let inputs = read(file).and_then(|cms| {
+        let content = content.map(read).transpose()?;
+        let cas = if chain.is_empty() {
+            CaSet::nca_production()
+        } else {
+            let certs = chain.iter().map(|path| {
+                read(path).and_then(|bytes| {
+                    parse_certificate(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+                })
+            });
+            CaSet::new(certs.collect::<Result<_, _>>()?)
+        };
+        Ok((cms, content, cas))
+    });
     let (report, ok) = match inputs {
-        Ok((cms, content)) => cms_verify_report(&cms, content.as_deref()),
+        Ok((cms, content, cas)) => {
+            let opts = CmsVerifyOptions {
+                cas,
+                http: &UreqTransport,
+                crl_dir: paths.crl(),
+                offline,
+                now: OffsetDateTime::now_utc(),
+            };
+            cms_verify_report_with(&cms, content.as_deref(), &opts)
+        }
         Err(e) => (format!("FAIL: {e}\n"), false),
     };
     print!("{report}");
@@ -664,68 +711,337 @@ pub fn cms_verify(file: &Path, content: Option<&Path>) -> ExitCode {
     }
 }
 
-/// The line before `OK` in a [`cms_verify_report`]: what `OK` does not mean.
-pub const NOT_CHECKED: &str = "not checked: certificate chains, validity periods, revocation";
+/// A certificate in PEM (the first block) or DER.
+fn parse_certificate(input: &[u8]) -> Result<Certificate, String> {
+    cert::parse(&pem_or_der(input)?).map_err(|e| e.to_string())
+}
 
-/// Verifies a CMS signature, PEM or DER/BER, over its encapsulated content or `content`.
+/// The line before `OK` in a [`cms_verify_report_with`] made with `offline`: what `OK` does
+/// not mean.
+pub const NOT_CHECKED: &str = "not checked: revocation";
+
+/// The last line of a [`cms_verify_report_with`] when only revocation data is missing.
+const INDETERMINATE: &str = "INDETERMINATE: revocation data unavailable";
+
+/// What `cms-verify` checks signer certificates against, and how.
+pub struct CmsVerifyOptions<'a> {
+    /// CAs certification paths are built through: the embedded NCA set or `--chain`.
+    pub cas: CaSet,
+    /// Transport of OCSP requests and CRL downloads.
+    pub http: &'a dyn HttpTransport,
+    /// CRL cache directory, normally `<data_dir>/crl`.
+    pub crl_dir: PathBuf,
+    /// Revocation is not checked: no OCSP, no CRL.
+    pub offline: bool,
+    /// The current time: OCSP responses and CRLs must be current at it, and it is the
+    /// validation time of a signer with neither a time-stamp nor signingTime.
+    pub now: OffsetDateTime,
+}
+
+/// Verifies a CMS signature, PEM or DER/BER, over its encapsulated content or `content`,
+/// and the certificate of every signer as of its validation time: the genTime of its
+/// verified time-stamp token, else its signingTime, else `opts.now`.
 ///
 /// The report has a block per signer (numbered from 0, as in error messages):
-/// `signer <n>: CN=<cn>, IIN=<iin|->, alg=<SigAlg>, signingTime=<RFC 3339|->` and
-/// `timestamp: yes|no` (whether the signer carries a time-stamp token); its last line is
-/// `OK` if every signature verifies and every token verifies and covers its signer's
-/// signature, otherwise `FAIL: <error>`. Returns the report and whether it is `OK`.
-/// Certificate chains, validity and revocation are not checked, and an `OK` report says
-/// so in the line [`NOT_CHECKED`] before `OK`.
-pub fn cms_verify_report(input: &[u8], content: Option<&[u8]>) -> (String, bool) {
+/// - `signer <n>: CN=<cn>, IIN=<iin|->, alg=<SigAlg>, signingTime=<RFC 3339|->`;
+/// - `timestamp: yes|no`: whether the signer carries a time-stamp token;
+/// - `chain: <issuer CN> -> … -> <anchor CN>` or `chain: FAIL <PathError>`: the path
+///   through `opts.cas` at the validation time (at the certificate's notAfter once it has
+///   expired: its own validity is the next line);
+/// - `validity: ok at <RFC 3339>` or `validity: FAIL`: the certificate at the validation
+///   time;
+/// - `tsa chain: …`, for a verified token: the TSA certificate's path at genTime;
+/// - `revocation: good (ocsp)`, `revocation: revoked <RFC 3339> [after signing ](ocsp|crl)`,
+///   `revocation: unavailable (<error>)` or `revocation: not checked (--offline)`: the signer
+///   by OCSP, every CA of the path between it and the anchor by the CRL of its issuer. A
+///   revocation after the validation time does not invalidate the signature.
+///
+/// The last line is `OK` if everything holds (with `offline`, after the line
+/// [`NOT_CHECKED`]); `FAIL: <error>` with the first failure of a signature, time-stamp,
+/// path, validity or revocation; otherwise, when revocation data is missing,
+/// `INDETERMINATE: revocation data unavailable`. Returns the report and whether it is
+/// `OK`.
+pub fn cms_verify_report_with(
+    input: &[u8],
+    content: Option<&[u8]>,
+    opts: &CmsVerifyOptions<'_>,
+) -> (String, bool) {
     let mut report = String::new();
-    match describe(input, content, &mut report) {
-        Ok(()) => {
-            let _ = writeln!(report, "{NOT_CHECKED}\nOK");
-            (report, true)
+    let ok = match describe(input, content, opts, &mut report) {
+        Ok(true) => {
+            if opts.offline {
+                let _ = writeln!(report, "{NOT_CHECKED}");
+            }
+            let _ = writeln!(report, "OK");
+            true
+        }
+        Ok(false) => {
+            let _ = writeln!(report, "{INDETERMINATE}");
+            false
         }
         Err(e) => {
             let _ = writeln!(report, "FAIL: {e}");
-            (report, false)
+            false
         }
-    }
+    };
+    (report, ok)
 }
 
-/// Writes the signer blocks; the first failure is the error.
-fn describe(input: &[u8], content: Option<&[u8]>, report: &mut String) -> Result<(), String> {
+/// Writes the signer blocks: the first failure is the error, otherwise whether the
+/// revocation status of every signer is known (or not to be checked).
+fn describe(
+    input: &[u8],
+    content: Option<&[u8]>,
+    opts: &CmsVerifyOptions<'_>,
+    report: &mut String,
+) -> Result<bool, String> {
     let der = pem_or_der(input)?;
     let signers = cms::verify(&der, content).map_err(|e| e.to_string())?;
     let mut failure = None;
+    let mut known = true;
     for (n, signer) in signers.iter().enumerate() {
-        let info = cert_info(&signer.cert);
-        let signing_time = match signer.signing_time.map(|t| t.format(&Rfc3339)) {
-            Some(Ok(t)) => t,
-            Some(Err(e)) => e.to_string(),
-            None => "-".to_owned(),
-        };
-        let _ = writeln!(
-            report,
-            "signer {n}: CN={}, IIN={}, alg={:?}, signingTime={signing_time}",
-            info.subject_cn.as_deref().unwrap_or("-"),
-            info.iin.as_deref().unwrap_or("-"),
-            signer.sig_alg,
-        );
-        let timestamp = match &signer.timestamp_token {
-            Some(token) => {
-                if let Err(e) = verify_token_for(token, &signer.signature) {
-                    failure.get_or_insert_with(|| match e {
-                        TspError::ImprintMismatch => {
-                            format!("time-stamp of signer {n} does not cover its signature")
-                        }
-                        e => format!("time-stamp of signer {n}: {e}"),
-                    });
-                }
-                "yes"
+        match describe_signer(n, signer, opts, report) {
+            Ok(revocation_known) => known &= revocation_known,
+            Err(e) => {
+                failure.get_or_insert(e);
             }
-            None => "no",
-        };
-        let _ = writeln!(report, "timestamp: {timestamp}");
+        }
     }
-    failure.map_or(Ok(()), Err)
+    failure.map_or(Ok(known), Err)
+}
+
+/// Writes the block of signer `n`: its first failure is the error, otherwise whether its
+/// revocation status is known (or not to be checked).
+fn describe_signer(
+    n: usize,
+    signer: &VerifiedSigner,
+    opts: &CmsVerifyOptions<'_>,
+    report: &mut String,
+) -> Result<bool, String> {
+    let mut failure = None;
+    let info = cert_info(&signer.cert);
+    let signing_time = signer.signing_time.map_or_else(|| "-".to_owned(), rfc3339);
+    let _ = writeln!(
+        report,
+        "signer {n}: CN={}, IIN={}, alg={:?}, signingTime={signing_time}",
+        info.subject_cn.as_deref().unwrap_or("-"),
+        info.iin.as_deref().unwrap_or("-"),
+        signer.sig_alg,
+    );
+
+    let token = signer.timestamp_token.as_ref().and_then(|token| {
+        verify_token_for(token, &signer.signature)
+            .map_err(|e| {
+                failure.get_or_insert_with(|| match e {
+                    TspError::ImprintMismatch => {
+                        format!("time-stamp of signer {n} does not cover its signature")
+                    }
+                    e => format!("time-stamp of signer {n}: {e}"),
+                });
+            })
+            .ok()
+    });
+    let stamped = if signer.timestamp_token.is_some() {
+        "yes"
+    } else {
+        "no"
+    };
+    let _ = writeln!(report, "timestamp: {stamped}");
+
+    let at = token
+        .as_ref()
+        .map(|(tst, _)| tst.gen_time)
+        .or(signer.signing_time)
+        .unwrap_or(opts.now);
+    let path = build_path(&signer.cert, &opts.cas, validation_time(&signer.cert, at));
+    let _ = writeln!(report, "chain: {}", chain_line(&path));
+    if let Err(e) = &path {
+        failure.get_or_insert_with(|| format!("certificate chain of signer {n}: {e}"));
+    }
+
+    if info.not_before <= at && at <= info.not_after {
+        let _ = writeln!(report, "validity: ok at {}", rfc3339(at));
+    } else {
+        let _ = writeln!(report, "validity: FAIL");
+        failure.get_or_insert_with(|| {
+            format!("certificate of signer {n} is not valid at {}", rfc3339(at))
+        });
+    }
+
+    if let Some((tst, tsa)) = &token {
+        let tsa_path = build_path(tsa, &opts.cas, tst.gen_time);
+        let _ = writeln!(report, "tsa chain: {}", chain_line(&tsa_path));
+        if let Err(e) = &tsa_path {
+            failure
+                .get_or_insert_with(|| format!("time-stamp certificate chain of signer {n}: {e}"));
+        }
+    }
+
+    let revocation = match &path {
+        _ if opts.offline => Revocation::NotChecked,
+        Ok(path) => revocation(path, at, opts),
+        Err(_) => Revocation::Unavailable("no certification path".to_owned()),
+    };
+    let _ = write!(report, "revocation: ");
+    let known = match revocation {
+        Revocation::Good => {
+            let _ = writeln!(report, "good (ocsp)");
+            true
+        }
+        Revocation::NotChecked => {
+            let _ = writeln!(report, "not checked (--offline)");
+            true
+        }
+        Revocation::Unavailable(e) => {
+            let _ = writeln!(report, "unavailable ({e})");
+            false
+        }
+        Revocation::Revoked(revoked) if revoked.time > at => {
+            let _ = writeln!(
+                report,
+                "revoked {} after signing ({})",
+                rfc3339(revoked.time),
+                revoked.source
+            );
+            true
+        }
+        Revocation::Revoked(revoked) => {
+            let (time, source) = (rfc3339(revoked.time), revoked.source);
+            let _ = writeln!(report, "revoked {time} ({source})");
+            failure.get_or_insert_with(|| match revoked.ca {
+                None => format!("certificate of signer {n} is revoked at {time} ({source})"),
+                Some(ca) => format!(
+                    "CA certificate CN={ca} in the chain of signer {n} is revoked at {time} \
+                     ({source})"
+                ),
+            });
+            true
+        }
+    };
+    failure.map_or(Ok(known), Err)
+}
+
+/// Revocation status of a signer's certification path.
+enum Revocation {
+    /// The signer is good by OCSP, every CA below the anchor by CRL.
+    Good,
+    /// A certificate of the path is revoked: the first one found revoked at or before the
+    /// validation time, else the earliest revocation after it.
+    Revoked(Revoked),
+    /// Some status is unknown: why.
+    Unavailable(String),
+    /// `--offline`.
+    NotChecked,
+}
+
+/// A revoked certificate of a signer's path.
+struct Revoked {
+    /// Revocation time.
+    time: OffsetDateTime,
+    /// `ocsp` or `crl`.
+    source: &'static str,
+    /// The CN of the CA, or `None` for the signer itself.
+    ca: Option<String>,
+}
+
+/// Revocation status of `path` (`[signer, issuer, …, anchor]`) for the validation time
+/// `at`: the signer by OCSP, then each CA between it and the anchor by the CRL of its
+/// issuer (through the cache in `opts.crl_dir`). A revocation at or before `at` ends the
+/// check; one after `at` is reported only if every status is known.
+fn revocation(path: &[Certificate], at: OffsetDateTime, opts: &CmsVerifyOptions<'_>) -> Revocation {
+    let Some(issuer) = path.get(1) else {
+        return Revocation::Unavailable("signer certificate is a trust anchor".to_owned());
+    };
+    let mut unavailable: Option<String> = None;
+    let mut later: Option<Revoked> = None;
+    let mut found = |revoked: Revoked| {
+        if revoked.time <= at {
+            return Some(revoked);
+        }
+        if later.as_ref().is_none_or(|l| revoked.time < l.time) {
+            later = Some(revoked);
+        }
+        None
+    };
+
+    match ocsp::check(
+        &path[0],
+        issuer,
+        &opts.cas,
+        opts.http,
+        opts.now,
+        ocsp::TIMEOUT,
+    ) {
+        Ok(CertStatus::Good) => {}
+        Ok(CertStatus::Revoked { time, .. }) => {
+            let revoked = Revoked {
+                time,
+                source: "ocsp",
+                ca: None,
+            };
+            if let Some(revoked) = found(revoked) {
+                return Revocation::Revoked(revoked);
+            }
+        }
+        Ok(CertStatus::Unknown) => {
+            unavailable = Some("OCSP responder does not know the certificate".to_owned());
+        }
+        Err(e) => unavailable = Some(e.to_string()),
+    }
+
+    let cache = CrlCache::new(&opts.crl_dir);
+    for pair in path[1..].windows(2) {
+        let (ca, issuer) = (&pair[0], &pair[1]);
+        match crl::check(ca, issuer, &cache, opts.http, opts.now) {
+            Ok(CrlStatus::Good) => {}
+            Ok(CrlStatus::Revoked { time, .. }) => {
+                let revoked = Revoked {
+                    time,
+                    source: "crl",
+                    ca: Some(cert_name(ca)),
+                };
+                if let Some(revoked) = found(revoked) {
+                    return Revocation::Revoked(revoked);
+                }
+            }
+            Err(e) => {
+                unavailable.get_or_insert_with(|| {
+                    format!("CRL of CA certificate CN={}: {e}", cert_name(ca))
+                });
+            }
+        }
+    }
+
+    match (unavailable, later) {
+        (Some(why), _) => Revocation::Unavailable(why),
+        (None, Some(revoked)) => Revocation::Revoked(revoked),
+        (None, None) => Revocation::Good,
+    }
+}
+
+/// `<issuer CN> -> … -> <anchor CN>` of a path (the certificate itself for a path of one),
+/// or `FAIL <PathError>`.
+fn chain_line(path: &Result<Vec<Certificate>, PathError>) -> String {
+    match path {
+        Ok(path) => path[1.min(path.len() - 1)..]
+            .iter()
+            .map(cert_name)
+            .collect::<Vec<_>>()
+            .join(" -> "),
+        Err(e) => format!("FAIL {e:?}"),
+    }
+}
+
+/// The subject CN of `cert`, or its whole subject without one.
+fn cert_name(cert: &Certificate) -> String {
+    cert_info(cert)
+        .subject_cn
+        .unwrap_or_else(|| cert.tbs_certificate().subject().to_string())
+}
+
+/// RFC 3339, or the formatting error (only for years beyond 9999).
+fn rfc3339(time: OffsetDateTime) -> String {
+    time.format(&Rfc3339).unwrap_or_else(|e| e.to_string())
 }
 
 /// The DER of a PEM input (the first block, any label), or the input as is.
@@ -778,7 +1094,26 @@ mod tests {
         ));
         let cli =
             Cli::try_parse_from(["openncalayer", "cms-verify", "a.p7s", "--content", "a"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::CmsVerify { .. })));
+        assert!(matches!(
+            cli.command,
+            Some(Command::CmsVerify { ref chain, offline: false, .. }) if chain.is_empty()
+        ));
+        let cli = Cli::try_parse_from([
+            "openncalayer",
+            "cms-verify",
+            "a.p7s",
+            "--chain",
+            "ca.der",
+            "--chain",
+            "root.pem",
+            "--offline",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::CmsVerify { ref chain, offline: true, content: None, .. })
+                if chain == &[PathBuf::from("ca.der"), PathBuf::from("root.pem")]
+        ));
         let cli = Cli::try_parse_from(["openncalayer", "run"]).unwrap();
         assert!(matches!(
             cli.command,

@@ -47,7 +47,8 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-# `testing`: `ScriptedPrompter`, `MemoryRecentPath` and `tsp::MockTsa`.
+# `testing`: `ScriptedPrompter`, `MemoryRecentPath`, `tsp::MockTsa`, `ocsp::MockOcsp`,
+# `crl::MockCrl` and `http::RouteTransport`.
 oncl-basics = { path = "../oncl-basics", features = ["testing"] }
 oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 # A `log` record must reach the log file through the `tracing-log` bridge.
@@ -55,3 +56,4 @@ log.workspace = true
 oncl-testkit.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+time = { workspace = true, features = ["macros"] }

@@ -48,6 +48,11 @@ impl Paths {
     pub fn logs(&self) -> PathBuf {
         self.data.join("logs")
     }
+
+    /// CRL cache (`crl/`) of `cms-verify`.
+    pub fn crl(&self) -> PathBuf {
+        self.data.join("crl")
+    }
 }
 
 /// The data directory from the environment `var`.

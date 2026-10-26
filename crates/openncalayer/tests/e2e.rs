@@ -7,13 +7,16 @@ use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
 use oncl_basics::RecentPathStore;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+use oncl_pki::cert;
 use oncl_pki::cms::{SignOptions, sign, verify};
+use oncl_pki::http::UreqTransport;
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
+use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::{MockTsa, TsaProfile, timestamp_signer, verify_token};
-use oncl_testkit::{read, synthetic};
+use oncl_testkit::{read, synthetic, synthetic_cert};
 use oncl_tls::TlsFiles;
-use openncalayer::cli::{NOT_CHECKED, cms_verify_report};
+use openncalayer::cli::{CmsVerifyOptions, NOT_CHECKED, cms_verify_report_with};
 use openncalayer::{JsonSettings, ServerConfig, build_registry, listen_port_from, serve};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
@@ -448,6 +451,19 @@ async fn demo_assets_served() {
     assert_eq!(digest, NCALAYER_CLIENT_SHA256);
 }
 
+/// `cms-verify` of `input` against the synthetic GOST 2015 root, offline.
+fn cms_verify_offline(input: &[u8]) -> (String, bool) {
+    let root = cert::parse(&synthetic_cert("root-gost2015")).unwrap();
+    let opts = CmsVerifyOptions {
+        cas: CaSet::new(vec![root]),
+        http: &UreqTransport,
+        crl_dir: PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
+        offline: true,
+        now: OffsetDateTime::now_utc(),
+    };
+    cms_verify_report_with(input, None, &opts)
+}
+
 #[tokio::test]
 async fn cms_verify_reports_signers() {
     let srv = start(vec![storage("user-gost2015-sign"), Step::Key(0)]).await;
@@ -462,10 +478,10 @@ async fn cms_verify_reports_signers() {
     let pem = reply["body"]["result"][0].as_str().unwrap();
 
     for input in [pem.as_bytes().to_vec(), pem_to_der(pem)] {
-        let (report, ok) = cms_verify_report(&input, None);
+        let (report, ok) = cms_verify_offline(&input);
         let lines: Vec<&str> = report.lines().collect();
         assert!(ok, "{report}");
-        assert_eq!(lines.len(), 4, "{report}");
+        assert_eq!(lines.len(), 8, "{report}");
         assert!(lines[0].starts_with("signer 0: CN="), "{report}");
         assert!(lines[0].contains(", IIN="), "{report}");
         assert!(
@@ -473,12 +489,15 @@ async fn cms_verify_reports_signers() {
             "{report}"
         );
         assert_eq!(lines[1], "timestamp: yes");
-        assert_eq!(lines[2], NOT_CHECKED);
-        assert!(lines[2].contains("chains") && lines[2].contains("revocation"));
-        assert_eq!(lines[3], "OK");
+        assert_eq!(lines[2], "chain: OpenNCALayer Synthetic Root GOST 2015");
+        assert!(lines[3].starts_with("validity: ok at 20"), "{report}");
+        assert_eq!(lines[4], "tsa chain: OpenNCALayer Synthetic Root GOST 2015");
+        assert_eq!(lines[5], "revocation: not checked (--offline)");
+        assert_eq!(lines[6], NOT_CHECKED);
+        assert_eq!(lines[7], "OK");
     }
 
-    let (report, ok) = cms_verify_report(b"not a CMS", None);
+    let (report, ok) = cms_verify_offline(b"not a CMS");
     assert!(!ok);
     assert!(
         report.lines().last().unwrap().starts_with("FAIL: "),
@@ -502,10 +521,12 @@ fn cms_verify_rejects_a_token_of_another_signature() {
     let second = sign(&key, b"doc", &opts).unwrap();
     let tsa = MockTsa::new(entry("tsa-gost2015"));
     let stamped = timestamp_signer(&first, 0, &TsaProfile::basics_default(), &tsa).unwrap();
-    let (report, ok) = cms_verify_report(&stamped, None);
+    let (report, ok) = cms_verify_offline(&stamped);
     assert!(ok, "{report}");
     assert!(
-        report.contains(&format!("\ntimestamp: yes\n{NOT_CHECKED}\nOK\n")),
+        report.ends_with(&format!(
+            "\nrevocation: not checked (--offline)\n{NOT_CHECKED}\nOK\n"
+        )),
         "{report}"
     );
 
@@ -528,7 +549,7 @@ fn cms_verify_rejects_a_token_of_another_signature() {
         "the signature itself verifies"
     );
 
-    let (report, ok) = cms_verify_report(&forged, None);
+    let (report, ok) = cms_verify_offline(&forged);
     assert!(!ok, "{report}");
     assert_eq!(
         report.lines().last(),
