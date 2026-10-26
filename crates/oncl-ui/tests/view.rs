@@ -1,9 +1,12 @@
 use oncl_basics::{
-    Action, Availability, DisabledReason, ImportPrompt, KeyCandidate, KeyPrompt, Locale, OpenError,
-    StorageKind,
+    Action, Availability, DisabledReason, FileKind, ImportPrompt, KeyCandidate, KeyPrompt, Locale,
+    OpenError, StorageKind,
 };
 use oncl_pki::info::{CertInfo, KeyUsageBits};
-use oncl_ui::view::{CertRow, cert_rows, error_text, key_rows, new_password_error};
+use oncl_ui::view::{
+    CertRow, cert_rows, error_text, file_dialog_title, file_filter_name, key_rows,
+    new_password_error,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use time::macros::datetime;
@@ -23,6 +26,7 @@ fn cert(cn: &str, iin: Option<&str>, bin: Option<&str>, org: Option<&str>) -> Ce
         key_usage: KeyUsageBits::default(),
         signature_alg_oid: "1.2.398.3.10.1.1.2.3.2".to_owned(),
         spki_alg_oid: "1.2.398.3.10.1.1.2.3.2".to_owned(),
+        ocsp_no_check: false,
     }
 }
 
@@ -55,6 +59,7 @@ fn prompt<const N: usize>(locale: Locale, candidates: [KeyCandidate; N]) -> KeyP
         locale,
         action: Action::Sign,
         candidates: candidates.into(),
+        detail: None,
     }
 }
 
@@ -255,4 +260,22 @@ fn po_entries(po: &str) -> BTreeMap<String, String> {
         }
     }
     entries
+}
+
+#[test]
+fn file_chooser_texts() {
+    assert_eq!(
+        file_dialog_title(FileKind::Directory, Locale::Ru),
+        "Выберите папку"
+    );
+    assert_eq!(
+        file_dialog_title(FileKind::Cer, Locale::Kk),
+        "Файлды таңдаңыз"
+    );
+    assert_eq!(
+        file_dialog_title(FileKind::All, Locale::En),
+        "Choose a file"
+    );
+    assert_eq!(file_filter_name(FileKind::Cer), "*.der, *.cer");
+    assert_eq!(file_filter_name(FileKind::Crl), "*.crl");
 }

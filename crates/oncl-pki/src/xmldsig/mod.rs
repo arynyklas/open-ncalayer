@@ -184,7 +184,8 @@ pub fn sign_enveloped(
 /// As [`sign_enveloped`], plus [`XmlError::XPath`] for an unsupported XPath and
 /// [`XmlError::Constraint`] if an element is not found, the element to sign has no `Id`
 /// (Kalkan refuses such elements too) or an `Id` used twice, or the signature would land
-/// inside the signed element.
+/// inside the signed element. The element to sign not found and its missing `Id` have
+/// Kalkan's (Russian) messages, which NCALayer sends to pages.
 pub fn sign_element(
     xml: &[u8],
     tbs_xpath: &str,
@@ -197,7 +198,9 @@ pub fn sign_element(
     let (digest, point, id) = {
         let doc = parse::parse(xml)?;
         let tbs = xpath::select_first(&doc, tbs_xpath)?.ok_or_else(|| {
-            XmlError::Constraint(format!("the element {tbs_xpath} to sign is not found"))
+            XmlError::Constraint(format!(
+                "Указанный для подписи элемент {tbs_xpath} не найден"
+            ))
         })?;
         let parent = match parent_xpath {
             Some(expr) => xpath::select_first(&doc, expr)?.ok_or_else(|| {
@@ -214,7 +217,9 @@ pub fn sign_element(
             .attribute("Id")
             .filter(|id| !id.is_empty())
             .ok_or_else(|| {
-                XmlError::Constraint("the element to sign has no 'Id' attribute".to_owned())
+                XmlError::Constraint(
+                    "Указанный для подписи элемент не содержит атрибут 'Id'".to_owned(),
+                )
             })?;
         if element_by_id(&doc, id).ok().flatten() != Some(tbs) {
             return Err(XmlError::Constraint(format!(

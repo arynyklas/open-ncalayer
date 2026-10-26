@@ -3,7 +3,7 @@
 
 use der::asn1::{AnyRef, ObjectIdentifier};
 use der::{Decode, Encode, Reader, SliceReader, Tagged};
-use oncl_pki::cms::{CmsError, SignOptions, sign, signer_count, to_pem, verify};
+use oncl_pki::cms::{CmsError, SignOptions, sign, signer_count, signer_index_of, to_pem, verify};
 use oncl_pki::info::cert_info;
 use oncl_pki::key::{KeyError, SigAlg};
 use oncl_pki::pkcs12::{KeyEntry, load};
@@ -507,4 +507,26 @@ fn signer_counts() {
     assert!(matches!(signer_count(b"d"), Err(CmsError::Malformed(_))));
     let cert = entry("user-rsa-sign").cert.to_der().unwrap();
     assert!(matches!(signer_count(&cert), Err(CmsError::Malformed(_))));
+}
+
+#[test]
+fn signers_are_found_by_certificate() {
+    let rsa = entry("user-rsa-sign");
+    let gost = entry("user-gost2015-sign");
+    let one = sign(&rsa, b"d", &opts(true)).unwrap();
+    let two = sign(&gost, &one, &opts(true)).unwrap();
+    assert_eq!(signer_index_of(&two, &rsa.cert), Ok(Some(0)));
+    assert_eq!(signer_index_of(&two, &gost.cert), Ok(Some(1)));
+    assert_eq!(signer_index_of(&one, &gost.cert), Ok(None));
+    // Detached and BER signatures from the original NCALayer are read too.
+    let detached = sign(&gost, b"d", &opts(false)).unwrap();
+    assert_eq!(signer_index_of(&detached, &gost.cert), Ok(Some(0)));
+    assert_eq!(
+        signer_index_of(&read(ncanode("cades-test-signed-b.p7s")), &gost.cert),
+        Ok(None)
+    );
+    assert!(matches!(
+        signer_index_of(b"d", &gost.cert),
+        Err(CmsError::Malformed(_))
+    ));
 }

@@ -2,8 +2,8 @@
 //! [`RecentPathStore`].
 
 use crate::prompt::{
-    CsrAnswer, CsrPrompt, ImportAnswer, ImportPrompt, KeyPrompt, Prompt, Prompter, RecentPathStore,
-    StorageAnswer, StorageKind, StoragePrompt,
+    CsrAnswer, CsrPrompt, FilePrompt, ImportAnswer, ImportPrompt, KeyPrompt, Prompt, Prompter,
+    RecentPathStore, StorageAnswer, StorageKind, StoragePrompt,
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -44,6 +44,10 @@ pub enum Step {
     },
     /// Cancel an `importCertificate` prompt.
     CancelImport,
+    /// Answer a file chooser with this path.
+    File(PathBuf),
+    /// Cancel a file chooser.
+    CancelFile,
     /// Wait on the barrier (without holding the prompter), then take the next step for the
     /// same prompt.
     Wait(Arc<Barrier>),
@@ -56,6 +60,7 @@ struct State {
     key_prompts: Vec<KeyPrompt>,
     csr_prompts: Vec<CsrPrompt>,
     import_prompts: Vec<ImportPrompt>,
+    file_prompts: Vec<FilePrompt>,
 }
 
 /// A [`Prompter`] answering from a queue of [`Step`]s and recording every prompt shown. An
@@ -97,6 +102,11 @@ impl ScriptedPrompter {
     /// `importCertificate` prompts shown so far.
     pub fn import_prompts(&self) -> Vec<ImportPrompt> {
         self.lock().import_prompts.clone()
+    }
+
+    /// File choosers shown so far.
+    pub fn file_prompts(&self) -> Vec<FilePrompt> {
+        self.lock().file_prompts.clone()
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -164,6 +174,14 @@ impl Prompter for ScriptedPrompter {
             Some(step) => {
                 panic!("ScriptedPrompter: importCertificate prompt answered by {step:?}")
             }
+        }
+    }
+
+    fn file(&self, p: &FilePrompt) -> Prompt<PathBuf> {
+        match self.next(|s| s.file_prompts.push(p.clone())) {
+            Some(Step::File(path)) => Prompt::Answer(path),
+            Some(Step::CancelFile) | None => Prompt::Cancelled,
+            Some(step) => panic!("ScriptedPrompter: file chooser answered by {step:?}"),
         }
     }
 }

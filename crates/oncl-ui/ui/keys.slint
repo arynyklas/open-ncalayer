@@ -24,6 +24,8 @@ export component KeyDialog inherits Window {
     in property <string> origin;
     // Authentication rather than signing.
     in property <bool> authenticate;
+    // A line about the request, e.g. the file to be signed; empty for none.
+    in property <string> detail;
     in property <[KeyItem]> keys;
     // Whether any key is enabled.
     in property <bool> has-enabled;
@@ -44,6 +46,11 @@ export component KeyDialog inherits Window {
         Text {
             text: root.authenticate ? @tr("Action: authentication") : @tr("Action: signing");
             font-weight: 700;
+        }
+
+        if !root.detail.is-empty: Text {
+            text: root.detail;
+            wrap: word-wrap;
         }
 
         Text {

@@ -1,7 +1,7 @@
 //! OpenNCALayer dialogs in Slint: [`SlintPrompter`] shows the storage dialog (storage, key
 //! store file, password) and the key dialog of the signing flow, the certificate request
-//! dialog (storage, folder, password) and the certificate installation dialog (folder, new
-//! password).
+//! dialog (storage, folder, password), the certificate installation dialog (folder, new
+//! password), and the system file chooser for paths a page asks for.
 //!
 //! Slint runs on the main thread in [`run_event_loop`]; the prompter is called from
 //! other threads and blocks them until the user answers. Fixed dialog texts are

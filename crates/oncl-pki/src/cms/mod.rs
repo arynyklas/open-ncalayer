@@ -21,8 +21,9 @@ mod verify;
 use crate::ber::{self, BerError};
 use crate::key::KeyError;
 use crate::oid;
-use asn1::{ContentInfo, SignedData};
-use der::Decode;
+use asn1::{ContentInfo, IssuerAndSerialNumber, SignedData, SignerInfo};
+use der::{Decode, Tag, Tagged};
+use x509_cert::Certificate;
 
 #[cfg(feature = "testing")]
 pub(crate) use sign::sign_content;
@@ -42,14 +43,49 @@ pub fn to_pem(der: &[u8]) -> String {
 pub fn signer_count(cms: &[u8]) -> Result<usize, CmsError> {
     let der = ber::to_der(cms)?;
     let content_info = ContentInfo::from_der(&der)?;
+    Ok(signed_data(&content_info)?.signer_infos.tlvs()?.len())
+}
+
+/// Index of the first signer of a DER or BER `ContentInfo{SignedData}` whose
+/// `IssuerAndSerialNumber` names `cert` (as Kalkan's `SignerId` selector finds it), or
+/// `None`. Signers identified by a SubjectKeyIdentifier never match.
+///
+/// # Errors
+///
+/// [`CmsError::Malformed`] if `cms` is not a readable `ContentInfo{SignedData}`.
+pub fn signer_index_of(cms: &[u8], cert: &Certificate) -> Result<Option<usize>, CmsError> {
+    let der = ber::to_der(cms)?;
+    let content_info = ContentInfo::from_der(&der)?;
+    let tbs = cert.tbs_certificate();
+    for (index, tlv) in signed_data(&content_info)?
+        .signer_infos
+        .tlvs()?
+        .into_iter()
+        .enumerate()
+    {
+        let sid = SignerInfo::from_der(tlv)?.sid;
+        if sid.tag() != Tag::Sequence {
+            continue;
+        }
+        let sid: IssuerAndSerialNumber = sid.decode_as()?;
+        if sid.issuer == *tbs.issuer()
+            && sid.serial_number.as_bytes() == tbs.serial_number().as_bytes()
+        {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+/// The `SignedData` of a `ContentInfo`, which must be of type id-signedData.
+fn signed_data<'a>(content_info: &ContentInfo<'a>) -> Result<SignedData<'a>, CmsError> {
     if content_info.content_type != oid::SIGNED_DATA {
         return Err(CmsError::Malformed(format!(
             "content type {} is not signedData",
             content_info.content_type
         )));
     }
-    let signed_data: SignedData<'_> = content_info.content.decode_as()?;
-    Ok(signed_data.signer_infos.tlvs()?.len())
+    Ok(content_info.content.decode_as()?)
 }
 
 /// Error of a CMS operation. `usize` values are signer indexes in `signerInfos`.

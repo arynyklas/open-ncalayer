@@ -3621,6 +3621,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-commonutils"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "der 0.8.2",
+ "oncl-basics",
+ "oncl-pki",
+ "oncl-protocol",
+ "oncl-testkit",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tracing",
+ "x509-cert",
+]
+
+[[package]]
 name = "oncl-gost"
 version = "0.1.0"
 dependencies = [
@@ -3747,6 +3765,7 @@ dependencies = [
  "httparse",
  "log",
  "oncl-basics",
+ "oncl-commonutils",
  "oncl-ipc",
  "oncl-pki",
  "oncl-protocol",

@@ -79,6 +79,8 @@ pub const DOMAIN_COMPONENT: Oid = Oid::new_unwrap("0.9.2342.19200300.100.1.25");
 pub const DATE_OF_BIRTH: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.9.1");
 
 // Extended key usages.
+/// id-kp-serverAuth.
+pub const SERVER_AUTH: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.3.1");
 /// id-kp-clientAuth.
 pub const CLIENT_AUTH: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.3.2");
 /// id-kp-timeStamping.

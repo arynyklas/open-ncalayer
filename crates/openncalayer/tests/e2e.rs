@@ -223,6 +223,36 @@ async fn unknown_module() {
 }
 
 #[tokio::test]
+async fn common_utils_over_wss() {
+    let srv = start(vec![storage("user-gost2015-sign"), Step::Key(0)]).await;
+    let mut c = connect(&srv).await;
+    next_text(&mut c).await;
+    send(
+        &mut c,
+        r#"{"module":"kz.gov.pki.knca.commonUtils","method":"getActiveTokens","args":[]}"#,
+    )
+    .await;
+    assert_eq!(
+        next_text(&mut c).await,
+        r#"{"code":"200","responseObject":[]}"#
+    );
+    send(
+        &mut c,
+        r#"{"module":"kz.gov.pki.knca.commonUtils","method":"signXml","args":["PKCS12","SIGNATURE","<doc>текст</doc>","",""],"uuid":"u-7"}"#,
+    )
+    .await;
+    let reply = json(&next_text(&mut c).await);
+    assert_eq!(reply["code"], "200", "{reply}");
+    assert_eq!(reply["uuid"], "u-7");
+    let signed = reply["responseObject"].as_str().unwrap();
+    assert_eq!(
+        oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap().len(),
+        1
+    );
+    assert_eq!(srv.prompter.storage_prompts()[0].origin, ORIGIN);
+}
+
+#[tokio::test]
 async fn basics_sign_cms_with_tsa_over_wss() {
     let srv = start(vec![storage("user-gost2015-sign"), Step::Key(0)]).await;
     let mut c = connect(&srv).await;

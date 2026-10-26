@@ -71,6 +71,14 @@ OpenNCALayer — независимый проект и не связан с Н�
 - Сертификат с подписью sha1RSA не подписывает (`UNKNOWN_ALGORITHM`, как для cms). Оригинал подписывает его по rsa-sha1.
 - Документ, где до корневого элемента стоит комментарий или инструкция обработки, подписывается. Оригинал на нём падает (`SIGNING_FAILURE`): он вставляет подпись в первый узел документа.
 
+Модуль `kz.gov.pki.knca.commonUtils`:
+- Хранилище `JKS` пока не открывается: окно хранилища предлагает только его, и подписать им нельзя. Токены отвечают `storage.empty`, `getActiveTokens` — `[]`, как у оригинала без подключённых устройств.
+- `createCAdESFromFile` и `createCMSSignatureFromFile` показывают в обоих окнах путь к файлу, который назвала страница. `getKeyInfo` открывает те же окна с пояснением, что ничего не подписывается. У оригинала таких строк нет.
+- Неверный пароль и хранилище без ключей нужного `keyType` снова открывают окно хранилища с ошибкой. Оригинал показывает ошибку в своём окне ключей. Просроченные ключи доступны, как у оригинала, но окно их не помечает.
+- Тексты, которые оригинал формирует сам, совпадают: `action.canceled`, `storage.*`, `file.not_found`, `NoSuchMethodException …`, `UNKNOWN_ALGORITHM`, `CMS_NO_ENCAPSULATED_DATA`, `ISSUER_CERT_NOT_FOUND`, сообщения Kalkan об элементе XML, сообщения Java о base64. Ошибки разбора XML и CMS, TSP и построения цепочки — свои; для цепочки — после префикса `java.security.cert.CertPathBuilderException: `.
+- Аргумент неверного типа всегда даёт `argument type mismatch`. JRE оригинала после 15 вызовов метода отвечает `java.lang.ClassCastException@<хэш>`.
+- `signXml` сохраняет байты документа, как и `basics`. Пустой `signatureParentElementXPath` при непустом `tbsElementXPath` кладёт подпись в корень, у оригинала это ошибка XPath. Ненайденный родитель подписи даёт сообщение, у оригинала ответ без `message` (`NullPointerException`).
+
 Документы:
 - [`docs/user/tls.md`](docs/user/tls.md) — сертификат OpenNCALayer: выпуск, установка, удаление, перевыпуск;
 - [`docs/design/roadmap.md`](docs/design/roadmap.md) — решения и дорожная карта;

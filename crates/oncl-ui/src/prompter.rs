@@ -4,8 +4,8 @@ use crate::foreground;
 use crate::ui::{CertItem, CsrDialog, ImportDialog, KeyDialog, KeyItem, StorageDialog, StorageRow};
 use crate::view;
 use oncl_basics::{
-    Action, CsrAnswer, CsrPrompt, ImportAnswer, ImportPrompt, KeyPrompt, Locale, Prompt, Prompter,
-    StorageAnswer, StorageKind, StoragePrompt,
+    Action, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyPrompt,
+    Locale, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
@@ -101,6 +101,10 @@ impl Prompter for SlintPrompter {
     fn import_cert(&self, p: &ImportPrompt) -> Prompt<ImportAnswer> {
         ask(p, show_import)
     }
+
+    fn file(&self, p: &FilePrompt) -> Prompt<PathBuf> {
+        ask(p, show_file)
+    }
 }
 
 /// A dialog to open on the event loop: it gets the prompt and where its outcome goes.
@@ -176,6 +180,7 @@ fn show_storage(
     select_language(p.locale);
     ui.set_origin(p.origin.as_str().into());
     ui.set_authenticate(p.action == Action::Authenticate);
+    ui.set_detail(p.detail.as_deref().unwrap_or_default().into());
     ui.set_storages(storage_rows(&p.storages, p.locale));
     ui.set_selected(index(p.storages.iter().position(StorageKind::supported)));
     if let Some(path) = &p.recent_path {
@@ -255,6 +260,7 @@ fn show_keys(p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), PlatformE
     select_language(p.locale);
     ui.set_origin(p.origin.as_str().into());
     ui.set_authenticate(p.action == Action::Authenticate);
+    ui.set_detail(p.detail.as_deref().unwrap_or_default().into());
     let rows = view::key_rows(&p);
     let enabled: Vec<bool> = rows.iter().map(|r| r.enabled).collect();
     let first_enabled = enabled.iter().position(|e| *e);
@@ -443,6 +449,38 @@ fn pick_folder(window: &slint::Window, current: &str, set: impl FnOnce(String) +
     if let Err(e) = picked {
         tracing::warn!(error = %e, "cannot open the folder dialog");
     }
+}
+
+/// The file chooser for `p`: the system file (or folder) dialog, with the original's
+/// extension filter and start folder; the outcome goes to `reply`. As in [`browse`], the
+/// start folder is not checked here.
+fn show_file(p: FilePrompt, reply: Sender<Prompt<PathBuf>>) -> Result<(), PlatformError> {
+    let mut dialog =
+        rfd::AsyncFileDialog::new().set_title(view::file_dialog_title(p.kind, p.locale));
+    let extensions = p.kind.extensions();
+    if !extensions.is_empty() {
+        dialog = dialog.add_filter(view::file_filter_name(p.kind), extensions);
+    }
+    if let Some(dir) = &p.directory {
+        dialog = dialog.set_directory(dir);
+    }
+    let folder = p.kind == FileKind::Directory;
+    slint::spawn_local(async move {
+        let picked = if folder {
+            dialog.pick_folder().await
+        } else {
+            dialog.pick_file().await
+        };
+        let outcome = match picked {
+            Some(handle) => Prompt::Answer(handle.path().to_path_buf()),
+            // As in `browse`: a cancel and a missing backend look the same.
+            None => Prompt::Cancelled,
+        };
+        // The asking thread waits on the receiver until the dialog closes.
+        let _ = reply.send(outcome);
+    })
+    .map(drop)
+    .map_err(|e| PlatformError::Other(e.to_string()))
 }
 
 /// A dialog's buttons and windowing callbacks shared by every dialog.

@@ -9,7 +9,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use oncl_basics::{Basics, MODULE_NAME, Prompter, RecentPathStore};
+use oncl_basics::{Basics, Prompter, RecentPathStore};
+use oncl_commonutils::CommonUtils;
 use oncl_pki::http::HttpTransport;
 use oncl_protocol::{AddInfo, HEARTBEAT, Registry, greeting};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -75,7 +76,8 @@ impl ServerConfig {
     }
 }
 
-/// The module registry of the daemon: `kz.gov.pki.knca.basics`, which reaches the NCA
+/// The module registry of the daemon: `kz.gov.pki.knca.basics` and
+/// `kz.gov.pki.knca.commonUtils`, which share the dialogs of `prompter` and reach the NCA
 /// time-stamping and OCSP services through `http`.
 pub fn build_registry(
     prompter: Arc<dyn Prompter>,
@@ -83,7 +85,12 @@ pub fn build_registry(
     http: Arc<dyn HttpTransport>,
 ) -> Registry {
     let mut registry = Registry::default();
-    registry.register(MODULE_NAME, Arc::new(Basics::new(prompter, recent, http)));
+    let common_utils = CommonUtils::new(Arc::clone(&prompter), Arc::clone(&http));
+    registry.register(
+        oncl_basics::MODULE_NAME,
+        Arc::new(Basics::new(prompter, recent, http)),
+    );
+    registry.register(oncl_commonutils::MODULE_NAME, Arc::new(common_utils));
     registry
 }
 

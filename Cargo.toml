@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 oncl-basics = { path = "crates/oncl-basics" }
+oncl-commonutils = { path = "crates/oncl-commonutils" }
 oncl-gost = { path = "crates/oncl-gost" }
 oncl-ipc = { path = "crates/oncl-ipc" }
 oncl-pki = { path = "crates/oncl-pki" }

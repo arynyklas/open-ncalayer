@@ -15,6 +15,7 @@ e2e-prompter = ["oncl-basics/testing"]
 
 [dependencies]
 oncl-basics.workspace = true
+oncl-commonutils.workspace = true
 oncl-ipc.workspace = true
 oncl-pki.workspace = true
 oncl-protocol.workspace = true

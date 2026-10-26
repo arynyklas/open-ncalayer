@@ -22,7 +22,7 @@ use crate::sign::{
     UNIDENTIFIED, get_array, get_string, json_exception, not_found, opt_string,
     parse_pem_or_base64, provider_failure, storage_list, wrong_type,
 };
-use crate::{Basics, DIALOG_FLOW};
+use crate::{Basics, lock_dialog_flow};
 use der::asn1::ObjectIdentifier;
 use oncl_pki::cert::Certificate;
 use oncl_pki::csr::{CsrRequest, KeyStoreInfo, build_csr};
@@ -36,7 +36,6 @@ use oncl_protocol::AddInfo;
 use oncl_protocol::invoker::{CallResult, Failure};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
-use std::sync::PoisonError;
 use zeroize::Zeroizing;
 
 const CSR_GENERATING_FAILURE: &str = "CSR_GENERATING_FAILURE";
@@ -56,7 +55,7 @@ pub(crate) fn generate_csr(
     add_info: &AddInfo,
 ) -> CallResult {
     let request = CsrArgs::parse(args)?;
-    let _flow = DIALOG_FLOW.lock().unwrap_or_else(PoisonError::into_inner);
+    let _flow = lock_dialog_flow();
     let prompt = CsrPrompt {
         origin: origin(add_info),
         locale: locale(args),
@@ -137,7 +136,7 @@ pub(crate) fn import_certificate(
         })
         .collect::<Result<_, _>>()?;
 
-    let _flow = DIALOG_FLOW.lock().unwrap_or_else(PoisonError::into_inner);
+    let _flow = lock_dialog_flow();
     let prompt = ImportPrompt {
         origin: origin(add_info),
         locale: locale(args),

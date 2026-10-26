@@ -1,9 +1,9 @@
 //! Dialog texts Rust composes, in the request's [`Locale`]: key and certificate rows,
-//! storage names, open errors and new password checks. Fixed dialog texts live in the
-//! `.slint` files and their `.po` catalogs.
+//! storage names, open errors, new password checks and the file chooser's title and filter.
+//! Fixed dialog texts live in the `.slint` files and their `.po` catalogs.
 
 use oncl_basics::{
-    Availability, DisabledReason, ImportPrompt, KeyPrompt, Locale, OpenError, StorageKind,
+    Availability, DisabledReason, FileKind, ImportPrompt, KeyPrompt, Locale, OpenError, StorageKind,
 };
 use oncl_pki::info::CertInfo;
 use time::OffsetDateTime;
@@ -176,6 +176,27 @@ pub fn storage_label(k: StorageKind, l: Locale) -> &'static str {
         },
         StorageKind::Token(name) => name,
     }
+}
+
+/// Title of the file chooser.
+pub fn file_dialog_title(kind: FileKind, l: Locale) -> &'static str {
+    match (kind == FileKind::Directory, l) {
+        (true, Locale::Kk) => "Папканы таңдаңыз",
+        (true, Locale::Ru) => "Выберите папку",
+        (true, Locale::En) => "Choose a folder",
+        (false, Locale::Kk) => "Файлды таңдаңыз",
+        (false, Locale::Ru) => "Выберите файл",
+        (false, Locale::En) => "Choose a file",
+    }
+}
+
+/// Name of the file chooser's filter: its extensions as patterns, `*.der, *.cer`.
+pub fn file_filter_name(kind: FileKind) -> String {
+    kind.extensions()
+        .iter()
+        .map(|e| format!("*.{e}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `dd.MM.yyyy` in UTC.

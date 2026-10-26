@@ -2,11 +2,8 @@
 //! storage → key → sign flow under the process-wide dialog-flow lock.
 
 use crate::filter::{Availability, ChainPolicy, KeyFilter, availabilities};
-use crate::prompt::{
-    Action, KeyCandidate, KeyPrompt, Locale, OpenError, Prompt, StorageAnswer, StorageKind,
-    StoragePrompt,
-};
-use crate::{Basics, DIALOG_FLOW};
+use crate::prompt::{Action, KeyCandidate, KeyPrompt, Locale, Prompt, StorageKind, StoragePrompt};
+use crate::{Basics, lock_dialog_flow};
 use base64::Engine;
 use base64::alphabet;
 use base64::engine::general_purpose::STANDARD;
@@ -16,7 +13,7 @@ use oncl_pki::cert::{self, Certificate};
 use oncl_pki::cms::{self, CmsError, SignOptions};
 use oncl_pki::info::{CertInfo, cert_info};
 use oncl_pki::key::{KeyAlg, KeyError, SigAlg};
-use oncl_pki::pkcs12::{self, KeyEntry, Pkcs12Error};
+use oncl_pki::pkcs12::KeyEntry;
 use oncl_pki::pkix::CaSet;
 use oncl_pki::xmldsig::{self, XmlError};
 use oncl_pki::{pem, tsp};
@@ -26,7 +23,7 @@ use serde_json::{Map, Value, json};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Display;
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 
 const SIGNING_FAILURE: &str = "SIGNING_FAILURE";
 const SIGNING_FAILURE_MESSAGE: &str = "Signing has failed.";
@@ -87,7 +84,7 @@ struct SignRequest<'a> {
 /// `PKIExtras.sign`.
 pub(crate) fn sign(basics: &Basics, args: &Map<String, Value>, add_info: &AddInfo) -> CallResult {
     let request = SignRequest::parse(args, add_info)?;
-    let _flow = DIALOG_FLOW.lock().unwrap_or_else(PoisonError::into_inner);
+    let _flow = lock_dialog_flow();
     let Some(mut entries) = open_storage(basics, &request) else {
         return Ok(json!({}));
     };
@@ -249,13 +246,14 @@ fn open_storage(basics: &Basics, request: &SignRequest<'_>) -> Option<Vec<KeyEnt
         storages: request.storages.clone(),
         recent_path: basics.recent.load(),
         error: None,
+        detail: None,
     };
     loop {
         let answer = match basics.prompter.storage(&prompt) {
             Prompt::Answer(answer) => answer,
             Prompt::Cancelled => return None,
         };
-        match open(&answer, &prompt.storages) {
+        match answer.open(&prompt.storages) {
             Ok(entries) => {
                 basics.recent.save(&answer.path);
                 return Some(entries);
@@ -265,20 +263,6 @@ fn open_storage(basics: &Basics, request: &SignRequest<'_>) -> Option<Vec<KeyEnt
                 prompt.recent_path = Some(answer.path);
             }
         }
-    }
-}
-
-/// Opens the key store of `answer`, which must be an offered, supported storage.
-fn open(answer: &StorageAnswer, offered: &[StorageKind]) -> Result<Vec<KeyEntry>, OpenError> {
-    if !answer.storage.supported() || !offered.contains(&answer.storage) {
-        return Err(OpenError::UnsupportedStorage);
-    }
-    let pfx = std::fs::read(&answer.path).map_err(|_| OpenError::FileNotFound)?;
-    match pkcs12::load(&pfx, &answer.password) {
-        Ok(entries) if entries.is_empty() => Err(OpenError::NoKeys),
-        Ok(entries) => Ok(entries),
-        Err(Pkcs12Error::WrongPassword) => Err(OpenError::WrongPassword),
-        Err(Pkcs12Error::Malformed(_) | Pkcs12Error::Unsupported(_)) => Err(OpenError::NotPkcs12),
     }
 }
 
@@ -305,6 +289,7 @@ fn choose_key(basics: &Basics, request: &SignRequest<'_>, entries: &[KeyEntry]) 
         locale: request.locale,
         action: request.action,
         candidates,
+        detail: None,
     };
     loop {
         match basics.prompter.key(&prompt) {

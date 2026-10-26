@@ -6,9 +6,9 @@ use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{
-    Action, Availability, Basics, ChainPolicy, CsrAnswer, CsrPrompt, DisabledReason, ImportAnswer,
-    ImportPrompt, KeyFilter, KeyPrompt, Locale, MODULE_NAME, OpenError, Prompt, Prompter,
-    StorageAnswer, StorageKind, StoragePrompt, availabilities,
+    Action, Availability, Basics, ChainPolicy, CsrAnswer, CsrPrompt, DisabledReason, FilePrompt,
+    ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt, Locale, MODULE_NAME, OpenError, Prompt,
+    Prompter, StorageAnswer, StorageKind, StoragePrompt, availabilities,
 };
 use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{SignOptions, verify};
@@ -409,6 +409,10 @@ impl Prompter for JksFirst {
     }
 
     fn import_cert(&self, _: &ImportPrompt) -> Prompt<ImportAnswer> {
+        Prompt::Cancelled
+    }
+
+    fn file(&self, _: &FilePrompt) -> Prompt<PathBuf> {
         Prompt::Cancelled
     }
 }

@@ -1,7 +1,7 @@
 //! Certificate info of the synthetic NCA-like certificates: KZ subject attributes, serial,
-//! validity, key usages and the signing algorithm.
+//! validity, key usages, the signing algorithm, Kalkan's certificate types and names.
 
-use oncl_pki::info::{CertInfo, cert_info};
+use oncl_pki::info::{CertInfo, KncaCertType, cert_info, kalkan_dn, kcert_types};
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::load;
 use oncl_testkit::{read, synthetic};
@@ -127,4 +127,34 @@ fn validity_window() {
     assert!(expired.is_within_validity(datetime!(2020-06-01 0:00 UTC)));
     let valid = info("user-gost2015-sign");
     assert!(valid.is_within_validity(datetime!(2026-10-24 0:00 UTC)));
+}
+
+#[test]
+fn kalkan_types_of_the_synthetic_certificates() {
+    use KncaCertType::*;
+    let types = |name: &str| kcert_types(&info(name)).into_iter().collect::<Vec<_>>();
+    assert_eq!(types("user-gost2015-sign"), [Signature, Authentication]);
+    assert_eq!(types("user-gost2004-sign"), [Signature]);
+    assert_eq!(types("user-rsa-sign"), [Signature]);
+    // The synthetic auth profile has keyAgreement, not keyEncipherment: no Kalkan type.
+    assert!(types("user-gost2015-auth").is_empty());
+    assert_eq!(types("tsa-gost2015"), [TspSigning]);
+    assert_eq!(types("ocsp-gost2015"), [OcspResponseSigning]);
+    assert!(info("ocsp-gost2015").ocsp_no_check);
+    assert!(types("ocsp-nocheckless-gost2015").is_empty());
+}
+
+#[test]
+fn kalkan_names_of_the_synthetic_certificates() {
+    let cert = leaf("legal-gost2015-sign");
+    assert_eq!(
+        kalkan_dn(cert.tbs_certificate().subject()),
+        "CN=ТЕСТОВА ДАНА,SURNAME=ТЕСТОВА,G=ТЕСТОВНА,SERIALNUMBER=IIN123456789022,C=KZ,\
+         O=ТОО СИНТЕТИКА,OU=BIN123456789021"
+    );
+    let tsa = leaf("tsa-gost2015");
+    assert_eq!(
+        kalkan_dn(tsa.tbs_certificate().subject()),
+        "CN=OpenNCALayer Synthetic TSA,C=KZ"
+    );
 }

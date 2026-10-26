@@ -71,6 +71,14 @@ XML signing (`basics.sign` with `format:"xml"`):
 - A certificate signed with sha1RSA is not used for signing (`UNKNOWN_ALGORITHM`, as for cms). The original signs with rsa-sha1.
 - A document with a comment or a processing instruction before the root element is signed. The original fails on it (`SIGNING_FAILURE`): it inserts the signature into the document's first node.
 
+The `kz.gov.pki.knca.commonUtils` module:
+- The `JKS` storage cannot be opened yet: the storage dialog offers it alone, and nothing can be signed with it. Tokens answer `storage.empty` and `getActiveTokens` answers `[]`, as the original does with no device connected.
+- `createCAdESFromFile` and `createCMSSignatureFromFile` show the path the page named in both dialogs. `getKeyInfo` opens the same dialogs with a note that nothing is signed. The original has no such lines.
+- A wrong password, and a store without keys of the requested `keyType`, reopen the storage dialog with an error. The original shows the error in its key dialog. Expired keys are available, as in the original, but the dialog does not mark them.
+- Texts the original composes itself are the same: `action.canceled`, `storage.*`, `file.not_found`, `NoSuchMethodException …`, `UNKNOWN_ALGORITHM`, `CMS_NO_ENCAPSULATED_DATA`, `ISSUER_CERT_NOT_FOUND`, Kalkan's messages about the XML element, Java's base64 messages. XML and CMS parse errors, TSP and chain building errors are ours; a chain error follows the prefix `java.security.cert.CertPathBuilderException: `.
+- An argument of the wrong type always gives `argument type mismatch`. After 15 calls of a method the original's JRE answers `java.lang.ClassCastException@<hash>` instead.
+- `signXml` keeps the document's bytes, as `basics` does. An empty `signatureParentElementXPath` with a non-empty `tbsElementXPath` puts the signature into the root element; for the original it is an XPath error. A signature parent that is not found gets a message; the original answers without `message` (`NullPointerException`).
+
 Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
 - [`docs/design/roadmap.md`](docs/design/roadmap.md) — decisions and roadmap;

@@ -37,6 +37,8 @@ use time::OffsetDateTime;
 
 /// Policy `kz.gov.pki.knca.basics` asks the NCA TSA for.
 const BASICS_POLICY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.398.3.3.2.6.4");
+/// Policy `TSA_RSA` of Kalkan's default `TSAProfile`.
+const TSA_RSA_POLICY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.398.3.3.2.6.2");
 
 /// Media type of a POSTed `TimeStampReq` (RFC 3161 §3.4).
 const TIMESTAMP_QUERY: &str = "application/timestamp-query";
@@ -114,6 +116,17 @@ impl TsaProfile {
             method: TsaMethod::Get,
             hash: TspHash::Streebog512,
             policy: BASICS_POLICY,
+        }
+    }
+
+    /// Kalkan's default `TSAProfile`, as `kz.gov.pki.knca.commonUtils` time-stamps:
+    /// `GET http://tsp.pki.gov.kz`, SHA-256 imprint, policy `TSA_RSA` 1.2.398.3.3.2.6.2.
+    pub fn kalkan_default() -> Self {
+        TsaProfile {
+            url: "http://tsp.pki.gov.kz".to_owned(),
+            method: TsaMethod::Get,
+            hash: TspHash::Sha256,
+            policy: TSA_RSA_POLICY,
         }
     }
 }

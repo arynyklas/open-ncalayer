@@ -19,8 +19,9 @@ pub use filter::{
     Availability, ChainPolicy, DisabledReason, KeyFilter, OCSP_DEADLINE, availabilities,
 };
 pub use prompt::{
-    Action, CsrAnswer, CsrPrompt, ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale,
-    OpenError, Prompt, Prompter, RecentPathStore, StorageAnswer, StorageKind, StoragePrompt,
+    Action, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyCandidate,
+    KeyPrompt, Locale, OpenError, Prompt, Prompter, RecentPathStore, StorageAnswer, StorageKind,
+    StoragePrompt,
 };
 
 use oncl_pki::http::HttpTransport;
@@ -28,7 +29,7 @@ use oncl_pki::tsp::TsaProfile;
 use oncl_protocol::invoker::{self, CallResult, Failure, NlClass};
 use oncl_protocol::{AddInfo, Module};
 use serde_json::{Map, Value};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use time::OffsetDateTime;
 
 /// Name the module is registered under.
@@ -37,6 +38,13 @@ pub const MODULE_NAME: &str = "kz.gov.pki.knca.basics";
 /// Serializes the module's dialog flows process-wide: the dialogs of two requests never
 /// interleave, and a second request waits for the first instead of failing as busy.
 static DIALOG_FLOW: Mutex<()> = Mutex::new(());
+
+/// Takes the process-wide dialog-flow turn the module's own flows take: another module
+/// showing the same dialogs holds it for its whole flow, so flows of different modules do
+/// not interleave either.
+pub fn lock_dialog_flow() -> MutexGuard<'static, ()> {
+    DIALOG_FLOW.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// The `kz.gov.pki.knca.basics` module.
 pub struct Basics {

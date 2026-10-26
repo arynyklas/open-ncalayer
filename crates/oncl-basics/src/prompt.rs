@@ -1,10 +1,12 @@
 //! What the module asks the user, and the [`Prompter`] that asks: the original's
 //! `StorageStage` (storage, file, password) and `KeystoreStage` (key choice) of the signing
-//! flow, `CsrStage` (storage, folder, password) of `generateCsr` and `ImportCertStage`
-//! (folder, new password) of `importCertificate`.
+//! flow, `CsrStage` (storage, folder, password) of `generateCsr`, `ImportCertStage`
+//! (folder, new password) of `importCertificate`, and the file chooser other modules hand
+//! paths to pages with.
 
 use crate::filter::Availability;
 use oncl_pki::info::CertInfo;
+use oncl_pki::pkcs12::{self, KeyEntry, Pkcs12Error};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -121,6 +123,8 @@ pub struct StoragePrompt {
     pub recent_path: Option<PathBuf>,
     /// Why the previous answer failed, on a retry.
     pub error: Option<OpenError>,
+    /// A line the dialog shows besides the request, e.g. the file to be signed.
+    pub detail: Option<String>,
 }
 
 /// The user's answer to a [`StoragePrompt`].
@@ -131,6 +135,31 @@ pub struct StorageAnswer {
     pub path: PathBuf,
     /// Key store password.
     pub password: Zeroizing<String>,
+}
+
+impl StorageAnswer {
+    /// Opens the answer's key store, which must be one of `offered` and supported: its keys
+    /// that have a certificate, in store order.
+    ///
+    /// # Errors
+    ///
+    /// Why it cannot be opened: [`OpenError::UnsupportedStorage`],
+    /// [`OpenError::FileNotFound`], [`OpenError::WrongPassword`], [`OpenError::NotPkcs12`],
+    /// or [`OpenError::NoKeys`] for a store without such keys.
+    pub fn open(&self, offered: &[StorageKind]) -> Result<Vec<KeyEntry>, OpenError> {
+        if !self.storage.supported() || !offered.contains(&self.storage) {
+            return Err(OpenError::UnsupportedStorage);
+        }
+        let pfx = std::fs::read(&self.path).map_err(|_| OpenError::FileNotFound)?;
+        match pkcs12::load(&pfx, &self.password) {
+            Ok(entries) if entries.is_empty() => Err(OpenError::NoKeys),
+            Ok(entries) => Ok(entries),
+            Err(Pkcs12Error::WrongPassword) => Err(OpenError::WrongPassword),
+            Err(Pkcs12Error::Malformed(_) | Pkcs12Error::Unsupported(_)) => {
+                Err(OpenError::NotPkcs12)
+            }
+        }
+    }
 }
 
 /// A key the user may pick.
@@ -155,6 +184,8 @@ pub struct KeyPrompt {
     pub action: Action,
     /// Keys of the opened store, in store order.
     pub candidates: Vec<KeyCandidate>,
+    /// A line the dialog shows besides the request, e.g. the file to be signed.
+    pub detail: Option<String>,
 }
 
 /// The `generateCsr` dialog: where the new key files go.
@@ -206,6 +237,82 @@ pub struct ImportAnswer {
     pub new_password: Zeroizing<String>,
 }
 
+/// What a file chooser accepts: the original's `FileChooser.FileType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    /// A folder (`DIRECTORY`).
+    Directory,
+    /// `.crl` files (`CRL`).
+    Crl,
+    /// `.der` and `.cer` files (`CER`).
+    Cer,
+    /// `.p12` files (`P12`).
+    P12,
+    /// `.pfx`, `.p12`, `.bin` and `.jks` files (`KEYSTORE`).
+    Keystore,
+    /// `.jks` files (`JKS`).
+    Jks,
+    /// Any file (`ALL`).
+    All,
+}
+
+impl FileKind {
+    /// Every kind, in the original's declaration order.
+    pub const ALL: [FileKind; 7] = [
+        FileKind::Directory,
+        FileKind::Crl,
+        FileKind::Cer,
+        FileKind::P12,
+        FileKind::Keystore,
+        FileKind::Jks,
+        FileKind::All,
+    ];
+
+    /// The original's constant name, e.g. `KEYSTORE`.
+    pub fn name(self) -> &'static str {
+        match self {
+            FileKind::Directory => "DIRECTORY",
+            FileKind::Crl => "CRL",
+            FileKind::Cer => "CER",
+            FileKind::P12 => "P12",
+            FileKind::Keystore => "KEYSTORE",
+            FileKind::Jks => "JKS",
+            FileKind::All => "ALL",
+        }
+    }
+
+    /// The kind named `name` exactly (Java's `valueOf`, case-sensitive).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.name() == name)
+    }
+
+    /// File name extensions shown, lowercase without the dot; empty for a folder and for any
+    /// file.
+    pub fn extensions(self) -> &'static [&'static str] {
+        match self {
+            FileKind::Directory | FileKind::All => &[],
+            FileKind::Crl => &["crl"],
+            FileKind::Cer => &["der", "cer"],
+            FileKind::P12 => &["p12"],
+            FileKind::Keystore => &["pfx", "p12", "bin", "jks"],
+            FileKind::Jks => &["jks"],
+        }
+    }
+}
+
+/// The file chooser: a file or folder whose path goes to the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePrompt {
+    /// The requesting page's origin, or `"UNIDENTIFIED"`.
+    pub origin: String,
+    /// Dialog language.
+    pub locale: Locale,
+    /// What may be chosen.
+    pub kind: FileKind,
+    /// Folder to start in, if the page names one.
+    pub directory: Option<PathBuf>,
+}
+
 /// The outcome of a dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prompt<T> {
@@ -227,6 +334,8 @@ pub trait Prompter: Send + Sync {
     /// Asks where the keys of the certificates `importCertificate` installs are, and for
     /// their new password.
     fn import_cert(&self, p: &ImportPrompt) -> Prompt<ImportAnswer>;
+    /// Asks for a file, or a folder for [`FileKind::Directory`].
+    fn file(&self, p: &FilePrompt) -> Prompt<PathBuf>;
 }
 
 /// Where the last opened key store path is kept (`recentPath` of settings.json).
@@ -235,4 +344,25 @@ pub trait RecentPathStore: Send + Sync {
     fn load(&self) -> Option<PathBuf>;
     /// Remembers `p`.
     fn save(&self, p: &Path);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_kinds_by_name() {
+        for kind in FileKind::ALL {
+            assert_eq!(FileKind::from_name(kind.name()), Some(kind));
+        }
+        for other in ["", "p12", "Keystore", "PFX", " ALL"] {
+            assert_eq!(FileKind::from_name(other), None, "{other:?}");
+        }
+        assert_eq!(
+            FileKind::Keystore.extensions(),
+            ["pfx", "p12", "bin", "jks"]
+        );
+        assert!(FileKind::Directory.extensions().is_empty());
+        assert!(FileKind::All.extensions().is_empty());
+    }
 }
