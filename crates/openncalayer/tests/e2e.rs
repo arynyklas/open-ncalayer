@@ -9,14 +9,13 @@ use oncl_basics::RecentPathStore;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_pki::cert;
 use oncl_pki::cms::{SignOptions, sign, verify};
-use oncl_pki::http::UreqTransport;
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::{MockTsa, TsaProfile, timestamp_signer, verify_token};
 use oncl_testkit::{read, synthetic, synthetic_cert};
 use oncl_tls::TlsFiles;
-use openncalayer::cli::{CmsVerifyOptions, NOT_CHECKED, cms_verify_report_with};
+use openncalayer::cms_verify::{NOT_CHECKED, Options, cms_verify_report_with};
 use openncalayer::{JsonSettings, ServerConfig, build_registry, listen_port_from, serve};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
@@ -454,11 +453,9 @@ async fn demo_assets_served() {
 /// `cms-verify` of `input` against the synthetic GOST 2015 root, offline.
 fn cms_verify_offline(input: &[u8]) -> (String, bool) {
     let root = cert::parse(&synthetic_cert("root-gost2015")).unwrap();
-    let opts = CmsVerifyOptions {
+    let opts = Options {
         cas: CaSet::new(vec![root]),
-        http: &UreqTransport,
-        crl_dir: PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
-        offline: true,
+        online: None,
         now: OffsetDateTime::now_utc(),
     };
     cms_verify_report_with(input, None, &opts)
@@ -551,6 +548,14 @@ fn cms_verify_rejects_a_token_of_another_signature() {
 
     let (report, ok) = cms_verify_offline(&forged);
     assert!(!ok, "{report}");
+    assert!(
+        report.contains("\ntimestamp: yes\n"),
+        "the token is still there: {report}"
+    );
+    assert!(
+        report.contains("\ntsa chain: not checked (time-stamp does not verify)\n"),
+        "{report}"
+    );
     assert_eq!(
         report.lines().last(),
         Some("FAIL: time-stamp of signer 0 does not cover its signature"),
