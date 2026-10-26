@@ -1,10 +1,15 @@
 //! Bounded, namespace-aware XML parsing: UTF-8 input of at most [`MAX_INPUT`] bytes, at most
-//! [`MAX_DEPTH`] levels of element nesting, and no DOCTYPE, so no entities beyond the
-//! predefined ones and nothing is ever fetched.
+//! [`MAX_DEPTH`] levels of element nesting, [`MAX_NODES`] nodes and [`MAX_ATTRIBUTES`]
+//! attributes, and no DOCTYPE, so no entities beyond the predefined ones and nothing is ever
+//! fetched.
 //!
-//! The parser's work that is not linear in the input is bounded before the tree is built:
-//! checking an element's attributes for duplicates is quadratic in their number, and every
-//! element declaring a namespace gets its own copy of the namespaces in scope.
+//! Everything that is not linear in the input is bounded by one scan before the tree is
+//! built:
+//! - the parser sizes its node and attribute arrays by the counts of `<` and `=` bytes;
+//! - checking an element's attributes for duplicates is quadratic in their number;
+//! - every element name and prefixed attribute name is resolved by a linear search of the
+//!   namespaces in scope, and an element declaring a namespace gets its own copy of them
+//!   (checked against its declarations), so namespace work is charged on every start tag.
 
 use super::XmlError;
 use roxmltree::{Document, Node, ParsingOptions};
@@ -15,51 +20,98 @@ pub const MAX_INPUT: usize = 64 * 1024 * 1024;
 /// Deepest accepted element nesting; the document element is level 1.
 pub const MAX_DEPTH: usize = 256;
 
-/// Bound on the sum over elements of the squared attribute count.
-const ATTRIBUTE_WORK: usize = 1 << 28;
+/// Most nodes (elements, text, comments, processing instructions) in a document; the input
+/// may also hold at most this many `<` bytes.
+pub const MAX_NODES: usize = 1 << 21;
 
-/// Bound on the sum over namespace-declaring elements of (namespaces in scope × namespaces
-/// declared): the namespace copies the parser keeps, and its work checking them.
-const NAMESPACE_WORK: usize = 1 << 26;
+/// Most `=` bytes in a document, which bounds its attributes.
+pub const MAX_ATTRIBUTES: usize = 1 << 21;
+
+/// Limits of one parse.
+#[derive(Clone, Copy)]
+struct Bounds {
+    nodes: usize,
+    attributes: usize,
+    /// Bound on the sum over elements of the squared attribute count.
+    attribute_work: usize,
+    /// Bound on the namespace entries the parser looks at: on every start tag, (namespaces
+    /// in scope) × (1 + attributes), plus (namespaces in scope)² / 2 on a declaring one (its
+    /// copy checks each inherited namespace against the ones copied so far). About 1 ns
+    /// each: 2²⁹ is half a second.
+    namespace_work: usize,
+    /// Bound on the namespace entries the parser copies: the namespaces in scope of every
+    /// declaring element (2 bytes each).
+    namespace_copies: usize,
+}
+
+const BOUNDS: Bounds = Bounds {
+    nodes: MAX_NODES,
+    attributes: MAX_ATTRIBUTES,
+    attribute_work: 1 << 28,
+    namespace_work: 1 << 29,
+    namespace_copies: 1 << 24,
+};
+
+/// Bounds for a document this module produced from an accepted one by inserting a signature:
+/// its few nodes and attributes, and its namespace work, which is at most that of the
+/// signature's parent (declaring `ds`, the signature copies the parent's namespaces).
+const SIGNED_BOUNDS: Bounds = Bounds {
+    nodes: MAX_NODES + 256,
+    attributes: MAX_ATTRIBUTES + 256,
+    attribute_work: 2 * BOUNDS.attribute_work,
+    namespace_work: 2 * BOUNDS.namespace_work,
+    namespace_copies: 2 * BOUNDS.namespace_copies,
+};
 
 /// Parses untrusted input.
 ///
 /// # Errors
 ///
-/// [`XmlError::TooLarge`] for input over [`MAX_INPUT`] or the parse work bounds,
-/// [`XmlError::TooDeep`], [`XmlError::Doctype`], or [`XmlError::Parse`] for input that is not
-/// well-formed namespace-aware UTF-8 XML.
+/// [`XmlError::TooLarge`] for input over [`MAX_INPUT`], [`MAX_NODES`], [`MAX_ATTRIBUTES`] or
+/// the parse work bounds, [`XmlError::TooDeep`], [`XmlError::Doctype`], or
+/// [`XmlError::Parse`] for input that is not well-formed namespace-aware UTF-8 XML.
 pub(crate) fn parse(xml: &[u8]) -> Result<Document<'_>, XmlError> {
     if xml.len() > MAX_INPUT {
         return Err(XmlError::TooLarge);
     }
-    parse_unbounded(xml)
+    parse_with(xml, BOUNDS)
 }
 
-/// Parses a document this module produced from an accepted input (an input plus one
-/// signature), which may exceed [`MAX_INPUT`] by the signature's size.
-pub(crate) fn parse_unbounded(xml: &[u8]) -> Result<Document<'_>, XmlError> {
+/// Parses a document this module produced from an input accepted by [`parse`] by inserting
+/// one signature; it may exceed [`MAX_INPUT`] and the other bounds by the signature's share.
+pub(crate) fn parse_signed(xml: &[u8]) -> Result<Document<'_>, XmlError> {
+    parse_with(xml, SIGNED_BOUNDS)
+}
+
+fn parse_with(xml: &[u8], bounds: Bounds) -> Result<Document<'_>, XmlError> {
     let text = std::str::from_utf8(xml)
         .map_err(|e| XmlError::Parse(format!("the input is not UTF-8: {e}")))?;
-    check_markup(xml)?;
+    let count = |byte: u8| xml.iter().filter(|&&b| b == byte).count();
+    if count(b'<') > bounds.nodes || count(b'=') > bounds.attributes {
+        return Err(XmlError::TooLarge);
+    }
+    check_markup(xml, bounds)?;
     let options = ParsingOptions {
         allow_dtd: false,
+        nodes_limit: u32::try_from(bounds.nodes).expect("node bound fits u32"),
         ..ParsingOptions::default()
     };
     Document::parse_with_options(text, options).map_err(|e| match e {
         roxmltree::Error::DtdDetected => XmlError::Doctype,
+        roxmltree::Error::NodesLimitReached => XmlError::TooLarge,
         e => XmlError::Parse(e.to_string()),
     })
 }
 
-/// Rejects a DOCTYPE, nesting deeper than [`MAX_DEPTH`] and input over the parse work bounds
-/// in one linear scan, before the tree is built. Only well-formed input matters here: anything
+/// Rejects a DOCTYPE, nesting deeper than [`MAX_DEPTH`] and input over the work bounds in one
+/// linear scan, before the tree is built. Only well-formed input matters here: anything
 /// malformed is reported by the parser afterwards.
-fn check_markup(xml: &[u8]) -> Result<(), XmlError> {
+fn check_markup(xml: &[u8], bounds: Bounds) -> Result<(), XmlError> {
     // Namespaces in scope (an upper bound) of each open element.
     let mut in_scope: Vec<usize> = Vec::new();
     let mut attribute_work = 0usize;
     let mut namespace_work = 0usize;
+    let mut namespace_copies = 0usize;
     let mut at = 0;
     while let Some(lt) = xml[at..].iter().position(|&b| b == b'<') {
         let start = at + lt;
@@ -88,10 +140,15 @@ fn check_markup(xml: &[u8]) -> Result<(), XmlError> {
             });
             let own = in_scope.last().copied().unwrap_or(0) + declarations;
             attribute_work = attribute_work.saturating_add(attributes.saturating_mul(attributes));
+            namespace_work = namespace_work.saturating_add(own.saturating_mul(1 + attributes));
             if declarations > 0 {
-                namespace_work = namespace_work.saturating_add(own.saturating_mul(declarations));
+                namespace_work = namespace_work.saturating_add(own.saturating_mul(own) / 2);
+                namespace_copies = namespace_copies.saturating_add(own);
             }
-            if attribute_work > ATTRIBUTE_WORK || namespace_work > NAMESPACE_WORK {
+            if attribute_work > bounds.attribute_work
+                || namespace_work > bounds.namespace_work
+                || namespace_copies > bounds.namespace_copies
+            {
                 return Err(XmlError::TooLarge);
             }
             if !empty {
@@ -249,8 +306,28 @@ mod tests {
         let xml = format!("<r{declarations}>{children}</r>");
         assert_eq!(parse(xml.as_bytes()).err(), Some(XmlError::TooLarge));
 
-        // The same children without the copies are fine.
+        // Without the copies 20 000 children are fine, but every element name is still looked
+        // up among the 5 000 namespaces: 200 000 children are too many.
         let xml = format!("<r{declarations}>{}</r>", "<c/>".repeat(20_000));
         assert!(parse(xml.as_bytes()).is_ok());
+        let xml = format!("<r{declarations}>{}</r>", "<c/>".repeat(200_000));
+        assert_eq!(parse(xml.as_bytes()).err(), Some(XmlError::TooLarge));
+    }
+
+    #[test]
+    fn nodes_and_attributes_are_capped() {
+        let at_cap = format!("<r>{}</r>", "<a/>".repeat(MAX_NODES - 2));
+        assert!(parse(at_cap.as_bytes()).is_ok());
+        let over = format!("<r>{}</r>", "<a/>".repeat(MAX_NODES - 1));
+        assert_eq!(parse(over.as_bytes()).err(), Some(XmlError::TooLarge));
+        // Text nodes count too: below the `<` bound, over the node bound.
+        let text = format!("<r>{}</r>", "<a/>x".repeat(MAX_NODES / 2 + 1));
+        assert_eq!(parse(text.as_bytes()).err(), Some(XmlError::TooLarge));
+        // A signature's share is allowed on re-parse.
+        let signed = format!("<r>{}</r>", "<a/>".repeat(MAX_NODES + 10));
+        assert!(parse_signed(signed.as_bytes()).is_ok());
+
+        let equals = format!("<r>{}</r>", "=".repeat(MAX_ATTRIBUTES + 1));
+        assert_eq!(parse(equals.as_bytes()).err(), Some(XmlError::TooLarge));
     }
 }

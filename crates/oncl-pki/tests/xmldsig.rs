@@ -9,7 +9,8 @@ use oncl_pki::cert;
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::xmldsig::{
-    C14n, MAX_INPUT, NodeRef, XmlError, canonicalize, sign_element, sign_enveloped, verify,
+    C14n, MAX_INPUT, MAX_NODES, NodeRef, XmlError, canonicalize, sign_element, sign_enveloped,
+    verify,
 };
 use oncl_testkit::{ncanode, read, synthetic};
 use std::time::{Duration, Instant};
@@ -398,6 +399,57 @@ fn element_signature_goes_into_the_parent() {
 }
 
 #[test]
+fn element_signatures_on_different_elements_both_verify() {
+    let [(gost, _), _, (rsa, _)] = signers();
+    // Inner element signed first, its signature placed in the body; then the body (with the
+    // inner signature inside) signed, its signature placed in the head: the usual SOAP
+    // layout. The inner signature is not a child of the root, so it stays covered.
+    let xml = b"<root><head/><body Id=\"b\"><inner Id=\"i\">x</inner></body></root>";
+    let inner = sign_element(xml, "//inner", Some("/root/body"), &gost.key, &gost.cert).unwrap();
+    assert_eq!(algs(&verify(&inner).unwrap()), [SigAlg::Gost2015_512]);
+    let outer = sign_element(
+        &inner,
+        "/root/body",
+        Some("/root/head"),
+        &rsa.key,
+        &rsa.cert,
+    )
+    .unwrap();
+    assert_eq!(
+        algs(&verify(&outer).unwrap()),
+        [SigAlg::Gost2015_512, SigAlg::RsaSha256]
+    );
+
+    // Two element signatures appended to the root.
+    let first = sign_element(ELEMENTS.as_bytes(), "//data", None, &gost.key, &gost.cert).unwrap();
+    let second = sign_element(&first, "/root/body[2]", None, &rsa.key, &rsa.cert).unwrap();
+    assert_eq!(
+        algs(&verify(&second).unwrap()),
+        [SigAlg::RsaSha256, SigAlg::Gost2015_512]
+    );
+}
+
+#[test]
+fn signature_inserted_into_a_signed_element_breaks_it() {
+    let [(gost, _), _, (rsa, _)] = signers();
+    let first = sign_element(ELEMENTS.as_bytes(), "//data", None, &gost.key, &gost.cert).unwrap();
+    // The second signature lands inside the element the first one covers.
+    let second =
+        sign_element(&first, "/root/body[2]", Some("//data"), &rsa.key, &rsa.cert).unwrap();
+    assert!(find(&second, "x:k=\"v\">one<ds:Signature") > 0);
+    assert_eq!(verify(&second), Err(XmlError::BadDigest));
+}
+
+#[test]
+fn id_with_line_break_character_references_round_trips() {
+    let [(signer, _), ..] = signers();
+    let xml = b"<root><data Id=\"a&#10;b&#9;c&#13;\">x</data></root>";
+    let signed = sign_element(xml, "//data", None, &signer.key, &signer.cert).unwrap();
+    assert!(find(&signed, "<ds:Reference URI=\"#a&#xA;b&#x9;c&#xD;\">") > 0);
+    assert_eq!(algs(&verify(&signed).unwrap()), [SigAlg::Gost2015_512]);
+}
+
+#[test]
 fn element_signing_constraints() {
     let [(signer, _), ..] = signers();
     let sign = |tbs: &str, parent: Option<&str>| {
@@ -566,22 +618,50 @@ fn oversized_input_is_refused() {
     );
 }
 
+/// `<r>` declaring `declarations` namespaces, with `children` empty `<c/>` children.
+fn namespace_heavy(declarations: usize, children: usize) -> String {
+    let declarations: String = (0..declarations)
+        .map(|i| format!(" xmlns:n{i}='u{i}'"))
+        .collect();
+    format!("<r{declarations}>{}</r>", "<c/>".repeat(children))
+}
+
 #[test]
-fn namespaces_in_scope_cost_once() {
-    // 5 000 namespaces declared on the root are rendered once, not looked at for each of the
-    // 200 000 elements under it.
-    let declarations: String = (0..5_000).map(|i| format!(" xmlns:n{i}='u{i}'")).collect();
-    let xml = format!("<r{declarations}>{}</r>", "<c/>".repeat(200_000));
+fn namespace_floods_are_refused_quickly() {
+    // The parser resolves every element name among the namespaces in scope. At full scale,
+    // 8 192 declarations on the root and 16.7 M children fill 64 MiB; here a sixteenth of
+    // that is refused before any tree is built, within a sixteenth of the 2 s bound for the
+    // three entry points.
+    let [(signer, _), ..] = signers();
+    let xml = namespace_heavy(8_192, 16_736_000 / 16);
+    let started = Instant::now();
+    assert_eq!(verify(xml.as_bytes()), Err(XmlError::TooLarge));
+    assert_eq!(
+        sign_enveloped(xml.as_bytes(), &signer.key, &signer.cert),
+        Err(XmlError::TooLarge)
+    );
+    assert_eq!(
+        canonicalize(xml.as_bytes(), C14n::Inclusive, None),
+        Err(XmlError::TooLarge)
+    );
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(2) / 16 * 3, "{elapsed:?}");
+}
+
+#[test]
+fn many_namespaces_in_scope_still_sign_and_verify() {
+    // 8 192 namespaces on the root are rendered once, not looked at for each element.
+    let [(signer, _), ..] = signers();
+    let xml = namespace_heavy(8_192, 20_000);
     let started = Instant::now();
     let canonical = canonicalize(xml.as_bytes(), C14n::Inclusive, None).unwrap();
     assert!(canonical.ends_with(b"<c></c></r>"));
     let exclusive = canonicalize(xml.as_bytes(), C14n::Exclusive, None).unwrap();
     assert!(exclusive.starts_with(b"<r><c></c>"));
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        started.elapsed()
-    );
+    let signed = enveloped(xml.as_bytes(), &signer);
+    assert_eq!(algs(&verify(&signed).unwrap()), [SigAlg::Gost2015_512]);
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
 }
 
 #[test]
@@ -618,8 +698,17 @@ fn malformed_and_non_utf8_input_is_refused() {
 }
 
 #[test]
-fn fifty_mebibytes_of_elements_get_an_answer() {
-    // 13 million elements: parsed in one pass, answered (no signature) rather than hanging.
+fn element_floods_are_refused_quickly() {
+    // 13 million elements in 50 MiB: more `<` than MAX_NODES, refused before any tree is
+    // built (whose node array alone would take about a gigabyte).
     let xml = format!("<r>{}</r>", "<a/>".repeat(50 * 1024 * 1024 / 4));
+    let started = Instant::now();
+    assert_eq!(verify(xml.as_bytes()), Err(XmlError::TooLarge));
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+
+    // At the node cap, 50 MiB still gets an answer.
+    let element = format!("<a>{}</a>", "x".repeat(50 * 1024 * 1024 / (MAX_NODES / 2)));
+    let xml = format!("<r>{}</r>", element.repeat(MAX_NODES / 2 - 2));
     assert_eq!(verify(xml.as_bytes()), Err(XmlError::NoSignature));
 }

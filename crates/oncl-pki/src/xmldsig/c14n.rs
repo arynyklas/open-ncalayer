@@ -91,8 +91,9 @@ impl NodeRef {
 ///
 /// # Errors
 ///
-/// The parsing errors of this module, and [`XmlError::Parse`] if `exclude_subtree` does not
-/// point at an element.
+/// The parsing errors of this module, [`XmlError::Parse`] if `exclude_subtree` does not
+/// point at an element, [`XmlError::TooLarge`] if the canonical form would exceed
+/// [`MAX_CANONICAL`] bytes.
 pub fn canonicalize(
     xml: &[u8],
     method: C14n,
@@ -103,14 +104,20 @@ pub fn canonicalize(
         Some(node) => vec![node.resolve(&doc)?.id()],
         None => Vec::new(),
     };
-    Ok(Canonicalizer {
+    Canonicalizer {
         exclusive: method.is_exclusive(),
         comments: method.with_comments(),
         inclusive_prefixes: &[],
         excluded: &excluded,
+        limit: MAX_CANONICAL,
     }
-    .run(doc.root()))
+    .run(doc.root())
 }
+
+/// Largest canonical form produced, in bytes. Escaping and the namespace declarations
+/// exclusive canonicalization repeats on every element using them can make the canonical
+/// form much larger than its input.
+pub const MAX_CANONICAL: usize = 2 * parse::MAX_INPUT;
 
 /// One canonicalization.
 pub(crate) struct Canonicalizer<'s> {
@@ -122,11 +129,14 @@ pub(crate) struct Canonicalizer<'s> {
     pub inclusive_prefixes: &'s [&'s str],
     /// Elements left out with their subtrees, in document order.
     pub excluded: &'s [NodeId],
+    /// Largest output, in bytes.
+    pub limit: usize,
 }
 
 /// Output plus the namespace bindings in effect in it.
 struct Output<'a> {
     bytes: Vec<u8>,
+    limit: usize,
     /// URIs each prefix is bound to by the open output elements, innermost last.
     bindings: HashMap<&'a str, Vec<&'a str>>,
 }
@@ -140,81 +150,126 @@ impl Output<'_> {
             .copied()
             .unwrap_or("")
     }
+
+    fn room(&self, len: usize) -> Result<(), XmlError> {
+        if self.bytes.len().saturating_add(len) > self.limit {
+            return Err(XmlError::TooLarge);
+        }
+        Ok(())
+    }
+
+    fn put(&mut self, bytes: &[u8]) -> Result<(), XmlError> {
+        self.room(bytes.len())?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn put_escaped(&mut self, text: &str, escape: Escape) -> Result<(), XmlError> {
+        self.room(escaped_len(text, escape))?;
+        push_escaped(&mut self.bytes, text, escape);
+        Ok(())
+    }
+
+    /// Comment or processing instruction content: line ends normalized to `#xA` (the
+    /// parser keeps them raw there).
+    fn put_newlines_normalized(&mut self, text: &str) -> Result<(), XmlError> {
+        self.room(text.len())?;
+        let mut bytes = text.bytes().peekable();
+        while let Some(b) = bytes.next() {
+            if b == b'\r' {
+                bytes.next_if_eq(&b'\n');
+                self.bytes.push(b'\n');
+            } else {
+                self.bytes.push(b);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Canonicalizer<'_> {
     /// Canonical form of the document (`node` is the root) or of an element subtree.
-    pub(crate) fn run(&self, node: Node<'_, '_>) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`XmlError::TooLarge`] if the output would exceed the limit.
+    pub(crate) fn run(&self, node: Node<'_, '_>) -> Result<Vec<u8>, XmlError> {
         let mut out = Output {
             bytes: Vec::new(),
+            limit: self.limit,
             bindings: HashMap::new(),
         };
         if node.node_type() == NodeType::Root {
-            self.document(&mut out, node);
+            self.document(&mut out, node)?;
         } else {
-            self.element(&mut out, node, true);
+            self.element(&mut out, node, true)?;
         }
-        out.bytes
+        Ok(out.bytes)
     }
 
-    fn document<'a>(&self, out: &mut Output<'a>, root: Node<'a, '_>) {
+    fn document<'a>(&self, out: &mut Output<'a>, root: Node<'a, '_>) -> Result<(), XmlError> {
         let mut after_element = false;
         for child in root.children() {
             match child.node_type() {
                 NodeType::Element => {
-                    self.element(out, child, false);
+                    self.element(out, child, false)?;
                     after_element = true;
                 }
                 NodeType::Comment | NodeType::PI => {
-                    let start = out.bytes.len();
-                    if after_element {
-                        out.bytes.push(b'\n');
+                    if !self.writes(child) {
+                        continue;
                     }
-                    if self.leaf(out, child) {
-                        if !after_element {
-                            out.bytes.push(b'\n');
-                        }
-                    } else {
-                        out.bytes.truncate(start);
+                    if after_element {
+                        out.put(b"\n")?;
+                    }
+                    self.leaf(out, child)?;
+                    if !after_element {
+                        out.put(b"\n")?;
                     }
                 }
                 NodeType::Root | NodeType::Text => {}
             }
         }
+        Ok(())
     }
 
-    /// Writes a comment (if comments are kept) or a processing instruction; `false` if
-    /// nothing was written.
-    fn leaf(&self, out: &mut Output<'_>, node: Node<'_, '_>) -> bool {
-        match node.node_type() {
-            NodeType::Comment if self.comments => {
-                out.bytes.extend_from_slice(b"<!--");
-                push_newlines_normalized(&mut out.bytes, node.text().unwrap_or(""));
-                out.bytes.extend_from_slice(b"-->");
-                true
+    /// Whether a comment or processing instruction is output.
+    fn writes(&self, node: Node<'_, '_>) -> bool {
+        node.is_pi() || (self.comments && node.is_comment())
+    }
+
+    /// Writes a comment (if comments are kept) or a processing instruction.
+    fn leaf(&self, out: &mut Output<'_>, node: Node<'_, '_>) -> Result<(), XmlError> {
+        if !self.writes(node) {
+            return Ok(());
+        }
+        if let Some(pi) = node.pi() {
+            out.put(b"<?")?;
+            out.put(pi.target.as_bytes())?;
+            if let Some(value) = pi.value {
+                out.put(b" ")?;
+                out.put_newlines_normalized(value)?;
             }
-            NodeType::PI => {
-                let pi = node.pi().expect("PI node");
-                out.bytes.extend_from_slice(b"<?");
-                out.bytes.extend_from_slice(pi.target.as_bytes());
-                if let Some(value) = pi.value {
-                    out.bytes.push(b' ');
-                    push_newlines_normalized(&mut out.bytes, value);
-                }
-                out.bytes.extend_from_slice(b"?>");
-                true
-            }
-            _ => false,
+            out.put(b"?>")
+        } else {
+            out.put(b"<!--")?;
+            out.put_newlines_normalized(node.text().unwrap_or(""))?;
+            out.put(b"-->")
         }
     }
 
-    fn element<'a, 'i: 'a>(&self, out: &mut Output<'a>, node: Node<'a, 'i>, apex: bool) {
+    fn element<'a, 'i: 'a>(
+        &self,
+        out: &mut Output<'a>,
+        node: Node<'a, 'i>,
+        apex: bool,
+    ) -> Result<(), XmlError> {
         if self
             .excluded
             .binary_search_by_key(&node.id().get(), |id| id.get())
             .is_ok()
         {
-            return;
+            return Ok(());
         }
         let qname = element_qname(node);
 
@@ -237,13 +292,19 @@ impl Canonicalizer<'_> {
             .collect();
         if apex && !self.exclusive {
             // Canonical XML 1.0 carries the xml:* attributes of omitted ancestors over to the
-            // apex, the nearest ancestor's value winning.
+            // apex. The apex's own ones win; among the ancestors Kalkan's Santuario keeps the
+            // OUTERMOST value, where the specification says the nearest: `handleParent`
+            // (Canonicalizer20010315) adds every ancestor's xml:* attributes to one
+            // XmlAttrStack level, root first (`push(-1)` does not start a new level), and
+            // `getXmlnsAttr` keeps the first of each name. We follow Kalkan.
             let mut seen: HashSet<&str> = attributes
                 .iter()
                 .filter(|(ns, ..)| *ns == XML_NS)
                 .map(|&(_, local, ..)| local)
                 .collect();
-            for ancestor in node.ancestors().skip(1).filter(Node::is_element) {
+            let ancestors: Vec<Node<'a, 'i>> =
+                node.ancestors().skip(1).filter(Node::is_element).collect();
+            for ancestor in ancestors.iter().rev() {
                 for a in ancestor.attributes() {
                     if a.namespace() == Some(XML_NS) && seen.insert(a.name()) {
                         let qname = &src[a.range_qname()];
@@ -254,50 +315,48 @@ impl Canonicalizer<'_> {
         }
         attributes.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
 
-        let bytes = &mut out.bytes;
-        bytes.push(b'<');
-        bytes.extend_from_slice(qname.as_bytes());
+        out.put(b"<")?;
+        out.put(qname.as_bytes())?;
         for (prefix, uri) in &declarations {
-            bytes.extend_from_slice(b" xmlns");
+            out.put(b" xmlns")?;
             if !prefix.is_empty() {
-                bytes.push(b':');
-                bytes.extend_from_slice(prefix.as_bytes());
+                out.put(b":")?;
+                out.put(prefix.as_bytes())?;
             }
-            bytes.extend_from_slice(b"=\"");
-            push_attribute_value(bytes, uri);
-            bytes.push(b'"');
+            out.put(b"=\"")?;
+            out.put_escaped(uri, attribute_escape)?;
+            out.put(b"\"")?;
         }
         for (_, _, qname, value) in &attributes {
-            bytes.push(b' ');
-            bytes.extend_from_slice(qname.as_bytes());
-            bytes.extend_from_slice(b"=\"");
-            push_attribute_value(bytes, value);
-            bytes.push(b'"');
+            out.put(b" ")?;
+            out.put(qname.as_bytes())?;
+            out.put(b"=\"")?;
+            out.put_escaped(value, attribute_escape)?;
+            out.put(b"\"")?;
         }
-        bytes.push(b'>');
+        out.put(b">")?;
         for &(prefix, uri) in &declarations {
             out.bindings.entry(prefix).or_default().push(uri);
         }
 
         for child in node.children() {
             match child.node_type() {
-                NodeType::Element => self.element(out, child, false),
-                NodeType::Text => push_text(&mut out.bytes, child.text().unwrap_or("")),
-                NodeType::Comment | NodeType::PI => {
-                    self.leaf(out, child);
-                }
+                NodeType::Element => self.element(out, child, false)?,
+                NodeType::Text => out.put_escaped(child.text().unwrap_or(""), text_escape)?,
+                NodeType::Comment | NodeType::PI => self.leaf(out, child)?,
                 NodeType::Root => {}
             }
         }
 
-        out.bytes.extend_from_slice(b"</");
-        out.bytes.extend_from_slice(qname.as_bytes());
-        out.bytes.push(b'>');
+        out.put(b"</")?;
+        out.put(qname.as_bytes())?;
+        out.put(b">")?;
         for (prefix, _) in &declarations {
             if let Some(uris) = out.bindings.get_mut(prefix) {
                 uris.pop();
             }
         }
+        Ok(())
     }
 
     /// Namespace nodes that may be rendered on `node`. Canonical XML: the namespaces in
@@ -311,15 +370,16 @@ impl Canonicalizer<'_> {
         qname: &'a str,
         apex: bool,
     ) -> Vec<(&'a str, &'a str)> {
-        let declared = if apex {
+        let mut declared = if apex {
             Vec::new()
         } else {
             parse::declared_prefixes(node)
         };
+        declared.sort_unstable();
         let in_scope: Vec<(&'a str, &'a str)> = if apex || !declared.is_empty() {
             node.namespaces()
                 .map(|ns| (ns.name().unwrap_or(""), ns.uri()))
-                .filter(|(prefix, _)| apex || declared.contains(prefix))
+                .filter(|(prefix, _)| apex || declared.binary_search(prefix).is_ok())
                 .collect()
         } else {
             Vec::new()
@@ -347,42 +407,50 @@ impl Canonicalizer<'_> {
     }
 }
 
-fn push_newlines_normalized(out: &mut Vec<u8>, text: &str) {
-    let mut chars = text.bytes().peekable();
-    while let Some(b) = chars.next() {
-        if b == b'\r' {
-            chars.next_if_eq(&b'\n');
-            out.push(b'\n');
-        } else {
-            out.push(b);
-        }
+/// Replacement of a byte, if it is escaped.
+type Escape = fn(u8) -> Option<&'static [u8]>;
+
+fn text_escape(b: u8) -> Option<&'static [u8]> {
+    match b {
+        b'&' => Some(b"&amp;"),
+        b'<' => Some(b"&lt;"),
+        b'>' => Some(b"&gt;"),
+        b'\r' => Some(b"&#xD;"),
+        _ => None,
     }
 }
 
-fn push_text(out: &mut Vec<u8>, text: &str) {
+fn attribute_escape(b: u8) -> Option<&'static [u8]> {
+    match b {
+        b'&' => Some(b"&amp;"),
+        b'<' => Some(b"&lt;"),
+        b'"' => Some(b"&quot;"),
+        b'\t' => Some(b"&#x9;"),
+        b'\n' => Some(b"&#xA;"),
+        b'\r' => Some(b"&#xD;"),
+        _ => None,
+    }
+}
+
+fn escaped_len(text: &str, escape: Escape) -> usize {
+    text.bytes().map(|b| escape(b).map_or(1, <[u8]>::len)).sum()
+}
+
+fn push_escaped(out: &mut Vec<u8>, text: &str, escape: Escape) {
     for b in text.bytes() {
-        match b {
-            b'&' => out.extend_from_slice(b"&amp;"),
-            b'<' => out.extend_from_slice(b"&lt;"),
-            b'>' => out.extend_from_slice(b"&gt;"),
-            b'\r' => out.extend_from_slice(b"&#xD;"),
-            _ => out.push(b),
+        match escape(b) {
+            Some(replacement) => out.extend_from_slice(replacement),
+            None => out.push(b),
         }
     }
 }
 
-fn push_attribute_value(out: &mut Vec<u8>, value: &str) {
-    for b in value.bytes() {
-        match b {
-            b'&' => out.extend_from_slice(b"&amp;"),
-            b'<' => out.extend_from_slice(b"&lt;"),
-            b'"' => out.extend_from_slice(b"&quot;"),
-            b'\t' => out.extend_from_slice(b"&#x9;"),
-            b'\n' => out.extend_from_slice(b"&#xA;"),
-            b'\r' => out.extend_from_slice(b"&#xD;"),
-            _ => out.push(b),
-        }
-    }
+/// An attribute value as Canonical XML writes it between double quotes; parsing it back
+/// gives `value`.
+pub(crate) fn escape_attribute(value: &str) -> String {
+    let mut out = Vec::with_capacity(escaped_len(value, attribute_escape));
+    push_escaped(&mut out, value, attribute_escape);
+    String::from_utf8(out).expect("escaping keeps UTF-8")
 }
 
 #[cfg(test)]
@@ -402,8 +470,9 @@ mod tests {
             comments: method.with_comments(),
             inclusive_prefixes: &[],
             excluded: &[],
+            limit: MAX_CANONICAL,
         };
-        String::from_utf8(c.run(node)).unwrap()
+        String::from_utf8(c.run(node).unwrap()).unwrap()
     }
 
     #[test]
@@ -457,10 +526,57 @@ mod tests {
             comments: false,
             inclusive_prefixes: &["#unused", "q"],
             excluded: &[],
+            limit: MAX_CANONICAL,
         };
         assert_eq!(
-            c.run(e),
+            c.run(e).unwrap(),
             b"<e xmlns:q=\"urn:q\"><f></f><f xmlns:q=\"urn:q2\"></f></e>"
+        );
+    }
+
+    #[test]
+    fn outermost_xml_attribute_of_omitted_ancestors_wins() {
+        // Kalkan's Santuario, not the Canonical XML 1.0 text (which takes the nearest).
+        let xml = "<r xml:lang=\"ru\" xml:space=\"preserve\"><m xml:lang=\"kk\"><e/><f xml:lang=\"en\"/></m></r>";
+        assert_eq!(
+            subtree(xml, "e", C14n::Inclusive),
+            "<e xml:lang=\"ru\" xml:space=\"preserve\"></e>"
+        );
+        assert_eq!(
+            subtree(xml, "f", C14n::Inclusive),
+            "<f xml:lang=\"en\" xml:space=\"preserve\"></f>"
+        );
+        assert_eq!(subtree(xml, "e", C14n::Exclusive), "<e></e>");
+    }
+
+    #[test]
+    fn output_is_capped() {
+        // Exclusive canonicalization repeats a long namespace URI on every element using it.
+        let uri = "u".repeat(1000);
+        let xml = format!("<r xmlns:p=\"{uri}\">{}</r>", "<p:x/>".repeat(100));
+        let doc = parse::parse(xml.as_bytes()).unwrap();
+        let run = |limit| {
+            Canonicalizer {
+                exclusive: true,
+                comments: false,
+                inclusive_prefixes: &[],
+                excluded: &[],
+                limit,
+            }
+            .run(doc.root())
+        };
+        let full = run(MAX_CANONICAL).unwrap();
+        assert!(full.len() > 100_000);
+        assert_eq!(run(full.len()).unwrap(), full);
+        assert_eq!(run(full.len() - 1), Err(XmlError::TooLarge));
+        assert_eq!(run(50_000), Err(XmlError::TooLarge));
+    }
+
+    #[test]
+    fn attribute_escape_round_trips() {
+        assert_eq!(
+            escape_attribute("a&<\"\t\n\r>'b"),
+            "a&amp;&lt;&quot;&#x9;&#xA;&#xD;>'b"
         );
     }
 }

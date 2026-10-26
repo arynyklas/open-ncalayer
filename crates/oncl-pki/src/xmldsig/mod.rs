@@ -19,21 +19,23 @@
 //! out whatever the canonicalization method says, as XMLDSig requires and Santuario does.
 //!
 //! Input is untrusted: no DOCTYPE (so no entity expansion and nothing fetched), at most
-//! [`MAX_INPUT`] bytes and [`MAX_DEPTH`] levels, bounded parse work for attributes and
-//! namespace declarations, and at most [`REFERENCE_WORK`] bytes canonicalized by [`verify`].
+//! [`MAX_INPUT`] bytes, [`MAX_DEPTH`] levels, [`MAX_NODES`] nodes and [`MAX_ATTRIBUTES`]
+//! attributes, bounded parse work for attributes and namespaces in scope, canonical forms
+//! of at most [`MAX_CANONICAL`] bytes, at most [`REFERENCE_WORK`] bytes canonicalized by
+//! [`verify`], and XPaths of at most 32 steps. Signing holds one parse tree at a time.
 
 mod c14n;
 mod parse;
 mod xpath;
 
-pub use c14n::{C14n, NodeRef, canonicalize};
-pub use parse::{MAX_DEPTH, MAX_INPUT};
+pub use c14n::{C14n, MAX_CANONICAL, NodeRef, canonicalize};
+pub use parse::{MAX_ATTRIBUTES, MAX_DEPTH, MAX_INPUT, MAX_NODES};
 
 use crate::cert::{self, Certificate};
 use crate::key::{KeyError, PrivateKey, PublicKey, SigAlg};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use c14n::Canonicalizer;
+use c14n::{Canonicalizer, escape_attribute};
 use der::Encode;
 use roxmltree::{Document, Node, NodeId};
 
@@ -149,19 +151,26 @@ pub fn sign_enveloped(
     cert: &Certificate,
 ) -> Result<Vec<u8>, XmlError> {
     let alg = signing_alg(cert)?;
-    let doc = parse::parse(xml)?;
-    // The new signature is the only node the enveloped transform drops, so the digest is
-    // that of the document as it is now; comments are out (`URI=""`).
-    let digest = alg.digest(&canonicalizer(C14n::Inclusive).run(doc.root()));
+    let cert = cert_der(cert)?;
+    // Only one parse tree at a time: this one is gone before the signature is spliced in.
+    let (digest, point) = {
+        let doc = parse::parse(xml)?;
+        // The new signature is the only node the enveloped transform drops, so the digest
+        // is that of the document as it is now; comments are out (`URI=""`).
+        let canonical = canonicalizer(C14n::Inclusive).run(doc.root())?;
+        let point = SplicePoint::of(xml, doc.root_element())?;
+        drop(doc);
+        (alg.digest(&canonical), point)
+    };
     let template = Template {
         alg,
         method: C14n::Inclusive,
         uri: "",
         transforms: &[ENVELOPED_SIGNATURE, C14n::InclusiveWithComments.uri()],
         digest,
-        cert: cert_der(cert)?,
+        cert,
     };
-    template.insert(xml, doc.root_element(), key)
+    template.insert(xml, &point, key)
 }
 
 /// Signs the element selected by `tbs_xpath`, which must have an `Id` attribute; the
@@ -184,33 +193,40 @@ pub fn sign_element(
     cert: &Certificate,
 ) -> Result<Vec<u8>, XmlError> {
     let alg = signing_alg(cert)?;
-    let doc = parse::parse(xml)?;
-    let tbs = xpath::select_first(&doc, tbs_xpath)?.ok_or_else(|| {
-        XmlError::Constraint(format!("the element {tbs_xpath} to sign is not found"))
-    })?;
-    let parent = match parent_xpath {
-        Some(expr) => xpath::select_first(&doc, expr)?.ok_or_else(|| {
-            XmlError::Constraint(format!("the signature parent element {expr} is not found"))
-        })?,
-        None => doc.root_element(),
-    };
-    if parent.ancestors().any(|a| a == tbs) {
-        return Err(XmlError::Constraint(
-            "the signature cannot be placed inside the signed element".to_owned(),
-        ));
-    }
-    let id = tbs
-        .attribute("Id")
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| {
-            XmlError::Constraint("the element to sign has no 'Id' attribute".to_owned())
+    let cert = cert_der(cert)?;
+    let (digest, point, id) = {
+        let doc = parse::parse(xml)?;
+        let tbs = xpath::select_first(&doc, tbs_xpath)?.ok_or_else(|| {
+            XmlError::Constraint(format!("the element {tbs_xpath} to sign is not found"))
         })?;
-    if element_by_id(&doc, id).ok().flatten() != Some(tbs) {
-        return Err(XmlError::Constraint(format!(
-            "the Id {id:?} also belongs to another element"
-        )));
-    }
-    let digest = alg.digest(&canonicalizer(C14n::Inclusive).run(tbs));
+        let parent = match parent_xpath {
+            Some(expr) => xpath::select_first(&doc, expr)?.ok_or_else(|| {
+                XmlError::Constraint(format!("the signature parent element {expr} is not found"))
+            })?,
+            None => doc.root_element(),
+        };
+        if parent.ancestors().any(|a| a == tbs) {
+            return Err(XmlError::Constraint(
+                "the signature cannot be placed inside the signed element".to_owned(),
+            ));
+        }
+        let id = tbs
+            .attribute("Id")
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                XmlError::Constraint("the element to sign has no 'Id' attribute".to_owned())
+            })?;
+        if element_by_id(&doc, id).ok().flatten() != Some(tbs) {
+            return Err(XmlError::Constraint(format!(
+                "the Id {id:?} also belongs to another element"
+            )));
+        }
+        let canonical = canonicalizer(C14n::Inclusive).run(tbs)?;
+        let point = SplicePoint::of(xml, parent)?;
+        let id = id.to_owned();
+        drop(doc);
+        (alg.digest(&canonical), point, id)
+    };
     let uri = format!("#{id}");
     let template = Template {
         alg,
@@ -218,15 +234,17 @@ pub fn sign_element(
         uri: &uri,
         transforms: &[C14n::InclusiveWithComments.uri()],
         digest,
-        cert: cert_der(cert)?,
+        cert,
     };
-    template.insert(xml, parent, key)
+    template.insert(xml, &point, key)
 }
 
 /// Verifies every signature of the document, from the last to the first, each against the
 /// certificate in its own `KeyInfo`. Signatures are the `ds:Signature` elements not nested in
-/// another one; a signature is checked as if the ones after it were removed, as NCANode does,
-/// so signatures appended one after another all verify.
+/// another one. A signature is checked as if the later signatures that are children of the
+/// document element were removed, as NCANode does (`root.removeChild`), so signatures
+/// appended one after another all verify; a later signature placed anywhere else (inside a
+/// signed element, say) stays part of what earlier signatures cover.
 ///
 /// Returns the signatures in that order (last first).
 ///
@@ -235,12 +253,12 @@ pub fn sign_element(
 /// The parsing errors, [`XmlError::NoSignature`], [`XmlError::BadSignature`],
 /// [`XmlError::BadDigest`], [`XmlError::UnsupportedAlgorithm`], [`XmlError::Key`] if the
 /// certificate key does not fit the signature algorithm, [`XmlError::Parse`] for a malformed
-/// signature, [`XmlError::TooLarge`] if the references would canonicalize more than
-/// [`REFERENCE_WORK`] bytes.
+/// signature, [`XmlError::TooLarge`] if the references times the input size exceed
+/// [`REFERENCE_WORK`], or the canonical forms together would.
 pub fn verify(xml: &[u8]) -> Result<Vec<XmlSignatureInfo>, XmlError> {
     let doc = parse::parse(xml)?;
-    let signatures: Vec<Node<'_, '_>> = doc
-        .root_element()
+    let root = doc.root_element();
+    let signatures: Vec<Node<'_, '_>> = root
         .descendants()
         .filter(|n| is_ds(*n, "Signature") && !n.ancestors().skip(1).any(|a| is_ds(a, "Signature")))
         .collect();
@@ -256,11 +274,22 @@ pub fn verify(xml: &[u8]) -> Result<Vec<XmlSignatureInfo>, XmlError> {
     if references.saturating_mul(xml.len()) > REFERENCE_WORK {
         return Err(XmlError::TooLarge);
     }
-    let ids: Vec<NodeId> = signatures.iter().map(Node::id).collect();
-    (0..signatures.len())
-        .rev()
-        .map(|i| verify_signature(&doc, signatures[i], &ids[i + 1..]))
-        .collect()
+    let mut budget = REFERENCE_WORK;
+    let mut infos = Vec::with_capacity(signatures.len());
+    // Appended signatures (children of the document element) after the current one.
+    let mut appended_later: Vec<NodeId> = Vec::new();
+    for signature in signatures.iter().rev() {
+        infos.push(verify_signature(
+            &doc,
+            *signature,
+            &appended_later,
+            &mut budget,
+        )?);
+        if signature.parent() == Some(root) {
+            appended_later.insert(0, signature.id());
+        }
+    }
+    Ok(infos)
 }
 
 /// Algorithm for signing with `cert`.
@@ -283,6 +312,7 @@ fn canonicalizer(method: C14n) -> Canonicalizer<'static> {
         comments: false,
         inclusive_prefixes: &[],
         excluded: &[],
+        limit: MAX_CANONICAL,
     }
 }
 
@@ -334,42 +364,81 @@ impl Template<'_> {
         s
     }
 
-    /// Splices the signature into `parent` (an element of the parse of `xml`) as its last
-    /// child, then fills in the value over the SignedInfo as canonicalized in place.
+    /// Splices the signature into the parent at `point` as its last child, then fills in the
+    /// value over the SignedInfo as canonicalized in place.
     fn insert(
         &self,
         xml: &[u8],
-        parent: Node<'_, '_>,
+        point: &SplicePoint,
         key: &PrivateKey,
     ) -> Result<Vec<u8>, XmlError> {
-        let range = parent.range();
-        let (head, tail): (Vec<u8>, Vec<u8>) = if xml[..range.end].ends_with(b"/>") {
-            let mut head = xml[..range.end - 2].to_vec();
-            head.push(b'>');
-            let mut tail = format!("</{}>", parse::element_qname(parent)).into_bytes();
-            tail.extend_from_slice(&xml[range.end..]);
-            (head, tail)
-        } else {
-            let end_tag = xml[range.clone()]
-                .windows(2)
-                .rposition(|w| w == b"</")
-                .map(|p| range.start + p)
-                .ok_or_else(|| XmlError::Parse("element without an end tag".to_owned()))?;
-            (xml[..end_tag].to_vec(), xml[end_tag..].to_vec())
+        let tbs = {
+            let unsigned = point.splice(xml, &self.render(None));
+            let doc = parse::parse_signed(&unsigned)?;
+            let signature = doc
+                .descendants()
+                .find(|n| n.is_element() && n.range().start == point.signature_offset())
+                .expect("the inserted signature");
+            let signed_info = signature.first_element_child().expect("SignedInfo");
+            canonicalizer(self.method).run(signed_info)?
         };
-        let splice =
-            |signature: &str| [head.as_slice(), signature.as_bytes(), tail.as_slice()].concat();
-
-        let unsigned = splice(&self.render(None));
-        let doc = parse::parse_unbounded(&unsigned)?;
-        let signature = doc
-            .descendants()
-            .find(|n| n.is_element() && n.range().start == head.len())
-            .expect("the inserted signature");
-        let signed_info = signature.first_element_child().expect("SignedInfo");
-        let tbs = canonicalizer(self.method).run(signed_info);
         let value = key.sign(self.alg, &tbs).map_err(XmlError::Key)?;
-        Ok(splice(&self.render(Some(&value))))
+        Ok(point.splice(xml, &self.render(Some(&value))))
+    }
+}
+
+/// Where a signature goes into its parent: before the parent's end tag, or into its
+/// empty-element tag, which is opened (`<p/>` becomes `<p>…</p>`).
+struct SplicePoint {
+    /// Input offset of the parent's end tag, or of the `/>` of its empty-element tag.
+    at: usize,
+    /// Qualified name of an empty-element parent, closed after the signature.
+    close: Option<String>,
+}
+
+impl SplicePoint {
+    fn of(xml: &[u8], parent: Node<'_, '_>) -> Result<SplicePoint, XmlError> {
+        let range = parent.range();
+        if xml[..range.end].ends_with(b"/>") {
+            return Ok(SplicePoint {
+                at: range.end - 2,
+                close: Some(parse::element_qname(parent).to_owned()),
+            });
+        }
+        let at = xml[range.clone()]
+            .windows(2)
+            .rposition(|w| w == b"</")
+            .map(|p| range.start + p)
+            .ok_or_else(|| XmlError::Parse("element without an end tag".to_owned()))?;
+        Ok(SplicePoint { at, close: None })
+    }
+
+    /// Offset of the signature in the spliced document.
+    fn signature_offset(&self) -> usize {
+        self.at + usize::from(self.close.is_some())
+    }
+
+    /// `xml` with `signature` spliced in; the other input bytes are kept.
+    fn splice(&self, xml: &[u8], signature: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            xml.len() + signature.len() + 3 + self.close.as_ref().map_or(0, String::len),
+        );
+        out.extend_from_slice(&xml[..self.at]);
+        match &self.close {
+            Some(qname) => {
+                out.push(b'>');
+                out.extend_from_slice(signature.as_bytes());
+                out.extend_from_slice(b"</");
+                out.extend_from_slice(qname.as_bytes());
+                out.push(b'>');
+                out.extend_from_slice(&xml[self.at + 2..]);
+            }
+            None => {
+                out.extend_from_slice(signature.as_bytes());
+                out.extend_from_slice(&xml[self.at..]);
+            }
+        }
+        out
     }
 }
 
@@ -377,6 +446,7 @@ fn verify_signature(
     doc: &Document<'_>,
     signature: Node<'_, '_>,
     later: &[NodeId],
+    budget: &mut usize,
 ) -> Result<XmlSignatureInfo, XmlError> {
     let signed_info = ds_child(signature, "SignedInfo")?;
     let method_element = ds_child(signed_info, "CanonicalizationMethod")?;
@@ -400,13 +470,17 @@ fn verify_signature(
         .map_err(XmlError::Key)?;
 
     let prefixes = inclusive_prefixes(method_element);
-    let tbs = Canonicalizer {
-        exclusive: method.is_exclusive(),
-        comments: method.with_comments(),
-        inclusive_prefixes: &prefixes,
-        excluded: &[],
-    }
-    .run(signed_info);
+    let tbs = run_within(
+        Canonicalizer {
+            exclusive: method.is_exclusive(),
+            comments: method.with_comments(),
+            inclusive_prefixes: &prefixes,
+            excluded: &[],
+            limit: 0,
+        },
+        signed_info,
+        budget,
+    )?;
     public.verify(alg, &tbs, &value).map_err(|e| match e {
         KeyError::BadSignature => XmlError::BadSignature,
         e => XmlError::Key(e),
@@ -420,9 +494,21 @@ fn verify_signature(
         return Err(malformed("SignedInfo has no Reference"));
     }
     for reference in references {
-        verify_reference(doc, signature, reference, later)?;
+        verify_reference(doc, signature, reference, later, budget)?;
     }
     Ok(XmlSignatureInfo { cert, sig_alg: alg })
+}
+
+/// Runs `canonicalizer` on `node` within what is left of the verification budget.
+fn run_within(
+    mut canonicalizer: Canonicalizer<'_>,
+    node: Node<'_, '_>,
+    budget: &mut usize,
+) -> Result<Vec<u8>, XmlError> {
+    canonicalizer.limit = MAX_CANONICAL.min(*budget);
+    let out = canonicalizer.run(node)?;
+    *budget -= out.len();
+    Ok(out)
 }
 
 fn verify_reference(
@@ -430,6 +516,7 @@ fn verify_reference(
     signature: Node<'_, '_>,
     reference: Node<'_, '_>,
     later: &[NodeId],
+    budget: &mut usize,
 ) -> Result<(), XmlError> {
     let uri = reference
         .attribute("URI")
@@ -467,14 +554,18 @@ fn verify_reference(
         .into_iter()
         .chain(later.iter().copied())
         .collect();
-    let data = Canonicalizer {
-        exclusive: method.is_exclusive(),
-        // Same-document references drop comments.
-        comments: false,
-        inclusive_prefixes: &prefixes,
-        excluded: &excluded,
-    }
-    .run(target);
+    let data = run_within(
+        Canonicalizer {
+            exclusive: method.is_exclusive(),
+            // Same-document references drop comments.
+            comments: false,
+            inclusive_prefixes: &prefixes,
+            excluded: &excluded,
+            limit: 0,
+        },
+        target,
+        budget,
+    )?;
 
     let digest_uri = algorithm(ds_child(reference, "DigestMethod")?)?;
     let digest_alg = digest_method(digest_uri)
@@ -569,11 +660,4 @@ fn base64_lines(bytes: &[u8]) -> String {
         .map(|line| std::str::from_utf8(line).expect("base64 is ASCII"))
         .collect::<Vec<_>>()
         .join("&#13;\n")
-}
-
-fn escape_attribute(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('"', "&quot;")
 }
