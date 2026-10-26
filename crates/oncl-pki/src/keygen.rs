@@ -74,8 +74,9 @@ impl KeySpec {
 }
 
 /// A new private key of `spec`. GOST scalars are drawn uniformly from `[1, q − 1]` with the
-/// operating system RNG; RSA keys come from `rsa` with the same RNG and are used through
-/// their PKCS#8 (signing is `ring`).
+/// operating system RNG, and redrawn while the public key has a short coordinate (see
+/// [`full_width_gost_key`]); RSA keys come from `rsa` with the same RNG and are used
+/// through their PKCS#8 (signing is `ring`).
 ///
 /// # Errors
 ///
@@ -87,10 +88,16 @@ impl KeySpec {
 /// If the operating system RNG fails.
 pub fn generate(spec: KeySpec) -> Result<PrivateKey, KeystoreError> {
     match spec {
-        KeySpec::Gost2015_512 => Ok(PrivateKey::Gost(SigningKey::generate(CurveId::Tc26_512A))),
-        KeySpec::Gost2004 => Ok(PrivateKey::Gost(SigningKey::generate(
-            CurveId::Pkigovkz2004A,
-        ))),
+        KeySpec::Gost2015_512 | KeySpec::Gost2004 => {
+            let curve = if spec == KeySpec::Gost2004 {
+                CurveId::Pkigovkz2004A
+            } else {
+                CurveId::Tc26_512A
+            };
+            Ok(PrivateKey::Gost(full_width_gost_key(|| {
+                SigningKey::generate(curve)
+            })))
+        }
         KeySpec::RsaSha256(bits) if RSA_BITS.contains(&bits) => {
             let key =
                 rsa::RsaPrivateKey::new(&mut OsRng, bits as usize).expect("RSA key generation");
@@ -99,6 +106,28 @@ pub fn generate(spec: KeySpec) -> Result<PrivateKey, KeystoreError> {
                 .expect("ring reads a generated RSA key of a supported size"))
         }
         KeySpec::RsaSha256(_) | KeySpec::Rsa1Sha1(_) => Err(KeystoreError::UnknownAlgorithm),
+    }
+}
+
+/// The first key of `next` whose public coordinates X and Y both have a non-zero top byte
+/// (as [`CurveId::coord_len`] big-endian bytes, i.e. `X, Y ≥ 2^(8·(coord_len − 1))`).
+///
+/// Kalkan's GOST key pair generators redraw any other key, and its public key encoders
+/// (`extractBytes` of `JCEECPublicKey` and `EcGost3410_2015PublicKey`) mis-encode a
+/// coordinate below `2^(8·coord_len − 9)`. For such a key the SubjectPublicKeyInfo Kalkan
+/// re-encodes from our request or certificate would differ from ours, and so would every
+/// key identifier it recomputes (`getKeyIdFromPK`, `createKeyId`). Keeping only keys
+/// Kalkan's generators could make (about 1 in 128 draws is redrawn) makes both encodings,
+/// and the identifiers, agree.
+fn full_width_gost_key(mut next: impl FnMut() -> SigningKey) -> SigningKey {
+    loop {
+        let key = next();
+        let n = key.curve().coord_len();
+        // `X_LE ‖ Y_LE`: the top byte of each coordinate is the last of its half.
+        let xy = key.verifying_key().to_kz_bytes();
+        if xy[n - 1] != 0 && xy[2 * n - 1] != 0 {
+            return key;
+        }
     }
 }
 
@@ -139,3 +168,53 @@ impl RngCore for OsRng {
 }
 
 impl CryptoRng for OsRng {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether both coordinates of `key` have a non-zero top byte.
+    fn full_width(key: &SigningKey) -> bool {
+        let n = key.curve().coord_len();
+        let xy = key.verifying_key().to_kz_bytes();
+        xy[n - 1] != 0 && xy[2 * n - 1] != 0
+    }
+
+    /// The key of scalar `d` (small, big-endian in `coord_len` bytes).
+    fn key_of(curve: CurveId, d: u32) -> SigningKey {
+        let mut be = vec![0; curve.coord_len()];
+        let n = be.len();
+        be[n - 4..].copy_from_slice(&d.to_be_bytes());
+        SigningKey::from_scalar_be(curve, &be).unwrap()
+    }
+
+    #[test]
+    fn keys_with_a_short_coordinate_are_redrawn() {
+        for curve in [CurveId::Pkigovkz2004A, CurveId::Tc26_512A] {
+            // The first small scalars with a short and with a full-width public key.
+            let short = (1..).find(|&d| !full_width(&key_of(curve, d))).unwrap();
+            let full = (1..).find(|&d| full_width(&key_of(curve, d))).unwrap();
+            let mut drawn = Vec::new();
+            let mut scalars = [short, short, full, short].into_iter();
+            let key = full_width_gost_key(|| {
+                let d = scalars.next().expect("no key accepted");
+                drawn.push(d);
+                key_of(curve, d)
+            });
+            assert_eq!(drawn, [short, short, full], "{curve:?}");
+            assert_eq!(key.scalar_be(), key_of(curve, full).scalar_be());
+        }
+    }
+
+    #[test]
+    fn generated_gost_keys_are_full_width() {
+        for spec in [KeySpec::Gost2004, KeySpec::Gost2015_512] {
+            for _ in 0..64 {
+                let PrivateKey::Gost(key) = generate(spec).unwrap() else {
+                    panic!("a GOST key");
+                };
+                assert!(full_width(&key), "{spec:?}");
+            }
+        }
+    }
+}
