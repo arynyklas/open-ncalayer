@@ -60,8 +60,8 @@ pub enum ChainPolicy {
     Default,
     /// `chain: []`: neither path building nor OCSP.
     Empty,
-    /// The CAs of a non-empty `chain`, in its order.
-    Custom(CaSet),
+    /// The CAs of a non-empty `chain`, in its order (shared with the OCSP checks).
+    Custom(Arc<CaSet>),
 }
 
 impl ChainPolicy {
@@ -70,7 +70,7 @@ impl ChainPolicy {
         match self {
             ChainPolicy::Default => Some(Arc::clone(&NCA_PRODUCTION)),
             ChainPolicy::Empty => None,
-            ChainPolicy::Custom(cas) => Some(Arc::new(cas.clone())),
+            ChainPolicy::Custom(cas) => Some(Arc::clone(cas)),
         }
     }
 }

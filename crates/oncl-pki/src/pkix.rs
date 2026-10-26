@@ -1,7 +1,10 @@
-//! Certification paths: from a certificate up through a set of CA certificates to a
-//! self-signed anchor, checked by the rules of RFC 5280 §6.1 without policies and name
-//! constraints.
+//! Certification paths: from a certificate up through a set of CA certificates to an
+//! anchor, checked by the rules of RFC 5280 §6.1 without policies and name constraints.
 //!
+//! - The anchor is a self-signed CA of the set or, as in the original's `PKIXUtil`, the
+//!   topmost CA of the set found on the way up: a CA of the set whose issuer name no CA of
+//!   the set has. So a set of an intermediate CA alone anchors the certificates it issued.
+//!   The certificate itself always needs an issuer in the set.
 //! - The issuer of a certificate is a CA of the set whose subject equals the certificate's
 //!   issuer name and whose key verifies its signature. Among several such CAs the one whose
 //!   subjectKeyIdentifier equals the certificate's authorityKeyIdentifier is tried first,
@@ -49,7 +52,8 @@ pub const KNOWN_EXTENSIONS: [ObjectIdentifier; 12] = [
 /// certificate itself, its issuer is 1, and so on.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PathError {
-    /// No CA of the set has the issuer name of a certificate on the path.
+    /// No CA of the set has the certificate's issuer name (above it, the topmost CA of the
+    /// set is the anchor).
     #[error("issuer certificate not found")]
     IssuerNotFound,
     /// CAs with the issuer name exist, but none of their keys verifies the signature.
@@ -92,7 +96,7 @@ pub enum PathError {
     TooLong,
 }
 
-/// A set of CA certificates paths are built through: issuing CAs and self-signed anchors.
+/// A set of CA certificates paths are built through: issuing CAs and anchors.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CaSet {
     certs: Vec<Certificate>,
@@ -134,9 +138,11 @@ impl CaSet {
     }
 }
 
-/// Builds and checks the path from `leaf` through `cas` to a self-signed anchor of `cas` at
-/// time `at`, returning `[leaf, issuer, …, anchor]`. A `leaf` that is itself an anchor of
-/// `cas` (byte for byte) gives the path `[leaf]`.
+/// Builds and checks the path from `leaf` through `cas` to an anchor of `cas` at time `at`,
+/// returning `[leaf, issuer, …, anchor]`. The anchor is a self-signed CA of `cas`, or the
+/// first CA of the path whose issuer name no CA of `cas` has. A `leaf` that is itself a
+/// self-signed CA of `cas` (byte for byte) gives the path `[leaf]`. The anchor is checked
+/// like any issuer.
 ///
 /// # Errors
 ///
@@ -158,7 +164,12 @@ pub fn build_path(
         if is_anchor(current, cas) {
             return Ok(path);
         }
-        let issuer = find_issuer(current, cas)?.clone();
+        let issuer = match find_issuer(current, cas) {
+            Ok(issuer) => issuer.clone(),
+            // The topmost CA of the set: the original's trust anchor.
+            Err(PathError::IssuerNotFound) if index > 0 => return Ok(path),
+            Err(e) => return Err(e),
+        };
         if path.len() == MAX_PATH_LEN {
             return Err(PathError::TooLong);
         }

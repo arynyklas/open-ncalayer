@@ -25,7 +25,7 @@ use serde_json::{Map, Value, json};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Display;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 const SIGNING_FAILURE: &str = "SIGNING_FAILURE";
 const SIGNING_FAILURE_MESSAGE: &str = "Signing has failed.";
@@ -366,8 +366,9 @@ fn decode_base64(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
 
 /// `signerParams.chain`, read like the original's `optJSONArray`: anything but an array
 /// (absent, `null`, another type) is no chain. Entries are certificates as text
-/// ([`parse_pem_or_base64`]); the first bad entry fails the request, a non-string with
-/// INVALID_SIGNING_PARAMS, an unparsable string with CERTIFICATE_PARSING_FAILURE.
+/// ([`parse_pem_or_base64`]); the first bad entry fails the request: an unparsable string
+/// with CERTIFICATE_PARSING_FAILURE, any other value as the original's `(String) e` and
+/// `X509Util.getX509Certificate` fail on it (INVOCATION_ERROR).
 fn parse_chain(signer_params: &Map<String, Value>) -> Result<ChainPolicy, Failure> {
     let Some(Value::Array(entries)) = signer_params.get("chain") else {
         return Ok(ChainPolicy::Default);
@@ -381,10 +382,14 @@ fn parse_chain(signer_params: &Map<String, Value>) -> Result<ChainPolicy, Failur
             Value::String(text) => {
                 parse_pem_or_base64(text).ok_or_else(certificate_parsing_failure)
             }
-            _ => Err(invalid_signing_params()),
+            // `(String) null` passes; `pem.getBytes()` then dereferences it.
+            Value::Null => Err(Failure::Invocation(Some(
+                "java.lang.NullPointerException".to_owned(),
+            ))),
+            other => Err(class_cast(other)),
         })
         .collect::<Result<_, _>>()?;
-    Ok(ChainPolicy::Custom(CaSet::new(certs)))
+    Ok(ChainPolicy::Custom(Arc::new(CaSet::new(certs))))
 }
 
 /// A certificate written as PEM or as base64 of its DER, whitespace allowed anywhere in the

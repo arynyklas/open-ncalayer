@@ -21,7 +21,7 @@ P1 provides:
 
 The second phase (P2) adds a browser extension: with it, sites work with OpenNCALayer without a trusted CA (see [Browser extension](#browser-extension)).
 
-The third phase (P3) checks keys in the key dialog as the original does. The key certificate's chain is built to the embedded NCA roots or to the CAs of `signerParams.chain`; `chain: []` turns the check off. Revocation is checked with the NCA OCSP responder. A key without a chain is unavailable. A revoked key is marked «revoked DD.MM.YYYY» and is unavailable too, unless `signingParams` has `allowRevoked` (which the `raw` format ignores). As in the original, the NCA test PKI is not embedded: test-environment sites must pass `chain`.
+The third phase (P3) checks keys in the key dialog as the original does. The key certificate's chain is built to the embedded NCA roots or to the CAs of `signerParams.chain`; `chain: []` turns the check off. The anchor is a self-signed CA of the set or, as in the original, the topmost CA of the set found, so a `chain` of an intermediate CA alone works too. Revocation is checked with the NCA OCSP responder. A key without a chain is unavailable. A revoked key is marked «revoked DD.MM.YYYY» and is unavailable too, unless `signingParams` has `allowRevoked` (which the `raw` format ignores). As in the original, the NCA test PKI is not embedded: test-environment sites must pass `chain`.
 
 Manual browser test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md) and [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md) (in Russian).
 
@@ -39,11 +39,11 @@ The first two are closed in P4.
 ### Deviations of P3 from the original
 
 - When the CA set has several CAs of the same name (the embedded set has `ncagost` and `ncagost18`, `ncarsa` and `ncarsa18`), the chain goes through the one whose signature verifies. The original keeps CAs by DN, so the last CA of a name hides the others.
+- The chain's anchor is checked like any CA: validity, `basicConstraints.cA`, `keyCertSign`. The original (Java PKIX) does not check the anchor.
 - The OCSP status of all keys of a store is checked at once, within 6 s in total. The original checks the keys one after another, 5 s each. A key not checked within that time stays available, as on a network error.
-- A key unavailable for another reason (EKU, IIN, BIN, serial number, chain) is not checked with OCSP: the dialog shows those reasons. The original puts its «REVOKED» mark on such keys too.
-- The dialog shows the revocation date: «revoked DD.MM.YYYY». The original's mark has no date: «REVOKED».
+- A key unavailable for another reason (EKU, IIN, BIN, serial number) is not checked with OCSP: the dialog shows those reasons. The original puts its «REVOKED» mark on such keys too.
+- The dialog shows the revocation date, in UTC: «revoked DD.MM.YYYY». The original's mark has no date: «REVOKED».
 - The OCSP responder is also found `byKey` (the SHA-1 of its key); the original understands only `byName`. A response's `thisUpdate` may be ahead of the computer's clock by up to 300 s; the original requires `thisUpdate < now` strictly.
-- A `chain` entry that is not a string answers `INVALID_SIGNING_PARAMS`. The original answers `INVOCATION_ERROR` with a `ClassCastException`, or a `NullPointerException` for `null`.
 
 Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;

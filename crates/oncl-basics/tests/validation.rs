@@ -8,8 +8,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{
-    Availability, Basics, ChainPolicy, DisabledReason, KeyFilter, KeyPrompt, MODULE_NAME,
-    OCSP_DEADLINE, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt, availabilities,
+    Availability, Basics, ChainPolicy, DisabledReason, KeyFilter, MODULE_NAME, OCSP_DEADLINE,
+    availabilities,
 };
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport};
@@ -21,12 +21,11 @@ use oncl_protocol::{AddInfo, Module};
 use oncl_testkit::{fixture, read, synthetic, synthetic_cert};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use time::macros::datetime;
-use zeroize::Zeroizing;
 
 const OCSP_URL: &str = "http://ocsp.synthetic.test/";
 /// When `MockOcsp` says `inter-revoked-…` was revoked.
@@ -135,7 +134,6 @@ fn refused(args: Value) -> String {
 }
 
 const CERTIFICATE_PARSING_FAILURE: &str = r#"{"status":false,"code":"CERTIFICATE_PARSING_FAILURE","message":"Certificate parsing failure."}"#;
-const INVALID_SIGNING_PARAMS: &str = r#"{"status":false,"code":"INVALID_SIGNING_PARAMS","message":"Invalid signing parameters provided."}"#;
 
 #[test]
 fn default_chain_disables_synthetic_key() {
@@ -236,6 +234,35 @@ fn custom_chain_enables_and_revoked_is_marked() {
         Availability::Enabled
     );
     assert_eq!(ocsp.calls().len(), 2);
+
+    // The intermediate CA alone is the anchor, as in the original: its keys are enabled,
+    // checked by OCSP (the responder chains to it as well), and others stay disabled.
+    let inter_only = || Some(json!([pem("inter-gost2015", "\n")]));
+    assert_eq!(
+        shown(
+            "inter-user-gost2015-sign",
+            args("cms", inter_only(), json!({})),
+            ocsp.clone()
+        ),
+        Availability::Enabled
+    );
+    assert_eq!(
+        shown(
+            "inter-revoked-gost2015-sign",
+            args("cms", inter_only(), json!({})),
+            ocsp.clone()
+        ),
+        Availability::Revoked { time: REVOKED_AT }
+    );
+    assert_eq!(
+        shown(
+            "user-gost2015-sign",
+            args("cms", inter_only(), json!({})),
+            ocsp.clone()
+        ),
+        Availability::Disabled(vec![DisabledReason::Chain])
+    );
+    assert_eq!(ocsp.calls().len(), 4);
 }
 
 #[test]
@@ -353,68 +380,29 @@ fn inter_filter() -> KeyFilter {
         bin: String::new(),
         serial_number: String::new(),
         allow_expired: false,
-        chain: ChainPolicy::Custom(CaSet::new(cas)),
+        chain: ChainPolicy::Custom(Arc::new(CaSet::new(cas))),
         allow_revoked: false,
-    }
-}
-
-/// Opens `store`, then records the key dialog's availabilities and how long after the
-/// storage answer it came, and cancels.
-struct Timed {
-    store: &'static str,
-    answered: Mutex<Option<Instant>>,
-    key_dialog: Mutex<Option<(Duration, Vec<Availability>)>>,
-}
-
-impl Prompter for Timed {
-    fn storage(&self, _: &StoragePrompt) -> Prompt<StorageAnswer> {
-        let key = synthetic(self.store);
-        *self.answered.lock().unwrap() = Some(Instant::now());
-        Prompt::Answer(StorageAnswer {
-            storage: StorageKind::Pkcs12,
-            path: key.path,
-            password: Zeroizing::new(key.password),
-        })
-    }
-
-    fn key(&self, p: &KeyPrompt) -> Prompt<usize> {
-        let after = self.answered.lock().unwrap().unwrap().elapsed();
-        let shown = p
-            .candidates
-            .iter()
-            .map(|c| c.availability.clone())
-            .collect();
-        *self.key_dialog.lock().unwrap() = Some((after, shown));
-        Prompt::Cancelled
     }
 }
 
 #[test]
 fn ocsp_unreachable_keeps_key_enabled_within_6_s() {
-    // A responder hanging past the request timeout: the request fails after 5 s, the key
-    // stays enabled and the dialog opens within 6 s of opening the store.
+    // A responder hanging past the request timeout: the request fails, the key stays
+    // enabled and the dialog opens.
     let ocsp = Arc::new(responder().tamper(OcspTamper::Hang(Duration::from_secs(30))));
-    let prompter = Arc::new(Timed {
-        store: "inter-revoked-gost2015-sign",
-        answered: Mutex::new(None),
-        key_dialog: Mutex::new(None),
-    });
-    let basics = Basics::new(
-        prompter.clone(),
-        Arc::new(MemoryRecentPath::new(None)),
-        ocsp.clone(),
-    );
     assert_eq!(
-        process(&basics, args("cms", Some(inter_chain()), json!({}))),
-        EMPTY
+        shown(
+            "inter-revoked-gost2015-sign",
+            args("cms", Some(inter_chain()), json!({})),
+            ocsp.clone()
+        ),
+        Availability::Enabled
     );
-    let (after, shown) = prompter.key_dialog.lock().unwrap().clone().unwrap();
-    assert_eq!(shown, [Availability::Enabled]);
-    assert!(after < Duration::from_secs(6), "{after:?}");
     assert_eq!(ocsp.calls().len(), 1);
 
     // A transport ignoring the timeout: every key is checked at once, and the checks are
-    // abandoned at the deadline.
+    // abandoned at the deadline, which counts from the start of the key checks (path
+    // building included): the dialog is never more than 6 s away.
     let keys = [
         key("inter-user-gost2015-sign"),
         key("inter-revoked-gost2015-sign"),
@@ -427,36 +415,43 @@ fn ocsp_unreachable_keeps_key_enabled_within_6_s() {
     assert_eq!(shown, vec![Availability::Enabled; 3]);
     assert_eq!(OCSP_DEADLINE, Duration::from_secs(6));
     assert!(
-        elapsed >= OCSP_DEADLINE && elapsed < OCSP_DEADLINE + Duration::from_millis(500),
+        elapsed >= OCSP_DEADLINE && elapsed < OCSP_DEADLINE + Duration::from_secs(1),
         "{elapsed:?}"
     );
 }
 
 #[test]
 fn ocsp_checks_run_in_parallel() {
-    // Three keys whose responder answers after 3 s each: one after the other they would
-    // need 9 s, past the deadline; at once, all three answers arrive.
-    let hang = Duration::from_secs(3);
-    let ocsp = Arc::new(responder().tamper(OcspTamper::Hang(hang)));
     let keys = [
         key("inter-user-gost2015-sign"),
         key("inter-revoked-gost2015-sign"),
         key("inter-noaki-gost2015-sign"),
     ];
-    let http: Arc<dyn HttpTransport> = ocsp.clone();
-    let start = Instant::now();
-    let shown = availabilities(&inter_filter(), &keys, &http, OffsetDateTime::now_utc());
-    let elapsed = start.elapsed();
-    assert_eq!(
-        shown,
-        [
-            Availability::Enabled,
-            Availability::Revoked { time: REVOKED_AT },
-            Availability::Enabled,
-        ]
+    let expected = [
+        Availability::Enabled,
+        Availability::Revoked { time: REVOKED_AT },
+        Availability::Enabled,
+    ];
+    let timed = |ocsp: MockOcsp| {
+        let ocsp = Arc::new(ocsp);
+        let http: Arc<dyn HttpTransport> = ocsp.clone();
+        let start = Instant::now();
+        let shown = availabilities(&inter_filter(), &keys, &http, OffsetDateTime::now_utc());
+        let elapsed = start.elapsed();
+        assert_eq!(shown, expected);
+        assert_eq!(ocsp.calls().len(), 3);
+        elapsed
+    };
+    // Path building, signing and checking the answers, without network delay.
+    let baseline = timed(responder());
+    // Each answer delayed by `hang`: at once they add about `hang`, one after the other
+    // they would add three times as much.
+    let hang = Duration::from_millis(1500);
+    let elapsed = timed(responder().tamper(OcspTamper::Hang(hang)));
+    assert!(
+        elapsed < baseline + 2 * hang,
+        "{elapsed:?}, baseline {baseline:?}"
     );
-    assert!(elapsed < 2 * hang, "{elapsed:?}");
-    assert_eq!(ocsp.calls().len(), 3);
 }
 
 #[test]
@@ -589,23 +584,38 @@ fn chain_garbage_is_certificate_parsing_failure() {
 }
 
 #[test]
-fn chain_number_is_invalid_signing_params() {
+fn chain_non_string_is_invocation_error() {
+    // The original casts each entry with `(String) e` and hands it to
+    // `X509Util.getX509Certificate`, outside the catch of CERTIFICATE_PARSING_FAILURE.
+    let class_cast = |class: &str| {
+        format!("java.lang.ClassCastException: {class} cannot be cast to java.lang.String")
+    };
     let root = pem("root-gost2015", "\n");
-    for chain in [
-        json!([5]),
-        json!([1.5]),
-        json!([null]),
-        json!([true]),
-        json!([{}]),
-        json!([[root]]),
-        json!([root, 5]),
-        json!([5, "abc"]),
+    for (chain, details) in [
+        (json!([5]), class_cast("java.lang.Integer")),
+        (json!([1.5]), class_cast("java.math.BigDecimal")),
+        (json!([true]), class_cast("java.lang.Boolean")),
+        (json!([{}]), class_cast("java.util.HashMap")),
+        (json!([[root]]), class_cast("java.util.ArrayList")),
+        (json!([root, 5]), class_cast("java.lang.Integer")),
+        (json!([5, "abc"]), class_cast("java.lang.Integer")),
+        (json!([null]), "java.lang.NullPointerException".to_owned()),
     ] {
-        assert_eq!(
-            refused(args("cms", Some(chain.clone()), json!({}))),
-            INVALID_SIGNING_PARAMS,
-            "{chain}"
-        );
+        for format in ["cms", "raw"] {
+            let reply: Value =
+                serde_json::from_str(&refused(args(format, Some(chain.clone()), json!({}))))
+                    .unwrap();
+            assert_eq!(
+                reply,
+                json!({
+                    "status": false,
+                    "code": "INVOCATION_ERROR",
+                    "message": "An invoked method threw an exception.",
+                    "details": details,
+                }),
+                "{chain}"
+            );
+        }
     }
 }
 

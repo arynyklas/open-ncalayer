@@ -118,6 +118,59 @@ fn missing_intermediate_is_issuer_not_found() {
 }
 
 #[test]
+fn topmost_ca_of_the_set_is_the_anchor() {
+    // As the original's `PKIXUtil`: without the root, the intermediate CA is the anchor.
+    let leaf = entry("inter-user-gost2015-sign").cert;
+    let inter_only = CaSet::new(vec![cer("inter-gost2015")]);
+    assert_eq!(
+        build_path(&leaf, &inter_only, NOW).unwrap(),
+        [leaf.clone(), cer("inter-gost2015")]
+    );
+    // The certificate itself still needs its issuer in the set.
+    assert_eq!(
+        build_path(&leaf, &CaSet::new(vec![nca("ncagost22")]), NOW),
+        Err(PathError::IssuerNotFound)
+    );
+    // The anchor is still checked like any issuer: dates, keyCertSign, cA.
+    let mut expired = entry("user-gost2015-sign");
+    let mut spec = TestCertSpec::from_cert(&expired.cert);
+    spec.extensions = ca_extensions(KeyUsages::KeyCertSign);
+    spec.validity = *entry("inter-expired-gost2015-sign")
+        .cert
+        .tbs_certificate()
+        .validity();
+    expired.cert = issue_cert(&entry("inter-gost2015.key"), spec);
+    let under_expired = issue_cert(
+        &expired,
+        TestCertSpec::from_cert(&entry("inter-user-gost2015-sign").cert),
+    );
+    assert_eq!(
+        build_path(&under_expired, &CaSet::new(vec![expired.cert]), NOW),
+        Err(PathError::NotValidAt { index: 1 })
+    );
+    let (sub_ca, sub_leaf) = sub_ca_and_leaf(KeyUsages::CRLSign);
+    assert_eq!(
+        build_path(&sub_leaf, &CaSet::new(vec![sub_ca.clone()]), NOW),
+        Err(PathError::KeyCertSignMissing { index: 1 })
+    );
+    let (sub_ca, sub_leaf) = sub_ca_and_leaf(KeyUsages::KeyCertSign);
+    assert_eq!(
+        build_path(&sub_leaf, &CaSet::new(vec![sub_ca.clone()]), NOW).unwrap(),
+        [sub_leaf.clone(), sub_ca.clone()]
+    );
+    // A non-CA in the set is not an anchor.
+    let user = entry("user-gost2015-sign");
+    let by_user = issue_cert(
+        &user,
+        TestCertSpec::from_cert(&entry("inter-user-gost2015-sign").cert),
+    );
+    assert_eq!(
+        build_path(&by_user, &CaSet::new(vec![user.cert]), NOW),
+        Err(PathError::NotCa { index: 1 })
+    );
+}
+
+#[test]
 fn expired_leaf_validates_at_not_after() {
     let leaf = entry("inter-expired-gost2015-sign").cert;
     let set = CaSet::new(inter_and_root());

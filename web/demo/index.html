@@ -50,7 +50,7 @@
   <legend>Цепочка доверия (<code>signerParams.chain</code>)</legend>
   <label><input type="radio" name="chain" value="default"> По умолчанию (НУЦ): поля <code>chain</code> нет, цепочка строится до встроенных корней НУЦ, отзыв проверяется по OCSP</label>
   <label><input type="radio" name="chain" value="empty" checked> Пусто <code>[]</code>: цепочка и отзыв не проверяются, синтетические и тестовые ключи NCANode доступны</label>
-  <label><input type="radio" name="chain" value="synthetic"> Синтетический тестовый корень (<code>fixtures/synthetic/root-gost2015.cer</code>): ключи других корней недоступны</label>
+  <label><input type="radio" name="chain" value="synthetic"> Синтетический тестовый корень (<code>fixtures/synthetic/root-gost2015.cer</code>): ключи других корней и промежуточного CA недоступны</label>
 </fieldset>
 
 <button id="sign" type="button">Подписать</button>
