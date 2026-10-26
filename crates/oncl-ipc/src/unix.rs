@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_socket_without_lock_is_in_use() {
+    async fn unlocked_listening_socket_is_in_use() {
         let (_dir, addr) = temp_address();
         // A server that does not take the lock, e.g. another implementation.
         let _live = std::os::unix::net::UnixListener::bind(&addr.path).unwrap();
