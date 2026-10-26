@@ -6,7 +6,9 @@ use der::asn1::{AnyRef, BitStringRef, Ia5String, OctetString};
 use der::oid::AssociatedOid;
 use der::{Decode, Encode, Sequence, Tag};
 use oncl_pki::cert::{self, Certificate};
-use oncl_pki::crl::{self, CrlCache, CrlError, CrlStatus, MAX_CRL_LEN, MockCrl, TIMEOUT};
+use oncl_pki::crl::{
+    self, CrlCache, CrlError, CrlStatus, MAX_BER_CRL_LEN, MAX_CRL_LEN, MockCrl, TIMEOUT,
+};
 use oncl_pki::http::{
     GetOptions, HttpError, HttpReply, HttpTransport, RouteTransport, UreqTransport,
 };
@@ -379,6 +381,46 @@ fn signature_is_checked_before_the_list_is_decoded() {
         crl::verify_crl(&forged, &inter, now()),
         Err(CrlError::BadSignature(_))
     ));
+}
+
+/// `crl` with its outer SEQUENCE in BER indefinite-length form: `30 80 … 00 00`.
+fn indefinite(crl: &[u8]) -> Vec<u8> {
+    let content = AnyRef::from_der(crl).unwrap().value();
+    [&[0x30, 0x80][..], content, &[0, 0]].concat()
+}
+
+#[test]
+fn ber_is_normalized_only_up_to_1_mib() {
+    assert_eq!(MAX_BER_CRL_LEN, 1 << 20);
+    let inter = cer("inter-gost2015");
+    let key = entry("inter-gost2015.key");
+
+    // A small BER CRL is normalized and verifies.
+    let small = indefinite(&MockCrl::new(key.clone()).der());
+    assert!(small.len() <= MAX_BER_CRL_LEN);
+    crl::verify_crl(&small, &inter, now()).unwrap();
+
+    // A CRL over the bound verifies as DER, and as BER is refused instead of normalized,
+    // although normalized it is that same DER CRL.
+    let revoked_at = datetime!(2026-03-01 07:08:09 UTC);
+    let big = (1..=60_000u32)
+        .fold(MockCrl::new(key), |mock, n| {
+            mock.revoke(&n.to_be_bytes(), revoked_at)
+        })
+        .der();
+    assert!(big.len() > MAX_BER_CRL_LEN);
+    let list = crl::verify_crl(&big, &inter, now()).unwrap();
+    let revoked = list.tbs_cert_list.revoked_certificates.as_ref();
+    assert_eq!(revoked.map(Vec::len), Some(60_000));
+    let big_ber = indefinite(&big);
+    assert_eq!(oncl_pki::ber::to_der(&big_ber).unwrap(), big);
+    match crl::verify_crl(&big_ber, &inter, now()) {
+        Err(CrlError::Malformed(why)) => assert!(
+            why.ends_with(&format!("(a CRL over {MAX_BER_CRL_LEN} bytes must be DER)")),
+            "{why}"
+        ),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

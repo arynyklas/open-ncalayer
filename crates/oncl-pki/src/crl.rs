@@ -9,10 +9,14 @@
 //!   order until one gives a valid CRL.
 //! - A CRL comes over plain HTTP, so it is hostile input: its issuer must be the subject of
 //!   the issuer certificate, and its signature must verify with that certificate's key
-//!   (checked over the received bytes, before the CRL is decoded); it must be a complete
-//!   CRL, so a delta CRL (deltaCRLIndicator) or a CRL with an issuing distribution point
-//!   is refused, critical or not, and so is any other unknown critical extension; and it
-//!   must be current: `thisUpdate ≤ now` and, if it has one, `now < nextUpdate`.
+//!   (checked over the signed `TBSCertList` bytes, before the list is decoded); it must be
+//!   a complete CRL, so a delta CRL (deltaCRLIndicator) or a CRL with an issuing
+//!   distribution point is refused, critical or not, and so is any other unknown critical
+//!   extension; and it must be current: `thisUpdate ≤ now` and, if it has one,
+//!   `now < nextUpdate`.
+//! - A CRL is parsed as DER. A BER one is normalized to DER first ([`ber::to_der`]) only
+//!   up to [`MAX_BER_CRL_LEN`]: normalization builds a tree of every element of the still
+//!   unauthenticated body, so a bigger body that is not DER is [`CrlError::Malformed`].
 //! - Downloads go through [`CrlCache`]: `<dir>/<hex sha256(url)>.crl`, used without a
 //!   request while it is a valid CRL with `now < nextUpdate`, written atomically.
 //! - Every failure is a [`CrlError`], never a [`CrlStatus`]: callers decide what an
@@ -36,6 +40,7 @@ use der::oid::AssociatedOid;
 use der::{Decode, Reader, SliceReader};
 use sha2::{Digest, Sha256};
 use spki::AlgorithmIdentifierRef;
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{Read, Write as _};
@@ -58,6 +63,10 @@ pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// Largest accepted CRL: 64 MiB. The NCA CRLs of end-entity certificates run to tens of
 /// megabytes.
 pub const MAX_CRL_LEN: u64 = 64 << 20;
+
+/// Largest CRL normalized from BER, as big as an OCSP or TSP answer: 1 MiB. A bigger CRL
+/// must be DER (see the module documentation).
+pub const MAX_BER_CRL_LEN: usize = 1 << 20;
 
 /// Revocation status of a certificate in a CRL of its issuer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,7 +184,7 @@ impl<'a> SignedCrl<'a> {
         reader.finish()?;
         let mut reader = SliceReader::new(tbs)?;
         let (tbs_signature, issuer) = reader.sequence(|r| {
-            // version, if present, is v2; it is checked by the full decode.
+            // version is not checked here: the full decode accepts v1 to v3 (0 to 2).
             let _version: Option<IntRef<'_>> = r.decode()?;
             let signature = r.decode()?;
             let issuer = r.decode()?;
@@ -208,8 +217,9 @@ const KNOWN_CRL_EXTENSIONS: [ObjectIdentifier; 5] = [
     FreshestCrl::OID,
 ];
 
-/// Checks a DER or BER CRL of `issuer` at `now` (see the module documentation). The issuer
-/// and the signature are checked before the CRL is decoded.
+/// Checks a DER CRL, or a BER one of at most [`MAX_BER_CRL_LEN`] bytes, of `issuer` at
+/// `now` (see the module documentation). The issuer and the signature are checked before
+/// the CRL is decoded.
 ///
 /// # Errors
 ///
@@ -222,8 +232,21 @@ pub fn verify_crl(
     issuer: &Certificate,
     now: OffsetDateTime,
 ) -> Result<CertificateList, CrlError> {
-    let der = ber::to_der(crl_der)?;
-    let signed = SignedCrl::read(&der)?;
+    let strict = crl_der.len() > MAX_BER_CRL_LEN;
+    let der: Cow<'_, [u8]> = if strict {
+        Cow::Borrowed(crl_der)
+    } else {
+        Cow::Owned(ber::to_der(crl_der)?)
+    };
+    let signed = SignedCrl::read(&der).map_err(|e| {
+        if strict {
+            CrlError::Malformed(format!(
+                "{e} (a CRL over {MAX_BER_CRL_LEN} bytes must be DER)"
+            ))
+        } else {
+            CrlError::from(e)
+        }
+    })?;
     if signed.issuer != *issuer.tbs_certificate().subject() {
         return Err(CrlError::IssuerMismatch);
     }

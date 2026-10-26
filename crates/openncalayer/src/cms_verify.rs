@@ -117,11 +117,15 @@ pub fn cms_verify_report_with(
 ///
 /// # Errors
 ///
-/// A PEM block of another label, bad base64, or a certificate that does not parse.
+/// A malformed PEM file (see `pem_blocks`), a PEM file without blocks or with a block of
+/// another label, bad base64, or a certificate that does not parse.
 pub fn parse_certificates(input: &[u8]) -> Result<Vec<Certificate>, String> {
     let Some(blocks) = pem_blocks(input)? else {
         return Ok(vec![cert::parse(input).map_err(|e| e.to_string())?]);
     };
+    if blocks.is_empty() {
+        return Err("PEM: no CERTIFICATE block".to_owned());
+    }
     if let Some((label, _)) = blocks.iter().find(|(label, _)| label != "CERTIFICATE") {
         return Err(format!("PEM block {label} is not a CERTIFICATE"));
     }
@@ -464,36 +468,50 @@ fn pem_or_der(input: &[u8]) -> Result<Cow<'_, [u8]>, String> {
 /// A PEM block: its label and DER.
 type PemBlock = (String, Vec<u8>);
 
-/// The blocks of a PEM input, `None` if it does not start with a BEGIN line. Text between
-/// blocks is ignored.
+/// The blocks of a PEM input, `None` if it does not start with a dash (it is then DER).
+///
+/// Text between blocks is ignored, but a line there that starts or ends with a dash or
+/// holds `-----` must be a `-----BEGIN <label>-----` line, and inside a block a line that
+/// starts with a dash must be its `-----END <label>-----` line: a mangled boundary is an
+/// error, never a block silently skipped.
 fn pem_blocks(input: &[u8]) -> Result<Option<Vec<PemBlock>>, String> {
     let text = input.trim_ascii_start();
-    if !text.starts_with(b"-----BEGIN ") {
+    if !text.starts_with(b"-") {
         return Ok(None);
     }
     let text = std::str::from_utf8(text).map_err(|_| "PEM is not ASCII text".to_owned())?;
+    let malformed = |line: &str| format!("PEM: malformed line {line:?}");
     let mut blocks = Vec::new();
-    let mut open: Option<(String, String)> = None;
+    let mut open: Option<(&str, String)> = None;
     for line in text.lines().map(str::trim) {
-        if let Some((_, body)) = open.as_mut() {
-            if line.starts_with("-----END ") {
+        if let Some((label, body)) = open.as_mut() {
+            if !line.starts_with('-') {
+                body.push_str(line);
+            } else if boundary_label(line, "-----END ") == Some(*label) {
                 let (label, body) = open.take().expect("a block is open");
                 let der = STANDARD.decode(&body).map_err(|e| format!("PEM: {e}"))?;
-                blocks.push((label, der));
+                blocks.push((label.to_owned(), der));
             } else {
-                body.push_str(line);
+                return Err(malformed(line));
             }
-        } else if let Some(label) = line
-            .strip_prefix("-----BEGIN ")
-            .and_then(|l| l.strip_suffix("-----"))
-        {
-            open = Some((label.to_owned(), String::new()));
+        } else if let Some(label) = boundary_label(line, "-----BEGIN ") {
+            open = Some((label, String::new()));
+        } else if line.starts_with('-') || line.ends_with('-') || line.contains("-----") {
+            return Err(malformed(line));
         }
     }
     if open.is_some() {
         return Err("PEM: no END line".to_owned());
     }
     Ok(Some(blocks))
+}
+
+/// The label of the boundary line `<prefix><label>-----`, if `line` is one; the label is
+/// not empty and neither starts nor ends with a dash.
+fn boundary_label<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    line.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix("-----"))
+        .filter(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
 }
 
 #[cfg(test)]
@@ -525,6 +543,65 @@ mod tests {
             "PEM block X is not a CERTIFICATE"
         );
         assert_eq!(pem_blocks(b"\x30\x03").unwrap(), None);
+    }
+
+    #[test]
+    fn bundle_of_root_and_intermediate_loads_both() {
+        let der = |name| oncl_testkit::synthetic_cert(name);
+        let pem = |name| oncl_pki::pem::encode("CERTIFICATE", &der(name));
+        let bundle = pem("root-gost2015") + "\n" + &pem("inter-gost2015");
+        let expected = ["root-gost2015", "inter-gost2015"].map(|n| cert::parse(&der(n)).unwrap());
+        assert_eq!(parse_certificates(bundle.as_bytes()).unwrap(), expected);
+    }
+
+    #[test]
+    fn malformed_pem_boundaries_are_errors() {
+        let pem = |name| oncl_pki::pem::encode("CERTIFICATE", &oncl_testkit::synthetic_cert(name));
+        let short =
+            |name| pem(name).replace("-----BEGIN CERTIFICATE-----", "-----BEGIN CERTIFICATE----");
+        let error = r#"PEM: malformed line "-----BEGIN CERTIFICATE----""#;
+        // One dash short in BEGIN: alone, after a good root block and before one.
+        for input in [
+            short("root-gost2015"),
+            pem("root-gost2015") + &short("inter-gost2015"),
+            short("root-gost2015") + &pem("inter-gost2015"),
+        ] {
+            assert_eq!(parse_certificates(input.as_bytes()).unwrap_err(), error);
+        }
+        for (input, line) in [
+            // A stray END line, and a BEGIN line one dash short at the start.
+            ("-----END CERTIFICATE-----\n", "-----END CERTIFICATE-----"),
+            (
+                "----BEGIN CERTIFICATE-----\nMAM=\n-----END CERTIFICATE-----\n",
+                "----BEGIN CERTIFICATE-----",
+            ),
+            // An END line of another label or mangled, a BEGIN inside a block.
+            (
+                "-----BEGIN CERTIFICATE-----\nMAM=\n-----END X-----\n",
+                "-----END X-----",
+            ),
+            (
+                "-----BEGIN CERTIFICATE-----\nMAM=\n-----END CERTIFICATE----\n",
+                "-----END CERTIFICATE----",
+            ),
+            (
+                "-----BEGIN CERTIFICATE-----\nMAM=\n-----BEGIN CERTIFICATE-----\n",
+                "-----BEGIN CERTIFICATE-----",
+            ),
+            // An empty label, a lone dash.
+            ("-----BEGIN -----\n", "-----BEGIN -----"),
+            ("-\n", "-"),
+        ] {
+            assert_eq!(
+                parse_certificates(input.as_bytes()).unwrap_err(),
+                format!("PEM: malformed line {line:?}"),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            parse_certificates(b"-----BEGIN CERTIFICATE-----\nMAM=\n").unwrap_err(),
+            "PEM: no END line"
+        );
     }
 
     #[test]

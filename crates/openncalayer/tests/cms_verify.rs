@@ -668,6 +668,38 @@ fn command_exit_codes_and_chain_files() {
             garbage.display()
         )
     );
+
+    // A BEGIN line one dash short, alone or in a bundle with a valid root, is an error: the
+    // block is never skipped, so the root cannot silently drop out of the trust set.
+    let short =
+        |name: &str| pem(name).replace("-----BEGIN CERTIFICATE-----", "-----BEGIN CERTIFICATE----");
+    for (name, contents) in [
+        ("short.pem", short("root-gost2015")),
+        (
+            "inter-short-root.pem",
+            pem("inter-gost2015") + &short("root-gost2015"),
+        ),
+        (
+            "root-short-inter.pem",
+            pem("root-gost2015") + &short("inter-gost2015"),
+        ),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, contents).unwrap();
+        let (stdout, code) = outcome(&cms_verify_command(
+            &file,
+            &[chain, path.as_os_str(), offline],
+            None,
+        ));
+        assert_eq!(code, Some(1), "{stdout}");
+        assert_eq!(
+            stdout,
+            format!(
+                "FAIL: {}: PEM: malformed line \"-----BEGIN CERTIFICATE----\"\n",
+                path.display()
+            )
+        );
+    }
 }
 
 /// The command over the real network: the synthetic `.test` services never resolve, so
