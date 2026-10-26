@@ -1,0 +1,165 @@
+// The certificate installation dialog of importCertificate: the certificates, the folder of
+// their key files and the key files' new password.
+
+import { Button, CheckBox, LineEdit, ListView, Palette, VerticalBox } from "std-widgets.slint";
+
+// A certificate to install.
+export struct CertItem {
+    title: string,
+    details: string,
+}
+
+export component ImportDialog inherits Window {
+    title: "OpenNCALayer";
+    always-on-top: true;
+    min-width: 520px;
+    forward-focus: password-input;
+
+    // The requesting page's origin.
+    in property <string> origin;
+    in property <[CertItem]> certificates;
+    // The storage the page names.
+    in property <string> storage;
+    // Whether OpenNCALayer can write to it.
+    in property <bool> storage-supported;
+    in-out property <string> path;
+    in-out property <string> password;
+    in-out property <string> confirmation;
+    // Why the answer was refused.
+    in-out property <string> error;
+
+    callback browse();
+    callback confirm();
+    callback cancel();
+
+    private property <bool> can-confirm: root.storage-supported && !root.path.is-empty && !root.password.is-empty;
+
+    VerticalBox {
+        Text {
+            text: @tr("Request from: {}", root.origin);
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: @tr("Certificate installation");
+            font-weight: 700;
+        }
+
+        Text {
+            text: @tr("Certificates to install");
+        }
+
+        ListView {
+            min-height: 96px;
+            vertical-stretch: 1;
+            for cert in root.certificates: VerticalLayout {
+                padding: 8px;
+                spacing: 2px;
+                accessible-role: list-item;
+                accessible-label: cert.title;
+                accessible-description: cert.details;
+                Text {
+                    text: cert.title;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: cert.details;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Text {
+                text: @tr("Key storage");
+            }
+
+            Text {
+                text: root.storage;
+                font-weight: 700;
+                color: root.storage-supported ? Palette.foreground : #888888;
+            }
+
+            if !root.storage-supported: Text {
+                text: @tr("not supported yet");
+                font-italic: true;
+                color: #888888;
+            }
+        }
+
+        Text {
+            text: @tr("Key storage folder");
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                text <=> root.path;
+                horizontal-stretch: 1;
+            }
+
+            Button {
+                text: @tr("Browse…");
+                clicked => {
+                    root.browse();
+                }
+            }
+        }
+
+        Text {
+            text: @tr("New password");
+        }
+
+        password-input := LineEdit {
+            text <=> root.password;
+            input-type: show-password.checked ? InputType.text : InputType.password;
+        }
+
+        Text {
+            text: @tr("Confirm password");
+        }
+
+        LineEdit {
+            text <=> root.confirmation;
+            input-type: show-password.checked ? InputType.text : InputType.password;
+            accepted => {
+                if (root.can-confirm) {
+                    root.confirm();
+                }
+            }
+        }
+
+        show-password := CheckBox {
+            text: @tr("Show password");
+        }
+
+        if !root.error.is-empty: Text {
+            text: root.error;
+            wrap: word-wrap;
+            color: #c42b1c;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Button {
+                text: @tr("Confirm");
+                primary: true;
+                enabled: root.can-confirm;
+                clicked => {
+                    root.confirm();
+                }
+            }
+
+            Button {
+                text: @tr("Cancel");
+                clicked => {
+                    root.cancel();
+                }
+            }
+        }
+    }
+}

@@ -1,6 +1,6 @@
 [package]
 name = "oncl-ui"
-description = "OpenNCALayer signing dialogs in Slint: storage, file and password; key choice"
+description = "OpenNCALayer dialogs in Slint: storage, file and password; key choice; certificate request and installation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,8 +10,9 @@ publish.workspace = true
 
 [dependencies]
 oncl-basics.workspace = true
+oncl-pki.workspace = true
 rfd.workspace = true
-# `raw-window-handle-06`: the file dialog is owned by (and stays above) the storage dialog,
+# `raw-window-handle-06`: the file and folder pickers are owned by (and stay above) their dialog,
 # and on Windows the dialog's HWND is brought to the foreground.
 # `unstable-winit-030`: a dialog window destroyed behind Slint's back (xkill, a compositor
 # restart) is seen as winit's `Destroyed` event and counts as cancelled. The API follows
@@ -35,5 +36,4 @@ windows-sys = { workspace = true, features = [
 slint-build.workspace = true
 
 [dev-dependencies]
-oncl-pki.workspace = true
 time = { workspace = true, features = ["macros"] }

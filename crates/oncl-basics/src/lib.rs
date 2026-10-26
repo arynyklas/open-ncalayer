@@ -1,11 +1,14 @@
 //! The `kz.gov.pki.knca.basics` module: `CommonInvoker` over the classes `PKIExtras`
-//! (`sign`: cms with NCA time-stamps, raw, and enveloped XMLDSig) and `PKIEssentials`.
+//! (`sign`: cms with NCA time-stamps, raw, and enveloped XMLDSig) and `PKIEssentials`
+//! (`generateCsr`: new keys in PKCS#12 key files and their requests; `importCertificate`:
+//! certificates installed next to those keys).
 //!
-//! Dialogs go through a [`Prompter`]; signing flows run one at a time process-wide, so a
+//! Dialogs go through a [`Prompter`]; dialog flows run one at a time process-wide, so a
 //! second request waits for the first one's dialogs to finish. The keys offered are checked
 //! against `signerParams.chain` and, through the same [`HttpTransport`] as time-stamping,
 //! their OCSP responders.
 
+mod essentials;
 mod filter;
 mod prompt;
 mod sign;
@@ -16,8 +19,8 @@ pub use filter::{
     Availability, ChainPolicy, DisabledReason, KeyFilter, OCSP_DEADLINE, availabilities,
 };
 pub use prompt::{
-    Action, KeyCandidate, KeyPrompt, Locale, OpenError, Prompt, Prompter, RecentPathStore,
-    StorageAnswer, StorageKind, StoragePrompt,
+    Action, CsrAnswer, CsrPrompt, ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale,
+    OpenError, Prompt, Prompter, RecentPathStore, StorageAnswer, StorageKind, StoragePrompt,
 };
 
 use oncl_pki::http::HttpTransport;
@@ -25,11 +28,15 @@ use oncl_pki::tsp::TsaProfile;
 use oncl_protocol::invoker::{self, CallResult, Failure, NlClass};
 use oncl_protocol::{AddInfo, Module};
 use serde_json::{Map, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
 
 /// Name the module is registered under.
 pub const MODULE_NAME: &str = "kz.gov.pki.knca.basics";
+
+/// Serializes the module's dialog flows process-wide: the dialogs of two requests never
+/// interleave, and a second request waits for the first instead of failing as busy.
+static DIALOG_FLOW: Mutex<()> = Mutex::new(());
 
 /// The `kz.gov.pki.knca.basics` module.
 pub struct Basics {
@@ -73,7 +80,7 @@ impl Basics {
 
 impl Module for Basics {
     fn process(&self, request: &str, add_info: &AddInfo) -> String {
-        invoker::invoke(request, add_info, &[&PkiExtras(self), &PkiEssentials])
+        invoker::invoke(request, add_info, &[&PkiExtras(self), &PkiEssentials(self)])
     }
 }
 
@@ -101,16 +108,29 @@ impl NlClass for PkiExtras<'_> {
     }
 }
 
-/// `PKIEssentials`: `generateCsr` and `importCertificate` come in a later phase.
-struct PkiEssentials;
+/// `PKIEssentials`, reachable only by name.
+struct PkiEssentials<'a>(&'a Basics);
 
-impl NlClass for PkiEssentials {
+impl NlClass for PkiEssentials<'_> {
     fn class_name(&self) -> &'static str {
         "PKIEssentials"
     }
 
-    fn call(&self, _: &str, _: Option<&Map<String, Value>>, _: &AddInfo) -> Option<CallResult> {
-        None
+    fn call(
+        &self,
+        method: &str,
+        args: Option<&Map<String, Value>>,
+        add_info: &AddInfo,
+    ) -> Option<CallResult> {
+        let call = match method {
+            "generateCsr" => essentials::generate_csr,
+            "importCertificate" => essentials::import_certificate,
+            _ => return None,
+        };
+        Some(match args {
+            Some(args) => call(self.0, args, add_info),
+            None => Err(demands_arguments(method)),
+        })
     }
 }
 

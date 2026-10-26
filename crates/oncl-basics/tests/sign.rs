@@ -6,9 +6,9 @@ use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{
-    Action, Availability, Basics, ChainPolicy, DisabledReason, KeyFilter, KeyPrompt, Locale,
-    MODULE_NAME, OpenError, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt,
-    availabilities,
+    Action, Availability, Basics, ChainPolicy, CsrAnswer, CsrPrompt, DisabledReason, ImportAnswer,
+    ImportPrompt, KeyFilter, KeyPrompt, Locale, MODULE_NAME, OpenError, Prompt, Prompter,
+    StorageAnswer, StorageKind, StoragePrompt, availabilities,
 };
 use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{SignOptions, verify};
@@ -402,6 +402,14 @@ impl Prompter for JksFirst {
 
     fn key(&self, _: &KeyPrompt) -> Prompt<usize> {
         Prompt::Answer(0)
+    }
+
+    fn csr(&self, _: &CsrPrompt) -> Prompt<CsrAnswer> {
+        Prompt::Cancelled
+    }
+
+    fn import_cert(&self, _: &ImportPrompt) -> Prompt<ImportAnswer> {
+        Prompt::Cancelled
     }
 }
 
@@ -912,13 +920,6 @@ fn missing_args_is_a_general_error() {
 #[test]
 fn classes() {
     let (b, _) = basics(script![]);
-    let r = json(b.process(
-        &json!({"module": MODULE_NAME, "class": "PKIEssentials", "method": "generateCsr", "args": {}})
-            .to_string(),
-        &origin("o"),
-    ));
-    assert_eq!(r["code"], "GENERAL_ERROR");
-    assert_eq!(r["details"], "generateCsr is not defined in PKIEssentials");
     let r = json(
         b.process(
             &json!({"module": MODULE_NAME, "class": "PKIEssentials", "method": "sign", "args": {}})
@@ -926,12 +927,22 @@ fn classes() {
             &origin("o"),
         ),
     );
+    assert_eq!(r["code"], "GENERAL_ERROR");
     assert_eq!(r["details"], "sign is not defined in PKIEssentials");
     let r = json(b.process(
         &json!({"module": MODULE_NAME, "method": "generateCsr", "args": {}}).to_string(),
         &origin("o"),
     ));
     assert_eq!(r["details"], "generateCsr is not defined in PKIExtras");
+    let r = json(b.process(
+        &json!({"module": MODULE_NAME, "class": "PKIExtras", "method": "importCertificate", "args": {}})
+            .to_string(),
+        &origin("o"),
+    ));
+    assert_eq!(
+        r["details"],
+        "importCertificate is not defined in PKIExtras"
+    );
 }
 
 #[test]

@@ -1,8 +1,16 @@
-//! Dialog texts Rust composes, in the request's [`Locale`]: key rows, storage names and
-//! open errors. Fixed dialog texts live in the `.slint` files and their `.po` catalogs.
+//! Dialog texts Rust composes, in the request's [`Locale`]: key and certificate rows,
+//! storage names, open errors and new password checks. Fixed dialog texts live in the
+//! `.slint` files and their `.po` catalogs.
 
-use oncl_basics::{Availability, DisabledReason, KeyPrompt, Locale, OpenError, StorageKind};
+use oncl_basics::{
+    Availability, DisabledReason, ImportPrompt, KeyPrompt, Locale, OpenError, StorageKind,
+};
+use oncl_pki::info::CertInfo;
 use time::OffsetDateTime;
+
+/// Characters a new key file password may have besides Latin letters and digits (the
+/// PKCS#12 password pattern).
+const PASSWORD_SPECIALS: &str = ".?#$^+=!*()@%&_-";
 
 /// A row of the key dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,25 +34,7 @@ pub fn key_rows(p: &KeyPrompt) -> Vec<KeyRow> {
         .iter()
         .map(|c| {
             let info = &c.info;
-            let holder = match (&info.bin, &info.iin) {
-                (Some(bin), _) => match &info.organization {
-                    Some(org) => format!("{} {bin} · {org}", t.bin),
-                    None => format!("{} {bin}", t.bin),
-                },
-                (None, Some(iin)) => format!("{} {iin}", t.iin),
-                (None, None) => String::new(),
-            };
-            let validity = format!(
-                "{} {} – {}",
-                t.valid,
-                date(info.not_before),
-                date(info.not_after)
-            );
-            let details = if holder.is_empty() {
-                validity
-            } else {
-                format!("{holder} · {validity}")
-            };
+            let details = cert_details(info, t, None);
             let revoked = match &c.availability {
                 Availability::Revoked { time } => Some(format!("{} {}", t.revoked, date(*time))),
                 _ => None,
@@ -70,6 +60,65 @@ pub fn key_rows(p: &KeyPrompt) -> Vec<KeyRow> {
             }
         })
         .collect()
+}
+
+/// A certificate of the import dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertRow {
+    /// Subject CN, or the serial number without one.
+    pub title: String,
+    /// IIN, or BIN and organization; the serial number; the validity period.
+    pub details: String,
+}
+
+/// The rows of the import dialog, one per certificate in order.
+pub fn cert_rows(p: &ImportPrompt) -> Vec<CertRow> {
+    let t = Texts::of(p.locale);
+    p.certificates
+        .iter()
+        .map(|info| CertRow {
+            title: info
+                .subject_cn
+                .clone()
+                .unwrap_or_else(|| info.serial_hex.clone()),
+            details: cert_details(info, t, Some(format!("{} {}", t.serial, info.serial_hex))),
+        })
+        .collect()
+}
+
+/// Why a new key file password (and its confirmation) is refused, as the original's import
+/// dialog checks it: the two must match, then the password needs 6 to 32 characters with an
+/// uppercase and a lowercase Latin letter and a digit. Only the characters of the PKCS#12
+/// password pattern are allowed, so the key file accepts every password that passes.
+pub fn new_password_error(password: &str, confirmation: &str, l: Locale) -> Option<&'static str> {
+    let pattern = (6..=32).contains(&password.chars().count())
+        && password
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || PASSWORD_SPECIALS.contains(c))
+        && password.chars().any(|c| c.is_ascii_uppercase())
+        && password.chars().any(|c| c.is_ascii_lowercase())
+        && password.chars().any(|c| c.is_ascii_digit());
+    if password != confirmation {
+        Some(match l {
+            Locale::Kk => "Енгізілген құпиясөздер сәйкес емес",
+            Locale::Ru => "Введённые пароли не совпадают",
+            Locale::En => "The passwords do not match",
+        })
+    } else if !pattern {
+        Some(match l {
+            Locale::Kk => {
+                "Құпиясөз 6–32 таңбадан тұруы және кемінде бір бас латын әрпін, бір кіші латын әрпін және бір санды қамтуы керек; .?#$^+=!*()@%&_- таңбалары да рұқсат етіледі"
+            }
+            Locale::Ru => {
+                "Пароль должен содержать от 6 до 32 символов, хотя бы одну заглавную и одну строчную латинскую букву и цифру; допускаются также символы .?#$^+=!*()@%&_-"
+            }
+            Locale::En => {
+                "The password needs 6 to 32 characters with at least one uppercase and one lowercase Latin letter and a digit; .?#$^+=!*()@%&_- are allowed too"
+            }
+        })
+    } else {
+        None
+    }
 }
 
 /// Why a storage answer could not be opened.
@@ -134,7 +183,30 @@ fn date(t: OffsetDateTime) -> String {
     format!("{:02}.{:02}.{:04}", t.day(), u8::from(t.month()), t.year())
 }
 
-/// Texts of [`key_rows`] in one language.
+/// IIN, or BIN and organization; then `extra`; then the validity period.
+fn cert_details(info: &CertInfo, t: &Texts, extra: Option<String>) -> String {
+    let holder = match (&info.bin, &info.iin) {
+        (Some(bin), _) => match &info.organization {
+            Some(org) => Some(format!("{} {bin} · {org}", t.bin)),
+            None => Some(format!("{} {bin}", t.bin)),
+        },
+        (None, Some(iin)) => Some(format!("{} {iin}", t.iin)),
+        (None, None) => None,
+    };
+    let validity = format!(
+        "{} {} – {}",
+        t.valid,
+        date(info.not_before),
+        date(info.not_after)
+    );
+    [holder, extra, Some(validity)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Texts of [`key_rows`] and [`cert_rows`] in one language.
 struct Texts {
     iin: &'static str,
     bin: &'static str,
@@ -147,6 +219,8 @@ struct Texts {
     chain: &'static str,
     /// Followed by the revocation date.
     revoked: &'static str,
+    /// Followed by the serial number.
+    serial: &'static str,
 }
 
 impl Texts {
@@ -163,6 +237,7 @@ impl Texts {
                 serial_differs: "Сериялық нөмір сұралғанмен сәйкес келмейді",
                 chain: "Сертификаттың сенімді куәландырушы орталыққа дейінгі тізбегі құрылмады",
                 revoked: "кері қайтарылған",
+                serial: "сериялық нөмірі",
             },
             Locale::Ru => &Texts {
                 iin: "ИИН",
@@ -175,6 +250,7 @@ impl Texts {
                 serial_differs: "Серийный номер не совпадает с запрошенным",
                 chain: "Цепочка сертификата не строится до доверенного удостоверяющего центра",
                 revoked: "отозван",
+                serial: "серийный номер",
             },
             Locale::En => &Texts {
                 iin: "IIN",
@@ -187,6 +263,7 @@ impl Texts {
                 serial_differs: "The serial number differs from the requested one",
                 chain: "The certificate does not chain to a trusted certification authority",
                 revoked: "revoked",
+                serial: "serial",
             },
         }
     }

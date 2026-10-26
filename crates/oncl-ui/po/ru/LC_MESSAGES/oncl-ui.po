@@ -52,3 +52,24 @@ msgstr "Подходящий ключ не найден"
 
 msgid "Sign"
 msgstr "Подписать"
+
+msgid "Certificate request"
+msgstr "Запрос на выпуск сертификата"
+
+msgid "Key storage folder"
+msgstr "Папка хранения ключа"
+
+msgid "Confirm password"
+msgstr "Подтверждение пароля"
+
+msgid "Confirm"
+msgstr "Подтвердить"
+
+msgid "Certificate installation"
+msgstr "Установка сертификата"
+
+msgid "Certificates to install"
+msgstr "Устанавливаемые сертификаты"
+
+msgid "New password"
+msgstr "Новый пароль"

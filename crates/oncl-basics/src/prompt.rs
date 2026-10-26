@@ -1,5 +1,7 @@
-//! What the signing flow asks the user, and the [`Prompter`] that asks: the original's
-//! `StorageStage` (storage, file, password) and `KeystoreStage` (key choice).
+//! What the module asks the user, and the [`Prompter`] that asks: the original's
+//! `StorageStage` (storage, file, password) and `KeystoreStage` (key choice) of the signing
+//! flow, `CsrStage` (storage, folder, password) of `generateCsr` and `ImportCertStage`
+//! (folder, new password) of `importCertificate`.
 
 use crate::filter::Availability;
 use oncl_pki::info::CertInfo;
@@ -155,6 +157,55 @@ pub struct KeyPrompt {
     pub candidates: Vec<KeyCandidate>,
 }
 
+/// The `generateCsr` dialog: where the new key files go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsrPrompt {
+    /// The requesting page's origin, or `"UNIDENTIFIED"`.
+    pub origin: String,
+    /// Dialog language.
+    pub locale: Locale,
+    /// Storages to offer, in order.
+    pub storages: Vec<StorageKind>,
+    /// Whether to ask for the key file password (with a confirmation): the page gave no
+    /// `defaultPassword`. Otherwise the page's password is used and the dialog has no
+    /// password field.
+    pub ask_password: bool,
+}
+
+/// The user's answer to a [`CsrPrompt`].
+pub struct CsrAnswer {
+    /// Chosen storage.
+    pub storage: StorageKind,
+    /// Folder for the key files.
+    pub dir: PathBuf,
+    /// The key file password; empty unless [`CsrPrompt::ask_password`].
+    pub password: Zeroizing<String>,
+}
+
+/// The `importCertificate` dialog: which key files get the certificates, and their new
+/// password.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportPrompt {
+    /// The requesting page's origin, or `"UNIDENTIFIED"`.
+    pub origin: String,
+    /// Dialog language.
+    pub locale: Locale,
+    /// The storage the page names (`allowedStorage`).
+    pub storage: StorageKind,
+    /// Folder to pre-fill: the page's `keystorePath`, if any.
+    pub path: Option<PathBuf>,
+    /// The certificates to install, in request order.
+    pub certificates: Vec<CertInfo>,
+}
+
+/// The user's answer to an [`ImportPrompt`].
+pub struct ImportAnswer {
+    /// Folder (or key file) holding the keys of the certificates.
+    pub dir: PathBuf,
+    /// The password the key files get once their certificate is installed.
+    pub new_password: Zeroizing<String>,
+}
+
 /// The outcome of a dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prompt<T> {
@@ -164,13 +215,18 @@ pub enum Prompt<T> {
     Cancelled,
 }
 
-/// Shows the signing dialogs. Calls block until the user answers; the signing flow never
-/// shows two dialogs at once.
+/// Shows the module's dialogs. Calls block until the user answers; the module never shows
+/// two dialogs at once.
 pub trait Prompter: Send + Sync {
     /// Asks for a storage, file and password.
     fn storage(&self, p: &StoragePrompt) -> Prompt<StorageAnswer>;
     /// Asks for a key: the index of a candidate.
     fn key(&self, p: &KeyPrompt) -> Prompt<usize>;
+    /// Asks where `generateCsr` puts the new keys.
+    fn csr(&self, p: &CsrPrompt) -> Prompt<CsrAnswer>;
+    /// Asks where the keys of the certificates `importCertificate` installs are, and for
+    /// their new password.
+    fn import_cert(&self, p: &ImportPrompt) -> Prompt<ImportAnswer>;
 }
 
 /// Where the last opened key store path is kept (`recentPath` of settings.json).

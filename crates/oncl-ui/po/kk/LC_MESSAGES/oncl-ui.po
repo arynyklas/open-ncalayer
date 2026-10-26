@@ -52,3 +52,24 @@ msgstr "Сәйкес кілт табылмады"
 
 msgid "Sign"
 msgstr "Қол қою"
+
+msgid "Certificate request"
+msgstr "Тіркеу куәлігіне сұраныс"
+
+msgid "Key storage folder"
+msgstr "Кілт сақталатын қалта"
+
+msgid "Confirm password"
+msgstr "Құпиясөзді құптау"
+
+msgid "Confirm"
+msgstr "Құптау"
+
+msgid "Certificate installation"
+msgstr "Куәлікті орнату"
+
+msgid "Certificates to install"
+msgstr "Орнатылатын куәліктер"
+
+msgid "New password"
+msgstr "Жаңа құпиясөз"

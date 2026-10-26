@@ -1,6 +1,6 @@
 [package]
 name = "oncl-basics"
-description = "The kz.gov.pki.knca.basics module of OpenNCALayer: PKIExtras.sign (cms, raw) behind a Prompter UI abstraction"
+description = "The kz.gov.pki.knca.basics module of OpenNCALayer: PKIExtras.sign (cms, raw, xml) and PKIEssentials (generateCsr, importCertificate) behind a Prompter UI abstraction"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,10 +24,16 @@ x509-cert.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-# `testing`: `tsp::MockTsa`, `ocsp::MockOcsp`.
+# `testing`: `tsp::MockTsa`, `ocsp::MockOcsp`, `testing::issue_cert`.
 oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 oncl-testkit.workspace = true
+tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
+tracing-subscriber.workspace = true
+
+[[test]]
+name = "essentials"
+required-features = ["testing"]
 
 [[test]]
 name = "sign"

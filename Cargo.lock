@@ -3612,8 +3612,10 @@ dependencies = [
  "oncl-protocol",
  "oncl-testkit",
  "serde_json",
+ "tempfile",
  "time",
  "tracing",
+ "tracing-subscriber",
  "x509-cert",
  "zeroize",
 ]

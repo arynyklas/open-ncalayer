@@ -1,8 +1,9 @@
 use oncl_basics::{
-    Action, Availability, DisabledReason, KeyCandidate, KeyPrompt, Locale, OpenError,
+    Action, Availability, DisabledReason, ImportPrompt, KeyCandidate, KeyPrompt, Locale, OpenError,
+    StorageKind,
 };
 use oncl_pki::info::{CertInfo, KeyUsageBits};
-use oncl_ui::view::{error_text, key_rows};
+use oncl_ui::view::{CertRow, cert_rows, error_text, key_rows, new_password_error};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use time::macros::datetime;
@@ -141,6 +142,67 @@ fn kazakh_and_english_texts_differ() {
     assert_ne!(
         error_text(OpenError::WrongPassword, Locale::Kk),
         error_text(OpenError::WrongPassword, Locale::En)
+    );
+}
+
+#[test]
+fn certificate_rows_show_the_serial() {
+    let mut no_cn = cert("x", None, None, None);
+    no_cn.subject_cn = None;
+    no_cn.serial_hex = "4105a0".to_owned();
+    let p = ImportPrompt {
+        origin: "https://example.kz".to_owned(),
+        locale: Locale::Ru,
+        storage: StorageKind::Pkcs12,
+        path: None,
+        certificates: vec![cert("ТЕСТОВ ТЕСТ", Some(IIN), None, None), no_cn],
+    };
+    assert_eq!(
+        cert_rows(&p),
+        [
+            CertRow {
+                title: "ТЕСТОВ ТЕСТ".to_owned(),
+                details: format!(
+                    "ИИН {IIN} · серийный номер 01 · действителен 01.03.2024 – 01.03.2025"
+                ),
+            },
+            CertRow {
+                title: "4105a0".to_owned(),
+                details: "серийный номер 4105a0 · действителен 01.03.2024 – 01.03.2025".to_owned(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn new_passwords_follow_the_import_pattern() {
+    for ok in ["Abcde1", "Pass.word#12", &format!("A1{}", "b".repeat(30))] {
+        assert_eq!(new_password_error(ok, ok, Locale::En), None, "{ok:?}");
+    }
+    let pattern = new_password_error("abc", "abc", Locale::En).unwrap();
+    for bad in [
+        "Abcd1",
+        "abcdef1",
+        "ABCDEF1",
+        "Abcdefg",
+        "Abc def1",
+        "Пароль1a",
+        "Abc1~xyz",
+        &format!("A1{}", "b".repeat(31)),
+    ] {
+        assert_eq!(
+            new_password_error(bad, bad, Locale::En),
+            Some(pattern),
+            "{bad:?}"
+        );
+    }
+    // A mismatch is reported first, as in the original.
+    let mismatch = new_password_error("Abcde1", "Abcde2", Locale::En).unwrap();
+    assert_ne!(mismatch, pattern);
+    assert_eq!(new_password_error("abc", "abd", Locale::En), Some(mismatch));
+    assert_ne!(
+        new_password_error("Abcde1", "x", Locale::Ru),
+        new_password_error("Abcde1", "x", Locale::Kk)
     );
 }
 

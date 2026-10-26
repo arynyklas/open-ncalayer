@@ -2,7 +2,8 @@
 //! [`RecentPathStore`].
 
 use crate::prompt::{
-    KeyPrompt, Prompt, Prompter, RecentPathStore, StorageAnswer, StorageKind, StoragePrompt,
+    CsrAnswer, CsrPrompt, ImportAnswer, ImportPrompt, KeyPrompt, Prompt, Prompter, RecentPathStore,
+    StorageAnswer, StorageKind, StoragePrompt,
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,24 @@ pub enum Step {
     Key(usize),
     /// Cancel a key prompt.
     CancelKey,
+    /// Answer a `generateCsr` prompt with PKCS#12 key files in `dir`.
+    Csr {
+        /// Folder for the key files.
+        dir: PathBuf,
+        /// The key file password (asked only without a `defaultPassword`; pass `""` then).
+        password: String,
+    },
+    /// Cancel a `generateCsr` prompt.
+    CancelCsr,
+    /// Answer an `importCertificate` prompt.
+    Import {
+        /// Folder (or key file) holding the keys.
+        dir: PathBuf,
+        /// The new key file password.
+        password: String,
+    },
+    /// Cancel an `importCertificate` prompt.
+    CancelImport,
     /// Wait on the barrier (without holding the prompter), then take the next step for the
     /// same prompt.
     Wait(Arc<Barrier>),
@@ -35,6 +54,8 @@ struct State {
     steps: VecDeque<Step>,
     storage_prompts: Vec<StoragePrompt>,
     key_prompts: Vec<KeyPrompt>,
+    csr_prompts: Vec<CsrPrompt>,
+    import_prompts: Vec<ImportPrompt>,
 }
 
 /// A [`Prompter`] answering from a queue of [`Step`]s and recording every prompt shown. An
@@ -42,7 +63,7 @@ struct State {
 ///
 /// # Panics
 ///
-/// A prompt panics if the next step answers the other kind of prompt.
+/// A prompt panics if the next step answers another kind of prompt.
 pub struct ScriptedPrompter {
     state: Mutex<State>,
 }
@@ -66,6 +87,16 @@ impl ScriptedPrompter {
     /// Key prompts shown so far.
     pub fn key_prompts(&self) -> Vec<KeyPrompt> {
         self.lock().key_prompts.clone()
+    }
+
+    /// `generateCsr` prompts shown so far.
+    pub fn csr_prompts(&self) -> Vec<CsrPrompt> {
+        self.lock().csr_prompts.clone()
+    }
+
+    /// `importCertificate` prompts shown so far.
+    pub fn import_prompts(&self) -> Vec<ImportPrompt> {
+        self.lock().import_prompts.clone()
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -108,6 +139,31 @@ impl Prompter for ScriptedPrompter {
             Some(Step::Key(index)) => Prompt::Answer(index),
             Some(Step::CancelKey) | None => Prompt::Cancelled,
             Some(step) => panic!("ScriptedPrompter: key prompt answered by {step:?}"),
+        }
+    }
+
+    fn csr(&self, p: &CsrPrompt) -> Prompt<CsrAnswer> {
+        match self.next(|s| s.csr_prompts.push(p.clone())) {
+            Some(Step::Csr { dir, password }) => Prompt::Answer(CsrAnswer {
+                storage: StorageKind::Pkcs12,
+                dir,
+                password: Zeroizing::new(password),
+            }),
+            Some(Step::CancelCsr) | None => Prompt::Cancelled,
+            Some(step) => panic!("ScriptedPrompter: generateCsr prompt answered by {step:?}"),
+        }
+    }
+
+    fn import_cert(&self, p: &ImportPrompt) -> Prompt<ImportAnswer> {
+        match self.next(|s| s.import_prompts.push(p.clone())) {
+            Some(Step::Import { dir, password }) => Prompt::Answer(ImportAnswer {
+                dir,
+                new_password: Zeroizing::new(password),
+            }),
+            Some(Step::CancelImport) | None => Prompt::Cancelled,
+            Some(step) => {
+                panic!("ScriptedPrompter: importCertificate prompt answered by {step:?}")
+            }
         }
     }
 }

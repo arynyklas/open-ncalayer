@@ -1,10 +1,11 @@
-//! [`SlintPrompter`]: the dialogs of the signing flow on the Slint event loop.
+//! [`SlintPrompter`]: the module's dialogs on the Slint event loop.
 
 use crate::foreground;
-use crate::ui::{KeyDialog, KeyItem, StorageDialog, StorageRow};
+use crate::ui::{CertItem, CsrDialog, ImportDialog, KeyDialog, KeyItem, StorageDialog, StorageRow};
 use crate::view;
 use oncl_basics::{
-    Action, KeyPrompt, Locale, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt,
+    Action, CsrAnswer, CsrPrompt, ImportAnswer, ImportPrompt, KeyPrompt, Locale, Prompt, Prompter,
+    StorageAnswer, StorageKind, StoragePrompt,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
@@ -69,7 +70,7 @@ pub fn quit() {
     }
 }
 
-/// The signing dialogs in Slint, shown on the event loop of [`run_event_loop`]. Calls
+/// The module's dialogs in Slint, shown on the event loop of [`run_event_loop`]. Calls
 /// block the calling thread until the user answers; a dialog that cannot be shown, or whose
 /// window disappears, counts as cancelled.
 #[derive(Debug, Default)]
@@ -91,6 +92,14 @@ impl Prompter for SlintPrompter {
 
     fn key(&self, p: &KeyPrompt) -> Prompt<usize> {
         ask(p, show_keys)
+    }
+
+    fn csr(&self, p: &CsrPrompt) -> Prompt<CsrAnswer> {
+        ask(p, show_csr)
+    }
+
+    fn import_cert(&self, p: &ImportPrompt) -> Prompt<ImportAnswer> {
+        ask(p, show_import)
     }
 }
 
@@ -127,7 +136,7 @@ where
         let (p, tx) = (p.clone(), tx.clone());
         invoke(Box::new(move || {
             if let Err(e) = show(p, tx) {
-                tracing::error!(error = %e, "cannot show a signing dialog");
+                tracing::error!(error = %e, "cannot show a dialog");
             }
         }))
     });
@@ -167,15 +176,7 @@ fn show_storage(
     select_language(p.locale);
     ui.set_origin(p.origin.as_str().into());
     ui.set_authenticate(p.action == Action::Authenticate);
-    let rows: Vec<StorageRow> = p
-        .storages
-        .iter()
-        .map(|k| StorageRow {
-            label: view::storage_label(*k, p.locale).into(),
-            supported: k.supported(),
-        })
-        .collect();
-    ui.set_storages(ModelRc::new(VecModel::from(rows)));
+    ui.set_storages(storage_rows(&p.storages, p.locale));
     ui.set_selected(index(p.storages.iter().position(StorageKind::supported)));
     if let Some(path) = &p.recent_path {
         ui.set_path(path.display().to_string().into());
@@ -291,7 +292,160 @@ fn show_keys(p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), PlatformE
     show(&ui, pending)
 }
 
-/// A dialog's buttons and windowing callbacks shared by both dialogs.
+/// The certificate request dialog for `p`; the outcome goes to `reply`.
+fn show_csr(p: CsrPrompt, reply: Sender<Prompt<CsrAnswer>>) -> Result<(), PlatformError> {
+    let ui = CsrDialog::new()?;
+    select_language(p.locale);
+    ui.set_origin(p.origin.as_str().into());
+    ui.set_storages(storage_rows(&p.storages, p.locale));
+    ui.set_selected(index(p.storages.iter().position(StorageKind::supported)));
+    ui.set_ask_password(p.ask_password);
+
+    let pending = Pending::new(ui.clone_strong(), reply);
+    let weak = ui.as_weak();
+    ui.on_browse({
+        let weak = weak.clone();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                let weak = ui.as_weak();
+                pick_folder(ui.window(), &ui.get_path(), move |dir| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_path(dir.into());
+                    }
+                });
+            }
+        }
+    });
+    ui.on_confirm({
+        let pending = pending.clone();
+        move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let Some(&storage) = usize::try_from(ui.get_selected())
+                .ok()
+                .and_then(|i| p.storages.get(i))
+                .filter(|k| k.supported())
+            else {
+                return;
+            };
+            let password = if p.ask_password {
+                let password = Zeroizing::new(ui.get_password().to_string());
+                let confirmation = Zeroizing::new(ui.get_confirmation().to_string());
+                if let Some(e) = view::new_password_error(&password, &confirmation, p.locale) {
+                    ui.set_error(e.into());
+                    return;
+                }
+                ui.set_password(SharedString::new());
+                ui.set_confirmation(SharedString::new());
+                password
+            } else {
+                Zeroizing::default()
+            };
+            pending.finish(Prompt::Answer(CsrAnswer {
+                storage,
+                dir: PathBuf::from(ui.get_path().as_str()),
+                password,
+            }));
+        }
+    });
+    show(&ui, pending)
+}
+
+/// The certificate installation dialog for `p`; the outcome goes to `reply`.
+fn show_import(p: ImportPrompt, reply: Sender<Prompt<ImportAnswer>>) -> Result<(), PlatformError> {
+    let ui = ImportDialog::new()?;
+    select_language(p.locale);
+    ui.set_origin(p.origin.as_str().into());
+    let items: Vec<CertItem> = view::cert_rows(&p)
+        .into_iter()
+        .map(|r| CertItem {
+            title: r.title.into(),
+            details: r.details.into(),
+        })
+        .collect();
+    ui.set_certificates(ModelRc::new(VecModel::from(items)));
+    ui.set_storage(view::storage_label(p.storage, p.locale).into());
+    ui.set_storage_supported(p.storage.supported());
+    if let Some(path) = &p.path {
+        ui.set_path(path.display().to_string().into());
+    }
+
+    let pending = Pending::new(ui.clone_strong(), reply);
+    let weak = ui.as_weak();
+    ui.on_browse({
+        let weak = weak.clone();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                let weak = ui.as_weak();
+                pick_folder(ui.window(), &ui.get_path(), move |dir| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_path(dir.into());
+                    }
+                });
+            }
+        }
+    });
+    ui.on_confirm({
+        let pending = pending.clone();
+        let locale = p.locale;
+        let supported = p.storage.supported();
+        move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if !supported {
+                return;
+            }
+            let password = Zeroizing::new(ui.get_password().to_string());
+            let confirmation = Zeroizing::new(ui.get_confirmation().to_string());
+            if let Some(e) = view::new_password_error(&password, &confirmation, locale) {
+                ui.set_error(e.into());
+                return;
+            }
+            ui.set_password(SharedString::new());
+            ui.set_confirmation(SharedString::new());
+            pending.finish(Prompt::Answer(ImportAnswer {
+                dir: PathBuf::from(ui.get_path().as_str()),
+                new_password: password,
+            }));
+        }
+    });
+    show(&ui, pending)
+}
+
+/// The rows of a storage list.
+fn storage_rows(storages: &[StorageKind], l: Locale) -> ModelRc<StorageRow> {
+    let rows: Vec<StorageRow> = storages
+        .iter()
+        .map(|k| StorageRow {
+            label: view::storage_label(*k, l).into(),
+            supported: k.supported(),
+        })
+        .collect();
+    ModelRc::new(VecModel::from(rows))
+}
+
+/// Picks a folder with the system folder dialog, starting in `current`, and hands it to
+/// `set`. As in [`browse`], the folder is not checked on the UI thread.
+fn pick_folder(window: &slint::Window, current: &str, set: impl FnOnce(String) + 'static) {
+    let mut dialog = rfd::AsyncFileDialog::new().set_parent(&window.window_handle());
+    if !current.is_empty() {
+        dialog = dialog.set_directory(current);
+    }
+    let picked = slint::spawn_local(async move {
+        match dialog.pick_folder().await {
+            Some(dir) => set(dir.path().display().to_string()),
+            // As in `browse`: a cancel and a missing backend look the same.
+            None => tracing::info!("the folder dialog returned no folder"),
+        }
+    });
+    if let Err(e) = picked {
+        tracing::warn!(error = %e, "cannot open the folder dialog");
+    }
+}
+
+/// A dialog's buttons and windowing callbacks shared by every dialog.
 trait Dialog: ComponentHandle + 'static {
     /// Registers the Cancel button's handler.
     fn set_cancel(&self, f: impl FnMut() + 'static);
@@ -306,6 +460,18 @@ impl Dialog for StorageDialog {
 impl Dialog for KeyDialog {
     fn set_cancel(&self, f: impl FnMut() + 'static) {
         KeyDialog::on_cancel(self, f);
+    }
+}
+
+impl Dialog for CsrDialog {
+    fn set_cancel(&self, f: impl FnMut() + 'static) {
+        CsrDialog::on_cancel(self, f);
+    }
+}
+
+impl Dialog for ImportDialog {
+    fn set_cancel(&self, f: impl FnMut() + 'static) {
+        ImportDialog::on_cancel(self, f);
     }
 }
 
@@ -344,7 +510,7 @@ fn on_close_requested<W: Closable, T>(pending: &Pending<W, T>) -> CloseRequestRe
 /// A window gone without a close request: cancelled. Other events go on to Slint.
 fn on_window_event<W: Closable, T>(pending: &Pending<W, T>, event: &WindowEvent) -> EventResult {
     if matches!(event, WindowEvent::Destroyed) && pending.cancel() {
-        tracing::warn!("a signing dialog window was destroyed without being closed");
+        tracing::warn!("a dialog window was destroyed without being closed");
     }
     EventResult::Propagate
 }
@@ -358,7 +524,7 @@ trait Closable {
 impl<D: Dialog> Closable for D {
     fn close(self) {
         if let Err(e) = self.hide() {
-            tracing::warn!(error = %e, "cannot hide a signing dialog");
+            tracing::warn!(error = %e, "cannot hide a dialog");
         }
         // This runs inside one of the window's callbacks: release the window after it.
         slint::Timer::single_shot(Duration::ZERO, move || drop(self));

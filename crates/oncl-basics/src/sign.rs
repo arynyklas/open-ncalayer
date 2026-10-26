@@ -1,12 +1,12 @@
 //! `PKIExtras.sign`: the arguments as the original reads them with org.json, then the
-//! storage → key → sign flow under the process-wide signing-flow lock.
+//! storage → key → sign flow under the process-wide dialog-flow lock.
 
-use crate::Basics;
 use crate::filter::{Availability, ChainPolicy, KeyFilter, availabilities};
 use crate::prompt::{
     Action, KeyCandidate, KeyPrompt, Locale, OpenError, Prompt, StorageAnswer, StorageKind,
     StoragePrompt,
 };
+use crate::{Basics, DIALOG_FLOW};
 use base64::Engine;
 use base64::alphabet;
 use base64::engine::general_purpose::STANDARD;
@@ -26,7 +26,7 @@ use serde_json::{Map, Value, json};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Display;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, PoisonError};
 
 const SIGNING_FAILURE: &str = "SIGNING_FAILURE";
 const SIGNING_FAILURE_MESSAGE: &str = "Signing has failed.";
@@ -40,13 +40,9 @@ const UNABLE_TO_PARSE_XML: &str = "UNABLE_TO_PARSE_XML";
 const TIMESTAMP_CREATION_FAILURE: &str = "TIMESTAMP_CREATION_FAILURE";
 
 /// Origin shown when the connection sent none.
-const UNIDENTIFIED: &str = "UNIDENTIFIED";
+pub(crate) const UNIDENTIFIED: &str = "UNIDENTIFIED";
 /// clientAuth: asking for it makes the dialog an authentication.
 const CLIENT_AUTH: &str = "1.3.6.1.5.5.7.3.2";
-
-/// Serializes signing flows process-wide: the dialogs of two requests never interleave, and
-/// a second request waits for the first instead of failing as busy.
-static SIGN_FLOW: Mutex<()> = Mutex::new(());
 
 /// Java's `Base64.getDecoder()`: the standard alphabet, no whitespace, padding optional but
 /// complete when present, trailing bits ignored. Inputs ending in `=` use [`PADDED`].
@@ -91,7 +87,7 @@ struct SignRequest<'a> {
 /// `PKIExtras.sign`.
 pub(crate) fn sign(basics: &Basics, args: &Map<String, Value>, add_info: &AddInfo) -> CallResult {
     let request = SignRequest::parse(args, add_info)?;
-    let _flow = SIGN_FLOW.lock().unwrap_or_else(PoisonError::into_inner);
+    let _flow = DIALOG_FLOW.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(mut entries) = open_storage(basics, &request) else {
         return Ok(json!({}));
     };
@@ -132,20 +128,8 @@ pub(crate) fn sign(basics: &Basics, args: &Map<String, Value>, add_info: &AddInf
 impl<'a> SignRequest<'a> {
     /// Reads the arguments in the original's order, so the first missing one is reported.
     fn parse(args: &'a Map<String, Value>, add_info: &AddInfo) -> Result<Self, Failure> {
-        // `(String) e` on each entry: a non-string is a ClassCastException; null and unknown
-        // names are dropped (`Storage.get` finds nothing); duplicates stay.
         let storages = match args.get("allowedStorages") {
-            Some(Value::Array(names)) => {
-                let mut storages = Vec::with_capacity(names.len());
-                for name in names {
-                    match name {
-                        Value::String(name) => storages.extend(StorageKind::from_name(name)),
-                        Value::Null => {}
-                        other => return Err(class_cast(other)),
-                    }
-                }
-                storages
-            }
+            Some(Value::Array(names)) => storage_list(names)?,
             _ => StorageKind::all(),
         };
         let origin = add_info
@@ -239,6 +223,21 @@ impl<'a> SignRequest<'a> {
             filter,
         })
     }
+}
+
+/// `allowedStorages` entries as the original maps them: `(String) e` on each entry, so a
+/// non-string is a ClassCastException; null and unknown names are dropped (`Storage.get`
+/// finds nothing); duplicates stay.
+pub(crate) fn storage_list(names: &[Value]) -> Result<Vec<StorageKind>, Failure> {
+    let mut storages = Vec::with_capacity(names.len());
+    for name in names {
+        match name {
+            Value::String(name) => storages.extend(StorageKind::from_name(name)),
+            Value::Null => {}
+            other => return Err(class_cast(other)),
+        }
+    }
+    Ok(storages)
 }
 
 /// Asks for a storage until one opens; `None` if the user cancels. Saves the opened path.
@@ -446,7 +445,7 @@ fn parse_chain(signer_params: &Map<String, Value>) -> Result<ChainPolicy, Failur
 
 /// A certificate written as PEM or as base64 of its DER, whitespace allowed anywhere in the
 /// base64.
-fn parse_pem_or_base64(text: &str) -> Option<Certificate> {
+pub(crate) fn parse_pem_or_base64(text: &str) -> Option<Certificate> {
     let base64: String = pem_body(text)
         .chars()
         .filter(|c| !c.is_whitespace())
@@ -493,7 +492,11 @@ fn key_failure(e: KeyError) -> Failure {
 
 /// The original's `ProviderUtilFailure`: the `ProviderUtilExceptionCode` name, the provider
 /// exception's message, and our error as details.
-fn provider_failure(code: &str, message: impl Into<String>, cause: &dyn Display) -> Failure {
+pub(crate) fn provider_failure(
+    code: &str,
+    message: impl Into<String>,
+    cause: &dyn Display,
+) -> Failure {
     Failure::Custom {
         code: code.to_owned(),
         message: Some(message.into()),
@@ -528,7 +531,7 @@ fn certificate_parsing_failure() -> Failure {
 }
 
 /// org.json `getString`.
-fn get_string<'a>(obj: &'a Map<String, Value>, key: &str) -> Result<&'a str, Failure> {
+pub(crate) fn get_string<'a>(obj: &'a Map<String, Value>, key: &str) -> Result<&'a str, Failure> {
     match obj.get(key) {
         None => Err(not_found(key)),
         Some(Value::String(s)) => Ok(s),
@@ -549,7 +552,10 @@ fn get_object<'a>(
 }
 
 /// org.json `getJSONArray`.
-fn get_array<'a>(obj: &'a Map<String, Value>, key: &str) -> Result<&'a [Value], Failure> {
+pub(crate) fn get_array<'a>(
+    obj: &'a Map<String, Value>,
+    key: &str,
+) -> Result<&'a [Value], Failure> {
     match obj.get(key) {
         None => Err(not_found(key)),
         Some(Value::Array(a)) => Ok(a),
@@ -558,7 +564,7 @@ fn get_array<'a>(obj: &'a Map<String, Value>, key: &str) -> Result<&'a [Value], 
 }
 
 /// org.json `optString`: `None` when absent or `null`, any other value as text.
-fn opt_string(obj: &Map<String, Value>, key: &str) -> Option<String> {
+pub(crate) fn opt_string(obj: &Map<String, Value>, key: &str) -> Option<String> {
     match obj.get(key) {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => Some(s.clone()),
@@ -576,21 +582,21 @@ fn opt_bool(obj: &Map<String, Value>, key: &str, default: bool) -> bool {
     }
 }
 
-fn not_found(key: &str) -> Failure {
+pub(crate) fn not_found(key: &str) -> Failure {
     json_exception(format!("JSONObject[\"{key}\"] not found."))
 }
 
-fn wrong_type(key: &str, what: &str) -> Failure {
+pub(crate) fn wrong_type(key: &str, what: &str) -> Failure {
     json_exception(format!("JSONObject[\"{key}\"] is not {what}."))
 }
 
 /// An org.json error escaping the method: INVOCATION_ERROR with the exception as details.
-fn json_exception(message: String) -> Failure {
+pub(crate) fn json_exception(message: String) -> Failure {
     Failure::Invocation(Some(format!("org.json.JSONException: {message}")))
 }
 
 /// `(String) value` on a JSON value that is not a string.
-fn class_cast(value: &Value) -> Failure {
+pub(crate) fn class_cast(value: &Value) -> Failure {
     // JRE 8 (bundled with the original) words it without "class " or module details.
     Failure::Invocation(Some(format!(
         "java.lang.ClassCastException: {} cannot be cast to java.lang.String",
