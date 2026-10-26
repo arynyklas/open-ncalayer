@@ -106,10 +106,11 @@ Key revocation is checked with OCSP when the key has a chain, is not disabled fo
 The points below are for `basics` (`format:"xml"`). commonUtils and the Applet sign with the same code: they keep the document's bytes, have the same input limits and refuse sha1RSA too, with error codes of their own.
 - The document's bytes are kept, including the `<?xml …?>` declaration, whitespace and attribute order. The `ds:Signature` element is appended as the last child of the root element. The original re-serializes the document without the declaration (`omit-xml-declaration`). The signature verifies the same way, but the response string differs.
 - Input limits the original does not have: at most 64 MiB and 256 levels of nesting, and bounded numbers of nodes, attributes and namespace declarations, as well as bounded canonicalization work. A document over the limits gets `UNABLE_TO_PARSE_XML`, like any parse error. The parse error text is ours; the original sends the SAX message.
+- An attribute with a prefix and the local name `xmlns` (`a:xmlns`, `xml:xmlns`) is a parse error, `UNABLE_TO_PARSE_XML`. Our parser would take it for a default namespace declaration, while the original (Xerces) refuses `a:xmlns` with an undeclared prefix and takes `a:xmlns` with a declared prefix, and `xml:xmlns`, for ordinary attributes, so the signature would not match Kalkan's.
 - A certificate signed with sha1RSA is not used for signing (`UNKNOWN_ALGORITHM`, as for cms). The original signs with rsa-sha1.
 - A document with a comment or a processing instruction before the root element is signed. The original fails on it (`SIGNING_FAILURE`): it inserts the signature into the document's first node.
 
-The XPaths of commonUtils `signXml` and `signXmls` are a subset: an absolute path of element names as written in the document (prefix included), each step with an optional `[n]`, `/` and `//` separators (`/root/body[2]`, `//data`), at most 32 steps. The prefix `SOAP-ENV` stands for the SOAP 1.1 namespace, as in Kalkan. Any other expression gets `{"code":"500","message":"unsupported XPath expression \"…\""}`. The original understands all of XPath 1.0.
+The XPaths of commonUtils `signXml` and `signXmls` are a subset: an absolute path of element names as written in the document (prefix included), each step with an optional `[n]`, `/` and `//` separators (`/root/body[2]`, `//data`), at most 32 steps. The prefix `SOAP-ENV` stands for the SOAP 1.1 namespace, as in Kalkan. An expression outside the subset gets `{"code":"500","message":"unsupported XPath expression \"…\""}`; a path of more than 32 steps gets `XPath expression "…" has more than 32 steps`. The original understands all of XPath 1.0.
 
 #### Storages and page paths
 
@@ -132,7 +133,7 @@ Tokens are not supported until P14 (see [Modules](#modules)).
 #### commonUtils
 
 The `kz.gov.pki.knca.commonUtils` module:
-- Tokens answer `storage.empty` and `getActiveTokens` answers `[]`, as the original does with no device connected.
+- Tokens: as described in [Modules](#modules), which is also how the original answers with no device connected.
 - `createCAdESFromFile` and `createCMSSignatureFromFile` show the full, normalized path of the file the page named in both dialogs. Only a regular file on disk of at most 64 MiB is read; a larger one gets `file.too_large: files over 64 MiB are not signed`. `file.not_found` goes to a folder and also: on Linux and macOS to FIFOs and devices; on Windows to device namespace paths (`\\.\…`, `\\?\…` except `\\?\C:\…` and `\\?\UNC\…`), named pipes, devices such as `NUL` and `CON`, and anything opened that is not a disk file. The original reads any path with no size limit.
 - `getKeyInfo` opens the dialogs with the action "Key information" and a "Send" button, as the original does.
 - The file chooser (`showFileChooser`) opens on top of other windows, in a small window naming the requesting site.
@@ -155,7 +156,7 @@ The `kz.gov.pki.knca.applet.Applet` module (legacy; it answers requests without 
 #### accessory
 
 - `getBundles` lists the original's framework (`org.apache.felix.framework`) and its core bundles whose functions OpenNCALayer implements, with the versions of the original's current update manifest, and OpenNCALayer itself (`io.github.arynyklas.openncalayer`). The original lists every installed bundle, other vendors' modules included.
-- `installBundle` with a non-empty `symname` always answers `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED`: there are no ports of other vendors' modules until P11 (D21). The request is logged.
+- `installBundle` with a non-empty `symname` and an `Origin` header always answers `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED`: there are no ports of other vendors' modules until P11 (D21). The request is logged. Without an `Origin` header the answer is `org.json.JSONException: JSONObject["origin"] is not a string.`, as from the original.
 - `showBundleManager`, `showSettings`, `showKeystoreExplorer`, `showAdesSigning` and `showAdesValidation` answer `{}`, as the original does, but no window opens: the request is only logged. The settings and modules windows arrive in P5.
 
 ## Build and run
