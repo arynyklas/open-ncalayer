@@ -23,7 +23,24 @@ The second phase (P2) adds a browser extension: with it, sites work with OpenNCA
 
 The third phase (P3) checks keys in the key dialog as the original does. The key certificate's chain is built to the embedded NCA roots or to the CAs of `signerParams.chain`; `chain: []` turns the check off. The anchor is a self-signed CA of the set or, as in the original, the topmost CA of the set found, so a `chain` of an intermediate CA alone works too. Revocation is checked with the NCA OCSP responder. A key without a chain is unavailable. A revoked key is marked «revoked DD.MM.YYYY» and is unavailable too, unless `signingParams` has `allowRevoked` (which the `raw` format ignores). As in the original, the NCA test PKI is not embedded: test-environment sites must pass `chain`.
 
-Manual browser test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md) and [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md) (in Russian).
+Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md) and [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md) (in Russian).
+
+### Certificate checking
+
+Trust comes only from the embedded NCA certificates and `signerParams.chain`, as in the original. The OS and browser trust stores are not read.
+
+The embedded certificates are the 10 CAs of the NCA production PKI from [`fixtures/nca/prod/`](fixtures/nca/prod/), compiled into the binary (`crates/oncl-pki/src/roots.rs`): `rcagost`, `ncagost`, `ncagost18`, `rcagost22`, `ncagost22`, `rcarsa`, `rcarsa20`, `ncarsa`, `ncarsa18`, `ncarsa22`. Their sha256 sums are in `fixtures/nca/SHA256SUMS`, and a test checks the embedded bytes against them. The NCA test PKI (`fixtures/nca/test/`) is not embedded, as in the original: test-environment sites and tests must pass `chain`.
+
+`signerParams.chain` in `basics.sign`:
+- absent or `null`: the embedded NCA set;
+- `[]`: neither the chain nor OCSP is checked (the demo page sends this by default);
+- an array of strings: a CA set replacing the embedded one. Each string is a certificate in PEM or base64 DER; spaces and line breaks are allowed. A string that does not parse gives the site `CERTIFICATE_PARSING_FAILURE` before the dialog. An entry that is not a string (a number, `null`) gives `INVOCATION_ERROR`, as in the original (Java `ClassCastException`/`NullPointerException`).
+
+The chain is built from the key certificate up through the CA set by the rules of RFC 5280 §6.1: signatures, validity of every certificate, the issuers' `basicConstraints.cA` and `pathLen`, `keyCertSign` (if `keyUsage` is present), unknown critical extensions. Certificate policies and `nameConstraints` are not processed. Names are compared byte for byte. The issuer is a CA of the set with the same name whose signature verifies; among several candidates the one whose `subjectKeyIdentifier` equals the certificate's `authorityKeyIdentifier` is tried first. Validity is checked at the current time, and for an expired key that is allowed (`allowExpired`, the `xml` format in P4) at its `notAfter`.
+
+Key revocation is checked with OCSP, only for an end-entity certificate with an OCSP URL in its AIA and only if the key is not already unavailable for another reason: a GET request with a SHA-1 `CertID` and no nonce, a 5 s timeout, 6 s in total per store. A response is accepted when its responder (`byName` or `byKey`) is issued by a CA of the same set and has the `OCSPSigning` EKU and `id-pkix-ocsp-nocheck`, the signature verifies, the `CertID` matches and the response is fresh. Only the `revoked` status disables a key. Without a network, on a timeout, a bad response or the `unknown` status the key stays available and the cause is logged (`warn`): offline, OCSP does not block signing.
+
+`openncalayer cms-verify` checks a finished signature (step 4 of [Build and run](#build-and-run)): chains to the embedded CAs or `--chain`, the signer's revocation by OCSP, intermediate CAs by CRL from `cRLDistributionPoints` (cached in `<data dir>/crl/`; a CRL is not downloaded again before its `nextUpdate`). `INDETERMINATE` means that everything checked is valid but no verdict is possible: revocation data is unavailable, or nothing proves when the signature was made.
 
 ### Deviations of P1 from the original
 
@@ -44,6 +61,8 @@ The first two are closed in P4.
 - A key unavailable for another reason (EKU, IIN, BIN, serial number) is not checked with OCSP: the dialog shows those reasons. The original puts its «REVOKED» mark on such keys too.
 - The dialog shows the revocation date, in UTC: «revoked DD.MM.YYYY». The original's mark has no date: «REVOKED».
 - The OCSP responder is also found `byKey` (the SHA-1 of its key); the original understands only `byName`. A response's `thisUpdate` may be ahead of the computer's clock by up to 300 s; the original requires `thisUpdate < now` strictly.
+- CRLs are checked only for intermediate CAs and only by `cms-verify` (the original's `basics` has no CRL). Delta CRLs and CRLs with an `issuingDistributionPoint` are refused. The CRL distribution point of `ncagost18` and `ncarsa18` holds two URLs in one string (`… URL=…`); OpenNCALayer tries both. Currently (October 2026) both mirrors serve CRLs past their `nextUpdate`, so `cms-verify` reports the revocation status of these CAs as unavailable.
+- Certificate policies and `nameConstraints` are not checked in the chain (NCA certificates have no `nameConstraints`).
 
 Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
@@ -152,6 +171,8 @@ Tests prefixed with `live_` call real NCA services and are skipped by default:
 ```sh
 cargo test --workspace --all-features -- --ignored live_
 ```
+
+They are `live_test_tsa` (NCA TSP), `live_ocsp_nca_test_certificate` (the NCA test OCSP responder; needs `cargo xtask fetch-fixtures`), `live_crl_nca_root_gost_2022` (a CRL from `crl.root.gov.kz`) and `live_cms_verify_command_without_revocation_services` (`cms-verify` with nonexistent OCSP and CRL hosts; needs DNS). They depend on the NCA test infrastructure, so CI runs them only on a schedule (the `live` job), and a single network failure is worth a rerun. The NCA test RSA OCSP responder answers `malformedRequest` to standard requests (OpenSSL's too), so live OCSP is tested with a GOST certificate.
 
 The browser extension:
 

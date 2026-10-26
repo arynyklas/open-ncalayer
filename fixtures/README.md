@@ -18,6 +18,7 @@
     - ГОСТ 34.310-2004: `prod/ncagost`, `prod/ncagost18`, `prod/rcagost`, `test/ncagosttest2018`, `test/rcagosttest2018`;
     - ГОСТ 34.10-2015-512: `prod/ncagost22`, `prod/rcagost22`, `test/ncagosttest2022`, `test/rcagosttest2022`.
   - `crates/oncl-pki/tests/cert_verify.rs` проверяет через `cert::verify_signature` все 16 сертификатов, ГОСТ и RSA. Издатель ищется по DN.
+- **Встроенные корни.** Все 10 сертификатов `nca/prod/` вшиваются в бинарь (`crates/oncl-pki/src/roots.rs`, `include_bytes!`) — это набор CA по умолчанию для `signerParams.chain` и `cms-verify`. Тест сверяет их с `SHA256SUMS`, поэтому файл в `nca/prod/` меняется только вместе с суммой. `nca/test/` не встраивается.
 
 ## `nca-ocsp/` — ответ тестового OCSP НУЦ (коммитится)
 
