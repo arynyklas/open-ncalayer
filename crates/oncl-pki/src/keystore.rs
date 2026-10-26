@@ -2,18 +2,23 @@
 //! `<dir>/<PREFIX><keyId>.p12` without a certificate; its certificate is installed later into
 //! whichever key file of the directory holds the key; passwords follow the PKCS#12 pattern.
 //!
-//! Files are replaced atomically (a temporary file in the same directory, then a rename).
-//! Errors carry the codes and messages of the original's `ProviderUtilException`.
+//! Files are replaced atomically (a temporary file in the same directory, then a rename) and
+//! are private: mode `0600` on Unix, whatever mode the file had before. On Windows a key file
+//! gets the ACL its directory passes on (the temporary file is created there); explicit ACLs
+//! of a replaced file are not carried over. Errors carry the codes and messages of the
+//! original's `ProviderUtilException`.
 
 use crate::cert::Certificate;
-use crate::fsutil::write_atomically;
+use crate::csr::KeyStoreInfo;
+use crate::fsutil::{Access, write_atomically};
 use crate::info::cert_info;
 use crate::key::{PrivateKey, PublicKey};
 use crate::keygen::{KeySpec, key_id};
 use crate::oid;
 use crate::pkcs12::{self, Contents, Pkcs12Error, WriteEntry, WriteOptions};
-use der::asn1::{ObjectIdentifier, SequenceRef};
-use der::{Decode, Encode, SliceReader};
+use der::Encode;
+use der::asn1::ObjectIdentifier;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use x509_cert::ext::pkix::SubjectKeyIdentifier;
@@ -21,12 +26,12 @@ use x509_cert::ext::pkix::SubjectKeyIdentifier;
 /// Prefix of the file name an authentication certificate gives its key file.
 const AUTH_PREFIX: &str = "AUTH_";
 
-/// Error of a key file operation. [`KeystoreError::code`] is the original's
-/// `ProviderUtilExceptionCode`; the `Display` text is the original's message, which
-/// NCALayer sends to pages (Russian, as in the original).
+/// Error of a key file operation. [`KeystoreError::provider_code`] is the original's
+/// `ProviderUtilExceptionCode`, where the original raises one; the `Display` text is the
+/// original's message, which NCALayer sends to pages (Russian, as in the original).
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KeystoreError {
-    /// The signature algorithm OID is not one of the four NCALayer generates keys for.
+    /// The signature algorithm OID (or RSA length) is not one NCALayer generates keys for.
     #[error("UNKNOWN_ALGORITHM")]
     UnknownAlgorithm,
     /// No key file of the directory opens with the password and holds the certificate's
@@ -64,7 +69,11 @@ pub enum KeystoreError {
     /// A subject name value or alternative name cannot be encoded as its ASN.1 type.
     #[error("invalid certificate request: {0}")]
     InvalidRequest(String),
-    /// A file cannot be read or written, or a certificate extension does not parse.
+    /// A certificate extension (SubjectKeyIdentifier, KeyStoreInfo) does not parse, or a
+    /// value does not encode.
+    #[error("{0}")]
+    Malformed(String),
+    /// A file cannot be read, written or renamed.
     #[error("{0}")]
     Io(String),
     /// The key file is not a readable PKCS#12 key store.
@@ -73,11 +82,13 @@ pub enum KeystoreError {
 }
 
 impl KeystoreError {
-    /// The original's `ProviderUtilExceptionCode` name. [`KeystoreError::InvalidRequest`],
-    /// [`KeystoreError::Io`] and [`KeystoreError::Pkcs12`] are plain exceptions there (the
-    /// module reports its generic failure); they give `PROVIDER_INVOCATION_FAILURE`.
-    pub fn code(&self) -> &'static str {
-        match self {
+    /// The original's `ProviderUtilExceptionCode` name, or `None` where the original throws
+    /// a plain exception ([`KeystoreError::InvalidRequest`], [`KeystoreError::Malformed`],
+    /// [`KeystoreError::Io`], [`KeystoreError::Pkcs12`]): the calling module reports its
+    /// own generic failure then (e.g. basics `CSR_GENERATING_FAILURE`,
+    /// `CERTIFICATE_IMPORTING_FAILURE`).
+    pub fn provider_code(&self) -> Option<&'static str> {
+        Some(match self {
             KeystoreError::UnknownAlgorithm => "UNKNOWN_ALGORITHM",
             KeystoreError::KeystoreFileNotFound(_) => "KEYSTORE_FILE_NOT_FOUND",
             KeystoreError::UnsuitedStorage => "UNSUITED_STORAGE",
@@ -87,10 +98,11 @@ impl KeystoreError {
             KeystoreError::ChangePasswordConstraint => "CHANGE_PASSWORD_CONSTRAINT",
             KeystoreError::ExtensionNotFound => "EXTENSION_NOT_FOUND",
             KeystoreError::UnsupportedStorage => "UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION",
-            KeystoreError::InvalidRequest(_) | KeystoreError::Io(_) | KeystoreError::Pkcs12(_) => {
-                "PROVIDER_INVOCATION_FAILURE"
-            }
-        }
+            KeystoreError::InvalidRequest(_)
+            | KeystoreError::Malformed(_)
+            | KeystoreError::Io(_)
+            | KeystoreError::Pkcs12(_) => return None,
+        })
     }
 }
 
@@ -113,6 +125,10 @@ fn wrong_password_pattern(empty: bool) -> &'static str {
 
 fn io_error(path: &Path, e: &std::io::Error) -> KeystoreError {
     KeystoreError::Io(format!("{}: {e}", path.display()))
+}
+
+fn malformed(e: impl std::fmt::Display) -> KeystoreError {
+    KeystoreError::Malformed(e.to_string())
 }
 
 /// Writes `key` alone (no certificate) into `<dir>/<PREFIX><keyId>.p12` with the Kalkan
@@ -167,7 +183,7 @@ pub fn create_key_file(
 /// [`KeystoreError::ExtensionNotFound`], [`KeystoreError::UnsuitedStorage`],
 /// [`KeystoreError::UnsupportedStorage`] unless `storage_oid` is PKCS#12,
 /// [`KeystoreError::KeystoreFileNotFound`], [`KeystoreError::InappropriateCert`],
-/// [`KeystoreError::Io`].
+/// [`KeystoreError::Malformed`], [`KeystoreError::Io`].
 ///
 /// # Panics
 ///
@@ -184,10 +200,10 @@ pub fn install_certificate(
     {
         Ok(Some((_, ski))) => pkcs12::hex(ski.0.as_bytes()),
         Ok(None) => return Err(KeystoreError::ExtensionNotFound),
-        Err(e) => return Err(KeystoreError::Io(e.to_string())),
+        Err(e) => return Err(malformed(format!("SubjectKeyIdentifier: {e}"))),
     };
-    if let Some(storage) = keystore_info_storage(cert)?
-        && storage != *storage_oid
+    if let Some(info) = KeyStoreInfo::of_certificate(cert)?
+        && info.storage_oid != *storage_oid
     {
         return Err(KeystoreError::UnsuitedStorage);
     }
@@ -206,22 +222,20 @@ pub fn install_certificate(
     if key.key.public_key() != public {
         return Err(KeystoreError::InappropriateCert);
     }
-    let cert_der = cert
-        .to_der()
-        .map_err(|e| KeystoreError::Io(e.to_string()))?;
+    let cert_der = cert.to_der().map_err(malformed)?;
     rewrite(&path, &contents, password, Some((&alias, cert_der)))?;
 
     if !needs_auth_name(cert) {
         return Ok(path);
     }
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default();
-    if name.starts_with(AUTH_PREFIX) || name.starts_with("auth_") {
+    let name = path.file_name().expect("a key file path has a file name");
+    let lossy = name.to_string_lossy();
+    if lossy.starts_with(AUTH_PREFIX) || lossy.starts_with("auth_") {
         return Ok(path);
     }
-    let renamed = path.with_file_name(format!("{AUTH_PREFIX}{name}"));
+    let mut auth_name = OsString::from(AUTH_PREFIX);
+    auth_name.push(name);
+    let renamed = path.with_file_name(auth_name);
     fs::rename(&path, &renamed).map_err(|e| io_error(&path, &e))?;
     Ok(renamed)
 }
@@ -235,7 +249,7 @@ pub fn install_certificate(
 ///
 /// [`KeystoreError::WrongPasswordPattern`], [`KeystoreError::WrongPassword`],
 /// [`KeystoreError::ChangePasswordConstraint`] for a file without keys,
-/// [`KeystoreError::Io`], [`KeystoreError::Pkcs12`].
+/// [`KeystoreError::Io`], [`KeystoreError::Pkcs12`], [`KeystoreError::Malformed`].
 ///
 /// # Panics
 ///
@@ -270,24 +284,6 @@ pub fn check_password_pattern(password: &str) -> Result<(), KeystoreError> {
     } else {
         Err(KeystoreError::WrongPasswordPattern { empty: false })
     }
-}
-
-/// Storage OID of the certificate's KeyStoreInfo extension
-/// (`SEQUENCE { storage OID, path UTF8String OPTIONAL }`), if it has one.
-fn keystore_info_storage(cert: &Certificate) -> Result<Option<ObjectIdentifier>, KeystoreError> {
-    let Some(ext) = cert
-        .tbs_certificate()
-        .extensions()
-        .and_then(|exts| exts.iter().find(|e| e.extn_id == oid::KEYSTORE_INFO))
-    else {
-        return Ok(None);
-    };
-    let malformed = |e: der::Error| KeystoreError::Io(format!("KeyStoreInfo: {e}"));
-    // As the original, only the first element (the storage OID) is read.
-    let info = <&SequenceRef>::from_der(ext.extn_value.as_bytes()).map_err(malformed)?;
-    let mut elements = SliceReader::new(info.as_bytes()).map_err(malformed)?;
-    let storage = ObjectIdentifier::decode(&mut elements).map_err(malformed)?;
-    Ok(Some(storage))
 }
 
 /// The key file holding a key under `alias`, opened.
@@ -348,7 +344,7 @@ fn rewrite(
                 .as_ref()
                 .map(Encode::to_der)
                 .transpose()
-                .map_err(|e| KeystoreError::Io(e.to_string()))?,
+                .map_err(malformed)?,
         };
         entries.push(WriteEntry {
             alias: stored.alias.clone(),
@@ -361,11 +357,12 @@ fn rewrite(
         .iter()
         .map(Encode::to_der)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| KeystoreError::Io(e.to_string()))?;
+        .map_err(malformed)?;
     store(path, &entries, &other_certs, password)
 }
 
-/// Writes a key store with the Kalkan profile and fresh salts to `path`, atomically.
+/// Writes a key store with the Kalkan profile and fresh salts to `path`, atomically and
+/// private ([`Access::Private`]).
 fn store(
     path: &Path,
     entries: &[WriteEntry],
@@ -379,7 +376,7 @@ fn store(
         &WriteOptions::default(),
         &mut |buf| getrandom::fill(buf).expect("operating system RNG failed"),
     )?;
-    write_atomically(path, &p12).map_err(|e| io_error(path, &e))
+    write_atomically(path, &p12, Access::Private).map_err(|e| io_error(path, &e))
 }
 
 /// Whether installing `cert` renames its key file: an AUTHENTICATION certificate in the
@@ -401,4 +398,78 @@ fn needs_auth_name(cert: &Certificate) -> bool {
         && ku.key_encipherment
         && info.ext_key_usages.contains(&oid::CLIENT_AUTH.to_string());
     legacy || client_auth
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pkcs12::{
+        ContentInfo, EncryptedData, EncryptedPrivateKeyInfo, Pfx, Pkcs12PbeParams, SafeBag,
+    };
+    use der::Decode;
+    use der::asn1::OctetString;
+    use oncl_testkit::{fixture, read};
+    use spki::AlgorithmIdentifierOwned;
+
+    /// Checks a PKCS#12 PBE `AlgorithmIdentifier`: `oid`, a 20-byte salt, 1024 iterations.
+    fn assert_kalkan_pbe(alg: &AlgorithmIdentifierOwned, oid: ObjectIdentifier) {
+        assert_eq!(alg.oid, oid);
+        let params: Pkcs12PbeParams = alg.parameters.as_ref().unwrap().decode_as().unwrap();
+        assert_eq!(params.salt.as_bytes().len(), 20);
+        assert_eq!(params.iterations, 1024);
+    }
+
+    /// The safes of a key file, after checking its MAC (HMAC-SHA1, 20-byte salt, 1024
+    /// iterations).
+    fn kalkan_safes(p12: &[u8]) -> Vec<ContentInfo> {
+        let pfx = Pfx::from_der(p12).unwrap();
+        assert_eq!(pfx.version, 3);
+        let mac = pfx.mac_data.unwrap();
+        assert_eq!(mac.mac.algorithm.oid, oid::SHA1);
+        assert_eq!(mac.mac.digest.as_bytes().len(), 20);
+        assert_eq!(mac.mac_salt.as_bytes().len(), 20);
+        assert_eq!(mac.iterations, 1024);
+        assert_eq!(pfx.auth_safe.content_type, oid::DATA);
+        let auth_safe: OctetString = pfx.auth_safe.content.unwrap().decode_as().unwrap();
+        Vec::<ContentInfo>::from_der(auth_safe.as_bytes()).unwrap()
+    }
+
+    /// The key safe: one 3DES-shrouded key bag.
+    fn assert_kalkan_key_safe(safe: &ContentInfo) {
+        assert_eq!(safe.content_type, oid::DATA);
+        let bags: OctetString = safe.content.as_ref().unwrap().decode_as().unwrap();
+        let bags = Vec::<SafeBag>::from_der(bags.as_bytes()).unwrap();
+        assert_eq!(bags.len(), 1);
+        assert_eq!(bags[0].bag_id, oid::PKCS8_SHROUDED_KEY_BAG);
+        let shrouded: EncryptedPrivateKeyInfo = bags[0].bag_value.decode_as().unwrap();
+        assert_kalkan_pbe(&shrouded.encryption_algorithm, oid::PBE_SHA_3DES);
+    }
+
+    #[test]
+    fn key_files_have_the_kalkan_profile() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rsa = read(fixture("openssl/rsa.pk8.der"));
+        let key = PrivateKey::from_pkcs8_der(&rsa, None).unwrap();
+        let path = create_key_file(dir.path(), &key, KeySpec::RsaSha256(2048), "Default1").unwrap();
+        let safes = kalkan_safes(&fs::read(&path).unwrap());
+        assert_eq!(safes.len(), 1, "no certificate safe without certificates");
+        assert_kalkan_key_safe(&safes[0]);
+
+        // With a certificate: an RC2-40 encrypted certificate safe follows.
+        let entry = WriteEntry {
+            alias: "rsa".to_owned(),
+            pkcs8_der: rsa,
+            cert_der: Some(read(fixture("openssl/rsa.cer"))),
+        };
+        store(&path, &[entry], &[], "Default1").unwrap();
+        let safes = kalkan_safes(&fs::read(&path).unwrap());
+        assert_eq!(safes.len(), 2);
+        assert_kalkan_key_safe(&safes[0]);
+        assert_eq!(safes[1].content_type, oid::ENCRYPTED_DATA);
+        let data: EncryptedData = safes[1].content.as_ref().unwrap().decode_as().unwrap();
+        assert_kalkan_pbe(
+            &data.encrypted_content_info.content_encryption_algorithm,
+            oid::PBE_SHA_RC2_40,
+        );
+    }
 }

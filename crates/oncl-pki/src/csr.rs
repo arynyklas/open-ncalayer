@@ -3,17 +3,18 @@
 //! KeyStoreInfo, signed with the request's own key, as PEM `CERTIFICATE REQUEST`.
 
 use crate::asn1util;
+use crate::cert::Certificate;
 use crate::key::{PrivateKey, SigAlg};
 use crate::keygen::KeySpec;
 use crate::keystore::KeystoreError;
 use crate::oid;
 use crate::pem;
 use der::asn1::{
-    Any, BitString, Ia5String, ObjectIdentifier, OctetString, PrintableStringRef, SetOfVec,
-    Utf8StringRef,
+    Any, BitString, Ia5String, ObjectIdentifier, OctetString, PrintableStringRef, SequenceRef,
+    SetOfVec, Utf8StringRef,
 };
 use der::oid::AssociatedOid;
-use der::{Decode, Encode, Sequence, Tag};
+use der::{Decode, Encode, Sequence, SliceReader, Tag};
 use spki::AlgorithmIdentifierOwned;
 use std::cmp::Ordering;
 use x509_cert::attr::{Attribute, AttributeTypeAndValue};
@@ -23,14 +24,68 @@ use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::name::{Name, RdnSequence, RelativeDistinguishedName};
 use x509_cert::request::{CertReq, CertReqInfo, ExtensionReq, Version};
 
-/// The KeyStoreInfo extension of a request: the storage the key lives in and, for file
-/// storages, the directory of the key file.
+/// The KeyStoreInfo extension (`1.2.398.3.3.5`) of a request and of the certificate issued
+/// on it: the storage the key lives in and, for file storages, the directory of the key
+/// file. `KeyStoreInfo ::= SEQUENCE { storage OID, path UTF8String OPTIONAL }`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyStoreInfo {
     /// Storage OID (`oid::STORAGE_PKCS12` for PKCS#12 files).
     pub storage_oid: ObjectIdentifier,
     /// Directory of the key file; `None` for tokens.
     pub path: Option<String>,
+}
+
+impl KeyStoreInfo {
+    /// DER of the extension value.
+    ///
+    /// # Errors
+    ///
+    /// [`KeystoreError::InvalidRequest`] if the path is too long for DER.
+    pub fn to_der(&self) -> Result<Vec<u8>, KeystoreError> {
+        let path = self
+            .path
+            .as_deref()
+            .map(Utf8StringRef::new)
+            .transpose()
+            .map_err(invalid)?;
+        KeyStoreInfoAsn1 {
+            storage: self.storage_oid,
+            path,
+        }
+        .to_der()
+        .map_err(invalid)
+    }
+
+    /// Reads an extension value as Kalkan does: the storage OID first; a UTF8String path
+    /// after it is taken, anything else after it ignored.
+    ///
+    /// # Errors
+    ///
+    /// [`KeystoreError::Malformed`] unless the value is a SEQUENCE starting with an OID.
+    pub fn from_der(der: &[u8]) -> Result<KeyStoreInfo, KeystoreError> {
+        let malformed = |e: der::Error| KeystoreError::Malformed(format!("KeyStoreInfo: {e}"));
+        let info = <&SequenceRef>::from_der(der).map_err(malformed)?;
+        let mut elements = SliceReader::new(info.as_bytes()).map_err(malformed)?;
+        let storage_oid = ObjectIdentifier::decode(&mut elements).map_err(malformed)?;
+        let path = Option::<Utf8StringRef<'_>>::decode(&mut elements)
+            .map_err(malformed)?
+            .map(|path| path.as_str().to_owned());
+        Ok(KeyStoreInfo { storage_oid, path })
+    }
+
+    /// The KeyStoreInfo extension of `cert`, if it has one.
+    ///
+    /// # Errors
+    ///
+    /// [`KeystoreError::Malformed`] if the extension does not read (see
+    /// [`KeyStoreInfo::from_der`]).
+    pub fn of_certificate(cert: &Certificate) -> Result<Option<KeyStoreInfo>, KeystoreError> {
+        cert.tbs_certificate()
+            .extensions()
+            .and_then(|exts| exts.iter().find(|e| e.extn_id == oid::KEYSTORE_INFO))
+            .map(|ext| KeyStoreInfo::from_der(ext.extn_value.as_bytes()))
+            .transpose()
+    }
 }
 
 /// What a request says besides its key.
@@ -97,18 +152,11 @@ pub fn build_csr(
     if !names.is_empty() {
         extensions.push(extension(SubjectAltName::OID, &SubjectAltName(names)));
     }
-    let path = req
-        .keystore_info
-        .path
-        .as_deref()
-        .map(Utf8StringRef::new)
-        .transpose()
-        .map_err(invalid)?;
-    let info = KeyStoreInfoAsn1 {
-        storage: req.keystore_info.storage_oid,
-        path,
-    };
-    extensions.push(extension(oid::KEYSTORE_INFO, &info));
+    extensions.push(Extension {
+        extn_id: oid::KEYSTORE_INFO,
+        critical: false,
+        extn_value: OctetString::new(req.keystore_info.to_der()?).map_err(invalid)?,
+    });
     let mut attributes = SetOfVec::new();
     attributes
         .insert(Attribute::try_from(ExtensionReq(extensions)).map_err(invalid)?)

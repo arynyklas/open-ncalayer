@@ -170,45 +170,30 @@ impl PrivateKey {
     /// [`KeyError::UnknownKeyAlgorithm`] for other key types, [`KeyError::KeyMismatch`] if no
     /// candidate matches `cert`.
     pub fn from_pkcs8_der(der: &[u8], cert: Option<&Certificate>) -> Result<PrivateKey, KeyError> {
-        let der = Zeroizing::new(ber::to_der(der).map_err(malformed)?);
-        let info = PrivateKeyInfoRef::from_der(&der).map_err(malformed)?;
         let expected = cert
             .map(|c| PublicKey::from_spki(c.tbs_certificate().subject_public_key_info()))
             .transpose()?;
-
-        if info.algorithm.oid == oid::RSA_ENCRYPTION {
-            let pair = ring::rsa::KeyPair::from_pkcs8(&der).map_err(malformed)?;
-            match expected {
-                None => {}
-                Some(PublicKey::Rsa(public)) if public == pair.public().as_ref() => {}
-                Some(_) => return Err(KeyError::KeyMismatch),
-            }
-            return Ok(PrivateKey::Rsa(Arc::new(RsaKeyPair { pair, pkcs8: der })));
-        }
-
-        let params = info
-            .algorithm
-            .parameters
-            .map(|p| p.decode_as::<Vec<ObjectIdentifier>>());
-        let curve = gost_curve(&info.algorithm.oid, params)?;
-        let candidates = scalar_candidates(curve, info.private_key.as_bytes());
         match expected {
-            None => {
-                let d = candidates
-                    .into_iter()
-                    .find(|c| c.form == default_form(curve, info.private_key.as_bytes()))
-                    .ok_or_else(|| malformed("no GOST private key in the expected form"))?;
-                let key = SigningKey::from_scalar_be(curve, &d.be).map_err(malformed)?;
-                Ok(PrivateKey::Gost(key))
-            }
-            Some(PublicKey::Gost(public)) if public.curve() == curve => candidates
-                .iter()
-                .filter_map(|c| SigningKey::from_scalar_be(curve, &c.be).ok())
-                .find(|k| *k.verifying_key() == public)
-                .map(PrivateKey::Gost)
-                .ok_or(KeyError::KeyMismatch),
-            Some(_) => Err(KeyError::KeyMismatch),
+            None => decode_pkcs8(der, Expected::DefaultForm),
+            Some(public) => decode_pkcs8(der, Expected::Key(&public)),
         }
+    }
+
+    /// Private key from a PKCS#8 `PrivateKeyInfo` whose public key has the key identifier
+    /// `key_id` (SHA-1 of the `subjectPublicKey` BIT STRING contents): for a key stored
+    /// without a certificate under that `localKeyId`, as Kalkan stores generated keys. Of
+    /// the GOST forms (see [`PrivateKey::from_pkcs8_der`]) the one with this identifier is
+    /// taken.
+    ///
+    /// # Errors
+    ///
+    /// As [`PrivateKey::from_pkcs8_der`]; [`KeyError::KeyMismatch`] if no form has the
+    /// identifier.
+    pub(crate) fn from_pkcs8_der_with_key_id(
+        der: &[u8],
+        key_id: &[u8],
+    ) -> Result<PrivateKey, KeyError> {
+        decode_pkcs8(der, Expected::KeyId(key_id))
     }
 
     /// Key type.
@@ -295,6 +280,65 @@ impl PrivateKey {
             _ => Err(KeyError::UnsupportedAlgorithm),
         }
     }
+}
+
+/// Which key a PKCS#8 decoding looks for.
+#[derive(Clone, Copy)]
+enum Expected<'a> {
+    /// Any; GOST scalars in the default form ([`default_form`]).
+    DefaultForm,
+    /// This public key.
+    Key(&'a PublicKey),
+    /// The public key with this key identifier.
+    KeyId(&'a [u8]),
+}
+
+impl Expected<'_> {
+    fn accepts(self, public: &PublicKey) -> bool {
+        match self {
+            Expected::DefaultForm => true,
+            Expected::Key(key) => key == public,
+            Expected::KeyId(id) => key_id_bytes(&public.to_spki()) == id,
+        }
+    }
+}
+
+fn decode_pkcs8(der: &[u8], expected: Expected<'_>) -> Result<PrivateKey, KeyError> {
+    let der = Zeroizing::new(ber::to_der(der).map_err(malformed)?);
+    let info = PrivateKeyInfoRef::from_der(&der).map_err(malformed)?;
+
+    if info.algorithm.oid == oid::RSA_ENCRYPTION {
+        let pair = ring::rsa::KeyPair::from_pkcs8(&der).map_err(malformed)?;
+        if !expected.accepts(&PublicKey::Rsa(pair.public().as_ref().to_vec())) {
+            return Err(KeyError::KeyMismatch);
+        }
+        return Ok(PrivateKey::Rsa(Arc::new(RsaKeyPair { pair, pkcs8: der })));
+    }
+
+    let params = info
+        .algorithm
+        .parameters
+        .map(|p| p.decode_as::<Vec<ObjectIdentifier>>());
+    let curve = gost_curve(&info.algorithm.oid, params)?;
+    if let Expected::Key(PublicKey::Rsa(_)) = expected {
+        return Err(KeyError::KeyMismatch);
+    }
+    let octets = info.private_key.as_bytes();
+    let candidates = scalar_candidates(curve, octets);
+    if let Expected::DefaultForm = expected {
+        let d = candidates
+            .into_iter()
+            .find(|c| c.form == default_form(curve, octets))
+            .ok_or_else(|| malformed("no GOST private key in the expected form"))?;
+        let key = SigningKey::from_scalar_be(curve, &d.be).map_err(malformed)?;
+        return Ok(PrivateKey::Gost(key));
+    }
+    candidates
+        .iter()
+        .filter_map(|c| SigningKey::from_scalar_be(curve, &c.be).ok())
+        .find(|k| expected.accepts(&PublicKey::Gost(k.verifying_key().clone())))
+        .map(PrivateKey::Gost)
+        .ok_or(KeyError::KeyMismatch)
 }
 
 /// Public key.
@@ -708,5 +752,34 @@ mod tests {
         assert_eq!(spki.algorithm.oid, oid::RSA_ENCRYPTION);
         assert_eq!(spki.algorithm.parameters, Some(Any::null()));
         assert_eq!(PublicKey::from_spki(&spki).unwrap(), key.public_key());
+    }
+
+    #[test]
+    fn key_id_picks_the_stored_form() {
+        for curve in CURVES {
+            let d = scalar(curve);
+            let public = PublicKey::Gost(
+                SigningKey::from_scalar_be(curve, &d)
+                    .unwrap()
+                    .verifying_key()
+                    .clone(),
+            );
+            let id = key_id_bytes(&public.to_spki());
+            // Raw big-endian octets: not the default form of either curve.
+            let der = pkcs8(curve, &d);
+            let key = PrivateKey::from_pkcs8_der_with_key_id(&der, &id).unwrap();
+            assert_eq!(key.public_key(), public, "{curve:?}");
+            assert_ne!(
+                PrivateKey::from_pkcs8_der(&der, None)
+                    .map(|k| k.public_key())
+                    .ok(),
+                Some(public),
+                "{curve:?}: the default form would read another scalar"
+            );
+            assert_eq!(
+                PrivateKey::from_pkcs8_der_with_key_id(&der, &[0; 20]).unwrap_err(),
+                KeyError::KeyMismatch
+            );
+        }
     }
 }

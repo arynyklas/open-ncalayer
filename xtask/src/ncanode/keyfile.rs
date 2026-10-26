@@ -43,7 +43,7 @@ pub(super) fn check(node: &Ncanode, issuers: &[Signer]) -> anyhow::Result<Vec<Ro
     for (spec, label, issuer) in [
         (KeySpec::Gost2015_512, "generated GOST 2015", gost2015),
         (KeySpec::Gost2004, "generated GOST 2004", gost2004),
-        (KeySpec::Rsa2048, "generated RSA", rsa),
+        (KeySpec::RsaSha256(2048), "generated RSA", rsa),
     ] {
         let dir = tempfile::Builder::new()
             .prefix("oncl-ncanode-keys-")

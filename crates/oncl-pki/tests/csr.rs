@@ -10,23 +10,19 @@ use oncl_pki::keystore::KeystoreError;
 use oncl_pki::oid;
 use oncl_pki::pkcs12::load;
 use oncl_testkit::{read, synthetic};
-use x509_cert::der::asn1::{Any, Ia5String, ObjectIdentifier, Utf8StringRef};
-use x509_cert::der::{Decode, Encode, Sequence, Tag, Tagged};
+use x509_cert::der::asn1::{Any, Ia5String, ObjectIdentifier};
+use x509_cert::der::{Decode, Encode, Tag, Tagged};
 use x509_cert::ext::pkix::SubjectAltName;
 use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::request::{CertReq, ExtensionReq};
 
 const NL: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 
-const SPECS: [KeySpec; 3] = [KeySpec::Gost2015_512, KeySpec::Gost2004, KeySpec::Rsa2048];
-
-/// `KeyStoreInfo ::= SEQUENCE { storage OID, path UTF8String OPTIONAL }`.
-#[derive(Sequence)]
-struct KeyStoreInfoAsn1<'a> {
-    storage: ObjectIdentifier,
-    #[asn1(optional = "true")]
-    path: Option<Utf8StringRef<'a>>,
-}
+const SPECS: [KeySpec; 3] = [
+    KeySpec::Gost2015_512,
+    KeySpec::Gost2004,
+    KeySpec::RsaSha256(2048),
+];
 
 fn oid(s: &str) -> ObjectIdentifier {
     ObjectIdentifier::new_unwrap(s)
@@ -169,9 +165,15 @@ fn generated_keys_sign_verifiable_requests() {
             ]
         );
         assert_eq!(exts[1].extn_id, oid("1.2.398.3.3.5"));
-        let info = KeyStoreInfoAsn1::from_der(exts[1].extn_value.as_bytes()).unwrap();
-        assert_eq!(info.storage, oid("1.2.398.3.3.5.1.1"));
-        assert_eq!(info.path.unwrap().as_str(), "C:\\Users\\Тест\\keys");
+        let info = KeyStoreInfo::from_der(exts[1].extn_value.as_bytes()).unwrap();
+        assert_eq!(info, pkcs12_info(Some("C:\\Users\\Тест\\keys")));
+        // SEQUENCE { OID, UTF8String }.
+        let path = "C:\\Users\\Тест\\keys".as_bytes();
+        let mut expected = vec![0x30, (12 + path.len()) as u8];
+        expected.extend(oid::STORAGE_PKCS12.to_der().unwrap());
+        expected.extend([0x0c, path.len() as u8]);
+        expected.extend(path);
+        assert_eq!(exts[1].extn_value.as_bytes(), expected);
     }
 }
 
@@ -219,6 +221,38 @@ fn keystore_info_alone_without_names() {
     let mut expected = vec![0x30, 0x0a];
     expected.extend(oid::STORAGE_PKCS12.to_der().unwrap());
     assert_eq!(exts[0].extn_value.as_bytes(), expected);
+}
+
+#[test]
+fn keystore_info_reads_as_kalkan_reads_it() {
+    let jks = oid("1.2.398.3.3.5.1.2");
+    let seq = |body: &[u8]| {
+        let mut der = vec![0x30, body.len() as u8];
+        der.extend(body);
+        der
+    };
+    let oid_der = jks.to_der().unwrap();
+    // A trailing element is ignored; a second element that is not a UTF8String is no path.
+    let trailing = [&oid_der[..], &[0x0c, 1, b'p', 0x05, 0]].concat();
+    assert_eq!(
+        KeyStoreInfo::from_der(&seq(&trailing)).unwrap(),
+        KeyStoreInfo {
+            storage_oid: jks,
+            path: Some("p".to_owned())
+        }
+    );
+    let integer = [&oid_der[..], &[0x02, 1, 1]].concat();
+    assert_eq!(KeyStoreInfo::from_der(&seq(&integer)).unwrap().path, None);
+    for bad in [vec![0x30, 0], seq(&[0x02, 1, 1]), oid_der.clone()] {
+        let err = KeyStoreInfo::from_der(&bad).unwrap_err();
+        assert!(matches!(err, KeystoreError::Malformed(_)), "{err:?}");
+        assert_eq!(err.provider_code(), None);
+    }
+    let info = pkcs12_info(Some("dir"));
+    assert_eq!(
+        KeyStoreInfo::from_der(&info.to_der().unwrap()).unwrap(),
+        info
+    );
 }
 
 #[test]
@@ -301,7 +335,11 @@ fn algorithms() {
     );
     assert_eq!(
         KeySpec::from_oid_len("1.2.840.113549.1.1.11", 2048),
-        Ok(KeySpec::Rsa2048)
+        Ok(KeySpec::RsaSha256(2048))
+    );
+    assert_eq!(
+        KeySpec::from_oid_len("1.2.840.113549.1.1.11", 4096),
+        Ok(KeySpec::RsaSha256(4096))
     );
     assert_eq!(
         KeySpec::from_oid_len("1.2.840.113549.1.1.5", 1024),
@@ -310,7 +348,20 @@ fn algorithms() {
     for unknown in ["1.2.398.3.10.1.1.2.3.1", "1.2.840.113549.1.1.1", "", "x"] {
         let err = KeySpec::from_oid_len(unknown, 2048).unwrap_err();
         assert_eq!(err, KeystoreError::UnknownAlgorithm);
-        assert_eq!(err.code(), "UNKNOWN_ALGORITHM");
+        assert_eq!(err.provider_code(), Some("UNKNOWN_ALGORITHM"));
+    }
+    // RSA moduli that ring cannot sign with.
+    for len in [0, 1024, 2047, 2560, 3000, 4097, 8192] {
+        assert_eq!(
+            KeySpec::from_oid_len("1.2.840.113549.1.1.11", len),
+            Err(KeystoreError::UnknownAlgorithm),
+            "{len}"
+        );
+        assert_eq!(
+            generate(KeySpec::RsaSha256(len)).unwrap_err(),
+            KeystoreError::UnknownAlgorithm,
+            "{len}"
+        );
     }
 
     // sha1WithRSA: no key, no request (SHA-1 signatures are refused).
@@ -318,7 +369,7 @@ fn algorithms() {
         generate(KeySpec::Rsa1Sha1(2048)).unwrap_err(),
         KeystoreError::UnknownAlgorithm
     );
-    let rsa = generate(KeySpec::Rsa2048).unwrap();
+    let rsa = generate(KeySpec::RsaSha256(2048)).unwrap();
     let request = CsrRequest {
         dn: &[],
         dns_names: &[],
@@ -334,6 +385,34 @@ fn algorithms() {
         build_csr(&rsa, KeySpec::Gost2015_512, &request).unwrap_err(),
         KeystoreError::UnknownAlgorithm
     );
+}
+
+#[test]
+fn rsa_keys_have_the_requested_length() {
+    for bits in [2048usize, 3072] {
+        let spec = KeySpec::from_oid_len("1.2.840.113549.1.1.11", bits as u32).unwrap();
+        let key = generate(spec).unwrap();
+        let PublicKey::Rsa(public) = key.public_key() else {
+            panic!("RSA key")
+        };
+        let rsa = RsaPublicKey::from_der(&public).unwrap();
+        assert_eq!(rsa.modulus.as_bytes().len() * 8, bits, "{bits}");
+        assert_eq!(rsa.public_exponent.as_bytes(), [1, 0, 1]);
+        let request = CsrRequest {
+            dn: &[(oid::COMMON_NAME, "RSA".to_owned())],
+            dns_names: &[],
+            email: None,
+            keystore_info: pkcs12_info(None),
+        };
+        verified(&build_csr(&key, spec, &request).unwrap(), spec);
+    }
+}
+
+/// `RSAPublicKey ::= SEQUENCE { modulus INTEGER, publicExponent INTEGER }`.
+#[derive(x509_cert::der::Sequence)]
+struct RsaPublicKey {
+    modulus: x509_cert::der::asn1::Uint,
+    public_exponent: x509_cert::der::asn1::Uint,
 }
 
 #[test]

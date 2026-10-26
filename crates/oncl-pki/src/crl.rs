@@ -31,7 +31,7 @@ pub use mock::MockCrl;
 use crate::asn1util::{Enumerated, unsigned};
 use crate::ber::{self, BerError};
 use crate::cert::Certificate;
-use crate::fsutil::write_atomically;
+use crate::fsutil::{Access, write_atomically};
 use crate::http::{GetOptions, HttpTransport};
 use crate::key::{PublicKey, SigAlg};
 use crate::oid;
@@ -397,7 +397,7 @@ impl CrlCache {
         if crl.tbs_cert_list.next_update.is_some() {
             // A cache that cannot be written only costs a download next time.
             let _ = fs::create_dir_all(&self.dir)
-                .and_then(|()| write_atomically(&self.path(url), &reply.body));
+                .and_then(|()| write_atomically(&self.path(url), &reply.body, Access::Default));
         }
         Ok(crl)
     }

@@ -71,14 +71,15 @@ pub fn load(pfx: &[u8], password: &str) -> Result<Vec<KeyEntry>, Pkcs12Error> {
     Ok(entries)
 }
 
-/// Opens a PKCS#12 key store like [`load`], keeping every key: a key that no certificate
-/// pairs with is read without one ([`PrivateKey::from_pkcs8_der`] with `cert = None`).
-/// Certificates that pair with no key are returned apart, in stored order.
+/// Opens a PKCS#12 key store like [`load`], keeping every key. A key that no certificate
+/// pairs with must carry a `localKeyId` (Kalkan writes the key identifier there): the key
+/// is the PKCS#8 form whose key identifier it is. Certificates that pair with no key are
+/// returned apart, in stored order.
 ///
 /// # Errors
 ///
 /// As [`load`]; also [`Pkcs12Error::Malformed`] / [`Pkcs12Error::Unsupported`] for a key
-/// without a certificate that cannot be read.
+/// without a certificate that has no `localKeyId`, matches none, or cannot be read.
 pub fn load_contents(pfx: &[u8], password: &str) -> Result<Contents, Pkcs12Error> {
     let (keys, certs) = bags(pfx, password)?;
     let mut paired = vec![false; certs.len()];
@@ -89,10 +90,20 @@ pub fn load_contents(pfx: &[u8], password: &str) -> Result<Contents, Pkcs12Error
                 paired[cert] = true;
                 (private, Some(certs[cert].cert.clone()))
             }
-            None => (
-                PrivateKey::from_pkcs8_der(&key.pkcs8, None).map_err(key_error)?,
-                None,
-            ),
+            None => {
+                let id = key.attrs.local_key_id.as_deref().ok_or_else(|| {
+                    Pkcs12Error::Malformed("key without certificate and localKeyId".into())
+                })?;
+                let private = PrivateKey::from_pkcs8_der_with_key_id(&key.pkcs8, id).map_err(
+                    |e| match e {
+                        KeyError::KeyMismatch => Pkcs12Error::Malformed(
+                            "key without certificate does not match its localKeyId".into(),
+                        ),
+                        e => key_error(e),
+                    },
+                )?;
+                (private, None)
+            }
         };
         stored.push(StoredKey {
             alias: key.alias(),
@@ -488,8 +499,13 @@ mod tests {
             ]
         );
 
-        // Without its certificate the key is still there.
-        let p12 = pfx(vec![key_bag(None), cert_bag("nca/prod/ncarsa22.der")]);
+        // Without its certificate the key is found by its localKeyId (the key identifier).
+        let rsa = PrivateKey::from_pkcs8_der(&read(fixture("openssl/rsa.pk8.der")), None).unwrap();
+        let id = crate::key::key_id_bytes(&rsa.public_key().to_spki());
+        let p12 = pfx(vec![
+            key_bag(Some(local_key_id(&id))),
+            cert_bag("nca/prod/ncarsa22.der"),
+        ]);
         let contents = load_contents(&p12, "").unwrap();
         assert_eq!(contents.keys.len(), 1);
         assert!(contents.keys[0].cert.is_none());
@@ -498,6 +514,24 @@ mod tests {
             read(fixture("openssl/rsa.pk8.der"))
         );
         assert_eq!(contents.other_certs.len(), 1);
+
+        // Without a localKeyId, or with another one, a keyless key is not guessed.
+        for attrs in [None, Some(local_key_id(&[0; 20]))] {
+            let p12 = pfx(vec![key_bag(attrs), cert_bag("nca/prod/ncarsa22.der")]);
+            assert!(matches!(
+                load_contents(&p12, ""),
+                Err(Pkcs12Error::Malformed(_))
+            ));
+        }
+    }
+
+    /// Bag attributes with `localKeyId` = `id`.
+    fn local_key_id(id: &[u8]) -> Any {
+        let attribute = Attribute {
+            oid: oid::LOCAL_KEY_ID,
+            values: Any::new(Tag::Set, octets(id.to_vec()).to_der().unwrap()).unwrap(),
+        };
+        Any::new(Tag::Set, attribute.to_der().unwrap()).unwrap()
     }
 
     #[test]

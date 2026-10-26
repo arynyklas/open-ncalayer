@@ -2,6 +2,7 @@
 //! installed later (found by SubjectKeyIdentifier in the directory), password changes.
 
 use oncl_pki::cert::Certificate;
+use oncl_pki::csr::KeyStoreInfo;
 use oncl_pki::key::{PrivateKey, PublicKey};
 use oncl_pki::keygen::{KeySpec, generate, key_id};
 use oncl_pki::keystore::{
@@ -17,9 +18,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tempfile::TempDir;
-use x509_cert::der::asn1::{ObjectIdentifier, OctetString, Utf8StringRef};
+use x509_cert::der::Encode;
+use x509_cert::der::asn1::{ObjectIdentifier, OctetString};
 use x509_cert::der::oid::AssociatedOid;
-use x509_cert::der::{Encode, Sequence};
 use x509_cert::ext::Extension;
 use x509_cert::ext::pkix::{ExtendedKeyUsage, KeyUsage, KeyUsages, SubjectKeyIdentifier};
 use x509_cert::name::Name;
@@ -27,13 +28,6 @@ use x509_cert::name::Name;
 const DEFAULT_PASSWORD: &str = "Default1";
 /// Storage OID of JKS key files.
 const STORAGE_JKS: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.398.3.3.5.1.2");
-
-#[derive(Sequence)]
-struct KeyStoreInfoAsn1<'a> {
-    storage: ObjectIdentifier,
-    #[asn1(optional = "true")]
-    path: Option<Utf8StringRef<'a>>,
-}
 
 /// What the test CA puts into a certificate.
 #[derive(Clone, Copy, Default)]
@@ -53,7 +47,7 @@ fn issuer(spec: KeySpec) -> KeyEntry {
     let name = match spec {
         KeySpec::Gost2015_512 => "user-gost2015-sign",
         KeySpec::Gost2004 => "user-gost2004-sign",
-        KeySpec::Rsa2048 | KeySpec::Rsa1Sha1(_) => "user-rsa-sign",
+        KeySpec::RsaSha256(_) | KeySpec::Rsa1Sha1(_) => "user-rsa-sign",
     };
     let fixture = synthetic(name);
     load(&read(&fixture.path), &fixture.password)
@@ -97,14 +91,16 @@ fn certificate_with_ski(
             &ExtendedKeyUsage(vec![oid::CLIENT_AUTH]),
         ));
     }
-    if let Some(storage) = profile.storage {
-        extensions.push(extension(
-            oid::KEYSTORE_INFO,
-            &KeyStoreInfoAsn1 {
-                storage,
-                path: Some(Utf8StringRef::new("C:\\keys").unwrap()),
-            },
-        ));
+    if let Some(storage_oid) = profile.storage {
+        let info = KeyStoreInfo {
+            storage_oid,
+            path: Some("C:\\keys".to_owned()),
+        };
+        extensions.push(Extension {
+            extn_id: oid::KEYSTORE_INFO,
+            critical: false,
+            extn_value: OctetString::new(info.to_der().unwrap()).unwrap(),
+        });
     }
     issue_cert(
         &issuer,
@@ -160,7 +156,7 @@ fn new_key_files_hold_the_key_alone() {
     for (spec, prefix) in [
         (KeySpec::Gost2015_512, "GOST512_"),
         (KeySpec::Gost2004, "GOSTKNCA_"),
-        (KeySpec::Rsa2048, "RSA256_"),
+        (KeySpec::RsaSha256(2048), "RSA256_"),
     ] {
         let (dir, key, path) = key_file(spec);
         let id = key_id(&key.public_key());
@@ -192,7 +188,7 @@ fn new_key_files_hold_the_key_alone() {
 #[test]
 fn key_file_prefix_for_sha1_rsa_and_mismatched_keys() {
     let dir = TempDir::new().unwrap();
-    let rsa = issuer(KeySpec::Rsa2048).key;
+    let rsa = issuer(KeySpec::RsaSha256(2048)).key;
     let path = create_key_file(dir.path(), &rsa, KeySpec::Rsa1Sha1(2048), "x").unwrap();
     let name = path.file_name().unwrap().to_str().unwrap();
     assert_eq!(name, format!("RSA_{}.p12", key_id(&rsa.public_key())));
@@ -201,13 +197,17 @@ fn key_file_prefix_for_sha1_rsa_and_mismatched_keys() {
         KeystoreError::UnknownAlgorithm
     );
     let missing = dir.path().join("missing");
-    let err = create_key_file(&missing, &rsa, KeySpec::Rsa2048, "x").unwrap_err();
+    let err = create_key_file(&missing, &rsa, KeySpec::RsaSha256(2048), "x").unwrap_err();
     assert!(matches!(err, KeystoreError::Io(_)), "{err:?}");
 }
 
 #[test]
 fn installed_certificate_pairs_with_the_key() {
-    for spec in [KeySpec::Gost2015_512, KeySpec::Gost2004, KeySpec::Rsa2048] {
+    for spec in [
+        KeySpec::Gost2015_512,
+        KeySpec::Gost2004,
+        KeySpec::RsaSha256(2048),
+    ] {
         let (dir, key, path) = key_file(spec);
         // Other files of the directory: another password, not PKCS#12, not a key file.
         let (_, other, _) = key_file(spec);
@@ -264,15 +264,15 @@ fn authentication_certificates_rename_the_file_unless_gost_2015() {
         auth: true,
         ..Profile::default()
     };
-    let (dir, key, path) = key_file(KeySpec::Rsa2048);
-    let cert = certificate(KeySpec::Rsa2048, &key, auth);
+    let (dir, key, path) = key_file(KeySpec::RsaSha256(2048));
+    let cert = certificate(KeySpec::RsaSha256(2048), &key, auth);
     let installed =
         install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12).unwrap();
     let name = path.file_name().unwrap().to_str().unwrap();
     assert_eq!(installed, dir.path().join(format!("AUTH_{name}")));
     assert!(!path.exists());
     let entries = load(&fs::read(&installed).unwrap(), DEFAULT_PASSWORD).unwrap();
-    assert_pair(&entries[0], KeySpec::Rsa2048);
+    assert_pair(&entries[0], KeySpec::RsaSha256(2048));
 
     // Installing again into the renamed file keeps its name.
     let again =
@@ -309,13 +309,16 @@ fn unsuited_storage() {
     let err =
         install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12).unwrap_err();
     assert_eq!(err, KeystoreError::UnsuitedStorage);
-    assert_eq!(err.code(), "UNSUITED_STORAGE");
+    assert_eq!(err.provider_code(), Some("UNSUITED_STORAGE"));
 
     // Without KeyStoreInfo any storage suits, but only PKCS#12 files are written.
     let cert = certificate(KeySpec::Gost2015_512, &key, Profile::default());
     let err = install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &STORAGE_JKS).unwrap_err();
     assert_eq!(err, KeystoreError::UnsupportedStorage);
-    assert_eq!(err.code(), "UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION");
+    assert_eq!(
+        err.provider_code(),
+        Some("UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION")
+    );
 }
 
 #[test]
@@ -333,7 +336,7 @@ fn inappropriate_certificate() {
     let err =
         install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12).unwrap_err();
     assert_eq!(err, KeystoreError::InappropriateCert);
-    assert_eq!(err.code(), "INAPPROPRIATE_CERT");
+    assert_eq!(err.provider_code(), Some("INAPPROPRIATE_CERT"));
     assert_eq!(fs::read(&path).unwrap(), before, "the file is not touched");
 }
 
@@ -345,7 +348,7 @@ fn keystore_file_not_found() {
     let alias = key_id(&stranger.public_key());
     let err =
         install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12).unwrap_err();
-    assert_eq!(err.code(), "KEYSTORE_FILE_NOT_FOUND");
+    assert_eq!(err.provider_code(), Some("KEYSTORE_FILE_NOT_FOUND"));
     assert_eq!(
         err.to_string(),
         format!(
@@ -386,7 +389,7 @@ fn certificate_without_subject_key_identifier() {
     let err =
         install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12).unwrap_err();
     assert_eq!(err, KeystoreError::ExtensionNotFound);
-    assert_eq!(err.code(), "EXTENSION_NOT_FOUND");
+    assert_eq!(err.provider_code(), Some("EXTENSION_NOT_FOUND"));
 }
 
 #[test]
@@ -397,7 +400,7 @@ fn change_password_after_install() {
 
     let err = change_password(&path, "Wrong123", "Secret123").unwrap_err();
     assert_eq!(err, KeystoreError::WrongPassword);
-    assert_eq!(err.code(), "WRONG_KEYSTORE_PASSWORD");
+    assert_eq!(err.provider_code(), Some("WRONG_KEYSTORE_PASSWORD"));
 
     change_password(&path, DEFAULT_PASSWORD, "Secret123").unwrap();
     let p12 = fs::read(&path).unwrap();
@@ -423,7 +426,7 @@ fn change_password_keeps_keyless_keys_and_other_certificates() {
     assert_eq!(contents.keys[0].key.public_key(), key.public_key());
 
     // Certificates that pair with no key (here a CA certificate) stay.
-    let entry = issuer(KeySpec::Rsa2048);
+    let entry = issuer(KeySpec::RsaSha256(2048));
     let ca = read(oncl_testkit::fixture("nca/prod/ncarsa22.der"));
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("store.p12");
@@ -463,7 +466,7 @@ fn change_password_needs_a_key() {
     fs::write(&path, &p12).unwrap();
     let err = change_password(&path, DEFAULT_PASSWORD, "Secret123").unwrap_err();
     assert_eq!(err, KeystoreError::ChangePasswordConstraint);
-    assert_eq!(err.code(), "CHANGE_PASSWORD_CONSTRAINT");
+    assert_eq!(err.provider_code(), Some("CHANGE_PASSWORD_CONSTRAINT"));
     assert_eq!(fs::read(&path).unwrap(), p12);
 
     let err = change_password(
@@ -503,7 +506,7 @@ fn password_pattern() {
             KeystoreError::WrongPasswordPattern { empty: false },
             "{bad}"
         );
-        assert_eq!(err.code(), "WRONG_PASSWORD_PATTERN");
+        assert_eq!(err.provider_code(), Some("WRONG_PASSWORD_PATTERN"));
     }
 
     // The pattern is checked before the file is even read.
@@ -512,4 +515,62 @@ fn password_pattern() {
     let err = change_password(&path, "Wrong123", "short").unwrap_err();
     assert_eq!(err, KeystoreError::WrongPasswordPattern { empty: false });
     assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[cfg(unix)]
+mod unix {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn key_files_stay_owner_only() {
+        let (dir, key, path) = key_file(KeySpec::Gost2015_512);
+        assert_eq!(mode(&path), 0o600, "a new key file");
+
+        let cert = certificate(KeySpec::Gost2015_512, &key, Profile::default());
+        install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12).unwrap();
+        assert_eq!(mode(&path), 0o600, "after install_certificate");
+        change_password(&path, DEFAULT_PASSWORD, "Secret123").unwrap();
+        assert_eq!(mode(&path), 0o600, "after change_password");
+
+        // A key file someone made world-readable is owner-only again once rewritten.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        change_password(&path, "Secret123", "Secret456").unwrap();
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn non_utf8_key_file_names_keep_their_name_under_auth() {
+        let (dir, key, path) = key_file(KeySpec::RsaSha256(2048));
+        let name = OsStr::from_bytes(b"RSA256_\xff\xfe.p12");
+        let odd = dir.path().join(name);
+        fs::rename(&path, &odd).unwrap();
+        let cert = certificate(
+            KeySpec::RsaSha256(2048),
+            &key,
+            Profile {
+                auth: true,
+                ..Profile::default()
+            },
+        );
+        let installed =
+            install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12).unwrap();
+        assert_eq!(
+            installed.file_name().unwrap().as_bytes(),
+            b"AUTH_RSA256_\xff\xfe.p12"
+        );
+        assert_eq!(mode(&installed), 0o600);
+        assert_eq!(
+            load(&fs::read(&installed).unwrap(), DEFAULT_PASSWORD)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 }

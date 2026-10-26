@@ -10,8 +10,10 @@ use oncl_gost::{CurveId, SigningKey};
 use rsa::pkcs8::EncodePrivateKey;
 use rsa::rand_core::{self, CryptoRng, RngCore};
 
-/// Modulus size of the RSA keys for sha256WithRSA.
-const RSA_BITS: usize = 2048;
+/// Modulus sizes of RSA keys for sha256WithRSA. The original passes the request's `length`
+/// to the key pair generator; `ring`, which signs with the key, takes moduli of 2048 to 4096
+/// bits whose primes are multiples of 512 bits, so these three.
+const RSA_BITS: [u32; 3] = [2048, 3072, 4096];
 
 /// The key (and signature algorithm) of a certificate request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,27 +22,31 @@ pub enum KeySpec {
     Gost2015_512,
     /// GOST 34.310-2004 (`1.2.398.3.10.1.1.1.2`).
     Gost2004,
-    /// RSA-2048 with sha256WithRSA (`1.2.840.113549.1.1.11`).
-    Rsa2048,
+    /// RSA with sha256WithRSA (`1.2.840.113549.1.1.11`), modulus of 2048, 3072 or 4096
+    /// bits.
+    RsaSha256(u32),
     /// RSA of the given modulus size with sha1WithRSA (`1.2.840.113549.1.1.5`). Accepted
-    /// as an algorithm (key files get the `RSA_` prefix), but no key is generated and no
-    /// request signed for it: SHA-1 signatures are refused.
+    /// as an algorithm (key files get the `RSA_` prefix), but refused for keys and requests
+    /// with [`KeystoreError::UnknownAlgorithm`]: its request needs a SHA-1 signature, which
+    /// OpenNCALayer never makes (the original generates such keys; the NCA no longer issues
+    /// sha1WithRSA certificates).
     Rsa1Sha1(u32),
 }
 
 impl KeySpec {
-    /// The spec of a request's `algorithm` OID and `length`. The length only matters for
-    /// sha1WithRSA: GOST keys have fixed sizes and sha256WithRSA keys are 2048-bit.
+    /// The spec of a request's `algorithm` OID and `length`. GOST keys have fixed sizes, so
+    /// the length is ignored for them; for sha256WithRSA it is the modulus size.
     ///
     /// # Errors
     ///
-    /// [`KeystoreError::UnknownAlgorithm`] for any other OID.
+    /// [`KeystoreError::UnknownAlgorithm`] for any other OID, and for sha256WithRSA with a
+    /// length other than 2048, 3072 or 4096.
     pub fn from_oid_len(oid: &str, len: u32) -> Result<KeySpec, KeystoreError> {
         let oid = ObjectIdentifier::new(oid).map_err(|_| KeystoreError::UnknownAlgorithm)?;
         match oid {
             oid::GOST_2015_512_SIGNATURE => Ok(KeySpec::Gost2015_512),
             oid::GOST_2004_SIGNATURE => Ok(KeySpec::Gost2004),
-            oid::SHA256_WITH_RSA => Ok(KeySpec::Rsa2048),
+            oid::SHA256_WITH_RSA if RSA_BITS.contains(&len) => Ok(KeySpec::RsaSha256(len)),
             oid::SHA1_WITH_RSA => Ok(KeySpec::Rsa1Sha1(len)),
             _ => Err(KeystoreError::UnknownAlgorithm),
         }
@@ -51,7 +57,7 @@ impl KeySpec {
         match self {
             KeySpec::Gost2015_512 => SigAlg::Gost2015_512,
             KeySpec::Gost2004 => SigAlg::Gost2004,
-            KeySpec::Rsa2048 => SigAlg::RsaSha256,
+            KeySpec::RsaSha256(_) => SigAlg::RsaSha256,
             KeySpec::Rsa1Sha1(_) => SigAlg::RsaSha1,
         }
     }
@@ -61,7 +67,7 @@ impl KeySpec {
         match self {
             KeySpec::Gost2015_512 => "GOST512_",
             KeySpec::Gost2004 => "GOSTKNCA_",
-            KeySpec::Rsa2048 => "RSA256_",
+            KeySpec::RsaSha256(_) => "RSA256_",
             KeySpec::Rsa1Sha1(_) => "RSA_",
         }
     }
@@ -73,8 +79,8 @@ impl KeySpec {
 ///
 /// # Errors
 ///
-/// [`KeystoreError::UnknownAlgorithm`] for [`KeySpec::Rsa1Sha1`]: its request would need a
-/// SHA-1 signature.
+/// [`KeystoreError::UnknownAlgorithm`] for [`KeySpec::Rsa1Sha1`] (see there) and for an RSA
+/// modulus size other than 2048, 3072 or 4096.
 ///
 /// # Panics
 ///
@@ -85,13 +91,14 @@ pub fn generate(spec: KeySpec) -> Result<PrivateKey, KeystoreError> {
         KeySpec::Gost2004 => Ok(PrivateKey::Gost(SigningKey::generate(
             CurveId::Pkigovkz2004A,
         ))),
-        KeySpec::Rsa2048 => {
-            let key = rsa::RsaPrivateKey::new(&mut OsRng, RSA_BITS).expect("RSA key generation");
+        KeySpec::RsaSha256(bits) if RSA_BITS.contains(&bits) => {
+            let key =
+                rsa::RsaPrivateKey::new(&mut OsRng, bits as usize).expect("RSA key generation");
             let pkcs8 = key.to_pkcs8_der().expect("RSA PKCS#8 encodes");
             Ok(PrivateKey::from_pkcs8_der(pkcs8.as_bytes(), None)
-                .expect("ring reads a generated RSA-2048 key"))
+                .expect("ring reads a generated RSA key of a supported size"))
         }
-        KeySpec::Rsa1Sha1(_) => Err(KeystoreError::UnknownAlgorithm),
+        KeySpec::RsaSha256(_) | KeySpec::Rsa1Sha1(_) => Err(KeystoreError::UnknownAlgorithm),
     }
 }
 
