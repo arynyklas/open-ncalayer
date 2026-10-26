@@ -926,7 +926,7 @@ fn param_errors() {
     );
     assert_eq!(
         details(raw_args(json!(["a", 1]), json!({}))),
-        "org.json.JSONException: JSONArray[1] is not a string."
+        "org.json.JSONException: JSONArray[1] is not a String."
     );
 }
 

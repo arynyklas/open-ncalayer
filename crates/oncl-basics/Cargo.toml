@@ -35,6 +35,15 @@ tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 tracing-subscriber.workspace = true
 
+[target.'cfg(windows)'.dev-dependencies]
+# A named pipe server for the test that a chosen network pipe is refused by `GetFileType`.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+] }
+
 [[test]]
 name = "essentials"
 required-features = ["testing"]

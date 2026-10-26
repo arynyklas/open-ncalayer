@@ -1092,12 +1092,10 @@ fn pipes_and_devices_are_refused_without_blocking() {
     ] {
         check(&path, Duration::from_secs(2));
     }
-    // The same pipe through the network redirector, when the system offers it: whatever
-    // opens must be a disk file.
-    check(
-        &format!(r"\\localhost\pipe\{name}"),
-        Duration::from_secs(30),
-    );
+    // The same pipe through the network redirector: a page may not name a network path,
+    // so it is refused before anything is opened. (A user-chosen network path is opened;
+    // the `GetFileType` guard that refuses such a pipe is tested in `oncl-basics`.)
+    check(&format!(r"\\localhost\pipe\{name}"), Duration::from_secs(2));
     assert!(s.prompter.storage_prompts().is_empty());
 
     // `\\?\` before a drive path is an ordinary file.

@@ -730,3 +730,29 @@ mod unix {
         );
     }
 }
+
+#[cfg(windows)]
+mod windows {
+    use super::*;
+
+    /// Windows resolves `..` lexically, so `<key file>\a\..` reads the key file; rewriting
+    /// it through that path must fail and keep the key file.
+    #[test]
+    fn change_password_through_dot_dot_keeps_the_key_file() {
+        let (dir, _, path) = key_file(KeySpec::Gost2015_512);
+        let before = fs::read(&path).unwrap();
+        let mut through = path.as_os_str().to_owned();
+        through.push(r"\a\..");
+        let through = Path::new(&through);
+        assert_eq!(
+            fs::read(through).unwrap(),
+            before,
+            "Windows opens the key file"
+        );
+
+        let err = change_password(through, DEFAULT_PASSWORD, "Secret123").unwrap_err();
+        assert!(matches!(err, KeystoreError::Io(_)), "{err:?}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(file_names(dir.path()).len(), 1, "no temporary file left");
+    }
+}

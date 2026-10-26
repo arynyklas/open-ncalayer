@@ -13,7 +13,7 @@ use oncl_pki::cert::Certificate;
 use oncl_pki::csr::KeyStoreInfo;
 use oncl_pki::info::cert_info;
 use oncl_pki::key::{PublicKey, SigAlg};
-use oncl_pki::keygen::key_id;
+use oncl_pki::keygen::{MAX_KEYS_PER_REQUEST, key_id};
 use oncl_pki::oid;
 use oncl_pki::pkcs12::{KeyEntry, load, load_contents};
 use oncl_pki::testing::{TestCertSpec, issue_cert};
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
 use tempfile::TempDir;
 use x509_cert::ext::Extension;
-use x509_cert::ext::pkix::{KeyUsage, KeyUsages, SubjectKeyIdentifier};
+use x509_cert::ext::pkix::{ExtendedKeyUsage, KeyUsage, KeyUsages, SubjectKeyIdentifier};
 use x509_cert::request::{CertReq, ExtensionReq};
 
 const GOST2015: &str = "1.2.398.3.10.1.1.2.3.2";
@@ -162,16 +162,49 @@ fn extension(extn_id: der::asn1::ObjectIdentifier, value: &impl Encode) -> Exten
 /// extensions, SubjectKeyIdentifier = the key identifier, issued by a synthetic GOST 2015
 /// key.
 fn issue(req: &CertReq, serial: &[u8]) -> Certificate {
-    let issuer = entry("user-gost2015-sign");
+    issue_by(
+        "user-gost2015-sign",
+        req,
+        serial,
+        KeyUsages::DigitalSignature | KeyUsages::NonRepudiation,
+        &[],
+    )
+}
+
+/// An authentication certificate on `req` (digitalSignature + keyEncipherment,
+/// clientAuth) signed with sha256WithRSA, which the original names `AUTH_` key files for.
+fn issue_auth(req: &CertReq, serial: &[u8]) -> Certificate {
+    issue_by(
+        "user-rsa-sign",
+        req,
+        serial,
+        KeyUsages::DigitalSignature | KeyUsages::KeyEncipherment,
+        &[oid::CLIENT_AUTH],
+    )
+}
+
+/// A certificate on `req` issued by the synthetic key `issuer` (whose algorithm signs
+/// it), with `usages` and the extended key usages `eku` (none: no extension).
+fn issue_by(
+    issuer: &str,
+    req: &CertReq,
+    serial: &[u8],
+    usages: der::flagset::FlagSet<KeyUsages>,
+    eku: &[der::asn1::ObjectIdentifier],
+) -> Certificate {
+    let issuer = entry(issuer);
     let public = PublicKey::from_spki(&req.info.public_key).unwrap();
     let ski = SubjectKeyIdentifier(OctetString::new(hex_decode(&key_id(&public))).unwrap());
     let mut extensions = vec![
         extension(SubjectKeyIdentifier::OID, &ski),
-        extension(
-            KeyUsage::OID,
-            &KeyUsage(KeyUsages::DigitalSignature | KeyUsages::NonRepudiation),
-        ),
+        extension(KeyUsage::OID, &KeyUsage(usages)),
     ];
+    if !eku.is_empty() {
+        extensions.push(extension(
+            ExtendedKeyUsage::OID,
+            &ExtendedKeyUsage(eku.to_vec()),
+        ));
+    }
     extensions.extend(request_extensions(req));
     issue_cert(
         &issuer,
@@ -276,12 +309,10 @@ fn two_params_make_two_requests_and_two_key_files() {
 
 #[test]
 fn cancel_answers_empty_and_writes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
     let (b, p) = basics(vec![Step::CancelCsr]);
     let r = essentials(&b, "generateCsr", csr_args(json!([gost2015()])));
     assert_eq!(r, json!({"status": true, "body": {}}));
     assert_eq!(p.csr_prompts().len(), 1);
-    assert!(files(dir.path()).is_empty());
 
     // An installed certificate's key file is left alone when the import is cancelled.
     let (dir, file, req) = generated(DEFAULT_PASSWORD);
@@ -376,6 +407,20 @@ fn csr_argument_errors_come_before_the_dialog() {
                 "org.json.JSONException: JSONObject[\"length\"] not found.".to_owned(),
             ),
         ),
+        (
+            json!({"omittedKeyIds": ["a", 1]}),
+            (
+                "INVOCATION_ERROR".to_owned(),
+                "org.json.JSONException: JSONArray[1] is not a String.".to_owned(),
+            ),
+        ),
+        (
+            json!({"params": vec![gost2015(); MAX_KEYS_PER_REQUEST + 1]}),
+            (
+                "INVOCATION_ERROR".to_owned(),
+                "java.lang.IllegalArgumentException: too many keys requested".to_owned(),
+            ),
+        ),
     ];
     for (patch, (code, details)) in cases {
         let mut args = csr_args(json!([gost2015()]));
@@ -393,6 +438,43 @@ fn csr_argument_errors_come_before_the_dialog() {
         assert_eq!((got_code, got_details), (code, details), "{patch}");
         assert!(p.csr_prompts().is_empty(), "{patch}: no dialog");
     }
+}
+
+/// A request may generate [`MAX_KEYS_PER_REQUEST`] keys; one more is refused before the
+/// dialog (above).
+#[test]
+fn at_most_sixteen_keys_per_request() {
+    assert_eq!(MAX_KEYS_PER_REQUEST, 16);
+    let dir = tempfile::tempdir().unwrap();
+    let (b, _) = basics(vec![csr_step(dir.path())]);
+    let gost2004 = json!({"algorithm": GOST2004, "length": 256});
+    let r = essentials(
+        &b,
+        "generateCsr",
+        csr_args(json!(vec![gost2004; MAX_KEYS_PER_REQUEST])),
+    );
+    assert_eq!(r["status"], true, "{r}");
+    assert_eq!(
+        r["body"]["pems"].as_array().unwrap().len(),
+        MAX_KEYS_PER_REQUEST
+    );
+    assert_eq!(files(dir.path()).len(), MAX_KEYS_PER_REQUEST);
+}
+
+/// The dialog answers with a storage the page did not offer: nothing is generated.
+#[test]
+fn csr_answer_must_name_an_offered_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let (b, p) = basics(vec![csr_step(dir.path())]);
+    let mut args = csr_args(json!([gost2015()]));
+    args["allowedStorages"] = json!(["AKKaztokenStore"]);
+    let (code, _, _) = failure(&essentials(&b, "generateCsr", args));
+    assert_eq!(code, "UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION");
+    assert_eq!(
+        p.csr_prompts()[0].storages,
+        [StorageKind::Token("AKKaztokenStore")]
+    );
+    assert!(files(dir.path()).is_empty());
 }
 
 #[test]
@@ -508,6 +590,86 @@ fn full_cycle_generate_issue_import_sign() {
     assert_eq!(signers.len(), 1);
 }
 
+/// The NCA portal's flow: an authentication (RSA, clientAuth) and a signing certificate
+/// imported in one call. The authentication key file is renamed `AUTH_…` and its password
+/// is changed under the new name; both files end up with the user's password.
+#[test]
+fn auth_and_sign_certificates_import_in_one_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let (b, _) = basics(vec![csr_step(dir.path())]);
+    let r = essentials(
+        &b,
+        "generateCsr",
+        csr_args(json!([
+            {"algorithm": "1.2.840.113549.1.1.11", "length": 2048},
+            gost2015(),
+        ])),
+    );
+    assert_eq!(r["status"], true, "{r}");
+    let pems = r["body"]["pems"].as_array().unwrap();
+    let auth_req = request(pems[0].as_str().unwrap());
+    let sign_req = request(pems[1].as_str().unwrap());
+    let auth = issue_auth(&auth_req, &[0x41, 0x07, 0x01]);
+    let sign = issue(&sign_req, &[0x41, 0x07, 0x02]);
+    let auth_name = format!(
+        "AUTH_RSA256_{}.p12",
+        key_id(&PublicKey::from_spki(&auth_req.info.public_key).unwrap())
+    );
+    let sign_name = format!(
+        "GOST512_{}.p12",
+        key_id(&PublicKey::from_spki(&sign_req.info.public_key).unwrap())
+    );
+
+    let (b, p) = basics(vec![import_step(dir.path(), NEW_PASSWORD)]);
+    let r = essentials(
+        &b,
+        "importCertificate",
+        import_args(dir.path(), &[&auth, &sign]),
+    );
+    assert_eq!(r, json!({"status": true, "body": {"result": true}}));
+    assert_eq!(
+        p.import_prompts()[0].certificates,
+        [cert_info(&auth), cert_info(&sign)]
+    );
+    // `AUTH_…` sorts before `GOST512_…`.
+    assert_eq!(files(dir.path()), [auth_name.as_str(), sign_name.as_str()]);
+    for (name, cert) in [(&auth_name, &auth), (&sign_name, &sign)] {
+        let p12 = read(dir.path().join(name));
+        assert!(load_contents(&p12, DEFAULT_PASSWORD).is_err(), "{name}");
+        let entries = load(&p12, NEW_PASSWORD).unwrap();
+        assert_eq!(entries.len(), 1, "{name}");
+        assert_eq!(&entries[0].cert, cert, "{name}");
+    }
+}
+
+/// A `keystorePath` a page may not name is not shown in the dialog, so Browse and Confirm
+/// never reach a host the page chose; a local one is.
+#[test]
+fn network_keystore_path_does_not_prefill_the_import_dialog() {
+    let (dir, _, req) = generated(DEFAULT_PASSWORD);
+    let cert = issue(&req, &[0x41, 0x08]);
+    let mut refused = vec!["//host/share", "//host/share/keys", ""];
+    if cfg!(windows) {
+        refused.extend([
+            r"\\host\share",
+            r"\\?\UNC\host\share",
+            r"\\.\pipe\keys",
+            r"\\?\GLOBALROOT\Device\Null",
+        ]);
+    }
+    for path in refused {
+        let mut args = import_args(dir.path(), &[&cert]);
+        args["keystorePath"] = json!(path);
+        let (b, p) = basics(vec![Step::CancelImport]);
+        let r = essentials(&b, "importCertificate", args);
+        assert_eq!(r, json!({"status": true, "body": {}}), "{path}");
+        assert_eq!(p.import_prompts()[0].path, None, "{path}");
+    }
+    let (b, p) = basics(vec![Step::CancelImport]);
+    essentials(&b, "importCertificate", import_args(dir.path(), &[&cert]));
+    assert_eq!(p.import_prompts()[0].path.as_deref(), Some(dir.path()));
+}
+
 /// The folder the user picks is searched whole, as the original searches it: the key file
 /// is found behind more key files than a page-named folder is searched for.
 #[test]
@@ -571,12 +733,13 @@ fn provider_errors_name_the_certificate_serial() {
     assert_eq!(code, "KEYSTORE_FILE_NOT_FOUND");
     assert!(message.starts_with("[4105a0] "), "{message}");
 
-    // JKS is read-only.
+    // JKS is read-only; the certificate's own checks come first, as in the original, and
+    // its KeyStoreInfo names PKCS#12.
     let mut args = import_args(dir.path(), &[&cert]);
     args["allowedStorage"] = json!("JKS");
     let (b, p) = basics(vec![import_step(dir.path(), NEW_PASSWORD)]);
     let (code, message, _) = failure(&essentials(&b, "importCertificate", args));
-    assert_eq!(code, "UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION");
+    assert_eq!(code, "UNSUITED_STORAGE");
     assert!(message.starts_with("[4105a0] "), "{message}");
     assert_eq!(p.import_prompts()[0].storage, StorageKind::Jks);
 

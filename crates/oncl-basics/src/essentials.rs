@@ -5,11 +5,16 @@
 //! lock.
 //!
 //! Only PKCS#12 key files are written. Hardware tokens and JKS are shown but cannot be picked
-//! (an answer naming them fails with UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION), so
-//! `omittedKeyIds` and the ID card's key bookkeeping never apply. Deviations from the
-//! original:
+//! (an answer naming them fails with UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION; a JKS import
+//! first runs the certificate's own checks, so a certificate for PKCS#12 is
+//! UNSUITED_STORAGE, as in the original), so `omittedKeyIds` and the ID card's key
+//! bookkeeping never apply. Deviations from the original:
 //! - `params` are read before the dialog: a bad entry or algorithm fails the request with the
-//!   original's code without asking (the original asks first, then fails);
+//!   original's code without asking (the original asks first, then fails); more than
+//!   [`MAX_KEYS_PER_REQUEST`] entries are an INVOCATION_ERROR (`IllegalArgumentException:
+//!   too many keys requested`; the original has no limit);
+//! - a `keystorePath` a page may not name (a network or device path) does not pre-fill the
+//!   import dialog;
 //! - without a `defaultPassword` the dialog asks for the key file password (the original
 //!   cannot be confirmed then);
 //! - the new password's pattern is checked before the first certificate is installed, so a
@@ -17,6 +22,7 @@
 //! - key files are only created in an existing folder given by an absolute path;
 //! - the page's `defaultPassword` and the chosen folder are never logged.
 
+use crate::page_file::local_page_path;
 use crate::prompt::{CsrPrompt, ImportPrompt, Locale, Prompt, StorageKind};
 use crate::sign::{
     UNIDENTIFIED, get_array, get_string, json_exception, not_found, parse_pem_or_base64,
@@ -27,7 +33,7 @@ use der::asn1::ObjectIdentifier;
 use oncl_pki::cert::Certificate;
 use oncl_pki::csr::{CsrRequest, KeyStoreInfo, build_csr};
 use oncl_pki::info::cert_info;
-use oncl_pki::keygen::{KeySpec, generate};
+use oncl_pki::keygen::{KeySpec, MAX_KEYS_PER_REQUEST, generate};
 use oncl_pki::keystore::{
     KeystoreError, change_password, check_password_pattern, create_key_file, install_certificate,
 };
@@ -36,7 +42,7 @@ use oncl_protocol::AddInfo;
 use oncl_protocol::invoker::{CallResult, Failure};
 use oncl_protocol::orgjson::{int_value, opt_string};
 use serde_json::{Map, Value, json};
-use std::path::PathBuf;
+use std::path::Path;
 use zeroize::Zeroizing;
 
 const CSR_GENERATING_FAILURE: &str = "CSR_GENERATING_FAILURE";
@@ -47,6 +53,8 @@ const INVALID_IMPORTING_CERTIFICATE: &str = "INVALID_IMPORTING_CERTIFICATE";
 const INVALID_IMPORTING_CERTIFICATE_MESSAGE: &str = "Importing certificate is invalid.";
 /// The original's message when `subjectAltNames` lacks the subject's CN.
 const SAN_WITHOUT_CN: &str = "java.lang.IllegalArgumentException: Subject alternative names do not contain corresponding common name";
+/// Over [`MAX_KEYS_PER_REQUEST`] `params` entries.
+const TOO_MANY_KEYS: &str = "java.lang.IllegalArgumentException: too many keys requested";
 
 /// `PKIEssentials.generateCsr`: `{"pems": [...]}`, one request (and key file) per `params`
 /// entry; `{}` if the user cancels.
@@ -142,7 +150,11 @@ pub(crate) fn import_certificate(
         origin: origin(add_info),
         locale: locale(args),
         storage,
-        path: (!keystore_path.is_empty()).then(|| PathBuf::from(keystore_path)),
+        // Like every path a page names: a network or device path is not shown, so the
+        // dialog never browses or opens a host the page chose.
+        path: local_page_path(&keystore_path)
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(Path::to_path_buf),
         certificates: certificates.iter().map(cert_info).collect(),
     };
     let answer = match basics.prompter.import_cert(&prompt) {
@@ -153,8 +165,13 @@ pub(crate) fn import_certificate(
         storage = storage.name(),
         "importCertificate: installing certificates"
     );
-    // Only PKCS#12 key files are written; tokens cannot be picked yet.
-    let storage_oid = (storage == StorageKind::Pkcs12).then_some(oid::STORAGE_PKCS12);
+    // Only PKCS#12 key files are written: JKS is refused by `install_certificate` after the
+    // certificate's own checks, as the original orders them; tokens cannot be picked yet.
+    let storage_oid = match storage {
+        StorageKind::Pkcs12 => Some(oid::STORAGE_PKCS12),
+        StorageKind::Jks => Some(oid::STORAGE_JKS),
+        StorageKind::Token(_) => None,
+    };
     for (cert, info) in certificates.iter().zip(&prompt.certificates) {
         let serial = info.serial_hex.as_str();
         let fail = |e: KeystoreError| import_failure(serial, e);
@@ -226,11 +243,14 @@ impl CsrArgs {
             }
         }
         let params = get_array(args, "params")?;
+        if params.len() > MAX_KEYS_PER_REQUEST {
+            return Err(Failure::Invocation(Some(TOO_MANY_KEYS.to_owned())));
+        }
         // Token bookkeeping only; the original reads the entries with `getString`.
         if let Some(Value::Array(ids)) = args.get("omittedKeyIds")
             && let Some(i) = ids.iter().position(|id| !id.is_string())
         {
-            return Err(json_exception(format!("JSONArray[{i}] is not a string.")));
+            return Err(json_exception(format!("JSONArray[{i}] is not a String.")));
         }
         let specs = params
             .iter()

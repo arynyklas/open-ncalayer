@@ -74,7 +74,8 @@ const SIGNED_BOUNDS: Bounds = Bounds {
 ///
 /// [`XmlError::TooLarge`] for input over [`MAX_INPUT`], [`MAX_NODES`], [`MAX_ATTRIBUTES`] or
 /// the parse work bounds, [`XmlError::TooDeep`], [`XmlError::Doctype`], or
-/// [`XmlError::Parse`] for input that is not well-formed namespace-aware UTF-8 XML.
+/// [`XmlError::Parse`] for input that is not well-formed namespace-aware UTF-8 XML (an
+/// attribute with a prefix and the local name `xmlns` included).
 pub(crate) fn parse(xml: &[u8]) -> Result<Document<'_>, XmlError> {
     if xml.len() > MAX_INPUT {
         return Err(XmlError::TooLarge);
@@ -357,7 +358,7 @@ mod tests {
         // roxmltree takes `p:xmlns` for a default namespace declaration and copies every
         // namespace in scope into the element: 15 ms per element under 5 000 namespaces.
         let declarations: String = (0..5_000).map(|i| format!(" xmlns:n{i}='u{i}'")).collect();
-        for attribute in ["n1:xmlns", "a:xmlns", "xml:xmlns"] {
+        for attribute in ["n1:xmlns", "a:xmlns", "xml:xmlns", ":xmlns"] {
             let children = format!("<c {attribute}='z'/>").repeat(20_000);
             let xml = format!("<r{declarations}>{children}</r>");
             let started = std::time::Instant::now();

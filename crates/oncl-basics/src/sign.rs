@@ -164,7 +164,7 @@ impl<'a> SignRequest<'a> {
                 .enumerate()
                 .map(|(i, item)| {
                     item.as_str()
-                        .ok_or_else(|| json_exception(format!("JSONArray[{i}] is not a string.")))
+                        .ok_or_else(|| json_exception(format!("JSONArray[{i}] is not a String.")))
                 })
                 .collect::<Result<_, _>>()?,
             _ => vec![get_string(args, "data")?],

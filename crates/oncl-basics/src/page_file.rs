@@ -238,4 +238,72 @@ mod tests {
             );
         }
     }
+
+    /// A pipe reached through the network redirector (`\\localhost\pipe\…`) passes the
+    /// metadata step as an empty regular file, so `GetFileType` is what refuses it before a
+    /// read that would block forever. Each step opens a pipe instance, so several listen.
+    /// Skipped when the system offers no redirector.
+    #[cfg(windows)]
+    #[test]
+    fn chosen_network_pipe_is_refused_by_its_file_type() {
+        use std::time::Duration;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+        use windows_sys::Win32::System::Pipes::{
+            CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        };
+
+        // Listening instances that never answer: reading from one blocks forever.
+        let name = format!("oncl-basics-test-{}", std::process::id());
+        let wide: Vec<u16> = format!(r"\\.\pipe\{name}")
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        let servers: Vec<_> = (0..8)
+            .map(|_| {
+                // SAFETY: a valid NUL-terminated name and no security attributes.
+                let server = unsafe {
+                    CreateNamedPipeW(
+                        wide.as_ptr(),
+                        PIPE_ACCESS_DUPLEX,
+                        PIPE_TYPE_BYTE | PIPE_WAIT,
+                        PIPE_UNLIMITED_INSTANCES,
+                        4096,
+                        4096,
+                        0,
+                        std::ptr::null(),
+                    )
+                };
+                assert_ne!(server, INVALID_HANDLE_VALUE);
+                server
+            })
+            .collect();
+
+        let path = PathBuf::from(format!(r"\\localhost\pipe\{name}"));
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                // What `read_file` sees before it opens the file.
+                assert!(meta.is_file() && meta.len() == 0, "{meta:?}");
+                let file = std::fs::File::open(&path).unwrap();
+                assert!(!is_disk_file(&file), "the redirector hands out the pipe");
+                drop(file);
+
+                let (done, finished) = std::sync::mpsc::channel();
+                let chosen = path.clone();
+                std::thread::spawn(move || {
+                    let _ = done.send(PageFile::read_chosen(&chosen).err());
+                });
+                assert_eq!(
+                    finished.recv_timeout(Duration::from_secs(10)),
+                    Ok(Some(PageFileError::NotFound)),
+                    "refused at once, not read"
+                );
+            }
+            Err(e) => eprintln!("skipped: {} is not reachable: {e}", path.display()),
+        }
+        for server in servers {
+            // SAFETY: each handle is a pipe instance created above, closed once.
+            unsafe { CloseHandle(server) };
+        }
+    }
 }

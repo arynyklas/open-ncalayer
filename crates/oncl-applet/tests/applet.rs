@@ -13,6 +13,7 @@ use oncl_basics::{Action, FileKind, Locale, OpenError, StorageKind};
 use oncl_pki::cert::Certificate;
 use oncl_pki::csr::KeyStoreInfo;
 use oncl_pki::key::{PublicKey, SigAlg};
+use oncl_pki::keygen::MAX_KEYS_PER_REQUEST;
 use oncl_pki::keystore::change_password;
 use oncl_pki::pkcs12::{KeyEntry, WriteOptions, load, load_contents, write};
 use oncl_pki::testing::{TestCertSpec, issue_cert};
@@ -768,6 +769,15 @@ fn gen_key_pair_failures() {
         // SubjectAltName without a CN; a dNSName that is not ASCII (the CN leads them).
         (gen_args(&d, "2.5.4.6", "KZ", "host.kz"), "GENKEY_COMMON"),
         (gen_args(&d, "2.5.4.3", "Тест", "host.kz"), "GENKEY_COMMON"),
+        // More keys than a request may generate (the original has no limit).
+        (
+            {
+                let mut args = with(4, json!(vec![GOST2004; MAX_KEYS_PER_REQUEST + 1]));
+                args[5] = json!(vec![256; MAX_KEYS_PER_REQUEST + 1]);
+                args
+            },
+            "GENKEY_COMMON",
+        ),
     ] {
         assert_code(&generate(args.clone()), expected);
     }
@@ -815,6 +825,23 @@ fn gen_key_pair_failures() {
     let reply = generate(with(4, json!([GOST2004, GOST2015])).tap(|args| args[5] = json!([0, 0])));
     assert_code(&reply, "GENKEY_UNKNOWN_ALG");
     assert_eq!(files(dir.path()).len(), 1);
+}
+
+#[test]
+fn gen_key_pair_makes_at_most_sixteen_keys() {
+    assert_eq!(MAX_KEYS_PER_REQUEST, 16);
+    let dir = tempfile::tempdir().unwrap();
+    let (a, _) = setup(vec![]);
+    let mut args = gen_args(&dir_arg(&dir), "2.5.4.3<:>2.5.4.6", "X<:>KZ", "");
+    args[4] = json!(vec![GOST2004; MAX_KEYS_PER_REQUEST]);
+    args[5] = json!(vec![256; MAX_KEYS_PER_REQUEST]);
+    let reply = call(&a, "genKeyPairAndGetPKCS10", args);
+    assert_eq!(code(&reply), "NONE", "{reply}");
+    assert_eq!(
+        reply["result"].as_str().unwrap().split("<:>").count(),
+        MAX_KEYS_PER_REQUEST
+    );
+    assert_eq!(files(dir.path()).len(), MAX_KEYS_PER_REQUEST);
 }
 
 /// `value` changed by `f`.
@@ -1487,6 +1514,33 @@ fn page_paths_are_regular_files_only() {
         ),
         expected,
     );
+}
+
+/// Windows resolves `..` lexically, so `<key file>\a\..` reads the key file. The window-less
+/// `changePassword` must not rewrite (or lose) the key file through such a path.
+#[cfg(windows)]
+#[test]
+fn change_password_through_dot_dot_keeps_the_key_file() {
+    let (a, _) = setup(vec![]);
+    let (dir, _, ids) = generated(&a);
+    let key_file = dir.path().join(format!("GOSTKNCA_{}.p12", ids[0]));
+    let before = fs::read(&key_file).unwrap();
+    let through = format!(r"{}\a\..", key_file.display());
+    assert_eq!(
+        fs::read(&through).unwrap(),
+        before,
+        "Windows opens the key file"
+    );
+    assert_code(
+        &call(
+            &a,
+            "changePassword",
+            json!(["PKCS12", through, DEFAULT_PASSWORD, NEW_PASSWORD]),
+        ),
+        "CHANGEPASS_COMMON",
+    );
+    assert_eq!(fs::read(&key_file).unwrap(), before);
+    assert_eq!(files(dir.path()).len(), 2, "{:?}", files(dir.path()));
 }
 
 /// A FIFO among the key files would block a read: it is skipped.

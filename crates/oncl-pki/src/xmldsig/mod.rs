@@ -91,7 +91,8 @@ fn digest_method(uri: &str) -> Option<SigAlg> {
 /// Error of an XML signature operation.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum XmlError {
-    /// The input is not well-formed UTF-8 XML, or a signature is malformed.
+    /// The input is not well-formed UTF-8 XML (or not namespace-well-formed: an attribute
+    /// with a prefix and the local name `xmlns`), or a signature is malformed.
     #[error("malformed XML: {0}")]
     Parse(String),
     /// The input has a DOCTYPE declaration.

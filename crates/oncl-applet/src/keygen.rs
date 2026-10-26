@@ -23,7 +23,9 @@
 //!   `subjectAlternativeNames` (`,`-separated), SubjectAltName dNSNames led by the CN;
 //!   PEM `NEW CERTIFICATE REQUEST` with `\n` line ends;
 //! - `result` is the requests, `secondResult` the key identifiers, each separated by
-//!   `<:>`. A failure ends it; key files written before stay.
+//!   `<:>`. A failure ends it; key files written before stay;
+//! - unlike the original, more than [`MAX_KEYS_PER_REQUEST`] `keyLengths` entries are
+//!   `GENKEY_COMMON` before any key is generated.
 //!
 //! The container must be an existing local folder given by an absolute path (else
 //! `COMMON`, as a file the original cannot write; a network path is refused before it is
@@ -41,7 +43,7 @@ use base64::engine::general_purpose::STANDARD;
 use der::asn1::ObjectIdentifier;
 use oncl_basics::{StorageKind, local_page_path};
 use oncl_pki::csr::{LegacyCsrRequest, build_legacy_csr};
-use oncl_pki::keygen::{KeySpec, applet_key_id, generate};
+use oncl_pki::keygen::{KeySpec, MAX_KEYS_PER_REQUEST, applet_key_id, generate};
 use oncl_pki::keystore::create_applet_key_file;
 use oncl_protocol::AddInfo;
 use zeroize::Zeroizing;
@@ -132,6 +134,11 @@ fn generate_all(a: &Applet, args: &Args<'_>) -> Result<Wrapper, Stop> {
         .collect();
 
     let lengths = args.ints(5).ok_or(NPE)?;
+    // Unlike the original, a request may generate at most `MAX_KEYS_PER_REQUEST` keys: file
+    // storages generate them without a window.
+    if lengths.len() > MAX_KEYS_PER_REQUEST {
+        return Err(Stop::Code(GENKEY_COMMON));
+    }
     let mut requests = Vec::with_capacity(lengths.len());
     let mut key_ids = Vec::with_capacity(lengths.len());
     for (i, &length) in lengths.iter().enumerate() {

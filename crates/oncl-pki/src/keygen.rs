@@ -15,6 +15,12 @@ use rsa::rand_core::{self, CryptoRng, RngCore};
 /// bits whose primes are multiples of 512 bits, so these three.
 const RSA_BITS: [u32; 3] = [2048, 3072, 4096];
 
+/// Most keys one page request may generate (basics `generateCsr` `params`, the Applet's
+/// `genKeyPairAndGetPKCS10` key lengths). Each costs a key generation (seconds for
+/// RSA-4096) and a key file in the user's folder; portals ask for one to four. The
+/// original has no limit.
+pub const MAX_KEYS_PER_REQUEST: usize = 16;
+
 /// The key (and signature algorithm) of a certificate request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeySpec {
