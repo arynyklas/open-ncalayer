@@ -1,6 +1,7 @@
 //! `cargo xtask fetch-fixtures`: downloads NCANode test fixtures from a pinned
-//! commit, verifies their sha256 and extracts the PKCS#12 test keys embedded in
-//! `WithTestData.groovy`. Nothing here is committed: files land in
+//! commit, verifies their sha256, extracts the PKCS#12 test keys embedded in
+//! `WithTestData.groovy` and the Kalkan-signed XML documents embedded in
+//! `XmlServiceTest.groovy`. Nothing here is committed: files land in
 //! `target/fixtures/ncanode/`.
 
 use std::fs;
@@ -29,7 +30,16 @@ struct GroovyKey {
     sha256: &'static str,
 }
 
+/// XML document stored as a triple-quoted constant in `XmlServiceTest.groovy`, written
+/// without the surrounding whitespace.
+struct GroovyXml {
+    constant: &'static str,
+    file: &'static str,
+    sha256: &'static str,
+}
+
 const GROOVY_FILE: &str = "WithTestData.groovy";
+const GROOVY_XML_FILE: &str = "XmlServiceTest.groovy";
 
 const REMOTE_FILES: &[RemoteFile] = &[
     RemoteFile {
@@ -60,6 +70,27 @@ const REMOTE_FILES: &[RemoteFile] = &[
         path: "src/test/resources/certs/individual_valid_sign_2004_rsa.cer",
         sha256: "4ae454f541b8c83dd20f2ee87136a2a87b083594931e6056da61ab1157e393d9",
     },
+    // XAdES-B/T/LT/LTA (GOST 2015, exclusive canonicalization, a SignedProperties reference).
+    RemoteFile {
+        path: "src/test/resources/xades/xades-test-signed-b.xml",
+        sha256: "1b02674345ce641a655a2f0e74ad3a27c50766cc2d6e650867f54e0d7ecdcc65",
+    },
+    RemoteFile {
+        path: "src/test/resources/xades/xades-test-signed-t.xml",
+        sha256: "9915a1e5e0b50b4583c63f6b29786869eaec53bf518baea78c0dda19dbd67793",
+    },
+    RemoteFile {
+        path: "src/test/resources/xades/xades-test-signed-lt.xml",
+        sha256: "72fe233be85e8a4f632056995195765143e40ca40d5c6d6c577892a57e3f1660",
+    },
+    RemoteFile {
+        path: "src/test/resources/xades/xades-test-signed-lta.xml",
+        sha256: "01a75067d5644a91387bff15507bf471424d5349a753667c2e15c551c97ff86e",
+    },
+    RemoteFile {
+        path: "src/test/groovy/kz/ncanode/unit/service/XmlServiceTest.groovy",
+        sha256: "b17ec71014bb95eb05a51eab44cd33668020156edec011d055f995744a0c4371",
+    },
 ];
 
 const GROOVY_KEYS: &[GroovyKey] = &[
@@ -72,6 +103,20 @@ const GROOVY_KEYS: &[GroovyKey] = &[
         constant: "KEY_INDIVIDUAL_VALID_2015",
         file: "individual_valid_2015.p12",
         sha256: "7b3c8cea6659f737e35a3a5b452b98f417449366cd16c26adb225da22131dfda",
+    },
+];
+
+/// Enveloped XMLDSig documents signed by Kalkan in the original NCALayer shape.
+const GROOVY_XMLS: &[GroovyXml] = &[
+    GroovyXml {
+        constant: "XML_SIGNED_VALID_STRING",
+        file: "xmldsig-signed-rsa.xml",
+        sha256: "8cabfb4e7984b3a4a87119facc3086c9a9a9e36cf3bee6cf4f6d365e313a8c87",
+    },
+    GroovyXml {
+        constant: "XML_SIGNED_VALID_STRING_TWO_SIGNERS",
+        file: "xmldsig-signed-rsa-gost2015.xml",
+        sha256: "654213a73594eec41009278895b0cd564f72d08796aad977f27ae774e3a73a43",
     },
 ];
 
@@ -118,6 +163,23 @@ pub fn fetch_fixtures() -> anyhow::Result<()> {
         write(&dest, &der)?;
         println!("extracted   {}", key.file);
     }
+
+    let groovy_xml_path = dir.join(GROOVY_XML_FILE);
+    let groovy_xml = fs::read_to_string(&groovy_xml_path)
+        .with_context(|| format!("cannot read {}", groovy_xml_path.display()))?;
+    for xml in GROOVY_XMLS {
+        let dest = dir.join(xml.file);
+        if is_current(&dest, xml.sha256)? {
+            println!("up to date  {}", xml.file);
+            continue;
+        }
+        let text = groovy_triple_quoted(&groovy_xml, xml.constant)
+            .with_context(|| format!("constant {} not found in {GROOVY_XML_FILE}", xml.constant))?;
+        let text = text.trim();
+        verify_sha256(text.as_bytes(), xml.sha256).with_context(|| xml.constant)?;
+        write(&dest, text.as_bytes())?;
+        println!("extracted   {}", xml.file);
+    }
     Ok(())
 }
 
@@ -132,6 +194,20 @@ pub fn groovy_constant(src: &str, name: &str) -> Option<String> {
         let value = rest.trim_start().strip_prefix('\'')?;
         let end = value.find('\'')?;
         Some(value[..end].to_owned())
+    })
+}
+
+/// Returns the value of a Groovy constant declared as `NAME = """…"""` (no interpolation).
+pub fn groovy_triple_quoted<'s>(src: &'s str, name: &str) -> Option<&'s str> {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    src.match_indices(name).find_map(|(at, _)| {
+        if src[..at].chars().next_back().is_some_and(is_ident) {
+            return None;
+        }
+        let rest = src[at + name.len()..].trim_start().strip_prefix('=')?;
+        let value = rest.trim_start().strip_prefix("\"\"\"")?;
+        let end = value.find("\"\"\"")?;
+        Some(&value[..end])
     })
 }
 
@@ -203,5 +279,13 @@ mod tests {
     fn groovy_constant_matches_whole_name_only() {
         let src = "String KEY_A_PASSWORD = 'pw'\nString XKEY_A = 'no'\nString KEY_A = 'yes'";
         assert_eq!(groovy_constant(src, "KEY_A").unwrap(), "yes");
+    }
+
+    #[test]
+    fn extracts_triple_quoted_groovy_constant() {
+        let src = "String XML_A = \"\"\"\n<a/>\n\"\"\"\nString XML_A_B = \"\"\"<b/>\"\"\"";
+        assert_eq!(groovy_triple_quoted(src, "XML_A").unwrap(), "\n<a/>\n");
+        assert_eq!(groovy_triple_quoted(src, "XML_A_B").unwrap(), "<b/>");
+        assert!(groovy_triple_quoted(src, "XML_C").is_none());
     }
 }

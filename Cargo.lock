@@ -3673,6 +3673,7 @@ dependencies = [
  "pkcs8 0.11.0",
  "rc2",
  "ring",
+ "roxmltree",
  "sha1",
  "sha2 0.11.1",
  "spki 0.8.1",

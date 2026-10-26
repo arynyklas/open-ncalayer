@@ -2,7 +2,7 @@
 //! PKCS#12 key stores with Kalkan's reading rules, certificate signature checks and
 //! certificate details, certification path building against the embedded NCA roots, OCSP,
 //! CRLs with an on-disk cache, CMS signing and verification, RFC 3161 time-stamping over a
-//! shared HTTP transport, PEM output.
+//! shared HTTP transport, XML signatures (XMLDSig) with XML canonicalization, PEM output.
 
 mod asn1util;
 pub mod ber;
@@ -21,3 +21,4 @@ pub mod roots;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod tsp;
+pub mod xmldsig;

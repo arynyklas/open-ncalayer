@@ -1,6 +1,6 @@
 [package]
 name = "oncl-pki"
-description = "BER normalization, keys, PKCS#8/PKCS#12, certificate checks, CMS and RFC 3161 time-stamping for OpenNCALayer"
+description = "BER normalization, keys, PKCS#8/PKCS#12, certificate checks, CMS, RFC 3161 time-stamping and XMLDSig for OpenNCALayer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -29,6 +29,7 @@ pbkdf2.workspace = true
 pkcs8.workspace = true
 rc2.workspace = true
 ring.workspace = true
+roxmltree.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 spki.workspace = true

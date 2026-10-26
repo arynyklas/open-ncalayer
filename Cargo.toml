@@ -47,6 +47,8 @@ raw-window-handle = "0.6.2"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto", "zeroize"] }
 rfd = "0.17.2"
 ring = "0.17.14"
+# XMLDSig: the XML tree with byte positions (the signature is spliced into the input bytes).
+roxmltree = "0.21.2"
 rsa = { version = "0.9.10", features = ["sha2"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
@@ -94,4 +96,7 @@ opt-level = 3
 [profile.dev.package.oncl-gost]
 opt-level = 3
 [profile.dev.package.crypto-bigint]
+opt-level = 3
+# The XMLDSig limit tests parse 50 MiB of XML; unoptimized parsing takes several seconds.
+[profile.dev.package.roxmltree]
 opt-level = 3
