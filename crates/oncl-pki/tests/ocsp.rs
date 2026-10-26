@@ -5,7 +5,7 @@
 use der::asn1::{AnyRef, IntRef, OctetStringRef};
 use der::{Decode, Encode, Sequence};
 use oncl_pki::cert::{self, Certificate};
-use oncl_pki::http::{HttpError, HttpReply, HttpTransport, UreqTransport};
+use oncl_pki::http::{HttpError, HttpReply, HttpTransport, UreqTransport, nca_get_url};
 use oncl_pki::ocsp::{
     self, ALLOWED_PERIOD, CLOCK_SKEW, CertStatus, MockOcsp, OcspError, OcspTamper, TIMEOUT,
 };
@@ -153,20 +153,14 @@ fn request_equals_openssl_request() {
 
 #[test]
 fn get_url_encodes_like_java_urlencoder() {
-    // base64 "+/8=" for [0xfb, 0xff].
-    assert_eq!(
-        ocsp::get_url("http://h/ocsp", &[0xfb, 0xff]),
-        "http://h/ocsp/%2B%2F8%3D"
-    );
-    assert_eq!(
-        ocsp::get_url("http://h/", &[0xfb, 0xff]),
-        "http://h/%2B%2F8%3D"
-    );
+    // The escapes themselves and the trailing `/` are covered by the unit test of
+    // `http::nca_get_url`; here the URL of a real request (83 bytes, so its base64 ends
+    // with `=`) has nothing but alphanumerics and escapes after the base URL.
     let request = ocsp::request_der(
         &entry("inter-user-gost2015-sign").cert,
         &cer("inter-gost2015"),
     );
-    let url = ocsp::get_url(OCSP_URL, &request);
+    let url = nca_get_url(OCSP_URL, &request);
     let encoded = url.strip_prefix("http://ocsp.synthetic.test/").unwrap();
     assert!(
         encoded
@@ -174,6 +168,7 @@ fn get_url_encodes_like_java_urlencoder() {
             .all(|b| b.is_ascii_alphanumeric() || b == b'%'),
         "{encoded}"
     );
+    assert!(encoded.ends_with("%3D"), "{encoded}");
 }
 
 #[test]

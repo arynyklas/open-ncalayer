@@ -5,7 +5,7 @@
 //! - The request is one `CertID`: SHA-1 (with NULL parameters) of the issuer's DER subject
 //!   and of the contents of its public key BIT STRING, and the certificate's serial number.
 //!   It has no nonce and no signature.
-//! - It goes by the NCA GET binding ([`get_url`]) within [`TIMEOUT`]; the reply must be
+//! - It goes by the NCA GET binding ([`nca_get_url`]) within [`TIMEOUT`]; the reply must be
 //!   HTTP 200 with `Content-Type: application/ocsp-response`.
 //! - The response comes over plain HTTP, so it is hostile input, checked in this order:
 //!   status successful; certificates present; the responder certificate found by the
@@ -28,14 +28,10 @@ mod mock;
 #[cfg(feature = "testing")]
 pub use mock::{MockOcsp, OcspTamper};
 
-/// URL of the NCA GET binding: [`crate::http::nca_get_url`], which OCSP shares with
-/// time-stamping.
-pub use crate::http::nca_get_url as get_url;
-
 use crate::asn1util::{TimeError, generalized_time};
 use crate::ber::{self, BerError};
 use crate::cert::Certificate;
-use crate::http::{GetOptions, HttpTransport, MAX_RESPONSE_LEN};
+use crate::http::{GetOptions, HttpTransport, MAX_RESPONSE_LEN, nca_get_url};
 use crate::key::{PublicKey, SigAlg};
 use crate::oid;
 use crate::pkix::{CaSet, PathError, build_path};
@@ -204,7 +200,7 @@ pub fn check(
         max_len: MAX_RESPONSE_LEN,
     };
     let reply = http
-        .get_with(&get_url(&url, &requested.request_der()), opts)
+        .get_with(&nca_get_url(&url, &requested.request_der()), opts)
         .map_err(|e| OcspError::Http(e.0))?;
     if reply.status != 200 {
         return Err(OcspError::HttpStatus(reply.status));

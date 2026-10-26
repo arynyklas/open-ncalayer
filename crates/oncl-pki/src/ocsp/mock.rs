@@ -29,9 +29,9 @@ const OTHER_RSA_KEY: &[u8] = include_bytes!("../../../../fixtures/openssl/rsa.pk
 /// How [`MockOcsp`] spoils its answer.
 ///
 /// `None` and `ByKeyResponderId` give a valid answer; so do `Hang` no longer than the
-/// request timeout, `NoNextUpdate` younger than `ocsp::ALLOWED_PERIOD` and
-/// `ThisUpdateAhead` within `ocsp::CLOCK_SKEW`. Every other variant makes `ocsp::check`
-/// fail.
+/// request timeout, `NoNextUpdate` younger than `ocsp::ALLOWED_PERIOD`, `ThisUpdateAhead`
+/// within `ocsp::CLOCK_SKEW` and `ContentType` with `application/ocsp-response` (any case,
+/// with parameters). Every other variant makes `ocsp::check` fail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OcspTamper {
     /// A correct answer, the responder identified by name.
