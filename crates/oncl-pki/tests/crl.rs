@@ -2,14 +2,15 @@
 //! against `MockCrl` with the synthetic intermediate PKI, plus a golden vector: a CRL of the
 //! NCA root (GOST 2022) checked offline.
 
-use der::asn1::{Ia5String, OctetString};
+use der::asn1::{AnyRef, BitStringRef, Ia5String, OctetString};
 use der::oid::AssociatedOid;
-use der::{Decode, Encode};
+use der::{Decode, Encode, Sequence, Tag};
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::crl::{self, CrlCache, CrlError, CrlStatus, MAX_CRL_LEN, MockCrl, TIMEOUT};
 use oncl_pki::http::{
     GetOptions, HttpError, HttpReply, HttpTransport, RouteTransport, UreqTransport,
 };
+use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::testing::{TestCertSpec, issue_cert};
 use oncl_testkit::{fixture, read, synthetic, synthetic_cert};
@@ -126,12 +127,49 @@ impl HttpTransport for Fixed {
     }
 }
 
+/// A transport that records every requested URL and fails it.
+#[derive(Default)]
+struct Down(Mutex<Vec<String>>);
+
+impl Down {
+    fn calls(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl HttpTransport for Down {
+    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
+        self.0.lock().unwrap().push(url.to_owned());
+        Err(HttpError("down".to_owned()))
+    }
+
+    fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
+        self.get(url)
+    }
+}
+
 #[test]
 fn crl_urls_are_the_http_uris_of_the_distribution_points_in_order() {
     let leaf = entry("inter-user-gost2015-sign").cert;
     assert_eq!(crl::crl_urls(&leaf), [INTER_CRL]);
     assert_eq!(crl::crl_urls(&cer("inter-gost2015")), [ROOT_CRL]);
     assert_eq!(crl::crl_urls(&nca("ncagost22")), [NCA_ROOT_CRL]);
+    // Two mirrors packed into one URI value (and the older CAs with two URIs).
+    for (name, file) in [
+        ("ncagost18", "gost"),
+        ("ncarsa18", "rsa"),
+        ("ncagost", "gost"),
+        ("ncarsa", "rsa"),
+    ] {
+        assert_eq!(
+            crl::crl_urls(&nca(name)),
+            [
+                format!("http://crl.root.gov.kz/{file}.crl"),
+                format!("http://crl1.root.gov.kz/{file}.crl")
+            ],
+            "{name}"
+        );
+    }
     assert!(crl::crl_urls(&cer("root-gost2015")).is_empty());
 
     let many = leaf_with_cdp(
@@ -139,8 +177,9 @@ fn crl_urls_are_the_http_uris_of_the_distribution_points_in_order() {
         &[
             "ldap://crl.synthetic.test/cn=x",
             "https://b.synthetic.test/b.crl",
-            "HTTP://a.synthetic.test/a.crl",
-            "http://c.synthetic.test/c.crl",
+            "HTTP://a.synthetic.test/a.crl\n   URL=http://c.synthetic.test/c.crl\tURL=ldap://x",
+            "http://c.synthetic.test/c.crl https://b.synthetic.test/b.crl",
+            " URL= ",
         ],
     );
     assert_eq!(
@@ -296,13 +335,87 @@ fn issuer_mismatch_and_bad_signature() {
     );
 }
 
+/// `CertificateList` with its parts raw.
+#[derive(Sequence)]
+struct RawCrl<'a> {
+    tbs_cert_list: AnyRef<'a>,
+    signature_algorithm: AnyRef<'a>,
+    signature: BitStringRef<'a>,
+}
+
+/// `crl` with the version INTEGER (the first element, `02 01 01`) cut out of its
+/// `TBSCertList` and signed anew by `signer`: a list that does not decode as v2.
+fn without_version(crl: &[u8], signer: &KeyEntry) -> Vec<u8> {
+    let raw = RawCrl::from_der(crl).unwrap();
+    let fields = raw.tbs_cert_list.value();
+    assert_eq!(fields[..3], [2, 1, 1]);
+    let tbs = AnyRef::new(Tag::Sequence, &fields[3..]).unwrap();
+    let signature = signer
+        .key
+        .sign(SigAlg::Gost2015_512, &tbs.to_der().unwrap())
+        .unwrap();
+    RawCrl {
+        tbs_cert_list: tbs,
+        signature: BitStringRef::from_bytes(&signature).unwrap(),
+        ..raw
+    }
+    .to_der()
+    .unwrap()
+}
+
 #[test]
-fn delta_crl_is_rejected() {
-    let der = MockCrl::new(entry("inter-gost2015.key")).delta().der();
+fn signature_is_checked_before_the_list_is_decoded() {
+    let inter = cer("inter-gost2015");
+    let key = entry("inter-gost2015.key");
+    let crl = MockCrl::new(key.clone()).der();
+    // Signed by the issuer: the list is read, and refused.
+    assert!(matches!(
+        crl::verify_crl(&without_version(&crl, &key), &inter, now()),
+        Err(CrlError::Malformed(_))
+    ));
+    // Signed by another key: refused before the list is read.
+    let forged = without_version(&crl, &entry("root-gost2015.key"));
+    assert!(matches!(
+        crl::verify_crl(&forged, &inter, now()),
+        Err(CrlError::BadSignature(_))
+    ));
+}
+
+#[test]
+fn delta_and_partitioned_crls_are_rejected() {
+    let inter = cer("inter-gost2015");
+    let key = entry("inter-gost2015.key");
+    let ext = |oid: &str, critical: bool, value: &[u8]| Extension {
+        extn_id: oid.parse().unwrap(),
+        critical,
+        extn_value: OctetString::new(value).unwrap(),
+    };
+    // deltaCRLIndicator (BaseCRLNumber 1) and issuingDistributionPoint (empty SEQUENCE),
+    // critical as RFC 5280 wants and not.
+    for (oid, value) in [("2.5.29.27", &[2, 1, 1][..]), ("2.5.29.28", &[0x30, 0])] {
+        for critical in [true, false] {
+            let der = MockCrl::new(key.clone())
+                .extension(ext(oid, critical, value))
+                .der();
+            assert_eq!(
+                crl::verify_crl(&der, &inter, now()).unwrap_err(),
+                CrlError::Malformed(format!("unsupported CRL extension {oid}")),
+                "{oid} critical={critical}"
+            );
+        }
+    }
+    // An unknown extension is refused only when critical.
+    let der = MockCrl::new(key.clone())
+        .extension(ext("1.2.3.4", true, &[5, 0]))
+        .der();
     assert_eq!(
-        crl::verify_crl(&der, &cer("inter-gost2015"), now()).unwrap_err(),
-        CrlError::Malformed("unsupported critical CRL extension 2.5.29.27".to_owned())
+        crl::verify_crl(&der, &inter, now()).unwrap_err(),
+        CrlError::Malformed("unsupported critical CRL extension 1.2.3.4".to_owned())
     );
+    let der = MockCrl::new(key)
+        .extension(ext("1.2.3.4", false, &[5, 0]))
+        .der();
+    assert!(crl::verify_crl(&der, &inter, now()).is_ok());
 }
 
 #[test]
@@ -407,11 +520,39 @@ fn second_url_used_when_first_fails() {
             .to_string_lossy()
             .into_owned()]
     );
-    let http_down = Fixed(Err(HttpError("down".to_owned())));
+    // A later check uses the cached CRL of the third URL without asking the network for
+    // the first two.
+    let down = Down::default();
     assert!(matches!(
-        crl::check(&leaf, &issuer, &cache, &http_down, now()),
+        crl::check(&leaf, &issuer, &cache, &down, now()),
         Ok(CrlStatus::Revoked { .. })
     ));
+    assert_eq!(down.calls(), [] as [String; 0]);
+    assert!(cache.cached(INTER_CRL, &issuer, now()).is_some());
+    assert!(
+        cache
+            .cached(INTER_CRL, &cer("inter-gost2015-twin"), now())
+            .is_none()
+    );
+    assert!(
+        cache
+            .cached("http://down.synthetic.test/a.crl", &issuer, now())
+            .is_none()
+    );
+    // Past its nextUpdate the cached CRL is not used: the URLs are tried in order.
+    let later = now() + 2 * time::Duration::HOUR;
+    assert_eq!(
+        crl::check(&leaf, &issuer, &cache, &down, later),
+        Err(CrlError::Http("down".to_owned()))
+    );
+    assert_eq!(
+        down.calls(),
+        [
+            "http://down.synthetic.test/a.crl",
+            "http://forged.synthetic.test/a.crl",
+            INTER_CRL
+        ]
+    );
 
     // Every URL fails: the error of the last one.
     let dir = temp_dir();

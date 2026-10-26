@@ -78,6 +78,13 @@ pub const OCSP_SIGNING: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.3.9");
 /// id-pkix-ocsp-nocheck (RFC 6960 §4.2.2.2.1).
 pub const OCSP_NOCHECK: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1.5");
 
+// CRL extensions (RFC 5280 §5.2). `x509-cert` 0.3 gives `IssuingDistributionPoint` the
+// OID of subjectInfoAccess, so both are spelled out here.
+/// id-ce-deltaCRLIndicator.
+pub const DELTA_CRL_INDICATOR: Oid = Oid::new_unwrap("2.5.29.27");
+/// id-ce-issuingDistributionPoint.
+pub const ISSUING_DISTRIBUTION_POINT: Oid = Oid::new_unwrap("2.5.29.28");
+
 // OCSP (RFC 6960).
 /// id-ad-ocsp: the OCSP access method of AuthorityInfoAccess.
 pub const AD_OCSP: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1");

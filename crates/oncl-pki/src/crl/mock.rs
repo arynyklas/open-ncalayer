@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 use x509_cert::certificate::Version;
 use x509_cert::crl::{RevokedCert, TbsCertList};
 use x509_cert::ext::Extension;
-use x509_cert::ext::pkix::{BaseCrlNumber, CrlNumber, CrlReason};
+use x509_cert::ext::pkix::{CrlNumber, CrlReason};
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::time::Time;
 
@@ -39,7 +39,7 @@ pub struct MockCrl {
     this_update: OffsetDateTime,
     next_update: Option<OffsetDateTime>,
     wrong_key: bool,
-    delta: bool,
+    extensions: Vec<Extension>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -54,7 +54,7 @@ impl MockCrl {
             this_update: now - time::Duration::MINUTE,
             next_update: Some(now + time::Duration::HOUR),
             wrong_key: false,
-            delta: false,
+            extensions: Vec::new(),
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -99,13 +99,12 @@ impl MockCrl {
         }
     }
 
-    /// The same CRL marked as a delta CRL: a critical deltaCRLIndicator.
+    /// The same CRL with `extension` added to its CRL extensions (after the CRL Number),
+    /// e.g. a deltaCRLIndicator.
     #[must_use]
-    pub fn delta(self) -> Self {
-        MockCrl {
-            delta: true,
-            ..self
-        }
+    pub fn extension(mut self, extension: Extension) -> Self {
+        self.extensions.push(extension);
+        self
     }
 
     /// URLs requested so far, in order.
@@ -141,10 +140,8 @@ impl MockCrl {
             })
             .collect();
         let one = Uint::new(&[1]).expect("1 is an INTEGER");
-        let mut extensions = vec![extension(CrlNumber::OID, false, &CrlNumber(one.clone()))];
-        if self.delta {
-            extensions.push(extension(BaseCrlNumber::OID, true, &BaseCrlNumber(one)));
-        }
+        let mut extensions = vec![extension(CrlNumber::OID, false, &CrlNumber(one))];
+        extensions.extend(self.extensions.iter().cloned());
         let tbs: TbsCertList = TbsCertList {
             version: Version::V2,
             signature: algorithm.clone(),

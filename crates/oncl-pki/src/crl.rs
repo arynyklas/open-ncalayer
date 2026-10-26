@@ -2,12 +2,17 @@
 //! engine of NCALayer checks the CAs of a chain.
 //!
 //! - The URLs are the `http://` and `https://` URIs of the certificate's
-//!   CRLDistributionPoints, tried in order until one gives a valid CRL.
+//!   CRLDistributionPoints, in order. Some NCA certificates (ncagost18, ncarsa18) pack two
+//!   mirrors into one URI value, `http://a/x.crl\n    URL=http://b/x.crl`: a value is split
+//!   on ASCII whitespace and a leading `URL=` is dropped.
+//! - A cached CRL of any of the URLs is used first; otherwise the URLs are downloaded in
+//!   order until one gives a valid CRL.
 //! - A CRL comes over plain HTTP, so it is hostile input: its issuer must be the subject of
-//!   the issuer certificate, its signature must verify with that certificate's key, it
-//!   must have no critical extension other than the ones of a complete CRL (a delta CRL or
-//!   a CRL with an issuing distribution point is refused), and it must be current:
-//!   `thisUpdate ≤ now` and, if it has one, `now < nextUpdate`.
+//!   the issuer certificate, and its signature must verify with that certificate's key
+//!   (checked over the received bytes, before the CRL is decoded); it must be a complete
+//!   CRL, so a delta CRL (deltaCRLIndicator) or a CRL with an issuing distribution point
+//!   is refused, critical or not, and so is any other unknown critical extension; and it
+//!   must be current: `thisUpdate ≤ now` and, if it has one, `now < nextUpdate`.
 //! - Downloads go through [`CrlCache`]: `<dir>/<hex sha256(url)>.crl`, used without a
 //!   request while it is a valid CRL with `now < nextUpdate`, written atomically.
 //! - Every failure is a [`CrlError`], never a [`CrlStatus`]: callers decide what an
@@ -24,10 +29,11 @@ use crate::ber::{self, BerError};
 use crate::cert::Certificate;
 use crate::http::{GetOptions, HttpTransport};
 use crate::key::{PublicKey, SigAlg};
+use crate::oid;
 use crate::pkix::time_of;
-use der::asn1::{AnyRef, BitStringRef};
+use der::asn1::{BitStringRef, IntRef, ObjectIdentifier};
 use der::oid::AssociatedOid;
-use der::{Decode, Encode, Sequence};
+use der::{Decode, Reader, SliceReader};
 use sha2::{Digest, Sha256};
 use spki::AlgorithmIdentifierRef;
 use std::fmt::Write as _;
@@ -42,6 +48,7 @@ use x509_cert::ext::pkix::{
     AuthorityInfoAccessSyntax, AuthorityKeyIdentifier, CrlDistributionPoints, CrlNumber, CrlReason,
     FreshestCrl, ID_CE_ISSUER_ALT_NAME,
 };
+use x509_cert::name::Name;
 
 pub use x509_cert::crl::CertificateList;
 
@@ -107,8 +114,10 @@ impl From<BerError> for CrlError {
     }
 }
 
-/// The `http://` and `https://` URIs of `cert`'s CRLDistributionPoints (fullName only), in
-/// order; none without the extension (or with a malformed one).
+/// The `http://` and `https://` URLs of `cert`'s CRLDistributionPoints (fullName URIs
+/// only), in order and without repeats; none without the extension (or with a malformed
+/// one). A URI value is split on ASCII whitespace and a leading `URL=` of a part is
+/// dropped (see the module documentation).
 pub fn crl_urls(cert: &Certificate) -> Vec<String> {
     let Ok(Some((_, points))) = cert
         .tbs_certificate()
@@ -116,7 +125,8 @@ pub fn crl_urls(cert: &Certificate) -> Vec<String> {
     else {
         return Vec::new();
     };
-    points
+    let mut urls: Vec<String> = Vec::new();
+    let uris = points
         .0
         .iter()
         .filter_map(|point| match &point.distribution_point {
@@ -125,11 +135,16 @@ pub fn crl_urls(cert: &Certificate) -> Vec<String> {
         })
         .flatten()
         .filter_map(|name| match name {
-            GeneralName::UniformResourceIdentifier(uri) => Some(uri.to_string()),
+            GeneralName::UniformResourceIdentifier(uri) => Some(uri.as_str()),
             _ => None,
-        })
-        .filter(|uri| is_http(uri))
-        .collect()
+        });
+    for part in uris.flat_map(str::split_ascii_whitespace) {
+        let url = part.strip_prefix("URL=").unwrap_or(part);
+        if is_http(url) && !urls.iter().any(|u| u == url) {
+            urls.push(url.to_owned());
+        }
+    }
+    urls
 }
 
 /// Whether `uri` starts with `http://` or `https://`, ignoring case.
@@ -140,19 +155,52 @@ fn is_http(uri: &str) -> bool {
     })
 }
 
-/// `CertificateList` with the `TBSCertList` kept raw: the signed bytes are the received
-/// ones, not a re-encoding.
-#[derive(Sequence)]
+/// What is checked of a `CertificateList` before it is decoded, borrowed from the DER.
 struct SignedCrl<'a> {
-    tbs_cert_list: AnyRef<'a>,
+    /// The whole `TBSCertList` element: the signed bytes as received.
+    tbs: &'a [u8],
+    /// `tbsCertList.signature`.
+    tbs_signature: AlgorithmIdentifierRef<'a>,
+    /// `tbsCertList.issuer`.
+    issuer: Name,
     signature_algorithm: AlgorithmIdentifierRef<'a>,
     signature: BitStringRef<'a>,
 }
 
+impl<'a> SignedCrl<'a> {
+    fn read(der: &'a [u8]) -> der::Result<Self> {
+        let mut reader = SliceReader::new(der)?;
+        let (tbs, signature_algorithm, signature) =
+            reader.sequence(|r| Ok::<_, der::Error>((r.tlv_bytes()?, r.decode()?, r.decode()?)))?;
+        reader.finish()?;
+        let mut reader = SliceReader::new(tbs)?;
+        let (tbs_signature, issuer) = reader.sequence(|r| {
+            // version, if present, is v2; it is checked by the full decode.
+            let _version: Option<IntRef<'_>> = r.decode()?;
+            let signature = r.decode()?;
+            let issuer = r.decode()?;
+            r.read_slice(r.remaining_len())?;
+            Ok::<_, der::Error>((signature, issuer))
+        })?;
+        reader.finish()?;
+        Ok(SignedCrl {
+            tbs,
+            tbs_signature,
+            issuer,
+            signature_algorithm,
+            signature,
+        })
+    }
+}
+
+/// CRL extensions that make a CRL other than a complete CRL of everything its issuer
+/// issued, refused whether critical or not.
+const REFUSED_CRL_EXTENSIONS: [ObjectIdentifier; 2] =
+    [oid::DELTA_CRL_INDICATOR, oid::ISSUING_DISTRIBUTION_POINT];
+
 /// CRL extensions of a complete CRL that may be critical without changing what the CRL
-/// covers. Any other critical one (deltaCRLIndicator, issuingDistributionPoint, …) makes the
-/// CRL unusable here.
-const KNOWN_CRL_EXTENSIONS: [der::asn1::ObjectIdentifier; 5] = [
+/// covers. Any other critical one makes the CRL unusable here.
+const KNOWN_CRL_EXTENSIONS: [ObjectIdentifier; 5] = [
     CrlNumber::OID,
     AuthorityKeyIdentifier::OID,
     ID_CE_ISSUER_ALT_NAME,
@@ -160,29 +208,28 @@ const KNOWN_CRL_EXTENSIONS: [der::asn1::ObjectIdentifier; 5] = [
     FreshestCrl::OID,
 ];
 
-/// Checks a DER or BER CRL of `issuer` at `now` (see the module documentation).
+/// Checks a DER or BER CRL of `issuer` at `now` (see the module documentation). The issuer
+/// and the signature are checked before the CRL is decoded.
 ///
 /// # Errors
 ///
 /// [`CrlError::Malformed`], [`CrlError::IssuerMismatch`], [`CrlError::BadSignature`],
-/// [`CrlError::NotYetValid`] or [`CrlError::Outdated`], checked in this order; an
-/// unsupported critical extension, checked after the signature, is
-/// [`CrlError::Malformed`].
+/// [`CrlError::NotYetValid`] or [`CrlError::Outdated`], checked in this order; a CRL whose
+/// list does not decode, or that is not a complete CRL, is [`CrlError::Malformed`] after
+/// its signature is checked.
 pub fn verify_crl(
     crl_der: &[u8],
     issuer: &Certificate,
     now: OffsetDateTime,
 ) -> Result<CertificateList, CrlError> {
     let der = ber::to_der(crl_der)?;
-    let signed = SignedCrl::from_der(&der)?;
-    let crl = CertificateList::from_der(&der)?;
-    let tbs = &crl.tbs_cert_list;
-    if tbs.issuer != *issuer.tbs_certificate().subject() {
+    let signed = SignedCrl::read(&der)?;
+    if signed.issuer != *issuer.tbs_certificate().subject() {
         return Err(CrlError::IssuerMismatch);
     }
 
     let oid = signed.signature_algorithm.oid;
-    if tbs.signature.oid != oid {
+    if signed.tbs_signature.oid != oid {
         return Err(CrlError::Malformed(
             "signatureAlgorithm differs from tbsCertList.signature".to_owned(),
         ));
@@ -195,19 +242,23 @@ pub fn verify_crl(
         .signature
         .as_bytes()
         .ok_or_else(|| CrlError::Malformed("signature BIT STRING has unused bits".to_owned()))?;
-    key.verify(alg, &signed.tbs_cert_list.to_der()?, signature)
+    key.verify(alg, signed.tbs, signature)
         .map_err(|e| CrlError::BadSignature(e.to_string()))?;
 
-    if let Some(unknown) = tbs
-        .crl_extensions
-        .iter()
-        .flatten()
-        .find(|e| e.critical && !KNOWN_CRL_EXTENSIONS.contains(&e.extn_id))
-    {
-        return Err(CrlError::Malformed(format!(
-            "unsupported critical CRL extension {}",
-            unknown.extn_id
-        )));
+    let crl = CertificateList::from_der(&der)?;
+    let tbs = &crl.tbs_cert_list;
+    for extension in tbs.crl_extensions.iter().flatten() {
+        let id = extension.extn_id;
+        if REFUSED_CRL_EXTENSIONS.contains(&id) {
+            return Err(CrlError::Malformed(format!(
+                "unsupported CRL extension {id}"
+            )));
+        }
+        if extension.critical && !KNOWN_CRL_EXTENSIONS.contains(&id) {
+            return Err(CrlError::Malformed(format!(
+                "unsupported critical CRL extension {id}"
+            )));
+        }
     }
 
     if time_of(&tbs.this_update) > now {
@@ -275,10 +326,41 @@ impl CrlCache {
         http: &dyn HttpTransport,
         now: OffsetDateTime,
     ) -> Result<CertificateList, CrlError> {
-        let path = self.path(url);
-        if let Some(crl) = cached(&path, issuer, now) {
-            return Ok(crl);
+        match self.cached(url, issuer, now) {
+            Some(crl) => Ok(crl),
+            None => self.download(url, issuer, http, now),
         }
+    }
+
+    /// The cached CRL of `url` if it is a valid CRL of `issuer` with a nextUpdate after
+    /// `now`; no request is made.
+    pub fn cached(
+        &self,
+        url: &str,
+        issuer: &Certificate,
+        now: OffsetDateTime,
+    ) -> Option<CertificateList> {
+        let mut der = Vec::new();
+        File::open(self.path(url))
+            .ok()?
+            .take(MAX_CRL_LEN + 1)
+            .read_to_end(&mut der)
+            .ok()?;
+        if u64::try_from(der.len()).ok()? > MAX_CRL_LEN {
+            return None;
+        }
+        let crl = verify_crl(&der, issuer, now).ok()?;
+        crl.tbs_cert_list.next_update.is_some().then_some(crl)
+    }
+
+    /// Downloads, checks and (with a nextUpdate) caches the CRL at `url`.
+    fn download(
+        &self,
+        url: &str,
+        issuer: &Certificate,
+        http: &dyn HttpTransport,
+        now: OffsetDateTime,
+    ) -> Result<CertificateList, CrlError> {
         let opts = GetOptions {
             timeout: TIMEOUT,
             max_len: MAX_CRL_LEN,
@@ -290,7 +372,7 @@ impl CrlCache {
         let crl = verify_crl(&reply.body, issuer, now)?;
         if crl.tbs_cert_list.next_update.is_some() {
             // A cache that cannot be written only costs a download next time.
-            let _ = write_atomically(&self.dir, &path, &reply.body);
+            let _ = write_atomically(&self.dir, &self.path(url), &reply.body);
         }
         Ok(crl)
     }
@@ -304,21 +386,6 @@ impl CrlCache {
         name.push_str(".crl");
         self.dir.join(name)
     }
-}
-
-/// The CRL in `path` if it is a valid CRL of `issuer` with a nextUpdate after `now`.
-fn cached(path: &Path, issuer: &Certificate, now: OffsetDateTime) -> Option<CertificateList> {
-    let mut der = Vec::new();
-    File::open(path)
-        .ok()?
-        .take(MAX_CRL_LEN + 1)
-        .read_to_end(&mut der)
-        .ok()?;
-    if u64::try_from(der.len()).ok()? > MAX_CRL_LEN {
-        return None;
-    }
-    let crl = verify_crl(&der, issuer, now).ok()?;
-    crl.tbs_cert_list.next_update.is_some().then_some(crl)
 }
 
 /// Writes `body` to `path` in `dir` through a temporary file in `dir` and a rename, so that
@@ -340,8 +407,9 @@ fn write_atomically(dir: &Path, path: &Path, body: &[u8]) -> std::io::Result<()>
     written
 }
 
-/// Status of `cert` in the CRL of `issuer` from the first of its distribution point URLs
-/// that gives a valid CRL at `now` (through `cache` and `http`).
+/// Status of `cert` in the CRL of `issuer` valid at `now`: a cached CRL of any of its
+/// distribution point URLs, else the first URL whose download gives a valid CRL (through
+/// `cache` and `http`).
 ///
 /// # Errors
 ///
@@ -362,10 +430,14 @@ pub fn check(
     if tbs.issuer() != issuer.tbs_certificate().subject() {
         return Err(CrlError::IssuerMismatch);
     }
+    let serial = tbs.serial_number().as_bytes();
+    if let Some(crl) = urls.iter().find_map(|url| cache.cached(url, issuer, now)) {
+        return Ok(lookup(&crl, serial));
+    }
     let mut last = CrlError::NoUrl;
     for url in &urls {
-        match cache.fetch(url, issuer, http, now) {
-            Ok(crl) => return Ok(lookup(&crl, tbs.serial_number().as_bytes())),
+        match cache.download(url, issuer, http, now) {
+            Ok(crl) => return Ok(lookup(&crl, serial)),
             Err(e) => last = e,
         }
     }
