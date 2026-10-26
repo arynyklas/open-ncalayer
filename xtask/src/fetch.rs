@@ -93,6 +93,8 @@ const REMOTE_FILES: &[RemoteFile] = &[
     },
 ];
 
+/// The test keys. Despite its name, `KEY_INDIVIDUAL_VALID_SIGN_2004` is an RSA-2048 key
+/// (issuer `ҰКО 3.0 (RSA TEST)`); `KEY_CEO_SIGN_REVOKED_2004` is the GOST 34.310-2004 one.
 const GROOVY_KEYS: &[GroovyKey] = &[
     GroovyKey {
         constant: "KEY_INDIVIDUAL_VALID_SIGN_2004",
@@ -103,6 +105,11 @@ const GROOVY_KEYS: &[GroovyKey] = &[
         constant: "KEY_INDIVIDUAL_VALID_2015",
         file: "individual_valid_2015.p12",
         sha256: "7b3c8cea6659f737e35a3a5b452b98f417449366cd16c26adb225da22131dfda",
+    },
+    GroovyKey {
+        constant: "KEY_CEO_SIGN_REVOKED_2004",
+        file: "ceo_sign_revoked_2004.p12",
+        sha256: "f969f9b173cceed1ce596b9225e45eb4bb5dae1be75d541e500017dc7094d3e5",
     },
 ];
 
