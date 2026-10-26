@@ -12,7 +12,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oncl_ipc::ids::{CHROMIUM_EXTENSION_ID, FIREFOX_EXTENSION_ID, HOST_NAME};
 use serde::{Deserialize, Serialize};
@@ -471,7 +471,9 @@ pub fn install(
 
     let mut report = Report::default();
     fs::create_dir_all(&layout.relay_dir).map_err(|e| at(&layout.relay_dir, e))?;
-    replace_relay(&relay, &relay_bytes, |from, to| fs::rename(from, to))?;
+    replace_relay(&relay, &relay_bytes, |from, to| {
+        rename_retrying(|from, to| fs::rename(from, to), from, to)
+    })?;
     report.push(Item::Relay, shown(&relay), State::Written);
     remove_old_relays(&layout.relay_dir, &mut report)?;
     let config_path = layout.relay_config();
@@ -716,12 +718,45 @@ fn replace_relay(
                 // Keep a relay in place for the browsers.
                 let _ = rename(&old, relay);
             }
-            at(relay, e)
+            at(&new, e)
         })
     };
     swap().inspect_err(|_| {
         let _ = fs::remove_file(&new);
     })
+}
+
+/// How long [`rename_retrying`] retries a rename refused with a sharing violation.
+const RENAME_RETRY_FOR: Duration = Duration::from_secs(2);
+/// The pause between two attempts of [`rename_retrying`].
+const RENAME_RETRY_STEP: Duration = Duration::from_millis(50);
+
+/// `rename(from, to)`, retried every [`RENAME_RETRY_STEP`] for up to [`RENAME_RETRY_FOR`]
+/// while Windows refuses it with a sharing violation: another process, typically an
+/// antivirus scanner, briefly holds a freshly written or started executable without delete
+/// sharing. Any other error is returned at once.
+fn rename_retrying(
+    rename: impl Fn(&Path, &Path) -> io::Result<()>,
+    from: &Path,
+    to: &Path,
+) -> io::Result<()> {
+    let deadline = Instant::now() + RENAME_RETRY_FOR;
+    loop {
+        match rename(from, to) {
+            Err(e) if sharing_violation(&e) && Instant::now() < deadline => {
+                std::thread::sleep(RENAME_RETRY_STEP);
+            }
+            result => return result,
+        }
+    }
+}
+
+/// `ERROR_SHARING_VIOLATION`: a process holds the file without the needed sharing mode.
+const SHARING_VIOLATION: i32 = 32;
+
+/// Whether `e` is a Windows sharing violation (on Unix, 32 is an unrelated `errno`).
+fn sharing_violation(e: &io::Error) -> bool {
+    cfg!(windows) && e.raw_os_error() == Some(SHARING_VIOLATION)
 }
 
 /// A free `nmhost.old-<unix-ms><EXE_SUFFIX>` next to `relay`.
@@ -797,11 +832,7 @@ fn removal(path: &Path) -> State {
 /// running executable (access denied) or a file opened without delete sharing (sharing
 /// violation). Unix deletes such files.
 fn in_use(e: &io::Error) -> bool {
-    /// `ERROR_SHARING_VIOLATION`.
-    const SHARING_VIOLATION: i32 = 32;
-    cfg!(windows)
-        && (e.kind() == io::ErrorKind::PermissionDenied
-            || e.raw_os_error() == Some(SHARING_VIOLATION))
+    cfg!(windows) && (e.kind() == io::ErrorKind::PermissionDenied || sharing_violation(e))
 }
 
 /// Writes `bytes` to `path` through `<path>.tmp` and a rename; no `.tmp` stays on failure.
@@ -1260,6 +1291,78 @@ mod tests {
 
         replace_relay(&relay, b"new", |from, to| fs::rename(from, to)).unwrap();
         assert_eq!(fs::read(&relay).unwrap(), b"new");
+    }
+
+    #[test]
+    fn relay_rename_retries_only_sharing_violations() {
+        use std::cell::Cell;
+
+        let tmp = TempDir::new().unwrap();
+        let relay = tmp.path().join(relay_file_name());
+        fs::write(&relay, b"old").unwrap();
+
+        // Every rename fails twice with a sharing violation, then goes through.
+        let calls = Cell::new(0);
+        let flaky = |from: &Path, to: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() % 3 != 0 {
+                Err(io::Error::from_raw_os_error(SHARING_VIOLATION))
+            } else {
+                fs::rename(from, to)
+            }
+        };
+        if cfg!(windows) {
+            replace_relay(&relay, b"new", |from, to| rename_retrying(flaky, from, to)).unwrap();
+            assert_eq!(fs::read(&relay).unwrap(), b"new");
+            // Two renames on Windows (the old relay away, the new one in), three tries each.
+            assert_eq!(calls.get(), 6);
+        } else {
+            // On Unix 32 is EPIPE: not retried.
+            rename_retrying(flaky, &relay, &tmp.path().join("x")).unwrap_err();
+            assert_eq!(calls.get(), 1);
+        }
+
+        // Any other error is returned at once.
+        let calls = Cell::new(0);
+        let denied = |_: &Path, _: &Path| {
+            calls.set(calls.get() + 1);
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        };
+        let err = rename_retrying(denied, &relay, &tmp.path().join("x")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn relay_rename_errors_name_their_source() {
+        let tmp = TempDir::new().unwrap();
+        let relay = tmp.path().join(relay_file_name());
+        let new = with_suffix(&relay, ".new");
+        fs::write(&relay, b"old").unwrap();
+        let failing_last = |from: &Path, to: &Path| {
+            if from == new {
+                Err(io::Error::other("injected"))
+            } else {
+                fs::rename(from, to)
+            }
+        };
+        let err = replace_relay(&relay, b"new", failing_last).unwrap_err();
+        assert!(
+            err.to_string().starts_with(&new.display().to_string()),
+            "{err}"
+        );
+        if cfg!(windows) {
+            let failing_first = |from: &Path, _: &Path| {
+                if from == relay {
+                    Err(io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            };
+            let err = replace_relay(&relay, b"new", failing_first).unwrap_err();
+            let shown = format!("{}: injected", relay.display());
+            assert_eq!(err.to_string(), shown);
+        }
     }
 
     #[test]
