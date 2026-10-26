@@ -66,6 +66,37 @@ impl SigningKey {
         })
     }
 
+    /// New private key with `d` drawn uniformly from `[1, q − 1]` (rejection sampling from
+    /// the operating system RNG).
+    ///
+    /// # Panics
+    ///
+    /// If the operating system RNG fails.
+    pub fn generate(curve: CurveId) -> SigningKey {
+        let d = random_scalar(curve);
+        let (x, y) = hazmat::public_point(curve.params(), &d);
+        SigningKey {
+            curve,
+            d,
+            public: VerifyingKey { curve, x, y },
+        }
+    }
+
+    /// The scalar `d`, big-endian, exactly [`CurveId::coord_len`] bytes; zeroized on drop.
+    pub fn scalar_be(&self) -> Zeroizing<Vec<u8>> {
+        let n = self.curve.coord_len();
+        let bytes = Zeroizing::new(self.d.to_be_bytes());
+        let (excess, d) = bytes.split_at(bytes.len().saturating_sub(n));
+        debug_assert!(
+            excess.iter().all(|&b| b == 0),
+            "scalar wider than coord_len"
+        );
+        let mut out = Zeroizing::new(Vec::with_capacity(n));
+        out.resize(n - d.len(), 0);
+        out.extend_from_slice(d);
+        out
+    }
+
     /// Curve of this key.
     pub fn curve(&self) -> CurveId {
         self.curve

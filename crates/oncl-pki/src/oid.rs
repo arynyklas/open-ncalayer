@@ -61,10 +61,22 @@ pub const TIME_STAMP_TOKEN: Oid = Oid::new_unwrap("1.2.840.113549.1.9.16.2.14");
 pub const COMMON_NAME: Oid = Oid::new_unwrap("2.5.4.3");
 /// serialNumber (SERIALNUMBER): `IIN…` in NCA certificates.
 pub const SERIAL_NUMBER: Oid = Oid::new_unwrap("2.5.4.5");
+/// countryName (C).
+pub const COUNTRY: Oid = Oid::new_unwrap("2.5.4.6");
 /// organizationName (O).
 pub const ORGANIZATION: Oid = Oid::new_unwrap("2.5.4.10");
 /// organizationalUnitName (OU): `BIN…` in NCA certificates.
 pub const ORGANIZATIONAL_UNIT: Oid = Oid::new_unwrap("2.5.4.11");
+/// telephoneNumber.
+pub const TELEPHONE_NUMBER: Oid = Oid::new_unwrap("2.5.4.20");
+/// dnQualifier.
+pub const DN_QUALIFIER: Oid = Oid::new_unwrap("2.5.4.46");
+/// emailAddress (PKCS#9, E).
+pub const EMAIL_ADDRESS: Oid = Oid::new_unwrap("1.2.840.113549.1.9.1");
+/// domainComponent (DC).
+pub const DOMAIN_COMPONENT: Oid = Oid::new_unwrap("0.9.2342.19200300.100.1.25");
+/// dateOfBirth (RFC 3739).
+pub const DATE_OF_BIRTH: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.9.1");
 
 // Extended key usages.
 /// id-kp-clientAuth.
@@ -77,6 +89,14 @@ pub const OCSP_SIGNING: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.3.9");
 // Certificate extensions without an `x509-cert` type.
 /// id-pkix-ocsp-nocheck (RFC 6960 §4.2.2.2.1).
 pub const OCSP_NOCHECK: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1.5");
+/// KeyStoreInfo (KNCA `keystore_branch`): the key storage a certificate request came from.
+pub const KEYSTORE_INFO: Oid = Oid::new_unwrap("1.2.398.3.3.5");
+/// KeyStoreInfo storage: a PKCS#12 file (Kalkan `Storage.PKCS12`).
+pub const STORAGE_PKCS12: Oid = Oid::new_unwrap("1.2.398.3.3.5.1.1");
+
+// PKCS#9 / PKCS#10.
+/// extensionRequest.
+pub const EXTENSION_REQUEST: Oid = Oid::new_unwrap("1.2.840.113549.1.9.14");
 
 // CRL extensions (RFC 5280 §5.2). `x509-cert` 0.3 gives `IssuingDistributionPoint` the
 // OID of subjectInfoAccess, so both are spelled out here.

@@ -396,7 +396,7 @@ impl IssuedCa {
         WriteEntry {
             alias: hex(&self.key.ski),
             pkcs8_der: self.key.pkcs8_der.clone(),
-            cert_der: self.cert.clone(),
+            cert_der: Some(self.cert.clone()),
         }
     }
 }
@@ -424,9 +424,14 @@ impl Output {
         encryption: Encryption,
         rng: &mut ChaCha20Rng,
     ) {
-        let p12 = pkcs12::write(entries, PASSWORD, &encryption.write_options(), &mut |buf| {
-            rng.fill_bytes(buf)
-        });
+        let p12 = pkcs12::write(
+            entries,
+            &[],
+            PASSWORD,
+            &encryption.write_options(),
+            &mut |buf| rng.fill_bytes(buf),
+        )
+        .expect("synthetic keys and certificates are valid");
         self.files.insert(format!("{name}.p12"), p12);
 
         let aliases: Vec<String> = entries.iter().map(|e| format!("\"{}\"", e.alias)).collect();
@@ -624,7 +629,7 @@ fn issue_entries(
             WriteEntry {
                 alias: hex(&key.ski),
                 pkcs8_der: key.pkcs8_der.clone(),
-                cert_der,
+                cert_der: Some(cert_der),
             }
         })
         .collect()

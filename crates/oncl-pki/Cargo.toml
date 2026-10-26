@@ -9,8 +9,6 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-# PKCS#12 writer (test fixtures, xtask).
-write = []
 # Test helpers: `tsp::MockTsa` (an in-process time-stamping authority),
 # `ocsp::MockOcsp` (an in-process OCSP responder), `crl::MockCrl` (an in-process CRL
 # distribution point), `http::RouteTransport` and `testing::issue_cert`.
@@ -30,6 +28,8 @@ pkcs8.workspace = true
 rc2.workspace = true
 ring.workspace = true
 roxmltree.workspace = true
+# RSA key generation only (`keygen`); RSA signing stays on `ring`.
+rsa.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 spki.workspace = true
@@ -59,4 +59,8 @@ required-features = ["testing"]
 
 [[test]]
 name = "crl"
+required-features = ["testing"]
+
+[[test]]
+name = "keystore"
 required-features = ["testing"]

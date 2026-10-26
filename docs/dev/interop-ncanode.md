@@ -1,6 +1,6 @@
 # Interop с NCANode (Kalkan)
 
-`cargo xtask interop-ncanode` проверяет наши подписи XMLDSig и CMS в [NCANode](https://github.com/ncanode-kz/NCANode): сервер проверяет их через Kalkan, как это делают сервисы, принимающие подписи NCALayer. Команда работает только в Linux. В Windows она печатает «interop с NCANode запускается в Linux» и завершается с кодом 0.
+`cargo xtask interop-ncanode` проверяет наши подписи XMLDSig и CMS и наши файлы ключей в [NCANode](https://github.com/ncanode-kz/NCANode): сервер проверяет их через Kalkan, как это делают сервисы, принимающие подписи NCALayer. Команда работает только в Linux. В Windows она печатает «interop с NCANode запускается в Linux» и завершается с кодом 0.
 
 ## Образ
 
@@ -72,6 +72,11 @@ cargo xtask interop-ncanode
 | Контроли | NCANode обязан ответить `INVALID/SIG_CRYPTO_FAILURE` на: изменённый документ (ГОСТ 2015, синтетический); изменённый элемент `#payload` с DTD (ГОСТ 2015, синтетический); изменённый элемент `#e1` с DTD (ключ NCANode ГОСТ 2015); испорченный `DigestValue` (ключ NCANode ГОСТ 2004); изменённое значение подписи CMS (синтетический ГОСТ 2015 и ключ NCANode ГОСТ 2004) |
 | Digest против Kalkan | Kalkan подписывает тот же вход тем же ключом (`/xml/sign`), и `DigestValue` новой ссылки должен совпасть с нашим. Входы: неудобный документ целиком (все три ключа NCANode); тот же документ с нашей подписью (вторая подпись покрывает первую); элемент `#e1` под двумя разными `xml:lang`. Затем наш `verify` должен принять документ, который подписал Kalkan |
 | `#e1` под двумя `xml:lang` | наша подпись элемента → `/xml/verify` |
+| Наш файл ключа: ключ без сертификата | генерируем ключ (ГОСТ 2015, ГОСТ 2004, RSA; `oncl_pki::keygen`), строим на него CSR (`oncl_pki::csr`) и пишем ключ в `<PREFIX><keyId>.p12` (`keystore::create_key_file`, пароль `Default1`) → `/pkcs12/aliases`: Kalkan открывает файл и видит ровно один alias — keyId |
+| Наш файл ключа: сертификат установлен | синтетический ключ того же алгоритма выпускает сертификат на CSR (субъект, ключ и расширения запроса, SKI = keyId); `keystore::install_certificate`, затем `keystore::change_password` на `Interop12`, как в `importCertificate` → `/pkcs12/info`: Kalkan находит в файле сертификат с нашим серийным номером |
+| Наш файл ключа: Kalkan подписывает CMS | `/cms/sign` с этим файлом → `/cms/verify`: подпись Kalkan нашим ключом проверяется, 1 подписант, `INDETERMINATE/CHAIN_INCOMPLETE` |
+
+Подпись CSR в NCANode проверить нельзя: у него нет метода для PKCS#10, а `/x509/verify` принимает подписанные данные строкой UTF-8, которой `CertificationRequestInfo` не является. Подпись CSR проверяет сам xtask (нашим кодом, открытым ключом из запроса) перед выпуском сертификата. Что Kalkan читает сгенерированный ключ, показывает строка «Kalkan подписывает CMS». Что Kalkan принимает подписи, которые делает `PrivateKey::sign` (им же подписывается CSR), показывают строки 1–12.
 
 ### Как читать результат
 
@@ -91,9 +96,11 @@ NCANode оценивает подпись по порядку (`AdesVerification
 
 Правило Kalkan для `xml:*` в Canonical XML подтверждено: при наследовании от опущенных предков побеждает **внешнее** значение (`crates/oncl-pki/src/xmldsig/c14n.rs`). Это показывают строки 37–38: digest элемента `<e Id="e1">` под `<r xml:lang="ru">` → `<m xml:lang="kk">` совпадает с digest Kalkan, и NCANode принимает нашу подпись этого элемента.
 
+Строки «our key file» (39–47): `opened` в колонке `signature` значит, что ответ NCANode совпал с ожидаемым (для «key alone» — список alias из одного keyId, для «certificate installed» — серийный номер выпущенного сертификата, как его печатает NCANode: `BigInteger.toString(16)`), `UNEXPECTED` — что не совпал (ожидаемое значение дописано в последнюю колонку). Строка «Kalkan signs CMS» читается как остальные строки CMS. Ключи генерируются заново при каждом запуске, поэтому keyId и серийные номера в таблице каждый раз другие.
+
 ## Результат — 2026-10-26
 
-WSL2 Ubuntu 24.04, Docker 29.3.1 (движок Docker Desktop, интеграция с WSL), образ выше. В этом запуске NCANode дважды завершился на загрузке `pki.gov.kz/cert/nca_gost.crt` и поднялся с третьей попытки.
+WSL2 Ubuntu 24.04, Docker 29.3.1 (движок Docker Desktop, интеграция с WSL), образ выше. Строки 1–38 — первый запуск: в нём NCANode дважды завершился на загрузке `pki.gov.kz/cert/nca_gost.crt` и поднялся с третьей попытки. Строки 39–47 добавлены вместе с генерацией ключей и запускались там же: прошли все 47 проверок, строки 1–38 совпали с таблицей.
 
 ```
 #  | check                                 | key                                 | signature          | valid | NCANode grade / detail
@@ -136,9 +143,18 @@ WSL2 Ubuntu 24.04, Docker 29.3.1 (движок Docker Desktop, интеграц�
 36 | Kalkan digest: over our signature     | NCANode GOST 2015                   | digest = Kalkan    | -     | our verify of Kalkan's XML: OK (2)
 37 | Kalkan digest: #e1 under 2 xml:lang   | NCANode GOST 2015                   | digest = Kalkan    | -     | our verify of Kalkan's XML: OK (1)
 38 | XML element #e1 under 2 xml:lang      | NCANode GOST 2015                   | OK                 | false | INDETERMINATE/OUT_OF_BOUNDS_NO_POE
-38 of 38 checks passed
+39 | our key file: key alone               | generated GOST 2015                 | opened             | -     | [["62debbcdc0511396fb3e52164e150bbd299bf1a9"]]
+40 | our key file: certificate installed   | generated GOST 2015                 | opened             | -     | 62debbcdc0511396
+41 | our key file: Kalkan signs CMS        | generated GOST 2015                 | OK                 | false | INDETERMINATE/CHAIN_INCOMPLETE
+42 | our key file: key alone               | generated GOST 2004                 | opened             | -     | [["c05a8a29170f6f411a0e2f16d55bf2f3f91dba9a"]]
+43 | our key file: certificate installed   | generated GOST 2004                 | opened             | -     | 405a8a29170f6f41
+44 | our key file: Kalkan signs CMS        | generated GOST 2004                 | OK                 | false | INDETERMINATE/CHAIN_INCOMPLETE
+45 | our key file: key alone               | generated RSA                       | opened             | -     | [["772c970ac20fa6c609385bf0b67a7229444a2f43"]]
+46 | our key file: certificate installed   | generated RSA                       | opened             | -     | 772c970ac20fa6c6
+47 | our key file: Kalkan signs CMS        | generated RSA                       | OK                 | false | INDETERMINATE/CHAIN_INCOMPLETE
+47 of 47 checks passed
 ```
 
 Kalkan принял все наши подписи: синтетическими ключами и ключами НУЦ ГОСТ 2015, ГОСТ 34.310-2004 и RSA. Все контроли отвергнуты, все пять digest совпали с Kalkan, и наш `verify` принял подписи Kalkan всеми тремя алгоритмами. Исправлять код XMLDSig и CMS не понадобилось.
 
-Проверку сгенерированного нами `.p12` (загрузка в NCANode и проверка подписи CSR) добавим следующим шагом.
+Наши файлы ключей Kalkan открывает для всех трёх алгоритмов: файл с одним ключом (без сертификата, как его пишет `generateCsr`) — с alias = keyId, файл после установки сертификата и смены пароля — с этим сертификатом при ключе. Kalkan подписывает ключом из нашего файла, и подпись проверяется: кодирование ключей в PKCS#8 и профиль PKCS#12 Kalkan понимает.

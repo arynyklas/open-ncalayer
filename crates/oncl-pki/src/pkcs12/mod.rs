@@ -11,11 +11,9 @@
 
 mod kdf;
 mod read;
-#[cfg(feature = "write")]
 mod write;
 
-pub use read::load;
-#[cfg(feature = "write")]
+pub use read::{load, load_contents};
 pub use write::{Pbe, WriteEntry, WriteOptions, write};
 
 use crate::ber::BerError;
@@ -39,6 +37,26 @@ pub struct KeyEntry {
     pub key: PrivateKey,
     /// Certificate of the key.
     pub cert: Certificate,
+}
+
+/// Private key as stored under one alias, with its certificate if the store has one.
+#[derive(Clone, Debug)]
+pub struct StoredKey {
+    /// `friendlyName`, else hex of `localKeyId`, else `"unmarked"`.
+    pub alias: String,
+    /// Private key.
+    pub key: PrivateKey,
+    /// Certificate of the key, if any.
+    pub cert: Option<Certificate>,
+}
+
+/// Everything [`load_contents`] reads from a key store.
+#[derive(Clone, Debug)]
+pub struct Contents {
+    /// Keys sorted by alias.
+    pub keys: Vec<StoredKey>,
+    /// Certificates that pair with no key (e.g. CA certificates), in stored order.
+    pub other_certs: Vec<Certificate>,
 }
 
 /// Error of a PKCS#12 operation.

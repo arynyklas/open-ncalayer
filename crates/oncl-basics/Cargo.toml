@@ -24,8 +24,8 @@ x509-cert.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-# `testing`: `tsp::MockTsa`, `ocsp::MockOcsp`; `write`: PKCS#12 files written by the tests.
-oncl-pki = { path = "../oncl-pki", features = ["testing", "write"] }
+# `testing`: `tsp::MockTsa`, `ocsp::MockOcsp`.
+oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 oncl-testkit.workspace = true
 time = { workspace = true, features = ["macros"] }
 

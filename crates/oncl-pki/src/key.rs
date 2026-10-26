@@ -3,8 +3,8 @@
 
 use crate::ber;
 use crate::oid;
-use der::Decode;
-use der::asn1::{ObjectIdentifier, OctetStringRef, UintRef};
+use der::asn1::{Any, AnyRef, BitString, ObjectIdentifier, OctetStringRef, UintRef};
+use der::{Decode, Encode};
 use oncl_gost::{CurveId, GostAlg, SigningKey, VerifyingKey};
 use pkcs8::PrivateKeyInfoRef;
 use ring::signature::{self, UnparsedPublicKey};
@@ -130,7 +130,28 @@ pub enum PrivateKey {
     /// GOST key.
     Gost(SigningKey),
     /// RSA key.
-    Rsa(Arc<ring::rsa::KeyPair>),
+    Rsa(Arc<RsaKeyPair>),
+}
+
+/// RSA private key: the `ring` key pair and the PKCS#8 it was read from (zeroized on drop).
+pub struct RsaKeyPair {
+    pair: ring::rsa::KeyPair,
+    pkcs8: Zeroizing<Vec<u8>>,
+}
+
+impl RsaKeyPair {
+    /// The DER `RSAPublicKey`.
+    pub fn public_key_der(&self) -> &[u8] {
+        self.pair.public().as_ref()
+    }
+}
+
+impl std::fmt::Debug for RsaKeyPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RsaKeyPair")
+            .field("pair", &self.pair)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PrivateKey {
@@ -162,7 +183,7 @@ impl PrivateKey {
                 Some(PublicKey::Rsa(public)) if public == pair.public().as_ref() => {}
                 Some(_) => return Err(KeyError::KeyMismatch),
             }
-            return Ok(PrivateKey::Rsa(Arc::new(pair)));
+            return Ok(PrivateKey::Rsa(Arc::new(RsaKeyPair { pair, pkcs8: der })));
         }
 
         let params = info
@@ -198,6 +219,49 @@ impl PrivateKey {
         }
     }
 
+    /// Public half of this key.
+    pub fn public_key(&self) -> PublicKey {
+        match self {
+            PrivateKey::Gost(key) => PublicKey::Gost(key.verifying_key().clone()),
+            PrivateKey::Rsa(key) => PublicKey::Rsa(key.public_key_der().to_vec()),
+        }
+    }
+
+    /// DER `PrivateKeyInfo` of this key. GOST keys take the forms Kalkan writes (and
+    /// [`PrivateKey::from_pkcs8_der`] picks without a certificate): the algorithm is the key
+    /// OID with `SEQUENCE { curve OID, digest parameter OID }`, the `privateKey` octets a DER
+    /// INTEGER (`d` big-endian) for GOST 2004 and a DER OCTET STRING (`d` little-endian,
+    /// coordinate width) for GOST 2015. An RSA key gives back the PKCS#8 it was read from.
+    pub fn to_pkcs8_der(&self) -> Zeroizing<Vec<u8>> {
+        let key = match self {
+            PrivateKey::Gost(key) => key,
+            PrivateKey::Rsa(key) => return key.pkcs8.clone(),
+        };
+        let curve = key.curve();
+        let d = key.scalar_be();
+        let private_key = Zeroizing::new(match curve {
+            CurveId::Pkigovkz2004A => UintRef::new(&d)
+                .and_then(|int| int.to_der())
+                .expect("scalar INTEGER encodes"),
+            CurveId::Tc26_512A => {
+                let d_le = Zeroizing::new(d.iter().rev().copied().collect::<Vec<u8>>());
+                OctetStringRef::new(&d_le)
+                    .and_then(|octets| octets.to_der())
+                    .expect("scalar OCTET STRING encodes")
+            }
+        });
+        let params = gost_params_der(curve);
+        let info = PrivateKeyInfoRef {
+            algorithm: spki::AlgorithmIdentifier {
+                oid: ObjectIdentifier::new_unwrap(curve.key_oid()),
+                parameters: Some(AnyRef::from_der(&params).expect("DER parameters")),
+            },
+            private_key: OctetStringRef::new(&private_key).expect("privateKey fits DER"),
+            public_key: None,
+        };
+        Zeroizing::new(info.to_der().expect("PrivateKeyInfo encodes"))
+    }
+
     /// Signs `message` (hashed here) with `alg`. GOST signatures use a fresh random nonce and
     /// the KZ encoding `r_LE ‖ s_LE`; RSA signatures are PKCS#1 v1.5.
     ///
@@ -216,15 +280,16 @@ impl PrivateKey {
             {
                 Ok(key.sign_digest(&alg.digest(message)))
             }
-            (PrivateKey::Rsa(pair), SigAlg::RsaSha256) => {
-                let mut sig = vec![0; pair.public().modulus_len()];
-                pair.sign(
-                    &signature::RSA_PKCS1_SHA256,
-                    &ring::rand::SystemRandom::new(),
-                    message,
-                    &mut sig,
-                )
-                .expect("RSA signing with a valid key and buffer");
+            (PrivateKey::Rsa(key), SigAlg::RsaSha256) => {
+                let mut sig = vec![0; key.pair.public().modulus_len()];
+                key.pair
+                    .sign(
+                        &signature::RSA_PKCS1_SHA256,
+                        &ring::rand::SystemRandom::new(),
+                        message,
+                        &mut sig,
+                    )
+                    .expect("RSA signing with a valid key and buffer");
                 Ok(sig)
             }
             _ => Err(KeyError::UnsupportedAlgorithm),
@@ -242,6 +307,32 @@ pub enum PublicKey {
 }
 
 impl PublicKey {
+    /// `SubjectPublicKeyInfo` of this key, as NCA certificates carry it: for GOST the key OID
+    /// with `SEQUENCE { curve OID, digest parameter OID }` and the OCTET STRING `X_LE ‖ Y_LE`
+    /// in the BIT STRING; for RSA `rsaEncryption` with NULL parameters and the
+    /// `RSAPublicKey`.
+    pub fn to_spki(&self) -> SubjectPublicKeyInfoOwned {
+        let (algorithm, bits) = match self {
+            PublicKey::Gost(key) => {
+                let curve = key.curve();
+                let params = Any::from_der(&gost_params_der(curve)).expect("DER parameters");
+                let xy = OctetStringRef::new(&key.to_kz_bytes())
+                    .and_then(|xy| xy.to_der())
+                    .expect("public key OCTET STRING encodes");
+                let oid = ObjectIdentifier::new_unwrap(curve.key_oid());
+                ((oid, Some(params)), xy)
+            }
+            PublicKey::Rsa(der) => ((oid::RSA_ENCRYPTION, Some(Any::null())), der.clone()),
+        };
+        SubjectPublicKeyInfoOwned {
+            algorithm: spki::AlgorithmIdentifierOwned {
+                oid: algorithm.0,
+                parameters: algorithm.1,
+            },
+            subject_public_key: BitString::from_bytes(&bits).expect("public key BIT STRING"),
+        }
+    }
+
     /// Public key from a `SubjectPublicKeyInfo`. A GOST key is the OCTET STRING `X_LE ‖ Y_LE`
     /// inside the BIT STRING.
     ///
@@ -301,11 +392,27 @@ impl PublicKey {
     }
 }
 
+/// Key identifier of a public key: SHA-1 of the `subjectPublicKey` BIT STRING contents
+/// (RFC 5280 §4.2.1.2 method 1, Kalkan's `createKeyId`).
+pub(crate) fn key_id_bytes(spki: &SubjectPublicKeyInfoOwned) -> [u8; 20] {
+    sha1::Sha1::digest(spki.subject_public_key.raw_bytes()).into()
+}
+
 fn curve_alg(curve: CurveId) -> KeyAlg {
     match curve {
         CurveId::Pkigovkz2004A => KeyAlg::Gost2004,
         CurveId::Tc26_512A => KeyAlg::Gost2015_512,
     }
+}
+
+/// DER of the GOST key parameters `SEQUENCE { curve OID, digest parameter OID }`.
+fn gost_params_der(curve: CurveId) -> Vec<u8> {
+    vec![
+        ObjectIdentifier::new_unwrap(curve.curve_oid()),
+        ObjectIdentifier::new_unwrap(curve.digest_param_oid()),
+    ]
+    .to_der()
+    .expect("OIDs encode")
 }
 
 /// Curve of a GOST key: from the key OID, cross-checked with the `publicKeyParamSet` OID when
@@ -392,21 +499,11 @@ fn scalar_candidates(curve: CurveId, octets: &[u8]) -> Vec<Candidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use der::Encode;
-    use der::asn1::{AnyRef, OctetString};
+    use der::asn1::OctetString;
     use pkcs8::PrivateKeyInfo;
     use spki::AlgorithmIdentifier;
 
     const CURVES: [CurveId; 2] = [CurveId::Pkigovkz2004A, CurveId::Tc26_512A];
-
-    /// DER of a GOST `AlgorithmIdentifier` parameter set.
-    fn gost_params_der(curve: CurveId) -> Vec<u8> {
-        let oids = vec![
-            ObjectIdentifier::new_unwrap(curve.curve_oid()),
-            ObjectIdentifier::new_unwrap(curve.digest_param_oid()),
-        ];
-        oids.to_der().unwrap()
-    }
 
     fn scalar(curve: CurveId) -> Vec<u8> {
         // Top byte zero: the INTEGER and BE forms then differ in length from the LE form.
@@ -565,5 +662,51 @@ mod tests {
                 Err(KeyError::UnknownKeyAlgorithm(_))
             ));
         }
+    }
+
+    #[test]
+    fn gost_pkcs8_export_is_the_kalkan_form() {
+        for curve in CURVES {
+            let d = scalar(curve);
+            let key = PrivateKey::Gost(SigningKey::from_scalar_be(curve, &d).unwrap());
+            let expected = match curve {
+                // INTEGER: the leading zero byte is not encoded.
+                CurveId::Pkigovkz2004A => pkcs8(curve, &integer(&d)),
+                CurveId::Tc26_512A => pkcs8(curve, &octets(&le(&d))),
+            };
+            assert_eq!(*key.to_pkcs8_der(), expected, "{curve:?}");
+            let back = gost(PrivateKey::from_pkcs8_der(&key.to_pkcs8_der(), None).unwrap());
+            assert_eq!(*back.scalar_be(), d, "{curve:?}");
+        }
+    }
+
+    #[test]
+    fn spki_export_reads_back() {
+        for curve in CURVES {
+            let key = PrivateKey::Gost(SigningKey::from_scalar_be(curve, &scalar(curve)).unwrap());
+            let spki = key.public_key().to_spki();
+            assert_eq!(spki.algorithm.oid.to_string(), curve.key_oid());
+            assert_eq!(
+                spki.algorithm
+                    .parameters
+                    .as_ref()
+                    .unwrap()
+                    .to_der()
+                    .unwrap(),
+                gost_params_der(curve)
+            );
+            assert_eq!(PublicKey::from_spki(&spki).unwrap(), key.public_key());
+        }
+        let rsa = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/openssl/rsa.pk8.der"),
+        )
+        .unwrap();
+        let key = PrivateKey::from_pkcs8_der(&rsa, None).unwrap();
+        assert_eq!(*key.to_pkcs8_der(), rsa, "RSA keeps its PKCS#8");
+        let spki = key.public_key().to_spki();
+        assert_eq!(spki.algorithm.oid, oid::RSA_ENCRYPTION);
+        assert_eq!(spki.algorithm.parameters, Some(Any::null()));
+        assert_eq!(PublicKey::from_spki(&spki).unwrap(), key.public_key());
     }
 }

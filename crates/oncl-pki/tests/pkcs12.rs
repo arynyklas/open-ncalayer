@@ -35,9 +35,10 @@ fn ncanode_2015_p12() {
     assert!(e.iter().any(|k| k.key.alg() == KeyAlg::Gost2015_512));
 }
 
+/// `individual_valid_sign_2004.p12` is RSA-2048 despite its name.
 #[test]
 #[ignore = "needs cargo xtask fetch-fixtures"]
-fn ncanode_2004_p12() {
+fn ncanode_rsa_p12() {
     let e = load(&read(ncanode("individual_valid_sign_2004.p12")), "Qwerty12").unwrap();
     assert!(
         e.iter()
@@ -46,6 +47,18 @@ fn ncanode_2004_p12() {
     for k in &e {
         assert_key_matches_cert(k);
     }
+    assert!(e.iter().all(|k| k.key.alg() == KeyAlg::Rsa));
+}
+
+#[test]
+#[ignore = "needs cargo xtask fetch-fixtures"]
+fn ncanode_gost2004_p12() {
+    let e = load(&read(ncanode("ceo_sign_revoked_2004.p12")), "Qwerty12").unwrap();
+    assert!(!e.is_empty());
+    for k in &e {
+        assert_key_matches_cert(k);
+    }
+    assert!(e.iter().any(|k| k.key.alg() == KeyAlg::Gost2004));
 }
 
 #[test]
@@ -203,11 +216,10 @@ fn iteration_counts_are_capped() {
     ));
 }
 
-#[cfg(feature = "write")]
 mod write {
     use super::*;
     use oncl_pki::cert;
-    use oncl_pki::pkcs12::{Pbe, WriteEntry, WriteOptions, write};
+    use oncl_pki::pkcs12::{Pbe, WriteEntry, WriteOptions, load_contents, write};
     use x509_cert::der::Encode;
     use x509_cert::ext::pkix::SubjectKeyIdentifier;
 
@@ -233,6 +245,14 @@ mod write {
         haystack.windows(needle.len()).any(|w| w == needle)
     }
 
+    /// DER of the `localKeyId` attribute with `id`.
+    fn local_key_id_attribute(id: &[u8]) -> Vec<u8> {
+        let mut attribute = oid_der("1.2.840.113549.1.9.21");
+        attribute.extend([0x31, id.len() as u8 + 2, 0x04, id.len() as u8]);
+        attribute.extend(id);
+        attribute
+    }
+
     #[test]
     fn kalkan_profile_is_the_default() {
         let opts = WriteOptions::default();
@@ -251,17 +271,14 @@ mod write {
             .get_extension::<SubjectKeyIdentifier>()
             .unwrap()
             .expect("make.sh certificate has a SKI");
-        let ski = ski.0.as_bytes().to_vec();
-        let mut local_key_id = oid_der("1.2.840.113549.1.9.21");
-        local_key_id.extend([0x31, ski.len() as u8 + 2, 0x04, ski.len() as u8]);
-        local_key_id.extend(&ski);
+        let local_key_id = local_key_id_attribute(ski.0.as_bytes());
         let prf_oids = [oid_der("1.2.840.113549.2.7"), oid_der("1.2.840.113549.2.9")];
         let pbes2 = oid_der("1.2.840.113549.1.5.13");
 
         let entry = WriteEntry {
             alias: "Тест-alias".to_owned(),
             pkcs8_der: pkcs8,
-            cert_der: cert_der.clone(),
+            cert_der: Some(cert_der.clone()),
         };
         for key in [Pbe::TripleDes, Pbe::Pbes2Aes256NoPrf] {
             for certs in [Pbe::Rc2_40, Pbe::TripleDes, Pbe::Pbes2Aes256NoPrf] {
@@ -271,20 +288,20 @@ mod write {
                     iterations: 1024,
                 };
                 let label = format!("{key:?}/{certs:?}");
-                let p12 = write(
-                    std::slice::from_ref(&entry),
-                    "Пароль123",
-                    &opts,
-                    &mut counter(),
-                );
-                assert_eq!(
-                    p12,
+                let written = || {
                     write(
                         std::slice::from_ref(&entry),
+                        &[],
                         "Пароль123",
                         &opts,
-                        &mut counter()
-                    ),
+                        &mut counter(),
+                    )
+                    .unwrap()
+                };
+                let p12 = written();
+                assert_eq!(
+                    p12,
+                    written(),
                     "{label}: output depends only on fill_random"
                 );
 
@@ -298,7 +315,8 @@ mod write {
                     "{label}"
                 );
 
-                // The key bag attributes are in the clear: localKeyId carries the SKI.
+                // The key bag attributes are in the clear: localKeyId carries the key
+                // identifier, here the SKI.
                 assert!(contains(&p12, &local_key_id), "{label}: localKeyId = SKI");
                 let uses_pbes2 = key == Pbe::Pbes2Aes256NoPrf || certs == Pbe::Pbes2Aes256NoPrf;
                 assert_eq!(contains(&p12, &pbes2), uses_pbes2, "{label}");
@@ -314,11 +332,82 @@ mod write {
         let entry = WriteEntry {
             alias: "empty".to_owned(),
             pkcs8_der: read(fixture("openssl/rsa.pk8.der")),
-            cert_der: read(fixture("openssl/rsa.cer")),
+            cert_der: Some(read(fixture("openssl/rsa.cer"))),
         };
-        let p12 = write(&[entry], "", &WriteOptions::default(), &mut counter());
+        let p12 = write(&[entry], &[], "", &WriteOptions::default(), &mut counter()).unwrap();
         let loaded = load(&p12, "").unwrap();
         assert_eq!(loaded.len(), 1);
         assert_key_matches_cert(&loaded[0]);
+    }
+
+    #[test]
+    fn keyless_entry_has_no_certificate_safe() {
+        let pkcs8 = read(fixture("openssl/rsa.pk8.der"));
+        let cert = cert::parse(&read(fixture("openssl/rsa.cer"))).unwrap();
+        let (_, ski) = cert
+            .tbs_certificate()
+            .get_extension::<SubjectKeyIdentifier>()
+            .unwrap()
+            .unwrap();
+        let entry = WriteEntry {
+            alias: "keyless".to_owned(),
+            pkcs8_der: pkcs8.clone(),
+            cert_der: None,
+        };
+        let p12 = write(
+            &[entry],
+            &[],
+            "Qwerty12",
+            &WriteOptions::default(),
+            &mut counter(),
+        )
+        .unwrap();
+        // localKeyId is the key identifier of the key itself.
+        assert!(contains(&p12, &local_key_id_attribute(ski.0.as_bytes())));
+        assert!(
+            !contains(&p12, &oid_der("1.2.840.113549.1.7.6")),
+            "no encryptedData"
+        );
+        assert!(load(&p12, "Qwerty12").unwrap().is_empty());
+        let contents = load_contents(&p12, "Qwerty12").unwrap();
+        assert_eq!(contents.keys.len(), 1);
+        assert_eq!(contents.keys[0].alias, "keyless");
+        assert!(contents.keys[0].cert.is_none());
+        assert_eq!(*contents.keys[0].key.to_pkcs8_der(), pkcs8);
+        assert!(contents.other_certs.is_empty());
+    }
+
+    #[test]
+    fn other_certificates_round_trip() {
+        let ca = read(fixture("nca/prod/ncarsa22.der"));
+        let entry = WriteEntry {
+            alias: "rsa".to_owned(),
+            pkcs8_der: read(fixture("openssl/rsa.pk8.der")),
+            cert_der: Some(read(fixture("openssl/rsa.cer"))),
+        };
+        let p12 = write(
+            &[entry],
+            std::slice::from_ref(&ca),
+            "Qwerty12",
+            &WriteOptions::default(),
+            &mut counter(),
+        )
+        .unwrap();
+        let contents = load_contents(&p12, "Qwerty12").unwrap();
+        assert_eq!(contents.keys.len(), 1);
+        assert!(contents.keys[0].cert.is_some());
+        assert_eq!(contents.other_certs.len(), 1);
+        assert_eq!(contents.other_certs[0].to_der().unwrap(), ca);
+
+        assert!(matches!(
+            write(
+                &[],
+                &[vec![0x30, 0]],
+                "x",
+                &WriteOptions::default(),
+                &mut counter()
+            ),
+            Err(Pkcs12Error::Malformed(_))
+        ));
     }
 }

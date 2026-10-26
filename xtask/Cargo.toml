@@ -11,7 +11,7 @@ publish.workspace = true
 [dependencies]
 oncl-gost.workspace = true
 oncl-ipc.workspace = true
-oncl-pki = { workspace = true, features = ["write"] }
+oncl-pki = { workspace = true, features = ["testing"] }
 oncl-protocol.workspace = true
 oncl-testkit.workspace = true
 

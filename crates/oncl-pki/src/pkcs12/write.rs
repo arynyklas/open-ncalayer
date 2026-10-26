@@ -1,21 +1,20 @@
-//! PKCS#12 writer (feature `write`): the Kalkan profile and its variants for test fixtures.
+//! PKCS#12 writer: the Kalkan profile, and its variants for test fixtures.
 
 use super::kdf::{self, Prf, Purpose};
 use super::{
     Attribute, CertBag, ContentInfo, DigestInfo, EncryptedContentInfo, EncryptedData,
     EncryptedPrivateKeyInfo, MAX_ITERATIONS, MacData, Passwords, Pbes2Params, Pbkdf2Params, Pfx,
-    Pkcs12PbeParams, SafeBag,
+    Pkcs12Error, Pkcs12PbeParams, SafeBag,
 };
+use crate::key::{PrivateKey, key_id_bytes};
 use crate::oid;
 use cbc::cipher::block_padding::Pkcs7;
 use cbc::cipher::{BlockCipherEncrypt, BlockModeEncrypt, InnerIvInit, KeyInit, KeyIvInit};
 use der::asn1::{Any, ObjectIdentifier, OctetString};
 use der::{Decode, Encode, EncodeValue, Tag, TagNumber, Tagged};
 use hmac::{Hmac, Mac};
-use sha1::Digest;
 use spki::AlgorithmIdentifierOwned;
 use x509_cert::Certificate;
-use x509_cert::ext::pkix::SubjectKeyIdentifier;
 use zeroize::Zeroize;
 
 /// Salt length of every scheme and of the MAC (Kalkan: 20 bytes).
@@ -54,15 +53,15 @@ impl Default for WriteOptions {
     }
 }
 
-/// One key with its certificate. The PKCS#8 bytes are zeroized on drop.
+/// One key with its certificate, if it has one. The PKCS#8 bytes are zeroized on drop.
 #[derive(Clone)]
 pub struct WriteEntry {
-    /// Written as `friendlyName` (pass hex(SKI) to reproduce Kalkan).
+    /// Written as `friendlyName` (Kalkan: hex of the key identifier).
     pub alias: String,
     /// DER `PrivateKeyInfo`.
     pub pkcs8_der: Vec<u8>,
-    /// DER certificate.
-    pub cert_der: Vec<u8>,
+    /// DER certificate of the key.
+    pub cert_der: Option<Vec<u8>>,
 }
 
 impl Drop for WriteEntry {
@@ -71,31 +70,41 @@ impl Drop for WriteEntry {
     }
 }
 
-/// Writes a PKCS#12 key store: one unencrypted `data` safe with a `pkcs8ShroudedKeyBag` per
-/// entry, one `encryptedData` safe with the certificates, and an HMAC-SHA1 MAC. Every bag
-/// carries `friendlyName` = alias and `localKeyId` = the certificate's SubjectKeyIdentifier
-/// (SHA-1 of the certificate DER without one). Salts (20 bytes) and IVs come from
-/// `fill_random`, so the output is a function of the inputs and of `fill_random`.
+/// Writes a PKCS#12 key store as Kalkan does: one unencrypted `data` safe with a
+/// `pkcs8ShroudedKeyBag` per entry; then, unless there are no certificates at all, one
+/// `encryptedData` safe with the entries' certificates followed by `other_certs` (without
+/// attributes); and an HMAC-SHA1 MAC. Key bags and their certificate bags carry
+/// `friendlyName` = alias and `localKeyId` = the key identifier (SHA-1 of the
+/// `subjectPublicKey` BIT STRING contents) of the certificate, or of the key itself when the
+/// entry has no certificate (Kalkan writes the hex-decoded alias there, which is the same
+/// for the keys it generates). Salts (20 bytes) and IVs come from `fill_random`, so the
+/// output is a function of the inputs and of `fill_random`.
+///
+/// # Errors
+///
+/// [`Pkcs12Error::Malformed`] if a certificate is not DER or a keyless entry's key cannot
+/// be read; [`Pkcs12Error::Unsupported`] for a keyless entry of another key type.
 ///
 /// # Panics
 ///
-/// If a `cert_der` is not a DER certificate or `opts.iterations` is not in
-/// `1..=`[`MAX_ITERATIONS`] (the reader refuses other counts).
+/// If `opts.iterations` is not in `1..=`[`MAX_ITERATIONS`] (the reader refuses other
+/// counts).
 pub fn write(
     entries: &[WriteEntry],
+    other_certs: &[Vec<u8>],
     password: &str,
     opts: &WriteOptions,
     fill_random: &mut dyn FnMut(&mut [u8]),
-) -> Vec<u8> {
+) -> Result<Vec<u8>, Pkcs12Error> {
     assert!(
         (1..=MAX_ITERATIONS).contains(&opts.iterations),
         "PKCS#12 iteration count must be in 1..={MAX_ITERATIONS}"
     );
     let passwords = Passwords::new(password);
     let mut key_bags = Vec::with_capacity(entries.len());
-    let mut cert_bags = Vec::with_capacity(entries.len());
+    let mut cert_bags = Vec::with_capacity(entries.len() + other_certs.len());
     for entry in entries {
-        let attributes = Some(bag_attributes(&entry.alias, &local_key_id(&entry.cert_der)));
+        let attributes = Some(bag_attributes(&entry.alias, &local_key_id(entry)?));
         let (algorithm, encrypted) = encrypt(
             opts.key,
             &passwords,
@@ -112,48 +121,48 @@ pub fn write(
             bag_value: any(&shrouded),
             bag_attributes: attributes.clone(),
         });
-        let cert_bag = CertBag {
-            cert_id: oid::X509_CERTIFICATE,
-            cert_value: octets(entry.cert_der.clone()),
-        };
-        cert_bags.push(SafeBag {
-            bag_id: oid::CERT_BAG,
-            bag_value: any(&cert_bag),
-            bag_attributes: attributes,
-        });
+        if let Some(cert_der) = &entry.cert_der {
+            cert_bags.push(cert_bag(cert_der, attributes));
+        }
+    }
+    for cert_der in other_certs {
+        Certificate::from_der(cert_der)?;
+        cert_bags.push(cert_bag(cert_der, None));
     }
 
-    let key_safe = ContentInfo {
+    let mut safes = vec![ContentInfo {
         content_type: oid::DATA,
         content: Some(any(&octets(der(&key_bags)))),
-    };
-    let (algorithm, encrypted) = encrypt(
-        opts.certs,
-        &passwords,
-        opts.iterations,
-        fill_random,
-        &der(&cert_bags),
-    );
-    let encrypted_content = Any::new(
-        Tag::ContextSpecific {
-            constructed: false,
-            number: TagNumber(0),
-        },
-        encrypted,
-    )
-    .expect("encrypted content length fits DER");
-    let cert_safe = ContentInfo {
-        content_type: oid::ENCRYPTED_DATA,
-        content: Some(any(&EncryptedData {
-            version: 0,
-            encrypted_content_info: EncryptedContentInfo {
-                content_type: oid::DATA,
-                content_encryption_algorithm: algorithm,
-                encrypted_content: Some(encrypted_content),
+    }];
+    if !cert_bags.is_empty() {
+        let (algorithm, encrypted) = encrypt(
+            opts.certs,
+            &passwords,
+            opts.iterations,
+            fill_random,
+            &der(&cert_bags),
+        );
+        let encrypted_content = Any::new(
+            Tag::ContextSpecific {
+                constructed: false,
+                number: TagNumber(0),
             },
-        })),
-    };
-    let auth_safe = der(&vec![key_safe, cert_safe]);
+            encrypted,
+        )
+        .expect("encrypted content length fits DER");
+        safes.push(ContentInfo {
+            content_type: oid::ENCRYPTED_DATA,
+            content: Some(any(&EncryptedData {
+                version: 0,
+                encrypted_content_info: EncryptedContentInfo {
+                    content_type: oid::DATA,
+                    content_encryption_algorithm: algorithm,
+                    encrypted_content: Some(encrypted_content),
+                },
+            })),
+        });
+    }
+    let auth_safe = der(&safes);
 
     let mut mac_salt = vec![0u8; SALT_LEN];
     fill_random(&mut mac_salt);
@@ -178,20 +187,34 @@ pub fn write(
             iterations: opts.iterations,
         }),
     };
-    der(&pfx)
+    Ok(der(&pfx))
 }
 
-/// `localKeyId`: the SubjectKeyIdentifier, else SHA-1 of the certificate DER.
-fn local_key_id(cert_der: &[u8]) -> Vec<u8> {
-    let cert = Certificate::from_der(cert_der).expect("WriteEntry::cert_der is a DER certificate");
-    match cert
-        .tbs_certificate()
-        .get_extension::<SubjectKeyIdentifier>()
-        .expect("well-formed SubjectKeyIdentifier")
-    {
-        Some((_, ski)) => ski.0.as_bytes().to_vec(),
-        None => sha1::Sha1::digest(cert_der).to_vec(),
+fn cert_bag(cert_der: &[u8], attributes: Option<Any>) -> SafeBag {
+    let cert_bag = CertBag {
+        cert_id: oid::X509_CERTIFICATE,
+        cert_value: octets(cert_der.to_vec()),
+    };
+    SafeBag {
+        bag_id: oid::CERT_BAG,
+        bag_value: any(&cert_bag),
+        bag_attributes: attributes,
     }
+}
+
+/// `localKeyId`: the key identifier of the certificate's public key, else of the key's.
+fn local_key_id(entry: &WriteEntry) -> Result<Vec<u8>, Pkcs12Error> {
+    let spki = match &entry.cert_der {
+        Some(cert_der) => Certificate::from_der(cert_der)?
+            .tbs_certificate()
+            .subject_public_key_info()
+            .clone(),
+        None => PrivateKey::from_pkcs8_der(&entry.pkcs8_der, None)
+            .map_err(super::read::key_error)?
+            .public_key()
+            .to_spki(),
+    };
+    Ok(key_id_bytes(&spki).to_vec())
 }
 
 /// `SET OF Attribute` with `friendlyName` and `localKeyId`, in DER order.

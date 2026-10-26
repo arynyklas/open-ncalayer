@@ -2,8 +2,8 @@
 
 use super::kdf::{self, Purpose};
 use super::{
-    Attribute, CertBag, ContentInfo, EncryptedData, EncryptedPrivateKeyInfo, KeyEntry, MacData,
-    Passwords, Pfx, Pkcs12Error, SafeBag, check_iterations, decrypt, hex,
+    Attribute, CertBag, ContentInfo, Contents, EncryptedData, EncryptedPrivateKeyInfo, KeyEntry,
+    MacData, Passwords, Pfx, Pkcs12Error, SafeBag, StoredKey, check_iterations, decrypt, hex,
 };
 use crate::ber;
 use crate::cert::{self, Certificate};
@@ -31,6 +31,17 @@ struct CertBagEntry {
     attrs: BagAttributes,
 }
 
+impl KeyBag {
+    /// `friendlyName`, else hex of `localKeyId`, else `"unmarked"`.
+    fn alias(&self) -> String {
+        self.attrs
+            .friendly_name
+            .clone()
+            .or_else(|| self.attrs.local_key_id.as_deref().map(hex))
+            .unwrap_or_else(|| "unmarked".to_owned())
+    }
+}
+
 /// Opens a PKCS#12 key store (DER or BER) and returns its key entries sorted by alias.
 ///
 /// A key is paired with the certificate carrying the same `localKeyId`, else the same
@@ -44,6 +55,66 @@ struct CertBagEntry {
 /// [`Pkcs12Error::Malformed`] for invalid structures or keys that do not match their
 /// certificates, [`Pkcs12Error::Unsupported`] for unsupported algorithms.
 pub fn load(pfx: &[u8], password: &str) -> Result<Vec<KeyEntry>, Pkcs12Error> {
+    let (keys, certs) = bags(pfx, password)?;
+    let mut entries = Vec::with_capacity(keys.len());
+    for key in keys {
+        let Some((private, cert)) = key_with_cert(&key, &certs)? else {
+            continue;
+        };
+        entries.push(KeyEntry {
+            alias: key.alias(),
+            key: private,
+            cert: certs[cert].cert.clone(),
+        });
+    }
+    entries.sort_by(|a, b| a.alias.cmp(&b.alias));
+    Ok(entries)
+}
+
+/// Opens a PKCS#12 key store like [`load`], keeping every key: a key that no certificate
+/// pairs with is read without one ([`PrivateKey::from_pkcs8_der`] with `cert = None`).
+/// Certificates that pair with no key are returned apart, in stored order.
+///
+/// # Errors
+///
+/// As [`load`]; also [`Pkcs12Error::Malformed`] / [`Pkcs12Error::Unsupported`] for a key
+/// without a certificate that cannot be read.
+pub fn load_contents(pfx: &[u8], password: &str) -> Result<Contents, Pkcs12Error> {
+    let (keys, certs) = bags(pfx, password)?;
+    let mut paired = vec![false; certs.len()];
+    let mut stored = Vec::with_capacity(keys.len());
+    for key in keys {
+        let (private, cert) = match key_with_cert(&key, &certs)? {
+            Some((private, cert)) => {
+                paired[cert] = true;
+                (private, Some(certs[cert].cert.clone()))
+            }
+            None => (
+                PrivateKey::from_pkcs8_der(&key.pkcs8, None).map_err(key_error)?,
+                None,
+            ),
+        };
+        stored.push(StoredKey {
+            alias: key.alias(),
+            key: private,
+            cert,
+        });
+    }
+    stored.sort_by(|a, b| a.alias.cmp(&b.alias));
+    let other_certs = certs
+        .into_iter()
+        .zip(paired)
+        .filter(|(_, paired)| !paired)
+        .map(|(entry, _)| entry.cert)
+        .collect();
+    Ok(Contents {
+        keys: stored,
+        other_certs,
+    })
+}
+
+/// The key and certificate bags of a key store, decrypted, in stored order.
+fn bags(pfx: &[u8], password: &str) -> Result<(Vec<KeyBag>, Vec<CertBagEntry>), Pkcs12Error> {
     let der = ber::to_der(pfx)?;
     let pfx = Pfx::from_der(&der)?;
     let auth_safe = data_content(&pfx.auth_safe)?;
@@ -83,26 +154,7 @@ pub fn load(pfx: &[u8], password: &str) -> Result<Vec<KeyEntry>, Pkcs12Error> {
             collect_bag(bag, &passwords, &mut keys, &mut certs)?;
         }
     }
-
-    let mut entries = Vec::with_capacity(keys.len());
-    for key in keys {
-        let Some((private, cert)) = key_with_cert(&key, &certs)? else {
-            continue;
-        };
-        let alias = key
-            .attrs
-            .friendly_name
-            .clone()
-            .or_else(|| key.attrs.local_key_id.as_deref().map(hex))
-            .unwrap_or_else(|| "unmarked".to_owned());
-        entries.push(KeyEntry {
-            alias,
-            key: private,
-            cert: cert.clone(),
-        });
-    }
-    entries.sort_by(|a, b| a.alias.cmp(&b.alias));
-    Ok(entries)
+    Ok((keys, certs))
 }
 
 fn content(info: &ContentInfo) -> Result<&Any, Pkcs12Error> {
@@ -256,44 +308,50 @@ fn string_value(value: &Any) -> Result<String, Pkcs12Error> {
     }
 }
 
-/// Private key of a key bag with its certificate: the one linked by attributes (which the
-/// key must match), else the first certificate the key matches. `None` if there is none.
-fn key_with_cert<'a>(
+/// Private key of a key bag with the index of its certificate: the one linked by attributes
+/// (which the key must match), else the first certificate the key matches. `None` if there
+/// is none.
+fn key_with_cert(
     key: &KeyBag,
-    certs: &'a [CertBagEntry],
-) -> Result<Option<(PrivateKey, &'a Certificate)>, Pkcs12Error> {
+    certs: &[CertBagEntry],
+) -> Result<Option<(PrivateKey, usize)>, Pkcs12Error> {
     if let Some(cert) = linked_cert(&key.attrs, certs) {
-        let private = PrivateKey::from_pkcs8_der(&key.pkcs8, Some(cert)).map_err(|e| match e {
-            KeyError::UnknownKeyAlgorithm(alg) => {
-                Pkcs12Error::Unsupported(format!("key algorithm {alg}"))
-            }
-            e => Pkcs12Error::Malformed(e.to_string()),
-        })?;
+        let private =
+            PrivateKey::from_pkcs8_der(&key.pkcs8, Some(&certs[cert].cert)).map_err(key_error)?;
         return Ok(Some((private, cert)));
     }
     // Any error here means "not this certificate": another key, another key type, or a
     // certificate (e.g. of a CA) whose key type is not supported.
-    Ok(certs.iter().find_map(|entry| {
+    Ok(certs.iter().enumerate().find_map(|(i, entry)| {
         PrivateKey::from_pkcs8_der(&key.pkcs8, Some(&entry.cert))
             .ok()
-            .map(|private| (private, &entry.cert))
+            .map(|private| (private, i))
     }))
 }
 
-fn linked_cert<'a>(key: &BagAttributes, certs: &'a [CertBagEntry]) -> Option<&'a Certificate> {
+pub(super) fn key_error(e: KeyError) -> Pkcs12Error {
+    match e {
+        KeyError::UnknownKeyAlgorithm(alg) => {
+            Pkcs12Error::Unsupported(format!("key algorithm {alg}"))
+        }
+        e => Pkcs12Error::Malformed(e.to_string()),
+    }
+}
+
+fn linked_cert(key: &BagAttributes, certs: &[CertBagEntry]) -> Option<usize> {
     let by_id = key.local_key_id.as_ref().and_then(|id| {
         certs
             .iter()
-            .find(|c| c.attrs.local_key_id.as_ref() == Some(id))
+            .position(|c| c.attrs.local_key_id.as_ref() == Some(id))
     });
     let by_name = || {
         key.friendly_name.as_ref().and_then(|name| {
             certs
                 .iter()
-                .find(|c| c.attrs.friendly_name.as_ref() == Some(name))
+                .position(|c| c.attrs.friendly_name.as_ref() == Some(name))
         })
     };
-    by_id.or_else(by_name).map(|c| &c.cert)
+    by_id.or_else(by_name)
 }
 
 #[cfg(test)]
@@ -400,6 +458,46 @@ mod tests {
     fn key_matching_no_certificate_is_skipped() {
         let p12 = pfx(vec![key_bag(None), cert_bag("nca/prod/ncarsa22.der")]);
         assert!(load(&p12, "").unwrap().is_empty());
+    }
+
+    #[test]
+    fn load_contents_keeps_keyless_keys_and_other_certificates() {
+        let p12 = pfx(vec![
+            cert_bag("nca/prod/ncarsa22.der"),
+            key_bag(None),
+            cert_bag("openssl/rsa.cer"),
+            cert_bag("nca/prod/ncagost22.der"),
+        ]);
+        let contents = load_contents(&p12, "").unwrap();
+        assert_eq!(contents.keys.len(), 1);
+        assert_eq!(contents.keys[0].alias, "unmarked");
+        assert_eq!(
+            contents.keys[0].cert.as_ref().unwrap().to_der().unwrap(),
+            read(fixture("openssl/rsa.cer"))
+        );
+        let others: Vec<Vec<u8>> = contents
+            .other_certs
+            .iter()
+            .map(|c| c.to_der().unwrap())
+            .collect();
+        assert_eq!(
+            others,
+            [
+                read(fixture("nca/prod/ncarsa22.der")),
+                read(fixture("nca/prod/ncagost22.der"))
+            ]
+        );
+
+        // Without its certificate the key is still there.
+        let p12 = pfx(vec![key_bag(None), cert_bag("nca/prod/ncarsa22.der")]);
+        let contents = load_contents(&p12, "").unwrap();
+        assert_eq!(contents.keys.len(), 1);
+        assert!(contents.keys[0].cert.is_none());
+        assert_eq!(
+            *contents.keys[0].key.to_pkcs8_der(),
+            read(fixture("openssl/rsa.pk8.der"))
+        );
+        assert_eq!(contents.other_certs.len(), 1);
     }
 
     #[test]

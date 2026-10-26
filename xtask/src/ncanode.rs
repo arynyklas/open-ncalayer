@@ -1,12 +1,13 @@
-//! `cargo xtask interop-ncanode`: NCANode (Kalkan) checks our XMLDSig and CMS signatures.
-//! Linux only; `docs/dev/interop-ncanode.md` describes the run.
+//! `cargo xtask interop-ncanode`: NCANode (Kalkan) checks our XMLDSig and CMS signatures and
+//! our key files. Linux only; `docs/dev/interop-ncanode.md` describes the run.
 //!
 //! The pinned NCANode image ([`container::IMAGE`]) runs in Docker with its default
 //! configuration. The xtask signs in process with the synthetic keys (GOST 2015, GOST 2004,
 //! RSA) and the NCANode test keys (GOST 2015, GOST 2004, RSA), posts the results to
 //! `/xml/verify` and `/cms/verify`, has Kalkan sign the same references through `/xml/sign`
-//! and compares the digests. The results are a table on stdout; any failed check fails the
-//! command.
+//! and compares the digests. It also generates keys, writes them into key files, installs
+//! certificates into them and has Kalkan open the files and sign with them ([`keyfile`]).
+//! The results are a table on stdout; any failed check fails the command.
 //!
 //! NCANode grades a signature in this order: the signature value (`SIG_CRYPTO_FAILURE`),
 //! then the certificate (validity period, trusted issuer, revocation). No key here chains to
@@ -22,6 +23,7 @@
 //! changes no canonical form.
 
 mod container;
+mod keyfile;
 
 use std::time::Duration;
 
@@ -218,7 +220,8 @@ pub fn interop_ncanode() -> anyhow::Result<()> {
         .into();
     let (_container, base) = container::start(&agent)?;
     let node = Ncanode { base, agent };
-    let rows = run_checks(&node, &signers)?;
+    let mut rows = run_checks(&node, &signers)?;
+    rows.extend(keyfile::check(&node, &signers[..3])?);
     print!("{}", render_table(&rows));
     let failed = rows.iter().filter(|r| !r.pass).count();
     println!("{} of {} checks passed", rows.len() - failed, rows.len());

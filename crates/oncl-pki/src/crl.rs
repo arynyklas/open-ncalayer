@@ -31,6 +31,7 @@ pub use mock::MockCrl;
 use crate::asn1util::{Enumerated, unsigned};
 use crate::ber::{self, BerError};
 use crate::cert::Certificate;
+use crate::fsutil::write_atomically;
 use crate::http::{GetOptions, HttpTransport};
 use crate::key::{PublicKey, SigAlg};
 use crate::oid;
@@ -43,9 +44,8 @@ use spki::AlgorithmIdentifierRef;
 use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{Read, Write as _};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io::Read;
+use std::path::PathBuf;
 use std::time::Duration;
 use time::OffsetDateTime;
 use x509_cert::ext::pkix::name::{DistributionPointName, GeneralName};
@@ -396,7 +396,8 @@ impl CrlCache {
         let crl = verify_crl(&reply.body, issuer, now)?;
         if crl.tbs_cert_list.next_update.is_some() {
             // A cache that cannot be written only costs a download next time.
-            let _ = write_atomically(&self.dir, &self.path(url), &reply.body);
+            let _ = fs::create_dir_all(&self.dir)
+                .and_then(|()| write_atomically(&self.path(url), &reply.body));
         }
         Ok(crl)
     }
@@ -410,25 +411,6 @@ impl CrlCache {
         name.push_str(".crl");
         self.dir.join(name)
     }
-}
-
-/// Writes `body` to `path` in `dir` through a temporary file in `dir` and a rename, so that
-/// a reader sees the old file or the new one, never a part.
-fn write_atomically(dir: &Path, path: &Path, body: &[u8]) -> std::io::Result<()> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    fs::create_dir_all(dir)?;
-    let tmp = path.with_extension(format!(
-        "{}-{}.tmp",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let written = File::create_new(&tmp)
-        .and_then(|mut file| file.write_all(body))
-        .and_then(|()| fs::rename(&tmp, path));
-    if written.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    written
 }
 
 /// Status of `cert` in the CRL of `issuer` valid at `now`: a cached CRL of any of its
@@ -471,6 +453,7 @@ pub fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn http_schemes() {

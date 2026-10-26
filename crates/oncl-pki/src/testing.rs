@@ -45,7 +45,7 @@ pub(crate) fn another_key(key: &PrivateKey) -> PrivateKey {
     };
     let same = match (key, &other) {
         (PrivateKey::Gost(a), PrivateKey::Gost(b)) => a.verifying_key() == b.verifying_key(),
-        (PrivateKey::Rsa(a), PrivateKey::Rsa(b)) => a.public().as_ref() == b.public().as_ref(),
+        (PrivateKey::Rsa(a), PrivateKey::Rsa(b)) => a.public_key_der() == b.public_key_der(),
         _ => false,
     };
     assert!(!same, "the signer key is the fixed other key");

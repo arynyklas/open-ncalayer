@@ -49,6 +49,7 @@ rfd = "0.17.2"
 ring = "0.17.14"
 # XMLDSig: the XML tree with byte positions (the signature is spliced into the input bytes).
 roxmltree = "0.21.2"
+# Key generation only: `oncl-pki::keygen` (RSA keys of new key files) and xtask fixtures.
 rsa = { version = "0.9.10", features = ["sha2"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
@@ -81,8 +82,8 @@ zeroize = "1.9.1"
 # Only in xtask (`ext build`): the extension zip/xpi, deflate through pure-Rust zlib-rs.
 zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
-# RSA key generation for `cargo xtask gen-fixtures` (also run by xtask tests) is very slow
-# unoptimized.
+# RSA key generation (`oncl-pki::keygen` and its tests, `cargo xtask gen-fixtures` and the
+# xtask tests) is very slow unoptimized.
 [profile.dev.package.rsa]
 opt-level = 3
 [profile.dev.package.num-bigint-dig]

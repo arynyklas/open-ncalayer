@@ -396,3 +396,37 @@ fn kz_encoding_is_fixed_width_for_short_coordinates() {
         assert!(found, "no key with a short x coordinate found");
     }
 }
+
+#[test]
+fn scalar_be_round_trips_at_full_width() {
+    for curve in CURVES {
+        let key = test_key(curve);
+        let d: Vec<u8> = (1..=curve.coord_len() as u8).collect();
+        assert_eq!(*key.scalar_be(), d, "{curve:?}");
+        // A short scalar comes back padded to the coordinate width.
+        let small = SigningKey::from_scalar_be(curve, &[7]).unwrap();
+        let mut seven = vec![0; curve.coord_len()];
+        *seven.last_mut().unwrap() = 7;
+        assert_eq!(*small.scalar_be(), seven, "{curve:?}");
+    }
+}
+
+#[test]
+fn generated_keys_are_valid_and_distinct() {
+    for curve in CURVES {
+        let a = SigningKey::generate(curve);
+        let b = SigningKey::generate(curve);
+        assert_eq!(a.curve(), curve);
+        let d =
+            BoxedUint::from_be_slice(&a.scalar_be(), curve.params().p.bits_precision()).unwrap();
+        assert!(hazmat::is_valid_scalar(curve.params(), &d), "{curve:?}");
+        assert_ne!(a.verifying_key(), b.verifying_key(), "{curve:?}");
+        // The public key is d·G: the scalar rebuilds the same key.
+        let again = SigningKey::from_scalar_be(curve, &a.scalar_be()).unwrap();
+        assert_eq!(again.verifying_key(), a.verifying_key(), "{curve:?}");
+        let alg = alg_for(curve);
+        let digest = alg.hash(b"generated");
+        let sig = a.sign_digest(&digest);
+        a.verifying_key().verify_digest(&digest, &sig).unwrap();
+    }
+}

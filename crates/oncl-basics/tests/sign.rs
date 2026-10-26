@@ -351,10 +351,12 @@ fn unreadable_storages_reprompt_with_error() {
 fn keyless_store_reprompts_with_no_keys() {
     let p12 = write(
         &[],
+        &[],
         "Qwerty12",
         &WriteOptions::default(),
         &mut |buf: &mut [u8]| buf.fill(3),
-    );
+    )
+    .unwrap();
     let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("oncl-basics-keyless.p12");
     std::fs::write(&path, p12).unwrap();
     let s = setup(
@@ -984,12 +986,14 @@ fn rsa_store_with_signature_oid(last: u8) -> PathBuf {
         &[WriteEntry {
             alias: "rsa".to_owned(),
             pkcs8_der: read(fixture("openssl/rsa.pk8.der")),
-            cert_der,
+            cert_der: Some(cert_der),
         }],
+        &[],
         "Qwerty12",
         &WriteOptions::default(),
         &mut |buf: &mut [u8]| buf.fill(7),
-    );
+    )
+    .unwrap();
     let path =
         Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("oncl-basics-rsa-oid-{last}.p12"));
     std::fs::write(&path, p12).unwrap();

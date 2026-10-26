@@ -3674,6 +3674,7 @@ dependencies = [
  "rc2",
  "ring",
  "roxmltree",
+ "rsa",
  "sha1",
  "sha2 0.11.1",
  "spki 0.8.1",

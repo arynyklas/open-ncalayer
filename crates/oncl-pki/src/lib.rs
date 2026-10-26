@@ -1,5 +1,6 @@
 //! PKI building blocks for OpenNCALayer: BER normalization, GOST and RSA keys in PKCS#8,
-//! PKCS#12 key stores with Kalkan's reading rules, certificate signature checks and
+//! key generation, PKCS#10 certificate requests, PKCS#12 key stores with Kalkan's reading
+//! and writing rules and Kalkan-shaped key files, certificate signature checks and
 //! certificate details, certification path building against the embedded NCA roots, OCSP,
 //! CRLs with an on-disk cache, CMS signing and verification, RFC 3161 time-stamping over a
 //! shared HTTP transport, XML signatures (XMLDSig) with XML canonicalization, PEM output.
@@ -9,9 +10,13 @@ pub mod ber;
 pub mod cert;
 pub mod cms;
 pub mod crl;
+pub mod csr;
+mod fsutil;
 pub mod http;
 pub mod info;
 pub mod key;
+pub mod keygen;
+pub mod keystore;
 pub mod ocsp;
 pub mod oid;
 pub mod pem;
