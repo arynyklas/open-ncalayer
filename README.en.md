@@ -63,6 +63,14 @@ The first one is closed in P4.
 - CRLs are checked only for intermediate CAs and only by `cms-verify` (the original's `basics` has no CRL). Delta CRLs and CRLs with an `issuingDistributionPoint` are refused. `ncagost`, `ncagost18`, `ncarsa` and `ncarsa18` have two CRL mirrors, `crl.root.gov.kz` and `crl1.root.gov.kz` (for `ncagost18` and `ncarsa18` in one string, `… URL=…`); OpenNCALayer tries both. At the time of checking (the date is in [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md)) neither mirror served a current CRL for these CAs, and `cms-verify` reported their revocation status as unavailable.
 - Certificate policies and `nameConstraints` are not checked in the chain (NCA certificates have no `nameConstraints`).
 
+### Deviations of P4 from the original
+
+XML signing (`basics.sign` with `format:"xml"`):
+- The document's bytes are kept, including the `<?xml …?>` declaration, whitespace and attribute order. The `ds:Signature` element is appended as the last child of the root element. The original re-serializes the document without the declaration (`omit-xml-declaration`). The signature verifies the same way, but the response string differs.
+- Input limits the original does not have: at most 64 MiB and 256 levels of nesting, and bounded numbers of nodes, attributes and namespace declarations, as well as bounded canonicalization work. A document over the limits gets `UNABLE_TO_PARSE_XML`, like any parse error. The parse error text is ours; the original sends the SAX message.
+- A certificate signed with sha1RSA is not used for signing (`UNKNOWN_ALGORITHM`, as for cms). The original signs with rsa-sha1.
+- A document with a comment or a processing instruction before the root element is signed. The original fails on it (`SIGNING_FAILURE`): it inserts the signature into the document's first node.
+
 Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
 - [`docs/design/roadmap.md`](docs/design/roadmap.md) — decisions and roadmap;

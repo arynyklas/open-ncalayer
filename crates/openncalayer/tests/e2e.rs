@@ -261,6 +261,9 @@ async fn basics_sign_xml_egov_login_over_wss() {
     let request = r#"{"module":"kz.gov.pki.knca.basics","method":"sign","args":{"data":"<?xml version=\"1.0\" encoding=\"UTF-8\"?><login><client-type>PORTAL</client-type></login>","allowedStorages":["PKCS12","AKKaztokenStore","AKKZIDCardStore"],"format":"xml","signingParams":{},"signerParams":{"extKeyUsageOids":["1.3.6.1.5.5.7.3.2"],"chain":[]},"locale":"ru"}}"#;
     send(&mut c, request).await;
     let reply = json(&next_text(&mut c).await);
+    // `{"status":true,"body":{"result":["<signed xml>"]}}`, nothing more.
+    assert_eq!(reply.as_object().unwrap().len(), 2, "{reply}");
+    assert_eq!(reply["body"].as_object().unwrap().len(), 1, "{reply}");
     assert_eq!(reply["status"], true, "{reply}");
     let result = reply["body"]["result"].as_array().unwrap();
     assert_eq!(result.len(), 1, "{reply}");

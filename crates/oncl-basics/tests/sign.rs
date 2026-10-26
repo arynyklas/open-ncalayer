@@ -957,15 +957,15 @@ fn cosign_detached_cms_error_code() {
     assert_eq!(r["message"], "CMS_NO_ENCAPSULATED_DATA", "{r}");
 }
 
-/// Replaces sha256WithRSAEncryption (1.2.840.113549.1.1.11) by sha1WithRSAEncryption
-/// (…1.1.5) in a DER certificate: same length, signature left as is.
-fn as_sha1_with_rsa(cert: &[u8]) -> Vec<u8> {
+/// Replaces sha256WithRSAEncryption (1.2.840.113549.1.1.11) by 1.2.840.113549.1.1.`last`
+/// in a DER certificate: same length, signature left as is.
+fn with_rsa_signature_oid(cert: &[u8], last: u8) -> Vec<u8> {
     const SHA256_RSA: [u8; 11] = [6, 9, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 0x0b];
     let mut out = cert.to_vec();
     let mut patched = 0;
     for i in 0..=out.len() - SHA256_RSA.len() {
         if out[i..i + SHA256_RSA.len()] == SHA256_RSA {
-            out[i + SHA256_RSA.len() - 1] = 5;
+            out[i + SHA256_RSA.len() - 1] = last;
             patched += 1;
         }
     }
@@ -976,12 +976,13 @@ fn as_sha1_with_rsa(cert: &[u8]) -> Vec<u8> {
     out
 }
 
-#[test]
-fn sha1_with_rsa_certificate_is_not_upgraded() {
-    let cert_der = as_sha1_with_rsa(&read(fixture("openssl/rsa.cer")));
+/// A PKCS#12 file (`Qwerty12`) with the OpenSSL RSA key under its certificate whose
+/// signature algorithm is patched to 1.2.840.113549.1.1.`last`.
+fn rsa_store_with_signature_oid(last: u8) -> PathBuf {
+    let cert_der = with_rsa_signature_oid(&read(fixture("openssl/rsa.cer")), last);
     let p12 = write(
         &[WriteEntry {
-            alias: "sha1".to_owned(),
+            alias: "rsa".to_owned(),
             pkcs8_der: read(fixture("openssl/rsa.pk8.der")),
             cert_der,
         }],
@@ -989,25 +990,73 @@ fn sha1_with_rsa_certificate_is_not_upgraded() {
         &WriteOptions::default(),
         &mut |buf: &mut [u8]| buf.fill(7),
     );
-    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("oncl-basics-sha1-rsa.p12");
+    let path =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("oncl-basics-rsa-oid-{last}.p12"));
     std::fs::write(&path, p12).unwrap();
+    path
+}
+
+/// A clock inside the validity of `openssl/rsa.cer`.
+fn inside_rsa_validity() -> OffsetDateTime {
+    let cert = oncl_pki::cert::parse(&read(fixture("openssl/rsa.cer"))).unwrap();
+    let info = cert_info(&cert);
+    info.not_before + (info.not_after - info.not_before) / 2
+}
+
+#[test]
+fn sha1_with_rsa_certificate_is_not_upgraded() {
+    let path = rsa_store_with_signature_oid(5);
     let entries = load(&read(&path), "Qwerty12").unwrap();
     assert_eq!(
         cert_info(&entries[0].cert).signing_alg(),
         Ok(SigAlg::RsaSha1)
     );
 
-    fn inside_validity() -> OffsetDateTime {
-        let cert = oncl_pki::cert::parse(&read(fixture("openssl/rsa.cer"))).unwrap();
-        let info = cert_info(&cert);
-        info.not_before + (info.not_after - info.not_before) / 2
+    // Refused for cms and, unlike the original (rsa-sha1), for xml too.
+    for args in [
+        cms_args(json!("x"), json!({})),
+        xml_args(json!("<a/>"), json!({})),
+    ] {
+        let s = setup(script![storage_at(&path, "Qwerty12"), key(0)], None);
+        let b = s.basics.with_clock(inside_rsa_validity);
+        let r = json(b.process(&req(args), &origin("o")));
+        assert_eq!(r["status"], false, "{r}");
+        assert_eq!(r["code"], "UNKNOWN_ALGORITHM");
+        assert_eq!(r["message"], "UNKNOWN_ALGORITHM", "{r}");
     }
+}
+
+#[test]
+fn xml_unknown_certificate_algorithm_is_incorrect_algorithm() {
+    // sha512WithRSAEncryption: `XMLUtil` throws IllegalArgumentException("Incorrect
+    // algorithm: …"), which `PKIExtras.sign` reports as SIGNING_FAILURE.
+    let path = rsa_store_with_signature_oid(13);
     let s = setup(script![storage_at(&path, "Qwerty12"), key(0)], None);
-    let b = s.basics.with_clock(inside_validity);
-    let r = json(b.process(&req(cms_args(json!("x"), json!({}))), &origin("o")));
-    assert_eq!(r["status"], false, "{r}");
-    assert_eq!(r["code"], "UNKNOWN_ALGORITHM");
-    assert_eq!(r["message"], "UNKNOWN_ALGORITHM", "{r}");
+    let b = s.basics.with_clock(inside_rsa_validity);
+    let r = json(b.process(&req(xml_args(json!("<a/>"), json!({}))), &origin("o")));
+    assert_eq!(
+        r,
+        json!({
+            "status": false,
+            "code": "SIGNING_FAILURE",
+            "message": "Signing has failed.",
+            "details": "java.lang.IllegalArgumentException: Incorrect algorithm: 1.2.840.113549.1.1.13",
+        })
+    );
+}
+
+#[test]
+fn xml_leading_comment_and_pi_are_kept_and_signed() {
+    // The original appends to the document's first child and fails here; we sign.
+    let doc = "<?xml version=\"1.0\"?>\n<!-- c --><?pi x?>\n<a>1</a>";
+    let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+    let r = json(b.process(&req(xml_args(json!(doc), json!({}))), &origin("o")));
+    let signed = r["body"]["result"][0].as_str().unwrap();
+    assert!(
+        signed.starts_with("<?xml version=\"1.0\"?>\n<!-- c --><?pi x?>\n<a>1<ds:Signature"),
+        "{r}"
+    );
+    oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
 }
 
 #[test]
@@ -1188,7 +1237,10 @@ fn xml_args(data: Value, signing_params: Value) -> Value {
 fn xml_egov_login_signs_with_the_chosen_key() {
     let (b, p) = basics(script![storage("user-gost2015-auth", "Qwerty12"), key(0)]);
     let r = json(b.process(&req(egov_login_args()), &origin("https://idp.egov.kz")));
+    // `{"status":true,"body":{"result":["<signed xml>"]}}`, nothing more.
+    assert_eq!(r.as_object().unwrap().len(), 2, "{r}");
     assert_eq!(r["status"], true, "{r}");
+    assert_eq!(r["body"].as_object().unwrap().len(), 1, "{r}");
     let result = r["body"]["result"].as_array().unwrap();
     assert_eq!(result.len(), 1);
     let signed = result[0].as_str().unwrap();
@@ -1214,6 +1266,9 @@ fn xml_array_of_documents() {
     let (b, _) = basics(script![storage("user-gost2004-sign", "Qwerty12"), key(0)]);
     let docs = ["<a>1</a>", "<b xmlns=\"urn:x\"><c/></b>"];
     let r = json(b.process(&req(xml_args(json!(docs), json!({}))), &origin("o")));
+    assert_eq!(r.as_object().unwrap().len(), 2, "{r}");
+    assert_eq!(r["status"], true, "{r}");
+    assert_eq!(r["body"].as_object().unwrap().len(), 1, "{r}");
     let result = r["body"]["result"].as_array().unwrap();
     assert_eq!(result.len(), 2, "{r}");
     for (signed, doc) in result.iter().zip(docs) {
@@ -1233,7 +1288,7 @@ fn xml_data_is_never_decoded() {
         &req(xml_args(json!("PGEvPg=="), json!({"decode": true}))),
         &origin("o"),
     ));
-    assert_eq!(r["code"], "SIGNING_FAILURE", "{r}");
+    assert_eq!(r["code"], "UNABLE_TO_PARSE_XML", "{r}");
 }
 
 #[test]
@@ -1273,13 +1328,26 @@ fn xml_allow_expired_makes_expired_keys_selectable() {
 }
 
 #[test]
-fn xml_malformed_is_signing_failure() {
-    for bad in ["<a>", "not xml", "<!DOCTYPE a><a/>"] {
-        let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+fn xml_malformed_is_unable_to_parse_xml_after_the_dialog() {
+    for bad in ["<a>", "not xml", "<!DOCTYPE a><a/>", "<a/><b/>"] {
+        let (b, p) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
         let r = json(b.process(&req(xml_args(json!(bad), json!({}))), &origin("o")));
+        // `ProviderUtilFailure(UNABLE_TO_PARSE_XML, <parser error>)`, as the original.
+        assert_eq!(r.as_object().unwrap().len(), 4, "{r}");
         assert_eq!(r["status"], false, "{r}");
-        assert_eq!(r["code"], "SIGNING_FAILURE", "{r}");
-        assert_eq!(r["message"], "Signing has failed.");
-        assert!(!r["details"].as_str().unwrap().is_empty(), "{r}");
+        assert_eq!(r["code"], "UNABLE_TO_PARSE_XML", "{r}");
+        let message = r["message"].as_str().unwrap();
+        assert!(!message.is_empty(), "{r}");
+        assert_eq!(r["details"], message, "{r}");
+        // Parsed after the key was chosen, as `XMLUtil.createXmlSignature` is.
+        assert_eq!(p.storage_prompts().len(), 1, "{bad}");
+        assert_eq!(p.key_prompts().len(), 1, "{bad}");
     }
+    // The first bad document fails the request.
+    let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+    let r = json(b.process(
+        &req(xml_args(json!(["<a/>", "<b>"]), json!({}))),
+        &origin("o"),
+    ));
+    assert_eq!(r["code"], "UNABLE_TO_PARSE_XML", "{r}");
 }

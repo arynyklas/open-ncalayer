@@ -300,11 +300,15 @@ fn expired_key_is_validated_at_its_not_after_and_still_checked() {
 #[test]
 fn allow_revoked_skips_ocsp() {
     let ocsp = Arc::new(responder());
-    for allow in [json!(true), json!("TRUE")] {
+    for (format, allow) in [
+        ("cms", json!(true)),
+        ("cms", json!("TRUE")),
+        ("xml", json!(true)),
+    ] {
         assert_eq!(
             shown(
                 "inter-revoked-gost2015-sign",
-                args("cms", Some(inter_chain()), json!({"allowRevoked": allow})),
+                args(format, Some(inter_chain()), json!({"allowRevoked": allow})),
                 ocsp.clone()
             ),
             Availability::Enabled

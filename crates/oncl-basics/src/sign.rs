@@ -36,6 +36,7 @@ const CERTIFICATE_PARSING_FAILURE: &str = "CERTIFICATE_PARSING_FAILURE";
 const CERTIFICATE_PARSING_FAILURE_MESSAGE: &str = "Certificate parsing failure.";
 const CMS_NO_ENCAPSULATED_DATA: &str = "CMS_NO_ENCAPSULATED_DATA";
 const UNKNOWN_ALGORITHM: &str = "UNKNOWN_ALGORITHM";
+const UNABLE_TO_PARSE_XML: &str = "UNABLE_TO_PARSE_XML";
 const TIMESTAMP_CREATION_FAILURE: &str = "TIMESTAMP_CREATION_FAILURE";
 
 /// Origin shown when the connection sent none.
@@ -372,14 +373,35 @@ fn sign_raw(entry: &KeyEntry, data: &[Cow<'_, [u8]>], output_cert: bool) -> Call
 
 /// The document with an enveloped signature appended to its root element.
 fn sign_xml(entry: &KeyEntry, xml: &[u8]) -> Result<String, Failure> {
-    let signed = xmldsig::sign_enveloped(xml, &entry.key, &entry.cert).map_err(xml_failure)?;
+    let signed = xmldsig::sign_enveloped(xml, &entry.key, &entry.cert)
+        .map_err(|e| xml_failure(e, &entry.cert))?;
     // The input was UTF-8 text and only ASCII markup and base64 were spliced in.
     String::from_utf8(signed).map_err(signing_failure)
 }
 
-fn xml_failure(e: XmlError) -> Failure {
+/// `XMLUtil.createXmlSignature`'s failures as `PKIExtras.sign` reports them:
+///
+/// - the document does not parse (DOCTYPE and our size, depth and work limits included):
+///   the provider's `UNABLE_TO_PARSE_XML`, the parser error as the message;
+/// - a certificate signature algorithm other than GOST 2015-512, GOST 2004 or sha256RSA:
+///   the original's `IllegalArgumentException`, a SIGNING_FAILURE; except sha1RSA, which
+///   the original signs with rsa-sha1 and we refuse as for cms (`UNKNOWN_ALGORITHM`);
+/// - anything else: SIGNING_FAILURE.
+fn xml_failure(e: XmlError, cert: &Certificate) -> Failure {
     match e {
-        XmlError::UnsupportedAlgorithm(_) | XmlError::Key(KeyError::UnsupportedAlgorithm) => {
+        XmlError::Parse(_) | XmlError::Doctype | XmlError::TooLarge | XmlError::TooDeep => {
+            provider_failure(UNABLE_TO_PARSE_XML, e.to_string(), &e)
+        }
+        XmlError::UnsupportedAlgorithm(_)
+            if SigAlg::from_signature_oid(&cert.signature_algorithm().oid)
+                == Some(SigAlg::RsaSha1) =>
+        {
+            provider_failure(UNKNOWN_ALGORITHM, UNKNOWN_ALGORITHM, &e)
+        }
+        XmlError::UnsupportedAlgorithm(oid) => signing_failure(format!(
+            "java.lang.IllegalArgumentException: Incorrect algorithm: {oid}"
+        )),
+        XmlError::Key(KeyError::UnsupportedAlgorithm) => {
             provider_failure(UNKNOWN_ALGORITHM, UNKNOWN_ALGORITHM, &e)
         }
         e => signing_failure(e),

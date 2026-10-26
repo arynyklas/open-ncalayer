@@ -1,5 +1,5 @@
 //! The `kz.gov.pki.knca.basics` module: `CommonInvoker` over the classes `PKIExtras`
-//! (`sign`: cms and raw, with NCA time-stamps) and `PKIEssentials` (no methods in P1).
+//! (`sign`: cms with NCA time-stamps, raw, and enveloped XMLDSig) and `PKIEssentials`.
 //!
 //! Dialogs go through a [`Prompter`]; signing flows run one at a time process-wide, so a
 //! second request waits for the first one's dialogs to finish. The keys offered are checked
