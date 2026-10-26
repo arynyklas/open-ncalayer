@@ -34,6 +34,11 @@ pub const MAX_DIR_ENTRIES: usize = 4096;
 /// Key files of a page-named folder tried when searching it for a key (each costs a key
 /// derivation; [`install_certificate_in_page_folder`]).
 pub const MAX_KEY_FILES: usize = 64;
+/// Most certificates one page request may install (basics `importCertificate`
+/// `certificates`, the Applet's `setX509CertToKeyStore*` list). Each costs a folder search
+/// and a key file rewrite; the Applet's run without a window. Portals send one to four. The
+/// original has no limit.
+pub const MAX_CERTIFICATES_PER_REQUEST: usize = 16;
 
 /// How far a folder is searched for a key file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

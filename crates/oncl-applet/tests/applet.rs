@@ -14,7 +14,7 @@ use oncl_pki::cert::Certificate;
 use oncl_pki::csr::KeyStoreInfo;
 use oncl_pki::key::{PublicKey, SigAlg};
 use oncl_pki::keygen::MAX_KEYS_PER_REQUEST;
-use oncl_pki::keystore::change_password;
+use oncl_pki::keystore::{MAX_CERTIFICATES_PER_REQUEST, change_password};
 use oncl_pki::pkcs12::{KeyEntry, WriteOptions, load, load_contents, write};
 use oncl_pki::testing::{TestCertSpec, issue_cert};
 use oncl_pki::{oid, pem, xmldsig};
@@ -1114,9 +1114,46 @@ fn set_certificate_failures() {
     ] {
         assert_eq!(set(args), thrown(ITE, "setX509CertToKeyStore"));
     }
+    // More certificates than a request may install, refused before any file is touched
+    // (the original has no limit).
+    let too_many = vec![cert_pem(&cert); MAX_CERTIFICATES_PER_REQUEST + 1].join("<@>");
+    assert_code(
+        &set(json!(["PKCS12", d, DEFAULT_PASSWORD, too_many])),
+        "SETCERT_COMMON",
+    );
+    assert_code(
+        &call(
+            &a,
+            "setX509CertToKeyStoreAndChangePassword",
+            json!(["PKCS12", d, DEFAULT_PASSWORD, NEW_PASSWORD, too_many]),
+        ),
+        "SETCERT_COMMON",
+    );
     // Nothing was installed.
     let contents = load_contents(&fs::read(&file).unwrap(), DEFAULT_PASSWORD).unwrap();
     assert!(contents.keys[0].cert.is_none());
+}
+
+#[test]
+fn set_certificate_installs_at_most_sixteen_certificates() {
+    assert_eq!(MAX_CERTIFICATES_PER_REQUEST, 16);
+    let (a, _) = setup(vec![]);
+    let (dir, requests, ids) = generated(&a);
+    let cert = issue(&requests[0], "user-gost2015-sign", false, 1);
+    let pems = vec![cert_pem(&cert); MAX_CERTIFICATES_PER_REQUEST].join("<@>");
+    let reply = call(
+        &a,
+        "setX509CertToKeyStore",
+        json!(["PKCS12", dir_arg(&dir), DEFAULT_PASSWORD, pems]),
+    );
+    assert_eq!(code(&reply), "NONE", "{reply}");
+    assert_eq!(
+        reply["result"].as_str().unwrap().split("<@>").count(),
+        MAX_CERTIFICATES_PER_REQUEST
+    );
+    let file = dir.path().join(format!("GOSTKNCA_{}.p12", ids[0]));
+    let contents = load_contents(&fs::read(&file).unwrap(), DEFAULT_PASSWORD).unwrap();
+    assert_eq!(contents.keys[0].cert.as_ref(), Some(&cert));
 }
 
 #[test]

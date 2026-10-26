@@ -14,6 +14,7 @@ use oncl_pki::csr::KeyStoreInfo;
 use oncl_pki::info::cert_info;
 use oncl_pki::key::{PublicKey, SigAlg};
 use oncl_pki::keygen::{MAX_KEYS_PER_REQUEST, key_id};
+use oncl_pki::keystore::MAX_CERTIFICATES_PER_REQUEST;
 use oncl_pki::oid;
 use oncl_pki::pkcs12::{KeyEntry, load, load_contents};
 use oncl_pki::testing::{TestCertSpec, issue_cert};
@@ -780,6 +781,12 @@ fn import_argument_errors() {
             "INVOCATION_ERROR",
             "org.json.JSONException: JSONObject[\"certificates\"] is not a JSONArray.",
         ),
+        // More certificates than a request may install (the original has no limit).
+        (
+            json!({"certificates": vec![cert_pem(&cert); MAX_CERTIFICATES_PER_REQUEST + 1]}),
+            "INVOCATION_ERROR",
+            "java.lang.IllegalArgumentException: too many certificates",
+        ),
     ];
     for (patch, code, details) in cases {
         let mut args = import_args(dir.path(), &[&cert]);
@@ -791,6 +798,25 @@ fn import_argument_errors() {
         assert_eq!((got_code.as_str(), got_details.as_str()), (code, details));
         assert!(p.import_prompts().is_empty());
     }
+}
+
+/// A request may install [`MAX_CERTIFICATES_PER_REQUEST`] certificates; one more is refused
+/// before the dialog (above).
+#[test]
+fn at_most_sixteen_certificates_per_import() {
+    assert_eq!(MAX_CERTIFICATES_PER_REQUEST, 16);
+    let (dir, file, req) = generated(DEFAULT_PASSWORD);
+    let before = read(&file);
+    let cert = issue(&req, &[0x41, 0x09]);
+    let certs = vec![&cert; MAX_CERTIFICATES_PER_REQUEST];
+    let (b, p) = basics(vec![Step::CancelImport]);
+    let r = essentials(&b, "importCertificate", import_args(dir.path(), &certs));
+    assert_eq!(r, json!({"status": true, "body": {}}));
+    assert_eq!(
+        p.import_prompts()[0].certificates.len(),
+        MAX_CERTIFICATES_PER_REQUEST
+    );
+    assert_eq!(read(&file), before);
 }
 
 thread_local! {

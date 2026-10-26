@@ -13,6 +13,9 @@
 //!   original's code without asking (the original asks first, then fails); more than
 //!   [`MAX_KEYS_PER_REQUEST`] entries are an INVOCATION_ERROR (`IllegalArgumentException:
 //!   too many keys requested`; the original has no limit);
+//! - more than [`MAX_CERTIFICATES_PER_REQUEST`] `certificates` are an INVOCATION_ERROR
+//!   (`IllegalArgumentException: too many certificates`, before the dialog; the original
+//!   has no limit);
 //! - a `keystorePath` a page may not name (a network or device path) does not pre-fill the
 //!   import dialog;
 //! - without a `defaultPassword` the dialog asks for the key file password (the original
@@ -35,7 +38,8 @@ use oncl_pki::csr::{CsrRequest, KeyStoreInfo, build_csr};
 use oncl_pki::info::cert_info;
 use oncl_pki::keygen::{KeySpec, MAX_KEYS_PER_REQUEST, generate};
 use oncl_pki::keystore::{
-    KeystoreError, change_password, check_password_pattern, create_key_file, install_certificate,
+    KeystoreError, MAX_CERTIFICATES_PER_REQUEST, change_password, check_password_pattern,
+    create_key_file, install_certificate,
 };
 use oncl_pki::oid;
 use oncl_protocol::AddInfo;
@@ -55,6 +59,8 @@ const INVALID_IMPORTING_CERTIFICATE_MESSAGE: &str = "Importing certificate is in
 const SAN_WITHOUT_CN: &str = "java.lang.IllegalArgumentException: Subject alternative names do not contain corresponding common name";
 /// Over [`MAX_KEYS_PER_REQUEST`] `params` entries.
 const TOO_MANY_KEYS: &str = "java.lang.IllegalArgumentException: too many keys requested";
+/// Over [`MAX_CERTIFICATES_PER_REQUEST`] `certificates` entries.
+const TOO_MANY_CERTIFICATES: &str = "java.lang.IllegalArgumentException: too many certificates";
 
 /// `PKIEssentials.generateCsr`: `{"pems": [...]}`, one request (and key file) per `params`
 /// entry; `{}` if the user cancels.
@@ -134,6 +140,9 @@ pub(crate) fn import_certificate(
             "java.lang.NullPointerException: Unsupported storage: {storage_name}"
         )))
     })?;
+    if certificates.len() > MAX_CERTIFICATES_PER_REQUEST {
+        return Err(Failure::Invocation(Some(TOO_MANY_CERTIFICATES.to_owned())));
+    }
     // `X509Util.getX509Certificate(e.toString())`: anything that is not a certificate (null
     // included) is INVALID_IMPORTING_CERTIFICATE.
     let certificates: Vec<Certificate> = certificates

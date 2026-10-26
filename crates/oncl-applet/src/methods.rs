@@ -25,8 +25,8 @@ use oncl_basics::{
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::info::{CertInfo, KncaCertType, cert_info, kcert_types};
 use oncl_pki::keystore::{
-    KeystoreError, certificate_alias, change_password_data, check_password_pattern,
-    install_certificate_in_page_folder,
+    KeystoreError, MAX_CERTIFICATES_PER_REQUEST, certificate_alias, change_password_data,
+    check_password_pattern, install_certificate_in_page_folder,
 };
 use oncl_pki::oid;
 use oncl_pki::pkcs12::KeyEntry;
@@ -200,7 +200,8 @@ pub(crate) fn set_x509_cert_to_key_store_and_change_password(
 /// Per certificate, in the original's order: the PEM, its SubjectKeyIdentifier and
 /// KeyStoreInfo (`SETCERT_COMMON`), then the folder: none, or one a page may not name (a
 /// device or network path, refused unlooked), is `KEYSTORE_FILE_NOT_FOUND`; not a folder
-/// is `SETCERT_COMMON`.
+/// is `SETCERT_COMMON`. Unlike the original, more than [`MAX_CERTIFICATES_PER_REQUEST`]
+/// certificates are `SETCERT_COMMON` before any file is touched.
 fn set_certificates(
     a: &Applet,
     storage_name: Option<&str>,
@@ -218,6 +219,11 @@ fn set_certificates(
         // Refused by `certificate_alias`: JKS is not written.
         StorageKind::Jks => oid::STORAGE_JKS,
     };
+    // Unlike the original, at most `MAX_CERTIFICATES_PER_REQUEST` certificates, checked
+    // before any file is touched: these run without a window.
+    if pems.len() > MAX_CERTIFICATES_PER_REQUEST {
+        return Ok(Wrapper::error(SETCERT_COMMON));
+    }
     let password = Zeroizing::new(default_password.ok_or(NPE)?.to_owned());
     a.set_password(Some(password.clone()));
 
