@@ -18,6 +18,7 @@ use oncl_pki::info::{CertInfo, cert_info};
 use oncl_pki::key::{KeyAlg, KeyError, SigAlg};
 use oncl_pki::pkcs12::{self, KeyEntry, Pkcs12Error};
 use oncl_pki::pkix::CaSet;
+use oncl_pki::xmldsig::{self, XmlError};
 use oncl_pki::{pem, tsp};
 use oncl_protocol::AddInfo;
 use oncl_protocol::invoker::{CallResult, Failure};
@@ -71,6 +72,8 @@ enum Format {
     Raw {
         output_cert: bool,
     },
+    /// Enveloped XMLDSig of each (UTF-8, never decoded) document.
+    Xml,
 }
 
 /// A parsed `sign` request; `data` borrows from the request unless base64-decoded.
@@ -114,6 +117,13 @@ pub(crate) fn sign(basics: &Basics, args: &Map<String, Value>, add_info: &AddInf
             Value::Array(pems)
         }
         Format::Raw { output_cert } => sign_raw(&entry, &request.data, output_cert)?,
+        Format::Xml => Value::from(
+            request
+                .data
+                .iter()
+                .map(|xml| sign_xml(&entry, xml))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
     };
     Ok(json!({ "result": result }))
 }
@@ -145,9 +155,12 @@ impl<'a> SignRequest<'a> {
 
         let format = get_string(args, "format")?;
         let signing_params = get_object(args, "signingParams")?;
-        let decode = opt_bool(signing_params, "decode", false);
-        // Read for cms (and xml); raw keys are always checked.
-        let allow_revoked = format == "cms" && opt_bool(signing_params, "allowRevoked", false);
+        // xml reads only allowRevoked and allowExpired; its data is never decoded.
+        let decode = format != "xml" && opt_bool(signing_params, "decode", false);
+        // Read for cms and xml; raw keys are always checked.
+        let allow_revoked =
+            matches!(format, "cms" | "xml") && opt_bool(signing_params, "allowRevoked", false);
+        let allow_expired = format == "xml" && opt_bool(signing_params, "allowExpired", false);
         let format = match format {
             "cms" => Format::Cms {
                 encapsulate: opt_bool(signing_params, "encapsulate", true),
@@ -158,6 +171,7 @@ impl<'a> SignRequest<'a> {
             "raw" => Format::Raw {
                 output_cert: opt_bool(signing_params, "outputCert", false),
             },
+            "xml" => Format::Xml,
             _ => return Err(invalid_signing_params()),
         };
 
@@ -196,7 +210,7 @@ impl<'a> SignRequest<'a> {
             iin: opt_string(signer_params, "iin").unwrap_or_default(),
             bin: opt_string(signer_params, "bin").unwrap_or_default(),
             serial_number: opt_string(signer_params, "serialNumber").unwrap_or_default(),
-            allow_expired: false,
+            allow_expired,
             chain,
             allow_revoked,
         };
@@ -354,6 +368,22 @@ fn sign_raw(entry: &KeyEntry, data: &[Cow<'_, [u8]>], output_cert: bool) -> Call
     } else {
         Value::from(signatures)
     })
+}
+
+/// The document with an enveloped signature appended to its root element.
+fn sign_xml(entry: &KeyEntry, xml: &[u8]) -> Result<String, Failure> {
+    let signed = xmldsig::sign_enveloped(xml, &entry.key, &entry.cert).map_err(xml_failure)?;
+    // The input was UTF-8 text and only ASCII markup and base64 were spliced in.
+    String::from_utf8(signed).map_err(signing_failure)
+}
+
+fn xml_failure(e: XmlError) -> Failure {
+    match e {
+        XmlError::UnsupportedAlgorithm(_) | XmlError::Key(KeyError::UnsupportedAlgorithm) => {
+            provider_failure(UNKNOWN_ALGORITHM, UNKNOWN_ALGORITHM, &e)
+        }
+        e => signing_failure(e),
+    }
 }
 
 fn decode_base64(s: &str) -> Result<Vec<u8>, base64::DecodeError> {

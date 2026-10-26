@@ -812,7 +812,7 @@ fn param_errors() {
     );
 
     // Unsupported formats.
-    for format in ["xml", "CMS", ""] {
+    for format in ["XML", "CMS", ""] {
         let (b, _) = basics(script![]);
         let r = json(b.process(
             &req(json!({"format":format,"data":"x","signingParams":{},"signerParams":{"extKeyUsageOids":[]}})),
@@ -1160,4 +1160,126 @@ fn locale_mapping() {
     // Java's `new Locale(…)` lower-cases the language.
     assert_eq!(Locale::from_arg(Some("RU")), Locale::Ru);
     assert_eq!(Locale::from_arg(None), Locale::Kk);
+}
+
+/// The eGov login request as the portal sends it, plus `chain: []` so the synthetic key is
+/// not disabled by the embedded production CAs.
+fn egov_login_args() -> Value {
+    json!({
+        "data": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><login><client-type>PORTAL</client-type></login>",
+        "allowedStorages": ["PKCS12", "AKKaztokenStore", "AKKZIDCardStore"],
+        "format": "xml",
+        "signingParams": {},
+        "signerParams": {"extKeyUsageOids": ["1.3.6.1.5.5.7.3.2"], "chain": []},
+        "locale": "ru",
+    })
+}
+
+fn xml_args(data: Value, signing_params: Value) -> Value {
+    json!({
+        "format": "xml",
+        "data": data,
+        "signingParams": signing_params,
+        "signerParams": {"extKeyUsageOids": [], "chain": []},
+    })
+}
+
+#[test]
+fn xml_egov_login_signs_with_the_chosen_key() {
+    let (b, p) = basics(script![storage("user-gost2015-auth", "Qwerty12"), key(0)]);
+    let r = json(b.process(&req(egov_login_args()), &origin("https://idp.egov.kz")));
+    assert_eq!(r["status"], true, "{r}");
+    let result = r["body"]["result"].as_array().unwrap();
+    assert_eq!(result.len(), 1);
+    let signed = result[0].as_str().unwrap();
+    assert!(
+        signed.starts_with(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><login><client-type>PORTAL</client-type><ds:Signature"
+        ),
+        "{signed}"
+    );
+    let infos = oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].cert, entry("user-gost2015-auth").cert);
+    assert_eq!(infos[0].sig_alg, SigAlg::Gost2015_512);
+    assert_eq!(p.storage_prompts()[0].action, Action::Authenticate);
+    assert_eq!(
+        p.key_prompts()[0].candidates[0].availability,
+        Availability::Enabled
+    );
+}
+
+#[test]
+fn xml_array_of_documents() {
+    let (b, _) = basics(script![storage("user-gost2004-sign", "Qwerty12"), key(0)]);
+    let docs = ["<a>1</a>", "<b xmlns=\"urn:x\"><c/></b>"];
+    let r = json(b.process(&req(xml_args(json!(docs), json!({}))), &origin("o")));
+    let result = r["body"]["result"].as_array().unwrap();
+    assert_eq!(result.len(), 2, "{r}");
+    for (signed, doc) in result.iter().zip(docs) {
+        let signed = signed.as_str().unwrap();
+        let root_end = doc.rfind("</").unwrap();
+        assert!(signed.starts_with(&doc[..root_end]), "{signed}");
+        let infos = oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+        assert_eq!(infos[0].cert, entry("user-gost2004-sign").cert);
+    }
+}
+
+#[test]
+fn xml_data_is_never_decoded() {
+    // `decode` is not read for xml: base64 text is signed as the (malformed) XML it is.
+    let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+    let r = json(b.process(
+        &req(xml_args(json!("PGEvPg=="), json!({"decode": true}))),
+        &origin("o"),
+    ));
+    assert_eq!(r["code"], "SIGNING_FAILURE", "{r}");
+}
+
+#[test]
+fn xml_allow_expired_makes_expired_keys_selectable() {
+    let (b, p) = basics(script![
+        storage("inter-expired-gost2015-sign", "Qwerty12"),
+        key(0)
+    ]);
+    let r = json(b.process(
+        &req(xml_args(json!("<a/>"), json!({"allowExpired": true}))),
+        &origin("o"),
+    ));
+    assert_eq!(r["status"], true, "{r}");
+    assert_eq!(
+        p.key_prompts()[0].candidates[0].availability,
+        Availability::Enabled
+    );
+    let signed = r["body"]["result"][0].as_str().unwrap();
+    oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+
+    // Without it (and for other formats) the expired key stays unselectable.
+    for args in [
+        xml_args(json!("<a/>"), json!({})),
+        cms_args(json!("x"), json!({"allowExpired": true})),
+    ] {
+        let (b, p) = basics(script![
+            storage("inter-expired-gost2015-sign", "Qwerty12"),
+            key(0)
+        ]);
+        let r = b.process(&req(args), &origin("o"));
+        assert_eq!(r, r#"{"status":true,"body":{}}"#);
+        assert_eq!(
+            p.key_prompts()[0].candidates[0].availability,
+            Availability::Expired
+        );
+    }
+}
+
+#[test]
+fn xml_malformed_is_signing_failure() {
+    for bad in ["<a>", "not xml", "<!DOCTYPE a><a/>"] {
+        let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+        let r = json(b.process(&req(xml_args(json!(bad), json!({}))), &origin("o")));
+        assert_eq!(r["status"], false, "{r}");
+        assert_eq!(r["code"], "SIGNING_FAILURE", "{r}");
+        assert_eq!(r["message"], "Signing has failed.");
+        assert!(!r["details"].as_str().unwrap().is_empty(), "{r}");
+    }
 }

@@ -44,9 +44,8 @@ Key revocation is checked with OCSP when the key has a chain, is not disabled fo
 
 ### Deviations of P1 from the original
 
-The first two are closed in P4.
+The first one is closed in P4.
 - Only the `PKCS12` storage works. The other storages are listed in the dialog but unavailable.
-- basics formats are `cms` and `raw` only; `xml` answers `INVALID_SIGNING_PARAMS`.
 - The original's password strength check for keys with EKU `1.2.398.3.3.4.2*` is not implemented in P1.
 - `NCALAYERPORT` is honoured in any session; the original honours it only in RDP/Citrix/xrdp sessions. The value must be within `13579..=13679`.
 - TLS 1.2 and 1.3; the original speaks only TLS 1.2.

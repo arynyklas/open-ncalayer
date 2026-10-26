@@ -252,6 +252,26 @@ async fn basics_sign_cms_with_tsa_over_wss() {
 }
 
 #[tokio::test]
+async fn basics_sign_xml_egov_login_over_wss() {
+    let srv = start(vec![storage("user-gost2015-auth"), Step::Key(0)]).await;
+    let mut c = connect(&srv).await;
+    next_text(&mut c).await;
+    // The eGov portal's login request as captured live, plus `"chain":[]`: without a chain
+    // the embedded production CAs would disable the synthetic key.
+    let request = r#"{"module":"kz.gov.pki.knca.basics","method":"sign","args":{"data":"<?xml version=\"1.0\" encoding=\"UTF-8\"?><login><client-type>PORTAL</client-type></login>","allowedStorages":["PKCS12","AKKaztokenStore","AKKZIDCardStore"],"format":"xml","signingParams":{},"signerParams":{"extKeyUsageOids":["1.3.6.1.5.5.7.3.2"],"chain":[]},"locale":"ru"}}"#;
+    send(&mut c, request).await;
+    let reply = json(&next_text(&mut c).await);
+    assert_eq!(reply["status"], true, "{reply}");
+    let result = reply["body"]["result"].as_array().unwrap();
+    assert_eq!(result.len(), 1, "{reply}");
+    let signed = result[0].as_str().unwrap();
+    let infos = oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].cert, entry("user-gost2015-auth").cert);
+    assert_eq!(srv.prompter.storage_prompts()[0].origin, ORIGIN);
+}
+
+#[tokio::test]
 async fn e2e_accepts_40_mib_request() {
     let srv = start(vec![storage("user-gost2015-sign"), Step::Key(0)]).await;
     let mut c = connect(&srv).await;
