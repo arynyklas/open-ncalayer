@@ -188,3 +188,8 @@ jobs:
         run: cargo xtask fetch-fixtures
       - name: Live tests
         run: cargo test --workspace --all-features -- --ignored live_
+      # Docker comes with the runner image. Runs even if a live test failed: it does not
+      # depend on them.
+      - name: NCANode interop (XMLDSig, CMS)
+        if: ${{ !cancelled() }}
+        run: cargo xtask interop-ncanode

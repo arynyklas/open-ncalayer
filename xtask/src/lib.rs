@@ -7,3 +7,4 @@ pub mod fetch;
 pub mod fixtures;
 pub mod imports;
 pub mod interop;
+pub mod ncanode;

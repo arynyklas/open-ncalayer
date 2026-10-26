@@ -43,6 +43,8 @@ enum Command {
     },
     /// Sign with the synthetic RSA key and check the CMS with `openssl cms -verify`.
     InteropOpenssl,
+    /// Verify our XMLDSig and CMS signatures with NCANode (Kalkan) in Docker (Linux only).
+    InteropNcanode,
 }
 
 #[derive(Subcommand)]
@@ -77,6 +79,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::FetchFixtures => xtask::fetch::fetch_fixtures(),
         Command::InteropOpenssl => xtask::interop::interop_openssl(&oncl_testkit::workspace_root()),
+        Command::InteropNcanode => xtask::ncanode::interop_ncanode(),
         Command::GenFixtures { check: false } => {
             xtask::fixtures::gen_fixtures(&oncl_testkit::workspace_root())
         }
