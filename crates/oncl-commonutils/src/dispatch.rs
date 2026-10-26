@@ -361,7 +361,9 @@ fn convert<'a>(method: &Method, args: &'a [Value]) -> Result<Vec<Arg<'a>>, Strin
 }
 
 /// Whether org.json `getInt` takes `value`: any number, or a string `Integer.parseInt`
-/// reads (an optional sign and decimal digits within the `int` range).
+/// reads (an optional sign and ASCII digits within the `int` range). Java also takes other
+/// Unicode decimal digits (`"\u0663"` is 3); they are not recognized here, so such an
+/// element fails the conversion where the original's would pass on to the refusal.
 fn is_java_int(value: &Value) -> bool {
     match value {
         Value::Number(_) => true,

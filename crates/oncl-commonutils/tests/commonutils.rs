@@ -603,6 +603,42 @@ fn key_type_selects_the_keys_listed() {
         assert_eq!(prompts[1].error, Some(error), "{key_type} {store}");
         assert!(s.prompter.key_prompts().is_empty());
     }
+
+    // A store without any key (certificates only): the text of the type as well.
+    let p12 = write(
+        &[],
+        &[read(fixture("synthetic/root-gost2015.cer"))],
+        "Qwerty12",
+        &WriteOptions::default(),
+        &mut |buf: &mut [u8]| buf.fill(5),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("empty.p12");
+    std::fs::write(&empty, p12).unwrap();
+    for (key_type, error) in [
+        ("SIGNATURE", OpenError::NoSigningKeys),
+        ("AUTHENTICATION", OpenError::NoAuthKeys),
+        ("", OpenError::NoKeys),
+    ] {
+        let s = setup(script![
+            Step::Storage {
+                path: empty.clone(),
+                password: "Qwerty12".to_owned(),
+            },
+            Step::CancelStorage
+        ]);
+        call(
+            &s.cu,
+            "signXml",
+            json!(["PKCS12", key_type, "<a/>", "", ""]),
+        );
+        assert_eq!(
+            s.prompter.storage_prompts()[1].error,
+            Some(error),
+            "{key_type}"
+        );
+    }
 }
 
 #[test]
@@ -1002,6 +1038,81 @@ fn fifos_and_devices_are_refused_without_blocking() {
         }
     }
     assert!(s.prompter.storage_prompts().is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn pipes_and_devices_are_refused_without_blocking() {
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows_sys::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    };
+
+    // A listening pipe that never answers: reading from it would block forever.
+    let name = format!("oncl-commonutils-test-{}", std::process::id());
+    let wide: Vec<u16> = format!(r"\\.\pipe\{name}")
+        .encode_utf16()
+        .chain([0])
+        .collect();
+    // SAFETY: a valid NUL-terminated name and no security attributes.
+    let server = unsafe {
+        CreateNamedPipeW(
+            wide.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            4096,
+            4096,
+            0,
+            std::ptr::null(),
+        )
+    };
+    assert_ne!(server, INVALID_HANDLE_VALUE);
+
+    let s = setup(script![]);
+    let check = |path: &str, limit: Duration| {
+        for method in ["createCAdESFromFile", "createCMSSignatureFromFile"] {
+            let started = Instant::now();
+            let reply = call(&s.cu, method, json!(["PKCS12", "", path, true]));
+            assert_eq!(failed(&reply), "file.not_found", "{method} {path}");
+            assert!(started.elapsed() < limit, "{method} {path}");
+        }
+    };
+    for path in [
+        format!(r"\\.\pipe\{name}"),
+        format!("//./pipe/{name}"),
+        format!(r"\\?\pipe\{name}"),
+        format!(r"\??\pipe\{name}"),
+        r"\\.\NUL".to_owned(),
+        r"\\?\GLOBALROOT\Device\Null".to_owned(),
+        "NUL".to_owned(),
+        "CON".to_owned(),
+    ] {
+        check(&path, Duration::from_secs(2));
+    }
+    // The same pipe through the network redirector, when the system offers it: whatever
+    // opens must be a disk file.
+    check(
+        &format!(r"\\localhost\pipe\{name}"),
+        Duration::from_secs(30),
+    );
+    assert!(s.prompter.storage_prompts().is_empty());
+
+    // `\\?\` before a drive path is an ordinary file.
+    let dir = tempfile::tempdir().unwrap();
+    let file = temp_file(dir.path(), "doc.txt", b"doc");
+    let verbatim = format!(r"\\?\{}", std::path::absolute(&file).unwrap().display());
+    let s = setup(script![storage("user-gost2015-sign"), key(0)]);
+    ok(&call(
+        &s.cu,
+        "createCAdESFromFile",
+        json!(["PKCS12", "", verbatim, true]),
+    ));
+
+    // SAFETY: the handle created above, closed once.
+    unsafe { CloseHandle(server) };
 }
 
 #[test]

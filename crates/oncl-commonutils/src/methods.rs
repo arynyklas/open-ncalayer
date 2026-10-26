@@ -356,10 +356,12 @@ fn choose_key(
         let Prompt::Answer(answer) = cu.prompter.storage(&prompt) else {
             return Err(canceled());
         };
-        match answer
-            .open(&prompt.storages)
-            .and_then(|entries| keys_of_type(entries, key_type))
-        {
+        // An empty store gets the text of the requested type too, as in the original.
+        let opened = match answer.open(&prompt.storages) {
+            Err(OpenError::NoKeys) => Ok(Vec::new()),
+            opened => opened,
+        };
+        match opened.and_then(|entries| keys_of_type(entries, key_type)) {
             Ok(keys) => break keys,
             Err(e) => {
                 prompt.error = Some(e);
@@ -522,8 +524,8 @@ fn sign_one_xml(
 }
 
 /// Java's `String.equalsIgnoreCase`: the same number of UTF-16 units, each pair equal, or
-/// equal after `Character.toUpperCase`, or after `toLowerCase` of those (single-unit case
-/// mappings; surrogates compare as they are).
+/// equal after `Character.toUpperCase`, or after `toLowerCase` of those (single-unit simple
+/// case mappings; surrogates compare as they are).
 fn java_equals_ignore_case(a: &str, b: &str) -> bool {
     fn map(unit: u16, f: fn(char) -> Option<char>) -> u16 {
         char::from_u32(u32::from(unit))
@@ -536,7 +538,9 @@ fn java_equals_ignore_case(a: &str, b: &str) -> bool {
         it.next().is_none().then_some(c)
     }
     let upper = |u| map(u, |c| single(c.to_uppercase()));
-    let lower = |u| map(u, |c| single(c.to_lowercase()));
+    // The only lowercase mapping longer than one character is U+0130 → `i` + U+0307; its
+    // simple mapping, Java's, is the `i`.
+    let lower = |u| map(u, |c| c.to_lowercase().next());
     a.encode_utf16().count() == b.encode_utf16().count()
         && a.encode_utf16().zip(b.encode_utf16()).all(|(x, y)| {
             let (ux, uy) = (upper(x), upper(y));
@@ -650,8 +654,8 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Largest page-named file signed: the base64 of a larger one would not fit the largest
-/// WebSocket message the module could have received instead.
+/// Largest page-named file signed, as for the module's other large inputs (the XMLDSig
+/// input limit and the native-messaging frame are 64 MiB too).
 pub(crate) const MAX_PAGE_FILE: u64 = 64 << 20;
 
 /// A file the page names (`createCAdESFromFile`, `createCMSSignatureFromFile`).
@@ -664,10 +668,15 @@ struct PageFile {
 
 impl PageFile {
     /// The original's `Files.readAllBytes`, any failure being `file.not_found`; but only a
-    /// regular file (symbolic links followed) is read, never a folder, FIFO or device, and
-    /// at most [`MAX_PAGE_FILE`] bytes of it.
+    /// regular file (symbolic links followed) is read, never a folder, FIFO, pipe or device,
+    /// and at most [`MAX_PAGE_FILE`] bytes of it. On Windows device namespace paths
+    /// (`\\.\…`, `\\?\…` other than a drive or UNC path) are refused before anything is
+    /// opened, and the opened handle must be a disk file.
     fn read(path: &str) -> Result<PageFile, Option<String>> {
         let not_found = || Some(FILE_NOT_FOUND.to_owned());
+        if is_device_path(path) {
+            return Err(not_found());
+        }
         let path = Path::new(path);
         let meta = std::fs::metadata(path).map_err(|_| not_found())?;
         if !meta.is_file() {
@@ -677,6 +686,9 @@ impl PageFile {
             return Err(too_large());
         }
         let file = std::fs::File::open(path).map_err(|_| not_found())?;
+        if !is_disk_file(&file) {
+            return Err(not_found());
+        }
         let mut data = Vec::new();
         file.take(MAX_PAGE_FILE + 1)
             .read_to_end(&mut data)
@@ -689,6 +701,47 @@ impl PageFile {
             shown: shown_path(path).display().to_string(),
         })
     }
+}
+
+/// Whether `path` names a Windows device namespace (`\\.\pipe\…`, `\\?\GLOBALROOT\…`,
+/// `\??\…`; either slash), where a "file" may be a pipe that never answers. `\\?\C:\…` and
+/// `\\?\UNC\…` are ordinary paths. Always false elsewhere.
+fn is_device_path(path: &str) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let p: String = path
+        .chars()
+        .take(8)
+        .map(|c| if c == '/' { '\\' } else { c })
+        .collect();
+    if p.starts_with(r"\\.\") || p.starts_with(r"\??\") {
+        return true;
+    }
+    if let Some(rest) = p.strip_prefix(r"\\?\") {
+        let drive = rest.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && rest.as_bytes().get(1) == Some(&b':');
+        let unc = rest
+            .get(..4)
+            .is_some_and(|s| s.eq_ignore_ascii_case(r"UNC\"));
+        return !(drive || unc);
+    }
+    false
+}
+
+/// Whether `file` is a disk file (`GetFileType` is `FILE_TYPE_DISK`), not a pipe or a
+/// character device. Always true elsewhere (the metadata check covers FIFOs and devices).
+#[cfg(windows)]
+fn is_disk_file(file: &std::fs::File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_DISK, GetFileType};
+    // SAFETY: the handle is the open file's, valid for the call.
+    unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_DISK }
+}
+
+#[cfg(not(windows))]
+fn is_disk_file(_: &std::fs::File) -> bool {
+    true
 }
 
 fn too_large() -> Option<String> {
@@ -729,11 +782,12 @@ fn file_detail(l: Locale, path: &str) -> String {
 
 /// Java 8's `Base64.getDecoder().decode(String)`, with its messages: the standard alphabet,
 /// no whitespace, padding optional but complete when present, trailing bits ignored.
-/// Characters beyond Latin-1 are `?` (`getBytes(ISO_8859_1)`).
+/// Characters beyond Latin-1 are one `?` each, a supplementary character included
+/// (`getBytes(ISO_8859_1)`).
 fn java_base64_decode(text: &str) -> Result<Vec<u8>, String> {
     let src: Vec<u8> = text
-        .encode_utf16()
-        .map(|u| u8::try_from(u).unwrap_or(b'?'))
+        .chars()
+        .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
         .collect();
     if src.is_empty() {
         return Ok(Vec::new());
@@ -828,8 +882,12 @@ mod tests {
         // Latin-1 bytes print as negative Java bytes; other characters become `?`.
         assert_eq!(err("aé"), "Illegal base64 character -17");
         assert_eq!(err("aӘ"), "Illegal base64 character 3f");
-        // A supplementary character is two UTF-16 units, so two `?`.
-        assert_eq!(err("\u{1F600}"), "Illegal base64 character 3f");
+        // A supplementary character is one `?` too.
+        assert_eq!(
+            err("\u{1F600}"),
+            "Input byte[] should at least have 2 bytes for base64 bytes"
+        );
+        assert_eq!(err("a\u{1F600}"), "Illegal base64 character 3f");
         assert_eq!(
             err("aGVsbA="),
             "Input byte array has wrong 4-byte ending unit"
@@ -866,6 +924,8 @@ mod tests {
         // Single-character mappings only: `ß` is not `SS`.
         assert!(!java_equals_ignore_case("ß", "SS"));
         assert!(java_equals_ignore_case("ı", "I"));
+        // `İ` lowercases to `i` by its simple mapping.
+        assert!(java_equals_ignore_case("İ", "i"));
     }
 
     #[test]

@@ -75,7 +75,7 @@ The `JKS` (Java KeyStore) storage opens for signing in `basics` and `commonUtils
 
 The `kz.gov.pki.knca.commonUtils` module:
 - Tokens answer `storage.empty` and `getActiveTokens` answers `[]`, as the original does with no device connected.
-- `createCAdESFromFile` and `createCMSSignatureFromFile` show the full, normalized path of the file the page named in both dialogs. Only a regular file (a folder, FIFO or device gives `file.not_found`) of at most 64 MiB is read; a larger one gets `file.too_large: files over 64 MiB are not signed`. The original reads any path with no size limit.
+- `createCAdESFromFile` and `createCMSSignatureFromFile` show the full, normalized path of the file the page named in both dialogs. Only a regular file on disk of at most 64 MiB is read; a larger one gets `file.too_large: files over 64 MiB are not signed`. `file.not_found` goes to a folder and also: on Linux and macOS to FIFOs and devices; on Windows to device namespace paths (`\\.\…`, `\\?\…` except `\\?\C:\…` and `\\?\UNC\…`), named pipes, devices such as `NUL` and `CON`, and anything opened that is not a disk file. The original reads any path with no size limit.
 - `getKeyInfo` opens the dialogs with the action "Key information" and a "Send" button, as the original does.
 - The file chooser (`showFileChooser`) opens on top of other windows, in a small window naming the requesting site.
 - A wrong password, and a store without keys of the requested `keyType`, reopen the storage dialog with an error (the no-keys texts are the original's). The original shows the error in its key dialog. Expired keys are available, as in the original, but the dialog does not mark them.
