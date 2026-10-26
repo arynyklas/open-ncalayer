@@ -19,14 +19,20 @@ oncl-pki.workspace = true
 oncl-protocol.workspace = true
 serde_json.workspace = true
 time.workspace = true
+tracing.workspace = true
+x509-cert.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-# `testing`: `tsp::MockTsa`; `write`: a PKCS#12 with a sha1WithRSA certificate.
+# `testing`: `tsp::MockTsa`, `ocsp::MockOcsp`; `write`: PKCS#12 files written by the tests.
 oncl-pki = { path = "../oncl-pki", features = ["testing", "write"] }
 oncl-testkit.workspace = true
 time = { workspace = true, features = ["macros"] }
 
 [[test]]
 name = "sign"
+required-features = ["testing"]
+
+[[test]]
+name = "validation"
 required-features = ["testing"]

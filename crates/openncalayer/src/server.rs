@@ -75,7 +75,8 @@ impl ServerConfig {
     }
 }
 
-/// The module registry of the daemon: `kz.gov.pki.knca.basics`.
+/// The module registry of the daemon: `kz.gov.pki.knca.basics`, which reaches the NCA
+/// time-stamping and OCSP services through `http`.
 pub fn build_registry(
     prompter: Arc<dyn Prompter>,
     recent: Arc<dyn RecentPathStore>,

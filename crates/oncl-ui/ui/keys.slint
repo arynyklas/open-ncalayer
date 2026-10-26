@@ -10,6 +10,8 @@ export struct KeyItem {
     enabled: bool,
     // Why the key may not sign; empty if it may.
     note: string,
+    // The revocation mark, `revoked <date>`; empty unless the key is revoked.
+    revoked: string,
 }
 
 export component KeyDialog inherits Window {
@@ -90,6 +92,12 @@ export component KeyDialog inherits Window {
                         text: row.details;
                         wrap: word-wrap;
                         color: !row.enabled ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                    }
+
+                    if !row.revoked.is-empty: Text {
+                        text: row.revoked;
+                        font-weight: 700;
+                        color: #c42b1c;
                     }
                 }
             }

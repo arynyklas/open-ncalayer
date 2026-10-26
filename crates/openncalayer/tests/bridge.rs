@@ -52,7 +52,7 @@ fn storage(name: &str) -> Step {
 }
 
 /// The request of ncalayer-js-client 1.6.1 `basicsSignCMS(basicsStorageAll, data, params,
-/// basicsSignerAny)`.
+/// basicsSignerTestAny)`.
 fn basics_sign_cms(data_b64: &str, signing_params: Value) -> String {
     json!({
         "module": "kz.gov.pki.knca.basics",
@@ -62,7 +62,7 @@ fn basics_sign_cms(data_b64: &str, signing_params: Value) -> String {
             "format": "cms",
             "data": data_b64,
             "signingParams": signing_params,
-            "signerParams": {"extKeyUsageOids": []},
+            "signerParams": {"extKeyUsageOids": [], "chain": []},
             "locale": "ru",
         },
     })

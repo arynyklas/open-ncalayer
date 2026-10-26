@@ -129,7 +129,8 @@
           data: testData(size),
           // No `tsaProfile`: no time-stamp, no network.
           signingParams: { decode: true, encapsulate: true, digested: false },
-          signerParams: { extKeyUsageOids: [] },
+          // `chain: []` (basicsSignerTestAny): the synthetic key is outside the NCA PKI.
+          signerParams: { extKeyUsageOids: [], chain: [] },
           locale: 'ru',
         },
       });

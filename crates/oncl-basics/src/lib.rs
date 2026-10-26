@@ -2,7 +2,9 @@
 //! (`sign`: cms and raw, with NCA time-stamps) and `PKIEssentials` (no methods in P1).
 //!
 //! Dialogs go through a [`Prompter`]; signing flows run one at a time process-wide, so a
-//! second request waits for the first one's dialogs to finish.
+//! second request waits for the first one's dialogs to finish. The keys offered are checked
+//! against `signerParams.chain` and, through the same [`HttpTransport`] as time-stamping,
+//! their OCSP responders.
 
 mod filter;
 mod prompt;
@@ -10,7 +12,9 @@ mod sign;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use filter::{Availability, DisabledReason, KeyFilter};
+pub use filter::{
+    Availability, ChainPolicy, DisabledReason, KeyFilter, OCSP_DEADLINE, availabilities,
+};
 pub use prompt::{
     Action, KeyCandidate, KeyPrompt, Locale, OpenError, Prompt, Prompter, RecentPathStore,
     StorageAnswer, StorageKind, StoragePrompt,
@@ -59,7 +63,8 @@ impl Basics {
         Basics { tsa: p, ..self }
     }
 
-    /// The same module reading the time (signingTime, certificate validity) from `f`.
+    /// The same module reading the time (signingTime, certificate validity, path validation
+    /// and OCSP) from `f`.
     #[must_use]
     pub fn with_clock(self, f: fn() -> OffsetDateTime) -> Self {
         Basics { clock: f, ..self }

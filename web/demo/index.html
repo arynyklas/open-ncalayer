@@ -46,6 +46,13 @@
   <label><input type="radio" name="signer" value="basicsSignerSignAny"> Только ключ подписи (<code>basicsSignerSignAny</code>)</label>
 </fieldset>
 
+<fieldset>
+  <legend>Цепочка доверия (<code>signerParams.chain</code>)</legend>
+  <label><input type="radio" name="chain" value="default"> По умолчанию (НУЦ): поля <code>chain</code> нет, цепочка строится до встроенных корней НУЦ, отзыв проверяется по OCSP</label>
+  <label><input type="radio" name="chain" value="empty" checked> Пусто <code>[]</code>: цепочка и отзыв не проверяются, синтетические и тестовые ключи NCANode доступны</label>
+  <label><input type="radio" name="chain" value="synthetic"> Синтетический тестовый корень (<code>fixtures/synthetic/root-gost2015.cer</code>): ключи других корней недоступны</label>
+</fieldset>
+
 <button id="sign" type="button">Подписать</button>
 <p id="status"></p>
 
@@ -64,6 +71,24 @@
   var signedBytes = null;
   var signedName = 'data.txt';
   var signatureDer = null;
+
+  // fixtures/synthetic/root-gost2015.cer, the self-signed root of the synthetic GOST 2015 keys.
+  var SYNTHETIC_ROOT = '-----BEGIN CERTIFICATE-----\n' +
+    'MIICgDCCAeigAwIBAgIQbLpJ0FxE/T35vfk2yc53nDAOBgoqgw4DCgEBAgMCBQAw\n' +
+    'VDEuMCwGA1UEAwwlT3Blbk5DQUxheWVyIFN5bnRoZXRpYyBSb290IEdPU1QgMjAx\n' +
+    'NTEVMBMGA1UECgwMT3Blbk5DQUxheWVyMQswCQYDVQQGEwJLWjAgFw0yNTAxMDEw\n' +
+    'MDAwMDBaGA8yMDk5MTIzMTIzNTk1OVowVDEuMCwGA1UEAwwlT3Blbk5DQUxheWVy\n' +
+    'IFN5bnRoZXRpYyBSb290IEdPU1QgMjAxNTEVMBMGA1UECgwMT3Blbk5DQUxheWVy\n' +
+    'MQswCQYDVQQGEwJLWjCBrDAjBgkqgw4DCgEBAgIwFgYKKoMOAwoBAQICAQYIKoMO\n' +
+    'AwoBAwMDgYQABIGAs+U13GYjnwY8hrz89WgmkRpd/XlVCIGpfwslywmfky8904hH\n' +
+    'b8LVVPXXcO+jdX8l4Opz0IZ5CZpN2970jtWg5BxRtWYSRKKXH4kv1ll1JqWit2do\n' +
+    'P7QLbcABADjVLlpf473aE5cn+QkajoJ1dIYS7qGtn6I7LG8S42plPkmKkK2jQjBA\n' +
+    'MA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMB0GA1UdDgQWBBTh4FiP\n' +
+    '+X+m9UGrNkV9EPfeSmx1FzAOBgoqgw4DCgEBAgMCBQADgYEAF97Obeoc+Q6dYSio\n' +
+    'JePH+IfNxSLeALrt88fZkKmcCIqF5VLDFgLZDsfVNsgJCQo6OBSLu09c7Fkoh5o5\n' +
+    'gYzcwyeQOxMhPrNHgUZFi+mq8FSfM4XUZ0aVHvPVySACCtH5rHT+R+LK56AByu5y\n' +
+    'pd6rcWC6OO00bMMNr7eU504spgU=\n' +
+    '-----END CERTIFICATE-----\n';
   var connecting = null;
 
   function checked(name) {
@@ -92,6 +117,19 @@
     var params = NCALayerClient.basicsCMSParamsAttached;
     delete params.tsaProfile;
     return { name: 'basicsCMSParamsAttached без tsaProfile', params: params };
+  }
+
+  // The ncalayer-js-client signer constant with the chosen `chain`: none (the NCA roots),
+  // `[]` (no checks) or the synthetic root.
+  function signerParams() {
+    var params = NCALayerClient[checked('signer')];
+    var chain = checked('chain');
+    if (chain === 'empty') {
+      params.chain = [];
+    } else if (chain === 'synthetic') {
+      params.chain = [SYNTHETIC_ROOT];
+    }
+    return params;
   }
 
   function showParams() {
@@ -175,7 +213,7 @@
       }
       var data = signedBytes.buffer;
       var chosen = signingParams();
-      var signer = NCALayerClient[checked('signer')];
+      var signer = signerParams();
       var ncalayer = await connected();
       show('status', null, 'ожидание подписи в окне OpenNCALayer…');
       var signature = await ncalayer.basicsSignCMS(

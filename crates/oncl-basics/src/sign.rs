@@ -2,7 +2,7 @@
 //! storage → key → sign flow under the process-wide signing-flow lock.
 
 use crate::Basics;
-use crate::filter::{Availability, KeyFilter};
+use crate::filter::{Availability, ChainPolicy, KeyFilter, availabilities};
 use crate::prompt::{
     Action, KeyCandidate, KeyPrompt, Locale, OpenError, Prompt, StorageAnswer, StorageKind,
     StoragePrompt,
@@ -12,10 +12,12 @@ use base64::alphabet;
 use base64::engine::general_purpose::STANDARD;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use der::Encode;
+use oncl_pki::cert::{self, Certificate};
 use oncl_pki::cms::{self, CmsError, SignOptions};
-use oncl_pki::info::cert_info;
+use oncl_pki::info::{CertInfo, cert_info};
 use oncl_pki::key::{KeyAlg, KeyError, SigAlg};
 use oncl_pki::pkcs12::{self, KeyEntry, Pkcs12Error};
+use oncl_pki::pkix::CaSet;
 use oncl_pki::{pem, tsp};
 use oncl_protocol::AddInfo;
 use oncl_protocol::invoker::{CallResult, Failure};
@@ -29,6 +31,8 @@ const SIGNING_FAILURE: &str = "SIGNING_FAILURE";
 const SIGNING_FAILURE_MESSAGE: &str = "Signing has failed.";
 const INVALID_SIGNING_PARAMS: &str = "INVALID_SIGNING_PARAMS";
 const INVALID_SIGNING_PARAMS_MESSAGE: &str = "Invalid signing parameters provided.";
+const CERTIFICATE_PARSING_FAILURE: &str = "CERTIFICATE_PARSING_FAILURE";
+const CERTIFICATE_PARSING_FAILURE_MESSAGE: &str = "Certificate parsing failure.";
 const CMS_NO_ENCAPSULATED_DATA: &str = "CMS_NO_ENCAPSULATED_DATA";
 const UNKNOWN_ALGORITHM: &str = "UNKNOWN_ALGORITHM";
 const TIMESTAMP_CREATION_FAILURE: &str = "TIMESTAMP_CREATION_FAILURE";
@@ -142,6 +146,8 @@ impl<'a> SignRequest<'a> {
         let format = get_string(args, "format")?;
         let signing_params = get_object(args, "signingParams")?;
         let decode = opt_bool(signing_params, "decode", false);
+        // Read for cms (and xml); raw keys are always checked.
+        let allow_revoked = format == "cms" && opt_bool(signing_params, "allowRevoked", false);
         let format = match format {
             "cms" => Format::Cms {
                 encapsulate: opt_bool(signing_params, "encapsulate", true),
@@ -152,13 +158,7 @@ impl<'a> SignRequest<'a> {
             "raw" => Format::Raw {
                 output_cert: opt_bool(signing_params, "outputCert", false),
             },
-            _ => {
-                return Err(Failure::Custom {
-                    code: INVALID_SIGNING_PARAMS.to_owned(),
-                    message: Some(INVALID_SIGNING_PARAMS_MESSAGE.to_owned()),
-                    details: None,
-                });
-            }
+            _ => return Err(invalid_signing_params()),
         };
 
         let data: Vec<&str> = match args.get("data") {
@@ -174,6 +174,7 @@ impl<'a> SignRequest<'a> {
         };
 
         let signer_params = get_object(args, "signerParams")?;
+        let chain = parse_chain(signer_params)?;
         // `toList().stream().map(Object::toString)`: a null entry is a NullPointerException.
         let ext_key_usages = get_array(signer_params, "extKeyUsageOids")?
             .iter()
@@ -196,6 +197,8 @@ impl<'a> SignRequest<'a> {
             bin: opt_string(signer_params, "bin").unwrap_or_default(),
             serial_number: opt_string(signer_params, "serialNumber").unwrap_or_default(),
             allow_expired: false,
+            chain,
+            allow_revoked,
         };
 
         // P1 deviation: invalid base64 fails before the dialog (the original fails after it,
@@ -265,18 +268,22 @@ fn open(answer: &StorageAnswer, offered: &[StorageKind]) -> Result<Vec<KeyEntry>
     }
 }
 
-/// Asks for a key until an enabled one is picked; `None` if the user cancels.
+/// Asks for a key until an enabled one is picked; `None` if the user cancels. The keys are
+/// checked once, before the first prompt.
 fn choose_key(basics: &Basics, request: &SignRequest<'_>, entries: &[KeyEntry]) -> Option<usize> {
-    let now = (basics.clock)();
+    let keys: Vec<(Certificate, CertInfo)> = entries
+        .iter()
+        .map(|entry| (entry.cert.clone(), cert_info(&entry.cert)))
+        .collect();
+    let availability = availabilities(&request.filter, &keys, &basics.http, (basics.clock)());
     let candidates = entries
         .iter()
-        .map(|entry| {
-            let info = cert_info(&entry.cert);
-            KeyCandidate {
-                alias: entry.alias.clone(),
-                availability: request.filter.availability(&info, now),
-                info,
-            }
+        .zip(keys)
+        .zip(availability)
+        .map(|((entry, (_, info)), availability)| KeyCandidate {
+            alias: entry.alias.clone(),
+            info,
+            availability,
         })
         .collect();
     let prompt = KeyPrompt {
@@ -357,6 +364,55 @@ fn decode_base64(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
     }
 }
 
+/// `signerParams.chain`, read like the original's `optJSONArray`: anything but an array
+/// (absent, `null`, another type) is no chain. Entries are certificates as text
+/// ([`parse_pem_or_base64`]); the first bad entry fails the request, a non-string with
+/// INVALID_SIGNING_PARAMS, an unparsable string with CERTIFICATE_PARSING_FAILURE.
+fn parse_chain(signer_params: &Map<String, Value>) -> Result<ChainPolicy, Failure> {
+    let Some(Value::Array(entries)) = signer_params.get("chain") else {
+        return Ok(ChainPolicy::Default);
+    };
+    if entries.is_empty() {
+        return Ok(ChainPolicy::Empty);
+    }
+    let certs = entries
+        .iter()
+        .map(|entry| match entry {
+            Value::String(text) => {
+                parse_pem_or_base64(text).ok_or_else(certificate_parsing_failure)
+            }
+            _ => Err(invalid_signing_params()),
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(ChainPolicy::Custom(CaSet::new(certs)))
+}
+
+/// A certificate written as PEM or as base64 of its DER, whitespace allowed anywhere in the
+/// base64.
+fn parse_pem_or_base64(text: &str) -> Option<Certificate> {
+    let base64: String = pem_body(text)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    cert::parse(&decode_base64(&base64).ok()?).ok()
+}
+
+/// What lies between the first `-----BEGIN …-----` and the next `-----END`; all of `text`
+/// without a BEGIN; empty for a block that does not end.
+fn pem_body(text: &str) -> &str {
+    const BEGIN: &str = "-----BEGIN";
+    const DASHES: &str = "-----";
+    let Some(start) = text.find(BEGIN) else {
+        return text;
+    };
+    let header = &text[start + BEGIN.len()..];
+    let Some(close) = header.find(DASHES) else {
+        return "";
+    };
+    let body = &header[close + DASHES.len()..];
+    body.find("-----END").map_or("", |end| &body[..end])
+}
+
 fn cms_failure(e: CmsError) -> Failure {
     match e {
         CmsError::NoEncapsulatedData => {
@@ -393,6 +449,24 @@ fn signing_failure(details: impl Display) -> Failure {
         code: SIGNING_FAILURE.to_owned(),
         message: Some(SIGNING_FAILURE_MESSAGE.to_owned()),
         details: Some(details.to_string()),
+    }
+}
+
+/// The original's `BasicsFailure.INVALID_SIGNING_PARAMS`.
+fn invalid_signing_params() -> Failure {
+    Failure::Custom {
+        code: INVALID_SIGNING_PARAMS.to_owned(),
+        message: Some(INVALID_SIGNING_PARAMS_MESSAGE.to_owned()),
+        details: None,
+    }
+}
+
+/// The original's `BasicsFailure.CERTIFICATE_PARSING_FAILURE`.
+fn certificate_parsing_failure() -> Failure {
+    Failure::Custom {
+        code: CERTIFICATE_PARSING_FAILURE.to_owned(),
+        message: Some(CERTIFICATE_PARSING_FAILURE_MESSAGE.to_owned()),
+        details: None,
     }
 }
 

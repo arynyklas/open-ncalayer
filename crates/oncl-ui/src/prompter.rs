@@ -267,6 +267,7 @@ fn show_keys(p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), PlatformE
             details: r.details.into(),
             enabled: r.enabled,
             note: r.note.unwrap_or_default().into(),
+            revoked: r.revoked.unwrap_or_default().into(),
         })
         .collect();
     ui.set_keys(ModelRc::new(VecModel::from(items)));

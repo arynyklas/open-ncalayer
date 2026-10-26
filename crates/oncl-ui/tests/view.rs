@@ -83,6 +83,7 @@ fn rows_for_mixed_candidates() {
         rows[0].details
     );
     assert_eq!(rows[0].note, None);
+    assert!(rows.iter().all(|r| r.revoked.is_none()));
     assert!(!rows[1].enabled && rows[1].note.as_deref().unwrap().contains("истёк"));
     assert!(!rows[2].enabled && rows[2].note.as_deref().unwrap().contains("ИИН"));
     assert!(
@@ -101,6 +102,7 @@ fn every_reason_is_listed_in_the_locale() {
         DisabledReason::Iin,
         DisabledReason::Bin,
         DisabledReason::SerialNumber,
+        DisabledReason::Chain,
     ];
     let rows = key_rows(&prompt(
         Locale::Kk,
@@ -108,7 +110,30 @@ fn every_reason_is_listed_in_the_locale() {
     ));
     let note = rows[0].note.as_deref().unwrap();
     assert!(note.contains("ЖСН") && note.contains("БСН"), "{note}");
+    assert!(note.contains("тізбегі"), "{note}");
     assert!(rows[0].details.contains("жарамды"), "{}", rows[0].details);
+}
+
+#[test]
+fn revoked_key_is_marked_with_its_date_and_disabled() {
+    let time = datetime!(2026-02-03 04:05:06 UTC);
+    let revoked = || {
+        candidate(
+            cert("ТЕСТОВ ТЕСТ", Some(IIN), None, None),
+            Availability::Revoked { time },
+        )
+    };
+    for (locale, mark) in [
+        (Locale::Ru, "отозван 03.02.2026"),
+        (Locale::Kk, "кері қайтарылған 03.02.2026"),
+        (Locale::En, "revoked 03.02.2026"),
+    ] {
+        let rows = key_rows(&prompt(locale, [revoked(), enabled("ДРУГОЙ", IIN)]));
+        assert!(!rows[0].enabled);
+        assert_eq!(rows[0].revoked.as_deref(), Some(mark));
+        assert_eq!(rows[0].note.as_deref(), Some(mark));
+        assert!(rows[1].enabled && rows[1].revoked.is_none());
+    }
 }
 
 #[test]

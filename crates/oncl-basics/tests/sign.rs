@@ -6,11 +6,14 @@ use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{
-    Action, Availability, Basics, DisabledReason, KeyFilter, KeyPrompt, Locale, MODULE_NAME,
-    OpenError, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt,
+    Action, Availability, Basics, ChainPolicy, DisabledReason, KeyFilter, KeyPrompt, Locale,
+    MODULE_NAME, OpenError, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt,
+    availabilities,
 };
+use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{SignOptions, verify};
-use oncl_pki::info::cert_info;
+use oncl_pki::http::HttpTransport;
+use oncl_pki::info::{CertInfo, cert_info};
 use oncl_pki::key::{PublicKey, SigAlg};
 use oncl_pki::pkcs12::{KeyEntry, WriteEntry, WriteOptions, load, write};
 use oncl_pki::tsp::{MockTsa, verify_token};
@@ -121,7 +124,7 @@ fn cms_args(data: Value, signing_params: Value) -> Value {
         "format": "cms",
         "data": data,
         "signingParams": signing_params,
-        "signerParams": {"extKeyUsageOids": []},
+        "signerParams": {"extKeyUsageOids": [], "chain": []},
     })
 }
 
@@ -130,7 +133,7 @@ fn raw_args(data: Value, signing_params: Value) -> Value {
         "format": "raw",
         "data": data,
         "signingParams": signing_params,
-        "signerParams": {"extKeyUsageOids": []},
+        "signerParams": {"extKeyUsageOids": [], "chain": []},
     })
 }
 
@@ -142,7 +145,7 @@ fn public_key(e: &KeyEntry) -> PublicKey {
 fn cms_attached_happy_path() {
     let (b, p) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
     let r = json(b.process(
-        &req(json!({"format":"cms","data":"aGVsbG8=","signingParams":{"decode":true},"signerParams":{"extKeyUsageOids":[]}})),
+        &req(json!({"format":"cms","data":"aGVsbG8=","signingParams":{"decode":true},"signerParams":{"extKeyUsageOids":[],"chain":[]}})),
         &origin("https://x.kz"),
     ));
     assert_eq!(r["status"], true);
@@ -437,7 +440,7 @@ fn ekus_iin_bin_serial_filters() {
         Step::CancelKey
     ]);
     b.process(
-        &req(json!({"format":"cms","data":"x","signingParams":{},"signerParams":{"extKeyUsageOids":[CLIENT_AUTH]}})),
+        &req(json!({"format":"cms","data":"x","signingParams":{},"signerParams":{"extKeyUsageOids":[CLIENT_AUTH],"chain":[]}})),
         &origin("o"),
     );
     let kp = &p.key_prompts()[0];
@@ -465,7 +468,7 @@ fn ekus_iin_bin_serial_filters() {
         Step::CancelKey
     ]);
     b.process(
-        &req(json!({"format":"cms","data":"x","signingParams":{},"signerParams":{"extKeyUsageOids":[],"iin":"999999999999"}})),
+        &req(json!({"format":"cms","data":"x","signingParams":{},"signerParams":{"extKeyUsageOids":[],"iin":"999999999999","chain":[]}})),
         &origin("o"),
     );
     for c in &p.key_prompts()[0].candidates {
@@ -485,7 +488,7 @@ fn ekus_iin_bin_serial_filters() {
     ]);
     b.process(
         &req(json!({"format":"raw","data":"x","signingParams":{},"signerParams":{
-            "extKeyUsageOids":[], "iin":"123456789022", "bin":"123456789021", "serialNumber": serial}})),
+            "extKeyUsageOids":[], "iin":"123456789022", "bin":"123456789021", "serialNumber": serial, "chain":[]}})),
         &origin("o"),
     );
     assert_eq!(
@@ -501,7 +504,7 @@ fn ekus_iin_bin_serial_filters() {
     b.process(
         &req(
             json!({"format":"raw","data":"x","signingParams":{},"signerParams":{
-            "extKeyUsageOids":[CLIENT_AUTH], "iin":"1", "bin":"2", "serialNumber":"3"}}),
+            "extKeyUsageOids":[CLIENT_AUTH], "iin":"1", "bin":"2", "serialNumber":"3", "chain":[]}}),
         ),
         &origin("o"),
     );
@@ -518,7 +521,12 @@ fn ekus_iin_bin_serial_filters() {
 
 #[test]
 fn key_filter_availability() {
-    let info = cert_info(&entry("user-gost2015-sign").cert);
+    let key = |name: &str| {
+        let cert = entry(name).cert;
+        let info = cert_info(&cert);
+        (cert, info)
+    };
+    let user = key("user-gost2015-sign");
     let filter = |ekus: &[&str], allow_expired: bool| KeyFilter {
         ext_key_usages: ekus
             .iter()
@@ -528,38 +536,51 @@ fn key_filter_availability() {
         bin: String::new(),
         serial_number: String::new(),
         allow_expired,
+        // No path building, no OCSP: the transport is never used.
+        chain: ChainPolicy::Empty,
+        allow_revoked: false,
+    };
+    let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
+    let http: Arc<dyn HttpTransport> = tsa.clone();
+    let availability = |filter: KeyFilter, key: &(Certificate, CertInfo), now| {
+        availabilities(&filter, std::slice::from_ref(key), &http, now).remove(0)
     };
     let inside = datetime!(2026-01-01 0:00 UTC);
     let after = datetime!(2100-01-01 0:00 UTC);
     assert_eq!(
-        filter(&[], false).availability(&info, inside),
+        availability(filter(&[], false), &user, inside),
         Availability::Enabled
     );
     assert_eq!(
-        filter(&[], false).availability(&info, after),
+        availability(filter(&[], false), &user, after),
         Availability::Expired
     );
     assert_eq!(
-        filter(&[], true).availability(&info, after),
+        availability(filter(&[], true), &user, after),
         Availability::Enabled
     );
-    let requested: Vec<&str> = info.ext_key_usages.iter().map(String::as_str).collect();
+    let requested: Vec<&str> = user.1.ext_key_usages.iter().map(String::as_str).collect();
     assert_eq!(
-        filter(&requested, false).availability(&info, inside),
+        availability(filter(&requested, false), &user, inside),
         Availability::Enabled
     );
     // Disabled wins over expired.
     assert_eq!(
-        filter(&[EMAIL_PROTECTION, CLIENT_AUTH], false).availability(&info, after),
+        availability(
+            filter(&[EMAIL_PROTECTION, CLIENT_AUTH], false),
+            &user,
+            after
+        ),
         Availability::Disabled(vec![DisabledReason::ExtKeyUsage])
     );
     // The obsolete-auth rule: a GOST 2015 key with keyAgreement counts as clientAuth.
-    let legacy = cert_info(&entry("legacy-gost2015-auth").cert);
-    assert!(!legacy.ext_key_usages.contains(CLIENT_AUTH));
+    let legacy = key("legacy-gost2015-auth");
+    assert!(!legacy.1.ext_key_usages.contains(CLIENT_AUTH));
     assert_eq!(
-        filter(&[CLIENT_AUTH], false).availability(&legacy, inside),
+        availability(filter(&[CLIENT_AUTH], false), &legacy, inside),
         Availability::Enabled
     );
+    assert!(tsa.calls().is_empty());
 }
 
 #[test]
