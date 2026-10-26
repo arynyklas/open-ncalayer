@@ -10,6 +10,11 @@
 //! - every element name and prefixed attribute name is resolved by a linear search of the
 //!   namespaces in scope, and an element declaring a namespace gets its own copy of them
 //!   (checked against its declarations), so namespace work is charged on every start tag.
+//!
+//! An attribute with a prefix and the local part `xmlns` (`a:xmlns`, `xml:xmlns`) is refused
+//! as malformed: roxmltree would take it for a default namespace declaration (and copy every
+//! namespace in scope into the element), where Kalkan's parser sees an ordinary attribute,
+//! or an error for an undeclared prefix.
 
 use super::XmlError;
 use roxmltree::{Document, Node, ParsingOptions};
@@ -103,9 +108,9 @@ fn parse_with(xml: &[u8], bounds: Bounds) -> Result<Document<'_>, XmlError> {
     })
 }
 
-/// Rejects a DOCTYPE, nesting deeper than [`MAX_DEPTH`] and input over the work bounds in one
-/// linear scan, before the tree is built. Only well-formed input matters here: anything
-/// malformed is reported by the parser afterwards.
+/// Rejects a DOCTYPE, nesting deeper than [`MAX_DEPTH`], prefixed `xmlns` attributes and
+/// input over the work bounds in one linear scan, before the tree is built. Otherwise only
+/// well-formed input matters here: anything malformed is reported by the parser afterwards.
 fn check_markup(xml: &[u8], bounds: Bounds) -> Result<(), XmlError> {
     // Namespaces in scope (an upper bound) of each open element.
     let mut in_scope: Vec<usize> = Vec::new();
@@ -132,15 +137,24 @@ fn check_markup(xml: &[u8], bounds: Bounds) -> Result<(), XmlError> {
                 return Err(XmlError::TooDeep);
             }
             let (mut attributes, mut declarations, mut resolved) = (0usize, 0usize, 0usize);
+            let mut reserved = None;
             let (end, empty) = scan_start_tag(xml, start + 1, |name| {
                 attributes += 1;
                 if namespace_prefix(name).is_some() {
                     declarations += 1;
+                } else if name.ends_with(b":xmlns") {
+                    reserved.get_or_insert(name);
                 } else if name.contains(&b':') && !name.starts_with(b"xml:") {
                     // The parser looks up only these attributes' prefixes.
                     resolved += 1;
                 }
             });
+            if let Some(name) = reserved {
+                return Err(XmlError::Parse(format!(
+                    "the attribute {} has a prefix and the local name xmlns",
+                    String::from_utf8_lossy(name)
+                )));
+            }
             let own = in_scope.last().copied().unwrap_or(0) + declarations;
             attribute_work = attribute_work.saturating_add(attributes.saturating_mul(attributes));
             namespace_work = namespace_work.saturating_add(own.saturating_mul(1 + resolved));
@@ -329,6 +343,40 @@ mod tests {
             format!("<c{prefixed}/>").repeat(20_000)
         );
         assert_eq!(parse(xml.as_bytes()).err(), Some(XmlError::TooLarge));
+        // Nor are `xml:*` attributes: that prefix is bound without a search.
+        let xml_attributes: String = (0..8).map(|i| format!(" xml:a{i}=''")).collect();
+        let xml = format!(
+            "<r{declarations}>{}</r>",
+            format!("<c{xml_attributes}/>").repeat(20_000)
+        );
+        assert!(parse(xml.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn prefixed_xmlns_attributes_are_refused() {
+        // roxmltree takes `p:xmlns` for a default namespace declaration and copies every
+        // namespace in scope into the element: 15 ms per element under 5 000 namespaces.
+        let declarations: String = (0..5_000).map(|i| format!(" xmlns:n{i}='u{i}'")).collect();
+        for attribute in ["n1:xmlns", "a:xmlns", "xml:xmlns"] {
+            let children = format!("<c {attribute}='z'/>").repeat(20_000);
+            let xml = format!("<r{declarations}>{children}</r>");
+            let started = std::time::Instant::now();
+            assert!(
+                matches!(parse(xml.as_bytes()), Err(XmlError::Parse(m)) if m.contains(attribute)),
+                "{attribute}"
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "{attribute}"
+            );
+            assert!(matches!(
+                parse(format!("<r {attribute}='z'/>").as_bytes()),
+                Err(XmlError::Parse(_))
+            ));
+        }
+        // Names that only look alike are ordinary attributes and declarations.
+        let doc = "<r xmlns='urn:d' xmlns:a='urn:a' xmlnsx='1' a:xmlnsx='2' a:x-xmlns='3'><c xmlns=''/></r>";
+        assert!(parse(doc.as_bytes()).is_ok());
     }
 
     #[test]
