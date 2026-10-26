@@ -20,8 +20,8 @@ pub use filter::{
 };
 pub use prompt::{
     Action, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyCandidate,
-    KeyPrompt, Locale, OpenError, Prompt, Prompter, RecentPathStore, StorageAnswer, StorageKind,
-    StoragePrompt,
+    KeyPrompt, Locale, OpenError, PasswordPrompt, Prompt, Prompter, RecentPathStore, StorageAnswer,
+    StorageKind, StoragePrompt,
 };
 
 use oncl_pki::http::HttpTransport;

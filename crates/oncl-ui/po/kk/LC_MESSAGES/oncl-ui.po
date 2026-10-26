@@ -79,3 +79,9 @@ msgstr "Әрекет: кілт туралы ақпарат"
 
 msgid "Send"
 msgstr "Жіберу"
+
+msgid "Enter the key store password:"
+msgstr "Кілт сақтау орнының құпиясөзін енгізіңіз:"
+
+msgid "OK"
+msgstr "OK"

@@ -7,8 +7,8 @@ use der::Encode;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{
     Action, Availability, Basics, ChainPolicy, CsrAnswer, CsrPrompt, DisabledReason, FilePrompt,
-    ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt, Locale, MODULE_NAME, OpenError, Prompt,
-    Prompter, StorageAnswer, StorageKind, StoragePrompt, availabilities,
+    ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt, Locale, MODULE_NAME, OpenError,
+    PasswordPrompt, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt, availabilities,
 };
 use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{SignOptions, verify};
@@ -414,6 +414,10 @@ impl Prompter for JksFirst {
     }
 
     fn file(&self, _: &FilePrompt) -> Prompt<PathBuf> {
+        Prompt::Cancelled
+    }
+
+    fn password(&self, _: &PasswordPrompt) -> Prompt<Zeroizing<String>> {
         Prompt::Cancelled
     }
 }

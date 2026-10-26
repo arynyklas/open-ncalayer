@@ -1,6 +1,6 @@
 [package]
 name = "oncl-ui"
-description = "OpenNCALayer dialogs in Slint: storage, file and password; key choice; certificate request and installation"
+description = "OpenNCALayer dialogs in Slint: storage, file and password; key choice; certificate request and installation; the legacy Applet's password"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

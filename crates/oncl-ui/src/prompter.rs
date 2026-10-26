@@ -2,12 +2,13 @@
 
 use crate::foreground;
 use crate::ui::{
-    CertItem, CsrDialog, FileDialog, ImportDialog, KeyDialog, KeyItem, StorageDialog, StorageRow,
+    CertItem, CsrDialog, FileDialog, ImportDialog, KeyDialog, KeyItem, PasswordDialog,
+    StorageDialog, StorageRow,
 };
 use crate::view;
 use oncl_basics::{
     Action, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyPrompt,
-    Locale, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt,
+    Locale, PasswordPrompt, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
@@ -106,6 +107,10 @@ impl Prompter for SlintPrompter {
 
     fn file(&self, p: &FilePrompt) -> Prompt<PathBuf> {
         ask(p, show_file)
+    }
+
+    fn password(&self, p: &PasswordPrompt) -> Prompt<Zeroizing<String>> {
+        ask(p, show_password)
     }
 }
 
@@ -513,6 +518,32 @@ fn pick(ui: &FileDialog, p: &FilePrompt, pending: Rc<Pending<FileDialog, PathBuf
     }
 }
 
+/// The password dialog for `p`; the outcome goes to `reply`.
+fn show_password(
+    p: PasswordPrompt,
+    reply: Sender<Prompt<Zeroizing<String>>>,
+) -> Result<(), PlatformError> {
+    let ui = PasswordDialog::new()?;
+    select_language(p.locale);
+    ui.set_origin(p.origin.as_str().into());
+    ui.set_message(p.message.as_deref().unwrap_or_default().into());
+
+    let pending = Pending::new(ui.clone_strong(), reply);
+    let weak = ui.as_weak();
+    ui.on_confirm({
+        let pending = pending.clone();
+        move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let password = Zeroizing::new(ui.get_password().to_string());
+            ui.set_password(SharedString::new());
+            pending.finish(Prompt::Answer(password));
+        }
+    });
+    show(&ui, pending)
+}
+
 /// A dialog's buttons and windowing callbacks shared by every dialog.
 trait Dialog: ComponentHandle + 'static {
     /// Registers the Cancel button's handler.
@@ -546,6 +577,12 @@ impl Dialog for ImportDialog {
 impl Dialog for FileDialog {
     fn set_cancel(&self, f: impl FnMut() + 'static) {
         FileDialog::on_cancel(self, f);
+    }
+}
+
+impl Dialog for PasswordDialog {
+    fn set_cancel(&self, f: impl FnMut() + 'static) {
+        PasswordDialog::on_cancel(self, f);
     }
 }
 

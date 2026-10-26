@@ -1,8 +1,8 @@
 //! What the module asks the user, and the [`Prompter`] that asks: the original's
 //! `StorageStage` (storage, file, password) and `KeystoreStage` (key choice) of the signing
 //! flow, `CsrStage` (storage, folder, password) of `generateCsr`, `ImportCertStage`
-//! (folder, new password) of `importCertificate`, and the file chooser other modules hand
-//! paths to pages with.
+//! (folder, new password) of `importCertificate`, the file chooser other modules hand
+//! paths to pages with, and the legacy Applet's password dialog.
 
 use crate::filter::Availability;
 use oncl_pki::info::CertInfo;
@@ -167,16 +167,28 @@ impl StorageAnswer {
             return Err(OpenError::UnsupportedStorage);
         }
         let data = std::fs::read(&self.path).map_err(|_| OpenError::FileNotFound)?;
-        let entries = if self.storage == StorageKind::Jks {
-            jks::load(&data, &self.password).map_err(|e| match e {
+        self.open_data(&data)
+    }
+
+    /// [`StorageAnswer::open`] of the key store file's contents `data`, read by the caller:
+    /// the keys that have a certificate, in store order.
+    ///
+    /// # Errors
+    ///
+    /// [`OpenError::UnsupportedStorage`] unless the storage is readable,
+    /// [`OpenError::WrongPassword`], [`OpenError::NotPkcs12`], [`OpenError::NotJks`], or
+    /// [`OpenError::NoKeys`].
+    pub fn open_data(&self, data: &[u8]) -> Result<Vec<KeyEntry>, OpenError> {
+        let entries = match self.storage {
+            StorageKind::Jks => jks::load(data, &self.password).map_err(|e| match e {
                 JksError::WrongPassword => OpenError::WrongPassword,
                 JksError::Malformed(_) | JksError::Unsupported(_) => OpenError::NotJks,
-            })?
-        } else {
-            pkcs12::load(&data, &self.password).map_err(|e| match e {
+            })?,
+            StorageKind::Pkcs12 => pkcs12::load(data, &self.password).map_err(|e| match e {
                 Pkcs12Error::WrongPassword => OpenError::WrongPassword,
                 Pkcs12Error::Malformed(_) | Pkcs12Error::Unsupported(_) => OpenError::NotPkcs12,
-            })?
+            })?,
+            StorageKind::Token(_) => return Err(OpenError::UnsupportedStorage),
         };
         if entries.is_empty() {
             return Err(OpenError::NoKeys);
@@ -336,6 +348,19 @@ pub struct FilePrompt {
     pub directory: Option<PathBuf>,
 }
 
+/// The password dialog of the legacy Applet's `setPassword`: a password the module keeps
+/// for later operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasswordPrompt {
+    /// The requesting page's origin, or `"UNIDENTIFIED"`.
+    pub origin: String,
+    /// Dialog language.
+    pub locale: Locale,
+    /// The page's text for the dialog; `None` shows the default request for the key store
+    /// password.
+    pub message: Option<String>,
+}
+
 /// The outcome of a dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prompt<T> {
@@ -359,6 +384,8 @@ pub trait Prompter: Send + Sync {
     fn import_cert(&self, p: &ImportPrompt) -> Prompt<ImportAnswer>;
     /// Asks for a file, or a folder for [`FileKind::Directory`].
     fn file(&self, p: &FilePrompt) -> Prompt<PathBuf>;
+    /// Asks for a password.
+    fn password(&self, p: &PasswordPrompt) -> Prompt<Zeroizing<String>>;
 }
 
 /// Where the last opened key store path is kept (`recentPath` of settings.json).

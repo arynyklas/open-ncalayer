@@ -273,7 +273,8 @@ fn configured(files: &TlsFiles) -> Result<TlsInfo, Failure> {
 /// windows, e.g. `[{"storage":{"path":"…","password":"…"}},{"key":0},{"cancel_storage":null}]`
 /// (also `{"jks":{"path","password"}}`, `{"cancel_key":null}`,
 /// `{"csr":{"dir","password"}}`, `{"cancel_csr":null}`, `{"import":{"dir","password"}}`,
-/// `{"cancel_import":null}`, `{"file":"…"}`, `{"cancel_file":null}`).
+/// `{"cancel_import":null}`, `{"file":"…"}`, `{"cancel_file":null}`, `{"password":"…"}`,
+/// `{"cancel_password":null}`).
 #[cfg(feature = "e2e-prompter")]
 pub const E2E_PROMPTER_VAR: &str = "ONCL_E2E_PROMPTER";
 
@@ -313,6 +314,8 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_basics::testing::Step>, String> {
         CancelImport,
         File(PathBuf),
         CancelFile,
+        Password(String),
+        CancelPassword,
     }
 
     let specs: Vec<StepSpec> = serde_json::from_str(text).map_err(|e| e.to_string())?;
@@ -330,6 +333,8 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_basics::testing::Step>, String> {
             StepSpec::CancelImport => Step::CancelImport,
             StepSpec::File(path) => Step::File(path),
             StepSpec::CancelFile => Step::CancelFile,
+            StepSpec::Password(password) => Step::Password(password),
+            StepSpec::CancelPassword => Step::CancelPassword,
         })
         .collect())
 }
@@ -798,7 +803,8 @@ mod tests {
                 {"jks":{"path":"k.jks","password":"pw"}},
                 {"csr":{"dir":"d","password":""}},{"cancel_csr":null},
                 {"import":{"dir":"d","password":"Qwerty12"}},{"cancel_import":null},
-                {"file":"f.cer"},{"cancel_file":null}]"#,
+                {"file":"f.cer"},{"cancel_file":null},
+                {"password":"Secret1"},{"cancel_password":null}]"#,
         )
         .unwrap();
         assert!(matches!(
@@ -815,7 +821,10 @@ mod tests {
                 Step::CancelImport,
                 Step::File(file),
                 Step::CancelFile,
+                Step::Password(secret),
+                Step::CancelPassword,
             ] if path == Path::new("k.p12") && password == "pw" && file == Path::new("f.cer")
+                && secret == "Secret1"
         ));
         assert!(parse_steps(r#"[{"wait":null}]"#).is_err());
         assert!(parse_steps("{}").is_err());

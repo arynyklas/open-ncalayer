@@ -2,8 +2,8 @@
 //! [`RecentPathStore`].
 
 use crate::prompt::{
-    CsrAnswer, CsrPrompt, FilePrompt, ImportAnswer, ImportPrompt, KeyPrompt, Prompt, Prompter,
-    RecentPathStore, StorageAnswer, StorageKind, StoragePrompt,
+    CsrAnswer, CsrPrompt, FilePrompt, ImportAnswer, ImportPrompt, KeyPrompt, PasswordPrompt,
+    Prompt, Prompter, RecentPathStore, StorageAnswer, StorageKind, StoragePrompt,
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -55,6 +55,10 @@ pub enum Step {
     File(PathBuf),
     /// Cancel a file chooser.
     CancelFile,
+    /// Answer a password dialog.
+    Password(String),
+    /// Cancel a password dialog.
+    CancelPassword,
     /// Wait on the barrier (without holding the prompter), then take the next step for the
     /// same prompt.
     Wait(Arc<Barrier>),
@@ -75,6 +79,8 @@ impl Step {
             Step::CancelImport => "CancelImport",
             Step::File(_) => "File",
             Step::CancelFile => "CancelFile",
+            Step::Password(_) => "Password",
+            Step::CancelPassword => "CancelPassword",
             Step::Wait(_) => "Wait",
         }
     }
@@ -94,6 +100,7 @@ struct State {
     csr_prompts: Vec<CsrPrompt>,
     import_prompts: Vec<ImportPrompt>,
     file_prompts: Vec<FilePrompt>,
+    password_prompts: Vec<PasswordPrompt>,
 }
 
 /// A [`Prompter`] answering from a queue of [`Step`]s and recording every prompt shown. An
@@ -140,6 +147,11 @@ impl ScriptedPrompter {
     /// File choosers shown so far.
     pub fn file_prompts(&self) -> Vec<FilePrompt> {
         self.lock().file_prompts.clone()
+    }
+
+    /// Password dialogs shown so far.
+    pub fn password_prompts(&self) -> Vec<PasswordPrompt> {
+        self.lock().password_prompts.clone()
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -229,6 +241,17 @@ impl Prompter for ScriptedPrompter {
             Some(Step::File(path)) => Prompt::Answer(path),
             Some(Step::CancelFile) | None => Prompt::Cancelled,
             Some(step) => panic!("ScriptedPrompter: file chooser answered by {}", step.kind()),
+        }
+    }
+
+    fn password(&self, p: &PasswordPrompt) -> Prompt<Zeroizing<String>> {
+        match self.next(|s| s.password_prompts.push(p.clone())) {
+            Some(Step::Password(password)) => Prompt::Answer(Zeroizing::new(password)),
+            Some(Step::CancelPassword) | None => Prompt::Cancelled,
+            Some(step) => panic!(
+                "ScriptedPrompter: password dialog answered by {}",
+                step.kind()
+            ),
         }
     }
 }

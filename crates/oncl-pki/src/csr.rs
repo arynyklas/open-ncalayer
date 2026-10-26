@@ -1,10 +1,12 @@
 //! PKCS#10 certificate requests as NCALayer's `generateCsr` builds them: the subject from the
 //! page's `dn`, an `extensionRequest` with SubjectAltName (when there are names) and
-//! KeyStoreInfo, signed with the request's own key, as PEM `CERTIFICATE REQUEST`.
+//! KeyStoreInfo, signed with the request's own key, as PEM `CERTIFICATE REQUEST`; and as the
+//! legacy Applet's `genKeyPairAndGetPKCS10` builds them, with SubjectKeyIdentifier instead of
+//! KeyStoreInfo.
 
 use crate::asn1util;
 use crate::cert::Certificate;
-use crate::key::{PrivateKey, SigAlg};
+use crate::key::{PrivateKey, SigAlg, key_id_bytes};
 use crate::keygen::KeySpec;
 use crate::keystore::KeystoreError;
 use crate::oid;
@@ -15,12 +17,12 @@ use der::asn1::{
 };
 use der::oid::AssociatedOid;
 use der::{Decode, Encode, Sequence, SliceReader, Tag};
-use spki::AlgorithmIdentifierOwned;
+use spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use std::cmp::Ordering;
 use x509_cert::attr::{Attribute, AttributeTypeAndValue};
 use x509_cert::ext::Extension;
-use x509_cert::ext::pkix::SubjectAltName;
 use x509_cert::ext::pkix::name::GeneralName;
+use x509_cert::ext::pkix::{SubjectAltName, SubjectKeyIdentifier};
 use x509_cert::name::{Name, RdnSequence, RelativeDistinguishedName};
 use x509_cert::request::{CertReq, CertReqInfo, ExtensionReq, Version};
 
@@ -103,6 +105,16 @@ pub struct CsrRequest<'a> {
     pub keystore_info: KeyStoreInfo,
 }
 
+/// What a request of the legacy Applet's `genKeyPairAndGetPKCS10` (Kalkan applet
+/// `KeyStoreUtil`) says besides its key.
+#[derive(Clone, Debug)]
+pub struct LegacyCsrRequest<'a> {
+    /// Subject attributes, one RDN each, in this order.
+    pub dn: &'a [(ObjectIdentifier, String)],
+    /// dNSName alternative names; `None` for no SubjectAltName.
+    pub dns_names: Option<&'a [String]>,
+}
+
 /// `KeyStoreInfo ::= SEQUENCE { storage OID, path UTF8String OPTIONAL }`.
 #[derive(Sequence)]
 struct KeyStoreInfoAsn1<'a> {
@@ -136,10 +148,7 @@ pub fn build_csr(
     spec: KeySpec,
     req: &CsrRequest<'_>,
 ) -> Result<String, KeystoreError> {
-    let alg = spec.sig_alg();
-    if alg == SigAlg::RsaSha1 || alg.key_alg() != key.alg() {
-        return Err(KeystoreError::UnknownAlgorithm);
-    }
+    let alg = request_alg(key, spec)?;
 
     let mut names = Vec::new();
     for dns in req.dns_names {
@@ -159,6 +168,77 @@ pub fn build_csr(
         critical: false,
         extn_value: OctetString::new(req.keystore_info.to_der()?).map_err(invalid)?,
     });
+    let mut sorted: Vec<&(ObjectIdentifier, String)> = req.dn.iter().collect();
+    sorted.sort_by(|a, b| natural_order(&a.0.to_string(), &b.0.to_string()));
+    let der = sign_request(
+        key,
+        alg,
+        key.public_key().to_spki(),
+        subject(sorted)?,
+        extensions,
+    )?;
+    Ok(pem::encode("CERTIFICATE REQUEST", &der))
+}
+
+/// Builds the request of the legacy Applet's `genKeyPairAndGetPKCS10` for `key` (of
+/// `spec`), as DER:
+/// - the subject has one RDN per `dn` attribute, in the given order; values are encoded as
+///   in [`build_csr`];
+/// - `extensionRequest` holds SubjectKeyIdentifier (the key identifier, see
+///   [`crate::keygen::key_id`]) and, with `dns_names`, SubjectAltName: each dNSName,
+///   followed by an iPAddress for `127.0.0.1` (Kalkan's `getExtensionReqSet`); both
+///   non-critical;
+/// - the signature algorithm is `spec`'s with NULL parameters.
+///
+/// # Errors
+///
+/// As [`build_csr`].
+///
+/// # Panics
+///
+/// If the operating system RNG fails (GOST signatures).
+pub fn build_legacy_csr(
+    key: &PrivateKey,
+    spec: KeySpec,
+    req: &LegacyCsrRequest<'_>,
+) -> Result<Vec<u8>, KeystoreError> {
+    let alg = request_alg(key, spec)?;
+    let public_key = key.public_key().to_spki();
+    let ski = SubjectKeyIdentifier(OctetString::new(key_id_bytes(&public_key)).map_err(invalid)?);
+    let mut extensions = vec![extension(SubjectKeyIdentifier::OID, &ski)];
+    if let Some(dns_names) = req.dns_names {
+        let mut names = Vec::with_capacity(dns_names.len());
+        for dns in dns_names {
+            names.push(GeneralName::DnsName(ia5(dns)?));
+            if dns == "127.0.0.1" {
+                names.push(GeneralName::IpAddress(
+                    OctetString::new([127, 0, 0, 1]).map_err(invalid)?,
+                ));
+            }
+        }
+        extensions.push(extension(SubjectAltName::OID, &SubjectAltName(names)));
+    }
+    sign_request(key, alg, public_key, subject(req.dn.iter())?, extensions)
+}
+
+/// The signature algorithm of a request for `key` of `spec`.
+fn request_alg(key: &PrivateKey, spec: KeySpec) -> Result<SigAlg, KeystoreError> {
+    let alg = spec.sig_alg();
+    if alg == SigAlg::RsaSha1 || alg.key_alg() != key.alg() {
+        return Err(KeystoreError::UnknownAlgorithm);
+    }
+    Ok(alg)
+}
+
+/// DER of the request for `key` (whose SubjectPublicKeyInfo is `public_key`) with `subject`
+/// and an `extensionRequest` of `extensions`, signed with `alg` (NULL parameters).
+fn sign_request(
+    key: &PrivateKey,
+    alg: SigAlg,
+    public_key: SubjectPublicKeyInfoOwned,
+    subject: Name,
+    extensions: Vec<Extension>,
+) -> Result<Vec<u8>, KeystoreError> {
     let mut attributes = SetOfVec::new();
     attributes
         .insert(Attribute::try_from(ExtensionReq(extensions)).map_err(invalid)?)
@@ -166,8 +246,8 @@ pub fn build_csr(
 
     let info = CertReqInfo {
         version: Version::V1,
-        subject: subject(req.dn)?,
-        public_key: key.public_key().to_spki(),
+        subject,
+        public_key,
         attributes,
     };
     let signature = key
@@ -181,10 +261,7 @@ pub fn build_csr(
         },
         signature: BitString::from_bytes(&signature).expect("signature BIT STRING"),
     };
-    Ok(pem::encode(
-        "CERTIFICATE REQUEST",
-        &request.to_der().map_err(invalid)?,
-    ))
+    request.to_der().map_err(invalid)
 }
 
 fn invalid(e: impl std::fmt::Display) -> KeystoreError {
@@ -205,12 +282,12 @@ fn extension(extn_id: ObjectIdentifier, value: &impl Encode) -> Extension {
     }
 }
 
-/// The subject: one single-valued RDN per attribute, in [`natural_order`] of the OIDs.
-fn subject(dn: &[(ObjectIdentifier, String)]) -> Result<Name, KeystoreError> {
-    let mut sorted: Vec<&(ObjectIdentifier, String)> = dn.iter().collect();
-    sorted.sort_by(|a, b| natural_order(&a.0.to_string(), &b.0.to_string()));
+/// The subject: one single-valued RDN per attribute, in the given order.
+fn subject<'a>(
+    dn: impl IntoIterator<Item = &'a (ObjectIdentifier, String)>,
+) -> Result<Name, KeystoreError> {
     let mut rdns = RdnSequence::default();
-    for (oid, value) in sorted {
+    for (oid, value) in dn {
         let atv = AttributeTypeAndValue {
             oid: *oid,
             value: name_value(oid, value)?,
@@ -326,6 +403,57 @@ fn at(s: &[u8], i: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key::PublicKey;
+
+    fn subject_oids(der: &[u8]) -> Vec<String> {
+        CertReq::from_der(der)
+            .unwrap()
+            .info
+            .subject
+            .iter_rdn()
+            .map(|rdn| rdn.iter().next().unwrap().oid.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn legacy_requests_keep_the_subject_order() {
+        let key = crate::keygen::generate(KeySpec::Gost2004).unwrap();
+        let dn = [
+            (oid::COUNTRY, "KZ".to_owned()),
+            (oid::COMMON_NAME, "A".to_owned()),
+        ];
+        let der = build_legacy_csr(
+            &key,
+            KeySpec::Gost2004,
+            &LegacyCsrRequest {
+                dn: &dn,
+                dns_names: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(subject_oids(&der), ["2.5.4.6", "2.5.4.3"]);
+        let request = CertReq::from_der(&der).unwrap();
+        let public = PublicKey::from_spki(&request.info.public_key).unwrap();
+        public
+            .verify(
+                SigAlg::Gost2004,
+                &request.info.to_der().unwrap(),
+                request.signature.as_bytes().unwrap(),
+            )
+            .unwrap();
+        // Another key's spec is refused, as in `build_csr`.
+        assert_eq!(
+            build_legacy_csr(
+                &key,
+                KeySpec::Gost2015_512,
+                &LegacyCsrRequest {
+                    dn: &dn,
+                    dns_names: None
+                }
+            ),
+            Err(KeystoreError::UnknownAlgorithm)
+        );
+    }
 
     #[test]
     fn natural_order_of_oids() {

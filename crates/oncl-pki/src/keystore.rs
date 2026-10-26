@@ -168,8 +168,8 @@ pub fn create_key_file(
 /// storages:
 /// 1. the alias is the certificate's SubjectKeyIdentifier (hex);
 /// 2. a KeyStoreInfo extension naming another storage than `storage_oid` is refused;
-/// 3. the key file is the first `*.p12` / `*.jks` file of the directory `dir_or_file` (by
-///    name) that opens as PKCS#12 with `password` and holds a key under the alias, or
+/// 3. the key file is the first regular `*.p12` / `*.jks` file of the directory `dir_or_file`
+///    (by name) that opens as PKCS#12 with `password` and holds a key under the alias, or
 ///    `dir_or_file` itself when it is a file;
 /// 4. the key must be the certificate's key (Kalkan pairs by alias alone);
 /// 5. the file is rewritten with the certificate, then renamed `AUTH_<name>` when the
@@ -303,6 +303,8 @@ fn find_key_file(
                         ext.eq_ignore_ascii_case("p12") || ext.eq_ignore_ascii_case("jks")
                     })
             })
+            // Only regular files are read: a FIFO named `*.p12` would block the read.
+            .filter(|path| path.is_file())
             .collect();
         files.sort();
         files

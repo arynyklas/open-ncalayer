@@ -95,6 +95,8 @@ pub const OCSP_NOCHECK: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1.5");
 pub const KEYSTORE_INFO: Oid = Oid::new_unwrap("1.2.398.3.3.5");
 /// KeyStoreInfo storage: a PKCS#12 file (Kalkan `Storage.PKCS12`).
 pub const STORAGE_PKCS12: Oid = Oid::new_unwrap("1.2.398.3.3.5.1.1");
+/// KeyStoreInfo storage: a JKS file (Kalkan `Storage.JKS`).
+pub const STORAGE_JKS: Oid = Oid::new_unwrap("1.2.398.3.3.5.1.2");
 
 // PKCS#9 / PKCS#10.
 /// extensionRequest.

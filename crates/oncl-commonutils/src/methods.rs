@@ -654,16 +654,18 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Largest page-named file signed, as for the module's other large inputs (the XMLDSig
+/// Largest page-named file read, as for the module's other large inputs (the XMLDSig
 /// input limit and the native-messaging frame are 64 MiB too).
-pub(crate) const MAX_PAGE_FILE: u64 = 64 << 20;
+pub const MAX_PAGE_FILE: u64 = 64 << 20;
 
-/// A file the page names (`createCAdESFromFile`, `createCMSSignatureFromFile`).
-struct PageFile {
-    data: Vec<u8>,
+/// A file a page names (`createCAdESFromFile`, `createCMSSignatureFromFile`, the legacy
+/// Applet's key files).
+pub struct PageFile {
+    /// The file's contents.
+    pub data: Vec<u8>,
     /// The path the dialogs show: absolute and normalized, so the user sees the file that
     /// is read.
-    shown: String,
+    pub shown: String,
 }
 
 impl PageFile {
@@ -672,7 +674,12 @@ impl PageFile {
     /// and at most [`MAX_PAGE_FILE`] bytes of it. On Windows device namespace paths
     /// (`\\.\…`, `\\?\…` other than a drive or UNC path) are refused before anything is
     /// opened, and the opened handle must be a disk file.
-    fn read(path: &str) -> Result<PageFile, Option<String>> {
+    ///
+    /// # Errors
+    ///
+    /// The commonUtils message: `file.not_found`, or `file.too_large: …` for a file over
+    /// [`MAX_PAGE_FILE`].
+    pub fn read(path: &str) -> Result<PageFile, Option<String>> {
         let not_found = || Some(FILE_NOT_FOUND.to_owned());
         if is_device_path(path) {
             return Err(not_found());
@@ -706,7 +713,7 @@ impl PageFile {
 /// Whether `path` names a Windows device namespace (`\\.\pipe\…`, `\\?\GLOBALROOT\…`,
 /// `\??\…`; either slash), where a "file" may be a pipe that never answers. `\\?\C:\…` and
 /// `\\?\UNC\…` are ordinary paths. Always false elsewhere.
-fn is_device_path(path: &str) -> bool {
+pub fn is_device_path(path: &str) -> bool {
     if !cfg!(windows) {
         return false;
     }

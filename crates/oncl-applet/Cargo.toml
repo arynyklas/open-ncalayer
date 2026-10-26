@@ -1,0 +1,30 @@
+[package]
+name = "oncl-applet"
+description = "The legacy kz.gov.pki.knca.applet.Applet module of OpenNCALayer (the default module): the original's reflective dispatcher over file choice, the password dialog, key files and their requests, certificate installation, password change and XML signing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+der.workspace = true
+oncl-basics.workspace = true
+oncl-commonutils.workspace = true
+oncl-pki.workspace = true
+oncl-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# `testing`: `ScriptedPrompter`.
+oncl-basics = { path = "../oncl-basics", features = ["testing"] }
+# `testing`: `issue_cert`.
+oncl-pki = { path = "../oncl-pki", features = ["testing"] }
+oncl-testkit.workspace = true
+tempfile.workspace = true
+x509-cert.workspace = true

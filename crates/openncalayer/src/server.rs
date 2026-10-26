@@ -9,6 +9,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use oncl_applet::Applet;
 use oncl_basics::{Basics, Prompter, RecentPathStore};
 use oncl_commonutils::CommonUtils;
 use oncl_pki::http::HttpTransport;
@@ -76,9 +77,10 @@ impl ServerConfig {
     }
 }
 
-/// The module registry of the daemon: `kz.gov.pki.knca.basics` and
-/// `kz.gov.pki.knca.commonUtils`, which share the dialogs of `prompter` and reach the NCA
-/// time-stamping and OCSP services through `http`.
+/// The module registry of the daemon: `kz.gov.pki.knca.basics`,
+/// `kz.gov.pki.knca.commonUtils` and `kz.gov.pki.knca.applet.Applet` (the default module),
+/// which share the dialogs of `prompter` and reach the NCA time-stamping and OCSP services
+/// through `http`.
 pub fn build_registry(
     prompter: Arc<dyn Prompter>,
     recent: Arc<dyn RecentPathStore>,
@@ -86,11 +88,13 @@ pub fn build_registry(
 ) -> Registry {
     let mut registry = Registry::default();
     let common_utils = CommonUtils::new(Arc::clone(&prompter), Arc::clone(&http));
+    let applet = Applet::new(Arc::clone(&prompter));
     registry.register(
         oncl_basics::MODULE_NAME,
         Arc::new(Basics::new(prompter, recent, http)),
     );
     registry.register(oncl_commonutils::MODULE_NAME, Arc::new(common_utils));
+    registry.register(oncl_applet::MODULE_NAME, Arc::new(applet));
     registry
 }
 

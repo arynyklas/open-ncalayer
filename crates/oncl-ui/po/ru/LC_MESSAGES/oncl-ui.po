@@ -79,3 +79,9 @@ msgstr "Действие: информация о ключе"
 
 msgid "Send"
 msgstr "Отправить"
+
+msgid "Enter the key store password:"
+msgstr "Введите пароль на хранилище ключей:"
+
+msgid "OK"
+msgstr "OK"
