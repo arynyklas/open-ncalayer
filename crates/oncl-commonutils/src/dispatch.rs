@@ -17,7 +17,7 @@
 use crate::CommonUtils;
 use crate::methods::{self, Outcome};
 use oncl_protocol::AddInfo;
-use oncl_protocol::orgjson::{int_value, opt_string};
+use oncl_protocol::orgjson::{get_string, int_value, opt_string};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -277,11 +277,7 @@ fn dispatch(
         return Err("A JSONObject text must begin with '{' at 1 [character 2 line 1]".to_owned());
     };
     let uuid = opt_string(&request, "uuid").unwrap_or_default();
-    let name = match request.get("method") {
-        None => return Err("JSONObject[\"method\"] not found.".to_owned()),
-        Some(Value::String(name)) => name.as_str(),
-        Some(_) => return Err("JSONObject[\"method\"] is not a string.".to_owned()),
-    };
+    let name = get_string(&request, "method")?;
     let args: &[Value] = match request.get("args") {
         Some(Value::Array(args)) => args,
         _ => &[],

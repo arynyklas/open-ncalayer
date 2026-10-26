@@ -22,7 +22,7 @@
 
 use crate::{Applet, keygen, methods};
 use oncl_protocol::AddInfo;
-use oncl_protocol::orgjson::{int_value, opt_string};
+use oncl_protocol::orgjson::{get_string, int_value, opt_string};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -316,21 +316,8 @@ fn dispatch(
     };
     let class = opt_string(&request, "class").unwrap_or_default();
     let uuid = opt_string(&request, "uuid").unwrap_or_default();
-    let name = match request.get("method") {
-        Some(Value::String(name)) => name.as_str(),
-        None => {
-            return Err(failure(
-                "org.json.JSONException: JSONObject[\"method\"] not found.",
-                "",
-            ));
-        }
-        Some(_) => {
-            return Err(failure(
-                "org.json.JSONException: JSONObject[\"method\"] is not a string.",
-                "",
-            ));
-        }
-    };
+    let name = get_string(&request, "method")
+        .map_err(|e| failure(&format!("org.json.JSONException: {e}"), ""))?;
     let args: &[Value] = match request.get("args") {
         Some(Value::Array(args)) => args,
         _ => &[],

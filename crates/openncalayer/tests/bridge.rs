@@ -372,9 +372,18 @@ async fn origin_reaches_add_info() {
     );
 }
 
+const INSTALL_BUNDLE: &str = r#"{"module":"kz.gov.pki.ncalayerservices.accessory","method":"installBundle","symname":"kz.x"}"#;
+/// The original's reply when the connection has no `Origin` (its headers are
+/// `{"origin":null}`).
+const NO_ORIGIN: &str =
+    r#"{"errorCode":"org.json.JSONException: JSONObject[\"origin\"] is not a string."}"#;
+
 #[tokio::test]
 async fn accessory_lists_the_daemon_modules() {
     let (registry, _) = scripted_registry(Vec::new());
+    // Every module of the registry, the accessory included: none is registered after it.
+    let names = registry.names();
+    assert!(names.contains(&"kz.gov.pki.ncalayerservices.accessory".to_owned()));
     let (_dir, ep) = start_ipc(registry).await;
     let mut c = Client::connect(&ep).await;
     c.open(1, "https://page.test").await;
@@ -386,26 +395,33 @@ async fn accessory_lists_the_daemon_modules() {
         .await;
     assert_eq!(
         json(&reply),
-        serde_json::json!({
-            "services": [
-                "kz.gov.pki.knca.applet.Applet",
-                "kz.gov.pki.knca.basics",
-                "kz.gov.pki.knca.commonUtils",
-                "kz.gov.pki.ncalayerservices.accessory"
-            ],
-            "uuid": "u"
-        })
+        serde_json::json!({"services": names, "uuid": "u"})
     );
-    let reply = c
-        .call(
-            1,
-            r#"{"module":"kz.gov.pki.ncalayerservices.accessory","method":"installBundle","symname":"kz.x"}"#,
-        )
-        .await;
     assert_eq!(
-        json(&reply),
+        json(&c.call(1, INSTALL_BUNDLE).await),
         serde_json::json!({"errorCode": "BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED"})
     );
+}
+
+#[tokio::test]
+async fn accessory_without_origin_over_the_bridge() {
+    let (registry, _) = scripted_registry(Vec::new());
+    let (_dir, ep) = start_ipc(registry).await;
+    let mut c = Client::connect(&ep).await;
+    c.send(&json!({"t": "open", "sid": 1, "origin": null}))
+        .await;
+    assert_eq!(c.next_raw().await, r#"{"t":"open","sid":1}"#);
+    assert_eq!(c.message(1).await, GREETING);
+    assert_eq!(c.call(1, INSTALL_BUNDLE).await, NO_ORIGIN);
+}
+
+#[tokio::test]
+async fn accessory_without_origin_over_wss() {
+    let (registry, _) = scripted_registry(Vec::new());
+    let wss = start_wss(registry).await;
+    // The client sends no `Origin` header.
+    let mut ws = wss_connect(wss.addr, &wss.ca_der).await;
+    assert_eq!(wss_call(&mut ws, INSTALL_BUNDLE).await, NO_ORIGIN);
 }
 
 /// The time of the first call, ever after: CMS replies of two calls are byte-equal.

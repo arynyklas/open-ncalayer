@@ -98,6 +98,7 @@ pub fn build_registry(
     );
     registry.register(oncl_commonutils::MODULE_NAME, Arc::new(common_utils));
     registry.register(oncl_applet::MODULE_NAME, Arc::new(applet));
+    // Registered last: its `getServices` snapshot must see every other module.
     let mut services = registry.names();
     services.push(oncl_accessory::MODULE_NAME.to_owned());
     services.sort_unstable();

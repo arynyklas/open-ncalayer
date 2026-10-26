@@ -10,7 +10,9 @@
 //! - `getServices`: `{"services": [module names]}` of the daemon's registry;
 //! - `installBundle`: `SYMNAME_PARAMETER_IS_EMPTY` for an empty `symname`, else
 //!   `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED` (no bundle can be installed); the original reads
-//!   the page's `origin` with `getString`, so a request without one fails;
+//!   the page's `origin` with `getString` from the headers its WebSocket server always writes
+//!   as `{"origin": <header or null>}`, so a connection without an `Origin` header fails with
+//!   `JSONObject["origin"] is not a string.`;
 //! - `showBundleManager`, `showSettings`, `showKeystoreExplorer`, `showAdesSigning`,
 //!   `showAdesValidation`: `{}`, after asking the daemon to open the window.
 //!
@@ -19,7 +21,7 @@
 
 use std::sync::Arc;
 
-use oncl_protocol::orgjson::opt_string;
+use oncl_protocol::orgjson::{get_string, opt_string};
 use oncl_protocol::{AddInfo, Module};
 use serde_json::{Map, Value, json};
 use tracing::{error, info};
@@ -30,17 +32,21 @@ pub const MODULE_NAME: &str = "kz.gov.pki.ncalayerservices.accessory";
 /// The bundle symbolic name `getBundles` reports OpenNCALayer under.
 pub const SYMNAME: &str = "io.github.arynyklas.openncalayer";
 
-/// The original's core bundles whose functions this daemon implements, with the versions of
-/// the original's update manifest `ncalayer.der` (manifest version 1.4, as published at
-/// http://crl.pki.gov.kz/updates/ncalayer.der on 2026-10-24).
-const CORE_BUNDLES: [(&str, &str); 7] = [
-    ("kz.gov.pki.api.layer.NCALayerServices", "0.7.4"),
+/// The bundles the original reports whose functions this daemon implements: its OSGi
+/// framework and its core bundles. The versions are what the original's
+/// `Bundle.getVersion().toString()` gives (OSGi `major.minor.micro`) once it has updated to
+/// the live update manifest (http://crl.pki.gov.kz/updates/ncalayer.der, manifest version
+/// 1.4, signed by `ncalayersigner2024_2`); the framework is the Apache Felix both
+/// distributions embed (`org/apache/felix/framework/Felix.properties`: `felix.version=7.0.3`).
+const CORE_BUNDLES: [(&str, &str); 8] = [
+    ("org.apache.felix.framework", "7.0.3"),
+    ("kz.gov.pki.api.layer.NCALayerServices", "0.8.3"),
     ("kz.gov.pki.kalkan.knca_provider_jce_kalkan", "0.7.8"),
-    ("kz.gov.pki.kalkan.xmldsig", "0.4"),
-    ("kz.gov.pki.knca.applet.knca_applet", "0.4.10"),
+    ("kz.gov.pki.kalkan.xmldsig", "0.5.2"),
+    ("kz.gov.pki.knca.applet.knca_applet", "0.4.13"),
     ("kz.gov.pki.osgi.layer.common", "0.3.4"),
-    ("kz.gov.pki.osgi.layer.websocket", "0.4.2"),
-    ("kz.gov.pki.provider.knca_provider_util", "0.8.8"),
+    ("kz.gov.pki.osgi.layer.websocket", "0.4.3"),
+    ("kz.gov.pki.provider.knca_provider_util", "0.9.2"),
 ];
 
 /// A window a page asks the daemon to open.
@@ -58,7 +64,9 @@ pub enum UiRequest {
     AdesValidation,
 }
 
-/// What opens the daemon's windows.
+/// What opens the daemon's windows. It is called synchronously from `Module::process` on a
+/// blocking-pool thread, and the page's reply waits for it: it must hand the request to the
+/// UI event loop and return at once, not run the window.
 pub type UiCallback = Arc<dyn Fn(UiRequest) + Send + Sync>;
 
 /// The `kz.gov.pki.ncalayerservices.accessory` module.
@@ -78,11 +86,7 @@ impl Accessory {
         let request: Map<String, Value> = serde_json::from_str(request).map_err(|_| {
             json_exception("A JSONObject text must begin with '{' at 1 [character 2 line 1]")
         })?;
-        let method = match request.get("method") {
-            None => return Err(json_exception("JSONObject[\"method\"] not found.")),
-            Some(Value::String(m)) => m.as_str(),
-            Some(_) => return Err(json_exception("JSONObject[\"method\"] is not a string.")),
-        };
+        let method = get_string(&request, "method").map_err(|e| json_exception(&e))?;
         let uuid = opt_string(&request, "uuid").unwrap_or_default();
         let mut obj = Map::new();
         let ui = match method {
@@ -103,11 +107,17 @@ impl Accessory {
                 let code = if symname.trim_matches(|c| c <= ' ').is_empty() {
                     "SYMNAME_PARAMETER_IS_EMPTY"
                 } else {
+                    // No `Origin` header is the original's `{"origin":null}`.
                     let Some(origin) = &add_info.origin else {
-                        return Err(json_exception("JSONObject[\"origin\"] not found."));
+                        return Err(json_exception("JSONObject[\"origin\"] is not a string."));
                     };
-                    // Bundles cannot be installed until plugin ports exist (D21).
-                    info!(%symname, %origin, "bundle installation requested; not available");
+                    // Bundles cannot be installed until plugin ports exist (D21). Page strings
+                    // are logged as `&str` fields, which the log escapes.
+                    info!(
+                        symname = symname.as_str(),
+                        origin = origin.as_str(),
+                        "bundle installation requested; not available"
+                    );
                     "BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED"
                 };
                 obj.insert("errorCode".to_owned(), json!(code));
@@ -172,14 +182,15 @@ mod tests {
         let (m, _) = module();
         let reply = call(&m, json!({"method": "getBundles", "uuid": "u1"}), None);
         let obj = reply.as_object().unwrap();
-        assert_eq!(obj.len(), 9);
-        assert_eq!(obj["kz.gov.pki.api.layer.NCALayerServices"], "0.7.4");
+        assert_eq!(obj.len(), 10);
+        assert_eq!(obj["org.apache.felix.framework"], "7.0.3");
+        assert_eq!(obj["kz.gov.pki.api.layer.NCALayerServices"], "0.8.3");
         assert_eq!(obj["kz.gov.pki.kalkan.knca_provider_jce_kalkan"], "0.7.8");
-        assert_eq!(obj["kz.gov.pki.kalkan.xmldsig"], "0.4");
-        assert_eq!(obj["kz.gov.pki.knca.applet.knca_applet"], "0.4.10");
+        assert_eq!(obj["kz.gov.pki.kalkan.xmldsig"], "0.5.2");
+        assert_eq!(obj["kz.gov.pki.knca.applet.knca_applet"], "0.4.13");
         assert_eq!(obj["kz.gov.pki.osgi.layer.common"], "0.3.4");
-        assert_eq!(obj["kz.gov.pki.osgi.layer.websocket"], "0.4.2");
-        assert_eq!(obj["kz.gov.pki.provider.knca_provider_util"], "0.8.8");
+        assert_eq!(obj["kz.gov.pki.osgi.layer.websocket"], "0.4.3");
+        assert_eq!(obj["kz.gov.pki.provider.knca_provider_util"], "0.9.2");
         assert_eq!(obj[SYMNAME], env!("CARGO_PKG_VERSION"));
         assert_eq!(obj["uuid"], "u1");
     }
@@ -231,7 +242,7 @@ mod tests {
                 json!({"method": "installBundle", "symname": "kz.x", "uuid": "u"}),
                 None
             ),
-            json!({"errorCode": "org.json.JSONException: JSONObject[\"origin\"] not found."})
+            json!({"errorCode": "org.json.JSONException: JSONObject[\"origin\"] is not a string."})
         );
     }
 
@@ -267,6 +278,10 @@ mod tests {
         assert_eq!(
             call(&m, json!({"uuid": "u"}), None),
             json!({"errorCode": "org.json.JSONException: JSONObject[\"method\"] not found."})
+        );
+        assert_eq!(
+            call(&m, json!({"method": null}), None),
+            json!({"errorCode": "org.json.JSONException: JSONObject[\"method\"] is not a string."})
         );
         assert_eq!(
             call(&m, json!({"method": 1}), None),

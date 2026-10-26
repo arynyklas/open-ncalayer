@@ -13,6 +13,17 @@ pub fn opt_string(obj: &Map<String, Value>, key: &str) -> Option<String> {
     }
 }
 
+/// org.json `getString`: the string under `key`, else the `JSONException` message org.json
+/// throws (`getMessage()`, without the `org.json.JSONException: ` prefix of `toString()`).
+/// A JSON `null` is a value that is not a string, not a missing key.
+pub fn get_string<'a>(obj: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
+    match obj.get(key) {
+        Some(Value::String(s)) => Ok(s),
+        None => Err(format!("JSONObject[\"{key}\"] not found.")),
+        Some(_) => Err(format!("JSONObject[\"{key}\"] is not a string.")),
+    }
+}
+
 /// The `int` org.json `getInt` makes of `value`: a number narrowed with `intValue()` (an
 /// integer keeps its low 32 bits, a fraction is cut toward zero and saturates), or a string
 /// `Integer.parseInt` reads (an optional sign and ASCII digits within the `int` range; Java
@@ -47,6 +58,25 @@ mod tests {
         assert_eq!(opt_string(obj, "b").as_deref(), Some("true"));
         assert_eq!(opt_string(obj, "null"), None);
         assert_eq!(opt_string(obj, "missing"), None);
+    }
+
+    #[test]
+    fn get_strings() {
+        let obj = json!({"s": "x", "n": 5, "null": null});
+        let obj = obj.as_object().unwrap();
+        assert_eq!(get_string(obj, "s"), Ok("x"));
+        assert_eq!(
+            get_string(obj, "n"),
+            Err("JSONObject[\"n\"] is not a string.".to_owned())
+        );
+        assert_eq!(
+            get_string(obj, "null"),
+            Err("JSONObject[\"null\"] is not a string.".to_owned())
+        );
+        assert_eq!(
+            get_string(obj, "missing"),
+            Err("JSONObject[\"missing\"] not found.".to_owned())
+        );
     }
 
     #[test]
