@@ -4,9 +4,9 @@
 //! by reflection over its `CommonUtils` class, and so does this module's dispatcher. The
 //! reply is `{"code":"200"|"500","message"?,"responseObject"?,"uuid"?}`.
 //!
-//! Signing methods name a storage: `PKCS12` (and `JKS`, which OpenNCALayer cannot open yet)
-//! opens the storage dialog for the key file and its password, then the key dialog lists
-//! the keys of the requested `keyType`. Hardware tokens answer as if none were connected.
+//! Signing methods name a storage: `PKCS12` and `JKS` (read only) open the storage dialog
+//! for the key file and its password, then the key dialog lists the keys of the requested
+//! `keyType`. Hardware tokens answer as if none were connected.
 //! Dialog flows take [`oncl_basics::lock_dialog_flow`], so they never interleave with
 //! another module's. The dialog language is process-wide, Russian until `changeLocale`.
 

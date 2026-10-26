@@ -23,7 +23,44 @@ OpenNCALayer — независимый проект и не связан с Н�
 
 Третий этап (P3) проверяет ключи в окне выбора так же, как оригинал. Цепочка сертификата ключа строится до встроенных корней НУЦ или до CA из `signerParams.chain`; `chain: []` отключает проверку. Якорь — самоподписанный CA набора или, как у оригинала, верхний найденный CA набора, поэтому `chain` из одного промежуточного CA тоже работает. Отзыв проверяется по OCSP НУЦ. Ключ без цепочки недоступен. Отозванный ключ помечается «отозван ДД.ММ.ГГГГ» и тоже недоступен, если в `signingParams` нет `allowRevoked` (для формата `raw` он не действует). Тестовая PKI НУЦ не встроена, как и у оригинала: сайтам тестовой среды нужен явный `chain`.
 
-Результаты ручной проверки — [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md) и [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md).
+Четвёртый этап (P4) завершает протокол оригинала: модули `basics`, `commonUtils`, `Applet` (подмножество) и `accessory`, подпись XML (XMLDSig), создание ключей и запросов на сертификат, установка выданных сертификатов, хранилище `JKS` только на чтение (раздел [«Модули»](#модули)).
+
+Результаты ручной проверки — [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md), [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md) и [`docs/dev/smoke-p4.md`](docs/dev/smoke-p4.md).
+
+Документы:
+- [`docs/user/tls.md`](docs/user/tls.md) — сертификат OpenNCALayer: выпуск, установка, удаление, перевыпуск;
+- [`docs/design/roadmap.md`](docs/design/roadmap.md) — решения и дорожная карта;
+- [`docs/original/architecture.md`](docs/original/architecture.md) — архитектура оригинального NCALayer.
+
+### Модули
+
+Модули отвечают так же, как одноимённые модули оригинала: форма ответов, коды и тексты ошибок, порядок проверок. Политика безопасности — тоже как у оригинала: согласия по origin нет, а методы, которые оригинал выполняет без окна (`getActiveTokens`, `loadSlotList`, `getTryCount`, `changePassword` модуля Applet), и здесь работают без окна. Отличия — в разделе [«Отличия P4 от оригинала»](#отличия-p4-от-оригинала).
+
+- `kz.gov.pki.knca.basics`:
+  - `sign` — форматы `cms`, `raw` и `xml`. Для входа на eGov (`format:"xml"`) ответ — `{"status":true,"body":{"result":["<подписанный XML>"]}}`, как у оригинала;
+  - `PKIEssentials` (запрос с `"class":"PKIEssentials"`): `generateCsr` создаёт ключи в папке, которую выбирает пользователь, и возвращает запросы на сертификат (`{"pems":[…]}`); `importCertificate` записывает выданные НУЦ сертификаты к этим ключам и меняет пароль файлов ключей с `defaultPassword` на введённый пользователем (`{"result":true}`). Отмена — `{}`.
+- `kz.gov.pki.knca.commonUtils`: `getActiveTokens`, `getKeyInfo`, `signXml`, `signXmls`, `createCMSSignatureFromBase64`, `createCMSSignatureFromFile`, `createCAdESFromBase64`, `createCAdESFromFile`, `createCAdESFromBase64Hash`, `applyCAdEST`, `showFileChooser`, `changeLocale`. Ответ — `{"code":"200"|"500","message"?,"responseObject"?,"uuid"?}`. Окна модуля — на русском, пока страница не вызовет `changeLocale` (`ru`, `kk`, `en`); выбранный язык действует для всех страниц.
+- `kz.gov.pki.knca.applet.Applet` — устаревший модуль; подмножество для файловых хранилищ (раздел [«Applet»](#applet)). Отвечает и на запросы без `module`, как оригинал.
+- `kz.gov.pki.ncalayerservices.accessory`: `getBundles`, `getServices` (модули демона), `installBundle`, `showBundleManager`, `showSettings`, `showKeystoreExplorer`, `showAdesSigning`, `showAdesValidation`.
+
+Хранилища:
+- `PKCS12` (`.p12`, `.pfx`) — чтение и запись;
+- `JKS` — только чтение, ключи RSA и ГОСТ;
+- токены (`AK…Store`) до P14 отвечают так, будто устройства не подключены: в окнах `basics` они недоступны, commonUtils отвечает `storage.empty`, Applet — `EMPTY_SLOT`, `getActiveTokens` — `[]`.
+
+Подпись XML (`basics` с `format:"xml"`, `signXml` и `signXmls` commonUtils, `signXml` Applet) имеет форму, которую строит Kalkan:
+- весь документ: `ds:Signature` — последний дочерний элемент корня; одна `Reference URI=""` с преобразованиями enveloped-signature и Canonical XML с комментариями; SignedInfo канонизируется по Canonical XML 1.0;
+- элемент (непустой `tbsElementXPath` в commonUtils): у элемента должен быть атрибут `Id`, иначе — ошибка с текстом Kalkan; `Reference URI="#<Id>"` с одним преобразованием Canonical XML с комментариями; SignedInfo — Exclusive XML Canonicalization; подпись кладётся в элемент `signatureParentElementXPath`;
+- алгоритм — по алгоритму подписи сертификата: ГОСТ 34.10-2015-512, ГОСТ 34.310-2004 или sha256RSA, с URI алгоритмов Kalkan;
+- каждый вызов дописывает новую подпись; DOCTYPE и внешние сущности запрещены.
+
+Ключи и запросы на сертификат (`generateCsr`; `genKeyPairAndGetPKCS10` Applet — с отличиями, см. [«Applet»](#applet)):
+- алгоритмы `params[].algorithm`: ГОСТ 34.10-2015-512 (`1.2.398.3.10.1.1.2.3.2`), ГОСТ 34.310-2004 (`1.2.398.3.10.1.1.1.2`), sha256RSA (`1.2.840.113549.1.1.11`) длиной 2048, 3072 или 4096 бит;
+- файл ключа — `<папка>/<префикс><идентификатор ключа>.p12` (`GOST512_`, `GOSTKNCA_`, `RSA256_`), PKCS#12 в профиле Kalkan, ключ без сертификата; идентификатор — SHA-1 от BIT STRING открытого ключа;
+- запрос — PKCS#10 в PEM: subject из `dn`, SAN (`subjectAltNames` и `email`) и расширение KeyStoreInfo (`1.2.398.3.3.5`) с путём папки ключей;
+- `importCertificate` ищет файл ключа по SubjectKeyIdentifier сертификата в папке, записывает к ключу сертификат (файл с сертификатом аутентификации не ГОСТ 2015 переименовывается в `AUTH_<имя>`), затем меняет пароль.
+
+Подписи XMLDSig и CMS и наши файлы ключей проверены в NCANode (Kalkan): [`docs/dev/interop-ncanode.md`](docs/dev/interop-ncanode.md).
 
 ### Проверка сертификатов
 
@@ -44,8 +81,7 @@ OpenNCALayer — независимый проект и не связан с Н�
 
 ### Отличия P1 от оригинала
 
-Первое закрывается в P4.
-- Работает только хранилище `PKCS12`. Остальные хранилища показаны в окне, но недоступны.
+- Токены (`AK…Store`) недоступны до P14. Файловые хранилища: в P1 — только `PKCS12`, с P4 также `JKS` (только чтение).
 - Проверка стойкости пароля для ключей с EKU `1.2.398.3.3.4.2*`, которая есть в оригинале, в P1 не реализована.
 - `NCALAYERPORT` учитывается в любой сессии, у оригинала — только в RDP/Citrix/xrdp. Значение должно быть в диапазоне `13579..=13679`.
 - TLS 1.2 и 1.3, у оригинала — только 1.2.
@@ -65,15 +101,35 @@ OpenNCALayer — независимый проект и не связан с Н�
 
 ### Отличия P4 от оригинала
 
-Подпись XML (`basics.sign` с `format:"xml"`):
+#### Подпись XML
+
+Пункты ниже — для `basics` (`format:"xml"`). commonUtils и Applet подписывают тем же кодом: байты документа, ограничения входа и отказ от sha1RSA у них те же, а коды ошибок — свои.
 - Байты документа сохраняются, включая декларацию `<?xml …?>`, пробелы и порядок атрибутов. Элемент `ds:Signature` дописывается последним дочерним элементом корня. Оригинал пересериализует документ без декларации (`omit-xml-declaration`). Подпись проверяется одинаково, но строка ответа отличается.
 - Ограничения входа, которых у оригинала нет: не больше 64 МиБ, не больше 256 уровней вложенности, ограничены число узлов, атрибутов и объявлений пространств имён, а также объём канонизации. Документ сверх ограничений получает `UNABLE_TO_PARSE_XML`, как и любая ошибка разбора. Текст ошибки разбора свой, у оригинала — сообщение SAX.
 - Сертификат с подписью sha1RSA не подписывает (`UNKNOWN_ALGORITHM`, как для cms). Оригинал подписывает его по rsa-sha1.
 - Документ, где до корневого элемента стоит комментарий или инструкция обработки, подписывается. Оригинал на нём падает (`SIGNING_FAILURE`): он вставляет подпись в первый узел документа.
 
+XPath в `signXml` и `signXmls` commonUtils — подмножество: абсолютный путь из имён элементов в том виде, как они записаны в документе (с префиксом), каждый шаг с необязательным `[n]`, разделители `/` и `//` (`/root/body[2]`, `//data`), не больше 32 шагов. Префикс `SOAP-ENV` означает пространство имён SOAP 1.1, как у Kalkan. Другое выражение получает `{"code":"500","message":"unsupported XPath expression \"…\""}`. Оригинал понимает весь XPath 1.0.
+
+#### Хранилища и пути страницы
+
 Хранилище `JKS` (Java KeyStore) открывается для подписи в `basics` и `commonUtils`, только на чтение: ключи в него не записываются (`generateCsr` и `importCertificate` работают только с PKCS#12). Читаются ключи RSA и ГОСТ.
 
 Пути, которые называет страница, не могут указывать на сеть: файлы `createCAdESFromFile` и `createCMSSignatureFromFile`, папки и файлы ключей модуля Applet, начальная папка `showFileChooser` обоих модулей. UNC-пути (`\\host\…`, `//host/…`, `\\?\UNC\…`; в Linux и macOS — пути, начинающиеся с `//`) отклоняются до любого обращения к файловой системе: иначе демон без окна подключился бы к узлу, который выбрала страница (в Windows — с учётными данными пользователя). Ответ — код оригинала для ненайденного файла: `file.not_found` в commonUtils; в Applet — `KEYSTORE_FILE_NOT_FOUND` (`setX509CertToKeyStore`), `CHANGEPASS_COMMON` (`changePassword`), `COMMON` (`genKeyPairAndGetPKCS10`). `signXml` Applet не подставляет такой путь в окно, а выбор файла открывается в папке по умолчанию. Оригинал открывает любой путь.
+
+Токены не поддерживаются до P14 (раздел [«Модули»](#модули)).
+
+#### `PKIEssentials`: `generateCsr` и `importCertificate`
+
+- sha1RSA (`1.2.840.113549.1.1.5`) не генерируется: `UNKNOWN_ALGORITHM` (правило P1 против SHA-1). RSA другой длины, чем 2048, 3072 или 4096 бит, — тоже `UNKNOWN_ALGORITHM`; оригинал генерирует RSA любой длины.
+- `params` проверяются до окна: ошибка в элементе или алгоритме даёт код оригинала, но окно не открывается. Оригинал сначала показывает окно.
+- Без `defaultPassword` окно `generateCsr` спрашивает пароль файлов ключей с подтверждением; окно оригинала в этом случае подтвердить нельзя.
+- Ключи создаются только в существующей папке, заданной абсолютным путём; иначе — `CSR_GENERATING_FAILURE`.
+- Шаблон нового пароля в `importCertificate` проверяется до записи первого сертификата: при `WRONG_PASSWORD_PATTERN` ни один файл не меняется. Оригинал сначала записывает сертификат.
+- `JKS` и токены показаны в обоих окнах, но выбрать их нельзя.
+- Файлы ключей пишутся через временный файл в той же папке. В Linux и macOS у них права `0600`; в Windows файл получает права папки, и явные права, выданные старому файлу, не сохраняются.
+
+#### commonUtils
 
 Модуль `kz.gov.pki.knca.commonUtils`:
 - Токены отвечают `storage.empty`, `getActiveTokens` — `[]`, как у оригинала без подключённых устройств.
@@ -85,6 +141,8 @@ OpenNCALayer — независимый проект и не связан с Н�
 - Аргумент неверного типа всегда даёт `argument type mismatch`. JRE оригинала после 15 вызовов метода отвечает `java.lang.ClassCastException@<хэш>`.
 - `signXml` сохраняет байты документа, как и `basics`. Пустой `signatureParentElementXPath` при непустом `tbsElementXPath` кладёт подпись в корень, у оригинала это ошибка XPath. Ненайденный родитель подписи даёт сообщение, у оригинала ответ без `message` (`NullPointerException`).
 
+#### Applet
+
 Модуль `kz.gov.pki.knca.applet.Applet` (устаревший; на запросы без `module` отвечает он):
 - Реализовано подмножество для файловых хранилищ `PKCS12` и `JKS` (только чтение): `showFileChooser`, `browseKeyStore`, `setPassword`, `getTryCount`, `genKeyPairAndGetPKCS10`, `setX509CertToKeyStore`, `setX509CertToKeyStoreAndChangePassword`, `changePassword`, `signXml`. `loadSlotList`, `getPublicPartInfo`, `deleteEntry` и `resetStorage` отвечают, как оригинал без устройств. `genExt`, `getProvider`, `setProvider` и `showTokenChooser` отвечают `java.lang.NoSuchMethodException. Method: <имя>`.
 - Токены до P14 отвечают `EMPTY_SLOT` (`browseKeyStore` — `TOKEN_CHOOSE_CANCEL`, `deleteEntry` и `resetStorage` — `COMMON`), окон не открывают. `changePassword` для токена, как оригинал без устройства, сначала проверяет новый PIN по правилу хранилища: пустой или с недопустимыми символами или длиной — `CHANGEPASS_INCORRECT_NEWPASS_PATTERN`, удостоверение личности и облачное хранилище — `UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION`; с верным PIN — `CHANGEPASS_COMMON` (устройства нет). `loadSlotList` всегда отвечает `EMPTY_SLOT`, в том числе для `PKCS12` и неизвестного имени: оригинал проверяет имя, только когда карта вставлена.
@@ -94,10 +152,11 @@ OpenNCALayer — независимый проект и не связан с Н�
 - `signXml` открывает окно хранилища с путём страницы (пользователь может выбрать другой файл), затем окно выбора ключа; кнопки «Удалить ключ» нет. Пустой пароль («Пустое поле»), пароль `INAUTH`/`INSIGN` не по правилу внутренних систем (тексты оригинала), неверный пароль и хранилище без ключей нужного `keyType` снова открывают окно хранилища. Если документ не подписывается (например, не XML), окно ключей остаётся открытым и показывает ошибку; закрыть его можно только отменой — `SIGN_CANCEL`. Окно оригинала в этом случае тоже остаётся открытым, но ошибку не показывает. Байты документа сохраняются, как в `basics`.
 - Окно `setPassword` показывает адрес запросившего сайта, а текст страницы — простым текстом (оригинал показывает его как HTML).
 
-Документы:
-- [`docs/user/tls.md`](docs/user/tls.md) — сертификат OpenNCALayer: выпуск, установка, удаление, перевыпуск;
-- [`docs/design/roadmap.md`](docs/design/roadmap.md) — решения и дорожная карта;
-- [`docs/original/architecture.md`](docs/original/architecture.md) — архитектура оригинального NCALayer.
+#### accessory
+
+- `getBundles` перечисляет фреймворк оригинала (`org.apache.felix.framework`), его основные бандлы, функции которых реализует OpenNCALayer, с версиями из текущего манифеста обновлений оригинала, и сам OpenNCALayer (`io.github.arynyklas.openncalayer`). Оригинал перечисляет все установленные бандлы, включая модули других поставщиков.
+- `installBundle` с непустым `symname` всегда отвечает `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED`: портов модулей других поставщиков до P11 нет (D21). Запрос пишется в журнал.
+- `showBundleManager`, `showSettings`, `showKeystoreExplorer`, `showAdesSigning` и `showAdesValidation` отвечают `{}`, как оригинал, но окно не открывается: запрос только пишется в журнал. Окна настроек и модулей появятся в P5.
 
 ## Сборка и запуск
 

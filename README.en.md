@@ -23,7 +23,44 @@ The second phase (P2) adds a browser extension: with it, sites work with OpenNCA
 
 The third phase (P3) checks keys in the key dialog as the original does. The key certificate's chain is built to the embedded NCA roots or to the CAs of `signerParams.chain`; `chain: []` turns the check off. The anchor is a self-signed CA of the set or, as in the original, the topmost CA of the set found, so a `chain` of an intermediate CA alone works too. Revocation is checked with the NCA OCSP responder. A key without a chain is unavailable. A revoked key is marked «revoked DD.MM.YYYY» and is unavailable too, unless `signingParams` has `allowRevoked` (which the `raw` format ignores). As in the original, the NCA test PKI is not embedded: test-environment sites must pass `chain`.
 
-Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md) and [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md) (in Russian).
+The fourth phase (P4) completes the original's protocol: the `basics`, `commonUtils`, `Applet` (a subset) and `accessory` modules, XML signatures (XMLDSig), new keys and certificate requests, installing issued certificates, and the `JKS` storage read-only (see [Modules](#modules)).
+
+Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md), [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md) and [`docs/dev/smoke-p4.md`](docs/dev/smoke-p4.md) (in Russian).
+
+Documentation is written in Russian:
+- [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
+- [`docs/design/roadmap.md`](docs/design/roadmap.md) — decisions and roadmap;
+- [`docs/original/architecture.md`](docs/original/architecture.md) — architecture of the original NCALayer.
+
+### Modules
+
+The modules answer as the original's modules of the same names do: reply shapes, error codes and texts, order of checks. The security policy is the original's too: there is no per-origin consent, and the methods the original runs without a dialog (`getActiveTokens`, `loadSlotList`, `getTryCount`, the Applet's `changePassword`) run without one here as well. The differences are listed in [Deviations of P4 from the original](#deviations-of-p4-from-the-original).
+
+- `kz.gov.pki.knca.basics`:
+  - `sign`, formats `cms`, `raw` and `xml`. For the eGov login (`format:"xml"`) the reply is `{"status":true,"body":{"result":["<signed XML>"]}}`, as from the original;
+  - `PKIEssentials` (a request with `"class":"PKIEssentials"`): `generateCsr` creates keys in a folder the user picks and returns certificate requests (`{"pems":[…]}`); `importCertificate` installs the certificates the NCA issued next to those keys and changes the key files' password from `defaultPassword` to the one the user types (`{"result":true}`). Cancelling gives `{}`.
+- `kz.gov.pki.knca.commonUtils`: `getActiveTokens`, `getKeyInfo`, `signXml`, `signXmls`, `createCMSSignatureFromBase64`, `createCMSSignatureFromFile`, `createCAdESFromBase64`, `createCAdESFromFile`, `createCAdESFromBase64Hash`, `applyCAdEST`, `showFileChooser`, `changeLocale`. The reply is `{"code":"200"|"500","message"?,"responseObject"?,"uuid"?}`. The module's dialogs are in Russian until a page calls `changeLocale` (`ru`, `kk`, `en`); the language chosen applies to every page.
+- `kz.gov.pki.knca.applet.Applet`: the legacy module; a subset for file storages (see [Applet](#applet)). As in the original, it also answers requests without a `module`.
+- `kz.gov.pki.ncalayerservices.accessory`: `getBundles`, `getServices` (the daemon's modules), `installBundle`, `showBundleManager`, `showSettings`, `showKeystoreExplorer`, `showAdesSigning`, `showAdesValidation`.
+
+Storages:
+- `PKCS12` (`.p12`, `.pfx`): read and write;
+- `JKS`: read only, RSA and GOST keys;
+- until P14, tokens (`AK…Store`) answer as if no device were connected: they are unavailable in the `basics` dialogs, commonUtils answers `storage.empty`, the Applet `EMPTY_SLOT`, `getActiveTokens` `[]`.
+
+XML signatures (`basics` with `format:"xml"`, commonUtils `signXml` and `signXmls`, the Applet's `signXml`) have the shape Kalkan makes:
+- the whole document: `ds:Signature` is the last child of the root element; one `Reference URI=""` with the enveloped-signature and Canonical XML with comments transforms; SignedInfo is canonicalized with Canonical XML 1.0;
+- an element (a non-empty `tbsElementXPath` in commonUtils): the element must have an `Id` attribute, else the error has Kalkan's text; `Reference URI="#<Id>"` with the one transform Canonical XML with comments; SignedInfo with Exclusive XML Canonicalization; the signature goes into the element of `signatureParentElementXPath`;
+- the algorithm follows the certificate's signature algorithm: GOST 34.10-2015-512, GOST 34.310-2004 or sha256RSA, with Kalkan's algorithm URIs;
+- every call appends a new signature; DOCTYPE and external entities are refused.
+
+Keys and certificate requests (`generateCsr`; the Applet's `genKeyPairAndGetPKCS10` differs, see [Applet](#applet)):
+- `params[].algorithm`: GOST 34.10-2015-512 (`1.2.398.3.10.1.1.2.3.2`), GOST 34.310-2004 (`1.2.398.3.10.1.1.1.2`), sha256RSA (`1.2.840.113549.1.1.11`) of 2048, 3072 or 4096 bits;
+- the key file is `<folder>/<prefix><key id>.p12` (`GOST512_`, `GOSTKNCA_`, `RSA256_`), PKCS#12 in Kalkan's profile, the key without a certificate; the key id is the SHA-1 of the public key BIT STRING;
+- the request is PKCS#10 in PEM: subject from `dn`, SAN (`subjectAltNames` and `email`) and the KeyStoreInfo extension (`1.2.398.3.3.5`) with the key folder's path;
+- `importCertificate` finds the key file in the folder by the certificate's SubjectKeyIdentifier, installs the certificate next to the key (a file with a non-GOST-2015 authentication certificate is renamed to `AUTH_<name>`), then changes the password.
+
+XMLDSig and CMS signatures and our key files are checked in NCANode (Kalkan): [`docs/dev/interop-ncanode.md`](docs/dev/interop-ncanode.md) (in Russian).
 
 ### Certificate checking
 
@@ -44,8 +81,7 @@ Key revocation is checked with OCSP when the key has a chain, is not disabled fo
 
 ### Deviations of P1 from the original
 
-The first one is closed in P4.
-- Only the `PKCS12` storage works. The other storages are listed in the dialog but unavailable.
+- Tokens (`AK…Store`) are unavailable until P14. File storages: `PKCS12` only in P1, `JKS` too (read-only) since P4.
 - The original's password strength check for keys with EKU `1.2.398.3.3.4.2*` is not implemented in P1.
 - `NCALAYERPORT` is honoured in any session; the original honours it only in RDP/Citrix/xrdp sessions. The value must be within `13579..=13679`.
 - TLS 1.2 and 1.3; the original speaks only TLS 1.2.
@@ -65,15 +101,35 @@ The first one is closed in P4.
 
 ### Deviations of P4 from the original
 
-XML signing (`basics.sign` with `format:"xml"`):
+#### XML signing
+
+The points below are for `basics` (`format:"xml"`). commonUtils and the Applet sign with the same code: they keep the document's bytes, have the same input limits and refuse sha1RSA too, with error codes of their own.
 - The document's bytes are kept, including the `<?xml …?>` declaration, whitespace and attribute order. The `ds:Signature` element is appended as the last child of the root element. The original re-serializes the document without the declaration (`omit-xml-declaration`). The signature verifies the same way, but the response string differs.
 - Input limits the original does not have: at most 64 MiB and 256 levels of nesting, and bounded numbers of nodes, attributes and namespace declarations, as well as bounded canonicalization work. A document over the limits gets `UNABLE_TO_PARSE_XML`, like any parse error. The parse error text is ours; the original sends the SAX message.
 - A certificate signed with sha1RSA is not used for signing (`UNKNOWN_ALGORITHM`, as for cms). The original signs with rsa-sha1.
 - A document with a comment or a processing instruction before the root element is signed. The original fails on it (`SIGNING_FAILURE`): it inserts the signature into the document's first node.
 
+The XPaths of commonUtils `signXml` and `signXmls` are a subset: an absolute path of element names as written in the document (prefix included), each step with an optional `[n]`, `/` and `//` separators (`/root/body[2]`, `//data`), at most 32 steps. The prefix `SOAP-ENV` stands for the SOAP 1.1 namespace, as in Kalkan. Any other expression gets `{"code":"500","message":"unsupported XPath expression \"…\""}`. The original understands all of XPath 1.0.
+
+#### Storages and page paths
+
 The `JKS` (Java KeyStore) storage opens for signing in `basics` and `commonUtils`, read-only: no keys are written into it (`generateCsr` and `importCertificate` work with PKCS#12 only). RSA and GOST keys are read.
 
 Paths a page names may not point to the network: the files of `createCAdESFromFile` and `createCMSSignatureFromFile`, the Applet module's key folders and files, and the start folder of both modules' `showFileChooser`. UNC paths (`\\host\…`, `//host/…`, `\\?\UNC\…`; on Linux and macOS, paths starting with `//`) are refused before the file system is touched at all: otherwise the daemon would connect, without a dialog, to a host the page chose (on Windows, with the user's credentials). The answer is the original's code for a file not found: `file.not_found` in commonUtils; in the Applet, `KEYSTORE_FILE_NOT_FOUND` (`setX509CertToKeyStore`), `CHANGEPASS_COMMON` (`changePassword`), `COMMON` (`genKeyPairAndGetPKCS10`). The Applet's `signXml` does not put such a path into its dialog, and the file chooser opens in its default folder. The original opens any path.
+
+Tokens are not supported until P14 (see [Modules](#modules)).
+
+#### `PKIEssentials`: `generateCsr` and `importCertificate`
+
+- sha1RSA (`1.2.840.113549.1.1.5`) keys are not generated: `UNKNOWN_ALGORITHM` (the P1 rule against SHA-1). RSA of a length other than 2048, 3072 or 4096 bits is `UNKNOWN_ALGORITHM` too; the original generates RSA of any length.
+- `params` are checked before the dialog: a bad entry or algorithm gets the original's code, but no dialog opens. The original shows the dialog first.
+- Without `defaultPassword`, the `generateCsr` dialog asks for the key file password with a confirmation; the original's dialog cannot be confirmed in that case.
+- Keys are only created in an existing folder given by an absolute path; otherwise `CSR_GENERATING_FAILURE`.
+- The new password's pattern in `importCertificate` is checked before the first certificate is installed: on `WRONG_PASSWORD_PATTERN` no file changes. The original installs the certificate first.
+- `JKS` and tokens are listed in both dialogs but cannot be picked.
+- Key files are written through a temporary file in the same folder. On Linux and macOS they get mode `0600`; on Windows the file gets the folder's permissions, and explicit permissions given to the old file are not kept.
+
+#### commonUtils
 
 The `kz.gov.pki.knca.commonUtils` module:
 - Tokens answer `storage.empty` and `getActiveTokens` answers `[]`, as the original does with no device connected.
@@ -85,6 +141,8 @@ The `kz.gov.pki.knca.commonUtils` module:
 - An argument of the wrong type always gives `argument type mismatch`. After 15 calls of a method the original's JRE answers `java.lang.ClassCastException@<hash>` instead.
 - `signXml` keeps the document's bytes, as `basics` does. An empty `signatureParentElementXPath` with a non-empty `tbsElementXPath` puts the signature into the root element; for the original it is an XPath error. A signature parent that is not found gets a message; the original answers without `message` (`NullPointerException`).
 
+#### Applet
+
 The `kz.gov.pki.knca.applet.Applet` module (legacy; it answers requests without a `module`):
 - A subset is implemented for the file storages `PKCS12` and `JKS` (read-only): `showFileChooser`, `browseKeyStore`, `setPassword`, `getTryCount`, `genKeyPairAndGetPKCS10`, `setX509CertToKeyStore`, `setX509CertToKeyStoreAndChangePassword`, `changePassword`, `signXml`. `loadSlotList`, `getPublicPartInfo`, `deleteEntry` and `resetStorage` answer as the original does with no device. `genExt`, `getProvider`, `setProvider` and `showTokenChooser` answer `java.lang.NoSuchMethodException. Method: <name>`.
 - Until P14 tokens answer `EMPTY_SLOT` (`browseKeyStore`: `TOKEN_CHOOSE_CANCEL`; `deleteEntry` and `resetStorage`: `COMMON`) and open no dialog. For a token, `changePassword` first checks the new PIN by the storage's rule, as the original does with no device: empty, or with characters or a length not allowed, gives `CHANGEPASS_INCORRECT_NEWPASS_PATTERN`; ID cards and the cloud storage give `UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION`; a valid PIN gives `CHANGEPASS_COMMON` (no device). `loadSlotList` always answers `EMPTY_SLOT`, also for `PKCS12` and an unknown name: the original checks the name only when a card is inserted.
@@ -94,10 +152,11 @@ The `kz.gov.pki.knca.applet.Applet` module (legacy; it answers requests without 
 - `signXml` opens the storage dialog with the page's path (the user may pick another file), then the key dialog; there is no "Delete key" button. An empty password ("Empty field"), an `INAUTH`/`INSIGN` password outside the internal systems' policy (the original's texts), a wrong password, and a store without keys of the requested `keyType` reopen the storage dialog. A document that does not sign (e.g. not XML) keeps the key dialog open, showing the error; only cancelling closes it, with `SIGN_CANCEL`. The original's dialog stays open too, but shows no error. The document's bytes are kept, as in `basics`.
 - The `setPassword` dialog shows the requesting site, and the page's text as plain text (the original renders it as HTML).
 
-Documentation is written in Russian:
-- [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
-- [`docs/design/roadmap.md`](docs/design/roadmap.md) — decisions and roadmap;
-- [`docs/original/architecture.md`](docs/original/architecture.md) — architecture of the original NCALayer.
+#### accessory
+
+- `getBundles` lists the original's framework (`org.apache.felix.framework`) and its core bundles whose functions OpenNCALayer implements, with the versions of the original's current update manifest, and OpenNCALayer itself (`io.github.arynyklas.openncalayer`). The original lists every installed bundle, other vendors' modules included.
+- `installBundle` with a non-empty `symname` always answers `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED`: there are no ports of other vendors' modules until P11 (D21). The request is logged.
+- `showBundleManager`, `showSettings`, `showKeystoreExplorer`, `showAdesSigning` and `showAdesValidation` answer `{}`, as the original does, but no window opens: the request is only logged. The settings and modules windows arrive in P5.
 
 ## Build and run
 

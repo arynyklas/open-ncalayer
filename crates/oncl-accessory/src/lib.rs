@@ -5,8 +5,9 @@
 //! `getString`, `symname` and `uuid` with `optString`. The reply is a JSON object, with the
 //! request's `uuid` when it is not empty:
 //!
-//! - `getBundles`: `{symname: version}` of the original's core bundles whose functions this
-//!   daemon implements, and of OpenNCALayer itself;
+//! - `getBundles`: `{symname: version}` of the original's OSGi framework
+//!   (`org.apache.felix.framework`), of its core bundles whose functions this daemon
+//!   implements, and of OpenNCALayer itself;
 //! - `getServices`: `{"services": [module names]}` of the daemon's registry;
 //! - `installBundle`: `SYMNAME_PARAMETER_IS_EMPTY` for an empty `symname`, else
 //!   `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED` (no bundle can be installed); the original reads

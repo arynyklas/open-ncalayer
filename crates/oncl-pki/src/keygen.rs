@@ -74,8 +74,8 @@ impl KeySpec {
 }
 
 /// A new private key of `spec`. GOST scalars are drawn uniformly from `[1, q − 1]` with the
-/// operating system RNG, and redrawn while the public key has a short coordinate (see
-/// [`full_width_gost_key`]); RSA keys come from `rsa` with the same RNG and are used
+/// operating system RNG, and redrawn while the public key has a short coordinate (as Kalkan's
+/// generators do); RSA keys come from `rsa` with the same RNG and are used
 /// through their PKCS#8 (signing is `ring`).
 ///
 /// # Errors
@@ -116,9 +116,10 @@ pub fn generate(spec: KeySpec) -> Result<PrivateKey, KeystoreError> {
 /// (`extractBytes` of `JCEECPublicKey` and `EcGost3410_2015PublicKey`) mis-encode a
 /// coordinate below `2^(8·coord_len − 9)`. For such a key the SubjectPublicKeyInfo Kalkan
 /// re-encodes from our request or certificate would differ from ours, and so would every
-/// key identifier it recomputes (`getKeyIdFromPK`, `createKeyId`). Keeping only keys
-/// Kalkan's generators could make (about 1 in 128 draws is redrawn) makes both encodings,
-/// and the identifiers, agree.
+/// key identifier it recomputes (`getKeyIdFromPK`, `createKeyId`). Keeping only keys that
+/// pass Kalkan's top-byte check (about 1 in 128 draws is redrawn) makes both encodings, and
+/// the identifiers, agree. Kalkan also redraws keys whose coordinates have a zero low byte;
+/// we keep those, since its encoders and key identifiers handle them byte for byte.
 fn full_width_gost_key(mut next: impl FnMut() -> SigningKey) -> SigningKey {
     loop {
         let key = next();

@@ -31,7 +31,7 @@ pub enum Pbe {
     Pbes2Aes256NoPrf,
 }
 
-/// Encryption profile of [`write`].
+/// Encryption profile of [`write()`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WriteOptions {
     /// Scheme for the private keys.
