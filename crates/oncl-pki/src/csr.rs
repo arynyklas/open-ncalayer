@@ -56,8 +56,9 @@ impl KeyStoreInfo {
         .map_err(invalid)
     }
 
-    /// Reads an extension value as Kalkan does: the storage OID first; a UTF8String path
-    /// after it is taken, anything else after it ignored.
+    /// Reads an extension value as Kalkan does (`X509Util.getKeystoreOid` reads only the
+    /// OID): the storage OID first; a valid UTF8String path after it is taken, anything else
+    /// after it ignored.
     ///
     /// # Errors
     ///
@@ -68,7 +69,8 @@ impl KeyStoreInfo {
         let mut elements = SliceReader::new(info.as_bytes()).map_err(malformed)?;
         let storage_oid = ObjectIdentifier::decode(&mut elements).map_err(malformed)?;
         let path = Option::<Utf8StringRef<'_>>::decode(&mut elements)
-            .map_err(malformed)?
+            .ok()
+            .flatten()
             .map(|path| path.as_str().to_owned());
         Ok(KeyStoreInfo { storage_oid, path })
     }

@@ -241,8 +241,19 @@ fn keystore_info_reads_as_kalkan_reads_it() {
             path: Some("p".to_owned())
         }
     );
-    let integer = [&oid_der[..], &[0x02, 1, 1]].concat();
-    assert_eq!(KeyStoreInfo::from_der(&seq(&integer)).unwrap().path, None);
+    // Second elements that are no valid UTF8String are no path: an INTEGER, a constructed
+    // UTF8String, a UniversalString, a UTF8String holding invalid UTF-8.
+    for second in [
+        &[0x02, 1, 1][..],
+        &[0x2c, 3, 0x0c, 1, b'p'],
+        &[0x1c, 4, 0, 0, 0, b'p'],
+        &[0x0c, 1, 0xff],
+    ] {
+        let value = [&oid_der[..], second].concat();
+        let info = KeyStoreInfo::from_der(&seq(&value)).unwrap();
+        assert_eq!(info.storage_oid, jks, "{second:02x?}");
+        assert_eq!(info.path, None, "{second:02x?}");
+    }
     for bad in [vec![0x30, 0], seq(&[0x02, 1, 1]), oid_der.clone()] {
         let err = KeyStoreInfo::from_der(&bad).unwrap_err();
         assert!(matches!(err, KeystoreError::Malformed(_)), "{err:?}");

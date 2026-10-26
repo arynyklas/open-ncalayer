@@ -520,8 +520,6 @@ fn password_pattern() {
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
 
     fn mode(path: &Path) -> u32 {
@@ -545,8 +543,13 @@ mod unix {
         assert_eq!(mode(&path), 0o600);
     }
 
+    /// APFS refuses file names that are not UTF-8, so macOS has no such key files.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn non_utf8_key_file_names_keep_their_name_under_auth() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
         let (dir, key, path) = key_file(KeySpec::RsaSha256(2048));
         let name = OsStr::from_bytes(b"RSA256_\xff\xfe.p12");
         let odd = dir.path().join(name);
