@@ -1,0 +1,48 @@
+// The file chooser's own window: who asks, and the system file dialog on top of it.
+
+import { Button, VerticalBox } from "std-widgets.slint";
+
+export component FileDialog inherits Window {
+    title: "OpenNCALayer";
+    always-on-top: true;
+    min-width: 420px;
+
+    // The requesting page's origin.
+    in property <string> origin;
+    // What to choose: a file or a folder.
+    in property <string> heading;
+
+    callback browse();
+    callback cancel();
+
+    VerticalBox {
+        Text {
+            text: @tr("Request from: {}", root.origin);
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: root.heading;
+            font-weight: 700;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Button {
+                text: @tr("Browse…");
+                primary: true;
+                clicked => {
+                    root.browse();
+                }
+            }
+
+            Button {
+                text: @tr("Cancel");
+                clicked => {
+                    root.cancel();
+                }
+            }
+        }
+    }
+}

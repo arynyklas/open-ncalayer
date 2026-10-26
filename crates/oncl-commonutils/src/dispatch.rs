@@ -5,8 +5,9 @@
 //!   array is no arguments) and `uuid` with `optString`;
 //! - the first method with that name and as many parameters as `args` has is taken, else
 //!   `NoSuchMethodException <name>`;
-//! - an array argument becomes a `String[]` for a `String[]` parameter (every element must
-//!   be a string) and an `Object[]` otherwise; other values pass as org.json gives them;
+//! - an array argument becomes an `int[]` for a parameter an `int[]` fits (`Object`: every
+//!   element must be an org.json int), else a `String[]` for a `String[]` parameter (every
+//!   element must be a string), else an `Object[]`; other values pass as org.json gives them;
 //! - `Method.invoke` refuses private methods (`IllegalAccessException`) and arguments of
 //!   another type than the parameter (`IllegalArgumentException`): a `String` parameter
 //!   takes only a JSON string, a `boolean` only a JSON boolean, `null` nothing;
@@ -47,6 +48,9 @@ enum Body {
     Unconvertible,
     /// Private: every call is refused.
     Private,
+    /// Private, taking one `Object`: an array argument is converted to `int[]` before the
+    /// call is refused.
+    PrivateTakingObject,
 }
 
 /// A declared method of `CommonUtils`.
@@ -155,7 +159,7 @@ const METHODS: [Method; 18] = [
     Method {
         name: "getJson",
         arity: 1,
-        body: Body::Private,
+        body: Body::PrivateTakingObject,
     },
 ];
 
@@ -289,7 +293,7 @@ fn dispatch(
     };
     let args = convert(method, args)?;
     let (call, args) = match &method.body {
-        Body::Private => {
+        Body::Private | Body::PrivateTakingObject => {
             return Err(format!(
                 "java.lang.IllegalAccessException: Class {ACTIVATOR_CLASS} can not access a \
                  member of class {COMMON_UTILS_CLASS} with modifiers \"private\". Method: {name}"
@@ -322,12 +326,19 @@ fn dispatch(
     Ok((outcome, uuid))
 }
 
-/// The dispatcher's array conversion: `String[]` for a `String[]` parameter, where every
-/// element must be a string (org.json `getString`), `Object[]` otherwise.
+/// The dispatcher's array conversion: `int[]` for an `Object` parameter, where every element
+/// must be an int (org.json `getInt`); `String[]` for a `String[]` parameter, where every
+/// element must be a string (org.json `getString`); `Object[]` otherwise.
 fn convert<'a>(method: &Method, args: &'a [Value]) -> Result<Vec<Arg<'a>>, String> {
     args.iter()
         .enumerate()
         .map(|(i, arg)| match arg {
+            Value::Array(items) if matches!(method.body, Body::PrivateTakingObject) => {
+                match items.iter().position(|item| !is_java_int(item)) {
+                    Some(j) => Err(format!("JSONArray[{j}] is not a int.")),
+                    None => Ok(Arg::Objects),
+                }
+            }
             Value::Array(items) => {
                 let strs =
                     matches!(&method.body, Body::Public(params, _) if params[i] == Param::Strs);
@@ -347,6 +358,21 @@ fn convert<'a>(method: &Method, args: &'a [Value]) -> Result<Vec<Arg<'a>>, Strin
             arg => Ok(Arg::Value(arg)),
         })
         .collect()
+}
+
+/// Whether org.json `getInt` takes `value`: any number, or a string `Integer.parseInt`
+/// reads (an optional sign and decimal digits within the `int` range).
+fn is_java_int(value: &Value) -> bool {
+    match value {
+        Value::Number(_) => true,
+        Value::String(s) => {
+            let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
+            !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && s.parse::<i32>().is_ok()
+        }
+        _ => false,
+    }
 }
 
 /// `Method.invoke`'s refusal of an argument of another type than its parameter.

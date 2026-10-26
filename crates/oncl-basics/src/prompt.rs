@@ -6,6 +6,7 @@
 
 use crate::filter::Availability;
 use oncl_pki::info::CertInfo;
+use oncl_pki::jks::{self, JksError};
 use oncl_pki::pkcs12::{self, KeyEntry, Pkcs12Error};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -34,13 +35,15 @@ impl Locale {
     }
 }
 
-/// What the signature is for, as the dialog words it.
+/// What the chosen key is for, as the dialog words it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// Signing.
     Sign,
     /// Authentication: the request asks for the clientAuth extended key usage.
     Authenticate,
+    /// Handing the key's certificate details to the page; nothing is signed.
+    KeyInfo,
 }
 
 /// A key storage of Kalkan's `Storage` enum.
@@ -87,8 +90,14 @@ impl StorageKind {
         }
     }
 
-    /// Whether OpenNCALayer can open it: in P1 only PKCS#12.
-    pub fn supported(&self) -> bool {
+    /// Whether OpenNCALayer can open it to sign: PKCS#12 and JKS files.
+    pub fn readable(&self) -> bool {
+        matches!(self, StorageKind::Pkcs12 | StorageKind::Jks)
+    }
+
+    /// Whether OpenNCALayer can write keys and certificates into it: PKCS#12 files only
+    /// (JKS is read-only).
+    pub fn writable(&self) -> bool {
         *self == StorageKind::Pkcs12
     }
 }
@@ -102,8 +111,15 @@ pub enum OpenError {
     FileNotFound,
     /// The file is not a PKCS#12 key store (or uses an unsupported feature).
     NotPkcs12,
-    /// The key store holds no keys.
+    /// The file is not a JKS key store (or uses an unsupported feature).
+    NotJks,
+    /// The key store holds no keys (of the requested type, for a type other than signing
+    /// and authentication).
     NoKeys,
+    /// The key store holds no signing keys (of the requested `SIGNATURE` type).
+    NoSigningKeys,
+    /// The key store holds no authentication keys (of the requested `AUTHENTICATION` type).
+    NoAuthKeys,
     /// The chosen storage is not supported (or not allowed by the request).
     UnsupportedStorage,
 }
@@ -138,27 +154,34 @@ pub struct StorageAnswer {
 }
 
 impl StorageAnswer {
-    /// Opens the answer's key store, which must be one of `offered` and supported: its keys
+    /// Opens the answer's key store, which must be one of `offered` and readable: its keys
     /// that have a certificate, in store order.
     ///
     /// # Errors
     ///
     /// Why it cannot be opened: [`OpenError::UnsupportedStorage`],
     /// [`OpenError::FileNotFound`], [`OpenError::WrongPassword`], [`OpenError::NotPkcs12`],
-    /// or [`OpenError::NoKeys`] for a store without such keys.
+    /// [`OpenError::NotJks`], or [`OpenError::NoKeys`] for a store without such keys.
     pub fn open(&self, offered: &[StorageKind]) -> Result<Vec<KeyEntry>, OpenError> {
-        if !self.storage.supported() || !offered.contains(&self.storage) {
+        if !self.storage.readable() || !offered.contains(&self.storage) {
             return Err(OpenError::UnsupportedStorage);
         }
-        let pfx = std::fs::read(&self.path).map_err(|_| OpenError::FileNotFound)?;
-        match pkcs12::load(&pfx, &self.password) {
-            Ok(entries) if entries.is_empty() => Err(OpenError::NoKeys),
-            Ok(entries) => Ok(entries),
-            Err(Pkcs12Error::WrongPassword) => Err(OpenError::WrongPassword),
-            Err(Pkcs12Error::Malformed(_) | Pkcs12Error::Unsupported(_)) => {
-                Err(OpenError::NotPkcs12)
-            }
+        let data = std::fs::read(&self.path).map_err(|_| OpenError::FileNotFound)?;
+        let entries = if self.storage == StorageKind::Jks {
+            jks::load(&data, &self.password).map_err(|e| match e {
+                JksError::WrongPassword => OpenError::WrongPassword,
+                JksError::Malformed(_) | JksError::Unsupported(_) => OpenError::NotJks,
+            })?
+        } else {
+            pkcs12::load(&data, &self.password).map_err(|e| match e {
+                Pkcs12Error::WrongPassword => OpenError::WrongPassword,
+                Pkcs12Error::Malformed(_) | Pkcs12Error::Unsupported(_) => OpenError::NotPkcs12,
+            })?
+        };
+        if entries.is_empty() {
+            return Err(OpenError::NoKeys);
         }
+        Ok(entries)
     }
 }
 

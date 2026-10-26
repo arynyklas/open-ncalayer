@@ -121,7 +121,8 @@ pub fn new_password_error(password: &str, confirmation: &str, l: Locale) -> Opti
     }
 }
 
-/// Why a storage answer could not be opened.
+/// Why a storage answer could not be opened. The texts for a store without (suitable) keys
+/// are the original's (`label.errorMessage.emptyStorage*`).
 pub fn error_text(e: OpenError, l: Locale) -> &'static str {
     match (e, l) {
         (OpenError::WrongPassword, Locale::Kk) => "Құпиясөз қате",
@@ -137,9 +138,28 @@ pub fn error_text(e: OpenError, l: Locale) -> &'static str {
             "Файл не является хранилищем PKCS#12 или не поддерживается"
         }
         (OpenError::NotPkcs12, Locale::En) => "The file is not a supported PKCS#12 key store",
-        (OpenError::NoKeys, Locale::Kk) => "Қоймада кілттер жоқ",
-        (OpenError::NoKeys, Locale::Ru) => "В хранилище нет ключей",
-        (OpenError::NoKeys, Locale::En) => "The key store holds no keys",
+        (OpenError::NotJks, Locale::Kk) => "Файл JKS қоймасы емес немесе оған қолдау көрсетілмейді",
+        (OpenError::NotJks, Locale::Ru) => "Файл не является хранилищем JKS или не поддерживается",
+        (OpenError::NotJks, Locale::En) => "The file is not a supported JKS key store",
+        (OpenError::NoKeys, Locale::Kk) => "Сақтау орны бос.",
+        (OpenError::NoKeys, Locale::Ru) => "Хранилище пустое.",
+        (OpenError::NoKeys, Locale::En) => "Empty storage.",
+        (OpenError::NoSigningKeys, Locale::Kk) => {
+            "Тандалған сақтау орынында қол қоюға арналған кілттер табылмады"
+        }
+        (OpenError::NoSigningKeys, Locale::Ru) => {
+            "В выбранном хранилище отсутствуют ключи для подписи"
+        }
+        (OpenError::NoSigningKeys, Locale::En) => "There are no keys for signing in the storage",
+        (OpenError::NoAuthKeys, Locale::Kk) => {
+            "Тандалған сақтау орынында аутентификацияға арналған кілттер табылмады"
+        }
+        (OpenError::NoAuthKeys, Locale::Ru) => {
+            "В выбранном хранилище отсутствуют ключи для аутентификации"
+        }
+        (OpenError::NoAuthKeys, Locale::En) => {
+            "There are no keys for authentication in the storage"
+        }
         (OpenError::UnsupportedStorage, Locale::Kk) => "Таңдалған қоймаға қолдау көрсетілмейді",
         (OpenError::UnsupportedStorage, Locale::Ru) => "Выбранное хранилище не поддерживается",
         (OpenError::UnsupportedStorage, Locale::En) => "The chosen storage is not supported",

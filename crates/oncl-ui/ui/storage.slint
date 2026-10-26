@@ -19,6 +19,8 @@ export component StorageDialog inherits Window {
     in property <string> origin;
     // Authentication rather than signing.
     in property <bool> authenticate;
+    // Handing the key's certificate details to the page: nothing is signed.
+    in property <bool> key-info;
     // A line about the request, e.g. the file to be signed; empty for none.
     in property <string> detail;
     in property <[StorageRow]> storages;
@@ -53,7 +55,7 @@ export component StorageDialog inherits Window {
         }
 
         Text {
-            text: root.authenticate ? @tr("Action: authentication") : @tr("Action: signing");
+            text: root.key-info ? @tr("Action: key information") : root.authenticate ? @tr("Action: authentication") : @tr("Action: signing");
             font-weight: 700;
         }
 

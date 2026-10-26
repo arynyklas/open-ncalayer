@@ -6,18 +6,20 @@
 //!
 //! - an empty (or blank) `storageName` is `storageName.param.empty`, a name Kalkan does not
 //!   know `storage.unknown`, a hardware token `storage.empty` (none is connected);
-//! - `PKCS12` and `JKS` open the storage dialog for that storage alone, then the key dialog
-//!   with the keys whose certificate is of the requested `keyType`
+//! - `PKCS12` and `JKS` (read-only) open the storage dialog for that storage alone, then the
+//!   key dialog with the keys whose certificate is of the requested `keyType`
 //!   ([`oncl_pki::info::kcert_types`]), any other `keyType` meaning SIGNATURE or
 //!   AUTHENTICATION, newest certificate first. A store without such keys is asked for
-//!   again. Cancelling either dialog is `action.canceled`.
+//!   again, with the original's message for the type. Cancelling either dialog is
+//!   `action.canceled`.
 //!
 //! `createCAdESFromBase64`, `createCAdESFromBase64Hash` and `applyCAdEST` then check the
 //! signer's certificate chain against the module's CAs, as the original's
 //! `getSigningEntityDefaultChained` does with its bundled CA list (expired keys at their
 //! notAfter). Base64 inputs are decoded after the dialogs, with Java's decoder and its
 //! messages. Paths a page names (`createCAdESFromFile`, `createCMSSignatureFromFile`) are
-//! read before any dialog, shown in both dialogs, and never logged.
+//! read before any dialog (regular files of at most [`MAX_PAGE_FILE`] bytes only), shown in
+//! both dialogs as absolute paths, and never logged.
 
 use crate::CommonUtils;
 use crate::dispatch::Args;
@@ -39,6 +41,7 @@ use oncl_protocol::AddInfo;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fmt::Write;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use x509_cert::Certificate;
 use x509_cert::ext::pkix::{AuthorityKeyIdentifier, SubjectKeyIdentifier};
@@ -65,14 +68,13 @@ pub(crate) fn get_active_tokens(_: &CommonUtils, _: &Args<'_>, _: &AddInfo) -> O
 
 /// `getKeyInfo(storageName)`: the chosen key's certificate details, nothing signed.
 pub(crate) fn get_key_info(cu: &CommonUtils, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
-    let detail = key_info_detail(cu.locale());
-    let entry = choose_key(cu, args.str(0), None, Some(detail), add_info)?;
+    let entry = choose_key(cu, args.str(0), None, Action::KeyInfo, None, add_info)?;
     Ok(Some(key_info(&entry)))
 }
 
 /// `signXml(storageName, keyType, xml, tbsElementXPath, signatureParentElementXPath)`.
 pub(crate) fn sign_xml(cu: &CommonUtils, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
-    let entry = choose_key(cu, args.str(0), key_type(args.str(1)), None, add_info)?;
+    let entry = signing_key(cu, args.str(0), args.str(1), add_info)?;
     let signed = sign_one_xml(&entry, args.str(2), args.str(3), args.str(4))?;
     Ok(Some(Value::String(signed)))
 }
@@ -80,7 +82,7 @@ pub(crate) fn sign_xml(cu: &CommonUtils, args: &Args<'_>, add_info: &AddInfo) ->
 /// `signXmls(storageName, keyType, String[] xmls, tbsElementXPath,
 /// signatureParentElementXPath)`: every document with the key of one dialog.
 pub(crate) fn sign_xmls(cu: &CommonUtils, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
-    let entry = choose_key(cu, args.str(0), key_type(args.str(1)), None, add_info)?;
+    let entry = signing_key(cu, args.str(0), args.str(1), add_info)?;
     let signed = args
         .strs(2)
         .iter()
@@ -117,14 +119,13 @@ pub(crate) fn create_cms_signature_from_file(
     args: &Args<'_>,
     add_info: &AddInfo,
 ) -> Outcome {
-    let path = args.str(2);
-    let data = read_file(path)?;
+    let file = PageFile::read(args.str(2))?;
     let request = Signing {
         storage_name: args.str(0),
         key_type: key_type(args.str(1)),
-        detail: Some(file_detail(cu.locale(), path)),
+        detail: Some(file_detail(cu.locale(), &file.shown)),
     };
-    cms_with_timestamp(cu, &request, Data::Bytes(data), args.bool(3), add_info)
+    cms_with_timestamp(cu, &request, Data::Bytes(file.data), args.bool(3), add_info)
 }
 
 /// `createCAdESFromBase64(storageName, keyType, base64Data, attached)`: CAdES without a
@@ -152,17 +153,16 @@ pub(crate) fn create_cades_from_file(
     args: &Args<'_>,
     add_info: &AddInfo,
 ) -> Outcome {
-    let path = args.str(2);
-    let data = read_file(path)?;
+    let file = PageFile::read(args.str(2))?;
     let request = Signing {
         storage_name: args.str(0),
         key_type: key_type(args.str(1)),
-        detail: Some(file_detail(cu.locale(), path)),
+        detail: Some(file_detail(cu.locale(), &file.shown)),
     };
     let content = Content::Data {
         attached: args.bool(3),
     };
-    cades(cu, &request, Data::Bytes(data), content, add_info)
+    cades(cu, &request, Data::Bytes(file.data), content, add_info)
 }
 
 /// `createCAdESFromBase64Hash(storageName, keyType, base64Hash)`: a detached CAdES over a
@@ -190,7 +190,7 @@ pub(crate) fn create_cades_from_base64_hash(
 /// key's certificate. A CMS without such a signer fails as the original does, on a
 /// `NullPointerException` (no message).
 pub(crate) fn apply_cades_t(cu: &CommonUtils, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
-    let entry = choose_key(cu, args.str(0), key_type(args.str(1)), None, add_info)?;
+    let entry = signing_key(cu, args.str(0), args.str(1), add_info)?;
     check_chain(cu, &entry.cert)?;
     let cms = Data::Base64(args.str(2)).bytes()?;
     let stamped = timestamp(cu, &cms, &entry.cert)?;
@@ -286,13 +286,7 @@ fn cades(
     content: Content,
     add_info: &AddInfo,
 ) -> Outcome {
-    let entry = choose_key(
-        cu,
-        request.storage_name,
-        request.key_type,
-        request.detail.clone(),
-        add_info,
-    )?;
+    let entry = request.choose(cu, add_info)?;
     check_chain(cu, &entry.cert)?;
     let data = data.bytes()?;
     let (encapsulate, digested) = match content {
@@ -316,13 +310,7 @@ fn cms_with_timestamp(
     attached: bool,
     add_info: &AddInfo,
 ) -> Outcome {
-    let entry = choose_key(
-        cu,
-        request.storage_name,
-        request.key_type,
-        request.detail.clone(),
-        add_info,
-    )?;
+    let entry = request.choose(cu, add_info)?;
     let data = data.bytes()?;
     let opts = SignOptions {
         encapsulate: attached,
@@ -347,17 +335,13 @@ fn choose_key(
     cu: &CommonUtils,
     storage_name: &str,
     key_type: Option<KncaCertType>,
+    action: Action,
     detail: Option<String>,
     add_info: &AddInfo,
 ) -> Result<KeyEntry, Option<String>> {
     let storage = file_storage(storage_name)?;
     let origin = origin(add_info);
     let locale = cu.locale();
-    let action = if key_type == Some(KncaCertType::Authentication) {
-        Action::Authenticate
-    } else {
-        Action::Sign
-    };
     let _flow = lock_dialog_flow();
     let mut prompt = StoragePrompt {
         origin: origin.clone(),
@@ -420,7 +404,8 @@ fn file_storage(name: &str) -> Result<StorageKind, Option<String>> {
 }
 
 /// The keys whose certificate is of `key_type` (`None`: SIGNATURE or AUTHENTICATION), with
-/// their details, newest notBefore first; [`OpenError::NoKeys`] if there are none.
+/// their details, newest notBefore first. Without any, the original's message for the type:
+/// [`OpenError::NoSigningKeys`], [`OpenError::NoAuthKeys`], else [`OpenError::NoKeys`].
 fn keys_of_type(
     entries: Vec<KeyEntry>,
     key_type: Option<KncaCertType>,
@@ -441,10 +426,55 @@ fn keys_of_type(
         })
         .collect();
     if keys.is_empty() {
-        return Err(OpenError::NoKeys);
+        return Err(match key_type {
+            Some(KncaCertType::Signature) => OpenError::NoSigningKeys,
+            Some(KncaCertType::Authentication) => OpenError::NoAuthKeys,
+            _ => OpenError::NoKeys,
+        });
     }
     keys.sort_by_key(|(_, info)| std::cmp::Reverse(info.not_before));
     Ok(keys)
+}
+
+/// The dialogs' action for a signing method's `key_type`.
+fn signing_action(key_type: Option<KncaCertType>) -> Action {
+    if key_type == Some(KncaCertType::Authentication) {
+        Action::Authenticate
+    } else {
+        Action::Sign
+    }
+}
+
+/// The key a signing method without a file asks for: [`choose_key`] for `key_type_name`.
+fn signing_key(
+    cu: &CommonUtils,
+    storage_name: &str,
+    key_type_name: &str,
+    add_info: &AddInfo,
+) -> Result<KeyEntry, Option<String>> {
+    let key_type = key_type(key_type_name);
+    choose_key(
+        cu,
+        storage_name,
+        key_type,
+        signing_action(key_type),
+        None,
+        add_info,
+    )
+}
+
+impl Signing<'_> {
+    /// [`choose_key`] for this request.
+    fn choose(&self, cu: &CommonUtils, add_info: &AddInfo) -> Result<KeyEntry, Option<String>> {
+        choose_key(
+            cu,
+            self.storage_name,
+            self.key_type,
+            signing_action(self.key_type),
+            self.detail.clone(),
+            add_info,
+        )
+    }
 }
 
 /// `KNCACertificateType.valueOf(keyType)`, an unknown name being `null`.
@@ -491,11 +521,26 @@ fn sign_one_xml(
     String::from_utf8(signed).map_err(|e| Some(e.to_string()))
 }
 
-/// Java's `String.equalsIgnoreCase`, char by char.
+/// Java's `String.equalsIgnoreCase`: the same number of UTF-16 units, each pair equal, or
+/// equal after `Character.toUpperCase`, or after `toLowerCase` of those (single-unit case
+/// mappings; surrogates compare as they are).
 fn java_equals_ignore_case(a: &str, b: &str) -> bool {
-    a.chars().count() == b.chars().count()
-        && a.chars().zip(b.chars()).all(|(x, y)| {
-            x == y || x.to_uppercase().eq(y.to_uppercase()) || x.to_lowercase().eq(y.to_lowercase())
+    fn map(unit: u16, f: fn(char) -> Option<char>) -> u16 {
+        char::from_u32(u32::from(unit))
+            .and_then(f)
+            .and_then(|c| u16::try_from(u32::from(c)).ok())
+            .unwrap_or(unit)
+    }
+    fn single(mut it: impl Iterator<Item = char>) -> Option<char> {
+        let c = it.next()?;
+        it.next().is_none().then_some(c)
+    }
+    let upper = |u| map(u, |c| single(c.to_uppercase()));
+    let lower = |u| map(u, |c| single(c.to_lowercase()));
+    a.encode_utf16().count() == b.encode_utf16().count()
+        && a.encode_utf16().zip(b.encode_utf16()).all(|(x, y)| {
+            let (ux, uy) = (upper(x), upper(y));
+            x == y || ux == uy || lower(ux) == lower(uy)
         })
 }
 
@@ -605,9 +650,62 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// `Files.readAllBytes` of the page's path: any failure is `file.not_found`.
-fn read_file(path: &str) -> Result<Vec<u8>, Option<String>> {
-    std::fs::read(Path::new(path)).map_err(|_| Some(FILE_NOT_FOUND.to_owned()))
+/// Largest page-named file signed: the base64 of a larger one would not fit the largest
+/// WebSocket message the module could have received instead.
+pub(crate) const MAX_PAGE_FILE: u64 = 64 << 20;
+
+/// A file the page names (`createCAdESFromFile`, `createCMSSignatureFromFile`).
+struct PageFile {
+    data: Vec<u8>,
+    /// The path the dialogs show: absolute and normalized, so the user sees the file that
+    /// is read.
+    shown: String,
+}
+
+impl PageFile {
+    /// The original's `Files.readAllBytes`, any failure being `file.not_found`; but only a
+    /// regular file (symbolic links followed) is read, never a folder, FIFO or device, and
+    /// at most [`MAX_PAGE_FILE`] bytes of it.
+    fn read(path: &str) -> Result<PageFile, Option<String>> {
+        let not_found = || Some(FILE_NOT_FOUND.to_owned());
+        let path = Path::new(path);
+        let meta = std::fs::metadata(path).map_err(|_| not_found())?;
+        if !meta.is_file() {
+            return Err(not_found());
+        }
+        if meta.len() > MAX_PAGE_FILE {
+            return Err(too_large());
+        }
+        let file = std::fs::File::open(path).map_err(|_| not_found())?;
+        let mut data = Vec::new();
+        file.take(MAX_PAGE_FILE + 1)
+            .read_to_end(&mut data)
+            .map_err(|_| not_found())?;
+        if data.len() as u64 > MAX_PAGE_FILE {
+            return Err(too_large());
+        }
+        Ok(PageFile {
+            data,
+            shown: shown_path(path).display().to_string(),
+        })
+    }
+}
+
+fn too_large() -> Option<String> {
+    Some(format!(
+        "file.too_large: files over {} MiB are not signed",
+        MAX_PAGE_FILE >> 20
+    ))
+}
+
+/// The absolute path of `path` as the file system resolves it: on Windows lexically (as
+/// Windows opens it), elsewhere with symbolic links resolved.
+fn shown_path(path: &Path) -> PathBuf {
+    #[cfg(not(windows))]
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn origin(add_info: &AddInfo) -> String {
@@ -629,23 +727,13 @@ fn file_detail(l: Locale, path: &str) -> String {
     }
 }
 
-/// The dialogs' line for `getKeyInfo`, which signs nothing.
-fn key_info_detail(l: Locale) -> String {
-    match l {
-        Locale::Kk => "Сайтқа кілттің сертификат деректері беріледі; ештеңеге қол қойылмайды",
-        Locale::Ru => "Сайт получит данные сертификата ключа; ничего не подписывается",
-        Locale::En => "The site receives the key's certificate details; nothing is signed",
-    }
-    .to_owned()
-}
-
 /// Java 8's `Base64.getDecoder().decode(String)`, with its messages: the standard alphabet,
 /// no whitespace, padding optional but complete when present, trailing bits ignored.
 /// Characters beyond Latin-1 are `?` (`getBytes(ISO_8859_1)`).
 fn java_base64_decode(text: &str) -> Result<Vec<u8>, String> {
     let src: Vec<u8> = text
-        .chars()
-        .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
+        .encode_utf16()
+        .map(|u| u8::try_from(u).unwrap_or(b'?'))
         .collect();
     if src.is_empty() {
         return Ok(Vec::new());
@@ -740,6 +828,8 @@ mod tests {
         // Latin-1 bytes print as negative Java bytes; other characters become `?`.
         assert_eq!(err("aé"), "Illegal base64 character -17");
         assert_eq!(err("aӘ"), "Illegal base64 character 3f");
+        // A supplementary character is two UTF-16 units, so two `?`.
+        assert_eq!(err("\u{1F600}"), "Illegal base64 character 3f");
         assert_eq!(
             err("aGVsbA="),
             "Input byte array has wrong 4-byte ending unit"
@@ -770,6 +860,12 @@ mod tests {
         assert!(java_equals_ignore_case("/Әлем", "/әлем"));
         assert!(!java_equals_ignore_case("/root/a", "/root/b"));
         assert!(!java_equals_ignore_case("", "/a"));
+        // Java compares UTF-16 units: surrogates do not change case.
+        assert!(!java_equals_ignore_case("/\u{10428}", "/\u{10400}"));
+        assert!(java_equals_ignore_case("/\u{10428}", "/\u{10428}"));
+        // Single-character mappings only: `ß` is not `SS`.
+        assert!(!java_equals_ignore_case("ß", "SS"));
+        assert!(java_equals_ignore_case("ı", "I"));
     }
 
     #[test]

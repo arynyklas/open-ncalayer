@@ -1,7 +1,9 @@
 //! [`SlintPrompter`]: the module's dialogs on the Slint event loop.
 
 use crate::foreground;
-use crate::ui::{CertItem, CsrDialog, ImportDialog, KeyDialog, KeyItem, StorageDialog, StorageRow};
+use crate::ui::{
+    CertItem, CsrDialog, FileDialog, ImportDialog, KeyDialog, KeyItem, StorageDialog, StorageRow,
+};
 use crate::view;
 use oncl_basics::{
     Action, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyPrompt,
@@ -180,9 +182,10 @@ fn show_storage(
     select_language(p.locale);
     ui.set_origin(p.origin.as_str().into());
     ui.set_authenticate(p.action == Action::Authenticate);
+    ui.set_key_info(p.action == Action::KeyInfo);
     ui.set_detail(p.detail.as_deref().unwrap_or_default().into());
-    ui.set_storages(storage_rows(&p.storages, p.locale));
-    ui.set_selected(index(p.storages.iter().position(StorageKind::supported)));
+    ui.set_storages(storage_rows(&p.storages, p.locale, StorageKind::readable));
+    ui.set_selected(index(p.storages.iter().position(StorageKind::readable)));
     if let Some(path) = &p.recent_path {
         ui.set_path(path.display().to_string().into());
     }
@@ -230,7 +233,7 @@ fn show_storage(
 /// the system dialog falls back to its default folder if it is gone.
 fn browse(ui: &StorageDialog) {
     let mut dialog = rfd::AsyncFileDialog::new()
-        .add_filter("PKCS#12", &["p12", "pfx"])
+        .add_filter("PKCS#12, JKS", &["p12", "pfx", "jks"])
         .set_parent(&ui.window().window_handle());
     let current = PathBuf::from(ui.get_path().as_str());
     if let Some(dir) = current.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -260,6 +263,7 @@ fn show_keys(p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), PlatformE
     select_language(p.locale);
     ui.set_origin(p.origin.as_str().into());
     ui.set_authenticate(p.action == Action::Authenticate);
+    ui.set_key_info(p.action == Action::KeyInfo);
     ui.set_detail(p.detail.as_deref().unwrap_or_default().into());
     let rows = view::key_rows(&p);
     let enabled: Vec<bool> = rows.iter().map(|r| r.enabled).collect();
@@ -303,8 +307,8 @@ fn show_csr(p: CsrPrompt, reply: Sender<Prompt<CsrAnswer>>) -> Result<(), Platfo
     let ui = CsrDialog::new()?;
     select_language(p.locale);
     ui.set_origin(p.origin.as_str().into());
-    ui.set_storages(storage_rows(&p.storages, p.locale));
-    ui.set_selected(index(p.storages.iter().position(StorageKind::supported)));
+    ui.set_storages(storage_rows(&p.storages, p.locale, StorageKind::writable));
+    ui.set_selected(index(p.storages.iter().position(StorageKind::writable)));
     ui.set_ask_password(p.ask_password);
 
     let pending = Pending::new(ui.clone_strong(), reply);
@@ -331,7 +335,7 @@ fn show_csr(p: CsrPrompt, reply: Sender<Prompt<CsrAnswer>>) -> Result<(), Platfo
             let Some(&storage) = usize::try_from(ui.get_selected())
                 .ok()
                 .and_then(|i| p.storages.get(i))
-                .filter(|k| k.supported())
+                .filter(|k| k.writable())
             else {
                 return;
             };
@@ -372,7 +376,7 @@ fn show_import(p: ImportPrompt, reply: Sender<Prompt<ImportAnswer>>) -> Result<(
         .collect();
     ui.set_certificates(ModelRc::new(VecModel::from(items)));
     ui.set_storage(view::storage_label(p.storage, p.locale).into());
-    ui.set_storage_supported(p.storage.supported());
+    ui.set_storage_supported(p.storage.writable());
     if let Some(path) = &p.path {
         ui.set_path(path.display().to_string().into());
     }
@@ -395,7 +399,7 @@ fn show_import(p: ImportPrompt, reply: Sender<Prompt<ImportAnswer>>) -> Result<(
     ui.on_confirm({
         let pending = pending.clone();
         let locale = p.locale;
-        let supported = p.storage.supported();
+        let supported = p.storage.writable();
         move || {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -420,13 +424,17 @@ fn show_import(p: ImportPrompt, reply: Sender<Prompt<ImportAnswer>>) -> Result<(
     show(&ui, pending)
 }
 
-/// The rows of a storage list.
-fn storage_rows(storages: &[StorageKind], l: Locale) -> ModelRc<StorageRow> {
+/// The rows of a storage list; the storages `usable` accepts may be picked.
+fn storage_rows(
+    storages: &[StorageKind],
+    l: Locale,
+    usable: fn(&StorageKind) -> bool,
+) -> ModelRc<StorageRow> {
     let rows: Vec<StorageRow> = storages
         .iter()
         .map(|k| StorageRow {
             label: view::storage_label(*k, l).into(),
-            supported: k.supported(),
+            supported: usable(k),
         })
         .collect();
     ModelRc::new(VecModel::from(rows))
@@ -451,12 +459,36 @@ fn pick_folder(window: &slint::Window, current: &str, set: impl FnOnce(String) +
     }
 }
 
-/// The file chooser for `p`: the system file (or folder) dialog, with the original's
-/// extension filter and start folder; the outcome goes to `reply`. As in [`browse`], the
-/// start folder is not checked here.
+/// The file chooser for `p`: a small always-on-top window naming the requesting page, which
+/// takes the foreground and opens the system file (or folder) dialog over itself, with the
+/// original's extension filter and start folder; the outcome goes to `reply`. As in
+/// [`browse`], the start folder is not checked here.
 fn show_file(p: FilePrompt, reply: Sender<Prompt<PathBuf>>) -> Result<(), PlatformError> {
-    let mut dialog =
-        rfd::AsyncFileDialog::new().set_title(view::file_dialog_title(p.kind, p.locale));
+    let ui = FileDialog::new()?;
+    select_language(p.locale);
+    ui.set_origin(p.origin.as_str().into());
+    ui.set_heading(view::file_dialog_title(p.kind, p.locale).into());
+    let pending = Pending::new(ui.clone_strong(), reply);
+    let weak = ui.as_weak();
+    ui.on_browse({
+        let pending = pending.clone();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                pick(&ui, &p, pending.clone());
+            }
+        }
+    });
+    show(&ui, pending)?;
+    ui.invoke_browse();
+    Ok(())
+}
+
+/// Opens the system dialog for `p` over `ui`; a choice answers `pending`, a cancel cancels
+/// it (rfd does not tell a cancel from a missing backend).
+fn pick(ui: &FileDialog, p: &FilePrompt, pending: Rc<Pending<FileDialog, PathBuf>>) {
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title(view::file_dialog_title(p.kind, p.locale))
+        .set_parent(&ui.window().window_handle());
     let extensions = p.kind.extensions();
     if !extensions.is_empty() {
         dialog = dialog.add_filter(view::file_filter_name(p.kind), extensions);
@@ -465,22 +497,20 @@ fn show_file(p: FilePrompt, reply: Sender<Prompt<PathBuf>>) -> Result<(), Platfo
         dialog = dialog.set_directory(dir);
     }
     let folder = p.kind == FileKind::Directory;
-    slint::spawn_local(async move {
+    let picked = slint::spawn_local(async move {
         let picked = if folder {
             dialog.pick_folder().await
         } else {
             dialog.pick_file().await
         };
-        let outcome = match picked {
-            Some(handle) => Prompt::Answer(handle.path().to_path_buf()),
-            // As in `browse`: a cancel and a missing backend look the same.
-            None => Prompt::Cancelled,
+        match picked {
+            Some(handle) => pending.finish(Prompt::Answer(handle.path().to_path_buf())),
+            None => pending.cancel(),
         };
-        // The asking thread waits on the receiver until the dialog closes.
-        let _ = reply.send(outcome);
-    })
-    .map(drop)
-    .map_err(|e| PlatformError::Other(e.to_string()))
+    });
+    if let Err(e) = picked {
+        tracing::warn!(error = %e, "cannot open the file dialog");
+    }
 }
 
 /// A dialog's buttons and windowing callbacks shared by every dialog.
@@ -510,6 +540,12 @@ impl Dialog for CsrDialog {
 impl Dialog for ImportDialog {
     fn set_cancel(&self, f: impl FnMut() + 'static) {
         ImportDialog::on_cancel(self, f);
+    }
+}
+
+impl Dialog for FileDialog {
+    fn set_cancel(&self, f: impl FnMut() + 'static) {
+        FileDialog::on_cancel(self, f);
     }
 }
 

@@ -73,3 +73,9 @@ msgstr "Устанавливаемые сертификаты"
 
 msgid "New password"
 msgstr "Новый пароль"
+
+msgid "Action: key information"
+msgstr "Действие: информация о ключе"
+
+msgid "Send"
+msgstr "Отправить"

@@ -73,3 +73,9 @@ msgstr "Орнатылатын куәліктер"
 
 msgid "New password"
 msgstr "Жаңа құпиясөз"
+
+msgid "Action: key information"
+msgstr "Әрекет: кілт туралы ақпарат"
+
+msgid "Send"
+msgstr "Жіберу"

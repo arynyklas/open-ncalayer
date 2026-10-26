@@ -71,10 +71,14 @@ XML signing (`basics.sign` with `format:"xml"`):
 - A certificate signed with sha1RSA is not used for signing (`UNKNOWN_ALGORITHM`, as for cms). The original signs with rsa-sha1.
 - A document with a comment or a processing instruction before the root element is signed. The original fails on it (`SIGNING_FAILURE`): it inserts the signature into the document's first node.
 
+The `JKS` (Java KeyStore) storage opens for signing in `basics` and `commonUtils`, read-only: no keys are written into it (`generateCsr` and `importCertificate` work with PKCS#12 only). RSA and GOST keys are read.
+
 The `kz.gov.pki.knca.commonUtils` module:
-- The `JKS` storage cannot be opened yet: the storage dialog offers it alone, and nothing can be signed with it. Tokens answer `storage.empty` and `getActiveTokens` answers `[]`, as the original does with no device connected.
-- `createCAdESFromFile` and `createCMSSignatureFromFile` show the path the page named in both dialogs. `getKeyInfo` opens the same dialogs with a note that nothing is signed. The original has no such lines.
-- A wrong password, and a store without keys of the requested `keyType`, reopen the storage dialog with an error. The original shows the error in its key dialog. Expired keys are available, as in the original, but the dialog does not mark them.
+- Tokens answer `storage.empty` and `getActiveTokens` answers `[]`, as the original does with no device connected.
+- `createCAdESFromFile` and `createCMSSignatureFromFile` show the full, normalized path of the file the page named in both dialogs. Only a regular file (a folder, FIFO or device gives `file.not_found`) of at most 64 MiB is read; a larger one gets `file.too_large: files over 64 MiB are not signed`. The original reads any path with no size limit.
+- `getKeyInfo` opens the dialogs with the action "Key information" and a "Send" button, as the original does.
+- The file chooser (`showFileChooser`) opens on top of other windows, in a small window naming the requesting site.
+- A wrong password, and a store without keys of the requested `keyType`, reopen the storage dialog with an error (the no-keys texts are the original's). The original shows the error in its key dialog. Expired keys are available, as in the original, but the dialog does not mark them.
 - Texts the original composes itself are the same: `action.canceled`, `storage.*`, `file.not_found`, `NoSuchMethodException …`, `UNKNOWN_ALGORITHM`, `CMS_NO_ENCAPSULATED_DATA`, `ISSUER_CERT_NOT_FOUND`, Kalkan's messages about the XML element, Java's base64 messages. XML and CMS parse errors, TSP and chain building errors are ours; a chain error follows the prefix `java.security.cert.CertPathBuilderException: `.
 - An argument of the wrong type always gives `argument type mismatch`. After 15 calls of a method the original's JRE answers `java.lang.ClassCastException@<hash>` instead.
 - `signXml` keeps the document's bytes, as `basics` does. An empty `signatureParentElementXPath` with a non-empty `tbsElementXPath` puts the signature into the root element; for the original it is an XPath error. A signature parent that is not found gets a message; the original answers without `message` (`NullPointerException`).

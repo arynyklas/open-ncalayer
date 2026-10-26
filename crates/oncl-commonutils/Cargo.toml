@@ -27,3 +27,4 @@ oncl-basics = { path = "../oncl-basics", features = ["testing"] }
 oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 oncl-testkit.workspace = true
 tempfile.workspace = true
+tracing-subscriber.workspace = true

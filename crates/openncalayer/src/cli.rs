@@ -271,7 +271,9 @@ fn configured(files: &TlsFiles) -> Result<TlsInfo, Failure> {
 
 /// With feature `e2e-prompter`: a JSON file of dialog answers that `run` uses instead of
 /// windows, e.g. `[{"storage":{"path":"…","password":"…"}},{"key":0},{"cancel_storage":null}]`
-/// (also `{"cancel_key":null}`).
+/// (also `{"jks":{"path","password"}}`, `{"cancel_key":null}`,
+/// `{"csr":{"dir","password"}}`, `{"cancel_csr":null}`, `{"import":{"dir","password"}}`,
+/// `{"cancel_import":null}`, `{"file":"…"}`, `{"cancel_file":null}`).
 #[cfg(feature = "e2e-prompter")]
 pub const E2E_PROMPTER_VAR: &str = "ONCL_E2E_PROMPTER";
 
@@ -301,9 +303,16 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_basics::testing::Step>, String> {
     #[serde(rename_all = "snake_case")]
     enum StepSpec {
         Storage { path: PathBuf, password: String },
+        Jks { path: PathBuf, password: String },
         CancelStorage,
         Key(usize),
         CancelKey,
+        Csr { dir: PathBuf, password: String },
+        CancelCsr,
+        Import { dir: PathBuf, password: String },
+        CancelImport,
+        File(PathBuf),
+        CancelFile,
     }
 
     let specs: Vec<StepSpec> = serde_json::from_str(text).map_err(|e| e.to_string())?;
@@ -311,9 +320,16 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_basics::testing::Step>, String> {
         .into_iter()
         .map(|spec| match spec {
             StepSpec::Storage { path, password } => Step::Storage { path, password },
+            StepSpec::Jks { path, password } => Step::Jks { path, password },
             StepSpec::CancelStorage => Step::CancelStorage,
             StepSpec::Key(index) => Step::Key(index),
             StepSpec::CancelKey => Step::CancelKey,
+            StepSpec::Csr { dir, password } => Step::Csr { dir, password },
+            StepSpec::CancelCsr => Step::CancelCsr,
+            StepSpec::Import { dir, password } => Step::Import { dir, password },
+            StepSpec::CancelImport => Step::CancelImport,
+            StepSpec::File(path) => Step::File(path),
+            StepSpec::CancelFile => Step::CancelFile,
         })
         .collect())
 }
@@ -778,7 +794,11 @@ mod tests {
 
         let steps = parse_steps(
             r#"[{"storage":{"path":"k.p12","password":"pw"}},{"key":1},
-                {"cancel_storage":null},{"cancel_key":null}]"#,
+                {"cancel_storage":null},{"cancel_key":null},
+                {"jks":{"path":"k.jks","password":"pw"}},
+                {"csr":{"dir":"d","password":""}},{"cancel_csr":null},
+                {"import":{"dir":"d","password":"Qwerty12"}},{"cancel_import":null},
+                {"file":"f.cer"},{"cancel_file":null}]"#,
         )
         .unwrap();
         assert!(matches!(
@@ -788,7 +808,14 @@ mod tests {
                 Step::Key(1),
                 Step::CancelStorage,
                 Step::CancelKey,
-            ] if path == Path::new("k.p12") && password == "pw"
+                Step::Jks { .. },
+                Step::Csr { .. },
+                Step::CancelCsr,
+                Step::Import { .. },
+                Step::CancelImport,
+                Step::File(file),
+                Step::CancelFile,
+            ] if path == Path::new("k.p12") && password == "pw" && file == Path::new("f.cer")
         ));
         assert!(parse_steps(r#"[{"wait":null}]"#).is_err());
         assert!(parse_steps("{}").is_err());

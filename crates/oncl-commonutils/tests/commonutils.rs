@@ -16,10 +16,12 @@ use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::{MockTsa, verify_token};
 use oncl_pki::{oid, pem, xmldsig};
 use oncl_protocol::{AddInfo, Module};
-use oncl_testkit::{ncanode, read, synthetic, synthetic_cert};
+use oncl_testkit::{fixture, ncanode, read, synthetic, synthetic_cert};
 use serde_json::{Value, json};
+use std::cell::RefCell;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use time::OffsetDateTime;
 use x509_cert::ext::pkix::{AuthorityKeyIdentifier, SubjectKeyIdentifier};
 
@@ -260,9 +262,28 @@ fn private_and_unconvertible_methods_are_refused() {
         ("getBase64FromFile", json!(["C:/x"])),
         ("chooseFile", json!(["P12", ""])),
         ("getJson", json!([null])),
+        ("getJson", json!([[1, "2", -3.5, "+4"]])),
     ] {
         assert_eq!(failed(&call(&s.cu, method, args)), private(method));
     }
+    // `getJson(Object)` takes an `int[]`, which the dispatcher converts first.
+    for (array, index) in [
+        (json!(["x"]), 0),
+        (json!([1, true]), 1),
+        (json!([1, "2147483648"]), 1),
+        (json!([null]), 0),
+        (json!([[1]]), 0),
+    ] {
+        assert_eq!(
+            failed(&call(&s.cu, "getJson", json!([array]))),
+            format!("JSONArray[{index}] is not a int.")
+        );
+    }
+    // Other parameter types take an `Object[]`: no element conversion.
+    assert_eq!(
+        failed(&call(&s.cu, "saveKey", json!([["x"], [true]]))),
+        private("saveKey")
+    );
     // The setters take a `Function`, which no JSON value is.
     for args in [json!(["x"]), json!([{}]), json!([[]]), json!([null])] {
         assert_eq!(
@@ -386,11 +407,10 @@ fn get_key_info_reports_the_chosen_certificate() {
     assert_eq!(sp.storages, [StorageKind::Pkcs12]);
     assert_eq!(sp.origin, "https://x.kz");
     assert_eq!(sp.locale, Locale::Ru);
-    assert_eq!(sp.action, Action::Sign);
+    assert_eq!(sp.action, Action::KeyInfo);
     assert_eq!(sp.recent_path, None);
-    let detail = sp.detail.as_deref().unwrap();
-    assert!(detail.contains("ничего не подписывается"), "{detail}");
-    assert_eq!(s.prompter.key_prompts()[0].detail, sp.detail);
+    assert_eq!(sp.detail, None);
+    assert_eq!(s.prompter.key_prompts()[0].action, Action::KeyInfo);
 
     // Other algorithms by Kalkan's key names.
     for (name, algorithm) in [
@@ -464,8 +484,20 @@ fn unopenable_stores_are_asked_for_again() {
         Some(synthetic("user-gost2015-sign").path)
     );
 
-    // JKS cannot be opened yet: the dialog offers it alone and refuses other storages.
-    let s = setup(script![storage("user-gost2015-sign"), Step::CancelStorage]);
+    // JKS: the dialog offers it alone and refuses other storages; a PKCS#12 file named as
+    // JKS is not a JKS.
+    let s = setup(script![
+        storage("user-gost2015-sign"),
+        Step::Storage {
+            path: synthetic("user-gost2015-sign").path,
+            password: "Qwerty12".to_owned(),
+        },
+        Step::Jks {
+            path: synthetic("user-gost2015-sign").path,
+            password: "Qwerty12".to_owned(),
+        },
+        Step::CancelStorage
+    ]);
     assert_eq!(
         failed(&call(&s.cu, "getKeyInfo", json!(["JKS"]))),
         "action.canceled"
@@ -473,6 +505,47 @@ fn unopenable_stores_are_asked_for_again() {
     let prompts = s.prompter.storage_prompts();
     assert_eq!(prompts[0].storages, [StorageKind::Jks]);
     assert_eq!(prompts[1].error, Some(OpenError::UnsupportedStorage));
+    assert_eq!(prompts[3].error, Some(OpenError::NotJks));
+}
+
+#[test]
+fn jks_keys_sign_read_only() {
+    let jks = || Step::Jks {
+        path: fixture("jks/rsa.jks"),
+        password: "Qwerty12".to_owned(),
+    };
+    let s = setup(script![jks(), key(0)]);
+    let reply = call(&s.cu, "getKeyInfo", json!(["JKS"]));
+    assert_eq!(ok(&reply)["alias"], "openncalayer-rsa");
+    assert_eq!(ok(&reply)["algorithm"], "RSA");
+
+    let s = setup(script![jks(), key(0)]);
+    let reply = call(
+        &s.cu,
+        "signXml",
+        json!(["JKS", "SIGNATURE", "<doc>x</doc>", "", ""]),
+    );
+    let signed = ok(&reply).as_str().unwrap();
+    assert_eq!(
+        xmldsig::verify(signed.as_bytes()).unwrap()[0].sig_alg,
+        SigAlg::RsaSha256
+    );
+    // The trusted root of the store is not offered as a key.
+    assert_eq!(s.prompter.key_prompts()[0].candidates.len(), 1);
+
+    // A wrong password is asked again.
+    let s = setup(script![
+        Step::Jks {
+            path: fixture("jks/rsa.jks"),
+            password: "wrong".to_owned(),
+        },
+        Step::CancelStorage
+    ]);
+    call(&s.cu, "getKeyInfo", json!(["JKS"]));
+    assert_eq!(
+        s.prompter.storage_prompts()[1].error,
+        Some(OpenError::WrongPassword)
+    );
 }
 
 #[test]
@@ -508,20 +581,28 @@ fn key_type_selects_the_keys_listed() {
         1
     );
 
-    // A store without such keys is asked for again.
-    let s = setup(script![storage("user-gost2015-sign"), Step::CancelStorage]);
-    assert_eq!(
-        failed(&call(
-            &s.cu,
-            "signXml",
-            json!(["PKCS12", "SSL", "<a/>", "", ""])
-        )),
-        "action.canceled"
-    );
-    let prompts = s.prompter.storage_prompts();
-    assert_eq!(prompts.len(), 2);
-    assert_eq!(prompts[1].error, Some(OpenError::NoKeys));
-    assert!(s.prompter.key_prompts().is_empty());
+    // A store without such keys is asked for again, with the original's message for the
+    // type.
+    for (key_type, store, error) in [
+        ("SSL", "user-gost2015-sign", OpenError::NoKeys),
+        ("AUTHENTICATION", "user-rsa-sign", OpenError::NoAuthKeys),
+        ("SIGNATURE", "tsa-gost2015", OpenError::NoSigningKeys),
+        ("", "tsa-gost2015", OpenError::NoKeys),
+    ] {
+        let s = setup(script![storage(store), Step::CancelStorage]);
+        assert_eq!(
+            failed(&call(
+                &s.cu,
+                "signXml",
+                json!(["PKCS12", key_type, "<a/>", "", ""])
+            )),
+            "action.canceled"
+        );
+        let prompts = s.prompter.storage_prompts();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[1].error, Some(error), "{key_type} {store}");
+        assert!(s.prompter.key_prompts().is_empty());
+    }
 }
 
 #[test]
@@ -823,7 +904,7 @@ fn files_are_read_first_and_shown_in_the_dialogs() {
         let reply = call(&s.cu, method, json!(["PKCS12", "", path, true]));
         let signers = verify(&unb64(&reply), None).unwrap();
         assert_eq!(signers.len(), 1, "{method}");
-        let detail = Some(format!("Файл: {path}"));
+        let detail = Some(format!("Файл: {}", shown(&path)));
         assert_eq!(s.prompter.storage_prompts()[0].detail, detail);
         assert_eq!(s.prompter.key_prompts()[0].detail, detail);
 
@@ -845,6 +926,22 @@ fn files_are_read_first_and_shown_in_the_dialogs() {
             json!(["PKCS12", "", dir.path().to_str().unwrap(), true]),
         );
         assert_eq!(failed(&reply), "file.not_found", "{method}");
+        // Nor a file over the limit (sparse: no disk space used).
+        let big = dir.path().join("big.bin");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len((64 << 20) + 1)
+            .unwrap();
+        let reply = call(
+            &s.cu,
+            method,
+            json!(["PKCS12", "", big.to_str().unwrap(), true]),
+        );
+        assert_eq!(
+            failed(&reply),
+            "file.too_large: files over 64 MiB are not signed",
+            "{method}"
+        );
         assert!(s.prompter.storage_prompts().is_empty());
     }
 
@@ -858,8 +955,53 @@ fn files_are_read_first_and_shown_in_the_dialogs() {
     ));
     assert_eq!(
         s.prompter.storage_prompts()[0].detail,
-        Some(format!("File: {path}"))
+        Some(format!("File: {}", shown(&path)))
     );
+
+    // The dialogs show the absolute path of the file read, whatever the page wrote.
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let roundabout = sub.join("..").join("договор.txt");
+    let s = setup(script![storage("user-gost2015-sign"), key(0)]);
+    ok(&call(
+        &s.cu,
+        "createCAdESFromFile",
+        json!(["PKCS12", "", roundabout.to_str().unwrap(), false]),
+    ));
+    let detail = s.prompter.storage_prompts()[0].detail.clone().unwrap();
+    assert_eq!(detail, format!("Файл: {}", shown(&path)));
+    assert!(!detail.contains(".."), "{detail}");
+}
+
+/// The path the dialogs show for `path`.
+fn shown(path: &str) -> String {
+    #[cfg(windows)]
+    let shown = std::path::absolute(path).unwrap();
+    #[cfg(not(windows))]
+    let shown = std::fs::canonicalize(path).unwrap();
+    shown.display().to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn fifos_and_devices_are_refused_without_blocking() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let s = setup(script![]);
+    for path in [fifo.to_str().unwrap(), "/dev/zero", "/dev/urandom"] {
+        for method in ["createCAdESFromFile", "createCMSSignatureFromFile"] {
+            let started = std::time::Instant::now();
+            let reply = call(&s.cu, method, json!(["PKCS12", "", path, true]));
+            assert_eq!(failed(&reply), "file.not_found", "{method} {path}");
+            assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        }
+    }
+    assert!(s.prompter.storage_prompts().is_empty());
 }
 
 #[test]
@@ -997,4 +1139,99 @@ fn change_locale_switches_the_dialog_language() {
     assert_eq!(locale_after("en"), Locale::En);
     // Empty: back to Russian.
     assert_eq!(locale_after(""), Locale::Ru);
+}
+
+thread_local! {
+    /// Formatted log lines of events on this thread.
+    static THREAD_LOG: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Writes into [`THREAD_LOG`] of the writing thread.
+struct ThreadLog;
+
+impl io::Write for ThreadLog {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        THREAD_LOG.with(|log| log.borrow_mut().extend_from_slice(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Every event of this test binary, at every level, goes to the emitting thread's
+/// [`THREAD_LOG`]. A process-wide subscriber: a scoped one misses events while other tests
+/// register the same callsites in parallel.
+fn capture_logs() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(|| ThreadLog)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+    });
+}
+
+#[test]
+fn page_paths_and_passwords_stay_out_of_the_log() {
+    const SECRET: &str = "LogSecret741";
+    capture_logs();
+    let dir = tempfile::tempdir().unwrap();
+    let path = temp_file(dir.path(), "secret-contract.txt", b"doc");
+    let missing = dir.path().join("secret-missing.txt");
+    let missing = missing.to_str().unwrap();
+    let store = synthetic("user-gost2015-sign");
+    // A copy of the key file whose password is the secret.
+    let e = entry("user-gost2015-sign");
+    let p12 = write(
+        &[WriteEntry {
+            alias: e.alias.clone(),
+            pkcs8_der: e.key.to_pkcs8_der().to_vec(),
+            cert_der: Some(e.cert.to_der().unwrap()),
+        }],
+        &[],
+        SECRET,
+        &WriteOptions::default(),
+        &mut |buf: &mut [u8]| buf.fill(9),
+    )
+    .unwrap();
+    let key_file = dir.path().join("secret-key.p12");
+    std::fs::write(&key_file, p12).unwrap();
+    let secret_store = || Step::Storage {
+        path: key_file.clone(),
+        password: SECRET.to_owned(),
+    };
+    for method in ["createCAdESFromFile", "createCMSSignatureFromFile"] {
+        // Success, after a wrong password.
+        let s = setup(script![
+            Step::Storage {
+                path: key_file.clone(),
+                password: store.password.clone(),
+            },
+            secret_store(),
+            key(0)
+        ]);
+        ok(&call(&s.cu, method, json!(["PKCS12", "", path, true])));
+        // file.not_found.
+        failed(&call(&s.cu, method, json!(["PKCS12", "", missing, true])));
+        // Cancelled.
+        let s = setup(script![secret_store(), Step::CancelKey]);
+        failed(&call(&s.cu, method, json!(["PKCS12", "", path, true])));
+        // A signing failure: a detached CMS cannot be co-signed.
+        let detached = cms::sign(&e, b"doc", &sign_opts(false)).unwrap();
+        let cms_path = temp_file(dir.path(), "secret-detached.p7s", &detached);
+        let s = setup(script![secret_store(), key(0)]);
+        failed(&call(&s.cu, method, json!(["PKCS12", "", cms_path, true])));
+    }
+
+    let log = THREAD_LOG.with(|log| String::from_utf8(log.borrow().clone()).unwrap());
+    assert!(
+        log.contains("commonUtils call failed"),
+        "the flow logs: {log}"
+    );
+    for secret in [SECRET, "secret-", &dir.path().display().to_string()] {
+        assert!(!log.contains(secret), "{secret:?} in the log:\n{log}");
+    }
 }

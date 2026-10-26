@@ -378,7 +378,8 @@ fn keyless_store_reprompts_with_no_keys() {
     assert_eq!(prompts[1].recent_path, Some(path));
 }
 
-/// Answers `JKS` first, then a working PKCS#12, then key 0.
+/// Answers a token first, then a JKS answer naming a PKCS#12 file, then a working PKCS#12,
+/// then key 0.
 struct JksFirst {
     storage_prompts: Mutex<Vec<StoragePrompt>>,
 }
@@ -387,10 +388,10 @@ impl Prompter for JksFirst {
     fn storage(&self, p: &StoragePrompt) -> Prompt<StorageAnswer> {
         let mut prompts = self.storage_prompts.lock().unwrap();
         prompts.push(p.clone());
-        let kind = if prompts.len() == 1 {
-            StorageKind::Jks
-        } else {
-            StorageKind::Pkcs12
+        let kind = match prompts.len() {
+            1 => StorageKind::Token("AKKaztokenStore"),
+            2 => StorageKind::Jks,
+            _ => StorageKind::Pkcs12,
         };
         let key = synthetic("user-gost2015-sign");
         Prompt::Answer(StorageAnswer {
@@ -430,8 +431,28 @@ fn unsupported_storage_reprompts() {
     let r = json(b.process(&req(raw_args(json!("x"), json!({}))), &origin("o")));
     assert_eq!(r["status"], true);
     let prompts = prompter.storage_prompts.lock().unwrap();
-    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts.len(), 3);
     assert_eq!(prompts[1].error, Some(OpenError::UnsupportedStorage));
+    assert_eq!(prompts[2].error, Some(OpenError::NotJks));
+}
+
+#[test]
+fn jks_keys_sign() {
+    let (b, p) = basics(script![
+        Step::Jks {
+            path: fixture("jks/rsa.jks"),
+            password: "Qwerty12".to_owned(),
+        },
+        key(0)
+    ]);
+    let r = json(b.process(
+        &req(cms_args(json!("aGVsbG8="), json!({"decode": true}))),
+        &origin("o"),
+    ));
+    assert_eq!(r["status"], true, "{r}");
+    let der = pem_to_der(r["body"]["result"][0].as_str().unwrap());
+    assert_eq!(verify(&der, None).unwrap()[0].sig_alg, SigAlg::RsaSha256);
+    assert_eq!(p.key_prompts()[0].candidates[0].alias, "openncalayer-rsa");
 }
 
 #[test]
@@ -1141,7 +1162,11 @@ fn storage_kinds() {
     );
     for kind in StorageKind::all() {
         assert_eq!(StorageKind::from_name(kind.name()), Some(kind));
-        assert_eq!(kind.supported(), kind == StorageKind::Pkcs12);
+        assert_eq!(
+            kind.readable(),
+            matches!(kind, StorageKind::Pkcs12 | StorageKind::Jks)
+        );
+        assert_eq!(kind.writable(), kind == StorageKind::Pkcs12);
     }
     assert_eq!(StorageKind::from_name("PKCS12"), Some(StorageKind::Pkcs12));
     assert_eq!(StorageKind::from_name("JKS"), Some(StorageKind::Jks));

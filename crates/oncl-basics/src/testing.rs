@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier, Mutex, MutexGuard, PoisonError};
 use zeroize::Zeroizing;
 
-/// One scripted answer.
-#[derive(Debug, Clone)]
+/// One scripted answer. Its `Debug` form is its kind alone: scripts carry passwords.
+#[derive(Clone)]
 pub enum Step {
     /// Answer a storage prompt with a PKCS#12 file.
     Storage {
@@ -22,6 +22,13 @@ pub enum Step {
     },
     /// Cancel a storage prompt.
     CancelStorage,
+    /// Answer a storage prompt with a JKS file.
+    Jks {
+        /// Key store file.
+        path: PathBuf,
+        /// Its password.
+        password: String,
+    },
     /// Pick candidate `n` in a key prompt.
     Key(usize),
     /// Cancel a key prompt.
@@ -51,6 +58,32 @@ pub enum Step {
     /// Wait on the barrier (without holding the prompter), then take the next step for the
     /// same prompt.
     Wait(Arc<Barrier>),
+}
+
+impl Step {
+    /// The step's kind, for messages: never its password or path.
+    fn kind(&self) -> &'static str {
+        match self {
+            Step::Storage { .. } => "Storage",
+            Step::CancelStorage => "CancelStorage",
+            Step::Jks { .. } => "Jks",
+            Step::Key(_) => "Key",
+            Step::CancelKey => "CancelKey",
+            Step::Csr { .. } => "Csr",
+            Step::CancelCsr => "CancelCsr",
+            Step::Import { .. } => "Import",
+            Step::CancelImport => "CancelImport",
+            Step::File(_) => "File",
+            Step::CancelFile => "CancelFile",
+            Step::Wait(_) => "Wait",
+        }
+    }
+}
+
+impl std::fmt::Debug for Step {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.kind())
+    }
 }
 
 #[derive(Default)]
@@ -139,8 +172,16 @@ impl Prompter for ScriptedPrompter {
                 path,
                 password: Zeroizing::new(password),
             }),
+            Some(Step::Jks { path, password }) => Prompt::Answer(StorageAnswer {
+                storage: StorageKind::Jks,
+                path,
+                password: Zeroizing::new(password),
+            }),
             Some(Step::CancelStorage) | None => Prompt::Cancelled,
-            Some(step) => panic!("ScriptedPrompter: storage prompt answered by {step:?}"),
+            Some(step) => panic!(
+                "ScriptedPrompter: storage prompt answered by {}",
+                step.kind()
+            ),
         }
     }
 
@@ -148,7 +189,7 @@ impl Prompter for ScriptedPrompter {
         match self.next(|s| s.key_prompts.push(p.clone())) {
             Some(Step::Key(index)) => Prompt::Answer(index),
             Some(Step::CancelKey) | None => Prompt::Cancelled,
-            Some(step) => panic!("ScriptedPrompter: key prompt answered by {step:?}"),
+            Some(step) => panic!("ScriptedPrompter: key prompt answered by {}", step.kind()),
         }
     }
 
@@ -160,7 +201,10 @@ impl Prompter for ScriptedPrompter {
                 password: Zeroizing::new(password),
             }),
             Some(Step::CancelCsr) | None => Prompt::Cancelled,
-            Some(step) => panic!("ScriptedPrompter: generateCsr prompt answered by {step:?}"),
+            Some(step) => panic!(
+                "ScriptedPrompter: generateCsr prompt answered by {}",
+                step.kind()
+            ),
         }
     }
 
@@ -172,7 +216,10 @@ impl Prompter for ScriptedPrompter {
             }),
             Some(Step::CancelImport) | None => Prompt::Cancelled,
             Some(step) => {
-                panic!("ScriptedPrompter: importCertificate prompt answered by {step:?}")
+                panic!(
+                    "ScriptedPrompter: importCertificate prompt answered by {}",
+                    step.kind()
+                )
             }
         }
     }
@@ -181,7 +228,7 @@ impl Prompter for ScriptedPrompter {
         match self.next(|s| s.file_prompts.push(p.clone())) {
             Some(Step::File(path)) => Prompt::Answer(path),
             Some(Step::CancelFile) | None => Prompt::Cancelled,
-            Some(step) => panic!("ScriptedPrompter: file chooser answered by {step:?}"),
+            Some(step) => panic!("ScriptedPrompter: file chooser answered by {}", step.kind()),
         }
     }
 }
