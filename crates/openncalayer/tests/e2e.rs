@@ -116,6 +116,7 @@ async fn start(steps: Vec<Step>) -> Srv {
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         tsa.clone(),
+        Arc::new(|_| {}),
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

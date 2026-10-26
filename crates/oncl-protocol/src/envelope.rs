@@ -60,6 +60,13 @@ impl Registry {
         true
     }
 
+    /// The names of the registered modules, sorted.
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.modules.keys().cloned().collect();
+        names.sort_unstable();
+        names
+    }
+
     /// Routes a text frame. The `module` field is read from the top-level JSON object; an absent
     /// or `null` field selects [`DEFAULT_MODULE`], and any other non-string value matches no
     /// module.

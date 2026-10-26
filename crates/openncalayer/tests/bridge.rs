@@ -126,6 +126,7 @@ fn scripted_registry(steps: Vec<Step>) -> (Arc<Registry>, Arc<ScriptedPrompter>)
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(MockTsa::new(entry("tsa-gost2015"))),
+        Arc::new(|_| {}),
     );
     (Arc::new(registry), prompter)
 }
@@ -368,6 +369,42 @@ async fn origin_reaches_add_info() {
             Some("https://second.test".to_owned()),
             Some("https://first.test".to_owned())
         ]
+    );
+}
+
+#[tokio::test]
+async fn accessory_lists_the_daemon_modules() {
+    let (registry, _) = scripted_registry(Vec::new());
+    let (_dir, ep) = start_ipc(registry).await;
+    let mut c = Client::connect(&ep).await;
+    c.open(1, "https://page.test").await;
+    let reply = c
+        .call(
+            1,
+            r#"{"module":"kz.gov.pki.ncalayerservices.accessory","method":"getServices","uuid":"u"}"#,
+        )
+        .await;
+    assert_eq!(
+        json(&reply),
+        serde_json::json!({
+            "services": [
+                "kz.gov.pki.knca.applet.Applet",
+                "kz.gov.pki.knca.basics",
+                "kz.gov.pki.knca.commonUtils",
+                "kz.gov.pki.ncalayerservices.accessory"
+            ],
+            "uuid": "u"
+        })
+    );
+    let reply = c
+        .call(
+            1,
+            r#"{"module":"kz.gov.pki.ncalayerservices.accessory","method":"installBundle","symname":"kz.x"}"#,
+        )
+        .await;
+    assert_eq!(
+        json(&reply),
+        serde_json::json!({"errorCode": "BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED"})
     );
 }
 

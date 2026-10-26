@@ -67,6 +67,8 @@ fn run(allow_no_wss: bool) -> ExitCode {
         scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new())),
         Arc::new(JsonSettings::new(daemon.paths.settings())),
         Arc::new(UreqTransport),
+        // The windows arrive in P5; until then a request to open one is only logged.
+        Arc::new(|window| tracing::info!(?window, "window requested; not available yet")),
     );
     let (ipc, wss) = (daemon.ipc, daemon.wss);
     let server = thread::Builder::new().name("server".into()).spawn(move || {
