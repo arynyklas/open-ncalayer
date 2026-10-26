@@ -2,45 +2,11 @@
 //! decoded strictly (DER), after `ber::to_der` normalization. CHOICEs (`ResponderID`,
 //! `CertStatus`) stay [`AnyRef`] and are told apart by their tag in `ocsp`.
 
-use crate::asn1util::{RawGeneralizedTime, RawSequence};
+use crate::asn1util::{Enumerated, RawGeneralizedTime, RawSequence};
+use der::Sequence;
 use der::asn1::{AnyRef, BitStringRef, IntRef, ObjectIdentifier, OctetStringRef};
-use der::{
-    DecodeValue, EncodeValue, ErrorKind, FixedTag, Header, Length, Reader, Sequence, Tag, Writer,
-};
 use spki::AlgorithmIdentifierRef;
 use x509_cert::Certificate;
-
-/// An `ENUMERATED` of 0 to 127: `OCSPResponseStatus` and `CRLReason` have no larger value,
-/// anything else is malformed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Enumerated(pub u8);
-
-impl<'a> DecodeValue<'a> for Enumerated {
-    type Error = der::Error;
-
-    fn decode_value<R: Reader<'a>>(reader: &mut R, header: Header) -> der::Result<Self> {
-        match reader.read_slice(header.length())? {
-            &[value] if value < 0x80 => Ok(Enumerated(value)),
-            _ => Err(reader.error(ErrorKind::Value {
-                tag: Tag::Enumerated,
-            })),
-        }
-    }
-}
-
-impl EncodeValue for Enumerated {
-    fn value_len(&self) -> der::Result<Length> {
-        Ok(Length::ONE)
-    }
-
-    fn encode_value(&self, writer: &mut impl Writer) -> der::Result<()> {
-        writer.write_byte(self.0)
-    }
-}
-
-impl FixedTag for Enumerated {
-    const TAG: Tag = Tag::Enumerated;
-}
 
 /// `CertID`.
 #[derive(Clone, Copy, Debug, Sequence)]

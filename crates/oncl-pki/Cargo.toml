@@ -12,8 +12,8 @@ publish.workspace = true
 # PKCS#12 writer (test fixtures, xtask).
 write = []
 # Test helpers: `tsp::MockTsa` (an in-process time-stamping authority),
-# `ocsp::MockOcsp` (an in-process OCSP responder), `http::RouteTransport` and
-# `testing::issue_cert`.
+# `ocsp::MockOcsp` (an in-process OCSP responder), `crl::MockCrl` (an in-process CRL
+# distribution point), `http::RouteTransport` and `testing::issue_cert`.
 testing = []
 
 [dependencies]
@@ -41,6 +41,7 @@ zeroize.workspace = true
 [dev-dependencies]
 hex-literal.workspace = true
 oncl-testkit.workspace = true
+tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 
 [[test]]
@@ -53,4 +54,8 @@ required-features = ["testing"]
 
 [[test]]
 name = "ocsp"
+required-features = ["testing"]
+
+[[test]]
+name = "crl"
 required-features = ["testing"]

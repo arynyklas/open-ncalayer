@@ -1,7 +1,8 @@
 //! DER pieces shared by the protocol modules (time-stamping, OCSP, CRL): values of a fixed
-//! tag kept raw, unsigned INTEGER bytes and `GeneralizedTime` with fractions of a second.
+//! tag kept raw, small `ENUMERATED` values, unsigned INTEGER bytes and `GeneralizedTime`
+//! with fractions of a second.
 
-use der::{DecodeValue, EncodeValue, FixedTag, Header, Length, Reader, Tag, Writer};
+use der::{DecodeValue, EncodeValue, ErrorKind, FixedTag, Header, Length, Reader, Tag, Writer};
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 /// A value of a fixed tag kept as its raw contents.
@@ -46,6 +47,38 @@ raw_value!(
     RawGeneralizedTime,
     Tag::GeneralizedTime
 );
+
+/// An `ENUMERATED` of 0 to 127: `OCSPResponseStatus` and `CRLReason` have no larger value,
+/// anything else is malformed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Enumerated(pub u8);
+
+impl<'a> DecodeValue<'a> for Enumerated {
+    type Error = der::Error;
+
+    fn decode_value<R: Reader<'a>>(reader: &mut R, header: Header) -> der::Result<Self> {
+        match reader.read_slice(header.length())? {
+            &[value] if value < 0x80 => Ok(Enumerated(value)),
+            _ => Err(reader.error(ErrorKind::Value {
+                tag: Tag::Enumerated,
+            })),
+        }
+    }
+}
+
+impl EncodeValue for Enumerated {
+    fn value_len(&self) -> der::Result<Length> {
+        Ok(Length::ONE)
+    }
+
+    fn encode_value(&self, writer: &mut impl Writer) -> der::Result<()> {
+        writer.write_byte(self.0)
+    }
+}
+
+impl FixedTag for Enumerated {
+    const TAG: Tag = Tag::Enumerated;
+}
 
 /// An unsigned big-endian number without leading zeros (zero is empty).
 pub(crate) fn unsigned(mut bytes: &[u8]) -> &[u8] {

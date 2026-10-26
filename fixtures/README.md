@@ -26,6 +26,10 @@
 - `individual_valid_2015.req.der` — запрос `openssl ocsp -issuer ncagosttest2022.pem -cert <лист> -no_nonce -reqout …` (OpenSSL 3.0.13). Тест сверяет с ним `ocsp::request_der` байт в байт.
 - `individual_valid_2015.resp.der` — ответ на этот запрос по GET-биндингу НУЦ (`curl http://test.pki.gov.kz/ocsp/<urlencode(base64(запрос))>`), записан 2026-10-26: `good`, thisUpdate = producedAt = `20261026000150Z`, без nextUpdate, ответчик `CN=OCSP` выпущен `ncagosttest2022` (срок до 2029-03-09). `crates/oncl-pki/tests/ocsp.rs` проверяет его офлайн на фиксированный момент внутри окна `ALLOWED_PERIOD`; лист берётся из `target/fixtures/ncanode/`.
 
+## `nca-crl/` — CRL корневого ГОСТ-УЦ НУЦ (коммитится)
+
+- `gost2015_2022.crl` — CRL `НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) 2022` (`nca/prod/rcagost22`) из точки распространения CRL сертификата `nca/prod/ncagost22`: `curl http://crl.root.gov.kz/gost2015_2022.crl`, записан 2026-10-26 (`Content-Type: application/pkix-crl`, 471 байт, sha256 `4e8038f34a1c216f352c7861b94ef99b5464bfb566a0737ef0140597ac1f8380`). CRL v2, подпись ГОСТ 34.10-2015-512, thisUpdate `2026-10-02 05:12:41 UTC`, nextUpdate `2026-11-06 05:12:41 UTC`, расширения CRL Number (63) и authorityKeyIdentifier, отозванных сертификатов нет. Публичные данные. `crates/oncl-pki/tests/crl.rs` проверяет его офлайн на фиксированные моменты: подпись ключом `rcagost22`, границы thisUpdate/nextUpdate, издателя и статус `ncagost22`.
+
 ## `ocsp/` — эталонный OCSP-запрос OpenSSL (коммитится)
 
 - `openssl-request-inter-user-gost2015-sign.der` — `openssl ocsp -issuer inter-gost2015.pem -cert inter-user-gost2015-sign.pem -no_nonce -reqout …` (OpenSSL 3.0.13; лист извлечён `openssl pkcs12 -legacy -nokeys -clcerts` из `synthetic/inter-user-gost2015-sign.p12`). Тест сверяет с ним `ocsp::request_der` байт в байт. Синтетические данные, лицензия репозитория. Пересоздаётся той же командой после `cargo xtask gen-fixtures`, если меняется синтетический PKI.

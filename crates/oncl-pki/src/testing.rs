@@ -1,16 +1,56 @@
-//! Helpers for tests of certificate validation: certificates issued on the fly.
+//! Helpers for tests of certificate validation: certificates issued on the fly, and the
+//! signing choices the in-process mocks share.
 
 use crate::cert::{self, Certificate};
-use crate::key::{KeyAlg, SigAlg};
+use crate::key::{KeyAlg, PrivateKey, SigAlg};
 use crate::pkcs12::KeyEntry;
 use der::asn1::{Any, BitString};
 use der::{Encode, Sequence};
+use oncl_gost::SigningKey;
 use spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use x509_cert::certificate::Version;
 use x509_cert::ext::Extension;
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::time::Validity;
+
+/// A second RSA key for mocks that sign with the wrong key of an RSA signer: the synthetic
+/// OpenSSL key of `fixtures/openssl`, which no CA or responder fixture uses.
+const OTHER_RSA_KEY: &[u8] = include_bytes!("../../../fixtures/openssl/rsa.pk8.der");
+
+/// The signature algorithm of a key: GOST 34.310-2004, GOST 34.10-2015-512 or
+/// sha256WithRSA.
+pub(crate) fn signature_alg(alg: KeyAlg) -> SigAlg {
+    match alg {
+        KeyAlg::Gost2004 => SigAlg::Gost2004,
+        KeyAlg::Gost2015_512 => SigAlg::Gost2015_512,
+        KeyAlg::Rsa => SigAlg::RsaSha256,
+    }
+}
+
+/// A fixed key of `key`'s algorithm that is not `key`: the scalar 7 on the same GOST curve,
+/// or [`OTHER_RSA_KEY`].
+///
+/// # Panics
+///
+/// If `key` is that fixed key.
+pub(crate) fn another_key(key: &PrivateKey) -> PrivateKey {
+    let other = match key {
+        PrivateKey::Gost(key) => PrivateKey::Gost(
+            SigningKey::from_scalar_be(key.curve(), &[7]).expect("7 is a valid scalar"),
+        ),
+        PrivateKey::Rsa(_) => {
+            PrivateKey::from_pkcs8_der(OTHER_RSA_KEY, None).expect("fixture RSA key parses")
+        }
+    };
+    let same = match (key, &other) {
+        (PrivateKey::Gost(a), PrivateKey::Gost(b)) => a.verifying_key() == b.verifying_key(),
+        (PrivateKey::Rsa(a), PrivateKey::Rsa(b)) => a.public().as_ref() == b.public().as_ref(),
+        _ => false,
+    };
+    assert!(!same, "the signer key is the fixed other key");
+    other
+}
 
 /// Contents of a certificate to issue.
 #[derive(Clone, Debug)]
@@ -72,11 +112,7 @@ struct SignedCertificate {
 ///
 /// If `spec` does not encode (e.g. an empty serial) or signing fails.
 pub fn issue_cert(issuer: &KeyEntry, spec: TestCertSpec) -> Certificate {
-    let alg = match issuer.key.alg() {
-        KeyAlg::Gost2004 => SigAlg::Gost2004,
-        KeyAlg::Gost2015_512 => SigAlg::Gost2015_512,
-        KeyAlg::Rsa => SigAlg::RsaSha256,
-    };
+    let alg = signature_alg(issuer.key.alg());
     let algorithm = AlgorithmIdentifierOwned {
         oid: alg.signature_oid(),
         parameters: Some(Any::null()),
@@ -109,4 +145,30 @@ pub fn issue_cert(issuer: &KeyEntry, spec: TestCertSpec) -> Certificate {
         "TBSCertificate re-encodes byte for byte"
     );
     cert
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::key::PublicKey;
+    use crate::pkcs12::load;
+    use oncl_testkit::{read, synthetic};
+
+    #[test]
+    fn another_key_has_the_algorithm_but_not_the_key() {
+        for name in ["user-gost2015-sign", "user-gost2004-sign", "user-rsa-sign"] {
+            let fixture = synthetic(name);
+            let entry = load(&read(&fixture.path), &fixture.password)
+                .unwrap()
+                .remove(0);
+            let other = another_key(&entry.key);
+            assert_eq!(other.alg(), entry.key.alg(), "{name}");
+            let alg = signature_alg(entry.key.alg());
+            let signature = other.sign(alg, b"tbs").unwrap();
+            let public =
+                PublicKey::from_spki(entry.cert.tbs_certificate().subject_public_key_info())
+                    .unwrap();
+            assert!(public.verify(alg, b"tbs", &signature).is_err(), "{name}");
+        }
+    }
 }

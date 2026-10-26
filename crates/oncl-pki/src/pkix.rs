@@ -259,6 +259,7 @@ fn authority_key_id(cert: &Certificate) -> Option<Vec<u8>> {
     }
 }
 
-fn time_of(time: &Time) -> OffsetDateTime {
+/// An X.509 `Time` as an `OffsetDateTime` in UTC.
+pub(crate) fn time_of(time: &Time) -> OffsetDateTime {
     OffsetDateTime::UNIX_EPOCH + time.to_unix_duration()
 }

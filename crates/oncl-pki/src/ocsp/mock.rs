@@ -1,30 +1,25 @@
 //! An in-process OCSP responder for tests.
 
 use super::asn1::{
-    BasicOcspResponse, CertId, Enumerated, OcspRequest, OcspResponse, ResponseBytes, ResponseData,
-    RevokedInfo, SingleResponse,
+    BasicOcspResponse, CertId, OcspRequest, OcspResponse, ResponseBytes, ResponseData, RevokedInfo,
+    SingleResponse,
 };
 use super::{CertStatus, OCSP_RESPONSE, key_hash};
-use crate::asn1util::{RawGeneralizedTime, format_generalized_time, unsigned};
+use crate::asn1util::{Enumerated, RawGeneralizedTime, format_generalized_time, unsigned};
 use crate::http::{GetOptions, HttpError, HttpReply, HttpTransport, percent_decode, text_reply};
-use crate::key::{KeyAlg, PrivateKey, SigAlg};
 use crate::oid;
 use crate::pkcs12::KeyEntry;
+use crate::testing::{another_key, signature_alg};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::asn1::{AnyRef, BitStringRef, IntRef, OctetStringRef};
 use der::{Decode, Encode, Tag, TagNumber};
-use oncl_gost::SigningKey;
 use spki::AlgorithmIdentifierRef;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 use time::OffsetDateTime;
-
-/// A second RSA key for [`OcspTamper::WrongKey`] with an RSA responder: the synthetic
-/// OpenSSL key of `fixtures/openssl`, which no responder fixture uses.
-const OTHER_RSA_KEY: &[u8] = include_bytes!("../../../../fixtures/openssl/rsa.pk8.der");
 
 /// How [`MockOcsp`] spoils its answer.
 ///
@@ -304,39 +299,6 @@ fn context(constructed: bool, number: u32) -> Tag {
     }
 }
 
-/// The signature algorithm of a key, as `testing::issue_cert` picks it.
-fn signature_alg(alg: KeyAlg) -> SigAlg {
-    match alg {
-        KeyAlg::Gost2004 => SigAlg::Gost2004,
-        KeyAlg::Gost2015_512 => SigAlg::Gost2015_512,
-        KeyAlg::Rsa => SigAlg::RsaSha256,
-    }
-}
-
-/// A fixed key of `key`'s algorithm that is not `key`: the scalar 7 on the same GOST curve,
-/// or [`OTHER_RSA_KEY`].
-///
-/// # Panics
-///
-/// If `key` is that fixed key.
-fn another_key(key: &PrivateKey) -> PrivateKey {
-    let other = match key {
-        PrivateKey::Gost(key) => PrivateKey::Gost(
-            SigningKey::from_scalar_be(key.curve(), &[7]).expect("7 is a valid scalar"),
-        ),
-        PrivateKey::Rsa(_) => {
-            PrivateKey::from_pkcs8_der(OTHER_RSA_KEY, None).expect("fixture RSA key parses")
-        }
-    };
-    let same = match (key, &other) {
-        (PrivateKey::Gost(a), PrivateKey::Gost(b)) => a.verifying_key() == b.verifying_key(),
-        (PrivateKey::Rsa(a), PrivateKey::Rsa(b)) => a.public().as_ref() == b.public().as_ref(),
-        _ => false,
-    };
-    assert!(!same, "the responder key is the fixed other key");
-    other
-}
-
 /// Unsigned big-endian bytes of hex digits, without leading zeros.
 fn serial_from_hex(hex: &str) -> Vec<u8> {
     let digits: Vec<u8> = hex
@@ -359,32 +321,11 @@ fn serial_from_hex(hex: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key::PublicKey;
-    use crate::pkcs12::load;
-    use oncl_testkit::{read, synthetic};
 
     #[test]
     fn serial_hex_parsing() {
         assert_eq!(serial_from_hex("00aB01"), [0xab, 0x01]);
         assert_eq!(serial_from_hex("abc"), [0x0a, 0xbc]);
         assert_eq!(serial_from_hex("0"), [] as [u8; 0]);
-    }
-
-    #[test]
-    fn another_key_has_the_algorithm_but_not_the_key() {
-        for name in ["user-gost2015-sign", "user-gost2004-sign", "user-rsa-sign"] {
-            let fixture = synthetic(name);
-            let entry = load(&read(&fixture.path), &fixture.password)
-                .unwrap()
-                .remove(0);
-            let other = another_key(&entry.key);
-            assert_eq!(other.alg(), entry.key.alg(), "{name}");
-            let alg = signature_alg(entry.key.alg());
-            let signature = other.sign(alg, b"tbs").unwrap();
-            let public =
-                PublicKey::from_spki(entry.cert.tbs_certificate().subject_public_key_info())
-                    .unwrap();
-            assert!(public.verify(alg, b"tbs", &signature).is_err(), "{name}");
-        }
     }
 }
