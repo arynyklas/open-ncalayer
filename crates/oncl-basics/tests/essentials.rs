@@ -508,6 +508,34 @@ fn full_cycle_generate_issue_import_sign() {
     assert_eq!(signers.len(), 1);
 }
 
+/// The folder the user picks is searched whole, as the original searches it: the key file
+/// is found behind more key files than a page-named folder is searched for.
+#[test]
+fn import_searches_every_key_file_of_the_folder() {
+    let (dir, file, req) = generated(DEFAULT_PASSWORD);
+    let cert = issue(&req, &[0x41, 0x02, 0x04]);
+    // Key files sorting first: copies under another password (skipped as not opening
+    // with the default password) and broken ones.
+    let other = fs::read(&file).unwrap();
+    for i in 0..(oncl_pki::keystore::MAX_KEY_FILES + 6) {
+        let contents: &[u8] = if i % 2 == 0 {
+            &other
+        } else {
+            b"not a key store"
+        };
+        let path = dir.path().join(format!("0-{i:03}.p12"));
+        fs::write(&path, contents).unwrap();
+        if i % 2 == 0 {
+            oncl_pki::keystore::change_password(&path, DEFAULT_PASSWORD, "Another12").unwrap();
+        }
+    }
+    let (b, _) = basics(vec![import_step(dir.path(), NEW_PASSWORD)]);
+    let r = essentials(&b, "importCertificate", import_args(dir.path(), &[&cert]));
+    assert_eq!(r, json!({"status": true, "body": {"result": true}}));
+    let entries = load(&read(&file), NEW_PASSWORD).unwrap();
+    assert_eq!(entries[0].cert, cert);
+}
+
 #[test]
 fn wrong_new_password_pattern_changes_nothing() {
     let (dir, file, req) = generated(DEFAULT_PASSWORD);

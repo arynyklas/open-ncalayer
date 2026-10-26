@@ -8,7 +8,7 @@ use oncl_pki::keygen::{KeySpec, applet_key_id, generate, key_id};
 use oncl_pki::keystore::{
     KeystoreError, MAX_KEY_FILE, MAX_KEY_FILES, certificate_alias, change_password,
     change_password_data, check_password_pattern, create_applet_key_file, create_key_file,
-    install_certificate,
+    install_certificate, install_certificate_in_page_folder,
 };
 use oncl_pki::oid;
 use oncl_pki::pkcs12::{
@@ -451,6 +451,17 @@ fn applet_key_files_use_the_applet_key_id() {
         let contents = load_contents(&fs::read(&path).unwrap(), DEFAULT_PASSWORD).unwrap();
         assert_eq!(contents.keys[0].alias, whole);
         assert_eq!(contents.keys[0].key.public_key(), key.public_key());
+        // The key bag's `localKeyId` is that identifier (Kalkan writes the hex-decoded
+        // alias), not the BIT STRING hash; key bag attributes are not encrypted.
+        let bytes = fs::read(&path).unwrap();
+        assert!(contains(
+            &bytes,
+            &local_key_id_attribute(&hex_decode(&whole))
+        ));
+        assert!(!contains(
+            &bytes,
+            &local_key_id_attribute(&hex_decode(&bits))
+        ));
 
         // A certificate whose SKI is that identifier installs into the file.
         let mut spec_cert = TestCertSpec::from_cert(&certificate(spec, &key, Profile::default()));
@@ -470,10 +481,10 @@ fn applet_key_files_use_the_applet_key_id() {
 }
 
 #[test]
-fn folder_search_is_bounded() {
+fn folder_search_bounds() {
+    // Every folder: a file over the size limit sorts first and is skipped unread.
     let (dir, key, path) = key_file(KeySpec::Gost2015_512);
     let cert = certificate(KeySpec::Gost2015_512, &key, Profile::default());
-    // A file over the size limit sorts first and is skipped without being read.
     let huge = fs::File::create(dir.path().join("0-huge.p12")).unwrap();
     huge.set_len(MAX_KEY_FILE + 1).unwrap();
     drop(huge);
@@ -481,18 +492,42 @@ fn folder_search_is_bounded() {
         install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12),
         Ok(path)
     );
-    // Only the first key files are tried.
-    let (dir, key, _) = key_file(KeySpec::Gost2015_512);
+
+    // A folder the user picked is searched whole; a page-named one only within bounds.
+    let (dir, key, path) = key_file(KeySpec::Gost2015_512);
     let cert = certificate(KeySpec::Gost2015_512, &key, Profile::default());
     for i in 0..MAX_KEY_FILES {
         fs::write(dir.path().join(format!("0-{i:03}.p12")), b"x").unwrap();
     }
-    let err =
-        install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12).unwrap_err();
+    let err = install_certificate_in_page_folder(
+        dir.path(),
+        DEFAULT_PASSWORD,
+        &cert,
+        &oid::STORAGE_PKCS12,
+    )
+    .unwrap_err();
     assert!(
         matches!(err, KeystoreError::KeystoreFileNotFound(_)),
         "{err:?}"
     );
+    assert_eq!(
+        install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12),
+        Ok(path)
+    );
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// DER of the `localKeyId` attribute (`1.2.840.113549.1.9.21`) with `id`.
+fn local_key_id_attribute(id: &[u8]) -> Vec<u8> {
+    let mut attribute = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.21")
+        .to_der()
+        .unwrap();
+    attribute.extend([0x31, id.len() as u8 + 2, 0x04, id.len() as u8]);
+    attribute.extend(id);
+    attribute
 }
 
 #[test]

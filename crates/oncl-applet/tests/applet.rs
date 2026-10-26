@@ -1535,14 +1535,7 @@ fn network_paths_are_refused() {
     let (_dir, requests, _) = generated(&a);
     let cert = cert_pem(&issue(&requests[0], "user-gost2004-sign", false, 1));
     for path in paths {
-        let (a, prompter) = setup(vec![
-            Step::Storage {
-                path: PathBuf::from(path),
-                password: DEFAULT_PASSWORD.to_owned(),
-            },
-            Step::CancelStorage,
-            Step::CancelFile,
-        ]);
+        let (a, prompter) = setup(vec![Step::CancelStorage, Step::CancelFile]);
         assert_code(
             &call(
                 &a,
@@ -1567,16 +1560,50 @@ fn network_paths_are_refused() {
             ),
             "COMMON",
         );
-        // signXml does not pre-fill the dialog with it, and does not read it if chosen.
+        // signXml does not pre-fill the dialog with it.
         assert_code(
             &call(&a, "signXml", json!(["PKCS12", path, "SIGN", "<a/>"])),
             "SIGN_CANCEL",
         );
-        let prompts = prompter.storage_prompts();
-        assert_eq!(prompts[0].recent_path, None, "{path}");
-        assert_eq!(prompts[1].error, Some(OpenError::FileNotFound), "{path}");
+        assert_eq!(prompter.storage_prompts()[0].recent_path, None, "{path}");
         // The file chooser does not start there.
         assert_code(&call(&a, "showFileChooser", json!(["P12", path])), "NONE");
         assert_eq!(prompter.file_prompts()[0].directory, None, "{path}");
     }
+}
+
+/// A key file the user picks in the signXml dialog is read even on a network path: only
+/// paths a page names are refused. On Unix a `//`-path is a network path by our rule and
+/// reaches the local file; on Windows the drive's administrative share is used when it is
+/// reachable.
+#[test]
+fn signxml_reads_a_user_picked_network_file() {
+    let key = synthetic("user-gost2015-sign");
+    let dir = tempfile::tempdir().unwrap();
+    let local = dir.path().join("k.p12");
+    fs::copy(&key.path, &local).unwrap();
+    let local = std::path::absolute(&local).unwrap();
+    let network = if cfg!(windows) {
+        let text = local.to_str().unwrap();
+        let (drive, rest) = text.split_at(2);
+        format!(r"\\localhost\{}${rest}", &drive[..1])
+    } else {
+        format!("/{}", local.display())
+    };
+    assert!(oncl_basics::is_network_path(&network), "{network}");
+    if fs::metadata(&network).is_err() {
+        // No administrative share here: nothing to read through.
+        eprintln!("skipped: {network} is not reachable");
+        return;
+    }
+    let (a, prompter) = setup(vec![
+        Step::Storage {
+            path: PathBuf::from(&network),
+            password: key.password.clone(),
+        },
+        Step::Key(0),
+    ]);
+    let reply = call(&a, "signXml", json!(["PKCS12", null, "SIGN", "<a/>"]));
+    assert_eq!(code(&reply), "NONE", "{reply}");
+    assert_eq!(prompter.storage_prompts().len(), 1);
 }

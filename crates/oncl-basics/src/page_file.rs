@@ -39,6 +39,26 @@ impl PageFile {
     /// [`PageFileError::TooLarge`].
     pub fn read(path: &str) -> Result<PageFile, PageFileError> {
         let path = local_page_path(path).ok_or(PageFileError::NotFound)?;
+        Self::read_file(path)
+    }
+
+    /// Reads a file the user chose in a dialog (which may have been pre-filled with a
+    /// [`local_page_path`]): as [`PageFile::read`], but a network path is read, as the
+    /// user's own choice; a device namespace path is still refused.
+    ///
+    /// # Errors
+    ///
+    /// As [`PageFile::read`].
+    pub fn read_chosen(path: &Path) -> Result<PageFile, PageFileError> {
+        let text = path.to_str().ok_or(PageFileError::NotFound)?;
+        if is_device_path(text) {
+            return Err(PageFileError::NotFound);
+        }
+        Self::read_file(path)
+    }
+
+    /// A regular disk file of at most [`MAX_PAGE_FILE`] bytes.
+    fn read_file(path: &Path) -> Result<PageFile, PageFileError> {
         let meta = std::fs::metadata(path).map_err(|_| PageFileError::NotFound)?;
         if !meta.is_file() {
             return Err(PageFileError::NotFound);
@@ -205,5 +225,17 @@ mod tests {
             PageFile::read("//host/share/f.bin").err(),
             Some(PageFileError::NotFound)
         );
+        // A chosen file is read like a page's, network paths aside.
+        assert_eq!(PageFile::read_chosen(&file).ok().unwrap().data, b"data");
+        assert_eq!(
+            PageFile::read_chosen(dir.path()).err(),
+            Some(PageFileError::NotFound)
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                PageFile::read_chosen(Path::new(r"\\.\pipe\x")).err(),
+                Some(PageFileError::NotFound)
+            );
+        }
     }
 }

@@ -26,7 +26,7 @@ use oncl_pki::cert::{self, Certificate};
 use oncl_pki::info::{CertInfo, KncaCertType, cert_info, kcert_types};
 use oncl_pki::keystore::{
     KeystoreError, certificate_alias, change_password_data, check_password_pattern,
-    install_certificate,
+    install_certificate_in_page_folder,
 };
 use oncl_pki::oid;
 use oncl_pki::pkcs12::KeyEntry;
@@ -192,8 +192,10 @@ pub(crate) fn set_x509_cert_to_key_store_and_change_password(
 
 /// Installs each certificate of `cert_pems` (PEM, separated by `<@>`) next to its key in a
 /// key file of the folder `container` that opens with `default_password` (Kalkan's
-/// `setX509Certificate`, [`install_certificate`]): the key files' paths, separated by
-/// `<@>`. The first failure ends it; earlier certificates stay installed.
+/// `setX509Certificate`, [`install_certificate_in_page_folder`]: the page names the folder,
+/// so at most its first 4096 entries are looked at and its first 64 key files tried): the
+/// key files' paths, separated by `<@>`. The first failure ends it; earlier certificates
+/// stay installed.
 ///
 /// Per certificate, in the original's order: the PEM, its SubjectKeyIdentifier and
 /// KeyStoreInfo (`SETCERT_COMMON`), then the folder: none, or one a page may not name (a
@@ -235,7 +237,7 @@ fn set_certificates(
         if !dir.is_dir() {
             return Ok(Wrapper::error(SETCERT_COMMON));
         }
-        match install_certificate(dir, &password, &cert, &storage_oid) {
+        match install_certificate_in_page_folder(dir, &password, &cert, &storage_oid) {
             Ok(path) => paths.push(std::path::absolute(&path).unwrap_or(path)),
             Err(e) => {
                 if e == KeystoreError::WrongPassword {
@@ -448,11 +450,11 @@ impl KeyType {
 
 /// The original dialog's password policy for `INAUTH`/`INSIGN`:
 /// `^(?=.*?[A-Z])(?=.*?[a-z])(?=.*?[0-9])(?=.*?[#$^+=!*()@%&_-]).{8,32}$` — 8 to 32
-/// characters (UTF-16 units) without line terminators, with a Latin capital, a Latin small
-/// letter, a digit and one of `#$^+=!*()@%&_-`.
+/// characters (code points, as `java.util.regex` `.` takes a supplementary character
+/// whole) without line terminators, with a Latin capital, a Latin small letter, a digit and
+/// one of `#$^+=!*()@%&_-`.
 fn inner_password_ok(password: &str) -> bool {
-    let units = password.encode_utf16().count();
-    (8..=32).contains(&units)
+    (8..=32).contains(&password.chars().count())
         && !password.contains(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'])
         && password.chars().any(|c| c.is_ascii_uppercase())
         && password.chars().any(|c| c.is_ascii_lowercase())
@@ -498,8 +500,9 @@ fn open_store(
 
 /// The keys of `key_type` in the answer's key store, oldest certificate first (the
 /// original dialog's order). The password is checked first, as the original dialog does.
-/// The file is read as a page-named file ([`PageFile::read`]), since the path may be the
-/// page's.
+/// The file is the user's choice (pre-filled with a local page path at most), read as
+/// [`PageFile::read_chosen`]: a regular disk file of at most 64 MiB, on a network share
+/// too.
 fn open_keys(
     answer: &StorageAnswer,
     storage: StorageKind,
@@ -514,8 +517,7 @@ fn open_keys(
     if answer.storage != storage {
         return Err(OpenError::UnsupportedStorage);
     }
-    let path = answer.path.to_str().ok_or(OpenError::FileNotFound)?;
-    let file = PageFile::read(path).map_err(|_| OpenError::FileNotFound)?;
+    let file = PageFile::read_chosen(&answer.path).map_err(|_| OpenError::FileNotFound)?;
     let entries = match answer.open_data(&file.data) {
         Err(OpenError::NoKeys) => Vec::new(),
         opened => opened?,
@@ -648,6 +650,9 @@ mod tests {
         // `.` is not a special character of the policy; other characters are allowed.
         assert!(!inner_password_ok("Abcdef1."));
         assert!(inner_password_ok("Абвгд Ab1#"));
+        // Code points, not UTF-16 units.
+        assert!(!inner_password_ok("Ab1#😀😀"));
+        assert!(inner_password_ok(&format!("Ab1#{}", "😀".repeat(28))));
         assert!(!inner_password_ok("Abcdef1#\n"));
     }
 

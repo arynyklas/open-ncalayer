@@ -28,10 +28,21 @@ use x509_cert::ext::pkix::SubjectKeyIdentifier;
 const AUTH_PREFIX: &str = "AUTH_";
 /// Largest key file read (as the modules' other page-named files).
 pub const MAX_KEY_FILE: u64 = 64 << 20;
-/// Entries of a folder looked at when searching it for a key file.
+/// Entries of a page-named folder looked at when searching it for a key file
+/// ([`install_certificate_in_page_folder`]).
 pub const MAX_DIR_ENTRIES: usize = 4096;
-/// Key files of a folder tried when searching it for a key (each costs a key derivation).
+/// Key files of a page-named folder tried when searching it for a key (each costs a key
+/// derivation; [`install_certificate_in_page_folder`]).
 pub const MAX_KEY_FILES: usize = 64;
+
+/// How far a folder is searched for a key file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Search {
+    /// Every entry, as the original: a folder the user picked.
+    Every,
+    /// Within [`MAX_DIR_ENTRIES`] and [`MAX_KEY_FILES`]: a folder a page named.
+    Bounded,
+}
 
 /// Error of a key file operation. [`KeystoreError::provider_code`] is the original's
 /// `ProviderUtilExceptionCode`, where the original raises one; the `Display` text is the
@@ -207,9 +218,9 @@ fn create_key_file_as(
 /// 1. the alias is the certificate's SubjectKeyIdentifier (hex);
 /// 2. a KeyStoreInfo extension naming another storage than `storage_oid` is refused;
 /// 3. the key file is the first regular `*.p12` / `*.jks` file of the directory `dir_or_file`
-///    (by name; within [`MAX_DIR_ENTRIES`], [`MAX_KEY_FILES`] and [`MAX_KEY_FILE`]) that
-///    opens as PKCS#12 with `password` and holds a key under the alias, or `dir_or_file`
-///    itself when it is a file;
+///    (by name; every one of at most [`MAX_KEY_FILE`] bytes is tried, as the original tries
+///    every file) that opens as PKCS#12 with `password` and holds a key under the alias, or
+///    `dir_or_file` itself when it is a file;
 /// 4. the key must be the certificate's key (Kalkan pairs by alias alone);
 /// 5. the file is rewritten with the certificate, then renamed `AUTH_<name>` when the
 ///    certificate is an authentication certificate whose signature algorithm is not
@@ -233,8 +244,41 @@ pub fn install_certificate(
     cert: &Certificate,
     storage_oid: &ObjectIdentifier,
 ) -> Result<PathBuf, KeystoreError> {
+    install(dir_or_file, password, cert, storage_oid, Search::Every)
+}
+
+/// [`install_certificate`] into a folder a page named (the legacy Applet's
+/// `setX509CertToKeyStore`), searched within bounds: at most the first [`MAX_DIR_ENTRIES`]
+/// entries are looked at, and at most the first [`MAX_KEY_FILES`] `*.p12` / `*.jks` files
+/// among them (by name) are tried, so a page cannot make the daemon derive keys for a
+/// folder of any size.
+///
+/// # Errors
+///
+/// As [`install_certificate`]; [`KeystoreError::KeystoreFileNotFound`] also when the key
+/// file lies beyond the bounds.
+///
+/// # Panics
+///
+/// If the operating system RNG fails.
+pub fn install_certificate_in_page_folder(
+    dir_or_file: &Path,
+    password: &str,
+    cert: &Certificate,
+    storage_oid: &ObjectIdentifier,
+) -> Result<PathBuf, KeystoreError> {
+    install(dir_or_file, password, cert, storage_oid, Search::Bounded)
+}
+
+fn install(
+    dir_or_file: &Path,
+    password: &str,
+    cert: &Certificate,
+    storage_oid: &ObjectIdentifier,
+    search: Search,
+) -> Result<PathBuf, KeystoreError> {
     let alias = certificate_alias(cert, storage_oid)?;
-    let (path, contents) = find_key_file(dir_or_file, password, &alias)?;
+    let (path, contents) = find_key_file(dir_or_file, password, &alias, search)?;
     let public = PublicKey::from_spki(cert.tbs_certificate().subject_public_key_info())
         .map_err(|_| KeystoreError::InappropriateCert)?;
     let key = contents
@@ -359,19 +403,23 @@ pub fn check_password_pattern(password: &str) -> Result<(), KeystoreError> {
     }
 }
 
-/// The key file holding a key under `alias`, opened. A folder is searched within bounds,
-/// since a page may name it: at most [`MAX_DIR_ENTRIES`] entries are looked at and at most
-/// [`MAX_KEY_FILES`] candidates tried; only regular files of at most [`MAX_KEY_FILE`] bytes
-/// are read.
+/// The key file holding a key under `alias`, opened. Only regular files of at most
+/// [`MAX_KEY_FILE`] bytes are read; a [`Search::Bounded`] folder is searched within
+/// [`MAX_DIR_ENTRIES`] and [`MAX_KEY_FILES`].
 fn find_key_file(
     dir_or_file: &Path,
     password: &str,
     alias: &str,
+    search: Search,
 ) -> Result<(PathBuf, Contents), KeystoreError> {
+    let (max_entries, max_files) = match search {
+        Search::Every => (usize::MAX, usize::MAX),
+        Search::Bounded => (MAX_DIR_ENTRIES, MAX_KEY_FILES),
+    };
     let candidates = if dir_or_file.is_dir() {
         let mut files: Vec<PathBuf> = fs::read_dir(dir_or_file)
             .map_err(|e| io_error(dir_or_file, &e))?
-            .take(MAX_DIR_ENTRIES)
+            .take(max_entries)
             .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|path| {
                 path.extension()
@@ -382,7 +430,7 @@ fn find_key_file(
             })
             .collect();
         files.sort();
-        files.truncate(MAX_KEY_FILES);
+        files.truncate(max_files);
         files
     } else {
         vec![dir_or_file.to_path_buf()]
