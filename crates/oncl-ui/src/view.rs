@@ -122,7 +122,9 @@ pub fn new_password_error(password: &str, confirmation: &str, l: Locale) -> Opti
 }
 
 /// Why a storage answer could not be opened. The texts for a store without (suitable) keys
-/// are the original's (`label.errorMessage.emptyStorage*`).
+/// (`label.errorMessage.emptyStorage*`) and for the legacy Applet's password checks are the
+/// original's; English for the internal systems' policy is ours (the original's English
+/// dictionary repeats the Kazakh text).
 pub fn error_text(e: OpenError, l: Locale) -> &'static str {
     match (e, l) {
         (OpenError::WrongPassword, Locale::Kk) => "Құпиясөз қате",
@@ -163,6 +165,20 @@ pub fn error_text(e: OpenError, l: Locale) -> &'static str {
         (OpenError::UnsupportedStorage, Locale::Kk) => "Таңдалған қоймаға қолдау көрсетілмейді",
         (OpenError::UnsupportedStorage, Locale::Ru) => "Выбранное хранилище не поддерживается",
         (OpenError::UnsupportedStorage, Locale::En) => "The chosen storage is not supported",
+        // The legacy Applet's texts (`label.errorMessage.emptyField`,
+        // `label.errorMessage.inPasswordPolicyNotSatisfied`).
+        (OpenError::EmptyPassword, Locale::Kk) => "Бос алаң",
+        (OpenError::EmptyPassword, Locale::Ru) => "Пустое поле",
+        (OpenError::EmptyPassword, Locale::En) => "Empty field",
+        (OpenError::InnerPasswordPolicy, Locale::Kk) => {
+            "Құпиясөз кем дегенде 8 таңбадан құралып, оның ішінде 1 бас әріп, 1 кіші әріп (тек латын әріптері), 1 арнайы таңба және 1 сан болуы қажет."
+        }
+        (OpenError::InnerPasswordPolicy, Locale::Ru) => {
+            "Пароль должен быть как минимум 8 символов и содержать 1 заглавную букву, 1 строчную букву (только латинские буквы), 1 специальный символ и 1 цифру."
+        }
+        (OpenError::InnerPasswordPolicy, Locale::En) => {
+            "The password needs at least 8 characters with 1 uppercase letter, 1 lowercase letter (Latin letters only), 1 special character and 1 digit."
+        }
     }
 }
 

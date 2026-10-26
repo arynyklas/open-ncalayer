@@ -9,8 +9,9 @@
 //! `GETPUBLICPART_EXCEPTION`), without a dialog. `JKS` is read, never written.
 //!
 //! Paths a page names are never logged. A key file the page names is read only if it is a
-//! regular disk file of at most [`oncl_commonutils::MAX_PAGE_FILE`] bytes
-//! ([`PageFile::read`]); a folder the page names is used only if it is a folder.
+//! local regular disk file of at most [`oncl_basics::MAX_PAGE_FILE`] bytes
+//! ([`PageFile::read`]); a folder the page names is used only if it is a local folder
+//! ([`local_page_path`]): device and network paths are refused before they are looked up.
 
 use crate::Applet;
 use crate::dispatch::{Args, NPE, Outcome, Thrown, Wrapper};
@@ -18,13 +19,13 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_basics::{
     Action, Availability, FileKind, FilePrompt, KeyCandidate, KeyPrompt, Locale, OpenError,
-    PasswordPrompt, Prompt, StorageAnswer, StorageKind, StoragePrompt, lock_dialog_flow,
+    PageFile, PasswordPrompt, Prompt, StorageAnswer, StorageKind, StoragePrompt, local_page_path,
+    lock_dialog_flow,
 };
-use oncl_commonutils::{PageFile, is_device_path};
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::info::{CertInfo, KncaCertType, cert_info, kcert_types};
 use oncl_pki::keystore::{
-    KeystoreError, change_password as change_file_password, check_password_pattern,
+    KeystoreError, certificate_alias, change_password_data, check_password_pattern,
     install_certificate,
 };
 use oncl_pki::oid;
@@ -32,7 +33,7 @@ use oncl_pki::pkcs12::KeyEntry;
 use oncl_pki::xmldsig;
 use oncl_protocol::AddInfo;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use zeroize::Zeroizing;
 
 // The original's `AECodes` this module answers with.
@@ -51,7 +52,6 @@ const CHANGEPASS_WRONG_PASSWORD: &str = "CHANGEPASS_WRONG_PASSWORD";
 const CHANGEPASS_COMMON: &str = "CHANGEPASS_COMMON";
 const CHANGEPASS_INCORRECT_NEWPASS_PATTERN: &str = "CHANGEPASS_INCORRECT_NEWPASS_PATTERN";
 const CHANGEPASS_CONTAINS_EMPTY_ALIAS: &str = "CHANGEPASS_CONTAINS_EMPTY_ALIAS";
-const SIGN_WRONG_PASSWORD: &str = "SIGN_WRONG_PASSWORD";
 const SIGN_CANCEL: &str = "SIGN_CANCEL";
 
 /// `<@>`: the original's separator of key details and installed key files.
@@ -106,7 +106,11 @@ fn choose_file(
         origin: origin(add_info),
         locale: LOCALE,
         kind,
-        directory: directory.filter(|d| !d.is_empty()).map(PathBuf::from),
+        // A network folder is not opened: the system dialog would connect to its host.
+        directory: directory
+            .and_then(local_page_path)
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(Path::to_path_buf),
     };
     let answer = {
         let _flow = lock_dialog_flow();
@@ -190,6 +194,11 @@ pub(crate) fn set_x509_cert_to_key_store_and_change_password(
 /// key file of the folder `container` that opens with `default_password` (Kalkan's
 /// `setX509Certificate`, [`install_certificate`]): the key files' paths, separated by
 /// `<@>`. The first failure ends it; earlier certificates stay installed.
+///
+/// Per certificate, in the original's order: the PEM, its SubjectKeyIdentifier and
+/// KeyStoreInfo (`SETCERT_COMMON`), then the folder: none, or one a page may not name (a
+/// device or network path, refused unlooked), is `KEYSTORE_FILE_NOT_FOUND`; not a folder
+/// is `SETCERT_COMMON`.
 fn set_certificates(
     a: &Applet,
     storage_name: Option<&str>,
@@ -204,7 +213,7 @@ fn set_certificates(
     let storage_oid = match storage {
         StorageKind::Token(_) => return Ok(Wrapper::error(EMPTY_SLOT)),
         StorageKind::Pkcs12 => oid::STORAGE_PKCS12,
-        // Refused by `install_certificate`: JKS is not written.
+        // Refused by `certificate_alias`: JKS is not written.
         StorageKind::Jks => oid::STORAGE_JKS,
     };
     let password = Zeroizing::new(default_password.ok_or(NPE)?.to_owned());
@@ -215,12 +224,14 @@ fn set_certificates(
         let Some(cert) = parse_pem_certificate(pem) else {
             return Ok(Wrapper::error(SETCERT_COMMON));
         };
-        // The original looks for key files only under a non-null folder; a path it cannot
-        // list fails on a NullPointerException.
-        let Some(dir) = container.filter(|c| !is_device_path(c)) else {
+        if certificate_alias(&cert, &storage_oid).is_err() {
+            return Ok(Wrapper::error(SETCERT_COMMON));
+        }
+        let Some(dir) = container.and_then(local_page_path) else {
             return Ok(Wrapper::error(KEYSTORE_FILE_NOT_FOUND));
         };
-        let dir = Path::new(dir);
+        // The original lists the folder: a path that is none fails on a
+        // NullPointerException.
         if !dir.is_dir() {
             return Ok(Wrapper::error(SETCERT_COMMON));
         }
@@ -249,7 +260,9 @@ fn set_certificates(
 }
 
 /// `changePassword(storageName, container, oldPassword, newPassword)`: re-encrypts the key
-/// file `container`, without a dialog, as the original.
+/// file `container`, without a dialog, as the original. The new password is checked first,
+/// by the storage's rule (provider `validatePasswordPattern`); then the file is read once,
+/// as a page-named file, and replaced.
 pub(crate) fn change_password(a: &Applet, args: &Args<'_>, _: &AddInfo) -> Outcome {
     let Some(storage) = storage(args.str(0)) else {
         return Ok(Wrapper::error(UNKNOWN_STORAGE));
@@ -260,11 +273,6 @@ pub(crate) fn change_password(a: &Applet, args: &Args<'_>, _: &AddInfo) -> Outco
         return Ok(Wrapper::error(CHANGEPASS_COMMON));
     };
     let code = match storage {
-        StorageKind::Token(_) => EMPTY_SLOT,
-        // The original checks JKS passwords for their characters alone, then writes the
-        // file; JKS is not written here.
-        StorageKind::Jks if !jks_password_ok(new) => CHANGEPASS_INCORRECT_NEWPASS_PATTERN,
-        StorageKind::Jks => UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION,
         StorageKind::Pkcs12 => match change_pkcs12_password(args.str(1), old, new) {
             Ok(()) => {
                 tracing::info!("Applet: key file password changed");
@@ -279,11 +287,21 @@ pub(crate) fn change_password(a: &Applet, args: &Args<'_>, _: &AddInfo) -> Outco
             Err(KeystoreError::UnsupportedStorage) => UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION,
             Err(_) => CHANGEPASS_COMMON,
         },
+        _ => match other_password_rule(storage) {
+            None if new.is_empty() => CHANGEPASS_INCORRECT_NEWPASS_PATTERN,
+            None => UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION,
+            Some(max) if !pin_pattern_ok(new, max) => CHANGEPASS_INCORRECT_NEWPASS_PATTERN,
+            // JKS is not written.
+            Some(_) if storage == StorageKind::Jks => UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION,
+            // The token cannot be opened: no device is connected.
+            Some(_) => CHANGEPASS_COMMON,
+        },
     };
     Ok(Wrapper::error(code))
 }
 
-/// The pattern first, then the page's key file (a regular disk file, else an I/O error).
+/// The pattern first, then the page's key file, read once ([`PageFile::read`]; a file it
+/// does not read is an I/O error) and re-encrypted from those bytes.
 fn change_pkcs12_password(
     container: Option<&str>,
     old: &str,
@@ -292,15 +310,26 @@ fn change_pkcs12_password(
     check_password_pattern(new)?;
     let not_found = || KeystoreError::Io("the key file cannot be read".to_owned());
     let container = container.ok_or_else(not_found)?;
-    PageFile::read(container).map_err(|_| not_found())?;
-    change_file_password(Path::new(container), old, new)
+    let file = PageFile::read(container).map_err(|_| not_found())?;
+    change_password_data(Path::new(container), &file.data, old, new)
 }
 
-/// Kalkan's JKS password check: not empty, at most 32 characters of `0-9 a-z A-Z` and
-/// `.?#$^+=!*()@%&_-`.
-fn jks_password_ok(password: &str) -> bool {
+/// The longest new password of a storage other than PKCS#12 (provider
+/// `validatePasswordPattern`); `None` where the password cannot be changed (ID cards,
+/// cloud storage).
+fn other_password_rule(storage: StorageKind) -> Option<usize> {
+    match storage.name() {
+        "AKKaztokenStore" | "AKEToken72KStore" | "AKAKEYStore" | "JKS" => Some(32),
+        "AKJaCartaStore" | "AKEToken5110Store" => Some(10),
+        _ => None,
+    }
+}
+
+/// The provider's password rule for storages other than PKCS#12: not empty, at most `max`
+/// characters of `0-9 a-z A-Z` and `.?#$^+=!*()@%&_-`.
+fn pin_pattern_ok(password: &str, max: usize) -> bool {
     !password.is_empty()
-        && password.chars().count() <= 32
+        && password.chars().count() <= max
         && password
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || ".?#$^+=!*()@%&_-".contains(c))
@@ -311,8 +340,8 @@ fn jks_password_ok(password: &str) -> bool {
 /// with the keys of `keyType`, then the enveloped signature of the whole document. Success
 /// is the signed document with the key's alias as `secondResult`; cancelling either dialog
 /// is `SIGN_CANCEL`. A wrong password or a store without such keys asks again, as the
-/// original's dialog does; a signing failure afterwards is the original dialog's
-/// `SIGN_WRONG_PASSWORD`.
+/// original's dialog does. A document that does not sign keeps the key dialog open with
+/// the error, as the original's dialog stays open; the user can only cancel then.
 pub(crate) fn sign_xml(a: &Applet, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
     let Some(storage) = storage(args.str(0)) else {
         return Ok(Wrapper::error(UNKNOWN_STORAGE));
@@ -322,91 +351,12 @@ pub(crate) fn sign_xml(a: &Applet, args: &Args<'_>, add_info: &AddInfo) -> Outco
     if let StorageKind::Token(_) = storage {
         return Ok(Wrapper::error(EMPTY_SLOT));
     }
-    let Some(entry) = choose_key(a, storage, args.str(1), key_type, add_info) else {
-        return Ok(Wrapper::error(SIGN_CANCEL));
-    };
-    // `SignatureUtil.signXml` parses the document after the dialogs; its failures leave
-    // the dialog's `SIGN_WRONG_PASSWORD` without a try count.
-    let Some(xml) = args.str(3) else {
-        return Ok(Wrapper::error(SIGN_WRONG_PASSWORD));
-    };
-    let signed = xmldsig::sign_enveloped(xml.as_bytes(), &entry.key, &entry.cert)
-        .ok()
-        .and_then(|signed| String::from_utf8(signed).ok());
-    let Some(signed) = signed else {
-        return Ok(Wrapper::error(SIGN_WRONG_PASSWORD));
-    };
-    Ok(Wrapper {
-        second_result: Some(Value::String(entry.alias)),
-        ..Wrapper::ok(signed)
-    })
-}
-
-/// The keys `signXml` offers (the original dialog's `keyType`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct KeyType {
-    /// The certificate type wanted; `None` for any.
-    wanted: Option<KncaCertType>,
-    /// The original's text for a store without such keys.
-    empty: OpenError,
-}
-
-impl KeyType {
-    /// `AUTH`, `INAUTH`, `SIGN`, `INSIGN` (any case), anything else all keys. Only `AUTH`
-    /// and `SIGN` have their own text for a store without such keys.
-    fn of(name: &str) -> KeyType {
-        let (wanted, empty) = match name.to_uppercase().as_str() {
-            "AUTH" => (Some(KncaCertType::Authentication), OpenError::NoAuthKeys),
-            "INAUTH" => (Some(KncaCertType::Authentication), OpenError::NoKeys),
-            "SIGN" => (Some(KncaCertType::Signature), OpenError::NoSigningKeys),
-            "INSIGN" => (Some(KncaCertType::Signature), OpenError::NoKeys),
-            _ => (None, OpenError::NoKeys),
-        };
-        KeyType { wanted, empty }
-    }
-
-    fn action(self) -> Action {
-        if self.wanted == Some(KncaCertType::Authentication) {
-            Action::Authenticate
-        } else {
-            Action::Sign
-        }
-    }
-}
-
-/// The storage dialog then the key dialog, under the process-wide dialog-flow turn;
-/// `None` if either is cancelled.
-fn choose_key(
-    a: &Applet,
-    storage: StorageKind,
-    container: Option<&str>,
-    key_type: KeyType,
-    add_info: &AddInfo,
-) -> Option<KeyEntry> {
     let origin = origin(add_info);
     let _flow = lock_dialog_flow();
-    let mut prompt = StoragePrompt {
-        origin: origin.clone(),
-        locale: LOCALE,
-        action: key_type.action(),
-        storages: vec![storage],
-        recent_path: container.filter(|c| !c.is_empty()).map(PathBuf::from),
-        error: None,
-        detail: None,
+    let Some(mut keys) = open_store(a, storage, args.str(1), key_type, &origin) else {
+        return Ok(Wrapper::error(SIGN_CANCEL));
     };
-    let mut keys = loop {
-        let Prompt::Answer(answer) = a.prompter.storage(&prompt) else {
-            return None;
-        };
-        match open_keys(&answer, storage, key_type) {
-            Ok(keys) => break keys,
-            Err(e) => {
-                prompt.error = Some(e);
-                prompt.recent_path = Some(answer.path);
-            }
-        }
-    };
-    let prompt = KeyPrompt {
+    let mut prompt = KeyPrompt {
         origin,
         locale: LOCALE,
         action: key_type.action(),
@@ -419,24 +369,148 @@ fn choose_key(
             })
             .collect(),
         detail: None,
+        error: None,
     };
     loop {
-        match a.prompter.key(&prompt) {
-            Prompt::Answer(i) if i < keys.len() => return Some(keys.swap_remove(i).0),
-            Prompt::Answer(_) => {}
-            Prompt::Cancelled => return None,
+        let i = match a.prompter.key(&prompt) {
+            Prompt::Answer(i) if i < keys.len() => i,
+            Prompt::Answer(_) => continue,
+            Prompt::Cancelled => return Ok(Wrapper::error(SIGN_CANCEL)),
+        };
+        match sign_document(&keys[i].0, args.str(3)) {
+            Ok(signed) => {
+                let alias = keys.swap_remove(i).0.alias;
+                return Ok(Wrapper {
+                    second_result: Some(Value::String(alias)),
+                    ..Wrapper::ok(signed)
+                });
+            }
+            Err(e) => prompt.error = Some(format!("Не удалось подписать документ: {e}")),
+        }
+    }
+}
+
+/// `SignatureUtil.signXml`: the enveloped signature of the whole document `xml`.
+fn sign_document(entry: &KeyEntry, xml: Option<&str>) -> Result<String, String> {
+    let xml = xml.ok_or_else(|| "документ не передан".to_owned())?;
+    let signed = xmldsig::sign_enveloped(xml.as_bytes(), &entry.key, &entry.cert)
+        .map_err(|e| e.to_string())?;
+    // The input was UTF-8 text and only ASCII markup and base64 were spliced in.
+    String::from_utf8(signed).map_err(|e| e.to_string())
+}
+
+/// The keys `signXml` offers (the original dialog's `keyType`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeyType {
+    /// The certificate type wanted; `None` for any.
+    wanted: Option<KncaCertType>,
+    /// The original's text for a store without such keys.
+    empty: OpenError,
+    /// `INAUTH`/`INSIGN`: keys of internal systems, whose password must match
+    /// [`inner_password_ok`].
+    inner: bool,
+}
+
+impl KeyType {
+    /// `AUTH`, `INAUTH`, `SIGN`, `INSIGN` (any case), anything else all keys. Only `AUTH`
+    /// and `SIGN` have their own text for a store without such keys.
+    fn of(name: &str) -> KeyType {
+        let (wanted, empty, inner) = match name.to_uppercase().as_str() {
+            "AUTH" => (
+                Some(KncaCertType::Authentication),
+                OpenError::NoAuthKeys,
+                false,
+            ),
+            "INAUTH" => (Some(KncaCertType::Authentication), OpenError::NoKeys, true),
+            "SIGN" => (
+                Some(KncaCertType::Signature),
+                OpenError::NoSigningKeys,
+                false,
+            ),
+            "INSIGN" => (Some(KncaCertType::Signature), OpenError::NoKeys, true),
+            _ => (None, OpenError::NoKeys, false),
+        };
+        KeyType {
+            wanted,
+            empty,
+            inner,
+        }
+    }
+
+    fn action(self) -> Action {
+        if self.wanted == Some(KncaCertType::Authentication) {
+            Action::Authenticate
+        } else {
+            Action::Sign
+        }
+    }
+}
+
+/// The original dialog's password policy for `INAUTH`/`INSIGN`:
+/// `^(?=.*?[A-Z])(?=.*?[a-z])(?=.*?[0-9])(?=.*?[#$^+=!*()@%&_-]).{8,32}$` — 8 to 32
+/// characters (UTF-16 units) without line terminators, with a Latin capital, a Latin small
+/// letter, a digit and one of `#$^+=!*()@%&_-`.
+fn inner_password_ok(password: &str) -> bool {
+    let units = password.encode_utf16().count();
+    (8..=32).contains(&units)
+        && !password.contains(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'])
+        && password.chars().any(|c| c.is_ascii_uppercase())
+        && password.chars().any(|c| c.is_ascii_lowercase())
+        && password.chars().any(|c| c.is_ascii_digit())
+        && password.chars().any(|c| "#$^+=!*()@%&_-".contains(c))
+}
+
+/// The storage dialog until a key store with keys of `key_type` opens; `None` if it is
+/// cancelled. The page's `container` pre-fills it unless a page may not name it (a device
+/// or network path).
+fn open_store(
+    a: &Applet,
+    storage: StorageKind,
+    container: Option<&str>,
+    key_type: KeyType,
+    origin: &str,
+) -> Option<Vec<(KeyEntry, CertInfo)>> {
+    let mut prompt = StoragePrompt {
+        origin: origin.to_owned(),
+        locale: LOCALE,
+        action: key_type.action(),
+        storages: vec![storage],
+        recent_path: container
+            .and_then(local_page_path)
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf),
+        error: None,
+        detail: None,
+    };
+    loop {
+        let Prompt::Answer(answer) = a.prompter.storage(&prompt) else {
+            return None;
+        };
+        match open_keys(&answer, storage, key_type) {
+            Ok(keys) => return Some(keys),
+            Err(e) => {
+                prompt.error = Some(e);
+                prompt.recent_path = Some(answer.path);
+            }
         }
     }
 }
 
 /// The keys of `key_type` in the answer's key store, oldest certificate first (the
-/// original dialog's order). The file is read as a page-named file: the path may be the
+/// original dialog's order). The password is checked first, as the original dialog does.
+/// The file is read as a page-named file ([`PageFile::read`]), since the path may be the
 /// page's.
 fn open_keys(
     answer: &StorageAnswer,
     storage: StorageKind,
     key_type: KeyType,
 ) -> Result<Vec<(KeyEntry, CertInfo)>, OpenError> {
+    if answer.password.is_empty() {
+        return Err(OpenError::EmptyPassword);
+    }
+    if key_type.inner && !inner_password_ok(&answer.password) {
+        return Err(OpenError::InnerPasswordPolicy);
+    }
     if answer.storage != storage {
         return Err(OpenError::UnsupportedStorage);
     }
@@ -545,23 +619,46 @@ mod tests {
         let auth = KeyType::of("auth");
         assert_eq!(auth.wanted, Some(KncaCertType::Authentication));
         assert_eq!(auth.empty, OpenError::NoAuthKeys);
+        assert!(!auth.inner);
         assert_eq!(auth.action(), Action::Authenticate);
-        assert_eq!(KeyType::of("INAUTH").empty, OpenError::NoKeys);
+        let inauth = KeyType::of("INAUTH");
+        assert_eq!((inauth.empty, inauth.inner), (OpenError::NoKeys, true));
         assert_eq!(KeyType::of("InSign").wanted, Some(KncaCertType::Signature));
+        assert!(KeyType::of("InSign").inner);
         assert_eq!(KeyType::of("SIGN").empty, OpenError::NoSigningKeys);
         assert_eq!(KeyType::of("SIGN").action(), Action::Sign);
         let all = KeyType::of("ALL");
-        assert_eq!((all.wanted, all.empty), (None, OpenError::NoKeys));
+        assert_eq!(
+            (all.wanted, all.empty, all.inner),
+            (None, OpenError::NoKeys, false)
+        );
         assert_eq!(KeyType::of("").action(), Action::Sign);
     }
 
     #[test]
-    fn jks_passwords() {
-        assert!(jks_password_ok("abc"));
-        assert!(jks_password_ok(&"a".repeat(32)));
-        assert!(!jks_password_ok(&"a".repeat(33)));
-        assert!(!jks_password_ok(""));
-        assert!(!jks_password_ok("пароль1"));
-        assert!(!jks_password_ok("a b"));
+    fn inner_passwords() {
+        assert!(inner_password_ok("Abcdef1#"));
+        assert!(inner_password_ok(&format!("Ab1#{}", "x".repeat(28))));
+        assert!(!inner_password_ok(&format!("Ab1#{}", "x".repeat(29))));
+        assert!(!inner_password_ok("Abcde1#"));
+        assert!(!inner_password_ok("abcdef1#"));
+        assert!(!inner_password_ok("ABCDEF1#"));
+        assert!(!inner_password_ok("Abcdefg#"));
+        assert!(!inner_password_ok("Abcdefg1"));
+        // `.` is not a special character of the policy; other characters are allowed.
+        assert!(!inner_password_ok("Abcdef1."));
+        assert!(inner_password_ok("Абвгд Ab1#"));
+        assert!(!inner_password_ok("Abcdef1#\n"));
+    }
+
+    #[test]
+    fn pin_patterns() {
+        assert!(pin_pattern_ok("abc", 32));
+        assert!(pin_pattern_ok(&"a".repeat(32), 32));
+        assert!(!pin_pattern_ok(&"a".repeat(33), 32));
+        assert!(!pin_pattern_ok(&"a".repeat(11), 10));
+        assert!(!pin_pattern_ok("", 32));
+        assert!(!pin_pattern_ok("пароль1", 32));
+        assert!(!pin_pattern_ok("a b", 32));
     }
 }

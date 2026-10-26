@@ -180,8 +180,9 @@ impl PrivateKey {
     }
 
     /// Private key from a PKCS#8 `PrivateKeyInfo` whose public key has the key identifier
-    /// `key_id` (SHA-1 of the `subjectPublicKey` BIT STRING contents): for a key stored
-    /// without a certificate under that `localKeyId`, as Kalkan stores generated keys. Of
+    /// `key_id` (SHA-1 of the `subjectPublicKey` BIT STRING contents, or the legacy Applet's
+    /// SHA-1 of the whole `SubjectPublicKeyInfo`): for a key stored without a certificate
+    /// under that `localKeyId`, as Kalkan stores generated keys. Of
     /// the GOST forms (see [`PrivateKey::from_pkcs8_der`]) the one with this identifier is
     /// taken.
     ///
@@ -298,7 +299,10 @@ impl Expected<'_> {
         match self {
             Expected::DefaultForm => true,
             Expected::Key(key) => key == public,
-            Expected::KeyId(id) => key_id_bytes(&public.to_spki()) == id,
+            Expected::KeyId(id) => {
+                let spki = public.to_spki();
+                key_id_bytes(&spki) == id || spki_key_id_bytes(&spki) == id
+            }
         }
     }
 }
@@ -440,6 +444,13 @@ impl PublicKey {
 /// (RFC 5280 §4.2.1.2 method 1, Kalkan's `createKeyId`).
 pub(crate) fn key_id_bytes(spki: &SubjectPublicKeyInfoOwned) -> [u8; 20] {
     sha1::Sha1::digest(spki.subject_public_key.raw_bytes()).into()
+}
+
+/// The legacy Applet's key identifier of a public key: SHA-1 of the whole DER
+/// `SubjectPublicKeyInfo` (Kalkan's `KALKANUtils.getKeyIdFromPK`, the hash of
+/// `PublicKey.getEncoded()`).
+pub(crate) fn spki_key_id_bytes(spki: &SubjectPublicKeyInfoOwned) -> [u8; 20] {
+    sha1::Sha1::digest(spki.to_der().expect("a SubjectPublicKeyInfo encodes")).into()
 }
 
 fn curve_alg(curve: CurveId) -> KeyAlg {

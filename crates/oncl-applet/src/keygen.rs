@@ -14,16 +14,21 @@
 //!   GOST 2015; unlike the original, sha1WithRSA, the GammaTech GOST and RSA lengths other
 //!   than 2048, 3072 and 4096 too;
 //! - each key goes alone into `<container>/<PREFIX><keyId>.p12` encrypted with
-//!   `newDefaultPassword` ([`create_key_file`]); `aliases` are for ID cards only;
+//!   `newDefaultPassword` ([`create_applet_key_file`]); `aliases` are for ID cards only;
+//! - the key identifier is the applet's: SHA-1 of the whole DER `SubjectPublicKeyInfo`
+//!   ([`applet_key_id`], Kalkan's `getKeyIdFromPK`), not the BIT STRING hash of
+//!   `generateCsr`; it is the alias, `localKeyId`, file name, SubjectKeyIdentifier and
+//!   `secondResult`;
 //! - the request ([`build_legacy_csr`]) has SubjectKeyIdentifier and, for a non-empty
 //!   `subjectAlternativeNames` (`,`-separated), SubjectAltName dNSNames led by the CN;
 //!   PEM `NEW CERTIFICATE REQUEST` with `\n` line ends;
 //! - `result` is the requests, `secondResult` the key identifiers, each separated by
 //!   `<:>`. A failure ends it; key files written before stay.
 //!
-//! The container must be an existing folder given by an absolute path (else `COMMON`, as a
-//! file the original cannot write); `JKS` is not written
-//! (`UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION`). Tokens answer `EMPTY_SLOT`.
+//! The container must be an existing local folder given by an absolute path (else
+//! `COMMON`, as a file the original cannot write; a network path is refused before it is
+//! looked up); `JKS` is not written (`UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION`). Tokens
+//! answer `EMPTY_SLOT`.
 
 use crate::Applet;
 use crate::dispatch::{Args, NPE, Outcome, Thrown, Wrapper};
@@ -34,13 +39,11 @@ use crate::methods::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::asn1::ObjectIdentifier;
-use oncl_basics::StorageKind;
-use oncl_commonutils::is_device_path;
+use oncl_basics::{StorageKind, local_page_path};
 use oncl_pki::csr::{LegacyCsrRequest, build_legacy_csr};
-use oncl_pki::keygen::{KeySpec, generate, key_id};
-use oncl_pki::keystore::create_key_file;
+use oncl_pki::keygen::{KeySpec, applet_key_id, generate};
+use oncl_pki::keystore::create_applet_key_file;
 use oncl_protocol::AddInfo;
-use std::path::Path;
 use zeroize::Zeroizing;
 
 const GENKEY_UNKNOWN_ALG: &str = "GENKEY_UNKNOWN_ALG";
@@ -150,24 +153,25 @@ fn generate_all(a: &Applet, args: &Args<'_>) -> Result<Wrapper, Stop> {
             Some(names) => Some(alt_names(names, &dn)?),
             None => None,
         };
-        let dir = Path::new(container);
-        if is_device_path(container) || !dir.is_absolute() || !dir.is_dir() {
-            return Err(Stop::Code(COMMON));
-        }
+        let dir = local_page_path(container)
+            .filter(|dir| dir.is_absolute() && dir.is_dir())
+            .ok_or(Stop::Code(COMMON))?;
 
         let key = generate(spec).map_err(|_| Stop::Code(GENKEY_UNKNOWN_ALG))?;
+        let key_id = applet_key_id(&key.public_key());
         let der = build_legacy_csr(
             &key,
             spec,
             &LegacyCsrRequest {
                 dn: &csr_dn,
+                key_id: &hex_decode(&key_id),
                 dns_names: dns_names.as_deref(),
             },
         )
         .map_err(|_| Stop::Code(GENKEY_COMMON))?;
-        create_key_file(dir, &key, spec, &password).map_err(|_| Stop::Code(COMMON))?;
+        create_applet_key_file(dir, &key, spec, &password).map_err(|_| Stop::Code(COMMON))?;
         requests.push(request_pem(&der));
-        key_ids.push(key_id(&key.public_key()));
+        key_ids.push(key_id);
     }
     tracing::info!(
         requests = requests.len(),
@@ -284,6 +288,14 @@ fn java_oid_valid(oid: &str) -> bool {
         }
     }
     period_allowed
+}
+
+/// The bytes of a lowercase hex key identifier.
+fn hex_decode(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("a hex key identifier"))
+        .collect()
 }
 
 /// Java's `String.trim`: every character up to U+0020 off both ends.

@@ -12,7 +12,6 @@ publish.workspace = true
 base64.workspace = true
 der.workspace = true
 oncl-basics.workspace = true
-oncl-commonutils.workspace = true
 oncl-pki.workspace = true
 oncl-protocol.workspace = true
 serde.workspace = true
@@ -26,5 +25,7 @@ oncl-basics = { path = "../oncl-basics", features = ["testing"] }
 # `testing`: `issue_cert`.
 oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 oncl-testkit.workspace = true
+# The key identifiers, computed independently in the tests.
+sha1.workspace = true
 tempfile.workspace = true
 x509-cert.workspace = true

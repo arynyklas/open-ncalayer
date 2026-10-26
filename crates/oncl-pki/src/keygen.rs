@@ -1,7 +1,7 @@
 //! Keys for new key files, chosen as NCALayer chooses them: by the signature algorithm OID of
 //! a certificate request (`params[].algorithm`).
 
-use crate::key::{PrivateKey, PublicKey, SigAlg, key_id_bytes};
+use crate::key::{PrivateKey, PublicKey, SigAlg, key_id_bytes, spki_key_id_bytes};
 use crate::keystore::KeystoreError;
 use crate::oid;
 use crate::pkcs12::hex;
@@ -107,6 +107,14 @@ pub fn generate(spec: KeySpec) -> Result<PrivateKey, KeystoreError> {
 /// NCA certificates carry it as SubjectKeyIdentifier.
 pub fn key_id(key: &PublicKey) -> String {
     hex(&key_id_bytes(&key.to_spki()))
+}
+
+/// The legacy Applet's key identifier of `key`, lowercase hex: SHA-1 of the whole DER
+/// `SubjectPublicKeyInfo` (Kalkan's `KALKANUtils.getKeyIdFromPK`). The Applet's
+/// `genKeyPairAndGetPKCS10` names its keys and files by it and puts it in the request as
+/// SubjectKeyIdentifier.
+pub fn applet_key_id(key: &PublicKey) -> String {
+    hex(&spki_key_id_bytes(&key.to_spki()))
 }
 
 /// The operating system RNG for `rsa` (`rand_core` 0.6).

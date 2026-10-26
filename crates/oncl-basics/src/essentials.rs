@@ -19,8 +19,8 @@
 
 use crate::prompt::{CsrPrompt, ImportPrompt, Locale, Prompt, StorageKind};
 use crate::sign::{
-    UNIDENTIFIED, get_array, get_string, json_exception, not_found, opt_string,
-    parse_pem_or_base64, provider_failure, storage_list, wrong_type,
+    UNIDENTIFIED, get_array, get_string, json_exception, not_found, parse_pem_or_base64,
+    provider_failure, storage_list, wrong_type,
 };
 use crate::{Basics, lock_dialog_flow};
 use der::asn1::ObjectIdentifier;
@@ -34,6 +34,7 @@ use oncl_pki::keystore::{
 use oncl_pki::oid;
 use oncl_protocol::AddInfo;
 use oncl_protocol::invoker::{CallResult, Failure};
+use oncl_protocol::orgjson::{int_value, opt_string};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 use zeroize::Zeroizing;
@@ -266,20 +267,10 @@ fn key_spec(i: usize, param: &Value) -> Result<KeySpec, Failure> {
     }
 }
 
-/// org.json `getInt`: a number narrowed with `intValue()`, or a string `Integer.parseInt`
-/// reads.
+/// org.json `getInt` ([`int_value`]).
 fn get_int(obj: &Map<String, Value>, key: &str) -> Result<i32, Failure> {
-    match obj.get(key) {
-        None => Err(not_found(key)),
-        // `intValue()` keeps the low 32 bits of integers and saturates fractions.
-        Some(Value::Number(n)) => Ok(match (n.as_i64(), n.as_u64()) {
-            (Some(i), _) => i as i32,
-            (None, Some(u)) => u as i32,
-            (None, None) => n.as_f64().map_or(0, |f| f as i32),
-        }),
-        Some(Value::String(s)) => s.parse().map_err(|_| wrong_type(key, "a int")),
-        Some(_) => Err(wrong_type(key, "a int")),
-    }
+    let value = obj.get(key).ok_or_else(|| not_found(key))?;
+    int_value(value).ok_or_else(|| wrong_type(key, "a int"))
 }
 
 /// `value.toString()` of an org.json `toMap()`/`toList()` value; null is a

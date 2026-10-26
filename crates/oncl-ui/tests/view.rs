@@ -60,6 +60,7 @@ fn prompt<const N: usize>(locale: Locale, candidates: [KeyCandidate; N]) -> KeyP
         action: Action::Sign,
         candidates: candidates.into(),
         detail: None,
+        error: None,
     }
 }
 

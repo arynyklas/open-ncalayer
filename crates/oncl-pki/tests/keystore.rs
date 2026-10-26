@@ -4,9 +4,11 @@
 use oncl_pki::cert::Certificate;
 use oncl_pki::csr::KeyStoreInfo;
 use oncl_pki::key::{PrivateKey, PublicKey};
-use oncl_pki::keygen::{KeySpec, generate, key_id};
+use oncl_pki::keygen::{KeySpec, applet_key_id, generate, key_id};
 use oncl_pki::keystore::{
-    KeystoreError, change_password, check_password_pattern, create_key_file, install_certificate,
+    KeystoreError, MAX_KEY_FILE, MAX_KEY_FILES, certificate_alias, change_password,
+    change_password_data, check_password_pattern, create_applet_key_file, create_key_file,
+    install_certificate,
 };
 use oncl_pki::oid;
 use oncl_pki::pkcs12::{
@@ -390,6 +392,122 @@ fn certificate_without_subject_key_identifier() {
         install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12).unwrap_err();
     assert_eq!(err, KeystoreError::ExtensionNotFound);
     assert_eq!(err.provider_code(), Some("EXTENSION_NOT_FOUND"));
+}
+
+#[test]
+fn certificate_alias_touches_no_file() {
+    let key = generate(KeySpec::Gost2015_512).unwrap();
+    let cert = certificate(KeySpec::Gost2015_512, &key, Profile::default());
+    assert_eq!(
+        certificate_alias(&cert, &oid::STORAGE_PKCS12),
+        Ok(key_id(&key.public_key()))
+    );
+    let no_ski = certificate(
+        KeySpec::Gost2015_512,
+        &key,
+        Profile {
+            no_ski: true,
+            ..Profile::default()
+        },
+    );
+    assert_eq!(
+        certificate_alias(&no_ski, &oid::STORAGE_PKCS12),
+        Err(KeystoreError::ExtensionNotFound)
+    );
+    // Checked before any folder is looked at.
+    let missing = Path::new("/no/such/folder");
+    assert_eq!(
+        install_certificate(missing, DEFAULT_PASSWORD, &no_ski, &oid::STORAGE_PKCS12),
+        Err(KeystoreError::ExtensionNotFound)
+    );
+    assert_eq!(
+        certificate_alias(&cert, &STORAGE_JKS),
+        Err(KeystoreError::UnsupportedStorage)
+    );
+}
+
+/// The legacy Applet names keys by SHA-1 of the whole SubjectPublicKeyInfo; the provider's
+/// path by SHA-1 of the BIT STRING. Both computed here from the key's SPKI.
+#[test]
+fn applet_key_files_use_the_applet_key_id() {
+    use sha1::{Digest, Sha1};
+    let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    for (spec, prefix) in [
+        (KeySpec::Gost2004, "GOSTKNCA_"),
+        (KeySpec::RsaSha256(2048), "RSA256_"),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let key = generate(spec).unwrap();
+        let spki = key.public_key().to_spki();
+        let whole = hex(&Sha1::digest(spki.to_der().unwrap()));
+        let bits = hex(&Sha1::digest(spki.subject_public_key.raw_bytes()));
+        assert_ne!(whole, bits);
+        assert_eq!(applet_key_id(&key.public_key()), whole);
+        assert_eq!(key_id(&key.public_key()), bits);
+
+        let path = create_applet_key_file(dir.path(), &key, spec, DEFAULT_PASSWORD).unwrap();
+        assert_eq!(path, dir.path().join(format!("{prefix}{whole}.p12")));
+        // The reader pairs the keyless key by its localKeyId, the applet identifier.
+        let contents = load_contents(&fs::read(&path).unwrap(), DEFAULT_PASSWORD).unwrap();
+        assert_eq!(contents.keys[0].alias, whole);
+        assert_eq!(contents.keys[0].key.public_key(), key.public_key());
+
+        // A certificate whose SKI is that identifier installs into the file.
+        let mut spec_cert = TestCertSpec::from_cert(&certificate(spec, &key, Profile::default()));
+        spec_cert.extensions[0] = extension(
+            SubjectKeyIdentifier::OID,
+            &SubjectKeyIdentifier(OctetString::new(hex_decode(&whole)).unwrap()),
+        );
+        let cert = issue_cert(&issuer(spec), spec_cert);
+        assert_eq!(
+            install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12),
+            Ok(path.clone())
+        );
+        let entries = load(&fs::read(&path).unwrap(), DEFAULT_PASSWORD).unwrap();
+        assert_eq!(entries[0].alias, whole);
+        assert_eq!(entries[0].cert, cert);
+    }
+}
+
+#[test]
+fn folder_search_is_bounded() {
+    let (dir, key, path) = key_file(KeySpec::Gost2015_512);
+    let cert = certificate(KeySpec::Gost2015_512, &key, Profile::default());
+    // A file over the size limit sorts first and is skipped without being read.
+    let huge = fs::File::create(dir.path().join("0-huge.p12")).unwrap();
+    huge.set_len(MAX_KEY_FILE + 1).unwrap();
+    drop(huge);
+    assert_eq!(
+        install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12),
+        Ok(path)
+    );
+    // Only the first key files are tried.
+    let (dir, key, _) = key_file(KeySpec::Gost2015_512);
+    let cert = certificate(KeySpec::Gost2015_512, &key, Profile::default());
+    for i in 0..MAX_KEY_FILES {
+        fs::write(dir.path().join(format!("0-{i:03}.p12")), b"x").unwrap();
+    }
+    let err =
+        install_certificate(dir.path(), DEFAULT_PASSWORD, &cert, &oid::STORAGE_PKCS12).unwrap_err();
+    assert!(
+        matches!(err, KeystoreError::KeystoreFileNotFound(_)),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn change_password_of_read_bytes() {
+    let (_dir, _, path) = key_file(KeySpec::Gost2015_512);
+    let bytes = fs::read(&path).unwrap();
+    // The bytes given are what is re-encrypted; the file is only written.
+    fs::write(&path, b"replaced").unwrap();
+    change_password_data(&path, &bytes, DEFAULT_PASSWORD, "Secret123").unwrap();
+    let contents = load_contents(&fs::read(&path).unwrap(), "Secret123").unwrap();
+    assert_eq!(contents.keys.len(), 1);
+    assert_eq!(
+        change_password_data(&path, &bytes, DEFAULT_PASSWORD, "short"),
+        Err(KeystoreError::WrongPasswordPattern { empty: false })
+    );
 }
 
 #[test]

@@ -28,6 +28,8 @@ export component KeyDialog inherits Window {
     in property <bool> key-info;
     // A line about the request, e.g. the file to be signed; empty for none.
     in property <string> detail;
+    // Why the previous choice failed; empty for none.
+    in property <string> error;
     in property <[KeyItem]> keys;
     // Whether any key is enabled.
     in property <bool> has-enabled;
@@ -114,6 +116,12 @@ export component KeyDialog inherits Window {
 
         if root.selected >= 0 && !root.keys[root.selected].enabled: Text {
             text: root.keys[root.selected].note;
+            wrap: word-wrap;
+            color: #c42b1c;
+        }
+
+        if !root.error.is-empty: Text {
+            text: root.error;
             wrap: word-wrap;
             color: #c42b1c;
         }

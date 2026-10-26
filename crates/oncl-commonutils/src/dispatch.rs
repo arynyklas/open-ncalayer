@@ -17,8 +17,9 @@
 use crate::CommonUtils;
 use crate::methods::{self, Outcome};
 use oncl_protocol::AddInfo;
+use oncl_protocol::orgjson::{int_value, opt_string};
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 /// The class whose members the dispatcher reaches, as Java names it in its messages.
 const COMMON_UTILS_CLASS: &str = "kz.gov.pki.knca.CommonUtils";
@@ -275,7 +276,7 @@ fn dispatch(
     let Value::Object(request) = request else {
         return Err("A JSONObject text must begin with '{' at 1 [character 2 line 1]".to_owned());
     };
-    let uuid = opt_string(&request, "uuid");
+    let uuid = opt_string(&request, "uuid").unwrap_or_default();
     let name = match request.get("method") {
         None => return Err("JSONObject[\"method\"] not found.".to_owned()),
         Some(Value::String(name)) => name.as_str(),
@@ -334,7 +335,7 @@ fn convert<'a>(method: &Method, args: &'a [Value]) -> Result<Vec<Arg<'a>>, Strin
         .enumerate()
         .map(|(i, arg)| match arg {
             Value::Array(items) if matches!(method.body, Body::PrivateTakingObject) => {
-                match items.iter().position(|item| !is_java_int(item)) {
+                match items.iter().position(|item| int_value(item).is_none()) {
                     Some(j) => Err(format!("JSONArray[{j}] is not a int.")),
                     None => Ok(Arg::Objects),
                 }
@@ -360,34 +361,7 @@ fn convert<'a>(method: &Method, args: &'a [Value]) -> Result<Vec<Arg<'a>>, Strin
         .collect()
 }
 
-/// Whether org.json `getInt` takes `value`: any number, or a string `Integer.parseInt`
-/// reads (an optional sign and ASCII digits within the `int` range). Java also takes other
-/// Unicode decimal digits (`"\u0663"` is 3); they are not recognized here, so such an
-/// element fails the conversion where the original's would pass on to the refusal.
-fn is_java_int(value: &Value) -> bool {
-    match value {
-        Value::Number(_) => true,
-        Value::String(s) => {
-            let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
-            !digits.is_empty()
-                && digits.bytes().all(|b| b.is_ascii_digit())
-                && s.parse::<i32>().is_ok()
-        }
-        _ => false,
-    }
-}
-
 /// `Method.invoke`'s refusal of an argument of another type than its parameter.
 fn type_mismatch(name: &str) -> String {
     format!("java.lang.IllegalArgumentException: argument type mismatch. Method: {name}")
-}
-
-/// org.json `optString`: absent and `null` are empty, a string is itself, anything else
-/// its JSON text.
-fn opt_string(obj: &Map<String, Value>, key: &str) -> String {
-    match obj.get(key) {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-    }
 }

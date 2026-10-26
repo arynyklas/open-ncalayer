@@ -13,8 +13,6 @@
 mod dispatch;
 mod methods;
 
-pub use methods::{MAX_PAGE_FILE, PageFile, is_device_path};
-
 use oncl_basics::{Locale, Prompter};
 use oncl_pki::http::HttpTransport;
 use oncl_pki::pkix::CaSet;

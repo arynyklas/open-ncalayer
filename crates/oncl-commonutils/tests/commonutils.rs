@@ -1346,3 +1346,29 @@ fn page_paths_and_passwords_stay_out_of_the_log() {
         assert!(!log.contains(secret), "{secret:?} in the log:\n{log}");
     }
 }
+
+/// Network paths a page names are refused before anything is looked up: the daemon would
+/// connect to a host the page chose.
+#[test]
+fn network_paths_are_refused() {
+    let mut paths = vec!["//oncl-test.invalid/share/data.bin"];
+    if cfg!(windows) {
+        paths.extend([
+            r"\\oncl-test.invalid\share\data.bin",
+            r"\/oncl-test.invalid/share/data.bin",
+            r"\\?\UNC\oncl-test.invalid\share\data.bin",
+        ]);
+    }
+    for path in paths {
+        let s = setup(script![Step::CancelFile]);
+        for method in ["createCAdESFromFile", "createCMSSignatureFromFile"] {
+            let reply = call(&s.cu, method, json!(["PKCS12", "", path, true]));
+            assert_eq!(failed(&reply), "file.not_found", "{method} {path}");
+        }
+        assert!(s.prompter.storage_prompts().is_empty());
+        // The file chooser does not start there.
+        let reply = call(&s.cu, "showFileChooser", json!(["P12", path]));
+        assert_eq!(failed(&reply), "action.canceled");
+        assert_eq!(s.prompter.file_prompts()[0].directory, None, "{path}");
+    }
+}

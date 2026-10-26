@@ -22,8 +22,9 @@
 
 use crate::{Applet, keygen, methods};
 use oncl_protocol::AddInfo;
+use oncl_protocol::orgjson::{int_value, opt_string};
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 /// The class the dispatcher's instance is of, the only `class` besides an empty one.
 const APPLET_CLASS: &str = "kz.gov.pki.knca.applet.Applet";
@@ -313,8 +314,8 @@ fn dispatch(
             ));
         }
     };
-    let class = opt_string(&request, "class");
-    let uuid = opt_string(&request, "uuid");
+    let class = opt_string(&request, "class").unwrap_or_default();
+    let uuid = opt_string(&request, "uuid").unwrap_or_default();
     let name = match request.get("method") {
         Some(Value::String(name)) => name.as_str(),
         None => {
@@ -408,7 +409,7 @@ fn convert<'a>(method: &Method, args: &'a [Value]) -> Result<Vec<Arg<'a>>, Strin
                 .iter()
                 .enumerate()
                 .map(|(j, item)| {
-                    java_int(item).ok_or_else(|| {
+                    int_value(item).ok_or_else(|| {
                         format!("org.json.JSONException: JSONArray[{j}] is not a int.")
                     })
                 })
@@ -430,65 +431,9 @@ fn convert<'a>(method: &Method, args: &'a [Value]) -> Result<Vec<Arg<'a>>, Strin
         .collect()
 }
 
-/// org.json `getInt`: a number narrowed with `intValue()` (an integer keeps its low 32
-/// bits, a fraction is cut toward zero), or a string `Integer.parseInt` reads (an optional
-/// sign and ASCII digits within the `int` range).
-fn java_int(value: &Value) -> Option<i32> {
-    match value {
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                // `Long.intValue()`.
-                Some(i as i32)
-            } else if let Some(u) = n.as_u64() {
-                // `BigInteger.intValue()`: the low 32 bits.
-                Some(u as i32)
-            } else {
-                // `Double.intValue()`: toward zero, saturating.
-                n.as_f64().map(|f| f as i32)
-            }
-        }
-        Value::String(s) => {
-            let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
-            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            s.parse::<i32>().ok()
-        }
-        _ => None,
-    }
-}
-
-/// org.json `optString`: absent and `null` are empty, a string is itself, anything else
-/// its JSON text.
-fn opt_string(obj: &Map<String, Value>, key: &str) -> String {
-    match obj.get(key) {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn java_ints() {
-        assert_eq!(java_int(&json!(7)), Some(7));
-        assert_eq!(java_int(&json!(-7)), Some(-7));
-        assert_eq!(java_int(&json!(4_294_967_298_i64)), Some(2));
-        assert_eq!(java_int(&json!(u64::MAX)), Some(-1));
-        assert_eq!(java_int(&json!(2.9)), Some(2));
-        assert_eq!(java_int(&json!(-2.9)), Some(-2));
-        assert_eq!(java_int(&json!("+12")), Some(12));
-        assert_eq!(java_int(&json!("-12")), Some(-12));
-        assert_eq!(java_int(&json!("2147483648")), None);
-        assert_eq!(java_int(&json!("1.5")), None);
-        assert_eq!(java_int(&json!("")), None);
-        assert_eq!(java_int(&json!(true)), None);
-        assert_eq!(java_int(&Value::Null), None);
-    }
 
     #[test]
     fn arities_are_unique() {

@@ -270,6 +270,7 @@ fn show_keys(p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), PlatformE
     ui.set_authenticate(p.action == Action::Authenticate);
     ui.set_key_info(p.action == Action::KeyInfo);
     ui.set_detail(p.detail.as_deref().unwrap_or_default().into());
+    ui.set_error(p.error.as_deref().unwrap_or_default().into());
     let rows = view::key_rows(&p);
     let enabled: Vec<bool> = rows.iter().map(|r| r.enabled).collect();
     let first_enabled = enabled.iter().position(|e| *e);

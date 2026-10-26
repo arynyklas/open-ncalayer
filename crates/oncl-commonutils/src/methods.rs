@@ -18,8 +18,8 @@
 //! `getSigningEntityDefaultChained` does with its bundled CA list (expired keys at their
 //! notAfter). Base64 inputs are decoded after the dialogs, with Java's decoder and its
 //! messages. Paths a page names (`createCAdESFromFile`, `createCMSSignatureFromFile`) are
-//! read before any dialog (regular files of at most [`MAX_PAGE_FILE`] bytes only), shown in
-//! both dialogs as absolute paths, and never logged.
+//! read before any dialog (local regular files of at most [`MAX_PAGE_FILE`] bytes only,
+//! [`PageFile`]), shown in both dialogs as absolute paths, and never logged.
 
 use crate::CommonUtils;
 use crate::dispatch::Args;
@@ -27,8 +27,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_basics::{
-    Action, Availability, FileKind, FilePrompt, KeyCandidate, KeyPrompt, Locale, OpenError, Prompt,
-    StorageKind, StoragePrompt, lock_dialog_flow,
+    Action, Availability, FileKind, FilePrompt, KeyCandidate, KeyPrompt, Locale, MAX_PAGE_FILE,
+    OpenError, PageFile, PageFileError, Prompt, StorageKind, StoragePrompt, local_page_path,
+    lock_dialog_flow,
 };
 use oncl_pki::cms::{self, CmsError, SignOptions};
 use oncl_pki::info::{CertInfo, KncaCertType, cert_info, common_name, kalkan_dn, kcert_types};
@@ -41,8 +42,7 @@ use oncl_protocol::AddInfo;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fmt::Write;
-use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use x509_cert::Certificate;
 use x509_cert::ext::pkix::{AuthorityKeyIdentifier, SubjectKeyIdentifier};
 
@@ -119,7 +119,7 @@ pub(crate) fn create_cms_signature_from_file(
     args: &Args<'_>,
     add_info: &AddInfo,
 ) -> Outcome {
-    let file = PageFile::read(args.str(2))?;
+    let file = read_page_file(args.str(2))?;
     let request = Signing {
         storage_name: args.str(0),
         key_type: key_type(args.str(1)),
@@ -153,7 +153,7 @@ pub(crate) fn create_cades_from_file(
     args: &Args<'_>,
     add_info: &AddInfo,
 ) -> Outcome {
-    let file = PageFile::read(args.str(2))?;
+    let file = read_page_file(args.str(2))?;
     let request = Signing {
         storage_name: args.str(0),
         key_type: key_type(args.str(1)),
@@ -216,7 +216,10 @@ pub(crate) fn show_file_chooser(cu: &CommonUtils, args: &Args<'_>, add_info: &Ad
         origin: origin(add_info),
         locale: cu.locale(),
         kind,
-        directory: (!directory.is_empty()).then(|| PathBuf::from(directory)),
+        // A network folder is not opened: the system dialog would connect to its host.
+        directory: local_page_path(directory)
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(Path::to_path_buf),
     };
     let answer = {
         let _flow = lock_dialog_flow();
@@ -382,6 +385,7 @@ fn choose_key(
             })
             .collect(),
         detail,
+        error: None,
     };
     loop {
         match cu.prompter.key(&prompt) {
@@ -654,118 +658,18 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Largest page-named file read, as for the module's other large inputs (the XMLDSig
-/// input limit and the native-messaging frame are 64 MiB too).
-pub const MAX_PAGE_FILE: u64 = 64 << 20;
-
-/// A file a page names (`createCAdESFromFile`, `createCMSSignatureFromFile`, the legacy
-/// Applet's key files).
-pub struct PageFile {
-    /// The file's contents.
-    pub data: Vec<u8>,
-    /// The path the dialogs show: absolute and normalized, so the user sees the file that
-    /// is read.
-    pub shown: String,
-}
-
-impl PageFile {
-    /// The original's `Files.readAllBytes`, any failure being `file.not_found`; but only a
-    /// regular file (symbolic links followed) is read, never a folder, FIFO, pipe or device,
-    /// and at most [`MAX_PAGE_FILE`] bytes of it. On Windows device namespace paths
-    /// (`\\.\…`, `\\?\…` other than a drive or UNC path) are refused before anything is
-    /// opened, and the opened handle must be a disk file.
-    ///
-    /// # Errors
-    ///
-    /// The commonUtils message: `file.not_found`, or `file.too_large: …` for a file over
-    /// [`MAX_PAGE_FILE`].
-    pub fn read(path: &str) -> Result<PageFile, Option<String>> {
-        let not_found = || Some(FILE_NOT_FOUND.to_owned());
-        if is_device_path(path) {
-            return Err(not_found());
-        }
-        let path = Path::new(path);
-        let meta = std::fs::metadata(path).map_err(|_| not_found())?;
-        if !meta.is_file() {
-            return Err(not_found());
-        }
-        if meta.len() > MAX_PAGE_FILE {
-            return Err(too_large());
-        }
-        let file = std::fs::File::open(path).map_err(|_| not_found())?;
-        if !is_disk_file(&file) {
-            return Err(not_found());
-        }
-        let mut data = Vec::new();
-        file.take(MAX_PAGE_FILE + 1)
-            .read_to_end(&mut data)
-            .map_err(|_| not_found())?;
-        if data.len() as u64 > MAX_PAGE_FILE {
-            return Err(too_large());
-        }
-        Ok(PageFile {
-            data,
-            shown: shown_path(path).display().to_string(),
+/// [`PageFile::read`] with the module's messages: `file.not_found`, or
+/// `file.too_large: …` for a file over [`MAX_PAGE_FILE`].
+fn read_page_file(path: &str) -> Result<PageFile, Option<String>> {
+    PageFile::read(path).map_err(|e| {
+        Some(match e {
+            PageFileError::NotFound => FILE_NOT_FOUND.to_owned(),
+            PageFileError::TooLarge => format!(
+                "file.too_large: files over {} MiB are not signed",
+                MAX_PAGE_FILE >> 20
+            ),
         })
-    }
-}
-
-/// Whether `path` names a Windows device namespace (`\\.\pipe\…`, `\\?\GLOBALROOT\…`,
-/// `\??\…`; either slash), where a "file" may be a pipe that never answers. `\\?\C:\…` and
-/// `\\?\UNC\…` are ordinary paths. Always false elsewhere.
-pub fn is_device_path(path: &str) -> bool {
-    if !cfg!(windows) {
-        return false;
-    }
-    let p: String = path
-        .chars()
-        .take(8)
-        .map(|c| if c == '/' { '\\' } else { c })
-        .collect();
-    if p.starts_with(r"\\.\") || p.starts_with(r"\??\") {
-        return true;
-    }
-    if let Some(rest) = p.strip_prefix(r"\\?\") {
-        let drive = rest.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-            && rest.as_bytes().get(1) == Some(&b':');
-        let unc = rest
-            .get(..4)
-            .is_some_and(|s| s.eq_ignore_ascii_case(r"UNC\"));
-        return !(drive || unc);
-    }
-    false
-}
-
-/// Whether `file` is a disk file (`GetFileType` is `FILE_TYPE_DISK`), not a pipe or a
-/// character device. Always true elsewhere (the metadata check covers FIFOs and devices).
-#[cfg(windows)]
-fn is_disk_file(file: &std::fs::File) -> bool {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_DISK, GetFileType};
-    // SAFETY: the handle is the open file's, valid for the call.
-    unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_DISK }
-}
-
-#[cfg(not(windows))]
-fn is_disk_file(_: &std::fs::File) -> bool {
-    true
-}
-
-fn too_large() -> Option<String> {
-    Some(format!(
-        "file.too_large: files over {} MiB are not signed",
-        MAX_PAGE_FILE >> 20
-    ))
-}
-
-/// The absolute path of `path` as the file system resolves it: on Windows lexically (as
-/// Windows opens it), elsewhere with symbolic links resolved.
-fn shown_path(path: &Path) -> PathBuf {
-    #[cfg(not(windows))]
-    if let Ok(real) = std::fs::canonicalize(path) {
-        return real;
-    }
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    })
 }
 
 fn origin(add_info: &AddInfo) -> String {

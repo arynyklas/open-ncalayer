@@ -6,7 +6,7 @@
 
 use crate::asn1util;
 use crate::cert::Certificate;
-use crate::key::{PrivateKey, SigAlg, key_id_bytes};
+use crate::key::{PrivateKey, SigAlg};
 use crate::keygen::KeySpec;
 use crate::keystore::KeystoreError;
 use crate::oid;
@@ -111,6 +111,9 @@ pub struct CsrRequest<'a> {
 pub struct LegacyCsrRequest<'a> {
     /// Subject attributes, one RDN each, in this order.
     pub dn: &'a [(ObjectIdentifier, String)],
+    /// The SubjectKeyIdentifier: the Applet's key identifier
+    /// ([`crate::keygen::applet_key_id`]), as Kalkan's `getExtensionReqSet` takes it.
+    pub key_id: &'a [u8],
     /// dNSName alternative names; `None` for no SubjectAltName.
     pub dns_names: Option<&'a [String]>,
 }
@@ -184,8 +187,8 @@ pub fn build_csr(
 /// `spec`), as DER:
 /// - the subject has one RDN per `dn` attribute, in the given order; values are encoded as
 ///   in [`build_csr`];
-/// - `extensionRequest` holds SubjectKeyIdentifier (the key identifier, see
-///   [`crate::keygen::key_id`]) and, with `dns_names`, SubjectAltName: each dNSName,
+/// - `extensionRequest` holds SubjectKeyIdentifier (`key_id`) and, with `dns_names`,
+///   SubjectAltName: each dNSName,
 ///   followed by an iPAddress for `127.0.0.1` (Kalkan's `getExtensionReqSet`); both
 ///   non-critical;
 /// - the signature algorithm is `spec`'s with NULL parameters.
@@ -203,8 +206,7 @@ pub fn build_legacy_csr(
     req: &LegacyCsrRequest<'_>,
 ) -> Result<Vec<u8>, KeystoreError> {
     let alg = request_alg(key, spec)?;
-    let public_key = key.public_key().to_spki();
-    let ski = SubjectKeyIdentifier(OctetString::new(key_id_bytes(&public_key)).map_err(invalid)?);
+    let ski = SubjectKeyIdentifier(OctetString::new(req.key_id).map_err(invalid)?);
     let mut extensions = vec![extension(SubjectKeyIdentifier::OID, &ski)];
     if let Some(dns_names) = req.dns_names {
         let mut names = Vec::with_capacity(dns_names.len());
@@ -218,7 +220,13 @@ pub fn build_legacy_csr(
         }
         extensions.push(extension(SubjectAltName::OID, &SubjectAltName(names)));
     }
-    sign_request(key, alg, public_key, subject(req.dn.iter())?, extensions)
+    sign_request(
+        key,
+        alg,
+        key.public_key().to_spki(),
+        subject(req.dn.iter())?,
+        extensions,
+    )
 }
 
 /// The signature algorithm of a request for `key` of `spec`.
@@ -427,6 +435,7 @@ mod tests {
             KeySpec::Gost2004,
             &LegacyCsrRequest {
                 dn: &dn,
+                key_id: &[1; 20],
                 dns_names: None,
             },
         )
@@ -448,6 +457,7 @@ mod tests {
                 KeySpec::Gost2015_512,
                 &LegacyCsrRequest {
                     dn: &dn,
+                    key_id: &[1; 20],
                     dns_names: None
                 }
             ),

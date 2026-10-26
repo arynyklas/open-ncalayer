@@ -19,6 +19,7 @@ use oncl_pki::xmldsig::{self, XmlError};
 use oncl_pki::{pem, tsp};
 use oncl_protocol::AddInfo;
 use oncl_protocol::invoker::{CallResult, Failure};
+use oncl_protocol::orgjson::opt_string;
 use serde_json::{Map, Value, json};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -290,6 +291,7 @@ fn choose_key(basics: &Basics, request: &SignRequest<'_>, entries: &[KeyEntry]) 
         action: request.action,
         candidates,
         detail: None,
+        error: None,
     };
     loop {
         match basics.prompter.key(&prompt) {
@@ -548,15 +550,6 @@ pub(crate) fn get_array<'a>(
     }
 }
 
-/// org.json `optString`: `None` when absent or `null`, any other value as text.
-pub(crate) fn opt_string(obj: &Map<String, Value>, key: &str) -> Option<String> {
-    match obj.get(key) {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) => Some(s.clone()),
-        Some(other) => Some(other.to_string()),
-    }
-}
-
 /// org.json `optBoolean`: a boolean, or the string `true`/`false` in any case.
 fn opt_bool(obj: &Map<String, Value>, key: &str, default: bool) -> bool {
     match obj.get(key) {
@@ -673,8 +666,6 @@ mod tests {
         assert!(get_object(obj, "a").is_err());
         assert!(get_array(obj, "a").is_ok());
         assert!(get_array(obj, "null").is_err());
-        assert_eq!(opt_string(obj, "n").as_deref(), Some("5"));
-        assert_eq!(opt_string(obj, "null"), None);
         assert!(opt_bool(obj, "b", false));
         assert!(!opt_bool(obj, "n", false));
         assert!(opt_bool(obj, "x", true));

@@ -7,9 +7,14 @@
 //! second request waits for the first one's dialogs to finish. The keys offered are checked
 //! against `signerParams.chain` and, through the same [`HttpTransport`] as time-stamping,
 //! their OCSP responders.
+//!
+//! The crate also holds what the other modules share with it: the [`Prompter`] dialogs, the
+//! dialog-flow turn ([`lock_dialog_flow`]) and the rules for paths a page names
+//! ([`PageFile`], [`local_page_path`]).
 
 mod essentials;
 mod filter;
+mod page_file;
 mod prompt;
 mod sign;
 #[cfg(feature = "testing")]
@@ -17,6 +22,9 @@ pub mod testing;
 
 pub use filter::{
     Availability, ChainPolicy, DisabledReason, KeyFilter, OCSP_DEADLINE, availabilities,
+};
+pub use page_file::{
+    MAX_PAGE_FILE, PageFile, PageFileError, is_device_path, is_network_path, local_page_path,
 };
 pub use prompt::{
     Action, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyCandidate,

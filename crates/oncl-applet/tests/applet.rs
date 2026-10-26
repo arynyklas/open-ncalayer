@@ -11,14 +11,16 @@ use oncl_applet::{Applet, MODULE_NAME};
 use oncl_basics::testing::{ScriptedPrompter, Step};
 use oncl_basics::{Action, FileKind, Locale, OpenError, StorageKind};
 use oncl_pki::cert::Certificate;
+use oncl_pki::csr::KeyStoreInfo;
 use oncl_pki::key::{PublicKey, SigAlg};
-use oncl_pki::keygen::key_id;
+use oncl_pki::keystore::change_password;
 use oncl_pki::pkcs12::{KeyEntry, WriteOptions, load, load_contents, write};
 use oncl_pki::testing::{TestCertSpec, issue_cert};
 use oncl_pki::{oid, pem, xmldsig};
 use oncl_protocol::{AddInfo, DEFAULT_MODULE, Module, Registry, Route};
 use oncl_testkit::{fixture, read, synthetic};
 use serde_json::{Value, json};
+use sha1::{Digest, Sha1};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,6 +38,8 @@ const SHA256_RSA: &str = "1.2.840.113549.1.1.11";
 const DEFAULT_PASSWORD: &str = "Default1";
 const NEW_PASSWORD: &str = "NewSecret12";
 const ITE: &str = "java.lang.reflect.InvocationTargetException";
+/// A password the internal systems' policy accepts (and the PKCS#12 pattern too).
+const INNER_PASSWORD: &str = "Qwerty12#";
 
 fn setup(steps: Vec<Step>) -> (Applet, Arc<ScriptedPrompter>) {
     let prompter = Arc::new(ScriptedPrompter::new(steps));
@@ -395,10 +399,56 @@ fn no_token_is_connected() {
             "setX509CertToKeyStoreAndChangePassword",
             json!([token, "c", "p", "n", "pem"]),
         ),
-        ("changePassword", json!([token, "c", "old", NEW_PASSWORD])),
         ("signXml", json!([token, "c", "SIGN", "<a/>"])),
     ] {
         assert_code(&call(&a, method, args), "EMPTY_SLOT");
+    }
+    // changePassword checks the new PIN by the storage's rule before the device is
+    // opened; with a valid PIN the missing device is the generic failure.
+    for (storage, new, expected) in [
+        (
+            "AKKaztokenStore",
+            "",
+            "CHANGEPASS_INCORRECT_NEWPASS_PATTERN",
+        ),
+        (
+            "AKKaztokenStore",
+            "a b",
+            "CHANGEPASS_INCORRECT_NEWPASS_PATTERN",
+        ),
+        ("AKKaztokenStore", "Pin12345", "CHANGEPASS_COMMON"),
+        ("AKAKEYStore", &"1".repeat(32), "CHANGEPASS_COMMON"),
+        (
+            "AKEToken72KStore",
+            &"1".repeat(33),
+            "CHANGEPASS_INCORRECT_NEWPASS_PATTERN",
+        ),
+        ("AKJaCartaStore", "1234567890", "CHANGEPASS_COMMON"),
+        (
+            "AKEToken5110Store",
+            "12345678901",
+            "CHANGEPASS_INCORRECT_NEWPASS_PATTERN",
+        ),
+        (
+            "AKKZIDCardStore",
+            "",
+            "CHANGEPASS_INCORRECT_NEWPASS_PATTERN",
+        ),
+        (
+            "AKKZIDCardStore",
+            "123456",
+            "UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION",
+        ),
+        (
+            "ABCloudServiceStore",
+            "a b",
+            "UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION",
+        ),
+    ] {
+        assert_code(
+            &call(&a, "changePassword", json!([storage, "c", "old", new])),
+            expected,
+        );
     }
     assert!(files(dir.path()).is_empty());
     assert!(prompter.storage_prompts().is_empty());
@@ -586,8 +636,13 @@ fn gen_key_pair_writes_key_files_and_requests() {
         let oids: Vec<_> = extensions.iter().map(|e| e.extn_id).collect();
         assert_eq!(oids, [SubjectKeyIdentifier::OID, SubjectAltName::OID]);
         assert!(extensions.iter().all(|e| !e.critical));
+        // The applet's key identifier: SHA-1 of the whole SubjectPublicKeyInfo, not of
+        // its BIT STRING (the provider's, `generateCsr`'s).
         let public = PublicKey::from_spki(&req.info.public_key).unwrap();
-        assert_eq!(key_id(&public), *key_id_hex);
+        let spki_der = req.info.public_key.to_der().unwrap();
+        assert_eq!(hex(&Sha1::digest(&spki_der)), *key_id_hex);
+        let bits = req.info.public_key.subject_public_key.raw_bytes();
+        assert_ne!(hex(&Sha1::digest(bits)), *key_id_hex);
         let ski = SubjectKeyIdentifier::from_der(extensions[0].extn_value.as_bytes()).unwrap();
         assert_eq!(hex(ski.0.as_bytes()), *key_id_hex);
         let san = SubjectAltName::from_der(extensions[1].extn_value.as_bytes()).unwrap();
@@ -954,6 +1009,41 @@ fn set_certificate_failures() {
         &set(json!(["PKCS12", null, DEFAULT_PASSWORD, cert_pem(&cert)])),
         "KEYSTORE_FILE_NOT_FOUND",
     );
+    // The certificate is checked before the folder, as in the original: without a
+    // SubjectKeyIdentifier, or for another storage, it is SETCERT_COMMON even without one.
+    let mut no_ski = TestCertSpec::from_cert(&cert);
+    no_ski
+        .extensions
+        .retain(|e| e.extn_id != SubjectKeyIdentifier::OID);
+    let no_ski = issue_cert(&entry("user-gost2004-sign"), no_ski);
+    let mut foreign = TestCertSpec::from_cert(&cert);
+    foreign.extensions.push(Extension {
+        extn_id: oid::KEYSTORE_INFO,
+        critical: false,
+        extn_value: OctetString::new(
+            KeyStoreInfo {
+                storage_oid: oid::STORAGE_JKS,
+                path: None,
+            }
+            .to_der()
+            .unwrap(),
+        )
+        .unwrap(),
+    });
+    let foreign = issue_cert(&entry("user-gost2004-sign"), foreign);
+    for wrong in [&no_ski, &foreign] {
+        for container in [Value::Null, json!("//host/share")] {
+            assert_code(
+                &set(json!([
+                    "PKCS12",
+                    container,
+                    DEFAULT_PASSWORD,
+                    cert_pem(wrong)
+                ])),
+                "SETCERT_COMMON",
+            );
+        }
+    }
     // A path that is not a folder.
     let file = dir.path().join(format!("GOSTKNCA_{}.p12", ids[0]));
     assert_code(
@@ -1170,8 +1260,6 @@ fn sign_xml_key_types() {
         prompter.key_prompts()[0].candidates.len()
     };
     assert_eq!(listed("user-gost2015-sign", "SIGN"), 1);
-    assert_eq!(listed("user-gost2015-sign", "insign"), 1);
-    assert_eq!(listed("user-gost2015-sign", "INAUTH"), 1);
     assert_eq!(listed("user-gost2004-sign", "ALL"), 1);
     assert_eq!(listed("user-gost2004-sign", ""), 1);
     // Any key with a certificate, whatever its type.
@@ -1186,9 +1274,53 @@ fn sign_xml_key_types() {
         prompter.storage_prompts()[1].error.unwrap()
     };
     assert_eq!(refused("user-gost2004-sign", "AUTH"), OpenError::NoAuthKeys);
-    assert_eq!(refused("user-gost2004-sign", "INAUTH"), OpenError::NoKeys);
     assert_eq!(refused("tsa-gost2015", "SIGN"), OpenError::NoSigningKeys);
-    assert_eq!(refused("tsa-gost2015", "INSIGN"), OpenError::NoKeys);
+    // INAUTH/INSIGN: the internal systems' password policy comes first.
+    assert_eq!(
+        refused("user-gost2015-sign", "INSIGN"),
+        OpenError::InnerPasswordPolicy
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let inner = |name: &str| {
+        let key = synthetic(name);
+        let path = dir.path().join(format!("{name}.p12"));
+        fs::copy(&key.path, &path).unwrap();
+        change_password(&path, &key.password, INNER_PASSWORD).unwrap();
+        Step::Storage {
+            path,
+            password: INNER_PASSWORD.to_owned(),
+        }
+    };
+    let (a, prompter) = setup(vec![inner("user-gost2015-sign"), Step::CancelKey]);
+    assert_code(
+        &call(&a, "signXml", json!(["PKCS12", null, "insign", "<a/>"])),
+        "SIGN_CANCEL",
+    );
+    assert_eq!(prompter.key_prompts()[0].candidates.len(), 1);
+    let (a, prompter) = setup(vec![inner("user-gost2015-sign"), Step::CancelKey]);
+    call(&a, "signXml", json!(["PKCS12", null, "INAUTH", "<a/>"]));
+    assert_eq!(prompter.key_prompts()[0].candidates.len(), 1);
+    for (store, key_type, error) in [
+        ("user-gost2004-sign", "INAUTH", OpenError::NoKeys),
+        ("tsa-gost2015", "INSIGN", OpenError::NoKeys),
+    ] {
+        let (a, prompter) = setup(vec![inner(store), Step::CancelStorage]);
+        call(&a, "signXml", json!(["PKCS12", null, key_type, "<a/>"]));
+        assert_eq!(prompter.storage_prompts()[1].error, Some(error));
+    }
+    // An empty password is refused for every keyType.
+    let (a, prompter) = setup(vec![
+        Step::Storage {
+            path: synthetic("user-gost2015-sign").path,
+            password: String::new(),
+        },
+        Step::CancelStorage,
+    ]);
+    call(&a, "signXml", json!(["PKCS12", null, "ALL", "<a/>"]));
+    assert_eq!(
+        prompter.storage_prompts()[1].error,
+        Some(OpenError::EmptyPassword)
+    );
     // Oldest certificate first.
     let (a, prompter) = setup(vec![storage("multi-gost2015"), Step::CancelKey]);
     call(&a, "signXml", json!(["PKCS12", "", "ALL", "<a/>"]));
@@ -1268,13 +1400,32 @@ fn sign_xml_dialog_outcomes() {
     let reply = call(&a, "signXml", json!(["JKS", "", "ALL", "<a/>"]));
     assert_eq!(reply["secondResult"], "openncalayer-rsa");
 
-    // Signing fails after the dialogs: the original dialog's code.
+    // A document that does not sign keeps the key dialog open with the error, as the
+    // original's dialog stays open; the user can only cancel.
     for xml in [json!("not xml"), json!("<!DOCTYPE a><a/>"), Value::Null] {
-        let (a, _) = setup(vec![storage("user-gost2015-sign"), Step::Key(0)]);
+        let (a, prompter) = setup(vec![
+            storage("user-gost2015-sign"),
+            Step::Key(0),
+            Step::Key(0),
+            Step::CancelKey,
+        ]);
         assert_code(
             &call(&a, "signXml", json!(["PKCS12", "", "SIGN", xml])),
-            "SIGN_WRONG_PASSWORD",
+            "SIGN_CANCEL",
         );
+        let errors: Vec<Option<String>> = prompter
+            .key_prompts()
+            .into_iter()
+            .map(|p| p.error)
+            .collect();
+        assert_eq!(errors.len(), 3);
+        assert_eq!(errors[0], None);
+        let error = errors[1].as_deref().unwrap();
+        assert!(
+            error.starts_with("Не удалось подписать документ: "),
+            "{error}"
+        );
+        assert_eq!(errors[2], errors[1]);
     }
 
     // Before any dialog: an unknown storage, a null keyType.
@@ -1366,4 +1517,66 @@ fn fifo_key_files_are_skipped() {
         ),
         "CHANGEPASS_COMMON",
     );
+}
+
+/// Paths of network locations a page names are refused before anything is looked up: the
+/// daemon would connect to a host the page chose.
+#[test]
+fn network_paths_are_refused() {
+    let mut paths = vec!["//oncl-test.invalid/share/keys"];
+    if cfg!(windows) {
+        paths.extend([
+            r"\\oncl-test.invalid\share\keys",
+            r"\/oncl-test.invalid/share",
+            r"\\?\UNC\oncl-test.invalid\share\keys",
+        ]);
+    }
+    let (a, _) = setup(vec![]);
+    let (_dir, requests, _) = generated(&a);
+    let cert = cert_pem(&issue(&requests[0], "user-gost2004-sign", false, 1));
+    for path in paths {
+        let (a, prompter) = setup(vec![
+            Step::Storage {
+                path: PathBuf::from(path),
+                password: DEFAULT_PASSWORD.to_owned(),
+            },
+            Step::CancelStorage,
+            Step::CancelFile,
+        ]);
+        assert_code(
+            &call(
+                &a,
+                "setX509CertToKeyStore",
+                json!(["PKCS12", path, DEFAULT_PASSWORD, cert]),
+            ),
+            "KEYSTORE_FILE_NOT_FOUND",
+        );
+        assert_code(
+            &call(
+                &a,
+                "changePassword",
+                json!(["PKCS12", path, DEFAULT_PASSWORD, NEW_PASSWORD]),
+            ),
+            "CHANGEPASS_COMMON",
+        );
+        assert_code(
+            &call(
+                &a,
+                "genKeyPairAndGetPKCS10",
+                gen_args(path, "2.5.4.3<:>2.5.4.6", "A<:>KZ", ""),
+            ),
+            "COMMON",
+        );
+        // signXml does not pre-fill the dialog with it, and does not read it if chosen.
+        assert_code(
+            &call(&a, "signXml", json!(["PKCS12", path, "SIGN", "<a/>"])),
+            "SIGN_CANCEL",
+        );
+        let prompts = prompter.storage_prompts();
+        assert_eq!(prompts[0].recent_path, None, "{path}");
+        assert_eq!(prompts[1].error, Some(OpenError::FileNotFound), "{path}");
+        // The file chooser does not start there.
+        assert_code(&call(&a, "showFileChooser", json!(["P12", path])), "NONE");
+        assert_eq!(prompter.file_prompts()[0].directory, None, "{path}");
+    }
 }

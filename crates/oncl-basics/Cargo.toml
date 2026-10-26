@@ -1,6 +1,6 @@
 [package]
 name = "oncl-basics"
-description = "The kz.gov.pki.knca.basics module of OpenNCALayer: PKIExtras.sign (cms, raw, xml) and PKIEssentials (generateCsr, importCertificate) behind a Prompter UI abstraction"
+description = "The kz.gov.pki.knca.basics module of OpenNCALayer: PKIExtras.sign (cms, raw, xml) and PKIEssentials (generateCsr, importCertificate) behind a Prompter UI abstraction, and the page-path rules every module shares"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,6 +22,10 @@ time.workspace = true
 tracing.workspace = true
 x509-cert.workspace = true
 zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# `GetFileType`: page-named files must be disk files, not pipes or devices.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 # `testing`: `tsp::MockTsa`, `ocsp::MockOcsp`, `testing::issue_cert`.

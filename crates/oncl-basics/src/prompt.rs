@@ -122,6 +122,11 @@ pub enum OpenError {
     NoAuthKeys,
     /// The chosen storage is not supported (or not allowed by the request).
     UnsupportedStorage,
+    /// No password was entered (the legacy Applet's `signXml`).
+    EmptyPassword,
+    /// The password does not match the policy for keys of internal systems (the legacy
+    /// Applet's `signXml` with `INAUTH`/`INSIGN`).
+    InnerPasswordPolicy,
 }
 
 /// The storage dialog.
@@ -221,6 +226,8 @@ pub struct KeyPrompt {
     pub candidates: Vec<KeyCandidate>,
     /// A line the dialog shows besides the request, e.g. the file to be signed.
     pub detail: Option<String>,
+    /// Why the previous choice failed, on a retry (e.g. the document did not sign).
+    pub error: Option<String>,
 }
 
 /// The `generateCsr` dialog: where the new key files go.

@@ -6,7 +6,7 @@ use super::{
     EncryptedPrivateKeyInfo, MAX_ITERATIONS, MacData, Passwords, Pbes2Params, Pbkdf2Params, Pfx,
     Pkcs12Error, Pkcs12PbeParams, SafeBag,
 };
-use crate::key::{PrivateKey, key_id_bytes};
+use crate::key::{PrivateKey, key_id_bytes, spki_key_id_bytes};
 use crate::oid;
 use cbc::cipher::block_padding::Pkcs7;
 use cbc::cipher::{BlockCipherEncrypt, BlockModeEncrypt, InnerIvInit, KeyInit, KeyIvInit};
@@ -76,8 +76,9 @@ impl Drop for WriteEntry {
 /// attributes); and an HMAC-SHA1 MAC. Key bags and their certificate bags carry
 /// `friendlyName` = alias and `localKeyId` = the key identifier (SHA-1 of the
 /// `subjectPublicKey` BIT STRING contents) of the certificate, or of the key itself when the
-/// entry has no certificate (Kalkan writes the hex-decoded alias there, which is the same
-/// for the keys it generates). Salts (20 bytes) and IVs come from `fill_random`, so the
+/// entry has no certificate (Kalkan writes the hex-decoded alias there: the same for the keys
+/// its provider generates, and written so for the legacy Applet's keys, whose alias is
+/// their SHA-1 of the whole `SubjectPublicKeyInfo`). Salts (20 bytes) and IVs come from `fill_random`, so the
 /// output is a function of the inputs and of `fill_random`.
 ///
 /// # Errors
@@ -202,18 +203,25 @@ fn cert_bag(cert_der: &[u8], attributes: Option<Any>) -> SafeBag {
     }
 }
 
-/// `localKeyId`: the key identifier of the certificate's public key, else of the key's.
+/// `localKeyId`: the key identifier of the certificate's public key; for an entry without
+/// a certificate the hex-decoded alias when it is the legacy Applet's identifier of the key
+/// (SHA-1 of the whole `SubjectPublicKeyInfo`), as Kalkan writes the alias there, else the
+/// key's key identifier.
 fn local_key_id(entry: &WriteEntry) -> Result<Vec<u8>, Pkcs12Error> {
     let spki = match &entry.cert_der {
-        Some(cert_der) => Certificate::from_der(cert_der)?
-            .tbs_certificate()
-            .subject_public_key_info()
-            .clone(),
+        Some(cert_der) => {
+            let cert = Certificate::from_der(cert_der)?;
+            return Ok(key_id_bytes(cert.tbs_certificate().subject_public_key_info()).to_vec());
+        }
         None => PrivateKey::from_pkcs8_der(&entry.pkcs8_der, None)
             .map_err(super::read::key_error)?
             .public_key()
             .to_spki(),
     };
+    let applet_id = spki_key_id_bytes(&spki);
+    if entry.alias == super::hex(&applet_id) {
+        return Ok(applet_id.to_vec());
+    }
     Ok(key_id_bytes(&spki).to_vec())
 }
 

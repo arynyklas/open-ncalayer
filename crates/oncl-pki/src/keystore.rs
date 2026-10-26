@@ -13,18 +13,25 @@ use crate::csr::KeyStoreInfo;
 use crate::fsutil::{Access, write_atomically};
 use crate::info::cert_info;
 use crate::key::{PrivateKey, PublicKey};
-use crate::keygen::{KeySpec, key_id};
+use crate::keygen::{KeySpec, applet_key_id, key_id};
 use crate::oid;
 use crate::pkcs12::{self, Contents, Pkcs12Error, WriteEntry, WriteOptions};
 use der::Encode;
 use der::asn1::ObjectIdentifier;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use x509_cert::ext::pkix::SubjectKeyIdentifier;
 
 /// Prefix of the file name an authentication certificate gives its key file.
 const AUTH_PREFIX: &str = "AUTH_";
+/// Largest key file read (as the modules' other page-named files).
+pub const MAX_KEY_FILE: u64 = 64 << 20;
+/// Entries of a folder looked at when searching it for a key file.
+pub const MAX_DIR_ENTRIES: usize = 4096;
+/// Key files of a folder tried when searching it for a key (each costs a key derivation).
+pub const MAX_KEY_FILES: usize = 64;
 
 /// Error of a key file operation. [`KeystoreError::provider_code`] is the original's
 /// `ProviderUtilExceptionCode`, where the original raises one; the `Display` text is the
@@ -132,9 +139,9 @@ fn malformed(e: impl std::fmt::Display) -> KeystoreError {
 }
 
 /// Writes `key` alone (no certificate) into `<dir>/<PREFIX><keyId>.p12` with the Kalkan
-/// profile, `friendlyName` = `localKeyId` = the key identifier, encrypted with `password`.
-/// The prefix follows `spec`: `GOST512_`, `GOSTKNCA_`, `RSA256_` or `RSA_`. An existing
-/// file of that name (the same key) is replaced.
+/// profile, `friendlyName` = `localKeyId` = the key identifier ([`key_id`]), encrypted with
+/// `password`. The prefix follows `spec`: `GOST512_`, `GOSTKNCA_`, `RSA256_` or `RSA_`. An
+/// existing file of that name (the same key) is replaced.
 ///
 /// # Errors
 ///
@@ -150,13 +157,44 @@ pub fn create_key_file(
     spec: KeySpec,
     password: &str,
 ) -> Result<PathBuf, KeystoreError> {
+    create_key_file_as(dir, key, spec, password, &key_id(&key.public_key()))
+}
+
+/// [`create_key_file`] with the legacy Applet's key identifier ([`applet_key_id`]) as the
+/// alias, `localKeyId` and file name, as the Applet's `genKeyPairAndGetPKCS10` writes its
+/// keys.
+///
+/// # Errors
+///
+/// As [`create_key_file`].
+///
+/// # Panics
+///
+/// If the operating system RNG fails.
+pub fn create_applet_key_file(
+    dir: &Path,
+    key: &PrivateKey,
+    spec: KeySpec,
+    password: &str,
+) -> Result<PathBuf, KeystoreError> {
+    create_key_file_as(dir, key, spec, password, &applet_key_id(&key.public_key()))
+}
+
+/// Writes `key` alone into `<dir>/<PREFIX><alias>.p12`; `alias` is one of the key's
+/// identifiers, which the reader matches the key against.
+fn create_key_file_as(
+    dir: &Path,
+    key: &PrivateKey,
+    spec: KeySpec,
+    password: &str,
+    alias: &str,
+) -> Result<PathBuf, KeystoreError> {
     if spec.sig_alg().key_alg() != key.alg() {
         return Err(KeystoreError::UnknownAlgorithm);
     }
-    let alias = key_id(&key.public_key());
     let path = dir.join(format!("{}{alias}.p12", spec.file_prefix()));
     let entry = WriteEntry {
-        alias,
+        alias: alias.to_owned(),
         pkcs8_der: std::mem::take(&mut *key.to_pkcs8_der()),
         cert_der: None,
     };
@@ -169,8 +207,9 @@ pub fn create_key_file(
 /// 1. the alias is the certificate's SubjectKeyIdentifier (hex);
 /// 2. a KeyStoreInfo extension naming another storage than `storage_oid` is refused;
 /// 3. the key file is the first regular `*.p12` / `*.jks` file of the directory `dir_or_file`
-///    (by name) that opens as PKCS#12 with `password` and holds a key under the alias, or
-///    `dir_or_file` itself when it is a file;
+///    (by name; within [`MAX_DIR_ENTRIES`], [`MAX_KEY_FILES`] and [`MAX_KEY_FILE`]) that
+///    opens as PKCS#12 with `password` and holds a key under the alias, or `dir_or_file`
+///    itself when it is a file;
 /// 4. the key must be the certificate's key (Kalkan pairs by alias alone);
 /// 5. the file is rewritten with the certificate, then renamed `AUTH_<name>` when the
 ///    certificate is an authentication certificate whose signature algorithm is not
@@ -194,23 +233,7 @@ pub fn install_certificate(
     cert: &Certificate,
     storage_oid: &ObjectIdentifier,
 ) -> Result<PathBuf, KeystoreError> {
-    let alias = match cert
-        .tbs_certificate()
-        .get_extension::<SubjectKeyIdentifier>()
-    {
-        Ok(Some((_, ski))) => pkcs12::hex(ski.0.as_bytes()),
-        Ok(None) => return Err(KeystoreError::ExtensionNotFound),
-        Err(e) => return Err(malformed(format!("SubjectKeyIdentifier: {e}"))),
-    };
-    if let Some(info) = KeyStoreInfo::of_certificate(cert)?
-        && info.storage_oid != *storage_oid
-    {
-        return Err(KeystoreError::UnsuitedStorage);
-    }
-    if *storage_oid != oid::STORAGE_PKCS12 {
-        return Err(KeystoreError::UnsupportedStorage);
-    }
-
+    let alias = certificate_alias(cert, storage_oid)?;
     let (path, contents) = find_key_file(dir_or_file, password, &alias)?;
     let public = PublicKey::from_spki(cert.tbs_certificate().subject_public_key_info())
         .map_err(|_| KeystoreError::InappropriateCert)?;
@@ -240,6 +263,36 @@ pub fn install_certificate(
     Ok(renamed)
 }
 
+/// Steps 1 and 2 of [`install_certificate`], which touch no file: the alias of `cert`'s
+/// key, if `cert` may be installed into the storage `storage_oid` (PKCS#12 only).
+///
+/// # Errors
+///
+/// [`KeystoreError::ExtensionNotFound`], [`KeystoreError::Malformed`],
+/// [`KeystoreError::UnsuitedStorage`], [`KeystoreError::UnsupportedStorage`].
+pub fn certificate_alias(
+    cert: &Certificate,
+    storage_oid: &ObjectIdentifier,
+) -> Result<String, KeystoreError> {
+    let alias = match cert
+        .tbs_certificate()
+        .get_extension::<SubjectKeyIdentifier>()
+    {
+        Ok(Some((_, ski))) => pkcs12::hex(ski.0.as_bytes()),
+        Ok(None) => return Err(KeystoreError::ExtensionNotFound),
+        Err(e) => return Err(malformed(format!("SubjectKeyIdentifier: {e}"))),
+    };
+    if let Some(info) = KeyStoreInfo::of_certificate(cert)?
+        && info.storage_oid != *storage_oid
+    {
+        return Err(KeystoreError::UnsuitedStorage);
+    }
+    if *storage_oid != oid::STORAGE_PKCS12 {
+        return Err(KeystoreError::UnsupportedStorage);
+    }
+    Ok(alias)
+}
+
 /// Re-encrypts the key file `file` from `old` to `new`, as the original's `changePassword`
 /// does for PKCS#12: the new password is checked against the pattern first (see
 /// [`check_password_pattern`]), then the file must open with `old` and hold a key. Keys
@@ -256,8 +309,28 @@ pub fn install_certificate(
 /// If the operating system RNG fails.
 pub fn change_password(file: &Path, old: &str, new: &str) -> Result<(), KeystoreError> {
     check_password_pattern(new)?;
-    let bytes = fs::read(file).map_err(|e| io_error(file, &e))?;
-    let contents = pkcs12::load_contents(&bytes, old)?;
+    let bytes = read_capped(file)?;
+    change_password_data(file, &bytes, old, new)
+}
+
+/// [`change_password`] of the key file `file` whose contents the caller has read as
+/// `bytes`: the file is not read again, only replaced.
+///
+/// # Errors
+///
+/// As [`change_password`].
+///
+/// # Panics
+///
+/// If the operating system RNG fails.
+pub fn change_password_data(
+    file: &Path,
+    bytes: &[u8],
+    old: &str,
+    new: &str,
+) -> Result<(), KeystoreError> {
+    check_password_pattern(new)?;
+    let contents = pkcs12::load_contents(bytes, old)?;
     if contents.keys.is_empty() {
         return Err(KeystoreError::ChangePasswordConstraint);
     }
@@ -286,7 +359,10 @@ pub fn check_password_pattern(password: &str) -> Result<(), KeystoreError> {
     }
 }
 
-/// The key file holding a key under `alias`, opened.
+/// The key file holding a key under `alias`, opened. A folder is searched within bounds,
+/// since a page may name it: at most [`MAX_DIR_ENTRIES`] entries are looked at and at most
+/// [`MAX_KEY_FILES`] candidates tried; only regular files of at most [`MAX_KEY_FILE`] bytes
+/// are read.
 fn find_key_file(
     dir_or_file: &Path,
     password: &str,
@@ -295,6 +371,7 @@ fn find_key_file(
     let candidates = if dir_or_file.is_dir() {
         let mut files: Vec<PathBuf> = fs::read_dir(dir_or_file)
             .map_err(|e| io_error(dir_or_file, &e))?
+            .take(MAX_DIR_ENTRIES)
             .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|path| {
                 path.extension()
@@ -303,17 +380,16 @@ fn find_key_file(
                         ext.eq_ignore_ascii_case("p12") || ext.eq_ignore_ascii_case("jks")
                     })
             })
-            // Only regular files are read: a FIFO named `*.p12` would block the read.
-            .filter(|path| path.is_file())
             .collect();
         files.sort();
+        files.truncate(MAX_KEY_FILES);
         files
     } else {
         vec![dir_or_file.to_path_buf()]
     };
     for path in candidates {
         // As the original: a file that does not open with the password is skipped.
-        let Ok(bytes) = fs::read(&path) else {
+        let Ok(bytes) = read_capped(&path) else {
             continue;
         };
         let Ok(contents) = pkcs12::load_contents(&bytes, password) else {
@@ -327,6 +403,27 @@ fn find_key_file(
         "По указанному пути \"{}\" отсутствует файл, предназначенный для хранения ключей с алиасом - {alias}.",
         dir_or_file.display()
     )))
+}
+
+/// The contents of the key file `path`: a regular file (a FIFO named `*.p12` would block
+/// the read) of at most [`MAX_KEY_FILE`] bytes.
+fn read_capped(path: &Path) -> Result<Vec<u8>, KeystoreError> {
+    let meta = fs::metadata(path).map_err(|e| io_error(path, &e))?;
+    let too_large = || KeystoreError::Io(format!("{}: over {MAX_KEY_FILE} bytes", path.display()));
+    if !meta.is_file() {
+        return Err(KeystoreError::Io(format!("{}: not a file", path.display())));
+    }
+    if meta.len() > MAX_KEY_FILE {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .and_then(|f| f.take(MAX_KEY_FILE + 1).read_to_end(&mut bytes))
+        .map_err(|e| io_error(path, &e))?;
+    if bytes.len() as u64 > MAX_KEY_FILE {
+        return Err(too_large());
+    }
+    Ok(bytes)
 }
 
 /// Writes `contents` back to `path` with `password`; `install` puts a certificate on the
