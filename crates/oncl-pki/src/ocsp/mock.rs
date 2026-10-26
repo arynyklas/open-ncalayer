@@ -5,13 +5,11 @@ use super::asn1::{
     RevokedInfo, SingleResponse,
 };
 use super::{CertStatus, OCSP_RESPONSE, key_hash};
-use crate::http::{GetOptions, HttpError, HttpReply, HttpTransport};
+use crate::asn1util::{RawGeneralizedTime, format_generalized_time, unsigned};
+use crate::http::{GetOptions, HttpError, HttpReply, HttpTransport, percent_decode, text_reply};
 use crate::key::{KeyAlg, PrivateKey, SigAlg};
 use crate::oid;
 use crate::pkcs12::KeyEntry;
-use crate::tsp::asn1::RawGeneralizedTime;
-use crate::tsp::mock::{percent_decode, text_reply};
-use crate::tsp::unsigned;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::asn1::{AnyRef, BitStringRef, IntRef, OctetStringRef};
@@ -24,25 +22,41 @@ use std::thread;
 use std::time::Duration;
 use time::OffsetDateTime;
 
-/// How [`MockOcsp`] spoils its answer. Every variant but `None` and `ByKeyResponderId`
-/// makes `ocsp::check` fail.
+/// A second RSA key for [`OcspTamper::WrongKey`] with an RSA responder: the synthetic
+/// OpenSSL key of `fixtures/openssl`, which no responder fixture uses.
+const OTHER_RSA_KEY: &[u8] = include_bytes!("../../../../fixtures/openssl/rsa.pk8.der");
+
+/// How [`MockOcsp`] spoils its answer.
+///
+/// `None` and `ByKeyResponderId` give a valid answer; so do `Hang` no longer than the
+/// request timeout, `NoNextUpdate` younger than `ocsp::ALLOWED_PERIOD` and
+/// `ThisUpdateAhead` within `ocsp::CLOCK_SKEW`. Every other variant makes `ocsp::check`
+/// fail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OcspTamper {
     /// A correct answer, the responder identified by name.
     None,
-    /// The response is signed with another key than the responder certificate's (GOST
-    /// responders only).
+    /// The response is signed with another key of the responder's algorithm than the
+    /// responder certificate's.
     WrongKey,
     /// The response carries no certificates.
     NoCerts,
     /// A correct answer, the responder identified by the SHA-1 of its key.
     ByKeyResponderId,
+    /// The responder is identified by the name of its issuer, which no certificate of the
+    /// response has as its subject.
+    OtherResponderId,
     /// The `CertID` of the answer has another serial number (its lowest bit flipped).
     OtherCertId,
+    /// The `ResponseData` has no `SingleResponse`.
+    NoSingleResponse,
     /// thisUpdate two hours ago, nextUpdate an hour ago.
     Stale,
     /// thisUpdate in an hour, nextUpdate in two.
     FutureThisUpdate,
+    /// thisUpdate this far ahead of now, nextUpdate an hour after it: a responder whose
+    /// clock runs ahead.
+    ThisUpdateAhead(Duration),
     /// thisUpdate `age` ago, no nextUpdate.
     NoNextUpdate {
         /// Age of thisUpdate.
@@ -140,15 +154,17 @@ impl MockOcsp {
         let (this_update, next_update) = match self.tamper {
             OcspTamper::Stale => (now - 2 * hour, Some(now - hour)),
             OcspTamper::FutureThisUpdate => (now + hour, Some(now + 2 * hour)),
+            OcspTamper::ThisUpdateAhead(ahead) => (now + ahead, Some(now + ahead + hour)),
             OcspTamper::NoNextUpdate { age } => (now - age, None),
             _ => (now - time::Duration::MINUTE, Some(now + hour)),
         };
-        let (produced_at, this_update) = (generalized_time(now), generalized_time(this_update));
-        let next_update = next_update.map(generalized_time);
+        let produced_at = format_generalized_time(now);
+        let this_update = format_generalized_time(this_update);
+        let next_update = next_update.map(format_generalized_time);
 
         let revoked_info = match status {
             CertStatus::Revoked { time, reason } => RevokedInfo {
-                revocation_time: RawGeneralizedTime(generalized_time(time).as_bytes()),
+                revocation_time: RawGeneralizedTime(format_generalized_time(time).as_bytes()),
                 revocation_reason: reason.map(Enumerated),
             }
             .to_der()
@@ -166,20 +182,20 @@ impl MockOcsp {
         .map_err(der_error)?;
 
         let cert = &self.responder.cert;
-        let responder_id = if self.tamper == OcspTamper::ByKeyResponderId {
-            let hash = key_hash(cert);
-            (2, OctetStringRef::new(&hash).and_then(|h| h.to_der()))
-        } else {
-            (1, cert.tbs_certificate().subject().to_der())
+        let (responder_tag, responder_id) = match self.tamper {
+            OcspTamper::ByKeyResponderId => {
+                let hash = key_hash(cert);
+                (2, OctetStringRef::new(&hash).and_then(|h| h.to_der()))
+            }
+            OcspTamper::OtherResponderId => (1, cert.tbs_certificate().issuer().to_der()),
+            _ => (1, cert.tbs_certificate().subject().to_der()),
         };
-        let responder_id = (responder_id.0, responder_id.1.map_err(der_error)?);
+        let responder_id = responder_id.map_err(der_error)?;
 
-        let tbs = ResponseData {
-            version: None,
-            responder_id: AnyRef::new(context(true, responder_id.0), &responder_id.1)
-                .map_err(der_error)?,
-            produced_at: RawGeneralizedTime(produced_at.as_bytes()),
-            responses: vec![SingleResponse {
+        let responses = if self.tamper == OcspTamper::NoSingleResponse {
+            Vec::new()
+        } else {
+            vec![SingleResponse {
                 cert_id,
                 cert_status,
                 this_update: RawGeneralizedTime(this_update.as_bytes()),
@@ -187,7 +203,14 @@ impl MockOcsp {
                     .as_deref()
                     .map(|t| RawGeneralizedTime(t.as_bytes())),
                 single_extensions: None,
-            }],
+            }]
+        };
+        let tbs = ResponseData {
+            version: None,
+            responder_id: AnyRef::new(context(true, responder_tag), &responder_id)
+                .map_err(der_error)?,
+            produced_at: RawGeneralizedTime(produced_at.as_bytes()),
+            responses,
             response_extensions: None,
         }
         .to_der()
@@ -281,19 +304,6 @@ fn context(constructed: bool, number: u32) -> Tag {
     }
 }
 
-/// `YYYYMMDDhhmmssZ`.
-fn generalized_time(time: OffsetDateTime) -> String {
-    format!(
-        "{:04}{:02}{:02}{:02}{:02}{:02}Z",
-        time.year(),
-        u8::from(time.month()),
-        time.day(),
-        time.hour(),
-        time.minute(),
-        time.second()
-    )
-}
-
 /// The signature algorithm of a key, as `testing::issue_cert` picks it.
 fn signature_alg(alg: KeyAlg) -> SigAlg {
     match alg {
@@ -303,17 +313,28 @@ fn signature_alg(alg: KeyAlg) -> SigAlg {
     }
 }
 
-/// A fixed GOST key on the curve of `key` that is not `key`.
+/// A fixed key of `key`'s algorithm that is not `key`: the scalar 7 on the same GOST curve,
+/// or [`OTHER_RSA_KEY`].
+///
+/// # Panics
+///
+/// If `key` is that fixed key.
 fn another_key(key: &PrivateKey) -> PrivateKey {
-    let PrivateKey::Gost(key) = key else {
-        panic!("OcspTamper::WrongKey needs a GOST responder");
+    let other = match key {
+        PrivateKey::Gost(key) => PrivateKey::Gost(
+            SigningKey::from_scalar_be(key.curve(), &[7]).expect("7 is a valid scalar"),
+        ),
+        PrivateKey::Rsa(_) => {
+            PrivateKey::from_pkcs8_der(OTHER_RSA_KEY, None).expect("fixture RSA key parses")
+        }
     };
-    let other = SigningKey::from_scalar_be(key.curve(), &[7]).expect("7 is a valid scalar");
-    assert!(
-        other.verifying_key() != key.verifying_key(),
-        "the responder key is the fixed key"
-    );
-    PrivateKey::Gost(other)
+    let same = match (key, &other) {
+        (PrivateKey::Gost(a), PrivateKey::Gost(b)) => a.verifying_key() == b.verifying_key(),
+        (PrivateKey::Rsa(a), PrivateKey::Rsa(b)) => a.public().as_ref() == b.public().as_ref(),
+        _ => false,
+    };
+    assert!(!same, "the responder key is the fixed other key");
+    other
 }
 
 /// Unsigned big-endian bytes of hex digits, without leading zeros.
@@ -338,11 +359,32 @@ fn serial_from_hex(hex: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key::PublicKey;
+    use crate::pkcs12::load;
+    use oncl_testkit::{read, synthetic};
 
     #[test]
     fn serial_hex_parsing() {
         assert_eq!(serial_from_hex("00aB01"), [0xab, 0x01]);
         assert_eq!(serial_from_hex("abc"), [0x0a, 0xbc]);
         assert_eq!(serial_from_hex("0"), [] as [u8; 0]);
+    }
+
+    #[test]
+    fn another_key_has_the_algorithm_but_not_the_key() {
+        for name in ["user-gost2015-sign", "user-gost2004-sign", "user-rsa-sign"] {
+            let fixture = synthetic(name);
+            let entry = load(&read(&fixture.path), &fixture.password)
+                .unwrap()
+                .remove(0);
+            let other = another_key(&entry.key);
+            assert_eq!(other.alg(), entry.key.alg(), "{name}");
+            let alg = signature_alg(entry.key.alg());
+            let signature = other.sign(alg, b"tbs").unwrap();
+            let public =
+                PublicKey::from_spki(entry.cert.tbs_certificate().subject_public_key_info())
+                    .unwrap();
+            assert!(public.verify(alg, b"tbs", &signature).is_err(), "{name}");
+        }
     }
 }

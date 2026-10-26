@@ -2,7 +2,7 @@
 //! decoded strictly (DER), after `ber::to_der` normalization. CHOICEs (`ResponderID`,
 //! `CertStatus`) stay [`AnyRef`] and are told apart by their tag in `ocsp`.
 
-use crate::tsp::asn1::{RawGeneralizedTime, RawSequence};
+use crate::asn1util::{RawGeneralizedTime, RawSequence};
 use der::asn1::{AnyRef, BitStringRef, IntRef, ObjectIdentifier, OctetStringRef};
 use der::{
     DecodeValue, EncodeValue, ErrorKind, FixedTag, Header, Length, Reader, Sequence, Tag, Writer,

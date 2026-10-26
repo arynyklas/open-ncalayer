@@ -12,27 +12,27 @@
 //!   certificate chain is not checked.
 //! - The token goes into the signer's unsigned attributes as id-aa-timeStampToken.
 
-pub(crate) mod asn1;
+mod asn1;
 #[cfg(feature = "testing")]
-pub(crate) mod mock;
+mod mock;
 
 #[cfg(feature = "testing")]
 pub use mock::{MockTamper, MockTsa};
 
+use crate::asn1util::{generalized_time, unsigned};
 use crate::ber::{self, BerError};
 use crate::cms::asn1::{
     Attribute, ContentInfo, RawSet, SignedContentInfo, SignedData, SignerInfo, der_set_contents,
 };
 use crate::cms::{self, CmsError};
-use crate::http::{HttpError, HttpTransport};
+use crate::http::{HttpError, HttpTransport, nca_get_url};
 use crate::info::cert_info;
 use crate::key::SigAlg;
-use crate::ocsp::get_url;
 use crate::oid;
 use der::asn1::{AnyRef, ObjectIdentifier, OctetStringRef, UintRef};
 use der::{Decode, Encode};
 use spki::AlgorithmIdentifierRef;
-use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
+use time::OffsetDateTime;
 
 /// Policy `kz.gov.pki.knca.basics` asks the NCA TSA for.
 const BASICS_POLICY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.398.3.3.2.6.4");
@@ -357,7 +357,7 @@ pub fn timestamp_signer(
     getrandom::fill(&mut nonce).expect("operating system RNG failed");
     let request = request_der(profile, &imprint, &nonce);
     let reply = match profile.method {
-        TsaMethod::Get => http.get(&get_url(&profile.url, &request))?,
+        TsaMethod::Get => http.get(&nca_get_url(&profile.url, &request))?,
         TsaMethod::Post => http.post(&profile.url, TIMESTAMP_QUERY, &request)?,
     };
     if reply.status != 200 {
@@ -449,45 +449,9 @@ fn tst_info(der: &[u8]) -> Result<TstInfo, TspError> {
         imprint_alg: tst.message_imprint.hash_algorithm.oid,
         imprint: tst.message_imprint.hashed_message.as_bytes().to_vec(),
         nonce: tst.nonce.map(|n| unsigned(n.as_bytes()).to_vec()),
-        gen_time: gen_time(tst.gen_time.0)?,
+        gen_time: generalized_time(tst.gen_time.0)
+            .map_err(|e| TspError::Malformed(format!("genTime: {e}")))?,
     })
-}
-
-/// An unsigned big-endian number without leading zeros (zero is empty).
-pub(crate) fn unsigned(mut bytes: &[u8]) -> &[u8] {
-    while let [0, rest @ ..] = bytes {
-        bytes = rest;
-    }
-    bytes
-}
-
-/// genTime: `YYYYMMDDhhmmss[.f…]Z` (RFC 3161 §2.4.2), fractions down to nanoseconds. OCSP
-/// times (RFC 6960) are read with it too.
-pub(crate) fn gen_time(value: &[u8]) -> Result<OffsetDateTime, TspError> {
-    let bad = || TspError::Malformed(format!("genTime {:?}", String::from_utf8_lossy(value)));
-    let Some((&b'Z', body)) = value.split_last() else {
-        return Err(bad());
-    };
-    let (whole, fraction) = match body.iter().position(|&b| b == b'.') {
-        Some(dot) => (&body[..dot], Some(&body[dot + 1..])),
-        None => (body, None),
-    };
-    let digits = |s: &[u8]| !s.is_empty() && s.iter().all(u8::is_ascii_digit);
-    if whole.len() != 14 || !digits(whole) || fraction.is_some_and(|f| !digits(f)) {
-        return Err(bad());
-    }
-    let number = |s: &[u8]| s.iter().fold(0u32, |n, d| n * 10 + u32::from(d - b'0'));
-    let two = |at: usize| u8::try_from(number(&whole[at..at + 2])).map_err(|_| bad());
-    let year = i32::try_from(number(&whole[..4])).map_err(|_| bad())?;
-    let month = Month::try_from(two(4)?).map_err(|_| bad())?;
-    let date = Date::from_calendar_date(year, month, two(6)?).map_err(|_| bad())?;
-    // The first nine fraction digits, padded: nanoseconds.
-    let nanos = (0..9).fold(0u32, |n, i| {
-        let digit = fraction.and_then(|f| f.get(i)).map_or(0, |d| d - b'0');
-        n * 10 + u32::from(digit)
-    });
-    let time = Time::from_hms_nano(two(8)?, two(10)?, two(12)?, nanos).map_err(|_| bad())?;
-    Ok(PrimitiveDateTime::new(date, time).assume_utc())
 }
 
 #[cfg(test)]
@@ -557,47 +521,5 @@ mod tests {
             check_answers(&other_policy, &p, &imprint, &[1]),
             Err(TspError::PolicyMismatch)
         );
-    }
-
-    #[test]
-    fn gen_time_formats() {
-        assert_eq!(
-            gen_time(b"20220918132014Z"),
-            Ok(datetime!(2022-09-18 13:20:14 UTC))
-        );
-        assert_eq!(
-            gen_time(b"20220918132014.5Z"),
-            Ok(datetime!(2022-09-18 13:20:14.5 UTC))
-        );
-        assert_eq!(
-            gen_time(b"20220918132014.1234567891Z"),
-            Ok(datetime!(2022-09-18 13:20:14.123456789 UTC))
-        );
-        for bad in [
-            &b""[..],
-            b"Z",
-            b"20220918132014",
-            b"2022091813201Z",
-            b"20220918132014.Z",
-            b"20220918132014.x5Z",
-            b"2022091813201aZ",
-            b"20221318132014Z",
-            b"20220918250000Z",
-            b"20220918132060Z",
-            b"20220918132014+0600",
-        ] {
-            assert!(
-                matches!(gen_time(bad), Err(TspError::Malformed(_))),
-                "{:?}",
-                String::from_utf8_lossy(bad)
-            );
-        }
-    }
-
-    #[test]
-    fn unsigned_strips_leading_zeros() {
-        assert_eq!(unsigned(&[0, 0, 1, 0]), [1, 0]);
-        assert_eq!(unsigned(&[0, 0]), [] as [u8; 0]);
-        assert_eq!(unsigned(&[]), [] as [u8; 0]);
     }
 }

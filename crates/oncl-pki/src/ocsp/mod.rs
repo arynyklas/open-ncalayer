@@ -12,8 +12,12 @@
 //!   ResponderID (byName, or byKey, which the original does not support); the responder
 //!   chains through the CA set and has the OCSPSigning extended key usage and
 //!   id-pkix-ocsp-nocheck; the signature verifies with its key; the first `SingleResponse`
-//!   is current (`thisUpdate < now < nextUpdate`, or `now < thisUpdate + ALLOWED_PERIOD`
-//!   without nextUpdate) and answers the requested `CertID`.
+//!   is current and answers the requested `CertID`.
+//! - Current means `thisUpdate ≤ now + CLOCK_SKEW` and then `now < nextUpdate`, or, without
+//!   nextUpdate, `now < thisUpdate + ALLOWED_PERIOD`. The NCA responders stamp thisUpdate
+//!   with their own clock at the moment they answer and send no nextUpdate, so a strict
+//!   `thisUpdate < now` would fail for any client a second behind them (or whose request
+//!   crosses a second boundary); [`CLOCK_SKEW`] absorbs that.
 //! - Every failure is an [`OcspError`], never a [`CertStatus`]: callers decide what an
 //!   unchecked certificate means.
 
@@ -24,20 +28,21 @@ mod mock;
 #[cfg(feature = "testing")]
 pub use mock::{MockOcsp, OcspTamper};
 
+/// URL of the NCA GET binding: [`crate::http::nca_get_url`], which OCSP shares with
+/// time-stamping.
+pub use crate::http::nca_get_url as get_url;
+
+use crate::asn1util::{TimeError, generalized_time};
 use crate::ber::{self, BerError};
 use crate::cert::Certificate;
 use crate::http::{GetOptions, HttpTransport, MAX_RESPONSE_LEN};
 use crate::key::{PublicKey, SigAlg};
 use crate::oid;
-use crate::pkix::{CaSet, build_path};
-use crate::tsp::asn1::RawGeneralizedTime;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use crate::pkix::{CaSet, PathError, build_path};
 use der::asn1::{AnyRef, IntRef, OctetStringRef};
 use der::{Decode, Encode, Tag, TagNumber};
 use sha1::{Digest, Sha1};
 use spki::AlgorithmIdentifierRef;
-use std::fmt::Write;
 use std::time::Duration;
 use time::OffsetDateTime;
 use x509_cert::ext::pkix::name::GeneralName;
@@ -49,6 +54,10 @@ pub const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a response without nextUpdate stays current after its thisUpdate.
 pub const ALLOWED_PERIOD: Duration = Duration::from_secs(300);
+
+/// How far a response's thisUpdate may be ahead of `now`: the responder's clock may run
+/// ahead of ours, and it stamps the moment it answers.
+pub const CLOCK_SKEW: Duration = Duration::from_secs(300);
 
 /// Media type of an `OCSPResponse` (RFC 6960 appendix C.2).
 const OCSP_RESPONSE: &str = "application/ocsp-response";
@@ -84,9 +93,9 @@ pub enum OcspError {
     /// The responder answered with a content type other than `application/ocsp-response`.
     #[error("OCSP responder answered with content type {0:?}")]
     ContentType(Option<String>),
-    /// The response is not a valid `OCSPResponse` with a `BasicOCSPResponse`.
-    #[error("malformed OCSP response")]
-    Malformed,
+    /// The response is not a valid `OCSPResponse` with a `BasicOCSPResponse`: what is wrong.
+    #[error("malformed OCSP response: {0}")]
+    Malformed(String),
     /// The `OCSPResponseStatus` is not successful (0).
     #[error("OCSP response status {0}")]
     NotSuccessful(u8),
@@ -96,21 +105,26 @@ pub enum OcspError {
     /// No certificate of the response matches its ResponderID.
     #[error("OCSP responder certificate not found")]
     ResponderNotFound,
-    /// The responder certificate does not chain through the CA set or lacks the OCSPSigning
-    /// extended key usage.
-    #[error("OCSP responder certificate is not trusted")]
-    ResponderNotTrusted,
+    /// The responder certificate does not chain through the CA set at `now`.
+    #[error("OCSP responder certificate is not trusted: {0}")]
+    ResponderNotTrusted(PathError),
+    /// The responder certificate lacks the OCSPSigning extended key usage.
+    #[error("OCSP responder certificate lacks the OCSPSigning extended key usage")]
+    OcspSigningMissing,
     /// The responder certificate lacks id-pkix-ocsp-nocheck.
     #[error("OCSP responder certificate lacks id-pkix-ocsp-nocheck")]
     NoCheckMissing,
-    /// The response signature does not verify with the responder key.
-    #[error("OCSP response signature does not verify")]
-    BadSignature,
+    /// The response signature does not verify with the responder key: why.
+    #[error("OCSP response signature does not verify: {0}")]
+    BadSignature(String),
     /// The response has no `SingleResponse`.
     #[error("OCSP response has no single response")]
     NoSingleResponse,
-    /// thisUpdate is not before now.
-    #[error("OCSP response thisUpdate is in the future")]
+    /// thisUpdate is later than now + [`CLOCK_SKEW`].
+    #[error(
+        "OCSP response thisUpdate is more than {} s in the future",
+        CLOCK_SKEW.as_secs()
+    )]
     ThisUpdate,
     /// now is not before nextUpdate (or, without nextUpdate, thisUpdate + ALLOWED_PERIOD).
     #[error("OCSP response is outdated")]
@@ -121,14 +135,20 @@ pub enum OcspError {
 }
 
 impl From<der::Error> for OcspError {
-    fn from(_: der::Error) -> Self {
-        OcspError::Malformed
+    fn from(e: der::Error) -> Self {
+        OcspError::Malformed(e.to_string())
     }
 }
 
 impl From<BerError> for OcspError {
-    fn from(_: BerError) -> Self {
-        OcspError::Malformed
+    fn from(e: BerError) -> Self {
+        OcspError::Malformed(e.to_string())
+    }
+}
+
+impl From<TimeError> for OcspError {
+    fn from(e: TimeError) -> Self {
+        OcspError::Malformed(e.to_string())
     }
 }
 
@@ -159,26 +179,6 @@ pub fn ocsp_url(cert: &Certificate) -> Option<String> {
 /// If the issuer's subject does not re-encode (it was decoded, so it does).
 pub fn request_der(cert: &Certificate, issuer: &Certificate) -> Vec<u8> {
     RequestedId::new(cert, issuer).request_der()
-}
-
-/// URL of the NCA GET binding (OCSP and time-stamping): `base`, a `/` unless `base` already
-/// ends with one, and the base64 of the DER `request` percent-encoded like
-/// `java.net.URLEncoder` (`+` → `%2B`, `/` → `%2F`, `=` → `%3D`).
-pub fn get_url(base: &str, request: &[u8]) -> String {
-    let encoded = STANDARD.encode(request);
-    let base = base.strip_suffix('/').unwrap_or(base);
-    let mut url = String::with_capacity(base.len() + 1 + encoded.len() + encoded.len() / 8);
-    url.push_str(base);
-    url.push('/');
-    for b in encoded.bytes() {
-        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-            url.push(char::from(b));
-        } else {
-            // Writing to a `String` cannot fail.
-            let _ = write!(url, "%{b:02X}");
-        }
-    }
-    url
 }
 
 /// Asks the OCSP responder of `cert` (issued by `issuer`) for its status at `now`, through
@@ -304,9 +304,14 @@ fn read_response(
     if response.response_status.0 != 0 {
         return Err(OcspError::NotSuccessful(response.response_status.0));
     }
-    let bytes = response.response_bytes.ok_or(OcspError::Malformed)?;
+    let bytes = response
+        .response_bytes
+        .ok_or_else(|| OcspError::Malformed("successful response without responseBytes".into()))?;
     if bytes.response_type != oid::OCSP_BASIC {
-        return Err(OcspError::Malformed);
+        return Err(OcspError::Malformed(format!(
+            "response type {} is not id-pkix-ocsp-basic",
+            bytes.response_type
+        )));
     }
     let basic_der = ber::to_der(bytes.response.as_bytes())?;
     let basic = asn1::BasicOcspResponse::from_der(&basic_der)?;
@@ -323,21 +328,26 @@ fn read_response(
         .ok_or(OcspError::ResponderNotFound)?;
     check_responder(responder, cas, now)?;
 
-    let alg = SigAlg::from_signature_oid(&basic.signature_algorithm.oid)
-        .ok_or(OcspError::BadSignature)?;
+    let oid = basic.signature_algorithm.oid;
+    let alg = SigAlg::from_signature_oid(&oid)
+        .ok_or_else(|| OcspError::BadSignature(format!("unsupported signature algorithm {oid}")))?;
     let key = PublicKey::from_spki(responder.tbs_certificate().subject_public_key_info())
-        .map_err(|_| OcspError::BadSignature)?;
-    let signature = basic.signature.as_bytes().ok_or(OcspError::Malformed)?;
+        .map_err(|e| OcspError::BadSignature(format!("responder key: {e}")))?;
+    let signature = basic
+        .signature
+        .as_bytes()
+        .ok_or_else(|| OcspError::Malformed("signature BIT STRING has unused bits".into()))?;
     key.verify(alg, &basic.tbs_response_data.to_der()?, signature)
-        .map_err(|_| OcspError::BadSignature)?;
+        .map_err(|e| OcspError::BadSignature(e.to_string()))?;
 
     let single = data.responses.first().ok_or(OcspError::NoSingleResponse)?;
-    let this_update = time_of(single.this_update)?;
-    if this_update >= now {
+    let this_update = generalized_time(single.this_update.0)?;
+    if this_update > now + CLOCK_SKEW {
         return Err(OcspError::ThisUpdate);
     }
     let current = match single.next_update {
-        Some(next_update) => now < time_of(next_update)?,
+        Some(next_update) => now < generalized_time(next_update.0)?,
+        // A thisUpdate ahead of now (within the skew) is a negative age: current.
         None => now - this_update < ALLOWED_PERIOD,
     };
     if !current {
@@ -370,7 +380,7 @@ impl<'a> ResponderId<'a> {
             } => Ok(ResponderId::ByKey(
                 <&OctetStringRef>::from_der(any.value())?.as_bytes(),
             )),
-            _ => Err(OcspError::Malformed),
+            tag => Err(OcspError::Malformed(format!("ResponderID tag {tag}"))),
         }
     }
 
@@ -389,14 +399,14 @@ fn check_responder(
     cas: &CaSet,
     now: OffsetDateTime,
 ) -> Result<(), OcspError> {
-    build_path(responder, cas, now).map_err(|_| OcspError::ResponderNotTrusted)?;
+    build_path(responder, cas, now).map_err(OcspError::ResponderNotTrusted)?;
     let tbs = responder.tbs_certificate();
     let ocsp_signing = matches!(
         tbs.get_extension::<ExtendedKeyUsage>(),
         Ok(Some((_, eku))) if eku.0.contains(&oid::OCSP_SIGNING)
     );
     if !ocsp_signing {
-        return Err(OcspError::ResponderNotTrusted);
+        return Err(OcspError::OcspSigningMissing);
     }
     let no_check = tbs
         .extensions()
@@ -424,7 +434,7 @@ fn cert_status(any: AnyRef<'_>) -> Result<CertStatus, OcspError> {
             let info: asn1::RevokedInfo<'_> =
                 AnyRef::new(Tag::Sequence, any.value())?.decode_as()?;
             Ok(CertStatus::Revoked {
-                time: time_of(info.revocation_time)?,
+                time: generalized_time(info.revocation_time.0)?,
                 reason: info.revocation_reason.map(|r| r.0),
             })
         }
@@ -432,12 +442,8 @@ fn cert_status(any: AnyRef<'_>) -> Result<CertStatus, OcspError> {
             constructed: false,
             number: TagNumber(2),
         } if empty => Ok(CertStatus::Unknown),
-        _ => Err(OcspError::Malformed),
+        tag => Err(OcspError::Malformed(format!("CertStatus tag {tag}"))),
     }
-}
-
-fn time_of(time: RawGeneralizedTime<'_>) -> Result<OffsetDateTime, OcspError> {
-    crate::tsp::gen_time(time.0).map_err(|_| OcspError::Malformed)
 }
 
 #[cfg(test)]
@@ -451,5 +457,21 @@ mod tests {
         assert!(!is_ocsp_response(Some("application/ocsp-request")));
         assert!(!is_ocsp_response(Some("")));
         assert!(!is_ocsp_response(None));
+    }
+
+    #[test]
+    fn error_messages_keep_their_cause() {
+        assert_eq!(
+            OcspError::ResponderNotTrusted(PathError::IssuerNotFound).to_string(),
+            "OCSP responder certificate is not trusted: issuer certificate not found"
+        );
+        assert_eq!(
+            OcspError::ThisUpdate.to_string(),
+            "OCSP response thisUpdate is more than 300 s in the future"
+        );
+        assert_eq!(
+            OcspError::from(TimeError("x".to_owned())).to_string(),
+            "malformed OCSP response: invalid GeneralizedTime \"x\""
+        );
     }
 }

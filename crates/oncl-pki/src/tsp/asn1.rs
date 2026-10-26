@@ -1,52 +1,10 @@
 //! ASN.1 structures of RFC 3161. They borrow from the DER input; the TSA's answer is
 //! decoded strictly (DER), after `ber::to_der` normalization.
 
+use crate::asn1util::{RawGeneralizedTime, RawSequence};
+use der::Sequence;
 use der::asn1::{AnyRef, BitStringRef, IntRef, ObjectIdentifier, OctetStringRef, UintRef};
-use der::{DecodeValue, EncodeValue, FixedTag, Header, Length, Reader, Sequence, Tag, Writer};
 use spki::AlgorithmIdentifierRef;
-
-/// A value of a fixed tag kept as its raw contents.
-macro_rules! raw_value {
-    ($(#[$doc:meta])* $name:ident, $tag:expr) => {
-        $(#[$doc])*
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub(crate) struct $name<'a>(pub &'a [u8]);
-
-        impl<'a> DecodeValue<'a> for $name<'a> {
-            type Error = der::Error;
-
-            fn decode_value<R: Reader<'a>>(reader: &mut R, header: Header) -> der::Result<Self> {
-                reader.read_slice(header.length()).map($name)
-            }
-        }
-
-        impl EncodeValue for $name<'_> {
-            fn value_len(&self) -> der::Result<Length> {
-                Length::try_from(self.0.len())
-            }
-
-            fn encode_value(&self, writer: &mut impl Writer) -> der::Result<()> {
-                writer.write(self.0)
-            }
-        }
-
-        impl FixedTag for $name<'_> {
-            const TAG: Tag = $tag;
-        }
-    };
-}
-
-raw_value!(
-    /// Contents of a `SEQUENCE` (or of an `IMPLICIT` tagged one), raw.
-    RawSequence,
-    Tag::Sequence
-);
-raw_value!(
-    /// Contents of a `GeneralizedTime`, raw: RFC 3161 allows fractions of a second in
-    /// genTime, which `der::asn1::GeneralizedTime` refuses.
-    RawGeneralizedTime,
-    Tag::GeneralizedTime
-);
 
 /// `MessageImprint`.
 #[derive(Clone, Copy, Debug, Sequence)]

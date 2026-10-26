@@ -1,5 +1,9 @@
-//! HTTP transport shared by the network clients: time-stamping, OCSP and CRL downloads.
+//! HTTP transport shared by the network clients: time-stamping, OCSP and CRL downloads, and
+//! the GET binding of the NCA services.
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use std::fmt::Write;
 use std::time::Duration;
 
 /// Default limit of a response body: 1 MiB. A time-stamp reply or an OCSP response is a few
@@ -133,8 +137,31 @@ fn reply(
     })
 }
 
+/// URL of the NCA GET binding (OCSP and time-stamping): `base`, a `/` unless `base` already
+/// ends with one, and the base64 of the DER `request` percent-encoded like
+/// `java.net.URLEncoder` (`+` → `%2B`, `/` → `%2F`, `=` → `%3D`; every character but the
+/// unreserved ones of RFC 3986 is escaped, which on the base64 alphabet is the same).
+pub fn nca_get_url(base: &str, request: &[u8]) -> String {
+    let encoded = STANDARD.encode(request);
+    let base = base.strip_suffix('/').unwrap_or(base);
+    let mut url = String::with_capacity(base.len() + 1 + encoded.len() + encoded.len() / 8);
+    url.push_str(base);
+    url.push('/');
+    for b in encoded.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            url.push(char::from(b));
+        } else {
+            // Writing to a `String` cannot fail.
+            let _ = write!(url, "%{b:02X}");
+        }
+    }
+    url
+}
+
 #[cfg(feature = "testing")]
 pub use route::RouteTransport;
+#[cfg(feature = "testing")]
+pub(crate) use route::{percent_decode, text_reply};
 
 #[cfg(feature = "testing")]
 mod route {
@@ -174,6 +201,31 @@ mod route {
         fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
             self.route(url)?.post(url, content_type, body)
         }
+    }
+
+    /// A reply of `status` with a `text/plain` body.
+    pub(crate) fn text_reply(status: u16, text: &str) -> HttpReply {
+        HttpReply {
+            status,
+            content_type: Some("text/plain".to_owned()),
+            body: text.as_bytes().to_vec(),
+        }
+    }
+
+    /// Decodes `%XX` escapes; `None` for a broken one.
+    pub(crate) fn percent_decode(s: &str) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(s.len());
+        let mut bytes = s.bytes();
+        while let Some(b) = bytes.next() {
+            if b == b'%' {
+                let hex = |b: Option<u8>| char::from(b?).to_digit(16);
+                let (high, low) = (hex(bytes.next())?, hex(bytes.next())?);
+                out.push(u8::try_from(high * 16 + low).ok()?);
+            } else {
+                out.push(b);
+            }
+        }
+        Some(out)
     }
 }
 
@@ -243,6 +295,28 @@ mod tests {
             reply.content_type.as_deref(),
             Some("application/octet-stream")
         );
+    }
+
+    #[test]
+    fn nca_get_url_encodes_all_but_unreserved() {
+        // base64 "+/8=" for [0xfb, 0xff].
+        assert_eq!(
+            nca_get_url("http://h/tsp", &[0xfb, 0xff]),
+            "http://h/tsp/%2B%2F8%3D"
+        );
+        assert_eq!(
+            nca_get_url("http://h/", &[0xfb, 0xff]),
+            "http://h/%2B%2F8%3D"
+        );
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn percent_decoding() {
+        assert_eq!(percent_decode("a%2Bb%2f").as_deref(), Some(&b"a+b/"[..]));
+        assert_eq!(percent_decode("%2"), None);
+        assert_eq!(percent_decode("%zz"), None);
+        assert_eq!(percent_decode("%+1"), None);
     }
 
     #[test]

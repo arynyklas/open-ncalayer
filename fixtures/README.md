@@ -19,6 +19,17 @@
     - ГОСТ 34.10-2015-512: `prod/ncagost22`, `prod/rcagost22`, `test/ncagosttest2022`, `test/rcagosttest2022`.
   - `crates/oncl-pki/tests/cert_verify.rs` проверяет через `cert::verify_signature` все 16 сертификатов, ГОСТ и RSA. Издатель ищется по DN.
 
+## `nca-ocsp/` — ответ тестового OCSP НУЦ (коммитится)
+
+Один записанный ответ тестового ответчика НУЦ `http://test.pki.gov.kz/ocsp/` о тестовом сертификате NCANode `individual_valid_2015` (издатель — `nca/test/ncagosttest2022`). Это публичные данные: подписанный статус публичного тестового сертификата и сертификат ответчика. Секретов в нём нет.
+
+- `individual_valid_2015.req.der` — запрос `openssl ocsp -issuer ncagosttest2022.pem -cert <лист> -no_nonce -reqout …` (OpenSSL 3.0.13). Тест сверяет с ним `ocsp::request_der` байт в байт.
+- `individual_valid_2015.resp.der` — ответ на этот запрос по GET-биндингу НУЦ (`curl http://test.pki.gov.kz/ocsp/<urlencode(base64(запрос))>`), записан 2026-10-26: `good`, thisUpdate = producedAt = `20261026000150Z`, без nextUpdate, ответчик `CN=OCSP` выпущен `ncagosttest2022` (срок до 2029-03-09). `crates/oncl-pki/tests/ocsp.rs` проверяет его офлайн на фиксированный момент внутри окна `ALLOWED_PERIOD`; лист берётся из `target/fixtures/ncanode/`.
+
+## `ocsp/` — эталонный OCSP-запрос OpenSSL (коммитится)
+
+- `openssl-request-inter-user-gost2015-sign.der` — `openssl ocsp -issuer inter-gost2015.pem -cert inter-user-gost2015-sign.pem -no_nonce -reqout …` (OpenSSL 3.0.13; лист извлечён `openssl pkcs12 -legacy -nokeys -clcerts` из `synthetic/inter-user-gost2015-sign.p12`). Тест сверяет с ним `ocsp::request_der` байт в байт. Синтетические данные, лицензия репозитория. Пересоздаётся той же командой после `cargo xtask gen-fixtures`, если меняется синтетический PKI.
+
 ## `target/fixtures/ncanode/` — фикстуры NCANode (не коммитятся)
 
 Тестовые PKCS#12-ключи и сопутствующие файлы проекта [NCANode](https://github.com/ncanode-kz/NCANode), лицензия MIT.

@@ -4,6 +4,7 @@
 //! CMS signing and verification, RFC 3161 time-stamping over a shared HTTP transport, PEM
 //! output.
 
+mod asn1util;
 pub mod ber;
 pub mod cert;
 pub mod cms;

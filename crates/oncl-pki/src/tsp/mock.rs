@@ -1,9 +1,10 @@
 //! An in-process TSA for tests.
 
-use super::asn1::{PkiStatusInfo, RawGeneralizedTime, TimeStampReq, TimeStampResp, TstInfo};
+use super::asn1::{PkiStatusInfo, TimeStampReq, TimeStampResp, TstInfo};
 use super::{BASICS_POLICY, TIMESTAMP_QUERY, TIMESTAMP_REPLY};
+use crate::asn1util::{RawGeneralizedTime, format_generalized_time};
 use crate::cms::{SignOptions, sign_content};
-use crate::http::{HttpError, HttpReply, HttpTransport};
+use crate::http::{HttpError, HttpReply, HttpTransport, percent_decode, text_reply};
 use crate::oid;
 use crate::pkcs12::KeyEntry;
 use base64::Engine;
@@ -86,15 +87,7 @@ impl MockTsa {
             *last ^= 1;
         }
         let now = OffsetDateTime::now_utc();
-        let gen_time = format!(
-            "{:04}{:02}{:02}{:02}{:02}{:02}Z",
-            now.year(),
-            u8::from(now.month()),
-            now.day(),
-            now.hour(),
-            now.minute(),
-            now.second()
-        );
+        let gen_time = format_generalized_time(now);
         // A leading 01 keeps the INTEGER positive and minimal.
         let mut serial_number = vec![1];
         serial_number.extend_from_slice(&serial.to_be_bytes());
@@ -155,43 +148,5 @@ impl HttpTransport for MockTsa {
             return Ok(text_reply(415, content_type));
         }
         Ok(self.respond(body, serial))
-    }
-}
-
-/// A reply of `status` with a `text/plain` body.
-pub(crate) fn text_reply(status: u16, text: &str) -> HttpReply {
-    HttpReply {
-        status,
-        content_type: Some("text/plain".to_owned()),
-        body: text.as_bytes().to_vec(),
-    }
-}
-
-/// Decodes `%XX` escapes; `None` for a broken one.
-pub(crate) fn percent_decode(s: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(s.len());
-    let mut bytes = s.bytes();
-    while let Some(b) = bytes.next() {
-        if b == b'%' {
-            let hex = |b: Option<u8>| char::from(b?).to_digit(16);
-            let (high, low) = (hex(bytes.next())?, hex(bytes.next())?);
-            out.push(u8::try_from(high * 16 + low).ok()?);
-        } else {
-            out.push(b);
-        }
-    }
-    Some(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn percent_decoding() {
-        assert_eq!(percent_decode("a%2Bb%2f").as_deref(), Some(&b"a+b/"[..]));
-        assert_eq!(percent_decode("%2"), None);
-        assert_eq!(percent_decode("%zz"), None);
-        assert_eq!(percent_decode("%+1"), None);
     }
 }

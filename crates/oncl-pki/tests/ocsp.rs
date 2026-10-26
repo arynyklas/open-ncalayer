@@ -1,22 +1,27 @@
 //! OCSP client: the request, the NCA GET binding and every way a response can be wrong,
-//! against `MockOcsp` with the synthetic responders of the intermediate PKI.
+//! against `MockOcsp` with the synthetic responders of the intermediate PKI, plus golden
+//! vectors: an OpenSSL request and a recorded answer of the NCA test responder.
 
 use der::asn1::{AnyRef, IntRef, OctetStringRef};
 use der::{Decode, Encode, Sequence};
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::http::{HttpError, HttpReply, HttpTransport, UreqTransport};
-use oncl_pki::ocsp::{self, ALLOWED_PERIOD, CertStatus, MockOcsp, OcspError, OcspTamper, TIMEOUT};
+use oncl_pki::ocsp::{
+    self, ALLOWED_PERIOD, CLOCK_SKEW, CertStatus, MockOcsp, OcspError, OcspTamper, TIMEOUT,
+};
 use oncl_pki::oid;
 use oncl_pki::pkcs12::{KeyEntry, load};
-use oncl_pki::pkix::CaSet;
+use oncl_pki::pkix::{CaSet, PathError};
 use oncl_testkit::{fixture, ncanode, read, synthetic, synthetic_cert};
 use sha1::{Digest, Sha1};
 use spki::AlgorithmIdentifierRef;
+use std::mem::discriminant;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use time::macros::datetime;
 
 const OCSP_URL: &str = "http://ocsp.synthetic.test";
+const OCSP_RESPONSE: &str = "application/ocsp-response";
 
 fn entry(name: &str) -> KeyEntry {
     let key = synthetic(name);
@@ -55,12 +60,22 @@ fn check_leaf(
     )
 }
 
-/// A transport answering every request with `reply`.
-struct Fixed(HttpReply);
+/// A transport answering every request with `reply`, or failing with the error.
+struct Fixed(Result<HttpReply, HttpError>);
+
+impl Fixed {
+    fn body(content_type: Option<&str>, body: &[u8]) -> Self {
+        Fixed(Ok(HttpReply {
+            status: 200,
+            content_type: content_type.map(str::to_owned),
+            body: body.to_vec(),
+        }))
+    }
+}
 
 impl HttpTransport for Fixed {
     fn get(&self, _: &str) -> Result<HttpReply, HttpError> {
-        Ok(self.0.clone())
+        self.0.clone()
     }
 
     fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
@@ -120,6 +135,19 @@ fn request_has_sha1_certid_of_issuer_name_and_key() {
     assert_eq!(
         id.serial_number.as_bytes(),
         leaf.tbs_certificate().serial_number().as_bytes()
+    );
+}
+
+#[test]
+fn request_equals_openssl_request() {
+    // `openssl ocsp -issuer inter-gost2015.pem -cert inter-user-gost2015-sign.pem -no_nonce
+    // -reqout …` (fixtures/README.md).
+    assert_eq!(
+        ocsp::request_der(
+            &entry("inter-user-gost2015-sign").cert,
+            &cer("inter-gost2015")
+        ),
+        read(fixture("ocsp/openssl-request-inter-user-gost2015-sign.der"))
     );
 }
 
@@ -214,12 +242,19 @@ fn by_key_responder_id_is_accepted() {
 #[test]
 fn every_tamper_is_an_error_not_a_status() {
     let revoked = entry("inter-revoked-gost2015-sign").cert;
+    let any = String::new;
     let table = [
-        (OcspTamper::WrongKey, OcspError::BadSignature),
+        (OcspTamper::WrongKey, OcspError::BadSignature(any())),
         (OcspTamper::NoCerts, OcspError::NoCerts),
+        (OcspTamper::OtherResponderId, OcspError::ResponderNotFound),
         (OcspTamper::OtherCertId, OcspError::CertIdMismatch),
+        (OcspTamper::NoSingleResponse, OcspError::NoSingleResponse),
         (OcspTamper::Stale, OcspError::NextUpdate),
         (OcspTamper::FutureThisUpdate, OcspError::ThisUpdate),
+        (
+            OcspTamper::ThisUpdateAhead(CLOCK_SKEW + Duration::from_secs(60)),
+            OcspError::ThisUpdate,
+        ),
         (
             OcspTamper::NoNextUpdate {
                 age: Duration::from_secs(600),
@@ -231,7 +266,7 @@ fn every_tamper_is_an_error_not_a_status() {
             OcspTamper::ContentType("text/html"),
             OcspError::ContentType(Some("text/html".to_owned())),
         ),
-        (OcspTamper::Garbage, OcspError::Malformed),
+        (OcspTamper::Garbage, OcspError::Malformed(any())),
         (
             OcspTamper::Hang(Duration::from_secs(30)),
             OcspError::Http("timed out".to_owned()),
@@ -247,30 +282,71 @@ fn every_tamper_is_an_error_not_a_status() {
                 },
             )
             .tamper(tamper);
-        assert_eq!(
-            check_leaf(
-                "inter-revoked-gost2015-sign",
-                &mock,
-                Duration::from_millis(200)
-            ),
-            Err(expected),
-            "{tamper:?}"
+        let result = check_leaf(
+            "inter-revoked-gost2015-sign",
+            &mock,
+            Duration::from_millis(200),
         );
+        let error = result.expect_err(&format!("{tamper:?}"));
+        // Variants with a free-text cause are compared by variant, the others exactly.
+        if matches!(
+            expected,
+            OcspError::BadSignature(_) | OcspError::Malformed(_)
+        ) {
+            assert_eq!(discriminant(&error), discriminant(&expected), "{tamper:?}");
+            assert!(!error.to_string().ends_with(": "), "{tamper:?}: {error}");
+        } else {
+            assert_eq!(error, expected, "{tamper:?}");
+        }
         assert_eq!(mock.calls().len(), 1, "{tamper:?}");
     }
 }
 
 #[test]
+fn http_failures_are_errors() {
+    let leaf = "inter-user-gost2015-sign";
+    let no_content_type = Fixed::body(None, b"");
+    assert_eq!(
+        check_leaf(leaf, &no_content_type, TIMEOUT),
+        Err(OcspError::ContentType(None))
+    );
+    let refused = Fixed(Err(HttpError("connection refused".to_owned())));
+    assert_eq!(
+        check_leaf(leaf, &refused, TIMEOUT),
+        Err(OcspError::Http("connection refused".to_owned()))
+    );
+    let error = check_leaf(leaf, &refused, TIMEOUT).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "HTTP request to the OCSP responder failed: connection refused"
+    );
+}
+
+#[test]
 fn unsuccessful_response_status_is_an_error() {
-    let try_later = Fixed(HttpReply {
-        status: 200,
-        content_type: Some("application/ocsp-response".to_owned()),
-        // OCSPResponse { responseStatus tryLater (3) }
-        body: vec![0x30, 0x03, 0x0a, 0x01, 0x03],
-    });
+    // OCSPResponse { responseStatus tryLater (3) }
+    let try_later = Fixed::body(Some(OCSP_RESPONSE), &[0x30, 0x03, 0x0a, 0x01, 0x03]);
     assert_eq!(
         check_leaf("inter-user-gost2015-sign", &try_later, TIMEOUT),
         Err(OcspError::NotSuccessful(3))
+    );
+}
+
+#[test]
+fn response_type_other_than_basic_is_malformed() {
+    // OCSPResponse { successful, [0] { id-pkix-ocsp-nonce (1.3.6.1.5.5.7.48.1.2), "" } }
+    let other_type = Fixed::body(
+        Some(OCSP_RESPONSE),
+        &[
+            0x30, 0x14, 0x0a, 0x01, 0x00, 0xa0, 0x0f, 0x30, 0x0d, 0x06, 0x09, 0x2b, 0x06, 0x01,
+            0x05, 0x05, 0x07, 0x30, 0x01, 0x02, 0x04, 0x00,
+        ],
+    );
+    assert_eq!(
+        check_leaf("inter-user-gost2015-sign", &other_type, TIMEOUT),
+        Err(OcspError::Malformed(
+            "response type 1.3.6.1.5.5.7.48.1.2 is not id-pkix-ocsp-basic".to_owned()
+        ))
     );
 }
 
@@ -289,22 +365,49 @@ fn responder_must_chain_and_be_an_ocsp_signer() {
     let not_a_responder = MockOcsp::new(entry("inter-user-gost2015-sign"));
     assert_eq!(
         check_leaf("inter-user-gost2015-sign", &not_a_responder, TIMEOUT),
-        Err(OcspError::ResponderNotTrusted)
+        Err(OcspError::OcspSigningMissing)
     );
     // The responder's issuer is not in the CA set.
     let leaf = entry("inter-user-gost2015-sign").cert;
     let root_only = CaSet::new(vec![cer("root-gost2015")]);
     let mock = MockOcsp::new(entry("ocsp-gost2015"));
+    let result = ocsp::check(
+        &leaf,
+        &cer("inter-gost2015"),
+        &root_only,
+        &mock,
+        OffsetDateTime::now_utc(),
+        TIMEOUT,
+    );
     assert_eq!(
-        ocsp::check(
-            &leaf,
-            &cer("inter-gost2015"),
-            &root_only,
-            &mock,
-            OffsetDateTime::now_utc(),
-            TIMEOUT
-        ),
-        Err(OcspError::ResponderNotTrusted)
+        result,
+        Err(OcspError::ResponderNotTrusted(PathError::IssuerNotFound))
+    );
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "OCSP responder certificate is not trusted: issuer certificate not found"
+    );
+}
+
+#[test]
+fn this_update_ahead_within_clock_skew_is_accepted() {
+    let ahead = |by| {
+        let mock = MockOcsp::new(entry("ocsp-gost2015")).tamper(OcspTamper::ThisUpdateAhead(by));
+        check_leaf("inter-user-gost2015-sign", &mock, TIMEOUT)
+    };
+    assert_eq!(ahead(Duration::from_secs(60)), Ok(CertStatus::Good));
+    assert_eq!(
+        ahead(CLOCK_SKEW - Duration::from_secs(30)),
+        Ok(CertStatus::Good)
+    );
+    assert_eq!(
+        ahead(CLOCK_SKEW + Duration::from_secs(30)),
+        Err(OcspError::ThisUpdate)
+    );
+    let future = MockOcsp::new(entry("ocsp-gost2015")).tamper(OcspTamper::FutureThisUpdate);
+    assert_eq!(
+        check_leaf("inter-user-gost2015-sign", &future, TIMEOUT),
+        Err(OcspError::ThisUpdate)
     );
 }
 
@@ -364,9 +467,9 @@ fn cert_without_aia_is_no_url() {
     assert!(mock.calls().is_empty());
 }
 
-#[test]
-#[ignore = "needs the NCA test OCSP responder and `cargo xtask fetch-fixtures`"]
-fn live_ocsp_nca_test_certificate() {
+/// The NCANode `individual_valid_2015` leaf, its issuer and the NCA test CAs
+/// (`fixtures/nca/test`).
+fn nca_test_leaf() -> (Certificate, Certificate, CaSet) {
     let leaf = load(&read(ncanode("individual_valid_2015.p12")), "Aa123456")
         .unwrap()
         .remove(0)
@@ -382,11 +485,66 @@ fn live_ocsp_nca_test_certificate() {
     let issuer = cas
         .issuers_of(&leaf)
         .find(|issuer| cert::verify_signature(&leaf, issuer).is_ok())
-        .expect("issuer among fixtures/nca/test");
+        .expect("issuer among fixtures/nca/test")
+        .clone();
+    (leaf, issuer, cas)
+}
+
+#[test]
+fn recorded_nca_test_answer_is_good() {
+    let (leaf, issuer, cas) = nca_test_leaf();
+    // `openssl ocsp -no_nonce -reqout` for the same pair (fixtures/README.md).
+    assert_eq!(
+        ocsp::request_der(&leaf, &issuer),
+        read(fixture("nca-ocsp/individual_valid_2015.req.der"))
+    );
+    let answer = read(fixture("nca-ocsp/individual_valid_2015.resp.der"));
+    let check_at = |now| {
+        let http = Fixed::body(Some(OCSP_RESPONSE), &answer);
+        ocsp::check(&leaf, &issuer, &cas, &http, now, TIMEOUT)
+    };
+    // thisUpdate = producedAt = 2026-10-26 00:01:50 UTC, no nextUpdate.
+    assert_eq!(
+        check_at(datetime!(2026-10-26 00:02:00 UTC)),
+        Ok(CertStatus::Good)
+    );
+    // A client clock a few seconds behind the responder's.
+    assert_eq!(
+        check_at(datetime!(2026-10-26 00:01:47 UTC)),
+        Ok(CertStatus::Good)
+    );
+    assert_eq!(
+        check_at(datetime!(2026-10-26 00:06:50 UTC)),
+        Err(OcspError::NextUpdate)
+    );
+    assert_eq!(
+        check_at(datetime!(2026-10-25 23:56:49 UTC)),
+        Err(OcspError::ThisUpdate)
+    );
+    // About another certificate of the same issuer.
+    let other = entry("inter-user-gost2015-sign").cert;
+    let http = Fixed::body(Some(OCSP_RESPONSE), &answer);
+    assert_eq!(
+        ocsp::check(
+            &other,
+            &issuer,
+            &cas,
+            &http,
+            datetime!(2026-10-26 00:02:00 UTC),
+            TIMEOUT
+        ),
+        Err(OcspError::CertIdMismatch)
+    );
+}
+
+#[test]
+#[ignore = "needs the NCA test OCSP responder and `cargo xtask fetch-fixtures`"]
+fn live_ocsp_nca_test_certificate() {
+    let (leaf, issuer, cas) = nca_test_leaf();
     let url = ocsp::ocsp_url(&leaf).expect("OCSP URL in AuthorityInfoAccess");
     let status = ocsp::check(
         &leaf,
-        issuer,
+        &issuer,
         &cas,
         &UreqTransport,
         OffsetDateTime::now_utc(),
