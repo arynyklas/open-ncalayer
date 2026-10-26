@@ -423,6 +423,51 @@ fn ber_is_normalized_only_up_to_1_mib() {
     }
 }
 
+/// `crl` with `issuer` (a whole DER element) in place of `tbsCertList.issuer`, and the
+/// signature left as it was.
+fn with_issuer(crl: &[u8], issuer: &[u8]) -> Vec<u8> {
+    use der::Reader as _;
+    let raw = RawCrl::from_der(crl).unwrap();
+    let mut reader = der::SliceReader::new(raw.tbs_cert_list.value()).unwrap();
+    let version = reader.tlv_bytes().unwrap();
+    let signature = reader.tlv_bytes().unwrap();
+    reader.tlv_bytes().unwrap();
+    let rest = reader.read_slice(reader.remaining_len()).unwrap();
+    let fields = [version, signature, issuer, rest].concat();
+    RawCrl {
+        tbs_cert_list: AnyRef::new(Tag::Sequence, &fields).unwrap(),
+        ..raw
+    }
+    .to_der()
+    .unwrap()
+}
+
+#[test]
+fn issuer_is_compared_as_bytes_without_decoding_the_name() {
+    let inter = cer("inter-gost2015");
+    let crl = MockCrl::new(entry("inter-gost2015.key")).der();
+    // 150 000 one-attribute RDNs, SET { SEQUENCE { OID 1.2, NULL } }: a valid Name over
+    // the BER bound that would decode into 150 000 owned RDNs before the signature check;
+    // and as many NULLs: no Name at all, which a decode would refuse as Malformed.
+    let rdns = [0x31, 7, 0x30, 5, 6, 1, 0x2a, 5, 0].repeat(150_000);
+    let nulls = [5, 0].repeat(600_000);
+    for elements in [rdns, nulls] {
+        let issuer = AnyRef::new(Tag::Sequence, &elements)
+            .unwrap()
+            .to_der()
+            .unwrap();
+        let forged = with_issuer(&crl, &issuer);
+        assert!(forged.len() > MAX_BER_CRL_LEN);
+        let start = std::time::Instant::now();
+        assert_eq!(
+            crl::verify_crl(&forged, &inter, now()).unwrap_err(),
+            CrlError::IssuerMismatch
+        );
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(1), "{took:?}");
+    }
+}
+
 #[test]
 fn delta_and_partitioned_crls_are_rejected() {
     let inter = cer("inter-gost2015");

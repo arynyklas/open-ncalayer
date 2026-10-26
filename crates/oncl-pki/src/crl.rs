@@ -7,13 +7,13 @@
 //!   on ASCII whitespace and a leading `URL=` is dropped.
 //! - A cached CRL of any of the URLs is used first; otherwise the URLs are downloaded in
 //!   order until one gives a valid CRL.
-//! - A CRL comes over plain HTTP, so it is hostile input: its issuer must be the subject of
-//!   the issuer certificate, and its signature must verify with that certificate's key
-//!   (checked over the signed `TBSCertList` bytes, before the list is decoded); it must be
-//!   a complete CRL, so a delta CRL (deltaCRLIndicator) or a CRL with an issuing
-//!   distribution point is refused, critical or not, and so is any other unknown critical
-//!   extension; and it must be current: `thisUpdate ≤ now` and, if it has one,
-//!   `now < nextUpdate`.
+//! - A CRL comes over plain HTTP, so it is hostile input. Before the list is decoded, its
+//!   issuer must be the subject of the issuer certificate, compared as DER bytes without
+//!   decoding the name, and its signature must verify with that certificate's key over
+//!   the signed `TBSCertList` bytes. Then it must be a complete CRL, so a delta CRL
+//!   (deltaCRLIndicator) or a CRL with an issuing distribution point is refused, critical
+//!   or not, and so is any other unknown critical extension; and it must be current:
+//!   `thisUpdate ≤ now` and, if it has one, `now < nextUpdate`.
 //! - A CRL is parsed as DER. A BER one is normalized to DER first ([`ber::to_der`]) only
 //!   up to [`MAX_BER_CRL_LEN`]: normalization builds a tree of every element of the still
 //!   unauthenticated body, so a bigger body that is not DER is [`CrlError::Malformed`].
@@ -37,7 +37,7 @@ use crate::oid;
 use crate::pkix::time_of;
 use der::asn1::{BitStringRef, IntRef, ObjectIdentifier};
 use der::oid::AssociatedOid;
-use der::{Decode, Reader, SliceReader};
+use der::{Decode, Encode, Reader, SliceReader};
 use sha2::{Digest, Sha256};
 use spki::AlgorithmIdentifierRef;
 use std::borrow::Cow;
@@ -53,7 +53,6 @@ use x509_cert::ext::pkix::{
     AuthorityInfoAccessSyntax, AuthorityKeyIdentifier, CrlDistributionPoints, CrlNumber, CrlReason,
     FreshestCrl, ID_CE_ISSUER_ALT_NAME,
 };
-use x509_cert::name::Name;
 
 pub use x509_cert::crl::CertificateList;
 
@@ -165,13 +164,14 @@ fn is_http(uri: &str) -> bool {
 }
 
 /// What is checked of a `CertificateList` before it is decoded, borrowed from the DER.
+/// Nothing is decoded into owned structures: the body is not authenticated yet.
 struct SignedCrl<'a> {
     /// The whole `TBSCertList` element: the signed bytes as received.
     tbs: &'a [u8],
     /// `tbsCertList.signature`.
     tbs_signature: AlgorithmIdentifierRef<'a>,
-    /// `tbsCertList.issuer`.
-    issuer: Name,
+    /// The whole `tbsCertList.issuer` element, not decoded: it is compared byte for byte.
+    issuer: &'a [u8],
     signature_algorithm: AlgorithmIdentifierRef<'a>,
     signature: BitStringRef<'a>,
 }
@@ -187,7 +187,7 @@ impl<'a> SignedCrl<'a> {
             // version is not checked here: the full decode accepts v1 to v3 (0 to 2).
             let _version: Option<IntRef<'_>> = r.decode()?;
             let signature = r.decode()?;
-            let issuer = r.decode()?;
+            let issuer = r.tlv_bytes()?;
             r.read_slice(r.remaining_len())?;
             Ok::<_, der::Error>((signature, issuer))
         })?;
@@ -218,8 +218,8 @@ const KNOWN_CRL_EXTENSIONS: [ObjectIdentifier; 5] = [
 ];
 
 /// Checks a DER CRL, or a BER one of at most [`MAX_BER_CRL_LEN`] bytes, of `issuer` at
-/// `now` (see the module documentation). The issuer and the signature are checked before
-/// the CRL is decoded.
+/// `now` (see the module documentation). The issuer name (byte for byte, as DER) and the
+/// signature are checked before the CRL is decoded.
 ///
 /// # Errors
 ///
@@ -247,7 +247,8 @@ pub fn verify_crl(
             CrlError::from(e)
         }
     })?;
-    if signed.issuer != *issuer.tbs_certificate().subject() {
+    let subject = issuer.tbs_certificate().subject().to_der()?;
+    if signed.issuer != subject.as_slice() {
         return Err(CrlError::IssuerMismatch);
     }
 
