@@ -89,3 +89,9 @@ opt-level = 3
 # minute and a half unoptimized, a few seconds optimized.
 [profile.dev.package.streebog]
 opt-level = 3
+# GOST 34.10 operations (512-bit curves) take about 0.1 s each unoptimized; the PKIX, OCSP and
+# CRL tests verify many signatures.
+[profile.dev.package.oncl-gost]
+opt-level = 3
+[profile.dev.package.crypto-bigint]
+opt-level = 3
