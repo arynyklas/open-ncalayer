@@ -1,5 +1,5 @@
 //! `kz.gov.pki.knca.basics` / `PKIExtras.sign`: argument parsing, the storage → key → sign
-//! flow driven by a scripted prompter, cms and raw results, TSP and error codes.
+//! flow driven by a scripted prompter, cms, raw and xml results, TSP and error codes.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -1087,6 +1087,12 @@ fn xml_unknown_certificate_algorithm_is_incorrect_algorithm() {
             "details": "java.lang.IllegalArgumentException: Incorrect algorithm: 1.2.840.113549.1.1.13",
         })
     );
+
+    // `XMLUtil` parses before it looks at the algorithm: malformed XML wins.
+    let s = setup(script![storage_at(&path, "Qwerty12"), key(0)], None);
+    let b = s.basics.with_clock(inside_rsa_validity);
+    let r = json(b.process(&req(xml_args(json!("<a>"), json!({}))), &origin("o")));
+    assert_eq!(r["code"], "UNABLE_TO_PARSE_XML", "{r}");
 }
 
 #[test]

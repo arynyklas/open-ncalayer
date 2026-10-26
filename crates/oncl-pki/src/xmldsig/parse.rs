@@ -35,9 +35,9 @@ struct Bounds {
     /// Bound on the sum over elements of the squared attribute count.
     attribute_work: usize,
     /// Bound on the namespace entries the parser looks at: on every start tag, (namespaces
-    /// in scope) × (1 + attributes), plus (namespaces in scope)² / 2 on a declaring one (its
-    /// copy checks each inherited namespace against the ones copied so far). About 1 ns
-    /// each: 2²⁹ is half a second.
+    /// in scope) × (1 + prefixed attributes other than `xml:*` and declarations), plus
+    /// (namespaces in scope)² / 2 on a declaring one (its copy checks each inherited
+    /// namespace against the ones copied so far). About 1 ns each: 2²⁹ is half a second.
     namespace_work: usize,
     /// Bound on the namespace entries the parser copies: the namespaces in scope of every
     /// declaring element (2 bytes each).
@@ -131,16 +131,19 @@ fn check_markup(xml: &[u8], bounds: Bounds) -> Result<(), XmlError> {
             if in_scope.len() == MAX_DEPTH {
                 return Err(XmlError::TooDeep);
             }
-            let (mut attributes, mut declarations) = (0usize, 0usize);
+            let (mut attributes, mut declarations, mut resolved) = (0usize, 0usize, 0usize);
             let (end, empty) = scan_start_tag(xml, start + 1, |name| {
                 attributes += 1;
                 if namespace_prefix(name).is_some() {
                     declarations += 1;
+                } else if name.contains(&b':') && !name.starts_with(b"xml:") {
+                    // The parser looks up only these attributes' prefixes.
+                    resolved += 1;
                 }
             });
             let own = in_scope.last().copied().unwrap_or(0) + declarations;
             attribute_work = attribute_work.saturating_add(attributes.saturating_mul(attributes));
-            namespace_work = namespace_work.saturating_add(own.saturating_mul(1 + attributes));
+            namespace_work = namespace_work.saturating_add(own.saturating_mul(1 + resolved));
             if declarations > 0 {
                 namespace_work = namespace_work.saturating_add(own.saturating_mul(own) / 2);
                 namespace_copies = namespace_copies.saturating_add(own);
@@ -311,6 +314,20 @@ mod tests {
         let xml = format!("<r{declarations}>{}</r>", "<c/>".repeat(20_000));
         assert!(parse(xml.as_bytes()).is_ok());
         let xml = format!("<r{declarations}>{}</r>", "<c/>".repeat(200_000));
+        assert_eq!(parse(xml.as_bytes()).err(), Some(XmlError::TooLarge));
+
+        // Unprefixed attributes are not looked up; prefixed ones are.
+        let plain: String = (0..8).map(|i| format!(" a{i}=''")).collect();
+        let xml = format!(
+            "<r{declarations}>{}</r>",
+            format!("<c{plain}/>").repeat(20_000)
+        );
+        assert!(parse(xml.as_bytes()).is_ok());
+        let prefixed: String = (0..8).map(|i| format!(" n{i}:a=''")).collect();
+        let xml = format!(
+            "<r{declarations}>{}</r>",
+            format!("<c{prefixed}/>").repeat(20_000)
+        );
         assert_eq!(parse(xml.as_bytes()).err(), Some(XmlError::TooLarge));
     }
 

@@ -97,9 +97,12 @@ pub enum XmlError {
     /// The input has a DOCTYPE declaration.
     #[error("DOCTYPE is not allowed in XML")]
     Doctype,
-    /// The input is larger than [`MAX_INPUT`], or would take too much work: attributes or
-    /// namespace declarations beyond the parse work bounds, or signature references whose
-    /// count times the input size exceeds 1 GiB.
+    /// The input would take too much memory or work: larger than [`MAX_INPUT`], more than
+    /// [`MAX_NODES`] nodes or `<` bytes, more than [`MAX_ATTRIBUTES`] `=` bytes, attributes
+    /// or namespaces in scope beyond the parse work bounds (duplicate checks, namespace
+    /// lookups and copies), a canonical form over [`MAX_CANONICAL`] bytes, or signature
+    /// references whose count times the input size, or whose canonical forms together,
+    /// exceed [`REFERENCE_WORK`].
     #[error("XML input exceeds the processing limits")]
     TooLarge,
     /// Elements are nested deeper than [`MAX_DEPTH`].
@@ -150,18 +153,19 @@ pub fn sign_enveloped(
     key: &PrivateKey,
     cert: &Certificate,
 ) -> Result<Vec<u8>, XmlError> {
-    let alg = signing_alg(cert)?;
-    let cert = cert_der(cert)?;
     // Only one parse tree at a time: this one is gone before the signature is spliced in.
-    let (digest, point) = {
+    let (alg, digest, point) = {
         let doc = parse::parse(xml)?;
+        // Kalkan parses the document before it looks at the certificate algorithm.
+        let alg = signing_alg(cert)?;
         // The new signature is the only node the enveloped transform drops, so the digest
         // is that of the document as it is now; comments are out (`URI=""`).
         let canonical = canonicalizer(C14n::Inclusive).run(doc.root())?;
         let point = SplicePoint::of(xml, doc.root_element())?;
         drop(doc);
-        (alg.digest(&canonical), point)
+        (alg, alg.digest(&canonical), point)
     };
+    let cert = cert_der(cert)?;
     let template = Template {
         alg,
         method: C14n::Inclusive,
@@ -193,10 +197,10 @@ pub fn sign_element(
     key: &PrivateKey,
     cert: &Certificate,
 ) -> Result<Vec<u8>, XmlError> {
-    let alg = signing_alg(cert)?;
-    let cert = cert_der(cert)?;
-    let (digest, point, id) = {
+    let (alg, digest, point, id) = {
         let doc = parse::parse(xml)?;
+        // Kalkan parses, then checks the certificate algorithm, then evaluates the XPaths.
+        let alg = signing_alg(cert)?;
         let tbs = xpath::select_first(&doc, tbs_xpath)?.ok_or_else(|| {
             XmlError::Constraint(format!(
                 "Указанный для подписи элемент {tbs_xpath} не найден"
@@ -230,8 +234,9 @@ pub fn sign_element(
         let point = SplicePoint::of(xml, parent)?;
         let id = id.to_owned();
         drop(doc);
-        (alg.digest(&canonical), point, id)
+        (alg, alg.digest(&canonical), point, id)
     };
+    let cert = cert_der(cert)?;
     let uri = format!("#{id}");
     let template = Template {
         alg,

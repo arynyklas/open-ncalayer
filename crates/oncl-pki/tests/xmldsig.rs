@@ -310,6 +310,19 @@ fn sha1_rsa_certificates_are_refused() {
             "1.2.840.113549.1.1.5".to_owned()
         ))
     );
+    // Kalkan parses the document first and checks the algorithm before any XPath.
+    assert!(matches!(
+        sign_enveloped(b"<a>", &signer.key, &sha1_cert),
+        Err(XmlError::Parse(_))
+    ));
+    assert!(matches!(
+        sign_element(b"<a>", "//b", None, &signer.key, &sha1_cert),
+        Err(XmlError::Parse(_))
+    ));
+    assert!(matches!(
+        sign_element(b"<a/>", "//b", None, &signer.key, &sha1_cert),
+        Err(XmlError::UnsupportedAlgorithm(_))
+    ));
 }
 
 #[test]
