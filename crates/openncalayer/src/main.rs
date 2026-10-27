@@ -178,12 +178,14 @@ fn main() -> ExitCode {
 /// With a tray, TLS not set up and a busy port do not end `run`: it serves the browser
 /// extension, the tray says what is wrong, and wss starts in this process once the TLS
 /// wizard saves a certificate or the port is free (the original NCALayer stopped from the
-/// tray, or quit). Without one (`--no-tray`, a tray that cannot be shown or is lost on the
-/// event loop's first turn, or no event loop) they end it with P1's code, unless
-/// `allow_no_wss`. Only a daemon started without `allow_no_wss` (by the user or our
-/// autostart, not the extension's relay) notifies them at the start, and takes a freed port
-/// by itself; a relay-started one does so only after the user stopped the original or saved
-/// a certificate (D13).
+/// tray, or quit). Without one (`--no-tray`, a tray that cannot be shown, one lost on the
+/// event loop's first turn on macOS or not taken by a StatusNotifierWatcher within a minute
+/// on Linux, or no event loop) they end it with P1's code, unless `allow_no_wss` — or unless
+/// the failure was lifted by then (wss serves): such a daemon carries on without an icon
+/// ([`tray_loss_ends_run`]). Only a daemon started without `allow_no_wss` (by the user or
+/// our autostart, not the extension's relay) notifies them at the start, and takes a freed
+/// port by itself; a relay-started one does so only after the user stopped the original or
+/// saved a certificate (D13).
 fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -243,7 +245,8 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         return failure.report();
     }
     // A tray lost after the start (macOS: on the event loop's first turn; Linux: no
-    // StatusNotifierWatcher within the grace) ends the loop, and then `run`.
+    // StatusNotifierWatcher within the grace) ends the loop, and then `run`, while wss is
+    // still off.
     let tray_lost = Rc::new(Cell::new(false));
     if let Some(tray) = &tray {
         TRAY.set(Some(Tray {
@@ -252,12 +255,18 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         }));
         if waits_for_tray.is_some() {
             let lost = Rc::clone(&tray_lost);
+            let wss = Arc::clone(&wss);
             tray.when_unavailable(move |_| {
-                lost.set(true);
-                oncl_ui::quit();
+                if tray_loss_ends_run(true, wss.off()) {
+                    lost.set(true);
+                    oncl_ui::quit();
+                } else {
+                    tracing::warn!("wss serves already: running without the system tray");
+                }
             });
         }
     }
+    let wss_at_exit = Arc::clone(&wss);
     let reports = Arc::new(SelftestReports::new());
     let ipc = daemon.ipc;
     let event_loop = windows || tray.is_some();
@@ -305,11 +314,23 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     if !event_loop {
         return exit_code(server.join());
     }
-    let looped = oncl_ui::run_event_loop();
+    let mut looped = oncl_ui::run_event_loop();
+    if tray_lost.get()
+        && looped.is_ok()
+        && !server.is_finished()
+        && !tray_loss_ends_run(true, wss_at_exit.off())
+    {
+        // wss started between the tray's loss and the loop's end: serve without the icon
+        // (winit keeps its event loop for another run).
+        tracing::warn!("wss serves already: running without the system tray");
+        tray_lost.set(false);
+        looped = oncl_ui::run_event_loop();
+    }
     // The icon goes before the process does (on Windows a dead process's icon lingers).
     drop(tray);
     if let Some(failure) = waits_for_tray
         && (looped.is_err() || tray_lost.get())
+        && tray_loss_ends_run(true, wss_at_exit.off())
     {
         // The tray that was to fix it is gone: P1's exit, as if there had been none.
         let reason = looped.as_ref().err().map(ToString::to_string);
@@ -342,6 +363,14 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Whether losing the tray after the start ends `run`: only for a daemon whose wss failure
+/// `waits_for_tray`, and only while wss is still off (`wss_off`). Once the user lifted the
+/// failure from the start notification (stopped the original, saved a certificate) or the
+/// port came free, the daemon serves on without an icon.
+fn tray_loss_ends_run(waits_for_tray: bool, wss_off: Option<cli::WssOff>) -> bool {
+    waits_for_tray && wss_off.is_some()
 }
 
 /// The exit code of the joined server thread.
@@ -754,6 +783,17 @@ mod tests {
                 .block_on(serve_all_stopped(dir.path(), wss))
                 .unwrap_or_else(|e| panic!("wss {wss}: {e}"));
         }
+    }
+
+    #[test]
+    fn a_lost_tray_ends_run_only_while_wss_is_off() {
+        use cli::WssOff;
+        assert!(tray_loss_ends_run(true, Some(WssOff::TlsNotConfigured)));
+        // The user stopped the original or saved a certificate within the grace.
+        assert!(!tray_loss_ends_run(true, None));
+        // A daemon that does not wait for the tray (configured, or `--allow-no-wss`).
+        assert!(!tray_loss_ends_run(false, Some(WssOff::TlsNotConfigured)));
+        assert!(!tray_loss_ends_run(false, None));
     }
 
     #[test]
