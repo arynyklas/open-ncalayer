@@ -371,6 +371,25 @@ impl TrayStatus {
                 },
                 None,
             ),
+            Notice::NoRollback { failed, version } => (
+                match l {
+                    Locale::Ru => format!("Версия {failed} работает с ошибками"),
+                    Locale::Kk => format!("{failed} нұсқасы қатемен жұмыс істейді"),
+                    Locale::En => format!("Version {failed} does not work properly"),
+                },
+                match l {
+                    Locale::Ru => format!(
+                        "Версия {failed} не запустилась как следует, а вернуть версию {version} нельзя: её нет в индексе обновлений. OpenNCALayer установит исправленную версию, когда она выйдет."
+                    ),
+                    Locale::Kk => format!(
+                        "{failed} нұсқасы дұрыс іске қосылмады, ал {version} нұсқасын қайтару мүмкін емес: ол жаңартулар индексінде жоқ. OpenNCALayer түзетілген нұсқа шыққанда оны орнатады."
+                    ),
+                    Locale::En => format!(
+                        "Version {failed} did not start properly, and version {version} cannot be put back: the update index no longer has it. OpenNCALayer installs a fixed version once one is out."
+                    ),
+                },
+                None,
+            ),
             Notice::RolledBack { failed, version } => (
                 match l {
                     Locale::Ru => "Обновление откачено",
@@ -768,6 +787,10 @@ mod tests {
                 found(false),
                 Notice::Updated(v("0.2.0")),
                 back.clone(),
+                Notice::NoRollback {
+                    failed: v("0.2.0"),
+                    version: v("0.1.0"),
+                },
                 Notice::Checked(UpdateStatus::UpToDate),
                 Notice::Checked(UpdateStatus::Failed("timed out".to_owned())),
                 Notice::Checked(UpdateStatus::NoKeys),

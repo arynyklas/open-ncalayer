@@ -211,9 +211,10 @@ pub trait Updates: Send + Sync {
     /// What the updater can do, and what it found last.
     fn status(&self) -> UpdateStatus;
 
-    /// «Проверить сейчас»: looks for a new version now, with the settings as saved, and
-    /// returns what it found. Blocks for the download of the index.
-    fn check_now(&self) -> UpdateStatus;
+    /// «Проверить сейчас»: looks for a new version now, with `settings` (the form's, saved
+    /// or not) or, without, the saved ones, and returns what it found. Blocks for the
+    /// download of the index.
+    fn check_now(&self, settings: Option<UpdateSettings>) -> UpdateStatus;
 }
 
 /// The original's and the extension's states.
@@ -605,7 +606,7 @@ pub(crate) mod fakes {
             self.status.lock().unwrap().clone()
         }
 
-        fn check_now(&self) -> UpdateStatus {
+        fn check_now(&self, _: Option<UpdateSettings>) -> UpdateStatus {
             *self.status.lock().unwrap() = self.found.clone();
             self.found.clone()
         }
@@ -724,7 +725,7 @@ mod tests {
             status: std::sync::Mutex::new(UpdateStatus::NotChecked),
             found: available(true),
         });
-        assert_eq!(s.updates.check_now(), available(true));
+        assert_eq!(s.updates.check_now(None), available(true));
         assert_eq!(s.load().update, available(true));
     }
 

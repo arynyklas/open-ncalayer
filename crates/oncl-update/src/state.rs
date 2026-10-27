@@ -40,14 +40,17 @@ pub struct PendingHealth {
     /// When the update was applied.
     #[serde(with = "time::serde::rfc3339")]
     pub applied: OffsetDateTime,
-    /// When the new version first started; it confirms its health within a grace from
-    /// then, or a later start finds it failed.
+    /// When the new version first started. A version that ends without confirming its
+    /// health is found failed at its next start.
     #[serde(
         default,
         with = "time::serde::rfc3339::option",
         skip_serializing_if = "Option::is_none"
     )]
     pub started: Option<OffsetDateTime>,
+    /// The update goes back from a version that failed its health check.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rollback: bool,
 }
 
 impl State {
@@ -139,6 +142,7 @@ mod tests {
             to: v("0.2.0"),
             applied: datetime!(2026-10-27 10:00 UTC),
             started: None,
+            rollback: false,
         });
         state.save(dir.path()).unwrap();
         assert_eq!(State::load(dir.path()).unwrap(), state);
@@ -156,9 +160,13 @@ mod tests {
         );
         if let Some(pending) = &mut state.pending_health {
             pending.started = Some(datetime!(2026-10-27 10:01 UTC));
+            pending.rollback = true;
         }
         state.save(dir.path()).unwrap();
         assert_eq!(State::load(dir.path()).unwrap(), state);
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["pending_health"]["rollback"], json!(true));
 
         // Saving again replaces the file; no temporary file stays.
         state.pending_health = None;

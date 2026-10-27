@@ -29,11 +29,13 @@ use openncalayer::cli::{self, Cli, Command};
 use openncalayer::notices::TrayStatus;
 use openncalayer::renewal::{self, RenewalCheck};
 use openncalayer::update::installer::VelopackInstaller;
-use openncalayer::update::{self, Host, Notice, Startup, Updater, UpdaterConfig, UpdaterHandle};
+use openncalayer::update::{
+    self, Host, Notice, RollBack, Startup, Updater, UpdaterConfig, UpdaterHandle,
+};
 use openncalayer::wss::{Listening, PortState, WATCH_EVERY, Watcher, Wss};
 use openncalayer::{
-    JsonSettings, LiveProxyTransport, Paths, ServerConfig, build_registry, desktop, listen_port,
-    load_settings, requests_idle, serve, serve_ipc,
+    JsonSettings, LiveProxyTransport, Paths, ServerConfig, build_registry, desktop, hold_requests,
+    listen_port, load_settings, release_requests, requests_idle, serve, serve_ipc,
 };
 use time::OffsetDateTime;
 use tokio::runtime::Runtime;
@@ -43,9 +45,6 @@ use tokio::sync::{Notify, mpsc};
 const SERVER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long wss keeps trying to take the port after the original NCALayer is stopped.
 const REBIND_WAIT: Duration = Duration::from_secs(2);
-/// How long after its event loop starts a new version confirms its health, if its servers
-/// still run then.
-const HEALTH_SETTLE: Duration = Duration::from_secs(5);
 
 /// The tray and what it shows, on the event loop's thread.
 struct Tray {
@@ -241,6 +240,20 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         Arc::clone(&stop),
         Arc::clone(&loop_runs),
     );
+    // A version that did not prove healthy goes back before anything else starts.
+    let mut rollback = None;
+    if let (UpdaterHandle::Running(updater), Startup::RollBack { failed, to }) =
+        (&updates, &startup)
+    {
+        match updater.roll_back_now(failed, to) {
+            RollBack::Applied => {
+                tracing::info!(%failed, %to, "rolling back; exiting");
+                return ExitCode::SUCCESS;
+            }
+            RollBack::Retry => rollback = Some((failed.clone(), to.clone())),
+            RollBack::GaveUp => {}
+        }
+    }
     // A failure only a tray lets the daemon live with.
     let (opened, waits_for_tray) = match daemon.wss {
         Ok(opened) => (Ok(opened), None),
@@ -317,12 +330,19 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     } else {
         start_renewal(files, wss);
     }
-    // Whether the servers still run, for a new version's health.
-    let serving = Arc::new(AtomicBool::new(true));
-    let served = Arc::clone(&serving);
+    // Whether the servers run, for a new version's health; cleared however the server
+    // thread ends.
+    let serving = Arc::new(AtomicBool::new(false));
+    if let (UpdaterHandle::Running(updater), Startup::Confirm) = (&updates, &startup) {
+        let (serving, loop_runs) = (Arc::clone(&serving), Arc::clone(&loop_runs));
+        updater.watch_health(move || {
+            serving.load(Ordering::SeqCst) && (!event_loop || loop_runs.load(Ordering::SeqCst))
+        });
+    }
+    let served = Flag::set(Arc::clone(&serving));
     let server = thread::Builder::new().name("server".into()).spawn(move || {
+        let _served = served;
         let result = runtime.block_on(serve_all(ipc, listeners, Arc::new(registry), reports, stop));
-        served.store(false, Ordering::SeqCst);
         if let Err(e) = &result {
             tracing::error!(error = %e, "server stopped");
         }
@@ -339,13 +359,13 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    start_updates(
-        updates,
-        startup,
-        serving,
-        event_loop,
-        Arc::clone(&loop_runs),
-    );
+    if event_loop {
+        let runs = Arc::clone(&loop_runs);
+        oncl_ui::when_event_loop_runs(move || runs.store(true, Ordering::SeqCst));
+    }
+    if let UpdaterHandle::Running(updater) = updates {
+        updater.spawn(rollback);
+    }
     if !event_loop {
         return exit_code(server.join());
     }
@@ -567,7 +587,7 @@ fn start_tray(
         TrayCommand::CheckUpdates => {
             let updates = updates.clone();
             spawn_named("check-updates", move || {
-                let found = updates.check_now();
+                let found = updates.check_now(None);
                 post_to_tray(move |status| status.update_notification(&Notice::Checked(found)));
             });
         }
@@ -599,9 +619,30 @@ struct DaemonHost {
 /// counts as one open.
 const WINDOW_ASK: Duration = Duration::from_secs(10);
 
+impl DaemonHost {
+    fn window_open(&self) -> bool {
+        self.loop_runs.load(Ordering::SeqCst) && window_open()
+    }
+}
+
 impl Host for DaemonHost {
     fn busy(&self) -> bool {
-        !requests_idle(update::QUIET) || (self.loop_runs.load(Ordering::SeqCst) && window_open())
+        !requests_idle(update::QUIET) || self.window_open()
+    }
+
+    fn hold(&self) -> bool {
+        if !hold_requests() {
+            return false;
+        }
+        if self.window_open() {
+            release_requests();
+            return false;
+        }
+        true
+    }
+
+    fn release(&self) {
+        release_requests();
     }
 
     fn notify(&self, notice: Notice) {
@@ -650,6 +691,8 @@ fn updater(
             keys,
             flavor,
             idle_poll: update::IDLE_POLL,
+            health_grace: update::HEALTH_GRACE,
+            health_settle: update::HEALTH_SETTLE,
         },
         transport,
         Box::new(installer),
@@ -659,38 +702,19 @@ fn updater(
     (UpdaterHandle::Running(Arc::new(updater)), startup)
 }
 
-/// Starts the updater once the event loop runs (at once without one): a version just
-/// installed confirms its health [`HEALTH_SETTLE`] later if its servers still run
-/// (`serving`); a failed one is rolled back; then the checks.
-fn start_updates(
-    updates: UpdaterHandle,
-    startup: Startup,
-    serving: Arc<AtomicBool>,
-    event_loop: bool,
-    loop_runs: Arc<AtomicBool>,
-) {
-    let UpdaterHandle::Running(updater) = updates else {
-        return;
-    };
-    let start = move || {
-        loop_runs.store(event_loop, Ordering::SeqCst);
-        if startup == Startup::Confirm {
-            let confirming = Arc::clone(&updater);
-            spawn_named("update-health", move || {
-                thread::sleep(HEALTH_SETTLE);
-                if serving.load(Ordering::SeqCst) {
-                    confirming.confirm_health();
-                } else {
-                    tracing::warn!("the servers stopped: this version's health is not confirmed");
-                }
-            });
-        }
-        updater.spawn(startup);
-    };
-    if event_loop {
-        oncl_ui::when_event_loop_runs(start);
-    } else {
-        start();
+/// A flag set from its creation to its drop, however its owner ends (a panic included).
+struct Flag(Arc<AtomicBool>);
+
+impl Flag {
+    fn set(flag: Arc<AtomicBool>) -> Flag {
+        flag.store(true, Ordering::SeqCst);
+        Flag(flag)
+    }
+}
+
+impl Drop for Flag {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 

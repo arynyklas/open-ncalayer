@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread::LocalKey;
 
 use oncl_basics::Locale;
-use oncl_desktop::Settings;
+use oncl_desktop::{Settings, UpdateSettings};
 use slint::{CloseRequestResponse, ComponentHandle, PlatformError, SharedString};
 
 use super::texts::Texts;
@@ -186,14 +186,19 @@ fn saved(
     show_states(&open.ui, &states, l);
 }
 
-/// «Проверить сейчас»: the updater looks for a new version on a worker thread; the window
-/// shows what it found.
+/// «Проверить сейчас»: the updater looks for a new version on a worker thread, with the
+/// channel the form shows (saved or not); the window shows what it found.
 fn check_updates(open: &Open) {
+    let form = form_of(&open.ui);
+    let updates = UpdateSettings {
+        enabled: form.updates_enabled,
+        channel: form.update_channel,
+    };
     open.ui
         .set_update_state(Texts::of(open.desktop.locale.get()).update_checking.into());
     run(
         open,
-        |s| s.updates.check_now(),
+        move |s| s.updates.check_now(Some(updates)),
         |desktop, open, status| {
             if let Some(open) = open {
                 show_update(&open.ui, &status, desktop.locale.get());

@@ -27,5 +27,5 @@ pub use server::{
     DEFAULT_PORT, IDLE_TIMEOUT, LiveTls, MAX_MESSAGE, MAX_PORT, PORT_VAR, ServerConfig,
     build_registry, listen_port, listen_port_from, serve,
 };
-pub use session::requests_idle;
+pub use session::{hold_requests, release_requests, requests_idle};
 pub use settings::{JsonSettings, LiveProxyTransport, load_settings};
