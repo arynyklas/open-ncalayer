@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "OpenNCALayer",
   "version": "{{VERSION}}",
+  "version_name": "{{VERSION_NAME}}",
   "description": "Connects sites built for NCALayer to OpenNCALayer through native messaging.",
   "key": "{{KEY}}",
   "minimum_chrome_version": "109",

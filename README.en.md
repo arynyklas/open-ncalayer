@@ -8,7 +8,7 @@ OpenNCALayer is an independent project and is not affiliated with the National C
 
 ## Status
 
-Early development; there are no release builds yet. The first end-to-end slice (P1) is in place: a site using [ncalayer-js-client](https://github.com/sigex-kz/ncalayer-js-client) gets a CMS signature over `wss://127.0.0.1:13579`.
+Early development; the first pre-release is `0.1.0-alpha.1` ([Releases](https://github.com/arynyklas/open-ncalayer/releases)). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. Tokens, Windows 7, auto-update and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
 
 P1 provides:
 - the `kz.gov.pki.knca.basics` module, method `sign`, formats `cms` and `raw`;
@@ -230,6 +230,12 @@ The About window: version, build commit, the Apache-2.0 licence, `Copyright 2026
 - Proxy: no SOCKS and no `https://` proxies; no proxy by default, even if the system has one.
 - The certificate for `wss` is issued on the user's computer and installed into trust stores only by a wizard button (D5); the original ships its own certificate.
 - The original's autostart is disabled by moving it aside, not deleting it; `HKLM\…\Run` is not changed without administrator rights.
+
+## Ready-made builds
+
+[Releases](https://github.com/arynyklas/open-ncalayer/releases): archives for Windows x64 (`x86_64-pc-windows-msvc`), Linux x64 (`x86_64-unknown-linux-gnu`, built on Ubuntu 24.04) and macOS on Apple Silicon (`aarch64-apple-darwin`) with `openncalayer` and `nmhost`, the extensions `openncalayer-chromium-<version>.zip` and `openncalayer-firefox-<version>.xpi` (unsigned: Firefox installs it only temporarily), and `SHA256SUMS`. Versions with a suffix (`0.1.0-alpha.1`) are pre-releases. The binaries are not code-signed: Windows SmartScreen and macOS Gatekeeper warn on first start. A `v<version>` tag builds and publishes the release by itself (`.github/workflows/release.yml`).
+
+Unpack the archive and go on as with your own build: `openncalayer run`, and the extension as in [Browser extension](#browser-extension).
 
 ## Build and run
 

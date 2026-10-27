@@ -58,7 +58,12 @@ fn builds_both_extensions_from_the_shared_ids() {
             "{}: unreplaced placeholder",
             package.browser
         );
-        assert_eq!(manifest["version"], version, "{}", package.browser);
+        assert_eq!(
+            manifest["version"],
+            xtask::ext::browser_version(),
+            "{}",
+            package.browser
+        );
         for script in referenced_scripts(&manifest) {
             assert!(
                 package.dir.join(&script).is_file(),
@@ -110,6 +115,7 @@ fn builds_both_extensions_from_the_shared_ids() {
     let (_, chromium) = manifest(&packages[0].dir);
     assert_eq!(chromium["manifest_version"], 3);
     assert_eq!(chromium["key"], CHROMIUM_EXTENSION_KEY);
+    assert_eq!(chromium["version_name"], version);
     assert_eq!(chromium["minimum_chrome_version"], "109");
     // The shim is registered at run time, so it is in the package without a manifest entry.
     assert!(packages[0].dir.join("shim.js").is_file());

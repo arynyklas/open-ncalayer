@@ -22,8 +22,15 @@ use oncl_ipc::ids::{
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipWriter};
 
-/// Extension version: the workspace version (xtask inherits it).
+/// The workspace version (xtask inherits it), in archive names and as Chromium's
+/// `version_name`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The browsers' `version`: [`VERSION`] without a semver pre-release or build suffix
+/// (`0.1.0-alpha.1` → `0.1.0`), since browsers take only dot-separated integers.
+pub fn browser_version() -> &'static str {
+    VERSION.split(['-', '+']).next().unwrap_or(VERSION)
+}
 
 /// Browsers and the extension of their archive.
 const BROWSERS: [(&str, &str); 2] = [("chromium", "zip"), ("firefox", "xpi")];
@@ -51,7 +58,7 @@ pub struct Package {
 /// keeps a placeholder, or a file cannot be read or written.
 pub fn build(root: &Path, out: &Path) -> anyhow::Result<Vec<Package>> {
     check_chromium_id()?;
-    check_version(VERSION)?;
+    check_version(browser_version())?;
     let extension = root.join("extension");
     let src = extension.join("src");
     refresh(&src.join("host.js"), &host_js())?;
@@ -107,14 +114,16 @@ pub fn host_js() -> String {
     )
 }
 
-/// The manifest template with `{{VERSION}}`, `{{KEY}}` and `{{FIREFOX_ID}}` filled in.
+/// The manifest template with `{{VERSION}}` ([`browser_version`]), `{{VERSION_NAME}}`
+/// ([`VERSION`]), `{{KEY}}` and `{{FIREFOX_ID}}` filled in.
 ///
 /// # Errors
 ///
 /// If a placeholder is left or the result is not JSON.
 pub fn render(template: &str) -> anyhow::Result<String> {
     let rendered = template
-        .replace("{{VERSION}}", VERSION)
+        .replace("{{VERSION}}", browser_version())
+        .replace("{{VERSION_NAME}}", VERSION)
         .replace("{{KEY}}", CHROMIUM_EXTENSION_KEY)
         .replace("{{FIREFOX_ID}}", FIREFOX_EXTENSION_ID);
     if let Some(at) = rendered.find("{{") {
@@ -183,10 +192,13 @@ mod tests {
 
     #[test]
     fn render_fills_placeholders_and_rejects_unknown_ones() {
-        let rendered =
-            render(r#"{"v": "{{VERSION}}", "k": "{{KEY}}", "id": "{{FIREFOX_ID}}"}"#).unwrap();
+        let rendered = render(
+            r#"{"v": "{{VERSION}}", "n": "{{VERSION_NAME}}", "k": "{{KEY}}", "id": "{{FIREFOX_ID}}"}"#,
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
-        assert_eq!(value["v"], VERSION);
+        assert_eq!(value["v"], browser_version());
+        assert_eq!(value["n"], VERSION);
         assert_eq!(value["k"], CHROMIUM_EXTENSION_KEY);
         assert_eq!(value["id"], FIREFOX_EXTENSION_ID);
 
@@ -198,6 +210,12 @@ mod tests {
     #[test]
     fn chromium_id_matches_the_key() {
         check_chromium_id().unwrap();
+    }
+
+    #[test]
+    fn browser_version_drops_the_pre_release() {
+        check_version(browser_version()).unwrap();
+        assert!(VERSION.starts_with(browser_version()));
     }
 
     #[test]
