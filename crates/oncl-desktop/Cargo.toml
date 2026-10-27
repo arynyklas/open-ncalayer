@@ -1,6 +1,6 @@
 [package]
 name = "oncl-desktop"
-description = "OpenNCALayer desktop integration without windows: settings.json and autostart at login"
+description = "OpenNCALayer desktop integration without windows: settings.json, autostart at login, the original NCALayer's and the browser extension's state"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

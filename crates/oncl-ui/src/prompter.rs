@@ -318,20 +318,8 @@ fn show_csr(p: CsrPrompt, reply: Sender<Prompt<CsrAnswer>>) -> Result<(), Platfo
     ui.set_ask_password(p.ask_password);
 
     let pending = Pending::new(ui.clone_strong(), reply);
+    wire_browse(&ui);
     let weak = ui.as_weak();
-    ui.on_browse({
-        let weak = weak.clone();
-        move || {
-            if let Some(ui) = weak.upgrade() {
-                let weak = ui.as_weak();
-                pick_folder(ui.window(), &ui.get_path(), move |dir| {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.set_path(dir.into());
-                    }
-                });
-            }
-        }
-    });
     ui.on_confirm({
         let pending = pending.clone();
         move || {
@@ -345,15 +333,16 @@ fn show_csr(p: CsrPrompt, reply: Sender<Prompt<CsrAnswer>>) -> Result<(), Platfo
             else {
                 return;
             };
+            // Checked here, so that the user can correct it; whether the folder exists is
+            // the backend's check (no file system access on the UI thread).
+            if let Some(e) = view::folder_error(&ui.get_path(), p.locale) {
+                ui.set_error(e.into());
+                return;
+            }
             let password = if p.ask_password {
-                let password = Zeroizing::new(ui.get_password().to_string());
-                let confirmation = Zeroizing::new(ui.get_confirmation().to_string());
-                if let Some(e) = view::new_password_error(&password, &confirmation, p.locale) {
-                    ui.set_error(e.into());
+                let Some(password) = take_new_password(&ui, p.locale) else {
                     return;
-                }
-                ui.set_password(SharedString::new());
-                ui.set_confirmation(SharedString::new());
+                };
                 password
             } else {
                 Zeroizing::default()
@@ -388,20 +377,8 @@ fn show_import(p: ImportPrompt, reply: Sender<Prompt<ImportAnswer>>) -> Result<(
     }
 
     let pending = Pending::new(ui.clone_strong(), reply);
+    wire_browse(&ui);
     let weak = ui.as_weak();
-    ui.on_browse({
-        let weak = weak.clone();
-        move || {
-            if let Some(ui) = weak.upgrade() {
-                let weak = ui.as_weak();
-                pick_folder(ui.window(), &ui.get_path(), move |dir| {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.set_path(dir.into());
-                    }
-                });
-            }
-        }
-    });
     ui.on_confirm({
         let pending = pending.clone();
         let locale = p.locale;
@@ -413,14 +390,9 @@ fn show_import(p: ImportPrompt, reply: Sender<Prompt<ImportAnswer>>) -> Result<(
             if !supported {
                 return;
             }
-            let password = Zeroizing::new(ui.get_password().to_string());
-            let confirmation = Zeroizing::new(ui.get_confirmation().to_string());
-            if let Some(e) = view::new_password_error(&password, &confirmation, locale) {
-                ui.set_error(e.into());
+            let Some(password) = take_new_password(&ui, locale) else {
                 return;
-            }
-            ui.set_password(SharedString::new());
-            ui.set_confirmation(SharedString::new());
+            };
             pending.finish(Prompt::Answer(ImportAnswer {
                 dir: PathBuf::from(ui.get_path().as_str()),
                 new_password: password,
@@ -428,6 +400,79 @@ fn show_import(p: ImportPrompt, reply: Sender<Prompt<ImportAnswer>>) -> Result<(
         }
     });
     show(&ui, pending)
+}
+
+/// What the certificate request and installation dialogs share: a folder picked with
+/// Browse…, and a new key file password with its confirmation.
+trait FolderDialog: ComponentHandle + 'static {
+    fn path(&self) -> SharedString;
+    fn set_path(&self, path: SharedString);
+    /// Registers Browse…'s handler.
+    fn set_browse(&self, f: impl FnMut() + 'static);
+    fn password(&self) -> SharedString;
+    fn confirmation(&self) -> SharedString;
+    /// Empties the password and its confirmation.
+    fn clear_passwords(&self);
+    fn set_error(&self, error: SharedString);
+}
+
+macro_rules! folder_dialog {
+    ($($dialog:ty),*) => {$(
+        impl FolderDialog for $dialog {
+            fn path(&self) -> SharedString {
+                self.get_path()
+            }
+            fn set_path(&self, path: SharedString) {
+                <$dialog>::set_path(self, path);
+            }
+            fn set_browse(&self, f: impl FnMut() + 'static) {
+                self.on_browse(f);
+            }
+            fn password(&self) -> SharedString {
+                self.get_password()
+            }
+            fn confirmation(&self) -> SharedString {
+                self.get_confirmation()
+            }
+            fn clear_passwords(&self) {
+                <$dialog>::set_password(self, SharedString::new());
+                <$dialog>::set_confirmation(self, SharedString::new());
+            }
+            fn set_error(&self, error: SharedString) {
+                <$dialog>::set_error(self, error);
+            }
+        }
+    )*};
+}
+
+folder_dialog!(CsrDialog, ImportDialog);
+
+/// Wires Browse… of `ui` to the system folder dialog, starting in the dialog's folder.
+fn wire_browse<D: FolderDialog>(ui: &D) {
+    let weak = ui.as_weak();
+    ui.set_browse(move || {
+        if let Some(ui) = weak.upgrade() {
+            let weak = ui.as_weak();
+            pick_folder(ui.window(), &FolderDialog::path(&ui), move |dir| {
+                if let Some(ui) = weak.upgrade() {
+                    FolderDialog::set_path(&ui, dir.into());
+                }
+            });
+        }
+    });
+}
+
+/// The new key file password of `ui`, emptied in the dialog, if it and its confirmation
+/// pass [`view::new_password_error`]; otherwise the dialog shows why and keeps them.
+fn take_new_password<D: FolderDialog>(ui: &D, l: Locale) -> Option<Zeroizing<String>> {
+    let password = Zeroizing::new(ui.password().to_string());
+    let confirmation = Zeroizing::new(ui.confirmation().to_string());
+    if let Some(e) = view::new_password_error(&password, &confirmation, l) {
+        FolderDialog::set_error(ui, e.into());
+        return None;
+    }
+    ui.clear_passwords();
+    Some(password)
 }
 
 /// The rows of a storage list; the storages `usable` accepts may be picked.
@@ -677,8 +722,9 @@ fn index(i: Option<usize>) -> i32 {
     i.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1)
 }
 
-/// Switches the bundled translation of the `.slint` texts to `l`; English is the source.
-fn select_language(l: Locale) {
+/// Switches the bundled translation of the `.slint` texts to `l`; English is the source. The
+/// translation is the process's: every open dialog and window follows it.
+pub(crate) fn select_language(l: Locale) {
     let language = match l {
         Locale::Kk => "kk",
         Locale::Ru => "ru",

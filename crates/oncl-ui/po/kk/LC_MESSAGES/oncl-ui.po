@@ -85,3 +85,78 @@ msgstr "Кілт сақтау орнының құпиясөзін енгізің
 
 msgid "OK"
 msgstr "OK"
+
+msgid "OpenNCALayer settings"
+msgstr "OpenNCALayer баптаулары"
+
+msgid "General"
+msgstr "Жалпы"
+
+msgid "Language"
+msgstr "Тіл"
+
+msgid "As in the system"
+msgstr "Жүйедегідей"
+
+msgid "Start at login"
+msgstr "Жүйеге кірген кезде іске қосу"
+
+msgid "Proxy for time stamps, OCSP and CRL"
+msgstr "Уақыт белгілері, OCSP және CRL үшін прокси"
+
+msgid "No proxy"
+msgstr "Проксисіз"
+
+msgid "System proxy"
+msgstr "Жүйелік прокси"
+
+msgid "This proxy:"
+msgstr "Көрсетілген прокси:"
+
+msgid "HTTP proxies only; SOCKS is not supported."
+msgstr "Тек HTTP прокси; SOCKS қолдау көрсетілмейді."
+
+msgid "Save"
+msgstr "Сақтау"
+
+msgid "Original NCALayer"
+msgstr "Түпнұсқа NCALayer"
+
+msgid "Disable the original's autostart"
+msgstr "Түпнұсқаның автоіске қосылуын өшіру"
+
+msgid "Restore the original"
+msgstr "Түпнұсқаны қайтару"
+
+msgid "Browser extension"
+msgstr "Браузер кеңейтуі"
+
+msgid "Register"
+msgstr "Тіркеу"
+
+msgid "Remove"
+msgstr "Жою"
+
+msgid "About OpenNCALayer"
+msgstr "OpenNCALayer бағдарламасы туралы"
+
+msgid "Version {} (commit {})"
+msgstr "Нұсқа {} (коммит {})"
+
+msgid "Licensed under the Apache License, Version 2.0."
+msgstr "Лицензия: Apache License, Version 2.0."
+
+msgid "Modules"
+msgstr "Модульдер"
+
+msgid "Bundles (getBundles)"
+msgstr "Бандлдар (getBundles)"
+
+msgid "Modules of the daemon"
+msgstr "Демон модульдері"
+
+msgid "Bundles cannot be installed: OpenNCALayer has its modules built in."
+msgstr "Бандлдарды орнату мүмкін емес: OpenNCALayer модульдері бағдарламаға кірістірілген."
+
+msgid "Third-party licences"
+msgstr "Үшінші тарап лицензиялары"

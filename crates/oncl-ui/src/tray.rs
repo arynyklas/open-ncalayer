@@ -99,6 +99,11 @@ impl TrayHandle {
     pub fn set_state(&self, state: TrayState) {
         self.tray.set_state(state);
     }
+
+    /// Shows the menu in `locale` (the language saved in the settings window).
+    pub fn set_locale(&self, locale: Locale) {
+        self.tray.set_locale(locale);
+    }
 }
 
 impl Drop for TrayHandle {
@@ -227,6 +232,14 @@ impl TrayModel {
     fn set_state(&mut self, state: TrayState) -> bool {
         let changed = state != self.state;
         self.state = state;
+        changed
+    }
+
+    /// Takes the menu texts of `locale`; whether they change.
+    fn set_locale(&mut self, locale: Locale) -> bool {
+        let texts = Texts::of(locale);
+        let changed = texts != self.texts;
+        self.texts = texts;
         changed
     }
 
@@ -365,6 +378,16 @@ mod tests {
             TrayModel::new(Locale::Kk).menu().last(),
             Some(&MenuRow::Item(TrayCommand::Quit, "Шығу"))
         );
+    }
+
+    #[test]
+    fn locale_switches_the_menu_and_keeps_the_state() {
+        let mut model = TrayModel::new(Locale::Ru);
+        model.set_state(warned("порт занят"));
+        assert!(!model.set_locale(Locale::Ru));
+        assert!(model.set_locale(Locale::En));
+        assert_eq!(model.menu(), TrayModel::new(Locale::En).menu());
+        assert_eq!(model.warning(), Some("порт занят"));
     }
 
     #[test]

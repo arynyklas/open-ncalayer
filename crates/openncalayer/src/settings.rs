@@ -1,10 +1,14 @@
 //! `settings.json` of the data directory ([`oncl_desktop::settings`]): the `recentPath` of the
-//! key store dialogs and the settings the daemon starts with.
+//! key store dialogs and the settings the daemon starts with; [`LiveProxyTransport`] takes a
+//! proxy the settings window saves while the daemon runs.
 
 use std::path::{Path, PathBuf};
+use std::sync::{PoisonError, RwLock};
 
 use oncl_basics::RecentPathStore;
+use oncl_desktop::ProxySetting;
 use oncl_desktop::settings::{self, Settings};
+use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport, UreqTransport};
 use serde_json::Value;
 
 const RECENT_PATH: &str = "recentPath";
@@ -58,11 +62,87 @@ pub fn load_settings(path: &Path) -> Settings {
     })
 }
 
+/// The daemon's HTTP transport (time stamps, OCSP, CRL): [`UreqTransport`] through the
+/// proxy of the settings, which [`LiveProxyTransport::set_proxy`] changes for the requests
+/// that start afterwards.
+#[derive(Debug)]
+pub struct LiveProxyTransport {
+    current: RwLock<UreqTransport>,
+}
+
+impl LiveProxyTransport {
+    /// A transport through `proxy`.
+    pub fn new(proxy: ProxySetting) -> Self {
+        LiveProxyTransport {
+            current: RwLock::new(UreqTransport::with_proxy(proxy)),
+        }
+    }
+
+    /// Goes through `proxy` from now on.
+    pub fn set_proxy(&self, proxy: ProxySetting) {
+        *self.current.write().unwrap_or_else(PoisonError::into_inner) =
+            UreqTransport::with_proxy(proxy);
+    }
+
+    /// The transport of a request starting now.
+    fn transport(&self) -> UreqTransport {
+        self.current
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl HttpTransport for LiveProxyTransport {
+    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
+        self.transport().get(url)
+    }
+
+    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
+        self.transport().get_with(url, opts)
+    }
+
+    fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
+        self.transport().post(url, content_type, body)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oncl_desktop::ProxySetting;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// `http://` URL of a server that answers one request with `200 ok`.
+    fn serve_once() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        url
+    }
+
+    #[test]
+    fn a_saved_proxy_applies_to_later_requests() {
+        let url = serve_once();
+        let http = LiveProxyTransport::new(ProxySetting::Manual("socks5://127.0.0.1:1".to_owned()));
+        // An unusable proxy fails the request without connecting directly.
+        let e = http.get(&url).unwrap_err();
+        assert!(e.0.contains("proxy"), "{e}");
+        http.set_proxy(ProxySetting::None);
+        let reply = http.get(&url).unwrap();
+        assert_eq!(
+            (reply.status, reply.body.as_slice()),
+            (200, b"ok".as_slice())
+        );
+    }
 
     #[test]
     fn other_keys_are_kept_and_garbage_is_replaced() {

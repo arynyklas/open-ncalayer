@@ -4,7 +4,7 @@ use oncl_basics::{
 };
 use oncl_pki::info::{CertInfo, KeyUsageBits};
 use oncl_ui::view::{
-    CertRow, cert_rows, error_text, file_dialog_title, file_filter_name, key_rows,
+    CertRow, cert_rows, error_text, file_dialog_title, file_filter_name, folder_error, key_rows,
     new_password_error,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -209,6 +209,25 @@ fn new_passwords_follow_the_import_pattern() {
     assert_ne!(
         new_password_error("Abcde1", "x", Locale::Ru),
         new_password_error("Abcde1", "x", Locale::Kk)
+    );
+}
+
+/// The certificate request dialog refuses a folder that is not a full path before it
+/// closes, so the user can correct it; the text alone decides.
+#[test]
+fn csr_folder_must_be_a_full_path() {
+    let absolute = std::env::temp_dir().join("oncl-missing-folder");
+    assert_eq!(folder_error(absolute.to_str().unwrap(), Locale::Ru), None);
+    for relative in ["", "keys", "./keys", r"..\keys"] {
+        assert_eq!(
+            folder_error(relative, Locale::Ru),
+            Some("Укажите полный путь к папке хранения ключа"),
+            "{relative:?}"
+        );
+    }
+    assert_ne!(
+        folder_error("keys", Locale::Kk),
+        folder_error("keys", Locale::En)
     );
 }
 

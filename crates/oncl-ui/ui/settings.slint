@@ -1,0 +1,185 @@
+// The settings window: language, our autostart and the proxy (saved together), and the
+// original NCALayer's autostart and the browser extension's registration (acted on at once).
+// The states and messages are composed in Rust.
+
+import { Button, CheckBox, ComboBox, GroupBox, LineEdit, VerticalBox } from "std-widgets.slint";
+
+export component SettingsWindow inherits Window {
+    title: @tr("OpenNCALayer settings");
+    min-width: 520px;
+
+    // 0: the system's language, 1: Russian, 2: Kazakh, 3: English.
+    in-out property <int> language;
+    in-out property <bool> autostart;
+    // 0: no proxy, 1: the system's proxy, 2: the proxy of `proxy-url`.
+    in-out property <int> proxy-mode;
+    in-out property <string> proxy-url;
+    // The outcome of the last action, and whether it failed.
+    in property <string> message;
+    in property <bool> message-is-error;
+    // An action runs (or the states load): the buttons wait.
+    in property <bool> busy;
+
+    in property <string> original-state;
+    in property <bool> can-disable-original;
+    in property <bool> can-restore-original;
+    in property <string> extension-state;
+    in property <bool> can-unregister-extension;
+
+    callback save();
+    callback dismiss();
+    callback disable-original();
+    callback restore-original();
+    callback register-extension();
+    callback unregister-extension();
+
+    VerticalBox {
+        GroupBox {
+            vertical-stretch: 0;
+            title: @tr("General");
+            VerticalLayout {
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: @tr("Language");
+                        vertical-alignment: center;
+                    }
+
+                    ComboBox {
+                        horizontal-stretch: 1;
+                        model: [@tr("As in the system"), "Русский", "Қазақша", "English"];
+                        current-index <=> root.language;
+                    }
+                }
+
+                CheckBox {
+                    text: @tr("Start at login");
+                    checked <=> root.autostart;
+                }
+            }
+        }
+
+        GroupBox {
+            vertical-stretch: 0;
+            title: @tr("Proxy for time stamps, OCSP and CRL");
+            VerticalLayout {
+                spacing: 8px;
+                ComboBox {
+                    model: [@tr("No proxy"), @tr("System proxy"), @tr("This proxy:")];
+                    current-index <=> root.proxy-mode;
+                }
+
+                LineEdit {
+                    enabled: root.proxy-mode == 2;
+                    placeholder-text: "http://proxy.example:3128";
+                    text <=> root.proxy-url;
+                }
+
+                Text {
+                    text: @tr("HTTP proxies only; SOCKS is not supported.");
+                    wrap: word-wrap;
+                    color: #888888;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 0;
+            spacing: 8px;
+            alignment: end;
+            Button {
+                text: @tr("Save");
+                primary: true;
+                enabled: !root.busy;
+                clicked => {
+                    root.save();
+                }
+            }
+        }
+
+        GroupBox {
+            vertical-stretch: 0;
+            title: @tr("Original NCALayer");
+            VerticalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.original-state;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: @tr("Disable the original's autostart");
+                        enabled: !root.busy && root.can-disable-original;
+                        clicked => {
+                            root.disable-original();
+                        }
+                    }
+
+                    Button {
+                        text: @tr("Restore the original");
+                        enabled: !root.busy && root.can-restore-original;
+                        clicked => {
+                            root.restore-original();
+                        }
+                    }
+                }
+            }
+        }
+
+        GroupBox {
+            vertical-stretch: 0;
+            title: @tr("Browser extension");
+            VerticalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.extension-state;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: @tr("Register");
+                        enabled: !root.busy;
+                        clicked => {
+                            root.register-extension();
+                        }
+                    }
+
+                    Button {
+                        text: @tr("Remove");
+                        enabled: !root.busy && root.can-unregister-extension;
+                        clicked => {
+                            root.unregister-extension();
+                        }
+                    }
+                }
+            }
+        }
+
+        // A taller window grows here, not in the controls.
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        if !root.message.is-empty: Text {
+            text: root.message;
+            wrap: word-wrap;
+            color: root.message-is-error ? #c42b1c : #2e7d32;
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 0;
+            alignment: end;
+            Button {
+                text: @tr("Close");
+                clicked => {
+                    root.dismiss();
+                }
+            }
+        }
+    }
+}

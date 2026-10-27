@@ -43,6 +43,13 @@ enum Command {
     },
     /// Sign with the synthetic RSA key and check the CMS with `openssl cms -verify`.
     InteropOpenssl,
+    /// Generate the third-party licence texts of the programs for the About window
+    /// (`crates/oncl-ui/assets/THIRD-PARTY.txt`) from the local cargo registry.
+    Licenses {
+        /// Regenerate in memory and fail if the committed file differs.
+        #[arg(long)]
+        check: bool,
+    },
     /// Verify our XMLDSig and CMS signatures with NCANode (Kalkan) in Docker (Linux only).
     InteropNcanode,
 }
@@ -88,6 +95,21 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("fixtures/synthetic is stale: run `cargo xtask gen-fixtures`");
             }
             println!("fixtures/synthetic is up to date");
+            Ok(())
+        }
+        Command::Licenses { check: false } => {
+            let path = xtask::licenses::write(&oncl_testkit::workspace_root())?;
+            println!("{}", path.display());
+            Ok(())
+        }
+        Command::Licenses { check: true } => {
+            if !xtask::licenses::check(&oncl_testkit::workspace_root())? {
+                anyhow::bail!(
+                    "{} is stale: run `cargo xtask licenses`",
+                    xtask::licenses::OUTPUT
+                );
+            }
+            println!("{} is up to date", xtask::licenses::OUTPUT);
             Ok(())
         }
     }

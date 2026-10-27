@@ -50,6 +50,14 @@ const CORE_BUNDLES: [(&str, &str); 8] = [
     ("kz.gov.pki.provider.knca_provider_util", "0.9.2"),
 ];
 
+/// What `getBundles` reports, `(symname, version)` in order: the original's framework and
+/// core bundles, then OpenNCALayer itself ([`SYMNAME`]). The About window lists them.
+pub fn bundles() -> Vec<(&'static str, &'static str)> {
+    let mut bundles = CORE_BUNDLES.to_vec();
+    bundles.push((SYMNAME, env!("CARGO_PKG_VERSION")));
+    bundles
+}
+
 /// A window a page asks the daemon to open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiRequest {
@@ -92,10 +100,9 @@ impl Accessory {
         let mut obj = Map::new();
         let ui = match method {
             "getBundles" => {
-                for (symname, version) in CORE_BUNDLES {
+                for (symname, version) in bundles() {
                     obj.insert(symname.to_owned(), json!(version));
                 }
-                obj.insert(SYMNAME.to_owned(), json!(env!("CARGO_PKG_VERSION")));
                 None
             }
             "getServices" => {

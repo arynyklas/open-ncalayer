@@ -3,6 +3,7 @@
 //! [`deliver`] so that `on_command` never runs inside a window procedure.
 
 use super::{IconKind, MenuRow, PRODUCT, TrayCommand, TrayError, TrayModel, TrayState, deliver};
+use oncl_basics::Locale;
 use std::cell::RefCell;
 use std::rc::Rc;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -73,10 +74,25 @@ impl Tray {
             tracing::warn!(error = %e, "cannot update the tray icon");
         }
     }
+
+    pub(super) fn set_locale(&self, locale: Locale) {
+        let mut shared = self.shared.borrow_mut();
+        if !shared.model.set_locale(locale) {
+            return;
+        }
+        let Shared { model, icon } = &*shared;
+        let Some(tray) = icon else {
+            return;
+        };
+        match menu(model) {
+            Ok(menu) => tray.set_menu(Some(Box::new(menu))),
+            Err(e) => tracing::warn!(error = %e, "cannot update the tray menu"),
+        }
+    }
 }
 
-/// The tray icon of `model`, with its menu.
-fn build(model: &TrayModel) -> Result<TrayIcon, TrayError> {
+/// The menu of `model`.
+fn menu(model: &TrayModel) -> Result<Menu, TrayError> {
     let menu = Menu::new();
     for row in model.menu() {
         match row {
@@ -87,9 +103,14 @@ fn build(model: &TrayModel) -> Result<TrayIcon, TrayError> {
         }
         .map_err(|e| TrayError(format!("tray menu: {e}")))?;
     }
+    Ok(menu)
+}
+
+/// The tray icon of `model`, with its menu.
+fn build(model: &TrayModel) -> Result<TrayIcon, TrayError> {
     TrayIconBuilder::new()
         .with_id(PRODUCT)
-        .with_menu(Box::new(menu))
+        .with_menu(Box::new(menu(model)?))
         .with_tooltip(model.tooltip())
         .with_icon(icon_of(model.icon())?)
         .build()

@@ -85,3 +85,78 @@ msgstr "Введите пароль на хранилище ключей:"
 
 msgid "OK"
 msgstr "OK"
+
+msgid "OpenNCALayer settings"
+msgstr "Настройки OpenNCALayer"
+
+msgid "General"
+msgstr "Общие"
+
+msgid "Language"
+msgstr "Язык"
+
+msgid "As in the system"
+msgstr "Как в системе"
+
+msgid "Start at login"
+msgstr "Запускать при входе в систему"
+
+msgid "Proxy for time stamps, OCSP and CRL"
+msgstr "Прокси для меток времени, OCSP и CRL"
+
+msgid "No proxy"
+msgstr "Без прокси"
+
+msgid "System proxy"
+msgstr "Системный прокси"
+
+msgid "This proxy:"
+msgstr "Указанный прокси:"
+
+msgid "HTTP proxies only; SOCKS is not supported."
+msgstr "Только HTTP-прокси; SOCKS не поддерживается."
+
+msgid "Save"
+msgstr "Сохранить"
+
+msgid "Original NCALayer"
+msgstr "Оригинальный NCALayer"
+
+msgid "Disable the original's autostart"
+msgstr "Отключить автозапуск оригинала"
+
+msgid "Restore the original"
+msgstr "Вернуть оригинал"
+
+msgid "Browser extension"
+msgstr "Расширение браузера"
+
+msgid "Register"
+msgstr "Зарегистрировать"
+
+msgid "Remove"
+msgstr "Удалить"
+
+msgid "About OpenNCALayer"
+msgstr "О программе OpenNCALayer"
+
+msgid "Version {} (commit {})"
+msgstr "Версия {} (коммит {})"
+
+msgid "Licensed under the Apache License, Version 2.0."
+msgstr "Лицензия: Apache License, Version 2.0."
+
+msgid "Modules"
+msgstr "Модули"
+
+msgid "Bundles (getBundles)"
+msgstr "Бандлы (getBundles)"
+
+msgid "Modules of the daemon"
+msgstr "Модули демона"
+
+msgid "Bundles cannot be installed: OpenNCALayer has its modules built in."
+msgstr "Установка бандлов не поддерживается: модули OpenNCALayer встроены в программу."
+
+msgid "Third-party licences"
+msgstr "Сторонние лицензии"

@@ -1,0 +1,151 @@
+// The About window: the program, its licence and Slint's (AboutSlint); the bundles and
+// modules pages see; the third-party licences.
+
+import { AboutSlint, Button, StandardListView, TabWidget, TextEdit, VerticalBox } from "std-widgets.slint";
+
+export component AboutWindow inherits Window {
+    title: @tr("About OpenNCALayer");
+    min-width: 640px;
+    min-height: 480px;
+
+    // 0: the program, 1: the modules, 2: the third-party licences.
+    in-out property <int> tab;
+    in property <string> version;
+    in property <string> commit;
+    in property <string> repository;
+    // `getBundles`: `symname version` per line.
+    in property <[StandardListViewItem]> bundles;
+    // The modules of the daemon's registry.
+    in property <[StandardListViewItem]> modules;
+    // The third-party crates, `name version` each.
+    in property <[StandardListViewItem]> crates;
+    in-out property <int> selected-crate: -1;
+    // The chosen crate's licence and texts.
+    in property <string> crate-license;
+    in property <string> crate-texts;
+
+    callback crate-chosen(int);
+    callback open-repository();
+    callback dismiss();
+
+    VerticalBox {
+        TabWidget {
+            current-index <=> root.tab;
+            Tab {
+                title: "OpenNCALayer";
+                VerticalBox {
+                    Text {
+                        text: "OpenNCALayer";
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        text: @tr("Version {} (commit {})", root.version, root.commit);
+                    }
+
+                    Text {
+                        text: "Copyright 2026 Aryn Yklas";
+                    }
+
+                    Text {
+                        text: @tr("Licensed under the Apache License, Version 2.0.");
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.repository;
+                            vertical-alignment: center;
+                            color: #1a73e8;
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.open-repository();
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                    }
+
+                    AboutSlint { }
+                }
+            }
+
+            Tab {
+                title: @tr("Modules");
+                VerticalBox {
+                    Text {
+                        text: @tr("Bundles (getBundles)");
+                        font-weight: 700;
+                    }
+
+                    StandardListView {
+                        vertical-stretch: 2;
+                        model: root.bundles;
+                    }
+
+                    Text {
+                        text: @tr("Modules of the daemon");
+                        font-weight: 700;
+                    }
+
+                    StandardListView {
+                        vertical-stretch: 1;
+                        model: root.modules;
+                    }
+
+                    Text {
+                        text: @tr("Bundles cannot be installed: OpenNCALayer has its modules built in.");
+                        wrap: word-wrap;
+                        color: #888888;
+                    }
+                }
+            }
+
+            Tab {
+                title: @tr("Third-party licences");
+                HorizontalLayout {
+                    spacing: 8px;
+                    padding: 8px;
+                    StandardListView {
+                        width: 220px;
+                        model: root.crates;
+                        current-item <=> root.selected-crate;
+                        current-item-changed(i) => {
+                            root.crate-chosen(i);
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.crate-license;
+                            wrap: word-wrap;
+                        }
+
+                        TextEdit {
+                            read-only: true;
+                            wrap: word-wrap;
+                            text: root.crate-texts;
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            alignment: end;
+            Button {
+                text: @tr("Close");
+                clicked => {
+                    root.dismiss();
+                }
+            }
+        }
+    }
+}

@@ -1,11 +1,12 @@
 //! Dialog texts Rust composes, in the request's [`Locale`]: key and certificate rows,
-//! storage names, open errors, new password checks and the file chooser's title and filter.
-//! Fixed dialog texts live in the `.slint` files and their `.po` catalogs.
+//! storage names, open errors, new password and folder checks and the file chooser's title
+//! and filter. Fixed dialog texts live in the `.slint` files and their `.po` catalogs.
 
 use oncl_basics::{
     Availability, DisabledReason, FileKind, ImportPrompt, KeyPrompt, Locale, OpenError, StorageKind,
 };
 use oncl_pki::info::CertInfo;
+use std::path::Path;
 use time::OffsetDateTime;
 
 /// Characters a new key file password may have besides Latin letters and digits (the
@@ -119,6 +120,17 @@ pub fn new_password_error(password: &str, confirmation: &str, l: Locale) -> Opti
     } else {
         None
     }
+}
+
+/// Why the folder of a certificate request is refused before the dialog closes: it must be
+/// a full path (the key files are not written relative to the daemon's working directory).
+/// Only the text is checked; whether the folder exists is the backend's check.
+pub fn folder_error(path: &str, l: Locale) -> Option<&'static str> {
+    (!Path::new(path).is_absolute()).then_some(match l {
+        Locale::Kk => "Кілт сақталатын қалтаның толық жолын көрсетіңіз",
+        Locale::Ru => "Укажите полный путь к папке хранения ключа",
+        Locale::En => "Enter the full path of the key storage folder",
+    })
 }
 
 /// Why a storage answer could not be opened. The texts for a store without (suitable) keys

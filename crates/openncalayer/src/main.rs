@@ -4,18 +4,25 @@ use std::io;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+use oncl_accessory::UiRequest;
 use oncl_basics::{Locale, Prompter};
+use oncl_desktop::Settings;
 use oncl_ipc::IpcListener;
-use oncl_pki::http::UreqTransport;
 use oncl_protocol::Registry;
-use oncl_ui::{SlintPrompter, TrayCommand, TrayHandle, TrayState};
-use openncalayer::cli::{self, Cli, Command};
-use openncalayer::{JsonSettings, ServerConfig, build_registry, load_settings, serve, serve_ipc};
+use oncl_ui::{
+    AboutInfo, DesktopWindow, DesktopWindows, SlintPrompter, TrayCommand, TrayHandle, TrayState,
+};
+use openncalayer::cli::{self, Cli, Command, WssOff};
+use openncalayer::{
+    JsonSettings, LiveProxyTransport, Paths, ServerConfig, build_registry, desktop, load_settings,
+    serve, serve_ipc,
+};
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
@@ -44,10 +51,11 @@ fn main() -> ExitCode {
 }
 
 /// The servers run on a tokio runtime in a background thread; the main thread runs the
-/// event loop of the dialogs and the tray, as windowing systems require. «Выход» in the
-/// tray stops the servers, and a stopped server ends the loop; closing windows does not.
-/// With feature `e2e-prompter` and its script set there are no windows: without a tray the
-/// main thread only waits for the servers. A tray that cannot be shown is only logged.
+/// event loop of the dialogs, the windows and the tray, as windowing systems require.
+/// «Выход» in the tray stops the servers, and a stopped server ends the loop; closing
+/// windows does not. With feature `e2e-prompter` and its script set there are no dialogs:
+/// without a tray the main thread only waits for the servers. A tray that cannot be shown is
+/// only logged.
 fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -71,26 +79,37 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     };
     let windows = scripted.is_none();
     let settings = load_settings(&daemon.paths.settings());
+    let locale = settings.ui_locale();
+    let http = Arc::new(LiveProxyTransport::new(settings.proxy.clone()));
     let registry = build_registry(
         scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new())),
         Arc::new(JsonSettings::new(daemon.paths.settings())),
-        Arc::new(UreqTransport::with_proxy(settings.proxy.clone())),
-        // The windows arrive in P5; until then a request to open one is only logged.
-        Arc::new(|window| tracing::info!(?window, "window requested; not available yet")),
+        Arc::clone(&http) as _,
+        Arc::new(open_requested_window),
     );
     let stop = Arc::new(Notify::new());
     let tray = if with_tray {
-        let locale = settings.ui_locale();
         start_tray(
             locale,
             daemon.paths.logs(),
             daemon.wss_off.map(|off| off.text(locale)),
             Arc::clone(&stop),
         )
+        .map(Rc::new)
     } else {
         None
     };
     let event_loop = windows || tray.is_some();
+    if event_loop {
+        oncl_ui::set_desktop_windows(desktop_windows(
+            &daemon.paths,
+            locale,
+            registry.names(),
+            http,
+            tray.as_ref().map_or_else(Weak::new, Rc::downgrade),
+            daemon.wss_off,
+        ));
+    }
     let (ipc, wss) = (daemon.ipc, daemon.wss);
     let server = thread::Builder::new().name("server".into()).spawn(move || {
         let result = runtime.block_on(serve_all(ipc, wss, Arc::new(registry), stop));
@@ -149,8 +168,56 @@ fn exit_code(server: thread::Result<io::Result<()>>) -> ExitCode {
     }
 }
 
+/// Opens the window a page asks for: `showSettings` the settings, `showBundleManager` the
+/// About window's «Модули» tab. There is no key store explorer and no AdES window.
+fn open_requested_window(window: UiRequest) {
+    match window {
+        UiRequest::Settings => oncl_ui::open_window(DesktopWindow::Settings),
+        UiRequest::BundleManager => oncl_ui::open_window(DesktopWindow::Modules),
+        UiRequest::KeystoreExplorer | UiRequest::AdesSigning | UiRequest::AdesValidation => {
+            tracing::info!(?window, "window requested; not available");
+        }
+    }
+}
+
+/// What the settings and About windows show and change. A save applies the proxy to `http`
+/// and the language to the tray, if it is still there.
+fn desktop_windows(
+    paths: &Paths,
+    locale: Locale,
+    modules: Vec<String>,
+    http: Arc<LiveProxyTransport>,
+    tray: Weak<TrayHandle>,
+    wss_off: Option<WssOff>,
+) -> DesktopWindows {
+    let exe = std::env::current_exe().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "the program's path is unknown; autostart cannot be set");
+        PathBuf::new()
+    });
+    let bundles = oncl_accessory::bundles()
+        .into_iter()
+        .map(|(symname, version)| (symname.to_owned(), version.to_owned()))
+        .collect();
+    DesktopWindows {
+        locale,
+        settings: desktop::settings_services(paths, exe),
+        about: AboutInfo { bundles, modules },
+        on_saved: Box::new(move |settings: &Settings| {
+            http.set_proxy(settings.proxy.clone());
+            if let Some(tray) = tray.upgrade() {
+                let locale = settings.ui_locale();
+                tray.set_locale(locale);
+                tray.set_state(TrayState {
+                    warning: wss_off.map(|off| off.text(locale)),
+                });
+            }
+        }),
+    }
+}
+
 /// The tray in `locale` with `warning` shown, or `None` (logged) if it cannot be shown. Its
-/// commands run on the event loop: «Выход» notifies `stop`, «Журнал» opens `logs`.
+/// commands run on the event loop: «Выход» notifies `stop`, «Журнал» opens `logs`,
+/// «Настройки…» and «О программе» open their windows.
 fn start_tray(
     locale: Locale,
     logs: PathBuf,
@@ -163,10 +230,9 @@ fn start_tray(
             stop.notify_one();
         }
         TrayCommand::OpenLogs => open_folder(&logs),
-        TrayCommand::Settings
-        | TrayCommand::TlsWizard
-        | TrayCommand::About
-        | TrayCommand::StopOriginal => {
+        TrayCommand::Settings => oncl_ui::open_window(DesktopWindow::Settings),
+        TrayCommand::About => oncl_ui::open_window(DesktopWindow::About),
+        TrayCommand::TlsWizard | TrayCommand::StopOriginal => {
             tracing::info!(?command, "window requested; not available yet");
         }
     });

@@ -1,6 +1,6 @@
 [package]
 name = "oncl-ui"
-description = "OpenNCALayer dialogs in Slint: storage, file and password; key choice; certificate request and installation; the legacy Applet's password; the system tray"
+description = "OpenNCALayer dialogs and windows in Slint: storage, file and password; key choice; certificate request and installation; the legacy Applet's password; settings and About; the system tray"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 oncl-basics.workspace = true
+oncl-desktop.workspace = true
 oncl-pki.workspace = true
 png.workspace = true
 rfd.workspace = true
@@ -22,6 +23,7 @@ slint = { workspace = true, features = ["raw-window-handle-06", "unstable-winit-
 thiserror.workspace = true
 time.workspace = true
 tracing.workspace = true
+webbrowser.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
@@ -44,4 +46,5 @@ ksni.workspace = true
 slint-build.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }

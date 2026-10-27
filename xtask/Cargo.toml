@@ -30,6 +30,8 @@ spki.workspace = true
 # `ext-e2e`: the browsers' short TMPDIR.
 tempfile.workspace = true
 time.workspace = true
+# `licenses`: the accepted licences of `deny.toml`.
+toml.workspace = true
 tungstenite.workspace = true
 ureq.workspace = true
 x509-cert.workspace = true

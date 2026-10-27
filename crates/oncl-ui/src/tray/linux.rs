@@ -6,6 +6,7 @@ use super::{IconKind, MenuRow, PRODUCT, TrayError, TrayModel, TrayState, deliver
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem, ToolTip};
+use oncl_basics::Locale;
 
 /// The tray of [`start_tray`](super::start_tray).
 pub(super) struct Tray {
@@ -35,6 +36,16 @@ impl Tray {
         if self
             .handle
             .update(|item| item.model.set_state(state))
+            .is_none()
+        {
+            tracing::warn!("the tray service has stopped");
+        }
+    }
+
+    pub(super) fn set_locale(&self, locale: Locale) {
+        if self
+            .handle
+            .update(|item| item.model.set_locale(locale))
             .is_none()
         {
             tracing::warn!("the tray service has stopped");
