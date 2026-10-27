@@ -199,6 +199,27 @@
       return { original: originalFirst, ncalayer: events };
     },
 
+    /**
+     * The page's networking after the extension was removed: the first message of the
+     * stand-in original (an NCALayer-range socket) and a `fetch` of this page, or the errors.
+     */
+    async plain_network() {
+      const result = {};
+      try {
+        const socket = connect(ORIGINAL);
+        result.websocket = await socket.message(5000);
+        socket.ws.close();
+      } catch (error) {
+        result.websocket = { error: String(error) };
+      }
+      try {
+        result.fetch = (await within(5000, 'fetch', fetch('/index.html', { cache: 'no-store' }))).status;
+      } catch (error) {
+        result.fetch = { error: String(error) };
+      }
+      return result;
+    },
+
     /** Without the native host: the NCALayer check of sites goes out as a real request. */
     async fallback_fetch() {
       try {

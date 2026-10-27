@@ -122,17 +122,19 @@ jobs:
           path: target/extension/signed/*.xpi
           if-no-files-found: error
 
-  # The extension in Chrome for Testing and Firefox, over native messaging to the daemon.
+  # The extension in Chrome for Testing, Firefox and Firefox ESR 115, over native messaging to
+  # the daemon.
   ext-e2e:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
+      # libdbus-glib-1-2: Firefox ESR 115 links libdbus-glib-1.so.2 (later Firefox does not).
       - name: Install system libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev openssl
+          sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev openssl libdbus-glib-1-2
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2

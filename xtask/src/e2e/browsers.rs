@@ -6,7 +6,7 @@
 //!   version (branded Chrome ignores `--load-extension`).
 //! - Firefox: the latest release and the latest geckodriver release.
 //! - Firefox ESR: the latest 115.x ESR (the last Firefox for Windows 7) from the release
-//!   archive, with the same geckodriver.
+//!   archive, with a pinned geckodriver that supports it.
 //!
 //! Every download lands in a directory named after its version, so a later run reuses it.
 //! All of them go through one agent with timeouts and a size cap. Firefox tarballs are
@@ -32,6 +32,9 @@ const CFT_VERSIONS: &str = "https://googlechromelabs.github.io/chrome-for-testin
 const FIREFOX_VERSIONS: &str = "https://product-details.mozilla.org/1.0/firefox_versions.json";
 /// Redirects to the tag page of the latest geckodriver release.
 const GECKODRIVER_LATEST: &str = "https://github.com/mozilla/geckodriver/releases/latest";
+/// The geckodriver of Firefox ESR 115, which stays at 115 for good: geckodriver 0.34–0.37.1
+/// support 115 ESR as their oldest Firefox, a later one may not.
+const GECKODRIVER_ESR: &str = "v0.37.1";
 /// Firefox releases: the version listing, `<version>/SHA256SUMS` and the tarballs.
 const FIREFOX_RELEASES: &str = "https://archive.mozilla.org/pub/firefox/releases";
 /// Firefox tarball compressions, newest first (`.tar.bz2` before Firefox 135).
@@ -77,10 +80,11 @@ impl Browser {
         self.extension() == "firefox"
     }
 
-    /// Whether `CustomEvent`s of the page reach the bridge: the shim runs in the page's own
-    /// world and talks to the bridge that way. Firefox ESR 115 has no `world: "MAIN"`; the
-    /// shim runs next to the bridge, calls it directly, and the bridge ignores page events.
-    pub fn bridge_hears_the_page(self) -> bool {
+    /// Whether the shim runs in the page's own world (Chromium, Firefox 128+): `CustomEvent`s
+    /// of the page reach the bridge, and the shim's functions outlive the extension. Firefox
+    /// ESR 115 has no `world: "MAIN"`: the shim runs next to the bridge, calls it directly,
+    /// the bridge ignores page events, and the shim's functions die with the extension.
+    pub fn shim_in_page_world(self) -> bool {
         self != Browser::FirefoxEsr
     }
 
@@ -204,7 +208,8 @@ fn download_firefox(dir: &Path) -> anyhow::Result<Binaries> {
         .with_context(|| format!("unexpected Firefox version {version:?}"))?
         .to_owned();
     let browser = firefox_release(dir, "firefox", &version)?;
-    let (driver, tag) = download_geckodriver(dir)?;
+    let tag = geckodriver_tag()?;
+    let driver = download_geckodriver(dir, "geckodriver", &tag)?;
     println!("Firefox {version}, geckodriver {tag}");
     Ok(Binaries { browser, driver })
 }
@@ -213,10 +218,11 @@ fn download_firefox_esr(dir: &Path) -> anyhow::Result<Binaries> {
     let listing_url = format!("{FIREFOX_RELEASES}/");
     let version = latest_esr115(&get_text(&listing_url)?)
         .with_context(|| format!("no 115.x ESR in {listing_url}"))?;
-    // Not `firefox-<version>`: unpacking either Firefox would remove the other one.
+    // Not `firefox-<version>` and `geckodriver-<tag>`: unpacking for one Firefox would remove
+    // what the other one uses.
     let browser = firefox_release(dir, "firefox_esr", &version)?;
-    let (driver, tag) = download_geckodriver(dir)?;
-    println!("Firefox ESR {version}, geckodriver {tag}");
+    let driver = download_geckodriver(dir, "geckodriver_esr", GECKODRIVER_ESR)?;
+    println!("Firefox ESR {version}, geckodriver {GECKODRIVER_ESR}");
     Ok(Binaries { browser, driver })
 }
 
@@ -236,16 +242,14 @@ fn firefox_release(dir: &Path, name: &str, version: &str) -> anyhow::Result<Path
     })
 }
 
-/// The latest geckodriver release, unpacked under `dir`, and its tag.
-fn download_geckodriver(dir: &Path) -> anyhow::Result<(PathBuf, String)> {
-    let tag = geckodriver_tag()?;
-    let driver = unpacked(dir, "geckodriver", &tag, "geckodriver", |to| {
+/// The geckodriver release `tag`, unpacked under `dir` as `<name>-<tag>`.
+fn download_geckodriver(dir: &Path, name: &str, tag: &str) -> anyhow::Result<PathBuf> {
+    unpacked(dir, name, tag, "geckodriver", |to| {
         let url = format!(
             "https://github.com/mozilla/geckodriver/releases/download/{tag}/geckodriver-{tag}-linux64.tar.gz"
         );
         untar(&download_to(&url, to)?, to)
-    })?;
-    Ok((driver, tag))
+    })
 }
 
 /// The linux-x86_64 en-US tarball of Firefox `version` that `SHA256SUMS` lists, and its
