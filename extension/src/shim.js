@@ -218,7 +218,10 @@
       emit({ t: 'ready' });
       if (heard) return true;
       bridgeGone = true;
-      for (const onFrame of [...sockets.values()]) onFrame({ t: 'gone' });
+      // A handler may close another socket meanwhile; that one is no longer the bridge's.
+      for (const [sid, onFrame] of [...sockets]) {
+        if (sockets.get(sid) === onFrame) onFrame({ t: 'gone' });
+      }
       for (const resolve of probes.splice(0)) resolve(false);
       return false;
     }
@@ -291,6 +294,8 @@
         }
         // Like the browser: data sent after `close()` is silently dropped.
         if (this.#state !== OPEN) return;
+        // With the bridge gone this socket is reset (error, close 1006) instead of dropping data.
+        if (!bridgeAlive()) return;
         const sid = this.#sid;
         switch (binaryKind(data)) {
           case 'bytes':

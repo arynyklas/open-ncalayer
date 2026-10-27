@@ -395,6 +395,32 @@ for (const { name, xray } of MODES) {
       // Nothing more went to the bridge but the checks.
       assert.equal(env.frames().length, 3);
     });
+
+    test('a socket the page closes while the bridge is found gone gets one close event', async () => {
+      const env = setup();
+      const { ws: first } = openSocket(env);
+      const { ws: second } = openSocket(env);
+      const secondEvents = record(second);
+      // The page reacts to the first reset by closing the second socket.
+      first.addEventListener('error', () => second.close());
+      env.bridge.answerReady = false;
+      new env.window.WebSocket('wss://127.0.0.1:13579/');
+      await tick();
+      assert.deepEqual(secondEvents, [['close', 1000, '', true, 3]]);
+    });
+
+    test('an open socket that sends after the bridge went away is reset, not left hanging', () => {
+      const env = setup();
+      const { ws } = openSocket(env);
+      const events = record(ws);
+      env.bridge.answerReady = false;
+      ws.send('lost');
+      assert.deepEqual(events, [
+        ['error', 3],
+        ['close', 1006, '', false, 3],
+      ]);
+      assert.equal(env.frames().filter((f) => f.t === 'msg').length, 0);
+    });
   });
 }
 
