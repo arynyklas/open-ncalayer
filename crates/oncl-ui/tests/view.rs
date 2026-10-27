@@ -1,6 +1,6 @@
 use oncl_basics::{
-    Action, Availability, DisabledReason, FileKind, ImportPrompt, KeyCandidate, KeyPrompt, Locale,
-    OpenError, StorageKind,
+    Action, Availability, DisabledReason, FileKind, ImportPrompt, KeyCandidate, KeyPrompt,
+    LiveAvailability, Locale, OpenError, StorageKind,
 };
 use oncl_pki::info::{CertInfo, KeyUsageBits};
 use oncl_ui::view::{
@@ -54,11 +54,14 @@ fn disabled(cn: &str, bin: &str, org: &str, reasons: Vec<DisabledReason>) -> Key
 }
 
 fn prompt<const N: usize>(locale: Locale, candidates: [KeyCandidate; N]) -> KeyPrompt {
+    let live =
+        LiveAvailability::settled(candidates.iter().map(|c| c.availability.clone()).collect());
     KeyPrompt {
         origin: "https://example.kz".to_owned(),
         locale,
         action: Action::Sign,
         candidates: candidates.into(),
+        live,
         detail: None,
         error: None,
     }
@@ -141,6 +144,19 @@ fn revoked_key_is_marked_with_its_date_and_disabled() {
         assert_eq!(rows[0].note.as_deref(), Some(mark));
         assert!(rows[1].enabled && rows[1].revoked.is_none());
     }
+}
+
+#[test]
+fn pending_key_is_not_enabled_and_has_no_note() {
+    let pending = candidate(
+        cert("ТЕСТОВ ТЕСТ", Some(IIN), None, None),
+        Availability::Pending,
+    );
+    let rows = key_rows(&prompt(Locale::Ru, [pending, expired("ДРУГОЙ", IIN)]));
+    assert!(!rows[0].enabled && rows[0].pending);
+    assert_eq!(rows[0].note, None);
+    assert_eq!(rows[0].revoked, None);
+    assert!(!rows[1].pending);
 }
 
 #[test]

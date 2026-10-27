@@ -2,12 +2,15 @@
 //! `StorageStage` (storage, file, password) and `KeystoreStage` (key choice) of the signing
 //! flow, `CsrStage` (storage, folder, password) of `generateCsr`, `ImportCertStage`
 //! (folder, new password) of `importCertificate`, the file chooser other modules hand
-//! paths to pages with, and the legacy Applet's password dialog.
+//! paths to pages with, and the legacy Applet's password dialog; between the storage and
+//! key dialogs, a busy indicator while the key store opens.
 
 use crate::filter::Availability;
+use crate::live::LiveAvailability;
 use oncl_pki::info::CertInfo;
 use oncl_pki::jks::{self, JksError};
 use oncl_pki::pkcs12::{self, KeyEntry, Pkcs12Error};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -222,12 +225,109 @@ pub struct KeyPrompt {
     pub locale: Locale,
     /// Signing or authentication.
     pub action: Action,
-    /// Keys of the opened store, in store order.
+    /// Keys of the opened store, in store order, with their availability when the dialog
+    /// opens.
     pub candidates: Vec<KeyCandidate>,
+    /// Their availability as their OCSP checks end: the dialog follows it
+    /// ([`LiveAvailability::watch`]).
+    pub live: LiveAvailability,
     /// A line the dialog shows besides the request, e.g. the file to be signed.
     pub detail: Option<String>,
     /// Why the previous choice failed, on a retry (e.g. the document did not sign).
     pub error: Option<String>,
+}
+
+impl KeyPrompt {
+    /// The dialog for `keys` (alias and certificate details, in order) whose availability is
+    /// `live`, without detail or error.
+    pub fn new(
+        origin: String,
+        locale: Locale,
+        action: Action,
+        keys: impl IntoIterator<Item = (String, CertInfo)>,
+        live: LiveAvailability,
+    ) -> Self {
+        let candidates = keys
+            .into_iter()
+            .zip(live.current())
+            .map(|((alias, info), availability)| KeyCandidate {
+                alias,
+                info,
+                availability,
+            })
+            .collect();
+        KeyPrompt {
+            origin,
+            locale,
+            action,
+            candidates,
+            live,
+            detail: None,
+            error: None,
+        }
+    }
+
+    /// Asks `prompter` until a key that is [`Availability::Enabled`] at the answer is
+    /// picked: its index; `None` if the dialog is cancelled. Each dialog opens with the
+    /// availabilities of the moment.
+    pub fn ask(&mut self, prompter: &dyn Prompter) -> Option<usize> {
+        loop {
+            for (candidate, availability) in self.candidates.iter_mut().zip(self.live.current()) {
+                candidate.availability = availability;
+            }
+            match prompter.key(self) {
+                Prompt::Answer(i) if self.live.current().get(i) == Some(&Availability::Enabled) => {
+                    return Some(i);
+                }
+                Prompt::Answer(_) => {}
+                Prompt::Cancelled => return None,
+            }
+        }
+    }
+}
+
+/// The busy indicator shown while the key store of a storage answer opens and its keys are
+/// checked, up to the key dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BusyPrompt {
+    /// The requesting page's origin, or `"UNIDENTIFIED"`.
+    pub origin: String,
+    /// Dialog language.
+    pub locale: Locale,
+}
+
+/// A busy indicator a [`Prompter`] shows: it goes away when this is dropped.
+#[must_use = "the indicator goes away when this is dropped"]
+pub struct Busy(Option<Box<dyn FnOnce() + Send>>);
+
+impl Busy {
+    /// An indicator that `close` takes away.
+    pub fn new(close: impl FnOnce() + Send + 'static) -> Self {
+        Busy(Some(Box::new(close)))
+    }
+
+    /// No indicator.
+    pub fn none() -> Self {
+        Busy(None)
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        if let Some(close) = self.0.take() {
+            close();
+        }
+    }
+}
+
+impl fmt::Debug for Busy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Busy"
+        } else {
+            "Busy(none)"
+        })
+    }
 }
 
 /// The `generateCsr` dialog: where the new key files go.
@@ -382,7 +482,11 @@ pub enum Prompt<T> {
 pub trait Prompter: Send + Sync {
     /// Asks for a storage, file and password.
     fn storage(&self, p: &StoragePrompt) -> Prompt<StorageAnswer>;
-    /// Asks for a key: the index of a candidate.
+    /// Shows that the key store of a storage answer is opening, until the returned
+    /// [`Busy`] is dropped. Returns at once.
+    fn busy(&self, p: &BusyPrompt) -> Busy;
+    /// Asks for a key: the index of a candidate. The dialog follows `p.live`; only a key
+    /// it shows [`Availability::Enabled`] may be picked.
     fn key(&self, p: &KeyPrompt) -> Prompt<usize>;
     /// Asks where `generateCsr` puts the new keys.
     fn csr(&self, p: &CsrPrompt) -> Prompt<CsrAnswer>;

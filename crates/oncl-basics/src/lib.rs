@@ -6,7 +6,9 @@
 //! Dialogs go through a [`Prompter`]; dialog flows run one at a time process-wide, so a
 //! second request waits for the first one's dialogs to finish. The keys offered are checked
 //! against `signerParams.chain` and, through the same [`HttpTransport`] as time-stamping,
-//! their OCSP responders.
+//! their OCSP responders: the key dialog opens while those checks run and follows their
+//! results ([`LiveAvailability`]); the module remembers responders that do not answer and
+//! verified answers ([`OcspCache`]).
 //!
 //! The crate also holds what the other modules share with it: the [`Prompter`] dialogs, the
 //! dialog-flow turn ([`lock_dialog_flow`]) and the rules for paths a page names
@@ -14,6 +16,8 @@
 
 mod essentials;
 mod filter;
+mod live;
+mod ocsp_cache;
 mod page_file;
 mod prompt;
 mod sign;
@@ -23,20 +27,21 @@ pub mod testing;
 pub use filter::{
     Availability, ChainPolicy, DisabledReason, KeyFilter, OCSP_DEADLINE, availabilities,
 };
+pub use live::LiveAvailability;
+pub use ocsp_cache::{ANSWER_FOR, OcspCache, UNREACHABLE_FOR};
+use oncl_pki::http::HttpTransport;
+use oncl_pki::tsp::TsaProfile;
+use oncl_protocol::invoker::{self, CallResult, Failure, NlClass};
+use oncl_protocol::{AddInfo, Module};
 pub use page_file::{
     MAX_CHOSEN_NETWORK_PATHS, MAX_PAGE_FILE, PageFile, PageFileError, is_device_path,
     is_network_path, page_path, remember_chosen_path,
 };
 pub use prompt::{
-    Action, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyCandidate,
-    KeyPrompt, Locale, OpenError, PasswordPrompt, Prompt, Prompter, RecentPathStore, StorageAnswer,
-    StorageKind, StoragePrompt,
+    Action, Busy, BusyPrompt, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer,
+    ImportPrompt, KeyCandidate, KeyPrompt, Locale, OpenError, PasswordPrompt, Prompt, Prompter,
+    RecentPathStore, StorageAnswer, StorageKind, StoragePrompt,
 };
-
-use oncl_pki::http::HttpTransport;
-use oncl_pki::tsp::TsaProfile;
-use oncl_protocol::invoker::{self, CallResult, Failure, NlClass};
-use oncl_protocol::{AddInfo, Module};
 use serde_json::{Map, Value};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use time::OffsetDateTime;
@@ -60,13 +65,15 @@ pub struct Basics {
     prompter: Arc<dyn Prompter>,
     recent: Arc<dyn RecentPathStore>,
     http: Arc<dyn HttpTransport>,
+    /// The module's OCSP memory; the daemon registers one module, so it is the process's.
+    ocsp_cache: Arc<OcspCache>,
     tsa: TsaProfile,
     clock: fn() -> OffsetDateTime,
 }
 
 impl Basics {
-    /// The module with the basics TSA profile ([`TsaProfile::basics_default`]) and the
-    /// system clock.
+    /// The module with the basics TSA profile ([`TsaProfile::basics_default`]), the system
+    /// clock and an empty OCSP memory.
     pub fn new(
         prompter: Arc<dyn Prompter>,
         recent: Arc<dyn RecentPathStore>,
@@ -76,6 +83,7 @@ impl Basics {
             prompter,
             recent,
             http,
+            ocsp_cache: Arc::new(OcspCache::new()),
             tsa: TsaProfile::basics_default(),
             clock: OffsetDateTime::now_utc,
         }

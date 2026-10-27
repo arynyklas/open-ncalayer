@@ -28,9 +28,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_basics::{
-    Action, Availability, FileKind, FilePrompt, KeyCandidate, KeyPrompt, Locale, MAX_PAGE_FILE,
-    OpenError, PageFile, PageFileError, Prompt, StorageKind, StoragePrompt, lock_dialog_flow,
-    page_path, remember_chosen_path,
+    Action, Availability, BusyPrompt, FileKind, FilePrompt, KeyPrompt, LiveAvailability, Locale,
+    MAX_PAGE_FILE, OpenError, PageFile, PageFileError, Prompt, StorageKind, StoragePrompt,
+    lock_dialog_flow, page_path, remember_chosen_path,
 };
 use oncl_pki::cms::{self, CmsError, SignOptions};
 use oncl_pki::info::{CertInfo, KncaCertType, cert_info, common_name, kalkan_dn, kcert_types};
@@ -337,7 +337,8 @@ fn timestamp(cu: &CommonUtils, cms: &[u8], cert: &Certificate) -> Result<Vec<u8>
     tsp::timestamp_signer(cms, index, &cu.tsa, cu.http.as_ref()).map_err(|e| Some(e.to_string()))
 }
 
-/// The storage dialog then the key dialog, under the process-wide dialog-flow turn.
+/// The storage dialog then the key dialog, under the process-wide dialog-flow turn; the
+/// busy indicator shows while the key store opens.
 fn choose_key(
     cu: &CommonUtils,
     storage_name: &str,
@@ -363,6 +364,10 @@ fn choose_key(
         let Prompt::Answer(answer) = cu.prompter.storage(&prompt) else {
             return Err(canceled());
         };
+        let _busy = cu.prompter.busy(&BusyPrompt {
+            origin: origin.clone(),
+            locale,
+        });
         // An empty store gets the text of the requested type too, as in the original.
         let opened = match answer.open(&prompt.storages) {
             Err(OpenError::NoKeys) => Ok(Vec::new()),
@@ -376,27 +381,18 @@ fn choose_key(
             }
         }
     };
-    let prompt = KeyPrompt {
+    let mut prompt = KeyPrompt::new(
         origin,
         locale,
         action,
-        candidates: keys
-            .iter()
-            .map(|(entry, info)| KeyCandidate {
-                alias: entry.alias.clone(),
-                info: info.clone(),
-                availability: Availability::Enabled,
-            })
-            .collect(),
-        detail,
-        error: None,
-    };
-    loop {
-        match cu.prompter.key(&prompt) {
-            Prompt::Answer(i) if i < keys.len() => return Ok(keys.swap_remove(i).0),
-            Prompt::Answer(_) => {}
-            Prompt::Cancelled => return Err(canceled()),
-        }
+        keys.iter()
+            .map(|(entry, info)| (entry.alias.clone(), info.clone())),
+        LiveAvailability::settled(vec![Availability::Enabled; keys.len()]),
+    );
+    prompt.detail = detail;
+    match prompt.ask(cu.prompter.as_ref()) {
+        Some(i) => Ok(keys.swap_remove(i).0),
+        None => Err(canceled()),
     }
 }
 

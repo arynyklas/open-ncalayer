@@ -1,6 +1,7 @@
-// The key dialog: one row per key of the opened store.
+// The key dialog: one row per key of the opened store. Rows of keys whose OCSP check is
+// still running show a spinner and change in place when it ends.
 
-import { Button, ListView, Palette, VerticalBox } from "std-widgets.slint";
+import { Button, ListView, Palette, Spinner, VerticalBox } from "std-widgets.slint";
 
 // A key in the list.
 export struct KeyItem {
@@ -8,7 +9,9 @@ export struct KeyItem {
     details: string,
     // Only enabled keys may sign.
     enabled: bool,
-    // Why the key may not sign; empty if it may.
+    // Its certificate status is still being checked: not enabled yet.
+    pending: bool,
+    // Why the key may not sign; empty if it may or is still being checked.
     note: string,
     // The revocation mark, `revoked <date>`; empty unless the key is revoked.
     revoked: string,
@@ -31,8 +34,8 @@ export component KeyDialog inherits Window {
     // Why the previous choice failed; empty for none.
     in property <string> error;
     in property <[KeyItem]> keys;
-    // Whether any key is enabled.
-    in property <bool> has-enabled;
+    // Whether any key is enabled or still being checked.
+    in property <bool> has-usable;
     // Index of the chosen key, -1 for none.
     in-out property <int> selected: -1;
 
@@ -58,8 +61,8 @@ export component KeyDialog inherits Window {
         }
 
         Text {
-            text: root.has-enabled ? @tr("Choose a key") : @tr("No suitable key found");
-            color: root.has-enabled ? Palette.foreground : #c42b1c;
+            text: root.has-usable ? @tr("Choose a key") : @tr("No suitable key found");
+            color: root.has-usable ? Palette.foreground : #c42b1c;
         }
 
         ListView {
@@ -70,7 +73,7 @@ export component KeyDialog inherits Window {
                 background: i == root.selected ? Palette.selection-background : transparent;
                 accessible-role: list-item;
                 accessible-label: row.title;
-                accessible-description: row.note.is-empty ? row.details : row.details + "\n" + row.note;
+                accessible-description: row.pending ? row.details + "\n" + @tr("Checking the certificate status…") : row.note.is-empty ? row.details : row.details + "\n" + row.note;
                 accessible-item-selectable: true;
                 accessible-item-selected: i == root.selected;
                 accessible-item-index: i;
@@ -96,13 +99,30 @@ export component KeyDialog inherits Window {
                     Text {
                         text: row.title;
                         font-weight: 700;
-                        color: !row.enabled ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                        color: !row.enabled && !row.pending ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
                     }
 
                     Text {
                         text: row.details;
                         wrap: word-wrap;
-                        color: !row.enabled ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                        color: !row.enabled && !row.pending ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                    }
+
+                    if row.pending: HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        Spinner {
+                            indeterminate: true;
+                            width: 14px;
+                            height: 14px;
+                        }
+
+                        Text {
+                            text: @tr("Checking the certificate status…");
+                            vertical-alignment: center;
+                            font-italic: true;
+                            color: i == root.selected ? Palette.selection-foreground : #888888;
+                        }
                     }
 
                     if !row.revoked.is-empty: Text {
@@ -114,7 +134,7 @@ export component KeyDialog inherits Window {
             }
         }
 
-        if root.selected >= 0 && !root.keys[root.selected].enabled: Text {
+        if root.selected >= 0 && !root.keys[root.selected].enabled && !root.keys[root.selected].note.is-empty: Text {
             text: root.keys[root.selected].note;
             wrap: word-wrap;
             color: #c42b1c;

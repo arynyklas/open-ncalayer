@@ -1440,6 +1440,11 @@ fn sign_xml_dialog_outcomes() {
         .map(|p| p.recent_path.clone())
         .collect();
     assert_eq!(paths[1].as_deref(), Some(key.path.as_path()));
+    // Each answer opens under the busy indicator, which goes before the next dialog.
+    let opened = ["storage", "busy", "busy closed"];
+    let mut expected = opened.repeat(4);
+    expected.push("storage");
+    assert_eq!(prompter.timeline(), expected);
 
     // The key dialog cancelled; an index past the keys is asked again.
     let (a, prompter) = setup(vec![

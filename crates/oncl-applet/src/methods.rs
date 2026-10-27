@@ -19,9 +19,9 @@ use crate::dispatch::{Args, NPE, Outcome, Thrown, Wrapper};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_basics::{
-    Action, Availability, FileKind, FilePrompt, KeyCandidate, KeyPrompt, Locale, OpenError,
-    PageFile, PasswordPrompt, Prompt, StorageAnswer, StorageKind, StoragePrompt, lock_dialog_flow,
-    page_path, remember_chosen_path,
+    Action, Availability, BusyPrompt, FileKind, FilePrompt, KeyPrompt, LiveAvailability, Locale,
+    OpenError, PageFile, PasswordPrompt, Prompt, StorageAnswer, StorageKind, StoragePrompt,
+    lock_dialog_flow, page_path, remember_chosen_path,
 };
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::info::{CertInfo, KncaCertType, cert_info, kcert_types};
@@ -371,26 +371,17 @@ pub(crate) fn sign_xml(a: &Applet, args: &Args<'_>, add_info: &AddInfo) -> Outco
     let Some(mut keys) = open_store(a, storage, args.str(1), key_type, &origin) else {
         return Ok(Wrapper::error(SIGN_CANCEL));
     };
-    let mut prompt = KeyPrompt {
+    let mut prompt = KeyPrompt::new(
         origin,
-        locale: LOCALE,
-        action: key_type.action(),
-        candidates: keys
-            .iter()
-            .map(|(entry, info)| KeyCandidate {
-                alias: entry.alias.clone(),
-                info: info.clone(),
-                availability: Availability::Enabled,
-            })
-            .collect(),
-        detail: None,
-        error: None,
-    };
+        LOCALE,
+        key_type.action(),
+        keys.iter()
+            .map(|(entry, info)| (entry.alias.clone(), info.clone())),
+        LiveAvailability::settled(vec![Availability::Enabled; keys.len()]),
+    );
     loop {
-        let i = match a.prompter.key(&prompt) {
-            Prompt::Answer(i) if i < keys.len() => i,
-            Prompt::Answer(_) => continue,
-            Prompt::Cancelled => return Ok(Wrapper::error(SIGN_CANCEL)),
+        let Some(i) = prompt.ask(a.prompter.as_ref()) else {
+            return Ok(Wrapper::error(SIGN_CANCEL));
         };
         match sign_document(&keys[i].0, args.str(3)) {
             Ok(signed) => {
@@ -477,7 +468,8 @@ fn inner_password_ok(password: &str) -> bool {
 
 /// The storage dialog until a key store with keys of `key_type` opens; `None` if it is
 /// cancelled. The page's `container` pre-fills it unless a page may not name it (a device
-/// path, or a network path the user did not choose in the file chooser).
+/// path, or a network path the user did not choose in the file chooser). The busy
+/// indicator shows while the key store opens.
 fn open_store(
     a: &Applet,
     storage: StorageKind,
@@ -501,6 +493,10 @@ fn open_store(
         let Prompt::Answer(answer) = a.prompter.storage(&prompt) else {
             return None;
         };
+        let _busy = a.prompter.busy(&BusyPrompt {
+            origin: origin.to_owned(),
+            locale: LOCALE,
+        });
         match open_keys(&answer, storage, key_type) {
             Ok(keys) => return Some(keys),
             Err(e) => {

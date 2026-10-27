@@ -1,28 +1,33 @@
-//! Screenshots of the settings, TLS wizard and About windows without a display: Slint's
-//! software renderer draws them into PNG files under `target/screenshots/`. The settings window
-//! shows `target/screenshots/settings.json` and this user's autostart entry (read only). The TLS
-//! wizard shows `target/screenshots/tls` (a certificate is issued there if there is none) and this
-//! user's trust stores, read only; its install question is shown without its button being
-//! pressed, and nothing is installed. No button is pressed.
+//! Screenshots of the settings, TLS wizard and About windows and of the key dialog and busy
+//! indicator without a display: Slint's software renderer draws them into PNG files under
+//! `target/screenshots/`. The settings window shows `target/screenshots/settings.json` and
+//! this user's autostart entry (read only). The TLS wizard shows `target/screenshots/tls` (a
+//! certificate is issued there if there is none) and this user's trust stores, read only;
+//! its install question is shown without its button being pressed, and nothing is
+//! installed. The key dialog shows made-up certificates. No button is pressed.
 //!
 //! `cargo test -p oncl-ui --lib screenshots -- --ignored`
 
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use oncl_basics::Locale;
+use oncl_basics::{Action, Availability, KeyCandidate, KeyPrompt, LiveAvailability, Locale};
 use oncl_desktop::original::Unavailable;
 use oncl_desktop::{BrowserExtension, ExtensionError, ExtensionStatus};
+use oncl_pki::info::{CertInfo, KeyUsageBits};
 use slint::{ComponentHandle, PhysicalSize, Rgb8Pixel};
+use time::macros::datetime;
 
 use crate::about_view::{self, AboutInfo, AboutTab};
 use crate::offscreen::{self, Last};
-use crate::prompter::select_language;
+use crate::prompter::{fill_keys, select_language, update_key};
 use crate::settings_view::{self, SettingsServices};
 use crate::tls_wizard::{self, Applied, IssueForm, Source, SystemTrust, TlsWizardServices};
-use crate::ui::SettingsWindow;
+use crate::ui::{BusyDialog, KeyDialog, SettingsWindow};
+use crate::view;
 use crate::windows::Desktop;
 
 /// The extension as `nm status` shows it after registration in two browsers.
@@ -163,6 +168,65 @@ fn screenshots() {
         save(&last, 760, 640, &format!("tls-confirm-{code}"));
         ui.invoke_cancel_confirm();
         ui.invoke_dismiss();
+    }
+}
+
+#[test]
+#[ignore = "writes screenshots to target/screenshots"]
+fn key_dialog_screenshots() {
+    std::fs::create_dir_all(out_dir()).unwrap();
+    let last = offscreen::install();
+    let info = |serial: &str| CertInfo {
+        subject_cn: Some("ТЕСТОВ ТЕСТ".to_owned()),
+        iin: Some("123456789011".to_owned()),
+        bin: None,
+        organization: None,
+        serial_hex: serial.to_owned(),
+        not_before: datetime!(2026-03-01 12:00 UTC),
+        not_after: datetime!(2027-03-01 12:00 UTC),
+        ext_key_usages: BTreeSet::new(),
+        key_usage: KeyUsageBits::default(),
+        signature_alg_oid: "1.2.398.3.10.1.1.2.3.2".to_owned(),
+        spki_alg_oid: "1.2.398.3.10.1.1.2.3.2".to_owned(),
+        ocsp_no_check: false,
+    };
+    let checked = [
+        Availability::Enabled,
+        Availability::Revoked {
+            time: datetime!(2026-10-20 09:30 UTC),
+        },
+    ];
+    for (locale, code) in [(Locale::Ru, "ru"), (Locale::Kk, "kk"), (Locale::En, "en")] {
+        // Both keys still being checked.
+        let p = KeyPrompt::new(
+            "https://idp.egov.kz".to_owned(),
+            locale,
+            Action::Authenticate,
+            [("auth", info("4105a0")), ("old", info("39c1f2"))]
+                .map(|(alias, info)| (alias.to_owned(), info)),
+            LiveAvailability::settled(vec![Availability::Pending; 2]),
+        );
+        let ui = KeyDialog::new().unwrap();
+        select_language(locale);
+        fill_keys(&ui, &p);
+        ui.show().unwrap();
+        save(&last, 560, 420, &format!("keys-pending-{code}"));
+        // The checks end: the first key is good, the second revoked.
+        for (i, availability) in checked.iter().enumerate() {
+            let candidate = KeyCandidate {
+                availability: availability.clone(),
+                ..p.candidates[i].clone()
+            };
+            update_key(&ui, i, view::key_row(&candidate, locale));
+        }
+        save(&last, 560, 420, &format!("keys-revoked-{code}"));
+        ui.hide().unwrap();
+
+        let busy = BusyDialog::new().unwrap();
+        busy.set_origin("https://idp.egov.kz".into());
+        busy.show().unwrap();
+        save(&last, 380, 110, &format!("busy-{code}"));
+        busy.hide().unwrap();
     }
 }
 

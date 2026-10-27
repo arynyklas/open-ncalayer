@@ -50,6 +50,12 @@ msgstr "Кілтті таңдаңыз"
 msgid "No suitable key found"
 msgstr "Сәйкес кілт табылмады"
 
+msgid "Checking the certificate status…"
+msgstr "Сертификат мәртебесі тексерілуде…"
+
+msgid "Opening the key store…"
+msgstr "Қойма ашылуда…"
+
 msgid "Sign"
 msgstr "Қол қою"
 

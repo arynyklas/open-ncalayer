@@ -1,0 +1,35 @@
+// The busy indicator between the storage and key dialogs: the key store is opening.
+
+import { Spinner, VerticalBox } from "std-widgets.slint";
+
+export component BusyDialog inherits Window {
+    title: "OpenNCALayer";
+    always-on-top: true;
+    min-width: 360px;
+
+    // The requesting page's origin.
+    in property <string> origin;
+
+    VerticalBox {
+        alignment: start;
+        Text {
+            text: @tr("Request from: {}", root.origin);
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Spinner {
+                indeterminate: true;
+                width: 20px;
+                height: 20px;
+            }
+
+            Text {
+                text: @tr("Opening the key store…");
+                vertical-alignment: center;
+            }
+        }
+    }
+}

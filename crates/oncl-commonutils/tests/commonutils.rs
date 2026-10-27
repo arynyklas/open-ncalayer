@@ -483,6 +483,19 @@ fn unopenable_stores_are_asked_for_again() {
         prompts[1].recent_path,
         Some(synthetic("user-gost2015-sign").path)
     );
+    // Each answer opens under the busy indicator, which goes before the next dialog.
+    assert_eq!(
+        s.prompter.timeline(),
+        [
+            "storage",
+            "busy",
+            "busy closed",
+            "storage",
+            "busy",
+            "busy closed",
+            "key"
+        ]
+    );
 
     // JKS: the dialog offers it alone and refuses other storages; a PKCS#12 file named as
     // JKS is not a JKS.

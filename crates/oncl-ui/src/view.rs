@@ -3,7 +3,8 @@
 //! and filter. Fixed dialog texts live in the `.slint` files and their `.po` catalogs.
 
 use oncl_basics::{
-    Availability, DisabledReason, FileKind, ImportPrompt, KeyPrompt, Locale, OpenError, StorageKind,
+    Availability, DisabledReason, FileKind, ImportPrompt, KeyCandidate, KeyPrompt, Locale,
+    OpenError, StorageKind,
 };
 use oncl_pki::info::CertInfo;
 use std::path::Path;
@@ -22,6 +23,8 @@ pub struct KeyRow {
     pub details: String,
     /// Whether the key may be picked.
     pub enabled: bool,
+    /// Whether its certificate status is still being checked (it may not be picked yet).
+    pub pending: bool,
     /// Why it may not be picked.
     pub note: Option<String>,
     /// The revocation mark the row shows: `revoked <date>`.
@@ -30,37 +33,38 @@ pub struct KeyRow {
 
 /// The rows of the key dialog, one per candidate in order.
 pub fn key_rows(p: &KeyPrompt) -> Vec<KeyRow> {
-    let t = Texts::of(p.locale);
-    p.candidates
-        .iter()
-        .map(|c| {
-            let info = &c.info;
-            let details = cert_details(info, t, None);
-            let revoked = match &c.availability {
-                Availability::Revoked { time } => Some(format!("{} {}", t.revoked, date(*time))),
-                _ => None,
-            };
-            let note = match &c.availability {
-                Availability::Enabled => None,
-                Availability::Expired => Some(t.expired.to_owned()),
-                Availability::Revoked { .. } => revoked.clone(),
-                Availability::Disabled(reasons) => Some(
-                    reasons
-                        .iter()
-                        .map(|r| t.reason(*r))
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                ),
-            };
-            KeyRow {
-                title: info.subject_cn.clone().unwrap_or_else(|| c.alias.clone()),
-                details,
-                enabled: c.availability == Availability::Enabled,
-                note,
-                revoked,
-            }
-        })
-        .collect()
+    p.candidates.iter().map(|c| key_row(c, p.locale)).collect()
+}
+
+/// The key dialog's row of `c` in `l`.
+pub fn key_row(c: &KeyCandidate, l: Locale) -> KeyRow {
+    let t = Texts::of(l);
+    let info = &c.info;
+    let details = cert_details(info, t, None);
+    let revoked = match &c.availability {
+        Availability::Revoked { time } => Some(format!("{} {}", t.revoked, date(*time))),
+        _ => None,
+    };
+    let note = match &c.availability {
+        Availability::Enabled | Availability::Pending => None,
+        Availability::Expired => Some(t.expired.to_owned()),
+        Availability::Revoked { .. } => revoked.clone(),
+        Availability::Disabled(reasons) => Some(
+            reasons
+                .iter()
+                .map(|r| t.reason(*r))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+    };
+    KeyRow {
+        title: info.subject_cn.clone().unwrap_or_else(|| c.alias.clone()),
+        details,
+        enabled: c.availability == Availability::Enabled,
+        pending: c.availability == Availability::Pending,
+        note,
+        revoked,
+    }
 }
 
 /// A certificate of the import dialog.

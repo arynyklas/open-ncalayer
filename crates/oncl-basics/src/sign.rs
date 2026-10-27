@@ -1,8 +1,10 @@
 //! `PKIExtras.sign`: the arguments as the original reads them with org.json, then the
 //! storage → key → sign flow under the process-wide dialog-flow lock.
 
-use crate::filter::{Availability, ChainPolicy, KeyFilter, availabilities};
-use crate::prompt::{Action, KeyCandidate, KeyPrompt, Locale, Prompt, StorageKind, StoragePrompt};
+use crate::filter::{ChainPolicy, KeyFilter, availabilities};
+use crate::prompt::{
+    Action, Busy, BusyPrompt, KeyPrompt, Locale, Prompt, StorageKind, StoragePrompt,
+};
 use crate::{Basics, lock_dialog_flow};
 use base64::Engine;
 use base64::alphabet;
@@ -86,10 +88,10 @@ struct SignRequest<'a> {
 pub(crate) fn sign(basics: &Basics, args: &Map<String, Value>, add_info: &AddInfo) -> CallResult {
     let request = SignRequest::parse(args, add_info)?;
     let _flow = lock_dialog_flow();
-    let Some(mut entries) = open_storage(basics, &request) else {
+    let Some((mut entries, busy)) = open_storage(basics, &request) else {
         return Ok(json!({}));
     };
-    let Some(index) = choose_key(basics, &request, &entries) else {
+    let Some(index) = choose_key(basics, &request, &entries, busy) else {
         return Ok(json!({}));
     };
     let entry = entries.swap_remove(index);
@@ -239,7 +241,8 @@ pub(crate) fn storage_list(names: &[Value]) -> Result<Vec<StorageKind>, Failure>
 }
 
 /// Asks for a storage until one opens; `None` if the user cancels. Saves the opened path.
-fn open_storage(basics: &Basics, request: &SignRequest<'_>) -> Option<Vec<KeyEntry>> {
+/// The busy indicator shows from each answer on; it is returned with the opened store.
+fn open_storage(basics: &Basics, request: &SignRequest<'_>) -> Option<(Vec<KeyEntry>, Busy)> {
     let mut prompt = StoragePrompt {
         origin: request.origin.clone(),
         locale: request.locale,
@@ -254,10 +257,14 @@ fn open_storage(basics: &Basics, request: &SignRequest<'_>) -> Option<Vec<KeyEnt
             Prompt::Answer(answer) => answer,
             Prompt::Cancelled => return None,
         };
+        let busy = basics.prompter.busy(&BusyPrompt {
+            origin: request.origin.clone(),
+            locale: request.locale,
+        });
         match answer.open(&prompt.storages) {
             Ok(entries) => {
                 basics.recent.save(&answer.path);
-                return Some(entries);
+                return Some((entries, busy));
             }
             Err(e) => {
                 prompt.error = Some(e);
@@ -267,46 +274,38 @@ fn open_storage(basics: &Basics, request: &SignRequest<'_>) -> Option<Vec<KeyEnt
     }
 }
 
-/// Asks for a key until an enabled one is picked; `None` if the user cancels. The keys are
-/// checked once, before the first prompt.
-fn choose_key(basics: &Basics, request: &SignRequest<'_>, entries: &[KeyEntry]) -> Option<usize> {
+/// Asks for a key until an enabled one is picked; `None` if the user cancels. The paths
+/// are built and the OCSP checks started, once, before the dialog opens, which ends `busy`;
+/// the dialog follows the checks.
+fn choose_key(
+    basics: &Basics,
+    request: &SignRequest<'_>,
+    entries: &[KeyEntry],
+    busy: Busy,
+) -> Option<usize> {
     let keys: Vec<(Certificate, CertInfo)> = entries
         .iter()
         .map(|entry| (entry.cert.clone(), cert_info(&entry.cert)))
         .collect();
-    let availability = availabilities(&request.filter, &keys, &basics.http, (basics.clock)());
-    let candidates = entries
-        .iter()
-        .zip(keys)
-        .zip(availability)
-        .map(|((entry, (_, info)), availability)| KeyCandidate {
-            alias: entry.alias.clone(),
-            info,
-            availability,
-        })
-        .collect();
-    let prompt = KeyPrompt {
-        origin: request.origin.clone(),
-        locale: request.locale,
-        action: request.action,
-        candidates,
-        detail: None,
-        error: None,
-    };
-    loop {
-        match basics.prompter.key(&prompt) {
-            Prompt::Answer(i)
-                if prompt
-                    .candidates
-                    .get(i)
-                    .is_some_and(|c| c.availability == Availability::Enabled) =>
-            {
-                return Some(i);
-            }
-            Prompt::Answer(_) => {}
-            Prompt::Cancelled => return None,
-        }
-    }
+    let live = availabilities(
+        &request.filter,
+        &keys,
+        &basics.http,
+        &basics.ocsp_cache,
+        (basics.clock)(),
+    );
+    let mut prompt = KeyPrompt::new(
+        request.origin.clone(),
+        request.locale,
+        request.action,
+        entries
+            .iter()
+            .zip(keys)
+            .map(|(entry, (_, info))| (entry.alias.clone(), info)),
+        live,
+    );
+    drop(busy);
+    prompt.ask(basics.prompter.as_ref())
 }
 
 /// A CAdES PEM of `data`, time-stamped on the new (last) signer if asked.

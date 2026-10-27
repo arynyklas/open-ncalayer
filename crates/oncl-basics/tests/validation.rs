@@ -9,7 +9,7 @@ use base64::engine::general_purpose::STANDARD;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{
     Availability, Basics, ChainPolicy, DisabledReason, KeyFilter, MODULE_NAME, OCSP_DEADLINE,
-    availabilities,
+    OcspCache, availabilities,
 };
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport};
@@ -21,7 +21,7 @@ use oncl_protocol::{AddInfo, Module};
 use oncl_testkit::{fixture, read, synthetic, synthetic_cert};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
@@ -389,24 +389,57 @@ fn inter_filter() -> KeyFilter {
     }
 }
 
+/// The availabilities of `keys` under the intermediate PKI through `http`, at `now`, with
+/// `cache`, once settled.
+fn settled_at(
+    keys: &[(Certificate, CertInfo)],
+    http: &Arc<dyn HttpTransport>,
+    cache: &Arc<OcspCache>,
+    now: OffsetDateTime,
+) -> Vec<Availability> {
+    availabilities(&inter_filter(), keys, http, cache, now).wait_settled()
+}
+
+/// [`settled_at`] now, with an empty OCSP memory.
+fn settled(keys: &[(Certificate, CertInfo)], http: &Arc<dyn HttpTransport>) -> Vec<Availability> {
+    settled_at(
+        keys,
+        http,
+        &Arc::new(OcspCache::new()),
+        OffsetDateTime::now_utc(),
+    )
+}
+
 #[test]
-fn ocsp_unreachable_keeps_key_enabled_within_6_s() {
-    // A responder hanging past the request timeout: the request fails, the key stays
-    // enabled and the dialog opens.
+fn ocsp_unreachable_keeps_key_enabled() {
+    // A responder hanging past the request timeout: the dialog opens with the key being
+    // checked, the request fails, and the key becomes enabled.
     let ocsp = Arc::new(responder().tamper(OcspTamper::Hang(Duration::from_secs(30))));
+    let (basics, prompter) = module(
+        vec![open("inter-revoked-gost2015-sign"), Step::CancelKey],
+        ocsp.clone(),
+    );
     assert_eq!(
-        shown(
-            "inter-revoked-gost2015-sign",
-            args("cms", Some(inter_chain()), json!({})),
-            ocsp.clone()
-        ),
+        process(&basics, args("cms", Some(inter_chain()), json!({}))),
+        EMPTY
+    );
+    assert_eq!(
+        prompter.opened_key_prompts()[0].candidates[0].availability,
+        Availability::Pending
+    );
+    assert_eq!(
+        prompter.key_prompts()[0].candidates[0].availability,
         Availability::Enabled
     );
     assert_eq!(ocsp.calls().len(), 1);
+}
 
-    // A transport ignoring the timeout: every key is checked at once, and the checks are
-    // abandoned at the deadline, which counts from the start of the key checks (path
-    // building included): the dialog is never more than 6 s away.
+#[test]
+fn pending_keys_become_available_at_the_deadline() {
+    // A transport ignoring the timeout: every key is checked at once, the result comes
+    // back at once with the keys pending, and the checks are abandoned at the deadline,
+    // which counts from the start of the key checks (path building included): then the
+    // keys become available.
     let keys = [
         key("inter-user-gost2015-sign"),
         key("inter-revoked-gost2015-sign"),
@@ -414,14 +447,271 @@ fn ocsp_unreachable_keeps_key_enabled_within_6_s() {
     ];
     let http: Arc<dyn HttpTransport> = Arc::new(Stuck);
     let start = Instant::now();
-    let shown = availabilities(&inter_filter(), &keys, &http, OffsetDateTime::now_utc());
+    let live = availabilities(
+        &inter_filter(),
+        &keys,
+        &http,
+        &Arc::new(OcspCache::new()),
+        OffsetDateTime::now_utc(),
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    let shown = live.watch(move |i, a| tx.send((i, a.clone(), start.elapsed())).unwrap());
+    assert_eq!(shown, vec![Availability::Pending; 3]);
+    assert!(!live.is_settled());
+    assert_eq!(live.wait_settled(), vec![Availability::Enabled; 3]);
     let elapsed = start.elapsed();
-    assert_eq!(shown, vec![Availability::Enabled; 3]);
     assert_eq!(OCSP_DEADLINE, Duration::from_secs(6));
     assert!(
         elapsed >= OCSP_DEADLINE && elapsed < OCSP_DEADLINE + Duration::from_secs(1),
         "{elapsed:?}"
     );
+    let updates: Vec<_> = rx.iter().collect();
+    assert_eq!(updates.len(), 3, "{updates:?}");
+    for (i, (index, availability, at)) in updates.into_iter().enumerate() {
+        assert_eq!((index, availability), (i, Availability::Enabled));
+        assert!(at >= OCSP_DEADLINE, "{at:?}");
+    }
+}
+
+#[test]
+fn dialog_opens_while_the_responder_hangs() {
+    // The responder answers `good` after 2 s: the key dialog is up long before, with the
+    // key pending; the pick comes once it is enabled and signs.
+    let hang = Duration::from_secs(2);
+    let ocsp = Arc::new(responder().tamper(OcspTamper::Hang(hang)));
+    let dialog = Arc::new(Barrier::new(2));
+    let (basics, prompter) = module(
+        vec![
+            open("inter-user-gost2015-sign"),
+            Step::Wait(dialog.clone()),
+            Step::Key(0),
+        ],
+        ocsp.clone(),
+    );
+    let signing =
+        thread::spawn(move || process(&basics, args("cms", Some(inter_chain()), json!({}))));
+    dialog.wait();
+    let opened = prompter.opened_key_prompts();
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].candidates[0].availability, Availability::Pending);
+    assert!(
+        !opened[0].live.is_settled(),
+        "the responder has not answered yet"
+    );
+    let reply: Value = serde_json::from_str(&signing.join().unwrap()).unwrap();
+    assert_eq!(reply["status"], true, "{reply}");
+    assert_eq!(
+        prompter.key_prompts()[0].candidates[0].availability,
+        Availability::Enabled
+    );
+    assert_eq!(
+        prompter.timeline(),
+        ["storage", "busy", "busy closed", "key"]
+    );
+
+    // The dialog does not wait for the checks: the key list is back at once.
+    let keys = [key("inter-user-gost2015-sign")];
+    let http: Arc<dyn HttpTransport> = Arc::new(responder().tamper(OcspTamper::Hang(hang)));
+    let start = Instant::now();
+    let live = availabilities(
+        &inter_filter(),
+        &keys,
+        &http,
+        &Arc::new(OcspCache::new()),
+        OffsetDateTime::now_utc(),
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(live.current(), [Availability::Pending]);
+    assert_eq!(live.wait_settled(), [Availability::Enabled]);
+    assert!(start.elapsed() >= hang);
+}
+
+#[test]
+fn revoked_update_keeps_the_key_unselectable() {
+    let keys = [
+        key("inter-user-gost2015-sign"),
+        key("inter-revoked-gost2015-sign"),
+        key("inter-expired-gost2015-sign"),
+    ];
+    let ocsp = responder()
+        .status(
+            &serial("inter-expired-gost2015-sign"),
+            CertStatus::Revoked {
+                time: REVOKED_AT,
+                reason: None,
+            },
+        )
+        .tamper(OcspTamper::Hang(Duration::from_millis(500)));
+    let http: Arc<dyn HttpTransport> = Arc::new(ocsp);
+    let live = availabilities(
+        &inter_filter(),
+        &keys,
+        &http,
+        &Arc::new(OcspCache::new()),
+        OffsetDateTime::now_utc(),
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    // An expired key stays expired while it is checked.
+    assert_eq!(
+        live.watch(move |i, a| tx.send((i, a.clone())).unwrap()),
+        [
+            Availability::Pending,
+            Availability::Pending,
+            Availability::Expired
+        ]
+    );
+    let revoked = Availability::Revoked { time: REVOKED_AT };
+    assert_eq!(
+        live.wait_settled(),
+        [Availability::Enabled, revoked.clone(), revoked.clone()]
+    );
+    let mut updates: Vec<_> = rx.iter().collect();
+    updates.sort_by_key(|(i, _)| *i);
+    assert_eq!(
+        updates,
+        [
+            (0, Availability::Enabled),
+            (1, revoked.clone()),
+            (2, revoked)
+        ]
+    );
+}
+
+/// A responder host that refuses every connection at once; counts the requests.
+#[derive(Default)]
+struct Refused(std::sync::Mutex<usize>);
+
+impl Refused {
+    fn calls(&self) -> usize {
+        *self.0.lock().unwrap()
+    }
+}
+
+impl HttpTransport for Refused {
+    fn get(&self, _: &str) -> Result<HttpReply, HttpError> {
+        *self.0.lock().unwrap() += 1;
+        Err(HttpError("connection refused".to_owned()))
+    }
+
+    fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
+        self.get(url)
+    }
+}
+
+#[test]
+fn unreachable_responder_is_skipped_for_10_min() {
+    let keys = [
+        key("inter-user-gost2015-sign"),
+        key("inter-noaki-gost2015-sign"),
+    ];
+    let refused = Arc::new(Refused::default());
+    let http: Arc<dyn HttpTransport> = refused.clone();
+    let cache = Arc::new(OcspCache::new());
+    let now = OffsetDateTime::now_utc();
+    let minute = time::Duration::MINUTE;
+    let enabled = vec![Availability::Enabled; 2];
+    // The first check finds the responder unreachable.
+    assert_eq!(settled_at(&keys[..1], &http, &cache, now), enabled[..1]);
+    assert_eq!(refused.calls(), 1);
+    // Within 10 min its host is not asked, for any key with a responder there.
+    let start = Instant::now();
+    assert_eq!(settled_at(&keys, &http, &cache, now + 9 * minute), enabled);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(refused.calls(), 1);
+    // Then it is asked again.
+    assert_eq!(
+        settled_at(&keys[..1], &http, &cache, now + 10 * minute),
+        enabled[..1]
+    );
+    assert_eq!(refused.calls(), 2);
+    // Another memory knows nothing of it.
+    assert_eq!(settled(&keys[..1], &http), enabled[..1]);
+    assert_eq!(refused.calls(), 3);
+
+    // A responder that answers, even with an error status, is asked every time.
+    let ocsp = Arc::new(responder().tamper(OcspTamper::HttpStatus(503)));
+    let http: Arc<dyn HttpTransport> = ocsp.clone();
+    let cache = Arc::new(OcspCache::new());
+    settled_at(&keys[..1], &http, &cache, now);
+    settled_at(&keys[..1], &http, &cache, now);
+    assert_eq!(ocsp.calls().len(), 2);
+}
+
+#[test]
+fn verified_answers_are_remembered() {
+    let keys = [
+        key("inter-user-gost2015-sign"),
+        key("inter-revoked-gost2015-sign"),
+    ];
+    let expected = [
+        Availability::Enabled,
+        Availability::Revoked { time: REVOKED_AT },
+    ];
+    let ocsp = Arc::new(responder());
+    let http: Arc<dyn HttpTransport> = ocsp.clone();
+    let cache = Arc::new(OcspCache::new());
+    let now = OffsetDateTime::now_utc();
+    let minute = time::Duration::MINUTE;
+    assert_eq!(settled_at(&keys, &http, &cache, now), expected);
+    assert_eq!(ocsp.calls().len(), 2);
+    // `good` and `revoked` come from memory.
+    assert_eq!(settled_at(&keys, &http, &cache, now + 9 * minute), expected);
+    assert_eq!(ocsp.calls().len(), 2);
+    // nextUpdate is an hour away, but memory lasts 10 min at most.
+    assert_eq!(
+        settled_at(&keys, &http, &cache, now + 10 * minute),
+        expected
+    );
+    assert_eq!(ocsp.calls().len(), 4);
+
+    // Without nextUpdate, until thisUpdate + 300 s: thisUpdate 4 min ago leaves a minute.
+    let ocsp = Arc::new(responder().tamper(OcspTamper::NoNextUpdate {
+        age: Duration::from_secs(240),
+    }));
+    let http: Arc<dyn HttpTransport> = ocsp.clone();
+    let cache = Arc::new(OcspCache::new());
+    let user = &keys[..1];
+    settled_at(user, &http, &cache, now);
+    settled_at(user, &http, &cache, now + time::Duration::seconds(30));
+    assert_eq!(ocsp.calls().len(), 1);
+    settled_at(user, &http, &cache, now + 2 * minute);
+    assert_eq!(ocsp.calls().len(), 2);
+
+    // Answers that fail verification are not remembered.
+    let ocsp = Arc::new(responder().tamper(OcspTamper::WrongKey));
+    let http: Arc<dyn HttpTransport> = ocsp.clone();
+    let cache = Arc::new(OcspCache::new());
+    settled_at(&keys[1..], &http, &cache, now);
+    assert_eq!(
+        settled_at(&keys[1..], &http, &cache, now),
+        [Availability::Enabled]
+    );
+    assert_eq!(ocsp.calls().len(), 2);
+
+    // An answer verified with other CAs is not trusted: the intermediate CA alone.
+    let ocsp = Arc::new(responder());
+    let http: Arc<dyn HttpTransport> = ocsp.clone();
+    let cache = Arc::new(OcspCache::new());
+    settled_at(user, &http, &cache, now);
+    let mut inter_only = inter_filter();
+    inter_only.chain = ChainPolicy::Custom(Arc::new(CaSet::new(vec![
+        cert::parse(&synthetic_cert("inter-gost2015")).unwrap(),
+    ])));
+    availabilities(&inter_only, user, &http, &cache, now).wait_settled();
+    assert_eq!(ocsp.calls().len(), 2);
 }
 
 #[test]
@@ -440,7 +730,7 @@ fn ocsp_checks_run_in_parallel() {
         let ocsp = Arc::new(ocsp);
         let http: Arc<dyn HttpTransport> = ocsp.clone();
         let start = Instant::now();
-        let shown = availabilities(&inter_filter(), &keys, &http, OffsetDateTime::now_utc());
+        let shown = settled(&keys, &http);
         let elapsed = start.elapsed();
         assert_eq!(shown, expected);
         assert_eq!(ocsp.calls().len(), 3);
@@ -463,12 +753,7 @@ fn tampered_ocsp_never_revokes() {
     let check = |ocsp: MockOcsp| {
         let ocsp = Arc::new(ocsp);
         let http: Arc<dyn HttpTransport> = ocsp.clone();
-        let shown = availabilities(
-            &inter_filter(),
-            &[key("inter-revoked-gost2015-sign")],
-            &http,
-            OffsetDateTime::now_utc(),
-        );
+        let shown = settled(&[key("inter-revoked-gost2015-sign")], &http);
         assert_eq!(ocsp.calls().len(), 1);
         shown.into_iter().next().unwrap()
     };

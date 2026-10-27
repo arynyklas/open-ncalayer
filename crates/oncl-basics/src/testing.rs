@@ -2,8 +2,8 @@
 //! [`RecentPathStore`].
 
 use crate::prompt::{
-    CsrAnswer, CsrPrompt, FilePrompt, ImportAnswer, ImportPrompt, KeyPrompt, PasswordPrompt,
-    Prompt, Prompter, RecentPathStore, StorageAnswer, StorageKind, StoragePrompt,
+    Busy, BusyPrompt, CsrAnswer, CsrPrompt, FilePrompt, ImportAnswer, ImportPrompt, KeyPrompt,
+    PasswordPrompt, Prompt, Prompter, RecentPathStore, StorageAnswer, StorageKind, StoragePrompt,
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -95,7 +95,10 @@ impl std::fmt::Debug for Step {
 #[derive(Default)]
 struct State {
     steps: VecDeque<Step>,
+    timeline: Vec<&'static str>,
     storage_prompts: Vec<StoragePrompt>,
+    busy_prompts: Vec<BusyPrompt>,
+    opened_key_prompts: Vec<KeyPrompt>,
     key_prompts: Vec<KeyPrompt>,
     csr_prompts: Vec<CsrPrompt>,
     import_prompts: Vec<ImportPrompt>,
@@ -104,24 +107,31 @@ struct State {
 }
 
 /// A [`Prompter`] answering from a queue of [`Step`]s and recording every prompt shown. An
-/// empty queue cancels. Safe to share between threads.
+/// empty queue cancels. A key prompt is answered once its OCSP checks have settled, as a
+/// user would pick from what the dialog ends up showing. Safe to share between threads.
 ///
 /// # Panics
 ///
 /// A prompt panics if the next step answers another kind of prompt.
 pub struct ScriptedPrompter {
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
 }
 
 impl ScriptedPrompter {
     /// A prompter answering with `steps` in order.
     pub fn new(steps: Vec<Step>) -> Self {
         ScriptedPrompter {
-            state: Mutex::new(State {
+            state: Arc::new(Mutex::new(State {
                 steps: steps.into(),
                 ..State::default()
-            }),
+            })),
         }
+    }
+
+    /// What was shown so far, in order: `"storage"`, `"busy"`, `"busy closed"`, `"key"`,
+    /// `"csr"`, `"import"`, `"file"`, `"password"`.
+    pub fn timeline(&self) -> Vec<&'static str> {
+        self.lock().timeline.clone()
     }
 
     /// Storage prompts shown so far.
@@ -129,7 +139,18 @@ impl ScriptedPrompter {
         self.lock().storage_prompts.clone()
     }
 
-    /// Key prompts shown so far.
+    /// Busy indicators shown so far.
+    pub fn busy_prompts(&self) -> Vec<BusyPrompt> {
+        self.lock().busy_prompts.clone()
+    }
+
+    /// Key prompts shown so far, as they opened: keys whose OCSP check was still running
+    /// are [`crate::Availability::Pending`].
+    pub fn opened_key_prompts(&self) -> Vec<KeyPrompt> {
+        self.lock().opened_key_prompts.clone()
+    }
+
+    /// Key prompts answered so far, with the availabilities they settled on.
     pub fn key_prompts(&self) -> Vec<KeyPrompt> {
         self.lock().key_prompts.clone()
     }
@@ -155,13 +176,14 @@ impl ScriptedPrompter {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.state)
     }
 
-    /// Records a prompt, then takes the next answering step, waiting out `Wait` steps with
-    /// the state unlocked.
-    fn next(&self, record: impl FnOnce(&mut State)) -> Option<Step> {
+    /// Records a prompt of `kind`, then takes the next answering step, waiting out `Wait`
+    /// steps with the state unlocked.
+    fn next(&self, kind: &'static str, record: impl FnOnce(&mut State)) -> Option<Step> {
         let mut state = self.lock();
+        state.timeline.push(kind);
         record(&mut state);
         loop {
             match state.steps.pop_front() {
@@ -176,9 +198,13 @@ impl ScriptedPrompter {
     }
 }
 
+fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl Prompter for ScriptedPrompter {
     fn storage(&self, p: &StoragePrompt) -> Prompt<StorageAnswer> {
-        match self.next(|s| s.storage_prompts.push(p.clone())) {
+        match self.next("storage", |s| s.storage_prompts.push(p.clone())) {
             Some(Step::Storage { path, password }) => Prompt::Answer(StorageAnswer {
                 storage: StorageKind::Pkcs12,
                 path,
@@ -197,8 +223,23 @@ impl Prompter for ScriptedPrompter {
         }
     }
 
+    fn busy(&self, p: &BusyPrompt) -> Busy {
+        let mut state = self.lock();
+        state.timeline.push("busy");
+        state.busy_prompts.push(p.clone());
+        drop(state);
+        let state = Arc::clone(&self.state);
+        Busy::new(move || lock(&state).timeline.push("busy closed"))
+    }
+
     fn key(&self, p: &KeyPrompt) -> Prompt<usize> {
-        match self.next(|s| s.key_prompts.push(p.clone())) {
+        let step = self.next("key", |s| s.opened_key_prompts.push(p.clone()));
+        let mut settled = p.clone();
+        for (candidate, availability) in settled.candidates.iter_mut().zip(p.live.wait_settled()) {
+            candidate.availability = availability;
+        }
+        self.lock().key_prompts.push(settled);
+        match step {
             Some(Step::Key(index)) => Prompt::Answer(index),
             Some(Step::CancelKey) | None => Prompt::Cancelled,
             Some(step) => panic!("ScriptedPrompter: key prompt answered by {}", step.kind()),
@@ -206,7 +247,7 @@ impl Prompter for ScriptedPrompter {
     }
 
     fn csr(&self, p: &CsrPrompt) -> Prompt<CsrAnswer> {
-        match self.next(|s| s.csr_prompts.push(p.clone())) {
+        match self.next("csr", |s| s.csr_prompts.push(p.clone())) {
             Some(Step::Csr { dir, password }) => Prompt::Answer(CsrAnswer {
                 storage: StorageKind::Pkcs12,
                 dir,
@@ -221,7 +262,7 @@ impl Prompter for ScriptedPrompter {
     }
 
     fn import_cert(&self, p: &ImportPrompt) -> Prompt<ImportAnswer> {
-        match self.next(|s| s.import_prompts.push(p.clone())) {
+        match self.next("import", |s| s.import_prompts.push(p.clone())) {
             Some(Step::Import { dir, password }) => Prompt::Answer(ImportAnswer {
                 dir,
                 new_password: Zeroizing::new(password),
@@ -237,7 +278,7 @@ impl Prompter for ScriptedPrompter {
     }
 
     fn file(&self, p: &FilePrompt) -> Prompt<PathBuf> {
-        match self.next(|s| s.file_prompts.push(p.clone())) {
+        match self.next("file", |s| s.file_prompts.push(p.clone())) {
             Some(Step::File(path)) => Prompt::Answer(path),
             Some(Step::CancelFile) | None => Prompt::Cancelled,
             Some(step) => panic!("ScriptedPrompter: file chooser answered by {}", step.kind()),
@@ -245,7 +286,7 @@ impl Prompter for ScriptedPrompter {
     }
 
     fn password(&self, p: &PasswordPrompt) -> Prompt<Zeroizing<String>> {
-        match self.next(|s| s.password_prompts.push(p.clone())) {
+        match self.next("password", |s| s.password_prompts.push(p.clone())) {
             Some(Step::Password(password)) => Prompt::Answer(Zeroizing::new(password)),
             Some(Step::CancelPassword) | None => Prompt::Cancelled,
             Some(step) => panic!(

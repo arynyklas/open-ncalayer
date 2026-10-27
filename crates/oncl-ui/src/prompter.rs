@@ -2,32 +2,43 @@
 
 use crate::foreground;
 use crate::ui::{
-    CertItem, CsrDialog, FileDialog, ImportDialog, KeyDialog, KeyItem, PasswordDialog,
+    BusyDialog, CertItem, CsrDialog, FileDialog, ImportDialog, KeyDialog, KeyItem, PasswordDialog,
     StorageDialog, StorageRow,
 };
-use crate::view;
+use crate::view::{self, KeyRow};
 use oncl_basics::{
-    Action, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyPrompt,
-    Locale, PasswordPrompt, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt,
+    Action, Busy, BusyPrompt, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer,
+    ImportPrompt, KeyCandidate, KeyPrompt, Locale, PasswordPrompt, Prompt, Prompter, StorageAnswer,
+    StorageKind, StoragePrompt,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{
-    CloseRequestResponse, ComponentHandle, EventLoopError, ModelRc, PlatformError, SharedString,
-    VecModel,
+    CloseRequestResponse, ComponentHandle, EventLoopError, Model, ModelRc, PlatformError,
+    SharedString, VecModel,
 };
 use std::any::Any;
 use std::cell::RefCell;
 use std::panic::{self, UnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Mutex, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 /// Shows one dialog at a time process-wide.
 static DIALOGS: Mutex<()> = Mutex::new(());
+
+/// How long a key store may take to open before the busy indicator shows: one that opens
+/// at once does not flash a window.
+const BUSY_DELAY: Duration = Duration::from_millis(150);
+
+thread_local! {
+    /// The busy indicator, on the event loop's thread, while it is shown.
+    static BUSY: RefCell<Option<BusyDialog>> = const { RefCell::new(None) };
+}
 
 /// How long a call waits for the main thread to start the event loop.
 const LOOP_START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -106,6 +117,29 @@ impl SlintPrompter {
 impl Prompter for SlintPrompter {
     fn storage(&self, p: &StoragePrompt) -> Prompt<StorageAnswer> {
         ask(p, show_storage)
+    }
+
+    fn busy(&self, p: &BusyPrompt) -> Busy {
+        let done = Arc::new(AtomicBool::new(false));
+        let scheduled = slint::invoke_from_event_loop({
+            let (p, done) = (p.clone(), Arc::clone(&done));
+            move || {
+                slint::Timer::single_shot(BUSY_DELAY, move || {
+                    if !done.load(Ordering::Acquire) {
+                        show_busy(&p);
+                    }
+                });
+            }
+        });
+        if let Err(e) = scheduled {
+            tracing::warn!(error = %e, "cannot show the busy indicator");
+            return Busy::none();
+        }
+        Busy::new(move || {
+            done.store(true, Ordering::Release);
+            // No event loop: nothing was shown.
+            let _ = slint::invoke_from_event_loop(hide_busy);
+        })
     }
 
     fn key(&self, p: &KeyPrompt) -> Prompt<usize> {
@@ -282,32 +316,63 @@ fn browse(ui: &StorageDialog) {
     }
 }
 
-/// The key dialog for `p`; the outcome goes to `reply`.
-fn show_keys(p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), PlatformError> {
-    let ui = KeyDialog::new()?;
+/// The busy indicator for `p`, kept until [`hide_busy`].
+fn show_busy(p: &BusyPrompt) {
+    let ui = match BusyDialog::new() {
+        Ok(ui) => ui,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot show the busy indicator");
+            return;
+        }
+    };
     select_language(p.locale);
     ui.set_origin(p.origin.as_str().into());
-    ui.set_authenticate(p.action == Action::Authenticate);
-    ui.set_key_info(p.action == Action::KeyInfo);
-    ui.set_detail(p.detail.as_deref().unwrap_or_default().into());
-    ui.set_error(p.error.as_deref().unwrap_or_default().into());
-    let rows = view::key_rows(&p);
-    let enabled: Vec<bool> = rows.iter().map(|r| r.enabled).collect();
-    let first_enabled = enabled.iter().position(|e| *e);
-    ui.set_has_enabled(first_enabled.is_some());
-    // Without an enabled key the first one is selected, so its note tells why.
-    ui.set_selected(index(first_enabled.or((!rows.is_empty()).then_some(0))));
-    let items: Vec<KeyItem> = rows
-        .into_iter()
-        .map(|r| KeyItem {
-            title: r.title.into(),
-            details: r.details.into(),
-            enabled: r.enabled,
-            note: r.note.unwrap_or_default().into(),
-            revoked: r.revoked.unwrap_or_default().into(),
-        })
-        .collect();
-    ui.set_keys(ModelRc::new(VecModel::from(items)));
+    if let Err(e) = ui.show() {
+        tracing::warn!(error = %e, "cannot show the busy indicator");
+        return;
+    }
+    foreground::take(&ui);
+    if let Some(previous) = BUSY.with(|busy| busy.replace(Some(ui))) {
+        let _ = previous.hide();
+    }
+}
+
+/// Closes the busy indicator, if shown.
+fn hide_busy() {
+    if let Some(ui) = BUSY.with(RefCell::take)
+        && let Err(e) = ui.hide()
+    {
+        tracing::warn!(error = %e, "cannot hide the busy indicator");
+    }
+}
+
+/// The key dialog for `p`; the outcome goes to `reply`. Its rows follow `p.live`: a key
+/// still being checked shows so and changes in place when its check ends.
+fn show_keys(mut p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), PlatformError> {
+    let ui = KeyDialog::new()?;
+    select_language(p.locale);
+    // The rows show the availabilities of the moment the changes are followed from.
+    let current = p.live.watch({
+        let (candidates, locale, weak) = (p.candidates.clone(), p.locale, ui.as_weak());
+        move |i, availability| {
+            let Some(candidate) = candidates.get(i) else {
+                return;
+            };
+            let row = view::key_row(
+                &KeyCandidate {
+                    availability: availability.clone(),
+                    ..candidate.clone()
+                },
+                locale,
+            );
+            // The dialog may be gone already.
+            let _ = weak.upgrade_in_event_loop(move |ui| update_key(&ui, i, row));
+        }
+    });
+    for (candidate, availability) in p.candidates.iter_mut().zip(current) {
+        candidate.availability = availability;
+    }
+    fill_keys(&ui, &p);
 
     let pending = Pending::new(ui.clone_strong(), reply);
     let weak = ui.as_weak();
@@ -319,13 +384,61 @@ fn show_keys(p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), PlatformE
             };
             if let Some(i) = usize::try_from(ui.get_selected())
                 .ok()
-                .filter(|&i| enabled.get(i) == Some(&true))
+                .filter(|&i| ui.get_keys().row_data(i).is_some_and(|k| k.enabled))
             {
                 pending.finish(Prompt::Answer(i));
             }
         }
     });
     show(&ui, pending)
+}
+
+/// Fills the key dialog with `p` and its candidates' availabilities.
+pub(crate) fn fill_keys(ui: &KeyDialog, p: &KeyPrompt) {
+    ui.set_origin(p.origin.as_str().into());
+    ui.set_authenticate(p.action == Action::Authenticate);
+    ui.set_key_info(p.action == Action::KeyInfo);
+    ui.set_detail(p.detail.as_deref().unwrap_or_default().into());
+    ui.set_error(p.error.as_deref().unwrap_or_default().into());
+    let rows = view::key_rows(p);
+    let usable = rows
+        .iter()
+        .position(|r| r.enabled)
+        .or_else(|| rows.iter().position(|r| r.pending));
+    ui.set_has_usable(usable.is_some());
+    // Without a usable key the first one is selected, so its note tells why.
+    ui.set_selected(index(usable.or((!rows.is_empty()).then_some(0))));
+    let items: Vec<KeyItem> = rows.into_iter().map(key_item).collect();
+    ui.set_keys(ModelRc::new(VecModel::from(items)));
+}
+
+/// The list item of a key row.
+fn key_item(r: KeyRow) -> KeyItem {
+    KeyItem {
+        title: r.title.into(),
+        details: r.details.into(),
+        enabled: r.enabled,
+        pending: r.pending,
+        note: r.note.unwrap_or_default().into(),
+        revoked: r.revoked.unwrap_or_default().into(),
+    }
+}
+
+/// Shows the new row of key `i`. If the selected key can no longer become usable, the first
+/// enabled key is selected instead.
+pub(crate) fn update_key(ui: &KeyDialog, i: usize, row: KeyRow) {
+    let keys = ui.get_keys();
+    keys.set_row_data(i, key_item(row));
+    let usable = |k: &KeyItem| k.enabled || k.pending;
+    ui.set_has_usable(keys.iter().any(|k| usable(&k)));
+    let selected = usize::try_from(ui.get_selected())
+        .ok()
+        .and_then(|s| keys.row_data(s));
+    if !selected.is_some_and(|k| usable(&k))
+        && let Some(first) = keys.iter().position(|k| k.enabled)
+    {
+        ui.set_selected(index(Some(first)));
+    }
 }
 
 /// The certificate request dialog for `p`; the outcome goes to `reply`.

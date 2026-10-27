@@ -6,9 +6,10 @@ use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{
-    Action, Availability, Basics, ChainPolicy, CsrAnswer, CsrPrompt, DisabledReason, FilePrompt,
-    ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt, Locale, MODULE_NAME, OpenError,
-    PasswordPrompt, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt, availabilities,
+    Action, Availability, Basics, Busy, BusyPrompt, ChainPolicy, CsrAnswer, CsrPrompt,
+    DisabledReason, FilePrompt, ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt, Locale,
+    MODULE_NAME, OcspCache, OpenError, PasswordPrompt, Prompt, Prompter, RecentPathStore,
+    StorageAnswer, StorageKind, StoragePrompt, availabilities,
 };
 use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{SignOptions, verify};
@@ -313,6 +314,71 @@ fn wrong_password_reprompts_with_error() {
     );
 }
 
+/// Remembers the prompter's timeline whenever the opened path is saved: right after the key
+/// store opened.
+struct TimelineAtSave {
+    prompter: Arc<ScriptedPrompter>,
+    seen: Mutex<Vec<Vec<&'static str>>>,
+}
+
+impl RecentPathStore for TimelineAtSave {
+    fn load(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn save(&self, _: &Path) {
+        self.seen.lock().unwrap().push(self.prompter.timeline());
+    }
+}
+
+#[test]
+fn busy_indicator_shows_while_the_store_opens() {
+    let prompter = Arc::new(ScriptedPrompter::new(script![
+        storage("user-gost2015-sign", "bad"),
+        storage("user-gost2015-sign", "Qwerty12"),
+        key(0)
+    ]));
+    let recent = Arc::new(TimelineAtSave {
+        prompter: prompter.clone(),
+        seen: Mutex::new(Vec::new()),
+    });
+    let b = Basics::new(
+        prompter.clone(),
+        recent.clone(),
+        Arc::new(MockTsa::new(entry("tsa-gost2015"))),
+    );
+    let r = json(b.process(&req(cms_args(json!("x"), json!({}))), &origin("o")));
+    assert_eq!(r["status"], true, "{r}");
+    // Each answer opens under the indicator, which goes before the next dialog.
+    assert_eq!(
+        *recent.seen.lock().unwrap(),
+        [vec!["storage", "busy", "busy closed", "storage", "busy"]]
+    );
+    assert_eq!(
+        prompter.timeline(),
+        [
+            "storage",
+            "busy",
+            "busy closed",
+            "storage",
+            "busy",
+            "busy closed",
+            "key"
+        ]
+    );
+    let storage = &prompter.storage_prompts()[0];
+    assert_eq!(
+        prompter.busy_prompts(),
+        vec![
+            BusyPrompt {
+                origin: storage.origin.clone(),
+                locale: storage.locale,
+            };
+            2
+        ]
+    );
+}
+
 #[test]
 fn unreadable_storages_reprompt_with_error() {
     let missing = synthetic("user-gost2015-sign")
@@ -399,6 +465,10 @@ impl Prompter for JksFirst {
             path: key.path,
             password: Zeroizing::new(key.password),
         })
+    }
+
+    fn busy(&self, _: &BusyPrompt) -> Busy {
+        Busy::none()
     }
 
     fn key(&self, _: &KeyPrompt) -> Prompt<usize> {
@@ -582,7 +652,10 @@ fn key_filter_availability() {
     let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
     let http: Arc<dyn HttpTransport> = tsa.clone();
     let availability = |filter: KeyFilter, key: &(Certificate, CertInfo), now| {
-        availabilities(&filter, std::slice::from_ref(key), &http, now).remove(0)
+        let cache = Arc::new(OcspCache::new());
+        let live = availabilities(&filter, std::slice::from_ref(key), &http, &cache, now);
+        assert!(live.is_settled(), "nothing to check");
+        live.current().remove(0)
     };
     let inside = datetime!(2026-01-01 0:00 UTC);
     let after = datetime!(2100-01-01 0:00 UTC);

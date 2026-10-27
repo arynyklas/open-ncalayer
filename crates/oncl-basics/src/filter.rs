@@ -2,12 +2,14 @@
 //! certificate, as the original's `KeystoreStage` disables entries — the conditions on the
 //! certificate, its certification path through `signerParams.chain` and its OCSP status.
 
+use crate::live::LiveAvailability;
+use crate::ocsp_cache::OcspCache;
 use oncl_pki::cert::Certificate;
 use oncl_pki::http::HttpTransport;
 use oncl_pki::info::CertInfo;
 use oncl_pki::ocsp::{self, CertStatus};
 use oncl_pki::pkix::{self, CaSet};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,7 +17,7 @@ use time::OffsetDateTime;
 use x509_cert::ext::pkix::BasicConstraints;
 
 /// How long the OCSP checks of a key list may take together: the request timeout and a
-/// second more. Keys whose check has not finished by then stay available.
+/// second more. Keys whose check has not finished by then become available.
 pub const OCSP_DEADLINE: Duration = ocsp::TIMEOUT.saturating_add(Duration::from_secs(1));
 
 /// The embedded NCA production CAs, shared by every request without `chain`.
@@ -42,6 +44,8 @@ pub enum DisabledReason {
 pub enum Availability {
     /// It may.
     Enabled,
+    /// It may once its OCSP check, still running, does not find it revoked: not yet.
+    Pending,
     /// The certificate is outside its validity period.
     Expired,
     /// Its OCSP responder reports the certificate revoked at `time`.
@@ -137,23 +141,28 @@ impl KeyFilter {
 ///   the key is disabled for [`DisabledReason::Chain`];
 /// - unless `chain` is empty or revoked keys are allowed, the OCSP status of every key not
 ///   disabled whose certificate is an end entity with a responder URL
-///   ([`ocsp::ocsp_url`]), all at once on a thread each, through `http`. Only a `revoked`
-///   answer counts; failures, `unknown` and checks still running after [`OCSP_DEADLINE`]
-///   leave the key as it is and are logged as warnings.
+///   ([`ocsp::ocsp_url`]), all at once on a thread each, through `http` and `cache`. Only
+///   a `revoked` answer counts; failures, `unknown` and checks still running after
+///   [`OCSP_DEADLINE`] leave the key as it is and are logged.
 ///
-/// Checks still running at the deadline are abandoned, not waited for: their threads end
-/// with the transport's own timeout.
+/// Returns once the paths are built: the OCSP checks go on in the background. Until its
+/// check ends, a key that would be enabled is [`Availability::Pending`]; an expired one
+/// stays expired (and may turn revoked). The result settles when every check has ended,
+/// at the latest at the deadline, which counts from this call. Checks still running then
+/// are abandoned, not waited for: their threads end with the transport's own timeout.
 pub fn availabilities(
     filter: &KeyFilter,
     keys: &[(Certificate, CertInfo)],
     http: &Arc<dyn HttpTransport>,
+    cache: &Arc<OcspCache>,
     now: OffsetDateTime,
-) -> Vec<Availability> {
+) -> LiveAvailability {
     let deadline = Instant::now() + OCSP_DEADLINE;
     let cas = filter.chain.ca_set();
     let (sender, receiver) = mpsc::channel();
-    let mut pending = 0_usize;
-    let mut result = Vec::with_capacity(keys.len());
+    // The keys being checked, with their availability unless revoked.
+    let mut checking = BTreeMap::new();
+    let mut initial = Vec::with_capacity(keys.len());
     for (index, (cert, info)) in keys.iter().enumerate() {
         let mut availability = filter.own_availability(info, now);
         if let Some(cas) = &cas {
@@ -175,37 +184,88 @@ pub fn availabilities(
                             issuer: issuer.clone(),
                             cas: Arc::clone(cas),
                             http: Arc::clone(http),
+                            cache: Arc::clone(cache),
                             now,
                         };
                         if check.spawn(sender.clone()) {
-                            pending += 1;
+                            checking.insert(index, availability.clone());
+                            if availability == Availability::Enabled {
+                                availability = Availability::Pending;
+                            }
                         }
                     }
                 }
             }
         }
-        result.push(availability);
+        initial.push(availability);
     }
     drop(sender);
-    while pending > 0 {
-        let Ok((index, revoked)) =
-            receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        else {
-            break;
-        };
-        pending -= 1;
-        if let Some(time) = revoked {
-            result[index] = Availability::Revoked { time };
+    if checking.is_empty() {
+        return LiveAvailability::settled(initial);
+    }
+    let live = LiveAvailability::changing(initial);
+    let results = Results {
+        live: live.clone(),
+        receiver,
+        checking,
+        deadline,
+    };
+    // Without a thread to collect them, the dropped `results` settle at once.
+    let spawned = thread::Builder::new()
+        .name("ocsp-results".to_owned())
+        .spawn(move || results.collect());
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "cannot wait for the OCSP checks: the keys stay available");
+    }
+    live
+}
+
+/// Where the OCSP checks of a key list report, and what becomes of their keys. Dropped, it
+/// leaves the keys still being checked as they are unless revoked, and settles.
+struct Results {
+    live: LiveAvailability,
+    receiver: mpsc::Receiver<(usize, Option<OffsetDateTime>)>,
+    /// The keys still being checked, with their availability unless revoked.
+    checking: BTreeMap<usize, Availability>,
+    deadline: Instant,
+}
+
+impl Results {
+    /// Sets each key's availability as its check ends, until the deadline.
+    fn collect(mut self) {
+        while !self.checking.is_empty() {
+            let Ok((index, revoked)) = self
+                .receiver
+                .recv_timeout(self.deadline.saturating_duration_since(Instant::now()))
+            else {
+                break;
+            };
+            if let Some(unrevoked) = self.checking.remove(&index) {
+                let availability = match revoked {
+                    Some(time) => Availability::Revoked { time },
+                    None => unrevoked,
+                };
+                self.live.set(index, availability);
+            }
         }
     }
-    if pending > 0 {
-        tracing::warn!(
-            pending,
-            "OCSP checks did not finish within {} s: those keys stay available",
-            OCSP_DEADLINE.as_secs()
-        );
+}
+
+impl Drop for Results {
+    fn drop(&mut self) {
+        let unchecked = std::mem::take(&mut self.checking);
+        if !unchecked.is_empty() {
+            tracing::warn!(
+                pending = unchecked.len(),
+                "OCSP checks did not finish within {} s: those keys stay available",
+                OCSP_DEADLINE.as_secs()
+            );
+        }
+        for (index, unrevoked) in unchecked {
+            self.live.set(index, unrevoked);
+        }
+        self.live.settle();
     }
-    result
 }
 
 /// The OCSP check of the key at `index`.
@@ -217,6 +277,7 @@ struct OcspCheck {
     issuer: Certificate,
     cas: Arc<CaSet>,
     http: Arc<dyn HttpTransport>,
+    cache: Arc<OcspCache>,
     now: OffsetDateTime,
 }
 
@@ -244,25 +305,22 @@ impl OcspCheck {
     /// The revocation time if the responder reports the certificate revoked.
     fn run(&self) -> Option<OffsetDateTime> {
         let serial = &self.serial;
-        match ocsp::check(
+        let status = self.cache.status(
+            serial,
             &self.cert,
             &self.issuer,
             &self.cas,
             self.http.as_ref(),
             self.now,
-            ocsp::TIMEOUT,
-        ) {
-            Ok(CertStatus::Revoked { time, reason }) => {
+        );
+        match status? {
+            CertStatus::Revoked { time, reason } => {
                 tracing::info!(%serial, %time, ?reason, "OCSP: the certificate is revoked");
                 Some(time)
             }
-            Ok(CertStatus::Good) => None,
-            Ok(CertStatus::Unknown) => {
+            CertStatus::Good => None,
+            CertStatus::Unknown => {
                 tracing::warn!(%serial, "OCSP: the responder does not know the certificate; the key stays available");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(%serial, error = %e, "OCSP check failed: the key stays available");
                 None
             }
         }

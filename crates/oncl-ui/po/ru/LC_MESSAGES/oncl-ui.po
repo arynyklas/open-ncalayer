@@ -50,6 +50,12 @@ msgstr "Выберите ключ"
 msgid "No suitable key found"
 msgstr "Подходящий ключ не найден"
 
+msgid "Checking the certificate status…"
+msgstr "Проверка статуса сертификата…"
+
+msgid "Opening the key store…"
+msgstr "Открываем хранилище…"
+
 msgid "Sign"
 msgstr "Подписать"
 
