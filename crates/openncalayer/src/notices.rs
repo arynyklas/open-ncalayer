@@ -122,6 +122,43 @@ impl TrayStatus {
         })
     }
 
+    /// The notification of «Остановить оригинал…» finding the original no longer on
+    /// `port`: whether wss took the port (`wss_off` as it is now), or another program
+    /// holds it.
+    pub fn original_gone_notification(&self, port: u16) -> Notification {
+        let l = self.locale;
+        let title = match l {
+            Locale::Ru => "Оригинальный NCALayer уже не держит порт",
+            Locale::Kk => "Түпнұсқа NCALayer портты енді алып тұрған жоқ",
+            Locale::En => "The original NCALayer no longer holds the port",
+        };
+        let body = match (self.wss_off, l) {
+            (None, Locale::Ru) => format!(
+                "Ничего не остановлено. OpenNCALayer принимает подключения сайтов на порту {port}."
+            ),
+            (None, Locale::Kk) => format!(
+                "Ештеңе тоқтатылмады. OpenNCALayer сайттардың қосылуларын {port} портында қабылдайды."
+            ),
+            (None, Locale::En) => format!(
+                "Nothing was stopped. OpenNCALayer accepts the sites' connections on port {port}."
+            ),
+            (Some(_), Locale::Ru) => format!(
+                "Ничего не остановлено. Порт {port} занят другой программой, поэтому OpenNCALayer не принимает подключения сайтов."
+            ),
+            (Some(_), Locale::Kk) => format!(
+                "Ештеңе тоқтатылмады. {port} портын басқа бағдарлама алып тұр, сондықтан OpenNCALayer сайттардың қосылуларын қабылдамайды."
+            ),
+            (Some(_), Locale::En) => format!(
+                "Nothing was stopped. Another program holds port {port}, so OpenNCALayer does not accept the sites' connections."
+            ),
+        };
+        Notification {
+            title: title.to_owned(),
+            body,
+            action: None,
+        }
+    }
+
     /// What the last renewal check warns about, if anything.
     fn renewal_warning(&self) -> Option<String> {
         let l = self.locale;
@@ -420,6 +457,36 @@ mod tests {
         status.wss_off = None;
         assert_eq!(status.tray_state(), TrayState::default());
         assert_eq!(status.original_on_port(), None);
+    }
+
+    /// «Остановить оригинал…» found the original gone: the user is told whether wss took
+    /// the port, in every language.
+    #[test]
+    fn an_original_gone_on_the_click_is_told() {
+        let mut status = TrayStatus::new(Locale::Ru, None);
+        let serving = status.original_gone_notification(13579);
+        assert_eq!(serving.title, "Оригинальный NCALayer уже не держит порт");
+        assert!(
+            serving
+                .body
+                .contains("принимает подключения сайтов на порту 13579"),
+            "{}",
+            serving.body
+        );
+        assert_eq!(serving.action, None);
+        status.wss_off = Some(WssOff::PortBusy(13579));
+        let busy = status.original_gone_notification(13579);
+        assert!(
+            busy.body.contains("Порт 13579 занят другой программой"),
+            "{}",
+            busy.body
+        );
+        for l in [Locale::Kk, Locale::En] {
+            status.locale = l;
+            let other = status.original_gone_notification(13579);
+            assert_ne!(other.title, serving.title);
+            assert!(other.body.contains("13579"));
+        }
     }
 
     #[test]

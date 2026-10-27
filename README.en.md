@@ -193,7 +193,7 @@ Exit codes of `run`:
 - 3 — the port is taken, for example by the original NCALayer;
 - 4 — OpenNCALayer with the same data directory is already running in this session.
 
-With `--allow-no-wss` (how the extension's relay starts the daemon) no wss startup failure (codes 2, 3 and 1) stops the daemon: it logs a warning and serves only the extension.
+With `--allow-no-wss` (how the extension's relay starts the daemon) no wss startup failure (codes 2, 3 and 1) stops the daemon: it logs a warning and serves only the extension. Such a daemon does not take a freed port by itself: it starts wss only after a user action in the tray or the TLS wizard (stopping the original, saving a certificate).
 
 The original and OpenNCALayer cannot both serve `wss` at the same time: both need port 13579. The extension does not need the port.
 
@@ -231,7 +231,7 @@ Installation:
 Good to know:
 - `nm install` resolves the data directory like `run` does, honouring `ONCL_DATA_DIR`. After moving the `openncalayer` binary or changing the data directory, run `nm install` again.
 - A repeated `nm install` replaces the relay by renaming: relays the browser is running keep working with the old file. Old `nmhost.old-*` files are removed by the next `nm install`. On Windows `nm uninstall` cannot delete a relay the browser is holding (the relay line says «занят запущенным процессом», exit code 1): close the browser and run the command again. On macOS and Linux the file is removed at once.
-- A daemon started by the relay runs until the session ends. If TLS is set up and port 13579 is free, the same daemon serves `wss` too; otherwise the log has a warning and the daemon serves only the extension.
+- A daemon started by the relay runs until the session ends. If TLS is set up and port 13579 is free, the same daemon serves `wss` too; otherwise the log has a warning and the daemon serves only the extension until the user stops the original or saves a certificate in the wizard.
 - Through the extension, the site origin that modules see comes from the browser, not from the page.
 - If the host is not installed or the daemon does not start, the extension gives the page its own `WebSocket`, i.e. the original NCALayer if it is running. While the host is installed, sites go to OpenNCALayer even when the original is running. To return to the original, run `nm uninstall` and restart the browser (or stop the daemon), or disable the extension: right after `nm uninstall` the browser keeps using the relay and daemon already running.
 

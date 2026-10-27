@@ -24,7 +24,7 @@ use oncl_ui::{
 use openncalayer::cli::{self, Cli, Command};
 use openncalayer::notices::TrayStatus;
 use openncalayer::renewal::{self, RenewalCheck};
-use openncalayer::wss::{Listening, PortState, WATCH_EVERY, Wss};
+use openncalayer::wss::{Listening, PortState, WATCH_EVERY, Watcher, Wss};
 use openncalayer::{
     JsonSettings, LiveProxyTransport, Paths, ServerConfig, build_registry, desktop, listen_port,
     load_settings, serve, serve_ipc,
@@ -71,12 +71,19 @@ fn post_to_tray(f: impl FnOnce(&mut TrayStatus) -> Option<Notification> + Send +
     }
 }
 
-/// Looks at wss's port again ([`Wss::recheck`]: wss takes it if nobody listens there any
-/// more) and tells the tray. Blocks for the lookup: call it off the event loop.
-fn tell_tray_wss(wss: &Wss) -> PortState {
+/// A user action looks at wss's port again ([`Wss::recheck`]: wss takes it if nobody
+/// listens there any more) and tells the tray. Blocks for the lookup: call it off the event
+/// loop.
+fn recheck_for_user(wss: &Wss) -> PortState {
     let state = wss.recheck(&port_owner::port_owner);
     show_port(state.clone(), false);
     state
+}
+
+/// Looks at wss's port without a user action ([`Wss::look`]: a free port is taken only if
+/// wss may do so on its own) and tells the tray. Blocks: call it off the event loop.
+fn look_for_tray(wss: &Wss) {
+    show_port(wss.look(&port_owner::port_owner), false);
 }
 
 /// Has the tray show `state`; with `notify` a problem the tray can fix is also notified.
@@ -92,27 +99,37 @@ fn show_port(state: PortState, notify: bool) {
     });
 }
 
-/// While wss is off, from when the event loop runs: tells the tray (notifying a problem it
-/// can fix if `notify`), then looks at a busy port every [`WATCH_EVERY`] ([`Wss::watch`]),
-/// so that wss takes it once it is free, and keeps the tray up to date. On a thread.
+/// While wss is off, from when the event loop runs: looks at the port once and tells the
+/// tray (notifying a problem it can fix if `notify`); then, if wss may take a freed port on
+/// its own, watches it every [`WATCH_EVERY`] ([`Wss::watch_if_allowed`]). A relay-started
+/// daemon starts that watch only after the user stopped the original or saved a
+/// certificate. On a thread.
 fn watch_wss(wss: Arc<Wss>, notify: bool) {
+    wss.set_watcher(Watcher {
+        every: WATCH_EVERY,
+        owner_of: Box::new(port_owner::port_owner),
+        on_change: Box::new(|state| show_port(state.clone(), false)),
+    });
     spawn_named("wss-port", move || {
-        let state = wss.recheck(&port_owner::port_owner);
-        show_port(state, notify);
-        wss.watch(WATCH_EVERY, &port_owner::port_owner, |state| {
-            show_port(state.clone(), false);
-        });
+        show_port(wss.look(&port_owner::port_owner), notify);
+        wss.watch_if_allowed();
     });
 }
 
 /// «Остановить оригинал…» (the menu, or the notification's button): looks at the port again,
-/// then asks before the original NCALayer holding it is stopped. If it is gone, wss takes
-/// the port and the tray says so. The lookup runs on a thread.
+/// then asks before the original NCALayer holding it is stopped. If it is gone, wss takes a
+/// free port and a notification says what became of it. The lookup runs on a thread.
 fn offer_to_stop_original(wss: &Arc<Wss>) {
     let wss = Arc::clone(wss);
     spawn_named("stop-original", move || {
-        let Some(owner) = tell_tray_wss(&wss).original else {
-            tracing::info!("the original NCALayer does not hold the port (any more)");
+        let state = recheck_for_user(&wss);
+        let Some(owner) = state.original else {
+            tracing::info!(
+                serving = state.off.is_none(),
+                "the original NCALayer does not hold the port any more"
+            );
+            let port = wss.port();
+            post_to_tray(move |status| Some(status.original_gone_notification(port)));
             return;
         };
         let stopping = Arc::clone(&wss);
@@ -123,7 +140,7 @@ fn offer_to_stop_original(wss: &Arc<Wss>) {
             // After any outcome the tray shows the port as it is then.
             stop: Box::new(move |locale: Locale| {
                 let stopped = stopping.stop_original(&owner, port_owner::stop, REBIND_WAIT, locale);
-                tell_tray_wss(&stopping);
+                recheck_for_user(&stopping);
                 stopped
             }),
         });
@@ -155,8 +172,8 @@ fn main() -> ExitCode {
 /// event loop of the dialogs, the windows and the tray, as windowing systems require.
 /// «Выход» in the tray stops the servers, and a stopped server ends the loop; closing
 /// windows does not. With feature `e2e-prompter` and its script set there are no dialogs:
-/// without a tray the main thread only waits for the servers. A tray that cannot be shown is
-/// only logged.
+/// without a tray the main thread only waits for the servers. A tray that cannot be shown
+/// is logged, and `run` carries on without it unless a deferred failure waits for it.
 ///
 /// With a tray, TLS not set up and a busy port do not end `run`: it serves the browser
 /// extension, the tray says what is wrong, and wss starts in this process once the TLS
@@ -164,7 +181,9 @@ fn main() -> ExitCode {
 /// tray, or quit). Without one (`--no-tray`, a tray that cannot be shown or is lost on the
 /// event loop's first turn, or no event loop) they end it with P1's code, unless
 /// `allow_no_wss`. Only a daemon started without `allow_no_wss` (by the user or our
-/// autostart, not the extension's relay) notifies them at the start.
+/// autostart, not the extension's relay) notifies them at the start, and takes a freed port
+/// by itself; a relay-started one does so only after the user stopped the original or saved
+/// a certificate (D13).
 fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -202,7 +221,7 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         Ok(opened) => (Ok(opened), None),
         Err(failure) => (Err(failure.off), (!allow_no_wss).then_some(failure)),
     };
-    let (wss, listeners) = Wss::new(daemon.paths.tls(), listen_port(), opened);
+    let (wss, listeners) = Wss::new(daemon.paths.tls(), listen_port(), opened, !allow_no_wss);
     let status = TrayStatus::new(locale, wss.off());
     let tray = if with_tray {
         start_tray(
@@ -358,7 +377,7 @@ fn start_renewal(files: TlsFiles, wss: Arc<Wss>) {
             let check = renewal::check(&files, OffsetDateTime::now_utc(), || wss.reload());
             if matches!(check, RenewalCheck::Renewed { .. }) {
                 // It may have started wss, too.
-                tell_tray_wss(&wss);
+                look_for_tray(&wss);
             }
             match &check {
                 RenewalCheck::Nothing => {}
@@ -418,14 +437,14 @@ fn desktop_windows(
         },
         tls: desktop::tls_wizard_services(paths, reports, wss, move |files: &TlsFiles| {
             // A new certificate is not due: the tray forgets the reminder. It may have
-            // started wss; if not, the port is looked at again (on the wizard's worker
+            // started wss; if not, the tray shows the port as it is (on the wizard's worker
             // thread).
             let state = renewal::state(files, OffsetDateTime::now_utc());
             post_to_tray(move |status| {
                 status.renewal = state;
                 None
             });
-            tell_tray_wss(&saved_to);
+            look_for_tray(&saved_to);
         }),
         on_saved: Box::new(move |settings: &Settings| {
             http.set_proxy(settings.proxy.clone());

@@ -4,12 +4,19 @@
 //! process, without a restart. Each listener it opens goes to the server task
 //! ([`Listening`]) over a channel.
 //!
-//! A busy port is looked at again ([`Wss::recheck`]) after a stop, after a certificate is
-//! saved, when the user picks «Остановить оригинал…», and every [`WATCH_EVERY`] while wss is
-//! off ([`Wss::watch`]): when nobody listens there any more, wss takes it.
+//! Whether it may take a freed port on its own (D13): a daemon the user or our autostart
+//! started may; one the extension's relay started (`--allow-no-wss`) may only after the user
+//! asked for wss — stopped the original from the tray or saved a certificate in the wizard
+//! ([`Wss::stop_original`], [`Wss::apply_saved`]). Until then it never binds the port by itself, so it cannot win the
+//! port from an original that is just restarting.
+//!
+//! A busy port is looked at again when the user picks «Остановить оригинал…» or saves a
+//! certificate ([`Wss::recheck`], which takes a free port), after a stop and a renewal
+//! ([`Wss::look`]), and, while it may, every [`WATCH_EVERY`] ([`Wss::watch_if_allowed`]).
 
 use std::io;
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -33,6 +40,14 @@ pub const WATCH_EVERY: Duration = Duration::from_secs(30);
 /// Who listens on a TCP port: [`oncl_desktop::port_owner::port_owner`], or a test's.
 pub type OwnerOf<'a> = &'a dyn Fn(u16) -> io::Result<Option<PortOwner>>;
 
+/// How the background watch of a busy port runs ([`Wss::watch_if_allowed`]): how often it
+/// looks, who listens, and who is told each change.
+pub struct Watcher {
+    pub every: Duration,
+    pub owner_of: Box<dyn Fn(u16) -> io::Result<Option<PortOwner>> + Send + Sync>,
+    pub on_change: Box<dyn Fn(&PortState) + Send + Sync>,
+}
+
 /// How wss's port stands for the tray: why wss is off, and the original NCALayer holding
 /// the port when a busy port is why.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -53,6 +68,12 @@ pub struct Wss {
     port: u16,
     state: Mutex<State>,
     listeners: mpsc::UnboundedSender<Listening>,
+    /// It may take a freed port without a user action.
+    on_its_own: AtomicBool,
+    watcher: Mutex<Option<Arc<Watcher>>>,
+    watching: AtomicBool,
+    /// What the last look at the port found, to log changes only.
+    seen: Mutex<Option<Seen>>,
 }
 
 /// Serving (`live`) or off (`off`).
@@ -61,13 +82,24 @@ struct State {
     off: Option<WssOff>,
 }
 
+/// Who a look found on the port, for the log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Seen {
+    Original(u32),
+    Other(u32),
+    Nobody,
+    Unknown(String),
+}
+
 impl Wss {
     /// The wss server as `run` found it: `opened` serving at once, or why it is off. The
-    /// listeners to serve arrive on the receiver, the first one at once.
+    /// listeners to serve arrive on the receiver, the first one at once. With `on_its_own`
+    /// it may take a freed port without a user action (not for a relay-started daemon).
     pub fn new(
         files: TlsFiles,
         port: u16,
         opened: Result<(Arc<rustls::ServerConfig>, TcpListener), WssOff>,
+        on_its_own: bool,
     ) -> (Arc<Wss>, mpsc::UnboundedReceiver<Listening>) {
         let (listeners, receiver) = mpsc::unbounded_channel();
         let wss = Wss {
@@ -78,6 +110,10 @@ impl Wss {
                 off: None,
             }),
             listeners,
+            on_its_own: AtomicBool::new(on_its_own),
+            watcher: Mutex::new(None),
+            watching: AtomicBool::new(false),
+            seen: Mutex::new(None),
         };
         {
             let mut state = wss.lock();
@@ -99,10 +135,61 @@ impl Wss {
         self.lock().off
     }
 
+    /// Whether it may take a freed port without a user action.
+    pub fn on_its_own(&self) -> bool {
+        self.on_its_own.load(Ordering::SeqCst)
+    }
+
     /// The TLS configuration being served, while wss serves.
     #[cfg(test)]
     fn live(&self) -> Option<Arc<LiveTls>> {
         self.lock().live.clone()
+    }
+
+    /// How [`Wss::watch_if_allowed`] watches a busy port.
+    pub fn set_watcher(&self, watcher: Watcher) {
+        *self.watcher.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(watcher));
+    }
+
+    /// The user asked for wss on this port (stopped the original, saved a certificate):
+    /// from now on it may take the port once free. [`Wss::watch_if_allowed`] then starts
+    /// the watch.
+    fn want(&self) {
+        if !self.on_its_own.swap(true, Ordering::SeqCst) {
+            info!("the user asked for wss: the port is taken once it is free");
+        }
+    }
+
+    /// Starts the background watch ([`Wss::watch`] with the [`Watcher`]) on a thread, if it
+    /// may take the port on its own, a busy port keeps wss off, and none runs yet.
+    pub fn watch_if_allowed(self: &Arc<Self>) {
+        if !self.on_its_own() || !matches!(self.off(), Some(WssOff::PortBusy(_))) {
+            return;
+        }
+        let watcher = self
+            .watcher
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let Some(watcher) = watcher else {
+            return;
+        };
+        if self.watching.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let wss = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("wss-port".into())
+            .spawn(move || {
+                wss.watch(watcher.every, &*watcher.owner_of, |state| {
+                    (watcher.on_change)(state);
+                });
+                wss.watching.store(false, Ordering::SeqCst);
+            });
+        if let Err(e) = spawned {
+            self.watching.store(false, Ordering::SeqCst);
+            warn!(error = %e, "cannot watch the port");
+        }
     }
 
     /// Starts wss unless it serves already, tried again for up to `wait` while the port is
@@ -127,9 +214,20 @@ impl Wss {
         }
     }
 
-    /// Looks at a port that keeps wss off: when nobody listens there any more wss takes it;
-    /// otherwise who holds it, kept if it is the original NCALayer (not this process).
+    /// A user action looks at a port that keeps wss off: when nobody listens there any more
+    /// wss takes it; otherwise who holds it, kept if it is the original NCALayer (not this
+    /// process).
     pub fn recheck(&self, owner_of: OwnerOf<'_>) -> PortState {
+        self.examine(owner_of, true)
+    }
+
+    /// As [`Wss::recheck`] without a user action: a free port is taken only if wss may do
+    /// so on its own.
+    pub fn look(&self, owner_of: OwnerOf<'_>) -> PortState {
+        self.examine(owner_of, self.on_its_own())
+    }
+
+    fn examine(&self, owner_of: OwnerOf<'_>, take_free: bool) -> PortState {
         let off = self.off();
         let Some(WssOff::PortBusy(port)) = off else {
             return PortState {
@@ -137,34 +235,54 @@ impl Wss {
                 original: None,
             };
         };
-        let original = match owner_of(port) {
+        let (seen, original) = match owner_of(port) {
             Ok(None) => {
-                let started = self.start_with(&mut self.lock());
-                if let Err(failure) = started {
-                    debug!(reason = %failure.message, "nobody listens, yet wss cannot start");
+                if take_free {
+                    let started = self.start_with(&mut self.lock());
+                    if let Err(failure) = started {
+                        debug!(reason = %failure.message, "nobody listens, yet wss cannot start");
+                    }
                 }
-                None
+                (Seen::Nobody, None)
             }
             Ok(Some(owner)) if owner.looks_original && owner.pid != std::process::id() => {
-                debug!(pid = owner.pid, exe = %owner.exe.display(), port, "the original NCALayer holds the port");
-                Some(owner)
+                (Seen::Original(owner.pid), Some(owner))
             }
             Ok(Some(owner)) => {
-                debug!(pid = owner.pid, exe = %owner.exe.display(), port, "another program holds the port");
-                None
+                self.log_seen(&Seen::Other(owner.pid), || {
+                    info!(pid = owner.pid, exe = %owner.exe.display(), port, "another program holds the port");
+                });
+                (Seen::Other(owner.pid), None)
             }
-            Err(e) => {
-                debug!(error = %e, port, "cannot tell who holds the port");
-                None
-            }
+            Err(e) => (Seen::Unknown(e.to_string()), None),
         };
-        PortState {
+        let state = PortState {
             off: self.off(),
             original,
+        };
+        self.log_seen(&seen, || match (&seen, &state.original) {
+            (Seen::Original(_), Some(owner)) => {
+                info!(pid = owner.pid, exe = %owner.exe.display(), port, "the original NCALayer holds the port");
+            }
+            (Seen::Nobody, _) if state.off.is_some() => {
+                info!(port, "nobody listens on the port; wss waits for the user to start it");
+            }
+            (Seen::Unknown(e), _) => warn!(error = %e, port, "cannot tell who holds the port"),
+            _ => {}
+        });
+        state
+    }
+
+    /// Runs `log` if `seen` differs from what the last look found.
+    fn log_seen(&self, seen: &Seen, log: impl FnOnce()) {
+        let mut last = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.as_ref() != Some(seen) {
+            log();
+            *last = Some(seen.clone());
         }
     }
 
-    /// Looks at the port every `every` ([`Wss::recheck`]) while wss is off for it, and tells
+    /// Looks at the port every `every` ([`Wss::look`]) while wss is off for it, and tells
     /// `on_change` each state that differs from the last one told. Returns once wss serves.
     pub fn watch(
         &self,
@@ -178,7 +296,7 @@ impl Wss {
             if !matches!(self.off(), Some(WssOff::PortBusy(_))) {
                 continue;
             }
-            let state = self.recheck(owner_of);
+            let state = self.look(owner_of);
             if last.as_ref() != Some(&state) {
                 on_change(&state);
                 last = Some(state);
@@ -186,22 +304,24 @@ impl Wss {
         }
     }
 
-    /// «Остановить»: ends the original `owner` with `stop` (which checks it is still that
-    /// process), then starts wss on the freed port, waiting up to `wait`; why wss is still
-    /// off is told in `locale`. If the process is gone already ([`io::ErrorKind::NotFound`])
-    /// wss still takes the port if it is free ([`Stopped::WasGone`]).
+    /// «Остановить»: the user asks for wss; ends the original `owner` with
+    /// `stop` (which checks it is still that process), then starts wss on the freed port,
+    /// waiting up to `wait`; why wss is still off is told in `locale`. If the process is gone
+    /// already ([`io::ErrorKind::NotFound`]) wss still takes the port if it is free
+    /// ([`Stopped::WasGone`]). While the port stays busy the watch takes it once free.
     ///
     /// # Errors
     ///
     /// `stop`'s error: nothing was ended (and, for `NotFound`, the port is not free).
     pub fn stop_original(
-        &self,
+        self: &Arc<Self>,
         owner: &PortOwner,
         stop: impl FnOnce(&PortOwner) -> io::Result<()>,
         wait: Duration,
         locale: Locale,
     ) -> io::Result<Stopped> {
-        match stop(owner) {
+        self.want();
+        let stopped = match stop(owner) {
             Ok(()) => {
                 info!(pid = owner.pid, exe = %owner.exe.display(), "the original NCALayer is stopped");
                 Ok(match self.start_within(wait) {
@@ -217,18 +337,36 @@ impl Wss {
                 }
             }
             Err(e) => Err(e),
-        }
+        };
+        self.watch_if_allowed();
+        stopped
+    }
+
+    /// The TLS wizard saved a certificate: the user asks for wss, and [`Wss::reload`] has it
+    /// taken. With [`Applied::WhenPortFree`] the watch takes the port once free.
+    pub fn apply_saved(self: &Arc<Self>) -> Applied {
+        self.want();
+        let applied = self.reload();
+        self.watch_if_allowed();
+        applied
     }
 
     /// Has the server take the certificate just saved in the files: served from the next
-    /// connection if wss runs ([`renewal::reload`]), otherwise wss is started with it.
-    /// [`Applied::WhenPortFree`] while another program holds the port (wss takes it once it
-    /// is free, [`Wss::watch`]), [`Applied::AfterRestart`] when the port cannot be opened;
-    /// [`Applied::Failed`] when the certificate cannot be served.
+    /// connection if wss runs ([`renewal::reload`]), otherwise wss is started with it if it
+    /// may start on its own. [`Applied::WhenPortFree`] while another program holds the port
+    /// (or wss waits for the user to want it), [`Applied::AfterRestart`] when the port
+    /// cannot be opened; [`Applied::Failed`] when the certificate cannot be served.
     pub fn reload(&self) -> Applied {
         let mut state = self.lock();
         if let Some(live) = &state.live {
             return renewal::reload(&self.files, Some(live.as_ref()));
+        }
+        if !self.on_its_own() {
+            debug!("wss is not started without the user");
+            return match state.off {
+                Some(WssOff::PortBusy(_)) => Applied::WhenPortFree,
+                _ => Applied::AfterRestart,
+            };
         }
         match self.start_with(&mut state) {
             Ok(()) => Applied::Serving,
@@ -314,7 +452,8 @@ mod tests {
         };
         let (port, held) = held_port();
         drop(held);
-        let (wss, mut listeners) = Wss::new(files.clone(), port, Err(WssOff::TlsNotConfigured));
+        let (wss, mut listeners) =
+            Wss::new(files.clone(), port, Err(WssOff::TlsNotConfigured), true);
         assert_eq!(wss.off(), Some(WssOff::TlsNotConfigured));
         assert!(wss.live().is_none());
         assert_eq!(
@@ -348,7 +487,7 @@ mod tests {
         };
         configure(&files);
         let (port, held) = held_port();
-        let (wss, mut listeners) = Wss::new(files, port, Err(WssOff::PortBusy(port)));
+        let (wss, mut listeners) = Wss::new(files, port, Err(WssOff::PortBusy(port)), true);
         assert_eq!(
             wss.start_within(Duration::ZERO),
             Err(WssOff::PortBusy(port))
@@ -382,7 +521,7 @@ mod tests {
         let (port, held) = held_port();
         drop(held);
         let opened = open_wss(&files, port).map_err(|f| f.off);
-        let (wss, mut listeners) = Wss::new(files, port, opened);
+        let (wss, mut listeners) = Wss::new(files, port, opened, true);
         assert_eq!(wss.off(), None);
         assert!(wss.live().is_some());
         assert!(listeners.try_recv().is_ok());
@@ -399,8 +538,20 @@ mod tests {
         }
     }
 
-    /// TLS set up, the port held by `held` and wss off for it.
+    /// TLS set up, the port held by `held` and wss off for it, in a daemon the user started.
     fn busy() -> (
+        tempfile::TempDir,
+        Arc<Wss>,
+        mpsc::UnboundedReceiver<Listening>,
+        TcpListener,
+    ) {
+        busy_in(true)
+    }
+
+    /// As [`busy`]; `on_its_own` false for a daemon the extension's relay started.
+    fn busy_in(
+        on_its_own: bool,
+    ) -> (
         tempfile::TempDir,
         Arc<Wss>,
         mpsc::UnboundedReceiver<Listening>,
@@ -412,16 +563,105 @@ mod tests {
         };
         configure(&files);
         let (port, held) = held_port();
-        let (wss, listeners) = Wss::new(files, port, Err(WssOff::PortBusy(port)));
+        let (wss, listeners) = Wss::new(files, port, Err(WssOff::PortBusy(port)), on_its_own);
         (dir, wss, listeners, held)
     }
 
     /// Who holds the port as a fake lookup sees it: the original while `held` is set.
     fn lookup(
         held: &Arc<Mutex<Option<TcpListener>>>,
-    ) -> impl Fn(u16) -> io::Result<Option<PortOwner>> + use<> {
+    ) -> impl Fn(u16) -> io::Result<Option<PortOwner>> + Send + Sync + use<> {
         let held = Arc::clone(held);
         move |_| Ok(held.lock().unwrap().as_ref().map(|_| original(4242)))
+    }
+
+    /// A fast watcher over `held`, as `run` sets one up.
+    fn watcher(held: &Arc<Mutex<Option<TcpListener>>>) -> Watcher {
+        Watcher {
+            every: Duration::from_millis(30),
+            owner_of: Box::new(lookup(held)),
+            on_change: Box::new(|_| {}),
+        }
+    }
+
+    /// Waits up to 10 s for wss to serve.
+    fn serves_soon(wss: &Wss) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if wss.off().is_none() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// A relay-started daemon never binds a freed port by itself: not at the start of the
+    /// watch, not on a look (after a renewal), not on a reload.
+    #[test]
+    fn a_relay_daemon_does_not_take_a_freed_port_on_its_own() {
+        let (_dir, wss, mut listeners, held) = busy_in(false);
+        let port = wss.port();
+        let held = Arc::new(Mutex::new(Some(held)));
+        wss.set_watcher(watcher(&held));
+        wss.watch_if_allowed();
+        assert_eq!(wss.look(&lookup(&held)).original, Some(original(4242)));
+        held.lock().unwrap().take();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(wss.off(), Some(WssOff::PortBusy(port)));
+        assert_eq!(
+            wss.look(&lookup(&held)),
+            PortState {
+                off: Some(WssOff::PortBusy(port)),
+                original: None,
+            }
+        );
+        assert_eq!(wss.reload(), Applied::WhenPortFree);
+        assert!(listeners.try_recv().is_err());
+        // The user's own look (the tray item) takes it.
+        assert_eq!(wss.recheck(&lookup(&held)).off, None);
+        assert!(listeners.try_recv().is_ok());
+    }
+
+    /// After the user stopped the original, a port freed later is taken by the watch.
+    #[test]
+    fn a_relay_daemon_takes_the_port_once_free_after_a_stop() {
+        let (_dir, wss, mut listeners, held) = busy_in(false);
+        let held = Arc::new(Mutex::new(Some(held)));
+        wss.set_watcher(watcher(&held));
+        wss.watch_if_allowed();
+        // Stopped, but the port is held a while longer.
+        let stopped = wss.stop_original(&original(4242), |_| Ok(()), Duration::ZERO, Locale::Ru);
+        assert!(matches!(stopped, Ok(Stopped::WssOff(_))), "{stopped:?}");
+        assert!(wss.on_its_own());
+        held.lock().unwrap().take();
+        assert!(serves_soon(&wss), "the watch did not take the port");
+        assert!(listeners.try_recv().is_ok());
+    }
+
+    /// After the user saved a certificate while the port was busy, the watch takes it once
+    /// free, as the wizard promised (`WhenPortFree`).
+    #[test]
+    fn a_relay_daemon_takes_the_port_once_free_after_a_save() {
+        let (_dir, wss, mut listeners, held) = busy_in(false);
+        let held = Arc::new(Mutex::new(Some(held)));
+        wss.set_watcher(watcher(&held));
+        assert_eq!(wss.apply_saved(), Applied::WhenPortFree);
+        held.lock().unwrap().take();
+        assert!(serves_soon(&wss), "the watch did not take the port");
+        assert!(listeners.try_recv().is_ok());
+    }
+
+    /// A daemon the user started watches from the start.
+    #[test]
+    fn a_users_daemon_takes_a_freed_port_by_itself() {
+        let (_dir, wss, mut listeners, held) = busy();
+        let held = Arc::new(Mutex::new(Some(held)));
+        wss.set_watcher(watcher(&held));
+        wss.watch_if_allowed();
+        held.lock().unwrap().take();
+        assert!(serves_soon(&wss), "the watch did not take the port");
+        assert!(listeners.try_recv().is_ok());
     }
 
     #[test]

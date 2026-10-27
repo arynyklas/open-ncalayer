@@ -173,8 +173,9 @@ pub const ORIGINAL_JOURNAL: &str = "original-autostart.json";
 
 /// The TLS wizard's services for this user: the TLS files of `paths`, the trust stores of
 /// this user ([`SystemTrust`]), mkcert's CA if there is one, the self-test `reports`. A
-/// saved certificate goes to `wss` at once ([`Wss::reload`]: served, or wss started with
-/// it); then `on_saved` runs with the files (on the wizard's worker thread).
+/// saved certificate goes to `wss` at once ([`Wss::apply_saved`]: served, or wss started
+/// with it, or once the port is free); then `on_saved` runs with the files (on the wizard's
+/// worker thread).
 pub fn tls_wizard_services(
     paths: &Paths,
     reports: Arc<SelftestReports>,
@@ -191,7 +192,7 @@ pub fn tls_wizard_services(
         trust: Box::new(SystemTrust),
         mkcert: Box::new(oncl_tls::mkcert_caroot),
         apply: Box::new(move || {
-            let applied = wss.reload();
+            let applied = wss.apply_saved();
             on_saved(&saved);
             applied
         }),
