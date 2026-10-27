@@ -7,11 +7,11 @@
 //! Whether it may take a freed port on its own (D13): a daemon the user or our autostart
 //! started may; one the extension's relay started (`--allow-no-wss`) may only after the user
 //! asked for wss — stopped the original from the tray or saved a certificate in the wizard
-//! ([`Wss::stop_original`], [`Wss::apply_saved`]). Until then it never binds the port by itself, so it cannot win the
-//! port from an original that is just restarting.
+//! ([`Wss::stop_original`], [`Wss::apply_saved`]). Until then it never binds the port by
+//! itself, so it cannot win the port from an original that is just restarting.
 //!
-//! A busy port is looked at again when the user picks «Остановить оригинал…» or saves a
-//! certificate ([`Wss::recheck`], which takes a free port), after a stop and a renewal
+//! A busy port is looked at again when the user picks «Остановить оригинал…» and after a
+//! stop ([`Wss::recheck`], which takes a free port), after a saved certificate and a renewal
 //! ([`Wss::look`]), and, while it may, every [`WATCH_EVERY`] ([`Wss::watch_if_allowed`]).
 
 use std::io;
@@ -265,7 +265,7 @@ impl Wss {
                 info!(pid = owner.pid, exe = %owner.exe.display(), port, "the original NCALayer holds the port");
             }
             (Seen::Nobody, _) if state.off.is_some() => {
-                info!(port, "nobody listens on the port; wss waits for the user to start it");
+                info!(port, "nobody listens on the port; wss stays off for now");
             }
             (Seen::Unknown(e), _) => warn!(error = %e, port, "cannot tell who holds the port"),
             _ => {}

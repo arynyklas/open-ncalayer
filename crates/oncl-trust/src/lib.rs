@@ -119,8 +119,9 @@ pub struct NssDbState {
     /// Whether the database has the CA; `None` if it could not be read.
     pub ca_present: Option<bool>,
     /// Whether the database trusts the CA for TLS servers (the SSL `C` flag of `certutil`);
-    /// `None` without `certutil`, or when another certificate with the same subject makes
-    /// the flags ambiguous. The live browser check stays the final word.
+    /// `None` without `certutil`, when `certutil` cannot read the database, or when another
+    /// certificate with the same subject makes the flags ambiguous. The live browser check
+    /// stays the final word.
     pub ca_ssl_trusted: Option<bool>,
 }
 

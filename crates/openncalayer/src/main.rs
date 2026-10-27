@@ -376,8 +376,9 @@ fn start_renewal(files: TlsFiles, wss: Arc<Wss>) {
             let checked = SystemTime::now();
             let check = renewal::check(&files, OffsetDateTime::now_utc(), || wss.reload());
             if matches!(check, RenewalCheck::Renewed { .. }) {
-                // It may have started wss, too.
+                // It may have started wss, too, or met a busy port the watch should wait out.
                 look_for_tray(&wss);
+                wss.watch_if_allowed();
             }
             match &check {
                 RenewalCheck::Nothing => {}
@@ -408,7 +409,8 @@ fn start_renewal(files: TlsFiles, wss: Arc<Wss>) {
 
 /// What the settings, TLS wizard and About windows show and change. A save applies the
 /// proxy to `http` and the language to the tray, if it is still there. A certificate the
-/// wizard saves goes to `wss` at once: served, or wss started with it.
+/// wizard saves goes to `wss` at once: served, or wss started with it, or kept for when the
+/// port is free or for the next start ([`Wss::apply_saved`]).
 fn desktop_windows(
     paths: &Paths,
     locale: Locale,
