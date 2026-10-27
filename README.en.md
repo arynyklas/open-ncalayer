@@ -32,6 +32,7 @@ Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/
 Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
 - [`docs/design/roadmap.md`](docs/design/roadmap.md) — decisions and roadmap;
+- [`docs/design/update-index.md`](docs/design/update-index.md) — the update index: format, signature, choice of a version;
 - [`docs/original/architecture.md`](docs/original/architecture.md) — architecture of the original NCALayer.
 
 ### Modules

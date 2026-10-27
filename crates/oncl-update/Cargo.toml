@@ -1,0 +1,28 @@
+[package]
+name = "oncl-update"
+description = "OpenNCALayer's update index: its model, minisign verification, the choice of a version and the updater's state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+getrandom.workspace = true
+minisign-verify.workspace = true
+# `fsutil` (the state file, written atomically) and the `HttpTransport` the index is fetched
+# through.
+oncl-pki.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time = { workspace = true, features = ["serde", "formatting", "parsing"] }
+
+[dev-dependencies]
+base64.workspace = true
+minisign.workspace = true
+tempfile.workspace = true
+time = { workspace = true, features = ["macros"] }

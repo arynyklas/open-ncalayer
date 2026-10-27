@@ -32,6 +32,7 @@ OpenNCALayer — независимый проект и не связан с Н�
 Документы:
 - [`docs/user/tls.md`](docs/user/tls.md) — сертификат OpenNCALayer: выпуск, установка, удаление, перевыпуск;
 - [`docs/design/roadmap.md`](docs/design/roadmap.md) — решения и дорожная карта;
+- [`docs/design/update-index.md`](docs/design/update-index.md) — индекс обновлений: формат, подпись, выбор версии;
 - [`docs/original/architecture.md`](docs/original/architecture.md) — архитектура оригинального NCALayer.
 
 ### Модули
