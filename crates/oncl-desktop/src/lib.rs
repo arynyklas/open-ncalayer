@@ -5,6 +5,7 @@
 
 pub mod autostart;
 pub mod extension;
+mod lnk;
 pub mod original;
 pub mod port_owner;
 pub mod settings;

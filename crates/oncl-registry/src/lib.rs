@@ -15,29 +15,41 @@ pub enum Hive {
     LocalMachine,
 }
 
+/// Which of the two registry views of 64-bit Windows a key of `HKLM\Software` is read in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    /// This process's own: the 64-bit one for a 64-bit process.
+    Native,
+    /// The 32-bit programs' (`HKLM\Software\WOW6432Node`), `KEY_WOW64_32KEY`.
+    Wow32,
+}
+
 #[cfg(windows)]
 pub use windows::{
-    delete_tree, delete_value, get_binary, get_dword, get_string, set_binary, set_dword, set_string,
+    delete_tree, delete_value, get_binary, get_dword, get_string, set_binary, set_dword,
+    set_string, value_exists,
 };
 
 #[cfg(not(windows))]
 pub use elsewhere::{
-    delete_tree, delete_value, get_binary, get_dword, get_string, set_binary, set_dword, set_string,
+    delete_tree, delete_value, get_binary, get_dword, get_string, set_binary, set_dword,
+    set_string, value_exists,
 };
 
 #[cfg(windows)]
 mod windows {
-    use super::Hive;
+    use super::{Hive, View};
     use std::io;
     use std::iter::once;
     use std::ptr;
 
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_BINARY, REG_DWORD,
-        REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE, RRF_RT_DWORD, RRF_RT_REG_BINARY,
-        RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW,
-        RegGetValueW, RegSetValueExW,
+        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE,
+        KEY_WOW64_32KEY, REG_BINARY, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
+        RRF_RT_DWORD, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW,
+        RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegOpenKeyExW, RegQueryValueExW,
+        RegSetValueExW,
     };
 
     /// `s` as a NUL-terminated UTF-16 string.
@@ -141,6 +153,41 @@ mod windows {
         get_bytes(hive, key, name, RRF_RT_REG_BINARY)
     }
 
+    /// Whether value `name` of `<hive>\<key>` in `view` exists, of any type.
+    pub fn value_exists(hive: Hive, key: &str, name: Option<&str>, view: View) -> io::Result<bool> {
+        let key = wide(key);
+        let name = name.map(wide);
+        let access = KEY_QUERY_VALUE
+            | match view {
+                View::Native => 0,
+                View::Wow32 => KEY_WOW64_32KEY,
+            };
+        let mut hkey: HKEY = ptr::null_mut();
+        // SAFETY: `key` is NUL-terminated and outlives the call; `hkey` receives the key.
+        match unsafe { RegOpenKeyExW(root(hive), key.as_ptr(), 0, access, &mut hkey) } {
+            ERROR_FILE_NOT_FOUND => return Ok(false),
+            status => check(status)?,
+        }
+        // SAFETY: `hkey` is open with KEY_QUERY_VALUE; the name is null (the default value)
+        // or NUL-terminated; type, data and size are not asked for.
+        let status = unsafe {
+            RegQueryValueExW(
+                hkey,
+                name.as_ref().map_or(ptr::null(), |n| n.as_ptr()),
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        // SAFETY: `hkey` was opened above and is closed once.
+        unsafe { RegCloseKey(hkey) };
+        match status {
+            ERROR_FILE_NOT_FOUND => Ok(false),
+            status => check(status).map(|()| true),
+        }
+    }
+
     /// Sets value `name` of `HKCU\<key>` to `data` of type `kind`, creating the key and its
     /// missing parents.
     fn set_bytes(
@@ -226,7 +273,7 @@ mod windows {
 
 #[cfg(not(windows))]
 mod elsewhere {
-    use super::Hive;
+    use super::{Hive, View};
     use std::io;
 
     fn unsupported() -> io::Error {
@@ -248,6 +295,16 @@ mod elsewhere {
 
     /// Fails: no registry.
     pub fn get_binary(_hive: Hive, _key: &str, _name: Option<&str>) -> io::Result<Option<Vec<u8>>> {
+        Err(unsupported())
+    }
+
+    /// Fails: no registry.
+    pub fn value_exists(
+        _hive: Hive,
+        _key: &str,
+        _name: Option<&str>,
+        _view: View,
+    ) -> io::Result<bool> {
         Err(unsupported())
     }
 
@@ -359,6 +416,14 @@ mod tests {
         assert!(get_dword(hkcu, &key, Some("v")).is_err());
         assert!(get_string(hkcu, &key, Some("d")).is_err());
 
+        // Any type; `HKCU\Software` is the same in both views.
+        for view in [View::Native, View::Wow32] {
+            for name in [Some("v"), Some("d"), Some("b0"), None] {
+                assert!(value_exists(hkcu, &key, name, view).unwrap(), "{name:?}");
+            }
+            assert!(!value_exists(hkcu, &key, Some("missing"), view).unwrap());
+            assert!(!value_exists(hkcu, &format!(r"{key}\No"), Some("v"), view).unwrap());
+        }
         assert!(delete_value(&key, "v").unwrap());
         assert_eq!(get_string(hkcu, &key, Some("v")).unwrap(), None);
         assert!(get_string(hkcu, &key, None).unwrap().is_some());
@@ -390,6 +455,7 @@ mod tests {
         assert!(get_string(hkcu, "k", None).is_err_and(unsupported));
         assert!(get_dword(hkcu, "k", None).is_err_and(unsupported));
         assert!(get_binary(hkcu, "k", None).is_err_and(unsupported));
+        assert!(value_exists(hkcu, "k", None, View::Wow32).is_err_and(unsupported));
         assert!(set_string("k", None, "v").is_err_and(unsupported));
         assert!(set_dword("k", None, 1).is_err_and(unsupported));
         assert!(set_binary("k", None, b"").is_err_and(unsupported));

@@ -73,14 +73,18 @@ pub fn port_owner(port: u16) -> io::Result<Option<PortOwner>> {
 
 /// Ends the process `owner` (found by [`port_owner`]) and waits until it is gone. Right
 /// before, its PID is checked to still be the program `owner.exe` started at
-/// `owner.started`. On Unix it is asked to end (`SIGTERM`) and forced (`SIGKILL`) after
-/// a few seconds; on Windows it is ended at once (`TerminateProcess`).
+/// `owner.started`, and that program to look like the original NCALayer: nothing else is
+/// ever ended, whatever `owner.looks_original` says. On Unix it is asked to end (`SIGTERM`)
+/// and forced (`SIGKILL`) after a few seconds, checked again right before each signal; on
+/// Windows it is ended at once (`TerminateProcess`). Blocks for up to 5 s after each signal:
+/// call it off the event loop.
 ///
 /// # Errors
 ///
-/// [`io::ErrorKind::InvalidInput`] for this process; [`io::ErrorKind::NotFound`] if the
-/// process is gone or its PID is another process now (nothing is ended);
-/// [`io::ErrorKind::TimedOut`] if it does not end; any error ending it.
+/// [`io::ErrorKind::InvalidInput`] for this process or one that does not look like the
+/// original (nothing is ended); [`io::ErrorKind::NotFound`] if the process is gone or its
+/// PID is another process now (nothing is ended); [`io::ErrorKind::TimedOut`] if it does
+/// not end; any error ending it.
 pub fn stop(owner: &PortOwner) -> io::Result<()> {
     if owner.pid == std::process::id() {
         return Err(io::Error::new(
@@ -91,18 +95,28 @@ pub fn stop(owner: &PortOwner) -> io::Result<()> {
     sys::stop(owner)
 }
 
-/// `Ok` if `now` is the process `owner` describes.
-fn same_process(owner: &PortOwner, now: &Process) -> io::Result<()> {
-    if now.exe == owner.exe && now.started == owner.started {
-        return Ok(());
+/// `Ok` if `now` is the process `owner` describes, and it looks like the original.
+fn check_target(owner: &PortOwner, now: &Process) -> io::Result<()> {
+    if now.exe != owner.exe || now.started != owner.started {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            Changed {
+                pid: owner.pid,
+                exe: now.exe.clone(),
+            },
+        ));
     }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        Changed {
-            pid: owner.pid,
-            exe: now.exe.clone(),
-        },
-    ))
+    if !looks_original(&now.exe, &now.command_line) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to stop process {} ({}): it does not look like the original NCALayer",
+                owner.pid,
+                now.exe.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The process found on the port is gone and its PID is another program's.
@@ -179,7 +193,7 @@ mod sys {
         WaitForSingleObject,
     };
 
-    use super::{PortOwner, Process, STOP_WAIT, same_process};
+    use super::{PortOwner, Process, STOP_WAIT, check_target};
 
     /// An open process handle, closed when dropped.
     struct Handle(HANDLE);
@@ -372,7 +386,7 @@ mod sys {
                 format!("process {} has ended", owner.pid),
             ));
         }
-        same_process(owner, &process(&handle)?)?;
+        check_target(owner, &process(&handle)?)?;
         // SAFETY: the handle is open with PROCESS_TERMINATE.
         if unsafe { TerminateProcess(handle.0, 1) } == 0 {
             return Err(io::Error::last_os_error());
@@ -395,6 +409,8 @@ mod unix {
     use std::io;
     use std::time::{Duration, Instant};
 
+    use super::{PortOwner, Process, STOP_WAIT, check_target};
+
     /// Sends `signal` to `pid` (`kill`).
     pub fn kill(pid: u32, signal: libc::c_int) -> io::Result<()> {
         let pid = libc::pid_t::try_from(pid)
@@ -407,17 +423,22 @@ mod unix {
         }
     }
 
-    /// Whether `pid` is gone within `timeout`, polled with `kill(pid, 0)` (a zombie child of
-    /// this process counts as alive until it is waited for).
-    pub fn gone_within(pid: u32, timeout: Duration) -> io::Result<bool> {
+    /// Whether `pid` has ended within `timeout`, polled with `alive` (which must count a
+    /// zombie as ended: `kill(pid, 0)` alone does not).
+    fn gone_within(
+        pid: u32,
+        alive: fn(u32) -> io::Result<bool>,
+        timeout: Duration,
+    ) -> io::Result<bool> {
         let deadline = Instant::now() + timeout;
         loop {
-            match kill(pid, 0) {
-                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => return Ok(true),
-                Err(e) => return Err(e),
-                Ok(()) if Instant::now() >= deadline => return Ok(false),
-                Ok(()) => std::thread::sleep(Duration::from_millis(50)),
+            if !alive(pid)? {
+                return Ok(true);
             }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -429,6 +450,39 @@ mod unix {
             e
         }
     }
+
+    /// Ends `owner` through its bare PID: `SIGTERM`, then `SIGKILL` if it is still there
+    /// after [`STOP_WAIT`], each sent only after `inspect` shows the same process right
+    /// before it. Once `SIGTERM` was sent, the process gone (or its PID another's) is
+    /// success. A PID reused between the check and the signal is not excluded, only made
+    /// unlikely: PIDs are handed out in sequence.
+    pub fn stop_by_pid(
+        owner: &PortOwner,
+        inspect: fn(u32) -> io::Result<Process>,
+        alive: fn(u32) -> io::Result<bool>,
+    ) -> io::Result<()> {
+        let pid = owner.pid;
+        for (n, sig) in [libc::SIGTERM, libc::SIGKILL].into_iter().enumerate() {
+            let asked = n > 0;
+            match inspect(pid).and_then(|now| check_target(owner, &now)) {
+                Ok(()) => {}
+                Err(e) if asked && e.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(e),
+            }
+            match kill(pid, sig) {
+                Ok(()) => {}
+                Err(e) if asked && e.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
+                Err(e) => return Err(gone(pid, e)),
+            }
+            if gone_within(pid, alive, STOP_WAIT)? {
+                return Ok(());
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("process {pid} did not end"),
+        ))
+    }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -437,10 +491,10 @@ mod sys {
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::path::PathBuf;
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, Instant, SystemTime};
 
-    use super::unix::{gone, gone_within, kill};
-    use super::{PortOwner, Process, STOP_WAIT, same_process};
+    use super::unix::{gone, stop_by_pid};
+    use super::{PortOwner, Process, STOP_WAIT, check_target};
 
     /// The inodes of the sockets listening on `port` in the `/proc/net/tcp` format `table`.
     fn listening_inodes(table: &str, port: u16) -> impl Iterator<Item = u64> + '_ {
@@ -578,39 +632,68 @@ mod sys {
         }
     }
 
-    /// Whether the process of `fd` ends within `timeout`.
+    /// Whether the process of `fd` ends within `timeout` (the pidfd turns readable when it
+    /// ends, before its parent waits for it).
     fn ended_within(fd: &OwnedFd, timeout: Duration) -> io::Result<bool> {
-        let mut poll = libc::pollfd {
-            fd: fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ms = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
-        // SAFETY: one valid pollfd.
-        match unsafe { libc::poll(&mut poll, 1, ms) } {
-            -1 => Err(io::Error::last_os_error()),
-            n => Ok(n > 0),
+        let deadline = Instant::now() + timeout;
+        loop {
+            let mut poll = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let left = deadline.saturating_duration_since(Instant::now());
+            let ms = libc::c_int::try_from(left.as_millis()).unwrap_or(libc::c_int::MAX);
+            // SAFETY: one valid pollfd.
+            match unsafe { libc::poll(&mut poll, 1, ms) } {
+                -1 => {
+                    let e = io::Error::last_os_error();
+                    // A signal of this process: poll is not restarted by itself.
+                    if e.kind() != io::ErrorKind::Interrupted {
+                        return Err(e);
+                    }
+                }
+                n => return Ok(n > 0),
+            }
         }
     }
 
+    /// Whether `pid` exists and has not ended: a zombie, which ended but waits for its
+    /// parent, has ended (`kill(pid, 0)` still succeeds for it).
+    pub fn alive(pid: u32) -> io::Result<bool> {
+        match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => Ok(!matches!(state(&stat), Some('Z' | 'X' | 'x'))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The state letter of `/proc/<pid>/stat`: the field after the name in parentheses.
+    fn state(stat: &str) -> Option<char> {
+        stat.rsplit_once(')')?.1.trim_start().chars().next()
+    }
+
     pub fn stop(owner: &PortOwner) -> io::Result<()> {
+        match pidfd(owner.pid)? {
+            Some(fd) => stop_by_pidfd(owner, &fd),
+            None => stop_by_pid(owner, inspect, alive),
+        }
+    }
+
+    /// The pidfd `fd` of `owner.pid` keeps the process's identity: checked once after it
+    /// was opened, every signal goes to that process.
+    fn stop_by_pidfd(owner: &PortOwner, fd: &OwnedFd) -> io::Result<()> {
         let pid = owner.pid;
-        // The pidfd keeps the process's identity: checked after it is opened, signalled
-        // through it.
-        let fd = pidfd(pid)?;
-        same_process(owner, &inspect(pid)?)?;
-        for sig in [libc::SIGTERM, libc::SIGKILL] {
-            let ended = match &fd {
-                Some(fd) => {
-                    signal(fd, sig).map_err(|e| gone(pid, e))?;
-                    ended_within(fd, STOP_WAIT)?
-                }
-                None => {
-                    kill(pid, sig).map_err(|e| gone(pid, e))?;
-                    gone_within(pid, STOP_WAIT)?
-                }
-            };
-            if ended {
+        check_target(owner, &inspect(pid)?)?;
+        for (n, sig) in [libc::SIGTERM, libc::SIGKILL].into_iter().enumerate() {
+            match signal(fd, sig) {
+                Ok(()) => {}
+                // Ended after SIGTERM.
+                Err(e) if n > 0 && e.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
+                Err(e) => return Err(gone(pid, e)),
+            }
+            if ended_within(fd, STOP_WAIT)? {
                 return Ok(());
             }
         }
@@ -652,8 +735,8 @@ mod sys {
     use std::process::{Command, Stdio};
     use std::time::{Duration, SystemTime};
 
-    use super::unix::{gone, gone_within, kill};
-    use super::{PortOwner, Process, STOP_WAIT, same_process};
+    use super::unix::{gone, kill, stop_by_pid};
+    use super::{PortOwner, Process};
 
     pub fn listener(port: u16) -> io::Result<Option<u32>> {
         let output = Command::new("lsof")
@@ -711,19 +794,42 @@ mod sys {
         })
     }
 
-    pub fn stop(owner: &PortOwner) -> io::Result<()> {
-        let pid = owner.pid;
-        same_process(owner, &inspect(pid)?)?;
-        for sig in [libc::SIGTERM, libc::SIGKILL] {
-            kill(pid, sig).map_err(|e| gone(pid, e))?;
-            if gone_within(pid, STOP_WAIT)? {
-                return Ok(());
-            }
+    /// Whether `pid` exists and is not a zombie: XNU's `kill(pid, 0)` succeeds for a zombie
+    /// (POSIX), which ended already but waits for its parent.
+    pub fn alive(pid: u32) -> io::Result<bool> {
+        let Ok(c_pid) = libc::c_int::try_from(pid) else {
+            return Ok(false);
+        };
+        // SAFETY: an all-zero proc_bsdinfo is valid; the call fills it.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: `info` holds `size` bytes.
+        let got = unsafe {
+            libc::proc_pidinfo(
+                c_pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&raw mut info).cast(),
+                size,
+            )
+        };
+        if got == size {
+            return Ok(info.pbi_status != libc::SZOMB);
         }
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("process {pid} did not end"),
-        ))
+        // No information: gone or a zombie (`ESRCH`), or not ours to read (`kill` tells).
+        if io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return Ok(false);
+        }
+        match kill(pid, 0) {
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => Ok(false),
+            Err(e) if e.raw_os_error() == Some(libc::EPERM) => Ok(true),
+            Err(e) => Err(e),
+            Ok(()) => Ok(true),
+        }
+    }
+
+    pub fn stop(owner: &PortOwner) -> io::Result<()> {
+        stop_by_pid(owner, inspect, alive)
     }
 }
 
@@ -753,11 +859,36 @@ mod tests {
     struct Listener {
         child: Child,
         port: u16,
+        /// The copy of the test program it runs, if any; removed after the child ends.
+        _copy: Option<tempfile::TempDir>,
     }
 
     impl Listener {
+        /// The test program itself.
         fn spawn() -> Listener {
-            let mut child = Command::new(std::env::current_exe().unwrap())
+            Listener::run(std::env::current_exe().unwrap(), None)
+        }
+
+        /// A copy of the test program named like the original NCALayer's program on this
+        /// system, in a directory under `target/`.
+        fn spawn_as_original() -> Listener {
+            let exe = std::env::current_exe().unwrap();
+            let dir = tempfile::Builder::new()
+                .prefix("oncl-port-owner-")
+                .tempdir_in(exe.parent().unwrap())
+                .unwrap();
+            let name = if cfg!(windows) {
+                "NCALayer.exe"
+            } else {
+                "ncalayer.sh"
+            };
+            let copy = dir.path().join(name);
+            std::fs::copy(&exe, &copy).unwrap();
+            Listener::run(copy, Some(dir))
+        }
+
+        fn run(program: PathBuf, copy: Option<tempfile::TempDir>) -> Listener {
+            let mut child = Command::new(program)
                 .args([
                     "--exact",
                     "port_owner::tests::listener_process",
@@ -780,11 +911,23 @@ mod tests {
                         .and_then(|(_, p)| p.trim().parse().ok())
                 })
                 .expect("the listener tells its port");
-            Listener { child, port }
+            Listener {
+                child,
+                port,
+                _copy: copy,
+            }
         }
 
+        /// Whether the child still runs (reaps it if it ended).
         fn running(&mut self) -> bool {
             self.child.try_wait().unwrap().is_none()
+        }
+
+        /// Its owner on the port, checked to be the child.
+        fn owner(&self) -> PortOwner {
+            let owner = port_owner(self.port).unwrap().expect("the child listens");
+            assert_eq!(owner.pid, self.child.id());
+            owner
         }
     }
 
@@ -799,18 +942,19 @@ mod tests {
         std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap()
     }
 
+    /// The child is not waited for until `stop` returns: it stays a zombie meanwhile on
+    /// Unix, which `stop` must count as ended.
     #[test]
     fn owner_of_a_listening_child_and_stopping_only_it() {
-        let mut listener = Listener::spawn();
-        let owner = port_owner(listener.port)
-            .unwrap()
-            .expect("the child listens");
-        assert_eq!(owner.pid, listener.child.id());
-        assert!(
-            same_file(&owner.exe, &std::env::current_exe().unwrap()),
+        let mut listener = Listener::spawn_as_original();
+        let owner = listener.owner();
+        let copy = listener._copy.as_ref().unwrap().path();
+        assert_eq!(
+            std::fs::canonicalize(owner.exe.parent().unwrap()).unwrap(),
+            std::fs::canonicalize(copy).unwrap(),
             "{owner:?}"
         );
-        assert!(!owner.looks_original);
+        assert!(owner.looks_original, "{owner:?}");
         let age = SystemTime::now().duration_since(owner.started).unwrap();
         assert!(age < Duration::from_secs(120), "{age:?}");
 
@@ -820,7 +964,7 @@ mod tests {
             ..owner.clone()
         };
         let other = PortOwner {
-            exe: owner.exe.with_file_name("NCALayer.exe"),
+            exe: owner.exe.with_file_name("other.exe"),
             ..owner.clone()
         };
         for changed in [later, other] {
@@ -828,12 +972,78 @@ mod tests {
             assert!(listener.running(), "a changed process is not ended");
         }
 
+        let asked = std::time::Instant::now();
         stop(&owner).unwrap();
+        // Ended by SIGTERM, not after waiting for the SIGKILL.
+        assert!(asked.elapsed() < STOP_WAIT, "{:?}", asked.elapsed());
         let status = listener.child.wait().unwrap();
         assert!(!status.success());
         assert_eq!(port_owner(listener.port).unwrap(), None);
         // Gone now: nothing to end.
         assert_eq!(stop(&owner).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn what_does_not_look_original_is_never_stopped() {
+        let mut listener = Listener::spawn();
+        let owner = listener.owner();
+        assert!(
+            same_file(&owner.exe, &std::env::current_exe().unwrap()),
+            "{owner:?}"
+        );
+        assert!(!owner.looks_original);
+        // Even when the caller says it does.
+        let claimed = PortOwner {
+            looks_original: true,
+            ..owner
+        };
+        assert_eq!(
+            stop(&claimed).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(listener.running());
+    }
+
+    /// Linux without a pidfd (before 5.3): the identity is checked before each signal.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn stopping_by_bare_pid() {
+        let mut listener = Listener::spawn_as_original();
+        let owner = listener.owner();
+        let later = PortOwner {
+            started: owner.started + Duration::from_secs(1),
+            ..owner.clone()
+        };
+        let by_pid = |o: &PortOwner| unix::stop_by_pid(o, sys::inspect, sys::alive);
+        assert_eq!(by_pid(&later).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(listener.running());
+        let asked = std::time::Instant::now();
+        by_pid(&owner).unwrap();
+        assert!(asked.elapsed() < STOP_WAIT, "{:?}", asked.elapsed());
+        assert!(!listener.child.wait().unwrap().success());
+    }
+
+    /// A child that ended but is not waited for yet: `kill(pid, 0)` succeeds, yet it has
+    /// ended.
+    #[cfg(unix)]
+    #[test]
+    fn zombie_has_ended() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while sys::alive(pid).unwrap() {
+            assert!(std::time::Instant::now() < deadline, "the child never ends");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            unix::kill(pid, 0).is_ok(),
+            "a zombie until it is waited for"
+        );
+        assert!(child.wait().unwrap().success());
+        assert!(!sys::alive(pid).unwrap());
     }
 
     #[test]

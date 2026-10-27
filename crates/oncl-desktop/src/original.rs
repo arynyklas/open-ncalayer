@@ -5,8 +5,8 @@
 //! Its autostart entries ([`original_autostart`]):
 //! - Windows: the shortcut `NCALayer.lnk` in the user's Startup folder, and any other
 //!   shortcut there to `NCALayer.exe` (a localized name); the value `NCALayer` of
-//!   `HKLM\Software\Microsoft\Windows\CurrentVersion\Run` (the MSI), for every user and only
-//!   read here;
+//!   `HKLM\Software\Microsoft\Windows\CurrentVersion\Run` (the MSI) in the 64-bit and the
+//!   32-bit registry view, for every user and only read here;
 //! - Linux: `ncalayer.desktop` in the XDG autostart directory;
 //! - macOS: none, the original has no autostart.
 //!
@@ -39,14 +39,33 @@ pub enum EntryKind {
     DesktopEntry,
 }
 
+/// Whether an autostart entry starts the original, and who turned it off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryState {
+    /// It starts the original at login.
+    Enabled,
+    /// Turned off outside OpenNCALayer (the desktop's own settings, Task Manager): neither
+    /// disabling nor restoring changes it.
+    DisabledByUser,
+    /// Moved aside or hidden by [`disable_original`], as its journal records:
+    /// [`restore_original`] puts it back.
+    DisabledByUs,
+}
+
 /// One autostart entry of the original.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutostartEntry {
     pub kind: EntryKind,
     /// The file, or the registry value as `HKLM\…\Run\NCALayer`.
     pub path: PathBuf,
-    /// Whether it starts the original at login (not moved aside or hidden).
-    pub enabled: bool,
+    pub state: EntryState,
+}
+
+impl AutostartEntry {
+    /// Whether it starts the original at login.
+    pub fn enabled(&self) -> bool {
+        self.state == EntryState::Enabled
+    }
 }
 
 /// The original NCALayer as found on this system.
@@ -54,7 +73,7 @@ pub struct AutostartEntry {
 pub struct OriginalStatus {
     /// Whether the original is installed.
     pub found: bool,
-    /// Its autostart entries, enabled or disabled by us.
+    /// Its autostart entries: enabled, or disabled by the user or by us.
     pub autostart: Vec<AutostartEntry>,
     /// The program holding our port, if it is not us (for the user).
     pub port_owner: Option<String>,
@@ -322,9 +341,10 @@ pub struct OriginalAutostart {
     pub entries: Vec<AutostartEntry>,
 }
 
-/// The original's autostart entries at `locations`, with those [`disable_original`] moved
-/// aside according to `journal` as disabled. What cannot be read is left out with a
-/// warning.
+/// The original's autostart entries at `locations`. An entry that does not start the
+/// original is [`EntryState::DisabledByUs`] if `journal` records it (moved aside or
+/// hidden by [`disable_original`]), [`EntryState::DisabledByUser`] otherwise. What cannot
+/// be read is left out with a warning.
 pub fn original_autostart(locations: &OriginalLocations, journal: &Path) -> OriginalAutostart {
     let mut entries = Vec::new();
     let records = Journal::load(journal)
@@ -333,12 +353,19 @@ pub fn original_autostart(locations: &OriginalLocations, journal: &Path) -> Orig
         )
         .map(|j| j.records)
         .unwrap_or_default();
+    let off = |path: &Path| {
+        if records.iter().any(|r| r.path == path) {
+            EntryState::DisabledByUs
+        } else {
+            EntryState::DisabledByUser
+        }
+    };
     if let Some(startup) = &locations.startup {
         match startup_shortcuts(startup) {
             Ok(shortcuts) => entries.extend(shortcuts.into_iter().map(|path| AutostartEntry {
                 kind: EntryKind::StartupShortcut,
                 path,
-                enabled: true,
+                state: EntryState::Enabled,
             })),
             Err(e) => tracing::warn!(error = %e, "the Startup folder is unreadable"),
         }
@@ -348,27 +375,31 @@ pub fn original_autostart(locations: &OriginalLocations, journal: &Path) -> Orig
         match read_text(&path) {
             Ok(Some(text)) => entries.push(AutostartEntry {
                 kind: EntryKind::DesktopEntry,
+                state: if desktop_entry_disabled(&text) {
+                    off(&path)
+                } else {
+                    EntryState::Enabled
+                },
                 path,
-                enabled: !desktop_entry_disabled(&text),
             }),
             Ok(None) => {}
             Err(e) => tracing::warn!(error = %e, "the original's desktop entry is unreadable"),
         }
     }
-    // Moved aside (a shortcut) or hidden and then deleted (a desktop entry): disabled.
-    for record in records {
+    // Moved aside (a shortcut) or hidden and then deleted (a desktop entry).
+    for record in &records {
         if !entries.iter().any(|e| e.path == record.path) && record.stored.exists() {
             entries.push(AutostartEntry {
                 kind: record.kind,
-                path: record.path,
-                enabled: false,
+                path: record.path.clone(),
+                state: EntryState::DisabledByUs,
             });
         }
     }
     #[cfg(windows)]
     if let Some(run) = &locations.machine_run {
-        match run.entry() {
-            Ok(entry) => entries.extend(entry),
+        match run.entries() {
+            Ok(found) => entries.extend(found),
             Err(e) => tracing::warn!(error = %e, "the machine-wide Run value is unreadable"),
         }
     }
@@ -654,24 +685,53 @@ impl Journal {
         self.path.with_file_name(STORE_DIR)
     }
 
-    /// Refuses records outside `locations` and the store: a changed journal cannot make
-    /// us move other files.
+    /// Refuses a journal that names anything but the original's entries in `locations`
+    /// and their copies in the store, one copy each: a changed journal cannot make us move
+    /// other files, nor two entries overwrite one copy. The error names every copy, so the
+    /// user can put them back by hand (when a location changed since, e.g. a redirected
+    /// Startup folder).
     fn check(&self, locations: &OriginalLocations) -> io::Result<()> {
         let store = self.store();
-        for r in &self.records {
-            let inside = |file: &Path, dir: Option<&Path>| {
-                dir.is_some_and(|d| file.parent() == Some(d) && file.file_name().is_some())
+        let in_dir = |file: &Path, dir: Option<&Path>| {
+            dir.is_some_and(|d| file.parent() == Some(d) && file.file_name().is_some())
+        };
+        for (i, r) in self.records.iter().enumerate() {
+            let named = match r.kind {
+                EntryKind::StartupShortcut => r
+                    .path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("lnk")),
+                EntryKind::DesktopEntry => r.path.file_name().is_some_and(|n| n == DESKTOP_NAME),
+                EntryKind::MachineRun => false,
             };
-            if !inside(&r.path, locations.dir_of(r.kind)) || !inside(&r.stored, Some(&store)) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "the journal {} names an entry outside the original's places: {}",
-                        self.path.display(),
-                        r.path.display()
-                    ),
-                ));
-            }
+            let earlier = &self.records[..i];
+            let why = if !named || !in_dir(&r.path, locations.dir_of(r.kind)) {
+                "an entry that is not one of the original's here"
+            } else if !in_dir(&r.stored, Some(&store)) {
+                "a copy outside its store"
+            } else if earlier
+                .iter()
+                .any(|e| e.stored == r.stored || e.path == r.path)
+            {
+                "an entry or a copy twice"
+            } else {
+                continue;
+            };
+            let copies: Vec<String> = self
+                .records
+                .iter()
+                .map(|r| format!("{} → {}", r.stored.display(), r.path.display()))
+                .collect();
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "the journal {} names {why} ({}); nothing was changed. Its copies, to put \
+                     back by hand: {}",
+                    self.path.display(),
+                    r.path.display(),
+                    copies.join("; ")
+                ),
+            ));
         }
         Ok(())
     }
@@ -805,7 +865,8 @@ fn key_of(line: &str) -> Option<&str> {
 }
 
 /// The original's shortcuts in the Startup folder `dir`: `NCALayer.lnk`, and any shortcut
-/// to `NCALayer.exe`; sorted.
+/// to `NCALayer.exe`; sorted. A shortcut that cannot be read is left out with a warning,
+/// unless its name tells already.
 fn startup_shortcuts(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
@@ -814,151 +875,36 @@ fn startup_shortcuts(dir: &Path) -> io::Result<Vec<PathBuf>> {
     };
     let mut shortcuts = Vec::new();
     for entry in read {
-        let entry = entry?;
-        let path = entry.path();
+        let path = entry?.path();
         let is_lnk = path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("lnk"));
-        if !is_lnk || !entry.file_type()?.is_file() {
+        if !is_lnk {
             continue;
         }
         let by_name = path
             .file_name()
             .is_some_and(|n| n.eq_ignore_ascii_case(SHORTCUT_NAME));
-        if by_name || (entry.metadata()?.len() <= MAX_SHORTCUT && points_to_original(&path)?) {
+        let unreadable = |e: &io::Error| {
+            tracing::warn!(error = %e, path = %path.display(), "a Startup shortcut is unreadable");
+        };
+        let matches = match fs::metadata(&path) {
+            Ok(meta) if !meta.is_file() => false,
+            Ok(_) if by_name => true,
+            Ok(_) => crate::lnk::points_to(&path, TARGET_NAME, MAX_SHORTCUT)
+                .inspect_err(unreadable)
+                .unwrap_or(false),
+            Err(e) => {
+                unreadable(&e);
+                by_name
+            }
+        };
+        if matches {
             shortcuts.push(path);
         }
     }
     shortcuts.sort();
     Ok(shortcuts)
-}
-
-/// Whether the shortcut `path` points to a file named `NCALayer.exe`.
-fn points_to_original(path: &Path) -> io::Result<bool> {
-    let bytes = fs::read(path)?;
-    Ok(shortcut_targets(&bytes).iter().any(|target| {
-        target
-            .rsplit(['\\', '/'])
-            .next()
-            .is_some_and(|name| name.eq_ignore_ascii_case(TARGET_NAME))
-    }))
-}
-
-/// The target paths a Shell Link (`.lnk`, \[MS-SHLLINK\]) holds: the local path of its
-/// LinkInfo (ANSI and Unicode) and its relative path. Empty if it is not a shortcut.
-fn shortcut_targets(bytes: &[u8]) -> Vec<String> {
-    /// `{00021401-0000-0000-C000-000000000046}` as stored.
-    const CLSID: [u8; 16] = [
-        0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x46,
-    ];
-    const HEADER: usize = 0x4C;
-    const HAS_ID_LIST: u32 = 0x1;
-    const HAS_LINK_INFO: u32 = 0x2;
-    const HAS_NAME: u32 = 0x4;
-    const HAS_RELATIVE_PATH: u32 = 0x8;
-    const IS_UNICODE: u32 = 0x80;
-    const VOLUME_ID_AND_LOCAL_BASE_PATH: u32 = 0x1;
-
-    let mut targets = Vec::new();
-    if u32_at(bytes, 0) != Some(HEADER as u32) || bytes.get(4..20) != Some(&CLSID[..]) {
-        return targets;
-    }
-    let Some(flags) = u32_at(bytes, 0x14) else {
-        return targets;
-    };
-    let mut at = HEADER;
-    if flags & HAS_ID_LIST != 0 {
-        let Some(size) = u16_at(bytes, at) else {
-            return targets;
-        };
-        at = at.saturating_add(2 + usize::from(size));
-    }
-    if flags & HAS_LINK_INFO != 0 {
-        let Some(info) = bytes.get(at..) else {
-            return targets;
-        };
-        let field = |offset: usize| u32_at(info, offset).map(|v| v as usize);
-        let (Some(size), Some(header), Some(info_flags)) = (field(0), field(4), field(8)) else {
-            return targets;
-        };
-        if info_flags & (VOLUME_ID_AND_LOCAL_BASE_PATH as usize) != 0 {
-            let suffix = field(24).and_then(|o| ansi_at(info, o)).unwrap_or_default();
-            if let Some(base) = field(16).and_then(|o| ansi_at(info, o)) {
-                targets.push(base + &suffix);
-            }
-            if header >= 0x24 {
-                let suffix = field(32)
-                    .and_then(|o| utf16_at(info, o))
-                    .unwrap_or_default();
-                if let Some(base) = field(28).and_then(|o| utf16_at(info, o)) {
-                    targets.push(base + &suffix);
-                }
-            }
-        }
-        at = at.saturating_add(size);
-    }
-    // StringData: the name first, then the relative path.
-    let unicode = flags & IS_UNICODE != 0;
-    let string = |at: &mut usize| -> Option<String> {
-        let count = usize::from(u16_at(bytes, *at)?);
-        let start = at.saturating_add(2);
-        let len = if unicode { count * 2 } else { count };
-        let raw = bytes.get(start..start.saturating_add(len))?;
-        *at = start + len;
-        Some(if unicode {
-            let units: Vec<u16> = raw
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&c| u16::from_le_bytes(c))
-                .collect();
-            String::from_utf16_lossy(&units)
-        } else {
-            raw.iter().map(|&b| char::from(b)).collect()
-        })
-    };
-    if flags & HAS_NAME != 0 && string(&mut at).is_none() {
-        return targets;
-    }
-    if flags & HAS_RELATIVE_PATH != 0
-        && let Some(relative) = string(&mut at)
-    {
-        targets.push(relative);
-    }
-    targets
-}
-
-fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(
-        bytes.get(at..at.checked_add(2)?)?.try_into().ok()?,
-    ))
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
-    ))
-}
-
-/// The NUL-terminated single-byte string at `at`, its bytes taken as Latin-1 (the name
-/// compared is ASCII).
-fn ansi_at(bytes: &[u8], at: usize) -> Option<String> {
-    let rest = bytes.get(at..)?;
-    let end = rest.iter().position(|&b| b == 0)?;
-    Some(rest[..end].iter().map(|&b| char::from(b)).collect())
-}
-
-/// The NUL-terminated UTF-16LE string at `at`.
-fn utf16_at(bytes: &[u8], at: usize) -> Option<String> {
-    let mut units = Vec::new();
-    for &c in bytes.get(at..)?.as_chunks::<2>().0 {
-        match u16::from_le_bytes(c) {
-            0 => return Some(String::from_utf16_lossy(&units)),
-            u => units.push(u),
-        }
-    }
-    None
 }
 
 /// The user's Startup folder (`FOLDERID_Startup`).
@@ -987,59 +933,107 @@ fn startup_folder() -> io::Result<PathBuf> {
     result
 }
 
-/// The machine-wide `Run` value `NCALayer` (the MSI's), or for tests one under a key of
-/// `HKCU` standing for `HKLM`: only read.
+/// The machine-wide `Run` values `NCALayer` (the MSI's) of both registry views, or for
+/// tests ones under a key of `HKCU` standing for `HKLM`: only read.
 #[cfg(windows)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MachineRun {
     hive: oncl_registry::Hive,
+    sources: Vec<RunSource>,
+}
+
+/// Where one `Run` value and Windows' switch for it are.
+#[cfg(windows)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RunSource {
     run_key: String,
+    view: oncl_registry::View,
+    /// In the native view: `StartupApproved\Run32` holds the switches of the 32-bit view.
     approved_key: String,
+    /// The value as the user reads it, e.g. `HKLM\Software\WOW6432Node\…\Run\NCALayer`.
+    shown: String,
 }
 
 #[cfg(windows)]
 impl MachineRun {
     const VALUE: &'static str = "NCALayer";
+    /// The 32-bit view's `Run` key as a 64-bit process names it.
+    const RUN_KEY_32: &'static str = r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run";
+    /// Windows' switches of the 32-bit view's `Run` values.
+    const APPROVED_KEY_32: &'static str =
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32";
 
+    /// `HKLM`, in the 64-bit view and, for a 32-bit MSI, in the 32-bit one. The switches
+    /// are read in this process's view, the 64-bit one (OpenNCALayer is built for x64).
     fn local_machine() -> MachineRun {
+        use crate::RegistryAutostart as R;
+        let shown = |key: &str| format!(r"HKLM\{key}\{}", Self::VALUE);
         MachineRun {
             hive: oncl_registry::Hive::LocalMachine,
-            run_key: crate::RegistryAutostart::RUN_KEY.to_owned(),
-            approved_key: crate::RegistryAutostart::APPROVED_KEY.to_owned(),
+            sources: vec![
+                RunSource {
+                    run_key: R::RUN_KEY.to_owned(),
+                    view: oncl_registry::View::Native,
+                    approved_key: R::APPROVED_KEY.to_owned(),
+                    shown: shown(R::RUN_KEY),
+                },
+                RunSource {
+                    run_key: R::RUN_KEY.to_owned(),
+                    view: oncl_registry::View::Wow32,
+                    approved_key: Self::APPROVED_KEY_32.to_owned(),
+                    shown: shown(Self::RUN_KEY_32),
+                },
+            ],
         }
     }
 
+    /// The same keys under `base` of `HKCU`, where no view is redirected: the 32-bit
+    /// view's `Run` key is named by its path.
     fn under(base: &crate::RegistryBase) -> MachineRun {
+        use crate::RegistryAutostart as R;
+        let source = |run: &str, approved: &str| RunSource {
+            run_key: base.key(run),
+            view: oncl_registry::View::Native,
+            approved_key: base.key(approved),
+            shown: format!(r"HKCU\{}\{}", base.key(run), Self::VALUE),
+        };
         MachineRun {
             hive: oncl_registry::Hive::CurrentUser,
-            run_key: base.key(crate::RegistryAutostart::RUN_KEY),
-            approved_key: base.key(crate::RegistryAutostart::APPROVED_KEY),
+            sources: vec![
+                source(R::RUN_KEY, R::APPROVED_KEY),
+                source(Self::RUN_KEY_32, Self::APPROVED_KEY_32),
+            ],
         }
     }
 
-    /// The value as an entry, enabled unless Windows' switch for it in `StartupApproved`
-    /// disables it.
-    fn entry(&self) -> io::Result<Option<AutostartEntry>> {
-        if oncl_registry::get_string(self.hive, &self.run_key, Some(Self::VALUE))?.is_none() {
-            return Ok(None);
+    /// The values that exist (of any string type), enabled unless Windows' switch for
+    /// them in `StartupApproved` disables them.
+    fn entries(&self) -> io::Result<Vec<AutostartEntry>> {
+        let mut entries = Vec::new();
+        for s in &self.sources {
+            if !oncl_registry::value_exists(self.hive, &s.run_key, Some(Self::VALUE), s.view)? {
+                continue;
+            }
+            let disabled =
+                crate::autostart::disabled_by_windows(self.hive, &s.approved_key, Self::VALUE)?;
+            entries.push(AutostartEntry {
+                kind: EntryKind::MachineRun,
+                path: PathBuf::from(&s.shown),
+                state: if disabled {
+                    EntryState::DisabledByUser
+                } else {
+                    EntryState::Enabled
+                },
+            });
         }
-        let disabled =
-            crate::autostart::disabled_by_windows(self.hive, &self.approved_key, Self::VALUE)?;
-        let hive = match self.hive {
-            oncl_registry::Hive::LocalMachine => "HKLM",
-            oncl_registry::Hive::CurrentUser => "HKCU",
-        };
-        Ok(Some(AutostartEntry {
-            kind: EntryKind::MachineRun,
-            path: PathBuf::from(format!(r"{hive}\{}\{}", self.run_key, Self::VALUE)),
-            enabled: !disabled,
-        }))
+        Ok(entries)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lnk::tests::shortcut;
 
     #[test]
     fn unavailable_finds_nothing_and_changes_nothing() {
@@ -1047,116 +1041,6 @@ mod tests {
         for result in [Unavailable.disable(), Unavailable.restore()] {
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
         }
-    }
-
-    /// A Shell Link to `target` the way the shell writes one for a local file: a LinkInfo
-    /// with the local path (ANSI, and Unicode if `unicode`), and the relative path.
-    fn shortcut(target: &str, unicode: bool) -> Vec<u8> {
-        let mut info_header = Vec::new();
-        let header_size: u32 = if unicode { 0x24 } else { 0x1C };
-        let volume = {
-            let mut v = Vec::new();
-            v.extend(0x11u32.to_le_bytes()); // VolumeIDSize
-            v.extend(3u32.to_le_bytes()); // DRIVE_FIXED
-            v.extend(0u32.to_le_bytes()); // serial
-            v.extend(0x10u32.to_le_bytes()); // label offset
-            v.push(0); // empty label
-            v
-        };
-        let ansi: Vec<u8> = target
-            .bytes()
-            .map(|b| if b.is_ascii() { b } else { b'?' })
-            .chain([0])
-            .collect();
-        let wide: Vec<u8> = target
-            .encode_utf16()
-            .chain([0])
-            .flat_map(u16::to_le_bytes)
-            .collect();
-        let volume_at = header_size;
-        let base_at = volume_at + volume.len() as u32;
-        let suffix_at = base_at + ansi.len() as u32;
-        let base_w_at = suffix_at + 1;
-        let suffix_w_at = base_w_at + wide.len() as u32;
-        let mut body = volume.clone();
-        body.extend(&ansi);
-        body.push(0); // empty common path suffix
-        if unicode {
-            body.extend(&wide);
-            body.extend([0, 0]);
-        }
-        let size = header_size + body.len() as u32;
-        for v in [size, header_size, 1, volume_at, base_at, 0, suffix_at] {
-            info_header.extend(v.to_le_bytes());
-        }
-        if unicode {
-            info_header.extend(base_w_at.to_le_bytes());
-            info_header.extend(suffix_w_at.to_le_bytes());
-        }
-        let mut lnk = Vec::new();
-        lnk.extend(0x4Cu32.to_le_bytes());
-        lnk.extend([
-            0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x46,
-        ]);
-        // HasLinkTargetIDList | HasLinkInfo | HasRelativePath | IsUnicode
-        lnk.extend((0x1u32 | 0x2 | 0x8 | 0x80).to_le_bytes());
-        lnk.resize(0x4C, 0);
-        // An ID list of one empty item list (only its terminator).
-        lnk.extend(2u16.to_le_bytes());
-        lnk.extend([0, 0]);
-        lnk.extend(info_header);
-        lnk.extend(body);
-        let relative: Vec<u16> = format!("..\\{target}").encode_utf16().collect();
-        lnk.extend((relative.len() as u16).to_le_bytes());
-        lnk.extend(relative.into_iter().flat_map(u16::to_le_bytes));
-        lnk.extend(0u32.to_le_bytes()); // TerminalBlock
-        lnk
-    }
-
-    #[test]
-    fn shortcut_targets_are_read() {
-        let target = r"C:\Program Files\NCALayer\NCALayer.exe";
-        assert_eq!(
-            shortcut_targets(&shortcut(target, false)),
-            [target.to_owned(), format!("..\\{target}")]
-        );
-        let target = r"C:\Users\Әлия\AppData\Roaming\NCALayer\NCALayer.exe";
-        let targets = shortcut_targets(&shortcut(target, true));
-        assert_eq!(targets[1], target);
-        // Not a shortcut, or cut short: nothing, without a panic.
-        assert!(shortcut_targets(b"[Desktop Entry]\n").is_empty());
-        let whole = shortcut(target, true);
-        for len in 0..whole.len() {
-            let _ = shortcut_targets(&whole[..len]);
-        }
-    }
-
-    /// The real shell's shortcut to a file of the sandbox.
-    #[cfg(windows)]
-    #[test]
-    fn shell_shortcut_target_is_read() {
-        let d = tempfile::tempdir().unwrap();
-        let target = d.path().join("NCALayer").join(TARGET_NAME);
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::write(&target, b"MZ").unwrap();
-        // WScript.Shell saves under ANSI names only: the localized name is in `sandbox`.
-        let lnk = d.path().join("Startup item.lnk");
-        let script = format!(
-            "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); $s.TargetPath = '{}'; $s.Save()",
-            lnk.display(),
-            target.display()
-        );
-        let status = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .status()
-            .unwrap();
-        assert!(status.success());
-        assert!(
-            points_to_original(&lnk).unwrap(),
-            "{:?}",
-            shortcut_targets(&fs::read(&lnk).unwrap())
-        );
     }
 
     const DESKTOP: &str = "[Desktop Entry]\nType=Application\nName=NCALayer\nExec=\"/opt/NCALayer/ncalayer.sh\" --run\n";
@@ -1188,7 +1072,7 @@ mod tests {
         (d, locations, journal)
     }
 
-    fn states(l: &OriginalLocations, journal: &Path) -> Vec<(EntryKind, String, bool)> {
+    fn states(l: &OriginalLocations, journal: &Path) -> Vec<(EntryKind, String, EntryState)> {
         original_autostart(l, journal)
             .entries
             .into_iter()
@@ -1196,7 +1080,7 @@ mod tests {
                 (
                     e.kind,
                     e.path.file_name().unwrap().to_string_lossy().into_owned(),
-                    e.enabled,
+                    e.state,
                 )
             })
             .collect()
@@ -1210,10 +1094,19 @@ mod tests {
         let before: Vec<_> = ["NCALayer.lnk", "НЦАЛэйер.lnk"]
             .map(|n| fs::read(startup.join(n)).unwrap())
             .into();
+        use EntryState::{DisabledByUs, Enabled};
         let all_on = vec![
-            (EntryKind::StartupShortcut, "NCALayer.lnk".to_owned(), true),
-            (EntryKind::StartupShortcut, "НЦАЛэйер.lnk".to_owned(), true),
-            (EntryKind::DesktopEntry, DESKTOP_NAME.to_owned(), true),
+            (
+                EntryKind::StartupShortcut,
+                "NCALayer.lnk".to_owned(),
+                Enabled,
+            ),
+            (
+                EntryKind::StartupShortcut,
+                "НЦАЛэйер.lnk".to_owned(),
+                Enabled,
+            ),
+            (EntryKind::DesktopEntry, DESKTOP_NAME.to_owned(), Enabled),
         ];
         assert_eq!(states(&l, &journal), all_on);
 
@@ -1244,7 +1137,7 @@ mod tests {
         );
         let all_off: Vec<_> = all_on
             .iter()
-            .map(|(k, n, _)| (*k, n.clone(), false))
+            .map(|(k, n, _)| (*k, n.clone(), DisabledByUs))
             .collect();
         let mut off = states(&l, &journal);
         off.sort_by_key(|e| e.0 == EntryKind::DesktopEntry);
@@ -1357,8 +1250,9 @@ mod tests {
         assert_eq!(Journal::load(&journal).unwrap().records.len(), 2);
         // The UI's view meanwhile: the one put back is on, the other still off.
         let s = states(&l, &journal);
-        assert!(s.contains(&(EntryKind::StartupShortcut, "NCALayer.lnk".to_owned(), true)));
-        assert!(s.contains(&(EntryKind::StartupShortcut, "НЦАЛэйер.lnk".to_owned(), false)));
+        let (on, ours) = (EntryState::Enabled, EntryState::DisabledByUs);
+        assert!(s.contains(&(EntryKind::StartupShortcut, "NCALayer.lnk".to_owned(), on)));
+        assert!(s.contains(&(EntryKind::StartupShortcut, "НЦАЛэйер.lnk".to_owned(), ours)));
 
         let report = restore_original(&l, &journal).unwrap();
         assert_eq!(report.changed.len(), 2);
@@ -1390,16 +1284,35 @@ mod tests {
         assert_eq!(fs::read_to_string(desktop).unwrap(), DESKTOP);
     }
 
+    /// Turned off by the user: not changed, and not shown as something to put back.
     #[test]
     fn hidden_by_the_user_is_left_alone() {
-        let (d, l, journal) = sandbox();
-        let desktop = d.path().join(".config/autostart").join(DESKTOP_NAME);
-        let text = "[Desktop Entry]\nX-GNOME-Autostart-enabled=false\n";
-        fs::write(&desktop, text).unwrap();
-        let report = disable_original(&l, &journal).unwrap();
-        assert!(!report.changed.contains(&desktop));
-        restore_original(&l, &journal).unwrap();
-        assert_eq!(fs::read_to_string(&desktop).unwrap(), text);
+        for text in [
+            "[Desktop Entry]\nX-GNOME-Autostart-enabled=false\n",
+            "[Desktop Entry]\nHidden=true\n",
+        ] {
+            let (d, l, journal) = sandbox();
+            let desktop = d.path().join(".config/autostart").join(DESKTOP_NAME);
+            fs::write(&desktop, text).unwrap();
+            let user_off = (
+                EntryKind::DesktopEntry,
+                DESKTOP_NAME.to_owned(),
+                EntryState::DisabledByUser,
+            );
+            assert!(states(&l, &journal).contains(&user_off));
+            let report = disable_original(&l, &journal).unwrap();
+            assert!(!report.changed.contains(&desktop));
+            // Still the user's after our disabling (the shortcuts are ours now).
+            assert!(states(&l, &journal).contains(&user_off));
+            restore_original(&l, &journal).unwrap();
+            assert_eq!(fs::read_to_string(&desktop).unwrap(), text);
+            assert!(states(&l, &journal).contains(&user_off));
+            assert!(
+                !states(&l, &journal)
+                    .iter()
+                    .any(|s| s.2 == EntryState::DisabledByUs)
+            );
+        }
     }
 
     #[test]
@@ -1445,6 +1358,96 @@ mod tests {
         );
     }
 
+    /// Records the original's disabling never writes: another file of the Startup or
+    /// autostart directory, our own entry, two entries sharing one copy.
+    #[test]
+    fn journal_naming_other_files_is_refused() {
+        let (d, l, journal) = sandbox();
+        let startup = d.path().join("Startup");
+        let autostart = d.path().join(".config/autostart");
+        let store = journal.with_file_name(STORE_DIR);
+        let ours = autostart.join("openncalayer.desktop");
+        fs::write(&ours, "[Desktop Entry]\n").unwrap();
+        let record = |kind: &str, path: &Path, stored: &str| {
+            json!({
+                "kind": kind,
+                "path": path.to_str().unwrap(),
+                "stored": store.join(stored).to_str().unwrap(),
+            })
+        };
+        let journals = [
+            vec![record("desktopEntry", &ours, "openncalayer.desktop")],
+            vec![record(
+                "startupShortcut",
+                &startup.join("NCALayer.txt"),
+                "x.txt",
+            )],
+            vec![record("startupShortcut", &autostart.join("a.lnk"), "a.lnk")],
+            vec![record("machineRun", &startup.join("NCALayer.lnk"), "m.lnk")],
+            vec![
+                record("startupShortcut", &startup.join("NCALayer.lnk"), "same.lnk"),
+                record("startupShortcut", &startup.join("НЦАЛэйер.lnk"), "same.lnk"),
+            ],
+        ];
+        fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        for entries in journals {
+            let text = json!({ "entries": entries }).to_string();
+            fs::write(&journal, &text).unwrap();
+            for result in [
+                disable_original(&l, &journal),
+                restore_original(&l, &journal),
+            ] {
+                let e = result.unwrap_err();
+                assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{text}");
+                // The copies are named for the user.
+                assert!(e.to_string().contains(&*store.to_string_lossy()), "{e}");
+            }
+        }
+        assert_eq!(fs::read_to_string(&ours).unwrap(), "[Desktop Entry]\n");
+        assert!(startup.join("NCALayer.lnk").exists());
+        assert!(startup.join("НЦАЛэйер.lnk").exists());
+    }
+
+    /// A shortcut that cannot be read does not hide the others.
+    #[test]
+    fn unreadable_shortcut_is_skipped() {
+        let (d, l, journal) = sandbox();
+        let startup = d.path().join("Startup");
+        let locked = startup.join("Locked.lnk");
+        fs::write(&locked, shortcut(r"C:\NCALayer\NCALayer.exe", true)).unwrap();
+        // Held open without sharing (Windows), or without read permission (Unix).
+        #[cfg(windows)]
+        let _hold = {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&locked)
+                .unwrap()
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        if fs::read(&locked).is_ok() {
+            eprintln!("skipped: {} is readable here (root?)", locked.display());
+            return;
+        }
+        let names: Vec<_> = states(&l, &journal).into_iter().map(|s| s.1).collect();
+        assert!(names.contains(&"NCALayer.lnk".to_owned()), "{names:?}");
+        assert!(!names.contains(&"Locked.lnk".to_owned()), "{names:?}");
+        let report = disable_original(&l, &journal).unwrap();
+        assert!(report.changed.contains(&startup.join("NCALayer.lnk")));
+        assert!(locked.exists());
+        restore_original(&l, &journal).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
     #[test]
     fn stored_names_do_not_collide() {
         let (d, l, journal) = sandbox();
@@ -1460,12 +1463,12 @@ mod tests {
         assert_eq!(fs::read(store.join("NCALayer.lnk")).unwrap(), b"older");
     }
 
-    /// `HKLM\…\Run\NCALayer` is shown and never changed: here a test key of `HKCU` stands
-    /// for `HKLM`.
+    /// `HKLM\…\Run\NCALayer` of both views is shown and never changed: here a test key of
+    /// `HKCU` stands for `HKLM`.
     #[cfg(windows)]
     #[test]
     fn machine_run_is_only_read() {
-        use oncl_registry::{Hive, TestKey, get_string, set_binary, set_string};
+        use oncl_registry::{Hive, TestKey, View, get_string, set_binary, set_string};
 
         let root = TestKey::new();
         let base = crate::RegistryBase::sandbox(root.path());
@@ -1483,7 +1486,7 @@ mod tests {
             [AutostartEntry {
                 kind: EntryKind::MachineRun,
                 path: PathBuf::from(format!(r"HKCU\{run_key}\NCALayer")),
-                enabled: true,
+                state: EntryState::Enabled,
             }]
         );
         assert_eq!(disable_original(&l, &journal).unwrap(), Report::default());
@@ -1496,16 +1499,53 @@ mod tests {
         );
         assert!(!journal.exists());
 
-        // Disabled in Task Manager.
+        // Disabled in Task Manager: by the user.
         let approved_key = base.key(crate::RegistryAutostart::APPROVED_KEY);
         set_binary(&approved_key, Some("NCALayer"), &[3, 0, 0, 0]).unwrap();
-        assert!(!original_autostart(&l, &journal).entries[0].enabled);
+        assert_eq!(
+            original_autostart(&l, &journal).entries[0].state,
+            EntryState::DisabledByUser
+        );
+
+        // A 32-bit MSI's value, in the 32-bit view (here named by its path).
+        let run_32 = base.key(MachineRun::RUN_KEY_32);
+        set_string(&run_32, Some("NCALayer"), value).unwrap();
+        let entries = original_autostart(&l, &journal).entries;
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(
+            entries[1].path,
+            PathBuf::from(format!(r"HKCU\{run_32}\NCALayer"))
+        );
+        assert!(entries[1].enabled());
+        set_binary(
+            &base.key(MachineRun::APPROVED_KEY_32),
+            Some("NCALayer"),
+            &[3],
+        )
+        .unwrap();
+        assert!(!original_autostart(&l, &journal).entries[1].enabled());
 
         let real = MachineRun::local_machine();
         assert_eq!(real.hive, Hive::LocalMachine);
+        let views: Vec<_> = real
+            .sources
+            .iter()
+            .map(|s| (s.run_key.as_str(), s.view, s.shown.as_str()))
+            .collect();
         assert_eq!(
-            real.run_key,
-            r"Software\Microsoft\Windows\CurrentVersion\Run"
+            views,
+            [
+                (
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                    View::Native,
+                    r"HKLM\Software\Microsoft\Windows\CurrentVersion\Run\NCALayer"
+                ),
+                (
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                    View::Wow32,
+                    r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run\NCALayer"
+                ),
+            ]
         );
     }
 }
