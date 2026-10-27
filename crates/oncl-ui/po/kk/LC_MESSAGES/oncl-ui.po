@@ -232,3 +232,9 @@ msgstr "Бетті әлі бірде-бір браузер ашқан жоқ."
 
 msgid "Yes"
 msgstr "Иә"
+
+msgid "Stop the original NCALayer"
+msgstr "Түпнұсқа NCALayer-ді тоқтату"
+
+msgid "Stop"
+msgstr "Тоқтату"

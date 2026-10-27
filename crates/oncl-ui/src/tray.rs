@@ -86,6 +86,8 @@ pub struct TrayState {
     /// A problem for the user (TLS not set up, the certificate expiring, the port busy):
     /// the icon turns to «attention» and the tooltip says this.
     pub warning: Option<String>,
+    /// The original NCALayer holds the port: the menu offers «Остановить оригинал…».
+    pub stop_original: bool,
 }
 
 /// A message from the tray: a balloon of the icon on Windows (a toast on Windows 10 and
@@ -306,14 +308,22 @@ impl TrayModel {
 
     fn menu(&self) -> Vec<MenuRow> {
         let t = self.texts;
-        vec![
+        let mut rows = Vec::with_capacity(8);
+        if self.state.stop_original {
+            rows.extend([
+                MenuRow::Item(TrayCommand::StopOriginal, t.stop_original),
+                MenuRow::Separator,
+            ]);
+        }
+        rows.extend([
             MenuRow::Item(TrayCommand::Settings, t.settings),
             MenuRow::Item(TrayCommand::TlsWizard, t.tls_wizard),
             MenuRow::Item(TrayCommand::OpenLogs, t.logs),
             MenuRow::Item(TrayCommand::About, t.about),
             MenuRow::Separator,
             MenuRow::Item(TrayCommand::Quit, t.quit),
-        ]
+        ]);
+        rows
     }
 
     fn icon(&self) -> IconKind {
@@ -356,6 +366,7 @@ impl TrayModel {
 /// The menu texts in one language.
 #[derive(Debug, PartialEq, Eq)]
 struct Texts {
+    stop_original: &'static str,
     settings: &'static str,
     tls_wizard: &'static str,
     logs: &'static str,
@@ -367,6 +378,7 @@ impl Texts {
     fn of(l: Locale) -> &'static Texts {
         match l {
             Locale::Kk => &Texts {
+                stop_original: "Түпнұсқаны тоқтату…",
                 settings: "Баптаулар…",
                 tls_wizard: "Браузерге арналған сертификат…",
                 logs: "Журнал",
@@ -374,6 +386,7 @@ impl Texts {
                 quit: "Шығу",
             },
             Locale::Ru => &Texts {
+                stop_original: "Остановить оригинал…",
                 settings: "Настройки…",
                 tls_wizard: "Сертификат для браузера…",
                 logs: "Журнал",
@@ -381,6 +394,7 @@ impl Texts {
                 quit: "Выход",
             },
             Locale::En => &Texts {
+                stop_original: "Stop the original…",
                 settings: "Settings…",
                 tls_wizard: "Certificate for browsers…",
                 logs: "Log",
@@ -398,6 +412,7 @@ mod tests {
     fn warned(warning: &str) -> TrayState {
         TrayState {
             warning: Some(warning.to_owned()),
+            stop_original: false,
         }
     }
 
@@ -439,6 +454,39 @@ mod tests {
             TrayModel::new(Locale::Kk).menu().last(),
             Some(&MenuRow::Item(TrayCommand::Quit, "Шығу"))
         );
+    }
+
+    #[test]
+    fn stopping_the_original_is_offered_only_when_it_holds_the_port() {
+        let mut model = TrayModel::new(Locale::Ru);
+        let plain = model.menu();
+        assert!(!plain.contains(&MenuRow::Item(
+            TrayCommand::StopOriginal,
+            "Остановить оригинал…"
+        )));
+        assert!(model.set_state(TrayState {
+            warning: Some("Порт занят оригинальным NCALayer".to_owned()),
+            stop_original: true,
+        }));
+        let menu = model.menu();
+        assert_eq!(
+            menu[..2],
+            [
+                MenuRow::Item(TrayCommand::StopOriginal, "Остановить оригинал…"),
+                MenuRow::Separator,
+            ]
+        );
+        assert_eq!(menu[2..], plain[..]);
+        for locale in [Locale::Kk, Locale::En] {
+            assert!(model.set_locale(locale));
+            assert!(matches!(
+                model.menu()[0],
+                MenuRow::Item(TrayCommand::StopOriginal, label) if !label.is_empty()
+            ));
+        }
+        // The warning stays, the item goes.
+        assert!(model.set_state(warned("Порт занят")));
+        assert_eq!(model.menu(), TrayModel::new(Locale::En).menu());
     }
 
     #[test]

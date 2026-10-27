@@ -1,11 +1,13 @@
-//! What the tray tells the user: its warning (wss off, the certificate due or not renewed)
-//! and its notifications (the certificate's renewal, a page's `installBundle`), in the
-//! user's language.
+//! What the tray tells the user: its warning (wss off, the original NCALayer holding the
+//! port, the certificate due or not renewed), whether it offers «Остановить оригинал…», and
+//! its notifications (wss off at the start, the certificate's renewal, a page's
+//! `installBundle`), in the user's language.
 
 use std::time::{Duration, Instant};
 
 use oncl_basics::Locale;
-use oncl_ui::{ActionTarget, Notification, NotificationAction, TrayCommand};
+use oncl_desktop::PortOwner;
+use oncl_ui::{ActionTarget, Notification, NotificationAction, TrayCommand, TrayState};
 
 use crate::cli::WssOff;
 use crate::renewal::{RenewFailure, RenewalCheck};
@@ -21,6 +23,8 @@ pub struct TrayStatus {
     pub locale: Locale,
     /// Why the wss server is off.
     pub wss_off: Option<WssOff>,
+    /// The original NCALayer found holding the port while it is busy.
+    pub original: Option<PortOwner>,
     /// The last renewal check.
     pub renewal: RenewalCheck,
     last_bundle_notice: Option<Instant>,
@@ -31,17 +35,91 @@ impl TrayStatus {
         TrayStatus {
             locale,
             wss_off,
+            original: None,
             renewal: RenewalCheck::Nothing,
             last_bundle_notice: None,
         }
     }
 
+    /// What the tray shows: the warning, and «Остановить оригинал…» while the original
+    /// holds the port.
+    pub fn tray_state(&self) -> TrayState {
+        TrayState {
+            warning: self.warning(),
+            stop_original: self.original_on_port().is_some(),
+        }
+    }
+
+    /// The original NCALayer holding the port wss needs, if that is why wss is off.
+    pub fn original_on_port(&self) -> Option<&PortOwner> {
+        match self.wss_off {
+            Some(WssOff::PortBusy(_)) => self.original.as_ref(),
+            _ => None,
+        }
+    }
+
     /// The warning the tray shows: wss being off comes first, then the certificate's.
     pub fn warning(&self) -> Option<String> {
+        if self.original_on_port().is_some() {
+            return Some(original_text(self.locale).to_owned());
+        }
         match self.wss_off {
             Some(off) => Some(off.text(self.locale)),
             None => self.renewal_warning(),
         }
+    }
+
+    /// The notification of wss being off at the start, if the user can lift it here: TLS
+    /// not set up (leads to the wizard), the port held by the original (leads to
+    /// «Остановить оригинал…»).
+    pub fn wss_off_notification(&self) -> Option<Notification> {
+        let l = self.locale;
+        let (body, action) = if self.original_on_port().is_some() {
+            (
+                match l {
+                    Locale::Ru => {
+                        "Пока оригинал работает, сайты подключаются к нему, а не к OpenNCALayer. Его можно остановить из меню значка."
+                    }
+                    Locale::Kk => {
+                        "Түпнұсқа жұмыс істеп тұрғанда сайттар OpenNCALayer-ге емес, соған қосылады. Оны белгіше мәзірінен тоқтатуға болады."
+                    }
+                    Locale::En => {
+                        "While the original runs, sites connect to it rather than to OpenNCALayer. It can be stopped from the icon's menu."
+                    }
+                },
+                NotificationAction {
+                    label: match l {
+                        Locale::Ru => "Остановить оригинал…",
+                        Locale::Kk => "Түпнұсқаны тоқтату…",
+                        Locale::En => "Stop the original…",
+                    }
+                    .to_owned(),
+                    target: ActionTarget::Command(TrayCommand::StopOriginal),
+                },
+            )
+        } else if self.wss_off == Some(WssOff::TlsNotConfigured) {
+            (
+                match l {
+                    Locale::Ru => {
+                        "Сайты не подключатся к OpenNCALayer, пока не выпущен сертификат для браузера; расширение браузера уже работает. Выпустите сертификат в мастере."
+                    }
+                    Locale::Kk => {
+                        "Браузерге арналған сертификат шығарылмайынша сайттар OpenNCALayer-ге қосылмайды; браузер кеңейтімі жұмыс істеп тұр. Сертификатты шеберде шығарыңыз."
+                    }
+                    Locale::En => {
+                        "Sites cannot connect to OpenNCALayer until a certificate for browsers is issued; the browser extension works already. Issue the certificate in the wizard."
+                    }
+                },
+                wizard_action(l),
+            )
+        } else {
+            return None;
+        };
+        Some(Notification {
+            title: self.warning()?,
+            body: body.to_owned(),
+            action: Some(action),
+        })
     }
 
     /// What the last renewal check warns about, if anything.
@@ -95,15 +173,7 @@ impl TrayStatus {
     /// whatever else the tray warns about.
     pub fn renewal_notification(&self) -> Option<Notification> {
         let l = self.locale;
-        let wizard = || NotificationAction {
-            label: match l {
-                Locale::Ru => "Открыть «Сертификат для браузера»",
-                Locale::Kk => "«Браузерге арналған сертификат» ашу",
-                Locale::En => "Open «Certificate for browsers»",
-            }
-            .to_owned(),
-            target: ActionTarget::Command(TrayCommand::TlsWizard),
-        };
+        let wizard = || wizard_action(l);
         let (title, body, action) = match &self.renewal {
             RenewalCheck::Nothing => return None,
             RenewalCheck::Due { .. } => (
@@ -182,6 +252,28 @@ impl TrayStatus {
                 target: ActionTarget::Url(PLUGIN_REGISTRY.to_owned()),
             }),
         })
+    }
+}
+
+/// The warning while the original NCALayer holds the port, in `l`.
+fn original_text(l: Locale) -> &'static str {
+    match l {
+        Locale::Ru => "Порт занят оригинальным NCALayer",
+        Locale::Kk => "Портты түпнұсқа NCALayer алып тұр",
+        Locale::En => "The port is held by the original NCALayer",
+    }
+}
+
+/// A notification's button that opens the TLS wizard, in `l`.
+fn wizard_action(l: Locale) -> NotificationAction {
+    NotificationAction {
+        label: match l {
+            Locale::Ru => "Открыть «Сертификат для браузера»",
+            Locale::Kk => "«Браузерге арналған сертификат» ашу",
+            Locale::En => "Open «Certificate for browsers»",
+        }
+        .to_owned(),
+        target: ActionTarget::Command(TrayCommand::TlsWizard),
     }
 }
 
@@ -277,6 +369,81 @@ mod tests {
             not_after: "2029-01-05T09:00:00Z".to_owned(),
         };
         assert_eq!(status.warning(), None);
+    }
+
+    fn original() -> PortOwner {
+        PortOwner {
+            pid: 4242,
+            exe: std::path::PathBuf::from(r"C:\Program Files\NCALayer\NCALayer.exe"),
+            started: std::time::SystemTime::UNIX_EPOCH,
+            looks_original: true,
+        }
+    }
+
+    #[test]
+    fn the_original_on_the_port_is_offered_to_be_stopped() {
+        let mut status = TrayStatus::new(Locale::Ru, Some(WssOff::PortBusy(13579)));
+        // Another program: the plain warning, nothing to stop.
+        assert_eq!(
+            status.tray_state(),
+            TrayState {
+                warning: Some("Порт 13579 занят (возможно, оригинальным NCALayer)".to_owned()),
+                stop_original: false,
+            }
+        );
+        assert_eq!(status.wss_off_notification(), None);
+
+        status.original = Some(original());
+        assert_eq!(
+            status.tray_state(),
+            TrayState {
+                warning: Some("Порт занят оригинальным NCALayer".to_owned()),
+                stop_original: true,
+            }
+        );
+        let notice = status.wss_off_notification().unwrap();
+        assert_eq!(notice.title, "Порт занят оригинальным NCALayer");
+        assert_eq!(
+            notice.action.unwrap(),
+            NotificationAction {
+                label: "Остановить оригинал…".to_owned(),
+                target: ActionTarget::Command(TrayCommand::StopOriginal),
+            }
+        );
+        for l in [Locale::Kk, Locale::En] {
+            status.locale = l;
+            assert_ne!(status.warning(), Some(original_text(Locale::Ru).to_owned()));
+            assert!(status.wss_off_notification().is_some());
+        }
+
+        // wss serves (the original stopped): the warning and the item go.
+        status.wss_off = None;
+        assert_eq!(status.tray_state(), TrayState::default());
+        assert_eq!(status.original_on_port(), None);
+    }
+
+    #[test]
+    fn tls_not_set_up_leads_to_the_wizard() {
+        let status = TrayStatus::new(Locale::Ru, Some(WssOff::TlsNotConfigured));
+        let state = status.tray_state();
+        assert_eq!(
+            state.warning.as_deref(),
+            Some("TLS не настроен: нет сертификата для браузера")
+        );
+        assert!(!state.stop_original);
+        let notice = status.wss_off_notification().unwrap();
+        assert_eq!(notice.title, state.warning.unwrap());
+        assert_eq!(
+            notice.action.unwrap().target,
+            ActionTarget::Command(TrayCommand::TlsWizard)
+        );
+        // A broken certificate or an unbindable port is only warned of.
+        for off in [WssOff::TlsUnusable, WssOff::PortUnavailable(1)] {
+            assert_eq!(
+                TrayStatus::new(Locale::Ru, Some(off)).wss_off_notification(),
+                None
+            );
+        }
     }
 
     #[test]

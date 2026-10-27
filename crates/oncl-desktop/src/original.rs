@@ -16,6 +16,7 @@
 //! written there before it is changed and removed only after it is put back, so an
 //! interrupted call loses nothing and a repeated one finishes the job.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -354,7 +355,7 @@ pub fn original_autostart(locations: &OriginalLocations, journal: &Path) -> Orig
         .map(|j| j.records)
         .unwrap_or_default();
     let off = |path: &Path| {
-        if records.iter().any(|r| r.path == path) {
+        if records.iter().any(|r| same_file(&r.path, path)) {
             EntryState::DisabledByUs
         } else {
             EntryState::DisabledByUser
@@ -388,7 +389,7 @@ pub fn original_autostart(locations: &OriginalLocations, journal: &Path) -> Orig
     }
     // Moved aside (a shortcut) or hidden and then deleted (a desktop entry).
     for record in &records {
-        if !entries.iter().any(|e| e.path == record.path) && record.stored.exists() {
+        if !entries.iter().any(|e| same_file(&e.path, &record.path)) && record.stored.exists() {
             entries.push(AutostartEntry {
                 kind: record.kind,
                 path: record.path.clone(),
@@ -442,7 +443,7 @@ fn disable_with(
     let store = log.store();
     let mut added = false;
     for (kind, path) in locations.enabled_entries()? {
-        if !log.records.iter().any(|r| r.path == path) {
+        if !log.records.iter().any(|r| same_file(&r.path, &path)) {
             let stored = log.free_name(&store, &path)?;
             log.records.push(Record { kind, path, stored });
             added = true;
@@ -686,10 +687,20 @@ impl Journal {
     }
 
     /// Refuses a journal that names anything but the original's entries in `locations`
-    /// and their copies in the store, one copy each: a changed journal cannot make us move
-    /// other files, nor two entries overwrite one copy. The error names every copy, so the
-    /// user can put them back by hand (when a location changed since, e.g. a redirected
-    /// Startup folder).
+    /// and copies we could have made of them, one copy each, so that a changed journal
+    /// cannot make us move or hide another file, nor two entries share one copy:
+    /// - a shortcut record names a `.lnk` directly in the Startup folder, and each of its
+    ///   two files that exists is the original's shortcut (named `NCALayer.lnk`, or
+    ///   pointing to `NCALayer.exe`, as the Startup scan finds them); a desktop entry
+    ///   record names `ncalayer.desktop` directly in the autostart directory; no record
+    ///   names the machine-wide `Run` value;
+    /// - its copy is directly in the store, under a name [`Journal::free_name`] gives the
+    ///   entry: its own, or numbered (`NCALayer (2).lnk`);
+    /// - no two records name one entry or one copy, compared without case on Windows,
+    ///   whose file names ignore it.
+    ///
+    /// The error names every copy, so the user can put them back by hand (when a location
+    /// changed since, e.g. a redirected Startup folder).
     fn check(&self, locations: &OriginalLocations) -> io::Result<()> {
         let store = self.store();
         let in_dir = |file: &Path, dir: Option<&Path>| {
@@ -707,13 +718,15 @@ impl Journal {
             let earlier = &self.records[..i];
             let why = if !named || !in_dir(&r.path, locations.dir_of(r.kind)) {
                 "an entry that is not one of the original's here"
-            } else if !in_dir(&r.stored, Some(&store)) {
-                "a copy outside its store"
+            } else if !in_dir(&r.stored, Some(&store)) || !copy_name_of(&r.stored, &r.path) {
+                "a copy that is not ours"
             } else if earlier
                 .iter()
-                .any(|e| e.stored == r.stored || e.path == r.path)
+                .any(|e| same_file(&e.stored, &r.stored) || same_file(&e.path, &r.path))
             {
                 "an entry or a copy twice"
+            } else if r.kind == EntryKind::StartupShortcut && !original_shortcut(r) {
+                "a shortcut that is not the original's"
             } else {
                 continue;
             };
@@ -749,12 +762,84 @@ impl Journal {
                 (n, None) => format!("{stem} ({n})"),
             };
             let candidate = store.join(name);
-            if !candidate.try_exists()? && !self.records.iter().any(|r| r.stored == candidate) {
+            if !candidate.try_exists()?
+                && !self
+                    .records
+                    .iter()
+                    .any(|r| same_file(&r.stored, &candidate))
+            {
                 return Ok(candidate);
             }
         }
         unreachable!("a free name is found before u32 runs out")
     }
+}
+
+/// A file name as the file system compares it: without case on Windows.
+fn folded(name: &OsStr) -> String {
+    let name = name.to_string_lossy();
+    if cfg!(windows) {
+        name.to_lowercase()
+    } else {
+        name.into_owned()
+    }
+}
+
+/// Whether `a` and `b` name one file (their texts; without case on Windows).
+fn same_file(a: &Path, b: &Path) -> bool {
+    folded(a.as_os_str()) == folded(b.as_os_str())
+}
+
+/// Whether `copy`'s name is one [`Journal::free_name`] gives the entry `path`: the entry's
+/// own, or with ` (n)` (n ≥ 2) after its stem.
+fn copy_name_of(copy: &Path, path: &Path) -> bool {
+    let (Some(name), Some(stem)) = (copy.file_name(), path.file_stem()) else {
+        return false;
+    };
+    let (name, stem) = (folded(name), folded(stem));
+    let extension = path
+        .extension()
+        .map(|e| format!(".{}", folded(e)))
+        .unwrap_or_default();
+    let Some(number) = name
+        .strip_prefix(&stem)
+        .and_then(|rest| rest.strip_suffix(&extension))
+    else {
+        return false;
+    };
+    number.is_empty()
+        || number
+            .strip_prefix(" (")
+            .and_then(|n| n.strip_suffix(')'))
+            .filter(|n| !n.starts_with('0') && n.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|n| n.parse::<u32>().ok())
+            .is_some_and(|n| n >= 2)
+}
+
+/// Whether the files of the shortcut record `r` that exist, the entry and its copy, are the
+/// original's shortcut: the entry is named `NCALayer.lnk`, or the file points to
+/// `NCALayer.exe`. One that cannot be read is not.
+fn original_shortcut(r: &Record) -> bool {
+    let by_name = r
+        .path
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case(SHORTCUT_NAME));
+    [&r.path, &r.stored]
+        .into_iter()
+        .all(|file| match fs::metadata(file) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+            Ok(meta) if meta.is_file() => {
+                by_name
+                    || crate::lnk::points_to(file, TARGET_NAME, MAX_SHORTCUT)
+                        .inspect_err(|e| tracing::warn!(error = %e, file = %file.display(), "a journalled shortcut is unreadable"))
+                        .unwrap_or(false)
+            }
+            Ok(_) => false,
+            Err(e) => {
+                tracing::warn!(error = %e, file = %file.display(), "a journalled shortcut is unreadable");
+                false
+            }
+        })
 }
 
 fn parse_records(bytes: &[u8]) -> Option<Vec<Record>> {
@@ -1359,7 +1444,8 @@ mod tests {
     }
 
     /// Records the original's disabling never writes: another file of the Startup or
-    /// autostart directory, our own entry, two entries sharing one copy.
+    /// autostart directory, our own entry, another program's shortcut (in Startup or as the
+    /// copy), a copy not named after its entry, one entry twice (without case on Windows).
     #[test]
     fn journal_naming_other_files_is_refused() {
         let (d, l, journal) = sandbox();
@@ -1368,6 +1454,12 @@ mod tests {
         let store = journal.with_file_name(STORE_DIR);
         let ours = autostart.join("openncalayer.desktop");
         fs::write(&ours, "[Desktop Entry]\n").unwrap();
+        fs::create_dir_all(&store).unwrap();
+        fs::write(
+            store.join("Moved.lnk"),
+            shortcut(r"C:\Other\other.exe", true),
+        )
+        .unwrap();
         let record = |kind: &str, path: &Path, stored: &str| {
             json!({
                 "kind": kind,
@@ -1375,22 +1467,63 @@ mod tests {
                 "stored": store.join(stored).to_str().unwrap(),
             })
         };
-        let journals = [
-            vec![record("desktopEntry", &ours, "openncalayer.desktop")],
-            vec![record(
-                "startupShortcut",
-                &startup.join("NCALayer.txt"),
-                "x.txt",
-            )],
-            vec![record("startupShortcut", &autostart.join("a.lnk"), "a.lnk")],
-            vec![record("machineRun", &startup.join("NCALayer.lnk"), "m.lnk")],
-            vec![
-                record("startupShortcut", &startup.join("NCALayer.lnk"), "same.lnk"),
-                record("startupShortcut", &startup.join("НЦАЛэйер.lnk"), "same.lnk"),
-            ],
+        let shortcut_record =
+            |name: &str, stored: &str| record("startupShortcut", &startup.join(name), stored);
+        let not_here = "an entry that is not one of the original's here";
+        let not_ours = "a copy that is not ours";
+        let twice = "an entry or a copy twice";
+        let foreign = "a shortcut that is not the original's";
+        let mut journals = vec![
+            (
+                vec![record("desktopEntry", &ours, "openncalayer.desktop")],
+                not_here,
+            ),
+            (
+                vec![shortcut_record("NCALayer.txt", "NCALayer.txt")],
+                not_here,
+            ),
+            (
+                vec![record("startupShortcut", &autostart.join("a.lnk"), "a.lnk")],
+                not_here,
+            ),
+            (
+                vec![record(
+                    "machineRun",
+                    &startup.join("NCALayer.lnk"),
+                    "NCALayer.lnk",
+                )],
+                not_here,
+            ),
+            (vec![shortcut_record("NCALayer.lnk", "same.lnk")], not_ours),
+            (
+                vec![shortcut_record("NCALayer.lnk", "NCALayer (1).lnk")],
+                not_ours,
+            ),
+            (
+                vec![shortcut_record("NCALayer.lnk", "NCALayer (02).lnk")],
+                not_ours,
+            ),
+            (
+                vec![
+                    shortcut_record("NCALayer.lnk", "NCALayer.lnk"),
+                    shortcut_record("NCALayer.lnk", "NCALayer (2).lnk"),
+                ],
+                twice,
+            ),
+            (vec![shortcut_record("Other.lnk", "Other.lnk")], foreign),
+            (vec![shortcut_record("Moved.lnk", "Moved.lnk")], foreign),
         ];
-        fs::create_dir_all(journal.parent().unwrap()).unwrap();
-        for entries in journals {
+        if cfg!(windows) {
+            // Names that differ only in case are one file there.
+            journals.push((
+                vec![
+                    shortcut_record("NCALayer.lnk", "NCALayer.lnk"),
+                    shortcut_record("ncalayer.LNK", "ncalayer (2).LNK"),
+                ],
+                twice,
+            ));
+        }
+        for (entries, why) in journals {
             let text = json!({ "entries": entries }).to_string();
             fs::write(&journal, &text).unwrap();
             for result in [
@@ -1399,13 +1532,45 @@ mod tests {
             ] {
                 let e = result.unwrap_err();
                 assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{text}");
+                assert!(e.to_string().contains(why), "{e}");
                 // The copies are named for the user.
                 assert!(e.to_string().contains(&*store.to_string_lossy()), "{e}");
             }
         }
         assert_eq!(fs::read_to_string(&ours).unwrap(), "[Desktop Entry]\n");
-        assert!(startup.join("NCALayer.lnk").exists());
-        assert!(startup.join("НЦАЛэйер.lnk").exists());
+        for name in ["NCALayer.lnk", "НЦАЛэйер.lnk", "Other.lnk"] {
+            assert!(startup.join(name).exists(), "{name}");
+        }
+        assert!(store.join("Moved.lnk").exists());
+    }
+
+    #[test]
+    fn copies_are_named_after_their_entry() {
+        let entry = Path::new("Startup").join("NCALayer.lnk");
+        let store = Path::new("original-autostart");
+        for ours in ["NCALayer.lnk", "NCALayer (2).lnk", "NCALayer (17).lnk"] {
+            assert!(copy_name_of(&store.join(ours), &entry), "{ours}");
+        }
+        for other in [
+            "Other.lnk",
+            "NCALayer.txt",
+            "NCALayer (1).lnk",
+            "NCALayer (02).lnk",
+            "NCALayer (x).lnk",
+            "NCALayer (+2).lnk",
+            "NCALayer(2).lnk",
+            "NCALayer.lnk.lnk",
+        ] {
+            assert!(!copy_name_of(&store.join(other), &entry), "{other}");
+        }
+        assert_eq!(
+            copy_name_of(&store.join("ncalayer (3).LNK"), &entry),
+            cfg!(windows)
+        );
+        assert!(copy_name_of(
+            &store.join("ncalayer.desktop"),
+            Path::new("ncalayer.desktop")
+        ));
     }
 
     /// A shortcut that cannot be read does not hide the others.

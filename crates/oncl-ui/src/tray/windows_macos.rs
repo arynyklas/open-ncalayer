@@ -106,6 +106,7 @@ impl Tray {
 
     pub(super) fn set_state(&self, state: TrayState) {
         let mut shared = self.shared.borrow_mut();
+        let menu_before = shared.model.menu();
         if !shared.model.set_state(state) {
             return;
         }
@@ -118,6 +119,13 @@ impl Tray {
             .and_then(|()| tray.set_tooltip(Some(model.tooltip())).map_err(tray_error));
         if let Err(e) = updated {
             tracing::warn!(error = %e, "cannot update the tray icon");
+        }
+        // «Остановить оригинал…» comes and goes with the state.
+        if model.menu() != menu_before {
+            match menu(model) {
+                Ok(menu) => tray.set_menu(Some(Box::new(menu))),
+                Err(e) => tracing::warn!(error = %e, "cannot update the tray menu"),
+            }
         }
     }
 

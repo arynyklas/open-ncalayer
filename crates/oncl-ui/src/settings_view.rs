@@ -16,7 +16,7 @@ pub(crate) use window::show_snapshot;
 pub(crate) use window::{is_open, open};
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use oncl_basics::Locale;
 use oncl_desktop::original::{EntryKind, EntryState};
@@ -326,7 +326,8 @@ pub struct OriginalView {
 }
 
 /// The block of `status` in `l`. Only this user's entries can be disabled or restored; an
-/// enabled `HKLM` entry gets the administrator's instructions.
+/// enabled `HKLM` entry gets the administrator's instructions, naming the key it is in (the
+/// 64-bit `Run` key, or `WOW6432Node`'s for a 32-bit installer).
 pub fn original_view(status: &OriginalStatus, l: Locale) -> OriginalView {
     let t = Texts::of(l);
     let mut lines = vec![
@@ -353,12 +354,14 @@ pub fn original_view(status: &OriginalStatus, l: Locale) -> OriginalView {
         };
         lines.push(format!("• {kind}: {} — {state}", entry.path.display()));
     }
-    if status
+    let admin_keys: Vec<String> = status
         .autostart
         .iter()
-        .any(|e| e.kind == EntryKind::MachineRun && e.enabled())
-    {
-        lines.push(t.machine_run_admin.to_owned());
+        .filter(|e| e.kind == EntryKind::MachineRun && e.enabled())
+        .map(|e| run_key(&e.path))
+        .collect();
+    if !admin_keys.is_empty() {
+        lines.push(t.machine_run_admin.replace("{0}", &admin_keys.join(", ")));
     }
     if let Some(owner) = &status.port_owner {
         lines.push(format!("{}{owner}", t.port_owner));
@@ -374,6 +377,15 @@ pub fn original_view(status: &OriginalStatus, l: Locale) -> OriginalView {
         text: lines.join("\n"),
         can_disable: any(EntryState::Enabled),
         can_restore: any(EntryState::DisabledByUs),
+    }
+}
+
+/// The key of a `Run` value shown as `HKLM\…\Run\NCALayer`: the text before its last `\`.
+fn run_key(value: &Path) -> String {
+    let shown = value.to_string_lossy();
+    match shown.rsplit_once('\\') {
+        Some((key, _)) => key.to_owned(),
+        None => shown.into_owned(),
     }
 }
 
@@ -798,7 +810,40 @@ mod tests {
                 .starts_with("The original NCALayer is found.\n• Startup shortcut: ")
         );
         assert!(view.text.contains("NCALayer.lnk — on\n"), "{}", view.text);
-        assert!(view.text.contains("Only an administrator"), "{}", view.text);
+        assert!(
+            view.text.contains(
+                r"delete the NCALayer value of HKLM\Software\Microsoft\Windows\CurrentVersion\Run, or"
+            ),
+            "{}",
+            view.text
+        );
+
+        // A 32-bit installer's value: the instruction names WOW6432Node's key; a value the
+        // user turned off needs no instruction.
+        let wow = AutostartEntry {
+            path: PathBuf::from(
+                r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run\NCALayer",
+            ),
+            ..machine.clone()
+        };
+        let off = AutostartEntry {
+            state: EntryState::DisabledByUser,
+            ..machine.clone()
+        };
+        let status32 = OriginalStatus {
+            found: true,
+            autostart: vec![off, wow],
+            port_owner: None,
+        };
+        let view32 = original_view(&status32, Locale::Ru);
+        assert!(
+            view32.text.ends_with(
+                r"удалите значение NCALayer в HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run или отключите его в Диспетчере задач → Автозагрузка."
+            ),
+            "{}",
+            view32.text
+        );
+        assert!(!view32.can_disable && !view32.can_restore);
         assert!(
             view.text
                 .ends_with(r"The port is held by: C:\Program Files\NCALayer\NCALayer.exe")

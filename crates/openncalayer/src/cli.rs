@@ -137,14 +137,12 @@ pub enum NmCommand {
 }
 
 /// Everything `run` sets up before the servers start: data paths, logging, the bound IPC
-/// endpoint of the browser extension bridge and, unless it is off, the wss server's TLS
-/// configuration and bound listening socket (non-blocking, for tokio).
+/// endpoint of the browser extension bridge and the wss server's TLS configuration and bound
+/// listening socket (non-blocking, for tokio), or why wss is off.
 pub struct Daemon {
     pub paths: Paths,
     pub ipc: IpcListener,
-    pub wss: Option<(Arc<rustls::ServerConfig>, TcpListener)>,
-    /// Why wss is off (`allow_no_wss`), for the user.
-    pub wss_off: Option<WssOff>,
+    pub wss: Result<(Arc<rustls::ServerConfig>, TcpListener), WssFailure>,
 }
 
 /// Why the wss server is off.
@@ -165,13 +163,13 @@ impl WssOff {
     pub fn text(self, l: Locale) -> String {
         match (self, l) {
             (WssOff::TlsNotConfigured, Locale::Ru) => {
-                "Сертификат для браузера не настроен".to_owned()
+                "TLS не настроен: нет сертификата для браузера".to_owned()
             }
             (WssOff::TlsNotConfigured, Locale::Kk) => {
-                "Браузерге арналған сертификат бапталмаған".to_owned()
+                "TLS бапталмаған: браузерге арналған сертификат жоқ".to_owned()
             }
             (WssOff::TlsNotConfigured, Locale::En) => {
-                "The certificate for browsers is not set up".to_owned()
+                "TLS is not set up: there is no certificate for browsers".to_owned()
             }
             (WssOff::TlsUnusable, Locale::Ru) => {
                 "Сертификат для браузера не загружается".to_owned()
@@ -202,32 +200,30 @@ impl WssOff {
 /// failure the message is already printed and the exit code returned:
 /// [`EXIT_ALREADY_RUNNING`], [`EXIT_TLS_NOT_CONFIGURED`], [`EXIT_PORT_BUSY`] or 1. With
 /// `allow_no_wss` any failure to start the wss server (TLS not set up or unusable, the port
-/// busy or not bindable) only turns it off, with a warning in the log.
-pub async fn prepare_run(allow_no_wss: bool) -> Result<Daemon, ExitCode> {
+/// busy or not bindable) only turns it off, with a warning in the log. With `tray_session`
+/// (a tray is to show the problem) so do TLS not set up and a busy port: the TLS wizard or
+/// stopping the original NCALayer lets wss start later; `run` still ends with the
+/// [`WssFailure`] if the tray cannot be shown.
+pub async fn prepare_run(allow_no_wss: bool, tray_session: bool) -> Result<Daemon, ExitCode> {
     let paths = data_paths()?;
     if let Err(e) = crate::logging::init(&paths.logs()) {
         warn!(dir = %paths.logs().display(), error = %e, "file logging is disabled");
     }
     let ipc = bind_ipc(&paths.data).await?;
-    let (wss, wss_off) = match open_wss(&paths) {
-        Ok(wss) => (Some(wss), None),
-        Err(failure) if allow_no_wss => {
+    let wss = match open_wss(&paths.tls(), listen_port()) {
+        Ok(wss) => Ok(wss),
+        Err(failure) if allow_no_wss || (tray_session && failure.fixed_in_the_tray()) => {
             warn!(
                 code = failure.code,
                 reason = %failure.message,
                 "wss is off; serving the browser extension only"
             );
-            (None, Some(failure.off))
+            Err(failure)
         }
         Err(failure) => return Err(failure.report()),
     };
     info!(data = %paths.data.display(), "daemon started");
-    Ok(Daemon {
-        paths,
-        ipc,
-        wss,
-        wss_off,
-    })
+    Ok(Daemon { paths, ipc, wss })
 }
 
 /// Binds the IPC endpoint of `data`.
@@ -252,12 +248,19 @@ async fn bind_ipc(data: &Path) -> Result<IpcListener, ExitCode> {
     }
 }
 
-/// The wss server's TLS configuration and listening socket.
-fn open_wss(paths: &Paths) -> Result<(Arc<rustls::ServerConfig>, TcpListener), Failure> {
-    let files = paths.tls();
-    configured(&files)?;
-    let tls = server_config(&files).map_err(|e| {
-        Failure::new(
+/// The wss server's TLS configuration from `files` and its listening socket on
+/// `127.0.0.1:port` (non-blocking, for tokio).
+///
+/// # Errors
+///
+/// TLS is not set up or cannot be used, or the port cannot be bound.
+pub fn open_wss(
+    files: &TlsFiles,
+    port: u16,
+) -> Result<(Arc<rustls::ServerConfig>, TcpListener), WssFailure> {
+    configured(files)?;
+    let tls = server_config(files).map_err(|e| {
+        WssFailure::new(
             1,
             WssOff::TlsUnusable,
             format!(
@@ -266,16 +269,15 @@ fn open_wss(paths: &Paths) -> Result<(Arc<rustls::ServerConfig>, TcpListener), F
             ),
         )
     })?;
-    let port = listen_port();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| {
         if port_busy(&e) {
-            Failure::new(
+            WssFailure::new(
                 EXIT_PORT_BUSY,
                 WssOff::PortBusy(port),
                 format!("Порт {port} занят (возможно, запущен оригинальный NCALayer)"),
             )
         } else {
-            Failure::new(
+            WssFailure::new(
                 1,
                 WssOff::PortUnavailable(port),
                 format!("Не удалось открыть порт 127.0.0.1:{port}: {e}"),
@@ -283,7 +285,7 @@ fn open_wss(paths: &Paths) -> Result<(Arc<rustls::ServerConfig>, TcpListener), F
         }
     })?;
     listener.set_nonblocking(true).map_err(|e| {
-        Failure::new(
+        WssFailure::new(
             1,
             WssOff::PortUnavailable(port),
             format!("Не удалось настроить порт 127.0.0.1:{port}: {e}"),
@@ -295,19 +297,26 @@ fn open_wss(paths: &Paths) -> Result<(Arc<rustls::ServerConfig>, TcpListener), F
 
 /// A failed step of a command: the message for the user, the exit code and, for the wss
 /// server, why it is off.
-struct Failure {
-    code: u8,
-    off: WssOff,
-    message: String,
+#[derive(Debug)]
+pub struct WssFailure {
+    pub code: u8,
+    pub off: WssOff,
+    pub message: String,
 }
 
-impl Failure {
+impl WssFailure {
     fn new(code: u8, off: WssOff, message: String) -> Self {
-        Failure { code, off, message }
+        WssFailure { code, off, message }
+    }
+
+    /// Whether the tray lets the user lift it without a restart: TLS not set up (the TLS
+    /// wizard), the port busy (stopping the original NCALayer).
+    pub fn fixed_in_the_tray(&self) -> bool {
+        matches!(self.off, WssOff::TlsNotConfigured | WssOff::PortBusy(_))
     }
 
     /// Prints the message; returns the exit code.
-    fn report(self) -> ExitCode {
+    pub fn report(self) -> ExitCode {
         eprintln!("{}", self.message);
         ExitCode::from(self.code)
     }
@@ -329,15 +338,15 @@ fn data_paths() -> Result<Paths, ExitCode> {
 }
 
 /// The stored [`TlsInfo`], or why there is none.
-fn configured(files: &TlsFiles) -> Result<TlsInfo, Failure> {
+fn configured(files: &TlsFiles) -> Result<TlsInfo, WssFailure> {
     match load_info(files) {
         Ok(Some(info)) => Ok(info),
-        Ok(None) => Err(Failure::new(
+        Ok(None) => Err(WssFailure::new(
             EXIT_TLS_NOT_CONFIGURED,
             WssOff::TlsNotConfigured,
             "TLS не настроен: выполните `openncalayer tls init`".to_owned(),
         )),
-        Err(e) => Err(Failure::new(
+        Err(e) => Err(WssFailure::new(
             1,
             WssOff::TlsUnusable,
             format!("Не удалось прочитать {}: {e}", files.info().display()),
@@ -545,7 +554,7 @@ fn save_and_explain(
 }
 
 fn tls_status(files: &TlsFiles) -> Result<ExitCode, ExitCode> {
-    let info = configured(files).map_err(Failure::report)?;
+    let info = configured(files).map_err(WssFailure::report)?;
     println!("Каталог: {}", files.dir.display());
     match &info.source {
         TlsSource::Own => {
@@ -916,6 +925,42 @@ mod tests {
             WssOff::TlsNotConfigured.text(Locale::Kk),
             WssOff::TlsNotConfigured.text(Locale::Ru)
         );
+    }
+
+    /// What a tray session lets start without wss: TLS not set up and a busy port, which the
+    /// TLS wizard and stopping the original fix; a broken certificate still ends `run`.
+    #[test]
+    fn only_tls_missing_and_a_busy_port_wait_for_the_tray() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TlsFiles {
+            dir: dir.path().join("tls"),
+        };
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let missing = open_wss(&files, port).unwrap_err();
+        assert_eq!(missing.off, WssOff::TlsNotConfigured);
+        assert_eq!(missing.code, EXIT_TLS_NOT_CONFIGURED);
+        assert!(missing.fixed_in_the_tray());
+
+        let material = oncl_tls::generate(OffsetDateTime::now_utc(), "cli").unwrap();
+        oncl_tls::save(&files, &material).unwrap();
+        let busy = open_wss(&files, port).unwrap_err();
+        assert_eq!(busy.off, WssOff::PortBusy(port));
+        assert_eq!(busy.code, EXIT_PORT_BUSY);
+        assert!(busy.fixed_in_the_tray());
+        drop(held);
+        let (_, listener) = open_wss(&files, port).unwrap();
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+        drop(listener);
+
+        fs::write(
+            files.dir.join("server.key"),
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n",
+        )
+        .unwrap();
+        let broken = open_wss(&files, port).unwrap_err();
+        assert_eq!(broken.off, WssOff::TlsUnusable);
+        assert!(!broken.fixed_in_the_tray());
     }
 
     #[cfg(feature = "e2e-prompter")]

@@ -232,3 +232,9 @@ msgstr "Ни один браузер ещё не открыл страницу."
 
 msgid "Yes"
 msgstr "Да"
+
+msgid "Stop the original NCALayer"
+msgstr "Остановить оригинальный NCALayer"
+
+msgid "Stop"
+msgstr "Остановить"

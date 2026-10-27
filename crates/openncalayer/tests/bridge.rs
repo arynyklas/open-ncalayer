@@ -1029,6 +1029,34 @@ mod binary {
         });
     }
 
+    /// `run` with a tray outlives TLS not set up and a busy port (the tray lets the user fix
+    /// them); when the tray cannot be shown (no session bus) it ends with P1's codes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn without_a_tray_tls_missing_and_a_busy_port_still_end_run() {
+        let dir = daemon_dir();
+        let port = free_port();
+        let tray_run = |dir: &Path, port| {
+            let mut command = daemon(dir, port, &["run"]);
+            command.env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent");
+            exit_of(command)
+        };
+        let (status, stderr) = tray_run(dir.path(), port);
+        assert_eq!(status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("TLS не настроен"), "{stderr}");
+        let log = logs(dir.path());
+        assert!(
+            log.contains("the system tray is unavailable; running without it"),
+            "{log}"
+        );
+
+        configure_tls(dir.path());
+        let (port, _held) = hold_port();
+        let (status, stderr) = tray_run(dir.path(), port);
+        assert_eq!(status.code(), Some(3), "{stderr}");
+        assert!(stderr.contains(&format!("Порт {port} занят")), "{stderr}");
+    }
+
     #[test]
     fn serves_wss_and_ipc_together() {
         let dir = daemon_dir();

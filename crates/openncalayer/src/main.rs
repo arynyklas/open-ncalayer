@@ -2,7 +2,6 @@
 
 use std::cell::RefCell;
 use std::io;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::rc::{Rc, Weak};
@@ -13,27 +12,32 @@ use std::time::{Duration, Instant, SystemTime};
 use clap::Parser;
 use oncl_accessory::UiRequest;
 use oncl_basics::{Locale, Prompter};
+use oncl_desktop::PortOwner;
 use oncl_desktop::Settings;
+use oncl_desktop::port_owner;
 use oncl_ipc::IpcListener;
 use oncl_protocol::Registry;
 use oncl_tls::{SelftestReports, TlsFiles};
 use oncl_ui::{
-    AboutInfo, DesktopWindow, DesktopWindows, Notification, SlintPrompter, TrayCommand, TrayHandle,
-    TrayState,
+    AboutInfo, DesktopWindow, DesktopWindows, Notification, SlintPrompter, StopOriginal, Stopped,
+    TrayCommand, TrayHandle, TrayState,
 };
-use openncalayer::cli::{self, Cli, Command};
+use openncalayer::cli::{self, Cli, Command, WssOff};
 use openncalayer::notices::TrayStatus;
 use openncalayer::renewal::{self, RenewalCheck};
+use openncalayer::wss::{Listening, Wss};
 use openncalayer::{
-    JsonSettings, LiveProxyTransport, LiveTls, Paths, ServerConfig, build_registry, desktop,
+    JsonSettings, LiveProxyTransport, Paths, ServerConfig, build_registry, desktop, listen_port,
     load_settings, serve, serve_ipc,
 };
 use time::OffsetDateTime;
 use tokio::runtime::Runtime;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 
 /// How long `run` waits for the server thread once the dialogs' event loop has ended.
 const SERVER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long wss keeps trying to take the port after the original NCALayer is stopped.
+const REBIND_WAIT: Duration = Duration::from_secs(2);
 
 /// The tray and what it shows, on the event loop's thread.
 struct Tray {
@@ -46,8 +50,8 @@ thread_local! {
 }
 
 /// Changes the tray's status with `f` on the event loop, from any thread; then the tray
-/// shows the status's warning and the notification `f` returns. Without an event loop or a
-/// tray nothing is shown.
+/// shows the status's warning and menu and the notification `f` returns. Without an event
+/// loop or a tray nothing is shown.
 fn post_to_tray(f: impl FnOnce(&mut TrayStatus) -> Option<Notification> + Send + 'static) {
     let posted = oncl_ui::run_on_event_loop(move || {
         TRAY.with_borrow_mut(|tray| {
@@ -56,9 +60,7 @@ fn post_to_tray(f: impl FnOnce(&mut TrayStatus) -> Option<Notification> + Send +
             };
             let notification = f(&mut tray.status);
             if let Some(handle) = tray.handle.upgrade() {
-                handle.set_state(TrayState {
-                    warning: tray.status.warning(),
-                });
+                handle.set_state(tray.status.tray_state());
                 if let Some(notification) = notification {
                     handle.notify(notification);
                 }
@@ -68,6 +70,81 @@ fn post_to_tray(f: impl FnOnce(&mut TrayStatus) -> Option<Notification> + Send +
     if let Err(e) = posted {
         tracing::debug!(error = %e, "no event loop: the tray is not told");
     }
+}
+
+/// Tells the tray how wss is now: why it is off and, for a busy port, whether the original
+/// NCALayer holds it (looked up here: call it off the event loop). With `notify` a problem
+/// the tray can fix is also notified.
+fn tell_tray_wss(wss: &Wss, notify: bool) {
+    let off = wss.off();
+    let original = original_on_port(off);
+    post_to_tray(move |status| {
+        status.wss_off = off;
+        status.original = original;
+        if notify {
+            status.wss_off_notification()
+        } else {
+            None
+        }
+    });
+}
+
+/// The original NCALayer holding the port, if a busy port is why wss is off (`off`).
+fn original_on_port(off: Option<WssOff>) -> Option<PortOwner> {
+    let Some(WssOff::PortBusy(port)) = off else {
+        return None;
+    };
+    match port_owner::port_owner(port) {
+        Ok(Some(owner)) if owner.looks_original && owner.pid != std::process::id() => {
+            tracing::info!(pid = owner.pid, exe = %owner.exe.display(), port, "the original NCALayer holds the port");
+            Some(owner)
+        }
+        Ok(Some(owner)) => {
+            tracing::info!(pid = owner.pid, exe = %owner.exe.display(), port, "another program holds the port");
+            None
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, port, "cannot tell who holds the port");
+            None
+        }
+    }
+}
+
+/// «Остановить оригинал…» (the menu, or the notification's button): asks before the
+/// original NCALayer the tray found on the port is stopped. On the event loop.
+fn offer_to_stop_original(wss: &Arc<Wss>) {
+    let owner = TRAY.with_borrow(|tray| {
+        tray.as_ref()
+            .and_then(|tray| tray.status.original_on_port().cloned())
+    });
+    let Some(owner) = owner else {
+        tracing::info!("the original NCALayer does not hold the port (any more)");
+        return;
+    };
+    let wss = Arc::clone(wss);
+    oncl_ui::ask_stop_original(StopOriginal {
+        port: wss.port(),
+        exe: owner.exe.clone(),
+        pid: owner.pid,
+        stop: Box::new(move |locale| stop_original(&owner, &wss, locale)),
+    });
+}
+
+/// Stops the original NCALayer `owner` ([`port_owner::stop`] checks it is still that
+/// process), then starts wss on the freed port in this process, waiting [`REBIND_WAIT`] for
+/// it; why wss is still off is told in `locale`. Either way the tray shows the port as it is
+/// now. Blocks: call it off the event loop.
+fn stop_original(owner: &PortOwner, wss: &Wss, locale: Locale) -> io::Result<Stopped> {
+    let result = port_owner::stop(owner).map(|()| {
+        tracing::info!(pid = owner.pid, exe = %owner.exe.display(), "the original NCALayer is stopped");
+        match wss.start_within(REBIND_WAIT) {
+            Ok(()) => Stopped::Serving,
+            Err(off) => Stopped::WssOff(off.text(locale)),
+        }
+    });
+    tell_tray_wss(wss, false);
+    result
 }
 
 fn main() -> ExitCode {
@@ -97,6 +174,11 @@ fn main() -> ExitCode {
 /// windows does not. With feature `e2e-prompter` and its script set there are no dialogs:
 /// without a tray the main thread only waits for the servers. A tray that cannot be shown is
 /// only logged.
+///
+/// With a tray, TLS not set up and a busy port do not end `run`: it serves the browser
+/// extension, the tray says what is wrong, and wss starts in this process once the TLS
+/// wizard saves a certificate or the original NCALayer holding the port is stopped. Without
+/// one (`--no-tray`, or no tray to show) they end it as before, unless `allow_no_wss`.
 fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -108,7 +190,7 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let daemon = match runtime.block_on(cli::prepare_run(allow_no_wss)) {
+    let daemon = match runtime.block_on(cli::prepare_run(allow_no_wss, with_tray)) {
         Ok(daemon) => daemon,
         Err(code) => return code,
     };
@@ -129,32 +211,47 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         Arc::new(open_requested_window),
     );
     let stop = Arc::new(Notify::new());
-    let status = TrayStatus::new(locale, daemon.wss_off);
+    // A failure only a tray lets the daemon live with.
+    let (opened, waits_for_tray) = match daemon.wss {
+        Ok(opened) => (Ok(opened), None),
+        Err(failure) => (Err(failure.off), (!allow_no_wss).then_some(failure)),
+    };
+    let (wss, listeners) = Wss::new(daemon.paths.tls(), listen_port(), opened);
+    let status = TrayStatus::new(locale, wss.off());
     let tray = if with_tray {
         start_tray(
             locale,
             daemon.paths.logs(),
-            status.warning(),
+            status.tray_state(),
             Arc::clone(&stop),
+            Arc::clone(&wss),
         )
         .map(Rc::new)
     } else {
         None
     };
+    if tray.is_none()
+        && let Some(failure) = waits_for_tray
+    {
+        // Nothing would tell the user, nor let them fix it: P1's exit.
+        return failure.report();
+    }
     if let Some(tray) = &tray {
         TRAY.set(Some(Tray {
             handle: Rc::downgrade(tray),
             status,
         }));
+        if wss.off().is_some() {
+            // Who holds a busy port is looked up off the event loop; a problem the tray
+            // can fix is notified once the loop runs.
+            let wss = Arc::clone(&wss);
+            oncl_ui::when_event_loop_runs(move || {
+                spawn_named("wss-state", move || tell_tray_wss(&wss, true));
+            });
+        }
     }
     let reports = Arc::new(SelftestReports::new());
-    let (ipc, wss) = (
-        daemon.ipc,
-        daemon
-            .wss
-            .map(|(tls, listener)| (Arc::new(LiveTls::new(tls)), listener)),
-    );
-    let live = wss.as_ref().map(|(live, _)| Arc::clone(live));
+    let ipc = daemon.ipc;
     let event_loop = windows || tray.is_some();
     if event_loop {
         oncl_ui::set_desktop_windows(desktop_windows(
@@ -164,18 +261,18 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             http,
             tray.as_ref().map_or_else(Weak::new, Rc::downgrade),
             Arc::clone(&reports),
-            live.clone(),
+            Arc::clone(&wss),
         ));
     }
     let files = daemon.paths.tls();
     if event_loop {
         // Its outcome goes to the tray once the event loop runs.
-        oncl_ui::when_event_loop_runs(move || start_renewal(files, live));
+        oncl_ui::when_event_loop_runs(move || start_renewal(files, wss));
     } else {
-        start_renewal(files, live);
+        start_renewal(files, wss);
     }
     let server = thread::Builder::new().name("server".into()).spawn(move || {
-        let result = runtime.block_on(serve_all(ipc, wss, Arc::new(registry), reports, stop));
+        let result = runtime.block_on(serve_all(ipc, listeners, Arc::new(registry), reports, stop));
         if let Err(e) = &result {
             tracing::error!(error = %e, "server stopped");
         }
@@ -248,15 +345,17 @@ fn open_requested_window(window: UiRequest) {
 }
 
 /// Checks the certificate in `files` now and then once a day by the wall clock
-/// ([`renewal::check`], [`renewal::check_due`]): a re-issued one is served at once through
-/// `live`; the outcome goes to the tray.
-fn start_renewal(files: TlsFiles, live: Option<Arc<LiveTls>>) {
+/// ([`renewal::check`], [`renewal::check_due`]): a re-issued one goes to `wss` at once
+/// ([`Wss::reload`]); the outcome goes to the tray.
+fn start_renewal(files: TlsFiles, wss: Arc<Wss>) {
     let spawned = thread::Builder::new().name("renewal".into()).spawn(move || {
         loop {
             let checked = SystemTime::now();
-            let check = renewal::check(&files, OffsetDateTime::now_utc(), || {
-                renewal::reload(&files, live.as_deref())
-            });
+            let check = renewal::check(&files, OffsetDateTime::now_utc(), || wss.reload());
+            if matches!(check, RenewalCheck::Renewed { .. }) {
+                // It may have started wss, too.
+                tell_tray_wss(&wss, false);
+            }
             match &check {
                 RenewalCheck::Nothing => {}
                 RenewalCheck::Due { days, expired } => {
@@ -286,7 +385,7 @@ fn start_renewal(files: TlsFiles, live: Option<Arc<LiveTls>>) {
 
 /// What the settings, TLS wizard and About windows show and change. A save applies the
 /// proxy to `http` and the language to the tray, if it is still there. A certificate the
-/// wizard saves is served through `live` at once.
+/// wizard saves goes to `wss` at once: served, or wss started with it.
 fn desktop_windows(
     paths: &Paths,
     locale: Locale,
@@ -294,7 +393,7 @@ fn desktop_windows(
     http: Arc<LiveProxyTransport>,
     tray: Weak<TrayHandle>,
     reports: Arc<SelftestReports>,
-    live: Option<Arc<LiveTls>>,
+    wss: Arc<Wss>,
 ) -> DesktopWindows {
     let exe = std::env::current_exe().unwrap_or_else(|e| {
         tracing::warn!(error = %e, "the program's path is unknown; autostart cannot be set");
@@ -304,19 +403,26 @@ fn desktop_windows(
         .into_iter()
         .map(|(symname, version)| (symname.to_owned(), version.to_owned()))
         .collect();
+    let saved_to = Arc::clone(&wss);
     DesktopWindows {
         locale,
-        settings: desktop::settings_services(paths, exe),
+        settings: desktop::settings_services(paths, exe, wss.port()),
         about: AboutInfo {
             commit: env!("ONCL_GIT_COMMIT").to_owned(),
             bundles,
             modules,
         },
-        tls: desktop::tls_wizard_services(paths, reports, live, |files: &TlsFiles| {
-            // A new certificate is not due: the tray forgets the reminder.
+        tls: desktop::tls_wizard_services(paths, reports, wss, move |files: &TlsFiles| {
+            // A new certificate is not due: the tray forgets the reminder. It may have
+            // started wss; if not, the port's owner is looked up again (on the wizard's
+            // worker thread).
             let state = renewal::state(files, OffsetDateTime::now_utc());
+            let off = saved_to.off();
+            let original = original_on_port(off);
             post_to_tray(move |status| {
                 status.renewal = state;
+                status.wss_off = off;
+                status.original = original;
                 None
             });
         }),
@@ -334,14 +440,16 @@ fn desktop_windows(
     }
 }
 
-/// The tray in `locale` with `warning` shown, or `None` (logged) if it cannot be shown. Its
+/// The tray in `locale` showing `state`, or `None` (logged) if it cannot be shown. Its
 /// commands run on the event loop: «Выход» notifies `stop`, «Журнал» opens `logs`,
-/// «Настройки…», «Сертификат для браузера…» and «О программе» open their windows.
+/// «Настройки…», «Сертификат для браузера…» and «О программе» open their windows,
+/// «Остановить оригинал…» asks before stopping the original that keeps `wss` off.
 fn start_tray(
     locale: Locale,
     logs: PathBuf,
-    warning: Option<String>,
+    state: TrayState,
     stop: Arc<Notify>,
+    wss: Arc<Wss>,
 ) -> Option<TrayHandle> {
     let tray = oncl_ui::start_tray(locale, move |command| match command {
         TrayCommand::Quit => {
@@ -352,19 +460,24 @@ fn start_tray(
         TrayCommand::Settings => oncl_ui::open_window(DesktopWindow::Settings),
         TrayCommand::About => oncl_ui::open_window(DesktopWindow::About),
         TrayCommand::TlsWizard => oncl_ui::open_window(DesktopWindow::TlsWizard),
-        TrayCommand::StopOriginal => {
-            tracing::info!(?command, "window requested; not available yet");
-        }
+        TrayCommand::StopOriginal => offer_to_stop_original(&wss),
     });
     match tray {
         Ok(tray) => {
-            tray.set_state(TrayState { warning });
+            tray.set_state(state);
             Some(tray)
         }
         Err(e) => {
             tracing::warn!(error = %e, "the system tray is unavailable; running without it");
             None
         }
+    }
+}
+
+/// Runs `f` on a thread named `name`; a thread that cannot start is logged.
+fn spawn_named(name: &str, f: impl FnOnce() + Send + 'static) {
+    if let Err(e) = thread::Builder::new().name(name.into()).spawn(f) {
+        tracing::warn!(thread = name, error = %e, "cannot start a thread");
     }
 }
 
@@ -418,35 +531,38 @@ fn scripted_prompter() -> Result<Option<Arc<dyn Prompter>>, ExitCode> {
     Ok(scripted)
 }
 
-/// The bridge and, unless it is off, the wss server (its self-test reports going to
-/// `reports`), until either stops or `stop` is notified.
+/// The bridge and the wss server on each listener `listeners` brings (at the start, or once
+/// [`Wss`] starts it later; its self-test reports going to `reports`), until the bridge or a
+/// wss server stops or `stop` is notified.
 async fn serve_all(
     ipc: IpcListener,
-    wss: Option<(Arc<LiveTls>, TcpListener)>,
+    mut listeners: mpsc::UnboundedReceiver<Listening>,
     registry: Arc<Registry>,
     reports: Arc<SelftestReports>,
     stop: Arc<Notify>,
 ) -> io::Result<()> {
-    let stopped = async move {
-        stop.notified().await;
-        tracing::info!("stopping the servers");
-        Ok(())
-    };
-    let Some((tls, listener)) = wss else {
-        return tokio::select! {
-            result = serve_ipc(ipc, registry) => result,
-            result = stopped => result,
-        };
-    };
-    let listener = tokio::net::TcpListener::from_std(listener)?;
-    let cfg = ServerConfig {
-        selftest: reports,
-        ..ServerConfig::new(tls, Arc::clone(&registry))
-    };
-    tokio::select! {
-        result = serve_ipc(ipc, registry) => result,
-        result = serve(listener, cfg) => result,
-        result = stopped => result,
+    let bridge = serve_ipc(ipc, Arc::clone(&registry));
+    let stopped = stop.notified();
+    tokio::pin!(bridge, stopped);
+    let mut servers = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            result = &mut bridge => return result,
+            () = &mut stopped => {
+                tracing::info!("stopping the servers");
+                return Ok(());
+            }
+            Some(Listening { tls, listener }) = listeners.recv() => {
+                let listener = tokio::net::TcpListener::from_std(listener)?;
+                let cfg = ServerConfig {
+                    selftest: Arc::clone(&reports),
+                    ..ServerConfig::new(tls, Arc::clone(&registry))
+                };
+                servers.spawn(serve(listener, cfg));
+            }
+            // `serve` returns only if it cannot run.
+            Some(ended) = servers.join_next() => return ended.map_err(io::Error::other)?,
+        }
     }
 }
 
@@ -504,23 +620,36 @@ mod tests {
         drop(tx);
     }
 
+    /// A wss listener on a free port of `127.0.0.1`, with a certificate saved under `dir`.
+    fn listening(dir: &Path) -> Listening {
+        let files = oncl_tls::TlsFiles {
+            dir: dir.join("tls"),
+        };
+        let material = oncl_tls::generate(time::OffsetDateTime::now_utc(), "stop").unwrap();
+        oncl_tls::save(&files, &material).unwrap();
+        let tls = Arc::new(oncl_tls::server_config(&files).unwrap());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        Listening {
+            tls: Arc::new(openncalayer::LiveTls::new(tls)),
+            listener,
+        }
+    }
+
+    async fn bridge(dir: &Path) -> IpcListener {
+        oncl_ipc::bind(&oncl_ipc::endpoint(dir).unwrap())
+            .await
+            .unwrap()
+    }
+
     /// `serve_all` with the bridge in `dir` and, if `wss`, a wss server on a free port;
     /// `stop` notified before it starts.
     async fn serve_all_stopped(dir: &Path, wss: bool) -> io::Result<()> {
-        let ipc = oncl_ipc::bind(&oncl_ipc::endpoint(dir).unwrap())
-            .await
-            .unwrap();
-        let wss = wss.then(|| {
-            let files = oncl_tls::TlsFiles {
-                dir: dir.join("tls"),
-            };
-            let material = oncl_tls::generate(time::OffsetDateTime::now_utc(), "stop").unwrap();
-            oncl_tls::save(&files, &material).unwrap();
-            let tls = Arc::new(oncl_tls::server_config(&files).unwrap());
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            (Arc::new(LiveTls::new(tls)), listener)
-        });
+        let ipc = bridge(dir).await;
+        let (listeners, received) = tokio::sync::mpsc::unbounded_channel();
+        if wss {
+            assert!(listeners.send(listening(dir)).is_ok());
+        }
         let stop = Arc::new(Notify::new());
         // Like «Выход» picked before the servers got to wait for it.
         stop.notify_one();
@@ -528,7 +657,7 @@ mod tests {
             Duration::from_secs(10),
             serve_all(
                 ipc,
-                wss,
+                received,
                 Arc::new(Registry::default()),
                 Arc::new(SelftestReports::new()),
                 stop,
@@ -536,6 +665,52 @@ mod tests {
         )
         .await
         .expect("the servers did not stop")
+    }
+
+    /// A listener handed over while the servers run (wss started later, [`Wss`]) is served:
+    /// a connection that is no TLS gets closed.
+    #[test]
+    fn a_later_listener_is_served() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        runtime.block_on(async {
+            let ipc = bridge(dir.path()).await;
+            let (listeners, received) = tokio::sync::mpsc::unbounded_channel();
+            let stop = Arc::new(Notify::new());
+            let servers = tokio::spawn(serve_all(
+                ipc,
+                received,
+                Arc::new(Registry::default()),
+                Arc::new(SelftestReports::new()),
+                Arc::clone(&stop),
+            ));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let later = listening(dir.path());
+            let address = later.listener.local_addr().unwrap();
+            assert!(listeners.send(later).is_ok());
+
+            let mut tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+            tcp.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+            let mut rest = Vec::new();
+            // Only a served listener's connection is answered and closed; one left in the
+            // backlog would wait for the timeout.
+            let closed = tokio::time::timeout(Duration::from_secs(10), tcp.read_to_end(&mut rest))
+                .await
+                .expect("the connection was not served");
+            drop(closed);
+
+            stop.notify_one();
+            tokio::time::timeout(Duration::from_secs(10), servers)
+                .await
+                .expect("the servers did not stop")
+                .unwrap()
+                .unwrap();
+        });
     }
 
     #[test]

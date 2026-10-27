@@ -1,0 +1,62 @@
+// «Остановить оригинал…»: asks before the original NCALayer holding the port is ended, then
+// shows how stopping it and starting wss went. The question and the outcome are composed in
+// Rust.
+
+import { Button, VerticalBox } from "std-widgets.slint";
+
+export component StopOriginalWindow inherits Window {
+    title: @tr("Stop the original NCALayer");
+    min-width: 460px;
+
+    in property <string> question;
+    // The outcome, and whether it failed.
+    in property <string> message;
+    in property <bool> message-is-error;
+    // Stopping runs: the buttons wait.
+    in property <bool> busy;
+    // Stopped: only «Закрыть» is left.
+    in property <bool> done;
+
+    callback stop();
+    callback dismiss();
+
+    VerticalBox {
+        Text {
+            text: root.question;
+            wrap: word-wrap;
+        }
+
+        if !root.message.is-empty: Text {
+            text: root.message;
+            wrap: word-wrap;
+            color: root.message-is-error ? #c42b1c : #2e7d32;
+        }
+
+        // A taller window grows here, not in the controls.
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 0;
+            spacing: 8px;
+            alignment: end;
+            if !root.done: Button {
+                text: @tr("Stop");
+                primary: true;
+                enabled: !root.busy;
+                clicked => {
+                    root.stop();
+                }
+            }
+
+            Button {
+                text: root.done ? @tr("Close") : @tr("Cancel");
+                enabled: !root.busy;
+                clicked => {
+                    root.dismiss();
+                }
+            }
+        }
+    }
+}

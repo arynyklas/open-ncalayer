@@ -6,14 +6,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use oncl_desktop::original::Unavailable;
-use oncl_desktop::{Autostart, BrowserExtension, ExtensionError, ExtensionStatus};
+use oncl_desktop::{
+    Autostart, BrowserExtension, ExtensionError, ExtensionStatus, OriginalLocations,
+    OriginalNcaLayer,
+};
 use oncl_tls::{SelftestReports, TlsFiles};
 use oncl_ui::SettingsServices;
 use oncl_ui::tls_wizard::{SystemTrust, TlsWizardServices};
 
 use crate::nm::{self, Item, NmLayout, Report, State};
-use crate::{LiveTls, Paths, cli, listen_port, renewal};
+use crate::wss::Wss;
+use crate::{Paths, cli};
 
 /// The native messaging host as `openncalayer nm install|uninstall|status` handles it: the
 /// relay `relay` (next to the daemon) installed for the daemon `daemon` with the data
@@ -134,8 +137,9 @@ impl Autostart for NoAutostart {
 }
 
 /// The settings window's services for this user and the daemon `exe` with the data
-/// directory of `paths`. The original NCALayer is not managed yet.
-pub fn settings_services(paths: &Paths, exe: PathBuf) -> SettingsServices {
+/// directory of `paths`: the original NCALayer of this user, its journal
+/// `<data>/original-autostart.json`, and wss's `port` to tell who holds it.
+pub fn settings_services(paths: &Paths, exe: PathBuf, port: u16) -> SettingsServices {
     let autostart = oncl_desktop::autostart::current_user().unwrap_or_else(|e| {
         tracing::warn!(error = %e, "the autostart entry is unknown");
         Box::new(NoAutostart(e.to_string()))
@@ -150,36 +154,44 @@ pub fn settings_services(paths: &Paths, exe: PathBuf) -> SettingsServices {
         exe.clone(),
         paths.data.clone(),
     );
+    let original = OriginalNcaLayer::new(
+        OriginalLocations::detect(),
+        paths.data.join(ORIGINAL_JOURNAL),
+        port,
+    );
     SettingsServices {
         settings_path: paths.settings(),
         exe,
         autostart,
-        original: Box::new(Unavailable),
+        original: Box::new(original),
         extension: Box::new(extension),
     }
 }
 
+/// The journal of the original's autostart entries disabled by us, in the data directory.
+pub const ORIGINAL_JOURNAL: &str = "original-autostart.json";
+
 /// The TLS wizard's services for this user: the TLS files of `paths`, the trust stores of
 /// this user ([`SystemTrust`]), mkcert's CA if there is one, the self-test `reports`. A
-/// saved certificate is served through `live` at once (when wss runs); then `on_saved` runs
-/// with the files (on the wizard's worker thread).
+/// saved certificate goes to `wss` at once ([`Wss::reload`]: served, or wss started with
+/// it); then `on_saved` runs with the files (on the wizard's worker thread).
 pub fn tls_wizard_services(
     paths: &Paths,
     reports: Arc<SelftestReports>,
-    live: Option<Arc<LiveTls>>,
+    wss: Arc<Wss>,
     on_saved: impl Fn(&TlsFiles) + Send + Sync + 'static,
 ) -> TlsWizardServices {
     let files = paths.tls();
     let saved = files.clone();
     TlsWizardServices {
         files,
-        port: listen_port(),
+        port: wss.port(),
         label: cli::label(),
         reports,
         trust: Box::new(SystemTrust),
         mkcert: Box::new(oncl_tls::mkcert_caroot),
         apply: Box::new(move || {
-            let applied = renewal::reload(&saved, live.as_deref());
+            let applied = wss.reload();
             on_saved(&saved);
             applied
         }),
