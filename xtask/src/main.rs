@@ -12,7 +12,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Fail if the executables import DLLs or functions that Windows 7 lacks.
+    /// Fail if the executables import DLLs or functions that Windows 7 lacks; an import from
+    /// an app-local DLL next to the executable passes if that DLL exports it.
     CheckImports {
         #[arg(required = true)]
         exes: Vec<PathBuf>,
@@ -52,6 +53,16 @@ enum Command {
     },
     /// Verify our XMLDSig and CMS signatures with NCANode (Kalkan) in Docker (Linux only).
     InteropNcanode,
+    /// Build the Windows 7 programs with their app-local DLLs into `<out>/<arch>/`, run the
+    /// import gate on them and, on Windows, start them there.
+    Win7 {
+        /// Architectures to build.
+        #[arg(long, value_enum, default_value_t = xtask::win7::Selection::All)]
+        arch: xtask::win7::Selection,
+        /// Output directory [default: target/win7].
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -64,7 +75,7 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::CheckImports { exes } => match xtask::imports::check_imports(&exes)? {
             0 => Ok(()),
-            found => anyhow::bail!("{found} imports are missing on Windows 7"),
+            found => anyhow::bail!("{found} violations of the Windows 7 import gate"),
         },
         Command::Ext {
             command: ExtCommand::Build,
@@ -111,6 +122,11 @@ fn main() -> anyhow::Result<()> {
             }
             println!("{} is up to date", xtask::licenses::OUTPUT);
             Ok(())
+        }
+        Command::Win7 { arch, out } => {
+            let root = oncl_testkit::workspace_root();
+            let out = out.unwrap_or_else(|| root.join("target").join("win7"));
+            xtask::win7::run(&root, arch, &out)
         }
     }
 }

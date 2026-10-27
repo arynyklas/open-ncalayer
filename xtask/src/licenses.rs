@@ -42,8 +42,9 @@ pub const VENDOR: &str = "vendor";
 const PROGRAMS: [&str; 2] = ["openncalayer", "oncl-nmhost"];
 
 /// The platforms we ship for.
-pub const TARGETS: [&str; 7] = [
+pub const TARGETS: [&str; 8] = [
     "x86_64-pc-windows-msvc",
+    "i686-pc-windows-msvc",
     "x86_64-win7-windows-msvc",
     "i686-win7-windows-msvc",
     "x86_64-unknown-linux-gnu",

@@ -9,3 +9,4 @@ pub mod imports;
 pub mod interop;
 pub mod licenses;
 pub mod ncanode;
+pub mod win7;
