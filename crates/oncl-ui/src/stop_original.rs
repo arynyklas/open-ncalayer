@@ -3,12 +3,11 @@
 //! job ([`worker`]) while the window waits; then the window shows how it went. One window at a
 //! time; its texts are composed here.
 
-use std::cell::{Cell, RefCell};
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread::LocalKey;
 
 use oncl_basics::Locale;
 use slint::{CloseRequestResponse, ComponentHandle, PlatformError, SharedString};
@@ -17,13 +16,15 @@ use crate::foreground;
 use crate::prompter::select_desktop_language;
 use crate::ui::StopOriginalWindow;
 use crate::windows::{self, Desktop};
-use crate::worker::{self, JobWindow, run, with};
+use crate::worker::{self, JobWindow, Slot, run, with};
 
 /// How stopping the original came out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Stopped {
     /// It is stopped, and wss serves on the port now.
     Serving,
+    /// It had ended already (nothing was stopped), and wss serves on the freed port now.
+    WasGone,
     /// It is stopped, but wss did not start: why, for the user.
     WssOff(String),
 }
@@ -39,8 +40,7 @@ pub struct StopOriginal {
     pub stop: Box<dyn Fn(Locale) -> io::Result<Stopped> + Send + Sync>,
 }
 
-/// The open window. Its callbacks find it by `id` in [`OPEN`], so that none holds it (a
-/// reference cycle) and a late result never reaches a window opened since.
+/// The open window ([`worker::Slot`]).
 struct Open {
     id: u64,
     ui: StopOriginalWindow,
@@ -49,17 +49,12 @@ struct Open {
 }
 
 thread_local! {
-    static OPEN: RefCell<Option<Rc<Open>>> = const { RefCell::new(None) };
-    static NEXT_ID: Cell<u64> = const { Cell::new(0) };
-}
-
-fn current(id: u64) -> Option<Rc<Open>> {
-    OPEN.with_borrow(|open| open.as_ref().filter(|o| o.id == id).cloned())
+    static OPEN: Slot<Open> = const { Slot::new() };
 }
 
 /// Whether the window is open.
 pub(crate) fn is_open() -> bool {
-    OPEN.with_borrow(Option::is_some)
+    worker::is_open::<Open>()
 }
 
 /// Asks the user whether to stop `request`'s process, in the windows' language; callable
@@ -77,7 +72,7 @@ fn open(request: StopOriginal) {
         tracing::info!("no windows: stopping the original is not offered");
         return;
     };
-    if let Some(open) = OPEN.with_borrow(Clone::clone) {
+    if let Some(open) = worker::opened::<Open>() {
         if open.ui.get_busy() {
             select_desktop_language(desktop.locale.get());
             if let Err(e) = open.ui.show() {
@@ -86,7 +81,7 @@ fn open(request: StopOriginal) {
             foreground::take(&open.ui);
             return;
         }
-        close(open.id);
+        worker::close::<Open>(open.id);
     }
     if let Err(e) = create(&desktop, request) {
         tracing::error!(error = %e, "cannot show the window to stop the original");
@@ -98,7 +93,7 @@ fn create(desktop: &Rc<Desktop>, request: StopOriginal) -> Result<(), PlatformEr
     let locale = desktop.locale.get();
     select_desktop_language(locale);
     ui.set_question(question_text(&request, locale).into());
-    let id = NEXT_ID.replace(NEXT_ID.get() + 1);
+    let id = worker::next_id::<Open>();
     let open = Rc::new(Open {
         id,
         ui: ui.clone_strong(),
@@ -110,9 +105,9 @@ fn create(desktop: &Rc<Desktop>, request: StopOriginal) -> Result<(), PlatformEr
         close_requested(id);
     });
     ui.window().on_close_requested(move || close_requested(id));
-    OPEN.set(Some(open));
+    worker::set_open(Some(open));
     if let Err(e) = ui.show() {
-        OPEN.set(None);
+        worker::set_open::<Open>(None);
         return Err(e);
     }
     foreground::take(&ui);
@@ -122,18 +117,7 @@ fn create(desktop: &Rc<Desktop>, request: StopOriginal) -> Result<(), PlatformEr
 /// «Отмена», «Закрыть» or the window's close button: closes the window `id`, unless it is
 /// stopping the process, whose outcome the user must see.
 fn close_requested(id: u64) -> CloseRequestResponse {
-    worker::close_requested::<Open>(id, close)
-}
-
-fn close(id: u64) {
-    let Some(open) = OPEN.with_borrow_mut(|slot| slot.take_if(|open| open.id == id)) else {
-        return;
-    };
-    if let Err(e) = open.ui.hide() {
-        tracing::warn!(error = %e, "cannot hide the window to stop the original");
-    }
-    // This may run inside one of the window's callbacks: release the window after it.
-    slint::Timer::single_shot(Duration::ZERO, move || drop(open));
+    worker::close_requested::<Open>(id)
 }
 
 /// «Остановить»: stops the process on a worker thread, then shows how it went. Once it is
@@ -176,8 +160,8 @@ impl JobWindow for Open {
     type Services = StopOriginal;
     const NAME: &'static str = "stop-original";
 
-    fn find(id: u64) -> Option<Rc<Open>> {
-        current(id)
+    fn slot() -> &'static LocalKey<Slot<Open>> {
+        &OPEN
     }
 
     fn id(&self) -> u64 {
@@ -207,6 +191,12 @@ impl JobWindow for Open {
     fn failure_text(&self) -> &'static str {
         Texts::of(self.desktop.locale.get()).cannot_start
     }
+
+    fn hide(&self) {
+        if let Err(e) = self.ui.hide() {
+            tracing::warn!(error = %e, "cannot hide the window to stop the original");
+        }
+    }
 }
 
 fn show_message(ui: &StopOriginalWindow, text: &str, error: bool) {
@@ -229,6 +219,7 @@ fn outcome_text(result: &io::Result<Stopped>, port: u16, l: Locale) -> (String, 
     let t = Texts::of(l);
     match result {
         Ok(Stopped::Serving) => (t.serving.replace("{port}", &port.to_string()), false),
+        Ok(Stopped::WasGone) => (t.was_gone.replace("{port}", &port.to_string()), false),
         Ok(Stopped::WssOff(why)) => (t.wss_off.replace("{0}", why), true),
         Err(e) => {
             let text = match e.kind() {
@@ -250,6 +241,8 @@ struct Texts {
     stopping: &'static str,
     /// `{port}`.
     serving: &'static str,
+    /// `{port}`.
+    was_gone: &'static str,
     /// `{0}`: why wss is off.
     wss_off: &'static str,
     gone: &'static str,
@@ -267,8 +260,9 @@ impl Texts {
                 question: "{port} портын түпнұсқа NCALayer алып тұр. OpenNCALayer портты алуы үшін оны тоқтату керек пе?\n\nБағдарлама: {exe}\nПроцесс: {pid}\n\nТүпнұсқа сақталмай жабылады; оны кейін әдеттегідей қайта іске қосуға болады.",
                 stopping: "Түпнұсқа тоқтатылуда…",
                 serving: "Түпнұсқа тоқтатылды. OpenNCALayer сайттардың қосылуларын {port} портында қабылдайды.",
+                was_gone: "Түпнұсқа өзі аяқталып қойған екен. OpenNCALayer сайттардың қосылуларын {port} портында қабылдайды.",
                 wss_off: "Түпнұсқа тоқтатылды, бірақ OpenNCALayer портты ала алмады: {0}",
-                gone: "Процесс аяқталып қойған немесе портты басқа процесс алған; ештеңе тоқтатылмады.",
+                gone: "Табылған процесс аяқталып қойған, ал портты басқа бағдарлама алып тұр; ештеңе тоқтатылмады.",
                 not_original: "Процесс түпнұсқа NCALayer-ге ұқсамайды, сондықтан ол тоқтатылмады.",
                 denied: "Процесті тоқтатуға құқық жоқ (мүмкін, ол әкімші атынан іске қосылған).",
                 timed_out: "Процесс белгіленген уақытта аяқталмады.",
@@ -279,8 +273,9 @@ impl Texts {
                 question: "Порт {port} занят оригинальным NCALayer. Остановить его, чтобы порт занял OpenNCALayer?\n\nПрограмма: {exe}\nПроцесс: {pid}\n\nОригинал будет завершён без сохранения; позже его можно запустить как обычно.",
                 stopping: "Оригинал останавливается…",
                 serving: "Оригинал остановлен. OpenNCALayer принимает подключения сайтов на порту {port}.",
+                was_gone: "Оригинал уже завершился сам. OpenNCALayer принимает подключения сайтов на порту {port}.",
                 wss_off: "Оригинал остановлен, но OpenNCALayer не смог занять порт: {0}",
-                gone: "Процесс уже завершился или порт занял другой процесс; ничего не остановлено.",
+                gone: "Найденный процесс уже завершился, а порт занят другой программой; ничего не остановлено.",
                 not_original: "Процесс не похож на оригинальный NCALayer, поэтому он не остановлен.",
                 denied: "Нет прав остановить процесс (возможно, он запущен от имени администратора).",
                 timed_out: "Процесс не завершился за отведённое время.",
@@ -291,8 +286,9 @@ impl Texts {
                 question: "Port {port} is held by the original NCALayer. Stop it so that OpenNCALayer takes the port?\n\nProgram: {exe}\nProcess: {pid}\n\nThe original is ended without saving; it can be started again later as usual.",
                 stopping: "Stopping the original…",
                 serving: "The original is stopped. OpenNCALayer accepts the sites' connections on port {port}.",
+                was_gone: "The original had ended already. OpenNCALayer accepts the sites' connections on port {port}.",
                 wss_off: "The original is stopped, but OpenNCALayer could not take the port: {0}",
-                gone: "The process has ended already, or another one holds the port now; nothing was stopped.",
+                gone: "The process found has ended already, and another program holds the port now; nothing was stopped.",
                 not_original: "The process does not look like the original NCALayer, so it was not stopped.",
                 denied: "No permission to stop the process (perhaps it runs as an administrator).",
                 timed_out: "The process did not end in time.",
@@ -328,7 +324,7 @@ mod tests {
     }
 
     fn the_window() -> Rc<Open> {
-        OPEN.with_borrow(Clone::clone).expect("the window is open")
+        worker::opened::<Open>().expect("the window is open")
     }
 
     /// A request whose stop gives `outcomes` in turn; how often it ran.
@@ -443,6 +439,11 @@ mod tests {
         for l in [Locale::Ru, Locale::Kk, Locale::En] {
             let (serving, error) = outcome_text(&Ok(Stopped::Serving), 13600, l);
             assert!(serving.contains("13600") && !error, "{serving}");
+            let (gone, error) = outcome_text(&Ok(Stopped::WasGone), 13600, l);
+            assert!(
+                gone.contains("13600") && !error && gone != serving,
+                "{gone}"
+            );
             let texts: Vec<String> = failures
                 .iter()
                 .map(|&kind| {
@@ -460,6 +461,7 @@ mod tests {
         }
         for (result, done) in [
             (Ok(Stopped::Serving), true),
+            (Ok(Stopped::WasGone), true),
             (Ok(Stopped::WssOff(String::new())), true),
             (Err(io::Error::from(io::ErrorKind::NotFound)), true),
             (Err(io::Error::from(io::ErrorKind::InvalidInput)), true),

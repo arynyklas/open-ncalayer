@@ -3,9 +3,10 @@
 //! is shown. Every action that writes to a trust store, and replacing the server certificate,
 //! first asks in the window; the question's «Да» runs it, with exactly the CAs it named.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::thread::LocalKey;
 use std::time::Duration;
 
 use oncl_basics::Locale;
@@ -25,7 +26,7 @@ use crate::foreground;
 use crate::prompter::select_desktop_language;
 use crate::ui::{BrowserRow, TlsWizardWindow, TrustStoreRow};
 use crate::windows::Desktop;
-use crate::worker::{self, JobWindow, run, with};
+use crate::worker::{self, JobWindow, Slot, run, with};
 
 /// How often the list of browsers that reported is refreshed while the window is open.
 const REPORTS_EVERY: Duration = Duration::from_secs(2);
@@ -58,8 +59,7 @@ enum StoresAction {
     RemoveReplaced,
 }
 
-/// The open wizard. Its callbacks find it by `id` in [`OPEN`], so that none holds it (a
-/// reference cycle) and a late result never reaches a window opened since.
+/// The open wizard ([`worker::Slot`]).
 struct Open {
     id: u64,
     ui: TlsWizardWindow,
@@ -74,26 +74,20 @@ struct Open {
 }
 
 thread_local! {
-    static OPEN: RefCell<Option<Rc<Open>>> = const { RefCell::new(None) };
-    static NEXT_ID: Cell<u64> = const { Cell::new(0) };
-}
-
-/// The wizard `id`, if it is open.
-fn current(id: u64) -> Option<Rc<Open>> {
-    OPEN.with_borrow(|open| open.as_ref().filter(|o| o.id == id).cloned())
+    static OPEN: Slot<Open> = const { Slot::new() };
 }
 
 /// Whether the wizard is open.
 pub(crate) fn is_open() -> bool {
-    OPEN.with_borrow(Option::is_some)
+    worker::is_open::<Open>()
 }
 
 impl JobWindow for Open {
     type Services = TlsWizardServices;
     const NAME: &'static str = "tls-wizard";
 
-    fn find(id: u64) -> Option<Rc<Open>> {
-        current(id)
+    fn slot() -> &'static LocalKey<Slot<Open>> {
+        &OPEN
     }
 
     fn id(&self) -> u64 {
@@ -123,11 +117,17 @@ impl JobWindow for Open {
     fn failure_text(&self) -> &'static str {
         Texts::of(self.desktop.locale.get()).cannot_start
     }
+
+    fn hide(&self) {
+        if let Err(e) = self.ui.hide() {
+            tracing::warn!(error = %e, "cannot hide the TLS wizard");
+        }
+    }
 }
 
 /// Shows the wizard, or brings the open one to the front. On the event loop.
 pub(crate) fn open(desktop: &Rc<Desktop>) {
-    if let Some(open) = OPEN.with_borrow(Clone::clone) {
+    if let Some(open) = worker::opened::<Open>() {
         select_desktop_language(desktop.locale.get());
         if let Err(e) = open.ui.show() {
             tracing::warn!(error = %e, "cannot show the TLS wizard");
@@ -147,7 +147,7 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
     let t = Texts::of(locale);
     ui.set_status_text(t.loading.into());
     ui.set_selftest_url(desktop.tls.selftest_url().into());
-    let id = NEXT_ID.replace(NEXT_ID.get() + 1);
+    let id = worker::next_id::<Open>();
     let reports = slint::Timer::default();
     reports.start(slint::TimerMode::Repeated, REPORTS_EVERY, move || {
         with(id, show_reports);
@@ -189,9 +189,9 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
     });
     ui.window().on_close_requested(move || close_requested(id));
 
-    OPEN.set(Some(Rc::clone(&open)));
+    worker::set_open(Some(Rc::clone(&open)));
     if let Err(e) = ui.show() {
-        OPEN.set(None);
+        worker::set_open::<Open>(None);
         return Err(e);
     }
     foreground::take(&ui);
@@ -203,19 +203,7 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
 /// «Закрыть» or the window's close button: closes the wizard `id`, unless it waits for an
 /// action, whose outcome the user must see.
 fn close_requested(id: u64) -> CloseRequestResponse {
-    worker::close_requested::<Open>(id, close)
-}
-
-/// Closes the wizard `id`.
-fn close(id: u64) {
-    let Some(open) = OPEN.with_borrow_mut(|slot| slot.take_if(|open| open.id == id)) else {
-        return;
-    };
-    if let Err(e) = open.ui.hide() {
-        tracing::warn!(error = %e, "cannot hide the TLS wizard");
-    }
-    // This runs inside one of the window's callbacks: release the window after it.
-    slint::Timer::single_shot(Duration::ZERO, move || drop(open));
+    worker::close_requested::<Open>(id)
 }
 
 /// Loads the state as a job, then shows it.
@@ -639,7 +627,7 @@ pub(crate) fn open_loaded(desktop: &Rc<Desktop>) -> TlsWizardWindow {
     worker::manual::enable();
     open(desktop);
     worker::manual::run_all();
-    OPEN.with_borrow(Clone::clone)
+    worker::opened::<Open>()
         .expect("the wizard is open")
         .ui
         .clone_strong()
@@ -649,7 +637,7 @@ pub(crate) fn open_loaded(desktop: &Rc<Desktop>) -> TlsWizardWindow {
 /// it (for screenshots: «Да» does nothing).
 #[cfg(test)]
 pub(crate) fn preview_install_question(desktop: &Desktop) {
-    let Some(open) = OPEN.with_borrow(Clone::clone) else {
+    let Some(open) = worker::opened::<Open>() else {
         return;
     };
     let labels = open
@@ -704,7 +692,7 @@ mod tests {
     }
 
     fn the_window() -> Rc<Open> {
-        OPEN.with_borrow(Clone::clone).expect("the wizard is open")
+        worker::opened::<Open>().expect("the wizard is open")
     }
 
     fn own() -> IssueForm {

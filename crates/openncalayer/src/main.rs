@@ -1,6 +1,6 @@
 //! `openncalayer`: see [`openncalayer::cli`].
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
@@ -12,20 +12,19 @@ use std::time::{Duration, Instant, SystemTime};
 use clap::Parser;
 use oncl_accessory::UiRequest;
 use oncl_basics::{Locale, Prompter};
-use oncl_desktop::PortOwner;
 use oncl_desktop::Settings;
 use oncl_desktop::port_owner;
 use oncl_ipc::IpcListener;
 use oncl_protocol::Registry;
 use oncl_tls::{SelftestReports, TlsFiles};
 use oncl_ui::{
-    AboutInfo, DesktopWindow, DesktopWindows, Notification, SlintPrompter, StopOriginal, Stopped,
+    AboutInfo, DesktopWindow, DesktopWindows, Notification, SlintPrompter, StopOriginal,
     TrayCommand, TrayHandle, TrayState,
 };
-use openncalayer::cli::{self, Cli, Command, WssOff};
+use openncalayer::cli::{self, Cli, Command};
 use openncalayer::notices::TrayStatus;
 use openncalayer::renewal::{self, RenewalCheck};
-use openncalayer::wss::{Listening, Wss};
+use openncalayer::wss::{Listening, PortState, WATCH_EVERY, Wss};
 use openncalayer::{
     JsonSettings, LiveProxyTransport, Paths, ServerConfig, build_registry, desktop, listen_port,
     load_settings, serve, serve_ipc,
@@ -72,15 +71,19 @@ fn post_to_tray(f: impl FnOnce(&mut TrayStatus) -> Option<Notification> + Send +
     }
 }
 
-/// Tells the tray how wss is now: why it is off and, for a busy port, whether the original
-/// NCALayer holds it (looked up here: call it off the event loop). With `notify` a problem
-/// the tray can fix is also notified.
-fn tell_tray_wss(wss: &Wss, notify: bool) {
-    let off = wss.off();
-    let original = original_on_port(off);
+/// Looks at wss's port again ([`Wss::recheck`]: wss takes it if nobody listens there any
+/// more) and tells the tray. Blocks for the lookup: call it off the event loop.
+fn tell_tray_wss(wss: &Wss) -> PortState {
+    let state = wss.recheck(&port_owner::port_owner);
+    show_port(state.clone(), false);
+    state
+}
+
+/// Has the tray show `state`; with `notify` a problem the tray can fix is also notified.
+fn show_port(state: PortState, notify: bool) {
     post_to_tray(move |status| {
-        status.wss_off = off;
-        status.original = original;
+        status.wss_off = state.off;
+        status.original = state.original;
         if notify {
             status.wss_off_notification()
         } else {
@@ -89,62 +92,42 @@ fn tell_tray_wss(wss: &Wss, notify: bool) {
     });
 }
 
-/// The original NCALayer holding the port, if a busy port is why wss is off (`off`).
-fn original_on_port(off: Option<WssOff>) -> Option<PortOwner> {
-    let Some(WssOff::PortBusy(port)) = off else {
-        return None;
-    };
-    match port_owner::port_owner(port) {
-        Ok(Some(owner)) if owner.looks_original && owner.pid != std::process::id() => {
-            tracing::info!(pid = owner.pid, exe = %owner.exe.display(), port, "the original NCALayer holds the port");
-            Some(owner)
-        }
-        Ok(Some(owner)) => {
-            tracing::info!(pid = owner.pid, exe = %owner.exe.display(), port, "another program holds the port");
-            None
-        }
-        Ok(None) => None,
-        Err(e) => {
-            tracing::warn!(error = %e, port, "cannot tell who holds the port");
-            None
-        }
-    }
+/// While wss is off, from when the event loop runs: tells the tray (notifying a problem it
+/// can fix if `notify`), then looks at a busy port every [`WATCH_EVERY`] ([`Wss::watch`]),
+/// so that wss takes it once it is free, and keeps the tray up to date. On a thread.
+fn watch_wss(wss: Arc<Wss>, notify: bool) {
+    spawn_named("wss-port", move || {
+        let state = wss.recheck(&port_owner::port_owner);
+        show_port(state, notify);
+        wss.watch(WATCH_EVERY, &port_owner::port_owner, |state| {
+            show_port(state.clone(), false);
+        });
+    });
 }
 
-/// «Остановить оригинал…» (the menu, or the notification's button): asks before the
-/// original NCALayer the tray found on the port is stopped. On the event loop.
+/// «Остановить оригинал…» (the menu, or the notification's button): looks at the port again,
+/// then asks before the original NCALayer holding it is stopped. If it is gone, wss takes
+/// the port and the tray says so. The lookup runs on a thread.
 fn offer_to_stop_original(wss: &Arc<Wss>) {
-    let owner = TRAY.with_borrow(|tray| {
-        tray.as_ref()
-            .and_then(|tray| tray.status.original_on_port().cloned())
-    });
-    let Some(owner) = owner else {
-        tracing::info!("the original NCALayer does not hold the port (any more)");
-        return;
-    };
     let wss = Arc::clone(wss);
-    oncl_ui::ask_stop_original(StopOriginal {
-        port: wss.port(),
-        exe: owner.exe.clone(),
-        pid: owner.pid,
-        stop: Box::new(move |locale| stop_original(&owner, &wss, locale)),
+    spawn_named("stop-original", move || {
+        let Some(owner) = tell_tray_wss(&wss).original else {
+            tracing::info!("the original NCALayer does not hold the port (any more)");
+            return;
+        };
+        let stopping = Arc::clone(&wss);
+        oncl_ui::ask_stop_original(StopOriginal {
+            port: wss.port(),
+            exe: owner.exe.clone(),
+            pid: owner.pid,
+            // After any outcome the tray shows the port as it is then.
+            stop: Box::new(move |locale: Locale| {
+                let stopped = stopping.stop_original(&owner, port_owner::stop, REBIND_WAIT, locale);
+                tell_tray_wss(&stopping);
+                stopped
+            }),
+        });
     });
-}
-
-/// Stops the original NCALayer `owner` ([`port_owner::stop`] checks it is still that
-/// process), then starts wss on the freed port in this process, waiting [`REBIND_WAIT`] for
-/// it; why wss is still off is told in `locale`. Either way the tray shows the port as it is
-/// now. Blocks: call it off the event loop.
-fn stop_original(owner: &PortOwner, wss: &Wss, locale: Locale) -> io::Result<Stopped> {
-    let result = port_owner::stop(owner).map(|()| {
-        tracing::info!(pid = owner.pid, exe = %owner.exe.display(), "the original NCALayer is stopped");
-        match wss.start_within(REBIND_WAIT) {
-            Ok(()) => Stopped::Serving,
-            Err(off) => Stopped::WssOff(off.text(locale)),
-        }
-    });
-    tell_tray_wss(wss, false);
-    result
 }
 
 fn main() -> ExitCode {
@@ -177,8 +160,11 @@ fn main() -> ExitCode {
 ///
 /// With a tray, TLS not set up and a busy port do not end `run`: it serves the browser
 /// extension, the tray says what is wrong, and wss starts in this process once the TLS
-/// wizard saves a certificate or the original NCALayer holding the port is stopped. Without
-/// one (`--no-tray`, or no tray to show) they end it as before, unless `allow_no_wss`.
+/// wizard saves a certificate or the port is free (the original NCALayer stopped from the
+/// tray, or quit). Without one (`--no-tray`, a tray that cannot be shown or is lost on the
+/// event loop's first turn, or no event loop) they end it with P1's code, unless
+/// `allow_no_wss`. Only a daemon started without `allow_no_wss` (by the user or our
+/// autostart, not the extension's relay) notifies them at the start.
 fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -225,6 +211,7 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             status.tray_state(),
             Arc::clone(&stop),
             Arc::clone(&wss),
+            waits_for_tray.is_some(),
         )
         .map(Rc::new)
     } else {
@@ -236,17 +223,18 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         // Nothing would tell the user, nor let them fix it: P1's exit.
         return failure.report();
     }
+    // A tray lost on the event loop's first turn (macOS) ends the loop, and then `run`.
+    let tray_lost = Rc::new(Cell::new(false));
     if let Some(tray) = &tray {
         TRAY.set(Some(Tray {
             handle: Rc::downgrade(tray),
             status,
         }));
-        if wss.off().is_some() {
-            // Who holds a busy port is looked up off the event loop; a problem the tray
-            // can fix is notified once the loop runs.
-            let wss = Arc::clone(&wss);
-            oncl_ui::when_event_loop_runs(move || {
-                spawn_named("wss-state", move || tell_tray_wss(&wss, true));
+        if waits_for_tray.is_some() {
+            let lost = Rc::clone(&tray_lost);
+            tray.when_unavailable(move |_| {
+                lost.set(true);
+                oncl_ui::quit();
             });
         }
     }
@@ -263,6 +251,11 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             Arc::clone(&reports),
             Arc::clone(&wss),
         ));
+        if wss.off().is_some() {
+            let watched = Arc::clone(&wss);
+            let notify = tray.is_some() && !allow_no_wss;
+            oncl_ui::when_event_loop_runs(move || watch_wss(watched, notify));
+        }
     }
     let files = daemon.paths.tls();
     if event_loop {
@@ -292,11 +285,24 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     if !event_loop {
         return exit_code(server.join());
     }
-    if let Err(e) = oncl_ui::run_event_loop() {
+    let looped = oncl_ui::run_event_loop();
+    // The icon goes before the process does (on Windows a dead process's icon lingers).
+    drop(tray);
+    if let Some(failure) = waits_for_tray
+        && (looped.is_err() || tray_lost.get())
+    {
+        // The tray that was to fix it is gone: P1's exit, as if there had been none.
+        let reason = looped.as_ref().err().map(ToString::to_string);
+        tracing::error!(
+            ?reason,
+            "the system tray is unavailable, and wss cannot start without it: exiting"
+        );
+        return failure.report();
+    }
+    if let Err(e) = looped {
         if !windows {
             // Only the tray needed the loop: the servers carry on without it.
             tracing::warn!(error = %e, "the system tray is unavailable; running without it");
-            drop(tray);
             return exit_code(server.join());
         }
         tracing::error!(error = %e, "signing dialogs are unavailable");
@@ -309,8 +315,6 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
-    // The icon goes before the process does (on Windows a dead process's icon lingers).
-    drop(tray);
     match join_within(server, SERVER_JOIN_TIMEOUT) {
         Some(result) => exit_code(result),
         None => {
@@ -354,7 +358,7 @@ fn start_renewal(files: TlsFiles, wss: Arc<Wss>) {
             let check = renewal::check(&files, OffsetDateTime::now_utc(), || wss.reload());
             if matches!(check, RenewalCheck::Renewed { .. }) {
                 // It may have started wss, too.
-                tell_tray_wss(&wss, false);
+                tell_tray_wss(&wss);
             }
             match &check {
                 RenewalCheck::Nothing => {}
@@ -414,17 +418,14 @@ fn desktop_windows(
         },
         tls: desktop::tls_wizard_services(paths, reports, wss, move |files: &TlsFiles| {
             // A new certificate is not due: the tray forgets the reminder. It may have
-            // started wss; if not, the port's owner is looked up again (on the wizard's
-            // worker thread).
+            // started wss; if not, the port is looked at again (on the wizard's worker
+            // thread).
             let state = renewal::state(files, OffsetDateTime::now_utc());
-            let off = saved_to.off();
-            let original = original_on_port(off);
             post_to_tray(move |status| {
                 status.renewal = state;
-                status.wss_off = off;
-                status.original = original;
                 None
             });
+            tell_tray_wss(&saved_to);
         }),
         on_saved: Box::new(move |settings: &Settings| {
             http.set_proxy(settings.proxy.clone());
@@ -443,13 +444,15 @@ fn desktop_windows(
 /// The tray in `locale` showing `state`, or `None` (logged) if it cannot be shown. Its
 /// commands run on the event loop: «Выход» notifies `stop`, «Журнал» opens `logs`,
 /// «Настройки…», «Сертификат для браузера…» and «О программе» open their windows,
-/// «Остановить оригинал…» asks before stopping the original that keeps `wss` off.
+/// «Остановить оригинал…» asks before stopping the original that keeps `wss` off. With
+/// `needed`, `run` cannot go on without it (wss waits for the tray).
 fn start_tray(
     locale: Locale,
     logs: PathBuf,
     state: TrayState,
     stop: Arc<Notify>,
     wss: Arc<Wss>,
+    needed: bool,
 ) -> Option<TrayHandle> {
     let tray = oncl_ui::start_tray(locale, move |command| match command {
         TrayCommand::Quit => {
@@ -466,6 +469,10 @@ fn start_tray(
         Ok(tray) => {
             tray.set_state(state);
             Some(tray)
+        }
+        Err(e) if needed => {
+            tracing::error!(error = %e, "the system tray is unavailable, and wss cannot start without it: exiting");
+            None
         }
         Err(e) => {
             tracing::warn!(error = %e, "the system tray is unavailable; running without it");

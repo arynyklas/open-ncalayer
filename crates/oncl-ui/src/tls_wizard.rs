@@ -117,6 +117,9 @@ fn nss_label(home: &Path, db: &Path) -> String {
 pub enum Applied {
     /// The server takes it for the next connections.
     Serving,
+    /// The wss server is off because another program holds its port: it starts with it as
+    /// soon as the port is free (e.g. the original NCALayer stopped from the tray).
+    WhenPortFree,
     /// The wss server is off: it takes it at the next start.
     AfterRestart,
     /// The server could not load it (and keeps the previous one).
@@ -720,6 +723,7 @@ fn issued_text(issued: &Issued, l: Locale) -> String {
     let mut text = match &issued.applied {
         Applied::Serving => t.issued_serving.to_owned(),
         Applied::AfterRestart => t.issued_after_restart.to_owned(),
+        Applied::WhenPortFree => t.issued_when_port_free.to_owned(),
         Applied::Failed(e) => fill(t.issued_not_served, &[e]),
     };
     for warning in &issued.warnings {
@@ -1168,6 +1172,49 @@ mod tests {
             store_state(&snapshot.stores[0], Locale::En),
             "the current certification authority is not there"
         );
+    }
+
+    /// What the wizard says of the server after a save: the port busy is not "after a
+    /// restart" (wss takes it once free), and each outcome reads differently.
+    #[test]
+    fn issued_texts_tell_what_the_server_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = services(dir.path(), Vec::new(), None);
+        let info = s.issue(&own(), NOW).unwrap().info;
+        for l in [Locale::Ru, Locale::Kk, Locale::En] {
+            let text = |applied| {
+                issued_text(
+                    &Issued {
+                        info: info.clone(),
+                        warnings: Vec::new(),
+                        applied,
+                    },
+                    l,
+                )
+            };
+            let texts = [
+                text(Applied::Serving),
+                text(Applied::WhenPortFree),
+                text(Applied::AfterRestart),
+                text(Applied::Failed("boom".to_owned())),
+            ];
+            for (i, t) in texts.iter().enumerate() {
+                assert!(!texts[..i].contains(t), "{l:?}: {t}");
+            }
+        }
+        let free = text_ru(&info, Applied::WhenPortFree);
+        assert!(free.contains("когда порт освободится"), "{free}");
+    }
+
+    fn text_ru(info: &TlsInfo, applied: Applied) -> String {
+        issued_text(
+            &Issued {
+                info: info.clone(),
+                warnings: Vec::new(),
+                applied,
+            },
+            Locale::Ru,
+        )
     }
 
     #[test]

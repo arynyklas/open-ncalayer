@@ -212,7 +212,7 @@ pub async fn prepare_run(allow_no_wss: bool, tray_session: bool) -> Result<Daemo
     let ipc = bind_ipc(&paths.data).await?;
     let wss = match open_wss(&paths.tls(), listen_port()) {
         Ok(wss) => Ok(wss),
-        Err(failure) if allow_no_wss || (tray_session && failure.fixed_in_the_tray()) => {
+        Err(failure) if allow_no_wss => {
             warn!(
                 code = failure.code,
                 reason = %failure.message,
@@ -220,9 +220,18 @@ pub async fn prepare_run(allow_no_wss: bool, tray_session: bool) -> Result<Daemo
             );
             Err(failure)
         }
+        Err(failure) if tray_session && failure.fixed_in_the_tray() => {
+            // `run` exits with the code after all if no tray can be shown.
+            warn!(
+                code = failure.code,
+                reason = %failure.message,
+                "wss is off until it can start; the tray is to tell the user"
+            );
+            Err(failure)
+        }
         Err(failure) => return Err(failure.report()),
     };
-    info!(data = %paths.data.display(), "daemon started");
+    info!(data = %paths.data.display(), "daemon prepared");
     Ok(Daemon { paths, ipc, wss })
 }
 

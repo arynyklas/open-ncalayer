@@ -56,16 +56,16 @@ impl Tray {
         #[cfg(target_os = "macos")]
         {
             // AppKit wants the status item made while the application runs: on the event
-            // loop's first turn. A failure there is only logged.
+            // loop's first turn. A failure there is told to `TrayHandle::when_unavailable`.
             let weak = Rc::downgrade(&shared);
             slint::Timer::single_shot(std::time::Duration::ZERO, move || {
                 let Some(shared) = weak.upgrade() else {
                     return;
                 };
-                let mut shared = shared.borrow_mut();
-                match build(&shared.model) {
-                    Ok(icon) => shared.icon = Some(icon),
-                    Err(e) => tracing::warn!(error = %e, "the system tray is unavailable"),
+                let built = build(&shared.borrow().model);
+                match built {
+                    Ok(icon) => shared.borrow_mut().icon = Some(icon),
+                    Err(e) => super::unavailable(e),
                 }
             });
         }

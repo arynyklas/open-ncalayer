@@ -89,9 +89,11 @@ pub fn check(
                 return failed(RenewFailure::Save(format!("{}: {e}", files.dir.display())));
             }
             match reload() {
-                Applied::Serving | Applied::AfterRestart => RenewalCheck::Renewed {
-                    not_after: material.info.leaf_not_after,
-                },
+                Applied::Serving | Applied::WhenPortFree | Applied::AfterRestart => {
+                    RenewalCheck::Renewed {
+                        not_after: material.info.leaf_not_after,
+                    }
+                }
                 Applied::Failed(e) => failed(RenewFailure::Reload(e)),
             }
         }

@@ -146,11 +146,19 @@ impl TrayHandle {
             tracing::warn!(error = %e, "cannot show the notification");
         }
     }
+
+    /// Runs `f` if the tray turns out unavailable after [`start_tray`] returned: on macOS
+    /// the icon is made on the event loop's first turn and may fail there. Elsewhere a tray
+    /// that cannot be shown fails [`start_tray`] itself, and `f` never runs.
+    pub fn when_unavailable(&self, f: impl FnOnce(&TrayError) + 'static) {
+        set_on_unavailable(Box::new(f));
+    }
 }
 
 impl Drop for TrayHandle {
     fn drop(&mut self) {
         ON_COMMAND.with_borrow_mut(|on_command| *on_command = None);
+        ON_UNAVAILABLE.with_borrow_mut(|slot| *slot = None);
     }
 }
 
@@ -172,10 +180,28 @@ pub fn start_tray(
 
 /// The `on_command` of [`start_tray`].
 type OnCommand = Rc<dyn Fn(TrayCommand)>;
+/// The `f` of [`TrayHandle::when_unavailable`].
+type OnUnavailable = Box<dyn FnOnce(&TrayError)>;
 
 thread_local! {
     /// The `on_command` of [`start_tray`], on the thread that started the tray.
     static ON_COMMAND: RefCell<Option<OnCommand>> = const { RefCell::new(None) };
+    /// The `f` of [`TrayHandle::when_unavailable`], on the same thread.
+    static ON_UNAVAILABLE: RefCell<Option<OnUnavailable>> = const { RefCell::new(None) };
+}
+
+fn set_on_unavailable(f: OnUnavailable) {
+    ON_UNAVAILABLE.with_borrow_mut(|slot| *slot = Some(f));
+}
+
+/// The tray could not be made after all: logged, and told once to
+/// [`TrayHandle::when_unavailable`]'s `f`.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn unavailable(e: TrayError) {
+    tracing::warn!(error = %e, "the system tray is unavailable");
+    if let Some(f) = ON_UNAVAILABLE.with_borrow_mut(Option::take) {
+        f(&e);
+    }
 }
 
 /// Hands `command` to the event loop, from whatever thread the tray library reports on.
@@ -414,6 +440,20 @@ mod tests {
             warning: Some(warning.to_owned()),
             stop_original: false,
         }
+    }
+
+    /// A tray that fails once the loop runs (macOS builds its icon then) is told once.
+    #[test]
+    fn a_tray_lost_later_is_told_once() {
+        let told = Rc::new(std::cell::Cell::new(0));
+        let counted = Rc::clone(&told);
+        set_on_unavailable(Box::new(move |e: &TrayError| {
+            assert_eq!(e.to_string(), "no status bar");
+            counted.set(counted.get() + 1);
+        }));
+        unavailable(TrayError("no status bar".to_owned()));
+        unavailable(TrayError("again".to_owned()));
+        assert_eq!(told.get(), 1);
     }
 
     #[test]

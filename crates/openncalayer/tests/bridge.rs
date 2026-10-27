@@ -1045,10 +1045,14 @@ mod binary {
         assert_eq!(status.code(), Some(2), "{stderr}");
         assert!(stderr.contains("TLS не настроен"), "{stderr}");
         let log = logs(dir.path());
+        // The log says why it ends, not that it carries on.
         assert!(
-            log.contains("the system tray is unavailable; running without it"),
+            log.contains(
+                "the system tray is unavailable, and wss cannot start without it: exiting"
+            ),
             "{log}"
         );
+        assert!(!log.contains("running without it"), "{log}");
 
         configure_tls(dir.path());
         let (port, _held) = hold_port();
