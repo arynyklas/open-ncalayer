@@ -262,7 +262,7 @@ Exit codes of `run`:
 - 3 — the port is taken, for example by the original NCALayer;
 - 4 — OpenNCALayer with the same data directory is already running in this session.
 
-Codes 2 and 3 occur only without the icon (`--no-tray`, or an icon not shown or lost on the event loop's first turn). With the icon, `run` keeps serving the extension when TLS is not set up or the port is taken, the icon shows the problem, and wss starts in the same process once the wizard saves a certificate or the port is free. A daemon started by the user or by our autostart notifies at start and takes a freed port by itself (it checks every 30 seconds).
+Codes 2 and 3 occur only without the icon: `--no-tray`, an icon not shown, one lost on the event loop's first turn (macOS), or one that no StatusNotifierWatcher took within a minute of the start (Linux). Even then they occur only while wss is still off; a daemon whose problem was fixed by then (the original stopped from the notification, a certificate saved) keeps serving without the icon. With the icon, `run` keeps serving the extension when TLS is not set up or the port is taken, the icon shows the problem, and wss starts in the same process once the wizard saves a certificate or the port is free. A daemon started by the user or by our autostart notifies at start and takes a freed port by itself (it checks every 30 seconds).
 
 With `--allow-no-wss` (how the extension's relay starts the daemon) no wss startup failure (codes 2, 3 and 1) stops the daemon: it logs a warning and serves only the extension. Such a daemon does not take a freed port by itself: it starts wss only after a user action in the tray or the TLS wizard (stopping the original, saving a certificate).
 
