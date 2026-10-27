@@ -6,6 +6,9 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+pub mod dll;
+
 /// Root of the Cargo workspace (the directory holding the top-level `Cargo.toml`).
 pub fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
