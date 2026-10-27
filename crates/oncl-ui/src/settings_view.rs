@@ -19,7 +19,7 @@ use std::io;
 use std::path::PathBuf;
 
 use oncl_basics::Locale;
-use oncl_desktop::original::EntryKind;
+use oncl_desktop::original::{EntryKind, EntryState};
 use oncl_desktop::{
     Autostart, BrowserExtension, ExtensionError, ExtensionStatus, OriginalControl, OriginalStatus,
     ProxySetting, Settings,
@@ -346,29 +346,34 @@ pub fn original_view(status: &OriginalStatus, l: Locale) -> OriginalView {
             EntryKind::MachineRun => t.machine_run,
             EntryKind::DesktopEntry => t.desktop_entry,
         };
-        let state = if entry.enabled { t.enabled } else { t.disabled };
+        let state = if entry.enabled() {
+            t.enabled
+        } else {
+            t.disabled
+        };
         lines.push(format!("• {kind}: {} — {state}", entry.path.display()));
     }
     if status
         .autostart
         .iter()
-        .any(|e| e.kind == EntryKind::MachineRun && e.enabled)
+        .any(|e| e.kind == EntryKind::MachineRun && e.enabled())
     {
         lines.push(t.machine_run_admin.to_owned());
     }
     if let Some(owner) = &status.port_owner {
         lines.push(format!("{}{owner}", t.port_owner));
     }
-    let own = |enabled: bool| {
+    // Ours to disable: this user's enabled entries. Ours to restore: what we disabled.
+    let any = |state: EntryState| {
         status
             .autostart
             .iter()
-            .any(|e| e.kind != EntryKind::MachineRun && e.enabled == enabled)
+            .any(|e| e.kind != EntryKind::MachineRun && e.state == state)
     };
     OriginalView {
         text: lines.join("\n"),
-        can_disable: own(true),
-        can_restore: own(false),
+        can_disable: any(EntryState::Enabled),
+        can_restore: any(EntryState::DisabledByUs),
     }
 }
 
@@ -468,11 +473,16 @@ pub(crate) mod fakes {
             if self.fail {
                 return Err(io::Error::other("moved halfway"));
             }
+            let (from, to) = if enabled {
+                (EntryState::DisabledByUs, EntryState::Enabled)
+            } else {
+                (EntryState::Enabled, EntryState::DisabledByUs)
+            };
             let mut status = self.status.lock().unwrap();
             let mut changed = Vec::new();
             for entry in &mut status.autostart {
-                if entry.kind != EntryKind::MachineRun && entry.enabled != enabled {
-                    entry.enabled = enabled;
+                if entry.kind != EntryKind::MachineRun && entry.state == from {
+                    entry.state = to;
                     changed.push(entry.path.clone());
                 }
             }
@@ -596,11 +606,11 @@ mod tests {
         assert_eq!(item(&ProxyMode::ALL, 2), ProxyMode::Manual);
     }
 
-    fn startup_shortcut(enabled: bool) -> AutostartEntry {
+    fn startup_shortcut(state: EntryState) -> AutostartEntry {
         AutostartEntry {
             kind: EntryKind::StartupShortcut,
             path: PathBuf::from("Startup").join("NCALayer.lnk"),
-            enabled,
+            state,
         }
     }
 
@@ -731,7 +741,7 @@ mod tests {
             .lock()
             .unwrap()
             .autostart
-            .push(startup_shortcut(true));
+            .push(startup_shortcut(EntryState::Enabled));
         let s = services(dir.path(), original);
         let ours = SettingsForm {
             autostart: true,
@@ -740,11 +750,11 @@ mod tests {
         s.save(&ours).unwrap();
 
         s.disable_original().unwrap();
-        assert!(!s.states().original.autostart[0].enabled);
+        assert!(!s.states().original.autostart[0].enabled());
         assert!(s.autostart.enabled().unwrap(), "disabling keeps ours");
 
         s.restore_original().unwrap();
-        assert!(s.states().original.autostart[0].enabled);
+        assert!(s.states().original.autostart[0].enabled());
         assert!(!s.autostart.enabled().unwrap());
         assert!(!Settings::load(&s.settings_path).unwrap().autostart);
     }
@@ -774,11 +784,11 @@ mod tests {
         let machine = AutostartEntry {
             kind: EntryKind::MachineRun,
             path: PathBuf::from(r"HKLM\Software\Microsoft\Windows\CurrentVersion\Run\NCALayer"),
-            enabled: true,
+            state: EntryState::Enabled,
         };
         let status = OriginalStatus {
             found: true,
-            autostart: vec![startup_shortcut(true), machine.clone()],
+            autostart: vec![startup_shortcut(EntryState::Enabled), machine.clone()],
             port_owner: Some(r"C:\Program Files\NCALayer\NCALayer.exe".to_owned()),
         };
         let view = original_view(&status, Locale::En);
@@ -797,11 +807,19 @@ mod tests {
         // Only the machine-wide entry is left on: neither button can change it.
         let status = OriginalStatus {
             found: true,
-            autostart: vec![startup_shortcut(false), machine],
+            autostart: vec![startup_shortcut(EntryState::DisabledByUs), machine],
             port_owner: None,
         };
         let view = original_view(&status, Locale::Kk);
         assert!(!view.can_disable && view.can_restore);
+        // Turned off by the user, not by us: nothing to put back.
+        let status = OriginalStatus {
+            found: true,
+            autostart: vec![startup_shortcut(EntryState::DisabledByUser)],
+            port_owner: None,
+        };
+        let view = original_view(&status, Locale::Ru);
+        assert!(!view.can_disable && !view.can_restore);
         let empty = original_view(
             &OriginalStatus {
                 found: true,

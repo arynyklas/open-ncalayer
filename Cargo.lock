@@ -3772,6 +3772,7 @@ dependencies = [
 name = "oncl-desktop"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "oncl-basics",
  "oncl-pki",
  "oncl-registry",

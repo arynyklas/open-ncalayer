@@ -106,7 +106,18 @@ impl AutostartPaths {
 
     /// `<config>/autostart/openncalayer.desktop`.
     pub fn desktop_entry(&self) -> PathBuf {
-        self.config.join("autostart").join("openncalayer.desktop")
+        self.autostart_dir().join("openncalayer.desktop")
+    }
+
+    /// `<config>/autostart`, the XDG autostart directory.
+    pub(crate) fn autostart_dir(&self) -> PathBuf {
+        self.config.join("autostart")
+    }
+
+    /// The home directory.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub(crate) fn home(&self) -> &Path {
+        &self.home
     }
 
     /// `<home>/Library/LaunchAgents/io.github.arynyklas.openncalayer.plist`.
@@ -236,7 +247,7 @@ fn desktop_exec_arg(arg: &str) -> String {
 }
 
 /// Whether the `[Desktop Entry]` group of `text` hides the entry or disables it for GNOME.
-fn desktop_entry_disabled(text: &str) -> bool {
+pub(crate) fn desktop_entry_disabled(text: &str) -> bool {
     let mut in_entry = false;
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {
@@ -358,13 +369,24 @@ impl RegistryAutostart {
 
     /// Whether Windows' switch disables our value.
     fn disabled_by_windows(&self) -> io::Result<bool> {
-        let state = oncl_registry::get_binary(
+        disabled_by_windows(
             oncl_registry::Hive::CurrentUser,
             &self.approved_key,
-            Some(Self::VALUE),
-        )?;
-        Ok(state.is_some_and(|s| s.first().is_some_and(|b| b & 1 == 1)))
+            Self::VALUE,
+        )
     }
+}
+
+/// Whether the switch of the `Run` value `value` in the `StartupApproved\Run` key
+/// `approved_key` of `hive` disables it ([`RegistryAutostart::APPROVED_KEY`]).
+#[cfg(windows)]
+pub(crate) fn disabled_by_windows(
+    hive: oncl_registry::Hive,
+    approved_key: &str,
+    value: &str,
+) -> io::Result<bool> {
+    let state = oncl_registry::get_binary(hive, approved_key, Some(value))?;
+    Ok(state.is_some_and(|s| s.first().is_some_and(|b| b & 1 == 1)))
 }
 
 #[cfg(windows)]

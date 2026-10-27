@@ -1,6 +1,6 @@
 [package]
 name = "oncl-desktop"
-description = "OpenNCALayer desktop integration without windows: settings.json, autostart at login, the original NCALayer's and the browser extension's state"
+description = "OpenNCALayer desktop integration without windows: settings.json, autostart at login, the original NCALayer's autostart and port, the browser extension's state"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,10 +15,25 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# Our `Run` value and its `StartupApproved` state.
+# Our `Run` value and its `StartupApproved` state; the original's `HKLM` `Run` value, read.
 oncl-registry.workspace = true
-# kernel32 `GetUserDefaultUILanguage`: the default language.
-windows-sys = { workspace = true, features = ["Win32_Globalization"] }
+# kernel32 `GetUserDefaultUILanguage`: the default language. The Startup folder
+# (`SHGetKnownFolderPath`), the port's owner (`GetExtendedTcpTable`) and its process
+# (image, times, command line, ending it).
+windows-sys = { workspace = true, features = [
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
+
+[target.'cfg(unix)'.dependencies]
+# The port owner's process: `kill`, pidfd (Linux), `proc_pidpath`/`proc_pidinfo` (macOS).
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

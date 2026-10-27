@@ -14,7 +14,8 @@ testing = []
 
 [target.'cfg(windows)'.dependencies]
 # advapi32 registry functions of Windows Vista and later (`RegGetValueW`,
-# `RegDeleteKeyValueW`, `RegDeleteTreeW`); `Win32_Security` for `RegCreateKeyExW`.
+# `RegDeleteKeyValueW`, `RegDeleteTreeW`, `RegOpenKeyExW` with `KEY_WOW64_32KEY`);
+# `Win32_Security` for `RegCreateKeyExW`.
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
