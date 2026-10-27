@@ -10,10 +10,12 @@
 //! new version.
 //!
 //! Before the update is applied, `pending_health = {from, to}` goes into the updater's
-//! state. The new version records its first start ([`Updater::startup`]) and clears it once
-//! its servers and its windows' event loop have run for a while
-//! ([`Updater::watch_health`]). A version that has not done so within [`HEALTH_GRACE`] of
-//! its start, or that ended before it did, is marked bad, never offered again, and the
+//! state. The new version records the start of each run ([`Updater::startup`]) and clears
+//! it once its servers and its windows' event loop have run for a while
+//! ([`Updater::watch_health`]); a run that ends cleanly first is not held against it
+//! ([`Updater::ended_cleanly`]). A version that has not proved healthy within
+//! [`HEALTH_GRACE`] while it runs, or whose runs crashed or hung
+//! [`CRASHES_TO_ROLL_BACK`] times in a row, is marked bad, never offered again, and the
 //! previous version is installed back from its full package in the index: while it runs,
 //! or at its next start before its servers and windows ([`Updater::roll_back_now`]). If the
 //! index has no such package, the version stays marked bad and the checks go on.
@@ -64,6 +66,9 @@ pub const HEALTH_GRACE: Duration = Duration::from_secs(60);
 pub const HEALTH_SETTLE: Duration = Duration::from_secs(5);
 /// An update is applied only once no request ran for this long.
 pub const QUIET: Duration = Duration::from_secs(30);
+/// A new version is rolled back after this many runs in a row that crashed or hung before
+/// it proved healthy.
+pub const CRASHES_TO_ROLL_BACK: u32 = 2;
 /// A waiting update looks whether the daemon is idle this often.
 pub const IDLE_POLL: Duration = Duration::from_secs(15);
 /// The longest sleep of the schedule: the wall clock is compared at least this often, so
@@ -273,9 +278,10 @@ impl Updater {
     }
 
     /// Looks at `pending_health` at the start of this version; see [`Startup`]. A version
-    /// just installed records its start. One that started before and never confirmed its
-    /// health (it failed, or ended first) is marked bad; if the version before it failed
-    /// here too, nothing is rolled back.
+    /// just installed records the start of its run. A run that ended neither cleanly
+    /// ([`Updater::ended_cleanly`]) nor confirmed healthy crashed or hung; after
+    /// [`CRASHES_TO_ROLL_BACK`] such runs in a row, or once the version is marked bad, it is
+    /// rolled back. If the version before it failed here too, nothing is rolled back.
     pub fn startup(&self) -> Startup {
         let current = self.installer.current();
         let now = OffsetDateTime::now_utc();
@@ -296,22 +302,42 @@ impl Updater {
                 state.pending_health = None;
                 return Startup::Normal;
             }
-            match pending.started {
-                None => {
-                    if let Some(p) = &mut state.pending_health {
-                        p.started = Some(now);
-                    }
-                    Startup::Confirm
-                }
-                Some(started) => {
-                    error!(version = %current, %started, "this version ended before it proved healthy");
-                    match mark_failed(state, &pending) {
-                        Some(to) => Startup::RollBack { failed: current.clone(), to },
-                        None => Startup::Normal,
-                    }
-                }
+            let crashes = pending.crashes + u32::from(pending.started.is_some());
+            if state.bad.contains(&current) || crashes >= CRASHES_TO_ROLL_BACK {
+                error!(version = %current, crashes, "this version did not prove healthy");
+                return match mark_failed(state, &pending) {
+                    Some(to) => Startup::RollBack {
+                        failed: current.clone(),
+                        to,
+                    },
+                    None => Startup::Normal,
+                };
             }
+            if crashes > pending.crashes {
+                warn!(version = %current, crashes, "the last run of this version crashed or hung before it proved healthy");
+            }
+            if let Some(p) = &mut state.pending_health {
+                p.started = Some(now);
+                p.crashes = crashes;
+            }
+            Startup::Confirm
         })
+    }
+
+    /// The run ends cleanly (asked to stop, or P1's exit for TLS not set up or a busy
+    /// port): a new version not yet confirmed healthy has neither crashed nor hung, and its
+    /// count of crashed runs starts again.
+    pub fn ended_cleanly(&self) {
+        let current = self.installer.current();
+        self.update_state(|state| {
+            if let Some(p) = &mut state.pending_health
+                && p.to == current
+                && !state.bad.contains(&current)
+            {
+                p.started = None;
+                p.crashes = 0;
+            }
+        });
     }
 
     /// The new version's health check, on a thread of its own: once `healthy` (its
@@ -683,6 +709,7 @@ impl Updater {
             to: version.clone(),
             applied: OffsetDateTime::now_utc(),
             started: None,
+            crashes: 0,
             rollback: plan.rollback,
         };
         if let Err(e) = self.try_update_state(|s| s.pending_health = Some(pending.clone())) {

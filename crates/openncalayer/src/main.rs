@@ -279,6 +279,7 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         && let Some(failure) = waits_for_tray
     {
         // Nothing would tell the user, nor let them fix it: P1's exit.
+        ended_cleanly(&updates);
         return failure.report();
     }
     // A tray lost after the start (macOS: on the event loop's first turn; Linux: no
@@ -363,11 +364,11 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         let runs = Arc::clone(&loop_runs);
         oncl_ui::when_event_loop_runs(move || runs.store(true, Ordering::SeqCst));
     }
-    if let UpdaterHandle::Running(updater) = updates {
-        updater.spawn(rollback);
+    if let UpdaterHandle::Running(updater) = &updates {
+        Arc::clone(updater).spawn(rollback);
     }
     if !event_loop {
-        return exit_code(server.join());
+        return server_ended(&updates, server.join());
     }
     let mut looped = oncl_ui::run_event_loop();
     loop_runs.store(false, Ordering::SeqCst);
@@ -396,13 +397,14 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             ?reason,
             "the system tray is unavailable, and wss cannot start without it: exiting"
         );
+        ended_cleanly(&updates);
         return failure.report();
     }
     if let Err(e) = looped {
         if !windows {
             // Only the tray needed the loop: the servers carry on without it.
             tracing::warn!(error = %e, "the system tray is unavailable; running without it");
-            return exit_code(server.join());
+            return server_ended(&updates, server.join());
         }
         tracing::error!(error = %e, "signing dialogs are unavailable");
         eprintln!("Не удалось показать окна подписи: {e}");
@@ -415,11 +417,28 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
     match join_within(server, SERVER_JOIN_TIMEOUT) {
-        Some(result) => exit_code(result),
+        Some(result) => server_ended(&updates, result),
         None => {
             tracing::error!("the dialog event loop ended while the server is running");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// The exit code of the joined server thread; servers that stopped as asked (the tray's
+/// «Выход», an update applied) end the run cleanly ([`ended_cleanly`]).
+fn server_ended(updates: &UpdaterHandle, server: thread::Result<io::Result<()>>) -> ExitCode {
+    if matches!(server, Ok(Ok(()))) {
+        ended_cleanly(updates);
+    }
+    exit_code(server)
+}
+
+/// The run ends cleanly (asked to, or with P1's exit code for TLS not set up or a busy
+/// port): a new version not yet confirmed healthy has not failed.
+fn ended_cleanly(updates: &UpdaterHandle) {
+    if let UpdaterHandle::Running(updater) = updates {
+        updater.ended_cleanly();
     }
 }
 

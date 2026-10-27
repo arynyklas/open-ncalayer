@@ -312,6 +312,8 @@ impl Sandbox {
             to: v(to),
             applied: now - TimeDuration::minutes(5),
             started: started.map(|ago| now - ago),
+            // A run in progress at the last start: one crash already counted.
+            crashes: u32::from(started.is_some()),
             rollback,
         });
         state.save(self.dir.path()).unwrap();
@@ -434,10 +436,12 @@ fn the_new_version_confirms_its_health() {
 fn a_version_that_ended_before_proving_healthy_is_rolled_back_at_its_next_start() {
     let s = Sandbox::new();
     s.publish(4, two_releases());
-    // It started once (`started` is set) and never confirmed: its event loop or its
-    // servers did not come up, and the process ended.
+    // Two runs in a row ended without confirming its health or ending cleanly: its event
+    // loop or its servers did not come up, and the process died.
     s.pending("0.1.0", "0.2.0", None, false);
     assert_eq!(s.updater("0.2.0", 0).startup(), Startup::Confirm);
+    assert_eq!(s.updater("0.2.0", 0).startup(), Startup::Confirm);
+    assert_eq!(s.state().pending_health.unwrap().crashes, 1);
     let bad = s.updater("0.2.0", 0);
     let startup = bad.startup();
     assert_eq!(
@@ -479,6 +483,105 @@ fn a_version_that_ended_before_proving_healthy_is_rolled_back_at_its_next_start(
     // 0.2.0 is not offered here again.
     assert_eq!(old.check(false, None).status, UpdateStatus::UpToDate);
     assert!(s.state().bad.contains(&v("0.2.0")));
+}
+
+#[test]
+fn a_quick_quit_is_not_a_crash() {
+    let s = Sandbox::new();
+    s.pending("0.1.0", "0.2.0", None, false);
+    for _ in 0..3 {
+        let u = s.updater("0.2.0", 0);
+        assert_eq!(u.startup(), Startup::Confirm);
+        // «Выход» within seconds, before the health check confirmed it.
+        u.ended_cleanly();
+        let pending = s.state().pending_health.unwrap();
+        assert_eq!((pending.started, pending.crashes), (None, 0));
+    }
+    assert!(s.state().bad.is_empty());
+}
+
+#[test]
+fn a_crash_then_a_healthy_run_rolls_nothing_back() {
+    let s = Sandbox::new();
+    s.pending("0.1.0", "0.2.0", None, false);
+    assert_eq!(s.updater("0.2.0", 0).startup(), Startup::Confirm);
+    // Crashed; then ended cleanly: the count starts again.
+    assert_eq!(s.updater("0.2.0", 0).startup(), Startup::Confirm);
+    assert_eq!(s.state().pending_health.unwrap().crashes, 1);
+    s.updater("0.2.0", 0).ended_cleanly();
+    assert_eq!(s.state().pending_health.unwrap().crashes, 0);
+    // Crashed once more: still one in a row.
+    assert_eq!(s.updater("0.2.0", 0).startup(), Startup::Confirm);
+    let u = s.updater("0.2.0", 0);
+    assert_eq!(u.startup(), Startup::Confirm);
+    assert_eq!(s.state().pending_health.unwrap().crashes, 1);
+    // This run proves healthy.
+    u.confirm_health();
+    assert_eq!(s.state().pending_health, None);
+    assert!(s.state().bad.is_empty());
+    assert_eq!(s.events(), [Event::Notice(Notice::Updated(v("0.2.0")))]);
+}
+
+#[test]
+fn a_version_marked_bad_is_rolled_back_even_after_a_clean_end() {
+    let s = Sandbox::new();
+    s.pending("0.1.0", "0.2.0", None, false);
+    let u = s.updater("0.2.0", 0);
+    assert_eq!(u.startup(), Startup::Confirm);
+    // The health check ran out while it ran; the user quit before the rollback applied.
+    u.health_failed();
+    u.ended_cleanly();
+    assert_eq!(
+        s.updater("0.2.0", 0).startup(),
+        Startup::RollBack {
+            failed: v("0.2.0"),
+            to: v("0.1.0"),
+        }
+    );
+}
+
+#[test]
+fn the_updater_thread_installs_what_check_now_found() {
+    let s = Sandbox::new();
+    s.publish(3, two_releases());
+    let u = Arc::new(s.updater("0.1.0", 0));
+    Arc::clone(&u).spawn(None);
+    assert_eq!(u.check_now(None), available("0.2.0", true));
+    let events = s.wait_for(&Event::Exit);
+    assert_eq!(
+        events,
+        [
+            Event::Download(v("0.2.0"), false),
+            Event::Busy,
+            Event::Hold,
+            Event::Apply(v("0.2.0")),
+            Event::Exit,
+        ]
+    );
+}
+
+#[test]
+fn the_updater_thread_gives_up_a_rollback_without_a_package_and_checks_at_once() {
+    let s = Sandbox::new();
+    s.publish(
+        4,
+        vec![release("0.2.0", 100, false), release("0.3.0", 100, false)],
+    );
+    s.pending("0.1.0", "0.2.0", Some(TimeDuration::minutes(2)), false);
+    let u = Arc::new(s.updater("0.2.0", 0));
+    let Startup::RollBack { failed, to } = u.startup() else {
+        panic!("no rollback");
+    };
+    Arc::clone(&u).spawn(Some((failed, to)));
+    let events = s.wait_for(&Event::Exit);
+    assert_eq!(
+        events[0],
+        Event::Notice(Notice::NoRollback {
+            failed: v("0.2.0"),
+            version: v("0.1.0"),
+        })
+    );
+    assert!(events.contains(&Event::Apply(v("0.3.0"))), "{events:?}");
 }
 
 /// A new version whose health check runs out: rolled back while it runs, by the updater's
@@ -640,6 +743,7 @@ fn a_check_does_not_undo_what_other_threads_write_meanwhile() {
             to: v("0.2.0"),
             applied: OffsetDateTime::now_utc(),
             started: None,
+            crashes: 0,
             rollback: false,
         });
         state.save(&dir).unwrap();
