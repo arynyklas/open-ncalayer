@@ -56,6 +56,11 @@ pub enum Command {
             help = "Если wss не запускается (TLS не настроен или повреждён, порт занят или недоступен), работать только для расширения браузера"
         )]
         allow_no_wss: bool,
+        #[arg(
+            long,
+            help = "Без значка в области уведомлений: для сеансов без графической оболочки и автоматических тестов"
+        )]
+        no_tray: bool,
     },
     #[command(about = "Сертификат HTTPS/WSS-сервера")]
     Tls {
@@ -136,6 +141,8 @@ pub struct Daemon {
     pub paths: Paths,
     pub ipc: IpcListener,
     pub wss: Option<(Arc<rustls::ServerConfig>, TcpListener)>,
+    /// Why wss is off (`allow_no_wss`), for the user.
+    pub wss_off: Option<String>,
 }
 
 /// Prepares `run`: data paths and logging, the IPC endpoint, then TLS and the port. On
@@ -149,20 +156,25 @@ pub async fn prepare_run(allow_no_wss: bool) -> Result<Daemon, ExitCode> {
         warn!(dir = %paths.logs().display(), error = %e, "file logging is disabled");
     }
     let ipc = bind_ipc(&paths.data).await?;
-    let wss = match open_wss(&paths) {
-        Ok(wss) => Some(wss),
+    let (wss, wss_off) = match open_wss(&paths) {
+        Ok(wss) => (Some(wss), None),
         Err(failure) if allow_no_wss => {
             warn!(
                 code = failure.code,
                 reason = %failure.message,
                 "wss is off; serving the browser extension only"
             );
-            None
+            (None, Some(failure.message))
         }
         Err(failure) => return Err(failure.report()),
     };
     info!(data = %paths.data.display(), "daemon started");
-    Ok(Daemon { paths, ipc, wss })
+    Ok(Daemon {
+        paths,
+        ipc,
+        wss,
+        wss_off,
+    })
 }
 
 /// Binds the IPC endpoint of `data`.
@@ -782,13 +794,18 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Run {
-                allow_no_wss: false
+                allow_no_wss: false,
+                no_tray: false
             })
         ));
-        let cli = Cli::try_parse_from(["openncalayer", "run", "--allow-no-wss"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["openncalayer", "run", "--allow-no-wss", "--no-tray"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Run { allow_no_wss: true })
+            Some(Command::Run {
+                allow_no_wss: true,
+                no_tray: true
+            })
         ));
     }
 

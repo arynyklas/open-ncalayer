@@ -25,6 +25,7 @@ allow = [
     "Zlib",
     "CDLA-Permissive-2.0", # webpki-roots (ureq `rustls`)
     "BSL-1.0", # clipboard-win, error-code (Slint's winit backend)
+    "Unlicense", # ksni (oncl-ui's tray on Linux), public-domain dedication
     # Slint (oncl-ui), under its royalty-free license: the storage dialog shows AboutSlint.
     "LicenseRef-Slint-Royalty-free-2.0",
 ]

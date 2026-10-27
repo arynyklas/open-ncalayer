@@ -878,22 +878,23 @@ mod binary {
         let port = free_port();
         runtime().block_on(async {
             let (_first, _c) = start(
-                daemon(dir.path(), port, &["run", "--allow-no-wss"]),
+                daemon(dir.path(), port, &["run", "--allow-no-wss", "--no-tray"]),
                 dir.path(),
             )
             .await;
             // Already running wins over TLS not being set up (2).
-            let (status, stderr) = exit_of(daemon(dir.path(), port, &["run"]));
+            let (status, stderr) = exit_of(daemon(dir.path(), port, &["run", "--no-tray"]));
             assert_eq!(status.code(), Some(4), "{stderr}");
             assert!(stderr.contains("OpenNCALayer уже запущен"), "{stderr}");
         });
     }
 
+    /// Also: `run --no-tray` keeps P4's behaviour, the main thread only waits for the servers.
     #[test]
     fn no_tls_without_flag_exits_2_with_flag_serves_ipc() {
         let dir = daemon_dir();
         let port = free_port();
-        let (status, stderr) = exit_of(daemon(dir.path(), port, &["run"]));
+        let (status, stderr) = exit_of(daemon(dir.path(), port, &["run", "--no-tray"]));
         assert_eq!(status.code(), Some(2), "{stderr}");
         assert!(stderr.contains("TLS не настроен"), "{stderr}");
 
@@ -904,7 +905,7 @@ mod binary {
         );
         runtime().block_on(async {
             let (_daemon, mut c) = start(
-                daemon(dir.path(), port, &["run", "--allow-no-wss"]),
+                daemon(dir.path(), port, &["run", "--allow-no-wss", "--no-tray"]),
                 dir.path(),
             )
             .await;
@@ -932,6 +933,36 @@ mod binary {
         assert!(log.contains("sid=1"), "{log}");
         assert!(log.contains("origin=https://binary.test"), "{log}");
         assert!(log.contains("wss is off"), "{log}");
+        assert!(!log.contains("system tray"), "{log}");
+    }
+
+    /// A login without a session bus: the tray cannot start, the daemon signs regardless.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn without_dbus_the_tray_is_off_and_the_daemon_signs() {
+        let dir = daemon_dir();
+        let port = free_port();
+        let key = synthetic("user-gost2015-sign");
+        write_steps(
+            dir.path(),
+            &json!([{"storage": {"path": key.path, "password": key.password}}, {"key": 0}]),
+        );
+        let mut command = daemon(dir.path(), port, &["run", "--allow-no-wss"]);
+        command.env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent");
+        runtime().block_on(async {
+            let (_daemon, mut c) = start(command, dir.path()).await;
+            c.open(1, "https://tray.test").await;
+            let params = json!({"decode": true, "encapsulate": false, "digested": false});
+            let reply = c
+                .call(1, &basics_sign_cms(&STANDARD.encode(b"tray"), params))
+                .await;
+            assert_eq!(json(&reply)["status"], true, "{reply}");
+        });
+        let log = logs(dir.path());
+        assert!(
+            log.contains("the system tray is unavailable; running without it"),
+            "{log}"
+        );
     }
 
     /// The text of the daemon's log files under `data`.
@@ -956,12 +987,12 @@ mod binary {
             configure_tls(dir.path());
             std::fs::write(dir.path().join("tls").join(broken), content).unwrap();
             let port = free_port();
-            let (status, stderr) = exit_of(daemon(dir.path(), port, &["run"]));
+            let (status, stderr) = exit_of(daemon(dir.path(), port, &["run", "--no-tray"]));
             assert_eq!(status.code(), Some(1), "{broken}: {stderr}");
             assert!(stderr.contains("Не удалось"), "{broken}: {stderr}");
             runtime().block_on(async {
                 let (_daemon, mut c) = start(
-                    daemon(dir.path(), port, &["run", "--allow-no-wss"]),
+                    daemon(dir.path(), port, &["run", "--allow-no-wss", "--no-tray"]),
                     dir.path(),
                 )
                 .await;
@@ -981,12 +1012,12 @@ mod binary {
         let dir = daemon_dir();
         configure_tls(dir.path());
         let (port, _held) = hold_port();
-        let (status, stderr) = exit_of(daemon(dir.path(), port, &["run"]));
+        let (status, stderr) = exit_of(daemon(dir.path(), port, &["run", "--no-tray"]));
         assert_eq!(status.code(), Some(3), "{stderr}");
         assert!(stderr.contains(&format!("Порт {port} занят")), "{stderr}");
         runtime().block_on(async {
             let (_daemon, mut c) = start(
-                daemon(dir.path(), port, &["run", "--allow-no-wss"]),
+                daemon(dir.path(), port, &["run", "--allow-no-wss", "--no-tray"]),
                 dir.path(),
             )
             .await;
@@ -1001,7 +1032,8 @@ mod binary {
         let ca_der = configure_tls(dir.path());
         let port = free_port();
         runtime().block_on(async {
-            let (_daemon, mut c) = start(daemon(dir.path(), port, &["run"]), dir.path()).await;
+            let (_daemon, mut c) =
+                start(daemon(dir.path(), port, &["run", "--no-tray"]), dir.path()).await;
             c.open(1, "https://a.test").await;
             let mut ws = wss_connect(SocketAddr::from(([127, 0, 0, 1], port)), &ca_der).await;
             assert_eq!(wss_call(&mut ws, HEARTBEAT).await, HEARTBEAT);

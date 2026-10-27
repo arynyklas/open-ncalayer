@@ -1,6 +1,6 @@
 [package]
 name = "oncl-ui"
-description = "OpenNCALayer dialogs in Slint: storage, file and password; key choice; certificate request and installation; the legacy Applet's password"
+description = "OpenNCALayer dialogs in Slint: storage, file and password; key choice; certificate request and installation; the legacy Applet's password; the system tray"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 oncl-basics.workspace = true
 oncl-pki.workspace = true
+png.workspace = true
 rfd.workspace = true
 # `raw-window-handle-06`: the file and folder pickers are owned by (and stay above) their dialog,
 # and on Windows the dialog's HWND is brought to the foreground.
@@ -18,6 +19,7 @@ rfd.workspace = true
 # restart) is seen as winit's `Destroyed` event and counts as cancelled. The API follows
 # winit 0.30 and may change in a Slint minor release, hence `~` in the workspace version.
 slint = { workspace = true, features = ["raw-window-handle-06", "unstable-winit-030"] }
+thiserror.workspace = true
 time.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
@@ -31,6 +33,12 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tray-icon.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true
