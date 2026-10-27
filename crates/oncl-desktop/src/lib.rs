@@ -1,17 +1,20 @@
 //! OpenNCALayer's desktop integration without windows: [`settings`] (`settings.json` in the
-//! data directory), [`autostart`] (our entry started at login), and what the settings window
-//! shows of the [`original`] NCALayer and of the browser [`extension`]'s registration.
+//! data directory), [`autostart`] (our entry started at login), the [`original`] NCALayer
+//! (its autostart, disabled and restored with a journal) and the [`port_owner`] (who holds
+//! the port, and stopping it), and the browser [`extension`]'s registration.
 
 pub mod autostart;
 pub mod extension;
 pub mod original;
+pub mod port_owner;
 pub mod settings;
 
 pub use autostart::{Autostart, AutostartPaths, FileAutostart};
 #[cfg(windows)]
 pub use autostart::{RegistryAutostart, RegistryBase};
 pub use extension::{BrowserExtension, ExtensionError, ExtensionStatus};
-pub use original::{OriginalControl, OriginalStatus};
+pub use original::{OriginalControl, OriginalLocations, OriginalNcaLayer, OriginalStatus};
+pub use port_owner::PortOwner;
 pub use settings::{ProxySetting, Settings};
 
 use std::io;
