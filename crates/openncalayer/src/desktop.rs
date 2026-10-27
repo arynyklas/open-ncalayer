@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use oncl_desktop::original::Unavailable;
-use oncl_desktop::{Autostart, BrowserExtension, ExtensionStatus};
+use oncl_desktop::{Autostart, BrowserExtension, ExtensionError, ExtensionStatus};
 use oncl_ui::SettingsServices;
 
 use crate::Paths;
@@ -54,26 +54,20 @@ impl BrowserExtension for NmExtension {
         }
     }
 
-    fn register(&self) -> io::Result<ExtensionStatus> {
+    fn register(&self) -> Result<ExtensionStatus, ExtensionError> {
         let layout = self.layout()?;
         if !self.relay.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("relay не найден: {}", self.relay.display()),
-            ));
+            return Err(ExtensionError::RelayMissing(self.relay.clone()));
         }
         let report = nm::install(layout, &self.relay, &self.daemon, &self.data_dir)?;
         failures(&report)?;
         Ok(self.status())
     }
 
-    fn unregister(&self) -> io::Result<ExtensionStatus> {
+    fn unregister(&self) -> Result<ExtensionStatus, ExtensionError> {
         let report = nm::uninstall(self.layout()?)?;
         if report.has_in_use() {
-            return Err(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "relay запущен браузером: закройте браузер и повторите",
-            ));
+            return Err(ExtensionError::RelayInUse);
         }
         failures(&report)?;
         Ok(self.status())
@@ -216,12 +210,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ext = sandboxed(dir.path());
         fs::remove_file(&ext.relay).unwrap();
-        let e = ext.register().unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+        let relay = ext.relay.clone();
+        assert!(matches!(ext.register(), Err(ExtensionError::RelayMissing(p)) if p == relay));
         assert!(!dir.path().join("nm").exists(), "nothing is installed");
 
         ext.layout = Err("HOME is not set".to_owned());
         assert_eq!(ext.status(), ExtensionStatus::default());
-        assert_eq!(ext.unregister().unwrap_err().to_string(), "HOME is not set");
+        match ext.unregister() {
+            Err(ExtensionError::Io(e)) => assert_eq!(e.to_string(), "HOME is not set"),
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -201,7 +201,11 @@ fn desktop_windows(
     DesktopWindows {
         locale,
         settings: desktop::settings_services(paths, exe),
-        about: AboutInfo { bundles, modules },
+        about: AboutInfo {
+            commit: env!("ONCL_GIT_COMMIT").to_owned(),
+            bundles,
+            modules,
+        },
         on_saved: Box::new(move |settings: &Settings| {
             http.set_proxy(settings.proxy.clone());
             if let Some(tray) = tray.upgrade() {

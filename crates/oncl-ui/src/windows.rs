@@ -11,6 +11,7 @@ use oncl_basics::Locale;
 use oncl_desktop::Settings;
 
 use crate::about_view::{self, AboutInfo, AboutTab};
+use crate::prompter::select_desktop_language;
 use crate::settings_view::{self, SettingsServices};
 
 /// A window of the daemon.
@@ -58,6 +59,11 @@ pub fn set_desktop_windows(windows: DesktopWindows) {
     DESKTOP.set(Some(Rc::new(desktop)));
 }
 
+/// The windows of [`set_desktop_windows`], on this thread.
+pub(crate) fn desktop() -> Option<Rc<Desktop>> {
+    DESKTOP.with_borrow(Clone::clone)
+}
+
 /// Opens `window` on the event loop, or brings it to the front; callable from any thread,
 /// returns at once. Without an event loop (no windows, e.g. a scripted e2e run) or without
 /// [`set_desktop_windows`] the request is only logged.
@@ -68,7 +74,7 @@ pub fn open_window(window: DesktopWindow) {
 }
 
 fn open_now(window: DesktopWindow) {
-    let Some(desktop) = DESKTOP.with_borrow(Clone::clone) else {
+    let Some(desktop) = desktop() else {
         tracing::info!(?window, "no windows: the window is not opened");
         return;
     };
@@ -76,5 +82,16 @@ fn open_now(window: DesktopWindow) {
         DesktopWindow::Settings => settings_view::open(&desktop),
         DesktopWindow::About => about_view::open(&desktop, AboutTab::Program),
         DesktopWindow::Modules => about_view::open(&desktop, AboutTab::Modules),
+    }
+}
+
+/// After a signing dialog: the open settings or About window gets its language back (the
+/// translation is the thread's, and the dialog had its page's).
+pub(crate) fn restore_language() {
+    if !(settings_view::is_open() || about_view::is_open()) {
+        return;
+    }
+    if let Some(desktop) = desktop() {
+        select_desktop_language(desktop.locale.get());
     }
 }

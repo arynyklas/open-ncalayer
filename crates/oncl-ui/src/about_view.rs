@@ -13,23 +13,23 @@ use slint::{
 };
 
 use crate::foreground;
-use crate::prompter::select_language;
+use crate::prompter::select_desktop_language;
 use crate::ui::AboutWindow;
 use crate::windows::Desktop;
 
 /// The program's version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// The git commit of the build (`unknown` outside a git checkout).
-pub const COMMIT: &str = env!("ONCL_GIT_COMMIT");
 /// The project's repository.
 pub const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
 /// The third-party licences, as `cargo xtask licenses` writes them.
 const THIRD_PARTY: &str = include_str!("../assets/THIRD-PARTY.txt");
 
-/// What the «Модули» tab lists, from the daemon.
+/// What the About window shows of the daemon.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AboutInfo {
+    /// The git commit the program was built from.
+    pub commit: String,
     /// `getBundles`: `(symname, version)`.
     pub bundles: Vec<(String, String)>,
     /// The modules of the daemon's registry.
@@ -156,7 +156,7 @@ pub(crate) fn open(desktop: &Rc<Desktop>, tab: AboutTab) {
         AboutTab::Modules => 1,
     };
     if let Some(ui) = current() {
-        select_language(desktop.locale.get());
+        select_desktop_language(desktop.locale.get());
         ui.set_tab(tab);
         if let Err(e) = ui.show() {
             tracing::warn!(error = %e, "cannot show the About window");
@@ -174,13 +174,18 @@ pub(crate) fn current() -> Option<AboutWindow> {
     OPEN.with_borrow(|open| open.as_ref().map(ComponentHandle::clone_strong))
 }
 
+/// Whether the About window is open.
+pub(crate) fn is_open() -> bool {
+    OPEN.with_borrow(Option::is_some)
+}
+
 fn create(desktop: &Desktop, tab: i32) -> Result<(), PlatformError> {
     let ui = AboutWindow::new()?;
     // After the window exists: the bundled translations come with it.
-    select_language(desktop.locale.get());
+    select_desktop_language(desktop.locale.get());
     ui.set_tab(tab);
     ui.set_version(VERSION.into());
-    ui.set_commit(COMMIT.into());
+    ui.set_commit(desktop.about.commit.as_str().into());
     ui.set_repository(REPOSITORY.into());
     ui.set_bundles(items(
         desktop

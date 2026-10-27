@@ -12,6 +12,8 @@
 
 pub mod about_view;
 mod foreground;
+#[cfg(test)]
+mod offscreen;
 mod prompter;
 #[cfg(test)]
 mod screenshots;

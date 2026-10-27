@@ -4,8 +4,9 @@
 //! The crates are those `cargo tree` resolves for the normal dependencies of `openncalayer`
 //! and `oncl-nmhost` on every platform we ship ([`TARGETS`]); build dependencies and
 //! procedural macros are not part of the programs. Their licence texts come from the
-//! packages themselves as cargo unpacks them (`cargo metadata`; cargo downloads a package
-//! it has not unpacked yet from crates.io, as for a build), never from a licence service:
+//! packages in the local cargo registry (`cargo metadata --offline`), without network
+//! access; `cargo fetch --locked` unpacks the packages of every platform
+//! ([`PackagesMissing`] otherwise):
 //!
 //! - the package's `license-file` and its files named `LICENSE*`, `LICENCE*`, `COPYING*`,
 //!   `NOTICE*`, `UNLICENSE*` or `COPYRIGHT*`;
@@ -13,8 +14,10 @@
 //! - for a package with none of these, the standard texts in [`STANDARD_TEXTS`] of the
 //!   licences its SPDX expression names.
 //!
-//! Identical texts (up to white space) are written once. The output is the same on every
-//! host; `--check` compares it with the committed file.
+//! A template copyright line (`Copyright (c) <year> <copyright holders>`) names the
+//! package's authors from `Cargo.toml`, or its repository. Identical texts (up to white
+//! space) are written once, the packages' own files before the standard texts. The output
+//! is the same on every host; `--check` compares it with the committed file.
 
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsString;
@@ -54,6 +57,8 @@ pub const CRATES_HEADER: &str = "[crates]";
 pub struct Package {
     pub name: String,
     pub version: String,
+    /// `authors` of `Cargo.toml`.
+    pub authors: Vec<String>,
     /// The SPDX expression of `Cargo.toml`.
     pub license: Option<String>,
     /// `license-file` of `Cargo.toml`, relative to `dir`.
@@ -62,6 +67,26 @@ pub struct Package {
     /// The unpacked package.
     pub dir: PathBuf,
 }
+
+/// Some package is not in the local cargo registry: `cargo fetch --locked` unpacks them.
+#[derive(Debug)]
+pub struct PackagesMissing {
+    /// What cargo said.
+    pub detail: String,
+}
+
+impl std::fmt::Display for PackagesMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "packages are missing from the local cargo registry: run `cargo fetch --locked` \
+             ({})",
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for PackagesMissing {}
 
 /// Writes [`OUTPUT`] under `root`.
 ///
@@ -89,8 +114,9 @@ pub fn check(root: &Path) -> anyhow::Result<bool> {
 ///
 /// # Errors
 ///
-/// `cargo tree` or `cargo metadata` fails, a licence file cannot be read, `deny.toml` or a
-/// standard text is missing, or a package has no licence text at all.
+/// [`PackagesMissing`]; `cargo tree` or `cargo metadata` fails otherwise, a licence file
+/// cannot be read, `deny.toml` or a standard text is missing, or a package has no licence
+/// text at all.
 pub fn generate(root: &Path) -> anyhow::Result<String> {
     let shipped = shipped_crates(root)?;
     let mut packages = registry_packages(root)?;
@@ -109,7 +135,13 @@ pub fn generate(root: &Path) -> anyhow::Result<String> {
 
 /// `(name, version)` of the third-party crates of [`PROGRAMS`] on [`TARGETS`], sorted.
 fn shipped_crates(root: &Path) -> anyhow::Result<BTreeSet<(String, String)>> {
-    let mut args = vec!["tree", "--locked", "--edges", "normal,no-proc-macro"];
+    let mut args = vec![
+        "tree",
+        "--locked",
+        "--offline",
+        "--edges",
+        "normal,no-proc-macro",
+    ];
     for program in PROGRAMS {
         args.extend(["--package", program]);
     }
@@ -171,6 +203,12 @@ fn registry_packages(root: &Path) -> anyhow::Result<HashMap<(String, String), Pa
             Package {
                 name,
                 version,
+                authors: p["authors"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a.as_str().map(str::to_owned))
+                    .collect(),
                 license: text(p, "license"),
                 license_file: text(p, "license_file"),
                 repository: text(p, "repository"),
@@ -186,13 +224,17 @@ fn packages_of(metadata: &Value) -> impl Iterator<Item = &Value> {
 }
 
 fn metadata(root: &Path, extra: &[&str]) -> anyhow::Result<Value> {
-    let mut args = vec!["metadata", "--format-version", "1", "--locked"];
+    let mut args = vec!["metadata", "--format-version", "1", "--locked", "--offline"];
     args.extend(extra);
     let out = cargo(root, &args)?;
     serde_json::from_str(&out).context("parsing `cargo metadata`")
 }
 
 /// The standard output of `cargo <args>` in `root`.
+///
+/// # Errors
+///
+/// [`PackagesMissing`] if offline cargo lacks a package; otherwise cargo's error.
 fn cargo(root: &Path, args: &[&str]) -> anyhow::Result<String> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let out = Command::new(cargo)
@@ -201,13 +243,19 @@ fn cargo(root: &Path, args: &[&str]) -> anyhow::Result<String> {
         .output()
         .with_context(|| format!("running cargo {}", args[0]))?;
     if !out.status.success() {
-        bail!(
-            "cargo {} failed: {}",
-            args[0],
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        if needs_download(&stderr) {
+            return Err(PackagesMissing { detail: stderr }.into());
+        }
+        bail!("cargo {} failed: {stderr}", args[0]);
     }
     String::from_utf8(out.stdout).with_context(|| format!("cargo {}: not UTF-8", args[0]))
+}
+
+/// Whether offline cargo failed for want of a package (`attempting to make an HTTP request,
+/// but --offline was specified`, `no matching package … offline mode`).
+fn needs_download(stderr: &str) -> bool {
+    stderr.contains("--offline") || stderr.contains("offline mode")
 }
 
 /// The licences `deny.toml` accepts (`[licenses] allow`).
@@ -329,9 +377,32 @@ fn dedup_key(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The template copyright line of the MIT and zlib texts.
+const TEMPLATE_COPYRIGHT: &str = "Copyright (c) <year> <copyright holders>";
+
+/// `text` with its template copyright line naming `p`'s authors from `Cargo.toml`, or, if
+/// it has none, its repository.
+fn with_holders(text: &str, p: &Package) -> String {
+    if !text.contains(TEMPLATE_COPYRIGHT) {
+        return text.to_owned();
+    }
+    let holders = if p.authors.is_empty() {
+        format!(
+            "the {} authors (see {})",
+            p.name,
+            p.repository.as_deref().unwrap_or("crates.io")
+        )
+    } else {
+        p.authors.join(", ")
+    };
+    text.replace(TEMPLATE_COPYRIGHT, &format!("Copyright (c) {holders}"))
+}
+
 /// The licence file of `crates` (sorted by name and version): the list of crates, each
-/// with the numbers of its texts, then the texts. `accepted` filters REUSE `LICENSES/`
-/// files; `standard` are the texts for packages without any.
+/// with the numbers of its texts, then the texts: the packages' own files first, then the
+/// standard texts of packages without any, so that a text shared by both is titled after
+/// a file. `accepted` filters REUSE `LICENSES/` files; `standard` are the texts for
+/// packages without any.
 ///
 /// # Errors
 ///
@@ -342,7 +413,7 @@ pub fn render(
     accepted: &BTreeSet<String>,
     standard: &[(String, String)],
 ) -> anyhow::Result<String> {
-    // (title, text) in the order of first use; dedup key → index.
+    // (title, text) in the order of first use; dedup key → number.
     let mut texts: Vec<(String, String)> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut add = |title: String, text: String| -> usize {
@@ -351,9 +422,9 @@ pub fn render(
             texts.len()
         })
     };
-    let mut list = String::new();
+    let mut refs: Vec<Vec<usize>> = Vec::with_capacity(crates.len());
     for p in crates {
-        let mut refs = Vec::new();
+        let mut own = Vec::new();
         for file in license_files(p, accepted)? {
             let text = fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
             let text = normalize(&text);
@@ -364,11 +435,15 @@ pub fn render(
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            refs.push(add(
+            own.push(add(
                 format!("{file_name} of {} {}", p.name, p.version),
-                text,
+                with_holders(&text, p),
             ));
         }
+        refs.push(own);
+    }
+    let mut list = String::new();
+    for (p, refs) in crates.iter().zip(&mut refs) {
         let Some(license) = p
             .license
             .as_deref()
@@ -378,11 +453,17 @@ pub fn render(
         };
         if refs.is_empty() {
             for id in license_ids(license) {
-                if let Some((_, text)) = standard.iter().find(|(s, _)| *s == id) {
-                    refs.push(add(
-                        format!("{id}, standard text (for crates without a licence file)"),
-                        text.clone(),
-                    ));
+                if let Some((_, template)) = standard.iter().find(|(s, _)| *s == id) {
+                    let text = with_holders(template, p);
+                    let title = if text == *template {
+                        format!("{id}, standard text (for crates without a licence file)")
+                    } else {
+                        format!(
+                            "{id}, standard text for {} {} (it ships no licence file)",
+                            p.name, p.version
+                        )
+                    };
+                    refs.push(add(title, text));
                 }
             }
         }
@@ -444,6 +525,7 @@ mod tests {
         Package {
             name: name.to_owned(),
             version: "1.0.0".to_owned(),
+            authors: Vec::new(),
             license: license.map(str::to_owned),
             license_file: None,
             repository: Some(format!("https://example.test/{name}")),
@@ -532,5 +614,62 @@ mod tests {
         assert!(e.contains("bare 1.0.0: no licence file"), "{e}");
         let unlicensed = package(dir.path(), "none", None);
         assert!(render(&[unlicensed], &accepted(), &[]).is_err());
+    }
+
+    /// A crate's own file titles a text it shares with a standard text, whichever crate
+    /// comes first in the list.
+    #[test]
+    fn own_files_come_before_standard_texts() {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = package(dir.path(), "a-bare", Some("Apache-2.0"));
+        let shipped = package(dir.path(), "b-shipped", Some("Apache-2.0"));
+        fs::write(shipped.dir.join("LICENSE-APACHE"), "Apache\n").unwrap();
+        let standard = [("Apache-2.0".to_owned(), "Apache".to_owned())];
+        let out = render(&[bare, shipped], &accepted(), &standard).unwrap();
+        assert!(out.contains("a-bare 1.0.0 | Apache-2.0 | https://example.test/a-bare | 1\n"));
+        assert!(
+            out.contains("[text 1] LICENSE-APACHE of b-shipped 1.0.0\n"),
+            "{out}"
+        );
+        assert!(!out.contains("[text 2]"));
+    }
+
+    /// The MIT and zlib templates name the crate's authors, or its repository.
+    #[test]
+    fn template_copyright_lines_name_the_holders() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut authored = package(dir.path(), "authored", Some("MIT"));
+        authored.authors = vec!["Ann <ann@example.test>".to_owned(), "Bob".to_owned()];
+        let anonymous = package(dir.path(), "anonymous", Some("MIT"));
+        let reuse = package(dir.path(), "reuse", Some("MIT"));
+        fs::create_dir(reuse.dir.join("LICENSES")).unwrap();
+        let template = format!("MIT License\n\n{TEMPLATE_COPYRIGHT}\n\nPermission");
+        fs::write(reuse.dir.join("LICENSES").join("MIT.txt"), &template).unwrap();
+        let standard = [("MIT".to_owned(), template)];
+        let out = render(&[anonymous, authored, reuse], &accepted(), &standard).unwrap();
+        assert!(!out.contains("<year>"), "{out}");
+        assert!(out.contains("\nCopyright (c) Ann <ann@example.test>, Bob\n"));
+        assert!(out.contains(
+            "\nCopyright (c) the anonymous authors (see https://example.test/anonymous)\n"
+        ));
+        assert!(
+            out.contains("\nCopyright (c) the reuse authors (see https://example.test/reuse)\n")
+        );
+        assert!(out.contains("MIT, standard text for authored 1.0.0 (it ships no licence file)"));
+    }
+
+    #[test]
+    fn missing_packages_are_told_from_other_failures() {
+        assert!(needs_download(
+            "error: failed to download `objc2 v0.6.5`\n\nCaused by:\n  attempting to make an \
+             HTTP request, but --offline was specified"
+        ));
+        assert!(needs_download(
+            "error: no matching package named `serde_json` found\nnote: offline mode (via \
+             `--offline`) can sometimes cause surprising resolution failures"
+        ));
+        assert!(!needs_download(
+            "error: the lock file needs to be updated but --locked was passed"
+        ));
     }
 }

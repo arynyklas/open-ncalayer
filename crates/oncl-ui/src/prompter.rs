@@ -22,7 +22,7 @@ use std::panic::{self, UnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -120,13 +120,18 @@ type Show<P, T> = fn(P, Sender<Prompt<T>>) -> Result<(), PlatformError>;
 /// A job for the event loop.
 type Job = Box<dyn FnOnce() + Send>;
 
-/// Opens a dialog with `show` on the event loop and waits for its outcome.
+/// Opens a dialog with `show` on the event loop and waits for its outcome. The dialog
+/// selects its page's language; afterwards an open settings or About window gets its own
+/// back.
 fn ask<P, T>(p: &P, show: Show<P, T>) -> Prompt<T>
 where
     P: Clone + Send + 'static,
     T: Send + 'static,
 {
-    ask_with(p, show, LOOP_START_TIMEOUT, slint::invoke_from_event_loop)
+    let outcome = ask_with(p, show, LOOP_START_TIMEOUT, slint::invoke_from_event_loop);
+    // No event loop: no window to restore.
+    let _ = slint::invoke_from_event_loop(crate::windows::restore_language);
+    outcome
 }
 
 /// [`ask`] with `invoke` running jobs on the event loop, waiting up to `loop_start_timeout`
@@ -723,7 +728,7 @@ fn index(i: Option<usize>) -> i32 {
 }
 
 /// Switches the bundled translation of the `.slint` texts to `l`; English is the source. The
-/// translation is the process's: every open dialog and window follows it.
+/// translation is the thread's: every open dialog and window follows it.
 pub(crate) fn select_language(l: Locale) {
     let language = match l {
         Locale::Kk => "kk",
@@ -732,6 +737,23 @@ pub(crate) fn select_language(l: Locale) {
     };
     if let Err(e) = slint::select_bundled_translation(language) {
         tracing::warn!(error = %e, language, "cannot select the dialog language");
+    }
+}
+
+/// [`select_language`] for the settings and About windows, unless a signing dialog is up:
+/// it keeps its page's language until it is answered (then [`ask`] restores the windows').
+pub(crate) fn select_desktop_language(l: Locale) {
+    select_unless_asking(&DIALOGS, l);
+}
+
+/// Selects `l` unless `dialogs` is held (a dialog is up); returns whether it did.
+fn select_unless_asking(dialogs: &Mutex<()>, l: Locale) -> bool {
+    match dialogs.try_lock() {
+        Ok(_) | Err(TryLockError::Poisoned(_)) => {
+            select_language(l);
+            true
+        }
+        Err(TryLockError::WouldBlock) => false,
     }
 }
 
@@ -899,6 +921,23 @@ mod tests {
             Ok(())
         });
         assert_eq!(r, Prompt::Cancelled);
+    }
+
+    /// While a signing dialog is up, the settings and About windows do not switch the
+    /// translation it shows.
+    #[test]
+    fn windows_keep_off_the_language_of_an_open_dialog() {
+        let dialogs = Mutex::new(());
+        let asking = dialogs.lock().unwrap();
+        assert!(!select_unless_asking(&dialogs, Locale::En));
+        drop(asking);
+        assert!(select_unless_asking(&dialogs, Locale::En));
+        // A dialog that panicked does not pin the language forever.
+        let _ = std::panic::catch_unwind(|| {
+            let _held = dialogs.lock().unwrap();
+            panic!("dialog failed");
+        });
+        assert!(select_unless_asking(&dialogs, Locale::Kk));
     }
 
     #[test]

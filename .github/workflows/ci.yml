@@ -58,6 +58,10 @@ jobs:
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # Every platform's packages: the licences test (`committed_licenses_are_fresh`) reads
+      # their licence files offline.
+      - name: Fetch packages
+        run: cargo fetch --locked
       - name: Test
         shell: bash
         run: cargo xtask fetch-fixtures && cargo test --workspace --all-features -- --include-ignored --skip live_

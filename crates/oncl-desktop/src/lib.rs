@@ -10,7 +10,7 @@ pub mod settings;
 pub use autostart::{Autostart, AutostartPaths, FileAutostart};
 #[cfg(windows)]
 pub use autostart::{RegistryAutostart, RegistryBase};
-pub use extension::{BrowserExtension, ExtensionStatus};
+pub use extension::{BrowserExtension, ExtensionError, ExtensionStatus};
 pub use original::{OriginalControl, OriginalStatus};
 pub use settings::{ProxySetting, Settings};
 

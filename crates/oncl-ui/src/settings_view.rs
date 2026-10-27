@@ -4,28 +4,28 @@
 //!
 //! The window's logic without a window is public: [`SettingsForm`] (what the form shows and
 //! the settings it gives), [`SettingsServices`] (loading and the actions, on sandboxes in
-//! tests) and the texts of the states ([`original_view`], [`extension_view`]). The actions
-//! run on a worker thread; the window waits for them.
+//! tests) and the texts of the states ([`original_view`], [`extension_view`]). The window
+//! itself is in `window`, its texts in `texts`; the actions run on a worker thread while the
+//! window waits for them.
 
-use std::cell::{Cell, RefCell};
+mod texts;
+mod window;
+
+#[cfg(test)]
+pub(crate) use window::show_snapshot;
+pub(crate) use window::{is_open, open};
+
 use std::io;
 use std::path::PathBuf;
-use std::rc::Rc;
-use std::sync::Arc;
-use std::time::Duration;
 
 use oncl_basics::Locale;
 use oncl_desktop::original::EntryKind;
 use oncl_desktop::{
-    Autostart, BrowserExtension, ExtensionStatus, OriginalControl, OriginalStatus, ProxySetting,
-    Settings,
+    Autostart, BrowserExtension, ExtensionError, ExtensionStatus, OriginalControl, OriginalStatus,
+    ProxySetting, Settings,
 };
-use slint::{CloseRequestResponse, ComponentHandle, PlatformError, SharedString};
 
-use crate::foreground;
-use crate::prompter::select_language;
-use crate::ui::SettingsWindow;
-use crate::windows::Desktop;
+use texts::Texts;
 
 /// The language choice of the form, in the order of its list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +192,15 @@ pub enum SaveError {
     Settings(io::Error),
 }
 
+/// Why an action of the window failed.
+#[derive(Debug)]
+pub enum ActionError {
+    /// Disabling or restoring the original NCALayer.
+    Original(io::Error),
+    /// Registering or removing the browser extension.
+    Extension(ExtensionError),
+}
+
 impl SettingsServices {
     /// The settings, our autostart entry's real state and the states. Reads only.
     pub fn load(&self) -> Snapshot {
@@ -225,8 +234,12 @@ impl SettingsServices {
         }
     }
 
-    /// Saves `form`: first our autostart entry, if it differs from the form, then
+    /// Saves `form`: first our autostart entry, if the form changes it, then
     /// `settings.json` (its other keys kept). Returns the saved settings.
+    ///
+    /// The entry is changed when its state differs from the form. When it cannot be read,
+    /// the form showed `settings.json`'s value, so it is changed only if the user changed
+    /// that: the proxy and the language can still be saved.
     ///
     /// # Errors
     ///
@@ -234,7 +247,11 @@ impl SettingsServices {
     /// or `settings.json` cannot be written.
     pub fn save(&self, form: &SettingsForm) -> Result<Settings, SaveError> {
         let settings = form.settings().map_err(SaveError::Form)?;
-        if self.autostart.enabled().ok() != Some(settings.autostart) {
+        let shown = match self.autostart.enabled() {
+            Ok(on) => on,
+            Err(_) => Settings::load(&self.settings_path).is_ok_and(|s| s.autostart),
+        };
+        if shown != settings.autostart {
             self.autostart
                 .set(settings.autostart, &self.exe)
                 .map_err(SaveError::Autostart)?;
@@ -252,13 +269,16 @@ impl SettingsServices {
     ///
     /// The original cannot be restored (ours is left as it is), or ours cannot be turned
     /// off.
-    pub fn restore_original(&self) -> io::Result<()> {
-        let report = self.original.restore()?;
-        tracing::info!(changed = ?report.changed, "the original NCALayer's autostart is restored");
-        self.autostart.set(false, &self.exe)?;
-        let mut settings = Settings::load(&self.settings_path)?;
-        settings.autostart = false;
-        settings.save(&self.settings_path)
+    pub fn restore_original(&self) -> Result<(), ActionError> {
+        let restore = || -> io::Result<()> {
+            let report = self.original.restore()?;
+            tracing::info!(changed = ?report.changed, "the original NCALayer's autostart is restored");
+            self.autostart.set(false, &self.exe)?;
+            let mut settings = Settings::load(&self.settings_path)?;
+            settings.autostart = false;
+            settings.save(&self.settings_path)
+        };
+        restore().map_err(ActionError::Original)
     }
 
     /// «Отключить автозапуск оригинала».
@@ -266,10 +286,34 @@ impl SettingsServices {
     /// # Errors
     ///
     /// See [`OriginalControl::disable`].
-    pub fn disable_original(&self) -> io::Result<()> {
-        let report = self.original.disable()?;
+    pub fn disable_original(&self) -> Result<(), ActionError> {
+        let report = self.original.disable().map_err(ActionError::Original)?;
         tracing::info!(changed = ?report.changed, "the original NCALayer's autostart is disabled");
         Ok(())
+    }
+
+    /// «Зарегистрировать».
+    ///
+    /// # Errors
+    ///
+    /// See [`BrowserExtension::register`].
+    pub fn register_extension(&self) -> Result<(), ActionError> {
+        self.extension
+            .register()
+            .map(drop)
+            .map_err(ActionError::Extension)
+    }
+
+    /// «Удалить».
+    ///
+    /// # Errors
+    ///
+    /// See [`BrowserExtension::unregister`].
+    pub fn unregister_extension(&self) -> Result<(), ActionError> {
+        self.extension
+            .unregister()
+            .map(drop)
+            .map_err(ActionError::Extension)
     }
 }
 
@@ -373,414 +417,105 @@ fn save_error_text(e: &SaveError, l: Locale) -> String {
     }
 }
 
-/// The open settings window. Its callbacks find it by `id` in [`OPEN`], so that none holds
-/// it (a reference cycle) and a late result never reaches a window opened since.
-struct Open {
-    id: u64,
-    ui: SettingsWindow,
-    desktop: Rc<Desktop>,
-}
-
-thread_local! {
-    static OPEN: RefCell<Option<Rc<Open>>> = const { RefCell::new(None) };
-    static NEXT_ID: Cell<u64> = const { Cell::new(0) };
-}
-
-/// The settings window `id`, if it is open.
-fn current(id: u64) -> Option<Rc<Open>> {
-    OPEN.with_borrow(|open| open.as_ref().filter(|o| o.id == id).cloned())
-}
-
-/// Shows the settings window, or brings the open one to the front. On the event loop.
-pub(crate) fn open(desktop: &Rc<Desktop>) {
-    if let Some(open) = OPEN.with_borrow(Clone::clone) {
-        select_language(desktop.locale.get());
-        if let Err(e) = open.ui.show() {
-            tracing::warn!(error = %e, "cannot show the settings window");
-        }
-        foreground::take(&open.ui);
-        return;
-    }
-    if let Err(e) = create(desktop) {
-        tracing::error!(error = %e, "cannot show the settings window");
-    }
-}
-
-fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
-    let ui = SettingsWindow::new()?;
-    let locale = desktop.locale.get();
-    select_language(locale);
-    let t = Texts::of(locale);
-    ui.set_original_state(t.loading.into());
-    ui.set_extension_state(t.loading.into());
-    let id = NEXT_ID.replace(NEXT_ID.get() + 1);
-    let open = Rc::new(Open {
-        id,
-        ui: ui.clone_strong(),
-        desktop: Rc::clone(desktop),
-    });
-
-    ui.on_save(move || with(id, save));
-    ui.on_disable_original(move || {
-        with(id, |open| {
-            act(open, SettingsServices::disable_original, |t| {
-                (t.original_disabled, t.cannot_disable_original)
-            });
-        });
-    });
-    ui.on_restore_original(move || {
-        with(id, |open| {
-            act(open, SettingsServices::restore_original, |t| {
-                (t.original_restored, t.cannot_restore_original)
-            });
-        });
-    });
-    ui.on_register_extension(move || {
-        with(id, |open| {
-            act(
-                open,
-                |s| s.extension.register().map(drop),
-                |t| (t.extension_registered_now, t.cannot_register),
-            );
-        });
-    });
-    ui.on_unregister_extension(move || {
-        with(id, |open| {
-            act(
-                open,
-                |s| s.extension.unregister().map(drop),
-                |t| (t.extension_unregistered, t.cannot_unregister),
-            );
-        });
-    });
-    ui.on_dismiss(move || close(id));
-    ui.window().on_close_requested(move || {
-        close(id);
-        CloseRequestResponse::HideWindow
-    });
-
-    OPEN.set(Some(Rc::clone(&open)));
-    if let Err(e) = ui.show() {
-        OPEN.set(None);
-        return Err(e);
-    }
-    foreground::take(&ui);
-    run(
-        &open,
-        |s| s.load(),
-        |open, snapshot| show_snapshot(&open.ui, &snapshot, open.desktop.locale.get()),
-    );
-    Ok(())
-}
-
-/// Fills `ui` with `snapshot` in `l`: the form, the states and what could not be read.
-pub(crate) fn show_snapshot(ui: &SettingsWindow, snapshot: &Snapshot, l: Locale) {
+/// The message of a failed action in `l`, after `failed` (what failed).
+pub fn action_error_text(e: &ActionError, failed: &str, l: Locale) -> String {
     let t = Texts::of(l);
-    show_form(ui, &snapshot.form);
-    show_states(ui, &snapshot.states, l);
-    let problems: Vec<String> = [
-        (t.cannot_read_settings, &snapshot.settings_error),
-        (t.cannot_read_autostart, &snapshot.autostart_error),
-    ]
-    .into_iter()
-    .filter_map(|(what, e)| Some(format!("{what}: {}", e.as_ref()?)))
-    .collect();
-    show_message(ui, &problems.join("\n"), true);
-}
-
-/// Runs `f` with the settings window `id`, if it is open.
-fn with(id: u64, f: impl FnOnce(&Open)) {
-    if let Some(open) = current(id) {
-        f(&open);
+    match e {
+        ActionError::Extension(ExtensionError::RelayMissing(relay)) => {
+            format!("{failed}: {}{}", t.relay_missing, relay.display())
+        }
+        ActionError::Extension(ExtensionError::RelayInUse) => {
+            format!("{failed}: {}", t.relay_in_use)
+        }
+        ActionError::Extension(ExtensionError::Io(e)) | ActionError::Original(e) => {
+            format!("{failed}: {e}")
+        }
     }
 }
 
-/// Closes the settings window `id`.
-fn close(id: u64) {
-    let Some(open) = OPEN.with_borrow_mut(|slot| slot.take_if(|open| open.id == id)) else {
-        return;
-    };
-    if let Err(e) = open.ui.hide() {
-        tracing::warn!(error = %e, "cannot hide the settings window");
-    }
-    // This runs inside one of the window's callbacks: release the window after it.
-    slint::Timer::single_shot(Duration::ZERO, move || drop(open));
-}
+/// Sandboxed services for the tests of the model and the window.
+#[cfg(test)]
+pub(crate) mod fakes {
+    use super::*;
+    use oncl_desktop::original::Report;
+    use oncl_desktop::{AutostartPaths, FileAutostart};
+    use std::path::Path;
+    use std::sync::Mutex;
 
-/// «Сохранить»: checks the form at once, saves it on a worker thread, then applies the
-/// saved settings and shows the states in the (perhaps new) language.
-fn save(open: &Open) {
-    let form = form_of(&open.ui);
-    let l = open.desktop.locale.get();
-    if let Err(e) = form.settings() {
-        show_message(&open.ui, form_error_text(e, l), true);
-        return;
+    /// An original NCALayer whose entries switch as asked, or that always fails.
+    #[derive(Default)]
+    pub(crate) struct FakeOriginal {
+        pub(crate) status: Mutex<OriginalStatus>,
+        pub(crate) fail: bool,
     }
-    run(
-        open,
-        move |s| (s.save(&form), s.states()),
-        |open, (saved, states)| {
-            match saved {
-                Ok(settings) => {
-                    let l = settings.ui_locale();
-                    open.desktop.locale.set(l);
-                    select_language(l);
-                    (open.desktop.on_saved)(&settings);
-                    show_message(&open.ui, Texts::of(l).saved, false);
-                }
-                Err(e) => {
-                    tracing::warn!(error = ?e, "settings window: cannot save");
-                    let l = open.desktop.locale.get();
-                    show_message(&open.ui, &save_error_text(&e, l), true);
+
+    impl OriginalControl for FakeOriginal {
+        fn status(&self) -> OriginalStatus {
+            self.status.lock().unwrap().clone()
+        }
+
+        fn disable(&self) -> io::Result<Report> {
+            self.set_all(false)
+        }
+
+        fn restore(&self) -> io::Result<Report> {
+            self.set_all(true)
+        }
+    }
+
+    impl FakeOriginal {
+        fn set_all(&self, enabled: bool) -> io::Result<Report> {
+            if self.fail {
+                return Err(io::Error::other("moved halfway"));
+            }
+            let mut status = self.status.lock().unwrap();
+            let mut changed = Vec::new();
+            for entry in &mut status.autostart {
+                if entry.kind != EntryKind::MachineRun && entry.enabled != enabled {
+                    entry.enabled = enabled;
+                    changed.push(entry.path.clone());
                 }
             }
-            show_states(&open.ui, &states, open.desktop.locale.get());
-        },
-    );
-}
-
-/// The messages of an action: on success, on failure.
-type ActionTexts = fn(&Texts) -> (&'static str, &'static str);
-
-/// Runs the action `job` on a worker thread, then shows its outcome and the new states.
-/// «Вернуть оригинал» also turns off our autostart, which the form then shows.
-fn act(open: &Open, job: fn(&SettingsServices) -> io::Result<()>, texts: ActionTexts) {
-    run(
-        open,
-        move |s| {
-            let done = job(s);
-            let autostart = s.autostart.enabled().ok();
-            (done, autostart, s.states())
-        },
-        move |open, (done, autostart, states)| {
-            let l = open.desktop.locale.get();
-            let (ok, failed) = texts(Texts::of(l));
-            match done {
-                Ok(()) => show_message(&open.ui, ok, false),
-                Err(e) => {
-                    tracing::warn!(error = %e, "settings window: {failed}");
-                    show_message(&open.ui, &format!("{failed}: {e}"), true);
-                }
-            }
-            if let Some(on) = autostart {
-                open.ui.set_autostart(on);
-            }
-            show_states(&open.ui, &states, l);
-        },
-    );
-}
-
-/// Runs `job` on a worker thread while the window waits; `done` gets its result on the
-/// event loop if the window is still open.
-fn run<T: Send + 'static>(
-    open: &Open,
-    job: impl FnOnce(&SettingsServices) -> T + Send + 'static,
-    done: impl FnOnce(&Open, T) + Send + 'static,
-) {
-    open.ui.set_busy(true);
-    let services = Arc::clone(&open.desktop.settings);
-    let id = open.id;
-    let spawned = std::thread::Builder::new()
-        .name("settings".into())
-        .spawn(move || {
-            let result = job(&services);
-            let delivered = slint::invoke_from_event_loop(move || {
-                with(id, |open| {
-                    open.ui.set_busy(false);
-                    done(open, result);
-                });
-            });
-            if let Err(e) = delivered {
-                tracing::warn!(error = %e, "settings window: a result is lost");
-            }
-        });
-    if let Err(e) = spawned {
-        tracing::error!(error = %e, "settings window: cannot start a worker thread");
-        open.ui.set_busy(false);
-        let t = Texts::of(open.desktop.locale.get());
-        show_message(&open.ui, t.cannot_start, true);
+            Ok(Report { changed })
+        }
     }
-}
 
-fn show_form(ui: &SettingsWindow, form: &SettingsForm) {
-    ui.set_language(index_of(&Language::ALL, &form.language));
-    ui.set_autostart(form.autostart);
-    ui.set_proxy_mode(index_of(&ProxyMode::ALL, &form.proxy_mode));
-    ui.set_proxy_url(form.proxy_url.as_str().into());
-}
+    /// An extension that registers nothing and never fails.
+    pub(crate) struct FakeExtension;
 
-fn form_of(ui: &SettingsWindow) -> SettingsForm {
-    SettingsForm {
-        language: item(&Language::ALL, ui.get_language()),
-        autostart: ui.get_autostart(),
-        proxy_mode: item(&ProxyMode::ALL, ui.get_proxy_mode()),
-        proxy_url: ui.get_proxy_url().to_string(),
+    impl BrowserExtension for FakeExtension {
+        fn status(&self) -> ExtensionStatus {
+            ExtensionStatus::default()
+        }
+
+        fn register(&self) -> Result<ExtensionStatus, ExtensionError> {
+            Ok(ExtensionStatus::default())
+        }
+
+        fn unregister(&self) -> Result<ExtensionStatus, ExtensionError> {
+            Ok(ExtensionStatus::default())
+        }
     }
-}
 
-fn show_states(ui: &SettingsWindow, states: &States, l: Locale) {
-    let original = original_view(&states.original, l);
-    ui.set_original_state(original.text.into());
-    ui.set_can_disable_original(original.can_disable);
-    ui.set_can_restore_original(original.can_restore);
-    let extension = extension_view(&states.extension, l);
-    ui.set_extension_state(extension.text.into());
-    ui.set_can_unregister_extension(extension.can_unregister);
-}
-
-fn show_message(ui: &SettingsWindow, text: &str, error: bool) {
-    ui.set_message(SharedString::from(text));
-    ui.set_message_is_error(error);
-}
-
-/// The texts Rust composes for the settings window, in one language.
-struct Texts {
-    loading: &'static str,
-    saved: &'static str,
-    proxy_url_missing: &'static str,
-    proxy_url_invalid: &'static str,
-    cannot_save: &'static str,
-    cannot_set_autostart: &'static str,
-    cannot_read_settings: &'static str,
-    cannot_read_autostart: &'static str,
-    cannot_start: &'static str,
-    original_not_found: &'static str,
-    original_found: &'static str,
-    original_no_autostart: &'static str,
-    startup_shortcut: &'static str,
-    machine_run: &'static str,
-    desktop_entry: &'static str,
-    enabled: &'static str,
-    disabled: &'static str,
-    machine_run_admin: &'static str,
-    port_owner: &'static str,
-    original_disabled: &'static str,
-    original_restored: &'static str,
-    cannot_disable_original: &'static str,
-    cannot_restore_original: &'static str,
-    extension_not_registered: &'static str,
-    extension_registered: &'static str,
-    extension_no_browser: &'static str,
-    extension_broken: &'static str,
-    extension_registered_now: &'static str,
-    extension_unregistered: &'static str,
-    cannot_register: &'static str,
-    cannot_unregister: &'static str,
-}
-
-impl Texts {
-    fn of(l: Locale) -> &'static Texts {
-        match l {
-            Locale::Kk => &Texts {
-                loading: "Жүктелуде…",
-                saved: "Баптаулар сақталды",
-                proxy_url_missing: "Прокси мекенжайын енгізіңіз",
-                proxy_url_invalid: "Прокси мекенжайы жарамсыз: оны http://түйін:порт түрінде көрсетіңіз (SOCKS және https:// қолдау көрсетілмейді)",
-                cannot_save: "Баптауларды сақтау мүмкін болмады",
-                cannot_set_autostart: "Автоіске қосуды өзгерту мүмкін болмады",
-                cannot_read_settings: "settings.json оқылмады, әдепкі мәндер көрсетілді",
-                cannot_read_autostart: "Автоіске қосу күйін оқу мүмкін болмады",
-                cannot_start: "Әрекетті орындау мүмкін болмады",
-                original_not_found: "Түпнұсқа NCALayer табылмады.",
-                original_found: "Түпнұсқа NCALayer табылды.",
-                original_no_autostart: "Автоіске қосу жоқ.",
-                startup_shortcut: "Автожүктеудегі белгіше",
-                machine_run: "Барлық пайдаланушыларға арналған автоіске қосу (HKLM\\…\\Run)",
-                desktop_entry: "Автоіске қосу файлы",
-                enabled: "қосулы",
-                disabled: "өшірулі",
-                machine_run_admin: "Барлық пайдаланушыларға арналған автоіске қосуды тек әкімші өшіре алады: HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run ішіндегі NCALayer мәнін жойыңыз немесе оны Тапсырмалар диспетчері → Автожүктеу бөлімінде өшіріңіз.",
-                port_owner: "Портты алып тұрған бағдарлама: ",
-                original_disabled: "Түпнұсқаның автоіске қосылуы өшірілді",
-                original_restored: "Түпнұсқа қайтарылды, біздің автоіске қосу өшірілді",
-                cannot_disable_original: "Түпнұсқаның автоіске қосылуын өшіру мүмкін болмады",
-                cannot_restore_original: "Түпнұсқаны қайтару мүмкін болмады",
-                extension_not_registered: "Кеңейту тіркелмеген.",
-                extension_registered: "Тіркелген браузерлер: ",
-                extension_no_browser: "Relay орнатылған, бірақ браузер табылмады: браузерді кемінде бір рет іске қосып, «Тіркеу» батырмасын басыңыз.",
-                extension_broken: "Тіркеу толық емес немесе зақымдалған: «Тіркеу» батырмасын басыңыз.",
-                extension_registered_now: "Кеңейту тіркелді",
-                extension_unregistered: "Тіркеу жойылды",
-                cannot_register: "Кеңейтуді тіркеу мүмкін болмады",
-                cannot_unregister: "Тіркеуді жою мүмкін болмады",
-            },
-            Locale::Ru => &Texts {
-                loading: "Загрузка…",
-                saved: "Настройки сохранены",
-                proxy_url_missing: "Укажите адрес прокси",
-                proxy_url_invalid: "Адрес прокси не подходит: укажите его в виде http://узел:порт (SOCKS и https:// не поддерживаются)",
-                cannot_save: "Не удалось сохранить настройки",
-                cannot_set_autostart: "Не удалось изменить автозапуск",
-                cannot_read_settings: "settings.json не прочитан, показаны значения по умолчанию",
-                cannot_read_autostart: "Не удалось прочитать состояние автозапуска",
-                cannot_start: "Не удалось выполнить действие",
-                original_not_found: "Оригинальный NCALayer не найден.",
-                original_found: "Оригинальный NCALayer найден.",
-                original_no_autostart: "Автозапуска нет.",
-                startup_shortcut: "Ярлык в автозагрузке",
-                machine_run: "Автозапуск для всех пользователей (HKLM\\…\\Run)",
-                desktop_entry: "Файл автозапуска",
-                enabled: "включён",
-                disabled: "выключен",
-                machine_run_admin: "Автозапуск для всех пользователей отключает только администратор: удалите значение NCALayer в HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run или отключите его в Диспетчере задач → Автозагрузка.",
-                port_owner: "Порт занят программой: ",
-                original_disabled: "Автозапуск оригинала отключён",
-                original_restored: "Оригинал возвращён, наш автозапуск выключен",
-                cannot_disable_original: "Не удалось отключить автозапуск оригинала",
-                cannot_restore_original: "Не удалось вернуть оригинал",
-                extension_not_registered: "Расширение не зарегистрировано.",
-                extension_registered: "Зарегистрировано в браузерах: ",
-                extension_no_browser: "Relay установлен, но браузеры не найдены: запустите браузер хотя бы раз и нажмите «Зарегистрировать».",
-                extension_broken: "Регистрация неполная или повреждена: нажмите «Зарегистрировать».",
-                extension_registered_now: "Расширение зарегистрировано",
-                extension_unregistered: "Регистрация удалена",
-                cannot_register: "Не удалось зарегистрировать расширение",
-                cannot_unregister: "Не удалось удалить регистрацию",
-            },
-            Locale::En => &Texts {
-                loading: "Loading…",
-                saved: "The settings are saved",
-                proxy_url_missing: "Enter the proxy URL",
-                proxy_url_invalid: "The proxy URL does not fit: enter it as http://host:port (SOCKS and https:// are not supported)",
-                cannot_save: "Cannot save the settings",
-                cannot_set_autostart: "Cannot change the autostart",
-                cannot_read_settings: "settings.json could not be read; the defaults are shown",
-                cannot_read_autostart: "Cannot read the autostart state",
-                cannot_start: "Cannot run the action",
-                original_not_found: "The original NCALayer is not found.",
-                original_found: "The original NCALayer is found.",
-                original_no_autostart: "It does not start at login.",
-                startup_shortcut: "Startup shortcut",
-                machine_run: "Autostart for all users (HKLM\\…\\Run)",
-                desktop_entry: "Autostart file",
-                enabled: "on",
-                disabled: "off",
-                machine_run_admin: "Only an administrator can turn off the autostart for all users: delete the NCALayer value of HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run, or disable it in Task Manager → Startup.",
-                port_owner: "The port is held by: ",
-                original_disabled: "The original's autostart is disabled",
-                original_restored: "The original is restored; our autostart is off",
-                cannot_disable_original: "Cannot disable the original's autostart",
-                cannot_restore_original: "Cannot restore the original",
-                extension_not_registered: "The extension is not registered.",
-                extension_registered: "Registered in: ",
-                extension_no_browser: "The relay is installed but no browser is found: start a browser once, then press Register.",
-                extension_broken: "The registration is incomplete or broken: press Register.",
-                extension_registered_now: "The extension is registered",
-                extension_unregistered: "The registration is removed",
-                cannot_register: "Cannot register the extension",
-                cannot_unregister: "Cannot remove the registration",
-            },
+    /// Services on a sandbox under `root`: `settings.json`, the autostart file of the
+    /// sandbox's XDG layout (on every system), the program `<root>/bin/openncalayer`.
+    pub(crate) fn services(root: &Path, original: FakeOriginal) -> SettingsServices {
+        SettingsServices {
+            settings_path: root.join("settings.json"),
+            exe: std::path::absolute(root.join("bin").join("openncalayer")).unwrap(),
+            autostart: Box::new(FileAutostart::desktop_entry(&AutostartPaths::sandbox(root))),
+            original: Box::new(original),
+            extension: Box::new(FakeExtension),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::fakes::{FakeOriginal, services};
     use super::*;
-    use oncl_desktop::original::{AutostartEntry, Report};
-    use oncl_desktop::{AutostartPaths, FileAutostart};
+    use oncl_desktop::original::AutostartEntry;
     use std::path::Path;
-    use std::sync::Mutex;
 
     fn manual(url: &str) -> SettingsForm {
         SettingsForm {
@@ -861,60 +596,6 @@ mod tests {
         assert_eq!(item(&ProxyMode::ALL, 2), ProxyMode::Manual);
     }
 
-    /// An original NCALayer with one entry in each state, recording its calls.
-    #[derive(Default)]
-    struct FakeOriginal {
-        status: Mutex<OriginalStatus>,
-        fail: bool,
-    }
-
-    impl OriginalControl for FakeOriginal {
-        fn status(&self) -> OriginalStatus {
-            self.status.lock().unwrap().clone()
-        }
-
-        fn disable(&self) -> io::Result<Report> {
-            self.set_all(false)
-        }
-
-        fn restore(&self) -> io::Result<Report> {
-            self.set_all(true)
-        }
-    }
-
-    impl FakeOriginal {
-        fn set_all(&self, enabled: bool) -> io::Result<Report> {
-            if self.fail {
-                return Err(io::Error::other("moved halfway"));
-            }
-            let mut status = self.status.lock().unwrap();
-            let mut changed = Vec::new();
-            for entry in &mut status.autostart {
-                if entry.kind != EntryKind::MachineRun && entry.enabled != enabled {
-                    entry.enabled = enabled;
-                    changed.push(entry.path.clone());
-                }
-            }
-            Ok(Report { changed })
-        }
-    }
-
-    struct FakeExtension;
-
-    impl BrowserExtension for FakeExtension {
-        fn status(&self) -> ExtensionStatus {
-            ExtensionStatus::default()
-        }
-
-        fn register(&self) -> io::Result<ExtensionStatus> {
-            Ok(ExtensionStatus::default())
-        }
-
-        fn unregister(&self) -> io::Result<ExtensionStatus> {
-            Ok(ExtensionStatus::default())
-        }
-    }
-
     fn startup_shortcut(enabled: bool) -> AutostartEntry {
         AutostartEntry {
             kind: EntryKind::StartupShortcut,
@@ -923,16 +604,61 @@ mod tests {
         }
     }
 
-    /// Services on a sandbox under `root`: `settings.json`, the autostart file of the
-    /// sandbox's XDG layout (on every system), the program `<root>/bin/openncalayer`.
-    fn services(root: &Path, original: FakeOriginal) -> SettingsServices {
-        SettingsServices {
-            settings_path: root.join("settings.json"),
-            exe: std::path::absolute(root.join("bin").join("openncalayer")).unwrap(),
-            autostart: Box::new(FileAutostart::desktop_entry(&AutostartPaths::sandbox(root))),
-            original: Box::new(original),
-            extension: Box::new(FakeExtension),
+    /// An autostart entry that cannot be read or written.
+    struct Unreadable;
+
+    impl Autostart for Unreadable {
+        fn enabled(&self) -> io::Result<bool> {
+            Err(io::Error::other("HOME is not set"))
         }
+
+        fn set(&self, _: bool, _: &Path) -> io::Result<()> {
+            Err(io::Error::other("HOME is not set"))
+        }
+    }
+
+    #[test]
+    fn unreadable_autostart_still_saves_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = services(dir.path(), FakeOriginal::default());
+        s.autostart = Box::new(Unreadable);
+        let loaded = s.load();
+        assert!(loaded.autostart_error.is_some());
+        // The box shows settings.json's value; the proxy and language are saved as long as
+        // the user leaves it.
+        let form = SettingsForm {
+            language: Language::En,
+            proxy_mode: ProxyMode::System,
+            ..loaded.form
+        };
+        assert_eq!(s.save(&form).unwrap().proxy, ProxySetting::System);
+        assert_eq!(
+            Settings::load(&s.settings_path).unwrap().proxy,
+            ProxySetting::System
+        );
+        let ticked = SettingsForm {
+            autostart: true,
+            ..form
+        };
+        assert!(matches!(s.save(&ticked), Err(SaveError::Autostart(_))));
+        assert!(!Settings::load(&s.settings_path).unwrap().autostart);
+    }
+
+    #[test]
+    fn action_errors_are_told_in_the_window_language() {
+        let relay = PathBuf::from("bin").join("nmhost");
+        let missing = ActionError::Extension(ExtensionError::RelayMissing(relay.clone()));
+        assert_eq!(
+            action_error_text(&missing, "Cannot register the extension", Locale::En),
+            format!(
+                "Cannot register the extension: The relay is not found: {}",
+                relay.display()
+            )
+        );
+        let busy = ActionError::Extension(ExtensionError::RelayInUse);
+        assert!(action_error_text(&busy, "x", Locale::Kk).starts_with("x: Relay браузерде"));
+        let io = ActionError::Original(io::Error::other("denied"));
+        assert_eq!(action_error_text(&io, "x", Locale::Ru), "x: denied");
     }
 
     #[test]

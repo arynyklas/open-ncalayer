@@ -48,6 +48,7 @@ export component SettingsWindow inherits Window {
 
                     ComboBox {
                         horizontal-stretch: 1;
+                        enabled: !root.busy;
                         model: [@tr("As in the system"), "Русский", "Қазақша", "English"];
                         current-index <=> root.language;
                     }
@@ -55,6 +56,7 @@ export component SettingsWindow inherits Window {
 
                 CheckBox {
                     text: @tr("Start at login");
+                    enabled: !root.busy;
                     checked <=> root.autostart;
                 }
             }
@@ -66,12 +68,13 @@ export component SettingsWindow inherits Window {
             VerticalLayout {
                 spacing: 8px;
                 ComboBox {
+                    enabled: !root.busy;
                     model: [@tr("No proxy"), @tr("System proxy"), @tr("This proxy:")];
                     current-index <=> root.proxy-mode;
                 }
 
                 LineEdit {
-                    enabled: root.proxy-mode == 2;
+                    enabled: !root.busy && root.proxy-mode == 2;
                     placeholder-text: "http://proxy.example:3128";
                     text <=> root.proxy-url;
                 }
@@ -176,6 +179,8 @@ export component SettingsWindow inherits Window {
             alignment: end;
             Button {
                 text: @tr("Close");
+                // Closing waits for the running action: its outcome is shown here.
+                enabled: !root.busy;
                 clicked => {
                     root.dismiss();
                 }

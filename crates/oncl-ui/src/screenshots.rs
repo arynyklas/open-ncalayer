@@ -5,36 +5,22 @@
 //!
 //! `cargo test -p oncl-ui --lib screenshots -- --ignored`
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use oncl_basics::Locale;
 use oncl_desktop::original::Unavailable;
-use oncl_desktop::{BrowserExtension, ExtensionStatus};
-use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-use slint::platform::{Platform, WindowAdapter};
-use slint::{ComponentHandle, PhysicalSize, PlatformError, Rgb8Pixel};
+use oncl_desktop::{BrowserExtension, ExtensionError, ExtensionStatus};
+use slint::{ComponentHandle, PhysicalSize, Rgb8Pixel};
 
 use crate::about_view::{self, AboutInfo, AboutTab};
+use crate::offscreen::{self, Last};
 use crate::prompter::select_language;
 use crate::settings_view::{self, SettingsServices};
 use crate::ui::SettingsWindow;
 use crate::windows::Desktop;
-
-type Last = Rc<RefCell<Option<Rc<MinimalSoftwareWindow>>>>;
-
-/// Windows drawn in memory; the last one created is kept for drawing.
-struct Offscreen(Last);
-
-impl Platform for Offscreen {
-    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-        self.0.replace(Some(Rc::clone(&window)));
-        Ok(window)
-    }
-}
 
 /// The extension as `nm status` shows it after registration in two browsers.
 struct Registered;
@@ -48,11 +34,11 @@ impl BrowserExtension for Registered {
         }
     }
 
-    fn register(&self) -> std::io::Result<ExtensionStatus> {
+    fn register(&self) -> Result<ExtensionStatus, ExtensionError> {
         unreachable!("no button is pressed")
     }
 
-    fn unregister(&self) -> std::io::Result<ExtensionStatus> {
+    fn unregister(&self) -> Result<ExtensionStatus, ExtensionError> {
         unreachable!("no button is pressed")
     }
 }
@@ -89,8 +75,7 @@ fn save(last: &Last, width: u32, height: u32, name: &str) {
 #[ignore = "writes screenshots to target/screenshots"]
 fn screenshots() {
     std::fs::create_dir_all(out_dir()).unwrap();
-    let last = Last::default();
-    slint::platform::set_platform(Box::new(Offscreen(Rc::clone(&last)))).unwrap();
+    let last = offscreen::install();
 
     let services = SettingsServices {
         settings_path: out_dir().join("settings.json"),
@@ -122,6 +107,7 @@ fn screenshots() {
         locale: Cell::new(Locale::Ru),
         settings: Arc::new(services),
         about: AboutInfo {
+            commit: "0123456789ab".to_owned(),
             bundles: bundles.map(|(s, v)| (s.to_owned(), v.to_owned())).to_vec(),
             modules: [
                 "kz.gov.pki.knca.applet.Applet",
