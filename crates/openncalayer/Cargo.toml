@@ -10,7 +10,8 @@ publish.workspace = true
 
 [features]
 # `e2e-prompter`: with `ONCL_E2E_PROMPTER=<steps.json>` set, `run` answers the signing
-# dialogs from that script and opens no windows (end-to-end tests). Never in releases.
+# dialogs from that script and opens no windows (end-to-end tests); with
+# `ONCL_UPDATE_INDEX_BASE` set, the updater reads its index there. Never in releases.
 e2e-prompter = ["oncl-basics/testing"]
 
 [dependencies]
@@ -25,10 +26,13 @@ oncl-protocol.workspace = true
 oncl-registry.workspace = true
 oncl-tls.workspace = true
 oncl-ui.workspace = true
+oncl-update.workspace = true
 
 base64.workspace = true
 clap.workspace = true
 futures-util.workspace = true
+# The random spread of the update checks.
+getrandom.workspace = true
 httparse.workspace = true
 rustls.workspace = true
 serde.workspace = true
@@ -41,6 +45,7 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+velopack.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
@@ -50,6 +55,8 @@ oncl-basics = { path = "../oncl-basics", features = ["testing"] }
 oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 # A `log` record must reach the log file through the `tracing-log` bridge.
 log.workspace = true
+# Update indexes signed in the updater's tests.
+minisign.workspace = true
 oncl-testkit.workspace = true
 # A fake mkcert CA in the renewal tests.
 rcgen.workspace = true

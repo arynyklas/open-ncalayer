@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 oncl-basics.workspace = true
 oncl-pki.workspace = true
+# The update channel of the settings.
+oncl-update.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 

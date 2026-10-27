@@ -1,9 +1,9 @@
 //! `settings.json` in the data directory, one JSON object shared by the settings window
-//! ([`Settings`]: `locale`, `autostart`, `proxy`) and other owners of single keys (the
-//! `recentPath` of the key store dialogs). Every change is a read-modify-write of the whole
-//! object ([`update`]) that keeps the keys it does not change, unknown ones included. The
-//! file may hold a proxy password: it is written readable by its owner only (mode `0600` on
-//! Unix).
+//! ([`Settings`]: `locale`, `autostart`, `proxy`, `updates`) and other owners of single keys
+//! (the `recentPath` of the key store dialogs). Every change is a read-modify-write of the
+//! whole object ([`update`]) that keeps the keys it does not change, unknown ones included.
+//! The file may hold a proxy password: it is written readable by its owner only (mode
+//! `0600` on Unix).
 
 use std::io;
 use std::path::Path;
@@ -12,6 +12,7 @@ use std::sync::{Mutex, PoisonError};
 use oncl_basics::Locale;
 use oncl_pki::fsutil::Access;
 pub use oncl_pki::http::ProxySetting;
+pub use oncl_update::Channel;
 use serde_json::{Map, Value};
 
 use crate::write_file;
@@ -21,6 +22,9 @@ const AUTOSTART: &str = "autostart";
 const PROXY: &str = "proxy";
 const MODE: &str = "mode";
 const URL: &str = "url";
+const UPDATES: &str = "updates";
+const ENABLED: &str = "enabled";
+const CHANNEL: &str = "channel";
 
 /// The settings of the settings window.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -34,6 +38,26 @@ pub struct Settings {
     /// "manual", "url": …}`); none (direct connections) by default, as before the setting
     /// existed.
     pub proxy: ProxySetting,
+    /// The self-update (`{"enabled": true, "channel": "stable" | "beta"}`).
+    pub updates: UpdateSettings,
+}
+
+/// Whether OpenNCALayer updates itself, and from which channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateSettings {
+    /// New versions are looked for, downloaded and installed by themselves; on by default.
+    pub enabled: bool,
+    /// The channel of the update index; stable by default.
+    pub channel: Channel,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        UpdateSettings {
+            enabled: true,
+            channel: Channel::Stable,
+        }
+    }
 }
 
 impl Settings {
@@ -98,10 +122,18 @@ impl Settings {
                 defaults.proxy
             }),
         };
+        let updates = match object.get(UPDATES) {
+            None => defaults.updates,
+            Some(v) => updates_of(v).unwrap_or_else(|| {
+                ignored(UPDATES);
+                defaults.updates
+            }),
+        };
         Settings {
             locale,
             autostart,
             proxy,
+            updates,
         }
     }
 
@@ -133,6 +165,19 @@ impl Settings {
             }
             proxy.insert(MODE.to_owned(), Value::String(mode.to_owned()));
         }
+        let updates = object
+            .entry(UPDATES)
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !updates.is_object() {
+            *updates = Value::Object(Map::new());
+        }
+        if let Value::Object(updates) = updates {
+            updates.insert(ENABLED.to_owned(), Value::Bool(self.updates.enabled));
+            updates.insert(
+                CHANNEL.to_owned(),
+                Value::String(self.updates.channel.as_str().to_owned()),
+            );
+        }
     }
 }
 
@@ -149,6 +194,24 @@ fn proxy_of(v: &Value) -> Option<ProxySetting> {
         "manual" => Some(ProxySetting::Manual(v.get(URL)?.as_str()?.to_owned())),
         _ => None,
     }
+}
+
+/// The update settings of an `updates` object: each member missing keeps its default; `None`
+/// if it is not an object or a member is not understood.
+fn updates_of(v: &Value) -> Option<UpdateSettings> {
+    let defaults = UpdateSettings::default();
+    let enabled = match v.as_object()?.get(ENABLED) {
+        None => defaults.enabled,
+        Some(on) => on.as_bool()?,
+    };
+    let channel = match v.get(CHANNEL) {
+        None => defaults.channel,
+        Some(name) => {
+            let name = name.as_str()?;
+            Channel::ALL.into_iter().find(|c| c.as_str() == name)?
+        }
+    };
+    Some(UpdateSettings { enabled, channel })
 }
 
 /// Our language of a locale name such as `ru`, `kk_KZ.UTF-8` or `en-US`; `None` for any
@@ -283,7 +346,8 @@ mod tests {
         let (_d, f) = file_with(
             r#"{"recentPath": "k.p12", "future": {"a": [1, 2]}, "originalAutostart": true,
                 "locale": "kk", "autostart": true,
-                "proxy": {"mode": "manual", "url": "http://p:3128", "extra": 1}}"#,
+                "proxy": {"mode": "manual", "url": "http://p:3128", "extra": 1},
+                "updates": {"enabled": false, "channel": "beta", "later": "x"}}"#,
         );
         let mut s = Settings::load(&f).unwrap();
         assert_eq!(
@@ -292,6 +356,10 @@ mod tests {
                 locale: Some("kk".to_owned()),
                 autostart: true,
                 proxy: ProxySetting::Manual("http://p:3128".to_owned()),
+                updates: UpdateSettings {
+                    enabled: false,
+                    channel: Channel::Beta,
+                },
             }
         );
         s.save(&f).unwrap();
@@ -300,6 +368,7 @@ mod tests {
         s.locale = None;
         s.autostart = false;
         s.proxy = ProxySetting::System;
+        s.updates = UpdateSettings::default();
         s.save(&f).unwrap();
         assert_eq!(
             on_disk(&f),
@@ -310,6 +379,7 @@ mod tests {
                 "autostart": false,
                 // The manual URL, and a password in it, goes with the manual mode.
                 "proxy": {"mode": "system", "extra": 1},
+                "updates": {"enabled": true, "channel": "stable", "later": "x"},
             })
         );
         assert_eq!(Settings::load(&f).unwrap(), s);
@@ -324,18 +394,27 @@ mod tests {
         let f = d.path().join("sub").join("settings.json");
         assert_eq!(Settings::load(&f).unwrap(), Settings::default());
         assert_eq!(Settings::default().proxy, ProxySetting::None);
+        assert_eq!(
+            Settings::default().updates,
+            UpdateSettings {
+                enabled: true,
+                channel: Channel::Stable,
+            }
+        );
 
         let s = Settings {
             locale: Some("en".to_owned()),
             autostart: true,
             proxy: ProxySetting::Manual("http://u:p@h:1".to_owned()),
+            ..Settings::default()
         };
         s.save(&f).unwrap();
         assert_eq!(Settings::load(&f).unwrap(), s);
         assert_eq!(
             on_disk(&f),
             json!({"locale": "en", "autostart": true,
-                   "proxy": {"mode": "manual", "url": "http://u:p@h:1"}})
+                   "proxy": {"mode": "manual", "url": "http://u:p@h:1"},
+                   "updates": {"enabled": true, "channel": "stable"}})
         );
     }
 
@@ -374,10 +453,36 @@ mod tests {
             let (_d, f) = file_with(&format!(r#"{{"proxy": {proxy}}}"#));
             assert_eq!(Settings::load(&f).unwrap().proxy, ProxySetting::None);
         }
-        // A `proxy` that is not an object is replaced on save.
-        let (_d, f) = file_with(r#"{"proxy": "system"}"#);
+        for updates in [
+            r#""beta""#,
+            r#"{"channel": "nightly"}"#,
+            r#"{"enabled": "no"}"#,
+            r#"{"channel": 1}"#,
+        ] {
+            let (_d, f) = file_with(&format!(r#"{{"updates": {updates}}}"#));
+            assert_eq!(
+                Settings::load(&f).unwrap().updates,
+                UpdateSettings::default(),
+                "{updates}"
+            );
+        }
+        // Members missing keep their defaults.
+        let (_d, f) = file_with(r#"{"updates": {"channel": "beta"}}"#);
+        assert_eq!(
+            Settings::load(&f).unwrap().updates,
+            UpdateSettings {
+                enabled: true,
+                channel: Channel::Beta,
+            }
+        );
+        // A `proxy` or `updates` that is not an object is replaced on save.
+        let (_d, f) = file_with(r#"{"proxy": "system", "updates": false}"#);
         Settings::default().save(&f).unwrap();
         assert_eq!(on_disk(&f)["proxy"], json!({"mode": "none"}));
+        assert_eq!(
+            on_disk(&f)["updates"],
+            json!({"enabled": true, "channel": "stable"})
+        );
     }
 
     #[test]

@@ -122,6 +122,24 @@ msgstr "Көрсетілген прокси:"
 msgid "HTTP proxies only; SOCKS is not supported."
 msgstr "Тек HTTP прокси; SOCKS қолдау көрсетілмейді."
 
+msgid "Updates"
+msgstr "Жаңартулар"
+
+msgid "Update automatically"
+msgstr "Автоматты түрде жаңарту"
+
+msgid "Channel"
+msgstr "Арна"
+
+msgid "Stable"
+msgstr "Тұрақты"
+
+msgid "Beta"
+msgstr "Бета"
+
+msgid "Check now"
+msgstr "Қазір тексеру"
+
 msgid "Save"
 msgstr "Сақтау"
 

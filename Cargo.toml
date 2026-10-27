@@ -106,6 +106,10 @@ tray-icon = { version = "=0.26.1", default-features = false }
 # Only in xtask (`ext-e2e`): the stand-in original NCALayer, a blocking WebSocket server.
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
+# The core's self-update (`openncalayer`): applies the packages the signed update index
+# names. Velopack's versions carry a commit suffix. No file logging of its own;
+# `public-utils` only makes public the app manifest type a custom `UpdateSource` takes.
+velopack = { version = "1.3.39-g8d2844f", default-features = false, features = ["public-utils"] }
 # The About window's repository link in the default browser; Slint's winit backend uses it
 # already.
 webbrowser = "1.2.5"

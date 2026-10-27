@@ -37,7 +37,9 @@ pub use tray::{
     ActionTarget, Notification, NotificationAction, TrayCommand, TrayError, TrayHandle, TrayState,
     start_tray,
 };
-pub use windows::{DesktopWindow, DesktopWindows, open_window, set_desktop_windows};
+pub use windows::{
+    DesktopWindow, DesktopWindows, any_window_open, open_window, set_desktop_windows,
+};
 
 mod ui {
     slint::include_modules!();

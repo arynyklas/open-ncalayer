@@ -45,6 +45,8 @@ pub enum TrayCommand {
     About,
     /// «Остановить оригинал…»: stop the original NCALayer holding the port.
     StopOriginal,
+    /// «Проверить обновления»: look for a new version now.
+    CheckUpdates,
     /// «Выход»: stop the servers and the event loop.
     Quit,
 }
@@ -53,12 +55,13 @@ pub enum TrayCommand {
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 impl TrayCommand {
     /// Every command, for [`TrayCommand::from_id`].
-    const ALL: [TrayCommand; 6] = [
+    const ALL: [TrayCommand; 7] = [
         TrayCommand::Settings,
         TrayCommand::TlsWizard,
         TrayCommand::OpenLogs,
         TrayCommand::About,
         TrayCommand::StopOriginal,
+        TrayCommand::CheckUpdates,
         TrayCommand::Quit,
     ];
 
@@ -70,6 +73,7 @@ impl TrayCommand {
             TrayCommand::OpenLogs => "open-logs",
             TrayCommand::About => "about",
             TrayCommand::StopOriginal => "stop-original",
+            TrayCommand::CheckUpdates => "check-updates",
             TrayCommand::Quit => "quit",
         }
     }
@@ -350,6 +354,7 @@ impl TrayModel {
             MenuRow::Item(TrayCommand::Settings, t.settings),
             MenuRow::Item(TrayCommand::TlsWizard, t.tls_wizard),
             MenuRow::Item(TrayCommand::OpenLogs, t.logs),
+            MenuRow::Item(TrayCommand::CheckUpdates, t.check_updates),
             MenuRow::Item(TrayCommand::About, t.about),
             MenuRow::Separator,
             MenuRow::Item(TrayCommand::Quit, t.quit),
@@ -401,6 +406,7 @@ struct Texts {
     settings: &'static str,
     tls_wizard: &'static str,
     logs: &'static str,
+    check_updates: &'static str,
     about: &'static str,
     quit: &'static str,
 }
@@ -413,6 +419,7 @@ impl Texts {
                 settings: "Баптаулар…",
                 tls_wizard: "Браузерге арналған сертификат…",
                 logs: "Журнал",
+                check_updates: "Жаңартуларды тексеру",
                 about: "Бағдарлама туралы",
                 quit: "Шығу",
             },
@@ -421,6 +428,7 @@ impl Texts {
                 settings: "Настройки…",
                 tls_wizard: "Сертификат для браузера…",
                 logs: "Журнал",
+                check_updates: "Проверить обновления",
                 about: "О программе",
                 quit: "Выход",
             },
@@ -429,6 +437,7 @@ impl Texts {
                 settings: "Settings…",
                 tls_wizard: "Certificate for browsers…",
                 logs: "Log",
+                check_updates: "Check for updates",
                 about: "About",
                 quit: "Quit",
             },
@@ -470,6 +479,7 @@ mod tests {
                 MenuRow::Item(TrayCommand::Settings, "Настройки…"),
                 MenuRow::Item(TrayCommand::TlsWizard, "Сертификат для браузера…"),
                 MenuRow::Item(TrayCommand::OpenLogs, "Журнал"),
+                MenuRow::Item(TrayCommand::CheckUpdates, "Проверить обновления"),
                 MenuRow::Item(TrayCommand::About, "О программе"),
                 MenuRow::Separator,
                 MenuRow::Item(TrayCommand::Quit, "Выход"),
@@ -488,7 +498,7 @@ mod tests {
                     MenuRow::Separator => None,
                 })
                 .collect();
-            assert_eq!(labels.len(), 5, "{locale:?}");
+            assert_eq!(labels.len(), 6, "{locale:?}");
             assert!(labels.iter().all(|l| !l.is_empty()), "{locale:?}");
         }
         assert_eq!(

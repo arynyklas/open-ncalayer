@@ -171,6 +171,7 @@ mod tests {
             locale: Some("en".to_owned()),
             autostart: true,
             proxy: ProxySetting::None,
+            ..Settings::default()
         };
         settings.save(&f).unwrap();
         recent.save(Path::new("l.p12"));

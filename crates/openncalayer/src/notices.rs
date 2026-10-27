@@ -1,16 +1,18 @@
 //! What the tray tells the user: its warning (wss off, the original NCALayer holding the
 //! port, the certificate due or not renewed), whether it offers «Остановить оригинал…», and
 //! its notifications (wss off at the start, the certificate's renewal, a page's
-//! `installBundle`), in the user's language.
+//! `installBundle`, the updates), in the user's language.
 
 use std::time::{Duration, Instant};
 
 use oncl_basics::Locale;
 use oncl_desktop::PortOwner;
+use oncl_ui::settings_view::{UpdateStatus, update_view};
 use oncl_ui::{ActionTarget, Notification, NotificationAction, TrayCommand, TrayState};
 
 use crate::cli::WssOff;
 use crate::renewal::{RenewFailure, RenewalCheck};
+use crate::update::Notice;
 
 /// Where the plugins of OpenNCALayer are to be listed (the page arrives with plugins, P12).
 pub const PLUGIN_REGISTRY: &str = "https://arynyklas.github.io/open-ncalayer/plugins/";
@@ -290,6 +292,112 @@ impl TrayStatus {
             }),
         })
     }
+
+    /// The notification of an update `notice`; none for a check that has not run.
+    pub fn update_notification(&self, notice: &Notice) -> Option<Notification> {
+        let l = self.locale;
+        let (title, body, action) = match notice {
+            Notice::Checked(UpdateStatus::NotChecked) => return None,
+            Notice::Checked(UpdateStatus::Available {
+                version,
+                installing,
+            }) => (
+                match l {
+                    Locale::Ru => format!("Доступна версия {version}"),
+                    Locale::Kk => format!("{version} нұсқасы қолжетімді"),
+                    Locale::En => format!("Version {version} is available"),
+                },
+                if *installing {
+                    match l {
+                        Locale::Ru => "OpenNCALayer установит её сам, когда не будет идти подпись, и перезапустится.",
+                        Locale::Kk => "OpenNCALayer оны қол қою жүрмеген кезде өзі орнатып, қайта іске қосылады.",
+                        Locale::En => "OpenNCALayer installs it by itself when no signing is in progress, and restarts.",
+                    }
+                } else {
+                    match l {
+                        Locale::Ru => "Автоматическое обновление выключено: включите его в настройках.",
+                        Locale::Kk => "Автоматты жаңарту өшірулі: оны баптауларда қосыңыз.",
+                        Locale::En => "Automatic updates are off: turn them on in the settings.",
+                    }
+                }
+                .to_owned(),
+                (!*installing).then(|| settings_action(l)),
+            ),
+            Notice::Checked(UpdateStatus::UpToDate) => (
+                match l {
+                    Locale::Ru => "Обновлений нет",
+                    Locale::Kk => "Жаңартулар жоқ",
+                    Locale::En => "No updates",
+                }
+                .to_owned(),
+                match l {
+                    Locale::Ru => "Установлена последняя версия OpenNCALayer.",
+                    Locale::Kk => "OpenNCALayer-дің соңғы нұсқасы орнатылған.",
+                    Locale::En => "The latest version of OpenNCALayer is installed.",
+                }
+                .to_owned(),
+                None,
+            ),
+            Notice::Checked(UpdateStatus::Failed(e)) => (
+                match l {
+                    Locale::Ru => "Не удалось проверить обновления",
+                    Locale::Kk => "Жаңартуларды тексеру мүмкін болмады",
+                    Locale::En => "Cannot check for updates",
+                }
+                .to_owned(),
+                e.clone(),
+                None,
+            ),
+            Notice::Checked(off @ (UpdateStatus::NotInstalled | UpdateStatus::NoKeys)) => (
+                match l {
+                    Locale::Ru => "Обновления недоступны",
+                    Locale::Kk => "Жаңартулар қолжетімсіз",
+                    Locale::En => "Updates are unavailable",
+                }
+                .to_owned(),
+                update_view(off, l),
+                None,
+            ),
+            Notice::Updated(version) => (
+                match l {
+                    Locale::Ru => format!("Обновлено до {version}"),
+                    Locale::Kk => format!("{version} нұсқасына жаңартылды"),
+                    Locale::En => format!("Updated to {version}"),
+                },
+                match l {
+                    Locale::Ru => format!("OpenNCALayer обновлён до версии {version}."),
+                    Locale::Kk => format!("OpenNCALayer {version} нұсқасына жаңартылды."),
+                    Locale::En => format!("OpenNCALayer is updated to version {version}."),
+                },
+                None,
+            ),
+            Notice::RolledBack { failed, version } => (
+                match l {
+                    Locale::Ru => "Обновление откачено",
+                    Locale::Kk => "Жаңарту кері қайтарылды",
+                    Locale::En => "The update is rolled back",
+                }
+                .to_owned(),
+                match l {
+                    Locale::Ru => format!(
+                        "Версия {failed} не запустилась как следует, возвращена версия {version}. Версия {failed} больше не будет предлагаться."
+                    ),
+                    Locale::Kk => format!(
+                        "{failed} нұсқасы дұрыс іске қосылмады, {version} нұсқасы қайтарылды. {failed} нұсқасы енді ұсынылмайды."
+                    ),
+                    Locale::En => format!(
+                        "Version {failed} did not start properly; version {version} is back. Version {failed} will not be offered again."
+                    ),
+                },
+                None,
+            ),
+        };
+        Some(Notification {
+            title,
+            body,
+            action,
+        })
+    }
 }
 
 /// The warning while the original NCALayer holds the port, in `l`.
@@ -311,6 +419,19 @@ fn wizard_action(l: Locale) -> NotificationAction {
         }
         .to_owned(),
         target: ActionTarget::Command(TrayCommand::TlsWizard),
+    }
+}
+
+/// A notification's button that opens the settings, in `l`.
+fn settings_action(l: Locale) -> NotificationAction {
+    NotificationAction {
+        label: match l {
+            Locale::Ru => "Открыть настройки",
+            Locale::Kk => "Баптауларды ашу",
+            Locale::En => "Open the settings",
+        }
+        .to_owned(),
+        target: ActionTarget::Command(TrayCommand::Settings),
     }
 }
 
@@ -594,5 +715,71 @@ mod tests {
                 .bundle_notification(t0 + Duration::from_secs(11 * 60))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn update_notifications_in_each_language() {
+        let v = |s: &str| oncl_update::Version::parse(s).unwrap();
+        let ru = TrayStatus::new(Locale::Ru, None);
+        let found = |installing| {
+            Notice::Checked(UpdateStatus::Available {
+                version: "0.2.0".to_owned(),
+                installing,
+            })
+        };
+        let n = ru.update_notification(&found(true)).unwrap();
+        assert_eq!(n.title, "Доступна версия 0.2.0");
+        assert_eq!(n.action, None);
+        // Updates off: the button leads to the settings.
+        let n = ru.update_notification(&found(false)).unwrap();
+        assert_eq!(
+            n.action.unwrap().target,
+            ActionTarget::Command(TrayCommand::Settings)
+        );
+        assert_eq!(
+            ru.update_notification(&Notice::Updated(v("0.2.0")))
+                .unwrap()
+                .title,
+            "Обновлено до 0.2.0"
+        );
+        let back = Notice::RolledBack {
+            failed: v("0.2.0"),
+            version: v("0.1.0"),
+        };
+        assert_eq!(
+            ru.update_notification(&back).unwrap().title,
+            "Обновление откачено"
+        );
+        let off = ru
+            .update_notification(&Notice::Checked(UpdateStatus::NotInstalled))
+            .unwrap();
+        assert_eq!(
+            off.body,
+            "Обновления доступны только для установленной версии."
+        );
+        assert_eq!(
+            ru.update_notification(&Notice::Checked(UpdateStatus::NotChecked)),
+            None
+        );
+        for l in [Locale::Kk, Locale::En] {
+            let status = TrayStatus::new(l, None);
+            for notice in [
+                found(true),
+                found(false),
+                Notice::Updated(v("0.2.0")),
+                back.clone(),
+                Notice::Checked(UpdateStatus::UpToDate),
+                Notice::Checked(UpdateStatus::Failed("timed out".to_owned())),
+                Notice::Checked(UpdateStatus::NoKeys),
+            ] {
+                let n = status.update_notification(&notice).unwrap();
+                let ours = ru.update_notification(&notice).unwrap();
+                assert!(
+                    !n.title.is_empty() && !n.body.is_empty(),
+                    "{l:?} {notice:?}"
+                );
+                assert_ne!(n.title, ours.title, "{l:?} {notice:?}");
+            }
+        }
     }
 }

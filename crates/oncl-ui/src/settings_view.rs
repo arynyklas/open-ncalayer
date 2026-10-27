@@ -1,12 +1,13 @@
-//! The settings window: the language, our autostart and the proxy, saved together into
-//! `settings.json` and our autostart entry; the original NCALayer's autostart and the browser
-//! extension's registration, acted on at once.
+//! The settings window: the language, our autostart, the proxy and the updates, saved
+//! together into `settings.json` and our autostart entry; the original NCALayer's autostart
+//! and the browser extension's registration, acted on at once; «Проверить сейчас», a check
+//! for a new version.
 //!
 //! The window's logic without a window is public: [`SettingsForm`] (what the form shows and
 //! the settings it gives), [`SettingsServices`] (loading and the actions, on sandboxes in
-//! tests) and the texts of the states ([`original_view`], [`extension_view`]). The window
-//! itself is in `window`, its texts in `texts`; the actions run on a worker thread while the
-//! window waits for them.
+//! tests) and the texts of the states ([`original_view`], [`extension_view`],
+//! [`update_view`]). The window itself is in `window`, its texts in `texts`; the actions run
+//! on a worker thread while the window waits for them.
 
 mod texts;
 mod window;
@@ -20,9 +21,10 @@ use std::path::{Path, PathBuf};
 
 use oncl_basics::Locale;
 use oncl_desktop::original::{EntryKind, EntryState};
+use oncl_desktop::settings::Channel;
 use oncl_desktop::{
     Autostart, BrowserExtension, ExtensionError, ExtensionStatus, OriginalControl, OriginalStatus,
-    ProxySetting, Settings,
+    ProxySetting, Settings, UpdateSettings,
 };
 
 use texts::Texts;
@@ -73,6 +75,9 @@ impl ProxyMode {
     const ALL: [ProxyMode; 3] = [ProxyMode::None, ProxyMode::System, ProxyMode::Manual];
 }
 
+/// The update channels, in the order of the form's list.
+const CHANNELS: [Channel; 2] = [Channel::Stable, Channel::Beta];
+
 /// The list item at `i` of `all`; the first for an index out of range.
 fn item<T: Copy>(all: &[T], i: i32) -> T {
     usize::try_from(i)
@@ -98,6 +103,9 @@ pub struct SettingsForm {
     pub proxy_mode: ProxyMode,
     /// The manual proxy's URL; kept while another mode is chosen.
     pub proxy_url: String,
+    /// «Обновлять автоматически».
+    pub updates_enabled: bool,
+    pub update_channel: Channel,
 }
 
 /// Why the form cannot be saved.
@@ -123,6 +131,8 @@ impl SettingsForm {
             autostart,
             proxy_mode,
             proxy_url,
+            updates_enabled: settings.updates.enabled,
+            update_channel: settings.updates.channel,
         }
     }
 
@@ -149,12 +159,17 @@ impl SettingsForm {
             locale: self.language.code().map(str::to_owned),
             autostart: self.autostart,
             proxy,
+            updates: UpdateSettings {
+                enabled: self.updates_enabled,
+                channel: self.update_channel,
+            },
         })
     }
 }
 
 /// What the settings window works with: `settings.json`, our autostart entry for the
-/// program `exe`, the original NCALayer and the browser extension's registration.
+/// program `exe`, the original NCALayer, the browser extension's registration and the
+/// updater.
 pub struct SettingsServices {
     pub settings_path: PathBuf,
     /// The program our autostart entry runs.
@@ -162,6 +177,43 @@ pub struct SettingsServices {
     pub autostart: Box<dyn Autostart + Send + Sync>,
     pub original: Box<dyn OriginalControl>,
     pub extension: Box<dyn BrowserExtension>,
+    pub updates: Box<dyn Updates>,
+}
+
+/// What the updater can do, and what it found last.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// This copy is not installed by the installer (a release archive, a build of its own):
+    /// only an installed version updates itself.
+    NotInstalled,
+    /// This build carries no update signing keys.
+    NoKeys,
+    /// Not looked for yet since the start.
+    NotChecked,
+    /// No other version is offered.
+    UpToDate,
+    /// `version` is offered. With `installing` it is downloaded and installed once no signing
+    /// is in progress; without, automatic updates are off.
+    Available { version: String, installing: bool },
+    /// The last check failed: the index could not be downloaded or was refused.
+    Failed(String),
+}
+
+impl UpdateStatus {
+    /// Whether this installation can look for a new version.
+    pub fn can_check(&self) -> bool {
+        !matches!(self, UpdateStatus::NotInstalled | UpdateStatus::NoKeys)
+    }
+}
+
+/// The updater, as the settings window sees it.
+pub trait Updates: Send + Sync {
+    /// What the updater can do, and what it found last.
+    fn status(&self) -> UpdateStatus;
+
+    /// «Проверить сейчас»: looks for a new version now, with the settings as saved, and
+    /// returns what it found. Blocks for the download of the index.
+    fn check_now(&self) -> UpdateStatus;
 }
 
 /// The original's and the extension's states.
@@ -180,6 +232,8 @@ pub struct Snapshot {
     /// Our autostart entry could not be read: the form shows `settings.json`'s value.
     pub autostart_error: Option<String>,
     pub states: States,
+    /// The updater's state.
+    pub update: UpdateStatus,
 }
 
 /// Why saving failed.
@@ -223,6 +277,7 @@ impl SettingsServices {
             settings_error,
             autostart_error,
             states: self.states(),
+            update: self.updates.status(),
         }
     }
 
@@ -415,6 +470,26 @@ pub fn extension_view(status: &ExtensionStatus, l: Locale) -> ExtensionView {
     }
 }
 
+/// The text of the updates block for `status` in `l`.
+pub fn update_view(status: &UpdateStatus, l: Locale) -> String {
+    let t = Texts::of(l);
+    match status {
+        UpdateStatus::NotInstalled => t.update_not_installed.to_owned(),
+        UpdateStatus::NoKeys => t.update_no_keys.to_owned(),
+        UpdateStatus::NotChecked => t.update_not_checked.to_owned(),
+        UpdateStatus::UpToDate => t.update_up_to_date.to_owned(),
+        UpdateStatus::Available {
+            version,
+            installing: true,
+        } => t.update_available.replace("{0}", version),
+        UpdateStatus::Available {
+            version,
+            installing: false,
+        } => t.update_available_off.replace("{0}", version),
+        UpdateStatus::Failed(e) => format!("{}: {e}", t.update_failed),
+    }
+}
+
 /// The message of a form error in `l`.
 pub fn form_error_text(e: FormError, l: Locale) -> &'static str {
     let t = Texts::of(l);
@@ -519,6 +594,32 @@ pub(crate) mod fakes {
         }
     }
 
+    /// An updater that says `status`, and finds `found` when asked to check.
+    pub(crate) struct FakeUpdates {
+        pub(crate) status: Mutex<UpdateStatus>,
+        pub(crate) found: UpdateStatus,
+    }
+
+    impl Updates for FakeUpdates {
+        fn status(&self) -> UpdateStatus {
+            self.status.lock().unwrap().clone()
+        }
+
+        fn check_now(&self) -> UpdateStatus {
+            *self.status.lock().unwrap() = self.found.clone();
+            self.found.clone()
+        }
+    }
+
+    impl Default for FakeUpdates {
+        fn default() -> Self {
+            FakeUpdates {
+                status: Mutex::new(UpdateStatus::NotChecked),
+                found: UpdateStatus::UpToDate,
+            }
+        }
+    }
+
     /// Services on a sandbox under `root`: `settings.json`, the autostart file of the
     /// sandbox's XDG layout (on every system), the program `<root>/bin/openncalayer`.
     pub(crate) fn services(root: &Path, original: FakeOriginal) -> SettingsServices {
@@ -528,6 +629,7 @@ pub(crate) mod fakes {
             autostart: Box::new(FileAutostart::desktop_entry(&AutostartPaths::sandbox(root))),
             original: Box::new(original),
             extension: Box::new(FakeExtension),
+            updates: Box::new(FakeUpdates::default()),
         }
     }
 }
@@ -545,6 +647,8 @@ mod tests {
             autostart: false,
             proxy_mode: ProxyMode::Manual,
             proxy_url: url.to_owned(),
+            updates_enabled: true,
+            update_channel: Channel::Stable,
         }
     }
 
@@ -556,11 +660,16 @@ mod tests {
                 locale: Some("kk".to_owned()),
                 autostart: true,
                 proxy: ProxySetting::System,
+                updates: UpdateSettings {
+                    enabled: false,
+                    channel: Channel::Beta,
+                },
             },
             Settings {
                 locale: Some("en".to_owned()),
                 autostart: false,
                 proxy: ProxySetting::Manual("http://user:pw@proxy.test:3128".to_owned()),
+                ..Settings::default()
             },
         ] {
             let form = SettingsForm::new(&settings, settings.autostart);
@@ -575,6 +684,48 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(SettingsForm::new(&odd, false).language, Language::System);
+    }
+
+    #[test]
+    fn update_block_texts_and_check() {
+        assert_eq!(
+            update_view(&UpdateStatus::NotInstalled, Locale::Ru),
+            "Обновления доступны только для установленной версии."
+        );
+        assert_eq!(
+            update_view(&UpdateStatus::NoKeys, Locale::Ru),
+            "Ключи подписи обновлений не встроены в эту сборку: обновления выключены."
+        );
+        let available = |installing| UpdateStatus::Available {
+            version: "0.2.0".to_owned(),
+            installing,
+        };
+        assert_eq!(
+            update_view(&available(true), Locale::En),
+            "Version 0.2.0 is available. It is installed when no signing is in progress."
+        );
+        assert!(update_view(&available(false), Locale::Kk).starts_with("0.2.0 нұсқасы"));
+        assert_eq!(
+            update_view(&UpdateStatus::Failed("timed out".to_owned()), Locale::Ru),
+            "Не удалось проверить обновления: timed out"
+        );
+        assert!(!UpdateStatus::NotInstalled.can_check());
+        assert!(!UpdateStatus::NoKeys.can_check());
+        assert!(UpdateStatus::NotChecked.can_check() && available(false).can_check());
+        for (i, channel) in CHANNELS.iter().enumerate() {
+            assert_eq!(item(&CHANNELS, i as i32), *channel);
+        }
+
+        // The window shows the updater's state, and a check's outcome.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = services(dir.path(), FakeOriginal::default());
+        assert_eq!(s.load().update, UpdateStatus::NotChecked);
+        s.updates = Box::new(fakes::FakeUpdates {
+            status: std::sync::Mutex::new(UpdateStatus::NotChecked),
+            found: available(true),
+        });
+        assert_eq!(s.updates.check_now(), available(true));
+        assert_eq!(s.load().update, available(true));
     }
 
     #[test]

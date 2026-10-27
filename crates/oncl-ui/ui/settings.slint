@@ -1,6 +1,6 @@
-// The settings window: language, our autostart and the proxy (saved together), and the
-// original NCALayer's autostart and the browser extension's registration (acted on at once).
-// The states and messages are composed in Rust.
+// The settings window: language, our autostart, the proxy and the updates (saved together),
+// the original NCALayer's autostart and the browser extension's registration (acted on at
+// once), and «Check now» for updates. The states and messages are composed in Rust.
 
 import { Button, CheckBox, ComboBox, GroupBox, LineEdit, VerticalBox } from "std-widgets.slint";
 
@@ -14,6 +14,13 @@ export component SettingsWindow inherits Window {
     // 0: no proxy, 1: the system's proxy, 2: the proxy of `proxy-url`.
     in-out property <int> proxy-mode;
     in-out property <string> proxy-url;
+    in-out property <bool> updates-enabled;
+    // 0: stable, 1: beta.
+    in-out property <int> update-channel;
+    // What the updater can do and found last.
+    in property <string> update-state;
+    // Whether this installation can update itself («Check now» works).
+    in property <bool> can-check-updates;
     // The outcome of the last action, and whether it failed.
     in property <string> message;
     in property <bool> message-is-error;
@@ -32,6 +39,7 @@ export component SettingsWindow inherits Window {
     callback restore-original();
     callback register-extension();
     callback unregister-extension();
+    callback check-updates();
 
     VerticalBox {
         GroupBox {
@@ -83,6 +91,51 @@ export component SettingsWindow inherits Window {
                     text: @tr("HTTP proxies only; SOCKS is not supported.");
                     wrap: word-wrap;
                     color: #888888;
+                }
+            }
+        }
+
+        GroupBox {
+            vertical-stretch: 0;
+            title: @tr("Updates");
+            VerticalLayout {
+                spacing: 8px;
+                CheckBox {
+                    text: @tr("Update automatically");
+                    enabled: !root.busy;
+                    checked <=> root.updates-enabled;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: @tr("Channel");
+                        vertical-alignment: center;
+                    }
+
+                    ComboBox {
+                        horizontal-stretch: 1;
+                        enabled: !root.busy;
+                        model: [@tr("Stable"), @tr("Beta")];
+                        current-index <=> root.update-channel;
+                    }
+                }
+
+                Text {
+                    text: root.update-state;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Button {
+                        text: @tr("Check now");
+                        enabled: !root.busy && root.can-check-updates;
+                        clicked => {
+                            root.check-updates();
+                        }
+                    }
                 }
             }
         }

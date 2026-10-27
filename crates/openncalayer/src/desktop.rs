@@ -12,6 +12,7 @@ use oncl_desktop::{
 };
 use oncl_tls::{SelftestReports, TlsFiles};
 use oncl_ui::SettingsServices;
+use oncl_ui::settings_view::Updates;
 use oncl_ui::tls_wizard::{SystemTrust, TlsWizardServices};
 
 use crate::nm::{self, Item, NmLayout, Report, State};
@@ -138,8 +139,13 @@ impl Autostart for NoAutostart {
 
 /// The settings window's services for this user and the daemon `exe` with the data
 /// directory of `paths`: the original NCALayer of this user, its journal
-/// `<data>/original-autostart.json`, and wss's `port` to tell who holds it.
-pub fn settings_services(paths: &Paths, exe: PathBuf, port: u16) -> SettingsServices {
+/// `<data>/original-autostart.json`, wss's `port` to tell who holds it, and the `updates`.
+pub fn settings_services(
+    paths: &Paths,
+    exe: PathBuf,
+    port: u16,
+    updates: Box<dyn Updates>,
+) -> SettingsServices {
     let autostart = oncl_desktop::autostart::current_user().unwrap_or_else(|e| {
         tracing::warn!(error = %e, "the autostart entry is unknown");
         Box::new(NoAutostart(e.to_string()))
@@ -165,6 +171,7 @@ pub fn settings_services(paths: &Paths, exe: PathBuf, port: u16) -> SettingsServ
         autostart,
         original: Box::new(original),
         extension: Box::new(extension),
+        updates,
     }
 }
 

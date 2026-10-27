@@ -91,6 +91,10 @@ fn screenshots() {
         autostart: oncl_desktop::autostart::current_user().unwrap(),
         original: Box::new(Unavailable),
         extension: Box::new(Registered),
+        updates: Box::new(settings_view::fakes::FakeUpdates {
+            status: std::sync::Mutex::new(settings_view::UpdateStatus::UpToDate),
+            found: settings_view::UpdateStatus::UpToDate,
+        }),
     };
     let snapshot = services.load();
     for (locale, code) in [(Locale::Ru, "ru"), (Locale::Kk, "kk"), (Locale::En, "en")] {
@@ -98,7 +102,7 @@ fn screenshots() {
         select_language(locale);
         settings_view::show_snapshot(&ui, &snapshot, locale);
         ui.show().unwrap();
-        save(&last, 620, 820, &format!("settings-{code}"));
+        save(&last, 620, 900, &format!("settings-{code}"));
         ui.hide().unwrap();
     }
 

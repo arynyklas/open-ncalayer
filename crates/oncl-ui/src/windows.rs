@@ -93,14 +93,19 @@ fn open_now(window: DesktopWindow) {
     }
 }
 
+/// Whether the settings, TLS wizard, About or stop-the-original window is open. On the
+/// event loop (each window lives in its thread's slot); elsewhere it is `false`.
+pub fn any_window_open() -> bool {
+    settings_view::is_open()
+        || tls_wizard::is_open()
+        || about_view::is_open()
+        || crate::stop_original::is_open()
+}
+
 /// After a signing dialog: the open settings, TLS wizard, About or stop-the-original window
 /// gets its language back (the translation is the thread's, and the dialog had its page's).
 pub(crate) fn restore_language() {
-    if !(settings_view::is_open()
-        || tls_wizard::is_open()
-        || about_view::is_open()
-        || crate::stop_original::is_open())
-    {
+    if !any_window_open() {
         return;
     }
     if let Some(desktop) = desktop() {

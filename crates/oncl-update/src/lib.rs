@@ -7,7 +7,8 @@
 //! - [`choose()`]: the version to move to, with the staged rollout, revoked versions and
 //!   versions that failed locally;
 //! - [`state`]: `<data>/update/state.json`, what the updater keeps between runs;
-//! - [`fetch()`]: the index and its signature, through an [`HttpTransport`].
+//! - [`fetch()`]: the index and its signature, through an [`HttpTransport`];
+//! - [`embedded_keys()`]: the public keys built in (`keys/current.pub`, `keys/next.pub`).
 //!
 //! The format is described in `docs/design/update-index.md`.
 //!
@@ -17,6 +18,7 @@ pub mod choose;
 pub mod fetch;
 mod hex;
 pub mod index;
+mod keys;
 pub mod state;
 pub mod verify;
 
@@ -25,6 +27,7 @@ pub use fetch::{Fetched, fetch, index_url};
 pub use index::{
     Asset, Channel, CoreRelease, Extension, Flavor, FlavorPackage, Index, Package, Sha256,
 };
+pub use keys::embedded_keys;
 pub use minisign_verify::PublicKey;
 pub use semver::Version;
 pub use state::{PendingHealth, State};
@@ -99,4 +102,7 @@ pub enum UpdateError {
     /// A file could not be read.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A built-in public key is not a minisign public key.
+    #[error("a built-in update signing key is malformed: {0}")]
+    BadKey(String),
 }

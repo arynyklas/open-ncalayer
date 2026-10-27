@@ -38,6 +38,16 @@ pub(super) struct Texts {
     pub(super) cannot_unregister: &'static str,
     pub(super) relay_missing: &'static str,
     pub(super) relay_in_use: &'static str,
+    pub(super) update_not_installed: &'static str,
+    pub(super) update_no_keys: &'static str,
+    pub(super) update_not_checked: &'static str,
+    pub(super) update_up_to_date: &'static str,
+    /// `{0}`: the version.
+    pub(super) update_available: &'static str,
+    /// `{0}`: the version; automatic updates are off.
+    pub(super) update_available_off: &'static str,
+    pub(super) update_failed: &'static str,
+    pub(super) update_checking: &'static str,
 }
 
 impl Texts {
@@ -77,6 +87,14 @@ impl Texts {
                 cannot_unregister: "Тіркеуді жою мүмкін болмады",
                 relay_missing: "Relay табылмады: ",
                 relay_in_use: "Relay браузерде іске қосылған: браузерді жауып, қайталаңыз",
+                update_not_installed: "Жаңартулар тек орнатылған нұсқа үшін қолжетімді.",
+                update_no_keys: "Бұл жинаққа жаңартулардың қолтаңба кілттері енгізілмеген: жаңартулар өшірулі.",
+                update_not_checked: "Жаңартулар әлі тексерілмеген.",
+                update_up_to_date: "Соңғы нұсқа орнатылған.",
+                update_available: "{0} нұсқасы қолжетімді. Ол қол қою жүрмеген кезде орнатылады.",
+                update_available_off: "{0} нұсқасы қолжетімді. Оны орнату үшін «Автоматты түрде жаңарту» белгілеп, сақтаңыз.",
+                update_failed: "Жаңартуларды тексеру мүмкін болмады",
+                update_checking: "Жаңартулар тексерілуде…",
             },
             Locale::Ru => &Texts {
                 loading: "Загрузка…",
@@ -112,6 +130,14 @@ impl Texts {
                 cannot_unregister: "Не удалось удалить регистрацию",
                 relay_missing: "Relay не найден: ",
                 relay_in_use: "Relay запущен браузером: закройте браузер и повторите",
+                update_not_installed: "Обновления доступны только для установленной версии.",
+                update_no_keys: "Ключи подписи обновлений не встроены в эту сборку: обновления выключены.",
+                update_not_checked: "Обновления ещё не проверялись.",
+                update_up_to_date: "Установлена последняя версия.",
+                update_available: "Доступна версия {0}. Она установится, когда не будет идти подпись.",
+                update_available_off: "Доступна версия {0}. Отметьте «Обновлять автоматически» и сохраните, чтобы установить её.",
+                update_failed: "Не удалось проверить обновления",
+                update_checking: "Проверка обновлений…",
             },
             Locale::En => &Texts {
                 loading: "Loading…",
@@ -147,6 +173,14 @@ impl Texts {
                 cannot_unregister: "Cannot remove the registration",
                 relay_missing: "The relay is not found: ",
                 relay_in_use: "A browser runs the relay: close the browser and retry",
+                update_not_installed: "Updates are available only for the installed version.",
+                update_no_keys: "This build carries no update signing keys: updates are off.",
+                update_not_checked: "Updates have not been checked yet.",
+                update_up_to_date: "The latest version is installed.",
+                update_available: "Version {0} is available. It is installed when no signing is in progress.",
+                update_available_off: "Version {0} is available. Tick «Update automatically» and save to install it.",
+                update_failed: "Cannot check for updates",
+                update_checking: "Checking for updates…",
             },
         }
     }

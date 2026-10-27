@@ -122,6 +122,24 @@ msgstr "Указанный прокси:"
 msgid "HTTP proxies only; SOCKS is not supported."
 msgstr "Только HTTP-прокси; SOCKS не поддерживается."
 
+msgid "Updates"
+msgstr "Обновления"
+
+msgid "Update automatically"
+msgstr "Обновлять автоматически"
+
+msgid "Channel"
+msgstr "Канал"
+
+msgid "Stable"
+msgstr "Стабильный"
+
+msgid "Beta"
+msgstr "Бета"
+
+msgid "Check now"
+msgstr "Проверить сейчас"
+
 msgid "Save"
 msgstr "Сохранить"
 

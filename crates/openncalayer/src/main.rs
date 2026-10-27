@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -15,19 +16,24 @@ use oncl_basics::{Locale, Prompter};
 use oncl_desktop::Settings;
 use oncl_desktop::port_owner;
 use oncl_ipc::IpcListener;
+use oncl_pki::http::HttpTransport;
 use oncl_protocol::Registry;
 use oncl_tls::{SelftestReports, TlsFiles};
+use oncl_ui::settings_view::Updates;
 use oncl_ui::{
     AboutInfo, DesktopWindow, DesktopWindows, Notification, SlintPrompter, StopOriginal,
     TrayCommand, TrayHandle, TrayState,
 };
+use oncl_update::{Flavor, embedded_keys};
 use openncalayer::cli::{self, Cli, Command};
 use openncalayer::notices::TrayStatus;
 use openncalayer::renewal::{self, RenewalCheck};
+use openncalayer::update::installer::VelopackInstaller;
+use openncalayer::update::{self, Host, Notice, Startup, Updater, UpdaterConfig, UpdaterHandle};
 use openncalayer::wss::{Listening, PortState, WATCH_EVERY, Watcher, Wss};
 use openncalayer::{
     JsonSettings, LiveProxyTransport, Paths, ServerConfig, build_registry, desktop, listen_port,
-    load_settings, serve, serve_ipc,
+    load_settings, requests_idle, serve, serve_ipc,
 };
 use time::OffsetDateTime;
 use tokio::runtime::Runtime;
@@ -37,6 +43,9 @@ use tokio::sync::{Notify, mpsc};
 const SERVER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long wss keeps trying to take the port after the original NCALayer is stopped.
 const REBIND_WAIT: Duration = Duration::from_secs(2);
+/// How long after its event loop starts a new version confirms its health, if its servers
+/// still run then.
+const HEALTH_SETTLE: Duration = Duration::from_secs(5);
 
 /// The tray and what it shows, on the event loop's thread.
 struct Tray {
@@ -148,6 +157,12 @@ fn offer_to_stop_original(wss: &Arc<Wss>) {
 }
 
 fn main() -> ExitCode {
+    // Velopack's install, update and uninstall hooks run here and exit; a copy that was not
+    // installed through Velopack carries on. A downloaded update is applied only by the
+    // updater, when no signing is in progress (not on the next start).
+    velopack::VelopackApp::build()
+        .set_auto_apply_on_startup(false)
+        .run();
     let command = Cli::parse().command.unwrap_or(Command::Run {
         allow_no_wss: false,
         no_tray: false,
@@ -218,6 +233,14 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         Arc::new(open_requested_window),
     );
     let stop = Arc::new(Notify::new());
+    // Whether the windows' event loop runs (an update waits for its windows to close).
+    let loop_runs = Arc::new(AtomicBool::new(false));
+    let (updates, startup) = updater(
+        &daemon.paths,
+        Arc::clone(&http),
+        Arc::clone(&stop),
+        Arc::clone(&loop_runs),
+    );
     // A failure only a tray lets the daemon live with.
     let (opened, waits_for_tray) = match daemon.wss {
         Ok(opened) => (Ok(opened), None),
@@ -232,6 +255,7 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             status.tray_state(),
             Arc::clone(&stop),
             Arc::clone(&wss),
+            updates.clone(),
             waits_for_tray.is_some(),
         )
         .map(Rc::new)
@@ -275,10 +299,10 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             &daemon.paths,
             locale,
             registry.names(),
-            http,
-            tray.as_ref().map_or_else(Weak::new, Rc::downgrade),
+            on_settings_saved(http, tray.as_ref().map_or_else(Weak::new, Rc::downgrade)),
             Arc::clone(&reports),
             Arc::clone(&wss),
+            updates.clone(),
         ));
         if wss.off().is_some() {
             let watched = Arc::clone(&wss);
@@ -293,8 +317,12 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     } else {
         start_renewal(files, wss);
     }
+    // Whether the servers still run, for a new version's health.
+    let serving = Arc::new(AtomicBool::new(true));
+    let served = Arc::clone(&serving);
     let server = thread::Builder::new().name("server".into()).spawn(move || {
         let result = runtime.block_on(serve_all(ipc, listeners, Arc::new(registry), reports, stop));
+        served.store(false, Ordering::SeqCst);
         if let Err(e) = &result {
             tracing::error!(error = %e, "server stopped");
         }
@@ -311,10 +339,18 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    start_updates(
+        updates,
+        startup,
+        serving,
+        event_loop,
+        Arc::clone(&loop_runs),
+    );
     if !event_loop {
         return exit_code(server.join());
     }
     let mut looped = oncl_ui::run_event_loop();
+    loop_runs.store(false, Ordering::SeqCst);
     if tray_lost.get()
         && looped.is_ok()
         && !server.is_finished()
@@ -324,7 +360,9 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         // (winit keeps its event loop for another run).
         tracing::warn!("wss serves already: running without the system tray");
         tray_lost.set(false);
+        loop_runs.store(true, Ordering::SeqCst);
         looped = oncl_ui::run_event_loop();
+        loop_runs.store(false, Ordering::SeqCst);
     }
     // The icon goes before the process does (on Windows a dead process's icon lingers).
     drop(tray);
@@ -437,18 +475,18 @@ fn start_renewal(files: TlsFiles, wss: Arc<Wss>) {
     }
 }
 
-/// What the settings, TLS wizard and About windows show and change. A save applies the
-/// proxy to `http` and the language to the tray, if it is still there. A certificate the
-/// wizard saves goes to `wss` at once: served, or wss started with it, or kept for when the
-/// port is free or for the next start ([`Wss::apply_saved`]).
+/// What the settings, TLS wizard and About windows show and change. A save runs
+/// `on_saved`. A certificate the wizard saves goes to `wss` at once: served, or wss started
+/// with it, or kept for when the port is free or for the next start ([`Wss::apply_saved`]).
+/// The settings window shows the `updates` and checks for them.
 fn desktop_windows(
     paths: &Paths,
     locale: Locale,
     modules: Vec<String>,
-    http: Arc<LiveProxyTransport>,
-    tray: Weak<TrayHandle>,
+    on_saved: Box<dyn Fn(&Settings)>,
     reports: Arc<SelftestReports>,
     wss: Arc<Wss>,
+    updates: UpdaterHandle,
 ) -> DesktopWindows {
     let exe = std::env::current_exe().unwrap_or_else(|e| {
         tracing::warn!(error = %e, "the program's path is unknown; autostart cannot be set");
@@ -461,7 +499,7 @@ fn desktop_windows(
     let saved_to = Arc::clone(&wss);
     DesktopWindows {
         locale,
-        settings: desktop::settings_services(paths, exe, wss.port()),
+        settings: desktop::settings_services(paths, exe, wss.port(), Box::new(updates)),
         about: AboutInfo {
             commit: env!("ONCL_GIT_COMMIT").to_owned(),
             bundles,
@@ -478,24 +516,34 @@ fn desktop_windows(
             });
             look_for_tray(&saved_to);
         }),
-        on_saved: Box::new(move |settings: &Settings| {
-            http.set_proxy(settings.proxy.clone());
-            let locale = settings.ui_locale();
-            if let Some(tray) = tray.upgrade() {
-                tray.set_locale(locale);
-            }
-            post_to_tray(move |status| {
-                status.locale = locale;
-                None
-            });
-        }),
+        on_saved,
     }
+}
+
+/// What a save of the settings window changes in the daemon: the proxy of `http`, and the
+/// language of the tray, if it is still there.
+fn on_settings_saved(
+    http: Arc<LiveProxyTransport>,
+    tray: Weak<TrayHandle>,
+) -> Box<dyn Fn(&Settings)> {
+    Box::new(move |settings: &Settings| {
+        http.set_proxy(settings.proxy.clone());
+        let locale = settings.ui_locale();
+        if let Some(tray) = tray.upgrade() {
+            tray.set_locale(locale);
+        }
+        post_to_tray(move |status| {
+            status.locale = locale;
+            None
+        });
+    })
 }
 
 /// The tray in `locale` showing `state`, or `None` (logged) if it cannot be shown. Its
 /// commands run on the event loop: «Выход» notifies `stop`, «Журнал» opens `logs`,
 /// «Настройки…», «Сертификат для браузера…» and «О программе» open their windows,
-/// «Остановить оригинал…» asks before stopping the original that keeps `wss` off. With
+/// «Остановить оригинал…» asks before stopping the original that keeps `wss` off,
+/// «Проверить обновления» has the `updates` check and notifies what they found. With
 /// `needed`, `run` cannot go on without it (wss waits for the tray).
 fn start_tray(
     locale: Locale,
@@ -503,6 +551,7 @@ fn start_tray(
     state: TrayState,
     stop: Arc<Notify>,
     wss: Arc<Wss>,
+    updates: UpdaterHandle,
     needed: bool,
 ) -> Option<TrayHandle> {
     let tray = oncl_ui::start_tray(locale, move |command| match command {
@@ -515,6 +564,13 @@ fn start_tray(
         TrayCommand::About => oncl_ui::open_window(DesktopWindow::About),
         TrayCommand::TlsWizard => oncl_ui::open_window(DesktopWindow::TlsWizard),
         TrayCommand::StopOriginal => offer_to_stop_original(&wss),
+        TrayCommand::CheckUpdates => {
+            let updates = updates.clone();
+            spawn_named("check-updates", move || {
+                let found = updates.check_now();
+                post_to_tray(move |status| status.update_notification(&Notice::Checked(found)));
+            });
+        }
     });
     match tray {
         Ok(tray) => {
@@ -529,6 +585,112 @@ fn start_tray(
             tracing::warn!(error = %e, "the system tray is unavailable; running without it");
             None
         }
+    }
+}
+
+/// The daemon as the updater sees it.
+struct DaemonHost {
+    stop: Arc<Notify>,
+    /// Whether the windows' event loop runs (its windows can be open).
+    loop_runs: Arc<AtomicBool>,
+}
+
+/// How long the event loop has to say whether a window is open; one that does not answer
+/// counts as one open.
+const WINDOW_ASK: Duration = Duration::from_secs(10);
+
+impl Host for DaemonHost {
+    fn busy(&self) -> bool {
+        !requests_idle(update::QUIET) || (self.loop_runs.load(Ordering::SeqCst) && window_open())
+    }
+
+    fn notify(&self, notice: Notice) {
+        post_to_tray(move |status| status.update_notification(&notice));
+    }
+
+    fn exit(&self) {
+        self.stop.notify_one();
+    }
+}
+
+/// Whether a window of the daemon is open, asked on the event loop.
+fn window_open() -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let asked = oncl_ui::run_on_event_loop(move || {
+        let _ = tx.send(oncl_ui::any_window_open());
+    });
+    if asked.is_err() {
+        return false;
+    }
+    rx.recv_timeout(WINDOW_ASK).unwrap_or(true)
+}
+
+/// The updater of this copy and what it found at the start, or why it is off: only a copy
+/// installed through Velopack, built with the keys of the update index, updates itself.
+/// It downloads through `http` (the proxy of the settings) and exits through `stop`.
+fn updater(
+    paths: &Paths,
+    http: Arc<LiveProxyTransport>,
+    stop: Arc<Notify>,
+    loop_runs: Arc<AtomicBool>,
+) -> (UpdaterHandle, Startup) {
+    let transport: Arc<dyn HttpTransport> = http;
+    let available = update::availability(embedded_keys(), Flavor::current(), || {
+        VelopackInstaller::detect(Arc::clone(&transport))
+    });
+    let (keys, flavor, installer) = match available {
+        Ok(available) => available,
+        Err(status) => return (UpdaterHandle::Off(status), Startup::Normal),
+    };
+    let updater = Updater::new(
+        UpdaterConfig {
+            data_dir: paths.data.clone(),
+            settings: paths.settings(),
+            base: update::index_base(),
+            keys,
+            flavor,
+            idle_poll: update::IDLE_POLL,
+        },
+        transport,
+        Box::new(installer),
+        Box::new(DaemonHost { stop, loop_runs }),
+    );
+    let startup = updater.startup();
+    (UpdaterHandle::Running(Arc::new(updater)), startup)
+}
+
+/// Starts the updater once the event loop runs (at once without one): a version just
+/// installed confirms its health [`HEALTH_SETTLE`] later if its servers still run
+/// (`serving`); a failed one is rolled back; then the checks.
+fn start_updates(
+    updates: UpdaterHandle,
+    startup: Startup,
+    serving: Arc<AtomicBool>,
+    event_loop: bool,
+    loop_runs: Arc<AtomicBool>,
+) {
+    let UpdaterHandle::Running(updater) = updates else {
+        return;
+    };
+    let start = move || {
+        loop_runs.store(event_loop, Ordering::SeqCst);
+        if startup == Startup::Confirm {
+            let confirming = Arc::clone(&updater);
+            spawn_named("update-health", move || {
+                thread::sleep(HEALTH_SETTLE);
+                if serving.load(Ordering::SeqCst) {
+                    confirming.confirm_health();
+                } else {
+                    tracing::warn!("the servers stopped: this version's health is not confirmed");
+                }
+            });
+        }
+        updater.spawn(startup);
+    };
+    if event_loop {
+        oncl_ui::when_event_loop_runs(start);
+    } else {
+        start();
     }
 }
 

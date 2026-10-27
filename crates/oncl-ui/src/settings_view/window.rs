@@ -13,9 +13,9 @@ use slint::{CloseRequestResponse, ComponentHandle, PlatformError, SharedString};
 
 use super::texts::Texts;
 use super::{
-    ActionError, Language, ProxyMode, SaveError, SettingsForm, SettingsServices, Snapshot, States,
-    action_error_text, extension_view, form_error_text, index_of, item, original_view,
-    save_error_text,
+    ActionError, CHANNELS, Language, ProxyMode, SaveError, SettingsForm, SettingsServices,
+    Snapshot, States, UpdateStatus, action_error_text, extension_view, form_error_text, index_of,
+    item, original_view, save_error_text, update_view,
 };
 use crate::foreground;
 use crate::prompter::select_desktop_language;
@@ -61,6 +61,7 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
     let t = Texts::of(locale);
     ui.set_original_state(t.loading.into());
     ui.set_extension_state(t.loading.into());
+    ui.set_update_state(t.loading.into());
     let id = worker::next_id::<Open>();
     let open = Rc::new(Open {
         id,
@@ -97,6 +98,7 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
             });
         });
     });
+    ui.on_check_updates(move || with(id, check_updates));
     ui.on_dismiss(move || {
         close_requested(id);
     });
@@ -125,6 +127,7 @@ pub(crate) fn show_snapshot(ui: &SettingsWindow, snapshot: &Snapshot, l: Locale)
     let t = Texts::of(l);
     show_form(ui, &snapshot.form);
     show_states(ui, &snapshot.states, l);
+    show_update(ui, &snapshot.update, l);
     let problems: Vec<String> = [
         (t.cannot_read_settings, &snapshot.settings_error),
         (t.cannot_read_autostart, &snapshot.autostart_error),
@@ -181,6 +184,22 @@ fn saved(
         Err(e) => show_message(&open.ui, &save_error_text(e, l), true),
     }
     show_states(&open.ui, &states, l);
+}
+
+/// «Проверить сейчас»: the updater looks for a new version on a worker thread; the window
+/// shows what it found.
+fn check_updates(open: &Open) {
+    open.ui
+        .set_update_state(Texts::of(open.desktop.locale.get()).update_checking.into());
+    run(
+        open,
+        |s| s.updates.check_now(),
+        |desktop, open, status| {
+            if let Some(open) = open {
+                show_update(&open.ui, &status, desktop.locale.get());
+            }
+        },
+    );
 }
 
 /// The messages of an action: on success, on failure.
@@ -271,6 +290,8 @@ fn show_form(ui: &SettingsWindow, form: &SettingsForm) {
     ui.set_autostart(form.autostart);
     ui.set_proxy_mode(index_of(&ProxyMode::ALL, &form.proxy_mode));
     ui.set_proxy_url(form.proxy_url.as_str().into());
+    ui.set_updates_enabled(form.updates_enabled);
+    ui.set_update_channel(index_of(&CHANNELS, &form.update_channel));
 }
 
 fn form_of(ui: &SettingsWindow) -> SettingsForm {
@@ -279,6 +300,8 @@ fn form_of(ui: &SettingsWindow) -> SettingsForm {
         autostart: ui.get_autostart(),
         proxy_mode: item(&ProxyMode::ALL, ui.get_proxy_mode()),
         proxy_url: ui.get_proxy_url().to_string(),
+        updates_enabled: ui.get_updates_enabled(),
+        update_channel: item(&CHANNELS, ui.get_update_channel()),
     }
 }
 
@@ -290,6 +313,11 @@ fn show_states(ui: &SettingsWindow, states: &States, l: Locale) {
     let extension = extension_view(&states.extension, l);
     ui.set_extension_state(extension.text.into());
     ui.set_can_unregister_extension(extension.can_unregister);
+}
+
+fn show_update(ui: &SettingsWindow, status: &UpdateStatus, l: Locale) {
+    ui.set_update_state(update_view(status, l).into());
+    ui.set_can_check_updates(status.can_check());
 }
 
 fn show_message(ui: &SettingsWindow, text: &str, error: bool) {
@@ -384,6 +412,8 @@ mod tests {
             autostart: false,
             proxy_mode: ProxyMode::System,
             proxy_url: String::new(),
+            updates_enabled: true,
+            update_channel: oncl_desktop::settings::Channel::Stable,
         };
         let result = (desktop.settings.save(&form), desktop.settings.states());
         worker::finish::<Open, _>(id, Ok(result), saved);

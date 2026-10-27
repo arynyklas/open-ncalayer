@@ -40,6 +40,14 @@ pub struct PendingHealth {
     /// When the update was applied.
     #[serde(with = "time::serde::rfc3339")]
     pub applied: OffsetDateTime,
+    /// When the new version first started; it confirms its health within a grace from
+    /// then, or a later start finds it failed.
+    #[serde(
+        default,
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub started: Option<OffsetDateTime>,
 }
 
 impl State {
@@ -130,6 +138,7 @@ mod tests {
             from: v("0.1.0"),
             to: v("0.2.0"),
             applied: datetime!(2026-10-27 10:00 UTC),
+            started: None,
         });
         state.save(dir.path()).unwrap();
         assert_eq!(State::load(dir.path()).unwrap(), state);
@@ -145,6 +154,11 @@ mod tests {
             value["pending_health"],
             json!({"from": "0.1.0", "to": "0.2.0", "applied": "2026-10-27T10:00:00Z"})
         );
+        if let Some(pending) = &mut state.pending_health {
+            pending.started = Some(datetime!(2026-10-27 10:01 UTC));
+        }
+        state.save(dir.path()).unwrap();
+        assert_eq!(State::load(dir.path()).unwrap(), state);
 
         // Saving again replaces the file; no temporary file stays.
         state.pending_health = None;
