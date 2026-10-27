@@ -8,10 +8,11 @@
 //! `deleteEntry`, `resetStorage`: `COMMON`; `getPublicPartInfo`:
 //! `GETPUBLICPART_EXCEPTION`), without a dialog. `JKS` is read, never written.
 //!
-//! Paths a page names are never logged. A key file the page names is read only if it is a
-//! local regular disk file of at most [`oncl_basics::MAX_PAGE_FILE`] bytes
-//! ([`PageFile::read`]); a folder the page names is used only if it is a local folder
-//! ([`local_page_path`]): device and network paths are refused before they are looked up.
+//! Paths a page names are never logged. A key file or folder the page names is used only if
+//! [`page_path`] accepts it: a local path, or a network path the user chose in the file
+//! chooser ([`remember_chosen_path`]); device paths and other network paths are refused
+//! before they are looked up. A key file is read only if it is a regular disk file of at
+//! most [`oncl_basics::MAX_PAGE_FILE`] bytes ([`PageFile::read`]).
 
 use crate::Applet;
 use crate::dispatch::{Args, NPE, Outcome, Thrown, Wrapper};
@@ -19,8 +20,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_basics::{
     Action, Availability, FileKind, FilePrompt, KeyCandidate, KeyPrompt, Locale, OpenError,
-    PageFile, PasswordPrompt, Prompt, StorageAnswer, StorageKind, StoragePrompt, local_page_path,
-    lock_dialog_flow,
+    PageFile, PasswordPrompt, Prompt, StorageAnswer, StorageKind, StoragePrompt, lock_dialog_flow,
+    page_path, remember_chosen_path,
 };
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::info::{CertInfo, KncaCertType, cert_info, kcert_types};
@@ -89,7 +90,8 @@ pub(crate) fn browse_key_store(a: &Applet, args: &Args<'_>, add_info: &AddInfo) 
 }
 
 /// The original's `FileChooserDialog`: a `null` type throws, an unknown one too
-/// (`FileType.valueOf`).
+/// (`FileType.valueOf`). The path given to the page may be named by it later, even on a
+/// network share ([`remember_chosen_path`]).
 fn choose_file(
     a: &Applet,
     extension: Option<&str>,
@@ -106,9 +108,10 @@ fn choose_file(
         origin: origin(add_info),
         locale: LOCALE,
         kind,
-        // A network folder is not opened: the system dialog would connect to its host.
+        // A network folder the user did not choose is not opened: the system dialog would
+        // connect to its host.
         directory: directory
-            .and_then(local_page_path)
+            .and_then(page_path)
             .filter(|d| !d.as_os_str().is_empty())
             .map(Path::to_path_buf),
     };
@@ -117,7 +120,10 @@ fn choose_file(
         a.prompter.file(&prompt)
     };
     Ok(match answer {
-        Prompt::Answer(path) if path.exists() => Wrapper::ok(path.to_string_lossy().into_owned()),
+        Prompt::Answer(path) if path.exists() => {
+            remember_chosen_path(&path);
+            Wrapper::ok(path.to_string_lossy().into_owned())
+        }
         Prompt::Answer(_) | Prompt::Cancelled => Wrapper::none(),
     })
 }
@@ -199,9 +205,10 @@ pub(crate) fn set_x509_cert_to_key_store_and_change_password(
 ///
 /// Per certificate, in the original's order: the PEM, its SubjectKeyIdentifier and
 /// KeyStoreInfo (`SETCERT_COMMON`), then the folder: none, or one a page may not name (a
-/// device or network path, refused unlooked), is `KEYSTORE_FILE_NOT_FOUND`; not a folder
-/// is `SETCERT_COMMON`. Unlike the original, more than [`MAX_CERTIFICATES_PER_REQUEST`]
-/// certificates are `SETCERT_COMMON` before any file is touched.
+/// device path or a network path the user did not choose, refused unlooked), is
+/// `KEYSTORE_FILE_NOT_FOUND`; not a folder is `SETCERT_COMMON`. Unlike the original, more
+/// than [`MAX_CERTIFICATES_PER_REQUEST`] certificates are `SETCERT_COMMON` before any file
+/// is touched.
 fn set_certificates(
     a: &Applet,
     storage_name: Option<&str>,
@@ -235,7 +242,7 @@ fn set_certificates(
         if certificate_alias(&cert, &storage_oid).is_err() {
             return Ok(Wrapper::error(SETCERT_COMMON));
         }
-        let Some(dir) = container.and_then(local_page_path) else {
+        let Some(dir) = container.and_then(page_path) else {
             return Ok(Wrapper::error(KEYSTORE_FILE_NOT_FOUND));
         };
         // The original lists the folder: a path that is none fails on a
@@ -470,7 +477,7 @@ fn inner_password_ok(password: &str) -> bool {
 
 /// The storage dialog until a key store with keys of `key_type` opens; `None` if it is
 /// cancelled. The page's `container` pre-fills it unless a page may not name it (a device
-/// or network path).
+/// path, or a network path the user did not choose in the file chooser).
 fn open_store(
     a: &Applet,
     storage: StorageKind,
@@ -484,7 +491,7 @@ fn open_store(
         action: key_type.action(),
         storages: vec![storage],
         recent_path: container
-            .and_then(local_page_path)
+            .and_then(page_path)
             .filter(|p| !p.as_os_str().is_empty())
             .map(Path::to_path_buf),
         error: None,
@@ -506,7 +513,7 @@ fn open_store(
 
 /// The keys of `key_type` in the answer's key store, oldest certificate first (the
 /// original dialog's order). The password is checked first, as the original dialog does.
-/// The file is the user's choice (pre-filled with a local page path at most), read as
+/// The file is the user's choice (pre-filled with a [`page_path`] at most), read as
 /// [`PageFile::read_chosen`]: a regular disk file of at most 64 MiB, on a network share
 /// too.
 fn open_keys(

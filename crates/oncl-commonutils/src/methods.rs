@@ -18,8 +18,9 @@
 //! `getSigningEntityDefaultChained` does with its bundled CA list (expired keys at their
 //! notAfter). Base64 inputs are decoded after the dialogs, with Java's decoder and its
 //! messages. Paths a page names (`createCAdESFromFile`, `createCMSSignatureFromFile`) are
-//! read before any dialog (local regular files of at most [`MAX_PAGE_FILE`] bytes only,
-//! [`PageFile`]), shown in both dialogs as absolute paths, and never logged.
+//! read before any dialog (regular files of at most [`MAX_PAGE_FILE`] bytes only, local or
+//! on a network path the user chose in the file chooser, [`PageFile`]), shown in both
+//! dialogs as absolute paths, and never logged.
 
 use crate::CommonUtils;
 use crate::dispatch::Args;
@@ -28,8 +29,8 @@ use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_basics::{
     Action, Availability, FileKind, FilePrompt, KeyCandidate, KeyPrompt, Locale, MAX_PAGE_FILE,
-    OpenError, PageFile, PageFileError, Prompt, StorageKind, StoragePrompt, local_page_path,
-    lock_dialog_flow,
+    OpenError, PageFile, PageFileError, Prompt, StorageKind, StoragePrompt, lock_dialog_flow,
+    page_path, remember_chosen_path,
 };
 use oncl_pki::cms::{self, CmsError, SignOptions};
 use oncl_pki::info::{CertInfo, KncaCertType, cert_info, common_name, kalkan_dn, kcert_types};
@@ -199,7 +200,8 @@ pub(crate) fn apply_cades_t(cu: &CommonUtils, args: &Args<'_>, add_info: &AddInf
 
 /// `showFileChooser(fileExtension, currentDirectory)`: the path of a chosen file (or folder
 /// for `DIRECTORY` or an empty `fileExtension`), starting in `currentDirectory` if given.
-/// A path that does not exist counts as cancelled, as in the original.
+/// A path that does not exist counts as cancelled, as in the original. The path given to
+/// the page may be named by it later, even on a network share ([`remember_chosen_path`]).
 pub(crate) fn show_file_chooser(cu: &CommonUtils, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
     let extension = args.str(0);
     let kind = if extension.is_empty() {
@@ -216,8 +218,9 @@ pub(crate) fn show_file_chooser(cu: &CommonUtils, args: &Args<'_>, add_info: &Ad
         origin: origin(add_info),
         locale: cu.locale(),
         kind,
-        // A network folder is not opened: the system dialog would connect to its host.
-        directory: local_page_path(directory)
+        // A network folder the user did not choose is not opened: the system dialog would
+        // connect to its host.
+        directory: page_path(directory)
             .filter(|d| !d.as_os_str().is_empty())
             .map(Path::to_path_buf),
     };
@@ -227,6 +230,7 @@ pub(crate) fn show_file_chooser(cu: &CommonUtils, args: &Args<'_>, add_info: &Ad
     };
     match answer {
         Prompt::Answer(path) if path.exists() => {
+            remember_chosen_path(&path);
             Ok(Some(Value::String(path.to_string_lossy().into_owned())))
         }
         Prompt::Answer(_) | Prompt::Cancelled => Err(canceled()),

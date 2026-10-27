@@ -10,7 +10,7 @@
 //!
 //! The crate also holds what the other modules share with it: the [`Prompter`] dialogs, the
 //! dialog-flow turn ([`lock_dialog_flow`]) and the rules for paths a page names
-//! ([`PageFile`], [`local_page_path`]).
+//! ([`PageFile`], [`page_path`], [`remember_chosen_path`]).
 
 mod essentials;
 mod filter;
@@ -24,7 +24,8 @@ pub use filter::{
     Availability, ChainPolicy, DisabledReason, KeyFilter, OCSP_DEADLINE, availabilities,
 };
 pub use page_file::{
-    MAX_PAGE_FILE, PageFile, PageFileError, is_device_path, is_network_path, local_page_path,
+    MAX_CHOSEN_NETWORK_PATHS, MAX_PAGE_FILE, PageFile, PageFileError, is_device_path,
+    is_network_path, page_path, remember_chosen_path,
 };
 pub use prompt::{
     Action, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyCandidate,

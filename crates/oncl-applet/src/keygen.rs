@@ -27,10 +27,10 @@
 //! - unlike the original, more than [`MAX_KEYS_PER_REQUEST`] `keyLengths` entries are
 //!   `GENKEY_COMMON` before any key is generated.
 //!
-//! The container must be an existing local folder given by an absolute path (else
-//! `COMMON`, as a file the original cannot write; a network path is refused before it is
-//! looked up); `JKS` is not written (`UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION`). Tokens
-//! answer `EMPTY_SLOT`.
+//! The container must be an existing local folder given by an absolute path, or a network
+//! folder the user chose in the file chooser (else `COMMON`, as a file the original cannot
+//! write; another network path is refused before it is looked up); `JKS` is not written
+//! (`UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION`). Tokens answer `EMPTY_SLOT`.
 
 use crate::Applet;
 use crate::dispatch::{Args, NPE, Outcome, Thrown, Wrapper};
@@ -41,7 +41,7 @@ use crate::methods::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::asn1::ObjectIdentifier;
-use oncl_basics::{StorageKind, local_page_path};
+use oncl_basics::{StorageKind, page_path};
 use oncl_pki::csr::{LegacyCsrRequest, build_legacy_csr};
 use oncl_pki::keygen::{KeySpec, MAX_KEYS_PER_REQUEST, applet_key_id, generate};
 use oncl_pki::keystore::create_applet_key_file;
@@ -160,7 +160,7 @@ fn generate_all(a: &Applet, args: &Args<'_>) -> Result<Wrapper, Stop> {
             Some(names) => Some(alt_names(names, &dn)?),
             None => None,
         };
-        let dir = local_page_path(container)
+        let dir = page_path(container)
             .filter(|dir| dir.is_absolute() && dir.is_dir())
             .ok_or(Stop::Code(COMMON))?;
 

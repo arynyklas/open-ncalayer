@@ -16,7 +16,7 @@ use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::{MockTsa, verify_token};
 use oncl_pki::{oid, pem, xmldsig};
 use oncl_protocol::{AddInfo, Module};
-use oncl_testkit::{fixture, ncanode, read, synthetic, synthetic_cert};
+use oncl_testkit::{fixture, ncanode, network_form, read, synthetic, synthetic_cert};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::io;
@@ -1369,4 +1369,41 @@ fn network_paths_are_refused() {
         assert_eq!(failed(&reply), "action.canceled");
         assert_eq!(s.prompter.file_prompts()[0].directory, None, "{path}");
     }
+}
+
+/// A network file the user chose in `showFileChooser` may be named by the page afterwards;
+/// before the choice it is refused, and so are the share's other files after it, although
+/// they exist.
+#[test]
+fn chosen_network_files_may_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let chosen = temp_file(dir.path(), "chosen.txt", b"chosen");
+    let other = temp_file(dir.path(), "other.txt", b"other");
+    let (Some(chosen), Some(other)) = (
+        network_form(Path::new(&chosen)),
+        network_form(Path::new(&other)),
+    ) else {
+        return;
+    };
+    let s = setup(script![
+        Step::File(PathBuf::from(&chosen)),
+        storage("user-gost2015-sign"),
+        key(0)
+    ]);
+    let sign = |path: &str| {
+        call(
+            &s.cu,
+            "createCAdESFromFile",
+            json!(["PKCS12", "", path, true]),
+        )
+    };
+    assert_eq!(failed(&sign(&chosen)), "file.not_found");
+    assert_eq!(
+        ok(&call(&s.cu, "showFileChooser", json!(["ALL", ""]))),
+        &json!(chosen)
+    );
+    let signers = verify(&unb64(&sign(&chosen)), None).unwrap();
+    assert_eq!(signers.len(), 1);
+    assert_eq!(failed(&sign(&other)), "file.not_found");
+    assert_eq!(s.prompter.storage_prompts().len(), 1);
 }

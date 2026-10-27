@@ -19,7 +19,7 @@ use oncl_pki::pkcs12::{KeyEntry, WriteOptions, load, load_contents, write};
 use oncl_pki::testing::{TestCertSpec, issue_cert};
 use oncl_pki::{oid, pem, xmldsig};
 use oncl_protocol::{AddInfo, DEFAULT_MODULE, Module, Registry, Route};
-use oncl_testkit::{fixture, read, synthetic};
+use oncl_testkit::{fixture, network_form, read, synthetic};
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 use std::fs;
@@ -1664,29 +1664,17 @@ fn network_paths_are_refused() {
 }
 
 /// A key file the user picks in the signXml dialog is read even on a network path: only
-/// paths a page names are refused. On Unix a `//`-path is a network path by our rule and
-/// reaches the local file; on Windows the drive's administrative share is used when it is
-/// reachable.
+/// paths a page names are refused.
 #[test]
 fn signxml_reads_a_user_picked_network_file() {
     let key = synthetic("user-gost2015-sign");
     let dir = tempfile::tempdir().unwrap();
     let local = dir.path().join("k.p12");
     fs::copy(&key.path, &local).unwrap();
-    let local = std::path::absolute(&local).unwrap();
-    let network = if cfg!(windows) {
-        let text = local.to_str().unwrap();
-        let (drive, rest) = text.split_at(2);
-        format!(r"\\localhost\{}${rest}", &drive[..1])
-    } else {
-        format!("/{}", local.display())
+    let Some(network) = network_form(&local) else {
+        return;
     };
     assert!(oncl_basics::is_network_path(&network), "{network}");
-    if fs::metadata(&network).is_err() {
-        // No administrative share here: nothing to read through.
-        eprintln!("skipped: {network} is not reachable");
-        return;
-    }
     let (a, prompter) = setup(vec![
         Step::Storage {
             path: PathBuf::from(&network),
@@ -1697,4 +1685,82 @@ fn signxml_reads_a_user_picked_network_file() {
     let reply = call(&a, "signXml", json!(["PKCS12", null, "SIGN", "<a/>"]));
     assert_eq!(code(&reply), "NONE", "{reply}");
     assert_eq!(prompter.storage_prompts().len(), 1);
+}
+
+/// A network path the user chose in the file chooser (`browseKeyStore`, `showFileChooser`)
+/// may be named by the page afterwards: a key file or folder on a company share. Before
+/// the choice it is refused, and so are the share's other paths after it, although they
+/// exist.
+#[test]
+fn chosen_network_paths_may_be_named() {
+    let (a, _) = setup(vec![]);
+    let (dir, requests, ids) = generated(&a);
+    let key_file = |i: usize| dir.path().join(format!("GOSTKNCA_{}.p12", ids[i]));
+    let (Some(folder), Some(chosen), Some(other)) = (
+        network_form(dir.path()),
+        network_form(&key_file(0)),
+        network_form(&key_file(1)),
+    ) else {
+        return;
+    };
+    let (a, prompter) = setup(vec![
+        Step::File(PathBuf::from(&chosen)),
+        Step::File(PathBuf::from(&folder)),
+        Step::CancelStorage,
+    ]);
+    let change = |path: &str| {
+        call(
+            &a,
+            "changePassword",
+            json!(["PKCS12", path, DEFAULT_PASSWORD, NEW_PASSWORD]),
+        )
+    };
+    let cert = cert_pem(&issue(&requests[1], "user-gost2004-sign", false, 1));
+    let set_cert = |path: &str| {
+        call(
+            &a,
+            "setX509CertToKeyStore",
+            json!(["PKCS12", path, DEFAULT_PASSWORD, cert]),
+        )
+    };
+    let gen_key = |path: &str| {
+        call(
+            &a,
+            "genKeyPairAndGetPKCS10",
+            gen_args(path, "2.5.4.3<:>2.5.4.6", "A<:>KZ", ""),
+        )
+    };
+
+    // Not chosen yet.
+    assert_code(&change(&chosen), "CHANGEPASS_COMMON");
+    assert_code(&set_cert(&folder), "KEYSTORE_FILE_NOT_FOUND");
+    assert_code(&gen_key(&folder), "COMMON");
+
+    // The key file, chosen: its password changes; the share's other files stay refused.
+    let reply = call(&a, "browseKeyStore", json!(["PKCS12", "KEYSTORE", null]));
+    assert_eq!(reply, json!({"errorCode": "NONE", "result": chosen}));
+    assert_eq!(change(&chosen), json!({"errorCode": "NONE"}));
+    assert!(load(&fs::read(key_file(0)).unwrap(), NEW_PASSWORD).is_ok());
+    assert_code(&change(&other), "CHANGEPASS_COMMON");
+    assert!(load(&fs::read(key_file(1)).unwrap(), DEFAULT_PASSWORD).is_ok());
+    // Its folder was not chosen.
+    assert_code(&set_cert(&folder), "KEYSTORE_FILE_NOT_FOUND");
+
+    // The folder, chosen: certificates go into it and keys are made there.
+    let reply = call(&a, "showFileChooser", json!(["", null]));
+    assert_eq!(reply, json!({"errorCode": "NONE", "result": folder}));
+    let reply = set_cert(&folder);
+    assert_eq!(code(&reply), "NONE", "{reply}");
+    assert_eq!(reply["result"], other);
+    assert_eq!(code(&gen_key(&folder)), "NONE");
+
+    // signXml puts the chosen key file into its dialog.
+    assert_code(
+        &call(&a, "signXml", json!(["PKCS12", chosen, "SIGN", "<a/>"])),
+        "SIGN_CANCEL",
+    );
+    assert_eq!(
+        prompter.storage_prompts()[0].recent_path,
+        Some(PathBuf::from(&chosen))
+    );
 }

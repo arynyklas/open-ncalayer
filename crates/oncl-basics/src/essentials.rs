@@ -16,8 +16,8 @@
 //! - more than [`MAX_CERTIFICATES_PER_REQUEST`] `certificates` are an INVOCATION_ERROR
 //!   (`IllegalArgumentException: too many certificates`, before the dialog; the original
 //!   has no limit);
-//! - a `keystorePath` a page may not name (a network or device path) does not pre-fill the
-//!   import dialog;
+//! - a `keystorePath` a page may not name (a device path, or a network path the user did not
+//!   choose in the file chooser) does not pre-fill the import dialog;
 //! - without a `defaultPassword` the dialog asks for the key file password (the original
 //!   cannot be confirmed then);
 //! - the new password's pattern is checked before the first certificate is installed, so a
@@ -25,7 +25,7 @@
 //! - key files are only created in an existing folder given by an absolute path;
 //! - the page's `defaultPassword` and the chosen folder are never logged.
 
-use crate::page_file::local_page_path;
+use crate::page_file::page_path;
 use crate::prompt::{CsrPrompt, ImportPrompt, Locale, Prompt, StorageKind};
 use crate::sign::{
     UNIDENTIFIED, get_array, get_string, json_exception, not_found, parse_pem_or_base64,
@@ -160,9 +160,10 @@ pub(crate) fn import_certificate(
         origin: origin(add_info),
         locale: locale(args),
         storage,
-        // Like every path a page names: a network or device path is not shown, so the
-        // dialog never browses or opens a host the page chose.
-        path: local_page_path(&keystore_path)
+        // Like every path a page names: a device path, or a network path the user did not
+        // choose in the file chooser, is not shown, so the dialog never browses or opens a
+        // host the page chose.
+        path: page_path(&keystore_path)
             .filter(|path| !path.as_os_str().is_empty())
             .map(Path::to_path_buf),
         certificates: certificates.iter().map(cert_info).collect(),
