@@ -3,10 +3,11 @@
 //! asks every proxy for a `CONNECT` tunnel, and proxies refuse `CONNECT` to port 80).
 //!
 //! One request per connection (`Connection: close`). The whole exchange, resolving the
-//! proxy's name and connecting included, ends at a deadline; a body longer than the limit
-//! is refused. The body may be framed by `Content-Length`, chunked, or end with the
-//! connection. Memory stays bounded whatever the proxy sends: the response head, the
-//! interim (1xx) responses, chunk lines and the trailer each have a limit.
+//! proxy's name and connecting included, ends at a deadline, and each connection attempt
+//! after the connect timeout; a body longer than the limit is refused. The body may be
+//! framed by `Content-Length`, chunked, or end with the connection. Memory stays bounded
+//! whatever the proxy sends: the response head, the interim (1xx) responses, chunk lines
+//! and the trailer each have a limit.
 
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
@@ -47,19 +48,21 @@ pub(super) struct Forwarded {
 ///
 /// # Errors
 ///
-/// [`HttpError`] if no complete response arrived by `deadline`. Messages name the proxy by
-/// host and port only, never with its credentials.
+/// [`HttpError`] if no complete response arrived by `deadline`, or no connection to the
+/// proxy within `connect_timeout` per address. Messages name the proxy by host and port
+/// only, never with its credentials.
 pub(super) fn send(
     proxy: &Proxy,
     url: &str,
     post: Option<(&str, &[u8])>,
     deadline: Instant,
+    connect_timeout: Duration,
     max_len: u64,
 ) -> Result<Forwarded, HttpError> {
     let at = format!("proxy {}:{}", proxy.host(), proxy.port());
     let fail = |e: io::Error| HttpError(format!("{at}: {e}"));
     let head = request_head(proxy, url, post)?;
-    let mut stream = connect(proxy, deadline).map_err(fail)?;
+    let mut stream = connect(proxy, deadline, connect_timeout).map_err(fail)?;
     stream.write_all(head.as_bytes()).map_err(fail)?;
     if let Some((_, body)) = post {
         stream.write_all(body).map_err(fail)?;
@@ -113,9 +116,9 @@ fn request_head(
     Ok(head)
 }
 
-/// A connection to `proxy`, resolving its name and trying each of its addresses until
-/// `deadline`.
-fn connect(proxy: &Proxy, deadline: Instant) -> io::Result<Deadlined> {
+/// A connection to `proxy`, resolving its name and trying each of its addresses, each for
+/// at most `connect_timeout`, until `deadline`.
+fn connect(proxy: &Proxy, deadline: Instant, connect_timeout: Duration) -> io::Result<Deadlined> {
     // An IPv6 address is bracketed in a URL.
     let host = proxy.host().trim_start_matches('[').trim_end_matches(']');
     let port = proxy.port();
@@ -131,7 +134,7 @@ fn connect(proxy: &Proxy, deadline: Instant) -> io::Result<Deadlined> {
     };
     let mut last = io::Error::new(io::ErrorKind::NotFound, "no address");
     for address in addresses {
-        match TcpStream::connect_timeout(&address, remaining(deadline)?) {
+        match TcpStream::connect_timeout(&address, remaining(deadline)?.min(connect_timeout)) {
             Ok(stream) => return Ok(Deadlined { stream, deadline }),
             Err(e) => last = e,
         }
@@ -486,6 +489,7 @@ fn read_chunked<R: Read>(input: &mut Input<R>, out: &mut Vec<u8>, max: u64) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::CONNECT_TIMEOUT;
     use std::net::TcpListener;
     use std::sync::mpsc;
     use std::thread;
@@ -532,7 +536,15 @@ mod tests {
         url: &str,
         post: Option<(&str, &[u8])>,
     ) -> Result<HttpReply, HttpError> {
-        send(&Proxy::new(proxy).unwrap(), url, post, deadline(), 100).map(|f| f.reply)
+        send(
+            &Proxy::new(proxy).unwrap(),
+            url,
+            post,
+            deadline(),
+            CONNECT_TIMEOUT,
+            100,
+        )
+        .map(|f| f.reply)
     }
 
     #[test]
@@ -690,7 +702,7 @@ mod tests {
         });
         let start = Instant::now();
         let quick = Instant::now() + Duration::from_millis(300);
-        let e = send(&proxy, "http://x/", None, quick, 100)
+        let e = send(&proxy, "http://x/", None, quick, CONNECT_TIMEOUT, 100)
             .map(|f| f.reply)
             .unwrap_err();
         assert!(start.elapsed() < Duration::from_secs(2), "{e}");
@@ -701,7 +713,7 @@ mod tests {
     fn only_http_urls_with_plain_content_types() {
         let proxy = Proxy::new("http://127.0.0.1:1").unwrap();
         for url in ["https://x/", "ftp://x/", "x/y", "http:///y"] {
-            let e = send(&proxy, url, None, deadline(), 100)
+            let e = send(&proxy, url, None, deadline(), CONNECT_TIMEOUT, 100)
                 .map(|f| f.reply)
                 .unwrap_err();
             assert!(
@@ -714,6 +726,7 @@ mod tests {
             "http://x/",
             Some(("a\r\nX-Evil: 1", b"")),
             deadline(),
+            CONNECT_TIMEOUT,
             100,
         )
         .map(|f| f.reply)
@@ -834,7 +847,7 @@ mod tests {
             }
         });
         let start = Instant::now();
-        let e = send(&proxy, "http://x/", None, deadline(), 100)
+        let e = send(&proxy, "http://x/", None, deadline(), CONNECT_TIMEOUT, 100)
             .map(|f| f.reply)
             .unwrap_err();
         assert!(e.0.ends_with("too many interim (1xx) responses"), "{e}");
@@ -860,9 +873,12 @@ mod tests {
             resolve_within(failing, deadline()).unwrap_err().to_string(),
             "no such host"
         );
-        // A name is resolved; an address is not looked up at all.
+        // A name is resolved; an address is not looked up at all. (Windows refuses a
+        // closed port only after about 2 s, so the connect timeout is the deadline's.)
         let proxy = Proxy::new("http://localhost:1").unwrap();
-        let e = connect(&proxy, deadline()).map(drop).unwrap_err();
+        let e = connect(&proxy, deadline(), Duration::from_secs(10))
+            .map(drop)
+            .unwrap_err();
         assert_ne!(e.kind(), io::ErrorKind::TimedOut, "{e}");
     }
 }

@@ -10,7 +10,7 @@ use oncl_pki::crl::{
     self, CrlCache, CrlError, CrlStatus, MAX_BER_CRL_LEN, MAX_CRL_LEN, MockCrl, TIMEOUT,
 };
 use oncl_pki::http::{
-    GetOptions, HttpError, HttpReply, HttpTransport, RouteTransport, UreqTransport,
+    CONNECT_TIMEOUT, GetOptions, HttpError, HttpReply, HttpTransport, RouteTransport, UreqTransport,
 };
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
@@ -705,6 +705,7 @@ fn oversized_body_is_rejected() {
         *http.0.lock().unwrap(),
         [GetOptions {
             timeout: TIMEOUT,
+            connect_timeout: CONNECT_TIMEOUT,
             max_len: MAX_CRL_LEN
         }]
     );
@@ -715,6 +716,7 @@ fn oversized_body_is_rejected() {
     let len = u64::try_from(mock.der().len()).unwrap();
     let tight = GetOptions {
         timeout: TIMEOUT,
+        connect_timeout: CONNECT_TIMEOUT,
         max_len: len - 1,
     };
     assert!(mock.get_with(INTER_CRL, tight).is_err());

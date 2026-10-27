@@ -32,7 +32,7 @@ use crate::asn1util::{Enumerated, unsigned};
 use crate::ber::{self, BerError};
 use crate::cert::Certificate;
 use crate::fsutil::{Access, write_atomically};
-use crate::http::{GetOptions, HttpTransport};
+use crate::http::{CONNECT_TIMEOUT, GetOptions, HttpTransport};
 use crate::key::{PublicKey, SigAlg};
 use crate::oid;
 use crate::pkix::time_of;
@@ -387,6 +387,7 @@ impl CrlCache {
     ) -> Result<CertificateList, CrlError> {
         let opts = GetOptions {
             timeout: TIMEOUT,
+            connect_timeout: CONNECT_TIMEOUT,
             max_len: MAX_CRL_LEN,
         };
         let reply = http.get_with(url, opts).map_err(|e| CrlError::Http(e.0))?;

@@ -31,7 +31,7 @@ pub use mock::{MockOcsp, OcspTamper};
 use crate::asn1util::{TimeError, generalized_time};
 use crate::ber::{self, BerError};
 use crate::cert::Certificate;
-use crate::http::{GetOptions, HttpTransport, MAX_RESPONSE_LEN, nca_get_url};
+use crate::http::{CONNECT_TIMEOUT, GetOptions, HttpTransport, MAX_RESPONSE_LEN, nca_get_url};
 use crate::key::{PublicKey, SigAlg};
 use crate::oid;
 use crate::pkix::{CaSet, PathError, build_path};
@@ -189,7 +189,8 @@ pub fn request_der(cert: &Certificate, issuer: &Certificate) -> Vec<u8> {
 }
 
 /// Asks the OCSP responder of `cert` (issued by `issuer`) for its status at `now`, through
-/// `http` within `timeout` (normally [`TIMEOUT`]). The responder certificate must chain
+/// `http` within `timeout` (normally [`TIMEOUT`]), connecting within [`CONNECT_TIMEOUT`]:
+/// a responder that cannot be reached fails fast. The responder certificate must chain
 /// through `cas` at `now`.
 ///
 /// # Errors
@@ -224,6 +225,7 @@ pub fn check_answer(
     let requested = RequestedId::new(cert, issuer);
     let opts = GetOptions {
         timeout,
+        connect_timeout: CONNECT_TIMEOUT,
         max_len: MAX_RESPONSE_LEN,
     };
     let reply = http

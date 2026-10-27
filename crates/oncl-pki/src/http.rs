@@ -19,6 +19,12 @@ pub const MAX_RESPONSE_LEN: u64 = 1 << 20;
 /// Default timeout of a whole request, connecting to reading the body.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Default timeout of connecting to a server (or proxy), for every request: time-stamping,
+/// OCSP and CRL. A host whose connection never completes (it drops the SYN) fails after
+/// this instead of holding the request to its whole timeout; a server that does connect
+/// answers well within it on any working network.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// An HTTP response.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpReply {
@@ -40,15 +46,19 @@ pub struct HttpError(pub String);
 pub struct GetOptions {
     /// Timeout of the whole request, connecting to reading the body.
     pub timeout: Duration,
+    /// Timeout of each connection attempt (to an address of the server or of its proxy),
+    /// within `timeout`.
+    pub connect_timeout: Duration,
     /// Largest accepted body; a bigger one is an [`HttpError`].
     pub max_len: u64,
 }
 
 impl Default for GetOptions {
-    /// 10 seconds and [`MAX_RESPONSE_LEN`].
+    /// 10 seconds, [`CONNECT_TIMEOUT`] and [`MAX_RESPONSE_LEN`].
     fn default() -> Self {
         GetOptions {
             timeout: TIMEOUT,
+            connect_timeout: CONNECT_TIMEOUT,
             max_len: MAX_RESPONSE_LEN,
         }
     }
@@ -161,8 +171,8 @@ fn usable(proxy: Proxy) -> Result<Proxy, HttpError> {
 
 /// [`HttpTransport`] over `ureq`: plain HTTP (the NCA services have no TLS) or HTTPS on
 /// rustls, directly or through the proxy of its [`ProxySetting`] (directly by default).
-/// Both the timeout (for the whole request, redirects included) and the body limit of
-/// [`GetOptions`] are enforced.
+/// The timeout (for the whole request, redirects included), the connect timeout and the
+/// body limit of [`GetOptions`] are enforced.
 ///
 /// Through a proxy, HTTPS goes in a `CONNECT` tunnel (`ureq`), and plain HTTP as an
 /// absolute-form request to the proxy (`GET http://host/path HTTP/1.1`, see `forward`),
@@ -221,11 +231,13 @@ impl UreqTransport {
         })
     }
 
-    /// A `ureq` agent connecting directly or through the tunnel of `proxy`, following no
-    /// redirects (`send` does).
-    fn agent(proxy: Option<Proxy>, timeout: Duration) -> ureq::Agent {
+    /// A `ureq` agent connecting directly or through the tunnel of `proxy` within
+    /// `connect_timeout`, the whole request ending after `timeout`, following no redirects
+    /// (`send` does).
+    fn agent(proxy: Option<Proxy>, timeout: Duration, connect_timeout: Duration) -> ureq::Agent {
         ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
+            .timeout_connect(Some(connect_timeout))
             .http_status_as_error(false)
             .max_redirects(0)
             .proxy(proxy)
@@ -244,7 +256,7 @@ impl UreqTransport {
         let deadline = Instant::now() + opts.timeout;
         let mut url = url.to_owned();
         for _ in 0..=MAX_REDIRECTS {
-            let (reply, location) = self.send_once(&url, post, deadline, opts.max_len)?;
+            let (reply, location) = self.send_once(&url, post, deadline, opts)?;
             match redirect(&url, &reply, location.as_deref(), post.is_some())? {
                 Some(next) => {
                     url = next;
@@ -264,11 +276,18 @@ impl UreqTransport {
         url: &str,
         post: Option<(&str, &[u8])>,
         deadline: Instant,
-        max_len: u64,
+        opts: GetOptions,
     ) -> Result<(HttpReply, Option<String>), HttpError> {
         let proxy = match self.route(url)? {
             Route::Forward(proxy) => {
-                let forwarded = forward::send(&proxy, url, post, deadline, max_len)?;
+                let forwarded = forward::send(
+                    &proxy,
+                    url,
+                    post,
+                    deadline,
+                    opts.connect_timeout,
+                    opts.max_len,
+                )?;
                 return Ok((forwarded.reply, forwarded.location));
             }
             Route::Tunnel(proxy) => Some(proxy),
@@ -278,7 +297,7 @@ impl UreqTransport {
         if left.is_zero() {
             return Err(HttpError("timed out".to_owned()));
         }
-        let agent = Self::agent(proxy, left);
+        let agent = Self::agent(proxy, left, opts.connect_timeout);
         let response = match post {
             Some((content_type, body)) => agent
                 .post(url)
@@ -286,7 +305,7 @@ impl UreqTransport {
                 .send(body),
             None => agent.get(url).call(),
         };
-        reply(response, max_len)
+        reply(response, opts.max_len)
     }
 }
 
@@ -540,7 +559,7 @@ mod tests {
 
         let limit = GetOptions {
             timeout: Duration::from_secs(10),
-            max_len: MAX_RESPONSE_LEN,
+            ..GetOptions::default()
         };
         let big = serve_once(body_of(2 << 20));
         direct().get_with(&big, limit).unwrap_err();
@@ -552,6 +571,79 @@ mod tests {
             reply.content_type.as_deref(),
             Some("application/octet-stream")
         );
+    }
+
+    #[test]
+    fn agent_connects_within_the_connect_timeout() {
+        let agent = UreqTransport::agent(None, Duration::from_secs(5), CONNECT_TIMEOUT);
+        let timeouts = agent.config().timeouts();
+        assert_eq!(
+            (timeouts.global, timeouts.connect),
+            (Some(Duration::from_secs(5)), Some(CONNECT_TIMEOUT))
+        );
+    }
+
+    /// A local address whose connections never complete: a listener with a backlog of 0
+    /// and its accept queue filled by connections it never accepts, so the system drops
+    /// further SYNs, as a dead host does. Windows refuses them instead (after its own SYN
+    /// retries, about 2 s), so this needs a Unix system.
+    #[cfg(unix)]
+    fn unconnectable() -> (std::net::SocketAddr, TcpListener, Vec<TcpStream>) {
+        use std::os::fd::AsRawFd;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        // SAFETY: `listen` on the listener's own open socket only changes its backlog.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let address = listener.local_addr().unwrap();
+        let mut held = Vec::new();
+        for _ in 0..64 {
+            match TcpStream::connect_timeout(&address, Duration::from_millis(300)) {
+                Ok(stream) => held.push(stream),
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    return (address, listener, held);
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        panic!("the accept queue of {address} never filled");
+    }
+
+    /// Connect timeout 2 s, whole request 5 s.
+    #[cfg(unix)]
+    const DEAD_HOST: GetOptions = GetOptions {
+        timeout: Duration::from_secs(5),
+        connect_timeout: Duration::from_secs(2),
+        max_len: MAX_RESPONSE_LEN,
+    };
+
+    /// Whether a request that cannot connect failed after the connect timeout, not the
+    /// whole request timeout.
+    #[cfg(unix)]
+    fn fails_at_the_connect_timeout(request: impl FnOnce() -> Result<HttpReply, HttpError>) {
+        let start = Instant::now();
+        let err = request().unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(1900) && elapsed < Duration::from_millis(2500),
+            "{elapsed:?}: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unconnectable_server_fails_at_the_connect_timeout() {
+        let (address, _listener, _held) = unconnectable();
+        fails_at_the_connect_timeout(|| {
+            direct().get_with(&format!("http://{address}/x"), DEAD_HOST)
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unconnectable_proxy_fails_at_the_connect_timeout() {
+        let (address, _listener, _held) = unconnectable();
+        // Plain HTTP goes through `forward`.
+        let through = UreqTransport::with_proxy(ProxySetting::Manual(format!("http://{address}")));
+        fails_at_the_connect_timeout(|| through.get_with("http://nca.invalid/ocsp", DEAD_HOST));
     }
 
     /// A one-connection stub proxy: sends the request head it received on the channel and
@@ -833,11 +925,12 @@ mod tests {
     }
 
     #[test]
-    fn default_options_are_ten_seconds_and_one_mib() {
+    fn default_options_are_ten_seconds_two_to_connect_and_one_mib() {
         assert_eq!(
             GetOptions::default(),
             GetOptions {
                 timeout: Duration::from_secs(10),
+                connect_timeout: Duration::from_secs(2),
                 max_len: 1 << 20,
             }
         );

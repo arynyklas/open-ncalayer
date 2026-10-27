@@ -3832,6 +3832,7 @@ dependencies = [
  "hex-literal",
  "hmac",
  "httparse",
+ "libc",
  "oncl-gost",
  "oncl-registry",
  "oncl-testkit",

@@ -5,7 +5,10 @@
 use der::asn1::{AnyRef, IntRef, OctetStringRef};
 use der::{Decode, Encode, Sequence};
 use oncl_pki::cert::{self, Certificate};
-use oncl_pki::http::{HttpError, HttpReply, HttpTransport, UreqTransport, nca_get_url};
+use oncl_pki::http::{
+    CONNECT_TIMEOUT, GetOptions, HttpError, HttpReply, HttpTransport, MAX_RESPONSE_LEN,
+    UreqTransport, nca_get_url,
+};
 use oncl_pki::ocsp::{
     self, ALLOWED_PERIOD, CLOCK_SKEW, CertStatus, MockOcsp, OcspError, OcspTamper, TIMEOUT,
 };
@@ -16,6 +19,7 @@ use oncl_testkit::{fixture, ncanode, read, synthetic, synthetic_cert};
 use sha1::{Digest, Sha1};
 use spki::AlgorithmIdentifierRef;
 use std::mem::discriminant;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use time::macros::datetime;
@@ -436,6 +440,42 @@ fn hang_returns_http_error_within_timeout() {
     let elapsed = start.elapsed();
     assert!(matches!(result, Err(OcspError::Http(_))), "{result:?}");
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+}
+
+/// A transport recording the options of its requests and answering none.
+struct Recording(Mutex<Vec<GetOptions>>);
+
+impl HttpTransport for Recording {
+    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
+        self.get_with(url, GetOptions::default())
+    }
+
+    fn get_with(&self, _: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
+        self.0.lock().unwrap().push(opts);
+        Err(HttpError("unreachable".to_owned()))
+    }
+
+    fn post(&self, _: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
+        unreachable!("OCSP uses GET")
+    }
+}
+
+#[test]
+fn request_connects_within_the_connect_timeout() {
+    // A responder whose connection never completes fails after the connect timeout, not
+    // the whole request timeout.
+    let http = Recording(Mutex::new(Vec::new()));
+    let result = check_leaf("inter-user-gost2015-sign", &http, TIMEOUT);
+    assert!(matches!(result, Err(OcspError::Http(_))), "{result:?}");
+    assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(2));
+    assert_eq!(
+        *http.0.lock().unwrap(),
+        [GetOptions {
+            timeout: TIMEOUT,
+            connect_timeout: CONNECT_TIMEOUT,
+            max_len: MAX_RESPONSE_LEN,
+        }]
+    );
 }
 
 #[test]
