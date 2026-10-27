@@ -69,6 +69,11 @@ jobs:
       - name: Clippy (Windows-only code)
         if: runner.os == 'Windows'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # The app-local DLLs of the Windows 7 builds are workspace members; on Windows their
+      # tests build them.
+      - name: Build the Windows 7 app-local DLLs
+        if: runner.os != 'Windows'
+        run: cargo build -p oncl-win7shim-combase -p oncl-win7shim-winrt-error
       - name: CMS interop with OpenSSL
         if: runner.os == 'Linux'
         run: cargo xtask interop-openssl
@@ -144,13 +149,17 @@ jobs:
             target/ext-e2e/*/data/logs/
           if-no-files-found: ignore
 
-  # Windows 7 lane (roadmap D14). Non-blocking in P1: a red import gate records the starting
-  # point for P6 and does not fail the workflow.
-  win7-canary:
+  # Windows 7 builds (roadmap D14), blocking: `cargo xtask win7` builds them with the app-local
+  # DLLs, fails on an import Windows 7 lacks, then starts them here, where Windows Server 2025
+  # must keep loading its own combase.dll and API sets.
+  win7:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
     runs-on: windows-2025
     timeout-minutes: 90
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchains (rust-toolchain.toml for xtask, pinned nightly for Win7)
@@ -159,21 +168,20 @@ jobs:
           rustup toolchain install nightly-2026-08-12 --profile minimal --component rust-src
       - uses: Swatinem/rust-cache@v2
         with:
-          # The job is expected to fail in P1; still keep the build cache.
-          cache-on-failure: true
-      - name: Build for Windows 7
-        # bash: pwsh splits the unquoted `-Zbuild-std=std,panic_abort` at the comma.
-        # The pinned nightly is 1.99.0-nightly, below the workspace rust-version 1.99.1.
-        shell: bash
-        run: cargo +nightly-2026-08-12 build -Zbuild-std=std,panic_abort --target x86_64-win7-windows-msvc --release --ignore-rust-version -p openncalayer -p oncl-nmhost
-      - name: Check imports
+          key: win7-${{ matrix.arch }}
+      - name: Build, check imports, start
         shell: bash
         run: |
-          { echo '## Win7 import gate'; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '## Windows 7 ${{ matrix.arch }}'; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           status=0
-          cargo -q xtask check-imports target/x86_64-win7-windows-msvc/release/openncalayer.exe target/x86_64-win7-windows-msvc/release/nmhost.exe | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          cargo xtask win7 --arch ${{ matrix.arch }} | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win7-${{ matrix.arch }}
+          path: target/win7/${{ matrix.arch }}/
+          if-no-files-found: error
 
   live:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

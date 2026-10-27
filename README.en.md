@@ -233,7 +233,7 @@ The About window: version, build commit, the Apache-2.0 licence, `Copyright 2026
 
 ## Ready-made builds
 
-[Releases](https://github.com/arynyklas/open-ncalayer/releases): archives for Windows x64 (`x86_64-pc-windows-msvc`), Linux x64 (`x86_64-unknown-linux-gnu`, built on Ubuntu 24.04) and macOS on Apple Silicon (`aarch64-apple-darwin`) with `openncalayer` and `nmhost`, the extensions `openncalayer-chromium-<version>.zip` and `openncalayer-firefox-<version>.xpi` (unsigned: Firefox installs it only temporarily), and `SHA256SUMS`. Versions with a suffix (`0.1.0-alpha.1`) are pre-releases. The binaries are not code-signed: Windows SmartScreen and macOS Gatekeeper warn on first start. A `v<version>` tag builds and publishes the release by itself (`.github/workflows/release.yml`).
+[Releases](https://github.com/arynyklas/open-ncalayer/releases): archives for Windows x64 and x86 (`x86_64-pc-windows-msvc`, `i686-pc-windows-msvc`), Windows 7 SP1 x64 and x86 (`win7-x64`, `win7-x86`; they carry `combase.dll` and `api-ms-win-core-winrt-error-l1-1-0.dll` next to the programs, keep them in one folder), Linux x64 (`x86_64-unknown-linux-gnu`, built on Ubuntu 24.04) and macOS on Apple Silicon (`aarch64-apple-darwin`) with `openncalayer` and `nmhost`, the extensions `openncalayer-chromium-<version>.zip` and `openncalayer-firefox-<version>.xpi` (unsigned: Firefox installs it only temporarily), and `SHA256SUMS`. Versions with a suffix (`0.1.0-alpha.1`) are pre-releases. The binaries are not code-signed: Windows SmartScreen and macOS Gatekeeper warn on first start. A `v<version>` tag builds and publishes the release by itself (`.github/workflows/release.yml`).
 
 Unpack the archive and go on as with your own build: `openncalayer run`, and the extension as in [Browser extension](#browser-extension).
 
@@ -363,6 +363,23 @@ cargo xtask ext-e2e --download
 ```
 
 Without `--download` the paths come from `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX` and `ONCL_GECKODRIVER`. The browsers run with throwaway profiles in `target/ext-e2e/`, and the host is registered there too (`nm install --sandbox`). The `e2e-prompter` feature replaces the signing dialogs with a script from the `ONCL_E2E_PROMPTER` file; regular builds do not have it.
+
+Windows 7 SP1 builds (on Windows only, with the pinned nightly):
+
+```sh
+rustup toolchain install nightly-2026-08-12 --profile minimal --component rust-src
+cargo xtask win7 --arch all   # → target/win7/x64/, target/win7/x86/
+```
+
+`cargo xtask win7` builds `openncalayer.exe` and `nmhost.exe` for `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` (`-Zbuild-std`, static CRT: no VC++ redistributable needed) and puts two DLLs Windows 7 lacks next to them: `combase.dll` forwards `CoTaskMemFree` and `CoCreateFreeThreadedMarshaler` to `ole32.dll`, and in `api-ms-win-core-winrt-error-l1-1-0.dll` the functions `RoOriginateErrorW` and `RoOriginateError` do nothing. Windows 8 and later never load these copies: there `combase.dll` is a known DLL, and `api-ms-win-*` names resolve through the API set schema.
+
+Then the import gate runs, also available as `cargo xtask check-imports <exe>…`:
+- an import of a DLL or function Windows 7 lacks fails (decorated x86 names too);
+- an import from `combase.dll` or `api-ms-win-core-winrt-error-l1-1-0.dll` passes only if the DLL of that name lies next to the exe and exports exactly that name; a new import such as `combase!CoTaskMemAlloc` fails until the DLL exports it;
+- these DLLs have the exe's bitness and import from and forward to `kernel32.dll` and `ole32.dll` only;
+- `nmhost.exe` must do without them: `nm install` copies the relay apart from the program.
+
+On Windows, `cargo xtask win7` then starts the build from `target/win7/<arch>/`: `--help`, `nm install` and `nm status` in a sandbox, `tls init`, then `run` until it answers `GET /` over HTTPS, with the data directory in a temporary directory under `target/win7-smoke/`. In CI this is the blocking `win7` job (x64 and x86 on Windows Server 2025); checks on Windows 7 itself come with the lab (P9).
 
 Before submitting changes:
 

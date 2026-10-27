@@ -235,7 +235,7 @@ mkcert: центр сертификации ищется в `$CAROOT` или к�
 
 ## Готовые сборки
 
-[Releases](https://github.com/arynyklas/open-ncalayer/releases): архивы для Windows x64 (`x86_64-pc-windows-msvc`), Linux x64 (`x86_64-unknown-linux-gnu`, собран на Ubuntu 24.04) и macOS на Apple Silicon (`aarch64-apple-darwin`) с `openncalayer` и `nmhost`, расширения `openncalayer-chromium-<версия>.zip` и `openncalayer-firefox-<версия>.xpi` (не подписано: в Firefox ставится только временно), контрольные суммы `SHA256SUMS`. Версии с суффиксом (`0.1.0-alpha.1`) — предварительные. Бинари не подписаны: Windows SmartScreen и macOS Gatekeeper предупредят при первом запуске. Тег `v<версия>` собирает и публикует релиз сам (`.github/workflows/release.yml`).
+[Releases](https://github.com/arynyklas/open-ncalayer/releases): архивы для Windows x64 и x86 (`x86_64-pc-windows-msvc`, `i686-pc-windows-msvc`), Windows 7 SP1 x64 и x86 (`win7-x64`, `win7-x86`; с программами лежат `combase.dll` и `api-ms-win-core-winrt-error-l1-1-0.dll`, держите их в одном каталоге), Linux x64 (`x86_64-unknown-linux-gnu`, собран на Ubuntu 24.04) и macOS на Apple Silicon (`aarch64-apple-darwin`) с `openncalayer` и `nmhost`, расширения `openncalayer-chromium-<версия>.zip` и `openncalayer-firefox-<версия>.xpi` (не подписано: в Firefox ставится только временно), контрольные суммы `SHA256SUMS`. Версии с суффиксом (`0.1.0-alpha.1`) — предварительные. Бинари не подписаны: Windows SmartScreen и macOS Gatekeeper предупредят при первом запуске. Тег `v<версия>` собирает и публикует релиз сам (`.github/workflows/release.yml`).
 
 Распакуйте архив и дальше действуйте как со своей сборкой: `openncalayer run`, расширение — по разделу [«Расширение браузера»](#расширение-браузера).
 
@@ -367,6 +367,23 @@ cargo xtask ext-e2e --download
 Без `--download` пути берутся из `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX` и `ONCL_GECKODRIVER`. Браузеры запускаются с одноразовыми профилями в `target/ext-e2e/`, хост регистрируется там же (`nm install --sandbox`). Фича `e2e-prompter` заменяет окна подписи сценарием из файла `ONCL_E2E_PROMPTER`; в обычных сборках её нет.
 
 Проверка наших подписей XMLDSig и CMS в NCANode (Kalkan), только Linux, нужен Docker: `cargo xtask fetch-fixtures && cargo xtask interop-ncanode`. Образ, порядок запуска и последний результат описаны в [`docs/dev/interop-ncanode.md`](docs/dev/interop-ncanode.md).
+
+Сборки для Windows 7 SP1 (только в Windows, нужен закреплённый nightly):
+
+```sh
+rustup toolchain install nightly-2026-08-12 --profile minimal --component rust-src
+cargo xtask win7 --arch all   # → target/win7/x64/, target/win7/x86/
+```
+
+`cargo xtask win7` собирает `openncalayer.exe` и `nmhost.exe` для `x86_64-win7-windows-msvc` и `i686-win7-windows-msvc` (`-Zbuild-std`, статический CRT — VC++ redist не нужен) и кладёт рядом две DLL, которых нет в Windows 7: `combase.dll` переадресует `CoTaskMemFree` и `CoCreateFreeThreadedMarshaler` в `ole32.dll`, а в `api-ms-win-core-winrt-error-l1-1-0.dll` функции `RoOriginateErrorW` и `RoOriginateError` ничего не делают. Windows 8 и новее эти копии не загружают: `combase.dll` там — known DLL, а имена `api-ms-win-*` разрешаются через схему API set.
+
+Затем работает гейт импортов, он же `cargo xtask check-imports <exe>…`:
+- импорт DLL или функции, которых нет в Windows 7, — ошибка (декорированные имена x86 тоже ловятся);
+- импорт из `combase.dll` или `api-ms-win-core-winrt-error-l1-1-0.dll` допустим, только если DLL с этим именем лежит рядом с exe и экспортирует ровно это имя; новый импорт, например `combase!CoTaskMemAlloc`, не пройдёт, пока DLL его не экспортирует;
+- сами эти DLL той же разрядности, что и exe, и импортируют и переадресуют только в `kernel32.dll` и `ole32.dll`;
+- `nmhost.exe` должен обходиться без них: `nm install` копирует relay отдельно от программы.
+
+В Windows `cargo xtask win7` после гейта запускает сборку из `target/win7/<arch>/`: `--help`, `nm install` и `nm status` в песочнице, `tls init`, затем `run` до ответа на `GET /` по HTTPS. Каталог данных — во временном каталоге под `target/win7-smoke/`. В CI это блокирующий job `win7` (x64 и x86 на Windows Server 2025); проверки в самой Windows 7 появятся с лабораторией (P9).
 
 Перед отправкой изменений:
 
