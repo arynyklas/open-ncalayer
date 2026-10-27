@@ -8,8 +8,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{
-    Availability, Basics, ChainPolicy, DisabledReason, KeyFilter, MODULE_NAME, OCSP_DEADLINE,
-    OcspCache, availabilities,
+    Availability, Basics, Busy, BusyPrompt, ChainPolicy, CsrAnswer, CsrPrompt, DisabledReason,
+    FilePrompt, ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt, MODULE_NAME, OCSP_DEADLINE,
+    OcspCache, PasswordPrompt, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt,
+    availabilities,
 };
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport};
@@ -906,6 +908,79 @@ fn chain_non_string_is_invocation_error() {
             );
         }
     }
+}
+
+/// Opens `inter-user-gost2015-sign` and picks key 0: at once in the first key dialog,
+/// without waiting for its check, in later ones once the check has ended. Records what
+/// each dialog showed when it opened.
+#[derive(Default)]
+struct Hasty(std::sync::Mutex<Vec<Availability>>);
+
+impl Prompter for Hasty {
+    fn storage(&self, _: &StoragePrompt) -> Prompt<StorageAnswer> {
+        let key = synthetic("inter-user-gost2015-sign");
+        Prompt::Answer(StorageAnswer {
+            storage: StorageKind::Pkcs12,
+            path: key.path,
+            password: key.password.into(),
+        })
+    }
+
+    fn busy(&self, _: &BusyPrompt) -> Busy {
+        Busy::none()
+    }
+
+    fn key(&self, p: &KeyPrompt) -> Prompt<usize> {
+        let mut shown = self.0.lock().unwrap();
+        shown.push(p.candidates[0].availability.clone());
+        if shown.len() > 1 {
+            // Later dialogs are answered once the check has ended.
+            p.live.wait_settled();
+        }
+        Prompt::Answer(0)
+    }
+
+    fn csr(&self, _: &CsrPrompt) -> Prompt<CsrAnswer> {
+        Prompt::Cancelled
+    }
+
+    fn import_cert(&self, _: &ImportPrompt) -> Prompt<ImportAnswer> {
+        Prompt::Cancelled
+    }
+
+    fn file(&self, _: &FilePrompt) -> Prompt<std::path::PathBuf> {
+        Prompt::Cancelled
+    }
+
+    fn password(&self, _: &PasswordPrompt) -> Prompt<zeroize::Zeroizing<String>> {
+        Prompt::Cancelled
+    }
+}
+
+#[test]
+fn picking_a_key_still_being_checked_is_refused() {
+    // The responder answers `good` after a second: a pick while the key is pending (a click
+    // racing the update) is refused at the answer and the dialog asks again.
+    let ocsp = Arc::new(responder().tamper(OcspTamper::Hang(Duration::from_secs(1))));
+    let prompter = Arc::new(Hasty::default());
+    let basics = Basics::new(
+        prompter.clone(),
+        Arc::new(MemoryRecentPath::new(None)),
+        ocsp.clone(),
+    );
+    let reply: Value = serde_json::from_str(&process(
+        &basics,
+        args("cms", Some(inter_chain()), json!({})),
+    ))
+    .unwrap();
+    assert_eq!(reply["status"], true, "{reply}");
+    assert!(
+        reply["body"]["result"][0].is_string(),
+        "signed once enabled: {reply}"
+    );
+    let shown = prompter.0.lock().unwrap();
+    assert_eq!(shown[0], Availability::Pending, "{shown:?}");
+    assert_eq!(shown.len(), 2, "the pending pick is asked again: {shown:?}");
 }
 
 #[test]

@@ -21,7 +21,8 @@ pub const ANSWER_FOR: Duration = Duration::from_secs(600);
 ///
 /// - A responder host without a response (connection failure, timeout, any transport
 ///   error: [`OcspError::Http`]) is not asked for [`UNREACHABLE_FOR`]: its keys stay
-///   unchecked at once.
+///   unchecked at once. The transport reports a body over its size limit the same way,
+///   so a responder sending more than 1 MiB counts as not answering too.
 /// - A `good` or `revoked` answer that passed [`ocsp::check_answer`] is used for its
 ///   certificate (issuer key hash and serial number) until its nextUpdate, or without one
 ///   until thisUpdate + [`ocsp::ALLOWED_PERIOD`], and never longer than [`ANSWER_FOR`];

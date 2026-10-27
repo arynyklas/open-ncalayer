@@ -255,11 +255,20 @@ impl Drop for Results {
     fn drop(&mut self) {
         let unchecked = std::mem::take(&mut self.checking);
         if !unchecked.is_empty() {
-            tracing::warn!(
-                pending = unchecked.len(),
-                "OCSP checks did not finish within {} s: those keys stay available",
-                OCSP_DEADLINE.as_secs()
-            );
+            let pending = unchecked.len();
+            if Instant::now() >= self.deadline {
+                tracing::warn!(
+                    pending,
+                    "OCSP checks did not finish within {} s: those keys stay available",
+                    OCSP_DEADLINE.as_secs()
+                );
+            } else {
+                // The collector could not start, or a check thread ended without a result.
+                tracing::warn!(
+                    pending,
+                    "OCSP checks ended without a result: those keys stay available"
+                );
+            }
         }
         for (index, unrevoked) in unchecked {
             self.live.set(index, unrevoked);

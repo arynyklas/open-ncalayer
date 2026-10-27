@@ -42,7 +42,8 @@ export component KeyDialog inherits Window {
     callback sign();
     callback cancel();
 
-    private property <bool> can-sign: root.selected >= 0 && root.keys[root.selected].enabled;
+    // Whether OK may be pressed: the selected key is enabled.
+    out property <bool> can-sign: root.selected >= 0 && root.keys[root.selected].enabled;
 
     VerticalBox {
         Text {
@@ -111,10 +112,18 @@ export component KeyDialog inherits Window {
                     if row.pending: HorizontalLayout {
                         spacing: 6px;
                         alignment: start;
-                        Spinner {
-                            indeterminate: true;
-                            width: 14px;
-                            height: 14px;
+                        // On the selected row the spinner sits on the window colour, so it
+                        // stands out from the selection background.
+                        Rectangle {
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: i == root.selected ? Palette.background : transparent;
+                            Spinner {
+                                indeterminate: true;
+                                width: 14px;
+                                height: 14px;
+                            }
                         }
 
                         Text {

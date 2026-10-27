@@ -22,7 +22,6 @@ use std::cell::RefCell;
 use std::panic::{self, UnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
@@ -34,10 +33,40 @@ static DIALOGS: Mutex<()> = Mutex::new(());
 /// How long a key store may take to open before the busy indicator shows: one that opens
 /// at once does not flash a window.
 const BUSY_DELAY: Duration = Duration::from_millis(150);
+/// How long the busy indicator stays once shown, so it does not flash for a frame right
+/// before the key dialog.
+const BUSY_MIN_SHOWN: Duration = Duration::from_millis(400);
 
 thread_local! {
     /// The busy indicator, on the event loop's thread, while it is shown.
     static BUSY: RefCell<Option<BusyDialog>> = const { RefCell::new(None) };
+}
+
+/// One busy indicator's turn: whether it was shown and when, and whether it is over. The
+/// delayed show and the end decide under one lock, so either the show sees the end (and
+/// shows nothing) or the end sees the show (and keeps it up long enough).
+#[derive(Default)]
+struct BusyTurn(Mutex<(bool, Option<Instant>)>);
+
+impl BusyTurn {
+    /// Whether the indicator may show at `now`: not once the turn is over. Records `now`.
+    fn show(&self, now: Instant) -> bool {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.0 {
+            return false;
+        }
+        state.1 = Some(now);
+        true
+    }
+
+    /// Ends the turn at `now`: how much longer the indicator must stay up.
+    fn end(&self, now: Instant) -> Duration {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.0 = true;
+        state.1.map_or(Duration::ZERO, |shown| {
+            BUSY_MIN_SHOWN.saturating_sub(now.saturating_duration_since(shown))
+        })
+    }
 }
 
 /// How long a call waits for the main thread to start the event loop.
@@ -120,12 +149,12 @@ impl Prompter for SlintPrompter {
     }
 
     fn busy(&self, p: &BusyPrompt) -> Busy {
-        let done = Arc::new(AtomicBool::new(false));
+        let turn = Arc::new(BusyTurn::default());
         let scheduled = slint::invoke_from_event_loop({
-            let (p, done) = (p.clone(), Arc::clone(&done));
+            let (p, turn) = (p.clone(), Arc::clone(&turn));
             move || {
                 slint::Timer::single_shot(BUSY_DELAY, move || {
-                    if !done.load(Ordering::Acquire) {
+                    if turn.show(Instant::now()) {
                         show_busy(&p);
                     }
                 });
@@ -136,7 +165,8 @@ impl Prompter for SlintPrompter {
             return Busy::none();
         }
         Busy::new(move || {
-            done.store(true, Ordering::Release);
+            // The next dialog waits until a shown indicator has been up long enough.
+            std::thread::sleep(turn.end(Instant::now()));
             // No event loop: nothing was shown.
             let _ = slint::invoke_from_event_loop(hide_busy);
         })
@@ -401,10 +431,9 @@ pub(crate) fn fill_keys(ui: &KeyDialog, p: &KeyPrompt) {
     ui.set_detail(p.detail.as_deref().unwrap_or_default().into());
     ui.set_error(p.error.as_deref().unwrap_or_default().into());
     let rows = view::key_rows(p);
-    let usable = rows
-        .iter()
-        .position(|r| r.enabled)
-        .or_else(|| rows.iter().position(|r| r.pending));
+    // The first key that is or may become available, in list order: the default does not
+    // depend on which check ends first.
+    let usable = rows.iter().position(|r| r.enabled || r.pending);
     ui.set_has_usable(usable.is_some());
     // Without a usable key the first one is selected, so its note tells why.
     ui.set_selected(index(usable.or((!rows.is_empty()).then_some(0))));
@@ -424,21 +453,12 @@ fn key_item(r: KeyRow) -> KeyItem {
     }
 }
 
-/// Shows the new row of key `i`. If the selected key can no longer become usable, the first
-/// enabled key is selected instead.
+/// Shows the new row of key `i`. The selection never moves: if the selected key turns
+/// revoked it stays selected with its note, OK stays disabled, and the user picks another.
 pub(crate) fn update_key(ui: &KeyDialog, i: usize, row: KeyRow) {
     let keys = ui.get_keys();
     keys.set_row_data(i, key_item(row));
-    let usable = |k: &KeyItem| k.enabled || k.pending;
-    ui.set_has_usable(keys.iter().any(|k| usable(&k)));
-    let selected = usize::try_from(ui.get_selected())
-        .ok()
-        .and_then(|s| keys.row_data(s));
-    if !selected.is_some_and(|k| usable(&k))
-        && let Some(first) = keys.iter().position(|k| k.enabled)
-    {
-        ui.set_selected(index(Some(first)));
-    }
+    ui.set_has_usable(keys.iter().any(|k| k.enabled || k.pending));
 }
 
 /// The certificate request dialog for `p`; the outcome goes to `reply`.
@@ -1069,6 +1089,24 @@ mod tests {
     }
 
     #[test]
+    fn busy_indicator_never_flashes() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        // Ended before the delayed show: it never shows, and nothing is waited for.
+        let turn = BusyTurn::default();
+        assert_eq!(turn.end(t0), Duration::ZERO);
+        assert!(!turn.show(t0 + ms(150)));
+        // Shown, then ended 50 ms later: it stays up the rest of its minimum time.
+        let turn = BusyTurn::default();
+        assert!(turn.show(t0));
+        assert_eq!(turn.end(t0 + ms(50)), BUSY_MIN_SHOWN - ms(50));
+        // Shown long enough already: no wait.
+        let turn = BusyTurn::default();
+        assert!(turn.show(t0));
+        assert_eq!(turn.end(t0 + BUSY_MIN_SHOWN + ms(1)), Duration::ZERO);
+    }
+
+    #[test]
     fn panics_of_the_windowing_system_are_errors() {
         let r: Result<(), _> =
             catching_panics(|| panic!("Library libxkbcommon-x11.so could not be loaded."));
@@ -1080,5 +1118,135 @@ mod tests {
         let r: Result<(), _> = catching_panics(|| panic!("{}", String::from("formatted")));
         assert!(r.unwrap_err().to_string().ends_with("formatted"));
         assert_eq!(catching_panics(|| Ok(3)).unwrap(), 3);
+    }
+}
+
+/// The key dialog's selection while OCSP results arrive, drawn offscreen.
+#[cfg(test)]
+mod key_selection {
+    use super::*;
+    use oncl_basics::{Availability, LiveAvailability};
+    use oncl_pki::info::{CertInfo, KeyUsageBits};
+    use std::collections::BTreeSet;
+    use time::macros::datetime;
+
+    fn info(cn: &str) -> CertInfo {
+        CertInfo {
+            subject_cn: Some(cn.to_owned()),
+            iin: Some("123456789011".to_owned()),
+            bin: None,
+            organization: None,
+            serial_hex: "01".to_owned(),
+            not_before: datetime!(2026-03-01 12:00 UTC),
+            not_after: datetime!(2027-03-01 12:00 UTC),
+            ext_key_usages: BTreeSet::new(),
+            key_usage: KeyUsageBits::default(),
+            signature_alg_oid: "1.2.398.3.10.1.1.2.3.2".to_owned(),
+            spki_alg_oid: "1.2.398.3.10.1.1.2.3.2".to_owned(),
+            ocsp_no_check: false,
+        }
+    }
+
+    /// An offscreen key dialog with keys `A`, `B`, … of these availabilities.
+    fn dialog(availabilities: &[Availability]) -> (KeyDialog, KeyPrompt) {
+        thread_local! {
+            // The thread's windows are offscreen (each test runs on a thread of its own).
+            static OFFSCREEN: crate::offscreen::Last = crate::offscreen::install();
+        }
+        OFFSCREEN.with(|_| ());
+        let names = ["A", "B", "C", "D"];
+        let p = KeyPrompt::new(
+            "https://idp.egov.kz".to_owned(),
+            Locale::Ru,
+            Action::Sign,
+            availabilities
+                .iter()
+                .zip(names)
+                .map(|(_, name)| (name.to_owned(), info(name))),
+            LiveAvailability::settled(availabilities.to_vec()),
+        );
+        let ui = KeyDialog::new().unwrap();
+        fill_keys(&ui, &p);
+        (ui, p)
+    }
+
+    /// The result of key `i`'s check reaching the dialog.
+    fn arrive(ui: &KeyDialog, p: &KeyPrompt, i: usize, availability: Availability) {
+        let candidate = KeyCandidate {
+            availability,
+            ..p.candidates[i].clone()
+        };
+        update_key(ui, i, view::key_row(&candidate, p.locale));
+    }
+
+    fn revoked() -> Availability {
+        Availability::Revoked {
+            time: datetime!(2026-10-20 09:30 UTC),
+        }
+    }
+
+    #[test]
+    fn initial_selection_is_the_first_usable_key_in_list_order() {
+        use Availability::{Disabled, Enabled, Expired, Pending};
+        for (keys, selected) in [
+            // A pending key before an enabled one stays the default.
+            (vec![Pending, Enabled], 0),
+            (vec![Enabled, Pending], 0),
+            (vec![Expired, Pending, Enabled], 1),
+            (vec![Disabled(Vec::new()), Expired, Enabled], 2),
+            // Nothing usable: the first key, so its note tells why.
+            (vec![Expired, revoked()], 0),
+        ] {
+            let (ui, _) = dialog(&keys);
+            assert_eq!(ui.get_selected(), selected, "{keys:?}");
+        }
+        let (ui, _) = dialog(&[Availability::Expired]);
+        assert!(!ui.get_has_usable());
+        assert!(!ui.get_can_sign());
+    }
+
+    #[test]
+    fn selected_pending_key_turning_revoked_stays_selected() {
+        let (ui, p) = dialog(&[Availability::Pending, Availability::Enabled]);
+        // The user picks A while it is checked; B is ready.
+        ui.set_selected(0);
+        assert!(!ui.get_can_sign());
+        arrive(&ui, &p, 0, revoked());
+        assert_eq!(ui.get_selected(), 0, "the selection is not moved to B");
+        assert!(!ui.get_can_sign(), "OK stays disabled");
+        let row = ui.get_keys().row_data(0).unwrap();
+        assert!(!row.enabled && !row.pending);
+        assert!(!row.note.is_empty(), "its note tells why");
+        assert!(ui.get_has_usable());
+        // A good answer instead enables OK on the same key.
+        let (ui, p) = dialog(&[Availability::Pending, Availability::Enabled]);
+        arrive(&ui, &p, 0, Availability::Enabled);
+        assert_eq!(ui.get_selected(), 0);
+        assert!(ui.get_can_sign());
+    }
+
+    #[test]
+    fn another_key_finishing_does_not_move_the_selection() {
+        let (ui, p) = dialog(&[
+            Availability::Pending,
+            Availability::Pending,
+            Availability::Expired,
+        ]);
+        assert_eq!(ui.get_selected(), 0);
+        // The user picks B; A's check ends first.
+        ui.set_selected(1);
+        arrive(&ui, &p, 0, Availability::Enabled);
+        assert_eq!(ui.get_selected(), 1);
+        assert!(!ui.get_can_sign());
+        // The user looks at the expired key's note; the other checks end.
+        ui.set_selected(2);
+        arrive(&ui, &p, 1, revoked());
+        assert_eq!(ui.get_selected(), 2);
+        assert!(!ui.get_can_sign());
+        // Nothing left usable once every key is out.
+        let (ui, p) = dialog(&[Availability::Pending]);
+        arrive(&ui, &p, 0, revoked());
+        assert!(!ui.get_has_usable());
+        assert_eq!(ui.get_selected(), 0);
     }
 }
