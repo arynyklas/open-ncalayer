@@ -9,13 +9,13 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use oncl_basics::Prompter;
+use oncl_basics::{Locale, Prompter};
 use oncl_ipc::IpcListener;
 use oncl_pki::http::UreqTransport;
 use oncl_protocol::Registry;
 use oncl_ui::{SlintPrompter, TrayCommand, TrayHandle, TrayState};
 use openncalayer::cli::{self, Cli, Command};
-use openncalayer::{JsonSettings, ServerConfig, build_registry, serve, serve_ipc};
+use openncalayer::{JsonSettings, ServerConfig, build_registry, load_settings, serve, serve_ipc};
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
@@ -70,16 +70,22 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         Err(code) => return code,
     };
     let windows = scripted.is_none();
+    let settings = load_settings(&daemon.paths.settings());
     let registry = build_registry(
         scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new())),
         Arc::new(JsonSettings::new(daemon.paths.settings())),
-        Arc::new(UreqTransport),
+        Arc::new(UreqTransport::with_proxy(settings.proxy.clone())),
         // The windows arrive in P5; until then a request to open one is only logged.
         Arc::new(|window| tracing::info!(?window, "window requested; not available yet")),
     );
     let stop = Arc::new(Notify::new());
     let tray = if with_tray {
-        start_tray(daemon.paths.logs(), daemon.wss_off, Arc::clone(&stop))
+        start_tray(
+            settings.ui_locale(),
+            daemon.paths.logs(),
+            daemon.wss_off,
+            Arc::clone(&stop),
+        )
     } else {
         None
     };
@@ -142,10 +148,15 @@ fn exit_code(server: thread::Result<io::Result<()>>) -> ExitCode {
     }
 }
 
-/// The tray with `warning` shown, or `None` (logged) if it cannot be shown. Its commands run
-/// on the event loop: «Выход» notifies `stop`, «Журнал» opens `logs`.
-fn start_tray(logs: PathBuf, warning: Option<String>, stop: Arc<Notify>) -> Option<TrayHandle> {
-    let tray = oncl_ui::start_tray(move |command| match command {
+/// The tray in `locale` with `warning` shown, or `None` (logged) if it cannot be shown. Its
+/// commands run on the event loop: «Выход» notifies `stop`, «Журнал» opens `logs`.
+fn start_tray(
+    locale: Locale,
+    logs: PathBuf,
+    warning: Option<String>,
+    stop: Arc<Notify>,
+) -> Option<TrayHandle> {
+    let tray = oncl_ui::start_tray(locale, move |command| match command {
         TrayCommand::Quit => {
             tracing::info!("quit from the tray");
             stop.notify_one();

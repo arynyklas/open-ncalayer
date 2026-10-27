@@ -6,6 +6,8 @@ use base64::engine::general_purpose::STANDARD;
 use std::fmt::Write;
 use std::time::Duration;
 
+mod system_proxy;
+
 /// Default limit of a response body: 1 MiB. A time-stamp reply or an OCSP response is a few
 /// kilobytes; the NCA services are reached over plain HTTP, so anything on the path can
 /// answer, and a bigger body is refused instead of buffered.
@@ -77,18 +79,57 @@ pub trait HttpTransport: Send + Sync {
     fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError>;
 }
 
+/// The proxy [`UreqTransport`] connects through.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ProxySetting {
+    /// Direct connections, whatever the system's settings.
+    None,
+    /// The system's proxy: `ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY` (with `NO_PROXY`), on
+    /// Windows otherwise the manual proxy of the Internet Options (`ProxyServer` with its
+    /// per-scheme entries, `ProxyOverride`). Automatic configuration (PAC, WPAD) is not
+    /// followed.
+    #[default]
+    System,
+    /// This proxy URL, e.g. `http://proxy.example:3128`; `user:password@` before the host
+    /// for Basic authentication.
+    Manual(String),
+}
+
 /// [`HttpTransport`] over `ureq`: plain HTTP (the NCA services have no TLS) or HTTPS on
-/// rustls. Both the timeout and the body limit of [`GetOptions`] are enforced.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UreqTransport;
+/// rustls, directly or through the proxy of its [`ProxySetting`]. Both the timeout and the
+/// body limit of [`GetOptions`] are enforced.
+///
+/// An HTTP proxy is asked for a tunnel (`CONNECT host:port`), for plain HTTP too: a proxy
+/// that allows `CONNECT` to port 443 only cannot reach the NCA services.
+#[derive(Clone, Debug, Default)]
+pub struct UreqTransport {
+    proxy: ProxySetting,
+}
 
 impl UreqTransport {
-    fn agent(timeout: Duration) -> ureq::Agent {
-        ureq::Agent::config_builder()
+    /// A transport through `proxy`. A [`ProxySetting::Manual`] URL that is not one fails
+    /// every request with an [`HttpError`] instead of connecting directly.
+    pub fn with_proxy(proxy: ProxySetting) -> Self {
+        UreqTransport { proxy }
+    }
+
+    /// An agent for a request to `url`. The system's proxy is looked up for each request,
+    /// so a change takes effect without a restart.
+    fn agent(&self, url: &str, timeout: Duration) -> Result<ureq::Agent, HttpError> {
+        let proxy = match &self.proxy {
+            ProxySetting::None => None,
+            ProxySetting::System => system_proxy::for_url(url),
+            // The URL may hold a password: it is not repeated in the error.
+            ProxySetting::Manual(proxy) => Some(
+                ureq::Proxy::new(proxy).map_err(|_| HttpError("invalid proxy URL".to_owned()))?,
+            ),
+        };
+        Ok(ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
+            .proxy(proxy)
             .build()
-            .into()
+            .into())
     }
 }
 
@@ -98,13 +139,13 @@ impl HttpTransport for UreqTransport {
     }
 
     fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        reply(Self::agent(opts.timeout).get(url).call(), opts.max_len)
+        reply(self.agent(url, opts.timeout)?.get(url).call(), opts.max_len)
     }
 
     fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
         let opts = GetOptions::default();
         reply(
-            Self::agent(opts.timeout)
+            self.agent(url, opts.timeout)?
                 .post(url)
                 .header("Content-Type", content_type)
                 .send(body),
@@ -267,6 +308,11 @@ mod tests {
         }
     }
 
+    /// Direct connections: a proxy of the environment would not reach the local servers.
+    fn direct() -> UreqTransport {
+        UreqTransport::with_proxy(ProxySetting::None)
+    }
+
     #[test]
     fn ureq_transport_honours_timeout_and_size() {
         let silent = serve_once(|stream| {
@@ -278,7 +324,7 @@ mod tests {
             timeout: Duration::from_millis(200),
             ..GetOptions::default()
         };
-        let err = UreqTransport.get_with(&silent, opts).unwrap_err();
+        let err = direct().get_with(&silent, opts).unwrap_err();
         assert!(start.elapsed() < Duration::from_secs(2), "{err}");
 
         let limit = GetOptions {
@@ -286,14 +332,50 @@ mod tests {
             max_len: MAX_RESPONSE_LEN,
         };
         let big = serve_once(body_of(2 << 20));
-        UreqTransport.get_with(&big, limit).unwrap_err();
+        direct().get_with(&big, limit).unwrap_err();
 
         let small = serve_once(body_of(1 << 10));
-        let reply = UreqTransport.get_with(&small, limit).unwrap();
+        let reply = direct().get_with(&small, limit).unwrap();
         assert_eq!((reply.status, reply.body.len()), (200, 1 << 10));
         assert_eq!(
             reply.content_type.as_deref(),
             Some("application/octet-stream")
+        );
+    }
+
+    #[test]
+    fn manual_proxy_is_used_and_a_broken_url_fails_without_connecting() {
+        // The proxy is the one-connection server: it gets the tunnel request.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+            tx.send(head).unwrap();
+        });
+        let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
+        through.get("http://nca.invalid:8080/ocsp").unwrap_err();
+        let head = String::from_utf8(rx.recv().unwrap()).unwrap();
+        assert!(
+            head.starts_with("CONNECT nca.invalid:8080 HTTP/1.1\r\n"),
+            "{head}"
+        );
+
+        let broken = UreqTransport::with_proxy(ProxySetting::Manual("http://u:p@[x".to_owned()));
+        assert_eq!(
+            broken.post("http://127.0.0.1:1/", "t", b""),
+            Err(HttpError("invalid proxy URL".to_owned()))
+        );
+        assert_eq!(
+            UreqTransport::default().proxy,
+            ProxySetting::System,
+            "the system's proxy by default"
         );
     }
 

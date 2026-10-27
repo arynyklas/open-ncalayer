@@ -541,7 +541,7 @@ fn live_ocsp_nca_test_certificate() {
         &leaf,
         &issuer,
         &cas,
-        &UreqTransport,
+        &UreqTransport::default(),
         OffsetDateTime::now_utc(),
         TIMEOUT,
     );

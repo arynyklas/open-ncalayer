@@ -6,7 +6,7 @@ use base64::engine::general_purpose::STANDARD;
 use der::asn1::{AnyRef, ObjectIdentifier};
 use der::{Decode, Encode, Reader, SliceReader, Tag, Tagged};
 use oncl_pki::cms::{SignOptions, sign, verify};
-use oncl_pki::http::{HttpError, HttpReply, HttpTransport, UreqTransport};
+use oncl_pki::http::{HttpError, HttpReply, HttpTransport, ProxySetting, UreqTransport};
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::{
@@ -15,7 +15,10 @@ use oncl_pki::tsp::{
 };
 use oncl_testkit::{ncanode, read, synthetic};
 use sha1::Digest as _;
-use std::sync::Mutex;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use time::macros::datetime;
 
 const STREEBOG_512: &str = "1.2.398.3.10.1.3.3";
@@ -633,6 +636,96 @@ fn sha1_imprints_verify_but_are_never_requested() {
     );
 }
 
+/// An HTTP request or reply head, up to the blank line.
+fn read_head(stream: &mut TcpStream) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0];
+    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+        head.push(byte[0]);
+    }
+    String::from_utf8(head).unwrap()
+}
+
+/// The value of header `name` in `head`.
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+/// A stand-in HTTP proxy in front of `tsa` for `connections` connections: it answers
+/// `CONNECT` with 200 and hands the request inside the tunnel to `tsa`, as if it were the
+/// TSA at `http://tsp.invalid`. Returns the proxy URL and, once joined, the `CONNECT` and
+/// tunnelled request lines.
+fn tunnel_proxy(tsa: Arc<MockTsa>, connections: usize) -> (String, JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let proxy = thread::spawn(move || {
+        let mut seen = Vec::new();
+        for _ in 0..connections {
+            let (mut stream, _) = listener.accept().unwrap();
+            let connect = read_head(&mut stream);
+            seen.push(connect.lines().next().unwrap().to_owned());
+            stream
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .unwrap();
+
+            let head = read_head(&mut stream);
+            let request_line = head.lines().next().unwrap().to_owned();
+            let mut body =
+                vec![0; header(&head, "content-length").map_or(0, |n| n.parse().unwrap())];
+            stream.read_exact(&mut body).unwrap();
+            let mut parts = request_line.split(' ');
+            let (method, path) = (parts.next().unwrap(), parts.next().unwrap());
+            let target = format!("http://tsp.invalid{path}");
+            let reply = match method {
+                "GET" => tsa.get(&target),
+                _ => tsa.post(&target, header(&head, "content-type").unwrap_or(""), &body),
+            }
+            .unwrap();
+            let content_type = reply.content_type.unwrap_or_default();
+            let reply_head = format!(
+                "HTTP/1.1 {} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n",
+                reply.status,
+                reply.body.len()
+            );
+            stream.write_all(reply_head.as_bytes()).unwrap();
+            stream.write_all(&reply.body).unwrap();
+            seen.push(request_line);
+        }
+        seen
+    });
+    (url, proxy)
+}
+
+#[test]
+fn timestamp_through_a_manual_proxy() {
+    let mock = Arc::new(tsa());
+    let (proxy, seen) = tunnel_proxy(Arc::clone(&mock), 2);
+    let transport = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
+    for method in [TsaMethod::Get, TsaMethod::Post] {
+        // `.invalid` resolves nowhere: only the proxy can reach it.
+        let profile = TsaProfile {
+            url: "http://tsp.invalid/tsp".to_owned(),
+            method,
+            ..TsaProfile::basics_default()
+        };
+        let cms = timestamp_signer(&signed("user-gost2015-sign"), 0, &profile, &transport)
+            .unwrap_or_else(|e| panic!("{method:?}: {e}"));
+        let s = verify(&cms, None).unwrap();
+        verify_token(s[0].timestamp_token.as_ref().unwrap()).unwrap();
+    }
+    let seen = seen.join().unwrap();
+    assert_eq!(seen.len(), 4, "{seen:?}");
+    assert_eq!(seen[0], "CONNECT tsp.invalid:80 HTTP/1.1");
+    assert!(seen[1].starts_with("GET /tsp/"), "{seen:?}");
+    assert_eq!(seen[2], "CONNECT tsp.invalid:80 HTTP/1.1");
+    assert_eq!(seen[3], "POST /tsp HTTP/1.1");
+    assert_eq!(mock.calls().len(), 2);
+}
+
 #[test]
 #[ignore = "network"]
 fn live_test_tsa() {
@@ -642,8 +735,13 @@ fn live_test_tsa() {
             method,
             ..TsaProfile::basics_default()
         };
-        let cms =
-            timestamp_signer(&signed("user-gost2015-sign"), 0, &profile, &UreqTransport).unwrap();
+        let cms = timestamp_signer(
+            &signed("user-gost2015-sign"),
+            0,
+            &profile,
+            &UreqTransport::default(),
+        )
+        .unwrap();
         let s = verify(&cms, None).unwrap();
         let tst = verify_token(s[0].timestamp_token.as_ref().unwrap()).unwrap();
         println!("{method:?}: {tst:?}");

@@ -15,6 +15,7 @@ oncl-accessory = { path = "crates/oncl-accessory" }
 oncl-applet = { path = "crates/oncl-applet" }
 oncl-basics = { path = "crates/oncl-basics" }
 oncl-commonutils = { path = "crates/oncl-commonutils" }
+oncl-desktop = { path = "crates/oncl-desktop" }
 oncl-gost = { path = "crates/oncl-gost" }
 oncl-ipc = { path = "crates/oncl-ipc" }
 oncl-pki = { path = "crates/oncl-pki" }

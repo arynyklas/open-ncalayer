@@ -107,14 +107,17 @@ impl Drop for TrayHandle {
     }
 }
 
-/// Shows the tray icon with its menu. Call it on the main thread, which then runs
+/// Shows the tray icon with its menu in `locale`. Call it on the main thread, which then runs
 /// [`run_event_loop`](crate::run_event_loop): `on_command` runs there, once per picked item.
 ///
 /// # Errors
 ///
 /// The tray cannot be shown; the caller carries on without it.
-pub fn start_tray(on_command: impl Fn(TrayCommand) + 'static) -> Result<TrayHandle, TrayError> {
-    let model = TrayModel::new(Locale::Ru);
+pub fn start_tray(
+    locale: Locale,
+    on_command: impl Fn(TrayCommand) + 'static,
+) -> Result<TrayHandle, TrayError> {
+    let model = TrayModel::new(locale);
     let tray = platform::Tray::start(model)?;
     ON_COMMAND.with_borrow_mut(|slot| *slot = Some(Rc::new(on_command)));
     Ok(TrayHandle { tray })

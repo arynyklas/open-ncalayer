@@ -3736,6 +3736,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-desktop"
+version = "0.1.0"
+dependencies = [
+ "oncl-basics",
+ "oncl-pki",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "oncl-gost"
 version = "0.1.0"
 dependencies = [
@@ -3799,6 +3811,7 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "ureq",
+ "windows-sys 0.61.2",
  "x509-cert",
  "zeroize",
 ]
@@ -3869,6 +3882,7 @@ dependencies = [
  "oncl-applet",
  "oncl-basics",
  "oncl-commonutils",
+ "oncl-desktop",
  "oncl-ipc",
  "oncl-pki",
  "oncl-protocol",
@@ -3887,7 +3901,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
- "windows-sys 0.61.2",
  "zeroize",
 ]
 

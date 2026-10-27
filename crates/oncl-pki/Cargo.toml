@@ -39,6 +39,11 @@ x509-cert.workspace = true
 ureq.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# advapi32 `RegGetValueW` (Vista and later), read only: the Internet Options proxy of
+# `ProxySetting::System`.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Registry"] }
+
 [dev-dependencies]
 hex-literal.workspace = true
 oncl-testkit.workspace = true

@@ -28,6 +28,7 @@ use crate::cms_verify::{Online, Options, cms_verify_report_with, parse_certifica
 use crate::nm::{self, Item, NmLayout, Report, State};
 use crate::paths::Paths;
 use crate::server::listen_port;
+use crate::settings::load_settings;
 
 /// Exit code: TLS is not set up yet.
 pub const EXIT_TLS_NOT_CONFIGURED: u8 = 2;
@@ -688,7 +689,8 @@ fn print_nm_report(report: &Report) {
 /// `cms-verify <file> [--content <file>] [--chain <file>]... [--offline]`: prints
 /// [`cms_verify_report_with`] against the CA certificates of the `chain` files (each PEM,
 /// every `CERTIFICATE` block, or DER) or, without any, the embedded NCA set; unless
-/// `offline`, over the network ([`UreqTransport`]) with the CRL cache in `<data_dir>/crl`.
+/// `offline`, over the network ([`UreqTransport`] through the proxy of `settings.json`) with
+/// the CRL cache in `<data_dir>/crl`.
 /// Exit code 0 when the report ends with `OK`, otherwise 1.
 pub fn cms_verify(
     file: &Path,
@@ -720,6 +722,7 @@ pub fn cms_verify(
             return ExitCode::FAILURE;
         }
     };
+    let http;
     let online = if offline {
         None
     } else {
@@ -727,8 +730,9 @@ pub fn cms_verify(
             Ok(paths) => paths,
             Err(code) => return code,
         };
+        http = UreqTransport::with_proxy(load_settings(&paths.settings()).proxy);
         Some(Online {
-            http: &UreqTransport,
+            http: &http,
             crl_dir: paths.crl(),
         })
     };

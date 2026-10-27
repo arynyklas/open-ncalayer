@@ -21,4 +21,4 @@ pub use server::{
     DEFAULT_PORT, IDLE_TIMEOUT, MAX_MESSAGE, MAX_PORT, PORT_VAR, ServerConfig, build_registry,
     listen_port, listen_port_from, serve,
 };
-pub use settings::JsonSettings;
+pub use settings::{JsonSettings, load_settings};

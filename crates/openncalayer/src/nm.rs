@@ -4,9 +4,6 @@
 //!
 //! Messages in [`State::Invalid`] are for the user, in Russian.
 
-#[cfg(windows)]
-mod registry;
-
 use std::env::consts::EXE_SUFFIX;
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -14,6 +11,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use oncl_desktop::registry;
 use oncl_ipc::ids::{CHROMIUM_EXTENSION_ID, FIREFOX_EXTENSION_ID, HOST_NAME};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -510,7 +508,7 @@ pub fn install(
             for sub in family.registry_keys() {
                 let key = registry_key(base, sub);
                 let state = match manifest.to_str() {
-                    Some(value) => match registry::set_default(&key, value) {
+                    Some(value) => match registry::set_string(&key, None, value) {
                         Ok(()) => State::Written,
                         Err(e) => State::Invalid(e.to_string()),
                     },
@@ -628,7 +626,7 @@ pub fn status(layout: &NmLayout) -> Report {
                 .map(|path| path.to_string_lossy().into_owned());
             for sub in family.registry_keys() {
                 let key = registry_key(base, sub);
-                let state = match (registry::get_default(&key), &expected) {
+                let state = match (registry::get_string(&key, None), &expected) {
                     (Ok(Some(value)), Ok(expected)) if value == *expected => State::Present,
                     (Ok(Some(value)), Ok(expected)) => {
                         State::Invalid(format!("указывает на {value}, а не на {expected}"))
@@ -906,31 +904,6 @@ fn shown(path: &Path) -> String {
 /// `e` with `path` in its message.
 fn at(path: &Path, e: io::Error) -> io::Error {
     io::Error::new(e.kind(), format!("{}: {e}", path.display()))
-}
-
-/// The registry exists on Windows only: elsewhere a layout with a registry base fails.
-#[cfg(not(windows))]
-mod registry {
-    use std::io;
-
-    fn unsupported() -> io::Error {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the registry exists on Windows only",
-        )
-    }
-
-    pub fn set_default(_key: &str, _value: &str) -> io::Result<()> {
-        Err(unsupported())
-    }
-
-    pub fn get_default(_key: &str) -> io::Result<Option<String>> {
-        Err(unsupported())
-    }
-
-    pub fn delete_tree(_key: &str) -> io::Result<bool> {
-        Err(unsupported())
-    }
 }
 
 #[cfg(test)]
@@ -1432,7 +1405,7 @@ mod tests {
         for (key, manifest) in &keys {
             assert!(key.starts_with(r"Software\OpenNCALayer-test-"), "{key}");
             assert_eq!(
-                registry::get_default(key).unwrap().as_deref(),
+                registry::get_string(key, None).unwrap().as_deref(),
                 Some(manifest.to_str().unwrap()),
                 "{key}"
             );
@@ -1451,7 +1424,7 @@ mod tests {
         assert!(status(&layout).is_healthy());
 
         // A key pointing elsewhere is reported.
-        registry::set_default(&keys[0].0, r"C:\elsewhere.json").unwrap();
+        registry::set_string(&keys[0].0, None, r"C:\elsewhere.json").unwrap();
         let report = status(&layout);
         assert!(!report.is_healthy());
         assert!(matches!(
@@ -1465,7 +1438,7 @@ mod tests {
 
         let report = uninstall(&layout).unwrap();
         for (key, _) in &keys {
-            assert_eq!(registry::get_default(key).unwrap(), None, "{key}");
+            assert_eq!(registry::get_string(key, None).unwrap(), None, "{key}");
             assert!(
                 report.entries.contains(&Entry {
                     item: Item::RegistryKey,

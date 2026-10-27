@@ -18,6 +18,7 @@ oncl-accessory.workspace = true
 oncl-applet.workspace = true
 oncl-basics.workspace = true
 oncl-commonutils.workspace = true
+oncl-desktop.workspace = true
 oncl-ipc.workspace = true
 oncl-pki.workspace = true
 oncl-protocol.workspace = true
@@ -40,14 +41,6 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 zeroize.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-# advapi32 registry functions of Windows 7 and later: the native messaging host keys.
-windows-sys = { workspace = true, features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_Registry",
-] }
 
 [dev-dependencies]
 # `testing`: `ScriptedPrompter`, `MemoryRecentPath`, `tsp::MockTsa`, `ocsp::MockOcsp`,

@@ -782,7 +782,7 @@ fn live_crl_nca_root_gost_2022() {
     let (nca, root) = (nca("ncagost22"), nca("rcagost22"));
     let dir = temp_dir();
     let cache = CrlCache::new(dir.path());
-    let status = crl::check(&nca, &root, &cache, &UreqTransport, now());
+    let status = crl::check(&nca, &root, &cache, &UreqTransport::default(), now());
     println!("CRL {:?}: {status:?}", crl::crl_urls(&nca));
     assert_eq!(status, Ok(CrlStatus::Good));
 }
