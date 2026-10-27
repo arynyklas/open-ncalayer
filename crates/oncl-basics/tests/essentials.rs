@@ -525,31 +525,46 @@ fn alternative_names_must_contain_the_common_name() {
 
 /// `subjectAltNames` are read before the dialog: any number is deduplicated in linear time,
 /// keeping the first occurrence of each name in the page's order.
+///
+/// The bound scales with the machine's speed, and its 10 s floor absorbs load: the
+/// baseline is the same call with as many names, all equal. It parses, converts and hashes
+/// as much, but any deduplication is linear on it (one distinct name), even a quadratic one.
+/// Over 101 000 distinct names a quadratic deduplication makes about 5·10⁹ comparisons:
+/// measured at 27 s in a debug build (baseline 70 ms), well past the bound.
 #[test]
 fn many_alternative_names_are_deduplicated_quickly_in_order() {
+    use std::time::{Duration, Instant};
     use x509_cert::ext::pkix::SubjectAltName;
     use x509_cert::ext::pkix::name::GeneralName;
 
     let mut names: Vec<String> = (0..100_000).map(|i| format!("h{i}.test.kz")).collect();
     names.extend(names[..1000].to_vec());
-    for (cn, expect_dialog) in [("h99999.test.kz", true), ("absent.kz", false)] {
+    // The call with `names`, timed; it shows the dialog (cancelled) unless `cn` is absent.
+    let timed = |cn: &str, names: &[String], expect_dialog: bool| {
         let mut args = csr_args(json!([gost2015()]));
         args["dn"] = json!({"2.5.4.3": cn});
         args["subjectAltNames"] = json!(names);
         let (b, p) = basics(vec![Step::CancelCsr]);
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let r = essentials(&b, "generateCsr", args);
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "{cn}: {:?}",
-            started.elapsed()
-        );
+        let elapsed = started.elapsed();
         if expect_dialog {
             assert_eq!(r, json!({"status": true, "body": {}}));
         } else {
             assert_eq!(failure(&r).0, "INVOCATION_ERROR");
         }
         assert_eq!(p.csr_prompts().len(), usize::from(expect_dialog), "{cn}");
+        elapsed
+    };
+    let same = vec!["h0.test.kz".to_owned(); names.len()];
+    let baseline = timed("h0.test.kz", &same, true);
+    let bound = (baseline * 5 + Duration::from_secs(2)).max(Duration::from_secs(10));
+    for (cn, expect_dialog) in [("h99999.test.kz", true), ("absent.kz", false)] {
+        let elapsed = timed(cn, &names, expect_dialog);
+        assert!(
+            elapsed < bound,
+            "{cn}: {elapsed:?}, bound {bound:?} (baseline {baseline:?})"
+        );
     }
 
     // First-seen order, each name once, then the email.
