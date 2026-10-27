@@ -188,8 +188,8 @@ msgstr "Свой сертификат (импорт)"
 msgid "OpenNCALayer creates a local CA that can only certify 127.0.0.1, ::1 and localhost, issues the certificate and destroys the CA's key at once. Install the new CA on the «Installation» tab."
 msgstr "OpenNCALayer создаёт локальный центр сертификации, который может подтверждать только 127.0.0.1, ::1 и localhost, выпускает сертификат и сразу уничтожает ключ центра сертификации. Новый центр сертификации установите на вкладке «Установка»."
 
-msgid "I agree that OpenNCALayer reads the mkcert CA key rootCA-key.pem at every renewal (it is never copied)"
-msgstr "Я согласен, что OpenNCALayer читает ключ центра mkcert rootCA-key.pem при каждом перевыпуске (ключ никуда не копируется)"
+msgid "I agree that OpenNCALayer reads the mkcert CA key rootCA-key.pem at every renewal (it is never copied). Untick to withdraw the consent."
+msgstr "Я согласен, что OpenNCALayer читает ключ центра mkcert rootCA-key.pem при каждом перевыпуске (ключ никуда не копируется). Снимите флажок, чтобы отозвать согласие."
 
 msgid "A certificate for 127.0.0.1 with serverAuth, ECDSA P-256/P-384 or RSA of 2048 bits and more, not signed with SHA-1, and its key (PEM)."
 msgstr "Сертификат для 127.0.0.1 с serverAuth, ключом ECDSA P-256/P-384 или RSA от 2048 бит, не подписанный SHA-1, и его ключ (PEM)."
@@ -221,8 +221,8 @@ msgstr "Удалить старый"
 msgid "Check"
 msgstr "Проверка"
 
-msgid "Open the self-test page in each browser you use. A browser that opens it without a certificate warning appears in the list below."
-msgstr "Откройте страницу самопроверки в каждом браузере, которым пользуетесь. Браузер, открывший её без предупреждения о сертификате, появится в списке ниже."
+msgid "Open the self-test page in each browser you use. A browser that opened the page and ran it appears in the list below. Only a page that opened without a certificate warning means the browser trusts the certificate: if you clicked through a warning, the browser is listed but does not trust it."
+msgstr "Откройте страницу самопроверки в каждом браузере, которым пользуетесь. Браузер, открывший страницу, появится в списке ниже. Доверие подтверждает только страница, открывшаяся без предупреждения о сертификате: если вы прошли предупреждение («Перейти на сайт», «Принять риск»), браузер попадёт в список, но сертификату не доверяет."
 
 msgid "Open the check in the browser"
 msgstr "Открыть проверку в браузере"

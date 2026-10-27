@@ -138,7 +138,7 @@ pub fn issue_with_mkcert(caroot: &Path, now: OffsetDateTime) -> Result<TlsMateri
     let info = TlsInfo {
         source: TlsSource::Mkcert {
             caroot: caroot.to_path_buf(),
-            consented_at: crate::rfc3339(now).map_err(TlsError::Gen)?,
+            consented_at: Some(crate::rfc3339(now).map_err(TlsError::Gen)?),
         },
         ca_sha1: Some(crate::sha1_hex(&ca_der)),
         ca_sha256: Some(crate::sha256_hex(&ca_der)),

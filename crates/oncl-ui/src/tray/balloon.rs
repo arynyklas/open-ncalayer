@@ -4,6 +4,7 @@
 //! `tray-icon` neither shows balloons nor reports their clicks, so this goes to the shell
 //! itself: `Shell_NotifyIconW(NIM_MODIFY, NIF_INFO)` on the icon's window, and a subclass of
 //! that window that sees `NIN_BALLOONUSERCLICK` before `tray-icon`'s window procedure does.
+//! Both rely on tray-icon 0.26.1 internals, which is why the workspace pins `=0.26.1`.
 
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicIsize, Ordering};

@@ -1,9 +1,9 @@
 //! The tray on Linux: a StatusNotifierItem over the D-Bus session bus (`ksni`), without
 //! GTK. Its service runs in a thread of its own; picked items go to the event loop through
 //! [`deliver`]. Notifications go to the desktop's notification server
-//! (`org.freedesktop.Notifications`), whose clicks a thread of their own listens for.
+//! (`org.freedesktop.Notifications`) from a thread of their own, so that a slow server never
+//! holds up the dialogs; another thread listens for their clicks.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -29,8 +29,8 @@ const PENDING_CLICKS: usize = 16;
 /// The tray of [`start_tray`](super::start_tray).
 pub(super) struct Tray {
     handle: Handle<Item>,
-    /// Connected at the first notification.
-    notifier: RefCell<Option<Notifier>>,
+    /// Connected at the first notification; notifications are sent one at a time.
+    notifier: Arc<Mutex<Option<Notifier>>>,
 }
 
 impl Tray {
@@ -51,19 +51,31 @@ impl Tray {
             .map_err(|e| TrayError(format!("StatusNotifierItem: {e}")))?;
         Ok(Tray {
             handle,
-            notifier: RefCell::new(None),
+            notifier: Arc::default(),
         })
     }
 
+    /// Sends `notification` from a thread of its own; a failure there is logged.
     pub(super) fn notify(&self, notification: Notification) -> Result<(), TrayError> {
-        let mut slot = self.notifier.borrow_mut();
-        let notifier = match slot.take() {
-            Some(notifier) => notifier,
-            None => Notifier::connect().map_err(notify_error)?,
-        };
-        let shown = notifier.show(notification).map_err(notify_error);
-        *slot = Some(notifier);
-        shown
+        let notifier = Arc::clone(&self.notifier);
+        std::thread::Builder::new()
+            .name("notify".into())
+            .spawn(move || {
+                let mut slot = notifier.lock().unwrap_or_else(PoisonError::into_inner);
+                let shown = match &*slot {
+                    Some(connected) => connected.show(notification),
+                    None => Notifier::connect().and_then(|connected| {
+                        let shown = connected.show(notification);
+                        *slot = Some(connected);
+                        shown
+                    }),
+                };
+                if let Err(e) = shown {
+                    tracing::warn!(error = %notify_error(e), "cannot show the notification");
+                }
+            })
+            .map(drop)
+            .map_err(|e| TrayError(format!("notifications: {e}")))
     }
 
     pub(super) fn set_state(&self, state: TrayState) {

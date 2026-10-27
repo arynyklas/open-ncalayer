@@ -1,6 +1,6 @@
-//! The settings window on the event loop: one at a time, its loading and actions on worker
-//! threads. While one runs the window waits (`busy`) and cannot be closed, so its outcome is
-//! shown; a successful save takes effect in the daemon even if the window is gone (e.g.
+//! The settings window on the event loop: one at a time, its loading and actions are jobs
+//! ([`worker`]). While one runs the window waits (`busy`) and cannot be closed, so its outcome
+//! is shown; a successful save takes effect in the daemon even if the window is gone (e.g.
 //! destroyed by the windowing system).
 
 use std::cell::{Cell, RefCell};
@@ -21,7 +21,8 @@ use super::{
 use crate::foreground;
 use crate::prompter::select_desktop_language;
 use crate::ui::SettingsWindow;
-use crate::windows::{self, Desktop};
+use crate::windows::Desktop;
+use crate::worker::{self, JobWindow, run, with};
 
 /// The open settings window. Its callbacks find it by `id` in [`OPEN`], so that none holds
 /// it (a reference cycle) and a late result never reaches a window opened since.
@@ -116,7 +117,7 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
     }
     foreground::take(&ui);
     run(
-        &open,
+        &*open,
         |s| s.load(),
         |desktop, open, snapshot| {
             if let Some(open) = open {
@@ -142,21 +143,10 @@ pub(crate) fn show_snapshot(ui: &SettingsWindow, snapshot: &Snapshot, l: Locale)
     show_message(ui, &problems.join("\n"), true);
 }
 
-/// Runs `f` with the settings window `id`, if it is open.
-fn with(id: u64, f: impl FnOnce(&Open)) {
-    if let Some(open) = current(id) {
-        f(&open);
-    }
-}
-
 /// «Закрыть» or the window's close button: closes the window `id`, unless it waits for an
 /// action, whose outcome the user must see.
 fn close_requested(id: u64) -> CloseRequestResponse {
-    if current(id).is_some_and(|open| open.ui.get_busy()) {
-        return CloseRequestResponse::KeepWindowShown;
-    }
-    close(id);
-    CloseRequestResponse::HideWindow
+    worker::close_requested::<Open>(id, close)
 }
 
 /// Closes the settings window `id`.
@@ -253,47 +243,40 @@ fn act(open: &Open, action: Action, refresh_autostart: bool, texts: ActionTexts)
     );
 }
 
-/// Runs `job` on a worker thread while the window waits; then [`finish`] hands the result
-/// to `done` on the event loop.
-fn run<T: Send + 'static>(
-    open: &Open,
-    job: impl FnOnce(&SettingsServices) -> T + Send + 'static,
-    done: impl FnOnce(&Desktop, Option<&Open>, T) + Send + 'static,
-) {
-    open.ui.set_busy(true);
-    let services = Arc::clone(&open.desktop.settings);
-    let id = open.id;
-    let spawned = std::thread::Builder::new()
-        .name("settings".into())
-        .spawn(move || {
-            let result = job(&services);
-            let delivered = slint::invoke_from_event_loop(move || finish(id, result, done));
-            if let Err(e) = delivered {
-                tracing::warn!(error = %e, "settings window: a result is lost");
-            }
-        });
-    if let Err(e) = spawned {
-        tracing::error!(error = %e, "settings window: cannot start a worker thread");
-        open.ui.set_busy(false);
-        let t = Texts::of(open.desktop.locale.get());
-        show_message(&open.ui, t.cannot_start, true);
-    }
-}
+impl JobWindow for Open {
+    type Services = SettingsServices;
+    const NAME: &'static str = "settings";
 
-/// Hands a worker's `result` to `done`, with the daemon's windows and the window `id` if it
-/// is still open (it waits no longer).
-fn finish<T>(id: u64, result: T, done: impl FnOnce(&Desktop, Option<&Open>, T)) {
-    let open = current(id);
-    if let Some(open) = &open {
-        open.ui.set_busy(false);
+    fn find(id: u64) -> Option<Rc<Open>> {
+        current(id)
     }
-    let desktop = open
-        .as_ref()
-        .map(|open| Rc::clone(&open.desktop))
-        .or_else(windows::desktop);
-    match desktop {
-        Some(desktop) => done(&desktop, open.as_deref(), result),
-        None => tracing::warn!("settings window: a result without the windows"),
+
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn desktop(&self) -> &Rc<Desktop> {
+        &self.desktop
+    }
+
+    fn services(&self) -> Arc<SettingsServices> {
+        Arc::clone(&self.desktop.settings)
+    }
+
+    fn busy(&self) -> bool {
+        self.ui.get_busy()
+    }
+
+    fn set_busy(&self, busy: bool) {
+        self.ui.set_busy(busy);
+    }
+
+    fn show_message(&self, text: &str, error: bool) {
+        show_message(&self.ui, text, error);
+    }
+
+    fn failure_text(&self) -> &'static str {
+        Texts::of(self.desktop.locale.get()).cannot_start
     }
 }
 
@@ -342,6 +325,7 @@ mod tests {
     /// The windows on a sandbox under `root`; the proxies `on_saved` got.
     fn desktop(root: &std::path::Path) -> (Rc<Desktop>, Rc<RefCell<Vec<ProxySetting>>>) {
         offscreen::install();
+        worker::manual::enable();
         let applied = Rc::new(RefCell::new(Vec::new()));
         let record = Rc::clone(&applied);
         set_desktop_windows(DesktopWindows {
@@ -351,7 +335,7 @@ mod tests {
             tls: crate::tls_wizard::fakes::services(root, Vec::new(), None),
             on_saved: Box::new(move |s: &Settings| record.borrow_mut().push(s.proxy.clone())),
         });
-        (windows::desktop().unwrap(), applied)
+        (crate::windows::desktop().unwrap(), applied)
     }
 
     fn the_window() -> Rc<Open> {
@@ -375,7 +359,7 @@ mod tests {
         assert!(is_open());
 
         let snapshot = desktop.settings.load();
-        finish(window.id, snapshot, |desktop, open, snapshot| {
+        worker::finish::<Open, _>(window.id, Ok(snapshot), |desktop, open, snapshot| {
             show_snapshot(&open.unwrap().ui, &snapshot, desktop.locale.get());
         });
         assert!(!window.ui.get_busy());
@@ -389,7 +373,7 @@ mod tests {
         let (desktop, applied) = desktop(dir.path());
         open(&desktop);
         let window = the_window();
-        finish(window.id, (), |_, _, ()| {});
+        worker::finish::<Open, _>(window.id, Ok(()), |_, _, ()| {});
 
         // «Сохранить» with English and the system's proxy: the window waits for the worker.
         window
@@ -416,7 +400,7 @@ mod tests {
             proxy_url: String::new(),
         };
         let result = (desktop.settings.save(&form), desktop.settings.states());
-        finish(id, result, saved);
+        worker::finish::<Open, _>(id, Ok(result), saved);
         assert_eq!(*applied.borrow(), [ProxySetting::System]);
         assert_eq!(desktop.locale.get(), Locale::En);
 
@@ -427,7 +411,37 @@ mod tests {
             ..form
         };
         let result = (desktop.settings.save(&bad), desktop.settings.states());
-        finish(id, result, saved);
+        worker::finish::<Open, _>(id, Ok(result), saved);
         assert_eq!(applied.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_broken_job_frees_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (desktop, _) = desktop(dir.path());
+        open(&desktop);
+        let window = the_window();
+        assert_eq!(worker::manual::run_all(), 1);
+        assert!(!window.ui.get_busy());
+
+        run(
+            &*window,
+            |_| -> () { panic!("a broken job") },
+            |_, _, ()| unreachable!("a panicked job has no result"),
+        );
+        assert!(window.ui.get_busy());
+        assert_eq!(
+            close_requested(window.id),
+            CloseRequestResponse::KeepWindowShown
+        );
+        assert_eq!(worker::manual::run_all(), 1);
+        assert!(!window.ui.get_busy());
+        assert!(window.ui.get_message_is_error());
+        assert_eq!(
+            window.ui.get_message(),
+            Texts::of(desktop.locale.get()).cannot_start
+        );
+        assert_eq!(close_requested(window.id), CloseRequestResponse::HideWindow);
+        assert!(!is_open());
     }
 }

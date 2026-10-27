@@ -23,6 +23,7 @@ pub mod tls_wizard;
 mod tray;
 pub mod view;
 mod windows;
+mod worker;
 
 pub use about_view::AboutInfo;
 pub use prompter::{SlintPrompter, quit, run_event_loop, run_on_event_loop, when_event_loop_runs};

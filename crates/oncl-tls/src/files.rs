@@ -3,13 +3,22 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{InconsistentKeys, ServerConfig};
 
 use crate::{TlsError, TlsInfo, TlsMaterial, TlsSource};
+
+/// Held while this process writes the TLS files or reads them into a server configuration:
+/// two writers (the TLS wizard, the renewal) never interleave their files, and a reload never
+/// pairs one save's key with another's certificate.
+static FILES: Mutex<()> = Mutex::new(());
+
+fn lock() -> MutexGuard<'static, ()> {
+    FILES.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// The TLS directory (`<data dir>/tls`) and the names of the files in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,12 +65,15 @@ impl TlsFiles {
 /// left over from a previous set are removed when `m` has no CA (imported). An own local CA
 /// that `m` replaces (a re-issue, mkcert or an import after [`generate`](crate::generate))
 /// is first copied into [`TlsFiles::replaced_dir`]: it may still be trusted somewhere, and
-/// the user is asked to remove it ([`replaced_cas`]).
+/// the user is asked to remove it ([`replaced_cas`]). Saves of this process run one at a
+/// time. A save that fails part-way may leave a key that does not match the certificate:
+/// [`server_config`] then refuses the pair, and the server keeps what it has loaded.
 ///
 /// `server.key` is created with mode `0600` on Unix. On Windows no ACL is changed: the file
 /// inherits the ACL of the data directory (`%APPDATA%\OpenNCALayer`, which by default is
 /// accessible only to the user, SYSTEM and Administrators).
 pub fn save(files: &TlsFiles, m: &TlsMaterial) -> io::Result<()> {
+    let _files = lock();
     fs::create_dir_all(&files.dir)?;
     keep_replaced_ca(files, m)?;
     write_file(&files.key_pem(), m.key_pem.as_bytes(), true)?;
@@ -91,6 +103,27 @@ pub fn load_info(files: &TlsFiles) -> io::Result<Option<TlsInfo>> {
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Records in `tls.json` that the user gave (`Some(time)`, RFC 3339) or withdrew (`None`)
+/// the consent to have mkcert's CA key read at every renewal. Only a certificate issued with
+/// mkcert has the consent; for others nothing is written and `Ok(false)` returned.
+pub fn set_mkcert_consent(files: &TlsFiles, consented_at: Option<String>) -> io::Result<bool> {
+    let _files = lock();
+    let Some(mut info) = load_info(files)? else {
+        return Ok(false);
+    };
+    let TlsSource::Mkcert {
+        consented_at: consent,
+        ..
+    } = &mut info.source
+    else {
+        return Ok(false);
+    };
+    *consent = consented_at;
+    let json = serde_json::to_vec_pretty(&info).map_err(io::Error::other)?;
+    write_file(&files.info(), &json, false)?;
+    Ok(true)
 }
 
 /// The own local CAs (DER) that [`save`] replaced and the user has not removed from the
@@ -147,8 +180,9 @@ fn keep_replaced_ca(files: &TlsFiles, m: &TlsMaterial) -> io::Result<()> {
 }
 
 /// A rustls server configuration (ring provider, TLS 1.3 and 1.2, no client authentication)
-/// serving `server.crt` with `server.key`.
+/// serving `server.crt` with `server.key`, read while no [`save`] of this process runs.
 pub fn server_config(files: &TlsFiles) -> Result<ServerConfig, TlsError> {
+    let _files = lock();
     let chain_path = files.chain_pem();
     let chain = CertificateDer::pem_file_iter(&chain_path)
         .and_then(|certs| certs.collect::<Result<Vec<_>, _>>())

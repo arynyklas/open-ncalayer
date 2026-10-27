@@ -240,6 +240,20 @@ pub enum StoreOutcome {
     Failed(io::Error),
 }
 
+/// Why a confirmed action on the trust stores did nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refused {
+    /// There is no own CA (any more).
+    NoOwnCa,
+    /// The CA is not the one the user confirmed: it was replaced meanwhile.
+    Changed,
+    /// The embedded NCA roots do not match their pins.
+    Roots(String),
+}
+
+/// The per-store outcomes of a confirmed action, or why it did nothing.
+pub type Outcomes = Result<Vec<(String, StoreOutcome)>, Refused>;
+
 impl TlsWizardServices {
     /// The self-test page.
     pub fn selftest_url(&self) -> String {
@@ -348,47 +362,63 @@ impl TlsWizardServices {
             .collect()
     }
 
-    /// Installs the own CA into the stores named `labels`; `None` without an own CA.
-    pub fn install_ca(&self, labels: &[String]) -> Option<Vec<(String, StoreOutcome)>> {
-        let ca = self.own_ca()?;
-        Some(self.each(labels, |store| {
+    /// Installs the own CA into the stores named `labels`, if it still is `confirmed`.
+    ///
+    /// # Errors
+    ///
+    /// There is no own CA, or it is not `confirmed`.
+    pub fn install_ca(&self, labels: &[String], confirmed: &Certificate) -> Outcomes {
+        let ca = self.confirmed_own_ca(confirmed)?;
+        Ok(self.each(labels, |store| {
             store.install(&ca).map(StoreOutcome::Installed)
         }))
     }
 
-    /// Removes exactly the own CA from the stores named `labels`; `None` without an own CA.
-    pub fn remove_ca(&self, labels: &[String]) -> Option<Vec<(String, StoreOutcome)>> {
-        let ca = self.own_ca()?;
-        Some(self.each(labels, |store| store.remove(&ca).map(StoreOutcome::Removed)))
+    /// Removes exactly the own CA from the stores named `labels`, if it still is
+    /// `confirmed`.
+    ///
+    /// # Errors
+    ///
+    /// There is no own CA, or it is not `confirmed`.
+    pub fn remove_ca(&self, labels: &[String], confirmed: &Certificate) -> Outcomes {
+        let ca = self.confirmed_own_ca(confirmed)?;
+        Ok(self.each(labels, |store| store.remove(&ca).map(StoreOutcome::Removed)))
     }
 
     /// Installs the NCA's RSA CAs ([`oncl_pki::roots::nca_tls_roots`], checked against
     /// their pinned SHA-256) into the stores named `labels`: one outcome per store and CA.
-    pub fn install_nca_roots(&self, labels: &[String]) -> Vec<(String, StoreOutcome)> {
-        let roots: Vec<(&str, io::Result<Certificate>)> = oncl_pki::roots::nca_tls_roots()
+    ///
+    /// # Errors
+    ///
+    /// An embedded root does not match its pin: nothing is installed.
+    pub fn install_nca_roots(&self, labels: &[String]) -> Outcomes {
+        let roots = oncl_pki::roots::nca_tls_roots()
+            .map_err(Refused::Roots)?
             .into_iter()
-            .map(|(alias, der)| (alias, Certificate::from_der(der)))
-            .collect();
+            .map(|(alias, der)| {
+                Certificate::from_der(der)
+                    .map(|root| (alias, root))
+                    .map_err(|e| Refused::Roots(format!("{alias}: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut outcomes = Vec::new();
         for named in self.selected(labels) {
             for (alias, root) in &roots {
-                let outcome = match root {
-                    Ok(root) => named.store.install(root),
-                    Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
-                };
                 let label = format!("{} ({alias})", named.label);
+                let outcome = named.store.install(root);
                 outcomes.push((
                     label,
                     outcome.map_or_else(StoreOutcome::Failed, StoreOutcome::Installed),
                 ));
             }
         }
-        outcomes
+        Ok(outcomes)
     }
 
-    /// Removes the replaced own CAs from the stores named `labels`; a CA removed (or absent)
-    /// everywhere ticked is forgotten ([`oncl_tls::forget_replaced_ca`]).
-    pub fn remove_replaced(&self, labels: &[String]) -> Vec<(String, StoreOutcome)> {
+    /// Removes the replaced own CAs that are among `confirmed` from the stores named
+    /// `labels`; a CA removed (or absent) everywhere ticked is forgotten
+    /// ([`oncl_tls::forget_replaced_ca`]). Replaced CAs the user was not asked about stay.
+    pub fn remove_replaced(&self, labels: &[String], confirmed: &[Certificate]) -> Outcomes {
         let stores = self.selected(labels);
         let mut outcomes = Vec::new();
         let replaced = oncl_tls::replaced_cas(&self.files).unwrap_or_default();
@@ -396,6 +426,9 @@ impl TlsWizardServices {
             let Ok(ca) = Certificate::from_der(der) else {
                 continue;
             };
+            if !confirmed.contains(&ca) {
+                continue;
+            }
             let name = oncl_tls::subject_common_name(ca.der()).unwrap_or_default();
             let mut all_done = !stores.is_empty();
             for named in &stores {
@@ -411,7 +444,31 @@ impl TlsWizardServices {
                 outcomes.push((name, StoreOutcome::Failed(e)));
             }
         }
-        outcomes
+        Ok(outcomes)
+    }
+
+    /// Records the mkcert consent given (`true`, at `now`) or withdrawn in `tls.json`; whether
+    /// the saved certificate is mkcert's and so has the consent at all.
+    ///
+    /// # Errors
+    ///
+    /// `tls.json` cannot be read or written.
+    pub fn set_mkcert_consent(&self, consent: bool, now: OffsetDateTime) -> io::Result<bool> {
+        let consented_at = consent
+            .then(|| now.to_offset(UtcOffset::UTC).format(&Rfc3339))
+            .transpose()
+            .map_err(io::Error::other)?;
+        oncl_tls::set_mkcert_consent(&self.files, consented_at)
+    }
+
+    /// The own CA of the saved material, if it is `confirmed`.
+    fn confirmed_own_ca(&self, confirmed: &Certificate) -> Result<Certificate, Refused> {
+        let ca = self.own_ca().ok_or(Refused::NoOwnCa)?;
+        if ca == *confirmed {
+            Ok(ca)
+        } else {
+            Err(Refused::Changed)
+        }
     }
 
     /// The own CA of the saved material.
@@ -490,16 +547,13 @@ pub fn status_text(snapshot: &Snapshot, now: OffsetDateTime, l: Locale) -> Strin
                 fill(t.leaf_valid, &[&date(not_after), &left.to_string()]),
             );
         }
-        match info.source {
-            TlsSource::Mkcert { .. } => {
-                line(
-                    &mut s,
-                    fill(t.auto_renew, &[&date(not_after - AUTO_RENEW_BEFORE)]),
-                );
-            }
-            TlsSource::Own | TlsSource::Imported => {
-                line(&mut s, fill(t.renew_by, &[&date(not_after - RENEW_BEFORE)]));
-            }
+        if info.source.renews_itself() {
+            line(
+                &mut s,
+                fill(t.auto_renew, &[&date(not_after - AUTO_RENEW_BEFORE)]),
+            );
+        } else {
+            line(&mut s, fill(t.renew_by, &[&date(not_after - RENEW_BEFORE)]));
         }
     }
     if let Some(sha1) = &info.ca_sha1 {
@@ -693,6 +747,18 @@ fn issue_error_text(e: &IssueError, l: Locale) -> String {
     }
 }
 
+/// The message of a confirmed action: its outcomes, one line per store, or why it did
+/// nothing; whether it failed.
+fn action_text(outcomes: &Outcomes, l: Locale) -> (String, bool) {
+    let t = Texts::of(l);
+    match outcomes {
+        Ok(outcomes) => outcomes_text(outcomes, l),
+        Err(Refused::NoOwnCa) => (t.no_ca.to_owned(), true),
+        Err(Refused::Changed) => (t.ca_changed.to_owned(), true),
+        Err(Refused::Roots(e)) => (fill(t.roots_broken, &[e]), true),
+    }
+}
+
 /// The outcomes of an action, one line per store; whether any failed.
 fn outcomes_text(outcomes: &[(String, StoreOutcome)], l: Locale) -> (String, bool) {
     let t = Texts::of(l);
@@ -830,11 +896,28 @@ pub(crate) mod fakes {
             apply: Box::new(|| Applied::Serving),
         }
     }
+
+    /// An mkcert-like CA `mkcert user@host` (valid 2000–2099) in the CAROOT `dir`; its
+    /// certificate.
+    pub(crate) fn fake_mkcert(dir: &Path) -> Certificate {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "mkcert user@host");
+        params.not_before = rcgen::date_time_ymd(2000, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+        let ca = params.self_signed(&key).unwrap();
+        std::fs::write(dir.join("rootCA.pem"), ca.pem()).unwrap();
+        std::fs::write(dir.join("rootCA-key.pem"), key.serialize_pem()).unwrap();
+        Certificate::from_der(ca.der().to_vec()).unwrap()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fakes::{MemoryStore, services};
+    use super::fakes::{self, MemoryStore, services};
     use super::*;
     use time::Duration;
     use time::macros::datetime;
@@ -870,7 +953,11 @@ mod tests {
             ],
             None,
         );
-        assert!(s.install_ca(&labels(&["User"])).is_none());
+        let stranger = Certificate::from_der(foreign.clone()).unwrap();
+        assert_eq!(
+            s.install_ca(&labels(&["User"]), &stranger).unwrap_err(),
+            Refused::NoOwnCa
+        );
 
         let issued = s.issue(&own(), NOW).unwrap();
         assert_eq!(issued.applied, Applied::Serving);
@@ -885,7 +972,13 @@ mod tests {
             [Some(Ok(false)), Some(Ok(false))]
         );
 
-        let outcomes = s.install_ca(&labels(&["User"])).unwrap();
+        // Only the CA the user confirmed is acted on.
+        assert_eq!(
+            s.install_ca(&labels(&["User"]), &stranger).unwrap_err(),
+            Refused::Changed
+        );
+        assert!(user.certificates().is_empty());
+        let outcomes = s.install_ca(&labels(&["User"]), &ca).unwrap();
         assert!(matches!(
             &outcomes[..],
             [(l, StoreOutcome::Installed(InstallOutcome::Installed))] if l == "User"
@@ -893,7 +986,7 @@ mod tests {
         assert_eq!(user.certificates(), [ca.der().to_vec()]);
         assert_eq!(other.certificates(), std::slice::from_ref(&foreign));
         // A second click duplicates nothing.
-        let again = s.install_ca(&labels(&["User"])).unwrap();
+        let again = s.install_ca(&labels(&["User"]), &ca).unwrap();
         assert!(matches!(
             again[..],
             [(_, StoreOutcome::Installed(InstallOutcome::AlreadyPresent))]
@@ -901,7 +994,7 @@ mod tests {
         assert_eq!(user.certificates().len(), 1);
         assert_eq!(s.load().trust.unwrap().os_store, StoreState::User);
 
-        let removed = s.remove_ca(&labels(&["User", "Other"])).unwrap();
+        let removed = s.remove_ca(&labels(&["User", "Other"]), &ca).unwrap();
         assert!(matches!(
             removed[..],
             [
@@ -924,7 +1017,7 @@ mod tests {
         let s = services(dir.path(), vec![("User".to_owned(), user.clone())], None);
         s.issue(&own(), NOW).unwrap();
         let first = s.load().own_ca().unwrap().clone();
-        s.install_ca(&labels(&["User"])).unwrap();
+        s.install_ca(&labels(&["User"]), &first).unwrap();
 
         s.issue(&own(), NOW + Duration::days(1)).unwrap();
         let snapshot = s.load();
@@ -937,7 +1030,13 @@ mod tests {
         );
         assert!(text.contains(&sha1_grouped(&hex(&first.sha1()))), "{text}");
 
-        let outcomes = s.remove_replaced(&labels(&["User"]));
+        // Only the CAs the user was asked about.
+        let outcomes = s.remove_replaced(&labels(&["User"]), &[]).unwrap();
+        assert!(outcomes.is_empty());
+        assert_eq!(s.load().replaced.len(), 1);
+        let outcomes = s
+            .remove_replaced(&labels(&["User"]), std::slice::from_ref(&first))
+            .unwrap();
         assert!(matches!(outcomes[..], [(_, StoreOutcome::Removed(true))]));
         assert!(user.certificates().is_empty());
         assert!(s.load().replaced.is_empty());
@@ -947,17 +1046,7 @@ mod tests {
     fn mkcert_needs_consent_and_its_ca_is_not_installed_by_us() {
         let dir = tempfile::tempdir().unwrap();
         let caroot = tempfile::tempdir().unwrap();
-        let key = rcgen::KeyPair::generate().unwrap();
-        let mut params = rcgen::CertificateParams::default();
-        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        params
-            .distinguished_name
-            .push(rcgen::DnType::CommonName, "mkcert user@host");
-        params.not_before = NOW - Duration::days(1);
-        params.not_after = NOW + Duration::days(3650);
-        let ca = params.self_signed(&key).unwrap();
-        std::fs::write(caroot.path().join("rootCA.pem"), ca.pem()).unwrap();
-        std::fs::write(caroot.path().join("rootCA-key.pem"), key.serialize_pem()).unwrap();
+        let ca = fakes::fake_mkcert(caroot.path());
 
         let none = services(dir.path(), Vec::new(), None);
         let mut form = IssueForm {
@@ -983,7 +1072,10 @@ mod tests {
             Some("mkcert user@host")
         );
         assert!(snapshot.own_ca().is_none());
-        assert!(s.install_ca(&labels(&["User"])).is_none());
+        assert_eq!(
+            s.install_ca(&labels(&["User"]), &ca).unwrap_err(),
+            Refused::NoOwnCa
+        );
         assert!(install_text(&snapshot, Locale::Ru).contains("mkcert -install"));
         let status = status_text(&snapshot, NOW, Locale::Ru);
         assert!(status.contains("перевыпустит его сам"), "{status}");
@@ -994,15 +1086,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let user = MemoryStore::default();
         let s = services(dir.path(), vec![("User".to_owned(), user.clone())], None);
-        let outcomes = s.install_nca_roots(&labels(&["User"]));
+        let outcomes = s.install_nca_roots(&labels(&["User"])).unwrap();
         let names: Vec<&str> = outcomes.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(names, ["User (rcarsa20)", "User (ncarsa22)"]);
         let expected: Vec<Vec<u8>> = oncl_pki::roots::nca_tls_roots()
+            .unwrap()
             .into_iter()
             .map(|(_, der)| der.to_vec())
             .collect();
         assert_eq!(user.certificates(), expected);
-        assert!(s.install_nca_roots(&labels(&["Missing"])).is_empty());
+        assert!(
+            s.install_nca_roots(&labels(&["Missing"]))
+                .unwrap()
+                .is_empty()
+        );
+        let (text, failed) = action_text(&Err(Refused::Roots("rcarsa20".to_owned())), Locale::En);
+        assert!(failed);
+        assert!(text.ends_with("nothing was installed: rcarsa20"), "{text}");
     }
 
     #[test]

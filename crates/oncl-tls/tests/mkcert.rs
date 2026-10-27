@@ -8,6 +8,7 @@ use der::{Decode, Encode};
 use oncl_tls::{
     Renewal, TargetOs, TlsError, TlsFiles, TlsInfo, TlsSource, generate, instructions,
     issue_with_mkcert, load_info, needs_renewal, replaced_cas, save, server_config,
+    set_mkcert_consent,
 };
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::SeedableRng;
@@ -187,7 +188,7 @@ fn leaf_from_a_p256_mkcert_ca() {
         m.info.source,
         TlsSource::Mkcert {
             caroot: caroot.path().to_path_buf(),
-            consented_at: "2026-10-24T00:00:00Z".to_owned(),
+            consented_at: Some("2026-10-24T00:00:00Z".to_owned()),
         }
     );
     assert_eq!(m.ca_der.as_deref(), Some(caroot.ca_der.as_slice()));
@@ -345,7 +346,7 @@ fn info(source: TlsSource, not_after: OffsetDateTime) -> TlsInfo {
 fn mkcert_source() -> TlsSource {
     TlsSource::Mkcert {
         caroot: PathBuf::from("/ca"),
-        consented_at: "2026-10-24T00:00:00Z".to_owned(),
+        consented_at: Some("2026-10-24T00:00:00Z".to_owned()),
     }
 }
 
@@ -376,6 +377,18 @@ fn renewal_at_60_and_30_days() {
             Renewal::Remind { days: -3 }
         );
     }
+    // Without the consent an mkcert certificate is reminded of like any other.
+    let withdrawn = info(
+        TlsSource::Mkcert {
+            caroot: PathBuf::from("/ca"),
+            consented_at: None,
+        },
+        end,
+    );
+    assert_eq!(
+        needs_renewal(&withdrawn, end - Duration::days(30)),
+        Renewal::Remind { days: 30 }
+    );
     let i = info(mkcert_source(), end);
     assert_eq!(needs_renewal(&i, end - Duration::days(60)), Renewal::None);
     assert_eq!(
@@ -417,6 +430,15 @@ fn sources_in_tls_json() {
         "2026-10-24T00:00:00Z"
     );
     assert_eq!(serde_json::from_value::<TlsInfo>(json).unwrap(), mkcert);
+    // A withdrawn consent is `null`, and so is a missing one.
+    let mut json = serde_json::to_value(&mkcert).unwrap();
+    json["source"]["mkcert"]
+        .as_object_mut()
+        .unwrap()
+        .remove("consented_at");
+    let withdrawn: TlsInfo = serde_json::from_value(json).unwrap();
+    assert!(!withdrawn.source.renews_itself());
+    assert!(mkcert.source.renews_itself());
     assert_eq!(
         serde_json::to_value(info(TlsSource::Imported, end)).unwrap()["source"],
         "imported"
@@ -478,4 +500,46 @@ fn instructions_for_mkcert() {
             "{s}"
         );
     }
+}
+
+#[test]
+fn the_mkcert_consent_is_withdrawn_and_given_in_tls_json() {
+    let caroot = FakeCaroot::p256();
+    let data = tempfile::tempdir().unwrap();
+    let files = TlsFiles {
+        dir: data.path().join("tls"),
+    };
+    assert!(!set_mkcert_consent(&files, None).unwrap());
+    save(&files, &generate(NOW, "user@host").unwrap()).unwrap();
+    // Only an mkcert certificate has the consent.
+    assert!(!set_mkcert_consent(&files, None).unwrap());
+    assert_eq!(load_info(&files).unwrap().unwrap().source, TlsSource::Own);
+
+    let m = issue_with_mkcert(caroot.path(), NOW).unwrap();
+    save(&files, &m).unwrap();
+    assert!(set_mkcert_consent(&files, None).unwrap());
+    let info = load_info(&files).unwrap().unwrap();
+    assert_eq!(
+        info.source,
+        TlsSource::Mkcert {
+            caroot: caroot.path().to_path_buf(),
+            consented_at: None,
+        }
+    );
+    assert_eq!(info.leaf_sha256, m.info.leaf_sha256);
+    let late = NOW + Duration::days(790);
+    assert!(matches!(needs_renewal(&info, late), Renewal::Remind { .. }));
+
+    let again = "2026-11-01T00:00:00Z".to_owned();
+    assert!(set_mkcert_consent(&files, Some(again.clone())).unwrap());
+    let info = load_info(&files).unwrap().unwrap();
+    assert_eq!(
+        info.source,
+        TlsSource::Mkcert {
+            caroot: caroot.path().to_path_buf(),
+            consented_at: Some(again),
+        }
+    );
+    assert_eq!(needs_renewal(&info, late), Renewal::AutoRenew);
+    server_config(&files).unwrap();
 }

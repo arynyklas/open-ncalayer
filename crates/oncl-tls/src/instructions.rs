@@ -288,24 +288,21 @@ fn validity(s: &mut String, info: &TlsInfo) {
         );
         return;
     };
-    match info.source {
-        TlsSource::Mkcert { .. } => {
-            let _ = writeln!(
-                s,
-                "Сертификат сервера действует до {} (UTC). OpenNCALayer перевыпустит его сам \
-                 после {}.",
-                ru_date(not_after),
-                ru_date(not_after - AUTO_RENEW_BEFORE)
-            );
-        }
-        TlsSource::Own | TlsSource::Imported => {
-            let _ = writeln!(
-                s,
-                "Сертификат сервера действует до {} (UTC). Перевыпустите его до {}.",
-                ru_date(not_after),
-                ru_date(not_after - RENEW_BEFORE)
-            );
-        }
+    if info.source.renews_itself() {
+        let _ = writeln!(
+            s,
+            "Сертификат сервера действует до {} (UTC). OpenNCALayer перевыпустит его сам \
+             после {}.",
+            ru_date(not_after),
+            ru_date(not_after - AUTO_RENEW_BEFORE)
+        );
+    } else {
+        let _ = writeln!(
+            s,
+            "Сертификат сервера действует до {} (UTC). Перевыпустите его до {}.",
+            ru_date(not_after),
+            ru_date(not_after - RENEW_BEFORE)
+        );
     }
 }
 

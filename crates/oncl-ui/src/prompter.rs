@@ -58,7 +58,7 @@ fn catching_panics<R>(
 }
 
 /// The message of a panic payload.
-fn panic_text(panic: &(dyn Any + Send)) -> &str {
+pub(crate) fn panic_text(panic: &(dyn Any + Send)) -> &str {
     panic
         .downcast_ref::<&str>()
         .copied()

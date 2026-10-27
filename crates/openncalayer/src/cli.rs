@@ -551,8 +551,12 @@ fn tls_status(files: &TlsFiles) -> Result<ExitCode, ExitCode> {
         TlsSource::Own => {
             println!("Источник: локальный центр сертификации OpenNCALayer (tls init)");
         }
-        TlsSource::Mkcert { caroot, .. } => println!(
+        TlsSource::Mkcert { caroot, .. } if info.source.renews_itself() => println!(
             "Источник: центр сертификации mkcert ({}), перевыпуск автоматический",
+            caroot.display()
+        ),
+        TlsSource::Mkcert { caroot, .. } => println!(
+            "Источник: центр сертификации mkcert ({}), согласие на перевыпуск отозвано",
             caroot.display()
         ),
         TlsSource::Imported => println!("Источник: импортированный сертификат (tls import)"),
@@ -576,14 +580,16 @@ fn tls_status(files: &TlsFiles) -> Result<ExitCode, ExitCode> {
     match OffsetDateTime::parse(&info.leaf_not_after, &Rfc3339) {
         Ok(not_after) => {
             println!("Сертификат сервера действует до: {}", info.leaf_not_after);
+            let auto = info.source.renews_itself();
             let renew = not_after
-                - match info.source {
-                    TlsSource::Mkcert { .. } => AUTO_RENEW_BEFORE,
-                    TlsSource::Own | TlsSource::Imported => RENEW_BEFORE,
+                - if auto {
+                    AUTO_RENEW_BEFORE
+                } else {
+                    RENEW_BEFORE
                 };
             let days = (renew - OffsetDateTime::now_utc()).whole_days();
             match &info.source {
-                TlsSource::Mkcert { .. } => println!(
+                _ if auto => println!(
                     "Дней до перевыпуска: {} (OpenNCALayer перевыпустит сертификат сам после {})",
                     days.max(0),
                     ru_date(renew)
@@ -592,7 +598,7 @@ fn tls_status(files: &TlsFiles) -> Result<ExitCode, ExitCode> {
                     "Дней до перевыпуска: {days} (перевыпустить до {})",
                     ru_date(renew)
                 ),
-                TlsSource::Own => println!(
+                TlsSource::Own | TlsSource::Mkcert { .. } => println!(
                     "Дней до перевыпуска: 0 — перевыпустите сертификат сейчас \
                      (`openncalayer tls init --force` или мастер «Сертификат для браузера…»)"
                 ),

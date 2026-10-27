@@ -90,7 +90,9 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "tracing-log"] }
 # The tray on Windows and macOS (its menus are `muda`, re-exported as `tray_icon::menu`).
 # Default features are Linux only (libappindicator and GTK).
-tray-icon = { version = "0.26.1", default-features = false }
+# Pinned: the Windows balloons (crates/oncl-ui/src/tray/balloon.rs) rely on tray-icon's
+# private callback message (6002) and its icon id counter; check both before an upgrade.
+tray-icon = { version = "=0.26.1", default-features = false }
 # Only in xtask (`ext-e2e`): the stand-in original NCALayer, a blocking WebSocket server.
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }

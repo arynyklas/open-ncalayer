@@ -55,6 +55,8 @@ export component TlsWizardWindow inherits Window {
 
     callback refresh();
     callback issue();
+    // The mkcert consent box changed (a saved mkcert certificate records it at once).
+    callback consent-toggled(bool);
     callback browse-chain();
     callback browse-key();
     callback store-toggled(int, bool);
@@ -137,17 +139,21 @@ export component TlsWizardWindow inherits Window {
                                 enabled: !root.busy && !root.asking && root.mkcert-found;
                                 checked <=> root.mkcert-consent;
                                 accessible-label: consent-text.text;
+                                toggled => {
+                                    root.consent-toggled(self.checked);
+                                }
                             }
 
                             consent-text := Text {
                                 horizontal-stretch: 1;
                                 vertical-alignment: center;
                                 wrap: word-wrap;
-                                text: @tr("I agree that OpenNCALayer reads the mkcert CA key rootCA-key.pem at every renewal (it is never copied)");
+                                text: @tr("I agree that OpenNCALayer reads the mkcert CA key rootCA-key.pem at every renewal (it is never copied). Untick to withdraw the consent.");
                                 TouchArea {
                                     enabled: consent.enabled;
                                     clicked => {
                                         root.mkcert-consent = !root.mkcert-consent;
+                                        root.consent-toggled(root.mkcert-consent);
                                     }
                                 }
                             }
@@ -303,7 +309,7 @@ export component TlsWizardWindow inherits Window {
                 title: @tr("Check");
                 VerticalBox {
                     Text {
-                        text: @tr("Open the self-test page in each browser you use. A browser that opens it without a certificate warning appears in the list below.");
+                        text: @tr("Open the self-test page in each browser you use. A browser that opened the page and ran it appears in the list below. Only a page that opened without a certificate warning means the browser trusts the certificate: if you clicked through a warning, the browser is listed but does not trust it.");
                         wrap: word-wrap;
                     }
 

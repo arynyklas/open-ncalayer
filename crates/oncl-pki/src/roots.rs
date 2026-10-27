@@ -82,22 +82,31 @@ const TLS_ROOTS: [(&str, &str); 2] = [
 /// `(alias, DER)` of the NCA's RSA CAs `rcarsa20` and `ncarsa22`, for a browser's trust
 /// store, each checked against its SHA-256 pinned here.
 ///
-/// # Panics
+/// # Errors
 ///
-/// If an embedded certificate does not match its pinned SHA-256 (a broken build).
-pub fn nca_tls_roots() -> Vec<(&'static str, &'static [u8])> {
+/// An embedded certificate is missing or does not match its pinned SHA-256 (a broken
+/// build): the message names it.
+pub fn nca_tls_roots() -> Result<Vec<(&'static str, &'static [u8])>, String> {
+    pinned(&TLS_ROOTS)
+}
+
+/// The embedded certificates of `pins`, each checked against its SHA-256.
+fn pinned(pins: &[(&'static str, &str)]) -> Result<Vec<(&'static str, &'static [u8])>, String> {
     use sha2::{Digest, Sha256};
-    TLS_ROOTS
-        .iter()
+    pins.iter()
         .map(|&(alias, sha256)| {
             let (_, der) = EMBEDDED
                 .iter()
                 .find(|(a, _)| *a == alias)
-                .unwrap_or_else(|| panic!("{alias} is not embedded"));
+                .ok_or_else(|| format!("the certificate {alias} is not embedded"))?;
             let digest = Sha256::digest(der);
             let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-            assert_eq!(hex, sha256, "embedded certificate {alias}");
-            (alias, *der)
+            if hex != sha256 {
+                return Err(format!(
+                    "the embedded certificate {alias} has SHA-256 {hex}, not {sha256}"
+                ));
+            }
+            Ok((alias, *der))
         })
         .collect()
 }
@@ -161,7 +170,7 @@ mod tests {
 
     #[test]
     fn tls_roots_are_the_pinned_rsa_cas() {
-        let roots = nca_tls_roots();
+        let roots = nca_tls_roots().unwrap();
         assert_eq!(
             roots.iter().map(|(alias, _)| *alias).collect::<Vec<_>>(),
             ["rcarsa20", "ncarsa22"]
@@ -169,5 +178,16 @@ mod tests {
         for (alias, der) in roots {
             assert!(EMBEDDED.contains(&(alias, der)), "{alias}");
         }
+        // A wrong pin or an unknown alias is an error, never a panic.
+        let wrong = pinned(&[("rcarsa20", "00")]).unwrap_err();
+        assert!(
+            wrong.contains("rcarsa20") && wrong.contains("not 00"),
+            "{wrong}"
+        );
+        assert!(
+            pinned(&[("nope", "00")])
+                .unwrap_err()
+                .contains("not embedded")
+        );
     }
 }

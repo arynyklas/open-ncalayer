@@ -30,7 +30,9 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 use zeroize::Zeroizing;
 
-pub use files::{TlsFiles, forget_replaced_ca, load_info, replaced_cas, save, server_config};
+pub use files::{
+    TlsFiles, forget_replaced_ca, load_info, replaced_cas, save, server_config, set_mkcert_consent,
+};
 pub use generate::generate;
 pub use import::import;
 pub use instructions::{TargetOs, instructions, nss_nickname, sha1_grouped};
@@ -52,13 +54,29 @@ pub enum TlsSource {
     #[serde(alias = "generated")]
     Own,
     /// Issued by [`issue_with_mkcert`] with the key of the mkcert CA in `caroot`. The user
-    /// agreed at `consented_at` (RFC 3339) that this key is read at every renewal.
+    /// agreed at `consented_at` (RFC 3339) that this key is read at every renewal; `None`:
+    /// the consent was withdrawn ([`set_mkcert_consent`]), and the certificate is reminded
+    /// of like any other instead of being re-issued.
     Mkcert {
         caroot: PathBuf,
-        consented_at: String,
+        #[serde(default)]
+        consented_at: Option<String>,
     },
     /// Supplied by the user via [`import`].
     Imported,
+}
+
+impl TlsSource {
+    /// Whether the certificate is re-issued automatically: mkcert's, with the consent.
+    pub fn renews_itself(&self) -> bool {
+        matches!(
+            self,
+            TlsSource::Mkcert {
+                consented_at: Some(_),
+                ..
+            }
+        )
+    }
 }
 
 /// Metadata stored next to the TLS files (`tls.json`).
@@ -91,22 +109,27 @@ pub enum Renewal {
     AutoRenew,
 }
 
-/// Whether the server certificate of `info` is due for renewal at `now`: an mkcert one is
-/// re-issued automatically within [`AUTO_RENEW_BEFORE`] of its end (and not reminded of
-/// before), others are reminded of within [`RENEW_BEFORE`]. An unreadable end date counts
-/// as due today.
+/// Whether the server certificate of `info` is due for renewal at `now`: an mkcert one with
+/// the consent is re-issued automatically within [`AUTO_RENEW_BEFORE`] of its end (and not
+/// reminded of before), others are reminded of within [`RENEW_BEFORE`]. An unreadable end
+/// date counts as due today.
 pub fn needs_renewal(info: &TlsInfo, now: OffsetDateTime) -> Renewal {
     let Ok(not_after) = OffsetDateTime::parse(&info.leaf_not_after, &Rfc3339) else {
         return Renewal::Remind { days: 0 };
     };
     let left = not_after - now;
-    match info.source {
-        TlsSource::Mkcert { .. } if left <= AUTO_RENEW_BEFORE => Renewal::AutoRenew,
-        TlsSource::Mkcert { .. } => Renewal::None,
-        TlsSource::Own | TlsSource::Imported if left <= RENEW_BEFORE => Renewal::Remind {
+    if info.source.renews_itself() {
+        if left <= AUTO_RENEW_BEFORE {
+            Renewal::AutoRenew
+        } else {
+            Renewal::None
+        }
+    } else if left <= RENEW_BEFORE {
+        Renewal::Remind {
             days: left.whole_days(),
-        },
-        TlsSource::Own | TlsSource::Imported => Renewal::None,
+        }
+    } else {
+        Renewal::None
     }
 }
 

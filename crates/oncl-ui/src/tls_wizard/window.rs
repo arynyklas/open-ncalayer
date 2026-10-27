@@ -1,7 +1,7 @@
-//! The TLS wizard window on the event loop: one at a time, its loading and actions on worker
-//! threads. While one runs the window waits (`busy`) and cannot be closed, so its outcome is
-//! shown. Every action that writes to a trust store, and replacing the server certificate,
-//! first asks in the window; the question's «Да» runs it.
+//! The TLS wizard window on the event loop: one at a time, its loading and actions are jobs
+//! ([`worker`]). While one runs the window waits (`busy`) and cannot be closed, so its outcome
+//! is shown. Every action that writes to a trust store, and replacing the server certificate,
+//! first asks in the window; the question's «Да» runs it, with exactly the CAs it named.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oncl_basics::Locale;
-use oncl_tls::TlsSource;
+use oncl_trust::Certificate;
 use slint::{
     CloseRequestResponse, ComponentHandle, Model, ModelRc, PlatformError, SharedString, VecModel,
 };
@@ -17,26 +17,45 @@ use time::OffsetDateTime;
 
 use super::texts::{Texts, fill};
 use super::{
-    IssueForm, Snapshot, Source, TlsWizardServices, browser_rows, ca_line, install_text,
-    issue_error_text, issued_text, mkcert_text, outcomes_text, replaced_text, status_text,
+    Applied, IssueForm, Outcomes, Snapshot, Source, TlsWizardServices, action_text, browser_rows,
+    ca_line, install_text, issue_error_text, issued_text, mkcert_text, replaced_text, status_text,
     store_state, trust_text,
 };
 use crate::foreground;
 use crate::prompter::select_desktop_language;
 use crate::ui::{BrowserRow, TlsWizardWindow, TrustStoreRow};
-use crate::windows::{self, Desktop};
+use crate::windows::Desktop;
+use crate::worker::{self, JobWindow, run, with};
 
 /// How often the list of browsers that reported is refreshed while the window is open.
 const REPORTS_EVERY: Duration = Duration::from_secs(2);
 
-/// An action waiting for the confirmation's «Да».
+/// An action waiting for the confirmation's «Да», with the CAs the question named.
 #[derive(Debug)]
 enum Pending {
     Issue(IssueForm),
-    Install(Vec<String>),
-    Remove(Vec<String>),
+    Install {
+        labels: Vec<String>,
+        ca: Certificate,
+    },
+    Remove {
+        labels: Vec<String>,
+        ca: Certificate,
+    },
     InstallNca(Vec<String>),
-    RemoveReplaced(Vec<String>),
+    RemoveReplaced {
+        labels: Vec<String>,
+        cas: Vec<Certificate>,
+    },
+}
+
+/// What a button asks to do with the ticked stores.
+#[derive(Clone, Copy, Debug)]
+enum StoresAction {
+    Install,
+    Remove,
+    InstallNca,
+    RemoveReplaced,
 }
 
 /// The open wizard. Its callbacks find it by `id` in [`OPEN`], so that none holds it (a
@@ -67,6 +86,43 @@ fn current(id: u64) -> Option<Rc<Open>> {
 /// Whether the wizard is open.
 pub(crate) fn is_open() -> bool {
     OPEN.with_borrow(Option::is_some)
+}
+
+impl JobWindow for Open {
+    type Services = TlsWizardServices;
+    const NAME: &'static str = "tls-wizard";
+
+    fn find(id: u64) -> Option<Rc<Open>> {
+        current(id)
+    }
+
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn desktop(&self) -> &Rc<Desktop> {
+        &self.desktop
+    }
+
+    fn services(&self) -> Arc<TlsWizardServices> {
+        Arc::clone(&self.desktop.tls)
+    }
+
+    fn busy(&self) -> bool {
+        self.ui.get_busy()
+    }
+
+    fn set_busy(&self, busy: bool) {
+        self.ui.set_busy(busy);
+    }
+
+    fn show_message(&self, text: &str, error: bool) {
+        show_message(&self.ui, text, error);
+    }
+
+    fn failure_text(&self) -> &'static str {
+        Texts::of(self.desktop.locale.get()).cannot_start
+    }
 }
 
 /// Shows the wizard, or brings the open one to the front. On the event loop.
@@ -108,19 +164,22 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
 
     ui.on_refresh(move || with(id, load));
     ui.on_issue(move || with(id, issue));
+    ui.on_consent_toggled(move |on| with(id, |open| consent(open, on)));
     ui.on_browse_chain(move || with(id, |open| browse(open, Field::Chain)));
     ui.on_browse_key(move || with(id, |open| browse(open, Field::Key)));
     ui.on_store_toggled(move |i, checked| with(id, |open| toggle(open, i, checked)));
-    ui.on_install_ca(move || with(id, |open| ask_for_stores(open, Pending::Install)));
-    ui.on_remove_ca(move || with(id, |open| ask_for_stores(open, Pending::Remove)));
-    ui.on_install_nca(move || with(id, |open| ask_for_stores(open, Pending::InstallNca)));
+    ui.on_install_ca(move || with(id, |open| ask_for_stores(open, StoresAction::Install)));
+    ui.on_remove_ca(move || with(id, |open| ask_for_stores(open, StoresAction::Remove)));
+    ui.on_install_nca(move || with(id, |open| ask_for_stores(open, StoresAction::InstallNca)));
     ui.on_remove_replaced(move || {
-        with(id, |open| ask_for_stores(open, Pending::RemoveReplaced));
+        with(id, |open| {
+            ask_for_stores(open, StoresAction::RemoveReplaced)
+        });
     });
     ui.on_open_selftest(move || with(id, open_selftest));
     ui.on_confirm(move || with(id, confirm));
     ui.on_cancel_confirm(move || {
-        with(id, |open| {
+        with(id, |open: &Open| {
             open.pending.take();
             open.ui.set_confirm_text(SharedString::new());
         });
@@ -141,31 +200,25 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
     Ok(())
 }
 
-/// Runs `f` with the wizard `id`, if it is open.
-fn with(id: u64, f: impl FnOnce(&Open)) {
-    if let Some(open) = current(id) {
-        f(&open);
-    }
-}
-
 /// «Закрыть» or the window's close button: closes the wizard `id`, unless it waits for an
 /// action, whose outcome the user must see.
 fn close_requested(id: u64) -> CloseRequestResponse {
-    if current(id).is_some_and(|open| open.ui.get_busy()) {
-        return CloseRequestResponse::KeepWindowShown;
-    }
+    worker::close_requested::<Open>(id, close)
+}
+
+/// Closes the wizard `id`.
+fn close(id: u64) {
     let Some(open) = OPEN.with_borrow_mut(|slot| slot.take_if(|open| open.id == id)) else {
-        return CloseRequestResponse::HideWindow;
+        return;
     };
     if let Err(e) = open.ui.hide() {
         tracing::warn!(error = %e, "cannot hide the TLS wizard");
     }
     // This runs inside one of the window's callbacks: release the window after it.
     slint::Timer::single_shot(Duration::ZERO, move || drop(open));
-    CloseRequestResponse::HideWindow
 }
 
-/// Loads the state on a worker thread, then shows it.
+/// Loads the state as a job, then shows it.
 fn load(open: &Open) {
     run(
         open,
@@ -191,7 +244,7 @@ fn show_snapshot(open: &Open, snapshot: Snapshot, l: Locale) {
             .position(|s| *s == Source::of(source))
             .unwrap_or(0);
         ui.set_source(i32::try_from(index).unwrap_or(0));
-        ui.set_mkcert_consent(matches!(source, TlsSource::Mkcert { .. }));
+        ui.set_mkcert_consent(source.renews_itself());
     }
     ui.set_mkcert_found(snapshot.mkcert.is_some());
     ui.set_mkcert_text(mkcert_text(snapshot.mkcert.as_deref(), l).into());
@@ -280,10 +333,59 @@ fn issue(open: &Open) {
     }
 }
 
-/// Asks to run the action `pending` makes of the ticked stores.
-fn ask_for_stores(open: &Open, pending: fn(Vec<String>) -> Pending) {
-    let l = open.desktop.locale.get();
-    let t = Texts::of(l);
+/// The mkcert consent box changed. For a saved mkcert certificate the change is recorded at
+/// once: unticked withdraws the consent (the key is read no more), ticked gives it again.
+fn consent(open: &Open, on: bool) {
+    let saved_mkcert = open
+        .snapshot
+        .borrow()
+        .as_ref()
+        .and_then(Snapshot::source)
+        .is_some_and(|source| matches!(source, oncl_tls::TlsSource::Mkcert { .. }));
+    if !saved_mkcert {
+        return;
+    }
+    run(
+        open,
+        move |s| {
+            (
+                s.set_mkcert_consent(on, OffsetDateTime::now_utc()),
+                s.load(),
+            )
+        },
+        move |desktop, open, (saved, snapshot)| {
+            let l = desktop.locale.get();
+            let t = Texts::of(l);
+            if let Err(e) = &saved {
+                tracing::warn!(error = %e, "TLS wizard: cannot save the mkcert consent");
+            }
+            let Some(open) = open else {
+                return;
+            };
+            match saved {
+                Ok(_) if on => show_message(&open.ui, t.consent_given, false),
+                Ok(_) => show_message(&open.ui, t.consent_withdrawn, false),
+                Err(e) => {
+                    show_message(
+                        &open.ui,
+                        &fill(t.cannot_save_consent, &[&e.to_string()]),
+                        true,
+                    );
+                }
+            }
+            open.ui.set_mkcert_consent(
+                snapshot
+                    .source()
+                    .is_some_and(oncl_tls::TlsSource::renews_itself),
+            );
+            show_snapshot(open, snapshot, l);
+        },
+    );
+}
+
+/// Asks to run `action` on the ticked stores, naming the CAs it acts on.
+fn ask_for_stores(open: &Open, action: StoresAction) {
+    let t = Texts::of(open.desktop.locale.get());
     let labels: Vec<String> = open
         .stores
         .borrow()
@@ -295,43 +397,70 @@ fn ask_for_stores(open: &Open, pending: fn(Vec<String>) -> Pending) {
         show_message(&open.ui, t.none_selected, true);
         return;
     }
-    let pending = pending(labels);
-    let question = {
+    let asked = {
         let snapshot = open.snapshot.borrow();
-        question(&pending, snapshot.as_ref(), t)
+        pending(action, labels, snapshot.as_ref()).map(|pending| {
+            let question = question(&pending, snapshot.as_ref(), t);
+            (pending, question)
+        })
     };
-    ask(open, question, pending);
+    match asked {
+        Some((pending, question)) => ask(open, question, pending),
+        None => show_message(&open.ui, t.no_ca, true),
+    }
+}
+
+/// The action `action` on `labels` with the CAs of `snapshot` it acts on; `None` without
+/// an own CA to install or remove.
+fn pending(
+    action: StoresAction,
+    labels: Vec<String>,
+    snapshot: Option<&Snapshot>,
+) -> Option<Pending> {
+    let own = || snapshot.and_then(Snapshot::own_ca).cloned();
+    Some(match action {
+        StoresAction::Install => Pending::Install { labels, ca: own()? },
+        StoresAction::Remove => Pending::Remove { labels, ca: own()? },
+        StoresAction::InstallNca => Pending::InstallNca(labels),
+        StoresAction::RemoveReplaced => Pending::RemoveReplaced {
+            labels,
+            cas: snapshot
+                .map(|s| s.replaced.iter().map(|r| r.ca.clone()).collect())
+                .unwrap_or_default(),
+        },
+    })
 }
 
 /// The question that confirms `pending`.
 fn question(pending: &Pending, snapshot: Option<&Snapshot>, t: &Texts) -> String {
-    let ca = || {
-        let (name, sha1) = snapshot
-            .and_then(|s| s.own_ca().map(|ca| (s, ca)))
-            .map(|(s, ca)| {
-                let name =
-                    s.ca.as_ref()
-                        .and_then(|(_, n)| n.clone())
-                        .unwrap_or_default();
-                (name, oncl_tls::sha1_grouped(&super::hex(&ca.sha1())))
-            })
+    let named = |ca: &Certificate| {
+        let name = snapshot
+            .and_then(|s| s.ca.as_ref())
+            .filter(|(own, _)| own == ca)
+            .and_then(|(_, name)| name.clone())
             .unwrap_or_default();
-        (name, sha1)
+        (name, oncl_tls::sha1_grouped(&super::hex(&ca.sha1())))
     };
     match pending {
         Pending::Issue(_) => t.confirm_replace.to_owned(),
-        Pending::Install(labels) => {
-            let (name, sha1) = ca();
+        Pending::Install { labels, ca } => {
+            let (name, sha1) = named(ca);
             fill(t.confirm_install, &[&name, &sha1, &labels.join(", ")])
         }
-        Pending::Remove(labels) => {
-            let (name, sha1) = ca();
+        Pending::Remove { labels, ca } => {
+            let (name, sha1) = named(ca);
             fill(t.confirm_remove, &[&name, &sha1, &labels.join(", ")])
         }
         Pending::InstallNca(labels) => fill(t.confirm_nca, &[&labels.join(", ")]),
-        Pending::RemoveReplaced(labels) => {
+        Pending::RemoveReplaced { labels, cas } => {
             let replaced: Vec<String> = snapshot
-                .map(|s| s.replaced.iter().map(ca_line).collect())
+                .map(|s| {
+                    s.replaced
+                        .iter()
+                        .filter(|r| cas.contains(&r.ca))
+                        .map(ca_line)
+                        .collect()
+                })
                 .unwrap_or_default();
             format!(
                 "{}\n{}",
@@ -355,7 +484,7 @@ fn confirm(open: &Open) {
     }
 }
 
-/// Runs `pending` on a worker thread, then shows its outcome and the new state.
+/// Runs `pending` as a job, then shows its outcome and the new state.
 fn act(open: &Open, pending: Pending) {
     match pending {
         Pending::Issue(form) => run(
@@ -371,10 +500,10 @@ fn act(open: &Open, pending: Pending) {
                 };
                 match &issued {
                     Ok(issued) => {
-                        let failed = matches!(issued.applied, super::Applied::Failed(_));
+                        let failed = matches!(issued.applied, Applied::Failed(_));
                         show_message(&open.ui, &issued_text(issued, l), failed);
                         // Installing the new CA comes next.
-                        if issued.info.source == TlsSource::Own {
+                        if issued.info.source == oncl_tls::TlsSource::Own {
                             open.ui.set_tab(2);
                         }
                     }
@@ -383,34 +512,31 @@ fn act(open: &Open, pending: Pending) {
                 show_snapshot(open, snapshot, l);
             },
         ),
-        Pending::Install(labels) => stores_action(open, move |s| s.install_ca(&labels)),
-        Pending::Remove(labels) => stores_action(open, move |s| s.remove_ca(&labels)),
-        Pending::InstallNca(labels) => {
-            stores_action(open, move |s| Some(s.install_nca_roots(&labels)));
+        Pending::Install { labels, ca } => {
+            stores_action(open, move |s| s.install_ca(&labels, &ca));
         }
-        Pending::RemoveReplaced(labels) => {
-            stores_action(open, move |s| Some(s.remove_replaced(&labels)));
+        Pending::Remove { labels, ca } => {
+            stores_action(open, move |s| s.remove_ca(&labels, &ca));
+        }
+        Pending::InstallNca(labels) => stores_action(open, move |s| s.install_nca_roots(&labels)),
+        Pending::RemoveReplaced { labels, cas } => {
+            stores_action(open, move |s| s.remove_replaced(&labels, &cas));
         }
     }
 }
 
-/// Runs an action on the stores (`None`: there is no own CA to act with), then shows its
-/// outcome per store and the new state.
+/// Runs an action on the stores as a job, then shows its outcome per store (or why it did
+/// nothing) and the new state.
 fn stores_action(
     open: &Open,
-    action: impl FnOnce(&TlsWizardServices) -> Option<Vec<(String, super::StoreOutcome)>>
-    + Send
-    + 'static,
+    action: impl FnOnce(&TlsWizardServices) -> Outcomes + Send + 'static,
 ) {
     run(
         open,
         move |s| (action(s), s.load()),
         |desktop, open, (outcomes, snapshot)| {
             let l = desktop.locale.get();
-            let (text, failed) = match &outcomes {
-                Some(outcomes) => outcomes_text(outcomes, l),
-                None => (Texts::of(l).no_ca.to_owned(), true),
-            };
+            let (text, failed) = action_text(&outcomes, l);
             if failed {
                 tracing::warn!(%text, "TLS wizard: a trust store action failed");
             }
@@ -447,7 +573,7 @@ fn open_selftest(open: &Open) {
                 tracing::warn!(%url, error = %e, "cannot open the browser");
                 let e = e.to_string();
                 let _ = slint::invoke_from_event_loop(move || {
-                    with(id, |open| {
+                    with(id, |open: &Open| {
                         let t = Texts::of(open.desktop.locale.get());
                         show_message(&open.ui, &fill(t.cannot_open_browser, &[&e]), true);
                     });
@@ -501,68 +627,22 @@ fn browse(open: &Open, field: Field) {
     }
 }
 
-/// Runs `job` on a worker thread while the window waits; then [`finish`] hands the result
-/// to `done` on the event loop.
-fn run<T: Send + 'static>(
-    open: &Open,
-    job: impl FnOnce(&TlsWizardServices) -> T + Send + 'static,
-    done: impl FnOnce(&Desktop, Option<&Open>, T) + Send + 'static,
-) {
-    open.ui.set_busy(true);
-    let services = Arc::clone(&open.desktop.tls);
-    let id = open.id;
-    let spawned = std::thread::Builder::new()
-        .name("tls-wizard".into())
-        .spawn(move || {
-            let result = job(&services);
-            let delivered = slint::invoke_from_event_loop(move || finish(id, result, done));
-            if let Err(e) = delivered {
-                tracing::warn!(error = %e, "TLS wizard: a result is lost");
-            }
-        });
-    if let Err(e) = spawned {
-        tracing::error!(error = %e, "TLS wizard: cannot start a worker thread");
-        open.ui.set_busy(false);
-        let t = Texts::of(open.desktop.locale.get());
-        show_message(&open.ui, t.cannot_start, true);
-    }
-}
-
-/// Hands a worker's `result` to `done`, with the daemon's windows and the wizard `id` if it
-/// is still open (it waits no longer).
-fn finish<T>(id: u64, result: T, done: impl FnOnce(&Desktop, Option<&Open>, T)) {
-    let open = current(id);
-    if let Some(open) = &open {
-        open.ui.set_busy(false);
-    }
-    let desktop = open
-        .as_ref()
-        .map(|open| Rc::clone(&open.desktop))
-        .or_else(windows::desktop);
-    match desktop {
-        Some(desktop) => done(&desktop, open.as_deref(), result),
-        None => tracing::warn!("TLS wizard: a result without the windows"),
-    }
-}
-
 fn show_message(ui: &TlsWizardWindow, text: &str, error: bool) {
     ui.set_message(SharedString::from(text));
     ui.set_message_is_error(error);
 }
 
-/// Opens the wizard with the state its services load now (on the offscreen platform of the
-/// tests, where a worker's result never arrives by itself); returns the window.
+/// Opens the wizard and runs its loading at once (on the offscreen platform of the tests,
+/// with [`worker::manual`] jobs); returns the window.
 #[cfg(test)]
 pub(crate) fn open_loaded(desktop: &Rc<Desktop>) -> TlsWizardWindow {
+    worker::manual::enable();
     open(desktop);
-    let open = OPEN.with_borrow(Clone::clone).expect("the wizard is open");
-    let snapshot = desktop.tls.load();
-    finish(open.id, snapshot, |desktop, open, snapshot| {
-        if let Some(open) = open {
-            show_snapshot(open, snapshot, desktop.locale.get());
-        }
-    });
-    open.ui.clone_strong()
+    worker::manual::run_all();
+    OPEN.with_borrow(Clone::clone)
+        .expect("the wizard is open")
+        .ui
+        .clone_strong()
 }
 
 /// Shows the question «Установить…» asks for every listed store, without the action behind
@@ -578,25 +658,31 @@ pub(crate) fn preview_install_question(desktop: &Desktop) {
         .iter()
         .map(|(l, _)| l.clone())
         .collect();
-    let text = question(
-        &Pending::Install(labels),
-        open.snapshot.borrow().as_ref(),
-        Texts::of(desktop.locale.get()),
-    );
+    let snapshot = open.snapshot.borrow();
+    let text = match pending(StoresAction::Install, labels, snapshot.as_ref()) {
+        Some(pending) => question(&pending, snapshot.as_ref(), Texts::of(desktop.locale.get())),
+        None => return,
+    };
     open.ui.set_confirm_text(text.into());
 }
 
-/// The wizard on the offscreen platform of the tests, without an event loop: a worker's
-/// result never arrives by itself, so a test hands it over with [`finish`].
+/// The wizard on the offscreen platform of the tests: jobs wait for
+/// [`worker::manual::run_all`], which runs them on the test's thread.
 #[cfg(test)]
 mod tests {
+    use std::io;
+
+    use oncl_trust::{InstallOutcome, StoreState, TrustReport, TrustStore};
+
     use super::*;
     use crate::tls_wizard::fakes::{MemoryStore, services};
+    use crate::tls_wizard::{NamedStore, TrustTargets};
     use crate::windows::{DesktopWindows, set_desktop_windows};
     use crate::{AboutInfo, offscreen};
 
-    fn desktop(root: &std::path::Path, user: &MemoryStore) -> Rc<Desktop> {
+    fn desktop_with(root: &std::path::Path, tls: TlsWizardServices) -> Rc<Desktop> {
         offscreen::install();
+        worker::manual::enable();
         set_desktop_windows(DesktopWindows {
             locale: Locale::Ru,
             settings: crate::settings_view::fakes::services(
@@ -604,22 +690,30 @@ mod tests {
                 crate::settings_view::fakes::FakeOriginal::default(),
             ),
             about: AboutInfo::default(),
-            tls: services(root, vec![("User".to_owned(), user.clone())], None),
+            tls,
             on_saved: Box::new(|_| {}),
         });
-        windows::desktop().unwrap()
+        crate::windows::desktop().unwrap()
+    }
+
+    fn desktop(root: &std::path::Path, user: &MemoryStore) -> Rc<Desktop> {
+        desktop_with(
+            root,
+            services(root, vec![("User".to_owned(), user.clone())], None),
+        )
     }
 
     fn the_window() -> Rc<Open> {
         OPEN.with_borrow(Clone::clone).expect("the wizard is open")
     }
 
-    /// Hands the window the state its services load now.
-    fn loaded(window: &Open) {
-        let snapshot = window.desktop.tls.load();
-        finish(window.id, snapshot, |desktop, open, snapshot| {
-            show_snapshot(open.unwrap(), snapshot, desktop.locale.get());
-        });
+    fn own() -> IssueForm {
+        IssueForm {
+            source: Source::Own,
+            mkcert_consent: false,
+            chain: String::new(),
+            key: String::new(),
+        }
     }
 
     #[test]
@@ -629,29 +723,24 @@ mod tests {
         let desktop = desktop(dir.path(), &user);
         desktop
             .tls
-            .issue(
-                &IssueForm {
-                    source: Source::Own,
-                    mkcert_consent: false,
-                    chain: String::new(),
-                    key: String::new(),
-                },
-                OffsetDateTime::now_utc(),
-            )
+            .issue(&own(), OffsetDateTime::now_utc())
             .unwrap();
         open(&desktop);
         let window = the_window();
-        // Loading runs on a worker: the window waits and cannot be closed.
+        // Loading is a job: the window waits and cannot be closed.
         assert!(window.ui.get_busy());
         assert_eq!(
             close_requested(window.id),
             CloseRequestResponse::KeepWindowShown
         );
-        loaded(&window);
+        assert_eq!(worker::manual::run_all(), 1);
+        assert!(!window.ui.get_busy());
         assert!(window.ui.get_can_install_ca());
         assert_eq!(window.ui.get_stores().row_count(), 1);
+        let ca = desktop.tls.load().own_ca().unwrap().clone();
 
-        // «Установить…» only asks; «Отмена» drops the question.
+        // «Установить…» only asks; «Отмена» drops the question; «Да» with no question
+        // does nothing.
         window.ui.invoke_install_ca();
         assert!(
             window
@@ -665,18 +754,23 @@ mod tests {
         assert!(window.ui.get_confirm_text().is_empty());
         window.ui.invoke_confirm();
         assert!(!window.ui.get_busy());
+        assert_eq!(worker::manual::run_all(), 0);
         assert!(user.certificates().is_empty());
 
-        // «Да» starts the action on a worker (its result is handed over here).
+        // «Да» starts the job; the store is written only when it runs.
         window.ui.invoke_install_ca();
         window.ui.invoke_confirm();
         assert!(window.ui.get_busy());
         assert!(window.ui.get_confirm_text().is_empty());
+        assert!(user.certificates().is_empty());
+        assert_eq!(worker::manual::run_all(), 1);
+        assert!(!window.ui.get_busy());
+        assert_eq!(user.certificates(), [ca.der().to_vec()]);
+        assert_eq!(window.ui.get_message(), "User: установлен");
 
         // An unticked store is never asked about.
         window.ui.invoke_store_toggled(0, false);
-        finish(window.id, (), |_, _, ()| {});
-        window.ui.invoke_install_ca();
+        window.ui.invoke_remove_ca();
         assert!(window.ui.get_confirm_text().is_empty());
         assert_eq!(window.ui.get_message(), "Отметьте хотя бы одно хранилище.");
 
@@ -684,9 +778,142 @@ mod tests {
         window.ui.invoke_issue();
         assert!(window.ui.get_confirm_text().starts_with("Заменить текущий"));
         window.ui.invoke_cancel_confirm();
+        assert_eq!(worker::manual::run_all(), 0);
         assert_eq!(close_requested(window.id), CloseRequestResponse::HideWindow);
         assert!(!is_open());
+        assert_eq!(user.certificates(), [ca.der().to_vec()]);
+    }
+
+    #[test]
+    fn yes_acts_on_the_confirmed_ca_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = MemoryStore::default();
+        let desktop = desktop(dir.path(), &user);
+        desktop
+            .tls
+            .issue(&own(), OffsetDateTime::now_utc())
+            .unwrap();
+        open(&desktop);
+        let window = the_window();
+        worker::manual::run_all();
+
+        // The question names this CA; a re-issue (say, `tls init --force`) replaces it
+        // before «Да».
+        window.ui.invoke_install_ca();
+        desktop
+            .tls
+            .issue(&own(), OffsetDateTime::now_utc())
+            .unwrap();
+        window.ui.invoke_confirm();
+        worker::manual::run_all();
         assert!(user.certificates().is_empty());
+        assert!(window.ui.get_message_is_error());
+        assert!(
+            window
+                .ui
+                .get_message()
+                .starts_with("Центр сертификации сменился"),
+            "{}",
+            window.ui.get_message()
+        );
+        assert_eq!(close_requested(window.id), CloseRequestResponse::HideWindow);
+    }
+
+    /// A store whose install breaks off (panics).
+    struct Broken;
+
+    impl TrustStore for Broken {
+        fn contains(&self, _: &Certificate) -> io::Result<bool> {
+            Ok(false)
+        }
+
+        fn install(&self, _: &Certificate) -> io::Result<InstallOutcome> {
+            panic!("a broken store")
+        }
+
+        fn remove(&self, _: &Certificate) -> io::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    struct BrokenTargets;
+
+    impl TrustTargets for BrokenTargets {
+        fn check(&self, _: &Certificate, _: &Certificate) -> TrustReport {
+            TrustReport {
+                os_store: StoreState::Absent,
+                os_chain_ok: None,
+                nss: Vec::new(),
+                firefox_enterprise_roots: Vec::new(),
+            }
+        }
+
+        fn stores(&self) -> Vec<NamedStore> {
+            vec![NamedStore {
+                label: "Broken".to_owned(),
+                store: Box::new(Broken),
+            }]
+        }
+    }
+
+    #[test]
+    fn a_broken_job_frees_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tls = services(dir.path(), Vec::new(), None);
+        tls.trust = Box::new(BrokenTargets);
+        let desktop = desktop_with(dir.path(), tls);
+        desktop
+            .tls
+            .issue(&own(), OffsetDateTime::now_utc())
+            .unwrap();
+        open(&desktop);
+        let window = the_window();
+        worker::manual::run_all();
+
+        window.ui.invoke_install_ca();
+        window.ui.invoke_confirm();
+        assert!(window.ui.get_busy());
+        assert_eq!(worker::manual::run_all(), 1);
+        assert!(!window.ui.get_busy());
+        assert!(window.ui.get_message_is_error());
+        assert_eq!(window.ui.get_message(), "Не удалось выполнить действие");
+        assert_eq!(close_requested(window.id), CloseRequestResponse::HideWindow);
+    }
+
+    #[test]
+    fn unticking_withdraws_the_mkcert_consent() {
+        let dir = tempfile::tempdir().unwrap();
+        let caroot = tempfile::tempdir().unwrap();
+        crate::tls_wizard::fakes::fake_mkcert(caroot.path());
+        let tls = services(dir.path(), Vec::new(), Some(caroot.path().to_path_buf()));
+        let desktop = desktop_with(dir.path(), tls);
+        let form = IssueForm {
+            source: Source::Mkcert,
+            mkcert_consent: true,
+            ..own()
+        };
+        desktop.tls.issue(&form, OffsetDateTime::now_utc()).unwrap();
+        open(&desktop);
+        let window = the_window();
+        worker::manual::run_all();
+        assert_eq!(window.ui.get_source(), 1);
+        assert!(window.ui.get_mkcert_consent());
+
+        window.ui.set_mkcert_consent(false);
+        window.ui.invoke_consent_toggled(false);
+        assert_eq!(worker::manual::run_all(), 1);
+        let info = oncl_tls::load_info(&desktop.tls.files).unwrap().unwrap();
+        assert!(!info.source.renews_itself());
+        assert!(!window.ui.get_mkcert_consent());
+        assert!(window.ui.get_message().starts_with("Согласие отозвано"));
+
+        window.ui.set_mkcert_consent(true);
+        window.ui.invoke_consent_toggled(true);
+        worker::manual::run_all();
+        let info = oncl_tls::load_info(&desktop.tls.files).unwrap().unwrap();
+        assert!(info.source.renews_itself());
+        assert!(window.ui.get_mkcert_consent());
+        assert_eq!(close_requested(window.id), CloseRequestResponse::HideWindow);
     }
 
     #[test]
@@ -709,7 +936,7 @@ mod tests {
             window.ui.get_selftest_url(),
             "https://127.0.0.1:13579/openncalayer/selftest"
         );
-        loaded(&window);
+        worker::manual::run_all();
         assert_eq!(close_requested(window.id), CloseRequestResponse::HideWindow);
     }
 }

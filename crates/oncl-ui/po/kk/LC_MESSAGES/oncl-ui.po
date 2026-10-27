@@ -188,8 +188,8 @@ msgstr "Өз сертификатым (импорт)"
 msgid "OpenNCALayer creates a local CA that can only certify 127.0.0.1, ::1 and localhost, issues the certificate and destroys the CA's key at once. Install the new CA on the «Installation» tab."
 msgstr "OpenNCALayer тек 127.0.0.1, ::1 және localhost растай алатын жергілікті куәландырушы орталық жасайды, сертификат шығарады және орталықтың кілтін бірден жояды. Жаңа куәландырушы орталықты «Орнату» қойындысында орнатыңыз."
 
-msgid "I agree that OpenNCALayer reads the mkcert CA key rootCA-key.pem at every renewal (it is never copied)"
-msgstr "OpenNCALayer әр қайта шығарған сайын mkcert орталығының rootCA-key.pem кілтін оқитынына келісемін (кілт ешқайда көшірілмейді)"
+msgid "I agree that OpenNCALayer reads the mkcert CA key rootCA-key.pem at every renewal (it is never copied). Untick to withdraw the consent."
+msgstr "OpenNCALayer әр қайта шығарған сайын mkcert орталығының rootCA-key.pem кілтін оқитынына келісемін (кілт ешқайда көшірілмейді). Келісімді кері қайтару үшін белгіні алыңыз."
 
 msgid "A certificate for 127.0.0.1 with serverAuth, ECDSA P-256/P-384 or RSA of 2048 bits and more, not signed with SHA-1, and its key (PEM)."
 msgstr "127.0.0.1 үшін serverAuth бар, ECDSA P-256/P-384 немесе кемінде 2048 биттік RSA кілтімен, SHA-1 қолтаңбасынсыз сертификат және оның кілті (PEM)."
@@ -221,8 +221,8 @@ msgstr "Ескісін жою"
 msgid "Check"
 msgstr "Тексеру"
 
-msgid "Open the self-test page in each browser you use. A browser that opens it without a certificate warning appears in the list below."
-msgstr "Өзіңіз пайдаланатын әр браузерде өзін-өзі тексеру бетін ашыңыз. Оны сертификат туралы ескертусіз ашқан браузер төмендегі тізімде пайда болады."
+msgid "Open the self-test page in each browser you use. A browser that opened the page and ran it appears in the list below. Only a page that opened without a certificate warning means the browser trusts the certificate: if you clicked through a warning, the browser is listed but does not trust it."
+msgstr "Өзіңіз пайдаланатын әр браузерде өзін-өзі тексеру бетін ашыңыз. Бетті ашқан браузер төмендегі тізімде пайда болады. Сенімді тек сертификат туралы ескертусіз ашылған бет растайды: ескертуден өтіп кетсеңіз, браузер тізімге енеді, бірақ сертификатқа сенбейді."
 
 msgid "Open the check in the browser"
 msgstr "Тексеруді браузерде ашу"

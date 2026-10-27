@@ -8,7 +8,7 @@ use std::process::{ExitCode, Stdio};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use clap::Parser;
 use oncl_accessory::UiRequest;
@@ -247,30 +247,36 @@ fn open_requested_window(window: UiRequest) {
     }
 }
 
-/// Checks the certificate in `files` now and then once a day ([`renewal::check`]): a
-/// re-issued one is served at once through `live`; the outcome goes to the tray.
+/// Checks the certificate in `files` now and then once a day by the wall clock
+/// ([`renewal::check`], [`renewal::check_due`]): a re-issued one is served at once through
+/// `live`; the outcome goes to the tray.
 fn start_renewal(files: TlsFiles, live: Option<Arc<LiveTls>>) {
     let spawned = thread::Builder::new().name("renewal".into()).spawn(move || {
         loop {
-            let check = renewal::check(&files, OffsetDateTime::now_utc());
+            let checked = SystemTime::now();
+            let check = renewal::check(&files, OffsetDateTime::now_utc(), || {
+                renewal::reload(&files, live.as_deref())
+            });
             match &check {
                 RenewalCheck::Nothing => {}
-                RenewalCheck::Due { days } => {
-                    tracing::info!(days, "the server certificate is due for renewal");
+                RenewalCheck::Due { days, expired } => {
+                    tracing::info!(days, expired, "the server certificate is due for renewal");
                 }
                 RenewalCheck::Renewed { not_after } => {
                     tracing::info!(%not_after, "the server certificate is re-issued with mkcert");
-                    renewal::reload(&files, live.as_deref());
                 }
-                RenewalCheck::RenewFailed { days, error } => {
-                    tracing::warn!(days, %error, "cannot re-issue the server certificate with mkcert");
+                RenewalCheck::RenewFailed { days, failure } => {
+                    tracing::warn!(days, ?failure, "cannot re-issue the server certificate with mkcert");
                 }
             }
             post_to_tray(move |status| {
                 status.renewal = check;
                 status.renewal_notification()
             });
-            thread::sleep(renewal::CHECK_EVERY);
+            // Monotonic sleep stops while the computer sleeps: wake hourly, compare clocks.
+            while !renewal::check_due(checked, SystemTime::now()) {
+                thread::sleep(renewal::WAKE_EVERY);
+            }
         }
     });
     if let Err(e) = spawned {
