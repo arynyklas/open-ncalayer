@@ -27,12 +27,13 @@ pub fn index_url(base: &str, channel: Channel) -> String {
 }
 
 /// Downloads the index of `channel` under `base` ([`index_url`]) and its signature
-/// (`.minisig` appended), over HTTPS only, the index up to [`MAX_INDEX_LEN`] bytes.
+/// (`.minisig` appended), over HTTPS only (redirects included: [`GetOptions::https_only`]),
+/// the index up to [`MAX_INDEX_LEN`] bytes.
 ///
 /// # Errors
 ///
 /// [`UpdateError::Fetch`] if `base` is not `https://`, a request gets no response (a body
-/// over its limit included), or a response is not `200`.
+/// over its limit or a redirect to plain HTTP included), or a response is not `200`.
 pub fn fetch(
     transport: &dyn HttpTransport,
     base: &str,
@@ -50,6 +51,7 @@ pub fn fetch(
 fn get(transport: &dyn HttpTransport, url: &str, max_len: u64) -> Result<Vec<u8>, UpdateError> {
     let opts = GetOptions {
         max_len,
+        https_only: true,
         ..GetOptions::default()
     };
     let reply = transport
@@ -71,10 +73,10 @@ mod tests {
     use oncl_pki::http::{HttpError, HttpReply};
     use std::sync::Mutex;
 
-    /// Replies from a table by URL and records the limits asked for.
+    /// Replies from a table by URL and records the limit and `https_only` asked for.
     struct Table {
         replies: Vec<(&'static str, u16, Vec<u8>)>,
-        asked: Mutex<Vec<(String, u64)>>,
+        asked: Mutex<Vec<(String, u64, bool)>>,
     }
 
     impl HttpTransport for Table {
@@ -86,7 +88,7 @@ mod tests {
             self.asked
                 .lock()
                 .unwrap()
-                .push((url.to_owned(), opts.max_len));
+                .push((url.to_owned(), opts.max_len, opts.https_only));
             let (_, status, body) = self
                 .replies
                 .iter()
@@ -135,11 +137,13 @@ mod tests {
             [
                 (
                     "https://example.org/updates/v1/beta.json".to_owned(),
-                    1 << 20
+                    1 << 20,
+                    true
                 ),
                 (
                     "https://example.org/updates/v1/beta.json.minisig".to_owned(),
-                    4096
+                    4096,
+                    true
                 ),
             ]
         );

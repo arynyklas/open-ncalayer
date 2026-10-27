@@ -51,15 +51,19 @@ pub struct GetOptions {
     pub connect_timeout: Duration,
     /// Largest accepted body; a bigger one is an [`HttpError`].
     pub max_len: u64,
+    /// Refuse a URL that is not `https://`, the request's and every redirect's: the request
+    /// fails with an [`HttpError`] instead of going in clear.
+    pub https_only: bool,
 }
 
 impl Default for GetOptions {
-    /// 10 seconds, [`CONNECT_TIMEOUT`] and [`MAX_RESPONSE_LEN`].
+    /// 10 seconds, [`CONNECT_TIMEOUT`], [`MAX_RESPONSE_LEN`], `http://` allowed.
     fn default() -> Self {
         GetOptions {
             timeout: TIMEOUT,
             connect_timeout: CONNECT_TIMEOUT,
             max_len: MAX_RESPONSE_LEN,
+            https_only: false,
         }
     }
 }
@@ -256,6 +260,9 @@ impl UreqTransport {
         let deadline = Instant::now() + opts.timeout;
         let mut url = url.to_owned();
         for _ in 0..=MAX_REDIRECTS {
+            if opts.https_only && !is_https(&url) {
+                return Err(HttpError(format!("{url} is not an https URL")));
+            }
             let (reply, location) = self.send_once(&url, post, deadline, opts)?;
             match redirect(&url, &reply, location.as_deref(), post.is_some())? {
                 Some(next) => {
@@ -362,6 +369,12 @@ fn join_url(base: &str, location: &str) -> Result<String, HttpError> {
         Some(s) if s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https") => Ok(joined),
         _ => Err(bad()),
     }
+}
+
+/// Whether `url` is `https://` (the scheme in any case, as [`join_url`] accepts it).
+fn is_https(url: &str) -> bool {
+    url.get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
 }
 
 impl HttpTransport for UreqTransport {
@@ -614,6 +627,7 @@ mod tests {
         timeout: Duration::from_secs(5),
         connect_timeout: Duration::from_secs(2),
         max_len: MAX_RESPONSE_LEN,
+        https_only: false,
     };
 
     /// Whether a request that cannot connect failed after the connect timeout, not the
@@ -891,6 +905,23 @@ mod tests {
     }
 
     #[test]
+    fn https_only_refuses_plain_http_without_connecting() {
+        // The check runs on every URL of the chain, before its request: the first one here,
+        // a redirect's the same way.
+        let (proxy, heads) = serve_in_turn(Vec::new());
+        let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
+        let opts = GetOptions {
+            https_only: true,
+            ..GetOptions::default()
+        };
+        let e = through.get_with("http://nca.invalid/x", opts).unwrap_err();
+        assert_eq!(e.0, "http://nca.invalid/x is not an https URL");
+        assert!(heads.join().unwrap().is_empty());
+        assert!(is_https("https://h/") && is_https("HTTPS://h/"));
+        assert!(!is_https("http://h/") && !is_https("https:/") && !is_https(""));
+    }
+
+    #[test]
     fn locations_are_resolved_against_the_request() {
         let base = "https://h:8443/a/b/c?q=1";
         let joined = |l| join_url(base, l).unwrap();
@@ -933,6 +964,7 @@ mod tests {
                 timeout: Duration::from_secs(10),
                 connect_timeout: Duration::from_secs(2),
                 max_len: 1 << 20,
+                https_only: false,
             }
         );
     }

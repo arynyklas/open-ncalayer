@@ -24,5 +24,7 @@ time = { workspace = true, features = ["serde", "formatting", "parsing"] }
 [dev-dependencies]
 base64.workspace = true
 minisign.workspace = true
+# A minisign signature in the legacy (not prehashed) mode, which `minisign` cannot make.
+ring.workspace = true
 tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }

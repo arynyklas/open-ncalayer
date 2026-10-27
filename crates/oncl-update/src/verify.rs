@@ -243,20 +243,36 @@ pub(crate) mod tests {
         ));
     }
 
+    /// A minisign signature in the legacy mode (`Ed`: Ed25519 over the raw file, not its
+    /// BLAKE2b-512 hash), built apart from minisign, which only makes prehashed ones; and
+    /// the public key that verifies it.
+    fn legacy_signature(data: &[u8], comment: &str) -> (PublicKey, Vec<u8>) {
+        use ring::signature::{Ed25519KeyPair, KeyPair as _};
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+        let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let key_id = *b"legacy01";
+        let public = [&b"Ed"[..], &key_id, pair.public_key().as_ref()].concat();
+        let public = PublicKey::from_base64(&STANDARD.encode(public)).unwrap();
+        let signature = pair.sign(data);
+        let global = pair.sign(&[signature.as_ref(), comment.as_bytes()].concat());
+        let line = [&b"Ed"[..], &key_id, signature.as_ref()].concat();
+        let text = format!(
+            "untrusted comment: legacy\n{}\ntrusted comment: {comment}\n{}\n",
+            STANDARD.encode(line),
+            STANDARD.encode(global.as_ref())
+        );
+        (public, text.into_bytes())
+    }
+
     #[test]
     fn legacy_unhashed_signatures_are_refused() {
-        let key = TestKey::new();
-        let (index, sig) = signed(&key, "beta", 42);
-        let text = String::from_utf8(sig).unwrap();
-        let mut lines: Vec<&str> = text.lines().collect();
-        // The algorithm is the first two bytes, "ED" (prehashed); "Ed" is the legacy mode.
-        let mut raw = STANDARD.decode(lines[1]).unwrap();
-        assert_eq!(&raw[..2], b"ED");
-        raw[1] = b'd';
-        let legacy = STANDARD.encode(&raw);
-        lines[1] = &legacy;
+        let index = body("beta", 42);
+        let (public, sig) = legacy_signature(&index, "channel=beta;seq=42");
+        // The signature is genuine: minisign-verify accepts it when legacy mode is allowed.
+        let decoded = Signature::decode(std::str::from_utf8(&sig).unwrap()).unwrap();
+        public.verify(&index, &decoded, true).unwrap();
         assert!(matches!(
-            check(&index, lines.join("\n").as_bytes(), &[&key]),
+            verify(&index, &sig, &[public], Channel::Beta, None, NOW),
             Err(UpdateError::BadSignature)
         ));
     }
@@ -353,7 +369,7 @@ pub(crate) mod tests {
             (index, sig)
         };
 
-        // Past `expires` (2026-10-31).
+        // Past `expires` (2026-10-31, also generated + 30 days).
         let (index, sig) = at(index_json("beta", 42));
         let expires = datetime!(2026-10-31 0:00 UTC);
         verify(
@@ -369,6 +385,30 @@ pub(crate) mod tests {
             verify(&index, &sig, &keys, Channel::Beta, None, expires),
             Err(UpdateError::Expired(t)) if t == expires
         ));
+
+        // An `expires` before generated + 30 days ends the index first.
+        let mut early = index_json("beta", 42);
+        early["expires"] = serde_json::json!("2026-10-08T00:00:00Z");
+        let (index, sig) = at(early);
+        let expires = datetime!(2026-10-08 0:00 UTC);
+        verify(
+            &index,
+            &sig,
+            &keys,
+            Channel::Beta,
+            None,
+            expires - Duration::SECOND,
+        )
+        .unwrap();
+        for now in [expires, datetime!(2026-10-20 0:00 UTC)] {
+            assert!(
+                matches!(
+                    verify(&index, &sig, &keys, Channel::Beta, None, now),
+                    Err(UpdateError::Expired(t)) if t == expires
+                ),
+                "{now}"
+            );
+        }
 
         // A far `expires` does not stretch the index past 30 days from `generated`.
         let mut far = index_json("beta", 42);

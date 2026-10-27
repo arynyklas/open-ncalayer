@@ -706,7 +706,8 @@ fn oversized_body_is_rejected() {
         [GetOptions {
             timeout: TIMEOUT,
             connect_timeout: CONNECT_TIMEOUT,
-            max_len: MAX_CRL_LEN
+            max_len: MAX_CRL_LEN,
+            https_only: false,
         }]
     );
     assert!(files(dir.path()).is_empty());
@@ -718,6 +719,7 @@ fn oversized_body_is_rejected() {
         timeout: TIMEOUT,
         connect_timeout: CONNECT_TIMEOUT,
         max_len: len - 1,
+        https_only: false,
     };
     assert!(mock.get_with(INTER_CRL, tight).is_err());
     let roomy = GetOptions {

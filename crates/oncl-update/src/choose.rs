@@ -51,8 +51,12 @@ pub fn rollout_bucket(install_id: &[u8; 16], version: &Version) -> u8 {
 /// A version is offered if it is not revoked, not in `bad` (versions that failed their
 /// health check here), has a package for `flavor` and the installation's
 /// [`rollout_bucket`] is below its `rollout`. The newest offered version is an
-/// [`Choice::Update`] if newer than `current`; if older, it is a [`Choice::Downgrade`]
-/// only when the index revokes `current`, and nothing otherwise.
+/// [`Choice::Update`] if newer than `current`, and nothing otherwise.
+///
+/// When the index revokes `current`, getting off it comes before staging: `rollout` is
+/// ignored, and the newest version neither revoked nor bad with a package for `flavor` is
+/// an [`Choice::Update`] if newer, a [`Choice::Downgrade`] if older. Only then is a
+/// downgrade chosen.
 pub fn choose(
     index: &Index,
     current: &Version,
@@ -60,10 +64,11 @@ pub fn choose(
     install_id: [u8; 16],
     bad: &BTreeSet<Version>,
 ) -> Choice {
+    let current_revoked = index.release(current).is_some_and(|r| r.revoked);
     let offered = |release: &&CoreRelease| {
         !release.revoked
             && !bad.contains(&release.version)
-            && rollout_bucket(&install_id, &release.version) < release.rollout
+            && (current_revoked || rollout_bucket(&install_id, &release.version) < release.rollout)
     };
     let newest = index
         .core
@@ -74,7 +79,6 @@ pub fn choose(
     let Some((release, package)) = newest else {
         return Choice::UpToDate;
     };
-    let current_revoked = index.release(current).is_some_and(|r| r.revoked);
     if release.version > *current {
         Choice::Update(target(release, package, current))
     } else if current_revoked && release.version < *current {
@@ -265,7 +269,7 @@ mod tests {
             ("downgrade", "0.2.0".to_owned())
         );
 
-        // An older version that is bad here or not rolled out to us is passed over.
+        // An older version that is bad here is passed over.
         let bad = BTreeSet::from([v("0.2.0")]);
         let choice = choose(&idx, &v("0.3.0"), Flavor::WinX64, ID, &bad);
         let Choice::Downgrade(t) = choice else {
@@ -274,15 +278,6 @@ mod tests {
         assert_eq!(t.version, v("0.1.0"));
         assert_eq!(t.full, package("0.1.0-full"));
         assert_eq!(t.delta, None);
-        let idx_unrolled = index(vec![
-            release("0.1.0", 100, false),
-            release("0.2.0", 0, false),
-            release("0.3.0", 100, true),
-        ]);
-        assert_eq!(
-            version_of(&pick(&idx_unrolled, "0.3.0")),
-            ("downgrade", "0.1.0".to_owned())
-        );
 
         // A newer version not revoked is an update, as usual.
         let idx = index(vec![
@@ -298,6 +293,86 @@ mod tests {
         // Nothing else offered: stay.
         let idx = index(vec![release("0.3.0", 100, true)]);
         assert_eq!(pick(&idx, "0.3.0"), Choice::UpToDate);
+    }
+
+    #[test]
+    fn revoked_current_version_ignores_the_rollout() {
+        // The fix is staged at 0%, older versions were pruned: an installation on the
+        // revoked version still gets the fix, while one on a good version does not.
+        let idx = index(vec![
+            release("0.2.0", 100, false),
+            release("0.3.0", 100, true),
+            release("0.4.0", 0, false),
+        ]);
+        assert_eq!(
+            version_of(&pick(&idx, "0.3.0")),
+            ("update", "0.4.0".to_owned())
+        );
+        assert_eq!(pick(&idx, "0.2.0"), Choice::UpToDate);
+
+        // A downgrade target outside our bucket is taken too, and preferred over an older
+        // one inside it.
+        let idx = index(vec![
+            release("0.1.0", 100, false),
+            release("0.2.0", 0, false),
+            release("0.3.0", 100, true),
+        ]);
+        assert_eq!(
+            version_of(&pick(&idx, "0.3.0")),
+            ("downgrade", "0.2.0".to_owned())
+        );
+
+        // Every bucket gets the same answer.
+        for n in 0..=u8::MAX {
+            let choice = choose(&idx, &v("0.3.0"), Flavor::WinX64, [n; 16], &BTreeSet::new());
+            assert_eq!(
+                version_of(&choice),
+                ("downgrade", "0.2.0".to_owned()),
+                "{n}"
+            );
+        }
+
+        // Revoked and bad versions stay excluded.
+        let bad = BTreeSet::from([v("0.2.0")]);
+        let choice = choose(&idx, &v("0.3.0"), Flavor::WinX64, ID, &bad);
+        assert_eq!(version_of(&choice), ("downgrade", "0.1.0".to_owned()));
+    }
+
+    #[test]
+    fn pre_releases_order_by_semver() {
+        // alpha.9 -> alpha.10 is an update (numeric, not lexical, order).
+        let idx = index(vec![
+            release("0.1.0-alpha.9", 100, false),
+            release("0.1.0-alpha.10", 100, false),
+        ]);
+        assert_eq!(
+            version_of(&pick(&idx, "0.1.0-alpha.9")),
+            ("update", "0.1.0-alpha.10".to_owned())
+        );
+        // alpha.10 is not moved back to alpha.9.
+        assert_eq!(pick(&idx, "0.1.0-alpha.10"), Choice::UpToDate);
+
+        // beta.N -> the release is an update.
+        let idx = index(vec![
+            release("1.0.0-beta.3", 100, false),
+            release("1.0.0", 100, false),
+        ]);
+        assert_eq!(
+            version_of(&pick(&idx, "1.0.0-beta.3")),
+            ("update", "1.0.0".to_owned())
+        );
+        assert_eq!(pick(&idx, "1.0.0"), Choice::UpToDate);
+
+        // A revoked release falls back to its release candidate.
+        let idx = index(vec![
+            release("1.0.0-beta.3", 100, false),
+            release("1.0.0-rc.1", 100, false),
+            release("1.0.0", 100, true),
+        ]);
+        assert_eq!(
+            version_of(&pick(&idx, "1.0.0")),
+            ("downgrade", "1.0.0-rc.1".to_owned())
+        );
     }
 
     #[test]

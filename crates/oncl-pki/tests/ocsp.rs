@@ -474,6 +474,7 @@ fn request_connects_within_the_connect_timeout() {
             timeout: TIMEOUT,
             connect_timeout: CONNECT_TIMEOUT,
             max_len: MAX_RESPONSE_LEN,
+            https_only: false,
         }]
     );
 }
