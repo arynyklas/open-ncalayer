@@ -84,6 +84,36 @@ impl Certificate {
     pub fn sha256(&self) -> [u8; 32] {
         sha2::Sha256::digest(&self.der).into()
     }
+
+    /// The last common name of the subject, if it is a UTF-8, Printable or IA5 string.
+    pub fn subject_common_name(&self) -> Option<String> {
+        use x509_cert::der::{Tag, Tagged as _};
+        const COMMON_NAME: x509_cert::der::asn1::ObjectIdentifier =
+            x509_cert::der::asn1::ObjectIdentifier::new_unwrap("2.5.4.3");
+        let cert = x509_cert::Certificate::from_der(&self.der).ok()?;
+        let value = cert
+            .tbs_certificate()
+            .subject()
+            .iter()
+            .filter(|attribute| attribute.oid == COMMON_NAME)
+            .last()?
+            .value
+            .clone();
+        match value.tag() {
+            Tag::Utf8String | Tag::PrintableString | Tag::Ia5String => {
+                String::from_utf8(value.value().to_vec()).ok()
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the certificate names itself as its issuer (a root CA, not an intermediate).
+    pub fn is_self_issued(&self) -> bool {
+        x509_cert::Certificate::from_der(&self.der).is_ok_and(|cert| {
+            let tbs = cert.tbs_certificate();
+            tbs.subject() == tbs.issuer()
+        })
+    }
 }
 
 impl fmt::Debug for Certificate {
@@ -164,7 +194,9 @@ pub struct Cancelled;
 pub trait TrustStore {
     /// Whether the store has exactly this certificate.
     fn contains(&self, ca: &Certificate) -> io::Result<bool>;
-    /// Adds the certificate as a trusted root for TLS servers, unless it is already there.
+    /// Adds the certificate as a trusted CA for TLS servers, unless it is already there. On
+    /// macOS only a self-signed root becomes a trust root; an issuing CA is added as an
+    /// intermediate that chains to its root.
     fn install(&self, ca: &Certificate) -> io::Result<InstallOutcome>;
     /// Deletes exactly this certificate (matched by its encoding, never by name); `false` if
     /// the store did not have it. A declined system confirmation is an error with
@@ -360,6 +392,39 @@ pub(crate) mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         let err = Certificate::from_pem(&pem(b"not a certificate")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// The NCA's RSA root and issuing CA (the pinned ones the wizard installs).
+    pub(crate) fn nca_rsa() -> (Certificate, Certificate) {
+        let root = include_bytes!("../../../fixtures/nca/prod/rcarsa20.der");
+        let issuing = include_bytes!("../../../fixtures/nca/prod/ncarsa22.der");
+        (
+            Certificate::from_der(root.to_vec()).unwrap(),
+            Certificate::from_der(issuing.to_vec()).unwrap(),
+        )
+    }
+
+    #[test]
+    fn names_and_roots_of_certificates() {
+        let (root, issuing) = nca_rsa();
+        assert_eq!(
+            root.subject_common_name().as_deref(),
+            Some("НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)")
+        );
+        assert_eq!(
+            issuing.subject_common_name().as_deref(),
+            Some("ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA) 2022")
+        );
+        assert!(root.is_self_issued());
+        assert!(!issuing.is_self_issued());
+        let (ca, leaf) = ca_and_leaf("a@h");
+        assert!(ca.is_self_issued());
+        assert!(!leaf.is_self_issued());
+        assert!(
+            ca.subject_common_name()
+                .is_some_and(|cn| cn.starts_with("OpenNCALayer Local CA (a@h ")),
+            "{ca:?}"
+        );
     }
 
     pub(crate) fn pem(der: &[u8]) -> String {

@@ -215,6 +215,9 @@ msgstr "Установить мой CA в хранилище пользоват�
 msgid "Download and install the NCA roots"
 msgstr "Скачать и установить корни НУЦ"
 
+msgid "Remove the NCA roots"
+msgstr "Удалить корни НУЦ"
+
 msgid "Remove the old one"
 msgstr "Удалить старый"
 

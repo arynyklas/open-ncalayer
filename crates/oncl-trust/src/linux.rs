@@ -134,10 +134,22 @@ fn sqlite_contains(dir: &Path, ca: &Certificate) -> rusqlite::Result<bool> {
     )
 }
 
-/// The nickname [`NssDb::install`] gives the CA: unique per certificate, because NSS refuses
-/// a nickname already used by a certificate with another subject (a previous CA).
+/// What the subject common name of OpenNCALayer's own local CA starts with (`oncl-tls`).
+const OWN_CA_NAME: &str = "OpenNCALayer Local CA";
+
+/// The nickname [`NssDb::install`] gives a certificate. OpenNCALayer's own CA gets
+/// `OpenNCALayer Local CA <SHA-256 prefix>`, unique per certificate, because NSS refuses a
+/// nickname already used by a certificate with another subject (a previous CA). Any other
+/// CA (the NCA's roots) is named by its own subject common name (`CA <SHA-256 prefix>`
+/// without one), so that it never looks like OpenNCALayer's in the browser's certificate
+/// manager.
 fn nickname(ca: &Certificate) -> String {
-    format!("OpenNCALayer Local CA {}", &hex(&ca.sha256())[..16])
+    let prefix = || hex(&ca.sha256())[..16].to_owned();
+    match ca.subject_common_name() {
+        Some(name) if name.starts_with(OWN_CA_NAME) => format!("{OWN_CA_NAME} {}", prefix()),
+        Some(name) if !name.trim().is_empty() => name,
+        _ => format!("CA {}", prefix()),
+    }
 }
 
 /// `certutil` on one database.
@@ -361,7 +373,7 @@ mod tests {
     use x509_cert::der::Decode as _;
 
     use super::*;
-    use crate::tests::{ca_and_leaf, ca_and_leaf_at, noncanonical, write};
+    use crate::tests::{ca_and_leaf, ca_and_leaf_at, nca_rsa, noncanonical, write};
 
     /// Creates an empty NSS database in `dir` with `certutil -N`.
     fn create_db(dir: &Path, password: Option<&str>) {
@@ -431,6 +443,41 @@ mod tests {
         assert!(!db.contains(&ca).unwrap());
         assert!(!sqlite_contains(dir.path(), &ca).unwrap());
         assert!(!db.remove(&ca).unwrap());
+    }
+
+    #[test]
+    fn nca_roots_have_their_own_nicknames() {
+        let dir = new_db(None);
+        let db = NssDb(dir.path().to_owned());
+        let (root, issuing) = nca_rsa();
+        let (ours, _) = ca_and_leaf("ours@host");
+        for ca in [&root, &issuing, &ours] {
+            assert_eq!(db.install(ca).unwrap(), InstallOutcome::Installed);
+        }
+        assert_eq!(
+            certutil(dir.path()).find(&root).unwrap().unwrap().nickname,
+            "НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)"
+        );
+        assert_eq!(
+            certutil(dir.path())
+                .find(&issuing)
+                .unwrap()
+                .unwrap()
+                .nickname,
+            "ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA) 2022"
+        );
+        let own = certutil(dir.path()).find(&ours).unwrap().unwrap().nickname;
+        assert_eq!(
+            own,
+            format!("OpenNCALayer Local CA {}", &hex(&ours.sha256())[..16])
+        );
+        assert_eq!(listing(dir.path()).matches("OpenNCALayer").count(), 1);
+
+        // Removing the NCA roots leaves the own CA.
+        assert!(db.remove(&root).unwrap());
+        assert!(db.remove(&issuing).unwrap());
+        assert!(!db.contains(&root).unwrap() && !db.contains(&issuing).unwrap());
+        assert!(db.contains(&ours).unwrap());
     }
 
     #[test]

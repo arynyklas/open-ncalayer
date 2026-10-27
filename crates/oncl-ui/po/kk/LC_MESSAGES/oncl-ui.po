@@ -215,6 +215,9 @@ msgstr "Менің CA-мды пайдаланушы қоймасына орна�
 msgid "Download and install the NCA roots"
 msgstr "ҰКО түбірлерін жүктеп, орнату"
 
+msgid "Remove the NCA roots"
+msgstr "ҰКО түбірлерін жою"
+
 msgid "Remove the old one"
 msgstr "Ескісін жою"
 

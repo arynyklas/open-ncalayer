@@ -395,6 +395,31 @@ impl TlsWizardServices {
     ///
     /// An embedded root does not match its pin: nothing is installed.
     pub fn install_nca_roots(&self, labels: &[String]) -> Outcomes {
+        self.each_nca_root(labels, |store, root| {
+            store.install(root).map(StoreOutcome::Installed)
+        })
+    }
+
+    /// Removes exactly the NCA's RSA CAs that [`install_nca_roots`](Self::install_nca_roots)
+    /// installs (the same pinned encodings, never another certificate of the same name) from
+    /// the stores named `labels`: one outcome per store and CA.
+    ///
+    /// # Errors
+    ///
+    /// An embedded root does not match its pin: nothing is removed.
+    pub fn remove_nca_roots(&self, labels: &[String]) -> Outcomes {
+        self.each_nca_root(labels, |store, root| {
+            store.remove(root).map(StoreOutcome::Removed)
+        })
+    }
+
+    /// `act` on each pinned NCA RSA CA in each store named `labels`, outcomes labelled
+    /// `<store> (<alias>)`.
+    fn each_nca_root(
+        &self,
+        labels: &[String],
+        act: impl Fn(&dyn TrustStore, &Certificate) -> io::Result<StoreOutcome>,
+    ) -> Outcomes {
         let roots = oncl_pki::roots::nca_tls_roots()
             .map_err(Refused::Roots)?
             .into_iter()
@@ -408,11 +433,8 @@ impl TlsWizardServices {
         for named in self.selected(labels) {
             for (alias, root) in &roots {
                 let label = format!("{} ({alias})", named.label);
-                let outcome = named.store.install(root);
-                outcomes.push((
-                    label,
-                    outcome.map_or_else(StoreOutcome::Failed, StoreOutcome::Installed),
-                ));
+                let outcome = act(&*named.store, root).unwrap_or_else(StoreOutcome::Failed);
+                outcomes.push((label, outcome));
             }
         }
         Ok(outcomes)
@@ -1106,7 +1128,29 @@ mod tests {
         );
         let (text, failed) = action_text(&Err(Refused::Roots("rcarsa20".to_owned())), Locale::En);
         assert!(failed);
-        assert!(text.ends_with("nothing was installed: rcarsa20"), "{text}");
+        assert!(text.ends_with("nothing was changed: rcarsa20"), "{text}");
+
+        // Removal takes exactly the pinned encodings and leaves anything else.
+        let other =
+            Certificate::from_der(include_bytes!("../../../fixtures/nca/prod/ncarsa.der").to_vec())
+                .unwrap();
+        user.install(&other).unwrap();
+        let outcomes = s.remove_nca_roots(&labels(&["User"])).unwrap();
+        let names: Vec<&str> = outcomes.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(names, ["User (rcarsa20)", "User (ncarsa22)"]);
+        assert!(
+            outcomes
+                .iter()
+                .all(|(_, o)| matches!(o, StoreOutcome::Removed(true))),
+            "{outcomes:?}"
+        );
+        assert_eq!(user.certificates(), [other.der().to_vec()]);
+        let again = s.remove_nca_roots(&labels(&["User"])).unwrap();
+        assert!(
+            again
+                .iter()
+                .all(|(_, o)| matches!(o, StoreOutcome::Removed(false)))
+        );
     }
 
     #[test]

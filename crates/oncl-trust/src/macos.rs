@@ -2,7 +2,9 @@
 //! through Security.framework (`SecTrust`, trust settings).
 //!
 //! Only the user trust domain is written (`security add-trusted-cert` without `-d`); macOS
-//! asks for the login password itself, which the user may cancel.
+//! asks for the login password itself, which the user may cancel. Apple lets only a
+//! self-signed certificate be a trust root: an issuing CA (the NCA's `ncarsa22`) is added to
+//! the keychain as an intermediate, without trust settings, and chains to its trusted root.
 
 use std::io::{self, Write as _};
 use std::path::PathBuf;
@@ -47,18 +49,20 @@ impl TrustStore for MacLoginKeychain {
     }
 
     fn install(&self, ca: &Certificate) -> io::Result<InstallOutcome> {
-        if self.contains(ca)? && user_trust(ca).is_ok_and(|t| t == StoreState::User) {
+        let root = ca.is_self_issued();
+        if self.contains(ca)? && (!root || user_trust(ca).is_ok_and(|t| t == StoreState::User)) {
             return Ok(InstallOutcome::AlreadyPresent);
         }
         let mut file = tempfile::Builder::new().suffix(".cer").tempfile()?;
         file.write_all(ca.der())?;
         file.flush()?;
-        match security(
-            Command::new(SECURITY)
-                .args(["add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k"])
-                .arg(Self::keychain()?)
-                .arg(file.path()),
-        ) {
+        let mut command = Command::new(SECURITY);
+        if root {
+            command.args(["add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k"]);
+        } else {
+            command.args(["add-certificates", "-k"]);
+        }
+        match security(command.arg(Self::keychain()?).arg(file.path())) {
             Ok(_) => Ok(InstallOutcome::Installed),
             Err(e) if is_cancelled(&e) => Ok(InstallOutcome::CancelledByUser),
             Err(e) => Err(e),
@@ -70,13 +74,14 @@ impl TrustStore for MacLoginKeychain {
             return Ok(false);
         }
         // `-Z` selects by SHA-1 (the exact certificate); `-t` also drops its user trust
-        // settings.
+        // settings, which an intermediate added by `install` does not have.
         let sha1 = hex(&ca.sha1()).to_uppercase();
-        match security(
-            Command::new(SECURITY)
-                .args(["delete-certificate", "-Z", &sha1, "-t"])
-                .arg(Self::keychain()?),
-        ) {
+        let mut command = Command::new(SECURITY);
+        command.args(["delete-certificate", "-Z", &sha1]);
+        if ca.is_self_issued() || user_trust(ca).is_ok_and(|t| t == StoreState::User) {
+            command.arg("-t");
+        }
+        match security(command.arg(Self::keychain()?)) {
             Ok(_) => Ok(true),
             Err(e) if is_cancelled(&e) => Err(io::Error::other(Cancelled)),
             Err(e) => Err(e),

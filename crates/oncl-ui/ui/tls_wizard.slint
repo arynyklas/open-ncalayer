@@ -63,6 +63,7 @@ export component TlsWizardWindow inherits Window {
     callback install-ca();
     callback remove-ca();
     callback install-nca();
+    callback remove-nca();
     callback remove-replaced();
     callback open-selftest();
     callback confirm();
@@ -274,12 +275,21 @@ export component TlsWizardWindow inherits Window {
                     }
 
                     HorizontalLayout {
+                        spacing: 8px;
                         alignment: start;
                         Button {
                             text: @tr("Download and install the NCA roots");
                             enabled: !root.busy && !root.asking;
                             clicked => {
                                 root.install-nca();
+                            }
+                        }
+
+                        Button {
+                            text: @tr("Remove the NCA roots");
+                            enabled: !root.busy && !root.asking;
+                            clicked => {
+                                root.remove-nca();
                             }
                         }
                     }

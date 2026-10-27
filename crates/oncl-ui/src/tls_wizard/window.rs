@@ -44,6 +44,7 @@ enum Pending {
         ca: Certificate,
     },
     InstallNca(Vec<String>),
+    RemoveNca(Vec<String>),
     RemoveReplaced {
         labels: Vec<String>,
         cas: Vec<Certificate>,
@@ -56,6 +57,7 @@ enum StoresAction {
     Install,
     Remove,
     InstallNca,
+    RemoveNca,
     RemoveReplaced,
 }
 
@@ -171,6 +173,7 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
     ui.on_install_ca(move || with(id, |open| ask_for_stores(open, StoresAction::Install)));
     ui.on_remove_ca(move || with(id, |open| ask_for_stores(open, StoresAction::Remove)));
     ui.on_install_nca(move || with(id, |open| ask_for_stores(open, StoresAction::InstallNca)));
+    ui.on_remove_nca(move || with(id, |open| ask_for_stores(open, StoresAction::RemoveNca)));
     ui.on_remove_replaced(move || {
         with(id, |open| {
             ask_for_stores(open, StoresAction::RemoveReplaced)
@@ -351,8 +354,10 @@ fn consent(open: &Open, on: bool) {
                 return;
             };
             match saved {
-                Ok(_) if on => show_message(&open.ui, t.consent_given, false),
-                Ok(_) => show_message(&open.ui, t.consent_withdrawn, false),
+                Ok(true) if on => show_message(&open.ui, t.consent_given, false),
+                Ok(true) => show_message(&open.ui, t.consent_withdrawn, false),
+                // The saved certificate is no longer mkcert's: the new state tells it.
+                Ok(false) => {}
                 Err(e) => {
                     show_message(
                         &open.ui,
@@ -410,6 +415,7 @@ fn pending(
         StoresAction::Install => Pending::Install { labels, ca: own()? },
         StoresAction::Remove => Pending::Remove { labels, ca: own()? },
         StoresAction::InstallNca => Pending::InstallNca(labels),
+        StoresAction::RemoveNca => Pending::RemoveNca(labels),
         StoresAction::RemoveReplaced => Pending::RemoveReplaced {
             labels,
             cas: snapshot
@@ -440,6 +446,7 @@ fn question(pending: &Pending, snapshot: Option<&Snapshot>, t: &Texts) -> String
             fill(t.confirm_remove, &[&name, &sha1, &labels.join(", ")])
         }
         Pending::InstallNca(labels) => fill(t.confirm_nca, &[&labels.join(", ")]),
+        Pending::RemoveNca(labels) => fill(t.confirm_remove_nca, &[&labels.join(", ")]),
         Pending::RemoveReplaced { labels, cas } => {
             let replaced: Vec<String> = snapshot
                 .map(|s| {
@@ -507,6 +514,7 @@ fn act(open: &Open, pending: Pending) {
             stores_action(open, move |s| s.remove_ca(&labels, &ca));
         }
         Pending::InstallNca(labels) => stores_action(open, move |s| s.install_nca_roots(&labels)),
+        Pending::RemoveNca(labels) => stores_action(open, move |s| s.remove_nca_roots(&labels)),
         Pending::RemoveReplaced { labels, cas } => {
             stores_action(open, move |s| s.remove_replaced(&labels, &cas));
         }
@@ -770,6 +778,51 @@ mod tests {
         assert_eq!(close_requested(window.id), CloseRequestResponse::HideWindow);
         assert!(!is_open());
         assert_eq!(user.certificates(), [ca.der().to_vec()]);
+    }
+
+    #[test]
+    fn nca_roots_are_removed_only_after_yes() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = MemoryStore::default();
+        let desktop = desktop(dir.path(), &user);
+        desktop
+            .tls
+            .issue(&own(), OffsetDateTime::now_utc())
+            .unwrap();
+        open(&desktop);
+        let window = the_window();
+        assert_eq!(worker::manual::run_all(), 1);
+        let ca = desktop.tls.load().own_ca().unwrap().clone();
+        window.ui.invoke_install_ca();
+        window.ui.invoke_confirm();
+        assert_eq!(worker::manual::run_all(), 1);
+        window.ui.invoke_install_nca();
+        window.ui.invoke_confirm();
+        assert_eq!(worker::manual::run_all(), 1);
+        assert_eq!(user.certificates().len(), 3);
+
+        // «Удалить корни НУЦ» only asks.
+        window.ui.invoke_remove_nca();
+        assert!(
+            window
+                .ui
+                .get_confirm_text()
+                .starts_with("Удалить корневые сертификаты НУЦ РК (RSA: rcarsa20, ncarsa22"),
+            "{}",
+            window.ui.get_confirm_text()
+        );
+        window.ui.invoke_cancel_confirm();
+        window.ui.invoke_confirm();
+        assert_eq!(worker::manual::run_all(), 0);
+        assert_eq!(user.certificates().len(), 3);
+
+        // «Да» removes exactly the two NCA CAs; the own CA stays.
+        window.ui.invoke_remove_nca();
+        window.ui.invoke_confirm();
+        assert!(user.certificates().len() == 3);
+        assert_eq!(worker::manual::run_all(), 1);
+        assert_eq!(user.certificates(), [ca.der().to_vec()]);
+        assert_eq!(close_requested(window.id), CloseRequestResponse::HideWindow);
     }
 
     #[test]
