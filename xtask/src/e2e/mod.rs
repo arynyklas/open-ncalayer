@@ -51,6 +51,7 @@ use webdriver::{Driver, Session};
 pub enum Selection {
     Chromium,
     Firefox,
+    FirefoxEsr,
     All,
 }
 
@@ -59,7 +60,8 @@ impl Selection {
         match self {
             Selection::Chromium => &[Browser::Chromium],
             Selection::Firefox => &[Browser::Firefox],
-            Selection::All => &[Browser::Chromium, Browser::Firefox],
+            Selection::FirefoxEsr => &[Browser::FirefoxEsr],
+            Selection::All => &[Browser::Chromium, Browser::Firefox, Browser::FirefoxEsr],
         }
     }
 }
@@ -82,6 +84,9 @@ const SIGNED_SIZE: usize = 3 << 19;
 const SIGNING_KEY: &str = "user-gost2015-sign";
 /// A socket the daemon dropped must close in the page within this.
 const CLOSE_WITHIN: Duration = Duration::from_secs(5);
+/// How long a page step waits for the bridge to answer a forged event (it answers in
+/// milliseconds when it listens).
+const FORGED_SILENCE_MS: u64 = 3000;
 /// How long the extension gets to put its shim into a fresh page.
 const SHIM_PATIENCE: Duration = Duration::from_secs(30);
 /// Longest page step (the signature included).
@@ -133,7 +138,7 @@ pub fn run(root: &Path, selection: Selection, download: bool) -> anyhow::Result<
         );
     }
     for browser in selection.browsers() {
-        let dir = inputs.extension.join(browser.name());
+        let dir = inputs.extension.join(browser.extension());
         ensure!(
             dir.join("manifest.json").is_file(),
             "{} is missing: run `cargo xtask ext build`",
@@ -195,15 +200,17 @@ fn print_table(columns: &[(Browser, Outcomes)]) {
     let width = SCENARIOS.iter().map(|s| s.len()).max().unwrap_or(0);
     let mut header = format!("{:width$}", "scenario");
     for (browser, _) in columns {
-        header.push_str(&format!("  {:8}", browser.name()));
+        header.push_str(&format!("  {}", browser.name()));
     }
     println!("{}", header.trim_end());
     for (i, scenario) in SCENARIOS.iter().enumerate() {
         let mut line = format!("{scenario:width$}");
-        for (_, outcomes) in columns {
+        for (browser, outcomes) in columns {
             let passed = outcomes.as_ref().is_ok_and(|outcomes| outcomes[i].is_ok());
             let mark = if passed { "PASS" } else { "FAIL" };
-            line.push_str(&format!("  {mark:8}"));
+            // Every browser name is at least as long as a mark.
+            let column = browser.name().len();
+            line.push_str(&format!("  {mark:column$}"));
         }
         println!("{}", line.trim_end());
     }
@@ -285,7 +292,9 @@ fn start_browser(
             Vec::new()
         }
         // The Firefox profile stays under `target/`, not in the short TMPDIR.
-        Browser::Firefox => vec![format!("--profile-root={}", sandbox.profiles.display())],
+        Browser::Firefox | Browser::FirefoxEsr => {
+            vec![format!("--profile-root={}", sandbox.profiles.display())]
+        }
     };
     let driver = Driver::start(
         &binaries.driver,
@@ -294,10 +303,10 @@ fn start_browser(
         &UNSET,
         &sandbox.root.join("driver.log"),
     )?;
-    let extension = inputs.extension.join(browser.name());
+    let extension = inputs.extension.join(browser.extension());
     let session = driver.session(capabilities(browser, binaries, &extension, sandbox)?)?;
     session.set_script_timeout(SCRIPT_TIMEOUT)?;
-    if browser == Browser::Firefox {
+    if browser.is_firefox() {
         let id = session
             .install_temporary_addon(&extension)
             .context("installing the add-on")?;
@@ -308,6 +317,7 @@ fn start_browser(
     }
     let scenarios = Scenarios {
         session: &session,
+        browser,
         inputs,
         sandbox,
         page_port,
@@ -389,7 +399,7 @@ fn capabilities(
                 ],
             },
         }),
-        Browser::Firefox => json!({
+        Browser::Firefox | Browser::FirefoxEsr => json!({
             "browserName": "firefox",
             "moz:firefoxOptions": {
                 "binary": path(&binaries.browser)?,
@@ -488,6 +498,7 @@ const STEP_SCRIPT: &str = "const done = arguments[arguments.length - 1];\n\
 
 struct Scenarios<'a> {
     session: &'a Session<'a>,
+    browser: Browser,
     inputs: &'a Inputs,
     sandbox: &'a Sandbox,
     page_port: u16,
@@ -605,18 +616,31 @@ impl Scenarios<'_> {
         Ok(())
     }
 
-    /// 5. A page forging a bridge `open` with `origin: "https://evil.example"` gets its socket
-    ///    with the page's real origin: the daemon logs `origin=http://127.0.0.1:<port>`, never
-    ///    the forged one.
+    /// 5. The daemon logs `origin=http://127.0.0.1:<port>` for the page's sockets, never an
+    ///    origin the page claims. Where page events reach the bridge, a page forging a bridge
+    ///    `open` with `origin: "https://evil.example"` gets its socket with the real origin.
+    ///    Where the shim calls the bridge directly (Firefox ESR 115), the forged `open` gets
+    ///    no answer at all, and an ordinary socket carries the real origin.
     fn origin(&self) -> anyhow::Result<()> {
         let real = format!("origin=http://127.0.0.1:{}", self.page_port);
         let before = self.sandbox.logs().matches(&real).count();
-        let result = self.step("forged_open", Value::Null)?;
-        let frame = &result["frame"];
-        ensure!(
-            frame["t"] == "msg" && frame["data"] == oncl_protocol::greeting(),
-            "the forged open was not served by the daemon: {frame}"
-        );
+        if self.browser.bridge_hears_the_page() {
+            let result = self.step("forged_open", Value::Null)?;
+            let frame = &result["frame"];
+            ensure!(
+                frame["t"] == "msg" && frame["data"] == oncl_protocol::greeting(),
+                "the forged open was not served by the daemon: {frame}"
+            );
+        } else {
+            let result = self.step("forged_open", json!(FORGED_SILENCE_MS))?;
+            ensure!(
+                result["frame"].is_null(),
+                "the bridge answered a page event: {}",
+                result["frame"]
+            );
+            let result = self.step("greeting", Value::Null)?;
+            expect_text(&result["first"], &oncl_protocol::greeting(), "greeting")?;
+        }
         // The log writer runs on its own thread: give it a moment.
         let deadline = Instant::now() + Duration::from_secs(5);
         let logs = loop {

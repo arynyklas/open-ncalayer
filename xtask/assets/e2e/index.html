@@ -85,9 +85,14 @@
   let held = null; // the socket of `hold`, for `held_close`
 
   const steps = {
-    /** Whether `WebSocket` is the extension's shim rather than the browser's own. */
+    /**
+     * Whether `WebSocket` is the extension's shim rather than the browser's own: the browser's
+     * interface object has a read-only `prototype`, the shim's constructor a writable one.
+     * (Firefox before 128 gets the shim as an exported function, `[native code]` like the
+     * browser's own.)
+     */
     async shimmed() {
-      return { shimmed: !Function.prototype.toString.call(window.WebSocket).includes('[native code]') };
+      return { shimmed: Object.getOwnPropertyDescriptor(window.WebSocket, 'prototype').writable === true };
     },
 
     /** The first message on a new NCALayer socket. */
@@ -142,11 +147,13 @@
 
     /**
      * A page forging a bridge `open` with its own `origin` (and a valid endpoint URL, so the
-     * bridge passes it on): the first answer for that sid.
+     * bridge passes it on): the first answer for that sid. With `silenceMs`, no answer is
+     * expected: `frame` is `null` if none came within that time.
      */
-    async forged_open() {
+    async forged_open(silenceMs) {
+      let listener;
       const answer = new Promise((resolve) => {
-        const listener = (event) => {
+        listener = (event) => {
           let frame;
           try {
             frame = JSON.parse(event.detail);
@@ -154,14 +161,17 @@
             return;
           }
           if (frame.sid !== FORGED_SID || frame.t === 'open') return;
-          document.removeEventListener('__oncl_to_page', listener);
           resolve(frame);
         };
         document.addEventListener('__oncl_to_page', listener);
       });
       const forge = (frame) => document.dispatchEvent(new CustomEvent('__oncl_to_ext', { detail: JSON.stringify(frame) }));
       forge({ t: 'open', sid: FORGED_SID, url: NCALAYER, origin: 'https://evil.example' });
-      const frame = await within(WAIT_MS, 'an answer to the forged open', answer);
+      const frame =
+        silenceMs == null
+          ? await within(WAIT_MS, 'an answer to the forged open', answer)
+          : await Promise.race([answer, new Promise((resolve) => setTimeout(() => resolve(null), silenceMs))]);
+      document.removeEventListener('__oncl_to_page', listener);
       forge({ t: 'close', sid: FORGED_SID, origin: 'https://evil.example' });
       return { frame };
     },

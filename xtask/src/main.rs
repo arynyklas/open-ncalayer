@@ -28,9 +28,9 @@ enum Command {
         /// Browsers to run.
         #[arg(long, value_enum, default_value_t = xtask::e2e::Selection::All)]
         browser: xtask::e2e::Selection,
-        /// Download Chrome for Testing, Firefox and their drivers into `target/browsers/`
-        /// instead of taking them from ONCL_CHROME, ONCL_CHROMEDRIVER, ONCL_FIREFOX and
-        /// ONCL_GECKODRIVER.
+        /// Download Chrome for Testing, Firefox, Firefox ESR 115 and their drivers into
+        /// `target/browsers/` instead of taking them from ONCL_CHROME, ONCL_CHROMEDRIVER,
+        /// ONCL_FIREFOX, ONCL_FIREFOX_ESR and ONCL_GECKODRIVER.
         #[arg(long)]
         download: bool,
     },
