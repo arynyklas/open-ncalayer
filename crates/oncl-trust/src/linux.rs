@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::{
-    Certificate, InstallOutcome, NssDbState, StoreState, TrustReport, TrustStore, hex,
-    pem_certificates,
+    Certificate, InstallOutcome, NssDbState, StoreState, TrustReport, TrustStore, hex, pem_blocks,
 };
 
 const CERTUTIL: &str = "certutil";
@@ -81,7 +80,7 @@ pub fn nss_databases(home: &Path) -> Vec<NssDb> {
     dbs
 }
 
-/// Read-only check: presence of the CA in the NSS databases under `$HOME`.
+/// Read-only check: the CA in the NSS databases under `$HOME`.
 pub(crate) fn check(ca: &Certificate, _leaf: &Certificate) -> TrustReport {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     report(ca, home.as_deref(), CERTUTIL.as_ref())
@@ -94,21 +93,24 @@ fn report(ca: &Certificate, home: Option<&Path>, certutil: &OsStr) -> TrustRepor
         os_chain_ok: None,
         nss: dbs
             .into_iter()
-            .map(|NssDb(path)| {
-                let ca_present = presence(ca, &path, certutil);
-                NssDbState { path, ca_present }
-            })
+            .map(|NssDb(path)| db_state(ca, path, certutil))
             .collect(),
         firefox_enterprise_roots: Vec::new(),
     }
 }
 
-/// Through `certutil`, else (not installed) through SQLite; `None` if neither can read it.
-fn presence(ca: &Certificate, dir: &Path, certutil: &OsStr) -> Option<bool> {
-    match Certutil::new(certutil, dir).contains(ca) {
-        Ok(present) => Some(present),
-        Err(e) if is_certutil_missing(&e) => sqlite_contains(dir, ca).ok(),
-        Err(_) => None,
+/// Through `certutil`, else (not installed) presence only through SQLite.
+fn db_state(ca: &Certificate, path: PathBuf, certutil: &OsStr) -> NssDbState {
+    let (ca_present, ca_ssl_trusted) = match Certutil::new(certutil, &path).find(ca) {
+        Ok(None) => (Some(false), Some(false)),
+        Ok(Some(found)) => (Some(true), found.ssl_trusted()),
+        Err(e) if is_certutil_missing(&e) => (sqlite_contains(&path, ca).ok(), None),
+        Err(_) => (None, None),
+    };
+    NssDbState {
+        path,
+        ca_present,
+        ca_ssl_trusted,
     }
 }
 
@@ -144,20 +146,48 @@ struct Certutil<'a> {
     db: OsString,
 }
 
-/// One line of `certutil -L`.
+/// One line of `certutil -L`: one certificate.
 struct Entry {
     nickname: String,
     /// `SSL,S/MIME,JAR/XPI`, like `C,,`.
     trust: String,
 }
 
-impl Entry {
-    /// Trusted as a CA for TLS servers.
-    fn ssl_trusted(&self) -> bool {
-        self.trust
-            .split(',')
-            .next()
-            .is_some_and(|ssl| ssl.contains('C'))
+/// The CA found in a database.
+struct Found {
+    /// A nickname that lists the CA.
+    nickname: String,
+    /// The `-L` trust flags under that nickname.
+    trust: Vec<String>,
+    /// The subject group of the CA (`-L -n` lists every certificate with the nickname's
+    /// subject) holds the CA only. Only then do the trust flags and the nickname-addressed
+    /// `-M` and `-D`, which resolve the nickname to one "best" certificate of the group,
+    /// certainly concern the CA.
+    alone: bool,
+}
+
+impl Found {
+    /// The SSL `C` flag of the CA; `None` when the subject group makes it ambiguous.
+    fn ssl_trusted(&self) -> Option<bool> {
+        self.alone.then(|| {
+            self.trust
+                .iter()
+                .any(|t| t.split(',').next().is_some_and(|ssl| ssl.contains('C')))
+        })
+    }
+
+    /// Refuses a nickname-addressed change to a group holding other certificates too.
+    fn require_alone(&self) -> io::Result<()> {
+        if self.alone {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "the NSS database holds another certificate with the same subject as \"{}\"; \
+                 certutil cannot tell them apart, so change the certificate in the browser's \
+                 certificate manager",
+                self.nickname
+            )))
+        }
     }
 }
 
@@ -188,7 +218,15 @@ impl<'a> Certutil<'a> {
             })?;
         if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
             // A certificate is far smaller than a pipe buffer: no deadlock with the reads.
-            pipe.write_all(input)?;
+            // certutil may exit without reading it; its status and stderr then tell why.
+            match pipe.write_all(input) {
+                Err(e) if e.kind() != io::ErrorKind::BrokenPipe => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(e);
+                }
+                _ => {}
+            }
         }
         let output = child.wait_with_output()?;
         if output.status.success() {
@@ -238,47 +276,70 @@ impl<'a> Certutil<'a> {
             .collect())
     }
 
-    /// The certificates under a nickname (NSS files every certificate of one subject under
-    /// one nickname).
-    fn certificates(&self, nickname: &str) -> io::Result<Vec<Certificate>> {
+    /// The encodings listed under a nickname: its whole subject group. `None` stands for a
+    /// block that does not decode: some other certificate.
+    fn group(&self, nickname: &str) -> io::Result<Vec<Option<Vec<u8>>>> {
         let pem = self.run(&["-L", "-n", nickname, "-a"], None)?;
-        pem_certificates(&String::from_utf8_lossy(&pem)).collect()
+        Ok(pem_blocks(&String::from_utf8_lossy(&pem)).collect())
     }
 
-    /// The `-L` entries whose certificates include `ca`.
-    fn entries_of(&self, ca: &Certificate) -> io::Result<Vec<Entry>> {
-        let mut found = Vec::new();
-        for entry in self.entries()? {
-            if self.certificates(&entry.nickname)?.contains(ca) {
-                found.push(entry);
+    /// Where the database has exactly `ca`. Our own nickname is tried first (one `certutil`
+    /// run after the listing); the other nicknames only when it does not list the CA, for a
+    /// CA imported by hand.
+    fn find(&self, ca: &Certificate) -> io::Result<Option<Found>> {
+        let entries = self.entries()?;
+        let ours = nickname(ca);
+        let mut nicknames: Vec<&str> = Vec::new();
+        for entry in &entries {
+            if !nicknames.contains(&entry.nickname.as_str()) {
+                nicknames.push(&entry.nickname);
             }
         }
-        Ok(found)
+        // A stable sort: ours first, the rest in listing order.
+        nicknames.sort_by_key(|n| *n != ours);
+        for nickname in nicknames {
+            let group = self.group(nickname)?;
+            if group.iter().any(|der| ca.is(der.as_deref())) {
+                return Ok(Some(Found {
+                    nickname: nickname.to_owned(),
+                    trust: entries
+                        .iter()
+                        .filter(|e| e.nickname == nickname)
+                        .map(|e| e.trust.clone())
+                        .collect(),
+                    alone: group.iter().all(|der| ca.is(der.as_deref())),
+                }));
+            }
+        }
+        Ok(None)
     }
 
     fn contains(&self, ca: &Certificate) -> io::Result<bool> {
-        Ok(!self.entries_of(ca)?.is_empty())
+        Ok(self.find(ca)?.is_some())
     }
 
     fn install(&self, ca: &Certificate) -> io::Result<InstallOutcome> {
-        let present = self.entries_of(ca)?;
-        if present.iter().any(Entry::ssl_trusted) {
-            return Ok(InstallOutcome::AlreadyPresent);
-        }
-        if let Some(entry) = present.first() {
+        if let Some(found) = self.find(ca)? {
+            found.require_alone()?;
+            if found.ssl_trusted() == Some(true) {
+                return Ok(InstallOutcome::AlreadyPresent);
+            }
             // Present without TLS trust (imported without the "identify websites" box, or a
             // failed earlier attempt): add the trust, keep the other flags.
-            let (ssl, rest) = entry.trust.split_once(',').unwrap_or((&entry.trust, ","));
+            let flags = found.trust.first().map_or(",,", String::as_str);
+            let (ssl, rest) = flags.split_once(',').unwrap_or((flags, ","));
             let trust = format!("{ssl}C,{rest}");
-            self.write(&["-M", "-n", &entry.nickname, "-t", &trust], None)?;
+            self.write(&["-M", "-n", &found.nickname, "-t", &trust], None)?;
             return Ok(InstallOutcome::Installed);
         }
-        let nickname = nickname(ca);
-        if let Err(e) = self.write(&["-A", "-n", &nickname, "-t", "C,,"], Some(ca.der())) {
+        // `-A` stores the certificate from stdin itself, whatever else the database holds.
+        if let Err(e) = self.write(&["-A", "-n", &nickname(ca), "-t", "C,,"], Some(ca.der())) {
             // NSS may have stored the certificate before failing to set its trust (a
-            // password-protected database): take it out again.
-            if self.contains(ca).unwrap_or(false) {
-                let _ = self.remove(ca);
+            // password-protected database): take it out again when that is unambiguous.
+            if let Ok(Some(found)) = self.find(ca)
+                && found.alone
+            {
+                let _ = self.write(&["-D", "-n", &found.nickname], None);
             }
             return Err(e);
         }
@@ -286,40 +347,33 @@ impl<'a> Certutil<'a> {
     }
 
     fn remove(&self, ca: &Certificate) -> io::Result<bool> {
-        let found = self.entries_of(ca)?;
-        for entry in &found {
-            // `-D` deletes one certificate of the nickname, not necessarily ours: refuse
-            // rather than risk another certificate of the same subject.
-            if self.certificates(&entry.nickname)? != [ca.clone()] {
-                return Err(io::Error::other(format!(
-                    "the NSS nickname \"{}\" holds other certificates of the same subject too; \
-                     remove the certificate in the browser's certificate manager",
-                    entry.nickname
-                )));
-            }
-            self.write(&["-D", "-n", &entry.nickname], None)?;
-        }
-        Ok(!found.is_empty())
+        let Some(found) = self.find(ca)? else {
+            return Ok(false);
+        };
+        found.require_alone()?;
+        self.write(&["-D", "-n", &found.nickname], None)?;
+        Ok(true)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tests::ca_and_leaf;
+    use x509_cert::der::Decode as _;
 
-    /// An empty NSS database in a temporary directory, created by `certutil -N`.
-    fn new_db(password: Option<&str>) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
+    use super::*;
+    use crate::tests::{ca_and_leaf, ca_and_leaf_at, noncanonical, write};
+
+    /// Creates an empty NSS database in `dir` with `certutil -N`.
+    fn create_db(dir: &Path, password: Option<&str>) {
         let mut command = Command::new(CERTUTIL);
         command
             .arg("-N")
             .arg("-d")
-            .arg(Certutil::new(CERTUTIL.as_ref(), dir.path()).db);
+            .arg(Certutil::new(CERTUTIL.as_ref(), dir).db);
         match password {
             None => command.arg("--empty-password"),
             Some(password) => {
-                let file = dir.path().join("password.txt");
+                let file = dir.join("password.txt");
                 std::fs::write(&file, password).unwrap();
                 command.arg("-f").arg(file)
             }
@@ -328,16 +382,33 @@ mod tests {
             .status()
             .expect("certutil (libnss3-tools) is installed");
         assert!(status.success());
+    }
+
+    /// An empty NSS database in a temporary directory.
+    fn new_db(password: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        create_db(dir.path(), password);
         dir
     }
 
-    fn trust_of(dir: &Path, ca: &Certificate) -> Vec<String> {
+    fn certutil(dir: &Path) -> Certutil<'static> {
         Certutil::new(CERTUTIL.as_ref(), dir)
-            .entries_of(ca)
-            .unwrap()
-            .into_iter()
-            .map(|e| e.trust)
-            .collect()
+    }
+
+    /// Adds a certificate the way a user's manual import would, with `trust`.
+    fn import(dir: &Path, nickname: &str, der: &[u8], trust: &str) {
+        certutil(dir)
+            .write(&["-A", "-n", nickname, "-t", trust], Some(der))
+            .unwrap();
+    }
+
+    /// The whole `certutil -L` listing: nicknames and trust flags of every certificate.
+    fn listing(dir: &Path) -> String {
+        String::from_utf8(certutil(dir).run(&["-L"], None).unwrap()).unwrap()
+    }
+
+    fn trust_of(dir: &Path, ca: &Certificate) -> Vec<String> {
+        certutil(dir).find(ca).unwrap().unwrap().trust
     }
 
     #[test]
@@ -374,25 +445,73 @@ mod tests {
         assert!(db.remove(&ours).unwrap());
         assert!(!db.contains(&ours).unwrap());
         assert!(db.contains(&other).unwrap());
+        assert_eq!(trust_of(dir.path(), &other), ["C,,"]);
     }
 
     #[test]
-    fn nss_db_never_removes_a_same_subject_certificate() {
-        // Same label and day: the same subject, which NSS files under one nickname.
+    fn nss_db_never_acts_on_a_same_subject_certificate() {
+        // The same label at the same instant: two CAs with the same subject.
+        let now = time::OffsetDateTime::now_utc();
+        let (ours, _) = ca_and_leaf_at("same@host", now);
+        let (sibling, _) = ca_and_leaf_at("same@host", now);
+        assert_ne!(ours, sibling);
+        let subject = |c: &Certificate| {
+            x509_cert::Certificate::from_der(c.der())
+                .unwrap()
+                .tbs_certificate()
+                .subject()
+                .clone()
+        };
+        assert_eq!(subject(&ours), subject(&sibling));
+
+        // The sibling is trusted; ours was imported without trust.
         let dir = new_db(None);
         let db = NssDb(dir.path().to_owned());
-        let (first, _) = ca_and_leaf("same@host");
-        let (second, _) = ca_and_leaf("same@host");
-        assert_ne!(first, second);
-        db.install(&first).unwrap();
-        db.install(&second).unwrap();
-        assert!(db.contains(&first).unwrap());
+        assert_eq!(db.install(&sibling).unwrap(), InstallOutcome::Installed);
+        import(dir.path(), "Imported by hand", ours.der(), ",,");
+        assert!(db.contains(&ours).unwrap());
+        let before = listing(dir.path());
 
-        match db.remove(&first) {
-            Ok(removed) => assert!(removed),
-            Err(e) => assert!(e.to_string().contains("other certificates"), "{e}"),
+        // Neither "already trusted" from the sibling's flags nor a `-M` that may hit it.
+        let err = db.install(&ours).unwrap_err();
+        assert!(err.to_string().contains("same subject"), "{err}");
+        assert_eq!(listing(dir.path()), before);
+        for ca in [&ours, &sibling] {
+            let err = db.remove(ca).unwrap_err();
+            assert!(err.to_string().contains("same subject"), "{err}");
         }
-        assert!(db.contains(&second).unwrap(), "the other CA stays");
+        assert_eq!(listing(dir.path()), before);
+        assert!(db.contains(&ours).unwrap());
+        assert!(db.contains(&sibling).unwrap());
+
+        let state = db_state(&ours, dir.path().to_owned(), CERTUTIL.as_ref());
+        assert_eq!(state.ca_present, Some(true));
+        assert_eq!(state.ca_ssl_trusted, None, "ambiguous flags");
+    }
+
+    #[test]
+    fn nss_db_with_a_certificate_x509_cert_rejects() {
+        let dir = new_db(None);
+        let db = NssDb(dir.path().to_owned());
+        let (stranger, _) = ca_and_leaf("odd@host");
+        let odd = noncanonical(&stranger);
+        assert!(Certificate::from_der(odd.clone()).is_err());
+        import(dir.path(), "Odd", &odd, "C,,");
+        assert_eq!(
+            certutil(dir.path()).group("Odd").unwrap(),
+            [Some(odd.clone())]
+        );
+
+        let (ca, _) = ca_and_leaf("ours@host");
+        assert!(!db.contains(&ca).unwrap());
+        assert_eq!(db.install(&ca).unwrap(), InstallOutcome::Installed);
+        assert_eq!(db.install(&ca).unwrap(), InstallOutcome::AlreadyPresent);
+        let state = db_state(&ca, dir.path().to_owned(), CERTUTIL.as_ref());
+        assert_eq!(state.ca_present, Some(true));
+        assert_eq!(state.ca_ssl_trusted, Some(true));
+        assert!(db.remove(&ca).unwrap());
+        assert!(!db.contains(&ca).unwrap());
+        assert_eq!(certutil(dir.path()).group("Odd").unwrap(), [Some(odd)]);
     }
 
     #[test]
@@ -400,10 +519,13 @@ mod tests {
         let dir = new_db(None);
         let db = NssDb(dir.path().to_owned());
         let (ca, _) = ca_and_leaf("untrusted@host");
-        Certutil::new(CERTUTIL.as_ref(), dir.path())
-            .write(&["-A", "-n", "Imported", "-t", ",,"], Some(ca.der()))
-            .unwrap();
+        import(dir.path(), "Imported", ca.der(), ",,");
         assert_eq!(trust_of(dir.path(), &ca), [",,"]);
+        let state = db_state(&ca, dir.path().to_owned(), CERTUTIL.as_ref());
+        assert_eq!(
+            (state.ca_present, state.ca_ssl_trusted),
+            (Some(true), Some(false))
+        );
 
         assert_eq!(db.install(&ca).unwrap(), InstallOutcome::Installed);
         assert_eq!(trust_of(dir.path(), &ca), ["C,,"]);
@@ -422,7 +544,8 @@ mod tests {
 
     #[test]
     fn missing_certutil_is_a_clear_error() {
-        let dir = new_db(None);
+        // Fails at spawn: no database (and no real certutil) is needed.
+        let dir = tempfile::tempdir().unwrap();
         let (ca, _) = ca_and_leaf("nocertutil@host");
         let missing = Certutil::new("/nonexistent/certutil".as_ref(), dir.path());
         for err in [
@@ -439,11 +562,6 @@ mod tests {
     fn touch(path: &Path) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"").unwrap();
-    }
-
-    fn write(path: &Path, text: &str) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, text).unwrap();
     }
 
     #[test]
@@ -502,30 +620,17 @@ mod tests {
         );
     }
 
-    /// A sandbox home whose Chrome database is a real NSS database.
-    fn home_with_chrome_db() -> tempfile::TempDir {
-        let home = tempfile::tempdir().unwrap();
-        let db = home.path().join(".pki/nssdb");
-        std::fs::create_dir_all(&db).unwrap();
-        let status = Command::new(CERTUTIL)
-            .arg("-N")
-            .arg("--empty-password")
-            .arg("-d")
-            .arg(Certutil::new(CERTUTIL.as_ref(), &db).db)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        home
-    }
-
     #[test]
     fn report_on_a_sandbox_home() {
-        let home = home_with_chrome_db();
+        let home = tempfile::tempdir().unwrap();
         let chrome = home.path().join(".pki/nssdb");
+        std::fs::create_dir_all(&chrome).unwrap();
+        create_db(&chrome, None);
         let (ca, _) = ca_and_leaf("report@host");
-        let certutil: &OsStr = CERTUTIL.as_ref();
+        let with: &OsStr = CERTUTIL.as_ref();
+        let without: &OsStr = "/nonexistent/certutil".as_ref();
 
-        let before = report(&ca, Some(home.path()), certutil);
+        let before = report(&ca, Some(home.path()), with);
         assert_eq!(before.os_store, StoreState::NotApplicable);
         assert_eq!(before.os_chain_ok, None);
         assert!(before.firefox_enterprise_roots.is_empty());
@@ -533,24 +638,27 @@ mod tests {
             before.nss,
             [NssDbState {
                 path: chrome.clone(),
-                ca_present: Some(false)
+                ca_present: Some(false),
+                ca_ssl_trusted: Some(false),
             }]
         );
 
         NssDb(chrome.clone()).install(&ca).unwrap();
-        let after = report(&ca, Some(home.path()), certutil);
-        assert_eq!(after.nss[0].ca_present, Some(true));
-        // Without certutil the read-only SQLite query gives the same answer.
-        let without = report(&ca, Some(home.path()), "/nonexistent/certutil".as_ref());
-        assert_eq!(without.nss[0].ca_present, Some(true));
-        let (stranger, _) = ca_and_leaf("stranger@host");
-        let other = report(
-            &stranger,
-            Some(home.path()),
-            "/nonexistent/certutil".as_ref(),
+        let after = report(&ca, Some(home.path()), with);
+        assert_eq!(
+            (after.nss[0].ca_present, after.nss[0].ca_ssl_trusted),
+            (Some(true), Some(true))
         );
+        // Without certutil the read-only SQLite query still tells presence, not trust.
+        let fallback = report(&ca, Some(home.path()), without);
+        assert_eq!(
+            (fallback.nss[0].ca_present, fallback.nss[0].ca_ssl_trusted),
+            (Some(true), None)
+        );
+        let (stranger, _) = ca_and_leaf("stranger@host");
+        let other = report(&stranger, Some(home.path()), without);
         assert_eq!(other.nss[0].ca_present, Some(false));
 
-        assert!(report(&ca, None, certutil).nss.is_empty());
+        assert!(report(&ca, None, with).nss.is_empty());
     }
 }

@@ -130,6 +130,11 @@ impl TrustStore for WindowsUserRoot {
 /// Read-only check against the real stores (opened with `CERT_STORE_READONLY_FLAG`) and the
 /// current user's chain engine.
 pub(crate) fn check(ca: &Certificate, leaf: &Certificate) -> TrustReport {
+    check_os_stores(ca, leaf, &firefox_roots())
+}
+
+/// [`check`] with the given Firefox profile roots.
+fn check_os_stores(ca: &Certificate, leaf: &Certificate, firefox_roots: &[PathBuf]) -> TrustReport {
     let read_only = CERT_STORE_READONLY_FLAG | CERT_STORE_OPEN_EXISTING_FLAG;
     let user = Store::physical(CERT_SYSTEM_STORE_CURRENT_USER | read_only, "Root\\.Default");
     // Policy and machine stores that may not exist are skipped.
@@ -149,7 +154,7 @@ pub(crate) fn check(ca: &Certificate, leaf: &Certificate) -> TrustReport {
         user.as_ref(),
         &managed,
         ptr::null_mut(),
-        &firefox_roots(),
+        firefox_roots,
     )
 }
 
@@ -359,7 +364,7 @@ impl Store {
 /// thumbprint. A yielded context stays valid until the next `next_match` or the drop.
 struct Matches<'a> {
     store: &'a Store,
-    der: &'a [u8],
+    ca: &'a Certificate,
     sha1: [u8; 20],
     current: *const CERT_CONTEXT,
 }
@@ -368,7 +373,7 @@ impl<'a> Matches<'a> {
     fn new(store: &'a Store, ca: &'a Certificate) -> Self {
         Self {
             store,
-            der: ca.der(),
+            ca,
             sha1: ca.sha1(),
             current: ptr::null(),
         }
@@ -400,7 +405,7 @@ impl<'a> Matches<'a> {
             let encoded = unsafe {
                 std::slice::from_raw_parts((*found).pbCertEncoded, (*found).cbCertEncoded as usize)
             };
-            if encoded == self.der {
+            if self.ca.is(Some(encoded)) {
                 return Some(found);
             }
         }
@@ -564,12 +569,14 @@ mod tests {
 
     #[test]
     fn check_reads_the_real_stores_without_failing() {
-        // Read-only: a CA generated just now is in no store and nothing trusts its leaf.
+        // Read-only: a CA generated just now is in no store and nothing trusts its leaf. The
+        // user's Firefox profiles are left alone (the profile parsing has its own tests).
         let (ca, leaf) = ca_and_leaf("fresh@host");
-        let report = check(&ca, &leaf);
+        let report = check_os_stores(&ca, &leaf, &[]);
         assert_eq!(report.os_store, StoreState::Absent);
         assert_eq!(report.os_chain_ok, Some(false));
         assert!(report.nss.is_empty());
+        assert!(report.firefox_enterprise_roots.is_empty());
     }
 
     #[test]

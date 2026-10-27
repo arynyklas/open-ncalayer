@@ -15,8 +15,7 @@ use security_framework::trust::SecTrust;
 use security_framework::trust_settings::{Domain, TrustSettings, TrustSettingsForCertificate};
 
 use crate::{
-    Cancelled, Certificate, InstallOutcome, StoreState, TrustReport, TrustStore, hex,
-    pem_certificates,
+    Cancelled, Certificate, InstallOutcome, StoreState, TrustReport, TrustStore, hex, pem_blocks,
 };
 
 /// The name the SSL policy checks the leaf against.
@@ -44,12 +43,7 @@ impl TrustStore for MacLoginKeychain {
                 .args(["find-certificate", "-a", "-p"])
                 .arg(Self::keychain()?),
         )?;
-        for cert in pem_certificates(&pem) {
-            if cert? == *ca {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(pem_blocks(&pem).any(|der| ca.is(der.as_deref())))
     }
 
     fn install(&self, ca: &Certificate) -> io::Result<InstallOutcome> {

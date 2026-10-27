@@ -9,9 +9,11 @@
 //!   to a trust store on its own. Implementations: `WindowsUserRoot` (`CurrentUser\Root`),
 //!   `MacLoginKeychain` (the login keychain with SSL trust) and `NssDb` (one NSS database).
 //!
-//! Certificates are identified by their exact encoding: installing twice does not duplicate
-//! a certificate, and removing deletes exactly the given certificate, never another one with
-//! the same name.
+//! Certificates are identified by their exact encoding, compared byte for byte (the other
+//! certificates of a store are never parsed): installing twice does not duplicate a
+//! certificate, and removing deletes exactly the given certificate, never another one with
+//! the same name. Where a store can only address certificates by name and another
+//! certificate shares the name (NSS, the same subject), the change is refused.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -59,9 +61,15 @@ impl Certificate {
     /// Takes a PEM `CERTIFICATE` block (surrounding text is ignored; only the first block
     /// is taken).
     pub fn from_pem(pem: &str) -> io::Result<Self> {
-        pem_certificates(pem)
+        let block = pem_blocks(pem)
             .next()
-            .ok_or_else(|| invalid_data("no PEM CERTIFICATE block"))?
+            .ok_or_else(|| invalid_data("no PEM CERTIFICATE block"))?;
+        Self::from_der(block.ok_or_else(|| invalid_data("malformed PEM CERTIFICATE block"))?)
+    }
+
+    /// Whether `der` is exactly this certificate's encoding.
+    fn is(&self, der: Option<&[u8]>) -> bool {
+        der == Some(self.der.as_slice())
     }
 
     pub fn der(&self) -> &[u8] {
@@ -108,9 +116,12 @@ pub enum StoreState {
 pub struct NssDbState {
     /// The database directory (holding `cert9.db`).
     pub path: PathBuf,
-    /// Whether the database has the CA; `None` if it could not be read. Presence only: the
-    /// trust flags are not interpreted, the live browser check decides.
+    /// Whether the database has the CA; `None` if it could not be read.
     pub ca_present: Option<bool>,
+    /// Whether the database trusts the CA for TLS servers (the SSL `C` flag of `certutil`);
+    /// `None` without `certutil`, or when another certificate with the same subject makes
+    /// the flags ambiguous. The live browser check stays the final word.
+    pub ca_ssl_trusted: Option<bool>,
 }
 
 /// Result of [`check`].
@@ -194,8 +205,12 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// The `CERTIFICATE` blocks of a PEM text, in order.
-fn pem_certificates(text: &str) -> impl Iterator<Item = io::Result<Certificate>> + '_ {
+/// The DER of each `CERTIFICATE` block of a PEM text, in order; `None` for a block that does
+/// not decode (and the text ends at an unterminated one).
+///
+/// The blocks are not parsed as X.509: the certificates of a store are compared by their
+/// bytes only, so one that this crate could not parse is still just "another certificate".
+fn pem_blocks(text: &str) -> impl Iterator<Item = Option<Vec<u8>>> + '_ {
     const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
     const END: &str = "-----END CERTIFICATE-----";
     let mut rest = text;
@@ -203,14 +218,14 @@ fn pem_certificates(text: &str) -> impl Iterator<Item = io::Result<Certificate>>
         let start = rest.find(BEGIN)?;
         let Some(len) = rest[start..].find(END) else {
             rest = "";
-            return Some(Err(invalid_data("unterminated PEM CERTIFICATE block")));
+            return Some(None);
         };
         let block = &rest[start..start + len + END.len()];
         rest = &rest[start + len + END.len()..];
         Some(
             x509_cert::der::pem::decode_vec(block.as_bytes())
-                .map_err(|e| invalid_data(e.to_string()))
-                .and_then(|(_, der)| Certificate::from_der(der)),
+                .ok()
+                .map(|(_, der)| der),
         )
     })
 }
@@ -303,7 +318,16 @@ pub(crate) mod tests {
 
     /// A fresh local CA (DER) and its server leaf for `127.0.0.1`, from `oncl-tls`.
     pub(crate) fn ca_and_leaf(label: &str) -> (Certificate, Certificate) {
-        let material = oncl_tls::generate(time::OffsetDateTime::now_utc(), label).unwrap();
+        ca_and_leaf_at(label, time::OffsetDateTime::now_utc())
+    }
+
+    /// [`ca_and_leaf`] issued at `now`: the same label and `now` give two CAs with the same
+    /// subject.
+    pub(crate) fn ca_and_leaf_at(
+        label: &str,
+        now: time::OffsetDateTime,
+    ) -> (Certificate, Certificate) {
+        let material = oncl_tls::generate(now, label).unwrap();
         let ca = Certificate::from_der(material.ca_der.unwrap()).unwrap();
         let leaf = Certificate::from_pem(&material.chain_pem).unwrap();
         (ca, leaf)
@@ -333,26 +357,65 @@ pub(crate) mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         let err = Certificate::from_pem("-----BEGIN CERTIFICATE-----\nAAAA\n").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err = Certificate::from_pem(&pem(b"not a certificate")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    pub(crate) fn pem(der: &[u8]) -> String {
+        x509_cert::der::pem::encode_string("CERTIFICATE", x509_cert::der::pem::LineEnding::LF, der)
+            .unwrap()
     }
 
     #[test]
-    fn pem_certificates_reads_every_block() {
+    fn pem_blocks_compares_bytes_without_parsing() {
         let (ca, _) = ca_and_leaf("a@h");
         let (other, _) = ca_and_leaf("b@h");
-        let pem = |c: &Certificate| {
-            x509_cert::der::pem::encode_string(
-                "CERTIFICATE",
-                x509_cert::der::pem::LineEnding::LF,
-                c.der(),
-            )
-            .unwrap()
-        };
-        let text = format!("noise\n{}between\n{}", pem(&ca), pem(&other));
-        let certs: Vec<_> = pem_certificates(&text).map(Result::unwrap).collect();
-        assert_eq!(certs, [ca, other]);
+        let odd = noncanonical(&other);
+        assert!(
+            Certificate::from_der(odd.clone()).is_err(),
+            "x509-cert rejects it"
+        );
+        let text = format!(
+            "noise\n{}between\n{}{}-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n{}\
+             -----BEGIN CERTIFICATE-----\nAAAA\n",
+            pem(ca.der()),
+            pem(&odd),
+            pem(other.der()),
+            pem(ca.der()),
+        );
+        let blocks: Vec<_> = pem_blocks(&text).collect();
+        assert_eq!(
+            blocks,
+            [
+                Some(ca.der().to_vec()),
+                Some(odd),
+                Some(other.der().to_vec()),
+                None,
+                Some(ca.der().to_vec()),
+                None
+            ]
+        );
+        assert!(ca.is(blocks[0].as_deref()));
+        assert!(!ca.is(blocks[1].as_deref()));
+        assert!(!ca.is(blocks[3].as_deref()));
     }
 
-    fn write(path: &Path, text: &str) {
+    /// `ca` with the critical flag of its basicConstraints encoded as BOOLEAN `01` instead of
+    /// DER's `FF`: valid BER that NSS stores and x509-cert refuses. The signature no longer
+    /// matches, which NSS does not check on import.
+    pub(crate) fn noncanonical(ca: &Certificate) -> Vec<u8> {
+        const BASIC_CONSTRAINTS_CRITICAL: [u8; 8] =
+            [0x06, 0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff];
+        let mut der = ca.der().to_vec();
+        let at = der
+            .windows(BASIC_CONSTRAINTS_CRITICAL.len())
+            .position(|w| w == BASIC_CONSTRAINTS_CRITICAL)
+            .expect("the CA has a critical basicConstraints");
+        der[at + BASIC_CONSTRAINTS_CRITICAL.len() - 1] = 0x01;
+        der
+    }
+
+    pub(crate) fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
