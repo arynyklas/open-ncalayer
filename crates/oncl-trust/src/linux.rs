@@ -137,18 +137,19 @@ fn sqlite_contains(dir: &Path, ca: &Certificate) -> rusqlite::Result<bool> {
 /// What the subject common name of OpenNCALayer's own local CA starts with (`oncl-tls`).
 const OWN_CA_NAME: &str = "OpenNCALayer Local CA";
 
-/// The nickname [`NssDb::install`] gives a certificate. OpenNCALayer's own CA gets
-/// `OpenNCALayer Local CA <SHA-256 prefix>`, unique per certificate, because NSS refuses a
-/// nickname already used by a certificate with another subject (a previous CA). Any other
-/// CA (the NCA's roots) is named by its own subject common name (`CA <SHA-256 prefix>`
-/// without one), so that it never looks like OpenNCALayer's in the browser's certificate
-/// manager.
+/// The nickname [`NssDb::install`] gives a certificate: unique per certificate, because NSS
+/// refuses a nickname already used by a certificate with another subject (a previous own
+/// CA; the NCA's 2015 root `rcarsa`, whose CN `rcarsa20` shares). OpenNCALayer's own CA is
+/// `OpenNCALayer Local CA <first 16 hex of SHA-256>`; any other CA (the NCA's roots) is
+/// `<its subject CN> <first 8 hex of SHA-256>` (`CA <…>` without a CN), so that it never
+/// looks like OpenNCALayer's in the browser's certificate manager. Removal finds a
+/// certificate by its bytes, whatever its nickname.
 fn nickname(ca: &Certificate) -> String {
-    let prefix = || hex(&ca.sha256())[..16].to_owned();
+    let sha256 = hex(&ca.sha256());
     match ca.subject_common_name() {
-        Some(name) if name.starts_with(OWN_CA_NAME) => format!("{OWN_CA_NAME} {}", prefix()),
-        Some(name) if !name.trim().is_empty() => name,
-        _ => format!("CA {}", prefix()),
+        Some(name) if name.starts_with(OWN_CA_NAME) => format!("{OWN_CA_NAME} {}", &sha256[..16]),
+        Some(name) if !name.trim().is_empty() => format!("{} {}", name.trim(), &sha256[..8]),
+        _ => format!("CA {}", &sha256[..8]),
     }
 }
 
@@ -454,18 +455,14 @@ mod tests {
         for ca in [&root, &issuing, &ours] {
             assert_eq!(db.install(ca).unwrap(), InstallOutcome::Installed);
         }
-        assert_eq!(
-            certutil(dir.path()).find(&root).unwrap().unwrap().nickname,
-            "НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)"
-        );
-        assert_eq!(
-            certutil(dir.path())
-                .find(&issuing)
-                .unwrap()
-                .unwrap()
-                .nickname,
-            "ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA) 2022"
-        );
+        let named = |ca: &Certificate, cn: &str| {
+            assert_eq!(
+                certutil(dir.path()).find(ca).unwrap().unwrap().nickname,
+                format!("{cn} {}", &hex(&ca.sha256())[..8])
+            );
+        };
+        named(&root, "НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)");
+        named(&issuing, "ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA) 2022");
         let own = certutil(dir.path()).find(&ours).unwrap().unwrap().nickname;
         assert_eq!(
             own,
@@ -478,6 +475,35 @@ mod tests {
         assert!(db.remove(&issuing).unwrap());
         assert!(!db.contains(&root).unwrap() && !db.contains(&issuing).unwrap());
         assert!(db.contains(&ours).unwrap());
+    }
+
+    #[test]
+    fn an_nca_root_installs_next_to_one_with_the_same_name() {
+        // The 2015 root shares `rcarsa20`'s CN but not its subject, imported by hand under
+        // the bare CN: NSS refuses that nickname for another subject.
+        let dir = new_db(None);
+        let db = NssDb(dir.path().to_owned());
+        let (root, _) = nca_rsa();
+        let old =
+            Certificate::from_der(include_bytes!("../../../fixtures/nca/prod/rcarsa.der").to_vec())
+                .unwrap();
+        assert_eq!(old.subject_common_name(), root.subject_common_name());
+        let cn = old.subject_common_name().unwrap();
+        import(dir.path(), &cn, old.der(), "C,,");
+
+        assert_eq!(db.install(&root).unwrap(), InstallOutcome::Installed);
+        assert!(db.contains(&root).unwrap() && db.contains(&old).unwrap());
+        assert_eq!(trust_of(dir.path(), &root), ["C,,"]);
+        assert_eq!(db.install(&root).unwrap(), InstallOutcome::AlreadyPresent);
+
+        // Removal takes exactly the pinned root.
+        assert!(db.remove(&root).unwrap());
+        assert!(!db.contains(&root).unwrap());
+        assert!(db.contains(&old).unwrap());
+        assert_eq!(
+            certutil(dir.path()).find(&old).unwrap().unwrap().nickname,
+            cn
+        );
     }
 
     #[test]
