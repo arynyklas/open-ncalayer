@@ -57,16 +57,30 @@ export const CloseEvent =
     }
   };
 
-/** One end of the `CustomEvent` channel between the page and the bridge on `document`. */
-function eventEnd(document, inbound, outbound) {
-  const frames = [];
-  document.addEventListener(inbound, (event) => frames.push(JSON.parse(event.detail)));
-  return {
-    frames,
-    send(frame) {
-      document.dispatchEvent(new CustomEvent(outbound, { detail: JSON.stringify(frame) }));
+/**
+ * A test end of a link: the frames it received and `send`. With `answerReady` set, it answers
+ * `ready` at once, as the real bridge does (the shim checks the bridge is still there that way).
+ */
+function linkEnd(deliver) {
+  const end = {
+    frames: [],
+    answerReady: false,
+    send: deliver,
+    receive(frame) {
+      end.frames.push(frame);
+      if (end.answerReady && frame.t === 'ready') deliver({ t: 'ready' });
     },
   };
+  return end;
+}
+
+/** One end of the `CustomEvent` channel between the page and the bridge on `document`. */
+function eventEnd(document, inbound, outbound) {
+  const end = linkEnd((frame) => {
+    document.dispatchEvent(new CustomEvent(outbound, { detail: JSON.stringify(frame) }));
+  });
+  document.addEventListener(inbound, (event) => end.receive(JSON.parse(event.detail)));
+  return end;
 }
 
 /** The bridge as the shim sees it: frames from the page and a way to answer. */
@@ -83,15 +97,12 @@ function linkChannel(sandbox) {
 
 /** One end of the direct link between a shim and a bridge sharing the content-script global. */
 function directEnd(sandbox, inbound, outbound) {
-  const frames = [];
   const channel = linkChannel(sandbox);
-  channel[inbound] = (frame) => frames.push(structuredClone(frame));
-  return {
-    frames,
-    send(frame) {
-      if (channel[outbound]) channel[outbound](structuredClone(frame));
-    },
-  };
+  const end = linkEnd((frame) => {
+    if (channel[outbound]) channel[outbound](structuredClone(frame));
+  });
+  channel[inbound] = (frame) => end.receive(structuredClone(frame));
+  return end;
 }
 
 /** The bridge as a shim in the same content-script global sees it. */
@@ -139,6 +150,7 @@ export function contentSandbox(window) {
 export function pageWindow({ href = 'https://site.example/app/', document = new EventTarget(), xray = false } = {}) {
   const nativeSockets = [];
   const fetchCalls = [];
+  const socketListeners = []; // [type, listener] of every listener added to a virtual socket
   let checkCallback = () => {};
   let checkDict = () => {};
 
@@ -163,6 +175,10 @@ export function pageWindow({ href = 'https://site.example/app/', document = new 
         checkCallback(listener, `native socket ${type} listener`);
         EventTarget.prototype.addEventListener.call(this, type, listener, options);
       };
+    }
+    addEventListener(type, listener, options) {
+      socketListeners.push([type, listener]);
+      super.addEventListener(type, listener, options);
     }
     send(data) {
       if (this.readyState === 0) throw new DOMException('Still in CONNECTING state.', 'InvalidStateError');
@@ -194,6 +210,19 @@ export function pageWindow({ href = 'https://site.example/app/', document = new 
     return Promise.resolve('native fetch response');
   }
 
+  class PageBlob extends Blob {
+    /** A page promise of the text: the page calls its callbacks. */
+    text() {
+      const text = super.text();
+      return {
+        then(onText, onError) {
+          checkCallback(onText, 'Blob text callback');
+          checkCallback(onError, 'Blob error callback');
+          return text.then(onText, onError);
+        },
+      };
+    }
+  }
   // Page constructors that read a dictionary.
   const withDict = (Base) =>
     class extends Base {
@@ -218,7 +247,7 @@ export function pageWindow({ href = 'https://site.example/app/', document = new 
     location: { href },
     WebSocket: NativeWebSocket,
     fetch,
-    Blob,
+    Blob: PageBlob,
     CloseEvent: withDict(CloseEvent),
     CustomEvent,
     DOMException,
@@ -238,7 +267,7 @@ export function pageWindow({ href = 'https://site.example/app/', document = new 
       return setTimeout(callback, ms);
     },
   };
-  const env = { window, document, NativeWebSocket, nativeSockets, fetchCalls };
+  const env = { window, document, NativeWebSocket, nativeSockets, fetchCalls, socketListeners };
   if (!xray) return env;
   const sandbox = contentSandbox(window);
   checkCallback = (fn, what) => {

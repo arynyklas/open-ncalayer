@@ -4,7 +4,9 @@
 // extension: shim → bridge content script → background → native messaging host → daemon.
 // When the extension cannot reach the daemon, the background answers `fallback` and the
 // socket quietly becomes the browser's own `WebSocket` to the same URL (the original
-// NCALayer, if any). Everything else is untouched.
+// NCALayer, if any). Everything else is untouched. When the bridge stops answering (the
+// extension was disabled, removed or updated), the browser's own `WebSocket` and `fetch`
+// take over for good.
 //
 // The shim reaches the page in one of two ways:
 // - in the page's own world (Chromium; Firefox 128+ with `world: "MAIN"`): it replaces the
@@ -12,7 +14,9 @@
 //   carrying JSON strings;
 // - as an ordinary Firefox content script next to the bridge (Firefox before 128 ignores
 //   `world`): it replaces them through Xray vision (`window.wrappedJSObject`,
-//   `exportFunction`, `cloneInto`) and calls the bridge directly, with no page events.
+//   `exportFunction`, `cloneInto`) and calls the bridge directly, with no page events. When
+//   the extension goes away, Firefox destroys this script with what it gave the page: the
+//   page's `WebSocket` and `fetch` throw until it reloads.
 (function () {
   'use strict';
 
@@ -164,6 +168,10 @@
 
     // --- Link to the bridge ---------------------------------------------------------------
     let bridgeReady = false;
+    // The bridge said `ready` once and no longer answers: the extension was removed, disabled
+    // or updated. From then on the page's own `WebSocket` and `fetch` serve everything.
+    let bridgeGone = false;
+    let heard = false; // a `ready` arrived (while checking the bridge)
     const unsent = [];
     const sockets = new Map(); // sid → frame handler of a virtual socket
     const probes = []; // resolvers of pending probes, answered in order
@@ -172,6 +180,7 @@
     function fromBridge(frame) {
       if (frame === null || typeof frame !== 'object') return;
       if (frame.t === 'ready') {
+        heard = true;
         if (bridgeReady) return;
         bridgeReady = true;
         for (const queued of unsent.splice(0)) emit(queued);
@@ -194,6 +203,25 @@
 
     // The bridge may have started first and missed nothing but this: ask it to say `ready`.
     emit({ t: 'ready' });
+
+    /**
+     * Whether the bridge is still there. Both links deliver at once and the bridge answers
+     * `ready` at once, so no answer means it is gone (Firefox 128+ keeps this page-world shim
+     * when the extension goes away, but not the bridge). Then the extension's sockets are
+     * handed to the browser's own `WebSocket` (not yet accepted) or reset (accepted), and
+     * pending probes are refused. Until the bridge first answers, it is taken as coming.
+     */
+    function bridgeAlive() {
+      if (bridgeGone) return false;
+      if (!bridgeReady) return true;
+      heard = false;
+      emit({ t: 'ready' });
+      if (heard) return true;
+      bridgeGone = true;
+      for (const onFrame of [...sockets.values()]) onFrame({ t: 'gone' });
+      for (const resolve of probes.splice(0)) resolve(false);
+      return false;
+    }
 
     /** Whether the daemon is reachable through the extension. */
     function probe() {
@@ -270,13 +298,18 @@
             break;
           case 'blob': {
             const text = data.text();
-            // An unreadable Blob is skipped rather than stalling the messages behind it.
+            // An unreadable Blob is skipped rather than stalling the messages behind it (also
+            // when the page's `Blob.prototype.text` does not return a promise).
             this.#queue(
               new Promise((resolve) => {
-                text.then(
-                  expose((value) => resolve({ t: 'msg', sid, data: value })),
-                  expose(() => resolve(null)),
-                );
+                try {
+                  text.then(
+                    expose((value) => resolve({ t: 'msg', sid, data: value })),
+                    expose(() => resolve(null)),
+                  );
+                } catch {
+                  resolve(null);
+                }
               }),
             );
             break;
@@ -363,6 +396,10 @@
             break;
           case 'fallback':
             if (this.#state === CONNECTING) this.#fallback();
+            break;
+          case 'gone':
+            if (this.#state === CONNECTING) this.#fallback();
+            else this.#reset();
             break;
         }
       }
@@ -498,7 +535,7 @@
       }
       const args = Array.prototype.slice.call(arguments, 0, 2);
       const parsed = args.length > 0 ? parse(url) : null;
-      if (parsed === null || socketUrl(parsed.href) === null) {
+      if (parsed === null || socketUrl(parsed.href) === null || !bridgeAlive()) {
         // A subclass of the page keeps its prototype.
         return Reflect.construct(NativeWebSocket, args, new.target === WebSocket ? NativeWebSocket : new.target);
       }
@@ -534,7 +571,7 @@
       const init = arguments[1];
       const isRequest = input instanceof Request;
       const url = parse(isRequest ? input.url : input);
-      if (url === null || !isNcaLayer(url, ['http:', 'https:'])) {
+      if (url === null || !isNcaLayer(url, ['http:', 'https:']) || !bridgeAlive()) {
         return Reflect.apply(nativeFetch, this, arguments);
       }
       const thisArg = this;

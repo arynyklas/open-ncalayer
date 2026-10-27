@@ -24,6 +24,8 @@ function setupPage({ ready = true, xray = false } = {}) {
   const bridge = xray ? bridgeLink(env.sandbox) : bridgeEnd(env.document);
   installShim(env.window, env.sandbox);
   if (ready) bridge.send({ t: 'ready' });
+  // From now on the fake bridge, like the real one, answers the shim's `ready` at once.
+  bridge.answerReady = true;
   const frames = () => bridge.frames.filter((f) => f.t !== 'ready');
   return { ...env, bridge, frames };
 }
@@ -345,6 +347,54 @@ for (const { name, xray } of MODES) {
       assert.throws(() => members.send.call({}, 'x'), TypeError);
       assert.throws(() => Object.getOwnPropertyDescriptor(members, 'url').get.call(env.window), TypeError);
     });
+
+    test('a page Blob.text that returns no promise skips that message only', async () => {
+      const env = setup();
+      const { ws, sid } = openSocket(env);
+      const blob = new env.window.Blob(['skipped']);
+      blob.text = () => 'not a promise';
+      ws.send(blob);
+      ws.send('after');
+      await until(() => env.frames().some((f) => f.data === 'after'));
+      assert.deepEqual(
+        env.frames().filter((f) => f.t === 'msg'),
+        [{ t: 'msg', sid, data: 'after' }],
+      );
+    });
+
+    test("a bridge that stops answering hands everything to the page's own WebSocket and fetch", async () => {
+      const env = setup();
+      const { ws: accepted } = openSocket(env);
+      const acceptedEvents = record(accepted);
+      const pending = new env.window.WebSocket('ws://localhost:13600', ['p']);
+      const probe = env.window.fetch('https://127.0.0.1:13579/');
+      assert.deepEqual(
+        env.frames().map((f) => f.t),
+        ['open', 'open', 'probe'],
+      );
+
+      // The extension went away; the page notices on its next NCALayer socket.
+      env.bridge.answerReady = false;
+      const later = new env.window.WebSocket('wss://127.0.0.1:13579/');
+      assert.deepEqual(
+        env.nativeSockets.map((s) => s.args),
+        [['ws://localhost:13600', ['p']], ['wss://127.0.0.1:13579/']],
+      );
+      assert.equal(env.nativeSockets[1], later);
+      env.nativeSockets[0].serverOpen();
+      assert.equal(pending.readyState, 1);
+      assert.deepEqual(acceptedEvents, [
+        ['error', 3],
+        ['close', 1006, '', false, 3],
+      ]);
+      assert.equal(await probe, 'native fetch response');
+      const direct = env.window.fetch('https://127.0.0.1:13579/');
+      // Straight to the page's own fetch, without asking the extension.
+      assert.equal(env.fetchCalls.length, 2);
+      assert.equal(await direct, 'native fetch response');
+      // Nothing more went to the bridge but the checks.
+      assert.equal(env.frames().length, 3);
+    });
   });
 }
 
@@ -357,6 +407,7 @@ test('Firefox Xray: the page gets exported functions only, the bridge direct cal
   installShim(window, sandbox);
   assert.deepEqual(bridge.frames, [{ t: 'ready' }]);
   bridge.send({ t: 'ready' });
+  bridge.answerReady = true;
 
   assert.ok(sandbox.exported.has(window.WebSocket));
   assert.ok(sandbox.exported.has(window.fetch));
@@ -376,4 +427,15 @@ test('Firefox Xray: the page gets exported functions only, the bridge direct cal
   ws.send('hello');
   assert.deepEqual(bridge.frames.at(-1), { t: 'msg', sid: 1, data: 'hello' });
   assert.deepEqual(events.frames, []);
+
+  // Listeners the shim adds to page objects are exported too, their options cloned.
+  ws.onmessage = () => {};
+  assert.ok(sandbox.exported.has(env.socketListeners.at(-1)[1]), 'on<type> listener');
+  const signal = new AbortController().signal;
+  const added = [];
+  signal.addEventListener = (type, listener, options) => added.push([type, listener, options]);
+  window.fetch('https://127.0.0.1:13579/', { signal });
+  assert.equal(added.length, 1);
+  assert.ok(sandbox.exported.has(added[0][1]), 'abort listener');
+  assert.ok(sandbox.cloned.has(added[0][2]), 'abort listener options');
 });

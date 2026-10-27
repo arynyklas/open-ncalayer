@@ -99,8 +99,17 @@
     let direct = false;
 
     function toPage(frame) {
-      if (direct) channel.toPage(frame);
-      else doc.dispatchEvent(new win.CustomEvent(TO_PAGE, { detail: JSON.stringify(frame) }));
+      if (!direct) {
+        doc.dispatchEvent(new win.CustomEvent(TO_PAGE, { detail: JSON.stringify(frame) }));
+        return;
+      }
+      // Like an event listener's: a throw in the shim (page code it calls, e.g. a page
+      // `dispatchEvent`) must not cut short what the bridge is doing.
+      try {
+        channel.toPage(frame);
+      } catch {
+        // The page broke its own socket.
+      }
     }
 
     function fromEvent(event) {

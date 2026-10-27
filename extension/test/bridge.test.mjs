@@ -286,3 +286,26 @@ test('a shim that links up after the bridge started turns the page events off', 
   assert.deepEqual(env.ports[0].posted, [{ t: 'open', sid: 2, url: URL_13579 }]);
   assert.deepEqual(events.frames, [{ t: 'ready' }]);
 });
+
+test('shim in the content script: a throw in the shim does not stop the bridge', () => {
+  const env = contentWindow();
+  const sandbox = {};
+  const page = pageLink(sandbox);
+  installBridge(env.window, env.runtime, sandbox);
+  const channel = sandbox.__oncl_link;
+  const receive = channel.toPage;
+  // E.g. page code the shim calls throws while it handles a close.
+  channel.toPage = (frame) => {
+    receive(frame);
+    if (frame.t === 'close') throw new Error('page code threw');
+  };
+  page.send({ t: 'open', sid: 1, url: URL_13579 });
+  page.send({ t: 'open', sid: 2, url: URL_13579 });
+  page.send({ t: 'probe' });
+  env.ports[0].drop(env.runtime);
+  assert.deepEqual(page.frames.slice(1), [
+    { t: 'close', sid: 1 },
+    { t: 'close', sid: 2 },
+    { t: 'probe', ok: false },
+  ]);
+});

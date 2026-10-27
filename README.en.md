@@ -311,8 +311,9 @@ Good to know:
 - A repeated `nm install` replaces the relay by renaming: relays the browser is running keep working with the old file. Old `nmhost.old-*` files are removed by the next `nm install`. On Windows `nm uninstall` cannot delete a relay the browser is holding (the relay line says «занят запущенным процессом», exit code 1): close the browser and run the command again. On macOS and Linux the file is removed at once.
 - A daemon started by the relay runs until the session ends. If TLS is set up and port 13579 is free, the same daemon serves `wss` too; otherwise the log has a warning and the daemon serves only the extension until the user stops the original or saves a certificate in the wizard.
 - Through the extension, the site origin that modules see comes from the browser, not from the page.
-- If the host is not installed or the daemon does not start, the extension gives the page its own `WebSocket`, i.e. the original NCALayer if it is running. While the host is installed, sites go to OpenNCALayer even when the original is running. To return to the original, run `nm uninstall` and restart the browser (or stop the daemon), or disable the extension: right after `nm uninstall` the browser keeps using the relay and daemon already running.
+- If the host is not installed or the daemon does not start, the extension gives the page its own `WebSocket`, i.e. the original NCALayer if it is running. While the host is installed, sites go to OpenNCALayer even when the original is running. To return to the original, run `nm uninstall` and restart the browser (or stop the daemon), or disable the extension: right after `nm uninstall` the browser keeps using the relay and daemon already running. After the extension is disabled, open tabs in Chromium and Firefox 128 or later switch to the page's own `WebSocket` by themselves; in Firefox ESR 115 they must be reloaded (see below).
 - Firefox before 128 (ESR 115) has no `world: "MAIN"` for content scripts. There the shim runs as an ordinary content script: it replaces the page's `WebSocket` and `fetch` through Xray vision (`window.wrappedJSObject`, `exportFunction`, `cloneInto`) and hands frames to the bridge directly, with no events on `document`. In Firefox 128 and later the shim runs in the page's world, as in Chromium.
+- Firefox ESR 115: after disabling, removing, reloading or updating the extension, reload the open tabs. Until then `WebSocket` and `fetch` in them throw `TypeError: can't access dead object` — on every site, not only NCALayer ones. Firefox destroys the content script together with the functions it gave the page, and lets it run nothing before that.
 
 Linux, Firefox from snap and Flatpak:
 - `nm install` detects Firefox by `~/.mozilla` or `~/.config/mozilla`. Snap Firefox keeps its profile under `~/snap/firefox/`, so the command may skip Firefox ("пропущен"). Then create the directory with `mkdir -p ~/.mozilla` and run `nm install` again: the manifest goes to `~/.mozilla/native-messaging-hosts/`, where snap Firefox 135 or later reads it through xdg-desktop-portal.
@@ -322,6 +323,7 @@ Linux, Firefox from snap and Flatpak:
 ### Deviations and limits of the extension (P2)
 
 - In Firefox ESR 115 a page's subclass of `WebSocket` (`class X extends WebSocket`) creates a plain `WebSocket`, not an `X`: functions a content script gives the page do not receive `new.target`.
+- In Firefox ESR 115, open tabs must be reloaded after the extension is disabled, removed or updated: until then `WebSocket` and `fetch` do not work in them.
 - Chrome 109 (the last Chrome for Windows 7) is the declared minimum but has not been tested.
 - Safari is not supported.
 - Sockets a site opens from a Web Worker are not replaced: they still need `wss` and the CA.
@@ -363,7 +365,7 @@ cargo xtask ext build
 cargo xtask ext-e2e --download
 ```
 
-Without `--download` the paths come from `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`, `ONCL_FIREFOX_ESR` and `ONCL_GECKODRIVER`; one browser only: `--browser chromium|firefox|firefox-esr`. The browsers run with throwaway profiles in `target/ext-e2e/`, and the host is registered there too (`nm install --sandbox`). The `e2e-prompter` feature replaces the signing dialogs with a script from the `ONCL_E2E_PROMPTER` file; regular builds do not have it.
+Without `--download` the paths come from `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`, `ONCL_FIREFOX_ESR` and `ONCL_GECKODRIVER`; one browser only: `--browser chromium|firefox|firefox-esr`. Firefox ESR 115 needs the system library `libdbus-glib-1-2`. The browsers run with throwaway profiles in `target/ext-e2e/`, and the host is registered there too (`nm install --sandbox`). The `e2e-prompter` feature replaces the signing dialogs with a script from the `ONCL_E2E_PROMPTER` file; regular builds do not have it. Scenario 8 removes the extension under an open page (Firefox only; in ESR 115 it checks the limitation described above).
 
 Windows 7 SP1 builds (on Windows only, with the pinned nightly):
 

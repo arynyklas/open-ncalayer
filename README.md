@@ -313,8 +313,9 @@ cargo xtask ext build   # → target/extension/
 - Повторный `nm install` заменяет relay переименованием: копии relay, запущенные браузером, работают дальше со старым файлом. Старые файлы `nmhost.old-*` удаляются при следующем `nm install`. В Windows `nm uninstall` не может удалить relay, пока браузер его держит (строка relay «занят запущенным процессом», код 1): закройте браузер и повторите команду. В macOS и Linux файл удаляется сразу.
 - Демон, запущенный relay, работает до конца сеанса. Если TLS настроен и порт 13579 свободен, тот же демон обслуживает и `wss`; иначе в журнале — предупреждение, и демон работает только для расширения, пока пользователь не остановит оригинал или не сохранит сертификат в мастере.
 - Origin сайта, который получают модули, через расширение берётся у браузера, а не у страницы.
-- Если хост не установлен или демон не запускается, расширение отдаёт странице её обычный `WebSocket`, то есть оригинальный NCALayer, если он запущен. Пока хост установлен, сайты идут в OpenNCALayer, даже когда оригинал запущен. Чтобы вернуться к оригиналу, выполните `nm uninstall` и перезапустите браузер (или завершите демон) либо отключите расширение: сразу после `nm uninstall` браузер продолжает работать через уже запущенные relay и демон.
+- Если хост не установлен или демон не запускается, расширение отдаёт странице её обычный `WebSocket`, то есть оригинальный NCALayer, если он запущен. Пока хост установлен, сайты идут в OpenNCALayer, даже когда оригинал запущен. Чтобы вернуться к оригиналу, выполните `nm uninstall` и перезапустите браузер (или завершите демон) либо отключите расширение: сразу после `nm uninstall` браузер продолжает работать через уже запущенные relay и демон. После отключения расширения открытые вкладки в Chromium и Firefox 128 и новее сами переходят на обычный `WebSocket`; в Firefox ESR 115 их нужно перезагрузить (см. ниже).
 - В Firefox до 128 (ESR 115) content scripts не умеют `world: "MAIN"`. Там шим работает как обычный content script: подменяет `WebSocket` и `fetch` страницы через Xray (`window.wrappedJSObject`, `exportFunction`, `cloneInto`) и передаёт кадры мосту напрямую, без событий на `document`. В Firefox 128 и новее шим, как и в Chromium, работает в мире страницы.
+- Firefox ESR 115: после отключения, удаления, перезагрузки или обновления расширения перезагрузите открытые вкладки. До перезагрузки `WebSocket` и `fetch` в них бросают `TypeError: can't access dead object` — на любых сайтах, не только NCALayer. Firefox уничтожает content script вместе с функциями, которые он отдал странице, и не даёт ему ничего сделать перед этим.
 
 Linux, Firefox из snap и Flatpak:
 - `nm install` находит Firefox по `~/.mozilla` или `~/.config/mozilla`. Профиль Firefox из snap лежит в `~/snap/firefox/`, и команда может пропустить Firefox («пропущен»). Тогда создайте каталог `mkdir -p ~/.mozilla` и повторите `nm install`: манифест ляжет в `~/.mozilla/native-messaging-hosts/`, откуда Firefox из snap 135 и новее читает его через xdg-desktop-portal.
@@ -324,6 +325,7 @@ Linux, Firefox из snap и Flatpak:
 ### Отличия и ограничения расширения (P2)
 
 - В Firefox ESR 115 подкласс `WebSocket` страницы (`class X extends WebSocket`) создаёт обычный `WebSocket`, а не экземпляр `X`: функции, которые content script отдаёт странице, не получают `new.target`.
+- В Firefox ESR 115 после отключения, удаления или обновления расширения открытые вкладки нужно перезагрузить: до этого `WebSocket` и `fetch` в них не работают.
 - Chrome 109 (последний Chrome для Windows 7) заявлен минимальной версией, но не проверялся.
 - Safari не поддерживается.
 - Сокеты, которые сайт открывает из Web Worker, не подменяются: для них по-прежнему нужны `wss` и CA.
@@ -365,7 +367,7 @@ cargo xtask ext build
 cargo xtask ext-e2e --download
 ```
 
-Без `--download` пути берутся из `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`, `ONCL_FIREFOX_ESR` и `ONCL_GECKODRIVER`; один браузер — `--browser chromium|firefox|firefox-esr`. Браузеры запускаются с одноразовыми профилями в `target/ext-e2e/`, хост регистрируется там же (`nm install --sandbox`). Фича `e2e-prompter` заменяет окна подписи сценарием из файла `ONCL_E2E_PROMPTER`; в обычных сборках её нет.
+Без `--download` пути берутся из `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`, `ONCL_FIREFOX_ESR` и `ONCL_GECKODRIVER`; один браузер — `--browser chromium|firefox|firefox-esr`. Firefox ESR 115 нужна системная библиотека `libdbus-glib-1-2`. Браузеры запускаются с одноразовыми профилями в `target/ext-e2e/`, хост регистрируется там же (`nm install --sandbox`). Фича `e2e-prompter` заменяет окна подписи сценарием из файла `ONCL_E2E_PROMPTER`; в обычных сборках её нет. Сценарий 8 удаляет расширение из открытой страницы (только Firefox; в ESR 115 он проверяет описанное выше ограничение).
 
 Проверка наших подписей XMLDSig и CMS в NCANode (Kalkan), только Linux, нужен Docker: `cargo xtask fetch-fixtures && cargo xtask interop-ncanode`. Образ, порядок запуска и последний результат описаны в [`docs/dev/interop-ncanode.md`](docs/dev/interop-ncanode.md).
 
