@@ -303,7 +303,7 @@ Installation:
 
    The command never touches certificates. Check with `openncalayer nm status` (exit code 1 if anything is missing); remove with `openncalayer nm uninstall` (the data directory stays).
 2. Chrome, Edge, Yandex Browser: the extensions page (`chrome://extensions`, `edge://extensions`) → "Developer mode" → "Load unpacked" → the `target/extension/chromium` directory or the unpacked `openncalayer-chromium-<version>.zip`. The extension id must be `cmdaoegbcpdhoamhgmibpgpnlojopcal`: the host accepts no other id.
-3. Firefox (128 or later): for now only a temporary install — `about:debugging` → "This Firefox" → "Load Temporary Add-on…" → `target/extension/firefox/manifest.json`; the add-on is gone after a Firefox restart. Only an AMO-signed (unlisted) XPI installs permanently: Firefox refuses the unsigned `.xpi`.
+3. Firefox (115 or later, ESR 115 included — the last Firefox for Windows 7): for now only a temporary install — `about:debugging` → "This Firefox" → "Load Temporary Add-on…" → `target/extension/firefox/manifest.json`; the add-on is gone after a Firefox restart. Only an AMO-signed (unlisted) XPI installs permanently: Firefox refuses the unsigned `.xpi`.
 4. Reload the open tabs of the sites.
 
 Good to know:
@@ -312,6 +312,7 @@ Good to know:
 - A daemon started by the relay runs until the session ends. If TLS is set up and port 13579 is free, the same daemon serves `wss` too; otherwise the log has a warning and the daemon serves only the extension until the user stops the original or saves a certificate in the wizard.
 - Through the extension, the site origin that modules see comes from the browser, not from the page.
 - If the host is not installed or the daemon does not start, the extension gives the page its own `WebSocket`, i.e. the original NCALayer if it is running. While the host is installed, sites go to OpenNCALayer even when the original is running. To return to the original, run `nm uninstall` and restart the browser (or stop the daemon), or disable the extension: right after `nm uninstall` the browser keeps using the relay and daemon already running.
+- Firefox before 128 (ESR 115) has no `world: "MAIN"` for content scripts. There the shim runs as an ordinary content script: it replaces the page's `WebSocket` and `fetch` through Xray vision (`window.wrappedJSObject`, `exportFunction`, `cloneInto`) and hands frames to the bridge directly, with no events on `document`. In Firefox 128 and later the shim runs in the page's world, as in Chromium.
 
 Linux, Firefox from snap and Flatpak:
 - `nm install` detects Firefox by `~/.mozilla` or `~/.config/mozilla`. Snap Firefox keeps its profile under `~/snap/firefox/`, so the command may skip Firefox ("пропущен"). Then create the directory with `mkdir -p ~/.mozilla` and run `nm install` again: the manifest goes to `~/.mozilla/native-messaging-hosts/`, where snap Firefox 135 or later reads it through xdg-desktop-portal.
@@ -320,7 +321,7 @@ Linux, Firefox from snap and Flatpak:
 
 ### Deviations and limits of the extension (P2)
 
-- Firefox ESR 115 (the last Firefox for Windows 7) is not supported until P6: the shim needs `world: "MAIN"` in content scripts, available since Firefox 128.
+- In Firefox ESR 115 a page's subclass of `WebSocket` (`class X extends WebSocket`) creates a plain `WebSocket`, not an `X`: functions a content script gives the page do not receive `new.target`.
 - Chrome 109 (the last Chrome for Windows 7) is the declared minimum but has not been tested.
 - Safari is not supported.
 - Sockets a site opens from a Web Worker are not replaced: they still need `wss` and the CA.
@@ -354,7 +355,7 @@ node --test "extension/test/*.test.mjs"   # extension tests, Node 22 or later
 cargo xtask ext build                     # → target/extension/
 ```
 
-End-to-end check of the extension in Chrome for Testing and Firefox (Linux only; browsers and drivers are downloaded to `target/browsers/`):
+End-to-end check of the extension in Chrome for Testing, Firefox and Firefox ESR 115 (Linux only; browsers and drivers are downloaded to `target/browsers/`):
 
 ```sh
 cargo build --release -p openncalayer --features e2e-prompter -p oncl-nmhost
@@ -362,7 +363,7 @@ cargo xtask ext build
 cargo xtask ext-e2e --download
 ```
 
-Without `--download` the paths come from `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX` and `ONCL_GECKODRIVER`. The browsers run with throwaway profiles in `target/ext-e2e/`, and the host is registered there too (`nm install --sandbox`). The `e2e-prompter` feature replaces the signing dialogs with a script from the `ONCL_E2E_PROMPTER` file; regular builds do not have it.
+Without `--download` the paths come from `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`, `ONCL_FIREFOX_ESR` and `ONCL_GECKODRIVER`; one browser only: `--browser chromium|firefox|firefox-esr`. The browsers run with throwaway profiles in `target/ext-e2e/`, and the host is registered there too (`nm install --sandbox`). The `e2e-prompter` feature replaces the signing dialogs with a script from the `ONCL_E2E_PROMPTER` file; regular builds do not have it.
 
 Windows 7 SP1 builds (on Windows only, with the pinned nightly):
 

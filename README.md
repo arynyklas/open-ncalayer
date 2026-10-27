@@ -305,7 +305,7 @@ cargo xtask ext build   # → target/extension/
 
    Сертификаты команда не трогает. Проверка — `openncalayer nm status` (код 1, если чего-то не хватает), удаление — `openncalayer nm uninstall` (каталог данных остаётся).
 2. Chrome, Edge, Yandex Browser: страница расширений (`chrome://extensions`, `edge://extensions`) → «Режим разработчика» → «Загрузить распакованное расширение» → каталог `target/extension/chromium` или распакованный `openncalayer-chromium-<версия>.zip`. Id расширения должен быть `cmdaoegbcpdhoamhgmibpgpnlojopcal`: расширение с другим id хост не принимает.
-3. Firefox (128 и новее): пока только временная установка — `about:debugging` → «Этот Firefox» → «Загрузить временное дополнение…» → `target/extension/firefox/manifest.json`; дополнение пропадает при перезапуске Firefox. Постоянно ставится только подписанный AMO XPI (unlisted): неподписанный `.xpi` Firefox не установит.
+3. Firefox (115 и новее, в том числе ESR 115 — последний Firefox для Windows 7): пока только временная установка — `about:debugging` → «Этот Firefox» → «Загрузить временное дополнение…» → `target/extension/firefox/manifest.json`; дополнение пропадает при перезапуске Firefox. Постоянно ставится только подписанный AMO XPI (unlisted): неподписанный `.xpi` Firefox не установит.
 4. Перезагрузите открытые вкладки сайтов.
 
 Что важно знать:
@@ -314,6 +314,7 @@ cargo xtask ext build   # → target/extension/
 - Демон, запущенный relay, работает до конца сеанса. Если TLS настроен и порт 13579 свободен, тот же демон обслуживает и `wss`; иначе в журнале — предупреждение, и демон работает только для расширения, пока пользователь не остановит оригинал или не сохранит сертификат в мастере.
 - Origin сайта, который получают модули, через расширение берётся у браузера, а не у страницы.
 - Если хост не установлен или демон не запускается, расширение отдаёт странице её обычный `WebSocket`, то есть оригинальный NCALayer, если он запущен. Пока хост установлен, сайты идут в OpenNCALayer, даже когда оригинал запущен. Чтобы вернуться к оригиналу, выполните `nm uninstall` и перезапустите браузер (или завершите демон) либо отключите расширение: сразу после `nm uninstall` браузер продолжает работать через уже запущенные relay и демон.
+- В Firefox до 128 (ESR 115) content scripts не умеют `world: "MAIN"`. Там шим работает как обычный content script: подменяет `WebSocket` и `fetch` страницы через Xray (`window.wrappedJSObject`, `exportFunction`, `cloneInto`) и передаёт кадры мосту напрямую, без событий на `document`. В Firefox 128 и новее шим, как и в Chromium, работает в мире страницы.
 
 Linux, Firefox из snap и Flatpak:
 - `nm install` находит Firefox по `~/.mozilla` или `~/.config/mozilla`. Профиль Firefox из snap лежит в `~/snap/firefox/`, и команда может пропустить Firefox («пропущен»). Тогда создайте каталог `mkdir -p ~/.mozilla` и повторите `nm install`: манифест ляжет в `~/.mozilla/native-messaging-hosts/`, откуда Firefox из snap 135 и новее читает его через xdg-desktop-portal.
@@ -322,7 +323,7 @@ Linux, Firefox из snap и Flatpak:
 
 ### Отличия и ограничения расширения (P2)
 
-- Firefox ESR 115 (последний Firefox для Windows 7) не поддерживается до P6: шиму нужен `world: "MAIN"` в content scripts, он есть с Firefox 128.
+- В Firefox ESR 115 подкласс `WebSocket` страницы (`class X extends WebSocket`) создаёт обычный `WebSocket`, а не экземпляр `X`: функции, которые content script отдаёт странице, не получают `new.target`.
 - Chrome 109 (последний Chrome для Windows 7) заявлен минимальной версией, но не проверялся.
 - Safari не поддерживается.
 - Сокеты, которые сайт открывает из Web Worker, не подменяются: для них по-прежнему нужны `wss` и CA.
@@ -356,7 +357,7 @@ node --test "extension/test/*.test.mjs"   # тесты расширения, Nod
 cargo xtask ext build                     # → target/extension/
 ```
 
-Сквозная проверка расширения в Chrome for Testing и Firefox (только Linux, браузеры и драйверы скачиваются в `target/browsers/`):
+Сквозная проверка расширения в Chrome for Testing, Firefox и Firefox ESR 115 (только Linux, браузеры и драйверы скачиваются в `target/browsers/`):
 
 ```sh
 cargo build --release -p openncalayer --features e2e-prompter -p oncl-nmhost
@@ -364,7 +365,7 @@ cargo xtask ext build
 cargo xtask ext-e2e --download
 ```
 
-Без `--download` пути берутся из `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX` и `ONCL_GECKODRIVER`. Браузеры запускаются с одноразовыми профилями в `target/ext-e2e/`, хост регистрируется там же (`nm install --sandbox`). Фича `e2e-prompter` заменяет окна подписи сценарием из файла `ONCL_E2E_PROMPTER`; в обычных сборках её нет.
+Без `--download` пути берутся из `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`, `ONCL_FIREFOX_ESR` и `ONCL_GECKODRIVER`; один браузер — `--browser chromium|firefox|firefox-esr`. Браузеры запускаются с одноразовыми профилями в `target/ext-e2e/`, хост регистрируется там же (`nm install --sandbox`). Фича `e2e-prompter` заменяет окна подписи сценарием из файла `ONCL_E2E_PROMPTER`; в обычных сборках её нет.
 
 Проверка наших подписей XMLDSig и CMS в NCANode (Kalkan), только Linux, нужен Docker: `cargo xtask fetch-fixtures && cargo xtask interop-ncanode`. Образ, порядок запуска и последний результат описаны в [`docs/dev/interop-ncanode.md`](docs/dev/interop-ncanode.md).
 

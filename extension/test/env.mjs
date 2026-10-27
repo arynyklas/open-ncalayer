@@ -1,7 +1,8 @@
 // Fake browser environment for the extension unit tests. The scripts under `src/` are classic
 // scripts; `loadScript` runs one with `node:vm` and returns the factory it exports through
 // `module.exports`. The fakes stand in for the page (`window`, `document`, the browser's own
-// `WebSocket`/`fetch`) and for `chrome.runtime`/`chrome.scripting`.
+// `WebSocket`/`fetch`), for a Firefox content-script global (`exportFunction`, `cloneInto`)
+// and for `chrome.runtime`/`chrome.scripting`.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
@@ -9,6 +10,7 @@ import vm from 'node:vm';
 export const HOST_NAME = 'io.github.arynyklas.openncalayer';
 const TO_EXT = '__oncl_to_ext';
 const TO_PAGE = '__oncl_to_page';
+const LINK = '__oncl_link';
 
 /** Runs `extension/src/<name>` as a classic script and returns its `module.exports`. */
 export function loadScript(name) {
@@ -73,10 +75,72 @@ export const bridgeEnd = (document) => eventEnd(document, TO_EXT, TO_PAGE);
 /** The page (shim) as the bridge sees it. */
 export const pageEnd = (document) => eventEnd(document, TO_PAGE, TO_EXT);
 
-/** A page `window` whose own `WebSocket` and `fetch` are recording fakes. */
-export function pageWindow({ href = 'https://site.example/app/', document = new EventTarget() } = {}) {
+/** Where shim and bridge meet in a content-script global, as both scripts set it up. */
+function linkChannel(sandbox) {
+  if (!Object.hasOwn(sandbox, LINK)) Object.defineProperty(sandbox, LINK, { value: { toExt: null, toPage: null } });
+  return sandbox[LINK];
+}
+
+/** One end of the direct link between a shim and a bridge sharing the content-script global. */
+function directEnd(sandbox, inbound, outbound) {
+  const frames = [];
+  const channel = linkChannel(sandbox);
+  channel[inbound] = (frame) => frames.push(structuredClone(frame));
+  return {
+    frames,
+    send(frame) {
+      if (channel[outbound]) channel[outbound](structuredClone(frame));
+    },
+  };
+}
+
+/** The bridge as a shim in the same content-script global sees it. */
+export const bridgeLink = (sandbox) => directEnd(sandbox, 'toExt', 'toPage');
+
+/** A shim in the same content-script global as the bridge sees it. */
+export const pageLink = (sandbox) => directEnd(sandbox, 'toPage', 'toExt');
+
+/**
+ * A Firefox content-script global for `window`: `exportFunction` and `cloneInto`, recording
+ * what they made in `exported` and `cloned`. `window.wrappedJSObject` is `window` itself:
+ * the fakes have no Xray wrappers to waive.
+ */
+export function contentSandbox(window) {
+  const exported = new WeakSet();
+  const cloned = new WeakSet();
+  window.wrappedJSObject = window;
+  return {
+    exported,
+    cloned,
+    exportFunction(fn, scope) {
+      if (scope !== window) throw new Error('exportFunction into another scope');
+      // A forwarder: callable and constructible, `new.target` is not passed on.
+      const forwarder = function (...args) {
+        return new.target === undefined ? Reflect.apply(fn, this, args) : Reflect.construct(fn, args);
+      };
+      exported.add(forwarder);
+      return forwarder;
+    },
+    cloneInto(value, scope) {
+      if (scope !== window) throw new Error('cloneInto another scope');
+      const copy = structuredClone(value);
+      cloned.add(copy);
+      return copy;
+    },
+  };
+}
+
+/**
+ * A page `window` whose own `WebSocket` and `fetch` are recording fakes. With `xray`, also
+ * a content-script global (`sandbox`, see `contentSandbox`) for the shim, and page APIs that
+ * insist on what Xray vision demands: callbacks the page calls are exported functions, and
+ * dictionaries page constructors read were cloned into the page.
+ */
+export function pageWindow({ href = 'https://site.example/app/', document = new EventTarget(), xray = false } = {}) {
   const nativeSockets = [];
   const fetchCalls = [];
+  let checkCallback = () => {};
+  let checkDict = () => {};
 
   class NativeWebSocket extends EventTarget {
     constructor(url, protocols) {
@@ -93,6 +157,12 @@ export function pageWindow({ href = 'https://site.example/app/', document = new 
       this.closeCalls = [];
       void protocols;
       nativeSockets.push(this);
+      // Only the shim listens to a native socket (virtual ones share the prototype, and the
+      // tests listen to those).
+      this.addEventListener = (type, listener, options) => {
+        checkCallback(listener, `native socket ${type} listener`);
+        EventTarget.prototype.addEventListener.call(this, type, listener, options);
+      };
     }
     send(data) {
       if (this.readyState === 0) throw new DOMException('Still in CONNECTING state.', 'InvalidStateError');
@@ -124,26 +194,60 @@ export function pageWindow({ href = 'https://site.example/app/', document = new 
     return Promise.resolve('native fetch response');
   }
 
+  // Page constructors that read a dictionary.
+  const withDict = (Base) =>
+    class extends Base {
+      constructor(type, init) {
+        checkDict(init, Base.name);
+        super(type, init);
+      }
+    };
+  class PagePromise extends Promise {
+    // `then` and friends make plain promises.
+    static get [Symbol.species]() {
+      return Promise;
+    }
+    constructor(executor) {
+      checkCallback(executor, 'Promise executor');
+      super(executor);
+    }
+  }
+
   const window = {
     document,
     location: { href },
     WebSocket: NativeWebSocket,
     fetch,
     Blob,
-    CloseEvent,
+    CloseEvent: withDict(CloseEvent),
     CustomEvent,
     DOMException,
     Event,
     EventTarget,
-    MessageEvent,
+    MessageEvent: withDict(MessageEvent),
+    Object,
+    Promise: PagePromise,
     Request,
-    Response,
+    Response: withDict(Response),
     TextDecoder,
     TextEncoder,
+    TypeError,
     URL,
-    setTimeout,
+    setTimeout(callback, ms) {
+      checkCallback(callback, 'setTimeout callback');
+      return setTimeout(callback, ms);
+    },
   };
-  return { window, document, NativeWebSocket, nativeSockets, fetchCalls };
+  const env = { window, document, NativeWebSocket, nativeSockets, fetchCalls };
+  if (!xray) return env;
+  const sandbox = contentSandbox(window);
+  checkCallback = (fn, what) => {
+    if (!sandbox.exported.has(fn)) throw new Error(`${what} is not an exported function`);
+  };
+  checkDict = (init, what) => {
+    if (init !== undefined && !sandbox.cloned.has(init)) throw new Error(`${what} dictionary is not cloned into the page`);
+  };
+  return { ...env, sandbox };
 }
 
 /** A `chrome.events.Event` stand-in. */
