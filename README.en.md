@@ -8,7 +8,7 @@ OpenNCALayer is an independent project and is not affiliated with the National C
 
 ## Status
 
-Early development; the first pre-release is `0.1.0-alpha.1` ([Releases](https://github.com/arynyklas/open-ncalayer/releases)). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. Tokens, Windows 7, auto-update and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
+Early development; the first pre-release is `0.1.0-alpha.1` ([Releases](https://github.com/arynyklas/open-ncalayer/releases)). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. Builds for Windows 7 SP1 x64 and x86 exist but have not yet run on a real Windows 7 (see [Windows 7](#windows-7)). Tokens, auto-update and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
 
 P1 provides:
 - the `kz.gov.pki.knca.basics` module, method `sign`, formats `cms` and `raw`;
@@ -27,7 +27,9 @@ The fourth phase (P4) completes the original's protocol: the `basics`, `commonUt
 
 The fifth phase (P5) makes OpenNCALayer a desktop program: a tray icon, a settings window, a TLS wizard with buttons that install certificates, mkcert, certificate expiry reminders, coexistence with the original NCALayer, and an About window (see [Desktop](#desktop)).
 
-Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md), [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md), [`docs/dev/smoke-p4.md`](docs/dev/smoke-p4.md) and [`docs/dev/smoke-p5.md`](docs/dev/smoke-p5.md) (in Russian).
+The sixth phase (P6) adds builds for Windows 7 SP1 x64 and x86, a regular Windows x86 build and support for the extension in Firefox ESR 115 (see [Windows 7](#windows-7)).
+
+Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md), [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md), [`docs/dev/smoke-p4.md`](docs/dev/smoke-p4.md), [`docs/dev/smoke-p5.md`](docs/dev/smoke-p5.md) and [`docs/dev/smoke-p6.md`](docs/dev/smoke-p6.md) (in Russian).
 
 Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
@@ -237,6 +239,22 @@ The About window: version, build commit, the Apache-2.0 licence, `Copyright 2026
 
 Unpack the archive and go on as with your own build: `openncalayer run`, and the extension as in [Browser extension](#browser-extension).
 
+## Windows 7
+
+Windows 7 SP1 has archives of its own: `openncalayer-<version>-win7-x64.zip` (64-bit system) and `openncalayer-<version>-win7-x86.zip` (32-bit). On Windows 10 and 11 take the regular `openncalayer-<version>-x86_64-pc-windows-msvc.zip` and `openncalayer-<version>-i686-pc-windows-msvc.zip` (x86). The Windows 7 builds link the CRT statically: no Visual C++ Redistributable is needed.
+
+The Windows 7 archive has two small DLLs next to `openncalayer.exe` and `nmhost.exe`. Unpack the whole archive and keep them in the program's folder:
+- `combase.dll` forwards `CoTaskMemFree` and `CoCreateFreeThreadedMarshaler` to `ole32.dll`. The `windows` crates behind the windows and the tray icon import these functions from `combase.dll`, which Windows 7 does not have;
+- `api-ms-win-core-winrt-error-l1-1-0.dll` holds stubs of `RoOriginateErrorW` and `RoOriginateError`: Windows 7 has no WinRT to report an error to, so they do nothing and return `FALSE`.
+
+The DLLs export only these functions and reach only `kernel32.dll` and `ole32.dll`. On Windows 8 and later neither DLL is loaded: `combase.dll` is a KnownDLL there and `api-ms-…` an API set, so the loader takes the system ones. The Windows 7 build therefore also runs on Windows 10 and 11 (CI checks it there). The relay `nmhost.exe` does not need the DLLs: `nm install` copies it on its own.
+
+On Windows 7 the windows take their default font size from the system metrics (`SystemParametersInfoW`), scaled for DPI: `SystemParametersInfoForDpi`, which Slint uses, does not exist on Windows 7 (details in [Development](#development)).
+
+Browsers on Windows 7: Firefox ESR 115 and Chrome 109 are the last versions for it. The extension installs into Firefox ESR 115 just as into regular Firefox (see [Browser extension](#browser-extension)). There the shim works through Xray vision, which has limits of its own: a page subclass of `WebSocket` does not get its own class, and open tabs must be reloaded after the extension is disabled, removed or updated (see [Deviations and limits of the extension](#deviations-and-limits-of-the-extension-p2)). The end-to-end extension test passes in Firefox ESR 115 on Linux.
+
+Not checked yet: no real Windows 7 has run these builds; Windows 7 VMs come with the lab (P9). Checked automatically: every import (the import gate: no DLL or function from the Windows 8+ list) and starting the build on Windows 11. Not checked: start and tray icon on Windows 7, the signing window and its font, the eGov login through the extension in Firefox ESR 115 and Chrome 109, and matching the imports against the full Windows 7 SP1 export list. The checklist is in [`docs/dev/smoke-p6.md`](docs/dev/smoke-p6.md) (in Russian).
+
 ## Build and run
 
 You need `rustup`: the Rust version is pinned in `rust-toolchain.toml` and installed automatically. On Linux the dialogs need the fontconfig, xkbcommon, Wayland and GTK 3 development packages (Debian and Ubuntu: `libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev`).
@@ -311,7 +329,7 @@ Good to know:
 - A repeated `nm install` replaces the relay by renaming: relays the browser is running keep working with the old file. Old `nmhost.old-*` files are removed by the next `nm install`. On Windows `nm uninstall` cannot delete a relay the browser is holding (the relay line says «занят запущенным процессом», exit code 1): close the browser and run the command again. On macOS and Linux the file is removed at once.
 - A daemon started by the relay runs until the session ends. If TLS is set up and port 13579 is free, the same daemon serves `wss` too; otherwise the log has a warning and the daemon serves only the extension until the user stops the original or saves a certificate in the wizard.
 - Through the extension, the site origin that modules see comes from the browser, not from the page.
-- If the host is not installed or the daemon does not start, the extension gives the page its own `WebSocket`, i.e. the original NCALayer if it is running. While the host is installed, sites go to OpenNCALayer even when the original is running. To return to the original, run `nm uninstall` and restart the browser (or stop the daemon), or disable the extension: right after `nm uninstall` the browser keeps using the relay and daemon already running. After the extension is disabled, open tabs in Chromium and Firefox 128 or later switch to the page's own `WebSocket` by themselves; in Firefox ESR 115 they must be reloaded (see below).
+- If the host is not installed or the daemon does not start, the extension gives the page its own `WebSocket`, i.e. the original NCALayer if it is running. While the host is installed, sites go to OpenNCALayer even when the original is running. To return to the original, run `nm uninstall` and restart the browser (or stop the daemon), or disable the extension: right after `nm uninstall` the browser keeps using the relay and daemon already running. After the extension is disabled, open tabs in Chromium and Firefox 128 or later switch to the page's own `WebSocket` by themselves, but only for new sockets and `fetch`; in Firefox ESR 115 they must be reloaded (see below). A socket already open through the extension does not switch to the original: in Firefox 128 or later it is closed with code 1006 on its next `send` (sites usually reconnect), and a socket that only waits for messages gets nothing and stays open until the page closes it. In Chromium the end-to-end test does not check this.
 - Firefox before 128 (ESR 115) has no `world: "MAIN"` for content scripts. There the shim runs as an ordinary content script: it replaces the page's `WebSocket` and `fetch` through Xray vision (`window.wrappedJSObject`, `exportFunction`, `cloneInto`) and hands frames to the bridge directly, with no events on `document`. In Firefox 128 and later the shim runs in the page's world, as in Chromium.
 - Firefox ESR 115: after disabling, removing, reloading or updating the extension, reload the open tabs. Until then `WebSocket` and `fetch` in them throw `TypeError: can't access dead object` — on every site, not only NCALayer ones. Firefox destroys the content script together with the functions it gave the page, and lets it run nothing before that.
 
