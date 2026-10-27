@@ -55,7 +55,7 @@ time = { workspace = true, features = ["macros"] }
 # `TestKey`: the registry sandbox of the Internet Options test.
 oncl-registry = { path = "../oncl-registry", features = ["testing"] }
 
-[target.'cfg(unix)'.dev-dependencies]
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 # `listen` with a backlog of 0: a local address whose connections never complete.
 libc.workspace = true
 

@@ -585,9 +585,10 @@ mod tests {
 
     /// A local address whose connections never complete: a listener with a backlog of 0
     /// and its accept queue filled by connections it never accepts, so the system drops
-    /// further SYNs, as a dead host does. Windows refuses them instead (after its own SYN
-    /// retries, about 2 s), so this needs a Unix system.
-    #[cfg(unix)]
+    /// further SYNs, as a dead host does. Only Linux behaves so: Windows refuses them (after
+    /// its own SYN retries, about 2 s) and macOS keeps completing connections on loopback,
+    /// so there `agent_connects_within_the_connect_timeout` covers the setting alone.
+    #[cfg(target_os = "linux")]
     fn unconnectable() -> (std::net::SocketAddr, TcpListener, Vec<TcpStream>) {
         use std::os::fd::AsRawFd;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -608,7 +609,7 @@ mod tests {
     }
 
     /// Connect timeout 2 s, whole request 5 s.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     const DEAD_HOST: GetOptions = GetOptions {
         timeout: Duration::from_secs(5),
         connect_timeout: Duration::from_secs(2),
@@ -617,7 +618,7 @@ mod tests {
 
     /// Whether a request that cannot connect failed after the connect timeout, not the
     /// whole request timeout.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn fails_at_the_connect_timeout(request: impl FnOnce() -> Result<HttpReply, HttpError>) {
         let start = Instant::now();
         let err = request().unwrap_err();
@@ -628,7 +629,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn unconnectable_server_fails_at_the_connect_timeout() {
         let (address, _listener, _held) = unconnectable();
@@ -637,7 +638,7 @@ mod tests {
         });
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn unconnectable_proxy_fails_at_the_connect_timeout() {
         let (address, _listener, _held) = unconnectable();

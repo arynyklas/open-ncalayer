@@ -888,7 +888,8 @@ mod tests {
         }
 
         fn run(program: PathBuf, copy: Option<tempfile::TempDir>) -> Listener {
-            let mut child = Command::new(program)
+            let mut command = Command::new(program);
+            command
                 .args([
                     "--exact",
                     "port_owner::tests::listener_process",
@@ -898,9 +899,23 @@ mod tests {
                 .env(CHILD, "1")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
+                .stderr(Stdio::null());
+            // Linux: a child another test forks while this test still writes its copy of the
+            // program inherits the write handle, and exec of the copy fails with ETXTBSY until
+            // that child execs in turn.
+            let mut attempts = 0;
+            let mut child = loop {
+                match command.spawn() {
+                    Ok(child) => break child,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 100 =>
+                    {
+                        attempts += 1;
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            };
             let stdout = BufReader::new(child.stdout.take().unwrap());
             let port = stdout
                 .lines()
