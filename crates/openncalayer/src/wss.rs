@@ -200,6 +200,15 @@ impl Wss {
     ///
     /// Why it is still off (also kept for [`Wss::off`]).
     pub fn start_within(&self, wait: Duration) -> Result<(), WssOff> {
+        self.start_retrying(wait, std::thread::sleep)
+    }
+
+    /// [`Wss::start_within`], waiting between the tries with `sleep`.
+    fn start_retrying(
+        &self,
+        wait: Duration,
+        mut sleep: impl FnMut(Duration),
+    ) -> Result<(), WssOff> {
         let deadline = Instant::now() + wait;
         loop {
             let started = self.start_with(&mut self.lock());
@@ -207,7 +216,7 @@ impl Wss {
                 Err(failure)
                     if matches!(failure.off, WssOff::PortBusy(_)) && Instant::now() < deadline =>
                 {
-                    std::thread::sleep(RETRY_EVERY);
+                    sleep(RETRY_EVERY);
                 }
                 result => return result.map_err(still_off),
             }
@@ -812,22 +821,51 @@ mod tests {
         );
     }
 
-    /// The retry does not hold the state while it waits: others read it meanwhile.
+    /// The retry does not hold the state while it waits: others read it meanwhile. The
+    /// retry's wait is held open until the state was read from another thread; the timeouts
+    /// only end a test that would otherwise hang.
     #[test]
     fn the_retry_lets_others_read_the_state() {
-        let (_dir, wss, _listeners, _held) = busy();
+        const GUARD: Duration = Duration::from_secs(10);
+        let (_dir, wss, mut listeners, held) = busy();
+        let port = held.local_addr().unwrap().port();
+        let (sleeping, is_sleeping) = std::sync::mpsc::channel();
+        let (go, may_go) = std::sync::mpsc::channel::<()>();
         let retrying = {
             let wss = Arc::clone(&wss);
-            std::thread::spawn(move || wss.start_within(Duration::from_millis(1500)))
+            std::thread::spawn(move || {
+                let mut first = true;
+                wss.start_retrying(Duration::from_secs(60), |pause| {
+                    if std::mem::take(&mut first) {
+                        sleeping.send(()).unwrap();
+                        may_go.recv_timeout(GUARD).expect("the state was not read");
+                    } else {
+                        std::thread::sleep(pause);
+                    }
+                })
+            })
         };
-        std::thread::sleep(Duration::from_millis(200));
-        let asked = Instant::now();
-        assert!(wss.off().is_some());
-        assert!(
-            asked.elapsed() < Duration::from_millis(500),
-            "{:?}",
-            asked.elapsed()
-        );
-        assert!(retrying.join().unwrap().is_err());
+        is_sleeping
+            .recv_timeout(GUARD)
+            .expect("the retry did not wait");
+
+        // Read from another thread while the retry provably waits: a held state would
+        // block it.
+        let (read, was_read) = std::sync::mpsc::channel();
+        {
+            let wss = Arc::clone(&wss);
+            std::thread::spawn(move || read.send(wss.off()).unwrap());
+        }
+        let off = was_read
+            .recv_timeout(GUARD)
+            .expect("the state is held while the retry waits");
+        assert_eq!(off, Some(WssOff::PortBusy(port)));
+
+        // The port comes free: the next try takes it.
+        drop(held);
+        go.send(()).unwrap();
+        assert_eq!(retrying.join().unwrap(), Ok(()));
+        assert_eq!(wss.off(), None);
+        assert!(listeners.try_recv().is_ok());
     }
 }
