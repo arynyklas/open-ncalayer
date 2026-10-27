@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 
 use der::{Decode, Encode};
 use oncl_tls::{
-    Renewal, TargetOs, TlsError, TlsFiles, TlsInfo, TlsSource, generate, instructions,
-    issue_with_mkcert, load_info, needs_renewal, replaced_cas, save, server_config,
-    set_mkcert_consent,
+    MkcertRenewal, RenewError, Renewal, TargetOs, TlsError, TlsFiles, TlsInfo, TlsSource, generate,
+    instructions, issue_with_mkcert, load_info, needs_renewal, renew_with_mkcert, replaced_cas,
+    save, server_config, set_mkcert_consent,
 };
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::SeedableRng;
@@ -542,4 +542,94 @@ fn the_mkcert_consent_is_withdrawn_and_given_in_tls_json() {
     );
     assert_eq!(needs_renewal(&info, late), Renewal::AutoRenew);
     server_config(&files).unwrap();
+}
+
+/// Every file under `dir` with its contents.
+fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    files_under(dir)
+        .into_iter()
+        .map(|p| (p.clone(), std::fs::read(p).unwrap()))
+        .collect()
+}
+
+#[test]
+fn a_renewal_refuses_a_regenerated_mkcert_ca_before_reading_its_key() {
+    let caroot = FakeCaroot::p256();
+    let data = tempfile::tempdir().unwrap();
+    let files = TlsFiles {
+        dir: data.path().join("tls"),
+    };
+    let first = issue_with_mkcert(caroot.path(), NOW).unwrap();
+    save(&files, &first).unwrap();
+    let before = snapshot(data.path());
+    let late = NOW + Duration::days(780);
+
+    // CAROOT now holds another CA; its key file would not even parse if it were read.
+    let other = FakeCaroot::p256();
+    std::fs::copy(
+        other.path().join("rootCA.pem"),
+        caroot.path().join("rootCA.pem"),
+    )
+    .unwrap();
+    std::fs::write(caroot.path().join("rootCA-key.pem"), "not a key").unwrap();
+    match renew_with_mkcert(&files, late) {
+        Err(RenewError::Issue(TlsError::MkcertCaChanged(path))) => {
+            assert!(path.ends_with("rootCA.pem"), "{path}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(snapshot(data.path()), before);
+
+    // The CA that issued the certificate is back: it renews, keeping CA and consent.
+    std::fs::write(caroot.path().join("rootCA-key.pem"), &caroot.key_pem).unwrap();
+    std::fs::write(
+        caroot.path().join("rootCA.pem"),
+        der::pem::encode_string("CERTIFICATE", der::pem::LineEnding::LF, &caroot.ca_der).unwrap(),
+    )
+    .unwrap();
+    let MkcertRenewal::Renewed(info) = renew_with_mkcert(&files, late).unwrap() else {
+        panic!("not renewed");
+    };
+    assert_eq!(load_info(&files).unwrap().as_ref(), Some(&info));
+    assert_ne!(info.leaf_sha256, first.info.leaf_sha256);
+    assert_eq!(info.ca_sha256, first.info.ca_sha256);
+    assert_eq!(info.source, first.info.source);
+    server_config(&files).unwrap();
+}
+
+#[test]
+fn a_renewal_reads_nothing_when_not_due() {
+    let caroot = FakeCaroot::p256();
+    let data = tempfile::tempdir().unwrap();
+    let files = TlsFiles {
+        dir: data.path().join("tls"),
+    };
+    let late = NOW + Duration::days(780);
+    assert_eq!(
+        renew_with_mkcert(&files, late).unwrap(),
+        MkcertRenewal::NotDue
+    );
+    save(&files, &issue_with_mkcert(caroot.path(), NOW).unwrap()).unwrap();
+    std::fs::write(caroot.path().join("rootCA-key.pem"), "not a key").unwrap();
+    let before = snapshot(data.path());
+    // Too early.
+    assert_eq!(
+        renew_with_mkcert(&files, NOW).unwrap(),
+        MkcertRenewal::NotDue
+    );
+    // The consent withdrawn.
+    set_mkcert_consent(&files, None).unwrap();
+    let withdrawn = snapshot(data.path());
+    assert_ne!(withdrawn, before);
+    assert_eq!(
+        renew_with_mkcert(&files, late).unwrap(),
+        MkcertRenewal::NotDue
+    );
+    assert_eq!(snapshot(data.path()), withdrawn);
+    // Not an mkcert certificate.
+    save(&files, &generate(NOW, "user@host").unwrap()).unwrap();
+    assert_eq!(
+        renew_with_mkcert(&files, late).unwrap(),
+        MkcertRenewal::NotDue
+    );
 }

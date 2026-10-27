@@ -8,6 +8,7 @@
 
 use std::ffi::OsString;
 use std::fs;
+use std::io;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
@@ -27,7 +28,7 @@ use x509_cert::name::Name;
 use zeroize::Zeroizing;
 
 use crate::generate::{BACKDATE, LEAF_VALIDITY_DAYS, gen_err, leaf_params};
-use crate::{TargetOs, TlsError, TlsInfo, TlsMaterial, TlsSource};
+use crate::{Renewal, TargetOs, TlsError, TlsFiles, TlsInfo, TlsMaterial, TlsSource};
 
 /// mkcert's CA certificate in `CAROOT`.
 const ROOT_CERT: &str = "rootCA.pem";
@@ -73,6 +74,90 @@ fn caroot_of(os: TargetOs, var: impl Fn(&str) -> Option<OsString>) -> Option<Pat
 /// certificate, the certificate is not a CA or not valid at `now`, or its name cannot be
 /// reproduced.
 pub fn issue_with_mkcert(caroot: &Path, now: OffsetDateTime) -> Result<TlsMaterial, TlsError> {
+    issue(caroot, now, None)
+}
+
+/// What [`renew_with_mkcert`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MkcertRenewal {
+    /// The certificate in the files is not (or no longer) one issued with mkcert's CA, with
+    /// the consent, and due for the automatic re-issue ([`crate::needs_renewal`]): nothing
+    /// was read from `CAROOT` and nothing was written.
+    NotDue,
+    /// Re-issued with the CA that issued the previous certificate and saved, keeping the
+    /// recorded consent: the new metadata.
+    Renewed(TlsInfo),
+}
+
+/// Why [`renew_with_mkcert`] did not renew.
+#[derive(Debug, thiserror::Error)]
+pub enum RenewError {
+    /// mkcert's CA cannot be used ([`TlsError::Mkcert`]), or `rootCA.pem` is not the CA that
+    /// issued the certificate in use ([`TlsError::MkcertCaChanged`]; its key was not read).
+    /// Nothing was written.
+    #[error(transparent)]
+    Issue(TlsError),
+    /// The new certificate could not be saved; the files may be half written.
+    #[error("{0}")]
+    Save(io::Error),
+}
+
+/// Re-issues the mkcert certificate in `files` at `now` if it is due for the automatic
+/// re-issue with the user's consent ([`crate::needs_renewal`]) and saves it, keeping the
+/// recorded consent.
+///
+/// Everything runs while no other save, consent change or server configuration read of this
+/// process runs: a consent withdrawn ([`crate::set_mkcert_consent`]) before is honoured
+/// ([`MkcertRenewal::NotDue`]), one withdrawn meanwhile waits and then applies to the new
+/// certificate. The SHA-256 of `rootCA.pem` is compared with [`TlsInfo::ca_sha256`] before
+/// `rootCA-key.pem` is touched: the consent covers the key of the CA that issued the
+/// certificate, not of whatever CA is in `CAROOT` now.
+///
+/// # Errors
+///
+/// See [`RenewError`]; the certificate in use is left as it is.
+pub fn renew_with_mkcert(
+    files: &TlsFiles,
+    now: OffsetDateTime,
+) -> Result<MkcertRenewal, RenewError> {
+    renew_while_locked(files, now, || {})
+}
+
+/// [`renew_with_mkcert`]; `before_save` runs with the files locked, right before the save.
+fn renew_while_locked(
+    files: &TlsFiles,
+    now: OffsetDateTime,
+    before_save: impl FnOnce(),
+) -> Result<MkcertRenewal, RenewError> {
+    let _files = crate::files::lock();
+    let Ok(Some(info)) = crate::files::load_info(files) else {
+        return Ok(MkcertRenewal::NotDue);
+    };
+    let (Renewal::AutoRenew, TlsSource::Mkcert { caroot, .. }) =
+        (crate::needs_renewal(&info, now), &info.source)
+    else {
+        return Ok(MkcertRenewal::NotDue);
+    };
+    let mut material = issue(
+        caroot,
+        now,
+        Some(info.ca_sha256.as_deref().unwrap_or_default()),
+    )
+    .map_err(RenewError::Issue)?;
+    // The consent was given once, for every renewal.
+    material.info.source = info.source.clone();
+    before_save();
+    crate::files::save_locked(files, &material).map_err(RenewError::Save)?;
+    Ok(MkcertRenewal::Renewed(material.info))
+}
+
+/// [`issue_with_mkcert`]; with `expected_ca`, the lowercase hex SHA-256 of the CA that must be
+/// in `rootCA.pem`, any other CA is refused before its key is read.
+fn issue(
+    caroot: &Path,
+    now: OffsetDateTime,
+    expected_ca: Option<&str>,
+) -> Result<TlsMaterial, TlsError> {
     let now = now
         .to_offset(UtcOffset::UTC)
         .replace_nanosecond(0)
@@ -80,6 +165,9 @@ pub fn issue_with_mkcert(caroot: &Path, now: OffsetDateTime) -> Result<TlsMateri
     let cert_path = caroot.join(ROOT_CERT);
     let ca_pem = fs::read(&cert_path).map_err(|e| mkcert_err(&cert_path, e))?;
     let ca_der = CertificateDer::from_pem_slice(&ca_pem).map_err(|e| mkcert_err(&cert_path, e))?;
+    if expected_ca.is_some_and(|expected| crate::sha256_hex(&ca_der) != expected) {
+        return Err(TlsError::MkcertCaChanged(cert_path.display().to_string()));
+    }
     let ca = Certificate::from_der(&ca_der).map_err(|e| mkcert_err(&cert_path, e))?;
     let tbs = ca.tbs_certificate();
     let is_ca = tbs
@@ -285,5 +373,53 @@ mod tests {
             Some(Path::new("/home/a/.local/share").join("mkcert"))
         );
         assert_eq!(caroot_of(TargetOs::Windows, env(&home)), None);
+    }
+
+    #[test]
+    fn a_consent_withdrawn_during_a_renewal_wins() {
+        let now = time::macros::datetime!(2026-10-27 10:00 UTC);
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params = CertificateParams::default();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "mkcert test");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.not_before = now - Duration::days(365);
+        params.not_after = now + Duration::days(9 * 365);
+        let ca = params.self_signed(&key).unwrap();
+        let caroot = tempfile::tempdir().unwrap();
+        fs::write(caroot.path().join(ROOT_CERT), ca.pem()).unwrap();
+        fs::write(caroot.path().join(ROOT_KEY), key.serialize_pem()).unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let files = TlsFiles {
+            dir: data.path().join("tls"),
+        };
+        crate::save(&files, &issue_with_mkcert(caroot.path(), now).unwrap()).unwrap();
+
+        // The withdrawal comes while the renewal has issued but not saved yet. Without the
+        // lock it would finish during the pause and then be overwritten by the save.
+        let late = now + Duration::days(780);
+        let mut withdrawal = None;
+        let renewed = renew_while_locked(&files, late, || {
+            let files = files.clone();
+            withdrawal = Some(std::thread::spawn(move || {
+                crate::set_mkcert_consent(&files, None).unwrap()
+            }));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        })
+        .unwrap();
+        assert!(withdrawal.unwrap().join().unwrap());
+        let MkcertRenewal::Renewed(new) = renewed else {
+            panic!("not renewed");
+        };
+        let info = crate::load_info(&files).unwrap().unwrap();
+        assert_eq!(info.leaf_sha256, new.leaf_sha256);
+        assert!(!info.source.renews_itself(), "{:?}", info.source);
+        // Withdrawn: the next check renews nothing and reads no key.
+        fs::write(caroot.path().join(ROOT_KEY), "not a key").unwrap();
+        assert_eq!(
+            renew_with_mkcert(&files, late).unwrap(),
+            MkcertRenewal::NotDue
+        );
     }
 }

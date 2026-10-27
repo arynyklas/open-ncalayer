@@ -13,10 +13,11 @@ use crate::{TlsError, TlsInfo, TlsMaterial, TlsSource};
 
 /// Held while this process writes the TLS files or reads them into a server configuration:
 /// two writers (the TLS wizard, the renewal) never interleave their files, and a reload never
-/// pairs one save's key with another's certificate.
+/// pairs one save's key with another's certificate. The mkcert renewal holds it from reading
+/// `tls.json` to saving ([`crate::renew_with_mkcert`]).
 static FILES: Mutex<()> = Mutex::new(());
 
-fn lock() -> MutexGuard<'static, ()> {
+pub(crate) fn lock() -> MutexGuard<'static, ()> {
     FILES.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -74,6 +75,11 @@ impl TlsFiles {
 /// accessible only to the user, SYSTEM and Administrators).
 pub fn save(files: &TlsFiles, m: &TlsMaterial) -> io::Result<()> {
     let _files = lock();
+    save_locked(files, m)
+}
+
+/// [`save`] while the caller holds [`lock`].
+pub(crate) fn save_locked(files: &TlsFiles, m: &TlsMaterial) -> io::Result<()> {
     fs::create_dir_all(&files.dir)?;
     keep_replaced_ca(files, m)?;
     write_file(&files.key_pem(), m.key_pem.as_bytes(), true)?;

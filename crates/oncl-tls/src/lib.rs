@@ -36,7 +36,7 @@ pub use files::{
 pub use generate::generate;
 pub use import::import;
 pub use instructions::{TargetOs, instructions, nss_nickname, sha1_grouped};
-pub use mkcert::{issue_with_mkcert, mkcert_caroot};
+pub use mkcert::{MkcertRenewal, RenewError, issue_with_mkcert, mkcert_caroot, renew_with_mkcert};
 pub use selftest::{SelftestReport, SelftestReports};
 
 /// Remind the user to re-issue the server certificate this long before it expires.
@@ -189,6 +189,10 @@ pub enum TlsError {
     /// together, or the CA is not valid.
     #[error("cannot use the mkcert CA: {0}")]
     Mkcert(String),
+    /// The mkcert CA in this `rootCA.pem` is not the one that issued the certificate in use
+    /// (mkcert's CA was regenerated or replaced): its key is not read.
+    #[error("{0} is not the mkcert CA that issued the certificate in use")]
+    MkcertCaChanged(String),
 }
 
 /// The common name of the subject of the DER certificate `der`, if it parses and has one

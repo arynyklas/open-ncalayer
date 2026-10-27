@@ -327,6 +327,15 @@ fn failure_text(failure: &RenewFailure, l: Locale) -> String {
         (RenewFailure::Mkcert(_), Locale::En) => {
             format!("The mkcert CA key cannot be used ({e}). The previous certificate still works.")
         }
+        (RenewFailure::CaChanged(_), Locale::Ru) => format!(
+            "Центр mkcert сменился ({e}): текущий сертификат выпущен другим центром, и ключ нового OpenNCALayer не читал. Прежний сертификат пока работает; запустите мастер TLS заново."
+        ),
+        (RenewFailure::CaChanged(_), Locale::Kk) => format!(
+            "mkcert орталығы ауысты ({e}): ағымдағы сертификатты басқа орталық шығарған, жаңасының кілтін OpenNCALayer оқымады. Бұрынғы сертификат әзірге жұмыс істейді; TLS шеберін қайта іске қосыңыз."
+        ),
+        (RenewFailure::CaChanged(_), Locale::En) => format!(
+            "The mkcert CA has changed ({e}): another CA issued the certificate in use, and OpenNCALayer did not read the new one's key. The previous certificate still works; run the TLS wizard again."
+        ),
         (RenewFailure::Save(_), Locale::Ru) => format!(
             "Новый сертификат не удалось сохранить ({e}). Сервер пока работает с прежним; перевыпустите сертификат в мастере."
         ),
@@ -541,6 +550,10 @@ mod tests {
             (
                 RenewFailure::Save("disk full".to_owned()),
                 "could not be saved",
+            ),
+            (
+                RenewFailure::CaChanged("/ca/rootCA.pem".to_owned()),
+                "run the TLS wizard again",
             ),
             (
                 RenewFailure::Reload("key mismatch".to_owned()),

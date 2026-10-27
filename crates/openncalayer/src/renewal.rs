@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use oncl_tls::{
-    Renewal, TlsFiles, TlsSource, issue_with_mkcert, load_info, needs_renewal, save, server_config,
+    MkcertRenewal, RenewError, Renewal, TlsError, TlsFiles, load_info, needs_renewal,
+    renew_with_mkcert, server_config,
 };
 use oncl_ui::tls_wizard::Applied;
 use time::OffsetDateTime;
@@ -42,6 +43,10 @@ pub enum RenewFailure {
     /// mkcert's CA cannot be used (its key unreadable or not matching, the CA expired):
     /// nothing was written.
     Mkcert(String),
+    /// mkcert's `rootCA.pem` is another CA than the one that issued the certificate in use
+    /// (regenerated or replaced): its key was not read, nothing was written. The user is to
+    /// run the TLS wizard again.
+    CaChanged(String),
     /// The new certificate could not be saved; the files may be half written, and the
     /// server keeps the certificate it has loaded.
     Save(String),
@@ -52,14 +57,18 @@ pub enum RenewFailure {
 impl RenewFailure {
     pub fn detail(&self) -> &str {
         match self {
-            RenewFailure::Mkcert(e) | RenewFailure::Save(e) | RenewFailure::Reload(e) => e,
+            RenewFailure::Mkcert(e)
+            | RenewFailure::CaChanged(e)
+            | RenewFailure::Save(e)
+            | RenewFailure::Reload(e) => e,
         }
     }
 }
 
 /// Checks the certificate in `files` at `now`. A due mkcert certificate with the consent is
-/// re-issued, saved (keeping the recorded consent) and handed to the server by `reload`,
-/// which says whether the server took it.
+/// re-issued with the CA that issued it and saved, keeping the recorded consent
+/// ([`renew_with_mkcert`]: a consent withdrawn meanwhile wins), then handed to the server by
+/// `reload`, which says whether the server took it.
 pub fn check(
     files: &TlsFiles,
     now: OffsetDateTime,
@@ -72,26 +81,26 @@ pub fn check(
         Renewal::None => RenewalCheck::Nothing,
         Renewal::Remind { days } => due(&info.leaf_not_after, days, now),
         Renewal::AutoRenew => {
-            let TlsSource::Mkcert { caroot, .. } = &info.source else {
-                return RenewalCheck::Nothing;
-            };
             let failed = |failure| RenewalCheck::RenewFailed {
                 days: days_left(&info.leaf_not_after, now),
                 failure,
             };
-            let mut material = match issue_with_mkcert(caroot, now) {
-                Ok(material) => material,
-                Err(e) => return failed(RenewFailure::Mkcert(e.to_string())),
+            let renewed = match renew_with_mkcert(files, now) {
+                Ok(MkcertRenewal::Renewed(renewed)) => renewed,
+                // The consent was withdrawn (or the certificate replaced) since `info`.
+                Ok(MkcertRenewal::NotDue) => return state(files, now),
+                Err(RenewError::Issue(TlsError::MkcertCaChanged(e))) => {
+                    return failed(RenewFailure::CaChanged(e));
+                }
+                Err(RenewError::Issue(e)) => return failed(RenewFailure::Mkcert(e.to_string())),
+                Err(RenewError::Save(e)) => {
+                    return failed(RenewFailure::Save(format!("{}: {e}", files.dir.display())));
+                }
             };
-            // The consent was given once, for every renewal.
-            material.info.source = info.source.clone();
-            if let Err(e) = save(files, &material) {
-                return failed(RenewFailure::Save(format!("{}: {e}", files.dir.display())));
-            }
             match reload() {
                 Applied::Serving | Applied::WhenPortFree | Applied::AfterRestart => {
                     RenewalCheck::Renewed {
-                        not_after: material.info.leaf_not_after,
+                        not_after: renewed.leaf_not_after,
                     }
                 }
                 Applied::Failed(e) => failed(RenewFailure::Reload(e)),
@@ -153,6 +162,7 @@ pub fn check_due(last: SystemTime, now: SystemTime) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oncl_tls::{issue_with_mkcert, save};
     use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
     use time::Duration;
     use time::macros::datetime;
@@ -278,6 +288,34 @@ mod tests {
         // The server keeps serving what it has.
         assert_eq!(reload(&files, Some(&live)), Applied::Serving);
         assert_eq!(reload(&files, None), Applied::AfterRestart);
+    }
+
+    #[test]
+    fn a_regenerated_mkcert_ca_is_not_used() {
+        let caroot = caroot();
+        let dir = tempfile::tempdir().unwrap();
+        let files = files(dir.path());
+        let first = issue_with_mkcert(caroot.path(), NOW).unwrap();
+        save(&files, &first).unwrap();
+        // mkcert made a new CA; its key would not even parse, were it read.
+        let other = self::caroot();
+        std::fs::copy(
+            other.path().join("rootCA.pem"),
+            caroot.path().join("rootCA.pem"),
+        )
+        .unwrap();
+        std::fs::write(caroot.path().join("rootCA-key.pem"), "broken").unwrap();
+
+        let late = NOW + Duration::days(780);
+        let RenewalCheck::RenewFailed {
+            days: 19,
+            failure: RenewFailure::CaChanged(error),
+        } = check(&files, late, || unreachable!("nothing to reload"))
+        else {
+            panic!("renewed with another CA");
+        };
+        assert!(error.contains("rootCA.pem"), "{error}");
+        assert_eq!(load_info(&files).unwrap().unwrap(), first.info);
     }
 
     #[test]
