@@ -148,8 +148,10 @@ impl TrayHandle {
     }
 
     /// Runs `f` if the tray turns out unavailable after [`start_tray`] returned: on macOS
-    /// the icon is made on the event loop's first turn and may fail there. Elsewhere a tray
-    /// that cannot be shown fails [`start_tray`] itself, and `f` never runs.
+    /// the icon is made on the event loop's first turn and may fail there; on Linux no
+    /// StatusNotifierWatcher took the icon within a minute of the start (a panel that starts
+    /// later still gets it, but `f` has run). On Windows a tray that cannot be shown fails
+    /// [`start_tray`] itself, and `f` never runs.
     pub fn when_unavailable(&self, f: impl FnOnce(&TrayError) + 'static) {
         set_on_unavailable(Box::new(f));
     }
@@ -196,7 +198,10 @@ fn set_on_unavailable(f: OnUnavailable) {
 
 /// The tray could not be made after all: logged, and told once to
 /// [`TrayHandle::when_unavailable`]'s `f`.
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", test)),
+    allow(dead_code)
+)]
 fn unavailable(e: TrayError) {
     tracing::warn!(error = %e, "the system tray is unavailable");
     if let Some(f) = ON_UNAVAILABLE.with_borrow_mut(Option::take) {

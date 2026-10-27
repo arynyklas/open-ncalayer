@@ -242,7 +242,8 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         // Nothing would tell the user, nor let them fix it: P1's exit.
         return failure.report();
     }
-    // A tray lost on the event loop's first turn (macOS) ends the loop, and then `run`.
+    // A tray lost after the start (macOS: on the event loop's first turn; Linux: no
+    // StatusNotifierWatcher within the grace) ends the loop, and then `run`.
     let tray_lost = Rc::new(Cell::new(false));
     if let Some(tray) = &tray {
         TRAY.set(Some(Tray {

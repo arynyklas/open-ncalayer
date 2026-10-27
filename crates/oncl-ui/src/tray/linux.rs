@@ -1,11 +1,14 @@
 //! The tray on Linux: a StatusNotifierItem over the D-Bus session bus (`ksni`), without
 //! GTK. Its service runs in a thread of its own; picked items go to the event loop through
-//! [`deliver`]. Notifications go to the desktop's notification server
+//! [`deliver`]. A daemon started with the session may be up before the panel's
+//! StatusNotifierWatcher: the item waits for one for [`WATCHER_GRACE`] before the tray is
+//! reported unavailable. Notifications go to the desktop's notification server
 //! (`org.freedesktop.Notifications`) from a thread of their own, so that a slow server never
 //! holds up the dialogs; another thread listens for their clicks.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use super::{
     ActionTarget, IconKind, MenuRow, Notification, PRODUCT, TrayError, TrayModel, TrayState,
@@ -13,7 +16,7 @@ use super::{
 };
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::StandardItem;
-use ksni::{Icon, MenuItem, ToolTip};
+use ksni::{Icon, MenuItem, OfflineReason, ToolTip};
 use oncl_basics::Locale;
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::Value;
@@ -25,6 +28,10 @@ const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 const DEFAULT_ACTION: &str = "default";
 /// How many notifications' clicks are remembered.
 const PENDING_CLICKS: usize = 16;
+/// How long after the start a StatusNotifierWatcher may take to appear (the panel or the
+/// AppIndicator extension starting after the daemon at login) before the tray counts as
+/// unavailable ([`super::unavailable`]).
+const WATCHER_GRACE: Duration = Duration::from_secs(60);
 
 /// The tray of [`start_tray`](super::start_tray).
 pub(super) struct Tray {
@@ -34,21 +41,32 @@ pub(super) struct Tray {
 }
 
 impl Tray {
-    /// Registers the item with the StatusNotifierWatcher.
+    /// Registers the item with the StatusNotifierWatcher, or waits for one: a tray without a
+    /// watcher still after [`WATCHER_GRACE`] is told to
+    /// [`TrayHandle::when_unavailable`](super::TrayHandle::when_unavailable) (from the event
+    /// loop).
     ///
     /// # Errors
     ///
-    /// No session bus (`DBUS_SESSION_BUS_ADDRESS` points nowhere, no graphical session), or
-    /// no StatusNotifierWatcher or host (e.g. GNOME without the AppIndicator extension).
+    /// No session bus (`DBUS_SESSION_BUS_ADDRESS` points nowhere, no graphical session).
     pub(super) fn start(model: TrayModel) -> Result<Tray, TrayError> {
+        let presence = Arc::new(Mutex::new(Presence::default()));
         let item = Item {
             normal: vec![pixmap(IconKind::Normal)?],
             attention: vec![pixmap(IconKind::Attention)?],
             model,
+            presence: Arc::clone(&presence),
         };
         let handle = item
+            .assume_sni_available(true)
             .spawn()
             .map_err(|e| TrayError(format!("StatusNotifierItem: {e}")))?;
+        lock(&presence).spawned();
+        slint::Timer::single_shot(WATCHER_GRACE, move || {
+            if let Err(e) = lock(&presence).after_grace() {
+                super::unavailable(e);
+            }
+        });
         Ok(Tray {
             handle,
             notifier: Arc::default(),
@@ -111,6 +129,53 @@ struct Item {
     model: TrayModel,
     normal: Vec<Icon>,
     attention: Vec<Icon>,
+    presence: Arc<Mutex<Presence>>,
+}
+
+fn lock(presence: &Mutex<Presence>) -> std::sync::MutexGuard<'_, Presence> {
+    presence.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether a StatusNotifierWatcher has the item, as ksni tells it: a failed registration
+/// calls `watcher_offline` (also during `spawn`), a watcher that appears `watcher_online`.
+#[derive(Debug, Default)]
+struct Presence {
+    /// `None` until `spawn` returned; then whether a watcher has the item.
+    online: Option<bool>,
+    /// Why the item was last without a watcher.
+    missing: Option<String>,
+}
+
+impl Presence {
+    /// `spawn` returned: the item is registered unless it was reported offline meanwhile.
+    fn spawned(&mut self) {
+        self.online.get_or_insert(true);
+    }
+
+    fn online(&mut self) {
+        self.online = Some(true);
+        self.missing = None;
+    }
+
+    fn offline(&mut self, why: String) {
+        self.online = Some(false);
+        self.missing = Some(why);
+    }
+
+    /// After [`WATCHER_GRACE`]: an error unless a watcher has the item now.
+    fn after_grace(&self) -> Result<(), TrayError> {
+        if self.online == Some(true) {
+            return Ok(());
+        }
+        let why = self
+            .missing
+            .as_deref()
+            .unwrap_or("no StatusNotifierWatcher");
+        Err(TrayError(format!(
+            "StatusNotifierItem: no StatusNotifierWatcher within {} s ({why})",
+            WATCHER_GRACE.as_secs()
+        )))
+    }
 }
 
 impl ksni::Tray for Item {
@@ -154,6 +219,22 @@ impl ksni::Tray for Item {
                 MenuRow::Separator => MenuItem::Separator,
             })
             .collect()
+    }
+
+    fn watcher_online(&self) {
+        tracing::info!("a StatusNotifierWatcher appeared: the tray icon is shown");
+        lock(&self.presence).online();
+    }
+
+    fn watcher_offline(&self, reason: OfflineReason) -> bool {
+        let why = match reason {
+            OfflineReason::Error(e) => e.to_string(),
+            _ => "the StatusNotifierWatcher went away".to_owned(),
+        };
+        tracing::warn!(reason = %why, "no StatusNotifierWatcher shows the tray icon; waiting for one");
+        lock(&self.presence).offline(why);
+        // Keep the service: the watcher may (re)appear, and the item registers then.
+        true
     }
 }
 
@@ -289,6 +370,36 @@ mod tests {
                 rgba.pixels[centre + 2]
             ]
         );
+    }
+
+    #[test]
+    fn a_watcher_that_appears_within_the_grace_keeps_the_tray() {
+        // Registered at once.
+        let mut at_once = Presence::default();
+        at_once.spawned();
+        assert!(at_once.after_grace().is_ok());
+
+        // No watcher at the start (reported during `spawn`), one later.
+        let mut late = Presence::default();
+        late.offline("org.kde.StatusNotifierWatcher unknown".to_owned());
+        late.spawned();
+        assert_eq!(late.online, Some(false));
+        late.online();
+        assert!(late.after_grace().is_ok());
+
+        // Never one: the reason is told.
+        let mut never = Presence::default();
+        never.offline("org.kde.StatusNotifierWatcher unknown".to_owned());
+        never.spawned();
+        let e = never.after_grace().unwrap_err().to_string();
+        assert!(e.contains("within 60 s"), "{e}");
+        assert!(e.contains("StatusNotifierWatcher unknown"), "{e}");
+
+        // Gone again before the grace ended.
+        let mut gone = Presence::default();
+        gone.spawned();
+        gone.offline("the StatusNotifierWatcher went away".to_owned());
+        assert!(gone.after_grace().is_err());
     }
 
     #[test]
