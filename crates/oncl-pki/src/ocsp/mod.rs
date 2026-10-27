@@ -74,6 +74,17 @@ pub enum CertStatus {
     Unknown,
 }
 
+/// A verified answer of a responder: the status and how long the responder vouches for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OcspAnswer {
+    /// The certificate's status.
+    pub status: CertStatus,
+    /// thisUpdate of the `SingleResponse`.
+    pub this_update: OffsetDateTime,
+    /// nextUpdate of the `SingleResponse`, if it has one.
+    pub next_update: Option<OffsetDateTime>,
+}
+
 /// Why a certificate's status is not known.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum OcspError {
@@ -193,6 +204,22 @@ pub fn check(
     now: OffsetDateTime,
     timeout: Duration,
 ) -> Result<CertStatus, OcspError> {
+    check_answer(cert, issuer, cas, http, now, timeout).map(|answer| answer.status)
+}
+
+/// [`check`] with the answer's thisUpdate and nextUpdate.
+///
+/// # Errors
+///
+/// As [`check`].
+pub fn check_answer(
+    cert: &Certificate,
+    issuer: &Certificate,
+    cas: &CaSet,
+    http: &dyn HttpTransport,
+    now: OffsetDateTime,
+    timeout: Duration,
+) -> Result<OcspAnswer, OcspError> {
     let url = ocsp_url(cert).ok_or(OcspError::NoUrl)?;
     let requested = RequestedId::new(cert, issuer);
     let opts = GetOptions {
@@ -271,9 +298,9 @@ impl<'a> RequestedId<'a> {
     }
 }
 
-/// SHA-1 of the contents of `cert`'s public key BIT STRING: `KeyHash` of a `CertID` and of
-/// a byKey ResponderID.
-fn key_hash(cert: &Certificate) -> [u8; 20] {
+/// SHA-1 of the contents of `cert`'s public key BIT STRING: `KeyHash` of a `CertID` (of
+/// the issuer's key) and of a byKey ResponderID.
+pub fn key_hash(cert: &Certificate) -> [u8; 20] {
     let key = &cert
         .tbs_certificate()
         .subject_public_key_info()
@@ -294,7 +321,7 @@ fn read_response(
     requested: &RequestedId<'_>,
     cas: &CaSet,
     now: OffsetDateTime,
-) -> Result<CertStatus, OcspError> {
+) -> Result<OcspAnswer, OcspError> {
     let der = ber::to_der(body)?;
     let response = asn1::OcspResponse::from_der(&der)?;
     if response.response_status.0 != 0 {
@@ -341,8 +368,12 @@ fn read_response(
     if this_update > now + CLOCK_SKEW {
         return Err(OcspError::ThisUpdate);
     }
-    let current = match single.next_update {
-        Some(next_update) => now < generalized_time(next_update.0)?,
+    let next_update = single
+        .next_update
+        .map(|t| generalized_time(t.0))
+        .transpose()?;
+    let current = match next_update {
+        Some(next_update) => now < next_update,
         // A thisUpdate ahead of now (within the skew) is a negative age: current.
         None => now - this_update < ALLOWED_PERIOD,
     };
@@ -352,7 +383,11 @@ fn read_response(
     if !requested.matches(&single.cert_id) {
         return Err(OcspError::CertIdMismatch);
     }
-    cert_status(single.cert_status)
+    Ok(OcspAnswer {
+        status: cert_status(single.cert_status)?,
+        this_update,
+        next_update,
+    })
 }
 
 /// `ResponderID`.
