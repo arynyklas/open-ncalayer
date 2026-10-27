@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
+use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
+use oncl_update::Channel;
+use time::OffsetDateTime;
 
 /// OpenNCALayer development tasks.
 #[derive(Parser)]
@@ -52,6 +55,92 @@ enum Command {
     },
     /// Verify our XMLDSig and CMS signatures with NCANode (Kalkan) in Docker (Linux only).
     InteropNcanode,
+    /// Sign an update index with minisign: writes `<index>.minisig` beside it, with the
+    /// trusted comment `channel=<channel>;seq=<seq>`. The password is read without echo.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    Sign {
+        #[command(subcommand)]
+        command: Option<SignCommand>,
+        /// The index, e.g. `updates/v1/beta.json`.
+        #[arg(required = true)]
+        index: Option<PathBuf>,
+        /// The encrypted secret key made by `sign keygen`.
+        #[arg(long, required = true)]
+        key: Option<PathBuf>,
+    },
+    /// Update index tasks (`updates/v1/<channel>.json`).
+    Index {
+        #[command(subcommand)]
+        command: IndexCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SignCommand {
+    /// Make the minisign key pair of the update index: the secret key encrypted with a
+    /// password (read without echo) and the public key. Refuses a directory where git could
+    /// commit the secret key.
+    Keygen {
+        /// The directory of the key pair, outside the repository (or git-ignored).
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum IndexCommand {
+    /// Append a released version to the channel's index, from the release's downloaded
+    /// assets: sha256 and sizes of its packages, the next `seq`, 30 days of validity. The
+    /// result is unsigned.
+    Add {
+        /// `stable` or `beta`.
+        #[arg(long, value_parser = parse_channel)]
+        channel: Channel,
+        /// The release tag, `v<version>`.
+        #[arg(long)]
+        tag: String,
+        /// The downloaded assets of the release.
+        #[arg(long)]
+        release_assets: PathBuf,
+        /// Percentage of installations offered the version.
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u8).range(0..=100))]
+        rollout: u8,
+        /// The directory of the indexes [default: `updates/v1/` of the workspace].
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Check the indexes in a directory before publishing: format, signature by a trusted
+    /// key, validity, `seq` growth against the base branch, and that every asset answers
+    /// `HEAD` with 200.
+    Check {
+        /// The directory of the indexes, e.g. `updates/v1`.
+        dir: PathBuf,
+        /// Skip the network checks (asset URLs, `vm-smoke`).
+        #[arg(long)]
+        offline: bool,
+        /// The git revision of the base branch.
+        #[arg(long, default_value = "origin/main")]
+        base: String,
+        /// The directory of the trusted public keys [default: `crates/oncl-update/keys/`].
+        #[arg(long)]
+        keys: Option<PathBuf>,
+        /// Require the `vm-smoke` commit status to be `success` on the tag of every new
+        /// version (off until the lab runs it).
+        #[arg(long, conflicts_with = "offline")]
+        vm_smoke: bool,
+    },
+}
+
+fn parse_channel(name: &str) -> Result<Channel, String> {
+    Channel::ALL
+        .into_iter()
+        .find(|c| c.as_str() == name)
+        .ok_or_else(|| format!("{name:?} is not a channel (stable, beta)"))
+}
+
+/// Reads a password from the terminal without echo.
+fn password(prompt: &str) -> anyhow::Result<String> {
+    rpassword::prompt_password(prompt).context("reading the password")
 }
 
 #[derive(Subcommand)]
@@ -110,6 +199,129 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             println!("{} is up to date", xtask::licenses::OUTPUT);
+            Ok(())
+        }
+        Command::Sign {
+            command: Some(SignCommand::Keygen { out }),
+            ..
+        } => {
+            xtask::sign::keygen_target(&out)?;
+            let first = password("Password of the new secret key: ")?;
+            if password("The password again: ")? != first {
+                bail!("the passwords differ");
+            }
+            let files = xtask::sign::keygen(&out, &first)?;
+            println!(
+                "Secret key: {} (keep it offline, never in the repository)",
+                files.secret.display()
+            );
+            println!("Public key: {}", files.public.display());
+            println!(
+                "Copy the public key to {}/current.pub (or next.pub, to prepare a key \
+                 rotation) and commit it.",
+                xtask::sign::TRUSTED_KEYS_DIR
+            );
+            Ok(())
+        }
+        Command::Sign {
+            command: None,
+            index,
+            key,
+        } => {
+            let (Some(index), Some(key)) = (index, key) else {
+                bail!("`sign` needs an index and --key");
+            };
+            let secret = xtask::sign::load_secret_key(
+                &key,
+                &password(&format!("Password of {}: ", key.display()))?,
+            )?;
+            let signature = xtask::sign::sign(&index, &secret, OffsetDateTime::now_utc())?;
+            println!("{}", signature.display());
+            Ok(())
+        }
+        Command::Index {
+            command:
+                IndexCommand::Add {
+                    channel,
+                    tag,
+                    release_assets,
+                    rollout,
+                    dir,
+                },
+        } => {
+            let dir =
+                dir.unwrap_or_else(|| oncl_testkit::workspace_root().join(xtask::index::INDEX_DIR));
+            let added = xtask::index::add(
+                &dir,
+                channel,
+                &tag,
+                &release_assets,
+                rollout,
+                OffsetDateTime::now_utc(),
+            )?;
+            let flavors: Vec<_> = added.flavors.iter().map(|f| f.as_str()).collect();
+            println!(
+                "{}: seq {}, {tag} for {}{}",
+                added.path.display(),
+                added.seq,
+                flavors.join(", "),
+                if added.extension {
+                    " and the extension"
+                } else {
+                    ""
+                }
+            );
+            if let Some(signature) = added.removed_signature {
+                println!("removed the stale {}", signature.display());
+            }
+            println!(
+                "unsigned: cargo xtask sign {} --key <secret key>",
+                added.path.display()
+            );
+            Ok(())
+        }
+        Command::Index {
+            command:
+                IndexCommand::Check {
+                    dir,
+                    offline,
+                    base,
+                    keys,
+                    vm_smoke,
+                },
+        } => {
+            let keys = keys.unwrap_or_else(|| {
+                oncl_testkit::workspace_root().join(xtask::sign::TRUSTED_KEYS_DIR)
+            });
+            let keys = xtask::index::trusted_keys(&keys)?;
+            let github = xtask::index::GitHub::new();
+            let remote: Option<&dyn xtask::index::Remote> =
+                if offline { None } else { Some(&github) };
+            let options = xtask::index::CheckOptions {
+                keys: &keys,
+                base: Some(&base),
+                vm_smoke,
+                now: OffsetDateTime::now_utc(),
+            };
+            for checked in xtask::index::check(&dir, &options, remote)? {
+                let versions: Vec<_> = checked.new_versions.iter().map(|v| v.to_string()).collect();
+                println!(
+                    "{}: seq {} (base {}), new versions: {}",
+                    checked.channel,
+                    checked.seq,
+                    checked
+                        .base_seq
+                        .map_or_else(|| "none".to_owned(), |s| s.to_string()),
+                    if versions.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        versions.join(", ")
+                    }
+                );
+            }
+            if offline {
+                println!("offline: asset URLs and vm-smoke not checked");
+            }
             Ok(())
         }
     }

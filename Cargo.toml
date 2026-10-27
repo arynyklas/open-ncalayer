@@ -46,7 +46,8 @@ httparse = "1.10.1"
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 libc = "0.2.191"
 log = "0.4.34"
-# Signing of update indexes, in tests (`oncl-update`): the reference implementation's format.
+# Signing of update indexes: `cargo xtask sign` and the `oncl-update` tests; the reference
+# implementation's format.
 minisign = "0.10.0"
 # Verification of the update index signatures (`oncl-update`): no dependencies of its own.
 minisign-verify = "0.3.0"
@@ -65,6 +66,8 @@ rfd = "0.17.2"
 ring = "0.17.14"
 # XMLDSig: the XML tree with byte positions (the signature is spliced into the input bytes).
 roxmltree = "0.21.2"
+# Only in xtask (`sign`): passwords read without echo; minisign already depends on it.
+rpassword = "7.5.4"
 # Key generation only: `oncl-pki::keygen` (RSA keys of new key files) and xtask fixtures.
 rsa = { version = "0.9.10", features = ["sha2"] }
 # oncl-trust on Linux: read-only `cert9.db` (NSS) presence check without `certutil`.
@@ -120,6 +123,12 @@ zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2
 [profile.dev.package.rsa]
 opt-level = 3
 [profile.dev.package.num-bigint-dig]
+opt-level = 3
+# The scrypt of minisign secret keys (`cargo xtask sign` and its tests) takes seconds
+# unoptimized.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
 opt-level = 3
 # GOST 34.11-2015 hashing of the 40 MiB document makes the openncalayer e2e test take over a
 # minute and a half unoptimized, a few seconds optimized.

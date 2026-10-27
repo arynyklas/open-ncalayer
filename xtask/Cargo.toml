@@ -14,15 +14,20 @@ oncl-ipc.workspace = true
 oncl-pki = { workspace = true, features = ["testing"] }
 oncl-protocol.workspace = true
 oncl-testkit.workspace = true
+oncl-update.workspace = true
 
 anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
 der.workspace = true
+# `sign`: the update index key pair and signatures.
+minisign.workspace = true
 object.workspace = true
 pkcs8.workspace = true
 rand_chacha.workspace = true
 rsa.workspace = true
+# `sign`: passwords without echo.
+rpassword.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
 sha2.workspace = true

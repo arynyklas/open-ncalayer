@@ -6,6 +6,8 @@ pub mod ext;
 pub mod fetch;
 pub mod fixtures;
 pub mod imports;
+pub mod index;
 pub mod interop;
 pub mod licenses;
 pub mod ncanode;
+pub mod sign;
