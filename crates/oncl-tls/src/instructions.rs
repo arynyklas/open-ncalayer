@@ -1,14 +1,14 @@
 //! Per-OS instructions for trusting the local CA (Russian text).
 //!
-//! OpenNCALayer only shows these commands; it never runs them and never writes to OS or
-//! browser trust stores itself.
+//! OpenNCALayer only shows these commands; it never runs them. The TLS wizard installs the
+//! CA itself only when the user asks for it there.
 
 use std::fmt::Write;
 
+use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use time::{Duration, OffsetDateTime};
 
-use crate::{TlsFiles, TlsInfo, TlsSource};
+use crate::{AUTO_RENEW_BEFORE, RENEW_BEFORE, TlsFiles, TlsInfo, TlsSource};
 
 /// Operating system the instructions are written for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,18 +18,40 @@ pub enum TargetOs {
     Linux,
 }
 
-/// Re-issue the server certificate this long before it expires.
-pub const RENEW_BEFORE: Duration = Duration::days(60);
-/// NSS nickname of the CA in `certutil -d sql:<nssdb>` commands.
-const NSS_NICKNAME: &str = "OpenNCALayer Local CA";
+impl TargetOs {
+    /// The OS this program runs on (other Unix systems count as Linux).
+    pub fn current() -> TargetOs {
+        if cfg!(windows) {
+            TargetOs::Windows
+        } else if cfg!(target_os = "macos") {
+            TargetOs::MacOs
+        } else {
+            TargetOs::Linux
+        }
+    }
+}
+
+/// The NSS nickname of the CA with SHA-256 `ca_sha256_hex` (lowercase hex), as `oncl-trust`
+/// installs it: `OpenNCALayer Local CA <first 16 hex digits>`. The fingerprint keeps the
+/// nicknames of a CA and of the one replacing it apart (NSS refuses a nickname that a
+/// certificate with another subject has).
+pub fn nss_nickname(ca_sha256_hex: &str) -> String {
+    let prefix: String = ca_sha256_hex
+        .chars()
+        .take(16)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    format!("OpenNCALayer Local CA {prefix}")
+}
 
 /// Step-by-step instructions to trust the local CA on `os`, check the result at
 /// `https://127.0.0.1:<port>/` (`port` is the configured server port), remove the CA later,
 /// and the date by which the server certificate should be re-issued.
 pub fn instructions(os: TargetOs, files: &TlsFiles, info: &TlsInfo, port: u16) -> String {
     let mut s = String::new();
-    match info.source {
-        TlsSource::Generated => generated(&mut s, os, files, info),
+    match &info.source {
+        TlsSource::Own => own(&mut s, os, files, info),
+        TlsSource::Mkcert { caroot, .. } => mkcert(&mut s, &caroot.display().to_string()),
         TlsSource::Imported => imported(&mut s),
     }
     let _ = writeln!(s, "Проверка");
@@ -58,7 +80,7 @@ pub fn sha1_grouped(sha1_hex: &str) -> String {
         .join(" ")
 }
 
-fn generated(s: &mut String, os: TargetOs, files: &TlsFiles, info: &TlsInfo) {
+fn own(s: &mut String, os: TargetOs, files: &TlsFiles, info: &TlsInfo) {
     let ca_pem = files.ca_pem().display().to_string();
     let ca_der = files.ca_der().display().to_string();
     let sha1 = info
@@ -77,9 +99,10 @@ fn generated(s: &mut String, os: TargetOs, files: &TlsFiles, info: &TlsInfo) {
     let _ = writeln!(s);
     let _ = writeln!(
         s,
-        "OpenNCALayer сам ничего не устанавливает в хранилища сертификатов: выполните шаги \
-         ниже вручную. Этот центр сертификации может выпускать сертификаты только для \
-         127.0.0.1, ::1 и localhost — для других сайтов он недействителен."
+        "Установите центр сертификации кнопкой «Установить мой CA в хранилище пользователя» \
+         в мастере «Сертификат для браузера…» (меню значка OpenNCALayer) или вручную по шагам \
+         ниже. Этот центр сертификации может выпускать сертификаты только для 127.0.0.1, ::1 \
+         и localhost — для других сайтов он недействителен."
     );
     let _ = writeln!(s);
     let _ = writeln!(s, "Сертификат: {ca_der} (DER), {ca_pem} (PEM)");
@@ -90,7 +113,7 @@ fn generated(s: &mut String, os: TargetOs, files: &TlsFiles, info: &TlsInfo) {
     match os {
         TargetOs::Windows => windows(s, &ca_pem, &ca_der, &sha1, &sha1_grouped),
         TargetOs::MacOs => macos(s, &ca_pem, &sha1),
-        TargetOs::Linux => linux(s, &ca_pem),
+        TargetOs::Linux => linux(s, &ca_pem, &nss_nickname(&sha256)),
     }
 }
 
@@ -187,7 +210,7 @@ fn macos(s: &mut String, ca_pem: &str, sha1: &str) {
     let _ = writeln!(s);
 }
 
-fn linux(s: &mut String, ca_pem: &str) {
+fn linux(s: &mut String, ca_pem: &str, nickname: &str) {
     let _ = writeln!(s, "Chrome и Chromium:");
     let _ = writeln!(
         s,
@@ -209,7 +232,7 @@ fn linux(s: &mut String, ca_pem: &str) {
     );
     let _ = writeln!(
         s,
-        "    certutil -d sql:<nssdb> -A -t \"C,,\" -n \"{NSS_NICKNAME}\" -i \"{ca_pem}\""
+        "    certutil -d sql:<nssdb> -A -t \"C,,\" -n \"{nickname}\" -i \"{ca_pem}\""
     );
     let _ = writeln!(
         s,
@@ -220,11 +243,25 @@ fn linux(s: &mut String, ca_pem: &str) {
     );
     let _ = writeln!(s);
     let _ = writeln!(s, "Удаление");
-    let _ = writeln!(s, "    certutil -d sql:<nssdb> -D -n \"{NSS_NICKNAME}\"");
+    let _ = writeln!(s, "    certutil -d sql:<nssdb> -D -n \"{nickname}\"");
     let _ = writeln!(
         s,
         "или удалите «OpenNCALayer Local CA …» в chrome://certificate-manager («Свои» → \
          «Установленные вами») и в «Центрах сертификации» Firefox."
+    );
+    let _ = writeln!(s);
+}
+
+fn mkcert(s: &mut String, caroot: &str) {
+    let _ = writeln!(s, "Сертификат выпущен центром сертификации mkcert");
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "Центр сертификации mkcert ({caroot}) устанавливается в хранилища командой \
+         `mkcert -install`; если вы её уже выполняли, дополнительных шагов не нужно. \
+         OpenNCALayer читает ключ rootCA-key.pem только при выпуске сертификата и нигде его \
+         не сохраняет. Удаление доверия к центру mkcert — `mkcert -uninstall`: это затронет \
+         все сертификаты, выпущенные mkcert."
     );
     let _ = writeln!(s);
 }
@@ -251,13 +288,25 @@ fn validity(s: &mut String, info: &TlsInfo) {
         );
         return;
     };
-    let renew = not_after - RENEW_BEFORE;
-    let _ = writeln!(
-        s,
-        "Сертификат сервера действует до {} (UTC). Перевыпустите его до {}.",
-        ru_date(not_after),
-        ru_date(renew)
-    );
+    match info.source {
+        TlsSource::Mkcert { .. } => {
+            let _ = writeln!(
+                s,
+                "Сертификат сервера действует до {} (UTC). OpenNCALayer перевыпустит его сам \
+                 после {}.",
+                ru_date(not_after),
+                ru_date(not_after - AUTO_RENEW_BEFORE)
+            );
+        }
+        TlsSource::Own | TlsSource::Imported => {
+            let _ = writeln!(
+                s,
+                "Сертификат сервера действует до {} (UTC). Перевыпустите его до {}.",
+                ru_date(not_after),
+                ru_date(not_after - RENEW_BEFORE)
+            );
+        }
+    }
 }
 
 fn ru_date(t: OffsetDateTime) -> String {

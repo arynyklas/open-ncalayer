@@ -1,16 +1,36 @@
 //! The tray on Linux: a StatusNotifierItem over the D-Bus session bus (`ksni`), without
 //! GTK. Its service runs in a thread of its own; picked items go to the event loop through
-//! [`deliver`].
+//! [`deliver`]. Notifications go to the desktop's notification server
+//! (`org.freedesktop.Notifications`), whose clicks a thread of their own listens for.
 
-use super::{IconKind, MenuRow, PRODUCT, TrayError, TrayModel, TrayState, deliver};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use super::{
+    ActionTarget, IconKind, MenuRow, Notification, PRODUCT, TrayError, TrayModel, TrayState,
+    deliver, deliver_click,
+};
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem, ToolTip};
 use oncl_basics::Locale;
+use zbus::blocking::{Connection, Proxy};
+use zbus::zvariant::Value;
+
+/// The notification server.
+const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
+const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
+/// The action of a click on the notification itself.
+const DEFAULT_ACTION: &str = "default";
+/// How many notifications' clicks are remembered.
+const PENDING_CLICKS: usize = 16;
 
 /// The tray of [`start_tray`](super::start_tray).
 pub(super) struct Tray {
     handle: Handle<Item>,
+    /// Connected at the first notification.
+    notifier: RefCell<Option<Notifier>>,
 }
 
 impl Tray {
@@ -29,7 +49,21 @@ impl Tray {
         let handle = item
             .spawn()
             .map_err(|e| TrayError(format!("StatusNotifierItem: {e}")))?;
-        Ok(Tray { handle })
+        Ok(Tray {
+            handle,
+            notifier: RefCell::new(None),
+        })
+    }
+
+    pub(super) fn notify(&self, notification: Notification) -> Result<(), TrayError> {
+        let mut slot = self.notifier.borrow_mut();
+        let notifier = match slot.take() {
+            Some(notifier) => notifier,
+            None => Notifier::connect().map_err(notify_error)?,
+        };
+        let shown = notifier.show(notification).map_err(notify_error);
+        *slot = Some(notifier);
+        shown
     }
 
     pub(super) fn set_state(&self, state: TrayState) {
@@ -129,7 +163,95 @@ fn pixmap(kind: IconKind) -> Result<Icon, TrayError> {
     })
 }
 
-/// `text` for the tooltip's description, which hosts read as a subset of HTML.
+fn notify_error(e: zbus::Error) -> TrayError {
+    TrayError(format!("{NOTIFICATIONS}: {e}"))
+}
+
+/// The clicks of the notifications shown, by notification id (the latest few).
+type Pending = Arc<Mutex<Vec<(u32, ActionTarget)>>>;
+
+/// A session bus connection to the notification server.
+struct Notifier {
+    connection: Connection,
+    pending: Pending,
+}
+
+impl Notifier {
+    /// Connects and starts listening for clicks (`ActionInvoked`).
+    fn connect() -> zbus::Result<Notifier> {
+        let connection = Connection::session()?;
+        let pending = Pending::default();
+        let clicks = Proxy::new(
+            &connection,
+            NOTIFICATIONS,
+            NOTIFICATIONS_PATH,
+            NOTIFICATIONS,
+        )?
+        .receive_signal("ActionInvoked")?;
+        let listening = Arc::clone(&pending);
+        std::thread::Builder::new()
+            .name("notifications".into())
+            .spawn(move || {
+                for signal in clicks {
+                    let Ok((id, _action)) = signal.body().deserialize::<(u32, String)>() else {
+                        continue;
+                    };
+                    let target = {
+                        let mut pending = listening.lock().unwrap_or_else(PoisonError::into_inner);
+                        let at = pending.iter().position(|(i, _)| *i == id);
+                        at.map(|at| pending.remove(at).1)
+                    };
+                    if let Some(target) = target {
+                        deliver_click(target);
+                    }
+                }
+            })
+            .map_err(|e| zbus::Error::Failure(e.to_string()))?;
+        Ok(Notifier {
+            connection,
+            pending,
+        })
+    }
+
+    fn show(&self, notification: Notification) -> zbus::Result<()> {
+        let actions: Vec<&str> = match &notification.action {
+            Some(action) => vec![DEFAULT_ACTION, action.label.as_str()],
+            None => Vec::new(),
+        };
+        let hints: HashMap<&str, Value<'_>> = HashMap::new();
+        let proxy = Proxy::new(
+            &self.connection,
+            NOTIFICATIONS,
+            NOTIFICATIONS_PATH,
+            NOTIFICATIONS,
+        )?;
+        // Notify(app_name, replaces_id, app_icon, summary, body, actions, hints, timeout).
+        let id: u32 = proxy.call(
+            "Notify",
+            &(
+                PRODUCT,
+                0u32,
+                "",
+                notification.title.as_str(),
+                escape_markup(&notification.body),
+                actions,
+                hints,
+                -1i32,
+            ),
+        )?;
+        if let Some(action) = notification.action {
+            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            if pending.len() == PENDING_CLICKS {
+                pending.remove(0);
+            }
+            pending.push((id, action.target));
+        }
+        Ok(())
+    }
+}
+
+/// `text` for the tooltip's description or a notification's body, which hosts and
+/// notification servers read as a subset of HTML.
 fn escape_markup(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")

@@ -1,5 +1,6 @@
 //! `openncalayer`: see [`openncalayer::cli`].
 
+use std::cell::RefCell;
 use std::io;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -15,19 +16,59 @@ use oncl_basics::{Locale, Prompter};
 use oncl_desktop::Settings;
 use oncl_ipc::IpcListener;
 use oncl_protocol::Registry;
+use oncl_tls::{SelftestReports, TlsFiles};
 use oncl_ui::{
-    AboutInfo, DesktopWindow, DesktopWindows, SlintPrompter, TrayCommand, TrayHandle, TrayState,
+    AboutInfo, DesktopWindow, DesktopWindows, Notification, SlintPrompter, TrayCommand, TrayHandle,
+    TrayState,
 };
-use openncalayer::cli::{self, Cli, Command, WssOff};
+use openncalayer::cli::{self, Cli, Command};
+use openncalayer::notices::TrayStatus;
+use openncalayer::renewal::{self, RenewalCheck};
 use openncalayer::{
-    JsonSettings, LiveProxyTransport, Paths, ServerConfig, build_registry, desktop, load_settings,
-    serve, serve_ipc,
+    JsonSettings, LiveProxyTransport, LiveTls, Paths, ServerConfig, build_registry, desktop,
+    load_settings, serve, serve_ipc,
 };
+use time::OffsetDateTime;
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
 /// How long `run` waits for the server thread once the dialogs' event loop has ended.
 const SERVER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The tray and what it shows, on the event loop's thread.
+struct Tray {
+    handle: Weak<TrayHandle>,
+    status: TrayStatus,
+}
+
+thread_local! {
+    static TRAY: RefCell<Option<Tray>> = const { RefCell::new(None) };
+}
+
+/// Changes the tray's status with `f` on the event loop, from any thread; then the tray
+/// shows the status's warning and the notification `f` returns. Without an event loop or a
+/// tray nothing is shown.
+fn post_to_tray(f: impl FnOnce(&mut TrayStatus) -> Option<Notification> + Send + 'static) {
+    let posted = oncl_ui::run_on_event_loop(move || {
+        TRAY.with_borrow_mut(|tray| {
+            let Some(tray) = tray else {
+                return;
+            };
+            let notification = f(&mut tray.status);
+            if let Some(handle) = tray.handle.upgrade() {
+                handle.set_state(TrayState {
+                    warning: tray.status.warning(),
+                });
+                if let Some(notification) = notification {
+                    handle.notify(notification);
+                }
+            }
+        });
+    });
+    if let Err(e) = posted {
+        tracing::debug!(error = %e, "no event loop: the tray is not told");
+    }
+}
 
 fn main() -> ExitCode {
     let command = Cli::parse().command.unwrap_or(Command::Run {
@@ -88,17 +129,32 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         Arc::new(open_requested_window),
     );
     let stop = Arc::new(Notify::new());
+    let status = TrayStatus::new(locale, daemon.wss_off);
     let tray = if with_tray {
         start_tray(
             locale,
             daemon.paths.logs(),
-            daemon.wss_off.map(|off| off.text(locale)),
+            status.warning(),
             Arc::clone(&stop),
         )
         .map(Rc::new)
     } else {
         None
     };
+    if let Some(tray) = &tray {
+        TRAY.set(Some(Tray {
+            handle: Rc::downgrade(tray),
+            status,
+        }));
+    }
+    let reports = Arc::new(SelftestReports::new());
+    let (ipc, wss) = (
+        daemon.ipc,
+        daemon
+            .wss
+            .map(|(tls, listener)| (Arc::new(LiveTls::new(tls)), listener)),
+    );
+    let live = wss.as_ref().map(|(live, _)| Arc::clone(live));
     let event_loop = windows || tray.is_some();
     if event_loop {
         oncl_ui::set_desktop_windows(desktop_windows(
@@ -107,12 +163,19 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             registry.names(),
             http,
             tray.as_ref().map_or_else(Weak::new, Rc::downgrade),
-            daemon.wss_off,
+            Arc::clone(&reports),
+            live.clone(),
         ));
     }
-    let (ipc, wss) = (daemon.ipc, daemon.wss);
+    let files = daemon.paths.tls();
+    if event_loop {
+        // Its outcome goes to the tray once the event loop runs.
+        oncl_ui::when_event_loop_runs(move || start_renewal(files, live));
+    } else {
+        start_renewal(files, live);
+    }
     let server = thread::Builder::new().name("server".into()).spawn(move || {
-        let result = runtime.block_on(serve_all(ipc, wss, Arc::new(registry), stop));
+        let result = runtime.block_on(serve_all(ipc, wss, Arc::new(registry), reports, stop));
         if let Err(e) = &result {
             tracing::error!(error = %e, "server stopped");
         }
@@ -169,26 +232,63 @@ fn exit_code(server: thread::Result<io::Result<()>>) -> ExitCode {
 }
 
 /// Opens the window a page asks for: `showSettings` the settings, `showBundleManager` the
-/// About window's «Модули» tab. There is no key store explorer and no AdES window.
+/// About window's «Модули» tab; `installBundle` points the user to the plugin registry in a
+/// tray notification. There is no key store explorer and no AdES window.
 fn open_requested_window(window: UiRequest) {
     match window {
         UiRequest::Settings => oncl_ui::open_window(DesktopWindow::Settings),
         UiRequest::BundleManager => oncl_ui::open_window(DesktopWindow::Modules),
+        UiRequest::InstallBundle => {
+            post_to_tray(|status| status.bundle_notification(Instant::now()));
+        }
         UiRequest::KeystoreExplorer | UiRequest::AdesSigning | UiRequest::AdesValidation => {
             tracing::info!(?window, "window requested; not available");
         }
     }
 }
 
-/// What the settings and About windows show and change. A save applies the proxy to `http`
-/// and the language to the tray, if it is still there.
+/// Checks the certificate in `files` now and then once a day ([`renewal::check`]): a
+/// re-issued one is served at once through `live`; the outcome goes to the tray.
+fn start_renewal(files: TlsFiles, live: Option<Arc<LiveTls>>) {
+    let spawned = thread::Builder::new().name("renewal".into()).spawn(move || {
+        loop {
+            let check = renewal::check(&files, OffsetDateTime::now_utc());
+            match &check {
+                RenewalCheck::Nothing => {}
+                RenewalCheck::Due { days } => {
+                    tracing::info!(days, "the server certificate is due for renewal");
+                }
+                RenewalCheck::Renewed { not_after } => {
+                    tracing::info!(%not_after, "the server certificate is re-issued with mkcert");
+                    renewal::reload(&files, live.as_deref());
+                }
+                RenewalCheck::RenewFailed { days, error } => {
+                    tracing::warn!(days, %error, "cannot re-issue the server certificate with mkcert");
+                }
+            }
+            post_to_tray(move |status| {
+                status.renewal = check;
+                status.renewal_notification()
+            });
+            thread::sleep(renewal::CHECK_EVERY);
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "cannot start the certificate renewal");
+    }
+}
+
+/// What the settings, TLS wizard and About windows show and change. A save applies the
+/// proxy to `http` and the language to the tray, if it is still there. A certificate the
+/// wizard saves is served through `live` at once.
 fn desktop_windows(
     paths: &Paths,
     locale: Locale,
     modules: Vec<String>,
     http: Arc<LiveProxyTransport>,
     tray: Weak<TrayHandle>,
-    wss_off: Option<WssOff>,
+    reports: Arc<SelftestReports>,
+    live: Option<Arc<LiveTls>>,
 ) -> DesktopWindows {
     let exe = std::env::current_exe().unwrap_or_else(|e| {
         tracing::warn!(error = %e, "the program's path is unknown; autostart cannot be set");
@@ -206,22 +306,31 @@ fn desktop_windows(
             bundles,
             modules,
         },
+        tls: desktop::tls_wizard_services(paths, reports, live, |files: &TlsFiles| {
+            // A new certificate is not due: the tray forgets the reminder.
+            let state = renewal::state(files, OffsetDateTime::now_utc());
+            post_to_tray(move |status| {
+                status.renewal = state;
+                None
+            });
+        }),
         on_saved: Box::new(move |settings: &Settings| {
             http.set_proxy(settings.proxy.clone());
+            let locale = settings.ui_locale();
             if let Some(tray) = tray.upgrade() {
-                let locale = settings.ui_locale();
                 tray.set_locale(locale);
-                tray.set_state(TrayState {
-                    warning: wss_off.map(|off| off.text(locale)),
-                });
             }
+            post_to_tray(move |status| {
+                status.locale = locale;
+                None
+            });
         }),
     }
 }
 
 /// The tray in `locale` with `warning` shown, or `None` (logged) if it cannot be shown. Its
 /// commands run on the event loop: «Выход» notifies `stop`, «Журнал» opens `logs`,
-/// «Настройки…» and «О программе» open their windows.
+/// «Настройки…», «Сертификат для браузера…» and «О программе» open their windows.
 fn start_tray(
     locale: Locale,
     logs: PathBuf,
@@ -236,7 +345,8 @@ fn start_tray(
         TrayCommand::OpenLogs => open_folder(&logs),
         TrayCommand::Settings => oncl_ui::open_window(DesktopWindow::Settings),
         TrayCommand::About => oncl_ui::open_window(DesktopWindow::About),
-        TrayCommand::TlsWizard | TrayCommand::StopOriginal => {
+        TrayCommand::TlsWizard => oncl_ui::open_window(DesktopWindow::TlsWizard),
+        TrayCommand::StopOriginal => {
             tracing::info!(?command, "window requested; not available yet");
         }
     });
@@ -302,12 +412,13 @@ fn scripted_prompter() -> Result<Option<Arc<dyn Prompter>>, ExitCode> {
     Ok(scripted)
 }
 
-/// The bridge and, unless it is off, the wss server, until either stops or `stop` is
-/// notified.
+/// The bridge and, unless it is off, the wss server (its self-test reports going to
+/// `reports`), until either stops or `stop` is notified.
 async fn serve_all(
     ipc: IpcListener,
-    wss: Option<(Arc<rustls::ServerConfig>, TcpListener)>,
+    wss: Option<(Arc<LiveTls>, TcpListener)>,
     registry: Arc<Registry>,
+    reports: Arc<SelftestReports>,
     stop: Arc<Notify>,
 ) -> io::Result<()> {
     let stopped = async move {
@@ -322,7 +433,10 @@ async fn serve_all(
         };
     };
     let listener = tokio::net::TcpListener::from_std(listener)?;
-    let cfg = ServerConfig::new(tls, Arc::clone(&registry));
+    let cfg = ServerConfig {
+        selftest: reports,
+        ..ServerConfig::new(tls, Arc::clone(&registry))
+    };
     tokio::select! {
         result = serve_ipc(ipc, registry) => result,
         result = serve(listener, cfg) => result,
@@ -399,14 +513,20 @@ mod tests {
             let tls = Arc::new(oncl_tls::server_config(&files).unwrap());
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
-            (tls, listener)
+            (Arc::new(LiveTls::new(tls)), listener)
         });
         let stop = Arc::new(Notify::new());
         // Like «Выход» picked before the servers got to wait for it.
         stop.notify_one();
         tokio::time::timeout(
             Duration::from_secs(10),
-            serve_all(ipc, wss, Arc::new(Registry::default()), stop),
+            serve_all(
+                ipc,
+                wss,
+                Arc::new(Registry::default()),
+                Arc::new(SelftestReports::new()),
+                stop,
+            ),
         )
         .await
         .expect("the servers did not stop")

@@ -16,8 +16,28 @@
 <h1>OpenNCALayer {{version}}</h1>
 <p class="ok">Сертификат сервера принят браузером: HTTPS-соединение с OpenNCALayer установлено.</p>
 <p>Проверка WebSocket: <span id="ws">выполняется…</span></p>
+<p>Отчёт для мастера «Сертификат для браузера»: <span id="report">отправляется…</span></p>
 <p>Сайты подключаются к <code>wss://127.0.0.1</code> на этом же порту, как к оригинальному NCALayer.</p>
 <script>
+(function () {
+  // The TLS wizard lists the browsers that got this far: the page loaded without a
+  // certificate warning and its script runs.
+  var report = document.getElementById('report');
+  function reported(ok, text) { report.textContent = text; report.className = ok ? 'ok' : 'fail'; }
+  try {
+    fetch('{{report}}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      body: navigator.userAgent
+    }).then(function (response) {
+      reported(response.ok, response.ok ? 'отправлен' : 'не принят (' + response.status + ')');
+    }, function (e) {
+      reported(false, 'не отправлен: ' + e);
+    });
+  } catch (e) {
+    reported(false, 'не отправлен: ' + e);
+  }
+})();
 (function () {
   var out = document.getElementById('ws');
   function done(ok, text) { out.textContent = text; out.className = ok ? 'ok' : 'fail'; }

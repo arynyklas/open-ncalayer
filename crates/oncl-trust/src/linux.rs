@@ -564,6 +564,13 @@ mod tests {
         std::fs::write(path, b"").unwrap();
     }
 
+    /// The trust instructions of oncl-tls name the CA as `install` does.
+    #[test]
+    fn nickname_matches_the_printed_instructions() {
+        let (ca, _) = ca_and_leaf("t@h");
+        assert_eq!(nickname(&ca), oncl_tls::nss_nickname(&hex(&ca.sha256())));
+    }
+
     #[test]
     fn nss_databases_in_a_sandbox_home() {
         let home = tempfile::tempdir().unwrap();

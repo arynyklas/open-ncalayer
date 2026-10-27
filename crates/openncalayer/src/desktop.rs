@@ -1,15 +1,19 @@
-//! What the settings window works with in the daemon: the browser extension's registration
-//! through `openncalayer nm` ([`NmExtension`]), and [`settings_services`] for this user.
+//! What the settings window and the TLS wizard work with in the daemon: the browser
+//! extension's registration through `openncalayer nm` ([`NmExtension`]),
+//! [`settings_services`] and [`tls_wizard_services`] for this user.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use oncl_desktop::original::Unavailable;
 use oncl_desktop::{Autostart, BrowserExtension, ExtensionError, ExtensionStatus};
+use oncl_tls::{SelftestReports, TlsFiles};
 use oncl_ui::SettingsServices;
+use oncl_ui::tls_wizard::{SystemTrust, TlsWizardServices};
 
-use crate::Paths;
 use crate::nm::{self, Item, NmLayout, Report, State};
+use crate::{LiveTls, Paths, cli, listen_port, renewal};
 
 /// The native messaging host as `openncalayer nm install|uninstall|status` handles it: the
 /// relay `relay` (next to the daemon) installed for the daemon `daemon` with the data
@@ -152,6 +156,33 @@ pub fn settings_services(paths: &Paths, exe: PathBuf) -> SettingsServices {
         autostart,
         original: Box::new(Unavailable),
         extension: Box::new(extension),
+    }
+}
+
+/// The TLS wizard's services for this user: the TLS files of `paths`, the trust stores of
+/// this user ([`SystemTrust`]), mkcert's CA if there is one, the self-test `reports`. A
+/// saved certificate is served through `live` at once (when wss runs); then `on_saved` runs
+/// with the files (on the wizard's worker thread).
+pub fn tls_wizard_services(
+    paths: &Paths,
+    reports: Arc<SelftestReports>,
+    live: Option<Arc<LiveTls>>,
+    on_saved: impl Fn(&TlsFiles) + Send + Sync + 'static,
+) -> TlsWizardServices {
+    let files = paths.tls();
+    let saved = files.clone();
+    TlsWizardServices {
+        files,
+        port: listen_port(),
+        label: cli::label(),
+        reports,
+        trust: Box::new(SystemTrust),
+        mkcert: Box::new(oncl_tls::mkcert_caroot),
+        apply: Box::new(move || {
+            let applied = renewal::reload(&saved, live.as_deref());
+            on_saved(&saved);
+            applied
+        }),
     }
 }
 

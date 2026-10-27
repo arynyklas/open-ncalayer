@@ -8,8 +8,8 @@ use std::sync::Arc;
 use der::asn1::ObjectIdentifier as Oid;
 use der::{Decode, Encode};
 use oncl_tls::{
-    TargetOs, TlsError, TlsFiles, TlsInfo, TlsSource, TlsWarning, generate, import, instructions,
-    load_info, save, server_config, sha1_grouped,
+    TargetOs, TlsError, TlsFiles, TlsInfo, TlsSource, TlsWarning, forget_replaced_ca, generate,
+    import, instructions, load_info, nss_nickname, replaced_cas, save, server_config, sha1_grouped,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -323,7 +323,7 @@ fn generated_leaf_profile() {
 
     // Info.
     let info = &m.info;
-    assert_eq!(info.source, TlsSource::Generated);
+    assert_eq!(info.source, TlsSource::Own);
     assert_eq!(
         info.ca_sha1.as_deref(),
         Some(sha1_hex(m.ca_der.as_ref().unwrap()).as_str())
@@ -623,13 +623,19 @@ fn save_load_and_server_config() {
         handshake(config.clone(), m.ca_der.as_ref().unwrap(), name);
     }
 
-    // Importing over a generated set removes the now unrelated CA files.
+    // Importing over a generated set removes the now unrelated CA files; the own CA it
+    // replaces is kept until the user has removed it from the trust stores.
+    assert_eq!(replaced_cas(&files).unwrap(), Vec::<Vec<u8>>::new());
     let (chain, key) = good_leaf();
     let imported = import(&chain, &key, NOW).unwrap();
     save(&files, &imported).unwrap();
     assert_eq!(load_info(&files).unwrap(), Some(imported.info.clone()));
     assert!(!files.ca_pem().exists() && !files.ca_der().exists());
     assert!(server_config(&files).is_ok());
+    assert_eq!(replaced_cas(&files).unwrap(), [m.ca_der.clone().unwrap()]);
+    forget_replaced_ca(&files, m.ca_der.as_ref().unwrap()).unwrap();
+    forget_replaced_ca(&files, m.ca_der.as_ref().unwrap()).unwrap();
+    assert_eq!(replaced_cas(&files).unwrap(), Vec::<Vec<u8>>::new());
 
     // A corrupt tls.json is an InvalidData error, not "no TLS set up".
     std::fs::write(files.info(), b"{").unwrap();
@@ -690,11 +696,16 @@ fn instructions_for_macos_and_linux() {
 
     let linux = instructions(TargetOs::Linux, &f, &i, 13601);
     assert!(linux.contains("chrome://certificate-manager"));
-    assert!(linux.contains(&format!(
-        "-A -t \"C,,\" -n \"OpenNCALayer Local CA\" -i \"{ca_pem}\""
-    )));
+    // The nickname oncl-trust installs the CA under: with the first 16 hex digits of its
+    // SHA-256, for install and removal alike.
+    let nickname = format!(
+        "OpenNCALayer Local CA {}",
+        &i.ca_sha256.as_deref().unwrap()[..16]
+    );
+    assert_eq!(nss_nickname(i.ca_sha256.as_deref().unwrap()), nickname);
+    assert!(linux.contains(&format!("-A -t \"C,,\" -n \"{nickname}\" -i \"{ca_pem}\"")));
     assert!(linux.contains("certutil -d sql:"));
-    assert!(linux.contains("-D -n \"OpenNCALayer Local CA\""));
+    assert!(linux.contains(&format!("-D -n \"{nickname}\"")));
     assert!(linux.contains("Центры сертификации"));
     assert!(linux.contains("https://127.0.0.1:13601/"));
     assert!(linux.contains("01.11.2028"));

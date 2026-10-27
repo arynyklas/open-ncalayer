@@ -1,0 +1,422 @@
+// The TLS wizard: the certificate for browsers and its trust (status), where it comes from
+// (own CA, mkcert, an imported one), installing the CA into the user's trust stores, and the
+// check in the browser. Every write to a trust store waits for a confirmation here. The texts
+// of the states are composed in Rust.
+
+import { Button, CheckBox, ComboBox, GroupBox, LineEdit, ListView, Palette, ScrollView, TabWidget, VerticalBox } from "std-widgets.slint";
+
+// A trust store the install buttons act on.
+export struct TrustStoreRow {
+    label: string,
+    state: string,
+    selected: bool,
+}
+
+// A browser that opened the self-test page.
+export struct BrowserRow {
+    browser: string,
+    seen: string,
+}
+
+export component TlsWizardWindow inherits Window {
+    title: @tr("Certificate for browsers");
+    min-width: 640px;
+    min-height: 560px;
+
+    // 0: status, 1: source, 2: installation, 3: check.
+    in-out property <int> tab;
+    // An action runs (or the state loads): the buttons wait.
+    in property <bool> busy;
+    // The outcome of the last action, and whether it failed.
+    in property <string> message;
+    in property <bool> message-is-error;
+    // A question to confirm before an action; empty: none.
+    in property <string> confirm-text;
+
+    in property <string> status-text;
+    in property <string> trust-text;
+
+    // 0: own CA, 1: mkcert, 2: an imported certificate.
+    in-out property <int> source;
+    in property <string> mkcert-text;
+    in property <bool> mkcert-found;
+    in-out property <bool> mkcert-consent;
+    in-out property <string> chain-path;
+    in-out property <string> key-path;
+
+    in property <[TrustStoreRow]> stores;
+    in property <string> install-text;
+    in property <bool> can-install-ca;
+    in property <string> replaced-text;
+    in property <bool> has-replaced;
+
+    in property <string> selftest-url;
+    in property <[BrowserRow]> browsers;
+
+    callback refresh();
+    callback issue();
+    callback browse-chain();
+    callback browse-key();
+    callback store-toggled(int, bool);
+    callback install-ca();
+    callback remove-ca();
+    callback install-nca();
+    callback remove-replaced();
+    callback open-selftest();
+    callback confirm();
+    callback cancel-confirm();
+    callback dismiss();
+
+    private property <bool> can-issue: !root.busy && (root.source == 0 || (root.source == 1 && root.mkcert-found && root.mkcert-consent) || (root.source == 2 && !root.chain-path.is-empty && !root.key-path.is-empty));
+    private property <bool> asking: !root.confirm-text.is-empty;
+
+    VerticalBox {
+        TabWidget {
+            current-index <=> root.tab;
+            Tab {
+                title: @tr("Status");
+                VerticalBox {
+                    ScrollView {
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: 8px;
+                            Text {
+                                text: root.status-text;
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: @tr("Trust (read only)");
+                                font-weight: 700;
+                            }
+
+                            Text {
+                                text: root.trust-text;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        alignment: start;
+                        Button {
+                            text: @tr("Check again");
+                            enabled: !root.busy && !root.asking;
+                            clicked => {
+                                root.refresh();
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tab {
+                title: @tr("Source");
+                VerticalBox {
+                    ComboBox {
+                        enabled: !root.busy && !root.asking;
+                        model: [@tr("Create my own certificate"), @tr("Use mkcert"), @tr("My own certificate (import)")];
+                        current-index <=> root.source;
+                    }
+
+                    if root.source == 0: Text {
+                        text: @tr("OpenNCALayer creates a local CA that can only certify 127.0.0.1, ::1 and localhost, issues the certificate and destroys the CA's key at once. Install the new CA on the «Installation» tab.");
+                        wrap: word-wrap;
+                    }
+                    if root.source == 1: VerticalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.mkcert-text;
+                            wrap: word-wrap;
+                        }
+
+                        // The consent's long text wraps beside its box.
+                        HorizontalLayout {
+                            spacing: 4px;
+                            consent := CheckBox {
+                                enabled: !root.busy && !root.asking && root.mkcert-found;
+                                checked <=> root.mkcert-consent;
+                                accessible-label: consent-text.text;
+                            }
+
+                            consent-text := Text {
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                                text: @tr("I agree that OpenNCALayer reads the mkcert CA key rootCA-key.pem at every renewal (it is never copied)");
+                                TouchArea {
+                                    enabled: consent.enabled;
+                                    clicked => {
+                                        root.mkcert-consent = !root.mkcert-consent;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if root.source == 2: VerticalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: @tr("A certificate for 127.0.0.1 with serverAuth, ECDSA P-256/P-384 or RSA of 2048 bits and more, not signed with SHA-1, and its key (PEM).");
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            LineEdit {
+                                enabled: !root.busy && !root.asking;
+                                placeholder-text: @tr("Certificate chain (PEM)");
+                                text <=> root.chain-path;
+                            }
+
+                            Button {
+                                text: @tr("Browse…");
+                                enabled: !root.busy && !root.asking;
+                                clicked => {
+                                    root.browse-chain();
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            LineEdit {
+                                enabled: !root.busy && !root.asking;
+                                placeholder-text: @tr("Private key (PEM)");
+                                text <=> root.key-path;
+                            }
+
+                            Button {
+                                text: @tr("Browse…");
+                                enabled: !root.busy && !root.asking;
+                                clicked => {
+                                    root.browse-key();
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
+                    }
+
+                    HorizontalLayout {
+                        alignment: end;
+                        Button {
+                            text: root.source == 2 ? @tr("Use this certificate") : @tr("Issue the certificate");
+                            primary: true;
+                            enabled: root.can-issue && !root.asking;
+                            clicked => {
+                                root.issue();
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tab {
+                title: @tr("Installation");
+                VerticalBox {
+                    Text {
+                        text: root.install-text;
+                        wrap: word-wrap;
+                    }
+
+                    ListView {
+                        min-height: 72px;
+                        vertical-stretch: 1;
+                        for row[i] in root.stores: HorizontalLayout {
+                            padding: 4px;
+                            spacing: 8px;
+                            CheckBox {
+                                enabled: !root.busy && !root.asking;
+                                checked: row.selected;
+                                toggled => {
+                                    root.store-toggled(i, self.checked);
+                                }
+                            }
+
+                            VerticalLayout {
+                                Text {
+                                    text: row.label;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: row.state;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: @tr("Install my CA into the user's store");
+                            enabled: !root.busy && !root.asking && root.can-install-ca;
+                            clicked => {
+                                root.install-ca();
+                            }
+                        }
+
+                        Button {
+                            text: @tr("Remove");
+                            enabled: !root.busy && !root.asking && root.can-install-ca;
+                            clicked => {
+                                root.remove-ca();
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        alignment: start;
+                        Button {
+                            text: @tr("Download and install the NCA roots");
+                            enabled: !root.busy && !root.asking;
+                            clicked => {
+                                root.install-nca();
+                            }
+                        }
+                    }
+
+                    if root.has-replaced: VerticalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.replaced-text;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            alignment: start;
+                            Button {
+                                text: @tr("Remove the old one");
+                                enabled: !root.busy && !root.asking;
+                                clicked => {
+                                    root.remove-replaced();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tab {
+                title: @tr("Check");
+                VerticalBox {
+                    Text {
+                        text: @tr("Open the self-test page in each browser you use. A browser that opens it without a certificate warning appears in the list below.");
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: @tr("Open the check in the browser");
+                            enabled: !root.asking;
+                            clicked => {
+                                root.open-selftest();
+                            }
+                        }
+
+                        Text {
+                            text: root.selftest-url;
+                            vertical-alignment: center;
+                            color: #888888;
+                        }
+                    }
+
+                    ListView {
+                        vertical-stretch: 1;
+                        for row in root.browsers: HorizontalLayout {
+                            padding: 4px;
+                            spacing: 8px;
+                            Text {
+                                text: "✓";
+                                color: #2e7d32;
+                                font-weight: 700;
+                            }
+
+                            Text {
+                                text: row.browser;
+                                horizontal-stretch: 1;
+                            }
+
+                            Text {
+                                text: row.seen;
+                                color: #888888;
+                            }
+                        }
+                    }
+
+                    if root.browsers.length == 0: Text {
+                        text: @tr("No browser has opened the page yet.");
+                        color: #888888;
+                    }
+                }
+            }
+        }
+
+        if !root.message.is-empty: Text {
+            text: root.message;
+            wrap: word-wrap;
+            color: root.message-is-error ? #c42b1c : #2e7d32;
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 0;
+            alignment: end;
+            Button {
+                text: @tr("Close");
+                // Closing waits for the running action: its outcome is shown here.
+                enabled: !root.busy;
+                clicked => {
+                    root.dismiss();
+                }
+            }
+        }
+    }
+
+    // The confirmation, above everything else; the window's size does not depend on it.
+    if root.asking: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #00000080;
+        TouchArea { }
+
+        Rectangle {
+            width: min(root.width - 48px, 520px);
+            height: question.preferred-height;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 6px;
+            question := VerticalBox {
+                width: parent.width;
+                Text {
+                    text: root.confirm-text;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    Button {
+                        text: @tr("Yes");
+                        primary: true;
+                        clicked => {
+                            root.confirm();
+                        }
+                    }
+
+                    Button {
+                        text: @tr("Cancel");
+                        clicked => {
+                            root.cancel-confirm();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

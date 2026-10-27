@@ -2,7 +2,11 @@
 //! thread from inside the event loop's message dispatch; commands still go through
 //! [`deliver`] so that `on_command` never runs inside a window procedure.
 
-use super::{IconKind, MenuRow, PRODUCT, TrayCommand, TrayError, TrayModel, TrayState, deliver};
+#[cfg(windows)]
+use super::balloon::Balloons;
+use super::{
+    IconKind, MenuRow, Notification, PRODUCT, TrayCommand, TrayError, TrayModel, TrayState, deliver,
+};
 use oncl_basics::Locale;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -18,6 +22,9 @@ struct Shared {
     model: TrayModel,
     /// `None` until the icon exists (on macOS: once the event loop runs).
     icon: Option<TrayIcon>,
+    /// The icon's balloons.
+    #[cfg(windows)]
+    balloons: Option<Balloons>,
 }
 
 impl Tray {
@@ -31,13 +38,20 @@ impl Tray {
         // Clicks on the icon itself are not used (a click opens the menu); without a handler
         // they would pile up in the library's channel.
         TrayIconEvent::set_event_handler(Some(|_: TrayIconEvent| {}));
-        let shared = Rc::new(RefCell::new(Shared { model, icon: None }));
+        let shared = Rc::new(RefCell::new(Shared {
+            model,
+            icon: None,
+            #[cfg(windows)]
+            balloons: None,
+        }));
         #[cfg(windows)]
         {
             // The icon's hidden window gets its messages from the event loop that the main
             // thread runs next.
             let icon = build(&shared.borrow().model)?;
-            shared.borrow_mut().icon = Some(icon);
+            let mut shared = shared.borrow_mut();
+            shared.balloons = Some(Balloons::new(icon.window_handle()));
+            shared.icon = Some(icon);
         }
         #[cfg(target_os = "macos")]
         {
@@ -58,12 +72,44 @@ impl Tray {
         Ok(Tray { shared })
     }
 
+    /// Shows `notification` next to the icon (Windows) or as a macOS notification.
+    #[cfg(windows)]
+    pub(super) fn notify(&self, notification: Notification) -> Result<(), TrayError> {
+        match &self.shared.borrow().balloons {
+            Some(balloons) => balloons.show(notification),
+            None => Err(TrayError("there is no tray icon".to_owned())),
+        }
+    }
+
+    /// Shows `notification` as a macOS notification (`osascript`), which only informs.
+    #[cfg(target_os = "macos")]
+    pub(super) fn notify(&self, notification: Notification) -> Result<(), TrayError> {
+        let script = format!(
+            "display notification {} with title {}",
+            applescript_string(&notification.body),
+            applescript_string(&notification.title)
+        );
+        let mut child = std::process::Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| TrayError(format!("osascript: {e}")))?;
+        std::thread::Builder::new()
+            .name("osascript".into())
+            .spawn(move || child.wait())
+            .map(drop)
+            .map_err(|e| TrayError(format!("osascript: {e}")))
+    }
+
     pub(super) fn set_state(&self, state: TrayState) {
         let mut shared = self.shared.borrow_mut();
         if !shared.model.set_state(state) {
             return;
         }
-        let Shared { model, icon } = &*shared;
+        let Shared { model, icon, .. } = &*shared;
         let Some(tray) = icon else {
             return;
         };
@@ -80,7 +126,7 @@ impl Tray {
         if !shared.model.set_locale(locale) {
             return;
         }
-        let Shared { model, icon } = &*shared;
+        let Shared { model, icon, .. } = &*shared;
         let Some(tray) = icon else {
             return;
         };
@@ -125,4 +171,20 @@ fn icon_of(kind: IconKind) -> Result<Icon, TrayError> {
 
 fn tray_error(e: tray_icon::Error) -> TrayError {
     TrayError(format!("tray icon: {e}"))
+}
+
+/// `text` as an AppleScript string literal.
+#[cfg(any(target_os = "macos", test))]
+fn applescript_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn applescript_strings_are_quoted() {
+        assert_eq!(applescript_string(r#"a "b" \c"#), r#""a \"b\" \\c""#);
+    }
 }

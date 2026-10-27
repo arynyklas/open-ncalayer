@@ -1,7 +1,9 @@
-//! Screenshots of the settings and About windows without a display: Slint's software
-//! renderer draws them into PNG files under `target/screenshots/`. The settings window shows
-//! `target/screenshots/settings.json` and this user's autostart entry (read only); no button is
-//! pressed.
+//! Screenshots of the settings, TLS wizard and About windows without a display: Slint's
+//! software renderer draws them into PNG files under `target/screenshots/`. The settings window
+//! shows `target/screenshots/settings.json` and this user's autostart entry (read only). The TLS
+//! wizard shows `target/screenshots/tls` (a certificate is issued there if there is none) and this
+//! user's trust stores, read only; its install question is shown without its button being
+//! pressed, and nothing is installed. No button is pressed.
 //!
 //! `cargo test -p oncl-ui --lib screenshots -- --ignored`
 
@@ -19,6 +21,7 @@ use crate::about_view::{self, AboutInfo, AboutTab};
 use crate::offscreen::{self, Last};
 use crate::prompter::select_language;
 use crate::settings_view::{self, SettingsServices};
+use crate::tls_wizard::{self, Applied, IssueForm, Source, SystemTrust, TlsWizardServices};
 use crate::ui::SettingsWindow;
 use crate::windows::Desktop;
 
@@ -118,6 +121,7 @@ fn screenshots() {
             .map(str::to_owned)
             .to_vec(),
         },
+        tls: Arc::new(wizard_services()),
         on_saved: Box::new(|_| {}),
     });
     about_view::open(&desktop, AboutTab::Program);
@@ -126,4 +130,54 @@ fn screenshots() {
     save(&last, 760, 640, "about-modules");
     about_view::current().expect("the About window").set_tab(2);
     save(&last, 760, 640, "about-licences");
+
+    // The TLS wizard: its four tabs, then the question an install button asks.
+    if desktop.tls.load().info.unwrap_or_default().is_none() {
+        let own = IssueForm {
+            source: Source::Own,
+            mkcert_consent: false,
+            chain: String::new(),
+            key: String::new(),
+        };
+        desktop
+            .tls
+            .issue(&own, time::OffsetDateTime::now_utc())
+            .unwrap();
+    }
+    desktop.tls.reports.record(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0",
+        time::OffsetDateTime::now_utc(),
+    );
+    for (locale, code) in [(Locale::Ru, "ru"), (Locale::En, "en")] {
+        desktop.locale.set(locale);
+        let ui = tls_wizard::open_loaded(&desktop);
+        for (tab, name) in [(0, "status"), (1, "source"), (2, "install"), (3, "check")] {
+            ui.set_tab(tab);
+            save(&last, 760, 640, &format!("tls-{name}-{code}"));
+        }
+        ui.set_tab(1);
+        ui.set_source(1);
+        save(&last, 760, 640, &format!("tls-mkcert-{code}"));
+        ui.set_tab(2);
+        tls_wizard::preview_install_question(&desktop);
+        save(&last, 760, 640, &format!("tls-confirm-{code}"));
+        ui.invoke_cancel_confirm();
+        ui.invoke_dismiss();
+    }
+}
+
+/// The wizard on `target/screenshots/tls` with this user's trust stores (read only here: no
+/// button is pressed) and a server that is not running.
+fn wizard_services() -> TlsWizardServices {
+    TlsWizardServices {
+        files: oncl_tls::TlsFiles {
+            dir: out_dir().join("tls"),
+        },
+        port: 13579,
+        label: "screenshots".to_owned(),
+        reports: Arc::new(oncl_tls::SelftestReports::new()),
+        trust: Box::new(SystemTrust),
+        mkcert: Box::new(oncl_tls::mkcert_caroot),
+        apply: Box::new(|| Applied::AfterRestart),
+    }
 }

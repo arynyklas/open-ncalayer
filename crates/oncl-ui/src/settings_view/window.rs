@@ -348,6 +348,7 @@ mod tests {
             locale: Locale::Ru,
             settings: services(root, FakeOriginal::default()),
             about: AboutInfo::default(),
+            tls: crate::tls_wizard::fakes::services(root, Vec::new(), None),
             on_saved: Box::new(move |s: &Settings| record.borrow_mut().push(s.proxy.clone())),
         });
         (windows::desktop().unwrap(), applied)

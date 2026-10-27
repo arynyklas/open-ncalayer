@@ -4,12 +4,16 @@
 //!
 //! Windows and macOS use `tray-icon` (menus by `muda`), Linux a StatusNotifierItem over
 //! D-Bus (`ksni`). The menu, icon and tooltip come from the pure [`TrayModel`].
+//! [`TrayHandle::notify`] shows a [`Notification`]: a balloon of the icon on Windows, a
+//! desktop notification over D-Bus on Linux, `osascript` on macOS.
 
 use oncl_basics::Locale;
 use std::cell::RefCell;
 use std::io::Cursor;
 use std::rc::Rc;
 
+#[cfg(windows)]
+mod balloon;
 #[cfg(any(windows, target_os = "macos"))]
 mod windows_macos;
 #[cfg(any(windows, target_os = "macos"))]
@@ -84,6 +88,34 @@ pub struct TrayState {
     pub warning: Option<String>,
 }
 
+/// A message from the tray: a balloon of the icon on Windows (a toast on Windows 10 and
+/// later), a desktop notification on Linux (`org.freedesktop.Notifications`) and macOS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    pub title: String,
+    pub body: String,
+    /// What a click does: on the notification (Windows, Linux) or on its button (Linux, if
+    /// the notification server shows buttons). macOS notifications only inform.
+    pub action: Option<NotificationAction>,
+}
+
+/// What clicking a [`Notification`] does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationAction {
+    /// The button's text.
+    pub label: String,
+    pub target: ActionTarget,
+}
+
+/// Where a [`NotificationAction`] leads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionTarget {
+    /// As if the menu item had been picked.
+    Command(TrayCommand),
+    /// The page in the default browser.
+    Url(String),
+}
+
 /// The tray could not be shown (e.g. on Linux: no D-Bus session or no StatusNotifier host).
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -103,6 +135,14 @@ impl TrayHandle {
     /// Shows the menu in `locale` (the language saved in the settings window).
     pub fn set_locale(&self, locale: Locale) {
         self.tray.set_locale(locale);
+    }
+
+    /// Shows `notification`. A failure is only logged: a notification is a hint.
+    pub fn notify(&self, notification: Notification) {
+        tracing::info!(title = %notification.title, body = %notification.body, "tray notification");
+        if let Err(e) = self.tray.notify(notification) {
+            tracing::warn!(error = %e, "cannot show the notification");
+        }
     }
 }
 
@@ -147,6 +187,27 @@ fn deliver(command: TrayCommand) {
         }
     }) {
         tracing::warn!(?command, error = %e, "tray command lost");
+    }
+}
+
+/// Carries out a clicked notification's `target` on the event loop, from whatever thread
+/// the notification is reported on.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn deliver_click(target: ActionTarget) {
+    match target {
+        ActionTarget::Command(command) => deliver(command),
+        ActionTarget::Url(url) => {
+            let opened = std::thread::Builder::new()
+                .name("browser".into())
+                .spawn(move || {
+                    if let Err(e) = webbrowser::open(&url) {
+                        tracing::warn!(%url, error = %e, "cannot open the browser");
+                    }
+                });
+            if let Err(e) = opened {
+                tracing::warn!(error = %e, "cannot open the browser");
+            }
+        }
     }
 }
 

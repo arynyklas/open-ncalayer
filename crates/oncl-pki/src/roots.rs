@@ -65,6 +65,43 @@ pub fn nca_production() -> &'static [Certificate] {
     &NCA_PRODUCTION
 }
 
+/// The RSA CAs of the NCA (`rcarsa20`, `ncarsa22`) with the SHA-256 of their DER, which
+/// [`nca_tls_roots`] checks: the CAs of the TLS certificates of government sites. (Browsers
+/// do not use the GOST CAs.)
+const TLS_ROOTS: [(&str, &str); 2] = [
+    (
+        "rcarsa20",
+        "9ba06354b626641715182e4d07c9dbaa1777720fa795d03174ffc68876535dcd",
+    ),
+    (
+        "ncarsa22",
+        "84fb799a66140950818c056a5d9730acc2a7622cdd4ef0d47113b132fb892905",
+    ),
+];
+
+/// `(alias, DER)` of the NCA's RSA CAs `rcarsa20` and `ncarsa22`, for a browser's trust
+/// store, each checked against its SHA-256 pinned here.
+///
+/// # Panics
+///
+/// If an embedded certificate does not match its pinned SHA-256 (a broken build).
+pub fn nca_tls_roots() -> Vec<(&'static str, &'static [u8])> {
+    use sha2::{Digest, Sha256};
+    TLS_ROOTS
+        .iter()
+        .map(|&(alias, sha256)| {
+            let (_, der) = EMBEDDED
+                .iter()
+                .find(|(a, _)| *a == alias)
+                .unwrap_or_else(|| panic!("{alias} is not embedded"));
+            let digest = Sha256::digest(der);
+            let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, sha256, "embedded certificate {alias}");
+            (alias, *der)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +156,18 @@ mod tests {
         assert_eq!(certs.len(), 10);
         for (cert, (alias, der)) in certs.iter().zip(EMBEDDED) {
             assert_eq!(cert.to_der().unwrap(), der, "{alias} is DER");
+        }
+    }
+
+    #[test]
+    fn tls_roots_are_the_pinned_rsa_cas() {
+        let roots = nca_tls_roots();
+        assert_eq!(
+            roots.iter().map(|(alias, _)| *alias).collect::<Vec<_>>(),
+            ["rcarsa20", "ncarsa22"]
+        );
+        for (alias, der) in roots {
+            assert!(EMBEDDED.contains(&(alias, der)), "{alias}");
         }
     }
 }

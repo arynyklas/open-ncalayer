@@ -1,6 +1,6 @@
 [package]
 name = "oncl-tls"
-description = "Local TLS wizard backend for OpenNCALayer: name-constrained local CA, certificate import, rustls server config and trust instructions"
+description = "Local TLS wizard backend for OpenNCALayer: name-constrained local CA, mkcert-issued and imported certificates, renewal advice, rustls server config, trust instructions and self-test reports"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,8 @@ der = { workspace = true, features = ["pem"] }
 rcgen.workspace = true
 ring.workspace = true
 rustls.workspace = true
+# Checks that a leaf issued with mkcert's CA chains to it before it is saved.
+rustls-webpki.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -21,5 +23,8 @@ x509-cert.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-rustls-webpki.workspace = true
+# A fake mkcert CA with an RSA key, as mkcert makes by default.
+rand_chacha.workspace = true
+rsa.workspace = true
+tempfile.workspace = true
 time = { workspace = true, features = ["formatting", "parsing", "macros"] }

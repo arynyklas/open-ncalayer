@@ -3879,12 +3879,15 @@ name = "oncl-tls"
 version = "0.1.0"
 dependencies = [
  "der 0.8.2",
+ "rand_chacha",
  "rcgen",
  "ring",
+ "rsa",
  "rustls",
  "rustls-webpki",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "time",
  "x509-cert",
@@ -3915,8 +3918,11 @@ dependencies = [
  "oncl-basics",
  "oncl-desktop",
  "oncl-pki",
+ "oncl-tls",
+ "oncl-trust",
  "png",
  "raw-window-handle",
+ "rcgen",
  "rfd",
  "slint",
  "slint-build",
@@ -3927,6 +3933,7 @@ dependencies = [
  "tray-icon",
  "webbrowser",
  "windows-sys 0.61.2",
+ "zbus",
  "zeroize",
 ]
 
@@ -3951,6 +3958,7 @@ dependencies = [
  "oncl-testkit",
  "oncl-tls",
  "oncl-ui",
+ "rcgen",
  "rustls",
  "serde",
  "serde_json",

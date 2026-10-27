@@ -14,9 +14,9 @@ use zeroize::Zeroizing;
 use crate::{TlsError, TlsInfo, TlsMaterial, TlsSource};
 
 /// Leaf validity, below the 825-day limit of Apple clients.
-const LEAF_VALIDITY_DAYS: i64 = 800;
+pub(crate) const LEAF_VALIDITY_DAYS: i64 = 800;
 /// Backdating against clock skew between issuing and the first use.
-const BACKDATE: Duration = Duration::hours(1);
+pub(crate) const BACKDATE: Duration = Duration::hours(1);
 
 /// Issues a fresh local CA and a server leaf for `127.0.0.1`, `::1` and `localhost`.
 ///
@@ -48,7 +48,7 @@ pub fn generate(now: OffsetDateTime, label: &str) -> Result<TlsMaterial, TlsErro
 
     let ca_der = ca_cert.der().to_vec();
     let info = TlsInfo {
-        source: TlsSource::Generated,
+        source: TlsSource::Own,
         ca_sha1: Some(crate::sha1_hex(&ca_der)),
         ca_sha256: Some(crate::sha256_hex(&ca_der)),
         leaf_sha256: crate::sha256_hex(leaf_cert.der()),
@@ -109,7 +109,7 @@ fn ca_params(
     Ok(params)
 }
 
-fn leaf_params(
+pub(crate) fn leaf_params(
     not_before: OffsetDateTime,
     not_after: OffsetDateTime,
 ) -> Result<CertificateParams, TlsError> {
@@ -136,7 +136,7 @@ fn leaf_params(
 
 /// 16 random bytes; the top bit is cleared and the next one set, so the serial is a positive
 /// INTEGER encoded in exactly 16 octets.
-fn random_serial() -> Result<SerialNumber, TlsError> {
+pub(crate) fn random_serial() -> Result<SerialNumber, TlsError> {
     let mut serial = [0u8; 16];
     SystemRandom::new()
         .fill(&mut serial)
@@ -145,6 +145,6 @@ fn random_serial() -> Result<SerialNumber, TlsError> {
     Ok(SerialNumber::from_slice(&serial))
 }
 
-fn gen_err(e: rcgen::Error) -> TlsError {
+pub(crate) fn gen_err(e: rcgen::Error) -> TlsError {
     TlsError::Gen(e.to_string())
 }

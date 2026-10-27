@@ -232,7 +232,10 @@ async fn start_wss(registry: Arc<Registry>) -> Wss {
     let tls = Arc::new(oncl_tls::server_config(&files).unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(serve(listener, ServerConfig::new(tls, registry)));
+    tokio::spawn(serve(
+        listener,
+        ServerConfig::new(Arc::new(openncalayer::LiveTls::new(tls)), registry),
+    ));
     Wss {
         addr,
         ca_der: material.ca_der.unwrap(),

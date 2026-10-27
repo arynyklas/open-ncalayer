@@ -99,6 +99,9 @@ ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 webbrowser = "1.2.5"
 windows-sys = "0.61.2"
 x509-cert = "0.3.0"
+# Only in oncl-ui on Linux: desktop notifications over the session bus; the zbus that ksni
+# already brings, with its blocking API.
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 zeroize = "1.9.1"
 # Only in xtask (`ext build`): the extension zip/xpi, deflate through pure-Rust zlib-rs.
 zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }

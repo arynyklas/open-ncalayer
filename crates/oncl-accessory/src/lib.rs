@@ -10,7 +10,8 @@
 //!   implements, and of OpenNCALayer itself;
 //! - `getServices`: `{"services": [module names]}` of the daemon's registry;
 //! - `installBundle`: `SYMNAME_PARAMETER_IS_EMPTY` for an empty `symname`, else
-//!   `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED` (no bundle can be installed); the original reads
+//!   `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED` (no bundle can be installed), after telling the
+//!   daemon, which shows the user where plugins are listed; the original reads
 //!   the page's `origin` with `getString` from the headers its WebSocket server always writes
 //!   as `{"origin": <header or null>}`, so a connection without an `Origin` header fails with
 //!   `JSONObject["origin"] is not a string.`;
@@ -71,6 +72,9 @@ pub enum UiRequest {
     AdesSigning,
     /// `showAdesValidation`.
     AdesValidation,
+    /// `installBundle` of a bundle, which cannot be installed (D21): the daemon points the
+    /// user to the plugin registry.
+    InstallBundle,
 }
 
 /// What opens the daemon's windows. It is called synchronously from `Module::process` on a
@@ -129,7 +133,8 @@ impl Accessory {
                     "BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED"
                 };
                 obj.insert("errorCode".to_owned(), json!(code));
-                None
+                (code == "BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED")
+                    .then_some(UiRequest::InstallBundle)
             }
             "showBundleManager" => Some(UiRequest::BundleManager),
             "showSettings" => Some(UiRequest::Settings),
@@ -214,7 +219,7 @@ mod tests {
 
     #[test]
     fn install_bundle() {
-        let (m, _) = module();
+        let (m, seen) = module();
         let origin = Some("https://example.kz");
         for symname in [json!(""), json!(" \t"), Value::Null] {
             assert_eq!(
@@ -251,6 +256,11 @@ mod tests {
                 None
             ),
             json!({"errorCode": "org.json.JSONException: JSONObject[\"origin\"] is not a string."})
+        );
+        // Only a bundle that could have been installed tells the daemon.
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [UiRequest::InstallBundle, UiRequest::InstallBundle]
         );
     }
 

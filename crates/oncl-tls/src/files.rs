@@ -9,7 +9,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{InconsistentKeys, ServerConfig};
 
-use crate::{TlsError, TlsInfo, TlsMaterial};
+use crate::{TlsError, TlsInfo, TlsMaterial, TlsSource};
 
 /// The TLS directory (`<data dir>/tls`) and the names of the files in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,19 +42,28 @@ impl TlsFiles {
     pub fn info(&self) -> PathBuf {
         self.dir.join("tls.json")
     }
+
+    /// Own local CAs that [`save`] replaced, `<sha1>.cer` (DER) each: see [`replaced_cas`].
+    pub fn replaced_dir(&self) -> PathBuf {
+        self.dir.join("replaced")
+    }
 }
 
 /// Writes `m` into `files.dir`, creating the directory.
 ///
 /// Every file is written to a temporary sibling and renamed into place; `tls.json` goes last,
 /// so [`load_info`] sees the new material only after all other files are in place. CA files
-/// left over from a previously generated set are removed when `m` has no CA (imported).
+/// left over from a previous set are removed when `m` has no CA (imported). An own local CA
+/// that `m` replaces (a re-issue, mkcert or an import after [`generate`](crate::generate))
+/// is first copied into [`TlsFiles::replaced_dir`]: it may still be trusted somewhere, and
+/// the user is asked to remove it ([`replaced_cas`]).
 ///
 /// `server.key` is created with mode `0600` on Unix. On Windows no ACL is changed: the file
 /// inherits the ACL of the data directory (`%APPDATA%\OpenNCALayer`, which by default is
 /// accessible only to the user, SYSTEM and Administrators).
 pub fn save(files: &TlsFiles, m: &TlsMaterial) -> io::Result<()> {
     fs::create_dir_all(&files.dir)?;
+    keep_replaced_ca(files, m)?;
     write_file(&files.key_pem(), m.key_pem.as_bytes(), true)?;
     write_file(&files.chain_pem(), m.chain_pem.as_bytes(), false)?;
     match (&m.ca_pem, &m.ca_der) {
@@ -82,6 +91,59 @@ pub fn load_info(files: &TlsFiles) -> io::Result<Option<TlsInfo>> {
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// The own local CAs (DER) that [`save`] replaced and the user has not removed from the
+/// trust stores yet ([`forget_replaced_ca`]), in file name order.
+pub fn replaced_cas(files: &TlsFiles) -> io::Result<Vec<Vec<u8>>> {
+    let entries = match fs::read_dir(files.replaced_dir()) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "cer") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.into_iter().map(fs::read).collect()
+}
+
+/// Drops the replaced CA `ca_der` from [`replaced_cas`] (once it is out of the trust
+/// stores). A CA that is not there is not an error.
+pub fn forget_replaced_ca(files: &TlsFiles, ca_der: &[u8]) -> io::Result<()> {
+    remove_if_exists(&replaced_path(files, ca_der))
+}
+
+fn replaced_path(files: &TlsFiles, ca_der: &[u8]) -> PathBuf {
+    files
+        .replaced_dir()
+        .join(format!("{}.cer", crate::sha1_hex(ca_der)))
+}
+
+/// Copies the own local CA in `files` into [`TlsFiles::replaced_dir`] if `m` replaces it.
+/// Without readable metadata nothing is known to be ours, and nothing is kept.
+fn keep_replaced_ca(files: &TlsFiles, m: &TlsMaterial) -> io::Result<()> {
+    let Ok(Some(TlsInfo {
+        source: TlsSource::Own,
+        ..
+    })) = load_info(files)
+    else {
+        return Ok(());
+    };
+    let old = match fs::read(files.ca_der()) {
+        Ok(old) => old,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if m.ca_der.as_deref() == Some(old.as_slice()) {
+        return Ok(());
+    }
+    fs::create_dir_all(files.replaced_dir())?;
+    write_file(&replaced_path(files, &old), &old, false)
 }
 
 /// A rustls server configuration (ring provider, TLS 1.3 and 1.2, no client authentication)

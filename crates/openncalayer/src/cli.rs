@@ -17,8 +17,8 @@ use oncl_ipc::IpcListener;
 use oncl_pki::http::UreqTransport;
 use oncl_pki::pkix::CaSet;
 use oncl_tls::{
-    RENEW_BEFORE, TargetOs, TlsFiles, TlsInfo, TlsSource, TlsWarning, instructions, load_info,
-    server_config, sha1_grouped,
+    AUTO_RENEW_BEFORE, RENEW_BEFORE, TargetOs, TlsFiles, TlsInfo, TlsSource, TlsWarning,
+    instructions, load_info, server_config, sha1_grouped,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -430,18 +430,8 @@ pub fn tls(command: TlsCommand) -> ExitCode {
     result.unwrap_or_else(|code| code)
 }
 
-fn current_os() -> TargetOs {
-    if cfg!(windows) {
-        TargetOs::Windows
-    } else if cfg!(target_os = "macos") {
-        TargetOs::MacOs
-    } else {
-        TargetOs::Linux
-    }
-}
-
 /// `user@host` for the CA name, from the environment.
-fn label() -> String {
+pub fn label() -> String {
     let var = |names: &[&str]| {
         names
             .iter()
@@ -533,21 +523,23 @@ fn save_and_explain(
         ExitCode::FAILURE
     })?;
     if let Some(TlsInfo {
-        source: TlsSource::Generated,
+        source: TlsSource::Own,
         ca_sha1: Some(old),
         ..
     }) = previous
     {
         println!(
             "Прежний локальный центр сертификации (SHA-1 {}) больше не используется: удалите \
-             его из хранилищ доверия.",
-            sha1_grouped(old)
+             его из хранилищ доверия (кнопка «Удалить старый» в мастере «Сертификат для \
+             браузера…» или вручную, см. «Удаление» ниже). Его копия — в {}.",
+            sha1_grouped(old),
+            files.replaced_dir().display()
         );
         println!();
     }
     print!(
         "{}",
-        instructions(current_os(), files, &material.info, listen_port())
+        instructions(TargetOs::current(), files, &material.info, listen_port())
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -555,13 +547,16 @@ fn save_and_explain(
 fn tls_status(files: &TlsFiles) -> Result<ExitCode, ExitCode> {
     let info = configured(files).map_err(Failure::report)?;
     println!("Каталог: {}", files.dir.display());
-    println!(
-        "Источник: {}",
-        match info.source {
-            TlsSource::Generated => "локальный центр сертификации OpenNCALayer (tls init)",
-            TlsSource::Imported => "импортированный сертификат (tls import)",
+    match &info.source {
+        TlsSource::Own => {
+            println!("Источник: локальный центр сертификации OpenNCALayer (tls init)");
         }
-    );
+        TlsSource::Mkcert { caroot, .. } => println!(
+            "Источник: центр сертификации mkcert ({}), перевыпуск автоматический",
+            caroot.display()
+        ),
+        TlsSource::Imported => println!("Источник: импортированный сертификат (tls import)"),
+    }
     if let Some(sha1) = &info.ca_sha1 {
         println!(
             "Отпечаток SHA-1 центра сертификации: {}",
@@ -581,27 +576,39 @@ fn tls_status(files: &TlsFiles) -> Result<ExitCode, ExitCode> {
     match OffsetDateTime::parse(&info.leaf_not_after, &Rfc3339) {
         Ok(not_after) => {
             println!("Сертификат сервера действует до: {}", info.leaf_not_after);
-            let renew = not_after - RENEW_BEFORE;
+            let renew = not_after
+                - match info.source {
+                    TlsSource::Mkcert { .. } => AUTO_RENEW_BEFORE,
+                    TlsSource::Own | TlsSource::Imported => RENEW_BEFORE,
+                };
             let days = (renew - OffsetDateTime::now_utc()).whole_days();
-            if days > 0 {
-                println!(
+            match &info.source {
+                TlsSource::Mkcert { .. } => println!(
+                    "Дней до перевыпуска: {} (OpenNCALayer перевыпустит сертификат сам после {})",
+                    days.max(0),
+                    ru_date(renew)
+                ),
+                _ if days > 0 => println!(
                     "Дней до перевыпуска: {days} (перевыпустить до {})",
                     ru_date(renew)
-                );
-            } else {
-                println!(
-                    "Дней до перевыпуска: 0 — перевыпустите сертификат сейчас ({})",
-                    match info.source {
-                        TlsSource::Generated => "`openncalayer tls init --force`",
-                        TlsSource::Imported => "`openncalayer tls import`",
-                    }
-                );
+                ),
+                TlsSource::Own => println!(
+                    "Дней до перевыпуска: 0 — перевыпустите сертификат сейчас \
+                     (`openncalayer tls init --force` или мастер «Сертификат для браузера…»)"
+                ),
+                TlsSource::Imported => println!(
+                    "Дней до перевыпуска: 0 — перевыпустите сертификат сейчас \
+                     (`openncalayer tls import`)"
+                ),
             }
         }
         Err(_) => println!("Сертификат сервера действует до: {}", info.leaf_not_after),
     }
     println!("Создан: {} ({})", info.created_at, info.generator);
-    println!("Самопроверка: https://127.0.0.1:{}/", listen_port());
+    println!(
+        "Самопроверка: https://127.0.0.1:{}/openncalayer/selftest",
+        listen_port()
+    );
     if let Err(e) = server_config(files) {
         println!("Ошибка: сервер не сможет загрузить сертификат: {e}");
         return Err(ExitCode::FAILURE);

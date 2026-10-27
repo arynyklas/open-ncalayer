@@ -1,10 +1,11 @@
 //! The wss/https server: TLS, then either the NCALayer WebSocket protocol or a plain HTTP
-//! response, on one port.
+//! response, on one port. Its TLS configuration is [`LiveTls`]: a re-issued certificate
+//! serves the next connection, without a restart.
 
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use oncl_basics::{Basics, Prompter, RecentPathStore};
 use oncl_commonutils::CommonUtils;
 use oncl_pki::http::HttpTransport;
 use oncl_protocol::{AddInfo, HEARTBEAT, Registry, greeting};
+use oncl_tls::SelftestReports;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -56,10 +58,36 @@ pub fn listen_port() -> u16 {
     listen_port_from(std::env::var(PORT_VAR).ok().as_deref())
 }
 
+/// The TLS configuration the server accepts new connections with. [`LiveTls::replace`]
+/// takes effect at the next connection; connections already accepted keep theirs.
+pub struct LiveTls {
+    config: RwLock<Arc<rustls::ServerConfig>>,
+}
+
+impl LiveTls {
+    pub fn new(config: Arc<rustls::ServerConfig>) -> Self {
+        LiveTls {
+            config: RwLock::new(config),
+        }
+    }
+
+    /// The configuration for the next connection.
+    pub fn current(&self) -> Arc<rustls::ServerConfig> {
+        Arc::clone(&self.config.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Serves the next connections with `config` (a re-issued certificate).
+    pub fn replace(&self, config: Arc<rustls::ServerConfig>) {
+        *self.config.write().unwrap_or_else(PoisonError::into_inner) = config;
+    }
+}
+
 /// What [`serve`] needs.
 pub struct ServerConfig {
-    pub tls: Arc<rustls::ServerConfig>,
+    pub tls: Arc<LiveTls>,
     pub registry: Arc<Registry>,
+    /// Where the self-test page's reports go (the TLS wizard shows them).
+    pub selftest: Arc<SelftestReports>,
     /// Read timeout of a connection (TLS handshake, request head, WebSocket messages).
     pub idle_timeout: Duration,
     /// Largest WebSocket message and frame.
@@ -67,11 +95,13 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// `tls` and `registry` with [`IDLE_TIMEOUT`] and [`MAX_MESSAGE`].
-    pub fn new(tls: Arc<rustls::ServerConfig>, registry: Arc<Registry>) -> Self {
+    /// `tls` and `registry` with reports of their own, [`IDLE_TIMEOUT`] and
+    /// [`MAX_MESSAGE`].
+    pub fn new(tls: Arc<LiveTls>, registry: Arc<Registry>) -> Self {
         ServerConfig {
             tls,
             registry,
+            selftest: Arc::new(SelftestReports::new()),
             idle_timeout: IDLE_TIMEOUT,
             max_message: MAX_MESSAGE,
         }
@@ -110,14 +140,16 @@ pub fn build_registry(
 }
 
 /// Serves connections accepted on `listener`, each in its own task, until the process exits.
-/// Failed accepts (for example, out of file descriptors) are logged and retried.
+/// Each connection takes the TLS configuration [`LiveTls`] has when it is accepted. Failed
+/// accepts (for example, out of file descriptors) are logged and retried.
 ///
 /// # Errors
 ///
-/// None at present: the signature leaves room for fatal listener errors.
+/// The listener's address is unknown.
 pub async fn serve(listener: TcpListener, cfg: ServerConfig) -> io::Result<()> {
-    let acceptor = TlsAcceptor::from(Arc::clone(&cfg.tls));
-    let cfg = Arc::new(cfg);
+    // The self-test page's own origin: the only one that may report.
+    let origin = format!("https://127.0.0.1:{}", listener.local_addr()?.port());
+    let cfg = Arc::new(Served { cfg, origin });
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -127,7 +159,7 @@ pub async fn serve(listener: TcpListener, cfg: ServerConfig) -> io::Result<()> {
                 continue;
             }
         };
-        let acceptor = acceptor.clone();
+        let acceptor = TlsAcceptor::from(cfg.cfg.tls.current());
         let cfg = Arc::clone(&cfg);
         tokio::spawn(async move {
             match connection(tcp, peer, acceptor, &cfg).await {
@@ -136,6 +168,12 @@ pub async fn serve(listener: TcpListener, cfg: ServerConfig) -> io::Result<()> {
             }
         });
     }
+}
+
+/// A [`ServerConfig`] being served on the listener of `origin`.
+struct Served {
+    cfg: ServerConfig,
+    origin: String,
 }
 
 fn timed_out(_: tokio::time::error::Elapsed) -> io::Error {
@@ -156,8 +194,9 @@ async fn connection(
     tcp: TcpStream,
     peer: SocketAddr,
     acceptor: TlsAcceptor,
-    cfg: &ServerConfig,
+    served: &Served,
 ) -> io::Result<()> {
+    let cfg = &served.cfg;
     // Small replies (heartbeat) should not wait for Nagle.
     tcp.set_nodelay(true)?;
     let accepted = timeout(cfg.idle_timeout, acceptor.accept(tcp))
@@ -183,7 +222,12 @@ async fn connection(
         return reply(&mut tls, &Response::bad_request()).await;
     };
     if !request.websocket {
-        let response = http::respond(&request.method, &request.target);
+        let response = if request.method == "POST" && request.path() == http::SELFTEST_REPORT {
+            let body = &head[head_len..];
+            selftest_report(&mut tls, &request, body, served).await?
+        } else {
+            http::respond(&request.method, &request.target)
+        };
         info!(%peer, method = %request.method, target = %request.target, status = response.status(), "http");
         return reply(&mut tls, &response).await;
     }
@@ -216,6 +260,38 @@ async fn connection(
         cfg,
     )
     .await
+}
+
+/// `POST /openncalayer/selftest/report`: reads the body (`read` holds what came with the
+/// head) within the idle timeout, then records it ([`http::selftest_report`]).
+async fn selftest_report<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    request: &Request,
+    read: &[u8],
+    served: &Served,
+) -> io::Result<Response> {
+    let len = match request.content_length {
+        ContentLength::Absent => return Ok(Response::length_required()),
+        ContentLength::Invalid => return Ok(Response::bad_request()),
+        ContentLength::Bytes(len) if len > http::MAX_REPORT_BODY => {
+            return Ok(Response::payload_too_large());
+        }
+        ContentLength::Bytes(len) => len,
+    };
+    let mut body = read[..read.len().min(len)].to_vec();
+    if body.len() < len {
+        let mut rest = vec![0; len - body.len()];
+        timeout(served.cfg.idle_timeout, stream.read_exact(&mut rest))
+            .await
+            .map_err(timed_out)??;
+        body.extend_from_slice(&rest);
+    }
+    Ok(http::selftest_report(
+        request.origin.as_deref(),
+        &served.origin,
+        &body,
+        &served.cfg.selftest,
+    ))
 }
 
 /// Writes `response` and closes the TLS session.
@@ -314,9 +390,26 @@ struct Request {
     websocket: bool,
     /// The `Origin` header.
     origin: Option<String>,
+    content_length: ContentLength,
+}
+
+/// The `Content-Length` header of a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentLength {
+    Absent,
+    /// Not a number, or given twice.
+    Invalid,
+    Bytes(usize),
 }
 
 impl Request {
+    /// The target without its query.
+    fn path(&self) -> &str {
+        self.target
+            .split_once('?')
+            .map_or(self.target.as_str(), |(path, _)| path)
+    }
+
     fn parse(head: &[u8]) -> Option<Request> {
         let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
         let mut request = httparse::Request::new(&mut headers);
@@ -325,6 +418,7 @@ impl Request {
         }
         let mut websocket = false;
         let mut origin = None;
+        let mut content_length = ContentLength::Absent;
         for header in request.headers.iter() {
             if header.name.eq_ignore_ascii_case("upgrade") {
                 websocket |= header
@@ -333,6 +427,15 @@ impl Request {
                     .any(|v| v.trim_ascii().eq_ignore_ascii_case(b"websocket"));
             } else if header.name.eq_ignore_ascii_case("origin") {
                 origin = Some(String::from_utf8_lossy(header.value).into_owned());
+            } else if header.name.eq_ignore_ascii_case("content-length") {
+                let value = std::str::from_utf8(header.value)
+                    .ok()
+                    .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+                    .and_then(|v| v.parse().ok());
+                content_length = match (content_length, value) {
+                    (ContentLength::Absent, Some(len)) => ContentLength::Bytes(len),
+                    _ => ContentLength::Invalid,
+                };
             }
         }
         Some(Request {
@@ -340,6 +443,7 @@ impl Request {
             target: request.path?.to_owned(),
             websocket,
             origin,
+            content_length,
         })
     }
 }
@@ -452,5 +556,29 @@ mod tests {
             Head::Eof
         ));
         assert!(Request::parse(b"\x01\x02\r\n\r\n").is_none());
+    }
+
+    #[test]
+    fn content_length_is_read_strictly() {
+        let length = |headers: &str| {
+            let head = format!("POST /x?y HTTP/1.1\r\n{headers}\r\n");
+            let request = Request::parse(head.as_bytes()).unwrap();
+            assert_eq!(request.path(), "/x");
+            request.content_length
+        };
+        assert_eq!(length(""), ContentLength::Absent);
+        assert_eq!(length("Content-Length: 12\r\n"), ContentLength::Bytes(12));
+        assert_eq!(length("content-length: 0\r\n"), ContentLength::Bytes(0));
+        for bad in ["-1", "+1", "1 2", "", "0x10", "99999999999999999999999"] {
+            assert_eq!(
+                length(&format!("Content-Length: {bad}\r\n")),
+                ContentLength::Invalid,
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            length("Content-Length: 1\r\nContent-Length: 1\r\n"),
+            ContentLength::Invalid
+        );
     }
 }

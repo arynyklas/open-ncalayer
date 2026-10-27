@@ -66,6 +66,21 @@ fn panic_text(panic: &(dyn Any + Send)) -> &str {
         .unwrap_or("unknown panic")
 }
 
+/// Runs `f` on the event loop of [`run_event_loop`]; callable from any thread. Without an
+/// event loop (none started on this process) it fails at once.
+///
+/// # Errors
+///
+/// There is no event loop to run `f` on.
+pub fn run_on_event_loop(f: impl FnOnce() + Send + 'static) -> Result<(), slint::EventLoopError> {
+    slint::invoke_from_event_loop(f)
+}
+
+/// Runs `f` on this thread once its [`run_event_loop`] runs.
+pub fn when_event_loop_runs(f: impl FnOnce() + 'static) {
+    slint::Timer::single_shot(Duration::ZERO, f);
+}
+
 /// Ends [`run_event_loop`]; callable from any thread.
 pub fn quit() {
     if let Err(e) = when_loop_exists(LOOP_START_TIMEOUT, slint::quit_event_loop) {

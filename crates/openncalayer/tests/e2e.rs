@@ -14,9 +14,10 @@ use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::{MockTsa, TsaProfile, timestamp_signer, verify_token};
 use oncl_testkit::{read, synthetic, synthetic_cert};
-use oncl_tls::TlsFiles;
+use oncl_tls::{SelftestReports, TlsFiles};
 use openncalayer::cms_verify::{NOT_CHECKED, Options, cms_verify_report_with};
-use openncalayer::{JsonSettings, ServerConfig, build_registry, listen_port_from, serve};
+use openncalayer::{JsonSettings, LiveTls, ServerConfig, build_registry, listen_port_from, serve};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use serde_json::{Value, json};
@@ -99,6 +100,8 @@ struct Srv {
     ca_der: Vec<u8>,
     prompter: Arc<ScriptedPrompter>,
     tsa: Arc<MockTsa>,
+    tls: Arc<LiveTls>,
+    reports: Arc<SelftestReports>,
     _dir: TempDir,
 }
 
@@ -109,7 +112,10 @@ async fn start(steps: Vec<Step>) -> Srv {
         dir: dir.path().join("tls"),
     };
     oncl_tls::save(&files, &material).unwrap();
-    let tls = Arc::new(oncl_tls::server_config(&files).unwrap());
+    let tls = Arc::new(LiveTls::new(Arc::new(
+        oncl_tls::server_config(&files).unwrap(),
+    )));
+    let reports = Arc::new(SelftestReports::new());
     let prompter = Arc::new(ScriptedPrompter::new(steps));
     let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
     let registry = build_registry(
@@ -120,19 +126,32 @@ async fn start(steps: Vec<Step>) -> Srv {
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(serve(listener, ServerConfig::new(tls, Arc::new(registry))));
+    tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            selftest: Arc::clone(&reports),
+            ..ServerConfig::new(Arc::clone(&tls), Arc::new(registry))
+        },
+    ));
     Srv {
         addr,
         ca_der: material.ca_der.unwrap(),
         prompter,
         tsa,
+        tls,
+        reports,
         _dir: dir,
     }
 }
 
 async fn tls_connect(srv: &Srv) -> TlsStream<TcpStream> {
+    tls_connect_trusting(srv, &srv.ca_der).await
+}
+
+/// A TLS connection to `srv` from a client that trusts the CA `ca_der`.
+async fn tls_connect_trusting(srv: &Srv, ca_der: &[u8]) -> TlsStream<TcpStream> {
     let mut roots = RootCertStore::empty();
-    roots.add(CertificateDer::from(srv.ca_der.clone())).unwrap();
+    roots.add(CertificateDer::from(ca_der.to_vec())).unwrap();
     let config =
         ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_safe_default_protocol_versions()
@@ -149,7 +168,11 @@ async fn tls_connect(srv: &Srv) -> TlsStream<TcpStream> {
 type Client = WebSocketStream<TlsStream<TcpStream>>;
 
 async fn connect_from(srv: &Srv, origin: &str) -> Client {
-    let stream = tls_connect(srv).await;
+    websocket_over(srv, tls_connect(srv).await, origin).await
+}
+
+/// The WebSocket handshake from `origin` over `stream`.
+async fn websocket_over(srv: &Srv, stream: TlsStream<TcpStream>, origin: &str) -> Client {
     let mut request = format!("wss://127.0.0.1:{}/", srv.addr.port())
         .into_client_request()
         .unwrap();
@@ -468,6 +491,122 @@ async fn http_selftest_and_methods() {
 
     let (status, _) = http(&srv, "GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await;
     assert_eq!(status, 404);
+
+    let (status, body) = http(
+        &srv,
+        "GET /openncalayer/selftest HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(body.contains("/openncalayer/selftest/report"), "{body}");
+}
+
+/// `POST /openncalayer/selftest/report` with `origin` (none if empty) and `body`.
+async fn report(srv: &Srv, origin: &str, body: &str) -> u16 {
+    let origin = if origin.is_empty() {
+        String::new()
+    } else {
+        format!("Origin: {origin}\r\n")
+    };
+    let request = format!(
+        "POST /openncalayer/selftest/report HTTP/1.1\r\nHost: 127.0.0.1\r\n{origin}\
+         Content-Type: text/plain;charset=UTF-8\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    http(srv, &request).await.0
+}
+
+#[tokio::test]
+async fn selftest_page_reports_its_browser() {
+    let srv = start(vec![]).await;
+    let own = format!("https://127.0.0.1:{}", srv.addr.port());
+    let firefox = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
+    assert_eq!(report(&srv, &own, firefox).await, 204);
+    let latest = srv.reports.latest();
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].user_agent, firefox);
+
+    // Only the page itself may report.
+    assert_eq!(report(&srv, "https://evil.example", "x").await, 403);
+    assert_eq!(report(&srv, "", "x").await, 403);
+    assert_eq!(
+        report(&srv, &format!("http://127.0.0.1:{}", srv.addr.port()), "x").await,
+        403
+    );
+    // A small body only, and its length is required.
+    assert_eq!(report(&srv, &own, &"a".repeat(2000)).await, 413);
+    let (status, _) = http(
+        &srv,
+        &format!(
+            "POST /openncalayer/selftest/report HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: {own}\r\n\r\n"
+        ),
+    )
+    .await;
+    assert_eq!(status, 411);
+    assert_eq!(srv.reports.latest().len(), 1);
+
+    // A body that arrives after the head is read whole.
+    let mut stream = tls_connect(&srv).await;
+    let chrome = "Mozilla/5.0 Chrome/141.0.0.0 Safari/537.36";
+    let head = format!(
+        "POST /openncalayer/selftest/report HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: {own}\r\n\
+         Content-Length: {}\r\n\r\n",
+        chrome.len()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    stream.write_all(chrome.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    timeout(PATIENCE, stream.read_to_end(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 204 "), "{response:?}");
+    assert_eq!(srv.reports.latest()[0].user_agent, chrome);
+}
+
+/// The leaf the server presented on `stream`.
+fn peer_leaf(stream: &TlsStream<TcpStream>) -> Vec<u8> {
+    stream.get_ref().1.peer_certificates().unwrap()[0].to_vec()
+}
+
+#[tokio::test]
+async fn a_reissued_certificate_serves_new_connections_only() {
+    let srv = start(vec![]).await;
+    let old_stream = tls_connect(&srv).await;
+    let old_leaf = peer_leaf(&old_stream);
+    let mut old = websocket_over(&srv, old_stream, ORIGIN).await;
+    next_text(&mut old).await;
+
+    // Re-issued: a new CA and leaf, taken by the server without a restart.
+    let dir = tempfile::tempdir().unwrap();
+    let files = TlsFiles {
+        dir: dir.path().join("tls"),
+    };
+    let material = oncl_tls::generate(OffsetDateTime::now_utc(), "reissued").unwrap();
+    oncl_tls::save(&files, &material).unwrap();
+    srv.tls
+        .replace(Arc::new(oncl_tls::server_config(&files).unwrap()));
+
+    let new_ca = material.ca_der.unwrap();
+    let new_stream = tls_connect_trusting(&srv, &new_ca).await;
+    let new_leaf = peer_leaf(&new_stream);
+    assert_ne!(new_leaf, old_leaf);
+    assert_eq!(
+        new_leaf,
+        CertificateDer::from_pem_slice(material.chain_pem.as_bytes())
+            .unwrap()
+            .to_vec()
+    );
+    let mut new = websocket_over(&srv, new_stream, ORIGIN).await;
+    next_text(&mut new).await;
+
+    // The connection made before goes on with the old certificate.
+    send(&mut old, "--heartbeat--").await;
+    assert_eq!(next_text(&mut old).await, "--heartbeat--");
+    send(&mut new, "--heartbeat--").await;
+    assert_eq!(next_text(&mut new).await, "--heartbeat--");
 }
 
 /// sha256 of `package/ncalayer-client.js` in the npm package `ncalayer-js-client@1.6.1`.
