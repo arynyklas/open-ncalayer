@@ -4,7 +4,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use std::fmt::{self, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use ureq::http::Uri;
 use ureq::{Proxy, ProxyProtocol};
 
@@ -130,13 +130,11 @@ impl fmt::Debug for ProxySetting {
     }
 }
 
-/// `url` with the user name and password before its host replaced by `***`.
+/// `url` with everything between its scheme and its last `@` (the user name and password,
+/// which may hold an unencoded `/`, `?`, `#` or `@`) replaced by `***`.
 fn without_userinfo(url: &str) -> String {
     let start = url.find("://").map_or(0, |i| i + 3);
-    let end = url[start..]
-        .find(['/', '?', '#'])
-        .map_or(url.len(), |i| start + i);
-    match url[start..end].rfind('@') {
+    match url[start..].rfind('@') {
         Some(at) => format!("{}***{}", &url[..start], &url[start + at..]),
         None => url.to_owned(),
     }
@@ -163,15 +161,24 @@ fn usable(proxy: Proxy) -> Result<Proxy, HttpError> {
 
 /// [`HttpTransport`] over `ureq`: plain HTTP (the NCA services have no TLS) or HTTPS on
 /// rustls, directly or through the proxy of its [`ProxySetting`] (directly by default).
-/// Both the timeout and the body limit of [`GetOptions`] are enforced.
+/// Both the timeout (for the whole request, redirects included) and the body limit of
+/// [`GetOptions`] are enforced.
 ///
 /// Through a proxy, HTTPS goes in a `CONNECT` tunnel (`ureq`), and plain HTTP as an
 /// absolute-form request to the proxy (`GET http://host/path HTTP/1.1`, see `forward`),
 /// which `ureq` cannot send.
+///
+/// Redirects are followed as `ureq` follows them, at most [`MAX_REDIRECTS`]: 301, 302 and
+/// 303 as a GET; 307 and 308 of a GET as a GET, of a POST not at all (the 3xx is the
+/// reply). Each step takes its own route, so a redirect from `https://` to `http://` goes
+/// through the proxy in absolute form too.
 #[derive(Clone, Debug, Default)]
 pub struct UreqTransport {
     proxy: ProxySetting,
 }
+
+/// The most redirects one request follows, as `ureq` by default.
+pub const MAX_REDIRECTS: usize = 10;
 
 /// How a request reaches its server.
 enum Route {
@@ -214,29 +221,64 @@ impl UreqTransport {
         })
     }
 
-    /// A `ureq` agent connecting directly or through the tunnel of `proxy`.
+    /// A `ureq` agent connecting directly or through the tunnel of `proxy`, following no
+    /// redirects (`send` does).
     fn agent(proxy: Option<Proxy>, timeout: Duration) -> ureq::Agent {
         ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
+            .max_redirects(0)
             .proxy(proxy)
             .build()
             .into()
     }
 
-    /// `url` with `post` (content type and body) or GET, within `opts`.
+    /// `url` with `post` (content type and body) or GET, within `opts`, following
+    /// redirects.
     fn send(
         &self,
         url: &str,
-        post: Option<(&str, &[u8])>,
+        mut post: Option<(&str, &[u8])>,
         opts: GetOptions,
     ) -> Result<HttpReply, HttpError> {
+        let deadline = Instant::now() + opts.timeout;
+        let mut url = url.to_owned();
+        for _ in 0..=MAX_REDIRECTS {
+            let (reply, location) = self.send_once(&url, post, deadline, opts.max_len)?;
+            match redirect(&url, &reply, location.as_deref(), post.is_some())? {
+                Some(next) => {
+                    url = next;
+                    post = None;
+                }
+                None => return Ok(reply),
+            }
+        }
+        Err(HttpError(format!(
+            "too many redirects (more than {MAX_REDIRECTS})"
+        )))
+    }
+
+    /// One request without following redirects: the reply and its `Location`.
+    fn send_once(
+        &self,
+        url: &str,
+        post: Option<(&str, &[u8])>,
+        deadline: Instant,
+        max_len: u64,
+    ) -> Result<(HttpReply, Option<String>), HttpError> {
         let proxy = match self.route(url)? {
-            Route::Forward(proxy) => return forward::send(&proxy, url, post, opts),
+            Route::Forward(proxy) => {
+                let forwarded = forward::send(&proxy, url, post, deadline, max_len)?;
+                return Ok((forwarded.reply, forwarded.location));
+            }
             Route::Tunnel(proxy) => Some(proxy),
             Route::Direct => None,
         };
-        let agent = Self::agent(proxy, opts.timeout);
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(HttpError("timed out".to_owned()));
+        }
+        let agent = Self::agent(proxy, left);
         let response = match post {
             Some((content_type, body)) => agent
                 .post(url)
@@ -244,7 +286,62 @@ impl UreqTransport {
                 .send(body),
             None => agent.get(url).call(),
         };
-        reply(response, opts.max_len)
+        reply(response, max_len)
+    }
+}
+
+/// The URL a reply to `url` redirects to, if it is followed (see [`UreqTransport`]).
+///
+/// # Errors
+///
+/// A redirect to be followed without a usable `Location`.
+fn redirect(
+    url: &str,
+    reply: &HttpReply,
+    location: Option<&str>,
+    post: bool,
+) -> Result<Option<String>, HttpError> {
+    match reply.status {
+        301..=303 => {}
+        307 | 308 if !post => {}
+        _ => return Ok(None),
+    }
+    let location =
+        location.ok_or_else(|| HttpError(format!("redirect {} without Location", reply.status)))?;
+    join_url(url, location).map(Some)
+}
+
+/// `location` (absolute, scheme-relative, absolute-path or relative) resolved against
+/// `base`; only `http://` and `https://` results.
+fn join_url(base: &str, location: &str) -> Result<String, HttpError> {
+    let bad = || HttpError(format!("unusable redirect to {location}"));
+    let location = location.trim();
+    let base: Uri = base.parse().map_err(|_| bad())?;
+    let (scheme, authority) = match (base.scheme_str(), base.authority()) {
+        (Some(scheme), Some(authority)) => (scheme, authority.as_str()),
+        _ => return Err(bad()),
+    };
+    let has_scheme = location
+        .split_once(':')
+        .is_some_and(|(s, _)| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphabetic()));
+    let joined = if has_scheme {
+        location.to_owned()
+    } else if let Some(rest) = location.strip_prefix("//") {
+        format!("{scheme}://{rest}")
+    } else if location.starts_with('/') {
+        format!("{scheme}://{authority}{location}")
+    } else {
+        let path = base.path();
+        let dir = &path[..path.rfind('/').map_or(0, |i| i + 1)];
+        let dir = if dir.is_empty() { "/" } else { dir };
+        format!("{scheme}://{authority}{dir}{location}")
+    };
+    // The fragment stays with the client.
+    let joined = joined.split('#').next().unwrap_or_default().to_owned();
+    let uri: Uri = joined.parse().map_err(|_| bad())?;
+    match uri.scheme_str() {
+        Some(s) if s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https") => Ok(joined),
+        _ => Err(bad()),
     }
 }
 
@@ -262,28 +359,35 @@ impl HttpTransport for UreqTransport {
     }
 }
 
+/// The reply of a `ureq` response, with at most `max_len` bytes of body, and its
+/// `Location`.
 fn reply(
     response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     max_len: u64,
-) -> Result<HttpReply, HttpError> {
+) -> Result<(HttpReply, Option<String>), HttpError> {
     let http_error = |e: ureq::Error| HttpError(e.to_string());
     let mut response = response.map_err(http_error)?;
-    let content_type = response
-        .headers()
-        .get(ureq::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
+    let header = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let content_type = header(ureq::http::header::CONTENT_TYPE);
+    let location = header(ureq::http::header::LOCATION);
     let body = response
         .body_mut()
         .with_config()
         .limit(max_len)
         .read_to_vec()
         .map_err(http_error)?;
-    Ok(HttpReply {
+    let reply = HttpReply {
         status: response.status().as_u16(),
         content_type,
         body,
-    })
+    };
+    Ok((reply, location))
 }
 
 /// URL of the NCA GET binding (OCSP and time-stamping): `base`, a `/` unless `base` already
@@ -384,7 +488,6 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
-    use std::time::Instant;
 
     /// A one-connection HTTP server on a free local port: reads the request head and hands
     /// the stream to `serve`. Returns the URL.
@@ -535,15 +638,176 @@ mod tests {
         assert_eq!(UreqTransport::default().proxy, ProxySetting::None);
         assert_eq!(ProxySetting::default(), ProxySetting::None);
         let shown = |url: &str| format!("{:?}", ProxySetting::Manual(url.to_owned()));
+        // Everything up to the last `@` goes, an `@` after the host too (over-masking is
+        // harmless here).
         assert_eq!(
             shown("http://user:secret@h:1/x@y"),
-            r#"Manual("http://***@h:1/x@y")"#
+            r#"Manual("http://***@y")"#
         );
         assert_eq!(shown("a:b@c@h:1"), r#"Manual("***@h:1")"#);
+        // Unencoded `/`, `?` and `#` in the password.
+        for password in ["p/ss", "p?ss", "p#ss", "p/?#ss"] {
+            assert_eq!(
+                shown(&format!("http://user:{password}@h:1")),
+                r#"Manual("http://***@h:1")"#,
+                "{password}"
+            );
+        }
         assert_eq!(shown("http://h:1"), r#"Manual("http://h:1")"#);
         let transport = UreqTransport::with_proxy(ProxySetting::Manual("http://u:pw@h".to_owned()));
         assert!(!format!("{transport:?}").contains("pw"));
         assert_eq!(format!("{:?}", ProxySetting::System), "System");
+    }
+
+    /// A stub HTTP server (a proxy or the origin) answering its connections in turn with
+    /// `replies`; returns its URL and, once joined, the request heads it got.
+    fn serve_in_turn(replies: Vec<String>) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let mut heads = Vec::new();
+            for reply in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8(head).unwrap();
+                let len = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|n| n.trim().parse().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0; len];
+                stream.read_exact(&mut body).unwrap();
+                let _ = stream.write_all(reply.as_bytes());
+                heads.push(head);
+            }
+            heads
+        });
+        (url, server)
+    }
+
+    fn redirect_to(status: u16, location: &str) -> String {
+        format!("HTTP/1.1 {status} R\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n")
+    }
+
+    fn ok(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// The request lines of `heads`.
+    fn request_lines(heads: &[String]) -> Vec<&str> {
+        heads.iter().map(|h| h.lines().next().unwrap()).collect()
+    }
+
+    #[test]
+    fn redirects_are_followed_through_the_proxy_as_ureq_follows_them() {
+        let replies = vec![
+            redirect_to(302, "/b?x=1"),
+            redirect_to(307, "c"),
+            redirect_to(301, "http://other.invalid/d#frag"),
+            ok("done"),
+        ];
+        let (proxy, heads) = serve_in_turn(replies);
+        let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
+        let reply = through.get("http://nca.invalid:8080/a/start").unwrap();
+        assert_eq!((reply.status, &reply.body[..]), (200, &b"done"[..]));
+        assert_eq!(
+            request_lines(&heads.join().unwrap()),
+            [
+                "GET http://nca.invalid:8080/a/start HTTP/1.1",
+                "GET http://nca.invalid:8080/b?x=1 HTTP/1.1",
+                "GET http://nca.invalid:8080/c HTTP/1.1",
+                "GET http://other.invalid/d HTTP/1.1",
+            ]
+        );
+
+        // A POST: 303 continues as a GET without the body; 307 and 308 are the reply.
+        let (proxy, heads) = serve_in_turn(vec![redirect_to(303, "/r"), ok("got")]);
+        let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
+        let reply = through
+            .post("http://nca.invalid/q", "t/q", b"body")
+            .unwrap();
+        assert_eq!(reply.body, b"got");
+        let heads = heads.join().unwrap();
+        assert!(
+            heads[0].starts_with("POST http://nca.invalid/q "),
+            "{heads:?}"
+        );
+        assert!(
+            heads[1].starts_with("GET http://nca.invalid/r "),
+            "{heads:?}"
+        );
+        assert!(
+            !heads[1].to_ascii_lowercase().contains("content-length"),
+            "{heads:?}"
+        );
+        for status in [307, 308] {
+            let (proxy, heads) = serve_in_turn(vec![redirect_to(status, "/r")]);
+            let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
+            let reply = through
+                .post("http://nca.invalid/q", "t/q", b"body")
+                .unwrap();
+            assert_eq!(reply.status, status);
+            assert_eq!(heads.join().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn direct_redirects_take_the_same_rules() {
+        let (origin, heads) = serve_in_turn(vec![redirect_to(302, "/next"), ok("direct")]);
+        let reply = direct().get(&format!("{origin}/first")).unwrap();
+        assert_eq!(reply.body, b"direct");
+        assert_eq!(
+            request_lines(&heads.join().unwrap()),
+            ["GET /first HTTP/1.1", "GET /next HTTP/1.1"]
+        );
+        let (origin, heads) = serve_in_turn(vec![redirect_to(308, "/next")]);
+        let reply = direct().post(&format!("{origin}/q"), "t/q", b"x").unwrap();
+        assert_eq!(reply.status, 308);
+        heads.join().unwrap();
+    }
+
+    #[test]
+    fn redirect_limits_and_broken_redirects() {
+        let loops = vec![redirect_to(302, "/again"); MAX_REDIRECTS + 1];
+        let (proxy, heads) = serve_in_turn(loops);
+        let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
+        let e = through.get("http://nca.invalid/").unwrap_err();
+        assert_eq!(e.0, "too many redirects (more than 10)");
+        assert_eq!(heads.join().unwrap().len(), MAX_REDIRECTS + 1);
+
+        let no_location = "HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n".to_owned();
+        let (proxy, _) = serve_in_turn(vec![no_location]);
+        let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
+        let e = through.get("http://nca.invalid/").unwrap_err();
+        assert_eq!(e.0, "redirect 302 without Location");
+
+        let (proxy, _) = serve_in_turn(vec![redirect_to(302, "ftp://x/")]);
+        let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
+        let e = through.get("http://nca.invalid/").unwrap_err();
+        assert_eq!(e.0, "unusable redirect to ftp://x/");
+    }
+
+    #[test]
+    fn locations_are_resolved_against_the_request() {
+        let base = "https://h:8443/a/b/c?q=1";
+        let joined = |l| join_url(base, l).unwrap();
+        assert_eq!(joined("http://x/y"), "http://x/y");
+        assert_eq!(joined("//x/y"), "https://x/y");
+        assert_eq!(joined("/y"), "https://h:8443/y");
+        assert_eq!(joined("y?z"), "https://h:8443/a/b/y?z");
+        assert_eq!(joined("/y#f"), "https://h:8443/y");
+        assert_eq!(join_url("http://h", "y").unwrap(), "http://h/y");
+        assert!(join_url(base, "mailto:x@y").is_err());
     }
 
     #[test]
