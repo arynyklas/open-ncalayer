@@ -20,6 +20,7 @@ oncl-gost = { path = "crates/oncl-gost" }
 oncl-ipc = { path = "crates/oncl-ipc" }
 oncl-pki = { path = "crates/oncl-pki" }
 oncl-protocol = { path = "crates/oncl-protocol" }
+oncl-registry = { path = "crates/oncl-registry" }
 oncl-testkit = { path = "crates/oncl-testkit" }
 oncl-tls = { path = "crates/oncl-tls" }
 oncl-ui = { path = "crates/oncl-ui" }

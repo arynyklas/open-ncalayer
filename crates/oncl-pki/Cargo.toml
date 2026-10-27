@@ -22,6 +22,8 @@ der.workspace = true
 des.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
+# Response heads of plain HTTP sent through a proxy (`http::forward`).
+httparse.workspace = true
 oncl-gost.workspace = true
 pbkdf2.workspace = true
 pkcs8.workspace = true
@@ -40,15 +42,18 @@ ureq.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# advapi32 `RegGetValueW` (Vista and later), read only: the Internet Options proxy of
-# `ProxySetting::System`.
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Registry"] }
+# Read only: the Internet Options proxy of `ProxySetting::System`.
+oncl-registry.workspace = true
 
 [dev-dependencies]
 hex-literal.workspace = true
 oncl-testkit.workspace = true
 tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# `TestKey`: the registry sandbox of the Internet Options test.
+oncl-registry = { path = "../oncl-registry", features = ["testing"] }
 
 [[test]]
 name = "tsp"

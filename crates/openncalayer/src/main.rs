@@ -80,10 +80,11 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     );
     let stop = Arc::new(Notify::new());
     let tray = if with_tray {
+        let locale = settings.ui_locale();
         start_tray(
-            settings.ui_locale(),
+            locale,
             daemon.paths.logs(),
-            daemon.wss_off,
+            daemon.wss_off.map(|off| off.text(locale)),
             Arc::clone(&stop),
         )
     } else {

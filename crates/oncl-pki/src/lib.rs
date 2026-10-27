@@ -12,7 +12,7 @@ pub mod cert;
 pub mod cms;
 pub mod crl;
 pub mod csr;
-mod fsutil;
+pub mod fsutil;
 pub mod http;
 pub mod info;
 pub mod jks;

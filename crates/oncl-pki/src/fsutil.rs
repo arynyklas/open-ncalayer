@@ -1,4 +1,4 @@
-//! Atomic file replacement shared by the CRL cache and the key files.
+//! Atomic file replacement shared by the CRL cache, the key files and `settings.json`.
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Who may read a file written by [`write_atomically`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Access {
+pub enum Access {
     /// The process default (`0666 & !umask` on Unix).
     Default,
-    /// The owner only: mode `0600` on Unix, for private key material. On Windows the file
+    /// The owner only: mode `0600` on Unix, for key material and secrets. On Windows the file
     /// gets the ACL inherited from its directory (the temporary file is created there, and
     /// the rename keeps it); no ACL is set explicitly.
     Private,
@@ -32,7 +32,7 @@ pub(crate) enum Access {
 /// (on Windows also any name of dots and spaces only, which Windows strips to nothing):
 /// such a path may name an existing file through a lexical `..` (`k.p12\a\..` is `k.p12`
 /// on Windows), and is refused before anything is created. Any I/O error otherwise.
-pub(crate) fn write_atomically(path: &Path, body: &[u8], access: Access) -> io::Result<()> {
+pub fn write_atomically(path: &Path, body: &[u8], access: Access) -> io::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let target = target(path)?;
     let Some(name) = target.file_name() else {

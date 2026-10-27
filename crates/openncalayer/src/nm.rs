@@ -11,8 +11,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use oncl_desktop::registry;
 use oncl_ipc::ids::{CHROMIUM_EXTENSION_ID, FIREFOX_EXTENSION_ID, HOST_NAME};
+use oncl_registry::{self as registry, Hive};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -626,7 +626,10 @@ pub fn status(layout: &NmLayout) -> Report {
                 .map(|path| path.to_string_lossy().into_owned());
             for sub in family.registry_keys() {
                 let key = registry_key(base, sub);
-                let state = match (registry::get_string(&key, None), &expected) {
+                let state = match (
+                    registry::get_string(Hive::CurrentUser, &key, None),
+                    &expected,
+                ) {
                     (Ok(Some(value)), Ok(expected)) if value == *expected => State::Present,
                     (Ok(Some(value)), Ok(expected)) => {
                         State::Invalid(format!("указывает на {value}, а не на {expected}"))
@@ -1405,7 +1408,9 @@ mod tests {
         for (key, manifest) in &keys {
             assert!(key.starts_with(r"Software\OpenNCALayer-test-"), "{key}");
             assert_eq!(
-                registry::get_string(key, None).unwrap().as_deref(),
+                registry::get_string(Hive::CurrentUser, key, None)
+                    .unwrap()
+                    .as_deref(),
                 Some(manifest.to_str().unwrap()),
                 "{key}"
             );
@@ -1438,7 +1443,11 @@ mod tests {
 
         let report = uninstall(&layout).unwrap();
         for (key, _) in &keys {
-            assert_eq!(registry::get_string(key, None).unwrap(), None, "{key}");
+            assert_eq!(
+                registry::get_string(Hive::CurrentUser, key, None).unwrap(),
+                None,
+                "{key}"
+            );
             assert!(
                 report.entries.contains(&Entry {
                     item: Item::RegistryKey,

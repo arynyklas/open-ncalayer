@@ -3741,6 +3741,7 @@ version = "0.1.0"
 dependencies = [
  "oncl-basics",
  "oncl-pki",
+ "oncl-registry",
  "serde_json",
  "tempfile",
  "tracing",
@@ -3796,7 +3797,9 @@ dependencies = [
  "getrandom 0.4.3",
  "hex-literal",
  "hmac",
+ "httparse",
  "oncl-gost",
+ "oncl-registry",
  "oncl-testkit",
  "pbkdf2",
  "pkcs8 0.11.0",
@@ -3811,7 +3814,6 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "ureq",
- "windows-sys 0.61.2",
  "x509-cert",
  "zeroize",
 ]
@@ -3822,6 +3824,13 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "oncl-registry"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3886,6 +3895,7 @@ dependencies = [
  "oncl-ipc",
  "oncl-pki",
  "oncl-protocol",
+ "oncl-registry",
  "oncl-testkit",
  "oncl-tls",
  "oncl-ui",

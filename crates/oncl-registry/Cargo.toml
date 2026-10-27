@@ -1,0 +1,22 @@
+[package]
+name = "oncl-registry"
+description = "Windows registry values for OpenNCALayer: reads under HKCU and HKLM, writes under HKCU"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# `TestKey`: a throw-away `HKCU\Software\OpenNCALayer-test-*` key, deleted on drop.
+testing = []
+
+[target.'cfg(windows)'.dependencies]
+# advapi32 registry functions of Windows Vista and later (`RegGetValueW`,
+# `RegDeleteKeyValueW`, `RegDeleteTreeW`); `Win32_Security` for `RegCreateKeyExW`.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Registry",
+] }

@@ -1,7 +1,7 @@
 //! Our autostart: an entry that runs `"<exe>" run` when the user logs in.
 //!
-//! - Windows: the value `OpenNCALayer` of `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-//!   ([`RegistryAutostart`]);
+//! - Windows: the value `OpenNCALayer` of `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
+//!   unless Windows' own switch (Task Manager → Startup) disabled it ([`RegistryAutostart`]);
 //! - Linux: `~/.config/autostart/openncalayer.desktop` (`$XDG_CONFIG_HOME/autostart`;
 //!   [`FileAutostart::desktop_entry`]);
 //! - macOS: `~/Library/LaunchAgents/io.github.arynyklas.openncalayer.plist` with `RunAtLoad`
@@ -15,7 +15,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::fsutil::write_atomic;
+use oncl_pki::fsutil::Access;
+
+use crate::write_file;
 
 /// The launchd label of our LaunchAgent, also its file name.
 const LAUNCH_AGENT_LABEL: &str = "io.github.arynyklas.openncalayer";
@@ -179,7 +181,7 @@ impl Autostart for FileAutostart {
             FileKind::DesktopEntry => desktop_entry(exe),
             FileKind::LaunchAgent => launch_agent(exe),
         };
-        write_atomic(&self.path, text.as_bytes())
+        write_file(&self.path, text.as_bytes(), Access::Default)
     }
 }
 
@@ -323,42 +325,74 @@ impl RegistryBase {
     }
 }
 
-/// Our value of the `Run` key: `OpenNCALayer = "<exe>" run`.
+/// Our value of the `Run` key: `OpenNCALayer = "<exe>" run`, with the state of Windows' own
+/// switch for it in `Explorer\StartupApproved\Run`.
 #[cfg(windows)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegistryAutostart {
     run_key: String,
+    approved_key: String,
 }
 
 #[cfg(windows)]
 impl RegistryAutostart {
     /// The `Run` key of the current user.
     pub const RUN_KEY: &'static str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    /// Where Task Manager and Settings → Apps → Startup keep their switch of each `Run`
+    /// value: a `REG_BINARY` of 12 bytes, the first odd when disabled (`03`, then the
+    /// FILETIME of the change), even when enabled (`02 00 … 00`). No value: enabled.
+    pub const APPROVED_KEY: &'static str =
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
     /// Our value's name.
     pub const VALUE: &'static str = "OpenNCALayer";
+    /// What Windows writes into [`Self::APPROVED_KEY`] when the user enables an entry.
+    const APPROVED: [u8; 12] = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
     /// Our value of the `Run` key under `base`.
     pub fn new(base: RegistryBase) -> RegistryAutostart {
         RegistryAutostart {
             run_key: base.key(Self::RUN_KEY),
+            approved_key: base.key(Self::APPROVED_KEY),
         }
+    }
+
+    /// Whether Windows' switch disables our value.
+    fn disabled_by_windows(&self) -> io::Result<bool> {
+        let state = oncl_registry::get_binary(
+            oncl_registry::Hive::CurrentUser,
+            &self.approved_key,
+            Some(Self::VALUE),
+        )?;
+        Ok(state.is_some_and(|s| s.first().is_some_and(|b| b & 1 == 1)))
     }
 }
 
 #[cfg(windows)]
 impl Autostart for RegistryAutostart {
-    /// The value exists.
+    /// The value exists and Windows' switch does not disable it.
     fn enabled(&self) -> io::Result<bool> {
-        crate::registry::get_string(&self.run_key, Some(Self::VALUE)).map(|v| v.is_some())
+        let run = oncl_registry::get_string(
+            oncl_registry::Hive::CurrentUser,
+            &self.run_key,
+            Some(Self::VALUE),
+        )?;
+        Ok(run.is_some() && !self.disabled_by_windows()?)
     }
 
+    /// On: writes the value and, if Windows' switch disables it, turns the switch on as
+    /// Windows does. Off: removes the value and the switch.
     fn set(&self, on: bool, exe: &Path) -> io::Result<()> {
         if on {
             // A Windows path cannot hold `"`: quoting is enough.
             let command = format!("\"{}\" run", entry_exe(exe)?);
-            crate::registry::set_string(&self.run_key, Some(Self::VALUE), &command)
+            oncl_registry::set_string(&self.run_key, Some(Self::VALUE), &command)?;
+            if self.disabled_by_windows()? {
+                oncl_registry::set_binary(&self.approved_key, Some(Self::VALUE), &Self::APPROVED)?;
+            }
+            Ok(())
         } else {
-            crate::registry::delete_value(&self.run_key, Self::VALUE).map(drop)
+            oncl_registry::delete_value(&self.run_key, Self::VALUE)?;
+            oncl_registry::delete_value(&self.approved_key, Self::VALUE).map(drop)
         }
     }
 }
@@ -478,12 +512,17 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn run_value_under_a_test_key() {
-        let root = crate::registry::TestKey::new();
-        let base = RegistryBase::sandbox(&root.0);
+        use oncl_registry::{Hive, TestKey, get_string};
+
+        let root = TestKey::new();
+        let base = RegistryBase::sandbox(root.path());
         let run_key = base.key(RegistryAutostart::RUN_KEY);
         assert_eq!(
             run_key,
-            format!(r"{}\Software\Microsoft\Windows\CurrentVersion\Run", root.0)
+            format!(
+                r"{}\Software\Microsoft\Windows\CurrentVersion\Run",
+                root.path()
+            )
         );
         let autostart = RegistryAutostart::new(base);
         assert!(!autostart.enabled().unwrap());
@@ -493,7 +532,7 @@ mod tests {
         autostart.set(true, program).unwrap();
         assert!(autostart.enabled().unwrap());
         assert_eq!(
-            crate::registry::get_string(&run_key, Some("OpenNCALayer"))
+            get_string(Hive::CurrentUser, &run_key, Some("OpenNCALayer"))
                 .unwrap()
                 .as_deref(),
             Some(r#""C:\Program Files\OpenNCALayer\openncalayer.exe" run"#)
@@ -507,15 +546,67 @@ mod tests {
         autostart.set(false, program).unwrap();
         assert!(!autostart.enabled().unwrap());
         // The rest of the sandbox stays until the test key goes.
-        assert_eq!(crate::registry::get_string(&run_key, None).unwrap(), None);
+        assert_eq!(get_string(Hive::CurrentUser, &run_key, None).unwrap(), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_startup_switch_is_honoured() {
+        use oncl_registry::{Hive, TestKey, get_binary, set_binary};
+
+        let root = TestKey::new();
+        let base = RegistryBase::sandbox(root.path());
+        let approved_key = base.key(RegistryAutostart::APPROVED_KEY);
+        let autostart = RegistryAutostart::new(base);
+        let program = Path::new(r"C:\OpenNCALayer\openncalayer.exe");
+        let approved = || get_binary(Hive::CurrentUser, &approved_key, Some("OpenNCALayer"));
+        // Disabled in Task Manager: 03 and the FILETIME of the change.
+        let disabled = [3, 0, 0, 0, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x01];
+
+        autostart.set(true, program).unwrap();
+        assert_eq!(
+            approved().unwrap(),
+            None,
+            "no switch is written when not needed"
+        );
+        for state in [&disabled[..], &[7, 0, 0, 0]] {
+            set_binary(&approved_key, Some("OpenNCALayer"), state).unwrap();
+            assert!(!autostart.enabled().unwrap(), "{state:02x?}");
+        }
+        for state in [&[2, 0, 0, 0][..], &[6], &[]] {
+            set_binary(&approved_key, Some("OpenNCALayer"), state).unwrap();
+            assert!(autostart.enabled().unwrap(), "{state:02x?}");
+        }
+
+        // Turning on again enables Windows' switch the way Windows does.
+        set_binary(&approved_key, Some("OpenNCALayer"), &disabled).unwrap();
+        autostart.set(true, program).unwrap();
+        assert!(autostart.enabled().unwrap());
+        assert_eq!(
+            approved().unwrap(),
+            Some(vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        );
+
+        // Off removes both, also a switch left behind without a `Run` value.
+        autostart.set(false, program).unwrap();
+        assert_eq!(approved().unwrap(), None);
+        set_binary(&approved_key, Some("OpenNCALayer"), &disabled).unwrap();
+        autostart.set(false, program).unwrap();
+        assert_eq!(approved().unwrap(), None);
+        assert!(!autostart.enabled().unwrap());
     }
 
     #[cfg(windows)]
     #[test]
     fn real_base_is_hkcu_run() {
+        let real = RegistryAutostart::new(RegistryBase::current_user());
         assert_eq!(
-            RegistryAutostart::new(RegistryBase::current_user()).run_key,
+            real.run_key,
             r"Software\Microsoft\Windows\CurrentVersion\Run"
+        );
+        assert_eq!(
+            real.approved_key,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
         );
     }
 }

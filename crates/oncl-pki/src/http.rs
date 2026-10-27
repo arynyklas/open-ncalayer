@@ -3,9 +3,12 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use std::fmt::Write;
+use std::fmt::{self, Write};
 use std::time::Duration;
+use ureq::http::Uri;
+use ureq::{Proxy, ProxyProtocol};
 
+mod forward;
 mod system_proxy;
 
 /// Default limit of a response body: 1 MiB. A time-stamp reply or an OCSP response is a few
@@ -79,57 +82,169 @@ pub trait HttpTransport: Send + Sync {
     fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError>;
 }
 
-/// The proxy [`UreqTransport`] connects through.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The proxy [`UreqTransport`] connects through. Only HTTP proxies are supported: plain
+/// HTTP goes to them in absolute form (`GET http://host/path`), HTTPS through a
+/// `CONNECT` tunnel. SOCKS proxies and proxies reached over TLS (`https://` proxy URLs)
+/// are not.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub enum ProxySetting {
     /// Direct connections, whatever the system's settings.
+    #[default]
     None,
     /// The system's proxy: `ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY` (with `NO_PROXY`), on
     /// Windows otherwise the manual proxy of the Internet Options (`ProxyServer` with its
-    /// per-scheme entries, `ProxyOverride`). Automatic configuration (PAC, WPAD) is not
-    /// followed.
-    #[default]
+    /// per-scheme entries, `ProxyOverride`, the per-machine policy). Automatic
+    /// configuration (PAC, WPAD) is not followed.
     System,
     /// This proxy URL, e.g. `http://proxy.example:3128`; `user:password@` before the host
     /// for Basic authentication.
     Manual(String),
 }
 
+impl ProxySetting {
+    /// Checks that a [`ProxySetting::Manual`] URL names a usable proxy.
+    ///
+    /// # Errors
+    ///
+    /// [`HttpError`] if the URL is not one or the proxy is not an HTTP proxy. The message
+    /// does not repeat the URL, which may hold a password.
+    pub fn validate(&self) -> Result<(), HttpError> {
+        match self {
+            ProxySetting::Manual(url) => parse_proxy(url).map(drop),
+            ProxySetting::None | ProxySetting::System => Ok(()),
+        }
+    }
+}
+
+/// The password of a manual proxy URL is not shown.
+impl fmt::Debug for ProxySetting {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProxySetting::None => f.write_str("None"),
+            ProxySetting::System => f.write_str("System"),
+            ProxySetting::Manual(url) => f
+                .debug_tuple("Manual")
+                .field(&without_userinfo(url))
+                .finish(),
+        }
+    }
+}
+
+/// `url` with the user name and password before its host replaced by `***`.
+fn without_userinfo(url: &str) -> String {
+    let start = url.find("://").map_or(0, |i| i + 3);
+    let end = url[start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |i| start + i);
+    match url[start..end].rfind('@') {
+        Some(at) => format!("{}***{}", &url[..start], &url[start + at..]),
+        None => url.to_owned(),
+    }
+}
+
+/// The proxy of the URL `url`, if it is an HTTP proxy.
+fn parse_proxy(url: &str) -> Result<Proxy, HttpError> {
+    // The URL may hold a password: it is not repeated in the errors.
+    let proxy = Proxy::new(url).map_err(|_| HttpError("invalid proxy URL".to_owned()))?;
+    usable(proxy)
+}
+
+/// `proxy` if it is an HTTP proxy.
+fn usable(proxy: Proxy) -> Result<Proxy, HttpError> {
+    if proxy.protocol() == ProxyProtocol::Http {
+        Ok(proxy)
+    } else {
+        Err(HttpError(format!(
+            "unsupported proxy type {}: only http:// proxies are supported",
+            proxy.protocol()
+        )))
+    }
+}
+
 /// [`HttpTransport`] over `ureq`: plain HTTP (the NCA services have no TLS) or HTTPS on
-/// rustls, directly or through the proxy of its [`ProxySetting`]. Both the timeout and the
-/// body limit of [`GetOptions`] are enforced.
+/// rustls, directly or through the proxy of its [`ProxySetting`] (directly by default).
+/// Both the timeout and the body limit of [`GetOptions`] are enforced.
 ///
-/// An HTTP proxy is asked for a tunnel (`CONNECT host:port`), for plain HTTP too: a proxy
-/// that allows `CONNECT` to port 443 only cannot reach the NCA services.
+/// Through a proxy, HTTPS goes in a `CONNECT` tunnel (`ureq`), and plain HTTP as an
+/// absolute-form request to the proxy (`GET http://host/path HTTP/1.1`, see `forward`),
+/// which `ureq` cannot send.
 #[derive(Clone, Debug, Default)]
 pub struct UreqTransport {
     proxy: ProxySetting,
 }
 
+/// How a request reaches its server.
+enum Route {
+    /// Directly.
+    Direct,
+    /// Through a `CONNECT` tunnel of this proxy.
+    Tunnel(Proxy),
+    /// As an absolute-form request to this proxy.
+    Forward(Proxy),
+}
+
 impl UreqTransport {
-    /// A transport through `proxy`. A [`ProxySetting::Manual`] URL that is not one fails
-    /// every request with an [`HttpError`] instead of connecting directly.
+    /// A transport through `proxy`. A [`ProxySetting::Manual`] proxy that fails
+    /// [`ProxySetting::validate`] fails every request with an [`HttpError`] instead of
+    /// connecting directly.
     pub fn with_proxy(proxy: ProxySetting) -> Self {
         UreqTransport { proxy }
     }
 
-    /// An agent for a request to `url`. The system's proxy is looked up for each request,
+    /// The route of a request to `url`. The system's proxy is looked up for each request,
     /// so a change takes effect without a restart.
-    fn agent(&self, url: &str, timeout: Duration) -> Result<ureq::Agent, HttpError> {
+    fn route(&self, url: &str) -> Result<Route, HttpError> {
         let proxy = match &self.proxy {
-            ProxySetting::None => None,
-            ProxySetting::System => system_proxy::for_url(url),
-            // The URL may hold a password: it is not repeated in the error.
-            ProxySetting::Manual(proxy) => Some(
-                ureq::Proxy::new(proxy).map_err(|_| HttpError("invalid proxy URL".to_owned()))?,
-            ),
+            ProxySetting::None => return Ok(Route::Direct),
+            ProxySetting::System => match system_proxy::for_url(url) {
+                Some(proxy) => usable(proxy)?,
+                None => return Ok(Route::Direct),
+            },
+            ProxySetting::Manual(proxy) => parse_proxy(proxy)?,
         };
-        Ok(ureq::Agent::config_builder()
+        let uri: Uri = url
+            .parse()
+            .map_err(|e| HttpError(format!("invalid URL {url}: {e}")))?;
+        Ok(if proxy.is_no_proxy(&uri) {
+            Route::Direct
+        } else if uri.scheme_str() == Some("http") {
+            Route::Forward(proxy)
+        } else {
+            Route::Tunnel(proxy)
+        })
+    }
+
+    /// A `ureq` agent connecting directly or through the tunnel of `proxy`.
+    fn agent(proxy: Option<Proxy>, timeout: Duration) -> ureq::Agent {
+        ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .http_status_as_error(false)
             .proxy(proxy)
             .build()
-            .into())
+            .into()
+    }
+
+    /// `url` with `post` (content type and body) or GET, within `opts`.
+    fn send(
+        &self,
+        url: &str,
+        post: Option<(&str, &[u8])>,
+        opts: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
+        let proxy = match self.route(url)? {
+            Route::Forward(proxy) => return forward::send(&proxy, url, post, opts),
+            Route::Tunnel(proxy) => Some(proxy),
+            Route::Direct => None,
+        };
+        let agent = Self::agent(proxy, opts.timeout);
+        let response = match post {
+            Some((content_type, body)) => agent
+                .post(url)
+                .header("Content-Type", content_type)
+                .send(body),
+            None => agent.get(url).call(),
+        };
+        reply(response, opts.max_len)
     }
 }
 
@@ -139,18 +254,11 @@ impl HttpTransport for UreqTransport {
     }
 
     fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        reply(self.agent(url, opts.timeout)?.get(url).call(), opts.max_len)
+        self.send(url, None, opts)
     }
 
     fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
-        let opts = GetOptions::default();
-        reply(
-            self.agent(url, opts.timeout)?
-                .post(url)
-                .header("Content-Type", content_type)
-                .send(body),
-            opts.max_len,
-        )
+        self.send(url, Some((content_type, body)), GetOptions::default())
     }
 }
 
@@ -308,9 +416,9 @@ mod tests {
         }
     }
 
-    /// Direct connections: a proxy of the environment would not reach the local servers.
+    /// Direct connections, as by default.
     fn direct() -> UreqTransport {
-        UreqTransport::with_proxy(ProxySetting::None)
+        UreqTransport::default()
     }
 
     #[test]
@@ -343,9 +451,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn manual_proxy_is_used_and_a_broken_url_fails_without_connecting() {
-        // The proxy is the one-connection server: it gets the tunnel request.
+    /// A one-connection stub proxy: sends the request head it received on the channel and
+    /// answers `reply`. Returns the proxy URL.
+    fn stub_proxy(reply: &'static [u8]) -> (String, std::sync::mpsc::Receiver<String>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let proxy = format!("http://{}", listener.local_addr().unwrap());
@@ -356,27 +464,86 @@ mod tests {
             while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
                 head.push(byte[0]);
             }
-            let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
-            tx.send(head).unwrap();
+            let _ = stream.write_all(reply);
+            tx.send(String::from_utf8(head).unwrap()).unwrap();
         });
+        (proxy, rx)
+    }
+
+    #[test]
+    fn plain_http_is_forwarded_and_https_tunnelled() {
+        let (proxy, head) = stub_proxy(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
         let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
-        through.get("http://nca.invalid:8080/ocsp").unwrap_err();
-        let head = String::from_utf8(rx.recv().unwrap()).unwrap();
+        let reply = through.get("http://nca.invalid:8080/ocsp").unwrap();
+        assert_eq!((reply.status, &reply.body[..]), (200, &b"ok"[..]));
+        let head = head.recv().unwrap();
         assert!(
-            head.starts_with("CONNECT nca.invalid:8080 HTTP/1.1\r\n"),
+            head.starts_with("GET http://nca.invalid:8080/ocsp HTTP/1.1\r\n"),
             "{head}"
         );
 
-        let broken = UreqTransport::with_proxy(ProxySetting::Manual("http://u:p@[x".to_owned()));
-        assert_eq!(
-            broken.post("http://127.0.0.1:1/", "t", b""),
-            Err(HttpError("invalid proxy URL".to_owned()))
+        let (proxy, head) = stub_proxy(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+        let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
+        through.get("https://nca.invalid:8443/ocsp").unwrap_err();
+        let head = head.recv().unwrap();
+        assert!(
+            head.starts_with("CONNECT nca.invalid:8443 HTTP/1.1\r\n"),
+            "{head}"
         );
+    }
+
+    #[test]
+    fn unusable_proxies_fail_without_connecting_or_panicking() {
+        let unsupported = |url: &str| {
+            let setting = ProxySetting::Manual(url.to_owned());
+            let validated = setting.validate();
+            let through = UreqTransport::with_proxy(setting);
+            for target in ["http://127.0.0.1:1/", "https://127.0.0.1:1/"] {
+                let got = through.post(target, "t", b"");
+                assert_eq!(
+                    got.as_ref().err(),
+                    validated.as_ref().err(),
+                    "{url} {target}"
+                );
+                assert!(got.is_err(), "{url} {target}");
+            }
+            validated.unwrap_err().0
+        };
+        assert_eq!(unsupported("http://u:p@[x"), "invalid proxy URL");
+        assert_eq!(unsupported(""), "invalid proxy URL");
+        for url in [
+            "socks5://127.0.0.1:1",
+            "socks4://h",
+            "socks://h:1",
+            "https://u:p@h:443",
+        ] {
+            let e = unsupported(url);
+            assert!(e.starts_with("unsupported proxy type"), "{url}: {e}");
+            assert!(!e.contains("u:p"), "{e}");
+        }
         assert_eq!(
-            UreqTransport::default().proxy,
-            ProxySetting::System,
-            "the system's proxy by default"
+            ProxySetting::Manual("http://h:1".to_owned()).validate(),
+            Ok(())
         );
+        assert_eq!(ProxySetting::Manual("h:1".to_owned()).validate(), Ok(()));
+        assert_eq!(ProxySetting::None.validate(), Ok(()));
+        assert_eq!(ProxySetting::System.validate(), Ok(()));
+    }
+
+    #[test]
+    fn default_is_direct_and_debug_hides_passwords() {
+        assert_eq!(UreqTransport::default().proxy, ProxySetting::None);
+        assert_eq!(ProxySetting::default(), ProxySetting::None);
+        let shown = |url: &str| format!("{:?}", ProxySetting::Manual(url.to_owned()));
+        assert_eq!(
+            shown("http://user:secret@h:1/x@y"),
+            r#"Manual("http://***@h:1/x@y")"#
+        );
+        assert_eq!(shown("a:b@c@h:1"), r#"Manual("***@h:1")"#);
+        assert_eq!(shown("http://h:1"), r#"Manual("http://h:1")"#);
+        let transport = UreqTransport::with_proxy(ProxySetting::Manual("http://u:pw@h".to_owned()));
+        assert!(!format!("{transport:?}").contains("pw"));
+        assert_eq!(format!("{:?}", ProxySetting::System), "System");
     }
 
     #[test]

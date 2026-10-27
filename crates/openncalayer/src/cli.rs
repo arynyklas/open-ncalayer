@@ -12,6 +12,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use oncl_basics::Locale;
 use oncl_ipc::IpcListener;
 use oncl_pki::http::UreqTransport;
 use oncl_pki::pkix::CaSet;
@@ -143,7 +144,58 @@ pub struct Daemon {
     pub ipc: IpcListener,
     pub wss: Option<(Arc<rustls::ServerConfig>, TcpListener)>,
     /// Why wss is off (`allow_no_wss`), for the user.
-    pub wss_off: Option<String>,
+    pub wss_off: Option<WssOff>,
+}
+
+/// Why the wss server is off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WssOff {
+    /// TLS is not set up.
+    TlsNotConfigured,
+    /// The TLS files cannot be read or used.
+    TlsUnusable,
+    /// Another program holds the port.
+    PortBusy(u16),
+    /// The port cannot be opened for another reason.
+    PortUnavailable(u16),
+}
+
+impl WssOff {
+    /// A short line for the tray in `l`; the details are in the log.
+    pub fn text(self, l: Locale) -> String {
+        match (self, l) {
+            (WssOff::TlsNotConfigured, Locale::Ru) => {
+                "Сертификат для браузера не настроен".to_owned()
+            }
+            (WssOff::TlsNotConfigured, Locale::Kk) => {
+                "Браузерге арналған сертификат бапталмаған".to_owned()
+            }
+            (WssOff::TlsNotConfigured, Locale::En) => {
+                "The certificate for browsers is not set up".to_owned()
+            }
+            (WssOff::TlsUnusable, Locale::Ru) => {
+                "Сертификат для браузера не загружается".to_owned()
+            }
+            (WssOff::TlsUnusable, Locale::Kk) => {
+                "Браузерге арналған сертификат жүктелмейді".to_owned()
+            }
+            (WssOff::TlsUnusable, Locale::En) => {
+                "The certificate for browsers cannot be loaded".to_owned()
+            }
+            (WssOff::PortBusy(p), Locale::Ru) => {
+                format!("Порт {p} занят (возможно, оригинальным NCALayer)")
+            }
+            (WssOff::PortBusy(p), Locale::Kk) => {
+                format!("{p} порты бос емес (мүмкін, түпнұсқа NCALayer)")
+            }
+            (WssOff::PortBusy(p), Locale::En) => {
+                format!("Port {p} is in use (perhaps by the original NCALayer)")
+            }
+            (WssOff::PortUnavailable(p), Locale::Ru) => format!("Не удалось открыть порт {p}"),
+            (WssOff::PortUnavailable(p), Locale::Kk) => format!("{p} портын ашу мүмкін болмады"),
+            (WssOff::PortUnavailable(p), Locale::En) => format!("Cannot open port {p}"),
+        }
+    }
 }
 
 /// Prepares `run`: data paths and logging, the IPC endpoint, then TLS and the port. On
@@ -165,7 +217,7 @@ pub async fn prepare_run(allow_no_wss: bool) -> Result<Daemon, ExitCode> {
                 reason = %failure.message,
                 "wss is off; serving the browser extension only"
             );
-            (None, Some(failure.message))
+            (None, Some(failure.off))
         }
         Err(failure) => return Err(failure.report()),
     };
@@ -207,6 +259,7 @@ fn open_wss(paths: &Paths) -> Result<(Arc<rustls::ServerConfig>, TcpListener), F
     let tls = server_config(&files).map_err(|e| {
         Failure::new(
             1,
+            WssOff::TlsUnusable,
             format!(
                 "Не удалось загрузить сертификат сервера из {}: {e}",
                 files.dir.display()
@@ -218,15 +271,21 @@ fn open_wss(paths: &Paths) -> Result<(Arc<rustls::ServerConfig>, TcpListener), F
         if port_busy(&e) {
             Failure::new(
                 EXIT_PORT_BUSY,
+                WssOff::PortBusy(port),
                 format!("Порт {port} занят (возможно, запущен оригинальный NCALayer)"),
             )
         } else {
-            Failure::new(1, format!("Не удалось открыть порт 127.0.0.1:{port}: {e}"))
+            Failure::new(
+                1,
+                WssOff::PortUnavailable(port),
+                format!("Не удалось открыть порт 127.0.0.1:{port}: {e}"),
+            )
         }
     })?;
     listener.set_nonblocking(true).map_err(|e| {
         Failure::new(
             1,
+            WssOff::PortUnavailable(port),
             format!("Не удалось настроить порт 127.0.0.1:{port}: {e}"),
         )
     })?;
@@ -234,15 +293,17 @@ fn open_wss(paths: &Paths) -> Result<(Arc<rustls::ServerConfig>, TcpListener), F
     Ok((Arc::new(tls), listener))
 }
 
-/// A failed step of a command: the message for the user and the exit code.
+/// A failed step of a command: the message for the user, the exit code and, for the wss
+/// server, why it is off.
 struct Failure {
     code: u8,
+    off: WssOff,
     message: String,
 }
 
 impl Failure {
-    fn new(code: u8, message: String) -> Self {
-        Failure { code, message }
+    fn new(code: u8, off: WssOff, message: String) -> Self {
+        Failure { code, off, message }
     }
 
     /// Prints the message; returns the exit code.
@@ -273,10 +334,12 @@ fn configured(files: &TlsFiles) -> Result<TlsInfo, Failure> {
         Ok(Some(info)) => Ok(info),
         Ok(None) => Err(Failure::new(
             EXIT_TLS_NOT_CONFIGURED,
+            WssOff::TlsNotConfigured,
             "TLS не настроен: выполните `openncalayer tls init`".to_owned(),
         )),
         Err(e) => Err(Failure::new(
             1,
+            WssOff::TlsUnusable,
             format!("Не удалось прочитать {}: {e}", files.info().display()),
         )),
     }
@@ -811,6 +874,35 @@ mod tests {
                 no_tray: true
             })
         ));
+    }
+
+    #[test]
+    fn wss_off_is_told_in_the_tray_language() {
+        let off = WssOff::PortBusy(13579);
+        assert_eq!(
+            off.text(Locale::Ru),
+            "Порт 13579 занят (возможно, оригинальным NCALayer)"
+        );
+        assert_eq!(
+            off.text(Locale::En),
+            "Port 13579 is in use (perhaps by the original NCALayer)"
+        );
+        for l in [Locale::Ru, Locale::Kk, Locale::En] {
+            let texts = [
+                WssOff::TlsNotConfigured,
+                WssOff::TlsUnusable,
+                WssOff::PortBusy(1),
+                WssOff::PortUnavailable(1),
+            ]
+            .map(|off| off.text(l));
+            for (i, text) in texts.iter().enumerate() {
+                assert!(!texts[..i].contains(text), "{l:?}: {text}");
+            }
+        }
+        assert_ne!(
+            WssOff::TlsNotConfigured.text(Locale::Kk),
+            WssOff::TlsNotConfigured.text(Locale::Ru)
+        );
     }
 
     #[cfg(feature = "e2e-prompter")]

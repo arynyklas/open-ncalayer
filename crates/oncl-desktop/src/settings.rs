@@ -1,17 +1,20 @@
 //! `settings.json` in the data directory, one JSON object shared by the settings window
 //! ([`Settings`]: `locale`, `autostart`, `proxy`) and other owners of single keys (the
 //! `recentPath` of the key store dialogs). Every change is a read-modify-write of the whole
-//! object ([`update`]) that keeps the keys it does not change, unknown ones included.
+//! object ([`update`]) that keeps the keys it does not change, unknown ones included. The
+//! file may hold a proxy password: it is written readable by its owner only (mode `0600` on
+//! Unix).
 
 use std::io;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
 use oncl_basics::Locale;
+use oncl_pki::fsutil::Access;
 pub use oncl_pki::http::ProxySetting;
 use serde_json::{Map, Value};
 
-use crate::fsutil::write_atomic;
+use crate::write_file;
 
 const LOCALE: &str = "locale";
 const AUTOSTART: &str = "autostart";
@@ -28,7 +31,8 @@ pub struct Settings {
     /// Whether our entry starts OpenNCALayer at login (see [`crate::autostart`]).
     pub autostart: bool,
     /// The proxy of the time-stamping, OCSP and CRL requests (`{"mode": "none" | "system" |
-    /// "manual", "url": …}`); the system's by default.
+    /// "manual", "url": …}`); none (direct connections) by default, as before the setting
+    /// existed.
     pub proxy: ProxySetting,
 }
 
@@ -49,8 +53,12 @@ impl Settings {
     ///
     /// # Errors
     ///
-    /// As [`update`].
+    /// [`io::ErrorKind::InvalidInput`] if a manual proxy URL is not usable
+    /// ([`ProxySetting::validate`]), and nothing is written; otherwise as [`update`].
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        self.proxy
+            .validate()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.0))?;
         update(path, |object| self.store(object))
     }
 
@@ -97,8 +105,8 @@ impl Settings {
         }
     }
 
-    /// Writes the settings into `object`. Other members of a `proxy` object stay, so a
-    /// manual URL is remembered while another mode is chosen.
+    /// Writes the settings into `object`. Other members of a `proxy` object stay; its `url`
+    /// goes when the mode is not manual, so no proxy password is kept that is not used.
     fn store(&self, object: &mut Map<String, Value>) {
         match &self.locale {
             Some(l) => object.insert(LOCALE.to_owned(), Value::String(l.clone())),
@@ -120,6 +128,9 @@ impl Settings {
                     "manual"
                 }
             };
+            if !matches!(self.proxy, ProxySetting::Manual(_)) {
+                proxy.remove(URL);
+            }
             proxy.insert(MODE.to_owned(), Value::String(mode.to_owned()));
         }
     }
@@ -228,9 +239,9 @@ pub fn read(path: &Path) -> io::Result<Option<Map<String, Value>>> {
 }
 
 /// Applies `change` to the settings object in the file `path` and writes it back through a
-/// temporary file renamed into place; the file and its directory are created if missing.
-/// A file that is not a JSON object is replaced (logged). Changes within the process never
-/// interleave, so none is lost.
+/// temporary file renamed into place, readable by its owner only; the file and its
+/// directory are created if missing. A file that is not a JSON object is replaced (logged).
+/// Changes within the process never interleave, so none is lost.
 ///
 /// # Errors
 ///
@@ -247,7 +258,7 @@ pub fn update(path: &Path, change: impl FnOnce(&mut Map<String, Value>)) -> io::
     };
     change(&mut object);
     let json = serde_json::to_vec_pretty(&object).map_err(io::Error::other)?;
-    write_atomic(path, &json)
+    write_file(path, &json, Access::Private)
 }
 
 #[cfg(test)]
@@ -288,7 +299,7 @@ mod tests {
 
         s.locale = None;
         s.autostart = false;
-        s.proxy = ProxySetting::None;
+        s.proxy = ProxySetting::System;
         s.save(&f).unwrap();
         assert_eq!(
             on_disk(&f),
@@ -297,14 +308,14 @@ mod tests {
                 "future": {"a": [1, 2]},
                 "originalAutostart": true,
                 "autostart": false,
-                // The manual URL is remembered for when it is chosen again.
-                "proxy": {"mode": "none", "url": "http://p:3128", "extra": 1},
+                // The manual URL, and a password in it, goes with the manual mode.
+                "proxy": {"mode": "system", "extra": 1},
             })
         );
         assert_eq!(Settings::load(&f).unwrap(), s);
-        s.proxy = ProxySetting::System;
+        s.proxy = ProxySetting::None;
         s.save(&f).unwrap();
-        assert_eq!(Settings::load(&f).unwrap().proxy, ProxySetting::System);
+        assert_eq!(Settings::load(&f).unwrap().proxy, ProxySetting::None);
     }
 
     #[test]
@@ -312,7 +323,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("sub").join("settings.json");
         assert_eq!(Settings::load(&f).unwrap(), Settings::default());
-        assert_eq!(Settings::default().proxy, ProxySetting::System);
+        assert_eq!(Settings::default().proxy, ProxySetting::None);
 
         let s = Settings {
             locale: Some("en".to_owned()),
@@ -329,18 +340,44 @@ mod tests {
     }
 
     #[test]
+    fn unusable_manual_proxy_is_not_saved() {
+        let (_d, f) = file_with(r#"{"recentPath": "k.p12"}"#);
+        for url in ["socks5://127.0.0.1:1080", "https://p:443", "http://[x", ""] {
+            let s = Settings {
+                proxy: ProxySetting::Manual(url.to_owned()),
+                ..Settings::default()
+            };
+            let e = s.save(&f).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{url}");
+            assert_eq!(on_disk(&f), json!({"recentPath": "k.p12"}), "{url}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_d, f) = file_with("{}");
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).unwrap();
+        Settings::default().save(&f).unwrap();
+        let mode = fs::metadata(&f).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
     fn values_not_understood_are_defaults() {
         let (_d, f) =
             file_with(r#"{"locale": "de", "autostart": "yes", "proxy": {"mode": "manual"}}"#);
         assert_eq!(Settings::load(&f).unwrap(), Settings::default());
-        for proxy in [r#""none""#, r#"{"mode": "pac"}"#, r#"{"mode": 1}"#, "[]"] {
+        for proxy in [r#""system""#, r#"{"mode": "pac"}"#, r#"{"mode": 1}"#, "[]"] {
             let (_d, f) = file_with(&format!(r#"{{"proxy": {proxy}}}"#));
-            assert_eq!(Settings::load(&f).unwrap().proxy, ProxySetting::System);
+            assert_eq!(Settings::load(&f).unwrap().proxy, ProxySetting::None);
         }
         // A `proxy` that is not an object is replaced on save.
-        let (_d, f) = file_with(r#"{"proxy": "none"}"#);
+        let (_d, f) = file_with(r#"{"proxy": "system"}"#);
         Settings::default().save(&f).unwrap();
-        assert_eq!(on_disk(&f)["proxy"], json!({"mode": "system"}));
+        assert_eq!(on_disk(&f)["proxy"], json!({"mode": "none"}));
     }
 
     #[test]
@@ -388,8 +425,7 @@ mod tests {
         assert_eq!(locale_of("de_DE.UTF-8"), None);
         assert_eq!(locale_of("C"), None);
         assert_eq!(locale_of(""), None);
-        // Without a setting: the system's language or Russian, never anything else.
-        let shown = Settings::default().ui_locale();
-        assert_eq!(shown, system_locale().unwrap_or(Locale::Ru));
+        // A language that is not ours is ignored like no setting.
+        assert_eq!(with("de").ui_locale(), Settings::default().ui_locale());
     }
 }

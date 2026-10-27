@@ -654,31 +654,51 @@ fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
-/// A stand-in HTTP proxy in front of `tsa` for `connections` connections: it answers
-/// `CONNECT` with 200 and hands the request inside the tunnel to `tsa`, as if it were the
-/// TSA at `http://tsp.invalid`. Returns the proxy URL and, once joined, the `CONNECT` and
-/// tunnelled request lines.
-fn tunnel_proxy(tsa: Arc<MockTsa>, connections: usize) -> (String, JoinHandle<Vec<String>>) {
+/// The `Proxy-Authorization` the stub proxy wants: user `u@s`, password `p:w`.
+const PROXY_CREDENTIALS: &str = "Basic dUBzOnA6dw==";
+
+/// A one-thread HTTP server in front of `tsa` for `connections` connections, as if it were
+/// the TSA at `http://tsp.invalid`. As a proxy (`proxy`) it is configured like a stock
+/// Squid: it refuses `CONNECT` to any port but 443, and serves absolute-form requests
+/// (`GET http://tsp.invalid/…`) with the right `Proxy-Authorization`. Otherwise it is the
+/// TSA itself (origin-form). Returns its URL and, once joined, the request lines it got.
+fn tsa_server(
+    tsa: Arc<MockTsa>,
+    connections: usize,
+    proxy: bool,
+) -> (String, JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let proxy = thread::spawn(move || {
+    let server = thread::spawn(move || {
         let mut seen = Vec::new();
         for _ in 0..connections {
             let (mut stream, _) = listener.accept().unwrap();
-            let connect = read_head(&mut stream);
-            seen.push(connect.lines().next().unwrap().to_owned());
-            stream
-                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
-                .unwrap();
-
             let head = read_head(&mut stream);
             let request_line = head.lines().next().unwrap().to_owned();
+            seen.push(request_line.clone());
+            let mut parts = request_line.split(' ');
+            let (method, target) = (parts.next().unwrap(), parts.next().unwrap());
+            let refusal = if method == "CONNECT" && !target.ends_with(":443") {
+                Some("403 Forbidden")
+            } else if proxy && header(&head, "proxy-authorization") != Some(PROXY_CREDENTIALS) {
+                Some("407 Proxy Authentication Required")
+            } else if proxy && !target.starts_with("http://tsp.invalid/") {
+                Some("400 Bad Request")
+            } else {
+                None
+            };
+            if let Some(status) = refusal {
+                let reply = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+                stream.write_all(reply.as_bytes()).unwrap();
+                continue;
+            }
             let mut body =
                 vec![0; header(&head, "content-length").map_or(0, |n| n.parse().unwrap())];
             stream.read_exact(&mut body).unwrap();
-            let mut parts = request_line.split(' ');
-            let (method, path) = (parts.next().unwrap(), parts.next().unwrap());
-            let target = format!("http://tsp.invalid{path}");
+            let target = match target.strip_prefix("http://tsp.invalid") {
+                Some(path) => format!("http://tsp.invalid{path}"),
+                None => format!("http://tsp.invalid{target}"),
+            };
             let reply = match method {
                 "GET" => tsa.get(&target),
                 _ => tsa.post(&target, header(&head, "content-type").unwrap_or(""), &body),
@@ -693,37 +713,70 @@ fn tunnel_proxy(tsa: Arc<MockTsa>, connections: usize) -> (String, JoinHandle<Ve
             );
             stream.write_all(reply_head.as_bytes()).unwrap();
             stream.write_all(&reply.body).unwrap();
-            seen.push(request_line);
         }
         seen
     });
-    (url, proxy)
+    (url, server)
+}
+
+/// A GET and a POST time stamp from `url` through `transport`.
+fn timestamp_both_ways(url: &str, transport: &UreqTransport) {
+    for method in [TsaMethod::Get, TsaMethod::Post] {
+        let profile = TsaProfile {
+            url: url.to_owned(),
+            method,
+            ..TsaProfile::basics_default()
+        };
+        let cms = timestamp_signer(&signed("user-gost2015-sign"), 0, &profile, transport)
+            .unwrap_or_else(|e| panic!("{method:?}: {e}"));
+        let s = verify(&cms, None).unwrap();
+        verify_token(s[0].timestamp_token.as_ref().unwrap()).unwrap();
+    }
 }
 
 #[test]
 fn timestamp_through_a_manual_proxy() {
     let mock = Arc::new(tsa());
-    let (proxy, seen) = tunnel_proxy(Arc::clone(&mock), 2);
+    let (proxy, seen) = tsa_server(Arc::clone(&mock), 2, true);
+    let proxy = proxy.replace("http://", "http://u%40s:p%3Aw@");
     let transport = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
-    for method in [TsaMethod::Get, TsaMethod::Post] {
-        // `.invalid` resolves nowhere: only the proxy can reach it.
-        let profile = TsaProfile {
-            url: "http://tsp.invalid/tsp".to_owned(),
-            method,
-            ..TsaProfile::basics_default()
-        };
-        let cms = timestamp_signer(&signed("user-gost2015-sign"), 0, &profile, &transport)
-            .unwrap_or_else(|e| panic!("{method:?}: {e}"));
-        let s = verify(&cms, None).unwrap();
-        verify_token(s[0].timestamp_token.as_ref().unwrap()).unwrap();
-    }
+    // `.invalid` resolves nowhere: only the proxy can reach it.
+    timestamp_both_ways("http://tsp.invalid/tsp", &transport);
     let seen = seen.join().unwrap();
-    assert_eq!(seen.len(), 4, "{seen:?}");
-    assert_eq!(seen[0], "CONNECT tsp.invalid:80 HTTP/1.1");
-    assert!(seen[1].starts_with("GET /tsp/"), "{seen:?}");
-    assert_eq!(seen[2], "CONNECT tsp.invalid:80 HTTP/1.1");
-    assert_eq!(seen[3], "POST /tsp HTTP/1.1");
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(
+        seen[0].starts_with("GET http://tsp.invalid/tsp/") && seen[0].ends_with(" HTTP/1.1"),
+        "{seen:?}"
+    );
+    assert_eq!(seen[1], "POST http://tsp.invalid/tsp HTTP/1.1");
     assert_eq!(mock.calls().len(), 2);
+}
+
+#[test]
+fn stub_proxy_refuses_what_a_stock_proxy_refuses() {
+    let mock = Arc::new(tsa());
+    let (proxy, seen) = tsa_server(Arc::clone(&mock), 2, true);
+    let raw = |request: &str| {
+        let mut stream = TcpStream::connect(proxy.trim_start_matches("http://")).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        read_head(&mut stream)
+    };
+    let tunnel = raw("CONNECT tsp.invalid:80 HTTP/1.1\r\nHost: tsp.invalid:80\r\n\r\n");
+    assert!(tunnel.starts_with("HTTP/1.1 403 "), "{tunnel}");
+    let anonymous = raw("GET http://tsp.invalid/tsp/x HTTP/1.1\r\nHost: tsp.invalid\r\n\r\n");
+    assert!(anonymous.starts_with("HTTP/1.1 407 "), "{anonymous}");
+    seen.join().unwrap();
+    assert!(mock.calls().is_empty());
+}
+
+#[test]
+fn timestamp_directly_by_default() {
+    let mock = Arc::new(tsa());
+    let (server, seen) = tsa_server(Arc::clone(&mock), 2, false);
+    timestamp_both_ways(&format!("{server}/tsp"), &UreqTransport::default());
+    let seen = seen.join().unwrap();
+    assert!(seen[0].starts_with("GET /tsp/"), "{seen:?}");
+    assert_eq!(seen[1], "POST /tsp HTTP/1.1");
 }
 
 #[test]
