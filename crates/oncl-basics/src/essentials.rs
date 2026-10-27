@@ -46,6 +46,7 @@ use oncl_protocol::AddInfo;
 use oncl_protocol::invoker::{CallResult, Failure};
 use oncl_protocol::orgjson::{int_value, opt_string};
 use serde_json::{Map, Value, json};
+use std::collections::HashSet;
 use std::path::Path;
 use zeroize::Zeroizing;
 
@@ -240,12 +241,16 @@ impl CsrArgs {
         if let Some(Value::Array(names)) = args.get("subjectAltNames")
             && !names.is_empty()
         {
-            for name in names {
-                let name = java_string(name)?;
-                if !alt_names.contains(&name) {
-                    alt_names.push(name);
-                }
-            }
+            let names: Vec<String> = names.iter().map(java_string).collect::<Result<_, _>>()?;
+            // Each name once, in first-seen order; linear, as a page sends any number.
+            let mut seen = HashSet::with_capacity(names.len());
+            let first: Vec<bool> = names.iter().map(|n| seen.insert(n.as_str())).collect();
+            drop(seen);
+            alt_names = names
+                .into_iter()
+                .zip(first)
+                .filter_map(|(name, first)| first.then_some(name))
+                .collect();
             let common_name = get_string(dn_object, &oid::COMMON_NAME.to_string())?;
             if !alt_names.iter().any(|n| n == common_name) {
                 return Err(Failure::Invocation(Some(SAN_WITHOUT_CN.to_owned())));

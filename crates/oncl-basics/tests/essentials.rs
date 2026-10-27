@@ -523,6 +523,60 @@ fn alternative_names_must_contain_the_common_name() {
     assert_eq!(san.0.len(), 3, "two dNSNames, then the email: {san:?}");
 }
 
+/// `subjectAltNames` are read before the dialog: any number is deduplicated in linear time,
+/// keeping the first occurrence of each name in the page's order.
+#[test]
+fn many_alternative_names_are_deduplicated_quickly_in_order() {
+    use x509_cert::ext::pkix::SubjectAltName;
+    use x509_cert::ext::pkix::name::GeneralName;
+
+    let mut names: Vec<String> = (0..100_000).map(|i| format!("h{i}.test.kz")).collect();
+    names.extend(names[..1000].to_vec());
+    for (cn, expect_dialog) in [("h99999.test.kz", true), ("absent.kz", false)] {
+        let mut args = csr_args(json!([gost2015()]));
+        args["dn"] = json!({"2.5.4.3": cn});
+        args["subjectAltNames"] = json!(names);
+        let (b, p) = basics(vec![Step::CancelCsr]);
+        let started = std::time::Instant::now();
+        let r = essentials(&b, "generateCsr", args);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{cn}: {:?}",
+            started.elapsed()
+        );
+        if expect_dialog {
+            assert_eq!(r, json!({"status": true, "body": {}}));
+        } else {
+            assert_eq!(failure(&r).0, "INVOCATION_ERROR");
+        }
+        assert_eq!(p.csr_prompts().len(), usize::from(expect_dialog), "{cn}");
+    }
+
+    // First-seen order, each name once, then the email.
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = csr_args(json!([gost2015()]));
+    args["dn"] = json!({"2.5.4.3": "test.kz"});
+    args["subjectAltNames"] = json!(["b.test.kz", "test.kz", "b.test.kz", "a.test.kz", "test.kz"]);
+    let (b, _) = basics(vec![csr_step(dir.path())]);
+    let r = essentials(&b, "generateCsr", args);
+    assert_eq!(r["status"], true, "{r}");
+    let req = request(r["body"]["pems"][0].as_str().unwrap());
+    let san = request_extensions(&req)
+        .into_iter()
+        .find(|e| e.extn_id == SubjectAltName::OID)
+        .unwrap();
+    let san = SubjectAltName::from_der(san.extn_value.as_bytes()).unwrap();
+    let dns: Vec<&str> = san
+        .0
+        .iter()
+        .filter_map(|name| match name {
+            GeneralName::DnsName(dns) => Some(dns.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dns, ["b.test.kz", "test.kz", "a.test.kz"]);
+}
+
 #[test]
 fn password_asked_without_default_password() {
     let dir = tempfile::tempdir().unwrap();
