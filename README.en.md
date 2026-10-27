@@ -25,7 +25,9 @@ The third phase (P3) checks keys in the key dialog as the original does. The key
 
 The fourth phase (P4) completes the original's protocol: the `basics`, `commonUtils`, `Applet` (a subset) and `accessory` modules, XML signatures (XMLDSig), new keys and certificate requests, installing issued certificates, and the `JKS` storage read-only (see [Modules](#modules)).
 
-Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md), [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md) and [`docs/dev/smoke-p4.md`](docs/dev/smoke-p4.md) (in Russian).
+The fifth phase (P5) makes OpenNCALayer a desktop program: a tray icon, a settings window, a TLS wizard with buttons that install certificates, mkcert, certificate expiry reminders, coexistence with the original NCALayer, and an About window (see [Desktop](#desktop)).
+
+Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md), [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md), [`docs/dev/smoke-p4.md`](docs/dev/smoke-p4.md) and [`docs/dev/smoke-p5.md`](docs/dev/smoke-p5.md) (in Russian).
 
 Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
@@ -161,8 +163,73 @@ The `kz.gov.pki.knca.applet.Applet` module (legacy; it answers requests without 
 #### accessory
 
 - `getBundles` lists the original's framework (`org.apache.felix.framework`) and its core bundles whose functions OpenNCALayer implements, with the versions of the original's current update manifest, and OpenNCALayer itself (`io.github.arynyklas.openncalayer`). The original lists every installed bundle, other vendors' modules included.
-- `installBundle` with a non-empty `symname` and an `Origin` header always answers `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED`, without a dialog: there are no ports of other vendors' modules until P11 (D21). For a module it can install, the original asks the user to confirm first. The request is logged. Without an `Origin` header the answer is `org.json.JSONException: JSONObject["origin"] is not a string.`, as from the original.
-- `showBundleManager`, `showSettings`, `showKeystoreExplorer`, `showAdesSigning` and `showAdesValidation` answer `{}`, as the original does, but no window opens: the request is only logged. The settings and modules windows arrive in P5.
+- `installBundle` with a non-empty `symname` and an `Origin` header always answers `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED`, without a dialog: there are no ports of other vendors' modules until P11 (D21). For a module it can install, the original asks the user to confirm first. The request is logged; since P5 the OpenNCALayer icon also shows a notification linking to the plugin list `https://arynyklas.github.io/open-ncalayer/plugins/` (at most once in 10 minutes; the page itself arrives in P12). Without an `Origin` header the answer is `org.json.JSONException: JSONObject["origin"] is not a string.`, as from the original.
+- `showBundleManager` opens the About window on its Modules tab, `showSettings` OpenNCALayer's settings window (the original's shows its proxy settings; OpenNCALayer's proxy is in the same window). `showKeystoreExplorer`, `showAdesSigning` and `showAdesValidation` open no window: the request is only logged. All five answer `{}`, as the original does.
+
+## Desktop
+
+### Tray icon
+
+`openncalayer run` shows the OpenNCALayer icon (`tray-icon` on Windows and macOS, a StatusNotifierItem over D-Bus on Linux). Its menu:
+- «Настройки…» (Settings…);
+- «Сертификат для браузера…» (Browser certificate…) — the TLS wizard;
+- «Журнал» (Log) — opens the `logs/` directory in the file manager;
+- «О программе» (About);
+- «Выход» (Quit) — stops the servers and ends the process. Closing a window does not end it.
+
+The icon turns to "attention" when TLS is not set up, the server certificate expires within 60 days, or port 13579 is taken; its tooltip names the problem. When the original NCALayer holds the port, the menu gains «Остановить оригинал…» (Stop the original…; see [The original NCALayer](#the-original-ncalayer)). Notifications are a balloon of the icon on Windows, a desktop notification over D-Bus on Linux, and `osascript` on macOS. Menu and windows are in Russian, Kazakh or English.
+
+`openncalayer run --no-tray` runs without the icon, as in P4 (end-to-end tests and sessions without a desktop use it). If the icon cannot be shown (Linux without StatusNotifier, a session without a notification area), a warning is logged and the daemon keeps serving and signing. What happens then with TLS not set up or a taken port is in [Build and run](#build-and-run).
+
+### Settings
+
+The settings window saves into `settings.json` of the data directory (other keys of the file, such as `recentPath`, are kept):
+- `locale` — the language of the windows and the icon: `ru`, `kk` or `en`; without the key, the system's language if it is one of these three, else Russian;
+- `autostart` — "start at login": our autostart entry `"<exe>" run` — the value `OpenNCALayer` of `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows), `~/.config/autostart/openncalayer.desktop` (Linux), `~/Library/LaunchAgents/io.github.arynyklas.openncalayer.plist` with `RunAtLoad` (macOS). The window shows the entry's real state; an entry disabled in Task Manager → Startup counts as off;
+- `proxy` — the proxy of time-stamping (TSP), OCSP and CRL requests: `{"mode":"none"}` (the default, direct connections as in P4), `{"mode":"system"}` (`ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY` with `NO_PROXY`, and without them on Windows the manual proxy of the Internet Options) or `{"mode":"manual","url":"http://host:port"}`. Plain HTTP goes to the proxy as an absolute-form request (`GET http://…`), HTTPS through a `CONNECT` tunnel. SOCKS and `https://` proxies are not supported. A new proxy applies at once, without a restart. The file may hold a proxy password, so on macOS and Linux only its owner can read it (mode `0600`).
+
+The same window has:
+- an "Original NCALayer" block: whether it is found, its autostart entries and their state, and the buttons «Отключить автозапуск оригинала» (Disable the original's autostart) and «Вернуть оригинал» (Restore the original);
+- a "Browser extension" block: the `nm status` state and the buttons Register and Remove (the same as `openncalayer nm install` and `nm uninstall`).
+
+### TLS wizard
+
+The main way to set up the certificate is the «Сертификат для браузера…» wizard in the icon's menu; the `openncalayer tls init|import|status` commands remain. Details are in [`docs/user/tls.md`](docs/user/tls.md) (in Russian):
+- **State** — the certificate, its validity, fingerprints and a read-only trust check (the Windows stores, the macOS keychain, NSS databases on Linux);
+- **Source** — "create our own" (a local CA whose key is destroyed), "use mkcert", "own certificate (import)". The server takes a new certificate at once, without a restart;
+- **Install** (D5) — OpenNCALayer never installs anything into a trust store by itself: only on a button press confirmed in the wizard's window. "Install my CA into the user's store" (Windows `CurrentUser\Root` — Windows shows its own warning; macOS — the login keychain; Linux — the checked NSS databases of Chrome and Firefox profiles through `certutil`; without it the wizard names the `libnss3-tools` package), "Remove" (exactly this CA, by fingerprint), "Download and install the NCA roots" (the embedded RSA certificates `rcarsa20` and `ncarsa22` after a SHA-256 check — for government sites with NCA TLS certificates), and "Remove the old one" after a re-issue;
+- **Check** — "Open the check in the browser" opens `https://127.0.0.1:13579/openncalayer/selftest`; browsers that open the page appear in the wizard's list.
+
+mkcert: the CA is looked up in `$CAROOT` or the `mkcert -CAROOT` directory. It needs consent (a checkbox): the key `rootCA-key.pem` is read at every issue but never copied. Unchecking withdraws the consent. With consent the server certificate (at most 800 days) re-issues itself 30 days before it expires — at start and once a day; if the key is unavailable or has changed, the previous certificate keeps working and a notification names the reason.
+
+Reminders: at start and once a day OpenNCALayer checks the server certificate's expiry; 60 days before it, the icon turns to "attention" and a notification leads to the wizard.
+
+### The original NCALayer
+
+The original and OpenNCALayer cannot both serve `wss` at the same time: both need port 13579.
+
+«Остановить оригинал…» appears in the icon's menu when the original holds the port (`NCALayer.exe`, `ncalayer.sh` or Java with `ncalayer` in its command line; the port's owner is found with `GetExtendedTcpTable` on Windows, `/proc` on Linux, `lsof` on macOS). A window shows the program and its process id; after "Stop" OpenNCALayer checks once more that it is the same process (path and start time), ends it and starts wss in the running daemon. No other process is ever ended.
+
+«Отключить автозапуск оригинала» (D13) deletes nothing:
+- Windows — the shortcut `NCALayer.lnk` in the user's Startup folder, and any other shortcut there to `NCALayer.exe` (a localized name), move to `original-autostart/` in the data directory;
+- Linux — `~/.config/autostart/ncalayer.desktop` gets `Hidden=true`, with a copy of the previous file in `original-autostart/`;
+- macOS — the original has no autostart; the window says "not found".
+
+The value `NCALayer` of `HKLM\Software\Microsoft\Windows\CurrentVersion\Run` (also in the 32-bit view, `WOW6432Node`), written by the original's MSI, is only shown: only an administrator can turn it off, and the window says how. Entries the user turned off (for example in Task Manager) are left alone.
+
+«Вернуть оригинал» puts the moved shortcuts and `ncalayer.desktop` back and turns our autostart off. Both actions keep the journal `original-autostart.json` in the data directory: an entry is written before a change and removed only after it is put back, so an interrupted action is finished by pressing the button again, and nothing is lost.
+
+### About
+
+The About window: version, build commit, the Apache-2.0 licence, `Copyright 2026 Aryn Yklas`, a link to the repository and the mandatory `AboutSlint` element; a Modules tab (the bundles of `getBundles` and the daemon's modules); a third-party licences tab — the text of `crates/oncl-ui/assets/THIRD-PARTY.txt`, written by `cargo xtask licenses` (`cargo xtask licenses --check` checks that it is current).
+
+### P5 differences from the original
+
+- `showSettings` opens OpenNCALayer's settings (language, autostart, proxy, the original, the extension), not the original's proxy window; `showBundleManager` a list of modules without install or removal.
+- `installBundle` installs no third-party modules (D21): the icon shows a notification linking to the plugin list.
+- Proxy: no SOCKS and no `https://` proxies; no proxy by default, even if the system has one.
+- The certificate for `wss` is issued on the user's computer and installed into trust stores only by a wizard button (D5); the original ships its own certificate.
+- The original's autostart is disabled by moving it aside, not deleting it; `HKLM\…\Run` is not changed without administrator rights.
 
 ## Build and run
 
@@ -178,12 +245,14 @@ cargo build --release -p openncalayer
 
 The binary is `target/release/openncalayer` (`openncalayer.exe` on Windows).
 
+The main way is the «Сертификат для браузера…» wizard in the icon's menu (see [TLS wizard](#tls-wizard)). From the command line:
+
 ```sh
 openncalayer tls init   # issue the certificate and print how to trust the CA
-openncalayer run        # start the server; plain `openncalayer` does the same
+openncalayer run        # start the server with the icon; plain `openncalayer` does the same
 ```
 
-1. After `tls init`, trust the CA as the printed instructions say. Per-OS details are in [`docs/user/tls.md`](docs/user/tls.md).
+1. Issue the certificate in the wizard or with `tls init`, and trust the CA with the wizard's button or as the printed instructions say. Per-OS details are in [`docs/user/tls.md`](docs/user/tls.md).
 2. Start `openncalayer run` and open `https://127.0.0.1:13579/`: the page must load without a certificate warning.
 3. At `https://127.0.0.1:13579/demo/` you can sign a text or a file and download the `.p7s`.
 4. To check a signature: `openncalayer cms-verify signature.p7s`; for a detached signature, `openncalayer cms-verify signature.p7s --content <data file>`. It checks the signatures and timestamps, the certificate chains of the signer and of the TSA through the embedded NCA certificates (`--chain <CA file>` replaces them; repeatable, and a PEM file may hold several certificates), validity periods and revocation: the signer by OCSP, intermediate CAs by CRL (cached in `crl/` of the data directory). Only a verified timestamp proves when the signature was made: validity and revocation are judged at its `genTime`, and without one at the current time; `signingTime` is the signer's own claim and is only printed. A revocation after the timestamp does not invalidate the signature: `OK` comes with the line `revocation: revoked … after signing (…)`. The last line is `OK`, `FAIL: <reason>`, `INDETERMINATE: revocation data unavailable` (everything else holds, but no revocation data could be obtained) or `INDETERMINATE: no proof of signing time` (the certificate is expired or revoked now, and the signature would only hold at the claimed `signingTime`). The exit code is 0 only for `OK`. With `--offline` revocation is not checked and the line `not checked: revocation` precedes `OK`.
@@ -193,6 +262,8 @@ Exit codes of `run`:
 - 3 — the port is taken, for example by the original NCALayer;
 - 4 — OpenNCALayer with the same data directory is already running in this session.
 
+Codes 2 and 3 occur only without the icon (`--no-tray`, or an icon not shown or lost on the event loop's first turn). With the icon, `run` keeps serving the extension when TLS is not set up or the port is taken, the icon shows the problem, and wss starts in the same process once the wizard saves a certificate or the port is free. A daemon started by the user or by our autostart notifies at start and takes a freed port by itself (it checks every 30 seconds).
+
 With `--allow-no-wss` (how the extension's relay starts the daemon) no wss startup failure (codes 2, 3 and 1) stops the daemon: it logs a warning and serves only the extension. Such a daemon does not take a freed port by itself: it starts wss only after a user action in the tray or the TLS wizard (stopping the original, saving a certificate).
 
 The original and OpenNCALayer cannot both serve `wss` at the same time: both need port 13579. The extension does not need the port.
@@ -200,7 +271,8 @@ The original and OpenNCALayer cannot both serve `wss` at the same time: both nee
 Data lives in `%APPDATA%\OpenNCALayer` (Windows), `~/Library/Application Support/OpenNCALayer` (macOS) or `${XDG_DATA_HOME:-~/.local/share}/openncalayer` (Linux). Inside:
 - `tls/` — certificates;
 - `logs/openncalayer.YYYY-MM-DD.log` — logs, a new file every day;
-- `settings.json` — the path of the last chosen key file.
+- `settings.json` — the settings (`locale`, `autostart`, `proxy`) and the path of the last chosen key file;
+- `original-autostart.json` and `original-autostart/` — the journal and the moved autostart entries of the original.
 
 The `ONCL_DATA_DIR` variable overrides the data directory. Set it during development (for example `ONCL_DATA_DIR=target/oncl-data`) so your real profile stays untouched.
 
@@ -292,6 +364,7 @@ Before submitting changes:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo deny check
+cargo xtask licenses --check   # the About window's third-party licences are current
 ```
 
 `web/demo/vendor/ncalayer-client.js` is `package/ncalayer-client.js` from the npm package `ncalayer-js-client@1.6.1`, unmodified (MIT, sha256 `bdf2015c3e422eed70ccf38eef3246af67a0d38639e6b70fe6b8655a2fa03489`). The `demo_assets_served` test checks the sha256 of the file the server sends. The server sends the client's license next to it: `/demo/vendor/LICENSE`.
