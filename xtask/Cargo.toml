@@ -41,6 +41,8 @@ tungstenite.workspace = true
 ureq.workspace = true
 x509-cert.workspace = true
 zip.workspace = true
+# `sign`: passwords wiped after use.
+zeroize.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # `ext-e2e`: signal handling and killing process groups.

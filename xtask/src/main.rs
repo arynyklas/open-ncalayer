@@ -4,6 +4,7 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use oncl_update::Channel;
 use time::OffsetDateTime;
+use zeroize::Zeroizing;
 
 /// OpenNCALayer development tasks.
 #[derive(Parser)]
@@ -109,13 +110,23 @@ enum IndexCommand {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// Give the channel's index the next `seq`, a new `generated` and 30 days of validity,
+    /// and nothing else, to sign it again before it expires. The result is unsigned.
+    Refresh {
+        /// `stable` or `beta`.
+        #[arg(long, value_parser = parse_channel)]
+        channel: Channel,
+        /// The directory of the indexes [default: `updates/v1/` of the workspace].
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
     /// Check the indexes in a directory before publishing: format, signature by a trusted
-    /// key, validity, `seq` growth against the base branch, and that every asset answers
-    /// `HEAD` with 200.
+    /// key, validity, asset URLs on the project's releases, `seq` growth against the base
+    /// branch, and that every asset answers `HEAD` with 200.
     Check {
         /// The directory of the indexes, e.g. `updates/v1`.
         dir: PathBuf,
-        /// Skip the network checks (asset URLs, `vm-smoke`).
+        /// Skip the network checks (`HEAD` of the assets, `vm-smoke`).
         #[arg(long)]
         offline: bool,
         /// The git revision of the base branch.
@@ -139,8 +150,26 @@ fn parse_channel(name: &str) -> Result<Channel, String> {
 }
 
 /// Reads a password from the terminal without echo.
-fn password(prompt: &str) -> anyhow::Result<String> {
-    rpassword::prompt_password(prompt).context("reading the password")
+fn password(prompt: &str) -> anyhow::Result<Zeroizing<String>> {
+    rpassword::prompt_password(prompt)
+        .map(Zeroizing::new)
+        .context("reading the password")
+}
+
+/// The directory of the indexes: `dir`, or `updates/v1/` of the workspace.
+fn index_dir(dir: Option<PathBuf>) -> PathBuf {
+    dir.unwrap_or_else(|| oncl_testkit::workspace_root().join(xtask::index::INDEX_DIR))
+}
+
+/// Prints what [`xtask::index::add`] or [`xtask::index::refresh`] wrote.
+fn print_written(written: &xtask::index::Written) {
+    if let Some(signature) = &written.removed_signature {
+        println!("removed the stale {}", signature.display());
+    }
+    println!(
+        "unsigned: cargo xtask sign {} --key <secret key>",
+        written.path.display()
+    );
 }
 
 #[derive(Subcommand)]
@@ -249,10 +278,8 @@ fn main() -> anyhow::Result<()> {
                     dir,
                 },
         } => {
-            let dir =
-                dir.unwrap_or_else(|| oncl_testkit::workspace_root().join(xtask::index::INDEX_DIR));
             let added = xtask::index::add(
-                &dir,
+                &index_dir(dir),
                 channel,
                 &tag,
                 &release_assets,
@@ -262,8 +289,8 @@ fn main() -> anyhow::Result<()> {
             let flavors: Vec<_> = added.flavors.iter().map(|f| f.as_str()).collect();
             println!(
                 "{}: seq {}, {tag} for {}{}",
-                added.path.display(),
-                added.seq,
+                added.written.path.display(),
+                added.written.seq,
                 flavors.join(", "),
                 if added.extension {
                     " and the extension"
@@ -271,13 +298,16 @@ fn main() -> anyhow::Result<()> {
                     ""
                 }
             );
-            if let Some(signature) = added.removed_signature {
-                println!("removed the stale {}", signature.display());
-            }
-            println!(
-                "unsigned: cargo xtask sign {} --key <secret key>",
-                added.path.display()
-            );
+            print_written(&added.written);
+            Ok(())
+        }
+        Command::Index {
+            command: IndexCommand::Refresh { channel, dir },
+        } => {
+            let written =
+                xtask::index::refresh(&index_dir(dir), channel, OffsetDateTime::now_utc())?;
+            println!("{}: seq {}", written.path.display(), written.seq);
+            print_written(&written);
             Ok(())
         }
         Command::Index {
@@ -320,9 +350,128 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             if offline {
-                println!("offline: asset URLs and vm-smoke not checked");
+                println!("offline: HEAD of the assets and vm-smoke not checked");
             }
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Command, clap::Error> {
+        Cli::try_parse_from(std::iter::once("xtask").chain(args.iter().copied()))
+            .map(|cli| cli.command)
+    }
+
+    #[test]
+    fn the_cli_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn sign_takes_an_index_or_keygen() {
+        let Ok(Command::Sign {
+            command: None,
+            index: Some(index),
+            key: Some(key),
+        }) = parse(&["sign", "updates/v1/beta.json", "--key", "k.key"])
+        else {
+            panic!("sign <index> --key");
+        };
+        assert_eq!(
+            (index.to_str(), key.to_str()),
+            (Some("updates/v1/beta.json"), Some("k.key"))
+        );
+        assert!(matches!(
+            parse(&["sign", "keygen", "--out", "keys"]),
+            Ok(Command::Sign {
+                command: Some(SignCommand::Keygen { .. }),
+                index: None,
+                key: None,
+            })
+        ));
+        for args in [
+            &["sign"][..],
+            &["sign", "beta.json"],
+            &["sign", "--key", "k.key"],
+            &["sign", "keygen"],
+            &["sign", "--key", "k.key", "keygen", "--out", "keys"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn index_commands_parse() {
+        assert!(matches!(
+            parse(&[
+                "index",
+                "add",
+                "--channel",
+                "beta",
+                "--tag",
+                "v1.0.0",
+                "--release-assets",
+                "a"
+            ]),
+            Ok(Command::Index {
+                command: IndexCommand::Add {
+                    channel: Channel::Beta,
+                    rollout: 100,
+                    ..
+                }
+            })
+        ));
+        assert!(matches!(
+            parse(&["index", "refresh", "--channel", "stable"]),
+            Ok(Command::Index {
+                command: IndexCommand::Refresh {
+                    channel: Channel::Stable,
+                    dir: None
+                }
+            })
+        ));
+        assert!(matches!(
+            parse(&["index", "check", "updates/v1", "--offline"]),
+            Ok(Command::Index {
+                command: IndexCommand::Check {
+                    offline: true,
+                    vm_smoke: false,
+                    ..
+                }
+            })
+        ));
+        for args in [
+            &["index", "check", "updates/v1", "--offline", "--vm-smoke"][..],
+            &[
+                "index",
+                "add",
+                "--channel",
+                "nightly",
+                "--tag",
+                "v1.0.0",
+                "--release-assets",
+                "a",
+            ],
+            &[
+                "index",
+                "add",
+                "--channel",
+                "beta",
+                "--tag",
+                "v1.0.0",
+                "--release-assets",
+                "a",
+                "--rollout",
+                "101",
+            ],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
         }
     }
 }

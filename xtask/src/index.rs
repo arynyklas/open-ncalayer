@@ -4,9 +4,12 @@
 //! - [`add`] appends a released version to an index, from the downloaded assets of its
 //!   GitHub release, with the next `seq` and a new validity. The result is unsigned: sign it
 //!   with `cargo xtask sign`.
+//! - [`refresh`] gives an index the next `seq` and a new validity without other changes, to
+//!   sign it again before it expires.
 //! - [`check`] is the gate before publishing: the format, the signature by a trusted key,
-//!   `seq` growth against the base branch and, with a [`Remote`], that every asset answers
-//!   `HEAD` with 200 and, behind a flag, that new versions passed `vm-smoke`.
+//!   asset URLs on the project's releases ([`check_asset_urls`]), `seq` growth against the
+//!   base branch and, with a [`Remote`], that every asset answers `HEAD` with 200 and,
+//!   behind a flag, that new versions passed `vm-smoke`.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -33,6 +36,9 @@ pub const INDEX_DIR: &str = "updates/v1";
 /// The repository whose releases hold the assets.
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
+/// The Velopack package id (`vpk pack --packId`), the first part of package file names.
+pub const PACKAGE_ID: &str = "OpenNCALayer";
+
 /// The `vm-smoke` commit status context (set on release tags by the lab agent).
 pub const VM_SMOKE: &str = "vm-smoke";
 
@@ -41,38 +47,132 @@ pub fn index_path(dir: &Path, channel: Channel) -> PathBuf {
     dir.join(format!("{channel}.json"))
 }
 
+/// The full package of `version` for `flavor`: `OpenNCALayer-<version>-<flavor>-full.nupkg`.
+pub fn full_package_name(version: &Version, flavor: &str) -> String {
+    format!("{PACKAGE_ID}-{version}-{flavor}-full.nupkg")
+}
+
+/// The delta package of `version` for `flavor`: `OpenNCALayer-<version>-<flavor>-delta.nupkg`.
+pub fn delta_package_name(version: &Version, flavor: &str) -> String {
+    format!("{PACKAGE_ID}-{version}-{flavor}-delta.nupkg")
+}
+
+/// The Chromium extension of `version`: `openncalayer-chromium-<version>.zip`.
+pub fn chromium_name(version: &Version) -> String {
+    format!("openncalayer-chromium-{version}.zip")
+}
+
+/// The Firefox extension of `version`: `openncalayer-firefox-<version>.xpi`.
+pub fn firefox_name(version: &Version) -> String {
+    format!("openncalayer-firefox-{version}.xpi")
+}
+
+/// The URL of the asset `name` of the release of `version`, tag `v<version>`.
+pub fn release_asset_url(version: &Version, name: &str) -> String {
+    format!("{REPOSITORY}/releases/download/v{version}/{name}")
+}
+
+/// The release notes of `version`.
+pub fn release_notes_url(version: &Version) -> String {
+    format!("{REPOSITORY}/releases/tag/v{version}")
+}
+
+/// Refuses an index whose files are not where the release workflow puts them: every URL
+/// must be exactly [`release_asset_url`] of the entry's own version and the file name of
+/// its kind (full or delta package of that flavor, Chromium or Firefox extension), and
+/// `notes_url` [`release_notes_url`]. So no host, repository, tag, query or fragment other
+/// than the project's releases gets signed or published. Flavors this version does not
+/// know are refused too.
+///
+/// # Errors
+///
+/// The first URL that differs.
+pub fn check_asset_urls(index: &Index) -> anyhow::Result<()> {
+    let expect = |what: &str, url: &str, expected: String| {
+        if url == expected {
+            Ok(())
+        } else {
+            bail!("{what}: {url:?} is not {expected:?}, the asset of the project's release")
+        }
+    };
+    for release in &index.core {
+        let v = &release.version;
+        if let Some(url) = &release.notes_url {
+            expect(&format!("core {v} notes_url"), url, release_notes_url(v))?;
+        }
+        for (flavor, packages) in &release.flavors {
+            if !Flavor::ALL.iter().any(|f| f.as_str() == flavor) {
+                bail!("core {v}: unknown flavor {flavor:?}");
+            }
+            expect(
+                &format!("core {v} {flavor}"),
+                &packages.full.url,
+                release_asset_url(v, &full_package_name(v, flavor)),
+            )?;
+            for (from, delta) in &packages.delta_from {
+                expect(
+                    &format!("core {v} {flavor} delta from {from}"),
+                    &delta.url,
+                    release_asset_url(v, &delta_package_name(v, flavor)),
+                )?;
+            }
+        }
+    }
+    if let Some(ext) = &index.extension {
+        let v = &ext.version;
+        expect(
+            "extension chromium_zip",
+            &ext.chromium_zip.url,
+            release_asset_url(v, &chromium_name(v)),
+        )?;
+        expect(
+            "extension firefox_xpi",
+            &ext.firefox_xpi.url,
+            release_asset_url(v, &firefox_name(v)),
+        )?;
+    }
+    Ok(())
+}
+
+/// An index written by [`add`] or [`refresh`].
+#[derive(Debug)]
+pub struct Written {
+    /// The index.
+    pub path: PathBuf,
+    /// Its new `seq`.
+    pub seq: u64,
+    /// A signature of the previous index, removed: it does not match the new one.
+    pub removed_signature: Option<PathBuf>,
+}
+
 /// What [`add`] did.
 #[derive(Debug)]
 pub struct Added {
     /// The index written.
-    pub path: PathBuf,
-    /// Its new `seq`.
-    pub seq: u64,
+    pub written: Written,
     /// The flavors of the new version.
     pub flavors: Vec<Flavor>,
     /// Whether the new version brought the browser extension.
     pub extension: bool,
-    /// A signature of the previous index, removed: it does not match the new one.
-    pub removed_signature: Option<PathBuf>,
 }
 
 /// Appends the version of `tag` (`v<semver>`) to the index of `channel` in `dir`, created if
 /// missing, from the release's downloaded assets in `assets`:
 ///
-/// - per flavor, `<id>-<version>-<flavor>-full.nupkg` (required for at least one flavor) and
-///   optionally `<id>-<version>-<flavor>-delta.nupkg`, whose base version is the newest
-///   older full package in Velopack's `releases.<flavor>.json` beside it;
-/// - optionally the extension, `openncalayer-chromium-<version>.zip` and
-///   `openncalayer-firefox-<version>.xpi` together.
+/// - per flavor, [`full_package_name`] (required for at least one flavor) and optionally
+///   [`delta_package_name`], whose base version is the newest older full package in
+///   Velopack's `releases.<flavor>.json` beside it;
+/// - optionally the extension, [`chromium_name`] and [`firefox_name`] together.
 ///
-/// sha256 and sizes come from the files; URLs point at the release `tag` of the
-/// repository. `seq` grows by one, `generated` is `now` and `expires` 30 days later
-/// ([`oncl_update::MAX_AGE`]). A signature of the old index is removed.
+/// sha256 and sizes come from the files; URLs are [`release_asset_url`]. `seq` grows by
+/// one, `generated` is `now` and `expires` 30 days later ([`oncl_update::MAX_AGE`]). A
+/// signature of the old index is removed.
 ///
 /// # Errors
 ///
-/// A tag that is not `v<semver>`, a version already listed, missing or ambiguous assets,
-/// an existing index that is invalid or of another channel, or a failure to read or write.
+/// A tag that is not `v<semver>`, a version already listed, missing or half-present assets,
+/// an existing index that is invalid, of another channel or with URLs
+/// [`check_asset_urls`] refuses, or a failure to read or write.
 pub fn add(
     dir: &Path,
     channel: Channel,
@@ -84,19 +184,14 @@ pub fn add(
     let version = tag
         .strip_prefix('v')
         .and_then(|v| Version::parse(v).ok())
+        .filter(|v| format!("v{v}") == tag)
         .with_context(|| format!("the tag {tag:?} is not v<semver>"))?;
     if rollout > 100 {
         bail!("rollout {rollout} is over 100");
     }
     let path = index_path(dir, channel);
     let mut index = if path.exists() {
-        let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        let index =
-            Index::from_json(&bytes).with_context(|| format!("reading {}", path.display()))?;
-        if index.channel != channel {
-            bail!("{} is of the {} channel", path.display(), index.channel);
-        }
-        index
+        read_index(&path, channel)?
     } else {
         Index {
             schema: oncl_update::index::SCHEMA,
@@ -119,41 +214,44 @@ pub fn add(
         flavors: Default::default(),
         rollout,
         revoked: false,
-        notes_url: Some(format!("{REPOSITORY}/releases/tag/{tag}")),
+        notes_url: Some(release_notes_url(&version)),
     };
     let mut flavors = Vec::new();
     for flavor in Flavor::ALL {
-        let Some(full) = find_one(&names, &format!("-{version}-{flavor}-full.nupkg"))? else {
+        let full = full_package_name(&version, flavor.as_str());
+        if !names.contains(&full) {
             continue;
-        };
+        }
         let mut packages = FlavorPackage {
-            full: package(assets, tag, full)?,
+            full: package(assets, &version, &full)?,
             delta_from: Default::default(),
         };
-        if let Some(delta) = find_one(&names, &format!("-{version}-{flavor}-delta.nupkg"))? {
+        let delta = delta_package_name(&version, flavor.as_str());
+        if names.contains(&delta) {
             let base = delta_base(assets, flavor, &version)?;
             packages
                 .delta_from
-                .insert(base, package(assets, tag, delta)?);
+                .insert(base, package(assets, &version, &delta)?);
         }
         release.flavors.insert(flavor.as_str().to_owned(), packages);
         flavors.push(flavor);
     }
     if flavors.is_empty() {
         bail!(
-            "{} has no <id>-{version}-<flavor>-full.nupkg",
-            assets.display()
+            "{} has no {}",
+            assets.display(),
+            full_package_name(&version, "<flavor>")
         );
     }
 
-    let chromium = format!("openncalayer-chromium-{version}.zip");
-    let firefox = format!("openncalayer-firefox-{version}.xpi");
+    let chromium = chromium_name(&version);
+    let firefox = firefox_name(&version);
     let extension = match (names.contains(&chromium), names.contains(&firefox)) {
         (true, true) => {
             index.extension = Some(Extension {
                 version: version.clone(),
-                chromium_zip: asset(assets, tag, &chromium)?,
-                firefox_xpi: asset(assets, tag, &firefox)?,
+                chromium_zip: asset(assets, &version, &chromium)?,
+                firefox_xpi: asset(assets, &version, &firefox)?,
             });
             true
         }
@@ -164,6 +262,42 @@ pub fn add(
 
     index.core.push(release);
     index.core.sort_by(|a, b| a.version.cmp(&b.version));
+    let written = write_next(&path, index, now)?;
+    Ok(Added {
+        written,
+        flavors,
+        extension,
+    })
+}
+
+/// Gives the index of `channel` in `dir` the next `seq`, `generated` = `now` and `expires`
+/// 30 days later, and nothing else, so it can be signed again before it expires. A
+/// signature of the old index is removed.
+///
+/// # Errors
+///
+/// A missing or invalid index, one of another channel or with URLs [`check_asset_urls`]
+/// refuses, or a failure to write.
+pub fn refresh(dir: &Path, channel: Channel, now: OffsetDateTime) -> anyhow::Result<Written> {
+    let path = index_path(dir, channel);
+    let index = read_index(&path, channel)?;
+    write_next(&path, index, now)
+}
+
+/// The index at `path`, which must be of `channel` and pass [`check_asset_urls`].
+fn read_index(path: &Path, channel: Channel) -> anyhow::Result<Index> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let index = Index::from_json(&bytes).with_context(|| format!("reading {}", path.display()))?;
+    if index.channel != channel {
+        bail!("{} is of the {} channel", path.display(), index.channel);
+    }
+    check_asset_urls(&index).with_context(|| format!("reading {}", path.display()))?;
+    Ok(index)
+}
+
+/// Writes `index` to `path` with the next `seq` and a validity from `now`, and removes the
+/// signature beside it.
+fn write_next(path: &Path, mut index: Index, now: OffsetDateTime) -> anyhow::Result<Written> {
     index.seq = index
         .seq
         .checked_add(1)
@@ -174,21 +308,22 @@ pub fn add(
     let mut json = serde_json::to_string_pretty(&index).context("serializing the index")?;
     json.push('\n');
     // What is written must read back as valid.
-    Index::from_json(json.as_bytes()).context("the new index is invalid")?;
-    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
-    let signature = signature_path(&path);
+    let reread = Index::from_json(json.as_bytes()).context("the new index is invalid")?;
+    check_asset_urls(&reread).context("the new index is invalid")?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    fs::write(path, json).with_context(|| format!("writing {}", path.display()))?;
+    let signature = signature_path(path);
     let removed_signature = if signature.exists() {
         fs::remove_file(&signature).with_context(|| format!("removing {}", signature.display()))?;
         Some(signature)
     } else {
         None
     };
-    Ok(Added {
-        path,
+    Ok(Written {
+        path: path.to_owned(),
         seq: index.seq,
-        flavors,
-        extension,
         removed_signature,
     })
 }
@@ -205,30 +340,6 @@ fn file_names(dir: &Path) -> anyhow::Result<BTreeSet<String>> {
         }
     }
     Ok(names)
-}
-
-/// The one name `<id><suffix>` with a non-empty `<id>`, if any.
-fn find_one<'a>(names: &'a BTreeSet<String>, suffix: &str) -> anyhow::Result<Option<&'a str>> {
-    let mut found = names
-        .iter()
-        .filter(|n| n.len() > suffix.len() && n.ends_with(suffix));
-    match (found.next(), found.next()) {
-        (None, _) => Ok(None),
-        (Some(name), None) => Ok(Some(name)),
-        (Some(a), Some(b)) => bail!("both {a} and {b} end with {suffix}"),
-    }
-}
-
-/// The URL of the asset `name` of the release `tag`.
-fn release_url(tag: &str, name: &str) -> anyhow::Result<String> {
-    let safe = |s: &str| {
-        s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._-+".contains(&b))
-    };
-    if !safe(tag) || !safe(name) {
-        bail!("{tag}/{name}: only ASCII letters, digits and ._-+ go into an asset URL");
-    }
-    Ok(format!("{REPOSITORY}/releases/download/{tag}/{name}"))
 }
 
 /// The sha256 and size of `path`.
@@ -250,19 +361,19 @@ fn sum(path: &Path) -> anyhow::Result<(Sha256, u64)> {
     Ok((Sha256(hasher.finalize().into()), size))
 }
 
-fn package(assets: &Path, tag: &str, name: &str) -> anyhow::Result<Package> {
+fn package(assets: &Path, version: &Version, name: &str) -> anyhow::Result<Package> {
     let (sha256, size) = sum(&assets.join(name))?;
     Ok(Package {
-        url: release_url(tag, name)?,
+        url: release_asset_url(version, name),
         sha256,
         size,
     })
 }
 
-fn asset(assets: &Path, tag: &str, name: &str) -> anyhow::Result<Asset> {
+fn asset(assets: &Path, version: &Version, name: &str) -> anyhow::Result<Asset> {
     let (sha256, _) = sum(&assets.join(name))?;
     Ok(Asset {
-        url: release_url(tag, name)?,
+        url: release_asset_url(version, name),
         sha256,
     })
 }
@@ -416,9 +527,9 @@ pub struct Checked {
 
 /// Checks the indexes in `dir` (at least one channel): each passes the client's
 /// verification (`oncl_update::verify`, signature by one of `options.keys` included) at
-/// `options.now`; against `options.base`, a changed index has a greater `seq` and no index
-/// is removed. With `remote`, every asset URL answers `HEAD` with 200 and, if
-/// `options.vm_smoke`, every new version passed `vm-smoke`.
+/// `options.now` and [`check_asset_urls`]; against `options.base`, a changed index has a
+/// greater `seq` and no index is removed. With `remote`, every asset URL answers `HEAD`
+/// with 200 and, if `options.vm_smoke`, every new version passed `vm-smoke`.
 ///
 /// # Errors
 ///
@@ -464,6 +575,7 @@ pub fn check(
         })?;
         let index = oncl_update::verify(&bytes, &sig, options.keys, channel, None, options.now)
             .with_context(|| format!("{} is refused", path.display()))?;
+        check_asset_urls(&index).with_context(|| format!("{} is refused", path.display()))?;
 
         let (base_seq, new_versions) = match &base {
             Some((base_bytes, base_index)) => {

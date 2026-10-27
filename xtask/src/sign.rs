@@ -7,9 +7,11 @@
 //!   trusted comment `channel=<channel>;seq=<seq>` the client checks
 //!   (`oncl_update::trusted_comment`).
 //!
-//! Passwords are read by the CLI without echo; these functions take them as arguments, so
-//! tests use keys of their own in temporary directories.
+//! Passwords are read by the CLI without echo and held in `Zeroizing`; these functions take
+//! them as arguments, so tests use keys of their own in temporary directories. minisign
+//! takes the password as a `String` of its own and does not wipe it, nor the decrypted key.
 
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
@@ -103,13 +105,14 @@ pub fn signature_path(index: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Signs the index at `index` with `key` into [`signature_path`]. Before writing, the
-/// signature is verified as the client would verify it at `now`, so an index that is
-/// invalid or already expired is not signed.
+/// Signs the index at `index` with `key` into [`signature_path`]. An index whose asset URLs
+/// are not the project's releases ([`crate::index::check_asset_urls`]) is not signed.
+/// Before writing, the signature is verified as the client would verify it at `now`, so an
+/// index that is invalid or already expired is not signed either.
 ///
 /// # Errors
 ///
-/// If the index cannot be read or is refused by the client's checks, or signing fails.
+/// If the index cannot be read or is refused by these checks, or signing fails.
 pub fn sign(index: &Path, key: &SecretKey, now: OffsetDateTime) -> anyhow::Result<PathBuf> {
     let bytes = fs::read(index).with_context(|| format!("reading {}", index.display()))?;
     if bytes.len() as u64 > MAX_INDEX_LEN {
@@ -120,6 +123,8 @@ pub fn sign(index: &Path, key: &SecretKey, now: OffsetDateTime) -> anyhow::Resul
     }
     let parsed =
         Index::from_json(&bytes).with_context(|| format!("reading {}", index.display()))?;
+    crate::index::check_asset_urls(&parsed)
+        .with_context(|| format!("not signing {}", index.display()))?;
     let comment = trusted_comment(parsed.channel, parsed.seq);
     let public = PublicKey::from_secret_key(key).context("the public key of the secret key")?;
     let signature = minisign::sign(
@@ -157,30 +162,74 @@ pub fn sign(index: &Path, key: &SecretKey, now: OffsetDateTime) -> anyhow::Resul
 /// Refuses `secret` if it lies in a git work tree and is not ignored there, so the secret
 /// key is never committed by accident. A path outside any work tree passes.
 ///
+/// The deepest existing directory of the path is resolved first (symlinks, junctions,
+/// `..`), so a link into a work tree is caught and `../keys` beside one is not mistaken for
+/// a path in it; git itself then says whether that directory is in a work tree and whether
+/// the rest of the path is ignored there. A tracked file counts as not ignored.
+///
 /// # Errors
 ///
-/// If the path is committable, or git cannot tell.
+/// If the path is committable, names a directory with `..` after its last existing
+/// directory, or git cannot tell.
 pub fn refuse_committable(secret: &Path) -> anyhow::Result<()> {
-    let secret =
+    let absolute =
         std::path::absolute(secret).with_context(|| format!("resolving {}", secret.display()))?;
-    let Some(top) = secret
-        .ancestors()
-        .skip(1)
-        .find(|dir| dir.join(".git").exists())
-    else {
-        return Ok(());
-    };
-    let relative = secret
-        .strip_prefix(top)
-        .expect("an ancestor is a prefix")
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy())
+    let no_name = || format!("{}: no file name", secret.display());
+    let mut rest: Vec<OsString> = vec![absolute.file_name().with_context(no_name)?.to_owned()];
+    let mut existing = absolute.parent().with_context(no_name)?;
+    loop {
+        match fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let name = existing.file_name().with_context(|| {
+                    format!(
+                        "{}: write the directory without `..` after its last existing part",
+                        secret.display()
+                    )
+                })?;
+                rest.push(name.to_owned());
+                existing = existing.parent().with_context(no_name)?;
+            }
+            Err(e) => return Err(e).with_context(|| format!("reading {}", existing.display())),
+        }
+    }
+    let dir = plain(
+        fs::canonicalize(existing).with_context(|| format!("resolving {}", existing.display()))?,
+    );
+    let relative = rest
+        .iter()
+        .rev()
+        .map(|c| c.to_string_lossy())
         .collect::<Vec<_>>()
         .join("/");
-    // Without `--no-index`, a tracked file counts as not ignored.
+
+    // `LC_ALL=C`: the message below is matched in English.
+    let inside = Command::new("git")
+        .env("LC_ALL", "C")
+        .arg("-C")
+        .arg(&dir)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .context("running git to check that the secret key would not be committed")?;
+    if !inside.status.success() {
+        let stderr = String::from_utf8_lossy(&inside.stderr);
+        if stderr.contains("not a git repository") {
+            return Ok(());
+        }
+        bail!(
+            "git rev-parse failed in {} ({}): {}; not writing the secret key there",
+            dir.display(),
+            inside.status,
+            stderr.trim()
+        );
+    }
+    if String::from_utf8_lossy(&inside.stdout).trim() != "true" {
+        // A `.git` directory or a bare repository: nothing there is committed.
+        return Ok(());
+    }
     let status = Command::new("git")
         .arg("-C")
-        .arg(top)
+        .arg(&dir)
         .args(["check-ignore", "--quiet", "--"])
         .arg(&relative)
         .status()
@@ -188,16 +237,32 @@ pub fn refuse_committable(secret: &Path) -> anyhow::Result<()> {
     match status.code() {
         Some(0) => Ok(()),
         Some(1) => bail!(
-            "{} is in the git work tree {} and not ignored: keep the secret key outside the \
+            "{} is in a git work tree and not ignored: keep the secret key outside the \
              repository (or in an ignored directory)",
             secret.display(),
-            top.display()
         ),
         _ => bail!(
             "git check-ignore failed in {} ({status}); not writing the secret key there",
-            top.display()
+            dir.display()
         ),
     }
+}
+
+/// `path` without the `\\?\` prefix `canonicalize` gives on Windows, which git may not
+/// read.
+fn plain(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(text) = path.to_str() {
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        if let Some(local) = text.strip_prefix(r"\\?\")
+            && local.as_bytes().get(1) == Some(&b':')
+        {
+            return PathBuf::from(local);
+        }
+    }
+    path
 }
 
 /// Writes a file that must not exist yet; `private` makes it readable by its owner only
