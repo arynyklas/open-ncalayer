@@ -375,8 +375,10 @@ cargo xtask licenses --check   # the About window's third-party licences are cur
 
 `web/demo/vendor/ncalayer-client.js` is `package/ncalayer-client.js` from the npm package `ncalayer-js-client@1.6.1`, unmodified (MIT, sha256 `bdf2015c3e422eed70ccf38eef3246af67a0d38639e6b70fe6b8655a2fa03489`). The `demo_assets_served` test checks the sha256 of the file the server sends. The server sends the client's license next to it: `/demo/vendor/LICENSE`.
 
+`vendor/i-slint-backend-winit` is the crates.io package `i-slint-backend-winit` 1.18.1 (Slint's winit backend), modified, in the build through `[patch.crates-io]`. One place changed: the default font size on Windows (`windows_message_font_height` in `lib.rs`, called from `bind_context`). `SystemParametersInfoForDpi` (Windows 10 1607 and later) is looked up with `GetProcAddress`; without it, `SystemParametersInfoW(SPI_GETNONCLIENTMETRICS)` is called and the height is scaled from the system DPI to 96. `Cargo.toml` adds the `Win32_System_LibraryLoader` feature of `windows`. So the Windows 7 builds do not import a function Windows 7 lacks, and Windows 10/11 make the same call as before. Slint's royalty-free license 2.0 allows modifying the software and distributing it modified as part of an application (sections 1–2); the license notices in the files are kept. The `locked_slint_winit_backend_is_the_patched_copy` test fails if a Slint upgrade leaves the patch unused; on an upgrade, replace the copy with the new package and carry the change over.
+
 ## License
 
 © 2026 Aryn Yklas.
 
-[Apache-2.0](LICENSE); see also [NOTICE](NOTICE). `web/demo/vendor/ncalayer-client.js` is MIT, see [`web/demo/vendor/LICENSE`](web/demo/vendor/LICENSE).
+[Apache-2.0](LICENSE); see also [NOTICE](NOTICE). `web/demo/vendor/ncalayer-client.js` is MIT, see [`web/demo/vendor/LICENSE`](web/demo/vendor/LICENSE). `vendor/i-slint-backend-winit` is a modified copy of Slint's winit backend, used under LicenseRef-Slint-Royalty-free-2.0, see [`vendor/i-slint-backend-winit/LICENSES`](vendor/i-slint-backend-winit/LICENSES).

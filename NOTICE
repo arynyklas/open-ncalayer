@@ -14,3 +14,11 @@ repository.
 web/demo/vendor/ncalayer-client.js is ncalayer-js-client 1.6.1
 (https://github.com/sigex-kz/ncalayer-js-client), Copyright (c) 2020 SIGEX,
 distributed under the MIT License (see web/demo/vendor/LICENSE).
+
+vendor/i-slint-backend-winit is i-slint-backend-winit 1.18.1 from crates.io, part of
+Slint (https://slint.dev), Copyright SixtyFPS GmbH, used under the Slint Royalty-free
+Desktop, Mobile, and Web Applications License 2.0 (see
+vendor/i-slint-backend-winit/LICENSES). It is modified: on Windows, lib.rs looks up
+SystemParametersInfoForDpi at run time and falls back to SystemParametersInfoW instead
+of importing it, and Cargo.toml enables the Win32_System_LibraryLoader feature of the
+windows crate.

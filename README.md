@@ -379,8 +379,10 @@ cargo xtask licenses --check   # сторонние лицензии окна «
 
 `web/demo/vendor/ncalayer-client.js` — файл `package/ncalayer-client.js` из npm-пакета `ncalayer-js-client@1.6.1` без изменений (MIT, sha256 `bdf2015c3e422eed70ccf38eef3246af67a0d38639e6b70fe6b8655a2fa03489`). Тест `demo_assets_served` сверяет sha256 файла, который отдаёт сервер. Лицензию клиента сервер отдаёт рядом с ним: `/demo/vendor/LICENSE`.
 
+`vendor/i-slint-backend-winit` — пакет `i-slint-backend-winit` 1.18.1 с crates.io (бэкенд winit из Slint) с изменениями, в сборке через `[patch.crates-io]`. Изменено одно место — размер шрифта по умолчанию на Windows (`windows_message_font_height` в `lib.rs`, его вызывает `bind_context`). `SystemParametersInfoForDpi` (Windows 10 1607 и новее) ищется через `GetProcAddress`; без неё вызывается `SystemParametersInfoW(SPI_GETNONCLIENTMETRICS)`, и высота пересчитывается из системного DPI в 96. В `Cargo.toml` добавлена фича `Win32_System_LibraryLoader` крейта `windows`. Так Win7-сборка не импортирует функцию, которой нет в Windows 7, а Windows 10/11 получают тот же вызов, что и раньше. Лицензия Slint Royalty-free 2.0 разрешает изменять программу и распространять изменённую копию в составе приложения (разделы 1–2); уведомления о лицензии в файлах сохранены. Тест `locked_slint_winit_backend_is_the_patched_copy` падает, если обновление Slint оставит патч неиспользованным; при обновлении копию заменяют новым пакетом и переносят правку.
+
 ## Лицензия
 
 © 2026 Aryn Yklas.
 
-[Apache-2.0](LICENSE), см. также [NOTICE](NOTICE). `web/demo/vendor/ncalayer-client.js` — MIT, см. [`web/demo/vendor/LICENSE`](web/demo/vendor/LICENSE).
+[Apache-2.0](LICENSE), см. также [NOTICE](NOTICE). `web/demo/vendor/ncalayer-client.js` — MIT, см. [`web/demo/vendor/LICENSE`](web/demo/vendor/LICENSE). `vendor/i-slint-backend-winit` — изменённая копия бэкенда winit из Slint, используется по LicenseRef-Slint-Royalty-free-2.0, см. [`vendor/i-slint-backend-winit/LICENSES`](vendor/i-slint-backend-winit/LICENSES).

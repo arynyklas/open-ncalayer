@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*", "xtask"]
+# Third-party crates patched below: built as dependencies, not linted or tested as ours.
+exclude = ["vendor"]
 resolver = "3"
 
 [workspace.package]
@@ -107,6 +109,12 @@ zbus = { version = "5.19.0", default-features = false, features = ["async-io", "
 zeroize = "1.9.1"
 # Only in xtask (`ext build`): the extension zip/xpi, deflate through pure-Rust zlib-rs.
 zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[patch.crates-io]
+# The crates.io package with one change, described in the README and NOTICE:
+# `SystemParametersInfoForDpi` (Windows 10 1607+) is looked up at run time instead of
+# imported, so the Windows 7 builds start. The version must stay the one `slint` locks.
+i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
 
 # RSA key generation (`oncl-pki::keygen` and its tests, `cargo xtask gen-fixtures` and the
 # xtask tests) is very slow unoptimized.
