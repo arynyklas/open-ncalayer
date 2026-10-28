@@ -104,6 +104,22 @@
   - без `--offline` каждый URL пакета и расширения отвечает на `HEAD` кодом 200;
   - с `--vm-smoke` на теге каждой новой версии должен стоять статус `vm-smoke = success`. Флаг включается, когда заработает лаборатория.
 
+## Публикация
+
+Тег `v<версия>` запускает `.github/workflows/release.yml`:
+
+1. Для каждого флейвора собираются архив и пакеты Velopack: `vpk pack --packId OpenNCALayer --channel <флейвор>`. Дельта строится от последнего пакета флейвора в релизах (`vpk download github`): для релиза — от последнего релиза, для пререлиза — от последней версии любого вида. В релиз попадают `OpenNCALayer-<версия>-<флейвор>-full.nupkg`, `-delta.nupkg` (если есть предыдущий пакет), накопительный `releases.<флейвор>.json` и на Windows `RELEASES-<флейвор>`. Установщики (`Setup.exe`, `.pkg`) пока не собираются.
+2. Рядом ложатся расширение, SBOM `openncalayer-<версия>.cdx.json` (CycloneDX, `cargo cyclonedx`) и `SHA256SUMS`. На каждый файл релиза выпускается аттестация происхождения сборки (`actions/attest-build-provenance`), её проверяет `gh attestation verify <файл> --repo arynyklas/open-ncalayer`.
+3. Подпись кода идёт, только если заданы её секреты, иначе шаг пропускается с уведомлением в журнале. Authenticode через SignPath: секрет `SIGNPATH_API_TOKEN`, переменные `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_SIGNING_POLICY_SLUG`; подписываются `openncalayer.exe` и `nmhost.exe` до упаковки. Подпись и нотаризация Apple: секреты `APPLE_CERTIFICATE_P12` (base64), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`; подписывает и нотаризует пакет macOS сам `vpk pack`.
+4. После публикации релиза job `index` скачивает его ассеты, выполняет `cargo xtask index add` и открывает PR в `main` с неподписанным индексом: пререлиз идёт в `beta`, релиз без суффикса — в `stable`.
+
+Мейнтейнер на ветке PR при необходимости меняет `rollout`, подписывает индекс (`cargo xtask sign`), коммитит индекс с `.minisig` и пушит. PR, открытый workflow, сам проверки не запускает, поэтому `index-check.yml` (`cargo xtask index check updates/v1 --base origin/main`) срабатывает на этот пуш. После слияния `pages.yml` ещё раз проверяет индексы и публикует `updates/` на GitHub Pages под `/updates/`. Весь сайт Pages — один артефакт: другие страницы сайта добавятся в тот же артефакт рядом с `updates/`.
+
+Настройки репозитория меняет только мейнтейнер:
+
+- Pages: Settings → Pages → Source: GitHub Actions;
+- PR от workflow: Settings → Actions → General → Allow GitHub Actions to create and approve pull requests.
+
 ## Проверка на клиенте
 
 `oncl_update::verify` принимает индекс, только если выполнено всё:

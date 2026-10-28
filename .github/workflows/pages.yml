@@ -1,0 +1,55 @@
+name: Pages
+
+# GitHub Pages of the project: the update indexes `updates/` under `/updates/`
+# (`/updates/v1/<channel>.json`). Pages is one artifact for the whole site: later pages of
+# the site go into `_site` beside `updates/`. Pages must be enabled with "GitHub Actions"
+# as the source in the repository settings.
+on:
+  push:
+    branches: [main]
+    paths: ["updates/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      # Nothing unsigned, expired or pointing elsewhere is published, even if pushed past the
+      # pull request check. `seq` growth is checked on the pull request (`index-check.yml`).
+      - name: Check the indexes
+        run: cargo xtask index check updates/v1 --base HEAD
+      - name: Site
+        run: |
+          mkdir _site
+          cp -R updates _site/updates
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

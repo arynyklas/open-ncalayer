@@ -55,20 +55,22 @@ impl Balloons {
     }
 
     pub(super) fn show(&self, notification: Notification) -> Result<(), TrayError> {
-        let mut data = NOTIFYICONDATAW {
-            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: self.hwnd,
-            uFlags: NIF_INFO,
-            dwInfoFlags: NIIF_INFO | NIIF_RESPECT_QUIET_TIME,
-            ..Default::default()
-        };
         let body = match &notification.action {
             // A balloon has no buttons: the whole balloon is the button.
             Some(action) => format!("{}\n{}", notification.body, action.label),
             None => notification.body.clone(),
         };
-        copy_wide(&mut data.szInfo, &body);
-        copy_wide(&mut data.szInfoTitle, &notification.title);
+        // Fields by value: NOTIFYICONDATAW is packed on 32-bit Windows, which rules out
+        // references to its fields.
+        let mut data = NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: self.hwnd,
+            uFlags: NIF_INFO,
+            dwInfoFlags: NIIF_INFO | NIIF_RESPECT_QUIET_TIME,
+            szInfo: wide(&body),
+            szInfoTitle: wide(&notification.title),
+            ..Default::default()
+        };
         let ids = self.id.get().map_or(ICON_IDS, |id| id..=id);
         for id in ids {
             data.uID = id;
@@ -85,19 +87,20 @@ impl Balloons {
     }
 }
 
-/// `text` into a NUL-terminated UTF-16 field, cut to fit (never within a surrogate pair).
-fn copy_wide(field: &mut [u16], text: &str) {
+/// `text` as a NUL-terminated UTF-16 field, cut to fit (never within a surrogate pair).
+fn wide<const N: usize>(text: &str) -> [u16; N] {
+    let mut field = [0; N];
     let mut len = 0;
     for c in text.chars() {
         let mut units = [0; 2];
         let units = c.encode_utf16(&mut units);
-        if len + units.len() >= field.len() {
+        if len + units.len() >= N {
             break;
         }
         field[len..len + units.len()].copy_from_slice(units);
         len += units.len();
     }
-    field[len] = 0;
+    field
 }
 
 /// Sees balloon clicks, then hands every message to `tray-icon`'s procedure.
@@ -147,14 +150,13 @@ mod tests {
 
     #[test]
     fn wide_fields_are_cut_and_terminated() {
-        let mut field = [0xffffu16; 6];
-        copy_wide(&mut field, "ab");
-        assert_eq!(field[..3], [u16::from(b'a'), u16::from(b'b'), 0]);
-        copy_wide(&mut field, "abcdefgh");
+        let field: [u16; 6] = wide("ab");
+        assert_eq!(field, [u16::from(b'a'), u16::from(b'b'), 0, 0, 0, 0]);
+        let field: [u16; 6] = wide("abcdefgh");
         assert_eq!(field[5], 0);
         assert_eq!(String::from_utf16(&field[..5]).unwrap(), "abcde");
         // A surrogate pair that does not fit is left out whole.
-        copy_wide(&mut field, "abcd😀");
+        let field: [u16; 6] = wide("abcd😀");
         assert_eq!(String::from_utf16(&field[..4]).unwrap(), "abcd");
         assert_eq!(field[4], 0);
     }
