@@ -1,10 +1,23 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 import { bridgeEnd, bridgeLink, loadScript, pageWindow, tick, until } from './env.mjs';
 
 const installShim = loadScript('shim.js');
 const GREETING = '{"result":{"version":"1.4"}}';
+
+/** The ncalayer-js-client the demo page vendors, over the page's (shimmed) `WebSocket`. */
+function vendoredClient(window) {
+  const url = new URL('../../web/demo/vendor/ncalayer-client.js', import.meta.url);
+  const exports = {};
+  vm.runInThisContext(`(function (exports, WebSocket, window) {${readFileSync(url, 'utf8')}\n})`, {
+    filename: fileURLToPath(url),
+  })(exports, window.WebSocket, window);
+  return exports;
+}
 
 /**
  * Where the shim runs: in the page's own world (Chromium, Firefox 128+), or as a Firefox
@@ -383,6 +396,10 @@ for (const { name, xray } of MODES) {
       assert.equal(env.nativeSockets[1], later);
       env.nativeSockets[0].serverOpen();
       assert.equal(pending.readyState, 1);
+      // The accepted socket is reset from a task, not inside the page's `new WebSocket`.
+      assert.deepEqual(acceptedEvents, []);
+      assert.equal(accepted.readyState, 2);
+      await tick();
       assert.deepEqual(acceptedEvents, [
         ['error', 3],
         ['close', 1006, '', false, 3],
@@ -400,26 +417,50 @@ for (const { name, xray } of MODES) {
       const env = setup();
       const { ws: first } = openSocket(env);
       const { ws: second } = openSocket(env);
+      const firstEvents = record(first);
       const secondEvents = record(second);
       // The page reacts to the first reset by closing the second socket.
       first.addEventListener('error', () => second.close());
       env.bridge.answerReady = false;
       new env.window.WebSocket('wss://127.0.0.1:13579/');
       await tick();
-      assert.deepEqual(secondEvents, [['close', 1000, '', true, 3]]);
+      for (const events of [firstEvents, secondEvents]) {
+        assert.deepEqual(events, [
+          ['error', 3],
+          ['close', 1006, '', false, 3],
+        ]);
+      }
     });
 
-    test('an open socket that sends after the bridge went away is reset, not left hanging', () => {
+    test('an open socket that sends after the bridge went away is reset from a task', async () => {
       const env = setup();
       const { ws } = openSocket(env);
       const events = record(ws);
       env.bridge.answerReady = false;
       ws.send('lost');
+      // Like the browser's own socket: no events from inside `send()`.
+      assert.deepEqual(events, []);
+      assert.equal(ws.readyState, 2);
+      ws.send('dropped');
+      ws.close();
+      await tick();
       assert.deepEqual(events, [
         ['error', 3],
         ['close', 1006, '', false, 3],
       ]);
-      assert.equal(env.frames().filter((f) => f.t === 'msg').length, 0);
+      assert.equal(env.frames().filter((f) => f.t === 'msg' || f.t === 'close').length, 0);
+    });
+
+    test('the vendored ncalayer-js-client settles a request sent after the bridge went away', async () => {
+      const env = setup();
+      const { ws } = openSocket(env);
+      const { NCALayerClient, NCALayerError } = vendoredClient(env.window);
+      const client = new NCALayerClient();
+      // As after `connect()`: the client sends a request, then sets that request's handlers.
+      client.wsConnection = ws;
+      env.bridge.answerReady = false;
+      await assert.rejects(client.getActiveTokens(), NCALayerError);
+      assert.equal(ws.readyState, 3);
     });
   });
 }

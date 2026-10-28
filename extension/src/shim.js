@@ -294,7 +294,8 @@
         }
         // Like the browser: data sent after `close()` is silently dropped.
         if (this.#state !== OPEN) return;
-        // With the bridge gone this socket is reset (error, close 1006) instead of dropping data.
+        // With the bridge gone this socket is reset (error, close 1006, from a task) instead
+        // of dropping the data.
         if (!bridgeAlive()) return;
         const sid = this.#sid;
         switch (binaryKind(data)) {
@@ -397,37 +398,51 @@
             this.#fire(new MessageEvent('message', dict({ data: frame.data, origin: this.#origin })));
             break;
           case 'close':
-            this.#reset();
+            this.#reset(false);
             break;
           case 'fallback':
-            if (this.#state === CONNECTING) this.#fallback();
+            if (this.#state === CONNECTING) this.#fallback(false);
             break;
           case 'gone':
-            if (this.#state === CONNECTING) this.#fallback();
-            else this.#reset();
+            // Found inside a page call (`send`, `new WebSocket`, `fetch`): see `#reset`.
+            if (this.#state === CONNECTING) this.#fallback(true);
+            else this.#reset(true);
             break;
         }
       }
 
-      /** The daemon or the extension dropped the socket: error, then close 1006. */
-      #reset() {
+      /**
+       * The daemon or the extension dropped the socket: error, then close 1006. With `later`
+       * the events come from a task, as the browser's own do: the drop was found inside a page
+       * call, and pages often set their handlers right after `send()` returns. Until then the
+       * socket is CLOSING, so `send` and `close` do nothing.
+       */
+      #reset(later) {
         sockets.delete(this.#sid);
-        if (this.#state === CLOSED) return;
-        this.#state = CLOSED;
+        if (this.#state === CLOSING || this.#state === CLOSED) return;
         this.#outbox.length = 0;
-        this.#fire(new Event('error'));
-        this.#fire(new CloseEvent('close', dict({ code: 1006, reason: '', wasClean: false })));
+        const fire = () => {
+          this.#state = CLOSED;
+          this.#fire(new Event('error'));
+          this.#fire(new CloseEvent('close', dict({ code: 1006, reason: '', wasClean: false })));
+        };
+        if (!later) return fire();
+        this.#state = CLOSING;
+        page.setTimeout(expose(fire), 0);
       }
 
-      /** The extension cannot serve this socket: hand it to the browser's own WebSocket. */
-      #fallback() {
+      /**
+       * The extension cannot serve this socket: hand it to the browser's own WebSocket.
+       * `later`: as in `#reset`, for the case the native socket cannot be made.
+       */
+      #fallback(later) {
         sockets.delete(this.#sid);
         let native;
         try {
           native = new NativeWebSocket(...this.#nativeArgs);
         } catch {
           // E.g. invalid `protocols`, which the native constructor would have thrown on.
-          this.#reset();
+          this.#reset(later);
           return;
         }
         this.#native = native;
