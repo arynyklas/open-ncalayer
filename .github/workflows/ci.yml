@@ -37,7 +37,7 @@ jobs:
           sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev openssl
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
@@ -57,7 +57,7 @@ jobs:
           sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev openssl
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Every platform's packages: the licences test (`committed_licenses_are_fresh`) reads
       # their licence files offline.
       - name: Fetch packages
@@ -79,7 +79,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
   extension:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
@@ -97,7 +97,7 @@ jobs:
       - run: node --test "extension/test/*.test.mjs"
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo xtask ext build
       # Unlisted AMO signing (roadmap D6). Skipped without the secrets; release tags (`v*`)
       # only, because AMO refuses a version it has already signed.
@@ -130,7 +130,7 @@ jobs:
           sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev openssl
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --release -p openncalayer --features e2e-prompter -p oncl-nmhost
       - run: cargo xtask ext build
       - run: cargo xtask ext-e2e --download
@@ -157,7 +157,7 @@ jobs:
         run: |
           rustup toolchain install
           rustup toolchain install nightly-2026-08-12 --profile minimal --component rust-src
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # The job is expected to fail in P1; still keep the build cache.
           cache-on-failure: true
@@ -187,7 +187,7 @@ jobs:
           sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev openssl
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Fetch fixtures
         run: cargo xtask fetch-fixtures
       - name: Live tests

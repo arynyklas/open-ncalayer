@@ -9,9 +9,13 @@ name: Release
 #
 # Code signing runs only with its secrets, otherwise it is skipped with a notice:
 # Authenticode through SignPath (secret SIGNPATH_API_TOKEN, variables
-# SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG) and Apple
-# signing and notarization (secrets APPLE_CERTIFICATE_P12 (base64), APPLE_CERTIFICATE_PASSWORD,
-# APPLE_SIGN_IDENTITY, APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD).
+# SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG) signs the
+# Windows binaries of both the archive and the package; Apple signing and notarization
+# (secrets APPLE_CERTIFICATE_P12 (base64), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGN_IDENTITY,
+# APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD) covers the macOS Velopack package only: the
+# macOS archive stays unsigned.
+#
+# Third-party actions are pinned to a commit, with the release tag in a comment.
 on:
   push:
     tags: ["v*"]
@@ -84,6 +88,12 @@ jobs:
           #   runtime: win-x86
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    # `actions: read` for SignPath: its `github-token` reads the job details and downloads
+    # the unsigned artifact, "Requires the `action:read` and `content:read` permissions"
+    # (docs.signpath.io/trusted-build-systems/github, input `github-token`, action v3).
+    permissions:
+      contents: read
+      actions: read
     env:
       VERSION: ${{ needs.version.outputs.version }}
       PRERELEASE: ${{ needs.version.outputs.prerelease }}
@@ -119,7 +129,7 @@ jobs:
           if-no-files-found: error
       - name: Sign the Windows binaries (Authenticode, SignPath)
         if: runner.os == 'Windows' && env.SIGNPATH == 'true'
-        uses: signpath/github-action-submit-signing-request@v3
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
@@ -160,26 +170,42 @@ jobs:
 
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 8.0.427
       - name: Install the Velopack CLI
         shell: bash
         run: |
           dotnet tool install --tool-path "$RUNNER_TEMP/vpk" vpk --version "$VPK_VERSION"
           echo "$RUNNER_TEMP/vpk" >> "$GITHUB_PATH"
       # The newest earlier package of the flavor, which the delta is made from: of a stable
-      # release for a stable one, of any release for a pre-release.
+      # release for a stable one, of any release for a pre-release. Only when no such
+      # earlier release carries the flavor's feed is there no delta; any other failure of the
+      # download fails the job.
       - name: Download the previous package
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          VPK_TOKEN: ${{ github.token }}
         run: |
+          earlier="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[]
+            | select(.draft | not)
+            | select(env.PRERELEASE == "true" or (.prerelease | not))
+            | select(.tag_name != env.GITHUB_REF_NAME)
+            | select(any(.assets[]; .name == "releases.\(env.FLAVOR).json"))
+            | .tag_name')"
+          if [ -z "$earlier" ]; then
+            echo "::notice::no earlier release has a $FLAVOR package: no delta"
+            exit 0
+          fi
           pre=()
           if [ "$PRERELEASE" = true ]; then
             pre=(--pre)
           fi
           vpk --skip-updates download github --repoUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
-            --channel "$FLAVOR" --token "$GH_TOKEN" --outputDir packages "${pre[@]}" \
-            || echo "::notice::no earlier $FLAVOR package: no delta"
+            --channel "$FLAVOR" --outputDir packages "${pre[@]}"
+          if ! compgen -G "packages/OpenNCALayer-*-$FLAVOR-full.nupkg" > /dev/null; then
+            echo "::error::earlier releases with a $FLAVOR package exist (${earlier//$'\n'/ }), but none was downloaded"
+            exit 1
+          fi
       - name: Apple signing keychain and notary profile
         if: runner.os == 'macOS' && env.APPLE_SIGNING == 'true'
         env:
@@ -219,13 +245,19 @@ jobs:
         shell: bash
         run: |
           mkdir pack
-          options=(--noInst)
           case "$RUNNER_OS" in
             Windows)
               exe=openncalayer.exe
               cp "$BIN/openncalayer.exe" "$BIN/nmhost.exe" pack/
-              # The tray icon as a one-image .ico (a PNG entry, Windows Vista and later).
+              # The tray icon as a one-image .ico (a PNG entry, Windows Vista and later). The
+              # directory entry below says 32x32, 32 bpp: the PNG must be exactly that.
               png=crates/oncl-ui/assets/tray-ok.png
+              # IHDR: width, height (big-endian 32-bit), bit depth 8, colour type 6 (RGBA).
+              ihdr="$(od -An -tu1 -j16 -N10 "$png" | tr -s ' ' | sed 's/^ //')"
+              if [ "$ihdr" != "0 0 0 32 0 0 0 32 8 6" ]; then
+                echo "::error::$png is not a 32x32 RGBA PNG (IHDR $ihdr): fix the .ico header"
+                exit 1
+              fi
               # A 32-bit little-endian number.
               le32() {
                 for shift in 0 8 16 24; do
@@ -238,16 +270,19 @@ jobs:
                 le32 22
                 cat "$png"
               } > "$RUNNER_TEMP/openncalayer.ico"
-              options+=(--icon "$RUNNER_TEMP/openncalayer.ico")
+              options=(--noInst --icon "$RUNNER_TEMP/openncalayer.ico")
               ;;
             Linux)
               exe=openncalayer
               cp "$BIN/openncalayer" "$BIN/nmhost" pack/
+              # The Linux pack makes only the AppImage, and has no --noInst.
               options=(--icon crates/oncl-ui/assets/tray-ok.png)
               ;;
             macOS)
               exe=openncalayer
               cp "$BIN/openncalayer" "$BIN/nmhost" pack/
+              # vpk takes only an .icns icon on macOS, and there is none yet.
+              options=(--noInst)
               ;;
           esac
           cp README.md README.en.md LICENSE NOTICE pack/
@@ -374,6 +409,8 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: main
+          # The build below runs build scripts; create-pull-request brings its own token.
+          persist-credentials: false
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - name: Download the release
@@ -395,7 +432,7 @@ jobs:
             --release-assets "$RUNNER_TEMP/assets"
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - name: Open the index pull request
-        uses: peter-evans/create-pull-request@v8
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           # The index and the removal of its stale signature.
           add-paths: updates/v1
