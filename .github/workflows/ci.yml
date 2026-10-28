@@ -302,7 +302,7 @@ jobs:
               exit 1
             fi
           done
-          for exe in $(find unpacked -type f \( -name openncalayer -o -name nmhost \)); do
+          while IFS= read -r exe; do
             found=$((found + 1))
             archs="$(lipo -archs "$exe")"
             echo "$exe: $archs"
@@ -310,7 +310,7 @@ jobs:
               *" x86_64 "*" arm64 "*|*" arm64 "*" x86_64 "*) ;;
               *) echo "::error::$exe in the package is not universal: $archs"; exit 1 ;;
             esac
-          done
+          done < <(find unpacked -type f \( -name openncalayer -o -name nmhost \))
           echo "$found binaries in the package checked"
           [ "$found" -ge 2 ]
       - uses: actions/upload-artifact@v4
