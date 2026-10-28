@@ -315,6 +315,7 @@ impl Sandbox {
             // A run in progress at the last start: one crash already counted.
             crashes: u32::from(started.is_some()),
             rollback,
+            attempts: u32::from(rollback),
         });
         state.save(self.dir.path()).unwrap();
     }
@@ -366,7 +367,7 @@ fn an_update_is_found_downloaded_and_applied_once_the_daemon_is_idle() {
     // is to be applied: it waits again. Then new requests are held back, and it applies.
     let plan = checked.plan.unwrap();
     assert_eq!((plan.downgrade, plan.rollback), (false, false));
-    assert!(u.install(&plan, true));
+    assert_eq!(u.install(&plan, true), Installed::Applied);
     assert_eq!(
         s.events(),
         [
@@ -400,7 +401,7 @@ fn an_update_no_longer_offered_after_the_wait_is_not_applied() {
         4,
         vec![release("0.1.0", 100, false), release("0.2.0", 100, true)],
     );
-    assert!(!u.install(&plan, true));
+    assert_ne!(u.install(&plan, true), Installed::Applied);
     assert!(!s.events().iter().any(|e| matches!(e, Event::Apply(_))));
     assert_eq!(s.state().pending_health, None);
 }
@@ -631,7 +632,7 @@ fn a_version_whose_servers_stop_is_rolled_back() {
 }
 
 #[test]
-fn a_rollback_that_did_not_apply_is_tried_again() {
+fn a_rollback_the_installer_refuses_is_given_up() {
     let s = Sandbox::new();
     s.publish(4, two_releases());
     s.pending("0.1.0", "0.2.0", Some(TimeDuration::minutes(2)), false);
@@ -645,17 +646,58 @@ fn a_rollback_that_did_not_apply_is_tried_again() {
     let Startup::RollBack { failed, to } = failing.startup() else {
         panic!("no rollback");
     };
-    assert_eq!(failing.roll_back_now(&failed, &to), RollBack::Retry);
-    // The bad version starts again: it goes back again.
-    let again = s.updater("0.2.0", 0);
+    assert_eq!(failing.roll_back_now(&failed, &to), RollBack::GaveUp);
+    let state = s.state();
+    assert_eq!(state.pending_health, None);
+    assert!(state.bad.contains(&v("0.2.0")));
+    failing.tell_deferred();
+    assert!(s.events().contains(&Event::Notice(Notice::RollbackFailed {
+        failed: v("0.2.0"),
+        version: v("0.1.0"),
+    })));
+    // The bad version starts normally and serves.
+    assert_eq!(s.updater("0.2.0", 0).startup(), Startup::Normal);
+}
+
+#[test]
+fn a_rollback_the_installer_does_not_finish_is_tried_three_times() {
+    let s = Sandbox::new();
+    s.publish(4, two_releases());
+    s.pending("0.1.0", "0.2.0", Some(TimeDuration::minutes(2)), false);
+    // Each time the installer takes the rollback, fails after the exit and starts the bad
+    // version again.
+    for attempt in 1..=ROLLBACK_ATTEMPTS {
+        let bad = s.updater("0.2.0", 0);
+        let Startup::RollBack { failed, to } = bad.startup() else {
+            panic!("no rollback at attempt {attempt}");
+        };
+        assert_eq!(bad.roll_back_now(&failed, &to), RollBack::Applied);
+        assert_eq!(s.state().pending_health.unwrap().attempts, attempt);
+    }
     assert_eq!(
-        again.startup(),
-        Startup::RollBack {
-            failed: v("0.2.0"),
-            to: v("0.1.0"),
-        }
+        s.events()
+            .iter()
+            .filter(|e| matches!(e, Event::Apply(_)))
+            .count(),
+        3
     );
-    assert_eq!(again.roll_back_now(&failed, &to), RollBack::Applied);
+    // No fourth attempt: the bad version starts normally, and the user is told once.
+    let bad = s.updater("0.2.0", 0);
+    assert_eq!(bad.startup(), Startup::Normal);
+    let state = s.state();
+    assert_eq!(state.pending_health, None);
+    assert!(state.bad.contains(&v("0.2.0")));
+    assert_eq!(s.events(), []);
+    bad.tell_deferred();
+    bad.tell_deferred();
+    assert_eq!(
+        s.events(),
+        [Event::Notice(Notice::RollbackFailed {
+            failed: v("0.2.0"),
+            version: v("0.1.0"),
+        })]
+    );
+    assert_eq!(s.updater("0.2.0", 0).startup(), Startup::Normal);
 }
 
 #[test]
@@ -682,6 +724,8 @@ fn a_rollback_the_index_has_no_package_for_is_given_up_and_the_checks_go_on() {
         version: v("0.1.0"),
     };
     assert_eq!(*lock(&u.deferred), std::slice::from_ref(&notice));
+    u.tell_deferred();
+    assert_eq!(s.events(), [Event::Notice(notice.clone())]);
     // No rollback any more at the next start; the next check offers the fix.
     assert_eq!(s.updater("0.2.0", 0).startup(), Startup::Normal);
     assert_eq!(u.check(false, None).status, available("0.3.0", true));
@@ -745,6 +789,7 @@ fn a_check_does_not_undo_what_other_threads_write_meanwhile() {
             started: None,
             crashes: 0,
             rollback: false,
+            attempts: 0,
         });
         state.save(&dir).unwrap();
     }));
@@ -846,7 +891,7 @@ fn a_revoked_current_version_moves_to_the_newest_one_not_revoked() {
     assert_eq!(checked.status, available("0.1.0", true));
     let plan = checked.plan.unwrap();
     assert!(plan.downgrade && !plan.rollback);
-    assert!(u.install(&plan, true));
+    assert_eq!(u.install(&plan, true), Installed::Applied);
     assert_eq!(s.events()[1], Event::Download(v("0.1.0"), true));
 }
 
@@ -878,21 +923,26 @@ fn with_updates_off_only_a_check_now_looks_and_nothing_is_installed() {
     assert!(lock(&u.queue).plan.is_none());
     assert_eq!(s.events(), [], "the window shows it; no notification");
 
-    // The form's unsaved settings: checked with them, and the plan goes to the thread...
+    // The form's unsaved settings: checked with them, but nothing is to be installed
+    // until they are saved.
     let form = UpdateSettings {
         enabled: true,
         channel: Channel::Stable,
     };
+    assert_eq!(u.check_now(Some(form)), available("0.2.0", false));
+    assert!(lock(&u.queue).plan.is_none());
+    s.settings(true);
     assert_eq!(u.check_now(Some(form)), available("0.2.0", true));
     let far = SystemTime::now() + Duration::from_secs(3600);
     let Job::Plan(plan) = u.next(far) else {
         panic!("no plan");
     };
-    // ...which installs it only if the saved settings offer it.
-    assert!(!u.install(&plan, true));
+    // Turned off again before it applied: not applied.
+    s.settings(false);
+    assert_ne!(u.install(&plan, true), Installed::Applied);
     assert_eq!(s.state().pending_health, None);
     s.settings(true);
-    assert!(u.install(&plan, true));
+    assert_eq!(u.install(&plan, true), Installed::Applied);
 }
 
 #[test]
@@ -907,7 +957,7 @@ fn a_failed_download_or_apply_leaves_nothing_pending() {
         },
     );
     let plan = u.check(false, None).plan.unwrap();
-    assert!(!u.install(&plan, true));
+    assert_ne!(u.install(&plan, true), Installed::Applied);
     assert!(matches!(u.status(), UpdateStatus::Failed(e) if e.contains("sha256")));
     assert_eq!(s.state().pending_health, None);
 
@@ -918,7 +968,7 @@ fn a_failed_download_or_apply_leaves_nothing_pending() {
             ..Fakes::default()
         },
     );
-    assert!(!u.install(&plan, true));
+    assert_ne!(u.install(&plan, true), Installed::Applied);
     assert_eq!(s.state().pending_health, None);
     assert!(!s.events().contains(&Event::Exit));
 }

@@ -196,21 +196,53 @@ impl WssOff {
     }
 }
 
-/// Prepares `run`: data paths and logging, the IPC endpoint, then TLS and the port. On
-/// failure the message is already printed and the exit code returned:
+/// What `run` does in [`prepare_run`] once this process is the only daemon of its data
+/// directory, and when the start ends cleanly.
+pub trait AtStart {
+    /// The IPC endpoint is bound (no other daemon runs), before TLS and the port are
+    /// looked at. An `Err` ends the start with its exit code.
+    ///
+    /// # Errors
+    ///
+    /// The exit code the start ends with.
+    fn started(&mut self, paths: &Paths) -> Result<(), ExitCode>;
+
+    /// The start ends with P1's exit code for TLS not set up or a busy port, an outcome
+    /// of the setup and not a failure of the program.
+    fn ends_cleanly(&mut self);
+}
+
+/// Prepares `run`: data paths and logging, the IPC endpoint, `at_start`, then TLS and the
+/// port. On failure the message is already printed and the exit code returned:
 /// [`EXIT_ALREADY_RUNNING`], [`EXIT_TLS_NOT_CONFIGURED`], [`EXIT_PORT_BUSY`] or 1. With
 /// `allow_no_wss` any failure to start the wss server (TLS not set up or unusable, the port
 /// busy or not bindable) only turns it off, with a warning in the log. With `tray_session`
 /// (a tray is to show the problem) so do TLS not set up and a busy port: the TLS wizard or
 /// stopping the original NCALayer lets wss start later; `run` still ends with the
 /// [`WssFailure`] if the tray cannot be shown.
-pub async fn prepare_run(allow_no_wss: bool, tray_session: bool) -> Result<Daemon, ExitCode> {
+pub async fn prepare_run(
+    allow_no_wss: bool,
+    tray_session: bool,
+    at_start: &mut dyn AtStart,
+) -> Result<Daemon, ExitCode> {
     let paths = data_paths()?;
     if let Err(e) = crate::logging::init(&paths.logs()) {
         warn!(dir = %paths.logs().display(), error = %e, "file logging is disabled");
     }
+    prepare_in(paths, listen_port(), allow_no_wss, tray_session, at_start).await
+}
+
+/// [`prepare_run`] in `paths`, wss on `port`.
+async fn prepare_in(
+    paths: Paths,
+    port: u16,
+    allow_no_wss: bool,
+    tray_session: bool,
+    at_start: &mut dyn AtStart,
+) -> Result<Daemon, ExitCode> {
     let ipc = bind_ipc(&paths.data).await?;
-    let wss = match open_wss(&paths.tls(), listen_port()) {
+    at_start.started(&paths)?;
+    let wss = match open_wss(&paths.tls(), port) {
         Ok(wss) => Ok(wss),
         Err(failure) if allow_no_wss => {
             warn!(
@@ -229,7 +261,12 @@ pub async fn prepare_run(allow_no_wss: bool, tray_session: bool) -> Result<Daemo
             );
             Err(failure)
         }
-        Err(failure) => return Err(failure.report()),
+        Err(failure) => {
+            if failure.fixed_in_the_tray() {
+                at_start.ends_cleanly();
+            }
+            return Err(failure.report());
+        }
     };
     info!(data = %paths.data.display(), "daemon prepared");
     Ok(Daemon { paths, ipc, wss })
@@ -850,6 +887,76 @@ pub fn cms_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What [`prepare_in`] told the start hooks: `started` calls, `ends_cleanly` calls.
+    #[derive(Default)]
+    struct Hooks {
+        started: usize,
+        clean: usize,
+        refuse: Option<u8>,
+    }
+
+    impl AtStart for Hooks {
+        fn started(&mut self, _: &Paths) -> Result<(), ExitCode> {
+            self.started += 1;
+            self.refuse.map_or(Ok(()), |code| Err(ExitCode::from(code)))
+        }
+
+        fn ends_cleanly(&mut self) {
+            self.clean += 1;
+        }
+    }
+
+    /// `prepare_in` on a free port in `dir`: its exit code, if it fails.
+    fn prepare(dir: &Path, tray_session: bool, hooks: &mut Hooks) -> Option<u8> {
+        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let paths = Paths {
+            data: dir.to_owned(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        match runtime.block_on(prepare_in(paths, port, false, tray_session, hooks)) {
+            Ok(_) => None,
+            Err(code) => Some((1..=4u8).find(|c| ExitCode::from(*c) == code).unwrap_or(0)),
+        }
+    }
+
+    #[test]
+    fn start_hooks_run_after_the_single_instance_check() {
+        // TLS not set up without a tray: P1's exit 2, a clean end.
+        let dir = tempfile::tempdir().unwrap();
+        let mut hooks = Hooks::default();
+        assert_eq!(
+            prepare(dir.path(), false, &mut hooks),
+            Some(EXIT_TLS_NOT_CONFIGURED)
+        );
+        assert_eq!((hooks.started, hooks.clean), (1, 1));
+
+        // TLS unusable, in a tray session: exit 1, not a clean end (the start counted).
+        let files = Paths {
+            data: dir.path().to_owned(),
+        }
+        .tls();
+        fs::create_dir_all(&files.dir).unwrap();
+        fs::write(files.info(), "not json").unwrap();
+        let mut hooks = Hooks::default();
+        assert_eq!(prepare(dir.path(), true, &mut hooks), Some(1));
+        assert_eq!((hooks.started, hooks.clean), (1, 0));
+
+        // The hook ends the start (an update rolled back): its code, nothing else runs.
+        let mut hooks = Hooks {
+            refuse: Some(4),
+            ..Hooks::default()
+        };
+        assert_eq!(prepare(dir.path(), true, &mut hooks), Some(4));
+        assert_eq!((hooks.started, hooks.clean), (1, 0));
+    }
 
     #[test]
     fn default_command_is_run() {

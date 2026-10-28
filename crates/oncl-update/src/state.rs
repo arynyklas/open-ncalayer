@@ -55,6 +55,9 @@ pub struct PendingHealth {
     /// The update goes back from a version that failed its health check.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rollback: bool,
+    /// For a rollback: how many times it was handed to the installer.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub attempts: u32,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -152,6 +155,7 @@ mod tests {
             started: None,
             rollback: false,
             crashes: 0,
+            attempts: 0,
         });
         state.save(dir.path()).unwrap();
         assert_eq!(State::load(dir.path()).unwrap(), state);
@@ -171,6 +175,7 @@ mod tests {
             pending.started = Some(datetime!(2026-10-27 10:01 UTC));
             pending.rollback = true;
             pending.crashes = 1;
+            pending.attempts = 2;
         }
         state.save(dir.path()).unwrap();
         assert_eq!(State::load(dir.path()).unwrap(), state);

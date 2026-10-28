@@ -24,7 +24,7 @@ use oncl_ui::{
     AboutInfo, DesktopWindow, DesktopWindows, Notification, SlintPrompter, StopOriginal,
     TrayCommand, TrayHandle, TrayState,
 };
-use oncl_update::{Flavor, embedded_keys};
+use oncl_update::{Flavor, Version, embedded_keys};
 use openncalayer::cli::{self, Cli, Command};
 use openncalayer::notices::TrayStatus;
 use openncalayer::renewal::{self, RenewalCheck};
@@ -211,9 +211,26 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let daemon = match runtime.block_on(cli::prepare_run(allow_no_wss, with_tray)) {
+    let stop = Arc::new(Notify::new());
+    // Whether the windows' event loop runs (an update waits for its windows to close).
+    let loop_runs = Arc::new(AtomicBool::new(false));
+    let mut start = UpdateStart {
+        stop: Arc::clone(&stop),
+        loop_runs: Arc::clone(&loop_runs),
+        started: None,
+    };
+    let daemon = match runtime.block_on(cli::prepare_run(allow_no_wss, with_tray, &mut start)) {
         Ok(daemon) => daemon,
         Err(code) => return code,
+    };
+    let Some(Started {
+        http,
+        updates,
+        startup,
+        rollback,
+    }) = start.started
+    else {
+        unreachable!("prepare_run runs the start hook before it succeeds");
     };
     // Panics (e.g. of the windowing libraries) go to the log, not as raw text to stderr only.
     std::panic::set_hook(Box::new(|info| tracing::error!(%info, "panic")));
@@ -224,36 +241,12 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     let windows = scripted.is_none();
     let settings = load_settings(&daemon.paths.settings());
     let locale = settings.ui_locale();
-    let http = Arc::new(LiveProxyTransport::new(settings.proxy.clone()));
     let registry = build_registry(
         scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new())),
         Arc::new(JsonSettings::new(daemon.paths.settings())),
         Arc::clone(&http) as _,
         Arc::new(open_requested_window),
     );
-    let stop = Arc::new(Notify::new());
-    // Whether the windows' event loop runs (an update waits for its windows to close).
-    let loop_runs = Arc::new(AtomicBool::new(false));
-    let (updates, startup) = updater(
-        &daemon.paths,
-        Arc::clone(&http),
-        Arc::clone(&stop),
-        Arc::clone(&loop_runs),
-    );
-    // A version that did not prove healthy goes back before anything else starts.
-    let mut rollback = None;
-    if let (UpdaterHandle::Running(updater), Startup::RollBack { failed, to }) =
-        (&updates, &startup)
-    {
-        match updater.roll_back_now(failed, to) {
-            RollBack::Applied => {
-                tracing::info!(%failed, %to, "rolling back; exiting");
-                return ExitCode::SUCCESS;
-            }
-            RollBack::Retry => rollback = Some((failed.clone(), to.clone())),
-            RollBack::GaveUp => {}
-        }
-    }
     // A failure only a tray lets the daemon live with.
     let (opened, waits_for_tray) = match daemon.wss {
         Ok(opened) => (Ok(opened), None),
@@ -341,9 +334,14 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         });
     }
     let served = Flag::set(Arc::clone(&serving));
+    let at_stop = updates.clone();
     let server = thread::Builder::new().name("server".into()).spawn(move || {
         let _served = served;
-        let result = runtime.block_on(serve_all(ipc, listeners, Arc::new(registry), reports, stop));
+        // Asked to stop (the tray's «Выход», an update applied): a clean end, recorded
+        // while this process still holds the single-instance endpoint.
+        let on_stop = move || ended_cleanly(&at_stop);
+        let served = serve_all(ipc, listeners, Arc::new(registry), reports, stop, on_stop);
+        let result = runtime.block_on(served);
         if let Err(e) = &result {
             tracing::error!(error = %e, "server stopped");
         }
@@ -360,15 +358,25 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if event_loop {
+    if let UpdaterHandle::Running(updater) = &updates {
+        let told = Arc::clone(updater);
+        if event_loop {
+            let runs = Arc::clone(&loop_runs);
+            oncl_ui::when_event_loop_runs(move || {
+                runs.store(true, Ordering::SeqCst);
+                // The tray takes notifications from now on.
+                told.tell_deferred();
+            });
+        } else {
+            told.tell_deferred();
+        }
+        Arc::clone(updater).spawn(rollback);
+    } else if event_loop {
         let runs = Arc::clone(&loop_runs);
         oncl_ui::when_event_loop_runs(move || runs.store(true, Ordering::SeqCst));
     }
-    if let UpdaterHandle::Running(updater) = &updates {
-        Arc::clone(updater).spawn(rollback);
-    }
     if !event_loop {
-        return server_ended(&updates, server.join());
+        return exit_code(server.join());
     }
     let mut looped = oncl_ui::run_event_loop();
     loop_runs.store(false, Ordering::SeqCst);
@@ -397,14 +405,16 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             ?reason,
             "the system tray is unavailable, and wss cannot start without it: exiting"
         );
-        ended_cleanly(&updates);
+        if tray_exit_is_clean(&looped) {
+            ended_cleanly(&updates);
+        }
         return failure.report();
     }
     if let Err(e) = looped {
         if !windows {
             // Only the tray needed the loop: the servers carry on without it.
             tracing::warn!(error = %e, "the system tray is unavailable; running without it");
-            return server_ended(&updates, server.join());
+            return exit_code(server.join());
         }
         tracing::error!(error = %e, "signing dialogs are unavailable");
         eprintln!("Не удалось показать окна подписи: {e}");
@@ -417,7 +427,7 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
     match join_within(server, SERVER_JOIN_TIMEOUT) {
-        Some(result) => server_ended(&updates, result),
+        Some(result) => exit_code(result),
         None => {
             tracing::error!("the dialog event loop ended while the server is running");
             ExitCode::FAILURE
@@ -425,13 +435,11 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     }
 }
 
-/// The exit code of the joined server thread; servers that stopped as asked (the tray's
-/// «Выход», an update applied) end the run cleanly ([`ended_cleanly`]).
-fn server_ended(updates: &UpdaterHandle, server: thread::Result<io::Result<()>>) -> ExitCode {
-    if matches!(server, Ok(Ok(()))) {
-        ended_cleanly(updates);
-    }
-    exit_code(server)
+/// Whether P1's exit for a tray that wss waited for and that is gone ends the run cleanly:
+/// only if the tray was lost while the event loop ran. A loop that could not run, or that a
+/// panic ended, is a failure of the program.
+fn tray_exit_is_clean<E>(looped: &Result<(), E>) -> bool {
+    looped.is_ok()
 }
 
 /// The run ends cleanly (asked to, or with P1's exit code for TLS not set up or a busy
@@ -685,6 +693,65 @@ fn window_open() -> bool {
     rx.recv_timeout(WINDOW_ASK).unwrap_or(true)
 }
 
+/// The updater's part of the start ([`cli::AtStart`]): once this process is the only
+/// daemon, the updater looks at the last update before anything else is set up, and a
+/// version that did not prove healthy is rolled back at once.
+struct UpdateStart {
+    stop: Arc<Notify>,
+    loop_runs: Arc<AtomicBool>,
+    started: Option<Started>,
+}
+
+/// What [`UpdateStart`] set up.
+struct Started {
+    /// The daemon's HTTP transport, through the proxy of the settings.
+    http: Arc<LiveProxyTransport>,
+    updates: UpdaterHandle,
+    startup: Startup,
+    /// A rollback still to do: `(failed, to)`.
+    rollback: Option<(Version, Version)>,
+}
+
+impl cli::AtStart for UpdateStart {
+    fn started(&mut self, paths: &Paths) -> Result<(), ExitCode> {
+        let http = Arc::new(LiveProxyTransport::new(
+            load_settings(&paths.settings()).proxy,
+        ));
+        let (updates, startup) = updater(
+            paths,
+            Arc::clone(&http),
+            Arc::clone(&self.stop),
+            Arc::clone(&self.loop_runs),
+        );
+        let mut rollback = None;
+        if let (UpdaterHandle::Running(updater), Startup::RollBack { failed, to }) =
+            (&updates, &startup)
+        {
+            match updater.roll_back_now(failed, to) {
+                RollBack::Applied => {
+                    tracing::info!(%failed, %to, "rolling back; exiting");
+                    return Err(ExitCode::SUCCESS);
+                }
+                RollBack::Retry => rollback = Some((failed.clone(), to.clone())),
+                RollBack::GaveUp => {}
+            }
+        }
+        self.started = Some(Started {
+            http,
+            updates,
+            startup,
+            rollback,
+        });
+        Ok(())
+    }
+
+    fn ends_cleanly(&mut self) {
+        if let Some(started) = &self.started {
+            ended_cleanly(&started.updates);
+        }
+    }
+}
+
 /// The updater of this copy and what it found at the start, or why it is off: only a copy
 /// installed through Velopack, built with the keys of the update index, updates itself.
 /// It downloads through `http` (the proxy of the settings) and exits through `stop`.
@@ -796,13 +863,15 @@ fn scripted_prompter() -> Result<Option<Arc<dyn Prompter>>, ExitCode> {
 
 /// The bridge and the wss server on each listener `listeners` brings (at the start, or once
 /// [`Wss`] starts it later; its self-test reports going to `reports`), until the bridge or a
-/// wss server stops or `stop` is notified.
+/// wss server stops or `stop` is notified; then `on_stop` runs, before the servers and the
+/// IPC endpoint go.
 async fn serve_all(
     ipc: IpcListener,
     mut listeners: mpsc::UnboundedReceiver<Listening>,
     registry: Arc<Registry>,
     reports: Arc<SelftestReports>,
     stop: Arc<Notify>,
+    on_stop: impl FnOnce(),
 ) -> io::Result<()> {
     let bridge = serve_ipc(ipc, Arc::clone(&registry));
     let stopped = stop.notified();
@@ -813,6 +882,7 @@ async fn serve_all(
             result = &mut bridge => return result,
             () = &mut stopped => {
                 tracing::info!("stopping the servers");
+                on_stop();
                 return Ok(());
             }
             Some(Listening { tls, listener }) = listeners.recv() => {
@@ -907,7 +977,7 @@ mod tests {
 
     /// `serve_all` with the bridge in `dir` and, if `wss`, a wss server on a free port;
     /// `stop` notified before it starts.
-    async fn serve_all_stopped(dir: &Path, wss: bool) -> io::Result<()> {
+    async fn serve_all_stopped(dir: &Path, wss: bool) -> io::Result<bool> {
         let ipc = bridge(dir).await;
         let (listeners, received) = tokio::sync::mpsc::unbounded_channel();
         if wss {
@@ -916,6 +986,7 @@ mod tests {
         let stop = Arc::new(Notify::new());
         // Like «Выход» picked before the servers got to wait for it.
         stop.notify_one();
+        let mut told = false;
         tokio::time::timeout(
             Duration::from_secs(10),
             serve_all(
@@ -924,10 +995,12 @@ mod tests {
                 Arc::new(Registry::default()),
                 Arc::new(SelftestReports::new()),
                 stop,
+                || told = true,
             ),
         )
         .await
-        .expect("the servers did not stop")
+        .expect("the servers did not stop")?;
+        Ok(told)
     }
 
     /// A listener handed over while the servers run (wss started later, [`Wss`]) is served:
@@ -951,6 +1024,7 @@ mod tests {
                 Arc::new(Registry::default()),
                 Arc::new(SelftestReports::new()),
                 Arc::clone(&stop),
+                || {},
             ));
             tokio::time::sleep(Duration::from_millis(100)).await;
             let later = listening(dir.path());
@@ -984,10 +1058,17 @@ mod tests {
             .unwrap();
         for wss in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            runtime
+            let told = runtime
                 .block_on(serve_all_stopped(dir.path(), wss))
                 .unwrap_or_else(|e| panic!("wss {wss}: {e}"));
+            assert!(told, "a stop is told before the servers go");
         }
+    }
+
+    #[test]
+    fn only_a_tray_lost_while_the_loop_ran_ends_the_run_cleanly() {
+        assert!(tray_exit_is_clean::<String>(&Ok(())));
+        assert!(!tray_exit_is_clean(&Err("no display")));
     }
 
     #[test]

@@ -69,6 +69,9 @@ pub const QUIET: Duration = Duration::from_secs(30);
 /// A new version is rolled back after this many runs in a row that crashed or hung before
 /// it proved healthy.
 pub const CRASHES_TO_ROLL_BACK: u32 = 2;
+/// A rollback is handed to the installer at most this many times; then the failed version
+/// stays.
+pub const ROLLBACK_ATTEMPTS: u32 = 3;
 /// A waiting update looks whether the daemon is idle this often.
 pub const IDLE_POLL: Duration = Duration::from_secs(15);
 /// The longest sleep of the schedule: the wall clock is compared at least this often, so
@@ -149,6 +152,20 @@ pub enum Notice {
     /// `failed` did not prove healthy, and the index has no package of `version`, the one
     /// before it: it stays, and is not offered again.
     NoRollback { failed: Version, version: Version },
+    /// `failed` did not prove healthy, and `version`, the one before it, could not be
+    /// installed back: it stays, and is not offered again.
+    RollbackFailed { failed: Version, version: Version },
+}
+
+/// The outcome of [`Updater::install`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Installed {
+    /// The installer applies it once the process exits.
+    Applied,
+    /// Not downloaded, not offered any more, or not recorded.
+    NotApplied,
+    /// The installer refused to apply it.
+    ApplyFailed,
 }
 
 /// What [`Updater::startup`] found of the last update.
@@ -290,8 +307,17 @@ impl Updater {
                 return Startup::Normal;
             };
             if pending.rollback && current == pending.from {
-                warn!(failed = %current, to = %pending.to, "the rollback did not install; trying again");
                 state.bad.insert(current.clone());
+                if pending.attempts >= ROLLBACK_ATTEMPTS {
+                    error!(failed = %current, to = %pending.to, attempts = pending.attempts, "the rollback did not install; keeping this version");
+                    state.pending_health = None;
+                    lock(&self.deferred).push(Notice::RollbackFailed {
+                        failed: current.clone(),
+                        version: pending.to,
+                    });
+                    return Startup::Normal;
+                }
+                warn!(failed = %current, to = %pending.to, attempts = pending.attempts, "the rollback did not install; trying again");
                 return Startup::RollBack {
                     failed: current.clone(),
                     to: pending.to,
@@ -444,10 +470,17 @@ impl Updater {
         }
     }
 
-    fn run(&self, mut rollback: Option<(Version, Version)>) {
+    /// Tells the notices of the start (a rollback given up before the tray was there); call
+    /// it once the windows' event loop runs.
+    pub fn tell_deferred(&self) {
         for notice in std::mem::take(&mut *lock(&self.deferred)) {
             self.host.notify(notice);
         }
+    }
+
+    fn run(&self, mut rollback: Option<(Version, Version)>) {
+        // Rollbacks that could not be done (index, download) in this process.
+        let mut retries = 0;
         let mut due = if rollback.is_some() {
             SystemTime::now()
         } else {
@@ -455,7 +488,7 @@ impl Updater {
         };
         loop {
             let applied = match self.next(due) {
-                Job::Plan(plan) => self.install(&plan, true),
+                Job::Plan(plan) => self.install(&plan, true) == Installed::Applied,
                 Job::RollBack(failed, to) => {
                     rollback = Some((failed, to));
                     due = SystemTime::now();
@@ -465,7 +498,12 @@ impl Updater {
                     let (applied, wait) = match rollback.take() {
                         Some((failed, to)) => match self.roll_back(&failed, &to, true) {
                             RollBack::Applied => (true, None),
+                            RollBack::Retry if retries + 1 >= ROLLBACK_ATTEMPTS => {
+                                self.give_up(&failed, &to, true, false);
+                                (false, None)
+                            }
                             RollBack::Retry => {
+                                retries += 1;
                                 rollback = Some((failed, to));
                                 (false, Some(RETRY_AFTER))
                             }
@@ -474,8 +512,9 @@ impl Updater {
                         },
                         None => {
                             let checked = self.check(false, None);
-                            let applied =
-                                checked.plan.is_some_and(|plan| self.install(&plan, true));
+                            let applied = checked.plan.is_some_and(|plan| {
+                                self.install(&plan, true) == Installed::Applied
+                            });
                             let wait = if checked.retry_soon {
                                 RETRY_AFTER
                             } else {
@@ -521,10 +560,13 @@ impl Updater {
 
     /// One check: the index of the channel in `settings` (the saved ones without), verified,
     /// and the version it offers this installation. A scheduled one (`manual` false) does
-    /// nothing with updates off; it tells a version found once.
+    /// nothing with updates off; it tells a version found once. A version is to be installed
+    /// only if the saved settings enable updates and are the ones checked with.
     fn check(&self, manual: bool, settings: Option<UpdateSettings>) -> Checked {
         let _one = lock(&self.checking);
-        let settings = settings.unwrap_or_else(|| self.settings());
+        let saved = self.settings();
+        let settings = settings.unwrap_or(saved);
+        let installs = settings.enabled && settings == saved;
         if !manual && !settings.enabled {
             return Checked {
                 status: self.status(),
@@ -548,16 +590,16 @@ impl Updater {
                 Choice::Update(target) => (target, false),
                 Choice::Downgrade(target) => (target, true),
             };
-        info!(%current, version = %target.version, downgrade, enabled = settings.enabled, "an update is offered");
+        info!(%current, version = %target.version, downgrade, installs, "an update is offered");
         let status = UpdateStatus::Available {
             version: target.version.to_string(),
-            installing: settings.enabled,
+            installing: installs,
         };
         let new = lock(&self.told).replace(target.version.clone()) != Some(target.version.clone());
         if new && !manual {
             self.host.notify(Notice::Checked(status.clone()));
         }
-        let plan = settings.enabled.then_some(Plan {
+        let plan = installs.then_some(Plan {
             target,
             downgrade,
             rollback: false,
@@ -633,7 +675,8 @@ impl Updater {
             }
         };
         let Some(full) = package else {
-            return self.give_up_rollback(failed, to, wait);
+            error!(%failed, version = %to, flavor = %self.config.flavor, "the update index has no package to roll back to; keeping this version");
+            return self.give_up(failed, to, wait, true);
         };
         let plan = Plan {
             target: Target {
@@ -645,17 +688,20 @@ impl Updater {
             downgrade: true,
             rollback: true,
         };
-        if self.install(&plan, wait) {
-            RollBack::Applied
-        } else {
-            RollBack::Retry
+        match self.install(&plan, wait) {
+            Installed::Applied => RollBack::Applied,
+            Installed::NotApplied => RollBack::Retry,
+            Installed::ApplyFailed => {
+                error!(%failed, version = %to, "the installer cannot roll back; keeping this version");
+                self.give_up(failed, to, wait, false)
+            }
         }
     }
 
-    /// The index has no package of `to`: `failed` stays marked bad, its rollback is
-    /// forgotten, and the user is told once.
-    fn give_up_rollback(&self, failed: &Version, to: &Version, wait: bool) -> RollBack {
-        error!(%failed, version = %to, flavor = %self.config.flavor, "the update index has no package to roll back to; keeping this version");
+    /// A rollback from `failed` to `to` cannot be done (`missing`: the index has no package
+    /// of `to`): `failed` stays marked bad, its rollback is forgotten, and the user is told
+    /// once (later, without `wait`: the tray is not there yet).
+    fn give_up(&self, failed: &Version, to: &Version, wait: bool, missing: bool) -> RollBack {
         self.update_state(|s| {
             s.bad.insert(failed.clone());
             if s.pending_health
@@ -665,9 +711,11 @@ impl Updater {
                 s.pending_health = None;
             }
         });
-        let notice = Notice::NoRollback {
-            failed: failed.clone(),
-            version: to.clone(),
+        let (failed, version) = (failed.clone(), to.clone());
+        let notice = if missing {
+            Notice::NoRollback { failed, version }
+        } else {
+            Notice::RollbackFailed { failed, version }
         };
         if wait {
             self.host.notify(notice);
@@ -679,14 +727,14 @@ impl Updater {
 
     /// Downloads `plan`; with `wait`, waits until the daemon is idle, checks that the index
     /// still offers it (unless it is a rollback) and holds back new requests. Then records
-    /// `pending_health` and has the installer apply it: whether it was applied (the caller
-    /// exits).
-    fn install(&self, plan: &Plan, wait: bool) -> bool {
+    /// `pending_health` (for a rollback, counting its attempts) and has the installer apply
+    /// it; with [`Installed::Applied`] the caller exits.
+    fn install(&self, plan: &Plan, wait: bool) -> Installed {
         let version = &plan.target.version;
         if let Err(e) = self.installer.download(&plan.target, plan.downgrade) {
             warn!(%version, error = %e, "cannot download the update");
             *lock(&self.status) = UpdateStatus::Failed(e);
-            return false;
+            return Installed::NotApplied;
         }
         if wait {
             info!(%version, "the update is downloaded; waiting until no signing is in progress");
@@ -696,7 +744,7 @@ impl Updater {
                 }
                 if !plan.rollback && !self.still_offered(plan) {
                     info!(%version, "the update is no longer offered; it is not applied");
-                    return false;
+                    return Installed::NotApplied;
                 }
                 if self.host.hold() {
                     break;
@@ -704,42 +752,52 @@ impl Updater {
             }
         }
         let from = self.installer.current();
-        let pending = PendingHealth {
-            from: from.clone(),
-            to: version.clone(),
-            applied: OffsetDateTime::now_utc(),
-            started: None,
-            crashes: 0,
-            rollback: plan.rollback,
-        };
-        if let Err(e) = self.try_update_state(|s| s.pending_health = Some(pending.clone())) {
-            error!(error = %e, "cannot record the update; it is not applied");
-            if wait {
-                self.host.release();
+        let recorded = self.try_update_state(|s| {
+            let attempts = match &s.pending_health {
+                Some(p) if plan.rollback && p.rollback && p.from == from && p.to == *version => {
+                    p.attempts + 1
+                }
+                _ => u32::from(plan.rollback),
+            };
+            let pending = PendingHealth {
+                from: from.clone(),
+                to: version.clone(),
+                applied: OffsetDateTime::now_utc(),
+                started: None,
+                crashes: 0,
+                rollback: plan.rollback,
+                attempts,
+            };
+            s.pending_health = Some(pending.clone());
+            pending
+        });
+        let pending = match recorded {
+            Ok(pending) => pending,
+            Err(e) => {
+                error!(error = %e, "cannot record the update; it is not applied");
+                if wait {
+                    self.host.release();
+                }
+                return Installed::NotApplied;
             }
-            return false;
-        }
+        };
         match self.installer.apply_on_exit(&plan.target) {
             Ok(()) => {
-                info!(%from, to = %version, "applying the update; exiting");
-                true
+                info!(%from, to = %version, attempts = pending.attempts, "applying the update; exiting");
+                Installed::Applied
             }
             Err(e) => {
                 warn!(%version, error = %e, "cannot apply the update");
-                // A rollback that did not apply is tried again, at the latest at the next
-                // start.
-                if !plan.rollback {
-                    self.update_state(|s| {
-                        if s.pending_health.as_ref() == Some(&pending) {
-                            s.pending_health = None;
-                        }
-                    });
-                }
+                self.update_state(|s| {
+                    if s.pending_health.as_ref() == Some(&pending) {
+                        s.pending_health = None;
+                    }
+                });
                 if wait {
                     self.host.release();
                 }
                 *lock(&self.status) = UpdateStatus::Failed(e);
-                false
+                Installed::ApplyFailed
             }
         }
     }
