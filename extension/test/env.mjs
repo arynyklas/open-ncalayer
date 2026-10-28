@@ -22,6 +22,16 @@ export function loadScript(name) {
   return module.exports;
 }
 
+/** The ncalayer-js-client the demo page vendors, over the page's (shimmed) `WebSocket`. */
+export function vendoredClient(window) {
+  const url = new URL('../../web/demo/vendor/ncalayer-client.js', import.meta.url);
+  const exports = {};
+  vm.runInThisContext(`(function (exports, WebSocket, window) {${readFileSync(url, 'utf8')}\n})`, {
+    filename: fileURLToPath(url),
+  })(exports, window.WebSocket, window);
+  return exports;
+}
+
 /** Lets pending timers, promise jobs and `Blob` reads run. */
 export const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -125,7 +135,8 @@ export function contentSandbox(window) {
     cloned,
     exportFunction(fn, scope) {
       if (scope !== window) throw new Error('exportFunction into another scope');
-      // A forwarder: callable and constructible, `new.target` is not passed on.
+      // A forwarder, callable and constructible, built like Firefox's (`FunctionForwarder`):
+      // constructing it constructs `fn` with `fn` itself as `new.target`, never the page's.
       const forwarder = function (...args) {
         return new.target === undefined ? Reflect.apply(fn, this, args) : Reflect.construct(fn, args);
       };
@@ -158,6 +169,10 @@ export function pageWindow({ href = 'https://site.example/app/', document = new 
     constructor(url, protocols) {
       super();
       if (arguments.length === 0) throw new TypeError('1 argument required');
+      const list = protocols === undefined ? [] : typeof protocols === 'string' ? [protocols] : [...protocols];
+      if (list.some((protocol) => !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(String(protocol)))) {
+        throw new DOMException('An invalid or illegal subprotocol was specified.', 'SyntaxError');
+      }
       this.args = [...arguments];
       this.url = String(url);
       this.readyState = 0;
@@ -167,7 +182,6 @@ export function pageWindow({ href = 'https://site.example/app/', document = new 
       this.binaryType = 'blob';
       this.sent = [];
       this.closeCalls = [];
-      void protocols;
       nativeSockets.push(this);
       // Only the shim listens to a native socket (virtual ones share the prototype, and the
       // tests listen to those).

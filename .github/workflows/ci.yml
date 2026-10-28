@@ -152,8 +152,8 @@ jobs:
           if-no-files-found: ignore
 
   # Windows 7 builds (roadmap D14), blocking: `cargo xtask win7` builds them with the app-local
-  # DLLs, fails on an import Windows 7 lacks, then starts them here, where Windows Server 2025
-  # must keep loading its own combase.dll and API sets.
+  # DLLs, fails on an import from its denylist of DLLs and functions missing on Windows 7, then
+  # starts them here, where Windows Server 2025 must keep loading its own combase.dll and API sets.
   win7:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     strategy:
@@ -184,6 +184,13 @@ jobs:
           name: win7-${{ matrix.arch }}
           path: target/win7/${{ matrix.arch }}/
           if-no-files-found: error
+      # A red gate or start keeps what it judged, for `dumpbin`.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: win7-${{ matrix.arch }}-failed-${{ github.run_attempt }}
+          path: target/win7/${{ matrix.arch }}/
+          if-no-files-found: ignore
 
   live:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

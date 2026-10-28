@@ -75,6 +75,7 @@ pub fn build_cdylib(package: &str, target_dir: &Path) -> PathBuf {
         .current_dir(crate::workspace_root())
         .args([
             "build",
+            "--quiet",
             "--message-format=json-render-diagnostics",
             "-p",
             package,

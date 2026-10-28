@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
-import { contentWindow, loadScript, pageEnd, pageLink, pageWindow, until, withoutToWellFormed } from './env.mjs';
+import {
+  contentWindow,
+  loadScript,
+  pageEnd,
+  pageLink,
+  pageWindow,
+  tick,
+  until,
+  vendoredClient,
+  withoutToWellFormed,
+} from './env.mjs';
 
 const installBridge = loadScript('bridge.js');
 const installShim = loadScript('shim.js');
@@ -182,6 +192,56 @@ for (const mode of MODES) {
         assert.equal(env.ports.length, 2);
         assert.deepEqual(pageSide.nativeSockets.at(-1).args, [URL_13579, ['p']]);
       });
+    });
+
+    test('a send on a port that died resets the page socket from a task', async () => {
+      const { pageSide, env } = shimAndBridge();
+      const ws = new pageSide.window.WebSocket(URL_13579);
+      env.ports[0].deliver({ t: 'open', sid: 1 });
+      const events = [];
+      ws.addEventListener('error', () => events.push(['error', ws.readyState]));
+      ws.addEventListener('close', (e) => events.push(['close', e.code, e.wasClean, ws.readyState]));
+      // The background went away and the port's `onDisconnect` has not come yet.
+      env.ports[0].connected = false;
+      ws.send('lost');
+      // Like the browser's own socket: no events from inside `send()`.
+      assert.deepEqual(events, []);
+      assert.equal(ws.readyState, 2);
+      await tick();
+      assert.deepEqual(events, [
+        ['error', 3],
+        ['close', 1006, false, 3],
+      ]);
+    });
+
+    test('the vendored ncalayer-js-client settles a request sent on a port that died', { timeout: 5000 }, async () => {
+      const { pageSide, env } = shimAndBridge();
+      const ws = new pageSide.window.WebSocket(URL_13579);
+      env.ports[0].deliver({ t: 'open', sid: 1 });
+      const { NCALayerClient, NCALayerError } = vendoredClient(pageSide.window);
+      const client = new NCALayerClient();
+      // As after `connect()`: the client sends a request, then sets that request's handlers.
+      client.wsConnection = ws;
+      env.ports[0].connected = false;
+      await assert.rejects(client.getActiveTokens(), NCALayerError);
+      assert.equal(ws.readyState, 3);
+    });
+
+    test('a socket whose native stand-in cannot be made fails from a task', async () => {
+      const { pageSide, env } = shimAndBridge();
+      // The extension is gone before the first socket: the bridge answers `fallback` at once.
+      env.runtime.failConnect = true;
+      const ws = new pageSide.window.WebSocket(URL_13579, 'not a token');
+      const events = [];
+      ws.addEventListener('error', () => events.push(['error', ws.readyState]));
+      ws.addEventListener('close', (e) => events.push(['close', e.code, e.wasClean, ws.readyState]));
+      assert.equal(ws.readyState, 2);
+      assert.equal(pageSide.nativeSockets.length, 0);
+      await tick();
+      assert.deepEqual(events, [
+        ['error', 3],
+        ['close', 1006, false, 3],
+      ]);
     });
 
     test('bridge closes forged opens with bad URLs and keeps other sockets working', () => {

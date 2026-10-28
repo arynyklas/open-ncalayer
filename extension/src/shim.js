@@ -108,7 +108,11 @@
       const exported = waive(
         sandbox.exportFunction(function () {
           const args = Array.prototype.map.call(arguments, waive);
-          return new.target === undefined ? Reflect.apply(fn, waive(this), args) : Reflect.construct(fn, args);
+          if (new.target === undefined) return Reflect.apply(fn, waive(this), args);
+          // Firefox constructs an exported function with the function itself as `new.target`
+          // (`FunctionForwarder` calls `JS::Construct` without one): the class of a page
+          // subclass is lost before this point, so there is no page `new.target` to pass on.
+          return Reflect.construct(fn, args);
         }, win),
       );
       // Like the function itself rather than the wrapper above.
@@ -193,7 +197,20 @@
       }
     }
 
-    const emit = sandbox ? directLink(sandbox, fromBridge) : eventLink(win, fromBridge);
+    const link = sandbox ? directLink(sandbox, fromBridge) : eventLink(win, fromBridge);
+    // How many sends to the bridge are under way. Both links deliver at once, so a frame that
+    // arrives meanwhile is the bridge answering at once, most often inside a page call: it
+    // lost the background (`runtime.connect` or `postMessage` threw). See `#reset`.
+    let emitting = 0;
+
+    function emit(frame) {
+      emitting++;
+      try {
+        link(frame);
+      } finally {
+        emitting--;
+      }
+    }
 
     /** Sends `frame` to the bridge, holding it until the bridge has said `ready`. */
     function post(frame) {
@@ -398,10 +415,10 @@
             this.#fire(new MessageEvent('message', dict({ data: frame.data, origin: this.#origin })));
             break;
           case 'close':
-            this.#reset(false);
+            this.#reset(emitting > 0);
             break;
           case 'fallback':
-            if (this.#state === CONNECTING) this.#fallback(false);
+            if (this.#state === CONNECTING) this.#fallback(emitting > 0);
             break;
           case 'gone':
             // Found inside a page call (`send`, `new WebSocket`, `fetch`): see `#reset`.
@@ -414,8 +431,9 @@
       /**
        * The daemon or the extension dropped the socket: error, then close 1006. With `later`
        * the events come from a task, as the browser's own do: the drop was found inside a page
-       * call, and pages often set their handlers right after `send()` returns. Until then the
-       * socket is CLOSING, so `send` and `close` do nothing.
+       * call (`send`, `close`, `new WebSocket`, `fetch`), and pages often set their handlers
+       * right after the call returns, or never get the socket at all before the constructor
+       * returns. Until then the socket is CLOSING, so `send` and `close` do nothing.
        */
       #reset(later) {
         sockets.delete(this.#sid);
@@ -556,9 +574,10 @@
       const args = Array.prototype.slice.call(arguments, 0, 2);
       const parsed = args.length > 0 ? parse(url) : null;
       if (parsed === null || socketUrl(parsed.href) === null || !bridgeAlive()) {
-        // A subclass of the page keeps its prototype.
+        // A subclass of the page keeps its prototype (in the page's own world only: see `expose`).
         return Reflect.construct(NativeWebSocket, args, new.target === WebSocket ? NativeWebSocket : new.target);
       }
+      // A virtual socket is a plain `WebSocket`, also for a subclass of the page.
       const face = new EventTarget();
       Object.setPrototypeOf(face, virtualPrototype);
       new VirtualWebSocket(face, parsed, args);

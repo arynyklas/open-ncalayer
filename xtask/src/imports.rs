@@ -225,7 +225,8 @@ pub fn violations(exe: &Image, app_local: &[AppLocalDll]) -> Vec<String> {
 }
 
 /// Describes every import and forward of the app-local DLL `dll` that goes outside
-/// [`APP_LOCAL_TARGETS`], is by ordinal, or is missing on Windows 7, one line each.
+/// [`APP_LOCAL_TARGETS`], is by ordinal, is missing on Windows 7, or names an x86-decorated
+/// symbol (those DLLs export undecorated names only), one line each.
 pub fn app_local_violations(dll: &AppLocalDll) -> Vec<String> {
     let imports = dll.image.imports.iter().map(|import| ("imports", import));
     let forwards = dll
@@ -244,8 +245,15 @@ pub fn app_local_violations(dll: &AppLocalDll) -> Vec<String> {
                 format!("only {} are allowed", APP_LOCAL_TARGETS.join(" and "))
             } else if target.symbol.is_none() {
                 "only by name".to_owned()
+            } else if let Some(missing) = missing_on_windows7(target) {
+                format!("{missing} is missing on Windows 7")
+            } else if undecorated(symbol) != symbol {
+                format!(
+                    "{} export undecorated names only",
+                    APP_LOCAL_TARGETS.join(" and ")
+                )
             } else {
-                format!("{} is missing on Windows 7", missing_on_windows7(target)?)
+                return None;
             };
             Some(format!(
                 "{} {link} {}!{symbol}: {problem}",
@@ -588,13 +596,14 @@ mod tests {
     }
 
     #[test]
-    fn app_local_dll_uses_only_kernel32_and_ole32_by_name() {
+    fn app_local_dll_uses_only_kernel32_and_ole32_by_undecorated_name() {
         let dll = AppLocalDll {
             name: "combase.dll",
             image: Image {
                 pe64: true,
                 imports: vec![
                     imp("KERNEL32.dll", "HeapFree"),
+                    imp("kernel32.dll", "_HeapAlloc@12"),
                     imp("kernel32.dll", "_GetSystemTimePreciseAsFileTime@4"),
                     imp("user32.dll", "MessageBoxW"),
                     by_ordinal("ntdll.dll"),
@@ -602,6 +611,11 @@ mod tests {
                 ],
                 exports: vec![
                     forward("CoTaskMemFree", "OLE32.dll", "CoTaskMemFree"),
+                    forward(
+                        "CoCreateFreeThreadedMarshaler",
+                        "ole32.dll",
+                        "_CoCreateFreeThreadedMarshaler@8",
+                    ),
                     forward("CoTaskMemAlloc", "combase.dll", "CoTaskMemAlloc"),
                     Export {
                         name: Some("CoInitialize".to_owned()),
@@ -614,10 +628,12 @@ mod tests {
         assert_eq!(
             app_local_violations(&dll),
             [
+                "combase.dll imports kernel32.dll!_HeapAlloc@12: kernel32.dll and ole32.dll export undecorated names only",
                 "combase.dll imports kernel32.dll!_GetSystemTimePreciseAsFileTime@4: function is missing on Windows 7",
                 "combase.dll imports user32.dll!MessageBoxW: only kernel32.dll and ole32.dll are allowed",
                 "combase.dll imports ntdll.dll!<ordinal>: only kernel32.dll and ole32.dll are allowed",
                 "combase.dll imports ole32.dll!<ordinal>: only by name",
+                "combase.dll forwards to ole32.dll!_CoCreateFreeThreadedMarshaler@8: kernel32.dll and ole32.dll export undecorated names only",
                 "combase.dll forwards to combase.dll!CoTaskMemAlloc: only kernel32.dll and ole32.dll are allowed",
                 "combase.dll forwards to ole32.dll!<ordinal>: only by name",
             ]

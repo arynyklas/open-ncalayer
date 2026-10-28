@@ -564,7 +564,9 @@ impl Scenarios<'_> {
     }
 
     /// 1. With no daemon running, a page socket to NCALayer is a `WebSocket` and gets the
-    ///    greeting: the browser started the relay, the relay the daemon.
+    ///    greeting: the browser started the relay, the relay the daemon. A page subclass of
+    ///    `WebSocket` makes a plain `WebSocket` for an NCALayer URL; for any other URL it
+    ///    keeps its class, except where the shim is a Firefox content script (ESR 115).
     fn autostart(&self) -> anyhow::Result<()> {
         ensure!(
             self.daemons().is_empty(),
@@ -583,6 +585,15 @@ impl Scenarios<'_> {
         ensure!(
             !self.daemons().is_empty(),
             "no daemon process for the sandbox"
+        );
+        let result = self.step("subclass", Value::Null)?;
+        ensure!(
+            result["ncalayer"] == false,
+            "a subclass made an instance of itself for an NCALayer URL: {result}"
+        );
+        ensure!(
+            result["other"] == self.browser.shim_in_page_world(),
+            "a subclass for another URL: {result}"
         );
         Ok(())
     }

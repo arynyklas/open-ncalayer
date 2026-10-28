@@ -47,7 +47,8 @@ httparse = "1.10.1"
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 libc = "0.2.191"
 log = "0.4.34"
-# Only in xtask (`check-imports`): PE reading only.
+# PE reading only: in xtask (`check-imports`) and oncl-testkit (export tables of the Windows 7
+# app-local DLLs).
 object = { version = "0.40.0", default-features = false, features = ["read_core", "pe", "std"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 pkcs8 = { version = "0.11.0", features = ["alloc"] }

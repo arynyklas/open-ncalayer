@@ -103,6 +103,20 @@
       return { instance: socket.ws instanceof WebSocket, first };
     },
 
+    /**
+     * Whether a page subclass of `WebSocket` makes instances of itself, for an NCALayer URL
+     * and for a loopback port outside NCALayer's range.
+     */
+    async subclass() {
+      class PageSocket extends WebSocket {}
+      const made = (url) => {
+        const ws = new PageSocket(url);
+        ws.close();
+        return ws instanceof PageSocket;
+      };
+      return { ncalayer: made(NCALAYER), other: made('ws://127.0.0.1:13500/') };
+    },
+
     /** Heartbeat echo and the reply for an unknown module. */
     async echo_and_unknown() {
       const socket = connect(NCALAYER);

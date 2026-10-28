@@ -94,7 +94,7 @@ jobs:
           if-no-files-found: error
 
   # Windows 7 SP1 (roadmap D14): the executables with their app-local DLLs, built, checked
-  # for imports Windows 7 lacks and started by `cargo xtask win7`.
+  # against the denylist of imports missing on Windows 7 and started by `cargo xtask win7`.
   win7:
     needs: version
     strategy:

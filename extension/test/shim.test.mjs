@@ -1,23 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
-import { fileURLToPath } from 'node:url';
-import vm from 'node:vm';
 
-import { bridgeEnd, bridgeLink, loadScript, pageWindow, tick, until } from './env.mjs';
+import { bridgeEnd, bridgeLink, loadScript, pageWindow, tick, until, vendoredClient } from './env.mjs';
 
 const installShim = loadScript('shim.js');
 const GREETING = '{"result":{"version":"1.4"}}';
-
-/** The ncalayer-js-client the demo page vendors, over the page's (shimmed) `WebSocket`. */
-function vendoredClient(window) {
-  const url = new URL('../../web/demo/vendor/ncalayer-client.js', import.meta.url);
-  const exports = {};
-  vm.runInThisContext(`(function (exports, WebSocket, window) {${readFileSync(url, 'utf8')}\n})`, {
-    filename: fileURLToPath(url),
-  })(exports, window.WebSocket, window);
-  return exports;
-}
 
 /**
  * Where the shim runs: in the page's own world (Chromium, Firefox 128+), or as a Firefox
@@ -94,6 +81,20 @@ for (const { name, xray } of MODES) {
         ['wss://127.0.0.1:13579/', 'ws://localhost:13679/x?y', 'wss://[::1]:13600/'],
       );
       assert.throws(() => window.WebSocket('wss://127.0.0.1:13579/'), TypeError);
+    });
+
+    test('a page subclass of WebSocket keeps its class only for a native socket in the page world', () => {
+      const env = setup();
+      class PageSocket extends env.window.WebSocket {}
+      const virtual = new PageSocket('wss://127.0.0.1:13579/');
+      assert.equal(env.frames().at(-1).t, 'open');
+      assert.ok(!(virtual instanceof PageSocket));
+      assert.ok(virtual instanceof env.window.WebSocket);
+      const native = new PageSocket('wss://example.com/');
+      assert.equal(env.nativeSockets.at(-1), native);
+      // Firefox gives a function exported to the page itself as `new.target` (see env.mjs).
+      assert.equal(native instanceof PageSocket, !xray);
+      assert.ok(native instanceof env.window.WebSocket);
     });
 
     test('virtual socket: open then greeting message, instanceof WebSocket', () => {
