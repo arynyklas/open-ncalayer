@@ -186,11 +186,13 @@ pub enum Startup {
 pub enum RollBack {
     /// The version before is being installed: the process is to exit.
     Applied,
-    /// The index could not be read or the package not downloaded: try again.
+    /// Not this time: the index could not be read, the package not downloaded or the
+    /// rollback not recorded in the state file. It can be tried again.
     Retry,
-    /// Nothing more is tried: the index has no package to go back to, the installer
-    /// refused it, or it was handed over [`ROLLBACK_ATTEMPTS`] times without taking. The
-    /// failed version stays (marked bad).
+    /// Nothing more is tried: the index has no package to go back to, or the installer
+    /// refused it. The failed version stays (marked bad). A rollback handed over
+    /// [`ROLLBACK_ATTEMPTS`] times without taking is not this: [`Updater::startup`] then
+    /// keeps the failed version and returns [`Startup::Normal`].
     GaveUp,
 }
 

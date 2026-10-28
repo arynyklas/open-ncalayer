@@ -688,6 +688,19 @@ fn a_linked_work_tree_is_a_work_tree() {
 }
 
 #[test]
+fn a_directory_inside_dot_git_is_not_committable() {
+    // Nothing under `.git` is committed, and git would call a path there not ignored.
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "--quiet"]);
+    let secret = repo
+        .path()
+        .join(".git")
+        .join("oncl-keys")
+        .join(sign::SECRET_KEY_FILE);
+    sign::refuse_committable(&secret).unwrap();
+}
+
+#[test]
 fn a_work_tree_git_cannot_discover_is_refused() {
     // A linked work tree whose main repository is gone: git's own discovery dies there,
     // but the directory still belongs to a work tree that could commit the key once the
