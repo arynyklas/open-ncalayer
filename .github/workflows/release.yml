@@ -4,8 +4,9 @@ name: Release
 # macOS as archives and as Velopack packages (the update index points at those), the
 # browser extension, a CycloneDX SBOM and SHA256SUMS, every file with a build provenance
 # attestation. A tag with a pre-release suffix (`v0.1.0-alpha.1`) makes a pre-release.
-# Then a pull request adds the version to the update index (`updates/v1/<channel>.json`),
-# unsigned: the maintainer signs it locally (`cargo xtask sign`), never CI.
+# Then a pull request adds the version to the update indexes (`updates/v1/<channel>.json`:
+# a pre-release to beta, a release to stable and beta), unsigned: the maintainer signs them
+# locally (`cargo xtask sign`), never CI.
 #
 # Code signing runs only with its secrets, otherwise it is skipped with a notice:
 # Authenticode through SignPath (secret SIGNPATH_API_TOKEN, variables
@@ -176,36 +177,54 @@ jobs:
         run: |
           dotnet tool install --tool-path "$RUNNER_TEMP/vpk" vpk --version "$VPK_VERSION"
           echo "$RUNNER_TEMP/vpk" >> "$GITHUB_PATH"
-      # The newest earlier package of the flavor, which the delta is made from: of a stable
-      # release for a stable one, of any release for a pre-release. Only when no such
-      # earlier release carries the flavor's feed is there no delta; any other failure of the
-      # download fails the job.
+      # The full package the delta is made from: of the release with the highest version
+      # below this one that has the flavor's full package, among releases for a release and
+      # among releases and pre-releases for a pre-release. It comes straight from that
+      # release (`vpk download github` reads only the newest 10 releases) and must match the
+      # release's SHA256SUMS. `vpk pack` takes the delta's base from the packages in its
+      # output directory and writes the feed `releases.<flavor>.json` from them, so no older
+      # feed is needed. Only when no such release exists is there no delta; any other
+      # failure fails the job.
       - name: Download the previous package
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VPK_TOKEN: ${{ github.token }}
         run: |
-          earlier="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[]
+          previous="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[]
             | select(.draft | not)
             | select(env.PRERELEASE == "true" or (.prerelease | not))
-            | select(.tag_name != env.GITHUB_REF_NAME)
-            | select(any(.assets[]; .name == "releases.\(env.FLAVOR).json"))
-            | .tag_name')"
-          if [ -z "$earlier" ]; then
+            | select(.tag_name | startswith("v"))
+            | select(IN(.assets[].name; "OpenNCALayer-\(.tag_name[1:])-\(env.FLAVOR)-full.nupkg"))
+            | .tag_name' \
+            | jq -Rnr --arg current "$GITHUB_REF_NAME" '
+              # `v<semver>` as a key in semver order: the numbers, then a pre-release before
+              # its release, numeric identifiers before others (jq orders numbers first).
+              def key: ltrimstr("v") | split("+")[0] | index("-") as $i
+                | if $i == null then [(split(".") | map(tonumber)), [1]]
+                  else [(.[:$i] | split(".") | map(tonumber)),
+                    [0, (.[$i + 1:] | split(".") | map(tonumber? // .))]]
+                  end;
+              [inputs | select(key < ($current | key))] | max_by(key) // empty')"
+          if [ -z "$previous" ]; then
             echo "::notice::no earlier release has a $FLAVOR package: no delta"
             exit 0
           fi
-          pre=()
-          if [ "$PRERELEASE" = true ]; then
-            pre=(--pre)
+          package="OpenNCALayer-${previous#v}-$FLAVOR-full.nupkg"
+          mkdir -p packages previous
+          gh release download "$previous" --repo "$GITHUB_REPOSITORY" --dir previous \
+            --pattern "$package" --pattern SHA256SUMS
+          expected="$(awk -v name="$package" '$2 == name { print $1 }' previous/SHA256SUMS)"
+          if command -v sha256sum > /dev/null; then
+            actual="$(sha256sum < "previous/$package" | cut -d ' ' -f 1)"
+          else
+            actual="$(shasum -a 256 < "previous/$package" | cut -d ' ' -f 1)"
           fi
-          vpk --skip-updates download github --repoUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
-            --channel "$FLAVOR" --outputDir packages "${pre[@]}"
-          if ! compgen -G "packages/OpenNCALayer-*-$FLAVOR-full.nupkg" > /dev/null; then
-            echo "::error::earlier releases with a $FLAVOR package exist (${earlier//$'\n'/ }), but none was downloaded"
+          if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+            echo "::error::$package of $previous does not match its SHA256SUMS (${expected:-no entry}, got $actual)"
             exit 1
           fi
+          mv "previous/$package" packages/
+          echo "the $FLAVOR delta is made from $package of $previous"
       - name: Apple signing keychain and notary profile
         if: runner.os == 'macOS' && env.APPLE_SIGNING == 'true'
         env:
@@ -290,8 +309,8 @@ jobs:
             --packTitle OpenNCALayer --packAuthors "OpenNCALayer contributors" \
             --packDir pack --mainExe "$exe" --channel "$FLAVOR" --runtime "${{ matrix.runtime }}" \
             --outputDir packages "${options[@]}"
-          # This version's packages and the flavor's cumulative feed (`cargo xtask index add`
-          # reads the delta's base version from it); not the downloaded previous package.
+          # This version's packages and the flavor's feed (`cargo xtask index add` reads the
+          # delta's base version from it); not the downloaded previous package.
           mkdir velopack
           cp "packages/OpenNCALayer-$VERSION-$FLAVOR-full.nupkg" "packages/releases.$FLAVOR.json" velopack/
           for file in "packages/OpenNCALayer-$VERSION-$FLAVOR-delta.nupkg" "packages/RELEASES-$FLAVOR"; do
@@ -392,9 +411,11 @@ jobs:
             --generate-notes \
             "${flags[@]}"
 
-  # The version into the update index of its channel: beta for a pre-release, stable
-  # otherwise. A pull request with the unsigned index; the maintainer signs it on the PR
-  # branch, and the index check then runs on that push.
+  # The version into the update indexes: a pre-release into beta only, a release into
+  # stable and into beta, so a beta installation is offered it too. Each index gets its own
+  # next `seq` and keeps its versions. A pull request with the unsigned indexes; the
+  # maintainer signs every one of them on the PR branch, and the index check then runs on
+  # that push.
   index:
     needs: [version, publish]
     runs-on: ubuntu-24.04
@@ -420,32 +441,42 @@ jobs:
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/assets" \
             --pattern '*.nupkg' --pattern 'releases.*.json' \
             --pattern 'openncalayer-chromium-*.zip' --pattern 'openncalayer-firefox-*.xpi'
-      - name: Add the version to the index
+      - name: Add the version to the indexes
         id: add
         run: |
           if [ "$PRERELEASE" = true ]; then
-            channel=beta
+            channels=(beta)
+            subject="the beta index"
           else
-            channel=stable
+            channels=(stable beta)
+            subject="the stable and beta indexes"
           fi
-          cargo xtask index add --channel "$channel" --tag "$GITHUB_REF_NAME" \
-            --release-assets "$RUNNER_TEMP/assets"
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          for channel in "${channels[@]}"; do
+            cargo xtask index add --channel "$channel" --tag "$GITHUB_REF_NAME" \
+              --release-assets "$RUNNER_TEMP/assets"
+          done
+          {
+            echo "Adds $VERSION to $subject (\`cargo xtask index add\`, rollout 100 %): a release goes into \`stable\` and \`beta\`, a pre-release into \`beta\` only."
+            echo
+            echo "The indexes are unsigned, and the index check refuses an unsigned one. To publish them, on this branch:"
+            echo
+            echo "1. optionally lower \`rollout\` of the new version;"
+            echo "2. sign every index of this PR:"
+            for channel in "${channels[@]}"; do
+              echo "   - \`cargo xtask sign updates/v1/$channel.json --key <secret key>\`"
+            done
+            echo "3. \`cargo xtask index check updates/v1 --base origin/main\`;"
+            echo "4. commit the indexes and their \`.minisig\` files and push: the index check runs on that push;"
+            echo "5. merge: GitHub Pages publishes \`updates/\`."
+          } > "$RUNNER_TEMP/index-pr.md"
+          echo "subject=$subject" >> "$GITHUB_OUTPUT"
       - name: Open the index pull request
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          # The index and the removal of its stale signature.
+          # The indexes and the removal of their stale signatures.
           add-paths: updates/v1
           branch: updates/${{ github.ref_name }}
           base: main
-          commit-message: "chore(updates): add ${{ env.VERSION }} to the ${{ steps.add.outputs.channel }} index"
-          title: "chore(updates): add ${{ env.VERSION }} to the ${{ steps.add.outputs.channel }} index"
-          body: |
-            Adds ${{ env.VERSION }} to `updates/v1/${{ steps.add.outputs.channel }}.json` (`cargo xtask index add`, rollout 100 %).
-
-            The index is unsigned. To publish it, on this branch:
-
-            1. optionally lower `rollout` of the new version;
-            2. `cargo xtask sign updates/v1/${{ steps.add.outputs.channel }}.json --key <secret key>`;
-            3. commit the index and its `.minisig` and push: the index check runs on that push;
-            4. merge: GitHub Pages publishes `updates/`.
+          commit-message: "chore(updates): add ${{ env.VERSION }} to ${{ steps.add.outputs.subject }}"
+          title: "chore(updates): add ${{ env.VERSION }} to ${{ steps.add.outputs.subject }}"
+          body-path: ${{ runner.temp }}/index-pr.md
