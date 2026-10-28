@@ -1,0 +1,16 @@
+[package]
+name = "oncl-win7shim-combase"
+description = "combase.dll of the Windows 7 builds of OpenNCALayer: forwards the combase.dll imports of the windows crates to ole32.dll"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(windows)'.dev-dependencies]
+oncl-testkit.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }

@@ -2214,8 +2214,6 @@ dependencies = [
 [[package]]
 name = "i-slint-backend-winit"
 version = "1.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dae4fcf1b19e9cb109984d2af87d2b9485388c619265bff71dd523133888bee2"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -3938,8 +3936,12 @@ dependencies = [
 name = "oncl-testkit"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "object",
  "serde",
+ "serde_json",
+ "tempfile",
  "toml",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4023,6 +4025,21 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "zip",
+]
+
+[[package]]
+name = "oncl-win7shim-combase"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "oncl-testkit",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "oncl-win7shim-winrt-error"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "oncl-testkit",
 ]
 
 [[package]]

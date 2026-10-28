@@ -124,7 +124,11 @@ fn builds_both_extensions_from_the_shared_ids() {
     assert_eq!(firefox["manifest_version"], 2);
     let gecko = &firefox["browser_specific_settings"]["gecko"];
     assert_eq!(gecko["id"], FIREFOX_EXTENSION_ID);
-    assert_eq!(gecko["strict_min_version"], "128.0");
+    assert_eq!(gecko["strict_min_version"], "115.0");
+    // Firefox 128+ runs the shim in the page's world; older versions ignore `world` and run
+    // it as a content script, which then reaches the page through Xray vision.
+    assert_eq!(firefox["content_scripts"][0]["js"][0], "shim.js");
+    assert_eq!(firefox["content_scripts"][0]["world"], "MAIN");
 }
 
 /// Copies the files directly in `from` to `to`.

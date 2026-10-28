@@ -1,12 +1,15 @@
 //! The browsers and their WebDriver drivers: downloaded into `target/browsers/` (`--download`)
-//! or taken from `ONCL_CHROME`/`ONCL_CHROMEDRIVER` and `ONCL_FIREFOX`/`ONCL_GECKODRIVER`.
+//! or taken from `ONCL_CHROME`/`ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`/`ONCL_GECKODRIVER` and
+//! `ONCL_FIREFOX_ESR`/`ONCL_GECKODRIVER`.
 //!
 //! - Chromium: Chrome for Testing, the latest Stable with the chromedriver of the same
 //!   version (branded Chrome ignores `--load-extension`).
 //! - Firefox: the latest release and the latest geckodriver release.
+//! - Firefox ESR: the latest 115.x ESR (the last Firefox for Windows 7) from the release
+//!   archive, with a pinned geckodriver that supports it.
 //!
 //! Every download lands in a directory named after its version, so a later run reuses it.
-//! All of them go through one agent with timeouts and a size cap. The Firefox tarball is
+//! All of them go through one agent with timeouts and a size cap. Firefox tarballs are
 //! checked against the release's `SHA256SUMS`; Chrome for Testing and geckodriver publish no
 //! digests. Remote version strings are checked before they reach a path or a URL.
 
@@ -29,8 +32,13 @@ const CFT_VERSIONS: &str = "https://googlechromelabs.github.io/chrome-for-testin
 const FIREFOX_VERSIONS: &str = "https://product-details.mozilla.org/1.0/firefox_versions.json";
 /// Redirects to the tag page of the latest geckodriver release.
 const GECKODRIVER_LATEST: &str = "https://github.com/mozilla/geckodriver/releases/latest";
-/// Firefox releases: `<version>/SHA256SUMS` and the tarballs.
-const FIREFOX_RELEASES: &str = "https://ftp.mozilla.org/pub/firefox/releases";
+/// The geckodriver of Firefox ESR 115, which stays at 115 for good: geckodriver 0.34–0.37.1
+/// support 115 ESR as their oldest Firefox, a later one may not.
+const GECKODRIVER_ESR: &str = "v0.37.1";
+/// Firefox releases: the version listing, `<version>/SHA256SUMS` and the tarballs.
+const FIREFOX_RELEASES: &str = "https://archive.mozilla.org/pub/firefox/releases";
+/// Firefox tarball compressions, newest first (`.tar.bz2` before Firefox 135).
+const FIREFOX_TARBALLS: [&str; 2] = ["tar.xz", "tar.bz2"];
 
 /// Longest wait for a connection or for response headers.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -47,6 +55,7 @@ const MAX_TEXT: u64 = 16 << 20;
 pub enum Browser {
     Chromium,
     Firefox,
+    FirefoxEsr,
 }
 
 impl Browser {
@@ -55,7 +64,28 @@ impl Browser {
         match self {
             Browser::Chromium => "chromium",
             Browser::Firefox => "firefox",
+            Browser::FirefoxEsr => "firefox-esr",
         }
+    }
+
+    /// The package of `cargo xtask ext build` the browser loads.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Browser::Chromium => "chromium",
+            Browser::Firefox | Browser::FirefoxEsr => "firefox",
+        }
+    }
+
+    pub fn is_firefox(self) -> bool {
+        self.extension() == "firefox"
+    }
+
+    /// Whether the shim runs in the page's own world (Chromium, Firefox 128+): `CustomEvent`s
+    /// of the page reach the bridge, and the shim's functions outlive the extension. Firefox
+    /// ESR 115 has no `world: "MAIN"`: the shim runs next to the bridge, calls it directly,
+    /// the bridge ignores page events, and the shim's functions die with the extension.
+    pub fn shim_in_page_world(self) -> bool {
+        self != Browser::FirefoxEsr
     }
 
     /// Variables naming the browser and its driver without `--download`.
@@ -63,6 +93,7 @@ impl Browser {
         match self {
             Browser::Chromium => ("ONCL_CHROME", "ONCL_CHROMEDRIVER"),
             Browser::Firefox => ("ONCL_FIREFOX", "ONCL_GECKODRIVER"),
+            Browser::FirefoxEsr => ("ONCL_FIREFOX_ESR", "ONCL_GECKODRIVER"),
         }
     }
 }
@@ -105,6 +136,7 @@ pub fn download(browser: Browser, dir: &Path) -> anyhow::Result<Binaries> {
     match browser {
         Browser::Chromium => download_chrome(dir),
         Browser::Firefox => download_firefox(dir),
+        Browser::FirefoxEsr => download_firefox_esr(dir),
     }
 }
 
@@ -175,32 +207,58 @@ fn download_firefox(dir: &Path) -> anyhow::Result<Binaries> {
     let version = path_component(version)
         .with_context(|| format!("unexpected Firefox version {version:?}"))?
         .to_owned();
+    let browser = firefox_release(dir, "firefox", &version)?;
     let tag = geckodriver_tag()?;
-    let browser = unpacked(dir, "firefox", &version, "firefox/firefox", |to| {
-        let file = firefox_tarball(&version);
+    let driver = download_geckodriver(dir, "geckodriver", &tag)?;
+    println!("Firefox {version}, geckodriver {tag}");
+    Ok(Binaries { browser, driver })
+}
+
+fn download_firefox_esr(dir: &Path) -> anyhow::Result<Binaries> {
+    let listing_url = format!("{FIREFOX_RELEASES}/");
+    let version = latest_esr115(&get_text(&listing_url)?)
+        .with_context(|| format!("no 115.x ESR in {listing_url}"))?;
+    // Not `firefox-<version>` and `geckodriver-<tag>`: unpacking for one Firefox would remove
+    // what the other one uses.
+    let browser = firefox_release(dir, "firefox_esr", &version)?;
+    let driver = download_geckodriver(dir, "geckodriver_esr", GECKODRIVER_ESR)?;
+    println!("Firefox ESR {version}, geckodriver {GECKODRIVER_ESR}");
+    Ok(Binaries { browser, driver })
+}
+
+/// The `firefox` executable of the linux-x86_64 en-US release `version`, downloaded and
+/// checked against the release's `SHA256SUMS` unless already unpacked as `<name>-<version>`.
+fn firefox_release(dir: &Path, name: &str, version: &str) -> anyhow::Result<PathBuf> {
+    unpacked(dir, name, version, "firefox/firefox", |to| {
         let sums_url = format!("{FIREFOX_RELEASES}/{version}/SHA256SUMS");
         let sums = get_text(&sums_url)?;
-        let expected = firefox_sha256(&sums, &file)
-            .with_context(|| format!("{file} is not listed in {sums_url}"))?;
+        let (file, expected) = firefox_tarball(&sums, version)
+            .with_context(|| format!("no linux-x86_64 en-US tarball in {sums_url}"))?;
         let tarball = download_to(&format!("{FIREFOX_RELEASES}/{version}/{file}"), to)?;
         let bytes = fs::read(&tarball).with_context(|| format!("reading {}", tarball.display()))?;
         verify_sha256(&bytes, &expected).with_context(|| format!("{file} against {sums_url}"))?;
         println!("sha256 of {file} matches {sums_url}");
         untar(&tarball, to)
-    })?;
-    let driver = unpacked(dir, "geckodriver", &tag, "geckodriver", |to| {
+    })
+}
+
+/// The geckodriver release `tag`, unpacked under `dir` as `<name>-<tag>`.
+fn download_geckodriver(dir: &Path, name: &str, tag: &str) -> anyhow::Result<PathBuf> {
+    unpacked(dir, name, tag, "geckodriver", |to| {
         let url = format!(
             "https://github.com/mozilla/geckodriver/releases/download/{tag}/geckodriver-{tag}-linux64.tar.gz"
         );
         untar(&download_to(&url, to)?, to)
-    })?;
-    println!("Firefox {version}, geckodriver {tag}");
-    Ok(Binaries { browser, driver })
+    })
 }
 
-/// The linux-x86_64 en-US tarball of Firefox `version`, as named in `SHA256SUMS`.
-fn firefox_tarball(version: &str) -> String {
-    format!("linux-x86_64/en-US/firefox-{version}.tar.xz")
+/// The linux-x86_64 en-US tarball of Firefox `version` that `SHA256SUMS` lists, and its
+/// sha256.
+pub fn firefox_tarball(sums: &str, version: &str) -> Option<(String, String)> {
+    FIREFOX_TARBALLS.iter().find_map(|compression| {
+        let file = format!("linux-x86_64/en-US/firefox-{version}.{compression}");
+        firefox_sha256(sums, &file).map(|hex| (file, hex))
+    })
 }
 
 /// The sha256 that `SHA256SUMS` (`<hex>  <path>` lines) lists for `file`.
@@ -211,6 +269,31 @@ pub fn firefox_sha256(sums: &str, file: &str) -> Option<String> {
             name.trim() == file && hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit());
         valid.then(|| hex.to_owned())
     })
+}
+
+/// The highest `115.<n>…esr` release linked from the release listing (`…/releases/<name>/`
+/// links), by its numbers.
+pub fn latest_esr115(listing: &str) -> Option<String> {
+    listing
+        .split("/releases/")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('/').map(|(name, _)| name))
+        .filter_map(|name| Some((esr115_numbers(name)?, name)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, name)| name.to_owned())
+}
+
+/// The numbers of `115.<n>[.<m>…]esr`; `None` for other names.
+fn esr115_numbers(name: &str) -> Option<Vec<u32>> {
+    let numbers = path_component(name)?.strip_suffix("esr")?;
+    let numbers: Vec<u32> = numbers
+        .split('.')
+        .map(|n| {
+            let digits = !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+            digits.then(|| n.parse().ok()).flatten()
+        })
+        .collect::<Option<_>>()?;
+    (numbers.len() >= 2 && numbers[0] == 115).then_some(numbers)
 }
 
 /// The tag of the latest geckodriver release, from where `/releases/latest` redirects
@@ -447,18 +530,56 @@ mod tests {
     }
 
     #[test]
-    fn firefox_sha256_finds_the_tarball() {
+    fn firefox_tarball_finds_xz_or_bz2() {
         let a = "a".repeat(64);
         let b = "B".repeat(64);
+        let c = "c".repeat(64);
         let sums = format!(
             "{a}  linux-x86_64/en-US/firefox-158.0.1.tar.xz.asc\n\
              {b}  linux-x86_64/en-US/firefox-158.0.1.tar.xz\n\
-             {a}  linux-i686/en-US/firefox-158.0.1.tar.xz\n"
+             {a}  linux-i686/en-US/firefox-158.0.1.tar.xz\n\
+             {c}  linux-x86_64/en-US/firefox-115.44.0esr.tar.bz2\n\
+             {a}  update/linux-x86_64/en-US/firefox-115.44.0esr.complete.mar\n"
         );
-        let file = firefox_tarball("158.0.1");
-        assert_eq!(firefox_sha256(&sums, &file), Some(b));
-        assert_eq!(firefox_sha256(&sums, &firefox_tarball("1.0")), None);
-        assert_eq!(firefox_sha256(&format!("xyz  {file}"), &file), None);
+        assert_eq!(
+            firefox_tarball(&sums, "158.0.1"),
+            Some(("linux-x86_64/en-US/firefox-158.0.1.tar.xz".to_owned(), b))
+        );
+        assert_eq!(
+            firefox_tarball(&sums, "115.44.0esr"),
+            Some((
+                "linux-x86_64/en-US/firefox-115.44.0esr.tar.bz2".to_owned(),
+                c
+            ))
+        );
+        assert_eq!(firefox_tarball(&sums, "1.0"), None);
+        let file = "linux-x86_64/en-US/firefox-1.0.tar.xz";
+        assert_eq!(firefox_tarball(&format!("xyz  {file}"), "1.0"), None);
+    }
+
+    #[test]
+    fn latest_esr115_compares_numbers() {
+        let listing = r#"<a href="/pub/firefox/releases/115.9.1esr/">115.9.1esr/</a>
+            <a href="/pub/firefox/releases/115.0esr/">115.0esr/</a>
+            <a href="/pub/firefox/releases/115.44.0esr/">115.44.0esr/</a>
+            <a href="/pub/firefox/releases/115.43.1esr/">115.43.1esr/</a>
+            <a href="/pub/firefox/releases/128.20.0esr/">128.20.0esr/</a>
+            <a href="/pub/firefox/releases/159.0/">159.0/</a>
+            <a href="/pub/firefox/releases/115.99.0esr-candidates/">x</a>
+            <a href="/pub/firefox/releases/115.x.0esr/">x</a>"#;
+        assert_eq!(latest_esr115(listing).as_deref(), Some("115.44.0esr"));
+        assert_eq!(
+            latest_esr115("<a href=\"/releases/115.0esr/\">"),
+            Some("115.0esr".to_owned())
+        );
+        for none in [
+            "",
+            "/releases/128.1.0esr/",
+            "/releases/115esr/",
+            "/releases/115.+1.0esr/",
+        ] {
+            assert_eq!(latest_esr115(none), None, "{none}");
+        }
     }
 
     #[test]
@@ -554,6 +675,16 @@ mod tests {
             .collect();
         left.sort();
         assert_eq!(left, ["chrome-3.0", "chromedriver-1.0", "firefox-1"]);
+
+        // Firefox and Firefox ESR do not remove each other.
+        fs::create_dir_all(dir.path().join("firefox_esr-115.0esr")).unwrap();
+        let fill = |to: &Path| {
+            executable(&to.join("firefox"));
+            Ok(())
+        };
+        unpacked(dir.path(), "firefox", "2", "firefox", fill).unwrap();
+        assert!(dir.path().join("firefox_esr-115.0esr").is_dir());
+        assert!(!dir.path().join("firefox-1").exists());
     }
 
     #[test]

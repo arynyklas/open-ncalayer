@@ -11,3 +11,4 @@ pub mod interop;
 pub mod licenses;
 pub mod ncanode;
 pub mod sign;
+pub mod win7;

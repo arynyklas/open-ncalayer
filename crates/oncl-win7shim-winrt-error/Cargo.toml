@@ -1,0 +1,15 @@
+[package]
+name = "oncl-win7shim-winrt-error"
+description = "api-ms-win-core-winrt-error-l1-1-0.dll of the Windows 7 builds of OpenNCALayer: the WinRT error origination functions as stubs that report nothing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(windows)'.dev-dependencies]
+oncl-testkit.workspace = true

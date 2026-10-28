@@ -1,5 +1,5 @@
 //! A minimal W3C WebDriver client over `ureq`: a driver process (chromedriver, geckodriver),
-//! a session, navigation, `execute/async`, Firefox's `moz/addon/install`.
+//! a session, navigation, `execute/async`, Firefox's `moz/addon/install` and `uninstall`.
 
 use std::fs::File;
 use std::path::Path;
@@ -205,6 +205,12 @@ impl Session<'_> {
             Some(json!({"path": path, "temporary": true})),
         )?;
         Ok(id.as_str().unwrap_or_default().to_owned())
+    }
+
+    /// Firefox: removes the add-on `id`.
+    pub fn uninstall_addon(&self, id: &str) -> anyhow::Result<()> {
+        self.call("POST", "/moz/addon/uninstall", Some(json!({"id": id})))?;
+        Ok(())
     }
 }
 

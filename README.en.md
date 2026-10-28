@@ -8,7 +8,7 @@ OpenNCALayer is an independent project and is not affiliated with the National C
 
 ## Status
 
-Early development; the first pre-release is `0.1.0-alpha.1` ([Releases](https://github.com/arynyklas/open-ncalayer/releases)). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. The self-update from a signed index is written but not active yet: the builds carry no maintainer key, Pages has no signed index, and there are no installers yet (see [Updates](#updates)). Tokens, Windows 7, the installers, turning the self-update on and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
+Early development; the first pre-release is `0.1.0-alpha.1` ([Releases](https://github.com/arynyklas/open-ncalayer/releases)). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. Builds for Windows 7 SP1 x64 and x86 exist but have not yet run on a real Windows 7 (see [Windows 7](#windows-7)). The self-update from a signed index is written but not active yet: the builds carry no maintainer key, Pages has no signed index, and there are no installers yet (see [Updates](#updates)). Tokens, the installers, turning the self-update on and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
 
 P1 provides:
 - the `kz.gov.pki.knca.basics` module, method `sign`, formats `cms` and `raw`;
@@ -27,9 +27,11 @@ The fourth phase (P4) completes the original's protocol: the `basics`, `commonUt
 
 The fifth phase (P5) makes OpenNCALayer a desktop program: a tray icon, a settings window, a TLS wizard with buttons that install certificates, mkcert, certificate expiry reminders, coexistence with the original NCALayer, and an About window (see [Desktop](#desktop)).
 
+The sixth phase (P6) adds builds for Windows 7 SP1 x64 and x86, a regular Windows x86 build and support for the extension in Firefox ESR 115 (see [Windows 7](#windows-7)).
+
 The seventh phase (P7) adds updates from a signed index: a copy installed through Velopack checks its channel, installs a new version while nothing is being signed, and rolls back a version that does not run (see [Updates](#updates)).
 
-Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md), [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md), [`docs/dev/smoke-p4.md`](docs/dev/smoke-p4.md) and [`docs/dev/smoke-p5.md`](docs/dev/smoke-p5.md) (in Russian).
+Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md), [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md), [`docs/dev/smoke-p4.md`](docs/dev/smoke-p4.md), [`docs/dev/smoke-p5.md`](docs/dev/smoke-p5.md) and [`docs/dev/smoke-p6.md`](docs/dev/smoke-p6.md) (in Russian).
 
 Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
@@ -238,7 +240,7 @@ The About window: version, build commit, the Apache-2.0 licence, `Copyright 2026
 
 ## Ready-made builds
 
-[Releases](https://github.com/arynyklas/open-ncalayer/releases): archives for Windows x64 and x86 (`x86_64-pc-windows-msvc`, `i686-pc-windows-msvc`), Linux x64 (`x86_64-unknown-linux-gnu`, built on Ubuntu 24.04) and macOS, universal for Intel and Apple Silicon (`universal-apple-darwin`; `v0.1.0-alpha.1` has Apple Silicon only, `aarch64-apple-darwin`) with `openncalayer` and `nmhost`, Velopack packages for self-update (`OpenNCALayer-<version>-<flavor>-full.nupkg` and deltas), the extensions `openncalayer-chromium-<version>.zip` and `openncalayer-firefox-<version>.xpi` (unsigned: Firefox installs it only temporarily), a CycloneDX SBOM `openncalayer-<version>.cdx.json`, and `SHA256SUMS`. Every file has a build provenance attestation: `gh attestation verify <file> --repo arynyklas/open-ncalayer`. Versions with a suffix (`0.1.0-alpha.1`) are pre-releases. The binaries are not code-signed: Windows SmartScreen and macOS Gatekeeper warn on first start. A `v<version>` tag builds and publishes the release by itself (`.github/workflows/release.yml`; the publishing steps are in [docs/design/update-index.md](docs/design/update-index.md#публикация), in Russian).
+[Releases](https://github.com/arynyklas/open-ncalayer/releases): archives for Windows x64 and x86 (`x86_64-pc-windows-msvc`, `i686-pc-windows-msvc`), Windows 7 SP1 x64 and x86 (`win7-x64`, `win7-x86`; they carry `combase.dll` and `api-ms-win-core-winrt-error-l1-1-0.dll` next to the programs, keep them in one folder), Linux x64 (`x86_64-unknown-linux-gnu`, built on Ubuntu 24.04) and macOS, universal for Intel and Apple Silicon (`universal-apple-darwin`; `v0.1.0-alpha.1` has Apple Silicon only, `aarch64-apple-darwin`) with `openncalayer` and `nmhost`, Velopack packages for self-update (`OpenNCALayer-<version>-<flavor>-full.nupkg` and deltas), the extensions `openncalayer-chromium-<version>.zip` and `openncalayer-firefox-<version>.xpi` (unsigned: Firefox installs it only temporarily), a CycloneDX SBOM `openncalayer-<version>.cdx.json`, and `SHA256SUMS`. Every file has a build provenance attestation: `gh attestation verify <file> --repo arynyklas/open-ncalayer`. Versions with a suffix (`0.1.0-alpha.1`) are pre-releases. The binaries are not code-signed: Windows SmartScreen and macOS Gatekeeper warn on first start. A `v<version>` tag builds and publishes the release by itself (`.github/workflows/release.yml`; the publishing steps are in [docs/design/update-index.md](docs/design/update-index.md#публикация), in Russian).
 
 Unpack the archive and go on as with your own build: `openncalayer run`, and the extension as in [Browser extension](#browser-extension).
 
@@ -263,6 +265,24 @@ The settings window has an "Обновления" (Updates) group: the «Обн�
 An installed copy built without the public keys of the index (`crates/oncl-update/keys/current.pub` and `next.pub`, built in at compile time) cannot check the signature, so its updates are off: «Ключи подписи обновлений не встроены в эту сборку» (the update signing keys are not built into this build). Until the key is in the repository every version is built like that, the release builds included. A build of your own that is not installed through Velopack shows «Обновления доступны только для установленной версии» instead.
 
 The format of the index, its signature and the choice of a version are described in [`docs/design/update-index.md`](docs/design/update-index.md) (in Russian); the maintainer's release and signing steps are in [`docs/dev/release.md`](docs/dev/release.md) (in Russian).
+
+## Windows 7
+
+Windows 7 SP1 has archives of its own: `openncalayer-<version>-win7-x64.zip` (64-bit system) and `openncalayer-<version>-win7-x86.zip` (32-bit). On Windows 10 and 11 take the regular `openncalayer-<version>-x86_64-pc-windows-msvc.zip` and `openncalayer-<version>-i686-pc-windows-msvc.zip` (x86). The Windows 7 builds link the CRT statically: no Visual C++ Redistributable is needed.
+
+The Windows 7 archive has two small DLLs next to `openncalayer.exe` and `nmhost.exe`. Unpack the whole archive and keep them in the program's folder:
+- `combase.dll` forwards `CoTaskMemFree` and `CoCreateFreeThreadedMarshaler` to `ole32.dll`. The `windows` crates behind the windows (Slint and its dependencies) import these functions from `combase.dll`, which Windows 7 does not have;
+- `api-ms-win-core-winrt-error-l1-1-0.dll` holds stubs of `RoOriginateErrorW` and `RoOriginateError`: Windows 7 has no WinRT to report an error to, so they do nothing and return `FALSE`.
+
+The DLLs export only these functions and reach only `kernel32.dll` and `ole32.dll`. On Windows 8 and later neither DLL is loaded: `combase.dll` is a KnownDLL there and `api-ms-…` an API set, so the loader takes the system ones. The Windows 7 build therefore also runs on newer Windows: its start was checked on Windows 11; the CI job `win7` checks it on Windows Server 2025, but that job has not run yet; Windows 10 has not been checked. The relay `nmhost.exe` does not need the DLLs: `nm install` copies it on its own.
+
+For updates through Velopack the release builds packages of the flavors `win7-x64` and `win7-x86` from the same files. The executables of the package — ours, `Squirrel.exe` (Velopack's Update.exe) and its stub — go through the same import gate, in the release workflow and in the CI job `win7`.
+
+On Windows 7 the windows take their default font size from the system metrics (`SystemParametersInfoW`), scaled for DPI: `SystemParametersInfoForDpi`, which Slint uses, does not exist on Windows 7 (details in [Development](#development)).
+
+Browsers on Windows 7: Firefox ESR 115 and Chrome 109 are the last versions for it. The extension installs into Firefox ESR 115 just as into regular Firefox (see [Browser extension](#browser-extension)). There the shim works through Xray vision, which has limits of its own: a page subclass of `WebSocket` does not get its own class for any URL (in other browsers only for NCALayer URLs), and open tabs must be reloaded after the extension is disabled, removed or updated (see [Deviations and limits of the extension](#deviations-and-limits-of-the-extension-p2)). The end-to-end extension test passes in Firefox ESR 115 on Linux.
+
+Not checked yet: no real Windows 7 has run these builds; Windows 7 VMs come with the lab (P9). Checked automatically: every import (the import gate: no DLL or function from the Windows 8+ list) and starting the build on Windows 11. Not checked: start and tray icon on Windows 7, the signing window and its font, the eGov login through the extension in Firefox ESR 115 and Chrome 109, and matching the imports against the full Windows 7 SP1 export list. The checklist is in [`docs/dev/smoke-p6.md`](docs/dev/smoke-p6.md) (in Russian).
 
 ## Build and run
 
@@ -330,7 +350,7 @@ Installation:
 
    The command never touches certificates. Check with `openncalayer nm status` (exit code 1 if anything is missing); remove with `openncalayer nm uninstall` (the data directory stays).
 2. Chrome, Edge, Yandex Browser: the extensions page (`chrome://extensions`, `edge://extensions`) → "Developer mode" → "Load unpacked" → the `target/extension/chromium` directory or the unpacked `openncalayer-chromium-<version>.zip`. The extension id must be `cmdaoegbcpdhoamhgmibpgpnlojopcal`: the host accepts no other id.
-3. Firefox (128 or later): for now only a temporary install — `about:debugging` → "This Firefox" → "Load Temporary Add-on…" → `target/extension/firefox/manifest.json`; the add-on is gone after a Firefox restart. Only an AMO-signed (unlisted) XPI installs permanently: Firefox refuses the unsigned `.xpi`.
+3. Firefox (115 or later, ESR 115 included — the last Firefox for Windows 7): for now only a temporary install — `about:debugging` → "This Firefox" → "Load Temporary Add-on…" → `target/extension/firefox/manifest.json`; the add-on is gone after a Firefox restart. Only an AMO-signed (unlisted) XPI installs permanently: Firefox refuses the unsigned `.xpi`.
 4. Reload the open tabs of the sites.
 
 Good to know:
@@ -338,7 +358,9 @@ Good to know:
 - A repeated `nm install` replaces the relay by renaming: relays the browser is running keep working with the old file. Old `nmhost.old-*` files are removed by the next `nm install`. On Windows `nm uninstall` cannot delete a relay the browser is holding (the relay line says «занят запущенным процессом», exit code 1): close the browser and run the command again. On macOS and Linux the file is removed at once.
 - A daemon started by the relay runs until the session ends. If TLS is set up and port 13579 is free, the same daemon serves `wss` too; otherwise the log has a warning and the daemon serves only the extension until the user stops the original or saves a certificate in the wizard.
 - Through the extension, the site origin that modules see comes from the browser, not from the page.
-- If the host is not installed or the daemon does not start, the extension gives the page its own `WebSocket`, i.e. the original NCALayer if it is running. While the host is installed, sites go to OpenNCALayer even when the original is running. To return to the original, run `nm uninstall` and restart the browser (or stop the daemon), or disable the extension: right after `nm uninstall` the browser keeps using the relay and daemon already running.
+- If the host is not installed or the daemon does not start, the extension gives the page its own `WebSocket`, i.e. the original NCALayer if it is running. While the host is installed, sites go to OpenNCALayer even when the original is running. To return to the original, run `nm uninstall` and restart the browser (or stop the daemon), or disable the extension: right after `nm uninstall` the browser keeps using the relay and daemon already running. After the extension is disabled, open tabs in Chromium and Firefox 128 or later switch to the page's own `WebSocket` by themselves, but only for new sockets and `fetch`; in Firefox ESR 115 they must be reloaded (see below). A socket already open through the extension does not switch to the original: in Firefox 128 or later, on its next `send` the page gets `error` and `close` with code 1006 (like the browser, from a later task, not from inside `send`), and the pending request fails; a socket that only waits for messages gets nothing and stays open until the page closes it or uses NCALayer again (a new socket, `fetch` or `send`). In Chromium the end-to-end test does not check this.
+- Firefox before 128 (ESR 115) has no `world: "MAIN"` for content scripts. There the shim runs as an ordinary content script: it replaces the page's `WebSocket` and `fetch` through Xray vision (`window.wrappedJSObject`, `exportFunction`, `cloneInto`) and hands frames to the bridge directly, with no events on `document`. In Firefox 128 and later the shim runs in the page's world, as in Chromium.
+- Firefox ESR 115: after disabling, removing, reloading or updating the extension, reload the open tabs. Until then `WebSocket` and `fetch` in them throw `TypeError: can't access dead object` — on every site, not only NCALayer ones. Firefox destroys the content script together with the functions it gave the page, and lets it run nothing before that.
 
 Linux, Firefox from snap and Flatpak:
 - `nm install` detects Firefox by `~/.mozilla` or `~/.config/mozilla`. Snap Firefox keeps its profile under `~/snap/firefox/`, so the command may skip Firefox ("пропущен"). Then create the directory with `mkdir -p ~/.mozilla` and run `nm install` again: the manifest goes to `~/.mozilla/native-messaging-hosts/`, where snap Firefox 135 or later reads it through xdg-desktop-portal.
@@ -347,7 +369,8 @@ Linux, Firefox from snap and Flatpak:
 
 ### Deviations and limits of the extension (P2)
 
-- Firefox ESR 115 (the last Firefox for Windows 7) is not supported until P6: the shim needs `world: "MAIN"` in content scripts, available since Firefox 128.
+- A page's subclass of `WebSocket` (`class X extends WebSocket`) creates a plain `WebSocket`, not an `X`, for an NCALayer URL in every browser: the extension makes that socket. In Firefox ESR 115 the same holds for any other URL: Firefox constructs a function a content script gave the page with that function itself as `new.target`, so the page's class never reaches the shim.
+- In Firefox ESR 115, open tabs must be reloaded after the extension is disabled, removed or updated: until then `WebSocket` and `fetch` do not work in them.
 - Chrome 109 (the last Chrome for Windows 7) is the declared minimum but has not been tested.
 - Safari is not supported.
 - Sockets a site opens from a Web Worker are not replaced: they still need `wss` and the CA.
@@ -381,7 +404,7 @@ node --test "extension/test/*.test.mjs"   # extension tests, Node 22 or later
 cargo xtask ext build                     # → target/extension/
 ```
 
-End-to-end check of the extension in Chrome for Testing and Firefox (Linux only; browsers and drivers are downloaded to `target/browsers/`):
+End-to-end check of the extension in Chrome for Testing, Firefox and Firefox ESR 115 (Linux only; browsers and drivers are downloaded to `target/browsers/`):
 
 ```sh
 cargo build --release -p openncalayer --features e2e-prompter -p oncl-nmhost
@@ -389,7 +412,24 @@ cargo xtask ext build
 cargo xtask ext-e2e --download
 ```
 
-Without `--download` the paths come from `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX` and `ONCL_GECKODRIVER`. The browsers run with throwaway profiles in `target/ext-e2e/`, and the host is registered there too (`nm install --sandbox`). The `e2e-prompter` feature replaces the signing dialogs with a script from the `ONCL_E2E_PROMPTER` file; regular builds do not have it.
+Without `--download` the paths come from `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`, `ONCL_FIREFOX_ESR` and `ONCL_GECKODRIVER`; one browser only: `--browser chromium|firefox|firefox-esr`. Firefox ESR 115 needs the system library `libdbus-glib-1-2`. The browsers run with throwaway profiles in `target/ext-e2e/`, and the host is registered there too (`nm install --sandbox`). The `e2e-prompter` feature replaces the signing dialogs with a script from the `ONCL_E2E_PROMPTER` file; regular builds do not have it. Scenario 8 removes the extension under an open page (Firefox only; in ESR 115 it checks the limitation described above).
+
+Windows 7 SP1 builds (on Windows only, with the pinned nightly):
+
+```sh
+rustup toolchain install nightly-2026-08-12 --profile minimal --component rust-src
+cargo xtask win7 --arch all   # → target/win7/x64/, target/win7/x86/
+```
+
+`cargo xtask win7` builds `openncalayer.exe` and `nmhost.exe` for `x86_64-win7-windows-msvc` and `i686-win7-windows-msvc` (`-Zbuild-std`, static CRT: no VC++ redistributable needed) and puts two DLLs Windows 7 lacks next to them: `combase.dll` forwards `CoTaskMemFree` and `CoCreateFreeThreadedMarshaler` to `ole32.dll`, and in `api-ms-win-core-winrt-error-l1-1-0.dll` the functions `RoOriginateErrorW` and `RoOriginateError` do nothing. Windows 8 and later never load these copies: there `combase.dll` is a known DLL, and `api-ms-win-*` names resolve through the API set schema.
+
+Then the import gate runs, also available as `cargo xtask check-imports <exe>…`:
+- an import from a DLL or of a function on the list of those known to be missing on Windows 7 fails (decorated x86 names too). This is a denylist: a Windows 8+ import outside it passes; matching against the Windows 7 SP1 exports (an allowlist) comes with the lab (P9);
+- an import from `combase.dll` or `api-ms-win-core-winrt-error-l1-1-0.dll` passes only if the DLL of that name lies next to the exe and exports exactly that name; a new import such as `combase!CoTaskMemAlloc` fails until the DLL exports it;
+- these DLLs have the exe's bitness and import from and forward to `kernel32.dll` and `ole32.dll` only, by undecorated name;
+- `nmhost.exe` must do without them: `nm install` copies the relay apart from the program.
+
+On Windows, `cargo xtask win7` then starts the build from `target/win7/<arch>/`: `--help`, `nm install` and `nm status` in a sandbox, `tls init`, then `run` until it answers `GET /` over HTTPS, with the data directory in a temporary directory under `target/win7-smoke/`. In CI this is the blocking `win7` job (x64 and x86 on Windows Server 2025; it has not run yet); checks on Windows 7 itself come with the lab (P9).
 
 Before submitting changes:
 
@@ -402,10 +442,12 @@ cargo xtask licenses --check   # the About window's third-party licences are cur
 
 `web/demo/vendor/ncalayer-client.js` is `package/ncalayer-client.js` from the npm package `ncalayer-js-client@1.6.1`, unmodified (MIT, sha256 `bdf2015c3e422eed70ccf38eef3246af67a0d38639e6b70fe6b8655a2fa03489`). The `demo_assets_served` test checks the sha256 of the file the server sends. The server sends the client's license next to it: `/demo/vendor/LICENSE`.
 
+`vendor/i-slint-backend-winit` is the crates.io package `i-slint-backend-winit` 1.18.1 (Slint's winit backend), modified, in the build through `[patch.crates-io]`. One place changed: the default font size on Windows (`windows_message_font_height` in `lib.rs`, called from `bind_context`). `SystemParametersInfoForDpi` (Windows 10 1607 and later) is looked up with `GetProcAddress`; without it, `SystemParametersInfoW(SPI_GETNONCLIENTMETRICS)` is called and the height is scaled from the system DPI to 96. `Cargo.toml` adds the `Win32_System_LibraryLoader` feature of `windows`. So the Windows 7 builds do not import a function Windows 7 lacks, and Windows 10/11 make the same call as before. Slint's royalty-free license 2.0 allows modifying the software and distributing it modified as part of an application (sections 1–2); the license notices in the files are kept. The `locked_slint_winit_backend_is_the_patched_copy` test fails if a Slint upgrade leaves the patch unused; on an upgrade, replace the copy with the new package and carry the change over.
+
 `vendor/velopack` is the crates.io package `velopack` 1.3.39-g8d2844f (commit `8d2844f`, MIT) with changes, built through `[patch.crates-io]`. Two places change: `src/sources/mod.rs` adds the `verify_full_package` method to `UpdateSource` (by default Velopack's own size and checksum check), and `download_updates` in `src/manager.rs` checks with it a full package already on disk (one that fails is deleted and downloaded again) and a package rebuilt from a delta, before it is renamed into place and before `Squirrel.exe` (Update.exe) is extracted from it; one that fails is replaced by downloading the full package. Our `IndexSource` accepts a file that matches the signed index's full package by sha256 and size, or holds the same files (the index's `contents_sha256`). `vendor/velopack/LICENSE` is the Velopack repository's licence at that commit: the crates.io package has none. The `locked_velopack_is_the_patched_copy` test fails if `Cargo.lock` stops using this copy.
 
 ## License
 
 © 2026 Aryn Yklas.
 
-[Apache-2.0](LICENSE); see also [NOTICE](NOTICE). `web/demo/vendor/ncalayer-client.js` is MIT, see [`web/demo/vendor/LICENSE`](web/demo/vendor/LICENSE). `vendor/velopack` is a modified copy of Velopack, MIT, see [`vendor/velopack/LICENSE`](vendor/velopack/LICENSE).
+[Apache-2.0](LICENSE); see also [NOTICE](NOTICE). `web/demo/vendor/ncalayer-client.js` is MIT, see [`web/demo/vendor/LICENSE`](web/demo/vendor/LICENSE). `vendor/velopack` is a modified copy of Velopack, MIT, see [`vendor/velopack/LICENSE`](vendor/velopack/LICENSE). `vendor/i-slint-backend-winit` is a modified copy of Slint's winit backend, used under LicenseRef-Slint-Royalty-free-2.0, see [`vendor/i-slint-backend-winit/LICENSES`](vendor/i-slint-backend-winit/LICENSES).

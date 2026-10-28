@@ -1,0 +1,5 @@
+; Exports of combase.dll: forwards to ole32.dll, which Windows 7 has. Only the combase.dll
+; imports of the Windows 7 builds; `cargo xtask check-imports` lists them.
+EXPORTS
+    CoCreateFreeThreadedMarshaler=ole32.CoCreateFreeThreadedMarshaler
+    CoTaskMemFree=ole32.CoTaskMemFree

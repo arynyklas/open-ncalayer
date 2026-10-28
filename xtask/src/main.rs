@@ -16,7 +16,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Fail if the executables import DLLs or functions that Windows 7 lacks.
+    /// Fail on imports from a list of DLLs and functions known to be missing on Windows 7 (a
+    /// deny-list: passing does not show that a program runs there); an import from an
+    /// app-local DLL next to the executable passes if that DLL exports it.
     CheckImports {
         #[arg(required = true)]
         exes: Vec<PathBuf>,
@@ -31,9 +33,9 @@ enum Command {
         /// Browsers to run.
         #[arg(long, value_enum, default_value_t = xtask::e2e::Selection::All)]
         browser: xtask::e2e::Selection,
-        /// Download Chrome for Testing, Firefox and their drivers into `target/browsers/`
-        /// instead of taking them from ONCL_CHROME, ONCL_CHROMEDRIVER, ONCL_FIREFOX and
-        /// ONCL_GECKODRIVER.
+        /// Download Chrome for Testing, Firefox, Firefox ESR 115 and their drivers into
+        /// `target/browsers/` instead of taking them from ONCL_CHROME, ONCL_CHROMEDRIVER,
+        /// ONCL_FIREFOX, ONCL_FIREFOX_ESR and ONCL_GECKODRIVER.
         #[arg(long)]
         download: bool,
     },
@@ -73,6 +75,16 @@ enum Command {
     Index {
         #[command(subcommand)]
         command: IndexCommand,
+    },
+    /// Build the Windows 7 programs with their app-local DLLs into `<out>/<arch>/`, run the
+    /// import gate on them and, on Windows, start them there.
+    Win7 {
+        /// Architectures to build.
+        #[arg(long, value_enum, default_value_t = xtask::win7::Selection::All)]
+        arch: xtask::win7::Selection,
+        /// Output directory [default: target/win7].
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -124,9 +136,10 @@ enum IndexCommand {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
-    /// Check the indexes in a directory before publishing: format, signature by a trusted
-    /// key, validity, asset URLs on the project's releases, `seq` growth against the base
-    /// branch, and that every asset answers `HEAD` with 200.
+    /// Check the indexes in a directory before publishing: format, signature by
+    /// `current.pub` only (a `next.pub` is for clients, not for signing), validity, asset URLs
+    /// on the project's releases, `seq` growth against the base branch, and that every asset
+    /// answers `HEAD` with 200.
     Check {
         /// The directory of the indexes, e.g. `updates/v1`.
         dir: PathBuf,
@@ -190,7 +203,7 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::CheckImports { exes } => match xtask::imports::check_imports(&exes)? {
             0 => Ok(()),
-            found => anyhow::bail!("{found} imports are missing on Windows 7"),
+            found => anyhow::bail!("{found} violations of the Windows 7 import gate"),
         },
         Command::Ext {
             command: ExtCommand::Build,
@@ -377,6 +390,11 @@ fn main() -> anyhow::Result<()> {
                 println!("offline: HEAD of the assets and vm-smoke not checked");
             }
             Ok(())
+        }
+        Command::Win7 { arch, out } => {
+            let root = oncl_testkit::workspace_root();
+            let out = out.unwrap_or_else(|| root.join("target").join("win7"));
+            xtask::win7::run(&root, arch, &out)
         }
     }
 }

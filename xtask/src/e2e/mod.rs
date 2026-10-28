@@ -51,6 +51,7 @@ use webdriver::{Driver, Session};
 pub enum Selection {
     Chromium,
     Firefox,
+    FirefoxEsr,
     All,
 }
 
@@ -59,13 +60,14 @@ impl Selection {
         match self {
             Selection::Chromium => &[Browser::Chromium],
             Selection::Firefox => &[Browser::Firefox],
-            Selection::All => &[Browser::Chromium, Browser::Firefox],
+            Selection::FirefoxEsr => &[Browser::FirefoxEsr],
+            Selection::All => &[Browser::Chromium, Browser::Firefox, Browser::FirefoxEsr],
         }
     }
 }
 
 /// The scenarios, in the order they run.
-pub const SCENARIOS: [&str; 7] = [
+pub const SCENARIOS: [&str; 8] = [
     "1. autostart: greeting via relay and daemon",
     "2. heartbeat echo, unknown module",
     "3. fetch probe resolves",
@@ -73,6 +75,7 @@ pub const SCENARIOS: [&str; 7] = [
     "5. origin set by the browser, not the page",
     "6. daemon killed: close 1006, restart",
     "7. no host: page's own WebSocket and fetch",
+    "8. extension removed: open page, then reload",
 ];
 
 /// Size of the document signed in scenario 4: 1.5 MiB.
@@ -82,8 +85,13 @@ const SIGNED_SIZE: usize = 3 << 19;
 const SIGNING_KEY: &str = "user-gost2015-sign";
 /// A socket the daemon dropped must close in the page within this.
 const CLOSE_WITHIN: Duration = Duration::from_secs(5);
+/// How long a page step waits for the bridge to answer a forged event (it answers in
+/// milliseconds when it listens).
+const FORGED_SILENCE_MS: u64 = 3000;
 /// How long the extension gets to put its shim into a fresh page.
 const SHIM_PATIENCE: Duration = Duration::from_secs(30);
+/// How long removing the extension gets to reach an open page.
+const REMOVAL_PATIENCE: Duration = Duration::from_secs(5);
 /// Longest page step (the signature included).
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(240);
 /// The file in a sandbox that names its browsers' `TMPDIR`.
@@ -133,7 +141,7 @@ pub fn run(root: &Path, selection: Selection, download: bool) -> anyhow::Result<
         );
     }
     for browser in selection.browsers() {
-        let dir = inputs.extension.join(browser.name());
+        let dir = inputs.extension.join(browser.extension());
         ensure!(
             dir.join("manifest.json").is_file(),
             "{} is missing: run `cargo xtask ext build`",
@@ -187,23 +195,36 @@ struct Inputs {
     extension: PathBuf,
 }
 
+/// What a scenario did in a browser that passed it.
+#[derive(Debug)]
+enum Ran {
+    Passed,
+    /// The browser cannot do what the scenario needs.
+    NotApplicable,
+}
+
 /// The outcome of every scenario in one browser, an error text for a failed one; an error
 /// text alone if the browser did not get to the scenarios.
-type Outcomes = Result<Vec<Result<(), String>>, String>;
+type Outcomes = Result<Vec<Result<Ran, String>>, String>;
 
 fn print_table(columns: &[(Browser, Outcomes)]) {
     let width = SCENARIOS.iter().map(|s| s.len()).max().unwrap_or(0);
     let mut header = format!("{:width$}", "scenario");
     for (browser, _) in columns {
-        header.push_str(&format!("  {:8}", browser.name()));
+        header.push_str(&format!("  {}", browser.name()));
     }
     println!("{}", header.trim_end());
     for (i, scenario) in SCENARIOS.iter().enumerate() {
         let mut line = format!("{scenario:width$}");
-        for (_, outcomes) in columns {
-            let passed = outcomes.as_ref().is_ok_and(|outcomes| outcomes[i].is_ok());
-            let mark = if passed { "PASS" } else { "FAIL" };
-            line.push_str(&format!("  {mark:8}"));
+        for (browser, outcomes) in columns {
+            let mark = match outcomes.as_ref().map(|outcomes| &outcomes[i]) {
+                Ok(Ok(Ran::Passed)) => "PASS",
+                Ok(Ok(Ran::NotApplicable)) => "n/a",
+                _ => "FAIL",
+            };
+            // Every browser name is at least as long as a mark.
+            let column = browser.name().len();
+            line.push_str(&format!("  {mark:column$}"));
         }
         println!("{}", line.trim_end());
     }
@@ -235,7 +256,7 @@ fn run_browser(
     binaries: &browsers::Binaries,
     target: &Path,
     page_port: u16,
-) -> anyhow::Result<Vec<Result<(), String>>> {
+) -> anyhow::Result<Vec<Result<Ran, String>>> {
     let root = target.join("ext-e2e").join(browser.name());
     let data = root.join("data");
     // What a killed run left (driver, browser, relay, daemon) would keep the sandbox busy.
@@ -263,7 +284,7 @@ fn start_browser(
     binaries: &browsers::Binaries,
     sandbox: &Sandbox,
     page_port: u16,
-) -> anyhow::Result<Vec<Result<(), String>>> {
+) -> anyhow::Result<Vec<Result<Ran, String>>> {
     let env = sandbox.env();
     nm(
         inputs,
@@ -285,7 +306,9 @@ fn start_browser(
             Vec::new()
         }
         // The Firefox profile stays under `target/`, not in the short TMPDIR.
-        Browser::Firefox => vec![format!("--profile-root={}", sandbox.profiles.display())],
+        Browser::Firefox | Browser::FirefoxEsr => {
+            vec![format!("--profile-root={}", sandbox.profiles.display())]
+        }
     };
     let driver = Driver::start(
         &binaries.driver,
@@ -294,10 +317,15 @@ fn start_browser(
         &UNSET,
         &sandbox.root.join("driver.log"),
     )?;
-    let extension = inputs.extension.join(browser.name());
-    let session = driver.session(capabilities(browser, binaries, &extension, sandbox)?)?;
+    let extension = inputs.extension.join(browser.extension());
+    let session = driver
+        .session(capabilities(browser, binaries, &extension, sandbox)?)
+        .with_context(|| match browser {
+            Browser::FirefoxEsr => "starting the browser (Firefox ESR 115 needs libdbus-glib-1-2)",
+            _ => "starting the browser",
+        })?;
     session.set_script_timeout(SCRIPT_TIMEOUT)?;
-    if browser == Browser::Firefox {
+    if browser.is_firefox() {
         let id = session
             .install_temporary_addon(&extension)
             .context("installing the add-on")?;
@@ -308,19 +336,23 @@ fn start_browser(
     }
     let scenarios = Scenarios {
         session: &session,
+        browser,
         inputs,
         sandbox,
         page_port,
     };
     scenarios.wait_for_shim()?;
-    let steps: [&dyn Fn() -> anyhow::Result<()>; 7] = [
-        &|| scenarios.autostart(),
-        &|| scenarios.echo_and_unknown(),
-        &|| scenarios.probe(),
-        &|| scenarios.sign(),
-        &|| scenarios.origin(),
-        &|| scenarios.daemon_killed(),
-        &|| scenarios.no_host(),
+    let passed = |result: anyhow::Result<()>| result.map(|()| Ran::Passed);
+    let steps: [&dyn Fn() -> anyhow::Result<Ran>; 8] = [
+        &|| passed(scenarios.autostart()),
+        &|| passed(scenarios.echo_and_unknown()),
+        &|| passed(scenarios.probe()),
+        &|| passed(scenarios.sign()),
+        &|| passed(scenarios.origin()),
+        &|| passed(scenarios.daemon_killed()),
+        &|| passed(scenarios.no_host()),
+        // Last: it removes the extension.
+        &|| scenarios.extension_removed(),
     ];
     Ok(steps
         .iter()
@@ -389,7 +421,7 @@ fn capabilities(
                 ],
             },
         }),
-        Browser::Firefox => json!({
+        Browser::Firefox | Browser::FirefoxEsr => json!({
             "browserName": "firefox",
             "moz:firefoxOptions": {
                 "binary": path(&binaries.browser)?,
@@ -488,6 +520,7 @@ const STEP_SCRIPT: &str = "const done = arguments[arguments.length - 1];\n\
 
 struct Scenarios<'a> {
     session: &'a Session<'a>,
+    browser: Browser,
     inputs: &'a Inputs,
     sandbox: &'a Sandbox,
     page_port: u16,
@@ -531,7 +564,9 @@ impl Scenarios<'_> {
     }
 
     /// 1. With no daemon running, a page socket to NCALayer is a `WebSocket` and gets the
-    ///    greeting: the browser started the relay, the relay the daemon.
+    ///    greeting: the browser started the relay, the relay the daemon. A page subclass of
+    ///    `WebSocket` makes a plain `WebSocket` for an NCALayer URL; for any other URL it
+    ///    keeps its class, except where the shim is a Firefox content script (ESR 115).
     fn autostart(&self) -> anyhow::Result<()> {
         ensure!(
             self.daemons().is_empty(),
@@ -550,6 +585,15 @@ impl Scenarios<'_> {
         ensure!(
             !self.daemons().is_empty(),
             "no daemon process for the sandbox"
+        );
+        let result = self.step("subclass", Value::Null)?;
+        ensure!(
+            result["ncalayer"] == false,
+            "a subclass made an instance of itself for an NCALayer URL: {result}"
+        );
+        ensure!(
+            result["other"] == self.browser.shim_in_page_world(),
+            "a subclass for another URL: {result}"
         );
         Ok(())
     }
@@ -605,18 +649,33 @@ impl Scenarios<'_> {
         Ok(())
     }
 
-    /// 5. A page forging a bridge `open` with `origin: "https://evil.example"` gets its socket
-    ///    with the page's real origin: the daemon logs `origin=http://127.0.0.1:<port>`, never
-    ///    the forged one.
+    /// 5. The daemon logs `origin=http://127.0.0.1:<port>` for the page's sockets, never an
+    ///    origin the page claims. Where page events reach the bridge, a page forging a bridge
+    ///    `open` with `origin: "https://evil.example"` gets its socket with the real origin.
+    ///    Where the shim calls the bridge directly (Firefox ESR 115), the forged `open` gets
+    ///    no answer at all, and an ordinary socket carries the real origin.
     fn origin(&self) -> anyhow::Result<()> {
         let real = format!("origin=http://127.0.0.1:{}", self.page_port);
         let before = self.sandbox.logs().matches(&real).count();
-        let result = self.step("forged_open", Value::Null)?;
-        let frame = &result["frame"];
-        ensure!(
-            frame["t"] == "msg" && frame["data"] == oncl_protocol::greeting(),
-            "the forged open was not served by the daemon: {frame}"
-        );
+        let socket = if self.browser.shim_in_page_world() {
+            let result = self.step("forged_open", Value::Null)?;
+            let frame = &result["frame"];
+            ensure!(
+                frame["t"] == "msg" && frame["data"] == oncl_protocol::greeting(),
+                "the forged open was not served by the daemon: {frame}"
+            );
+            "the forged open"
+        } else {
+            let result = self.step("forged_open", json!(FORGED_SILENCE_MS))?;
+            ensure!(
+                result["frame"].is_null(),
+                "the bridge answered a page event: {}",
+                result["frame"]
+            );
+            let result = self.step("greeting", Value::Null)?;
+            expect_text(&result["first"], &oncl_protocol::greeting(), "greeting")?;
+            "the page's socket"
+        };
         // The log writer runs on its own thread: give it a moment.
         let deadline = Instant::now() + Duration::from_secs(5);
         let logs = loop {
@@ -628,7 +687,7 @@ impl Scenarios<'_> {
         };
         ensure!(
             logs.matches(&real).count() > before,
-            "the daemon log has no new `{real}` for the forged open"
+            "the daemon log has no new `{real}` for {socket}"
         );
         ensure!(
             !logs.contains("evil.example"),
@@ -719,6 +778,69 @@ impl Scenarios<'_> {
             "a daemon was started without the host"
         );
         Ok(())
+    }
+
+    /// 8. Firefox: the extension is removed while the page is open; then the page reloads.
+    ///    - Firefox 128+ (the shim in the page's world): the page's own `WebSocket` (to the
+    ///      stand-in original) and `fetch` keep working in the open page.
+    ///    - Firefox ESR 115 (the Xray shim): the browser destroys the content script, and with
+    ///      it what the shim gave the page: both throw "can't access dead object" until the
+    ///      page reloads (a documented limitation).
+    ///
+    ///    After the reload both work, without the shim. WebDriver cannot remove a Chromium
+    ///    extension.
+    fn extension_removed(&self) -> anyhow::Result<Ran> {
+        if !self.browser.is_firefox() {
+            return Ok(Ran::NotApplicable);
+        }
+        let works = |result: &Value| {
+            result["websocket"] == page::ORIGINAL_GREETING && result["fetch"] == 200
+        };
+        let dead = |result: &Value| {
+            ["websocket", "fetch"].iter().all(|key| {
+                result[key]["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("dead object"))
+            })
+        };
+        let result = self.step("plain_network", Value::Null)?;
+        ensure!(works(&result), "before the removal: {result}");
+
+        self.session
+            .uninstall_addon(FIREFOX_EXTENSION_ID)
+            .context("removing the add-on")?;
+        // The content process unloads the content scripts a moment later.
+        if self.browser.shim_in_page_world() {
+            // Working at once would prove nothing: give the removal time to take effect.
+            std::thread::sleep(REMOVAL_PATIENCE);
+            let result = self.step("plain_network", Value::Null)?;
+            ensure!(
+                works(&result),
+                "in the open page after the removal: {result}"
+            );
+        } else {
+            let deadline = Instant::now() + REMOVAL_PATIENCE;
+            loop {
+                let result = self.step("plain_network", Value::Null)?;
+                if dead(&result) {
+                    break;
+                }
+                ensure!(
+                    Instant::now() < deadline,
+                    "in the open page after the removal: {result}"
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+
+        self.session.navigate(&self.page_url())?;
+        ensure!(
+            self.step("shimmed", Value::Null)?["shimmed"] == false,
+            "the shim is still in the reloaded page"
+        );
+        let result = self.step("plain_network", Value::Null)?;
+        ensure!(works(&result), "in the reloaded page: {result}");
+        Ok(Ran::Passed)
     }
 }
 

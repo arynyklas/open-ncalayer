@@ -1,17 +1,19 @@
 name: Release
 
-# A `v*` tag publishes a GitHub release: the daemon and the relay for Windows, Linux and
-# macOS as archives and as Velopack packages (the update index points at those), the
-# browser extension, a CycloneDX SBOM and SHA256SUMS, every file with a build provenance
-# attestation. A tag with a pre-release suffix (`v0.1.0-alpha.1`) makes a pre-release.
+# A `v*` tag publishes a GitHub release: the daemon and the relay for Windows (x64, x86, and
+# Windows 7 x64/x86 with their app-local DLLs), Linux and macOS as archives and as Velopack
+# packages (the update index points at those), the browser extension, a CycloneDX SBOM and
+# SHA256SUMS, every file with a build provenance attestation. A tag with a pre-release
+# suffix (`v0.1.0-alpha.1`) makes a pre-release.
 # Then a pull request adds the version to the update indexes (`updates/v1/<channel>.json`:
 # a pre-release to beta, a release to stable and beta), unsigned: the maintainer signs them
 # locally (`cargo xtask sign`), never CI.
 #
 # Code signing runs only with its secrets, otherwise it is skipped with a notice:
 # Authenticode through SignPath (secret SIGNPATH_API_TOKEN, variables
-# SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG) signs the
-# Windows binaries of both the archive and the package; Apple signing and notarization
+# SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG) signs
+# openncalayer.exe and nmhost.exe of both the archive and the package (the app-local DLLs of
+# the Windows 7 builds stay unsigned); Apple signing and notarization
 # (secrets APPLE_CERTIFICATE_P12 (base64), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGN_IDENTITY,
 # APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD) covers the macOS Velopack package only: the
 # macOS archive stays unsigned.
@@ -79,18 +81,22 @@ jobs:
             target: universal-apple-darwin
             flavor: osx
             runtime: osx
-          # Pending the Windows 7 builds (`cargo xtask win7`): the flavors win7-x64 and
-          # win7-x86, packed from those builds with the same Velopack steps.
-          # - os: windows-2025
-          #   target: x86_64-win7-windows-msvc
-          #   flavor: win7-x64
-          #   runtime: win-x64
-          # - os: windows-2025
-          #   target: i686-win7-windows-msvc
-          #   flavor: win7-x86
-          #   runtime: win-x86
+          # Windows 7 SP1 (roadmap D14): `cargo xtask win7` builds the executables and the
+          # app-local DLLs, checks them against the denylist of imports missing on Windows 7
+          # and starts them; the package's contents, Velopack's own executables included,
+          # pass the same gate after `vpk pack`.
+          - os: windows-2025
+            target: x86_64-win7-windows-msvc
+            win7: x64
+            flavor: win7-x64
+            runtime: win-x64
+          - os: windows-2025
+            target: i686-win7-windows-msvc
+            win7: x86
+            flavor: win7-x86
+            runtime: win-x86
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.win7 && 90 || 60 }}
     # `actions: read` for SignPath: its `github-token` reads the job details and downloads
     # the unsigned artifact, "Requires the `action:read` and `content:read` permissions"
     # (docs.signpath.io/trusted-build-systems/github, input `github-token`, action v3).
@@ -101,7 +107,9 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       PRERELEASE: ${{ needs.version.outputs.prerelease }}
       FLAVOR: ${{ matrix.flavor }}
-      BIN: target/${{ matrix.target }}/release
+      BIN: ${{ matrix.win7 && format('target/win7/{0}', matrix.win7) || format('target/{0}/release', matrix.target) }}
+      # The archive's name: `openncalayer-<version>-<archive>`.
+      ARCHIVE: ${{ matrix.win7 && format('win7-{0}', matrix.win7) || matrix.target }}
       # Only whether the signing secrets exist: the secrets reach their signing steps alone.
       SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' && vars.SIGNPATH_ORGANIZATION_ID != '' && vars.SIGNPATH_PROJECT_SLUG != '' && vars.SIGNPATH_SIGNING_POLICY_SLUG != '' }}
       APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGN_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != '' }}
@@ -116,14 +124,20 @@ jobs:
         shell: bash
         run: |
           rustup toolchain install
-          if [ "${{ matrix.target }}" = universal-apple-darwin ]; then
+          if [ -n "${{ matrix.win7 }}" ]; then
+            # The pinned nightly of `cargo xtask win7` (xtask::win7::TOOLCHAIN).
+            rustup toolchain install nightly-2026-08-12 --profile minimal --component rust-src
+          elif [ "${{ matrix.target }}" = universal-apple-darwin ]; then
             rustup target add x86_64-apple-darwin aarch64-apple-darwin
           else
             rustup target add "${{ matrix.target }}"
           fi
       - name: Build
-        if: matrix.target != 'universal-apple-darwin'
+        if: matrix.target != 'universal-apple-darwin' && !matrix.win7
         run: cargo build --locked --release --target ${{ matrix.target }} -p openncalayer -p oncl-nmhost
+      - name: Build, check imports, start (Windows 7)
+        if: matrix.win7
+        run: cargo xtask win7 --arch ${{ matrix.win7 }}
       # Both slices, joined; a slice missing fails the job (no arm64-only `osx` package).
       - name: Build (macOS universal)
         if: matrix.target == 'universal-apple-darwin'
@@ -176,10 +190,13 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name="openncalayer-$VERSION-${{ matrix.target }}"
+          name="openncalayer-$VERSION-$ARCHIVE"
           mkdir -p "dist/$name"
           if [ "$RUNNER_OS" = Windows ]; then
             cp "$BIN/openncalayer.exe" "$BIN/nmhost.exe" "dist/$name/"
+            if [ -n "${{ matrix.win7 }}" ]; then
+              cp "$BIN/combase.dll" "$BIN/api-ms-win-core-winrt-error-l1-1-0.dll" "dist/$name/"
+            fi
           else
             cp "$BIN/openncalayer" "$BIN/nmhost" "dist/$name/"
           fi
@@ -296,6 +313,9 @@ jobs:
             Windows)
               exe=openncalayer.exe
               cp "$BIN/openncalayer.exe" "$BIN/nmhost.exe" pack/
+              if [ -n "${{ matrix.win7 }}" ]; then
+                cp "$BIN/combase.dll" "$BIN/api-ms-win-core-winrt-error-l1-1-0.dll" pack/
+              fi
               # The tray icon as a one-image .ico (a PNG entry, Windows Vista and later). The
               # directory entry below says 32x32, 32 bpp: the PNG must be exactly that.
               png=crates/oncl-ui/assets/tray-ok.png
@@ -347,6 +367,24 @@ jobs:
             fi
           done
           ls -l velopack
+      # What a Windows 7 installation runs from the package: our executables beside their
+      # app-local DLLs, Velopack's Update.exe (`Squirrel.exe` in the package) and its stub.
+      - name: Windows 7 package through the import gate
+        if: matrix.win7
+        shell: bash
+        run: |
+          package="packages/OpenNCALayer-$VERSION-$FLAVOR-full.nupkg"
+          7z x "$package" -owin7-package > /dev/null
+          app=win7-package/lib/app
+          for file in openncalayer.exe nmhost.exe combase.dll api-ms-win-core-winrt-error-l1-1-0.dll Squirrel.exe; do
+            if [ ! -f "$app/$file" ]; then
+              echo "::error::$file is not in $package"
+              ls -l "$app"
+              exit 1
+            fi
+          done
+          mapfile -t exes < <(find "$app" -maxdepth 1 -iname '*.exe')
+          cargo xtask check-imports "${exes[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: release-velopack-${{ matrix.flavor }}

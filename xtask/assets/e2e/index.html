@@ -85,9 +85,14 @@
   let held = null; // the socket of `hold`, for `held_close`
 
   const steps = {
-    /** Whether `WebSocket` is the extension's shim rather than the browser's own. */
+    /**
+     * Whether `WebSocket` is the extension's shim rather than the browser's own: the browser's
+     * interface object has a read-only `prototype`, the shim's constructor a writable one.
+     * (Firefox before 128 gets the shim as an exported function, `[native code]` like the
+     * browser's own.)
+     */
     async shimmed() {
-      return { shimmed: !Function.prototype.toString.call(window.WebSocket).includes('[native code]') };
+      return { shimmed: Object.getOwnPropertyDescriptor(window.WebSocket, 'prototype').writable === true };
     },
 
     /** The first message on a new NCALayer socket. */
@@ -96,6 +101,20 @@
       const first = await socket.message();
       socket.ws.close();
       return { instance: socket.ws instanceof WebSocket, first };
+    },
+
+    /**
+     * Whether a page subclass of `WebSocket` makes instances of itself, for an NCALayer URL
+     * and for a loopback port outside NCALayer's range.
+     */
+    async subclass() {
+      class PageSocket extends WebSocket {}
+      const made = (url) => {
+        const ws = new PageSocket(url);
+        ws.close();
+        return ws instanceof PageSocket;
+      };
+      return { ncalayer: made(NCALAYER), other: made('ws://127.0.0.1:13500/') };
     },
 
     /** Heartbeat echo and the reply for an unknown module. */
@@ -142,11 +161,13 @@
 
     /**
      * A page forging a bridge `open` with its own `origin` (and a valid endpoint URL, so the
-     * bridge passes it on): the first answer for that sid.
+     * bridge passes it on): the first answer for that sid. With `silenceMs`, no answer is
+     * expected: `frame` is `null` if none came within that time.
      */
-    async forged_open() {
+    async forged_open(silenceMs) {
+      let listener;
       const answer = new Promise((resolve) => {
-        const listener = (event) => {
+        listener = (event) => {
           let frame;
           try {
             frame = JSON.parse(event.detail);
@@ -154,14 +175,17 @@
             return;
           }
           if (frame.sid !== FORGED_SID || frame.t === 'open') return;
-          document.removeEventListener('__oncl_to_page', listener);
           resolve(frame);
         };
         document.addEventListener('__oncl_to_page', listener);
       });
       const forge = (frame) => document.dispatchEvent(new CustomEvent('__oncl_to_ext', { detail: JSON.stringify(frame) }));
       forge({ t: 'open', sid: FORGED_SID, url: NCALAYER, origin: 'https://evil.example' });
-      const frame = await within(WAIT_MS, 'an answer to the forged open', answer);
+      const frame =
+        silenceMs == null
+          ? await within(WAIT_MS, 'an answer to the forged open', answer)
+          : await Promise.race([answer, new Promise((resolve) => setTimeout(() => resolve(null), silenceMs))]);
+      document.removeEventListener('__oncl_to_page', listener);
       forge({ t: 'close', sid: FORGED_SID, origin: 'https://evil.example' });
       return { frame };
     },
@@ -187,6 +211,27 @@
       const ncalayer = connect(NCALAYER);
       const events = await ncalayer.untilClose();
       return { original: originalFirst, ncalayer: events };
+    },
+
+    /**
+     * The page's networking after the extension was removed: the first message of the
+     * stand-in original (an NCALayer-range socket) and a `fetch` of this page, or the errors.
+     */
+    async plain_network() {
+      const result = {};
+      try {
+        const socket = connect(ORIGINAL);
+        result.websocket = await socket.message(5000);
+        socket.ws.close();
+      } catch (error) {
+        result.websocket = { error: String(error) };
+      }
+      try {
+        result.fetch = (await within(5000, 'fetch', fetch('/index.html', { cache: 'no-store' }))).status;
+      } catch (error) {
+        result.fetch = { error: String(error) };
+      }
+      return result;
     },
 
     /** Without the native host: the NCALayer check of sites goes out as a real request. */

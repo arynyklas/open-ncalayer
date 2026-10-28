@@ -1,17 +1,21 @@
 // OpenNCALayer bridge (ISOLATED world content script, document_start, every frame).
 //
-// Relays bridge protocol frames between the page shim (`CustomEvent`s on `document`, JSON
-// strings in `detail`) and the background (`runtime.connect({name: "oncl"})`, one port per
-// frame, opened on first use). Sids on this port are the shim's local ones; the background
-// maps them to the daemon's. Outgoing messages are cut into pieces of at most 8 MiB (UTF-16
-// code units) so every native frame stays under the daemon's frame limit; incoming pieces are
-// joined back into whole messages.
+// Relays bridge protocol frames between the page shim and the background
+// (`runtime.connect({name: "oncl"})`, one port per frame, opened on first use). The shim is
+// reached by `CustomEvent`s on `document` with JSON strings in `detail` when it runs in the
+// page's own world, or by plain calls when it runs in this same content-script global
+// (Firefox before 128); then page events are not listened to at all. Sids on this port are
+// the shim's local ones; the background maps them to the daemon's. Outgoing messages are cut
+// into pieces of at most 8 MiB (UTF-16 code units) so every native frame stays under the
+// daemon's frame limit; incoming pieces are joined back into whole messages.
 (function () {
   'use strict';
 
   const TO_EXT = '__oncl_to_ext';
   const TO_PAGE = '__oncl_to_page';
   const PORT_NAME = 'oncl';
+  // The property of the content-script global where the shim and the bridge meet (Xray).
+  const LINK = '__oncl_link';
 
   // <oncl-common> Kept identical in shim.js, bridge.js and background.js (test/common.test.mjs).
   const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]'];
@@ -72,14 +76,58 @@
     return pieces;
   }
 
-  function installBridge(win, runtime) {
+  /** The meeting point of shim and bridge in the content-script global `sandbox`. */
+  function linkChannel(sandbox) {
+    if (!Object.prototype.hasOwnProperty.call(sandbox, LINK)) {
+      Object.defineProperty(sandbox, LINK, { value: { toExt: null, toPage: null } });
+    }
+    return sandbox[LINK];
+  }
+
+  /**
+   * Relays between the shim of the page `win` and the background over `runtime`. `sandbox`:
+   * this content script's global, where a shim running next to the bridge links up.
+   */
+  function installBridge(win, runtime, sandbox) {
     const doc = win.document;
     let port = null;
     const sockets = new Map(); // sid → pieces of the message being received
     let pendingProbes = 0;
 
+    // --- Link to the shim -----------------------------------------------------------------
+    const channel = linkChannel(sandbox);
+    let direct = false;
+
     function toPage(frame) {
-      doc.dispatchEvent(new win.CustomEvent(TO_PAGE, { detail: JSON.stringify(frame) }));
+      if (!direct) {
+        doc.dispatchEvent(new win.CustomEvent(TO_PAGE, { detail: JSON.stringify(frame) }));
+        return;
+      }
+      // Like an event listener's: a throw in the shim (page code it calls, e.g. a page
+      // `dispatchEvent`) must not cut short what the bridge is doing.
+      try {
+        channel.toPage(frame);
+      } catch {
+        // The page broke its own socket.
+      }
+    }
+
+    function fromEvent(event) {
+      if (typeof event.detail !== 'string') return;
+      let frame;
+      try {
+        frame = JSON.parse(event.detail);
+      } catch {
+        return;
+      }
+      if (frame !== null && typeof frame === 'object') fromPage(frame);
+    }
+
+    /** The shim runs in this global: plain calls from now on, page events are ignored. */
+    function goDirect() {
+      if (direct) return;
+      direct = true;
+      doc.removeEventListener(TO_EXT, fromEvent);
     }
 
     /** The port to the background, connecting if needed; `null` if the extension is gone. */
@@ -196,19 +244,15 @@
       }
     }
 
-    doc.addEventListener(TO_EXT, (event) => {
-      if (typeof event.detail !== 'string') return;
-      let frame;
-      try {
-        frame = JSON.parse(event.detail);
-      } catch {
-        return;
-      }
+    channel.toExt = (frame) => {
+      goDirect();
       if (frame !== null && typeof frame === 'object') fromPage(frame);
-    });
+    };
+    if (channel.toPage) goDirect();
+    else doc.addEventListener(TO_EXT, fromEvent);
     toPage({ t: 'ready' });
   }
 
   if (typeof module === 'object' && module !== null) module.exports = installBridge;
-  else installBridge(window, chrome.runtime);
+  else installBridge(window, chrome.runtime, globalThis);
 })();
