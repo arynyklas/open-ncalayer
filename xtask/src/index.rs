@@ -224,6 +224,7 @@ pub fn add(
         }
         let mut packages = FlavorPackage {
             full: package(assets, &version, &full)?,
+            contents_sha256: None,
             delta_from: Default::default(),
         };
         let delta = delta_package_name(&version, flavor.as_str());
@@ -232,6 +233,12 @@ pub fn add(
             packages
                 .delta_from
                 .insert(base, package(assets, &version, &delta)?);
+            // What the client checks the full package rebuilt from the delta against.
+            let path = assets.join(&full);
+            packages.contents_sha256 = Some(
+                oncl_update::contents_sha256(&path)
+                    .with_context(|| format!("reading the files of {}", path.display()))?,
+            );
         }
         release.flavors.insert(flavor.as_str().to_owned(), packages);
         flavors.push(flavor);
@@ -500,8 +507,10 @@ impl Remote for GitHub {
 
 /// What [`check`] reads besides the indexes.
 pub struct CheckOptions<'a> {
-    /// The trusted public keys (`crates/oncl-update/keys/`, [`trusted_keys`]).
-    pub keys: &'a [PublicKey],
+    /// The trusted public keys (`crates/oncl-update/keys/`, [`trusted_keys`]): every index
+    /// must be signed with `current`, and every version new against `base` must be tagged
+    /// with a build embedding one of them ([`check_tag_key`]).
+    pub keys: &'a TrustedKeys,
     /// The git revision of the base branch whose indexes `seq` must grow from; `None`
     /// skips that check.
     pub base: Option<&'a str>,
@@ -526,10 +535,13 @@ pub struct Checked {
 }
 
 /// Checks the indexes in `dir` (at least one channel): each passes the client's
-/// verification (`oncl_update::verify`, signature by one of `options.keys` included) at
-/// `options.now` and [`check_asset_urls`]; against `options.base`, a changed index has a
-/// greater `seq` and no index is removed. With `remote`, every asset URL answers `HEAD`
-/// with 200 and, if `options.vm_smoke`, every new version passed `vm-smoke`.
+/// verification (`oncl_update::verify`, the signature by `options.keys.current` only: a
+/// `next.pub` is for clients, not for signing before the switch) at `options.now` and
+/// [`check_asset_urls`]; against `options.base`, a changed index has a greater `seq` and no
+/// index is removed. Every version new against `options.base` (all with no base), or whose
+/// packages changed, passes [`check_tag_key`] in the repository of `dir`. With `remote`,
+/// every asset URL answers `HEAD` with 200 and, if `options.vm_smoke`, every new version
+/// passed `vm-smoke`.
 ///
 /// # Errors
 ///
@@ -542,9 +554,7 @@ pub fn check(
     if options.vm_smoke && remote.is_none() {
         bail!("the {VM_SMOKE} gate needs the network");
     }
-    if options.keys.is_empty() {
-        bail!("no trusted public key");
-    }
+    let signing = [options.keys.current.clone()];
     let mut checked = Vec::new();
     for channel in Channel::ALL {
         let path = index_path(dir, channel);
@@ -573,7 +583,7 @@ pub fn check(
                 signature.display()
             )
         })?;
-        let index = oncl_update::verify(&bytes, &sig, options.keys, channel, None, options.now)
+        let index = oncl_update::verify(&bytes, &sig, &signing, channel, None, options.now)
             .with_context(|| format!("{} is refused", path.display()))?;
         check_asset_urls(&index).with_context(|| format!("{} is refused", path.display()))?;
 
@@ -598,6 +608,20 @@ pub fn check(
             }
             None => (None, index.core.iter().map(|r| r.version.clone()).collect()),
         };
+
+        // A version an installation may be moved onto must be able to update itself again.
+        for release in &index.core {
+            let changed = match &base {
+                Some((_, base_index)) => base_index
+                    .release(&release.version)
+                    .is_none_or(|old| old.flavors != release.flavors),
+                None => true,
+            };
+            if changed {
+                check_tag_key(dir, &release.version, options.keys)
+                    .with_context(|| format!("{} is refused", path.display()))?;
+            }
+        }
 
         if let Some(remote) = remote {
             for url in asset_urls(&index) {
@@ -681,25 +705,101 @@ fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Output> {
         .with_context(|| format!("running git {}", args.join(" ")))
 }
 
+/// Where a build's update key is, from the workspace root: what the client embeds.
+pub const TAG_KEY: &str = "crates/oncl-update/keys/current.pub";
+
+/// The trusted public keys: `current.pub`, which signs the indexes, and the `next.pub` of a
+/// key rotation, which only clients take (`docs/dev/release.md`).
+pub struct TrustedKeys {
+    /// The key every published index is signed with.
+    pub current: PublicKey,
+    /// The key line (base64) of `current`.
+    current_line: String,
+    /// The key line of `next.pub`, if present.
+    next_line: Option<String>,
+}
+
+impl TrustedKeys {
+    /// Whether the key file `text` is `current` or `next`.
+    fn trusts(&self, text: &str) -> bool {
+        let line = key_line(text);
+        line == self.current_line || self.next_line.as_deref() == Some(line)
+    }
+}
+
+/// The base64 line of a minisign public key file.
+fn key_line(text: &str) -> &str {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("untrusted comment:"))
+        .unwrap_or_default()
+}
+
 /// The trusted public keys in `dir`: `current.pub` and, if present, `next.pub`.
 ///
 /// # Errors
 ///
 /// If `current.pub` is missing or a key cannot be read.
-pub fn trusted_keys(dir: &Path) -> anyhow::Result<Vec<PublicKey>> {
-    let mut keys = Vec::new();
-    for name in ["current.pub", "next.pub"] {
+pub fn trusted_keys(dir: &Path) -> anyhow::Result<TrustedKeys> {
+    let read = |name: &str| -> anyhow::Result<(PublicKey, String)> {
         let path = dir.join(name);
-        if name == "next.pub" && !path.exists() {
-            continue;
-        }
         let text = fs::read_to_string(&path).with_context(|| {
             format!(
                 "reading {}: make the key with `cargo xtask sign keygen`",
                 path.display()
             )
         })?;
-        keys.push(PublicKey::decode(&text).with_context(|| format!("reading {}", path.display()))?);
+        let key =
+            PublicKey::decode(&text).with_context(|| format!("reading {}", path.display()))?;
+        Ok((key, key_line(&text).to_owned()))
+    };
+    let (current, current_line) = read("current.pub")?;
+    let next_line = if dir.join("next.pub").exists() {
+        Some(read("next.pub")?.1)
+    } else {
+        None
+    };
+    Ok(TrustedKeys {
+        current,
+        current_line,
+        next_line,
+    })
+}
+
+/// Refuses `version` unless its tag `v<version>`, in the git repository of `dir`, holds
+/// [`TAG_KEY`] that is a minisign public key and one of `keys`: an installation moved onto
+/// it (an update, or the way off a revoked version) must be able to verify later indexes.
+/// A build without the key has its updater off for good.
+///
+/// # Errors
+///
+/// The tag is missing, has no key, a malformed key, or a key `keys` does not have.
+pub fn check_tag_key(dir: &Path, version: &Version, keys: &TrustedKeys) -> anyhow::Result<()> {
+    let tag = format!("v{version}");
+    // The index directory may not exist yet (the first index of a channel).
+    let dir = dir
+        .ancestors()
+        .find(|d| d.is_dir())
+        .with_context(|| format!("{} is not in a directory", dir.display()))?;
+    let commit = format!("refs/tags/{tag}^{{commit}}");
+    if !git(dir, &["rev-parse", "--verify", "--quiet", &commit])?
+        .status
+        .success()
+    {
+        bail!("{version}: there is no tag {tag} (fetch the tags)");
     }
-    Ok(keys)
+    let object = format!("refs/tags/{tag}:{TAG_KEY}");
+    let output = git(dir, &["cat-file", "blob", &object])?;
+    if !output.status.success() {
+        bail!(
+            "{version}: {tag} has no {TAG_KEY}: its build cannot update itself, so no installation may be moved onto it"
+        );
+    }
+    let text = String::from_utf8(output.stdout).context("the key is not UTF-8")?;
+    PublicKey::decode(&text)
+        .with_context(|| format!("{version}: {TAG_KEY} of {tag} is not a minisign public key"))?;
+    if !keys.trusts(&text) {
+        bail!("{version}: {TAG_KEY} of {tag} is neither current.pub nor next.pub");
+    }
+    Ok(())
 }

@@ -42,8 +42,12 @@ impl TestKey {
         TestKey { pair, keys }
     }
 
-    fn trusted(&self) -> Vec<oncl_update::PublicKey> {
+    fn trusted(&self) -> index::TrustedKeys {
         index::trusted_keys(self.keys.path()).unwrap()
+    }
+
+    fn public_text(&self) -> String {
+        fs::read_to_string(self.keys.path().join("current.pub")).unwrap()
     }
 
     fn sign(&self, index: &Path) {
@@ -52,7 +56,8 @@ impl TestKey {
 }
 
 /// The assets of the release `tag`: full packages for `flavors`, the delta of win-x64 when
-/// `delta_base` is given (with Velopack's feed naming its base), and the extension.
+/// `delta_base` is given (with Velopack's feed naming its base, and the win-x64 full
+/// package a zip archive, whose files the index sums), and the extension.
 fn release_assets(tag: &str, flavors: &[Flavor], delta_base: Option<&str>) -> tempfile::TempDir {
     let v = version(tag);
     let dir = tempfile::tempdir().unwrap();
@@ -65,6 +70,17 @@ fn release_assets(tag: &str, flavors: &[Flavor], delta_base: Option<&str>) -> te
         .unwrap();
     }
     if let Some(base) = delta_base {
+        let full = dir
+            .path()
+            .join(format!("OpenNCALayer-{v}-win-x64-full.nupkg"));
+        let mut zip = zip::ZipWriter::new(fs::File::create(full).unwrap());
+        zip.start_file(
+            "lib/app/openncalayer.exe",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut zip, format!("program {v}").as_bytes()).unwrap();
+        zip.finish().unwrap();
         fs::write(
             dir.path()
                 .join(format!("OpenNCALayer-{v}-win-x64-delta.nupkg")),
@@ -105,7 +121,7 @@ fn read(path: &Path) -> Index {
     Index::from_json(&fs::read(path).unwrap()).unwrap()
 }
 
-fn options<'a>(keys: &'a [oncl_update::PublicKey], base: Option<&'a str>) -> CheckOptions<'a> {
+fn options<'a>(keys: &'a index::TrustedKeys, base: Option<&'a str>) -> CheckOptions<'a> {
     CheckOptions {
         keys,
         base,
@@ -127,18 +143,54 @@ fn git(dir: &Path, args: &[&str]) {
             "user.email=test@example.invalid",
             "-c",
             "commit.gpgsign=false",
+            "-c",
+            "tag.gpgSign=false",
+            "-c",
+            "tag.forceSignAnnotated=false",
         ])
         .args(args)
-        .status()
+        .output()
         .unwrap();
-    assert!(status.success(), "git {args:?}");
+    assert!(
+        status.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
 }
 
-/// A git repository whose single commit holds `updates/v1/beta.json` at seq 1, signed.
-fn repository_with_index(key: &TestKey) -> (tempfile::TempDir, std::path::PathBuf) {
+/// A git repository whose first commit holds the update key `key` (the file the client
+/// embeds) and is tagged [`TAG`] and [`NEXT_TAG`]: builds of both versions update
+/// themselves. Its indexes are [`Repo::path`], `updates/v1`.
+struct Repo {
+    repo: tempfile::TempDir,
+    dir: std::path::PathBuf,
+}
+
+impl Repo {
+    fn path(&self) -> &Path {
+        &self.dir
+    }
+}
+
+fn keyed_repo(key: &str) -> Repo {
     let repo = tempfile::tempdir().unwrap();
     git(repo.path(), &["init", "--quiet"]);
+    let keys = repo.path().join(index::TAG_KEY);
+    fs::create_dir_all(keys.parent().unwrap()).unwrap();
+    fs::write(&keys, key).unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "--quiet", "-m", "key"]);
+    for tag in [TAG, NEXT_TAG] {
+        git(repo.path(), &["tag", tag]);
+    }
     let dir = repo.path().join("updates").join("v1");
+    Repo { repo, dir }
+}
+
+/// [`keyed_repo`] whose next commit holds `updates/v1/beta.json` at seq 1 with [`TAG`],
+/// signed.
+fn repository_with_index(key: &TestKey) -> (tempfile::TempDir, std::path::PathBuf) {
+    let Repo { repo, dir } = keyed_repo(&key.public_text());
     let assets = release_assets(TAG, &[Flavor::WinX64], None);
     let path = add(&dir, TAG, assets.path()).written.path;
     key.sign(&path);
@@ -215,6 +267,14 @@ fn add_takes_sums_and_sizes_from_the_assets() {
         Sha256::of(b"delta 0.2.0-beta.1 -> 0.2.0-beta.2")
     );
     assert_eq!(win.delta_from.len(), 1);
+    // The files of the full package, for the one the client rebuilds from the delta.
+    let full = second
+        .path()
+        .join("OpenNCALayer-0.2.0-beta.2-win-x64-full.nupkg");
+    assert_eq!(
+        win.contents_sha256,
+        Some(oncl_update::contents_sha256(&full).unwrap())
+    );
     assert_eq!(index.extension.unwrap().version, version(NEXT_TAG));
 
     // A version is added once.
@@ -281,7 +341,7 @@ fn add_refuses_bad_input() {
 #[test]
 fn signed_index_passes_the_check() {
     let key = TestKey::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = keyed_repo(&key.public_text());
     let assets = release_assets(TAG, &[Flavor::WinX64], None);
     let path = add(dir.path(), TAG, assets.path()).written.path;
 
@@ -302,7 +362,7 @@ fn signed_index_passes_the_check() {
     let index = oncl_update::verify(
         &fs::read(&path).unwrap(),
         signature.as_bytes(),
-        &key.trusted(),
+        &[key.trusted().current],
         Channel::Beta,
         None,
         now(),
@@ -319,7 +379,7 @@ fn signed_index_passes_the_check() {
 #[test]
 fn a_changed_byte_is_refused() {
     let key = TestKey::new();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = keyed_repo(&key.public_text());
     let assets = release_assets(TAG, &[Flavor::WinX64], None);
     let path = add(dir.path(), TAG, assets.path()).written.path;
     key.sign(&path);
@@ -475,7 +535,7 @@ fn keygen_makes_an_encrypted_pair_that_signs() {
     assert!(error_text(sign::load_secret_key(&files.secret, "wrong")).contains("password"));
     let secret = sign::load_secret_key(&files.secret, "correct horse").unwrap();
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = keyed_repo(&fs::read_to_string(&files.public).unwrap());
     let assets = release_assets(TAG, &[Flavor::WinX64], None);
     let path = add(dir.path(), TAG, assets.path()).written.path;
     sign::sign(&path, &secret, now()).unwrap();
@@ -766,4 +826,149 @@ fn only_the_owner_reads_the_secret_key() {
     let files = sign::keygen(&out.path().join("keys"), "password").unwrap();
     let mode = fs::metadata(&files.secret).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
+}
+
+/// Tags [`NEXT_TAG`] again on a new commit of `repo` whose update key is `key` (`None`:
+/// removed).
+fn retag_next(repo: &Repo, key: Option<&str>) {
+    let root = repo.repo.path();
+    let file = root.join(index::TAG_KEY);
+    match key {
+        Some(key) => fs::write(&file, key).unwrap(),
+        None => fs::remove_file(&file).unwrap(),
+    }
+    git(root, &["add", "--all", "."]);
+    git(root, &["commit", "--quiet", "-m", "another key"]);
+    git(root, &["tag", "--force", NEXT_TAG]);
+}
+
+#[test]
+fn a_version_tagged_without_a_trusted_key_is_refused() {
+    let key = TestKey::new();
+    let other = TestKey::new();
+    for (tag_key, expected) in [
+        (None, "has no crates/oncl-update/keys/current.pub"),
+        (
+            Some("untrusted comment: x\nnot a key\n".to_owned()),
+            "is not a minisign public key",
+        ),
+        (
+            Some(other.public_text()),
+            "neither current.pub nor next.pub",
+        ),
+    ] {
+        let repo = keyed_repo(&key.public_text());
+        retag_next(&repo, tag_key.as_deref());
+        let assets = release_assets(TAG, &[Flavor::WinX64], None);
+        add(repo.path(), TAG, assets.path());
+        let assets = release_assets(NEXT_TAG, &[Flavor::WinX64], None);
+        let path = add(repo.path(), NEXT_TAG, assets.path()).written.path;
+        key.sign(&path);
+        let result = index::check(repo.path(), &options(&key.trusted(), None), None);
+        let text = error_text(result);
+        assert!(
+            text.contains(expected) && text.contains("0.2.0-beta.2"),
+            "{text}"
+        );
+    }
+
+    // A tag that is not there at all (not fetched).
+    let repo = keyed_repo(&key.public_text());
+    let assets = release_assets("v0.3.0", &[Flavor::WinX64], None);
+    let path = add(repo.path(), "v0.3.0", assets.path()).written.path;
+    key.sign(&path);
+    let result = index::check(repo.path(), &options(&key.trusted(), None), None);
+    assert!(error_text(result).contains("there is no tag v0.3.0"));
+
+    // A tag with the next key of a rotation is fine: its clients trust both.
+    let keys = tempfile::tempdir().unwrap();
+    fs::write(keys.path().join("current.pub"), key.public_text()).unwrap();
+    fs::write(keys.path().join("next.pub"), other.public_text()).unwrap();
+    let trusted = index::trusted_keys(keys.path()).unwrap();
+    let repo = keyed_repo(&key.public_text());
+    retag_next(&repo, Some(&other.public_text()));
+    let assets = release_assets(NEXT_TAG, &[Flavor::WinX64], None);
+    let path = add(repo.path(), NEXT_TAG, assets.path()).written.path;
+    key.sign(&path);
+    index::check(repo.path(), &options(&trusted, None), None).unwrap();
+}
+
+#[test]
+fn only_versions_new_against_the_base_need_their_tag() {
+    let key = TestKey::new();
+    let (repo, dir) = repository_with_index(&key);
+    // The tag of the version already published goes; unchanged, it is not looked at again.
+    git(repo.path(), &["tag", "--delete", TAG]);
+    let path = dir.join("beta.json");
+    let mut index = read(&path);
+    index.seq = 2;
+    index.core[0].rollout = 50;
+    fs::write(&path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
+    key.sign(&path);
+    index::check(&dir, &options(&key.trusted(), Some("HEAD")), None).unwrap();
+    // Its packages replaced: looked at, and refused.
+    index.seq = 3;
+    index.core[0].flavors.values_mut().next().unwrap().full.size += 1;
+    fs::write(&path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
+    key.sign(&path);
+    let result = index::check(&dir, &options(&key.trusted(), Some("HEAD")), None);
+    assert!(error_text(result).contains("there is no tag v0.2.0-beta.1"));
+}
+
+#[test]
+fn indexes_are_published_signed_by_the_current_key_only() {
+    let key = TestKey::new();
+    let next = TestKey::new();
+    let keys = tempfile::tempdir().unwrap();
+    fs::write(keys.path().join("current.pub"), key.public_text()).unwrap();
+    fs::write(keys.path().join("next.pub"), next.public_text()).unwrap();
+    let trusted = index::trusted_keys(keys.path()).unwrap();
+    let repo = keyed_repo(&key.public_text());
+    let assets = release_assets(TAG, &[Flavor::WinX64], None);
+    let path = add(repo.path(), TAG, assets.path()).written.path;
+    next.sign(&path);
+    let result = index::check(repo.path(), &options(&trusted, None), None);
+    assert!(error_text(result).contains("does not match any trusted key"));
+    key.sign(&path);
+    index::check(repo.path(), &options(&trusted, None), None).unwrap();
+}
+
+#[test]
+fn the_add_command_refuses_a_tag_without_a_trusted_key() {
+    let key = TestKey::new();
+    let repo = keyed_repo(&key.public_text());
+    retag_next(&repo, None);
+    let xtask = |tag: &str, assets: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args(["index", "add", "--channel", "beta", "--tag", tag])
+            .arg("--release-assets")
+            .arg(assets)
+            .arg("--dir")
+            .arg(repo.path())
+            .arg("--keys")
+            .arg(key.keys.path())
+            .output()
+            .unwrap()
+    };
+    let assets = release_assets(NEXT_TAG, &[Flavor::WinX64], None);
+    let refused = xtask(NEXT_TAG, assets.path());
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("has no crates/oncl-update/keys/current.pub"),
+        "{stderr}"
+    );
+    assert!(!repo.path().join("beta.json").exists(), "nothing written");
+
+    let assets = release_assets(TAG, &[Flavor::WinX64], None);
+    let added = xtask(TAG, assets.path());
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert_eq!(
+        read(&repo.path().join("beta.json")).core[0].version,
+        version(TAG)
+    );
 }

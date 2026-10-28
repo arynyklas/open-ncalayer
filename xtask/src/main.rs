@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use oncl_update::Channel;
+use oncl_update::{Channel, Version};
 use time::OffsetDateTime;
 use zeroize::Zeroizing;
 
@@ -92,7 +92,8 @@ enum SignCommand {
 enum IndexCommand {
     /// Append a released version to the channel's index, from the release's downloaded
     /// assets: sha256 and sizes of its packages, the next `seq`, 30 days of validity. The
-    /// result is unsigned.
+    /// result is unsigned. The tag must hold a trusted update key (a build without one
+    /// cannot update itself, so no installation may be moved onto it).
     Add {
         /// `stable` or `beta`.
         #[arg(long, value_parser = parse_channel)]
@@ -109,6 +110,9 @@ enum IndexCommand {
         /// The directory of the indexes [default: `updates/v1/` of the workspace].
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// The directory of the trusted public keys [default: `crates/oncl-update/keys/`].
+        #[arg(long)]
+        keys: Option<PathBuf>,
     },
     /// Give the channel's index the next `seq`, a new `generated` and 30 days of validity,
     /// and nothing else, to sign it again before it expires. The result is unsigned.
@@ -132,6 +136,10 @@ enum IndexCommand {
         /// The git revision of the base branch.
         #[arg(long, default_value = "origin/main")]
         base: String,
+        /// No base: the first indexes (no `seq` growth to check; every version's tag is
+        /// checked).
+        #[arg(long)]
+        no_base: bool,
         /// The directory of the trusted public keys [default: `crates/oncl-update/keys/`].
         #[arg(long)]
         keys: Option<PathBuf>,
@@ -276,10 +284,18 @@ fn main() -> anyhow::Result<()> {
                     release_assets,
                     rollout,
                     dir,
+                    keys,
                 },
         } => {
+            let dir = index_dir(dir);
+            if let Some(version) = tag.strip_prefix('v').and_then(|v| Version::parse(v).ok()) {
+                let keys = xtask::index::trusted_keys(&keys.unwrap_or_else(|| {
+                    oncl_testkit::workspace_root().join(xtask::sign::TRUSTED_KEYS_DIR)
+                }))?;
+                xtask::index::check_tag_key(&dir, &version, &keys)?;
+            }
             let added = xtask::index::add(
-                &index_dir(dir),
+                &dir,
                 channel,
                 &tag,
                 &release_assets,
@@ -316,6 +332,7 @@ fn main() -> anyhow::Result<()> {
                     dir,
                     offline,
                     base,
+                    no_base,
                     keys,
                     vm_smoke,
                 },
@@ -329,7 +346,7 @@ fn main() -> anyhow::Result<()> {
                 if offline { None } else { Some(&github) };
             let options = xtask::index::CheckOptions {
                 keys: &keys,
-                base: Some(&base),
+                base: (!no_base).then_some(base.as_str()),
                 vm_smoke,
                 now: OffsetDateTime::now_utc(),
             };

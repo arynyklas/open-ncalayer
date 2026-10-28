@@ -5,7 +5,7 @@ name: Index check
 # HEAD with 200, `seq` growth against the base branch).
 on:
   pull_request:
-    paths: ["updates/**"]
+    paths: ["updates/**", "crates/oncl-update/keys/**"]
 
 permissions:
   contents: read
