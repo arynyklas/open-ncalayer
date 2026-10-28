@@ -76,11 +76,15 @@ jobs:
             flavor: linux-x64
             runtime: linux-x64
           # The `osx` flavor is every Mac's (`Flavor::current`, Intel and Apple silicon):
-          # both architectures, joined by lipo, packed without an architecture.
+          # both architectures, joined by lipo. vpk 1.3.39 takes no runtime for both
+          # (`--runtime osx` is refused): osx-arm64 only labels the package (its nuspec
+          # `rid` and `machineArchitecture`); the client picks it by the channel `osx`, the
+          # packed binaries stay universal (checked in CI, job macos-universal) and
+          # Velopack's UpdateMac is universal itself.
           - os: macos-15
             target: universal-apple-darwin
             flavor: osx
-            runtime: osx
+            runtime: osx-arm64
           # Windows 7 SP1 (roadmap D14): `cargo xtask win7` builds the executables and the
           # app-local DLLs, checks them against the denylist of imports missing on Windows 7
           # and starts them; the package's contents, Velopack's own executables included,

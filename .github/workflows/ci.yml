@@ -242,8 +242,8 @@ jobs:
           if-no-files-found: ignore
 
   # The macOS Velopack package as the release makes it (release.yml, flavor osx): both
-  # architectures joined by lipo, packed by the pinned vpk with runtime osx. Nothing is
-  # published.
+  # architectures joined by lipo, packed by the pinned vpk with runtime osx-arm64 (a label
+  # only, see release.yml); the packed binaries must stay universal. Nothing is published.
   macos-universal:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: macos-15
@@ -289,7 +289,7 @@ jobs:
           cp "$BIN/openncalayer" "$BIN/nmhost" README.md README.en.md LICENSE NOTICE pack/
           vpk --skip-updates pack --packId OpenNCALayer --packVersion "$version" \
             --packTitle OpenNCALayer --packAuthors "OpenNCALayer contributors" \
-            --packDir pack --mainExe openncalayer --channel osx --runtime osx \
+            --packDir pack --mainExe openncalayer --channel osx --runtime osx-arm64 \
             --outputDir packages --noInst
           ls -l packages
           package="packages/OpenNCALayer-$version-osx-full.nupkg"
