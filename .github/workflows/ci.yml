@@ -175,6 +175,74 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
+  # The macOS Velopack package as the release makes it (release.yml, flavor osx): both
+  # architectures joined by lipo, packed by the pinned vpk with runtime osx. Nothing is
+  # published.
+  macos-universal:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      VPK_VERSION: 1.3.39-g8d2844f
+      BIN: target/universal-apple-darwin/release
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Build both slices and join them
+        run: |
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo build --locked --release --target "$target" -p openncalayer -p oncl-nmhost
+          done
+          mkdir -p "$BIN"
+          for exe in openncalayer nmhost; do
+            lipo -create -output "$BIN/$exe" \
+              "target/x86_64-apple-darwin/release/$exe" "target/aarch64-apple-darwin/release/$exe"
+            archs="$(lipo -archs "$BIN/$exe")"
+            echo "$exe: $archs"
+            case " $archs " in
+              *" x86_64 "*" arm64 "*|*" arm64 "*" x86_64 "*) ;;
+              *) echo "::error::$exe is not universal: $archs"; exit 1 ;;
+            esac
+          done
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.427
+      - name: Install the Velopack CLI
+        run: |
+          dotnet tool install --tool-path "$RUNNER_TEMP/vpk" vpk --version "$VPK_VERSION"
+          echo "$RUNNER_TEMP/vpk" >> "$GITHUB_PATH"
+      - name: Velopack package (as release.yml, unsigned)
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          mkdir pack
+          cp "$BIN/openncalayer" "$BIN/nmhost" README.md README.en.md LICENSE NOTICE pack/
+          vpk --skip-updates pack --packId OpenNCALayer --packVersion "$version" \
+            --packTitle OpenNCALayer --packAuthors "OpenNCALayer contributors" \
+            --packDir pack --mainExe openncalayer --channel osx --runtime osx \
+            --outputDir packages --noInst
+          ls -l packages
+          package="packages/OpenNCALayer-$version-osx-full.nupkg"
+          mkdir unpacked
+          unzip -q "$package" -d unpacked
+          grep -o '<machineArchitecture>[^<]*</machineArchitecture>' unpacked/*.nuspec || true
+          # The packed binaries are both slices, not one.
+          for exe in $(find unpacked -type f \( -name openncalayer -o -name nmhost \)); do
+            archs="$(lipo -archs "$exe")"
+            echo "$exe: $archs"
+            case " $archs " in
+              *" x86_64 "*" arm64 "*|*" arm64 "*" x86_64 "*) ;;
+              *) echo "::error::$exe in the package is not universal: $archs"; exit 1 ;;
+            esac
+          done
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: macos-universal-package
+          path: packages/*
+          if-no-files-found: warn
+
   live:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
