@@ -511,8 +511,9 @@ pub struct CheckOptions<'a> {
     /// must be signed with `current`, and every version new against `base` must be tagged
     /// with a build embedding one of them ([`check_tag_key`]).
     pub keys: &'a TrustedKeys,
-    /// The git revision of the base branch whose indexes `seq` must grow from; `None`
-    /// skips that check.
+    /// The git revision of the base branch whose indexes `seq` must grow from and against
+    /// which new versions get [`check_tag_key`]; `None` skips both (the signature, schema,
+    /// expiry and URLs are still checked).
     pub base: Option<&'a str>,
     /// Require [`VM_SMOKE`] = `success` on the tag of every version new against `base`.
     /// Needs a [`Remote`].
@@ -680,7 +681,7 @@ fn asset_urls(index: &Index) -> BTreeSet<&str> {
 fn base_index(dir: &Path, rev: &str, channel: Channel) -> anyhow::Result<Option<(Vec<u8>, Index)>> {
     let (repo, below) = existing_ancestor(dir)?;
     let commit = format!("{rev}^{{commit}}");
-    if !git(repo, &["rev-parse", "--verify", "--quiet", &commit])?
+    if !git(&repo, &["rev-parse", "--verify", "--quiet", &commit])?
         .status
         .success()
     {
@@ -690,10 +691,10 @@ fn base_index(dir: &Path, rev: &str, channel: Channel) -> anyhow::Result<Option<
         );
     }
     let object = format!("{rev}:./{below}{channel}.json");
-    if !git(repo, &["cat-file", "-e", &object])?.status.success() {
+    if !git(&repo, &["cat-file", "-e", &object])?.status.success() {
         return Ok(None);
     }
-    let output = git(repo, &["cat-file", "blob", &object])?;
+    let output = git(&repo, &["cat-file", "blob", &object])?;
     if !output.status.success() {
         bail!(
             "git cat-file blob {object}: {}",
@@ -706,8 +707,10 @@ fn base_index(dir: &Path, rev: &str, channel: Channel) -> anyhow::Result<Option<
 
 /// The nearest directory of `dir` that exists (`dir` itself, or an ancestor when no index
 /// was published yet), where git runs, and the path from it down to `dir` (`a/b/`, empty
-/// for `dir` itself).
-fn existing_ancestor(dir: &Path) -> anyhow::Result<(&Path, String)> {
+/// for `dir` itself). A relative `dir` is taken from the current directory, so
+/// `updates/v1` without `updates/` resolves to the current directory, not to `""`.
+fn existing_ancestor(dir: &Path) -> anyhow::Result<(PathBuf, String)> {
+    let dir = std::path::absolute(dir).with_context(|| format!("resolving {}", dir.display()))?;
     let repo = dir
         .ancestors()
         .find(|d| d.is_dir())
@@ -717,7 +720,7 @@ fn existing_ancestor(dir: &Path) -> anyhow::Result<(&Path, String)> {
         below.push_str(&part.as_os_str().to_string_lossy());
         below.push('/');
     }
-    Ok((repo, below))
+    Ok((repo.to_owned(), below))
 }
 
 fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Output> {
@@ -802,6 +805,7 @@ pub fn check_tag_key(dir: &Path, version: &Version, keys: &TrustedKeys) -> anyho
     let tag = format!("v{version}");
     // The index directory may not exist yet (the first index of a channel).
     let (dir, _) = existing_ancestor(dir)?;
+    let dir = dir.as_path();
     let commit = format!("refs/tags/{tag}^{{commit}}");
     if !git(dir, &["rev-parse", "--verify", "--quiet", &commit])?
         .status

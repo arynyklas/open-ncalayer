@@ -1014,6 +1014,29 @@ fn no_index_published_yet_passes_and_still_reads_the_keys() {
     .unwrap();
     assert!(!xtask(broken.path(), &["--no-base"]).status.success());
 
+    // Relative, as the workflows pass it, from the repository root: `updates/` is not
+    // there either.
+    let relative = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .current_dir(repo.repo.path())
+        .args([
+            "index",
+            "check",
+            "updates/v1",
+            "--offline",
+            "--base",
+            "HEAD",
+            "--keys",
+        ])
+        .arg(key.keys.path())
+        .output()
+        .unwrap();
+    assert!(
+        relative.status.success(),
+        "{}",
+        String::from_utf8_lossy(&relative.stderr)
+    );
+    assert!(String::from_utf8_lossy(&relative.stdout).contains("no index is published yet"));
+
     // Once published, the directory may not go.
     let (repo, dir) = repository_with_index(&key);
     fs::remove_dir_all(repo.path().join("updates")).unwrap();

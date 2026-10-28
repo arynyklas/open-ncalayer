@@ -35,13 +35,14 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           BEFORE: ${{ github.event.before }}
         run: |
+          # --no-renames: a file moved out of updates/ or the keys counts as changed there.
           if [ "$EVENT" = pull_request ]; then
             base="origin/$BASE_REF"
-            changed="$(git diff --name-only "$base...HEAD")"
+            changed="$(git diff --name-only --no-renames "$base...HEAD")"
           elif [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] \
             && git cat-file -e "$BEFORE^{commit}" 2> /dev/null; then
             base="$BEFORE"
-            changed="$(git diff --name-only "$base" HEAD)"
+            changed="$(git diff --name-only --no-renames "$base" HEAD)"
           else
             # A new branch or a history this clone does not have: check without a base.
             base=""

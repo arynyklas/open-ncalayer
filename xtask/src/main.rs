@@ -136,8 +136,8 @@ enum IndexCommand {
         /// The git revision of the base branch.
         #[arg(long, default_value = "origin/main")]
         base: String,
-        /// No base: the first indexes (no `seq` growth to check; every version's tag is
-        /// checked).
+        /// No base (a first push, a manual run): signatures, schema, expiry and URLs are
+        /// checked; `seq` growth and the update key in the tags of new versions are not.
         #[arg(long)]
         no_base: bool,
         /// The directory of the trusted public keys [default: `crates/oncl-update/keys/`].
