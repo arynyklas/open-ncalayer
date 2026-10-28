@@ -8,7 +8,7 @@ OpenNCALayer is an independent project and is not affiliated with the National C
 
 ## Status
 
-Early development; the first pre-release is `0.1.0-alpha.1` ([Releases](https://github.com/arynyklas/open-ncalayer/releases)). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. Tokens, Windows 7, auto-update and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
+Early development; the first pre-release is `0.1.0-alpha.1` ([Releases](https://github.com/arynyklas/open-ncalayer/releases)). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension, the tray program and the self-update of an installed copy from a signed index. Tokens, Windows 7, the installers and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
 
 P1 provides:
 - the `kz.gov.pki.knca.basics` module, method `sign`, formats `cms` and `raw`;
@@ -27,12 +27,15 @@ The fourth phase (P4) completes the original's protocol: the `basics`, `commonUt
 
 The fifth phase (P5) makes OpenNCALayer a desktop program: a tray icon, a settings window, a TLS wizard with buttons that install certificates, mkcert, certificate expiry reminders, coexistence with the original NCALayer, and an About window (see [Desktop](#desktop)).
 
+The seventh phase (P7) adds updates from a signed index: a copy installed through Velopack checks its channel, installs a new version while nothing is being signed, and rolls back a version that does not run (see [Updates](#updates)).
+
 Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md), [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md), [`docs/dev/smoke-p4.md`](docs/dev/smoke-p4.md) and [`docs/dev/smoke-p5.md`](docs/dev/smoke-p5.md) (in Russian).
 
 Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
 - [`docs/design/roadmap.md`](docs/design/roadmap.md) — decisions and roadmap;
 - [`docs/design/update-index.md`](docs/design/update-index.md) — the update index: format, signature, choice of a version;
+- [`docs/dev/release.md`](docs/dev/release.md) — releasing a version and signing the index: the maintainer's instructions;
 - [`docs/original/architecture.md`](docs/original/architecture.md) — architecture of the original NCALayer.
 
 ### Modules
@@ -188,6 +191,7 @@ The settings window saves into `settings.json` of the data directory (other keys
 - `locale` — the language of the windows and the icon: `ru`, `kk` or `en`; without the key, the system's language if it is one of these three, else Russian;
 - `autostart` — "start at login": our autostart entry `"<exe>" run` — the value `OpenNCALayer` of `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows), `~/.config/autostart/openncalayer.desktop` (Linux), `~/Library/LaunchAgents/io.github.arynyklas.openncalayer.plist` with `RunAtLoad` (macOS). The window shows the entry's real state; an entry disabled in Task Manager → Startup counts as off;
 - `proxy` — the proxy of time-stamping (TSP), OCSP and CRL requests: `{"mode":"none"}` (the default, direct connections as in P4), `{"mode":"system"}` (`ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY` with `NO_PROXY`, and without them on Windows the manual proxy of the Internet Options) or `{"mode":"manual","url":"http://host:port"}`. Plain HTTP goes to the proxy as an absolute-form request (`GET http://…`), HTTPS through a `CONNECT` tunnel. SOCKS and `https://` proxies are not supported. A new proxy applies at once, without a restart. The file may hold a proxy password, so on macOS and Linux only its owner can read it (mode `0600`).
+- `updates` — the self-update: `{"enabled": true, "channel": "stable"}`, the channel `stable` or `beta`; see [Updates](#updates).
 
 The same window has:
 - an "Original NCALayer" block: whether it is found, its autostart entries and their state, and the buttons «Отключить автозапуск оригинала» (Disable the original's autostart) and «Вернуть оригинал» (Restore the original);
@@ -237,6 +241,28 @@ The About window: version, build commit, the Apache-2.0 licence, `Copyright 2026
 [Releases](https://github.com/arynyklas/open-ncalayer/releases): archives for Windows x64 and x86 (`x86_64-pc-windows-msvc`, `i686-pc-windows-msvc`), Linux x64 (`x86_64-unknown-linux-gnu`, built on Ubuntu 24.04) and macOS on Apple Silicon (`aarch64-apple-darwin`) with `openncalayer` and `nmhost`, Velopack packages for self-update (`OpenNCALayer-<version>-<flavor>-full.nupkg` and deltas), the extensions `openncalayer-chromium-<version>.zip` and `openncalayer-firefox-<version>.xpi` (unsigned: Firefox installs it only temporarily), a CycloneDX SBOM `openncalayer-<version>.cdx.json`, and `SHA256SUMS`. Every file has a build provenance attestation: `gh attestation verify <file> --repo arynyklas/open-ncalayer`. Versions with a suffix (`0.1.0-alpha.1`) are pre-releases. The binaries are not code-signed: Windows SmartScreen and macOS Gatekeeper warn on first start. A `v<version>` tag builds and publishes the release by itself (`.github/workflows/release.yml`; the publishing steps are in [docs/design/update-index.md](docs/design/update-index.md#публикация), in Russian).
 
 Unpack the archive and go on as with your own build: `openncalayer run`, and the extension as in [Browser extension](#browser-extension).
+
+## Updates
+
+Only a copy installed through Velopack updates itself: the release workflow builds those packages, and the installers (`Setup.exe`, `.pkg`, AppImage) come in the next phase. An unpacked archive from the Releases and a build of your own get no updates — the log and the settings window say «Обновления доступны только для установленной версии» (updates are only for the installed version), and a new version has to be downloaded by hand.
+
+How it works:
+- the first check runs 2 to 10 minutes after the start, the next ones every 6 to 24 hours, each at a random time. The channel's index is downloaded from `https://arynyklas.github.io/open-ncalayer/updates/v1/` over HTTPS, through the proxy of the settings;
+- the index is signed with minisign. Only a signature by one of the two keys built into this build is accepted, with a `seq` no lower than the one already accepted and no older than 30 days; otherwise nothing is installed and the reason is in the log and in the settings window;
+- the files live in the immutable [Releases](https://github.com/arynyklas/open-ncalayer/releases). A downloaded package is checked against the size and sha256 of the index before Velopack takes it;
+- a new version is announced once: «Доступна версия X» (version X is available). It is installed once nothing is going on: no page request is being answered (and the last one ended 30 seconds ago or more) and no OpenNCALayer window is open. The daemon then exits, Velopack replaces the version and starts it with the same arguments;
+- a version is rolled out to a percentage of the installations from the index. Which installation gets it earlier is decided by a random installation id kept in the data directory; it is never sent anywhere;
+- a new version proves itself: its servers and its windows' event loop must run for 5 seconds. If it does not come up within 60 seconds, or two runs in a row crash, the daemon installs the previous version from the index back and never offers the bad one again — a notification says «Обновление откачено» (the update was rolled back);
+- a version revoked in the index is replaced by the newest version that is not revoked, even if that is a step back. This is the only case where an older version is installed;
+- without a network, behind a proxy that refuses, or with Pages unreachable, the attempts repeat quietly (in 30 to 120 minutes) and no notification is shown.
+
+Channels: `stable` (the default) and `beta` — pre-releases go to `beta` first.
+
+The settings window has an "Обновления" (Updates) group: the «Обновлять автоматически» (update automatically) checkbox, the channel, a state line and the «Проверить сейчас» (check now) button; the icon's menu has «Проверить обновления» (check for updates). In `settings.json` this is the `updates` key. With the checkbox off (`"enabled": false`) nothing is installed: "check now" still reports a new version.
+
+A build without the public keys of the index (`crates/oncl-update/keys/current.pub` and `next.pub`, built in at compile time) cannot check the signature, so its updates are off: «Ключи подписи обновлений не встроены в эту сборку» (the update signing keys are not built into this build). A build from source is like that by default.
+
+The format of the index, its signature and the choice of a version are described in [`docs/design/update-index.md`](docs/design/update-index.md) (in Russian); the maintainer's release and signing steps are in [`docs/dev/release.md`](docs/dev/release.md) (in Russian).
 
 ## Build and run
 
