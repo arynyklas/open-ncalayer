@@ -717,7 +717,7 @@ fn a_rollback_the_index_has_no_package_for_is_given_up_and_the_checks_go_on() {
     let state = s.state();
     assert_eq!(state.pending_health, None);
     assert!(state.bad.contains(&v("0.2.0")));
-    // Told once, when the updater's thread starts (the tray is not up yet).
+    // Told once, deferred until the windows' event loop runs (the tray is not up yet).
     assert_eq!(s.events(), []);
     let notice = Notice::NoRollback {
         failed: v("0.2.0"),

@@ -232,8 +232,6 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     else {
         unreachable!("prepare_run runs the start hook before it succeeds");
     };
-    // Panics (e.g. of the windowing libraries) go to the log, not as raw text to stderr only.
-    std::panic::set_hook(Box::new(|info| tracing::error!(%info, "panic")));
     let scripted = match scripted_prompter() {
         Ok(scripted) => scripted,
         Err(code) => return code,

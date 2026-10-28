@@ -186,9 +186,11 @@ pub enum Startup {
 pub enum RollBack {
     /// The version before is being installed: the process is to exit.
     Applied,
-    /// The index could not be read, or the package not downloaded or applied: try again.
+    /// The index could not be read or the package not downloaded: try again.
     Retry,
-    /// The index has no package to go back to: the failed version stays (marked bad).
+    /// Nothing more is tried: the index has no package to go back to, the installer
+    /// refused it, or it was handed over [`ROLLBACK_ATTEMPTS`] times without taking. The
+    /// failed version stays (marked bad).
     GaveUp,
 }
 
@@ -263,7 +265,8 @@ pub struct Updater {
     told: Mutex<Option<Version>>,
     queue: Mutex<Queue>,
     wake: Condvar,
-    /// Notices from before the windows' event loop, told when the updater's thread starts.
+    /// Notices from before the windows' event loop; [`Updater::tell_deferred`] tells them
+    /// once it runs, or at once when the daemon has no event loop.
     deferred: Mutex<Vec<Notice>>,
 }
 

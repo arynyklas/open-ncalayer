@@ -212,14 +212,14 @@ pub trait AtStart {
     fn ends_cleanly(&mut self);
 }
 
-/// Prepares `run`: data paths and logging, the IPC endpoint, `at_start`, then TLS and the
-/// port. On failure the message is already printed and the exit code returned:
-/// [`EXIT_ALREADY_RUNNING`], [`EXIT_TLS_NOT_CONFIGURED`], [`EXIT_PORT_BUSY`] or 1. With
-/// `allow_no_wss` any failure to start the wss server (TLS not set up or unusable, the port
-/// busy or not bindable) only turns it off, with a warning in the log. With `tray_session`
-/// (a tray is to show the problem) so do TLS not set up and a busy port: the TLS wizard or
-/// stopping the original NCALayer lets wss start later; `run` still ends with the
-/// [`WssFailure`] if the tray cannot be shown.
+/// Prepares `run`: data paths and logging, the panic hook, the IPC endpoint, `at_start`,
+/// then TLS and the port. On failure the message is already printed and the exit code
+/// returned: [`EXIT_ALREADY_RUNNING`], [`EXIT_TLS_NOT_CONFIGURED`], [`EXIT_PORT_BUSY`] or 1.
+/// With `allow_no_wss` any failure to start the wss server (TLS not set up or unusable, the
+/// port busy or not bindable) only turns it off, with a warning in the log. With
+/// `tray_session` (a tray is to show the problem) so do TLS not set up and a busy port: the
+/// TLS wizard or stopping the original NCALayer lets wss start later; `run` still ends with
+/// the [`WssFailure`] if the tray cannot be shown.
 pub async fn prepare_run(
     allow_no_wss: bool,
     tray_session: bool,
@@ -229,6 +229,9 @@ pub async fn prepare_run(
     if let Err(e) = crate::logging::init(&paths.logs()) {
         warn!(dir = %paths.logs().display(), error = %e, "file logging is disabled");
     }
+    // As early as the log takes entries: panics of the start (the updater's hook included)
+    // and of the windowing libraries go to the log, not as raw text to stderr only.
+    std::panic::set_hook(Box::new(|info| tracing::error!(%info, "panic")));
     prepare_in(paths, listen_port(), allow_no_wss, tray_session, at_start).await
 }
 
