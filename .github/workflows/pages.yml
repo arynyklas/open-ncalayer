@@ -24,6 +24,8 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      publish: ${{ steps.site.outputs.publish }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -45,16 +47,27 @@ jobs:
           else
             cargo xtask index check updates/v1 --no-base
           fi
+      # Before the first index (the keys committed alone) there is nothing to publish: the
+      # keys were read above, and the deploy is skipped.
       - name: Site
+        id: site
         run: |
+          if [ ! -d updates/v1 ]; then
+            echo "::notice::no updates/v1 yet: nothing to publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           mkdir _site
           cp -R updates _site/updates
+          echo "publish=true" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-pages-artifact@v5
+        if: steps.site.outputs.publish == 'true'
         with:
           path: _site
 
   deploy:
     needs: build
+    if: needs.build.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

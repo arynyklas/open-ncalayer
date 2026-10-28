@@ -1,11 +1,16 @@
 name: Index check
 
-# A pull request that changes the update indexes: `cargo xtask index check` (format,
-# signature by a trusted key, validity, asset URLs on the project's releases answering
-# HEAD with 200, `seq` growth against the base branch).
+# `cargo xtask index check` (format, signature by the current key, validity, asset URLs on
+# the project's releases answering HEAD with 200, `seq` growth against the base, the update
+# key in the tag of every new version) when a pull request or a push to `main` changes the
+# update indexes or the update keys. It runs on every pull request and push to `main` and
+# decides in the job whether those changed, so the check always reports and can be a
+# required status check: with nothing relevant changed, only the cargo step is skipped and
+# the check passes.
 on:
   pull_request:
-    paths: ["updates/**", "crates/oncl-update/keys/**"]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -20,11 +25,47 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # The base branch too: `seq` is compared against its indexes.
+          # The base too: `seq` is compared against its indexes. The tags: every new
+          # version's tag must hold a trusted update key.
           fetch-depth: 0
-      - name: Install toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-      - name: Check the indexes
+      - name: What changed
+        id: changes
         env:
+          EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
-        run: cargo xtask index check updates/v1 --base "origin/$BASE_REF"
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            base="origin/$BASE_REF"
+            changed="$(git diff --name-only "$base...HEAD")"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] \
+            && git cat-file -e "$BEFORE^{commit}" 2> /dev/null; then
+            base="$BEFORE"
+            changed="$(git diff --name-only "$base" HEAD)"
+          else
+            # A new branch or a history this clone does not have: check without a base.
+            base=""
+            changed="updates/"
+          fi
+          if printf '%s\n' "$changed" | grep -qE '^(updates/|crates/oncl-update/keys/)'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "nothing under updates/ or crates/oncl-update/keys/ changed: no index to check"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+      - name: Install toolchain (rust-toolchain.toml)
+        if: steps.changes.outputs.relevant == 'true'
+        run: rustup toolchain install
+      # With no `updates/v1` yet (keys committed before the first index), only the keys are
+      # read (and built into `oncl-update`, which fails on a malformed one).
+      - name: Check the indexes
+        if: steps.changes.outputs.relevant == 'true'
+        env:
+          BASE: ${{ steps.changes.outputs.base }}
+        run: |
+          if [ -n "$BASE" ]; then
+            cargo xtask index check updates/v1 --base "$BASE"
+          else
+            cargo xtask index check updates/v1 --no-base
+          fi

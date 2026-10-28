@@ -227,8 +227,17 @@ jobs:
           mkdir unpacked
           unzip -q "$package" -d unpacked
           grep -o '<machineArchitecture>[^<]*</machineArchitecture>' unpacked/*.nuspec || true
-          # The packed binaries are both slices, not one.
+          # The packed binaries are both slices, not one; both must be in the package.
+          found=0
+          for name in openncalayer nmhost; do
+            if [ -z "$(find unpacked -type f -name "$name")" ]; then
+              echo "::error::$name is not in $package"
+              find unpacked -type f
+              exit 1
+            fi
+          done
           for exe in $(find unpacked -type f \( -name openncalayer -o -name nmhost \)); do
+            found=$((found + 1))
             archs="$(lipo -archs "$exe")"
             echo "$exe: $archs"
             case " $archs " in
@@ -236,6 +245,8 @@ jobs:
               *) echo "::error::$exe in the package is not universal: $archs"; exit 1 ;;
             esac
           done
+          echo "$found binaries in the package checked"
+          [ "$found" -ge 2 ]
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:

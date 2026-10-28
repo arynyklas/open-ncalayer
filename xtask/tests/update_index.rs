@@ -864,7 +864,8 @@ fn a_version_tagged_without_a_trusted_key_is_refused() {
         let assets = release_assets(NEXT_TAG, &[Flavor::WinX64], None);
         let path = add(repo.path(), NEXT_TAG, assets.path()).written.path;
         key.sign(&path);
-        let result = index::check(repo.path(), &options(&key.trusted(), None), None);
+        // Against a base without the index: every version is new and gated.
+        let result = index::check(repo.path(), &options(&key.trusted(), Some("HEAD")), None);
         let text = error_text(result);
         assert!(
             text.contains(expected) && text.contains("0.2.0-beta.2"),
@@ -877,7 +878,7 @@ fn a_version_tagged_without_a_trusted_key_is_refused() {
     let assets = release_assets("v0.3.0", &[Flavor::WinX64], None);
     let path = add(repo.path(), "v0.3.0", assets.path()).written.path;
     key.sign(&path);
-    let result = index::check(repo.path(), &options(&key.trusted(), None), None);
+    let result = index::check(repo.path(), &options(&key.trusted(), Some("HEAD")), None);
     assert!(error_text(result).contains("there is no tag v0.3.0"));
 
     // A tag with the next key of a rotation is fine: its clients trust both.
@@ -890,7 +891,7 @@ fn a_version_tagged_without_a_trusted_key_is_refused() {
     let assets = release_assets(NEXT_TAG, &[Flavor::WinX64], None);
     let path = add(repo.path(), NEXT_TAG, assets.path()).written.path;
     key.sign(&path);
-    index::check(repo.path(), &options(&trusted, None), None).unwrap();
+    index::check(repo.path(), &options(&trusted, Some("HEAD")), None).unwrap();
 }
 
 #[test]
@@ -970,5 +971,108 @@ fn the_add_command_refuses_a_tag_without_a_trusted_key() {
     assert_eq!(
         read(&repo.path().join("beta.json")).core[0].version,
         version(TAG)
+    );
+}
+
+#[test]
+fn no_index_published_yet_passes_and_still_reads_the_keys() {
+    let key = TestKey::new();
+    let repo = keyed_repo(&key.public_text());
+    assert!(!repo.path().exists(), "no updates/v1 in the tree");
+    for base in [Some("HEAD"), None] {
+        let checked = index::check(repo.path(), &options(&key.trusted(), base), None).unwrap();
+        assert!(checked.is_empty(), "{base:?}");
+    }
+
+    // The command, as the workflows run it on a change of the keys alone.
+    let xtask = |keys: &Path, base: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args(["index", "check"])
+            .arg(repo.path())
+            .arg("--offline")
+            .args(base)
+            .arg("--keys")
+            .arg(keys)
+            .output()
+            .unwrap()
+    };
+    for base in [&["--base", "HEAD"][..], &["--no-base"]] {
+        let ok = xtask(key.keys.path(), base);
+        let stdout = String::from_utf8_lossy(&ok.stdout);
+        assert!(
+            ok.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+        assert!(stdout.contains("no index is published yet"), "{stdout}");
+    }
+    let broken = tempfile::tempdir().unwrap();
+    fs::write(
+        broken.path().join("current.pub"),
+        "untrusted comment: x\nnot a key\n",
+    )
+    .unwrap();
+    assert!(!xtask(broken.path(), &["--no-base"]).status.success());
+
+    // Once published, the directory may not go.
+    let (repo, dir) = repository_with_index(&key);
+    fs::remove_dir_all(repo.path().join("updates")).unwrap();
+    let result = index::check(&dir, &options(&key.trusted(), Some("HEAD")), None);
+    assert!(error_text(result).contains("removed here"));
+}
+
+#[test]
+fn a_key_rotation_keeps_the_versions_published_before_it() {
+    let old = TestKey::new();
+    let new = TestKey::new();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    let dir = root.join("updates").join("v1");
+    git(root, &["init", "--quiet"]);
+    // v0.1.0: tagged before any update key existed.
+    fs::write(root.join("README"), "x").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "--quiet", "-m", "start"]);
+    git(root, &["tag", "v0.1.0"]);
+    // TAG and v0.1.5: built with the old key.
+    let key_file = root.join(index::TAG_KEY);
+    fs::create_dir_all(key_file.parent().unwrap()).unwrap();
+    fs::write(&key_file, old.public_text()).unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "--quiet", "-m", "old key"]);
+    git(root, &["tag", TAG]);
+    git(root, &["tag", "v0.1.5"]);
+    // Published with the old key: v0.1.0 and TAG.
+    for tag in ["v0.1.0", TAG] {
+        let assets = release_assets(tag, &[Flavor::WinX64], None);
+        add(&dir, tag, assets.path());
+    }
+    old.sign(&dir.join("beta.json"));
+    git(root, &["add", "."]);
+    git(root, &["commit", "--quiet", "-m", "index"]);
+    // The switch: the new key, NEXT_TAG built with it, the index signed with it.
+    fs::write(&key_file, new.public_text()).unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "--quiet", "-m", "new key"]);
+    git(root, &["tag", NEXT_TAG]);
+    let assets = release_assets(NEXT_TAG, &[Flavor::WinX64], None);
+    add(&dir, NEXT_TAG, assets.path());
+    new.sign(&dir.join("beta.json"));
+    let trusted = new.trusted();
+
+    // Against the base, only NEXT_TAG is new and gated; without a base (a manual Pages run)
+    // the gate is not applied to what was published.
+    let checked = index::check(&dir, &options(&trusted, Some("HEAD")), None).unwrap();
+    assert_eq!(checked[0].new_versions, [version(NEXT_TAG)]);
+    index::check(&dir, &options(&trusted, None), None).unwrap();
+
+    // A version with the old key added now is refused.
+    let assets = release_assets("v0.1.5", &[Flavor::WinX64], None);
+    add(&dir, "v0.1.5", assets.path());
+    new.sign(&dir.join("beta.json"));
+    let result = index::check(&dir, &options(&trusted, Some("HEAD")), None);
+    assert!(
+        error_text(result)
+            .contains("0.1.5: crates/oncl-update/keys/current.pub of v0.1.5 is neither")
     );
 }

@@ -534,14 +534,19 @@ pub struct Checked {
     pub new_versions: Vec<Version>,
 }
 
-/// Checks the indexes in `dir` (at least one channel): each passes the client's
-/// verification (`oncl_update::verify`, the signature by `options.keys.current` only: a
-/// `next.pub` is for clients, not for signing before the switch) at `options.now` and
-/// [`check_asset_urls`]; against `options.base`, a changed index has a greater `seq` and no
-/// index is removed. Every version new against `options.base` (all with no base), or whose
-/// packages changed, passes [`check_tag_key`] in the repository of `dir`. With `remote`,
-/// every asset URL answers `HEAD` with 200 and, if `options.vm_smoke`, every new version
-/// passed `vm-smoke`.
+/// Checks the indexes in `dir`: each passes the client's verification
+/// (`oncl_update::verify`, the signature by `options.keys.current` only: a `next.pub` is for
+/// clients, not for signing before the switch) at `options.now` and [`check_asset_urls`];
+/// against `options.base`, a changed index has a greater `seq` and no index is removed.
+/// With a base, every version new against it, or whose packages changed, passes
+/// [`check_tag_key`] in the repository of `dir` (all versions, if the base has no index of
+/// the channel). Without a base the tag gate is not applied: versions published before a
+/// key rotation keep tags with the old key, and the gate ran when they were added. With
+/// `remote`, every asset URL answers `HEAD` with 200 and, if `options.vm_smoke`, every new
+/// version passed `vm-smoke`.
+///
+/// A `dir` that does not exist (no index published yet) passes with nothing checked,
+/// unless the base has an index there. An existing `dir` needs at least one index.
 ///
 /// # Errors
 ///
@@ -610,16 +615,18 @@ pub fn check(
         };
 
         // A version an installation may be moved onto must be able to update itself again.
-        for release in &index.core {
-            let changed = match &base {
-                Some((_, base_index)) => base_index
-                    .release(&release.version)
-                    .is_none_or(|old| old.flavors != release.flavors),
-                None => true,
-            };
-            if changed {
-                check_tag_key(dir, &release.version, options.keys)
-                    .with_context(|| format!("{} is refused", path.display()))?;
+        if options.base.is_some() {
+            for release in &index.core {
+                let changed = match &base {
+                    Some((_, base_index)) => base_index
+                        .release(&release.version)
+                        .is_none_or(|old| old.flavors != release.flavors),
+                    None => true,
+                };
+                if changed {
+                    check_tag_key(dir, &release.version, options.keys)
+                        .with_context(|| format!("{} is refused", path.display()))?;
+                }
             }
         }
 
@@ -646,7 +653,7 @@ pub fn check(
             new_versions,
         });
     }
-    if checked.is_empty() {
+    if checked.is_empty() && dir.exists() {
         bail!("{} has no index", dir.display());
     }
     Ok(checked)
@@ -671,8 +678,9 @@ fn asset_urls(index: &Index) -> BTreeSet<&str> {
 /// The index of `channel` at the git revision `rev`, in `dir`'s directory of that
 /// revision: its bytes and contents, or `None` if it has none.
 fn base_index(dir: &Path, rev: &str, channel: Channel) -> anyhow::Result<Option<(Vec<u8>, Index)>> {
+    let (repo, below) = existing_ancestor(dir)?;
     let commit = format!("{rev}^{{commit}}");
-    if !git(dir, &["rev-parse", "--verify", "--quiet", &commit])?
+    if !git(repo, &["rev-parse", "--verify", "--quiet", &commit])?
         .status
         .success()
     {
@@ -681,11 +689,11 @@ fn base_index(dir: &Path, rev: &str, channel: Channel) -> anyhow::Result<Option<
             dir.display()
         );
     }
-    let object = format!("{rev}:./{channel}.json");
-    if !git(dir, &["cat-file", "-e", &object])?.status.success() {
+    let object = format!("{rev}:./{below}{channel}.json");
+    if !git(repo, &["cat-file", "-e", &object])?.status.success() {
         return Ok(None);
     }
-    let output = git(dir, &["cat-file", "blob", &object])?;
+    let output = git(repo, &["cat-file", "blob", &object])?;
     if !output.status.success() {
         bail!(
             "git cat-file blob {object}: {}",
@@ -694,6 +702,22 @@ fn base_index(dir: &Path, rev: &str, channel: Channel) -> anyhow::Result<Option<
     }
     let index = Index::from_json(&output.stdout).with_context(|| format!("reading {object}"))?;
     Ok(Some((output.stdout, index)))
+}
+
+/// The nearest directory of `dir` that exists (`dir` itself, or an ancestor when no index
+/// was published yet), where git runs, and the path from it down to `dir` (`a/b/`, empty
+/// for `dir` itself).
+fn existing_ancestor(dir: &Path) -> anyhow::Result<(&Path, String)> {
+    let repo = dir
+        .ancestors()
+        .find(|d| d.is_dir())
+        .with_context(|| format!("{} is not in a directory", dir.display()))?;
+    let mut below = String::new();
+    for part in dir.strip_prefix(repo).unwrap_or(Path::new("")).components() {
+        below.push_str(&part.as_os_str().to_string_lossy());
+        below.push('/');
+    }
+    Ok((repo, below))
 }
 
 fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Output> {
@@ -777,10 +801,7 @@ pub fn trusted_keys(dir: &Path) -> anyhow::Result<TrustedKeys> {
 pub fn check_tag_key(dir: &Path, version: &Version, keys: &TrustedKeys) -> anyhow::Result<()> {
     let tag = format!("v{version}");
     // The index directory may not exist yet (the first index of a channel).
-    let dir = dir
-        .ancestors()
-        .find(|d| d.is_dir())
-        .with_context(|| format!("{} is not in a directory", dir.display()))?;
+    let (dir, _) = existing_ancestor(dir)?;
     let commit = format!("refs/tags/{tag}^{{commit}}");
     if !git(dir, &["rev-parse", "--verify", "--quiet", &commit])?
         .status

@@ -350,7 +350,14 @@ fn main() -> anyhow::Result<()> {
                 vm_smoke,
                 now: OffsetDateTime::now_utc(),
             };
-            for checked in xtask::index::check(&dir, &options, remote)? {
+            let all = xtask::index::check(&dir, &options, remote)?;
+            if all.is_empty() {
+                println!(
+                    "{}: no index is published yet; the trusted keys read fine",
+                    dir.display()
+                );
+            }
+            for checked in all {
                 let versions: Vec<_> = checked.new_versions.iter().map(|v| v.to_string()).collect();
                 println!(
                     "{}: seq {} (base {}), new versions: {}",
