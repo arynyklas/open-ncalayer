@@ -8,7 +8,7 @@ OpenNCALayer is an independent project and is not affiliated with the National C
 
 ## Status
 
-Early development; the first pre-release is `0.1.0-alpha.1` ([Releases](https://github.com/arynyklas/open-ncalayer/releases)). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension, the tray program and the self-update of an installed copy from a signed index. Tokens, Windows 7, the installers and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
+Early development; the first pre-release is `0.1.0-alpha.1` ([Releases](https://github.com/arynyklas/open-ncalayer/releases)). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. The self-update from a signed index is written but not active yet: the builds carry no maintainer key, Pages has no signed index, and there are no installers yet (see [Updates](#updates)). Tokens, Windows 7, the installers, turning the self-update on and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
 
 P1 provides:
 - the `kz.gov.pki.knca.basics` module, method `sign`, formats `cms` and `raw`;
@@ -244,23 +244,23 @@ Unpack the archive and go on as with your own build: `openncalayer run`, and the
 
 ## Updates
 
-Only a copy installed through Velopack updates itself: the release workflow builds those packages, and the installers (`Setup.exe`, `.pkg`, AppImage) come in the next phase. An unpacked archive from the Releases and a build of your own get no updates — the log and the settings window say «Обновления доступны только для установленной версии» (updates are only for the installed version), and a new version has to be downloaded by hand.
+The updater is written but not active yet: no copy updates itself today. An installed copy starts updating only with all three of: the maintainer's public key built into it (`crates/oncl-update/keys/current.pub`, not in the repository yet), signed channel indexes on GitHub Pages (not published yet), and an installation through Velopack (the release workflow already builds the Velopack packages; the installers `Setup.exe`, `.pkg`, AppImage come in the next phase). An unpacked archive from the Releases and a build of your own do not update themselves even then: the log and the settings window say «Обновления доступны только для установленной версии» (updates are only for the installed version), and a new version has to be downloaded by hand.
 
-How it works:
+How an installed copy updates once all of that is there:
 - the first check runs 2 to 10 minutes after the start, the next ones every 6 to 24 hours, each at a random time. The channel's index is downloaded from `https://arynyklas.github.io/open-ncalayer/updates/v1/` over HTTPS, through the proxy of the settings;
 - the index is signed with minisign. Only a signature by one of the two keys built into this build is accepted, with a `seq` no lower than the one already accepted and no older than 30 days; otherwise nothing is installed and the reason is in the log and in the settings window;
 - the files live in the immutable [Releases](https://github.com/arynyklas/open-ncalayer/releases). A downloaded package is checked against the size and sha256 of the index before Velopack takes it;
 - a new version is announced once: «Доступна версия X» (version X is available). It is installed once nothing is going on: no page request is being answered (and the last one ended 30 seconds ago or more) and no OpenNCALayer window is open. The daemon then exits, Velopack replaces the version and starts it with the same arguments;
 - a version is rolled out to a percentage of the installations from the index. Which installation gets it earlier is decided by a random installation id kept in the data directory; it is never sent anywhere;
 - a new version proves itself: its servers and its windows' event loop must run for 5 seconds. If it does not come up within 60 seconds, or two runs in a row crash, the daemon installs the previous version from the index back and never offers the bad one again — a notification says «Обновление откачено» (the update was rolled back);
-- a version revoked in the index is replaced by the newest version that is not revoked, even if that is a step back. This is the only case where an older version is installed;
+- a version revoked in the index is replaced by the newest version that is not revoked, even if that is a step back. This is the only step back the index offers; the rollback after a failed start is the item above;
 - without a network, behind a proxy that refuses, or with Pages unreachable, the attempts repeat quietly (in 30 to 120 minutes) and no notification is shown.
 
-Channels: `stable` (the default) and `beta` — pre-releases go to `beta` first.
+Channels: `stable` (the default) and `beta`. Pre-releases go into `beta` only, releases into both `stable` and `beta`, so `beta` gets both.
 
 The settings window has an "Обновления" (Updates) group: the «Обновлять автоматически» (update automatically) checkbox, the channel, a state line and the «Проверить сейчас» (check now) button; the icon's menu has «Проверить обновления» (check for updates). In `settings.json` this is the `updates` key. With the checkbox off (`"enabled": false`) nothing is installed: "check now" still reports a new version.
 
-A build without the public keys of the index (`crates/oncl-update/keys/current.pub` and `next.pub`, built in at compile time) cannot check the signature, so its updates are off: «Ключи подписи обновлений не встроены в эту сборку» (the update signing keys are not built into this build). A build from source is like that by default.
+An installed copy built without the public keys of the index (`crates/oncl-update/keys/current.pub` and `next.pub`, built in at compile time) cannot check the signature, so its updates are off: «Ключи подписи обновлений не встроены в эту сборку» (the update signing keys are not built into this build). Until the key is in the repository every version is built like that, the release builds included. A build of your own that is not installed through Velopack shows «Обновления доступны только для установленной версии» instead.
 
 The format of the index, its signature and the choice of a version are described in [`docs/design/update-index.md`](docs/design/update-index.md) (in Russian); the maintainer's release and signing steps are in [`docs/dev/release.md`](docs/dev/release.md) (in Russian).
 
