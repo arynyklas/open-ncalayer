@@ -656,7 +656,7 @@ impl Host for DaemonHost {
     }
 
     fn hold(&self) -> bool {
-        if !hold_requests() {
+        if !hold_requests(update::QUIET) {
             return false;
         }
         if self.window_open() {

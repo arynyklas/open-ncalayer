@@ -2,8 +2,8 @@
 //!
 //! An [`Updater`] looks at the signed index of the channel in the settings
 //! ([`INDEX_BASE`]`/<channel>.json`) a few minutes after the start and then every 6 to 24
-//! hours: [`oncl_update::fetch`], [`oncl_update::verify`] with the keys built in,
-//! [`oncl_update::choose`]. A version it chooses is downloaded and checked against the index
+//! hours: [`oncl_update::fetch()`], [`oncl_update::verify()`] with the keys built in,
+//! [`oncl_update::choose()`]. A version it chooses is downloaded and checked against the index
 //! by an [`Installer`] (Velopack in an installed copy: [`installer::VelopackInstaller`]), and
 //! applied once no page's request is being answered and no window is open ([`Host::busy`]),
 //! new requests held back ([`Host::hold`]): the process then exits, and Velopack starts the
@@ -59,6 +59,14 @@ pub const FIRST_CHECK: (Duration, Duration) = (minutes(2), minutes(10));
 pub const CHECK_EVERY: (Duration, Duration) = (hours(6), hours(24));
 /// A check that could not download the index is tried again this soon.
 pub const RETRY_AFTER: (Duration, Duration) = (minutes(30), hours(2));
+/// The longest the index and its signature may take to download, together.
+pub const INDEX_TIMEOUT: Duration = Duration::from_secs(20);
+/// The longest a package download may take.
+pub const DOWNLOAD_TIMEOUT: Duration = minutes(30);
+/// The longest a rollback at the start (the index and the package) may hold up the
+/// daemon's start; then the daemon starts, and its updater's thread tries again with
+/// [`DOWNLOAD_TIMEOUT`].
+pub const STARTUP_BUDGET: Duration = Duration::from_secs(15);
 /// A new version proves healthy within this long of its start.
 pub const HEALTH_GRACE: Duration = Duration::from_secs(60);
 /// A new version is healthy once its servers and its windows' event loop have run this
@@ -86,7 +94,8 @@ const fn hours(n: u64) -> Duration {
     Duration::from_secs(n * 3600)
 }
 
-/// The base of the update indexes: [`INDEX_BASE`]; in test builds [`INDEX_BASE_VAR`] if set.
+/// The base of the update indexes: [`INDEX_BASE`]; in test builds `ONCL_UPDATE_INDEX_BASE`
+/// (`INDEX_BASE_VAR`) if set.
 pub fn index_base() -> String {
     #[cfg(feature = "e2e-prompter")]
     if let Some(base) = std::env::var(INDEX_BASE_VAR).ok().filter(|b| !b.is_empty()) {
@@ -101,13 +110,14 @@ pub trait Installer: Send + Sync {
     fn current(&self) -> Version;
 
     /// Downloads `target` (its delta from the running version, or its full package) into
-    /// the installer's store; every file is checked against the size and sha256 of the
-    /// index. `downgrade`: `target` is older than the running version.
+    /// the installer's store, each package download within `timeout`; every file is
+    /// checked against the index (a full package rebuilt from a delta by its contents).
+    /// `downgrade`: `target` is older than the running version.
     ///
     /// # Errors
     ///
     /// What failed, for the log and the settings window.
-    fn download(&self, target: &Target, downgrade: bool) -> Result<(), String>;
+    fn download(&self, target: &Target, downgrade: bool, timeout: Duration) -> Result<(), String>;
 
     /// Hands the downloaded `target` to the installer, which installs it once this process
     /// has exited and then starts it with this process's arguments. The caller exits next.
@@ -115,7 +125,25 @@ pub trait Installer: Send + Sync {
     /// # Errors
     ///
     /// What failed; nothing is installed then.
-    fn apply_on_exit(&self, target: &Target) -> Result<(), String>;
+    fn apply_on_exit(&self, target: &Target) -> Result<(), ApplyError>;
+}
+
+/// Why [`Installer::apply_on_exit`] did not hand an update over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApplyError {
+    /// The downloaded package is gone (another start of the program cleans the installer's
+    /// store of old packages): it can be downloaded again.
+    PackageMissing(String),
+    /// The installer refused it.
+    Failed(String),
+}
+
+impl std::fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApplyError::PackageMissing(e) | ApplyError::Failed(e) => f.write_str(e),
+        }
+    }
 }
 
 /// The daemon, as the updater sees it.
@@ -124,9 +152,10 @@ pub trait Host: Send + Sync {
     /// is open: no update is applied then.
     fn busy(&self) -> bool;
 
-    /// Holds back new requests of pages and returns whether the daemon is still idle; if
-    /// it is not, the requests are let through again. An update is applied only while they
-    /// are held.
+    /// Holds back new requests of pages and returns whether the daemon is still idle: no
+    /// request is being answered, none ended within [`QUIET`] and no window is open, all
+    /// looked at once requests are held. If it is not idle, the requests are let through
+    /// again. An update is applied only while they are held.
     fn hold(&self) -> bool;
 
     /// Lets held requests through again: the update was not applied.
@@ -303,11 +332,14 @@ impl Updater {
     /// just installed records the start of its run. A run that ended neither cleanly
     /// ([`Updater::ended_cleanly`]) nor confirmed healthy crashed or hung; after
     /// [`CRASHES_TO_ROLL_BACK`] such runs in a row, or once the version is marked bad, it is
-    /// rolled back. If the version before it failed here too, nothing is rolled back.
+    /// rolled back. If the version before it failed here too, nothing is rolled back. If the
+    /// state cannot be read or saved, nothing is done this run ([`Startup::Normal`]): the
+    /// state stays as it is on disk for the next start.
     pub fn startup(&self) -> Startup {
         let current = self.installer.current();
         let now = OffsetDateTime::now_utc();
-        self.update_state(|state| {
+        let mut notice = None;
+        let startup = self.update_state(|state| {
             let Some(pending) = state.pending_health.clone() else {
                 return Startup::Normal;
             };
@@ -316,7 +348,7 @@ impl Updater {
                 if pending.attempts >= ROLLBACK_ATTEMPTS {
                     error!(failed = %current, to = %pending.to, attempts = pending.attempts, "the rollback did not install; keeping this version");
                     state.pending_health = None;
-                    lock(&self.deferred).push(Notice::RollbackFailed {
+                    notice = Some(Notice::RollbackFailed {
                         failed: current.clone(),
                         version: pending.to,
                     });
@@ -352,7 +384,12 @@ impl Updater {
                 p.crashes = crashes;
             }
             Startup::Confirm
-        })
+        });
+        let Some(startup) = startup else {
+            return Startup::Normal;
+        };
+        lock(&self.deferred).extend(notice);
+        startup
     }
 
     /// The run ends cleanly (asked to stop, or P1's exit for TLS not set up or a busy
@@ -412,10 +449,12 @@ impl Updater {
     /// it was updated (or rolled back to).
     pub fn confirm_health(&self) {
         let current = self.installer.current();
-        let confirmed = self.update_state(|state| match &state.pending_health {
-            Some(p) if p.to == current => state.pending_health.take(),
-            _ => None,
-        });
+        let confirmed = self
+            .update_state(|state| match &state.pending_health {
+                Some(p) if p.to == current => state.pending_health.take(),
+                _ => None,
+            })
+            .flatten();
         let Some(pending) = confirmed else {
             return;
         };
@@ -434,11 +473,13 @@ impl Updater {
     /// updater's thread is to install the version before it.
     fn health_failed(&self) {
         let current = self.installer.current();
-        let to = self.update_state(|state| {
-            let pending = state.pending_health.clone().filter(|p| p.to == current)?;
-            error!(version = %current, "this version did not prove healthy in time");
-            mark_failed(state, &pending)
-        });
+        let to = self
+            .update_state(|state| {
+                let pending = state.pending_health.clone().filter(|p| p.to == current)?;
+                error!(version = %current, "this version did not prove healthy in time");
+                mark_failed(state, &pending)
+            })
+            .flatten();
         if let Some(to) = to {
             lock(&self.queue).rollback = Some((current, to));
             self.wake.notify_all();
@@ -446,11 +487,11 @@ impl Updater {
     }
 
     /// At the start, before the servers and windows: installs `to` back over the failed
-    /// version, from its full package in the index, without waiting for anything. With
-    /// [`RollBack::Applied`] the caller exits; with [`RollBack::Retry`] it starts normally
-    /// and hands the rollback to [`Updater::spawn`].
+    /// version, from its full package in the index, without waiting for anything and
+    /// within [`STARTUP_BUDGET`]. With [`RollBack::Applied`] the caller exits; with
+    /// [`RollBack::Retry`] it starts normally and hands the rollback to [`Updater::spawn`].
     pub fn roll_back_now(&self, failed: &Version, to: &Version) -> RollBack {
-        self.roll_back(failed, to, false)
+        self.roll_back(failed, to, false, STARTUP_BUDGET)
     }
 
     /// «Проверить сейчас»: checks with `settings` (the form's) or, without, the saved ones,
@@ -493,7 +534,9 @@ impl Updater {
         };
         loop {
             let applied = match self.next(due) {
-                Job::Plan(plan) => self.install(&plan, true) == Installed::Applied,
+                Job::Plan(plan) => {
+                    self.install(&plan, true, DOWNLOAD_TIMEOUT) == Installed::Applied
+                }
                 Job::RollBack(failed, to) => {
                     rollback = Some((failed, to));
                     due = SystemTime::now();
@@ -501,7 +544,12 @@ impl Updater {
                 }
                 Job::Due => {
                     let (applied, wait) = match rollback.take() {
-                        Some((failed, to)) => match self.roll_back(&failed, &to, true) {
+                        Some((failed, to)) => match self.roll_back(
+                            &failed,
+                            &to,
+                            true,
+                            INDEX_TIMEOUT + DOWNLOAD_TIMEOUT,
+                        ) {
                             RollBack::Applied => (true, None),
                             RollBack::Retry if retries + 1 >= ROLLBACK_ATTEMPTS => {
                                 self.give_up(&failed, &to, true, false);
@@ -518,7 +566,7 @@ impl Updater {
                         None => {
                             let checked = self.check(false, None);
                             let applied = checked.plan.is_some_and(|plan| {
-                                self.install(&plan, true) == Installed::Applied
+                                self.install(&plan, true, DOWNLOAD_TIMEOUT) == Installed::Applied
                             });
                             let wait = if checked.retry_soon {
                                 RETRY_AFTER
@@ -580,12 +628,21 @@ impl Updater {
             };
         }
         let channel = settings.channel;
-        let index = match self.verified_index(channel) {
+        let index = match self.verified_index(channel, INDEX_TIMEOUT) {
             Ok(index) => index,
+            Err((UpdateError::NotPublished(channel), _)) => {
+                return self.checked(UpdateStatus::NotPublished(channel), None);
+            }
             Err((e, retry_soon)) => return self.failed(&e, retry_soon),
         };
         let current = self.installer.current();
-        let (install_id, bad) = self.update_state(|s| (s.install_id, s.bad.clone()));
+        let (install_id, bad) = match self.try_update_state(|s| (s.install_id, s.bad.clone())) {
+            Ok(found) => found,
+            Err(e) => {
+                warn!(error = %e, "cannot read the updater's state");
+                return self.failed(&UpdateError::Io(e), true);
+            }
+        };
         let (target, downgrade) =
             match choose(&index, &current, self.config.flavor, install_id, &bad) {
                 Choice::UpToDate => {
@@ -612,17 +669,31 @@ impl Updater {
         self.checked(status, plan)
     }
 
-    /// The index of `channel`, downloaded and verified; its `seq` is saved. The error says
-    /// whether to try again soon (the index could not be downloaded).
+    /// The index of `channel`, downloaded within `timeout` and verified; its `seq` is
+    /// saved, and an index whose `seq` cannot be saved is not used. The error says whether
+    /// to try again soon (the index could not be downloaded, or the state not read or
+    /// saved); [`UpdateError::NotPublished`] is not tried again soon.
     fn verified_index(
         &self,
         channel: oncl_update::Channel,
+        timeout: Duration,
     ) -> Result<oncl_update::Index, (UpdateError, bool)> {
-        let fetched = fetch(&*self.transport, &self.config.base, channel).map_err(|e| {
-            info!(error = %e, %channel, "cannot download the update index; trying again later");
-            (e, true)
+        let fetched = fetch(&*self.transport, &self.config.base, channel, timeout).map_err(|e| {
+            if let UpdateError::NotPublished(_) = e {
+                info!(%channel, "the channel has no update index yet");
+                (e, false)
+            } else {
+                info!(error = %e, %channel, "cannot download the update index; trying again later");
+                (e, true)
+            }
         })?;
-        let last_seq = self.update_state(|s| s.last_seq.get(&channel).copied());
+        let state_error = |e: std::io::Error| {
+            warn!(error = %e, "cannot read or save the updater's state");
+            (UpdateError::Io(e), true)
+        };
+        let last_seq = self
+            .try_update_state(|s| s.last_seq.get(&channel).copied())
+            .map_err(state_error)?;
         let index = verify(
             &fetched.index,
             &fetched.signature,
@@ -636,10 +707,11 @@ impl Updater {
             (e, false)
         })?;
         // Only ever raised: the state is read again under the lock.
-        self.update_state(|s| {
+        self.try_update_state(|s| {
             let seq = s.last_seq.entry(channel).or_insert(index.seq);
             *seq = (*seq).max(index.seq);
-        });
+        })
+        .map_err(state_error)?;
         Ok(index)
     }
 
@@ -662,13 +734,15 @@ impl Updater {
         }
     }
 
-    /// Installs `to` back over `failed`. Without `wait` (at the start) nothing is waited
-    /// for, and a notice waits for the updater's thread.
-    fn roll_back(&self, failed: &Version, to: &Version, wait: bool) -> RollBack {
+    /// Installs `to` back over `failed`, the index and the package within `budget`. Without
+    /// `wait` (at the start) nothing is waited for, and a notice waits for the updater's
+    /// thread.
+    fn roll_back(&self, failed: &Version, to: &Version, wait: bool, budget: Duration) -> RollBack {
+        let start = Instant::now();
         let package = {
             let _one = lock(&self.checking);
             let channel = self.settings().channel;
-            match self.verified_index(channel) {
+            match self.verified_index(channel, budget.min(INDEX_TIMEOUT)) {
                 Ok(index) => index
                     .release(to)
                     .and_then(|release| release.package(self.config.flavor))
@@ -683,17 +757,23 @@ impl Updater {
             error!(%failed, version = %to, flavor = %self.config.flavor, "the update index has no package to roll back to; keeping this version");
             return self.give_up(failed, to, wait, true);
         };
+        let left = budget.saturating_sub(start.elapsed());
+        if left.is_zero() {
+            warn!(%failed, version = %to, "no time left to download the rollback; trying again later");
+            return RollBack::Retry;
+        }
         let plan = Plan {
             target: Target {
                 version: to.clone(),
                 full,
+                full_contents: None,
                 delta: None,
                 notes_url: None,
             },
             downgrade: true,
             rollback: true,
         };
-        match self.install(&plan, wait) {
+        match self.install(&plan, wait, left) {
             Installed::Applied => RollBack::Applied,
             Installed::NotApplied => RollBack::Retry,
             Installed::ApplyFailed => {
@@ -705,9 +785,10 @@ impl Updater {
 
     /// A rollback from `failed` to `to` cannot be done (`missing`: the index has no package
     /// of `to`): `failed` stays marked bad, its rollback is forgotten, and the user is told
-    /// once (later, without `wait`: the tray is not there yet).
+    /// once (later, without `wait`: the tray is not there yet). If that cannot be saved,
+    /// it is [`RollBack::Retry`]: the state on disk still asks for the rollback.
     fn give_up(&self, failed: &Version, to: &Version, wait: bool, missing: bool) -> RollBack {
-        self.update_state(|s| {
+        let saved = self.update_state(|s| {
             s.bad.insert(failed.clone());
             if s.pending_health
                 .as_ref()
@@ -716,6 +797,9 @@ impl Updater {
                 s.pending_health = None;
             }
         });
+        if saved.is_none() {
+            return RollBack::Retry;
+        }
         let (failed, version) = (failed.clone(), to.clone());
         let notice = if missing {
             Notice::NoRollback { failed, version }
@@ -730,15 +814,24 @@ impl Updater {
         RollBack::GaveUp
     }
 
-    /// Downloads `plan`; with `wait`, waits until the daemon is idle, checks that the index
-    /// still offers it (unless it is a rollback) and holds back new requests. Then records
+    /// Downloads `plan` (each package within `timeout`); with `wait`, waits until the
+    /// daemon is idle, checks that the index still offers it (unless it is a rollback) and
+    /// holds back new requests ([`Host::hold`] looks at the quiet time again). Then records
     /// `pending_health` (for a rollback, counting its attempts) and has the installer apply
-    /// it; with [`Installed::Applied`] the caller exits.
-    fn install(&self, plan: &Plan, wait: bool) -> Installed {
+    /// it; with [`Installed::Applied`] the caller exits. A package gone before it is handed
+    /// over ([`ApplyError::PackageMissing`]) is [`Installed::NotApplied`]: it is downloaded
+    /// again next time, and a rollback keeps its counted attempt.
+    fn install(&self, plan: &Plan, wait: bool, timeout: Duration) -> Installed {
         let version = &plan.target.version;
-        if let Err(e) = self.installer.download(&plan.target, plan.downgrade) {
+        if let Err(e) = self
+            .installer
+            .download(&plan.target, plan.downgrade, timeout)
+        {
             warn!(%version, error = %e, "cannot download the update");
-            *lock(&self.status) = UpdateStatus::Failed(e);
+            *lock(&self.status) = UpdateStatus::InstallFailed {
+                version: version.to_string(),
+                error: e,
+            };
             return Installed::NotApplied;
         }
         if wait {
@@ -793,16 +886,28 @@ impl Updater {
             }
             Err(e) => {
                 warn!(%version, error = %e, "cannot apply the update");
-                self.update_state(|s| {
-                    if s.pending_health.as_ref() == Some(&pending) {
-                        s.pending_health = None;
-                    }
-                });
+                let missing = matches!(e, ApplyError::PackageMissing(_));
+                // A rollback whose package went keeps its record: its attempt counts, and
+                // the next start still rolls back.
+                if !(missing && plan.rollback) {
+                    self.update_state(|s| {
+                        if s.pending_health.as_ref() == Some(&pending) {
+                            s.pending_health = None;
+                        }
+                    });
+                }
                 if wait {
                     self.host.release();
                 }
-                *lock(&self.status) = UpdateStatus::Failed(e);
-                Installed::ApplyFailed
+                *lock(&self.status) = UpdateStatus::InstallFailed {
+                    version: version.to_string(),
+                    error: e.to_string(),
+                };
+                if missing {
+                    Installed::NotApplied
+                } else {
+                    Installed::ApplyFailed
+                }
             }
         }
     }
@@ -821,25 +926,27 @@ impl Updater {
     }
 
     /// Applies `change` to the state as it is in the file now, under the state lock, and
-    /// saves it if it changed (logged if it cannot be).
-    fn update_state<R>(&self, change: impl FnOnce(&mut State) -> R) -> R {
-        let mut result = None;
-        if let Err(e) = self.try_update_state(|s| result = Some(change(s))) {
-            warn!(error = %e, "cannot save the updater's state");
-        }
-        result.expect("the change ran")
+    /// saves it if it changed. `None` (logged) if the state cannot be read or saved: the
+    /// caller does not act on a change that is not on disk.
+    fn update_state<R>(&self, change: impl FnOnce(&mut State) -> R) -> Option<R> {
+        self.try_update_state(change)
+            .inspect_err(|e| warn!(error = %e, "cannot read or save the updater's state"))
+            .ok()
     }
 
-    /// [`Updater::update_state`], failing if the state cannot be saved. A broken state file
-    /// is replaced by a fresh state (logged), so updates go on.
+    /// [`Updater::update_state`], with the error. A state file that is not a state
+    /// ([`std::io::ErrorKind::InvalidData`]: damaged) is replaced by a fresh state
+    /// (logged), so updates go on; any other read error (no permission, a file locked by
+    /// another program) fails, and the file is left as it is.
     fn try_update_state<R>(&self, change: impl FnOnce(&mut State) -> R) -> std::io::Result<R> {
         let _guard = lock(&self.state_lock);
         let (mut state, broken) = match State::load(&self.config.data_dir) {
             Ok(state) => (state, false),
-            Err(e) => {
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
                 warn!(error = %e, "the updater's state is broken; starting a new one");
                 (State::fresh(), true)
             }
+            Err(e) => return Err(e),
         };
         let before = state.clone();
         let result = change(&mut state);

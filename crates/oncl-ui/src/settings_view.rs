@@ -192,11 +192,15 @@ pub enum UpdateStatus {
     NotChecked,
     /// No other version is offered.
     UpToDate,
+    /// The channel has no update index yet: nothing has been released into it.
+    NotPublished(Channel),
     /// `version` is offered. With `installing` it is downloaded and installed once no signing
     /// is in progress; without, automatic updates are off.
     Available { version: String, installing: bool },
     /// The last check failed: the index could not be downloaded or was refused.
     Failed(String),
+    /// `version` was found, but could not be downloaded or handed to the installer.
+    InstallFailed { version: String, error: String },
 }
 
 impl UpdateStatus {
@@ -479,6 +483,8 @@ pub fn update_view(status: &UpdateStatus, l: Locale) -> String {
         UpdateStatus::NoKeys => t.update_no_keys.to_owned(),
         UpdateStatus::NotChecked => t.update_not_checked.to_owned(),
         UpdateStatus::UpToDate => t.update_up_to_date.to_owned(),
+        UpdateStatus::NotPublished(Channel::Stable) => t.update_not_published_stable.to_owned(),
+        UpdateStatus::NotPublished(Channel::Beta) => t.update_not_published_beta.to_owned(),
         UpdateStatus::Available {
             version,
             installing: true,
@@ -488,6 +494,12 @@ pub fn update_view(status: &UpdateStatus, l: Locale) -> String {
             installing: false,
         } => t.update_available_off.replace("{0}", version),
         UpdateStatus::Failed(e) => format!("{}: {e}", t.update_failed),
+        UpdateStatus::InstallFailed { version, error } => {
+            format!(
+                "{}: {error}",
+                t.update_install_failed.replace("{0}", version)
+            )
+        }
     }
 }
 
@@ -710,6 +722,25 @@ mod tests {
             update_view(&UpdateStatus::Failed("timed out".to_owned()), Locale::Ru),
             "Не удалось проверить обновления: timed out"
         );
+        assert_eq!(
+            update_view(&UpdateStatus::NotPublished(Channel::Stable), Locale::Ru),
+            "В канале «Стабильный» пока нет выпусков."
+        );
+        assert_eq!(
+            update_view(&UpdateStatus::NotPublished(Channel::Beta), Locale::En),
+            "The Beta channel has no releases yet."
+        );
+        assert_eq!(
+            update_view(
+                &UpdateStatus::InstallFailed {
+                    version: "0.2.0".to_owned(),
+                    error: "HTTP 404".to_owned()
+                },
+                Locale::Ru
+            ),
+            "Не удалось загрузить или установить версию 0.2.0: HTTP 404"
+        );
+        assert!(UpdateStatus::NotPublished(Channel::Beta).can_check());
         assert!(!UpdateStatus::NotInstalled.can_check());
         assert!(!UpdateStatus::NoKeys.can_check());
         assert!(UpdateStatus::NotChecked.can_check() && available(false).can_check());

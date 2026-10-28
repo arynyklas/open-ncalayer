@@ -12,23 +12,32 @@ use time::Duration as TimeDuration;
 /// Something done while a request is being answered.
 type Hook = Box<dyn FnOnce() + Send>;
 
-/// Replies `200` with the body served at a URL, and refuses any other; records what was
-/// asked: the URL, the size limit and whether only HTTPS was allowed. A hook runs during the
-/// next request.
+/// Replies with the status and body served at a URL (200 by [`FakeTransport::serve`]), and
+/// refuses any other; records what was asked: the URL, the size limit and whether only
+/// HTTPS was allowed, and apart the timeout. A hook runs during the next request.
 #[derive(Default)]
 pub(crate) struct FakeTransport {
-    bodies: Mutex<BTreeMap<String, Vec<u8>>>,
+    bodies: Mutex<BTreeMap<String, (u16, Vec<u8>)>>,
     asked: Mutex<Vec<(String, u64, bool)>>,
+    timeouts: Mutex<Vec<Duration>>,
     hook: Mutex<Option<Hook>>,
 }
 
 impl FakeTransport {
     pub(crate) fn serve(&self, url: &str, body: &[u8]) {
-        lock(&self.bodies).insert(url.to_owned(), body.to_vec());
+        self.reply(url, 200, body);
+    }
+
+    pub(crate) fn reply(&self, url: &str, status: u16, body: &[u8]) {
+        lock(&self.bodies).insert(url.to_owned(), (status, body.to_vec()));
     }
 
     pub(crate) fn asked(&self) -> Vec<(String, u64, bool)> {
         lock(&self.asked).clone()
+    }
+
+    fn timeouts(&self) -> Vec<Duration> {
+        lock(&self.timeouts).clone()
     }
 }
 
@@ -39,16 +48,17 @@ impl HttpTransport for FakeTransport {
 
     fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
         lock(&self.asked).push((url.to_owned(), opts.max_len, opts.https_only));
+        lock(&self.timeouts).push(opts.timeout);
         let hook = lock(&self.hook).take();
         if let Some(hook) = hook {
             hook();
         }
-        let body = lock(&self.bodies)
+        let (status, body) = lock(&self.bodies)
             .get(url)
             .cloned()
             .ok_or_else(|| HttpError("connection refused".to_owned()))?;
         Ok(HttpReply {
-            status: 200,
+            status,
             content_type: None,
             body,
         })
@@ -77,6 +87,10 @@ struct FakeInstaller {
     log: Log,
     fail_download: bool,
     fail_apply: bool,
+    /// The first this many applies find the package gone.
+    missing: AtomicUsize,
+    /// The timeout of each download.
+    timeouts: Arc<Mutex<Vec<Duration>>>,
 }
 
 impl Installer for FakeInstaller {
@@ -84,7 +98,8 @@ impl Installer for FakeInstaller {
         self.current.clone()
     }
 
-    fn download(&self, target: &Target, downgrade: bool) -> Result<(), String> {
+    fn download(&self, target: &Target, downgrade: bool, timeout: Duration) -> Result<(), String> {
+        lock(&self.timeouts).push(timeout);
         lock(&self.log).push(Event::Download(target.version.clone(), downgrade));
         if self.fail_download {
             return Err("the package's sha256 does not match the update index".to_owned());
@@ -92,9 +107,16 @@ impl Installer for FakeInstaller {
         Ok(())
     }
 
-    fn apply_on_exit(&self, target: &Target) -> Result<(), String> {
+    fn apply_on_exit(&self, target: &Target) -> Result<(), ApplyError> {
         if self.fail_apply {
-            return Err("the updater did not start".to_owned());
+            return Err(ApplyError::Failed("the updater did not start".to_owned()));
+        }
+        if self
+            .missing
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(ApplyError::PackageMissing("File does not exist".to_owned()));
         }
         lock(&self.log).push(Event::Apply(target.version.clone()));
         Ok(())
@@ -151,6 +173,7 @@ fn release(version: &str, rollout: u8, revoked: bool) -> CoreRelease {
             sha256: Sha256::of(name.as_bytes()),
             size: name.len() as u64,
         },
+        contents_sha256: None,
         delta_from: BTreeMap::new(),
     };
     CoreRelease {
@@ -189,6 +212,7 @@ struct Sandbox {
     transport: Arc<FakeTransport>,
     key: Key,
     log: Log,
+    download_timeouts: Arc<Mutex<Vec<Duration>>>,
 }
 
 /// How a fake updater behaves.
@@ -198,18 +222,25 @@ struct Fakes {
     refuse_hold: usize,
     fail_download: bool,
     fail_apply: bool,
+    /// The first this many applies find the package gone.
+    missing: usize,
     /// The health check's grace and settle time, in milliseconds; 60 s and 5 ms by default.
     health: Option<(u64, u64)>,
 }
 
 impl Sandbox {
+    /// With the settings of updates on, from the stable channel (saved: the default
+    /// depends on this build's version).
     fn new() -> Sandbox {
-        Sandbox {
+        let sandbox = Sandbox {
             dir: tempfile::tempdir().unwrap(),
             transport: Arc::new(FakeTransport::default()),
             key: Key::new(),
             log: Log::default(),
-        }
+            download_timeouts: Arc::default(),
+        };
+        sandbox.settings(true);
+        sandbox
     }
 
     /// Publishes the stable index `seq` of `core`, made `age` ago, signed by `key`.
@@ -272,6 +303,8 @@ impl Sandbox {
                 log: Arc::clone(&self.log),
                 fail_download: fakes.fail_download,
                 fail_apply: fakes.fail_apply,
+                missing: AtomicUsize::new(fakes.missing),
+                timeouts: Arc::clone(&self.download_timeouts),
             }),
             Box::new(FakeHost {
                 log: Arc::clone(&self.log),
@@ -367,7 +400,7 @@ fn an_update_is_found_downloaded_and_applied_once_the_daemon_is_idle() {
     // is to be applied: it waits again. Then new requests are held back, and it applies.
     let plan = checked.plan.unwrap();
     assert_eq!((plan.downgrade, plan.rollback), (false, false));
-    assert_eq!(u.install(&plan, true), Installed::Applied);
+    assert_eq!(u.install(&plan, true, DOWNLOAD_TIMEOUT), Installed::Applied);
     assert_eq!(
         s.events(),
         [
@@ -401,7 +434,7 @@ fn an_update_no_longer_offered_after_the_wait_is_not_applied() {
         4,
         vec![release("0.1.0", 100, false), release("0.2.0", 100, true)],
     );
-    assert_ne!(u.install(&plan, true), Installed::Applied);
+    assert_ne!(u.install(&plan, true, DOWNLOAD_TIMEOUT), Installed::Applied);
     assert!(!s.events().iter().any(|e| matches!(e, Event::Apply(_))));
     assert_eq!(s.state().pending_health, None);
 }
@@ -732,7 +765,10 @@ fn a_rollback_the_index_has_no_package_for_is_given_up_and_the_checks_go_on() {
 
     // Given up while running: told at once.
     s.pending("0.1.0", "0.2.0", Some(TimeDuration::minutes(2)), false);
-    assert_eq!(u.roll_back(&failed, &to, true), RollBack::GaveUp);
+    assert_eq!(
+        u.roll_back(&failed, &to, true, STARTUP_BUDGET),
+        RollBack::GaveUp
+    );
     assert!(s.events().contains(&Event::Notice(notice)));
 }
 
@@ -832,7 +868,7 @@ fn a_refused_index_changes_nothing_and_is_not_notified() {
 
     // A broken signature.
     s.publish(7, two_releases());
-    let mut body = lock(&s.transport.bodies)[INDEX].clone();
+    let mut body = lock(&s.transport.bodies)[INDEX].1.clone();
     body[10] ^= 1;
     s.transport.serve(INDEX, &body);
     assert!(matches!(
@@ -891,7 +927,7 @@ fn a_revoked_current_version_moves_to_the_newest_one_not_revoked() {
     assert_eq!(checked.status, available("0.1.0", true));
     let plan = checked.plan.unwrap();
     assert!(plan.downgrade && !plan.rollback);
-    assert_eq!(u.install(&plan, true), Installed::Applied);
+    assert_eq!(u.install(&plan, true, DOWNLOAD_TIMEOUT), Installed::Applied);
     assert_eq!(s.events()[1], Event::Download(v("0.1.0"), true));
 }
 
@@ -939,10 +975,10 @@ fn with_updates_off_only_a_check_now_looks_and_nothing_is_installed() {
     };
     // Turned off again before it applied: not applied.
     s.settings(false);
-    assert_ne!(u.install(&plan, true), Installed::Applied);
+    assert_ne!(u.install(&plan, true, DOWNLOAD_TIMEOUT), Installed::Applied);
     assert_eq!(s.state().pending_health, None);
     s.settings(true);
-    assert_eq!(u.install(&plan, true), Installed::Applied);
+    assert_eq!(u.install(&plan, true, DOWNLOAD_TIMEOUT), Installed::Applied);
 }
 
 #[test]
@@ -957,8 +993,10 @@ fn a_failed_download_or_apply_leaves_nothing_pending() {
         },
     );
     let plan = u.check(false, None).plan.unwrap();
-    assert_ne!(u.install(&plan, true), Installed::Applied);
-    assert!(matches!(u.status(), UpdateStatus::Failed(e) if e.contains("sha256")));
+    assert_ne!(u.install(&plan, true, DOWNLOAD_TIMEOUT), Installed::Applied);
+    assert!(
+        matches!(u.status(), UpdateStatus::InstallFailed { version, error } if version == "0.2.0" && error.contains("sha256"))
+    );
     assert_eq!(s.state().pending_health, None);
 
     let u = s.updater_with(
@@ -968,7 +1006,7 @@ fn a_failed_download_or_apply_leaves_nothing_pending() {
             ..Fakes::default()
         },
     );
-    assert_ne!(u.install(&plan, true), Installed::Applied);
+    assert_ne!(u.install(&plan, true, DOWNLOAD_TIMEOUT), Installed::Applied);
     assert_eq!(s.state().pending_health, None);
     assert!(!s.events().contains(&Event::Exit));
 }
@@ -982,6 +1020,205 @@ fn a_broken_state_is_replaced() {
     let u = s.updater("0.1.0", 0);
     assert_eq!(u.check(false, None).status, UpdateStatus::UpToDate);
     assert_eq!(s.state().last_seq[&Channel::Stable], 5);
+}
+
+/// Keeps `path` unreadable while it lives, not damaged: locked by another program (Windows,
+/// a sharing violation) or without read permission (Unix).
+struct Unreadable {
+    #[cfg(windows)]
+    _lock: std::fs::File,
+    #[cfg(unix)]
+    path: std::path::PathBuf,
+}
+
+impl Unreadable {
+    fn new(path: &std::path::Path) -> Unreadable {
+        #[cfg(windows)]
+        let guard = {
+            use std::os::windows::fs::OpenOptionsExt;
+            Unreadable {
+                _lock: std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(path)
+                    .unwrap(),
+            }
+        };
+        #[cfg(unix)]
+        let guard = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o200)).unwrap();
+            Unreadable {
+                path: path.to_owned(),
+            }
+        };
+        let e = std::fs::read(path).expect_err("the file is still readable (run as non-root)");
+        assert_ne!(e.kind(), std::io::ErrorKind::InvalidData);
+        guard
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+#[test]
+fn a_state_that_cannot_be_read_is_left_as_it_is() {
+    let s = Sandbox::new();
+    s.publish(5, two_releases());
+    s.pending("0.1.0", "0.2.0", Some(TimeDuration::minutes(2)), false);
+    let mut state = s.state();
+    state.bad.insert(v("0.1.5"));
+    state.last_seq.insert(Channel::Stable, 4);
+    state.save(s.dir.path()).unwrap();
+    let path = State::path(s.dir.path());
+    let before = std::fs::read(&path).unwrap();
+
+    {
+        let _unreadable = Unreadable::new(&path);
+        let u = s.updater("0.2.0", 0);
+        // No health watch, no rollback this run; nothing is written.
+        assert_eq!(u.startup(), Startup::Normal);
+        u.ended_cleanly();
+        u.confirm_health();
+        assert_eq!(s.events(), [], "no update notice from an unsaved change");
+        // A check cannot use the index without its replay floor: tried again soon.
+        let checked = u.check(false, None);
+        assert!(
+            matches!(checked.status, UpdateStatus::Failed(_)),
+            "{:?}",
+            checked.status
+        );
+        assert!(checked.retry_soon);
+        assert!(checked.plan.is_none());
+    }
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "the bytes are unchanged"
+    );
+    let state = s.state();
+    assert!(state.bad.contains(&v("0.1.5")));
+    assert_eq!(state.last_seq[&Channel::Stable], 4);
+    assert!(state.pending_health.is_some());
+
+    // Readable again: the run goes on from it.
+    assert_eq!(
+        s.updater("0.2.0", 0).startup(),
+        Startup::RollBack {
+            failed: v("0.2.0"),
+            to: v("0.1.0"),
+        }
+    );
+}
+
+#[test]
+fn an_unpublished_channel_is_not_tried_again_soon() {
+    let s = Sandbox::new();
+    s.transport.reply(INDEX, 404, b"Not Found");
+    let u = s.updater("0.1.0-alpha.1", 0);
+    let checked = u.check(false, None);
+    assert_eq!(checked.status, UpdateStatus::NotPublished(Channel::Stable));
+    assert!(!checked.retry_soon, "the normal interval");
+    assert_eq!(s.events(), [], "no notice");
+    assert_eq!(u.status(), UpdateStatus::NotPublished(Channel::Stable));
+
+    // Other failures still retry soon.
+    s.transport.reply(INDEX, 503, b"");
+    let checked = u.check(false, None);
+    assert!(matches!(checked.status, UpdateStatus::Failed(e) if e.contains("HTTP 503")));
+    assert!(checked.retry_soon);
+}
+
+#[test]
+fn a_rollback_whose_package_went_is_downloaded_again_within_its_attempts() {
+    let s = Sandbox::new();
+    s.publish(4, two_releases());
+    s.pending("0.1.0", "0.2.0", Some(TimeDuration::minutes(2)), false);
+    // Another start of the program cleaned the downloaded package before the hand-off.
+    let bad = s.updater_with(
+        "0.2.0",
+        Fakes {
+            missing: 1,
+            ..Fakes::default()
+        },
+    );
+    let Startup::RollBack { failed, to } = bad.startup() else {
+        panic!("no rollback");
+    };
+    assert_eq!(
+        bad.roll_back_now(&failed, &to),
+        RollBack::Retry,
+        "not given up"
+    );
+    let pending = s.state().pending_health.unwrap();
+    assert!(pending.rollback && pending.attempts == 1, "{pending:?}");
+    assert!(
+        matches!(bad.status(), UpdateStatus::InstallFailed { version, .. } if version == "0.1.0")
+    );
+    assert!(!s.state().bad.contains(&v("0.1.0")));
+    // The next try downloads it again and hands it over; the attempt counts.
+    assert_eq!(bad.roll_back_now(&failed, &to), RollBack::Applied);
+    assert_eq!(s.state().pending_health.unwrap().attempts, 2);
+    let downloads = s
+        .events()
+        .iter()
+        .filter(|e| matches!(e, Event::Download(..)))
+        .count();
+    assert_eq!(downloads, 2);
+
+    // Always gone: the attempts cap still ends it at a start.
+    let s = Sandbox::new();
+    s.publish(4, two_releases());
+    s.pending("0.1.0", "0.2.0", Some(TimeDuration::minutes(2)), false);
+    for _ in 0..ROLLBACK_ATTEMPTS {
+        let bad = s.updater_with(
+            "0.2.0",
+            Fakes {
+                missing: usize::MAX,
+                ..Fakes::default()
+            },
+        );
+        let Startup::RollBack { failed, to } = bad.startup() else {
+            panic!("no rollback");
+        };
+        assert_eq!(bad.roll_back_now(&failed, &to), RollBack::Retry);
+    }
+    assert_eq!(s.updater("0.2.0", 0).startup(), Startup::Normal);
+    assert!(s.state().pending_health.is_none());
+}
+
+#[test]
+fn a_rollback_at_the_start_stays_within_its_budget() {
+    let s = Sandbox::new();
+    s.publish(4, two_releases());
+    s.pending("0.1.0", "0.2.0", Some(TimeDuration::minutes(2)), false);
+    let bad = s.updater("0.2.0", 0);
+    let Startup::RollBack { failed, to } = bad.startup() else {
+        panic!("no rollback");
+    };
+    assert_eq!(bad.roll_back_now(&failed, &to), RollBack::Applied);
+    let index = s.transport.timeouts();
+    let package = lock(&s.download_timeouts).clone();
+    assert_eq!((index.len(), package.len()), (2, 1));
+    assert!(index.iter().all(|t| *t <= STARTUP_BUDGET), "{index:?}");
+    assert!(package[0] <= STARTUP_BUDGET, "{package:?}");
+
+    // The background retry has the long download time.
+    s.pending("0.1.0", "0.2.0", Some(TimeDuration::minutes(2)), false);
+    assert_eq!(
+        bad.roll_back(&failed, &to, true, INDEX_TIMEOUT + DOWNLOAD_TIMEOUT),
+        RollBack::Applied
+    );
+    let package = lock(&s.download_timeouts).clone();
+    assert!(
+        package[1] > DOWNLOAD_TIMEOUT - Duration::from_secs(60),
+        "{package:?}"
+    );
 }
 
 #[test]

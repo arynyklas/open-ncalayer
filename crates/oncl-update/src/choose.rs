@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use semver::Version;
 use sha2::Digest;
 
-use crate::index::{CoreRelease, Flavor, FlavorPackage, Index, Package};
+use crate::index::{CoreRelease, Flavor, FlavorPackage, Index, Package, Sha256};
 
 /// The version to move to, and its packages for the flavor.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,7 +14,11 @@ pub struct Target {
     pub version: Version,
     /// Its full package.
     pub full: Package,
-    /// Its delta package from the current version, if the index has one.
+    /// [`crate::contents_sha256()`] of its full package, which a full package rebuilt from
+    /// [`Target::delta`] must match.
+    pub full_contents: Option<Sha256>,
+    /// Its delta package from the current version, if the index has one (always with
+    /// [`Target::full_contents`]).
     pub delta: Option<Package>,
     /// Its release notes.
     pub notes_url: Option<String>,
@@ -89,10 +93,13 @@ pub fn choose(
 }
 
 fn target(release: &CoreRelease, package: &FlavorPackage, current: &Version) -> Target {
+    let delta = package.delta_from.get(current).cloned();
     Target {
         version: release.version.clone(),
         full: package.full.clone(),
-        delta: package.delta_from.get(current).cloned(),
+        // `Index::from_json` refuses deltas without it; never a delta that cannot be checked.
+        full_contents: package.contents_sha256,
+        delta: delta.filter(|_| package.contents_sha256.is_some()),
         notes_url: release.notes_url.clone(),
     }
 }
@@ -120,6 +127,7 @@ mod tests {
     fn release(version: &str, rollout: u8, revoked: bool) -> CoreRelease {
         let flavor = FlavorPackage {
             full: package(&format!("{version}-full")),
+            contents_sha256: Some(Sha256::of(format!("{version}-contents").as_bytes())),
             delta_from: BTreeMap::from([(v("0.1.0"), package(&format!("{version}-delta")))]),
         };
         CoreRelease {
@@ -221,6 +229,19 @@ mod tests {
         assert_eq!(t.version, v("0.3.0"));
         assert_eq!(t.full, package("0.3.0-full"));
         assert_eq!(t.delta, Some(package("0.3.0-delta")), "delta from 0.1.0");
+        assert_eq!(t.full_contents, Some(Sha256::of(b"0.3.0-contents")));
+
+        // A delta whose rebuilt package could not be checked is not offered.
+        let mut unchecked = idx.clone();
+        for release in &mut unchecked.core {
+            for package in release.flavors.values_mut() {
+                package.contents_sha256 = None;
+            }
+        }
+        let Choice::Update(t) = pick(&unchecked, "0.1.0") else {
+            panic!("no update");
+        };
+        assert_eq!((t.full_contents, t.delta), (None, None));
         assert_eq!(t.notes_url.as_deref(), Some("https://example.org/0.3.0"));
 
         let Choice::Update(t) = pick(&idx, "0.2.0") else {

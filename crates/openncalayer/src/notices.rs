@@ -338,6 +338,26 @@ impl TrayStatus {
                 .to_owned(),
                 None,
             ),
+            Notice::Checked(unpublished @ UpdateStatus::NotPublished(_)) => (
+                match l {
+                    Locale::Ru => "Обновлений нет",
+                    Locale::Kk => "Жаңартулар жоқ",
+                    Locale::En => "No updates",
+                }
+                .to_owned(),
+                update_view(unpublished, l),
+                None,
+            ),
+            Notice::Checked(failed @ UpdateStatus::InstallFailed { .. }) => (
+                match l {
+                    Locale::Ru => "Не удалось обновить OpenNCALayer",
+                    Locale::Kk => "OpenNCALayer жаңарту мүмкін болмады",
+                    Locale::En => "Cannot update OpenNCALayer",
+                }
+                .to_owned(),
+                update_view(failed, l),
+                None,
+            ),
             Notice::Checked(UpdateStatus::Failed(e)) => (
                 match l {
                     Locale::Ru => "Не удалось проверить обновления",

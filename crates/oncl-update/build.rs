@@ -1,6 +1,8 @@
 //! Embeds the public keys of the update index, `keys/current.pub` and `keys/next.pub`, if
 //! they are there: the maintainer adds them (`cargo xtask sign keygen`). A build without
-//! them has no keys, and its updater is off.
+//! them has no keys, and its updater is off. A key file that is there must be a minisign
+//! public key: a malformed one fails the build instead of shipping a release whose updater
+//! is off.
 
 use std::path::Path;
 
@@ -19,7 +21,12 @@ fn main() {
     for name in KEYS {
         let path = dir.join(name);
         match std::fs::read_to_string(&path) {
-            Ok(text) => keys.push(text),
+            Ok(text) => {
+                if let Err(e) = minisign_verify::PublicKey::decode(&text) {
+                    panic!("{} is not a minisign public key: {e}", path.display());
+                }
+                keys.push(text);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => panic!("cannot read {}: {e}", path.display()),
         }

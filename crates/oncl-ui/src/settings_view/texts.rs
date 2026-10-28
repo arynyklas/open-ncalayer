@@ -47,6 +47,12 @@ pub(super) struct Texts {
     /// `{0}`: the version; automatic updates are off.
     pub(super) update_available_off: &'static str,
     pub(super) update_failed: &'static str,
+    /// The stable channel has no index yet.
+    pub(super) update_not_published_stable: &'static str,
+    /// The beta channel has no index yet.
+    pub(super) update_not_published_beta: &'static str,
+    /// `{0}`: the version that could not be downloaded or installed.
+    pub(super) update_install_failed: &'static str,
     pub(super) update_checking: &'static str,
 }
 
@@ -94,6 +100,9 @@ impl Texts {
                 update_available: "{0} нұсқасы қолжетімді. Ол қол қою жүрмеген кезде орнатылады.",
                 update_available_off: "{0} нұсқасы қолжетімді. Оны орнату үшін «Автоматты түрде жаңарту» белгілеп, сақтаңыз: ол келесі тексеруден кейін орнатылады.",
                 update_failed: "Жаңартуларды тексеру мүмкін болмады",
+                update_not_published_stable: "«Тұрақты» арнасында әзірге шығарылымдар жоқ.",
+                update_not_published_beta: "«Бета» арнасында әзірге шығарылымдар жоқ.",
+                update_install_failed: "{0} нұсқасын жүктеу немесе орнату мүмкін болмады",
                 update_checking: "Жаңартулар тексерілуде…",
             },
             Locale::Ru => &Texts {
@@ -137,6 +146,9 @@ impl Texts {
                 update_available: "Доступна версия {0}. Она установится, когда не будет идти подпись.",
                 update_available_off: "Доступна версия {0}. Отметьте «Обновлять автоматически» и сохраните: она установится после следующей проверки.",
                 update_failed: "Не удалось проверить обновления",
+                update_not_published_stable: "В канале «Стабильный» пока нет выпусков.",
+                update_not_published_beta: "В канале «Бета» пока нет выпусков.",
+                update_install_failed: "Не удалось загрузить или установить версию {0}",
                 update_checking: "Проверка обновлений…",
             },
             Locale::En => &Texts {
@@ -180,6 +192,9 @@ impl Texts {
                 update_available: "Version {0} is available. It is installed when no signing is in progress.",
                 update_available_off: "Version {0} is available. Tick «Update automatically» and save: it is installed after the next check.",
                 update_failed: "Cannot check for updates",
+                update_not_published_stable: "The Stable channel has no releases yet.",
+                update_not_published_beta: "The Beta channel has no releases yet.",
+                update_install_failed: "Cannot download or install version {0}",
                 update_checking: "Checking for updates…",
             },
         }

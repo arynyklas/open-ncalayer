@@ -13,6 +13,7 @@ use oncl_basics::Locale;
 use oncl_pki::fsutil::Access;
 pub use oncl_pki::http::ProxySetting;
 pub use oncl_update::Channel;
+use oncl_update::Version;
 use serde_json::{Map, Value};
 
 use crate::write_file;
@@ -47,16 +48,27 @@ pub struct Settings {
 pub struct UpdateSettings {
     /// New versions are looked for, downloaded and installed by themselves; on by default.
     pub enabled: bool,
-    /// The channel of the update index; stable by default.
+    /// The channel of the update index; by default the one of this build's version
+    /// ([`UpdateSettings::default_for`]). A channel saved in the settings stays.
     pub channel: Channel,
 }
 
-impl Default for UpdateSettings {
-    fn default() -> Self {
+impl UpdateSettings {
+    /// The defaults of a build of `version`: updates on, from
+    /// [`Channel::default_for`]`(version)` (beta for a pre-release, stable for a release).
+    pub fn default_for(version: &Version) -> UpdateSettings {
         UpdateSettings {
             enabled: true,
-            channel: Channel::Stable,
+            channel: Channel::default_for(version),
         }
+    }
+}
+
+impl Default for UpdateSettings {
+    /// [`UpdateSettings::default_for`] this build's version.
+    fn default() -> Self {
+        let version = Version::parse(env!("CARGO_PKG_VERSION")).expect("the package version");
+        UpdateSettings::default_for(&version)
     }
 }
 
@@ -337,6 +349,11 @@ mod tests {
         (d, f)
     }
 
+    /// The channel this build saves by default.
+    fn default_channel() -> &'static str {
+        UpdateSettings::default().channel.as_str()
+    }
+
     fn on_disk(f: &Path) -> Value {
         serde_json::from_slice(&fs::read(f).unwrap()).unwrap()
     }
@@ -379,7 +396,7 @@ mod tests {
                 "autostart": false,
                 // The manual URL, and a password in it, goes with the manual mode.
                 "proxy": {"mode": "system", "extra": 1},
-                "updates": {"enabled": true, "channel": "stable", "later": "x"},
+                "updates": {"enabled": true, "channel": default_channel(), "later": "x"},
             })
         );
         assert_eq!(Settings::load(&f).unwrap(), s);
@@ -389,16 +406,59 @@ mod tests {
     }
 
     #[test]
+    fn the_default_channel_follows_the_version() {
+        let v = |s: &str| Version::parse(s).unwrap();
+        for (version, channel) in [
+            ("0.1.0-alpha.1", Channel::Beta),
+            ("0.2.0-beta.3", Channel::Beta),
+            ("1.0.0-rc.1", Channel::Beta),
+            // Releases below 1.0 are releases too.
+            ("0.3.0", Channel::Stable),
+            ("1.2.3", Channel::Stable),
+            // Build metadata is not a pre-release.
+            ("1.2.3+win7", Channel::Stable),
+        ] {
+            assert_eq!(
+                UpdateSettings::default_for(&v(version)),
+                UpdateSettings {
+                    enabled: true,
+                    channel,
+                },
+                "{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_saved_channel_is_kept_whatever_the_build() {
+        // A pre-release build (the default is beta) keeps a saved stable, and a missing
+        // channel takes the build's default.
+        let (_d, f) = file_with(r#"{"updates": {"enabled": true, "channel": "stable"}}"#);
+        assert_eq!(Settings::load(&f).unwrap().updates.channel, Channel::Stable);
+        let (_d, f) = file_with(r#"{"updates": {"channel": "beta"}}"#);
+        assert_eq!(Settings::load(&f).unwrap().updates.channel, Channel::Beta);
+        let (_d, f) = file_with(r#"{"updates": {"enabled": false}}"#);
+        assert_eq!(
+            Settings::load(&f).unwrap().updates,
+            UpdateSettings {
+                enabled: false,
+                ..UpdateSettings::default()
+            }
+        );
+    }
+
+    #[test]
     fn missing_file_and_keys_are_defaults() {
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("sub").join("settings.json");
         assert_eq!(Settings::load(&f).unwrap(), Settings::default());
         assert_eq!(Settings::default().proxy, ProxySetting::None);
+        let build = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
         assert_eq!(
             Settings::default().updates,
             UpdateSettings {
                 enabled: true,
-                channel: Channel::Stable,
+                channel: Channel::default_for(&build),
             }
         );
 
@@ -414,7 +474,7 @@ mod tests {
             on_disk(&f),
             json!({"locale": "en", "autostart": true,
                    "proxy": {"mode": "manual", "url": "http://u:p@h:1"},
-                   "updates": {"enabled": true, "channel": "stable"}})
+                   "updates": {"enabled": true, "channel": default_channel()}})
         );
     }
 
@@ -481,7 +541,7 @@ mod tests {
         assert_eq!(on_disk(&f)["proxy"], json!({"mode": "none"}));
         assert_eq!(
             on_disk(&f)["updates"],
-            json!({"enabled": true, "channel": "stable"})
+            json!({"enabled": true, "channel": default_channel()})
         );
     }
 

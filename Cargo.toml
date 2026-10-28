@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*", "xtask"]
+# Third-party crates patched below: built as dependencies, not linted or tested as ours.
+exclude = ["vendor"]
 resolver = "3"
 
 [workspace.package]
@@ -119,8 +121,15 @@ x509-cert = "0.3.0"
 # already brings, with its blocking API.
 zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 zeroize = "1.9.1"
-# Only in xtask (`ext build`): the extension zip/xpi, deflate through pure-Rust zlib-rs.
+# xtask (`ext build`: the extension zip/xpi) and oncl-update (the files of an update
+# package), deflate through pure-Rust zlib-rs.
 zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[patch.crates-io]
+# The crates.io package with one change, described in the README and NOTICE: a full
+# package already on disk or rebuilt from deltas is checked by the update source before it
+# is used and before Update.exe is taken from it. The version must stay the one above.
+velopack = { path = "vendor/velopack" }
 
 # RSA key generation (`oncl-pki::keygen` and its tests, `cargo xtask gen-fixtures` and the
 # xtask tests) is very slow unoptimized.

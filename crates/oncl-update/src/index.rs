@@ -40,6 +40,18 @@ impl Channel {
             Channel::Beta => "beta",
         }
     }
+
+    /// The channel an installation of `version` follows when its settings name none: beta
+    /// for a pre-release (a semver pre-release part, `-alpha.1`, `-rc.1`), stable for a
+    /// release, `0.x` releases included. Pre-releases are indexed into beta only, so a
+    /// pre-release on stable would never be offered the next one.
+    pub fn default_for(version: &Version) -> Channel {
+        if version.pre.is_empty() {
+            Channel::Stable
+        } else {
+            Channel::Beta
+        }
+    }
 }
 
 impl fmt::Display for Channel {
@@ -197,6 +209,12 @@ pub struct FlavorPackage {
     /// The full package (`url`, `sha256` and `size` beside `delta_from` in the JSON).
     #[serde(flatten)]
     pub full: Package,
+    /// [`crate::contents_sha256()`] of the full package: what a full package rebuilt from
+    /// a delta must hold. A rebuilt package is another zip archive of the same files
+    /// (another order and compression), so its own sha256 differs from [`Package::sha256`].
+    /// Required with `delta_from`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contents_sha256: Option<Sha256>,
     /// Delta packages by the version they apply to.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub delta_from: BTreeMap<Version, Package>,
@@ -277,7 +295,8 @@ pub struct Asset {
 
 impl Index {
     /// Reads an index from its JSON and checks the format's rules: [`SCHEMA`], `https://`
-    /// URLs only, `rollout` up to 100, each core version once. Unknown members are
+    /// URLs only, `rollout` up to 100, each core version once, `contents_sha256` beside any
+    /// `delta_from`. Unknown members are
     /// ignored, so later versions of schema 1 may add some. The signature is not checked
     /// here: see [`crate::verify()`].
     ///
@@ -323,6 +342,11 @@ impl Index {
             }
             for (flavor, package) in &release.flavors {
                 https(&package.full.url, || format!("core version {v} {flavor}"))?;
+                if !package.delta_from.is_empty() && package.contents_sha256.is_none() {
+                    return Err(malformed(format!(
+                        "core version {v} {flavor}: delta_from without contents_sha256"
+                    )));
+                }
                 for (from, delta) in &package.delta_from {
                     https(&delta.url, || {
                         format!("core version {v} {flavor}: delta from {from}")
@@ -379,6 +403,7 @@ pub(crate) mod tests {
                         "url": "https://github.com/o/r/releases/download/v0.1.0-alpha.2/full.nupkg",
                         "sha256": sum(1),
                         "size": 123,
+                        "contents_sha256": sum(6),
                         "delta_from": {
                             "0.1.0-alpha.1": {
                                 "url": "https://github.com/o/r/releases/download/v0.1.0-alpha.2/delta.nupkg",
@@ -435,6 +460,7 @@ pub(crate) mod tests {
         assert_eq!(package.full.sha256, Sha256([1; 32]));
         let from = Version::parse("0.1.0-alpha.1").unwrap();
         assert_eq!(package.delta_from[&from].size, 45);
+        assert_eq!(package.contents_sha256, Some(Sha256([6; 32])));
         assert!(release.package(Flavor::LinuxX64).is_none());
         assert!(
             release.flavors.contains_key("riscv-future"),
@@ -473,6 +499,13 @@ pub(crate) mod tests {
         let twice = v["core"][0].clone();
         v["core"].as_array_mut().unwrap().push(twice);
         assert!(malformed_message(&v).contains("listed twice"));
+
+        let mut v = index_json("beta", 1);
+        v["core"][0]["flavors"]["win-x64"]
+            .as_object_mut()
+            .unwrap()
+            .remove("contents_sha256");
+        assert!(malformed_message(&v).contains("delta_from without contents_sha256"));
 
         for (pointer, url) in [
             ("/core/0/flavors/win-x64/url", "http://github.com/x.nupkg"),

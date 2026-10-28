@@ -54,11 +54,13 @@ impl Activity {
         }
     }
 
-    /// Holds new requests back; whether none is being answered. If one is, they are let
-    /// through again.
-    fn hold(&self) -> bool {
+    /// Holds new requests back; whether the activity is still [`Activity::idle`] for
+    /// `quiet`, looked at only after the hold is in place (with the time from `now` read
+    /// then): a request that ended while the caller was busy elsewhere, after its own
+    /// look, still counts. If it is not idle, they are let through again.
+    fn hold(&self, quiet: Duration, now: impl FnOnce() -> Instant) -> bool {
         self.held.store(true, Ordering::SeqCst);
-        if self.in_flight.load(Ordering::SeqCst) == 0 {
+        if self.idle(quiet, now()) {
             return true;
         }
         self.release();
@@ -98,10 +100,10 @@ pub fn requests_idle(quiet: Duration) -> bool {
 }
 
 /// Holds back page requests that arrive from now on (they wait, and end with the process
-/// that applies an update); whether no request is being answered. If one is, nothing is
-/// held.
-pub fn hold_requests() -> bool {
-    ACTIVITY.hold()
+/// that applies an update); whether no request is being answered and none ended within
+/// `quiet`, looked at once the hold is in place. If that is not so, nothing is held.
+pub fn hold_requests(quiet: Duration) -> bool {
+    ACTIVITY.hold(quiet, Instant::now)
 }
 
 /// Lets held requests through again.
@@ -176,12 +178,14 @@ mod tests {
 
     #[test]
     fn held_requests_wait_and_a_running_one_prevents_the_hold() {
+        let quiet = Duration::from_secs(30);
         let activity = std::sync::Arc::new(Activity::new());
         let running = activity.begin();
-        assert!(!activity.hold(), "a request is being answered");
+        let later = || Instant::now() + Duration::from_secs(3600);
+        assert!(!activity.hold(quiet, later), "a request is being answered");
         assert!(!activity.held.load(Ordering::SeqCst));
         drop(running);
-        assert!(activity.hold());
+        assert!(activity.hold(quiet, later));
         let waiting = std::sync::Arc::clone(&activity);
         let request = thread::spawn(move || drop(waiting.begin()));
         thread::sleep(HELD_POLL * 3);
@@ -189,5 +193,32 @@ mod tests {
         assert_eq!(activity.in_flight.load(Ordering::SeqCst), 0);
         activity.release();
         request.join().unwrap();
+    }
+
+    #[test]
+    fn the_hold_looks_at_the_quiet_time_again() {
+        let quiet = Duration::from_secs(30);
+        let activity = Activity::new();
+        // The updater saw an idle daemon, then re-checked the index; meanwhile a request
+        // came and went.
+        assert!(activity.idle(quiet, Instant::now()));
+        drop(activity.begin());
+        let ended = activity
+            .last_end
+            .lock()
+            .unwrap()
+            .expect("the request ended");
+        // Within the quiet time of its end, up to its last moment: nothing is held.
+        for after in [
+            Duration::ZERO,
+            Duration::from_secs(1),
+            quiet - Duration::from_millis(1),
+        ] {
+            assert!(!activity.hold(quiet, || ended + after), "{after:?}");
+            assert!(!activity.held.load(Ordering::SeqCst), "{after:?}");
+        }
+        // From the end of the quiet time on, the hold takes.
+        assert!(activity.hold(quiet, || ended + quiet));
+        assert!(activity.held.load(Ordering::SeqCst));
     }
 }

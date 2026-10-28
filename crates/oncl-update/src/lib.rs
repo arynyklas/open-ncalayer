@@ -2,6 +2,8 @@
 //!
 //! - [`index`]: the update index of a channel (`updates/v1/<channel>.json`), its model and
 //!   structural checks, and the sha256 check of a downloaded package;
+//! - [`contents_sha256()`]: the sum of the files in a package, which a full package rebuilt
+//!   from a delta is checked against;
 //! - [`verify()`]: the minisign signature of an index (`<channel>.json.minisig`), its trusted
 //!   comment, the `seq` against the last one seen and the index's age;
 //! - [`choose()`]: the version to move to, with the staged rollout, revoked versions and
@@ -15,6 +17,7 @@
 //! [`HttpTransport`]: oncl_pki::http::HttpTransport
 
 pub mod choose;
+mod contents;
 pub mod fetch;
 mod hex;
 pub mod index;
@@ -23,6 +26,7 @@ pub mod state;
 pub mod verify;
 
 pub use choose::{Choice, Target, choose, rollout_bucket};
+pub use contents::contents_sha256;
 pub use fetch::{Fetched, fetch, index_url};
 pub use index::{
     Asset, Channel, CoreRelease, Extension, Flavor, FlavorPackage, Index, Package, Sha256,
@@ -95,10 +99,18 @@ pub enum UpdateError {
     /// A downloaded package has another sha256 than the index says.
     #[error("the package's sha256 does not match the update index")]
     PackageHash,
-    /// The index could not be downloaded: no response, a status other than 200, or a URL
-    /// that is not HTTPS.
+    /// A package rebuilt from a delta holds other files than the index's full package
+    /// ([`contents_sha256()`]), or is not a package.
+    #[error("the package's contents do not match the update index: {0}")]
+    PackageContents(String),
+    /// The index could not be downloaded: no response, a status other than 200 or 404, or a
+    /// URL that is not HTTPS.
     #[error("the update index could not be downloaded: {0}")]
     Fetch(String),
+    /// The index of the channel is not published (404): nothing has been released into it
+    /// yet.
+    #[error("the {0} channel has no update index yet")]
+    NotPublished(Channel),
     /// A file could not be read.
     #[error(transparent)]
     Io(#[from] std::io::Error),

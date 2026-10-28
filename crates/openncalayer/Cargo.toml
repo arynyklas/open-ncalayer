@@ -63,3 +63,5 @@ rcgen.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
+# Velopack packages (zip archives) in the installer's tests.
+zip.workspace = true

@@ -406,8 +406,10 @@ cargo xtask licenses --check   # сторонние лицензии окна «
 
 `web/demo/vendor/ncalayer-client.js` — файл `package/ncalayer-client.js` из npm-пакета `ncalayer-js-client@1.6.1` без изменений (MIT, sha256 `bdf2015c3e422eed70ccf38eef3246af67a0d38639e6b70fe6b8655a2fa03489`). Тест `demo_assets_served` сверяет sha256 файла, который отдаёт сервер. Лицензию клиента сервер отдаёт рядом с ним: `/demo/vendor/LICENSE`.
 
+`vendor/velopack` — пакет `velopack` 1.3.39-g8d2844f с crates.io (коммит `8d2844f`, MIT) с изменениями, в сборке через `[patch.crates-io]`. Изменены два места: `src/sources/mod.rs` добавляет в `UpdateSource` метод `verify_full_package` (по умолчанию — проверка размера и контрольной суммы самого Velopack), а `download_updates` в `src/manager.rs` проверяет им полный пакет, который уже лежит на диске (не прошедший удаляется и скачивается заново), и пакет, собранный из дельты, — до переименования и до извлечения из него `Squirrel.exe` (Update.exe); не прошедший заменяется скачиванием полного пакета. Наш `IndexSource` принимает файл, если он совпадает с полным пакетом подписанного индекса по sha256 и размеру или содержит те же файлы (`contents_sha256` индекса). `vendor/velopack/LICENSE` — лицензия репозитория Velopack на этом коммите: в пакете crates.io её нет. Тест `locked_velopack_is_the_patched_copy` падает, если `Cargo.lock` перестал брать эту копию.
+
 ## Лицензия
 
 © 2026 Aryn Yklas.
 
-[Apache-2.0](LICENSE), см. также [NOTICE](NOTICE). `web/demo/vendor/ncalayer-client.js` — MIT, см. [`web/demo/vendor/LICENSE`](web/demo/vendor/LICENSE).
+[Apache-2.0](LICENSE), см. также [NOTICE](NOTICE). `web/demo/vendor/ncalayer-client.js` — MIT, см. [`web/demo/vendor/LICENSE`](web/demo/vendor/LICENSE). `vendor/velopack` — изменённая копия Velopack, MIT, см. [`vendor/velopack/LICENSE`](vendor/velopack/LICENSE).

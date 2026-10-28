@@ -11,3 +11,6 @@ xtask/licenses/*.txt text eol=lf
 # Update indexes are signed byte for byte (`cargo xtask sign`) and published as committed:
 # no end-of-line conversion.
 updates/** -text
+# Vendored as published, with the patches the README and NOTICE describe: no end-of-line
+# conversion.
+vendor/** -text
