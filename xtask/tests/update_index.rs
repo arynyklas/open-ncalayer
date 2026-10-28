@@ -688,6 +688,26 @@ fn a_linked_work_tree_is_a_work_tree() {
 }
 
 #[test]
+fn a_work_tree_git_cannot_discover_is_refused() {
+    // A linked work tree whose main repository is gone: git's own discovery dies there,
+    // but the directory still belongs to a work tree that could commit the key once the
+    // repository is back.
+    let base = tempfile::tempdir().unwrap();
+    let linked = base.path().join("linked");
+    fs::create_dir_all(&linked).unwrap();
+    let gone = base.path().join("gone").display().to_string();
+    fs::write(
+        linked.join(".git"),
+        format!("gitdir: {}\n", gone.replace('\\', "/")),
+    )
+    .unwrap();
+    let keys = linked.join("keys");
+    let text = error_text(sign::keygen(&keys, "password"));
+    assert!(text.contains("check-ignore failed"), "{text}");
+    assert!(!keys.join(sign::SECRET_KEY_FILE).exists());
+}
+
+#[test]
 fn the_directory_is_resolved_before_git_is_asked() {
     let base = tempfile::tempdir().unwrap();
     let repo = base.path().join("repo");

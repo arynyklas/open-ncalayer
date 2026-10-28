@@ -164,8 +164,11 @@ pub fn sign(index: &Path, key: &SecretKey, now: OffsetDateTime) -> anyhow::Resul
 ///
 /// The deepest existing directory of the path is resolved first (symlinks, junctions,
 /// `..`), so a link into a work tree is caught and `../keys` beside one is not mistaken for
-/// a path in it; git itself then says whether that directory is in a work tree and whether
-/// the rest of the path is ignored there. A tracked file counts as not ignored.
+/// a path in it. The work tree is then the nearest ancestor with a `.git` entry
+/// ([`work_tree_top`]), found by reading the directories and not by git's own discovery,
+/// which a broken linked work tree, a mount point inside the tree or
+/// `GIT_CEILING_DIRECTORIES` can cut short. git says whether the rest of the path is
+/// ignored in that tree; a tracked file counts as not ignored.
 ///
 /// # Errors
 ///
@@ -196,45 +199,28 @@ pub fn refuse_committable(secret: &Path) -> anyhow::Result<()> {
     let dir = plain(
         fs::canonicalize(existing).with_context(|| format!("resolving {}", existing.display()))?,
     );
-    let relative = rest
-        .iter()
-        .rev()
-        .map(|c| c.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/");
-
-    // `LC_ALL=C`: the message below is matched in English.
-    let inside = Command::new("git")
-        .env("LC_ALL", "C")
-        .arg("-C")
-        .arg(&dir)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .context("running git to check that the secret key would not be committed")?;
-    if !inside.status.success() {
-        let stderr = String::from_utf8_lossy(&inside.stderr);
-        if stderr.contains("not a git repository") {
-            return Ok(());
-        }
-        bail!(
-            "git rev-parse failed in {} ({}): {}; not writing the secret key there",
-            dir.display(),
-            inside.status,
-            stderr.trim()
-        );
-    }
-    if String::from_utf8_lossy(&inside.stdout).trim() != "true" {
-        // A `.git` directory or a bare repository: nothing there is committed.
+    let Some(top) = work_tree_top(&dir) else {
+        // No work tree above the directory, or it is the `.git` directory of one: nothing
+        // there can be committed.
         return Ok(());
-    }
-    let status = Command::new("git")
+    };
+    let mut parts: Vec<String> = dir
+        .strip_prefix(top)
+        .expect("the top is an ancestor of the directory")
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.extend(rest.iter().rev().map(|c| c.to_string_lossy().into_owned()));
+    let relative = parts.join("/");
+
+    let checked = Command::new("git")
         .arg("-C")
-        .arg(&dir)
+        .arg(top)
         .args(["check-ignore", "--quiet", "--"])
         .arg(&relative)
-        .status()
+        .output()
         .context("running git to check that the secret key would not be committed")?;
-    match status.code() {
+    match checked.status.code() {
         Some(0) => Ok(()),
         Some(1) => bail!(
             "{} is in a git work tree and not ignored: keep the secret key outside the \
@@ -242,10 +228,20 @@ pub fn refuse_committable(secret: &Path) -> anyhow::Result<()> {
             secret.display(),
         ),
         _ => bail!(
-            "git check-ignore failed in {} ({status}); not writing the secret key there",
-            dir.display()
+            "git check-ignore failed in {} ({}): {}; not writing the secret key there",
+            top.display(),
+            checked.status,
+            String::from_utf8_lossy(&checked.stderr).trim()
         ),
     }
+}
+
+/// The root of the git work tree `dir` is in: its nearest ancestor with a `.git` entry (a
+/// directory, or the file of a linked work tree). `None` if there is none, or if `dir` is
+/// inside that `.git` itself, which holds nothing that is committed.
+fn work_tree_top(dir: &Path) -> Option<&Path> {
+    let top = dir.ancestors().find(|a| a.join(".git").exists())?;
+    (!dir.starts_with(top.join(".git"))).then_some(top)
 }
 
 /// `path` without the `\\?\` prefix `canonicalize` gives on Windows, which git may not
