@@ -256,7 +256,7 @@ How an installed copy updates once all of that is there:
 - a version revoked in the index is replaced by the newest version that is not revoked, even if that is a step back. This is the only step back the index offers; the rollback after a failed start is the item above;
 - without a network, behind a proxy that refuses, or with Pages unreachable, the attempts repeat quietly (in 30 to 120 minutes) and no notification is shown.
 
-Channels: `stable` (the default) and `beta`. Pre-releases go into `beta` only, releases into both `stable` and `beta`, so `beta` gets both.
+Channels: `stable` and `beta`; by default `beta` for a pre-release build and `stable` for a release, and a channel chosen in the settings stays. Pre-releases go into `beta` only, releases into both `stable` and `beta`, so `beta` gets both.
 
 The settings window has an "Обновления" (Updates) group: the «Обновлять автоматически» (update automatically) checkbox, the channel, a state line and the «Проверить сейчас» (check now) button; the icon's menu has «Проверить обновления» (check for updates). In `settings.json` this is the `updates` key. With the checkbox off (`"enabled": false`) nothing is installed: "check now" still reports a new version.
 
