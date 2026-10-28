@@ -267,10 +267,13 @@ jobs:
               "target/x86_64-apple-darwin/release/$exe" "target/aarch64-apple-darwin/release/$exe"
             archs="$(lipo -archs "$BIN/$exe")"
             echo "$exe: $archs"
-            case " $archs " in
-              *" x86_64 "*" arm64 "*|*" arm64 "*" x86_64 "*) ;;
-              *) echo "::error::$exe is not universal: $archs"; exit 1 ;;
-            esac
+            # Each architecture on its own: in " x86_64 arm64 " the two names share a space.
+            for arch in x86_64 arm64; do
+              case " $archs " in
+                *" $arch "*) ;;
+                *) echo "::error::$exe is not universal: $archs"; exit 1 ;;
+              esac
+            done
           done
       - uses: actions/setup-dotnet@v6
         with:
@@ -306,10 +309,12 @@ jobs:
             found=$((found + 1))
             archs="$(lipo -archs "$exe")"
             echo "$exe: $archs"
-            case " $archs " in
-              *" x86_64 "*" arm64 "*|*" arm64 "*" x86_64 "*) ;;
-              *) echo "::error::$exe in the package is not universal: $archs"; exit 1 ;;
-            esac
+            for arch in x86_64 arm64; do
+              case " $archs " in
+                *" $arch "*) ;;
+                *) echo "::error::$exe in the package is not universal: $archs"; exit 1 ;;
+              esac
+            done
           done < <(find unpacked -type f \( -name openncalayer -o -name nmhost \))
           echo "$found binaries in the package checked"
           [ "$found" -ge 2 ]
