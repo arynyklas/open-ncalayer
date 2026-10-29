@@ -156,8 +156,8 @@ enum IndexCommand {
         /// The release tag, `plugins-YYYYMMDD[.N]`.
         #[arg(long)]
         tag: String,
-        /// The `.onclp` packages of the release.
-        #[arg(long = "package", required = true)]
+        /// The `.onclp` packages of the release (several after one flag, or the flag again).
+        #[arg(long = "package", required = true, num_args = 1..)]
         packages: Vec<PathBuf>,
         /// Percentage of installations offered the new plugin versions.
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u8).range(0..=100))]
