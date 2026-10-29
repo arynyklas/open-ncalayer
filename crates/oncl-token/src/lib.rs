@@ -13,10 +13,12 @@ pub mod emulator;
 mod error;
 mod gzip;
 mod kind;
+mod service;
 
 pub use drivers::IdCardInfo;
 pub use error::TokenError;
 pub use kind::{ATRS, TokenKind};
+pub use service::{Present, Scan, ScanProblem, Tokens};
 
 /// Environment variable that turns the APDU trace on (`1`). PINs never reach the trace.
 pub const TRACE_VAR: &str = "ONCL_TOKEN_TRACE";

@@ -34,6 +34,7 @@ toml = { workspace = true, optional = true }
 [dev-dependencies]
 oncl-pki = { workspace = true, features = ["testing"] }
 oncl-testkit.workspace = true
+time = { workspace = true, features = ["macros"] }
 # Catches the APDU trace of a test.
 tracing-subscriber.workspace = true
 
@@ -43,4 +44,8 @@ required-features = ["emulator"]
 
 [[test]]
 name = "kaztoken"
+required-features = ["emulator"]
+
+[[test]]
+name = "service"
 required-features = ["emulator"]
