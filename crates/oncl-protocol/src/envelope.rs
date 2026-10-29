@@ -42,7 +42,9 @@ pub trait DynamicModules: Send + Sync {
     fn module(&self, name: &str) -> Option<Arc<dyn Module>>;
     /// The names of the modules served right now.
     fn names(&self) -> Vec<String>;
-    /// `session` has ended: whatever was kept for it may go.
+    /// `session` has ended: whatever was kept for it may go. Called once per session, after
+    /// its last call has returned, possibly from async context (a runtime worker thread): it
+    /// must not block.
     fn session_closed(&self, session: SessionId);
     /// A request named the module `name`, which nothing serves.
     fn missing(&self, name: &str, add_info: &AddInfo);

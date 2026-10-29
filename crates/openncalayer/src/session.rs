@@ -119,30 +119,31 @@ pub fn new_session() -> SessionId {
     NEXT_SESSION.fetch_add(1, Ordering::Relaxed)
 }
 
-/// A session of a WebSocket connection or a bridge socket: a new id, and
-/// [`Registry::session_closed`] when dropped, however the session ends (a closed or failed
-/// connection, an idle timeout, an aborted task).
+/// A session of a WebSocket connection or a bridge socket: the registry, the context of its
+/// calls (with a new session id), and [`Registry::session_closed`] when the last reference
+/// goes. [`process`] holds a reference for the whole module call, so the close comes after
+/// the session's last call however the session ends (a closed or failed connection, an idle
+/// timeout, an aborted task).
 pub(crate) struct Session {
     registry: Arc<Registry>,
-    id: SessionId,
+    add_info: AddInfo,
 }
 
 impl Session {
-    pub(crate) fn new(registry: &Arc<Registry>) -> Self {
-        Session {
+    pub(crate) fn new(registry: &Arc<Registry>, origin: Option<String>) -> Arc<Self> {
+        Arc::new(Session {
             registry: Arc::clone(registry),
-            id: new_session(),
-        }
-    }
-
-    pub(crate) fn id(&self) -> SessionId {
-        self.id
+            add_info: AddInfo {
+                origin,
+                session: new_session(),
+            },
+        })
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.registry.session_closed(self.id);
+        self.registry.session_closed(self.add_info.session);
     }
 }
 
@@ -168,24 +169,22 @@ pub(crate) fn dispatch(registry: &Registry, text: &str, add_info: &AddInfo) -> O
 
 /// [`dispatch`] on the blocking pool: routing parses the whole request (possibly tens of
 /// megabytes) and a module call may wait for a dialog, so neither may hold up the runtime.
+/// The call keeps `session` open until it returns, even if the caller is dropped.
 ///
 /// # Errors
 ///
 /// The module call panicked.
-pub(crate) async fn process<T>(
-    registry: &Arc<Registry>,
-    text: T,
-    add_info: &AddInfo,
-) -> io::Result<Option<String>>
+pub(crate) async fn process<T>(session: &Arc<Session>, text: T) -> io::Result<Option<String>>
 where
     T: AsRef<str> + Send + 'static,
 {
-    let registry = Arc::clone(registry);
-    let add_info = add_info.clone();
+    let session = Arc::clone(session);
     let len = text.as_ref().len();
-    let answer = tokio::task::spawn_blocking(move || dispatch(&registry, text.as_ref(), &add_info))
-        .await
-        .map_err(io::Error::other)?;
+    let answer = tokio::task::spawn_blocking(move || {
+        dispatch(&session.registry, text.as_ref(), &session.add_info)
+    })
+    .await
+    .map_err(io::Error::other)?;
     if let Some(reply) = &answer {
         debug!(
             request_len = len,

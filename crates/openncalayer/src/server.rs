@@ -15,7 +15,7 @@ use oncl_applet::Applet;
 use oncl_basics::{Basics, Prompter, RecentPathStore};
 use oncl_commonutils::CommonUtils;
 use oncl_pki::http::HttpTransport;
-use oncl_protocol::{AddInfo, HEARTBEAT, Registry, greeting};
+use oncl_protocol::{HEARTBEAT, Registry, greeting};
 use oncl_tls::SelftestReports;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -252,17 +252,9 @@ async fn connection(
         }
     };
     info!(%peer, origin = request.origin.as_deref().unwrap_or("-"), "websocket connected");
-    // Closed when the connection ends, however it does.
-    let session = Session::new(&cfg.registry);
-    websocket(
-        ws,
-        AddInfo {
-            origin: request.origin,
-            session: session.id(),
-        },
-        cfg,
-    )
-    .await
+    // Closed once the connection has ended and its last call returned.
+    let session = Session::new(&cfg.registry, request.origin);
+    websocket(ws, &session, cfg).await
 }
 
 /// `POST /openncalayer/selftest/report`: reads the body (`read` holds what came with the
@@ -307,7 +299,7 @@ async fn reply<S: AsyncWrite + Unpin>(stream: &mut S, response: &Response) -> io
 /// module calls run on the blocking pool so that other connections are not held up.
 async fn websocket<S>(
     mut ws: WebSocketStream<S>,
-    add_info: AddInfo,
+    session: &Arc<Session>,
     cfg: &ServerConfig,
 ) -> io::Result<()>
 where
@@ -338,7 +330,7 @@ where
             continue;
         }
         let len = text.len();
-        match process(&cfg.registry, text, &add_info).await? {
+        match process(session, text).await? {
             Some(reply) => ws.send(Message::text(reply)).await.map_err(ws_error)?,
             None => {
                 // As the original: drop the TCP connection, no close frame.

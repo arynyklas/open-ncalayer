@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use oncl_ipc::{IpcListener, read_frame, write_frame};
-use oncl_protocol::{AddInfo, COMPAT_VERSION, HEARTBEAT, Registry, greeting};
+use oncl_protocol::{COMPAT_VERSION, HEARTBEAT, Registry, greeting};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
@@ -554,7 +554,8 @@ async fn write_frames<W: AsyncWrite>(
 /// A socket: assembles messages from `pieces` and answers them in order. The daemon closes
 /// the socket (a `close` frame) on a request that is not a JSON object, a message over
 /// [`Limits::max_message`], a failed module call or [`Limits::idle`] without a frame. The
-/// socket is a session of its own, closed when the task ends or is aborted.
+/// socket is a session of its own, closed once the task has ended (or been aborted) and its
+/// last module call returned.
 async fn socket(
     sid: u32,
     mut pieces: mpsc::UnboundedReceiver<Queued>,
@@ -563,11 +564,7 @@ async fn socket(
     origin: Option<String>,
     limits: Limits,
 ) {
-    let session = Session::new(&registry);
-    let add_info = AddInfo {
-        origin,
-        session: session.id(),
-    };
+    let session = Session::new(&registry, origin);
     let mut message = String::new();
     // The budget share of `message`, kept until it is answered.
     let mut message_held: Option<Held> = None;
@@ -598,7 +595,7 @@ async fn socket(
             text
         } else {
             let len = text.len();
-            match process(&registry, text, &add_info).await {
+            match process(&session, text).await {
                 Ok(Some(reply)) => reply,
                 Ok(None) => {
                     // As the original drops the TCP connection.
@@ -634,6 +631,7 @@ async fn socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oncl_protocol::AddInfo;
 
     #[test]
     fn escaped_len_matches_serde_json() {
@@ -810,16 +808,18 @@ mod tests {
         );
     }
 
-    /// Dynamic modules that serve nothing and record what they are told.
+    /// Dynamic modules that serve `module` (under any name), if set, and record what they are
+    /// told.
     #[derive(Default)]
     struct Recorder {
+        module: Option<Arc<dyn oncl_protocol::Module>>,
         missing: std::sync::Mutex<Vec<(String, AddInfo)>>,
         closed: std::sync::Mutex<Vec<oncl_protocol::SessionId>>,
     }
 
     impl oncl_protocol::DynamicModules for Recorder {
         fn module(&self, _name: &str) -> Option<Arc<dyn oncl_protocol::Module>> {
-            None
+            self.module.clone()
         }
 
         fn names(&self) -> Vec<String> {
@@ -911,6 +911,57 @@ mod tests {
         assert_eq!(relay.next().await, r#"{"t":"close","sid":1}"#);
         let both = closed(&recorder, 2).await;
         assert_ne!(both[0], both[1], "a reopened sid is a new session");
+    }
+
+    /// Tells the test that a call came in, then answers once the test lets it.
+    struct Entered {
+        entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl oncl_protocol::Module for Entered {
+        fn process(&self, _request: &str, _add_info: &AddInfo) -> String {
+            let _ = self.entered.lock().unwrap().send(());
+            let _ = self.release.lock().unwrap().recv();
+            r#"{"gate":"open"}"#.to_owned()
+        }
+    }
+
+    #[tokio::test]
+    async fn session_closes_after_its_last_call_returns() {
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let recorder = Arc::new(Recorder {
+            module: Some(Arc::new(Entered {
+                entered: std::sync::Mutex::new(entered_tx),
+                release: std::sync::Mutex::new(release_rx),
+            })),
+            ..Recorder::default()
+        });
+        let mut registry = Registry::default();
+        registry.set_dynamic(Arc::clone(&recorder) as Arc<dyn oncl_protocol::DynamicModules>);
+        let mut relay = Relay::start(registry, SMALL).await;
+        relay.open(1).await;
+        relay.piece(1, r#"{"module":"x.Y"}"#, false).await;
+        tokio::task::spawn_blocking(move || entered.recv_timeout(Duration::from_secs(60)))
+            .await
+            .unwrap()
+            .expect("the call did not start");
+        // The extension closes the socket while its call runs: the socket task is aborted.
+        relay
+            .send(serde_json::json!({"t": "close", "sid": 1}))
+            .await;
+        // Frames are handled in order: once sid 2 is open, the close has been handled.
+        relay.open(2).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            recorder.closed.lock().unwrap().is_empty(),
+            "closed while its call runs"
+        );
+        release.send(()).unwrap();
+        assert_eq!(closed(&recorder, 1).await.len(), 1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(recorder.closed.lock().unwrap().len(), 1, "closed once");
     }
 
     /// Answers once the test lets it.
