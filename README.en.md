@@ -31,8 +31,6 @@ The sixth phase (P6) adds builds for Windows 7 SP1 x64 and x86, a regular Window
 
 The seventh phase (P7) adds updates from a signed index: a copy installed through Velopack checks its channel, installs a new version while nothing is being signed, and rolls back a version that does not run (see [Updates](#updates)).
 
-Manual test results: [`docs/dev/smoke-p1.md`](docs/dev/smoke-p1.md), [`docs/dev/smoke-p2.md`](docs/dev/smoke-p2.md), [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md), [`docs/dev/smoke-p4.md`](docs/dev/smoke-p4.md), [`docs/dev/smoke-p5.md`](docs/dev/smoke-p5.md) and [`docs/dev/smoke-p6.md`](docs/dev/smoke-p6.md) (in Russian).
-
 Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
 - [`docs/design/roadmap.md`](docs/design/roadmap.md) — decisions and roadmap;
@@ -104,7 +102,7 @@ Key revocation is checked with OCSP when the key has a chain, is not disabled fo
 - A key unavailable for another reason (EKU, IIN, BIN, serial number) is not checked with OCSP: the dialog shows those reasons. The original puts its «REVOKED» mark on such keys too.
 - The dialog shows the revocation date, in UTC: «revoked DD.MM.YYYY». The original's mark has no date: «REVOKED».
 - The OCSP responder is also found `byKey` (the SHA-1 of its key); the original understands only `byName`. A response's `thisUpdate` may be ahead of the computer's clock by up to 300 s; the original requires `thisUpdate < now` strictly.
-- CRLs are checked only for intermediate CAs and only by `cms-verify` (the original's `basics` has no CRL). Delta CRLs and CRLs with an `issuingDistributionPoint` are refused. `ncagost`, `ncagost18`, `ncarsa` and `ncarsa18` have two CRL mirrors, `crl.root.gov.kz` and `crl1.root.gov.kz` (for `ncagost18` and `ncarsa18` in one string, `… URL=…`); OpenNCALayer tries both. At the time of checking (the date is in [`docs/dev/smoke-p3.md`](docs/dev/smoke-p3.md)) neither mirror served a current CRL for these CAs, and `cms-verify` reported their revocation status as unavailable.
+- CRLs are checked only for intermediate CAs and only by `cms-verify` (the original's `basics` has no CRL). Delta CRLs and CRLs with an `issuingDistributionPoint` are refused. `ncagost`, `ncagost18`, `ncarsa` and `ncarsa18` have two CRL mirrors, `crl.root.gov.kz` and `crl1.root.gov.kz` (for `ncagost18` and `ncarsa18` in one string, `… URL=…`); OpenNCALayer tries both. On 2026-10-26 neither mirror served a current CRL for these CAs, and `cms-verify` reported their revocation status as unavailable.
 - Certificate policies and `nameConstraints` are not checked in the chain (NCA certificates have no `nameConstraints`).
 
 ### Deviations of P4 from the original
@@ -282,7 +280,7 @@ On Windows 7 the windows take their default font size from the system metrics (`
 
 Browsers on Windows 7: Firefox ESR 115 and Chrome 109 are the last versions for it. The extension installs into Firefox ESR 115 just as into regular Firefox (see [Browser extension](#browser-extension)). There the shim works through Xray vision, which has limits of its own: a page subclass of `WebSocket` does not get its own class for any URL (in other browsers only for NCALayer URLs), and open tabs must be reloaded after the extension is disabled, removed or updated (see [Deviations and limits of the extension](#deviations-and-limits-of-the-extension-p2)). The end-to-end extension test passes in Firefox ESR 115 on Linux.
 
-Not checked yet: no real Windows 7 has run these builds; Windows 7 VMs come with the lab (P9). Checked automatically: every import (the import gate: no DLL or function from the Windows 8+ list) and starting the build on Windows 11 and Windows Server 2025 (CI). Not checked: start and tray icon on Windows 7, the signing window and its font, the eGov login through the extension in Firefox ESR 115 and Chrome 109, and matching the imports against the full Windows 7 SP1 export list. The checklist is in [`docs/dev/smoke-p6.md`](docs/dev/smoke-p6.md) (in Russian).
+Not checked yet: no real Windows 7 has run these builds; Windows 7 VMs come with the lab (P9). Checked automatically: every import (the import gate: no DLL or function from the Windows 8+ list) and starting the build on Windows 11 and Windows Server 2025 (CI). Not checked: start and tray icon on Windows 7, the signing window and its font, the eGov login through the extension in Firefox ESR 115 and Chrome 109, and matching the imports against the full Windows 7 SP1 export list.
 
 ## Build and run
 
