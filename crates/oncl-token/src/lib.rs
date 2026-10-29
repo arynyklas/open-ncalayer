@@ -7,10 +7,14 @@
 pub mod apdu;
 pub mod backend;
 pub mod card;
+pub mod drivers;
+#[cfg(feature = "emulator")]
+pub mod emulator;
 mod error;
 mod gzip;
 mod kind;
 
+pub use drivers::IdCardInfo;
 pub use error::TokenError;
 pub use kind::{ATRS, TokenKind};
 

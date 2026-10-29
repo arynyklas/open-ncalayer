@@ -40,7 +40,7 @@ pub(crate) fn cert_bytes(raw: &[u8]) -> Result<Vec<u8>, TokenError> {
 }
 
 /// Gzip of `data`, as tokens store certificates.
-#[cfg(test)]
+#[cfg(any(test, feature = "emulator"))]
 pub(crate) fn compress(data: &[u8]) -> Vec<u8> {
     use std::io::Write;
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());

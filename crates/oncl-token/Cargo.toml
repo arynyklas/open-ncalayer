@@ -10,19 +10,33 @@ publish.workspace = true
 
 [features]
 # Software cards for tests and the e2e daemon; never in releases.
-emulator = []
+emulator = ["dep:rsa", "dep:serde", "dep:toml"]
 
 [dependencies]
 der.workspace = true
 flate2.workspace = true
 # The ATR table and the fixed APDUs of the drivers, as hex.
 hex-literal.workspace = true
+# GOST public keys read from cards.
+oncl-gost.workspace = true
 oncl-pki.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 x509-cert.workspace = true
 zeroize.workspace = true
 
+# The emulator only: the private RSA operation of emulated cards (`ring` signs messages, not
+# padded blocks) and its configuration file.
+rsa = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+
 [dev-dependencies]
+oncl-pki = { workspace = true, features = ["testing"] }
+oncl-testkit.workspace = true
 # Catches the APDU trace of a test.
 tracing-subscriber.workspace = true
+
+[[test]]
+name = "emulator"
+required-features = ["emulator"]
