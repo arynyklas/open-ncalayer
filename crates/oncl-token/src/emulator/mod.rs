@@ -6,6 +6,7 @@ mod applet;
 mod backend;
 mod config;
 mod etoken72k;
+mod gamma;
 mod kaztoken;
 mod kzid;
 pub mod soft;
@@ -146,6 +147,9 @@ pub fn card(spec: CardSpec) -> Box<dyn SoftCard> {
         TokenKind::KzIdCard => applet::Emulated::boxed(kzid::KzIdCard::new(spec.clone()), &spec),
         TokenKind::EToken72K => {
             applet::Emulated::boxed(etoken72k::EToken72K::new(spec.clone()), &spec)
+        }
+        TokenKind::EToken5110 | TokenKind::JaCarta => {
+            applet::Emulated::boxed(gamma::Gamma::new(spec.clone()), &spec)
         }
         kind => panic!("no emulated {} yet", kind.storage_name()),
     }

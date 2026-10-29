@@ -3,6 +3,7 @@
 //! ever written to a token.
 
 pub mod etoken72k;
+pub mod gamma;
 pub mod kaztoken;
 pub mod kzid;
 pub mod util;
@@ -155,9 +156,11 @@ pub fn open_driver(kind: TokenKind, card: &mut Card<'_>) -> Result<Box<dyn Drive
         TokenKind::Kaztoken => Ok(Box::new(kaztoken::Kaztoken::open(card)?)),
         TokenKind::KzIdCard => Ok(Box::new(kzid::KzIdCard::open(card)?)),
         TokenKind::EToken72K => Ok(Box::new(etoken72k::EToken72K::open(card)?)),
-        TokenKind::EToken5110 | TokenKind::JaCarta | TokenKind::AKey => Err(TokenError::Malformed(
-            format!("no driver for {} yet", kind.storage_name()),
-        )),
+        TokenKind::EToken5110 | TokenKind::JaCarta => Ok(Box::new(gamma::Gamma::open(kind, card)?)),
+        TokenKind::AKey => Err(TokenError::Malformed(format!(
+            "no driver for {} yet",
+            kind.storage_name()
+        ))),
     }
 }
 

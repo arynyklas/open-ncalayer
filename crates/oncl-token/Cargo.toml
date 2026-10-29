@@ -57,3 +57,11 @@ required-features = ["emulator"]
 [[test]]
 name = "etoken72k"
 required-features = ["emulator"]
+
+[[test]]
+name = "etoken5110"
+required-features = ["emulator"]
+
+[[test]]
+name = "jacarta"
+required-features = ["emulator"]
