@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 serde.workspace = true
 toml.workspace = true
+# `plugin::example_package`: the example plugin as a `.onclp` package.
+zip.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 object.workspace = true

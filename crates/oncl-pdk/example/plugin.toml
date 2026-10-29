@@ -1,0 +1,24 @@
+id = "io.github.arynyklas.openncalayer.example"
+version = "0.1.0"
+min_core = "0.1.0-alpha.2"
+modules = ["io.github.arynyklas.openncalayer.Example"]
+
+[name]
+ru = "Пример плагина"
+kk = "Плагин үлгісі"
+en = "Example plugin"
+
+[description]
+ru = "Показывает возможности плагинов OpenNCALayer"
+kk = "OpenNCALayer плагиндерінің мүмкіндіктерін көрсетеді"
+en = "Shows what OpenNCALayer plugins can do"
+
+[replaces]
+symname = "kz.example.echo"
+version = "1.0.0"
+
+[capabilities]
+keys = true
+dialogs = true
+files = true
+http = ["https://example.invalid/"]

@@ -1,0 +1,23 @@
+[package]
+name = "oncl-plugin-example"
+description = "An example OpenNCALayer plugin: every capability, in the CommonInvoker dialect"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# Built on its own for wasm32-unknown-unknown, not part of the core's workspace or releases.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.23.1"
+oncl-pdk = { path = ".." }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"

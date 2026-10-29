@@ -1,0 +1,18 @@
+[package]
+name = "oncl-pdk"
+description = "OpenNCALayer's plugin ABI and the guest SDK plugins are written with"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ciborium.workspace = true
+# `Request::add_info` and the CommonInvoker dialect plugins answer in.
+oncl-protocol.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+# Re-exported: the JSON values of the CommonInvoker dialect.
+serde_json.workspace = true

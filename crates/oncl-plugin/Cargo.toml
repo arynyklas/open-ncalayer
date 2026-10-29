@@ -1,6 +1,6 @@
 [package]
 name = "oncl-plugin"
-description = "OpenNCALayer's plugins: the package (`.onclp`) and its manifest (`plugin.toml`)"
+description = "OpenNCALayer's plugins: the package (`.onclp`), its manifest (`plugin.toml`) and the WebAssembly runtime they run in"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,17 +9,39 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-# `Locale`: the language a plugin's name and description are shown in.
+# The DER of a chosen key's certificate.
+der.workspace = true
+# `random`: the system's generator.
+getrandom.workspace = true
+# `Locale`, the dialogs and the key choice of the `keys`, `dialogs` and `files` capabilities.
 oncl-basics.workspace = true
+# The ABI: what the host functions take and return.
+oncl-pdk.workspace = true
+# Signing, time-stamps, certificate details and the HTTP transport of the capabilities.
+oncl-pki.workspace = true
+# `AddInfo`, `SessionId`: what a call comes with.
+oncl-protocol.workspace = true
 semver.workspace = true
 serde.workspace = true
 # `Package::sha256`: checked against the update index.
 sha2.workspace = true
 thiserror.workspace = true
+time.workspace = true
 toml.workspace = true
+tracing.workspace = true
 # `HttpPrefix`: the URLs a plugin may reach.
 url.workspace = true
+wasmi.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+oncl-basics = { path = "../oncl-basics", features = ["testing"] }
+# `testing`: `tsp::MockTsa`, `RouteTransport`.
+oncl-pki = { path = "../oncl-pki", features = ["testing"] }
+oncl-testkit.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
+time = { workspace = true, features = ["macros"] }
+tracing-subscriber.workspace = true
+wat.workspace = true

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 pub mod dll;
+pub mod plugin;
 
 /// Root of the Cargo workspace (the directory holding the top-level `Cargo.toml`).
 pub fn workspace_root() -> PathBuf {

@@ -1,17 +1,30 @@
-//! OpenNCALayer's plugins, as files:
+//! OpenNCALayer's plugins:
 //!
 //! - [`manifest`]: `plugin.toml`, what a plugin is and may do ([`Manifest`]), and the URL
 //!   prefixes it may reach ([`HttpPrefix`]);
 //! - [`package`]: the `.onclp` package, a zip of `plugin.toml` and `plugin.wasm`
-//!   ([`Package`]).
+//!   ([`Package`]);
+//! - the runtime: a module checked against the ABI of [`oncl_pdk::abi`] ([`Engine`],
+//!   [`Compiled`]), instantiated per session ([`Instance`]) with the host functions of its
+//!   capabilities ([`HostServices`]).
 //!
-//! The format is described in `docs/design/plugins.md`.
+//! The format, the ABI and the limits are described in `docs/design/plugins.md`.
 
+mod caps;
+mod host;
 pub mod manifest;
 pub mod package;
+mod runtime;
 
+pub use caps::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_KEY_HANDLES};
+pub use host::HostServices;
 pub use manifest::{Capabilities, HttpPrefix, Localized, Manifest, Replaces};
+pub use oncl_pdk::abi::ABI_VERSION;
 pub use package::{MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, PACKAGE_EXT, Package};
+pub use runtime::{
+    Compiled, Engine, Instance, LoadError, MAX_INSTANCES, MAX_MEMORY, MAX_TRANSFER,
+    PLUGIN_ERROR_REPLY, PROCESS_FUEL, PluginError, SessionContext,
+};
 pub use url::Url;
 
 use std::io;

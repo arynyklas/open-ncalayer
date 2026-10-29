@@ -21,6 +21,7 @@ oncl-desktop = { path = "crates/oncl-desktop" }
 oncl-gost = { path = "crates/oncl-gost" }
 oncl-ipc = { path = "crates/oncl-ipc" }
 oncl-pki = { path = "crates/oncl-pki" }
+oncl-pdk = { path = "crates/oncl-pdk" }
 oncl-plugin = { path = "crates/oncl-plugin" }
 oncl-protocol = { path = "crates/oncl-protocol" }
 oncl-registry = { path = "crates/oncl-registry" }
@@ -34,6 +35,9 @@ aes = "0.9.0"
 anyhow = "1.0.104"
 base64 = "0.23.1"
 cbc = { version = "0.2.1", features = ["alloc", "block-padding"] }
+# The plugin ABI (`oncl-pdk`): arguments and results between the core and a plugin, as CBOR;
+# serde support of its own, no build script, builds for wasm32 too.
+ciborium = "0.2.2"
 clap = { version = "4.6.7", features = ["derive"] }
 crypto-bigint = { version = "0.7.7", default-features = false, features = ["alloc", "zeroize"] }
 der = { version = "0.8.2", features = ["alloc", "derive", "oid", "zeroize"] }
@@ -79,6 +83,8 @@ rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
+# The plugin ABI: byte strings as CBOR byte strings, not arrays of integers.
+serde_bytes = "0.11.19"
 serde_json = "1.0.154"
 # oncl-trust on macOS: SecTrust and the trust settings.
 security-framework = "3.7.0"
@@ -121,6 +127,15 @@ velopack = { version = "1.3.39-g8d2844f", default-features = false, features = [
 # already.
 webbrowser = "1.2.5"
 windows-sys = "0.61.2"
+# The plugin runtime (`oncl-plugin`): a WebAssembly interpreter, pure Rust, with fuel metering
+# and memory limits, no JIT (no executable memory, so it runs where a JIT may not, Windows 7
+# included). Only the features the runtime needs; `portable-dispatch`: Wasmi's default
+# dispatch by tail calls relies on the compiler turning them into jumps, which it does not
+# in unoptimized builds nor on Windows x64 (whose calling convention passes the handlers'
+# arguments on the stack), and a long guest loop then overflows the native stack.
+wasmi = { version = "2.0.0", default-features = false, features = ["std", "validate", "portable-dispatch"] }
+# Only in the `oncl-plugin` tests: guests written as WebAssembly text.
+wat = "1.262.0"
 x509-cert = "0.3.0"
 # Only in oncl-ui on Linux: desktop notifications over the session bus; the zbus that ksni
 # already brings, with its blocking API.
@@ -165,4 +180,8 @@ opt-level = 3
 opt-level = 3
 # The XMLDSig limit tests parse 50 MiB of XML; unoptimized parsing takes several seconds.
 [profile.dev.package.roxmltree]
+opt-level = 3
+# The plugin tests run guests of millions of instructions (the example plugin parses JSON and
+# CBOR).
+[profile.dev.package.wasmi]
 opt-level = 3
