@@ -655,13 +655,11 @@ fn a_version_whose_event_loop_never_runs_is_rolled_back() {
 
 #[test]
 fn a_version_whose_servers_stop_is_rolled_back() {
-    let serving = Arc::new(AtomicBool::new(true));
-    let stops = Arc::clone(&serving);
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(30));
-        stops.store(false, Ordering::SeqCst);
-    });
-    rolled_back_while_running(move || serving.load(Ordering::SeqCst));
+    // Healthy on the first look only: the servers came up and stopped before the check
+    // settled. Driven by the calls rather than by a timer, so a slow runner cannot let the
+    // check settle before the servers stop.
+    let first = AtomicBool::new(true);
+    rolled_back_while_running(move || first.swap(false, Ordering::SeqCst));
 }
 
 #[test]
