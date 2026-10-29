@@ -53,3 +53,7 @@ required-features = ["emulator"]
 [[test]]
 name = "kzid"
 required-features = ["emulator"]
+
+[[test]]
+name = "etoken72k"
+required-features = ["emulator"]
