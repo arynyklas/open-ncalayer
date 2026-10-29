@@ -267,6 +267,7 @@ pub fn download_package(
         connect_timeout: GetOptions::default().connect_timeout.min(timeout),
         max_len: package.size,
         https_only: true,
+        redirects: true,
     };
     let reply = transport
         .get_with(url, opts)

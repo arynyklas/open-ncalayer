@@ -228,6 +228,7 @@ pub fn check_answer(
         connect_timeout: CONNECT_TIMEOUT,
         max_len: MAX_RESPONSE_LEN,
         https_only: false,
+        redirects: true,
     };
     let reply = http
         .get_with(&nca_get_url(&url, &requested.request_der()), opts)

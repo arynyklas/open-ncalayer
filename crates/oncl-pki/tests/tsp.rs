@@ -6,7 +6,9 @@ use base64::engine::general_purpose::STANDARD;
 use der::asn1::{AnyRef, ObjectIdentifier};
 use der::{Decode, Encode, Reader, SliceReader, Tag, Tagged};
 use oncl_pki::cms::{SignOptions, sign, verify};
-use oncl_pki::http::{HttpError, HttpReply, HttpTransport, ProxySetting, UreqTransport};
+use oncl_pki::http::{
+    GetOptions, HttpError, HttpReply, HttpTransport, ProxySetting, UreqTransport,
+};
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::{
@@ -444,6 +446,7 @@ impl Fixed {
             reply: HttpReply {
                 status,
                 content_type: content_type.map(str::to_owned),
+                location: None,
                 body,
             },
             seen: Mutex::new(Vec::new()),
@@ -452,12 +455,18 @@ impl Fixed {
 }
 
 impl HttpTransport for Fixed {
-    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
+    fn get_with(&self, url: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
         self.seen.lock().unwrap().push(url.as_bytes().to_vec());
         Ok(self.reply.clone())
     }
 
-    fn post(&self, _url: &str, _content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
+    fn post_with(
+        &self,
+        _url: &str,
+        _content_type: &str,
+        body: &[u8],
+        _: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
         self.seen.lock().unwrap().push(body.to_vec());
         Ok(self.reply.clone())
     }

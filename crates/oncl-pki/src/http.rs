@@ -32,6 +32,9 @@ pub struct HttpReply {
     pub status: u16,
     /// `Content-Type` header, if present.
     pub content_type: Option<String>,
+    /// The `Location` header of a 3xx reply that was not followed (redirects off, or a
+    /// redirect not followed for its method); `None` for other replies.
+    pub location: Option<String>,
     /// Body.
     pub body: Vec<u8>,
 }
@@ -41,7 +44,7 @@ pub struct HttpReply {
 #[error("{0}")]
 pub struct HttpError(pub String);
 
-/// Limits of a GET request.
+/// Limits of a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GetOptions {
     /// Timeout of the whole request, connecting to reading the body.
@@ -54,46 +57,67 @@ pub struct GetOptions {
     /// Refuse a URL that is not `https://`, the request's and every redirect's: the request
     /// fails with an [`HttpError`] instead of going in clear.
     pub https_only: bool,
+    /// Follow redirects ([`MAX_REDIRECTS`] at most). Off, a 3xx reply is the reply, with its
+    /// `Location` in [`HttpReply::location`].
+    pub redirects: bool,
 }
 
 impl Default for GetOptions {
-    /// 10 seconds, [`CONNECT_TIMEOUT`], [`MAX_RESPONSE_LEN`], `http://` allowed.
+    /// 10 seconds, [`CONNECT_TIMEOUT`], [`MAX_RESPONSE_LEN`], `http://` allowed, redirects
+    /// followed.
     fn default() -> Self {
         GetOptions {
             timeout: TIMEOUT,
             connect_timeout: CONNECT_TIMEOUT,
             max_len: MAX_RESPONSE_LEN,
             https_only: false,
+            redirects: true,
         }
     }
 }
 
 /// Sends HTTP requests. Any status code is a reply, not an error.
+///
+/// A transport implements both requests with their [`GetOptions`]: every option is a limit
+/// or a refusal its caller relies on, so none has a default that drops it.
 pub trait HttpTransport: Send + Sync {
+    /// `GET url` within `opts`.
+    ///
+    /// # Errors
+    ///
+    /// [`HttpError`] if no response arrived, or `opts` refuses the request.
+    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError>;
+
+    /// `POST url` with `body` of type `content_type`, within `opts`.
+    ///
+    /// # Errors
+    ///
+    /// [`HttpError`] if no response arrived, or `opts` refuses the request.
+    fn post_with(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
+        opts: GetOptions,
+    ) -> Result<HttpReply, HttpError>;
+
     /// `GET url` with the default [`GetOptions`].
     ///
     /// # Errors
     ///
     /// [`HttpError`] if no response arrived.
-    fn get(&self, url: &str) -> Result<HttpReply, HttpError>;
-
-    /// `GET url` within `opts`. The default implementation ignores `opts` and calls
-    /// [`HttpTransport::get`].
-    ///
-    /// # Errors
-    ///
-    /// [`HttpError`] if no response arrived.
-    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        let _ = opts;
-        self.get(url)
+    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
+        self.get_with(url, GetOptions::default())
     }
 
-    /// `POST url` with `body` of type `content_type`, with the default [`GetOptions`] limits.
+    /// `POST url` with `body` of type `content_type`, with the default [`GetOptions`].
     ///
     /// # Errors
     ///
     /// [`HttpError`] if no response arrived.
-    fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError>;
+    fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
+        self.post_with(url, content_type, body, GetOptions::default())
+    }
 }
 
 /// The proxy [`UreqTransport`] connects through. Only HTTP proxies are supported: plain
@@ -182,10 +206,11 @@ fn usable(proxy: Proxy) -> Result<Proxy, HttpError> {
 /// absolute-form request to the proxy (`GET http://host/path HTTP/1.1`, see `forward`),
 /// which `ureq` cannot send.
 ///
-/// Redirects are followed as `ureq` follows them, at most [`MAX_REDIRECTS`]: 301, 302 and
-/// 303 as a GET; 307 and 308 of a GET as a GET, of a POST not at all (the 3xx is the
-/// reply). Each step takes its own route, so a redirect from `https://` to `http://` goes
-/// through the proxy in absolute form too.
+/// Redirects are followed unless [`GetOptions::redirects`] is off, as `ureq` follows them, at
+/// most [`MAX_REDIRECTS`]: 301, 302 and 303 as a GET; 307 and 308 of a GET as a GET, of a
+/// POST not at all (the 3xx is the reply). Each step takes its own route, so a redirect from
+/// `https://` to `http://` goes through the proxy in absolute form too. A 3xx reply not
+/// followed carries its `Location`.
 #[derive(Clone, Debug, Default)]
 pub struct UreqTransport {
     proxy: ProxySetting,
@@ -250,7 +275,7 @@ impl UreqTransport {
     }
 
     /// `url` with `post` (content type and body) or GET, within `opts`, following
-    /// redirects.
+    /// redirects if `opts` says so.
     fn send(
         &self,
         url: &str,
@@ -263,13 +288,23 @@ impl UreqTransport {
             if opts.https_only && !is_https(&url) {
                 return Err(HttpError(format!("{url} is not an https URL")));
             }
-            let (reply, location) = self.send_once(&url, post, deadline, opts)?;
-            match redirect(&url, &reply, location.as_deref(), post.is_some())? {
+            let (mut reply, location) = self.send_once(&url, post, deadline, opts)?;
+            let next = if opts.redirects {
+                redirect(&url, &reply, location.as_deref(), post.is_some())?
+            } else {
+                None
+            };
+            match next {
                 Some(next) => {
                     url = next;
                     post = None;
                 }
-                None => return Ok(reply),
+                None => {
+                    if (300..400).contains(&reply.status) {
+                        reply.location = location;
+                    }
+                    return Ok(reply);
+                }
             }
         }
         Err(HttpError(format!(
@@ -378,16 +413,18 @@ fn is_https(url: &str) -> bool {
 }
 
 impl HttpTransport for UreqTransport {
-    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
-        self.get_with(url, GetOptions::default())
-    }
-
     fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
         self.send(url, None, opts)
     }
 
-    fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
-        self.send(url, Some((content_type, body)), GetOptions::default())
+    fn post_with(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
+        opts: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
+        self.send(url, Some((content_type, body)), opts)
     }
 }
 
@@ -417,6 +454,7 @@ fn reply(
     let reply = HttpReply {
         status: response.status().as_u16(),
         content_type,
+        location: None,
         body,
     };
     Ok((reply, location))
@@ -475,16 +513,18 @@ mod route {
     }
 
     impl HttpTransport for RouteTransport {
-        fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
-            self.route(url)?.get(url)
-        }
-
         fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
             self.route(url)?.get_with(url, opts)
         }
 
-        fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
-            self.route(url)?.post(url, content_type, body)
+        fn post_with(
+            &self,
+            url: &str,
+            content_type: &str,
+            body: &[u8],
+            opts: GetOptions,
+        ) -> Result<HttpReply, HttpError> {
+            self.route(url)?.post_with(url, content_type, body, opts)
         }
     }
 
@@ -493,6 +533,7 @@ mod route {
         HttpReply {
             status,
             content_type: Some("text/plain".to_owned()),
+            location: None,
             body: text.as_bytes().to_vec(),
         }
     }
@@ -628,6 +669,7 @@ mod tests {
         connect_timeout: Duration::from_secs(2),
         max_len: MAX_RESPONSE_LEN,
         https_only: false,
+        redirects: true,
     };
 
     /// Whether a request that cannot connect failed after the connect timeout, not the
@@ -922,6 +964,79 @@ mod tests {
     }
 
     #[test]
+    fn redirects_false_returns_3xx_with_location() {
+        let (origin, heads) = serve_in_turn(vec![redirect_to(302, "/next")]);
+        let opts = GetOptions {
+            redirects: false,
+            ..GetOptions::default()
+        };
+        let reply = direct().get_with(&format!("{origin}/first"), opts).unwrap();
+        assert_eq!(
+            (reply.status, reply.location.as_deref()),
+            (302, Some("/next"))
+        );
+        assert_eq!(
+            request_lines(&heads.join().unwrap()),
+            ["GET /first HTTP/1.1"]
+        );
+
+        // A POST's 303 would go on as a GET: not without redirects.
+        let (origin, heads) = serve_in_turn(vec![redirect_to(303, "https://other.invalid/")]);
+        let reply = direct()
+            .post_with(&format!("{origin}/q"), "t/q", b"x", opts)
+            .unwrap();
+        assert_eq!(
+            (reply.status, reply.location.as_deref()),
+            (303, Some("https://other.invalid/"))
+        );
+        assert_eq!(heads.join().unwrap().len(), 1);
+
+        // With redirects on, a 3xx that is not followed still carries its Location; other
+        // replies carry none.
+        let (origin, heads) = serve_in_turn(vec![redirect_to(308, "/next")]);
+        let reply = direct().post(&format!("{origin}/q"), "t/q", b"x").unwrap();
+        assert_eq!(
+            (reply.status, reply.location.as_deref()),
+            (308, Some("/next"))
+        );
+        heads.join().unwrap();
+        let (origin, heads) = serve_in_turn(vec![ok("fine")]);
+        let reply = direct().get_with(&origin, opts).unwrap();
+        assert_eq!((reply.status, reply.location), (200, None));
+        heads.join().unwrap();
+    }
+
+    #[test]
+    fn post_with_enforces_https_only_and_max_len() {
+        let (proxy, heads) = serve_in_turn(Vec::new());
+        let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
+        let https_only = GetOptions {
+            https_only: true,
+            ..GetOptions::default()
+        };
+        let e = through
+            .post_with("http://nca.invalid/x", "t/q", b"x", https_only)
+            .unwrap_err();
+        assert_eq!(e.0, "http://nca.invalid/x is not an https URL");
+        assert!(heads.join().unwrap().is_empty(), "nothing was sent");
+
+        let body = "z".repeat(2048);
+        let (origin, heads) = serve_in_turn(vec![ok(&body), ok(&body)]);
+        let small = GetOptions {
+            max_len: 1024,
+            ..GetOptions::default()
+        };
+        direct().post_with(&origin, "t/q", b"x", small).unwrap_err();
+        let large = GetOptions {
+            max_len: 4096,
+            ..GetOptions::default()
+        };
+        let reply = direct().post_with(&origin, "t/q", b"x", large).unwrap();
+        assert_eq!(reply.body.len(), 2048);
+        assert_eq!(heads.join().unwrap().len(), 2);
+    }
+
+    #[test]
     fn locations_are_resolved_against_the_request() {
         let base = "https://h:8443/a/b/c?q=1";
         let joined = |l| join_url(base, l).unwrap();
@@ -965,6 +1080,7 @@ mod tests {
                 connect_timeout: Duration::from_secs(2),
                 max_len: 1 << 20,
                 https_only: false,
+                redirects: true,
             }
         );
     }
@@ -976,15 +1092,23 @@ mod tests {
 
         struct Fixed(u16);
         impl HttpTransport for Fixed {
-            fn get(&self, _: &str) -> Result<HttpReply, HttpError> {
+            /// The reply's content type is the body limit it was asked with.
+            fn get_with(&self, _: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
                 Ok(HttpReply {
                     status: self.0,
-                    content_type: None,
+                    content_type: Some(opts.max_len.to_string()),
+                    location: None,
                     body: Vec::new(),
                 })
             }
-            fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
-                self.get(url)
+            fn post_with(
+                &self,
+                url: &str,
+                _: &str,
+                _: &[u8],
+                opts: GetOptions,
+            ) -> Result<HttpReply, HttpError> {
+                self.get_with(url, opts)
             }
         }
 
@@ -995,11 +1119,18 @@ mod tests {
         let status = |url| routes.get(url).map(|r| r.status);
         assert_eq!(status("http://a.test/x/1"), Ok(201));
         assert_eq!(status("http://a.test/y"), Ok(202));
+        let opts = GetOptions {
+            max_len: 7,
+            ..GetOptions::default()
+        };
+        let limit = |r: Result<HttpReply, HttpError>| r.map(|r| (r.status, r.content_type));
         assert_eq!(
-            routes
-                .get_with("http://a.test/y", GetOptions::default())
-                .map(|r| r.status),
-            Ok(202)
+            limit(routes.get_with("http://a.test/y", opts)),
+            Ok((202, Some("7".to_owned())))
+        );
+        assert_eq!(
+            limit(routes.post_with("http://a.test/x", "t", b"", opts)),
+            Ok((201, Some("7".to_owned())))
         );
         assert_eq!(
             routes.post("http://a.test/x", "t", b"").map(|r| r.status),

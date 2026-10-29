@@ -244,10 +244,6 @@ impl MockOcsp {
 }
 
 impl HttpTransport for MockOcsp {
-    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
-        self.get_with(url, GetOptions::default())
-    }
-
     fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
         self.lock_calls().push(url.to_owned());
         match self.tamper {
@@ -262,6 +258,7 @@ impl HttpTransport for MockOcsp {
                 return Ok(HttpReply {
                     status: 200,
                     content_type: Some(OCSP_RESPONSE.to_owned()),
+                    location: None,
                     body: b"<html>not an OCSP response</html>".to_vec(),
                 });
             }
@@ -279,13 +276,20 @@ impl HttpTransport for MockOcsp {
             Ok(body) => HttpReply {
                 status: 200,
                 content_type: Some(content_type.to_owned()),
+                location: None,
                 body,
             },
             Err(e) => text_reply(400, &e),
         })
     }
 
-    fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
+    fn post_with(
+        &self,
+        url: &str,
+        _: &str,
+        _: &[u8],
+        _: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
         self.lock_calls().push(url.to_owned());
         Ok(text_reply(405, "GET only"))
     }

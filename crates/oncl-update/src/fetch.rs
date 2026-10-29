@@ -82,6 +82,7 @@ fn get(
         connect_timeout: GetOptions::default().connect_timeout.min(left),
         max_len,
         https_only: true,
+        redirects: true,
     };
     let reply = transport
         .get_with(url, opts)
@@ -113,10 +114,6 @@ mod tests {
     }
 
     impl HttpTransport for Table {
-        fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
-            self.get_with(url, GetOptions::default())
-        }
-
         fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
             self.asked
                 .lock()
@@ -132,11 +129,18 @@ mod tests {
             Ok(HttpReply {
                 status: *status,
                 content_type: None,
+                location: None,
                 body: body.clone(),
             })
         }
 
-        fn post(&self, _: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
+        fn post_with(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[u8],
+            _: GetOptions,
+        ) -> Result<HttpReply, HttpError> {
             unreachable!()
         }
     }

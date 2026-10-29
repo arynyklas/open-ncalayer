@@ -171,10 +171,6 @@ impl MockCrl {
 }
 
 impl HttpTransport for MockCrl {
-    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
-        self.get_with(url, GetOptions::default())
-    }
-
     fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
         self.lock_calls().push(url.to_owned());
         let body = self.der();
@@ -184,11 +180,18 @@ impl HttpTransport for MockCrl {
         Ok(HttpReply {
             status: 200,
             content_type: Some(PKIX_CRL.to_owned()),
+            location: None,
             body,
         })
     }
 
-    fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
+    fn post_with(
+        &self,
+        url: &str,
+        _: &str,
+        _: &[u8],
+        _: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
         self.lock_calls().push(url.to_owned());
         Ok(text_reply(405, "GET only"))
     }

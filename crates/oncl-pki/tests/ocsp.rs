@@ -72,18 +72,25 @@ impl Fixed {
         Fixed(Ok(HttpReply {
             status: 200,
             content_type: content_type.map(str::to_owned),
+            location: None,
             body: body.to_vec(),
         }))
     }
 }
 
 impl HttpTransport for Fixed {
-    fn get(&self, _: &str) -> Result<HttpReply, HttpError> {
+    fn get_with(&self, _: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
         self.0.clone()
     }
 
-    fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
-        self.get(url)
+    fn post_with(
+        &self,
+        url: &str,
+        _: &str,
+        _: &[u8],
+        o: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
+        self.get_with(url, o)
     }
 }
 
@@ -446,16 +453,12 @@ fn hang_returns_http_error_within_timeout() {
 struct Recording(Mutex<Vec<GetOptions>>);
 
 impl HttpTransport for Recording {
-    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
-        self.get_with(url, GetOptions::default())
-    }
-
     fn get_with(&self, _: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
         self.0.lock().unwrap().push(opts);
         Err(HttpError("unreachable".to_owned()))
     }
 
-    fn post(&self, _: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
+    fn post_with(&self, _: &str, _: &str, _: &[u8], _: GetOptions) -> Result<HttpReply, HttpError> {
         unreachable!("OCSP uses GET")
     }
 }
@@ -475,6 +478,7 @@ fn request_connects_within_the_connect_timeout() {
             connect_timeout: CONNECT_TIMEOUT,
             max_len: MAX_RESPONSE_LEN,
             https_only: false,
+            redirects: true,
         }]
     );
 }

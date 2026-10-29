@@ -775,14 +775,19 @@ fn tsa_profile_adds_timestamp() {
 fn tsp_failure_code() {
     struct Down;
     impl oncl_pki::http::HttpTransport for Down {
-        fn get(&self, _: &str) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        fn get_with(
+            &self,
+            _: &str,
+            _: oncl_pki::http::GetOptions,
+        ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
             Err(oncl_pki::http::HttpError("down".to_owned()))
         }
-        fn post(
+        fn post_with(
             &self,
             _: &str,
             _: &str,
             _: &[u8],
+            _: oncl_pki::http::GetOptions,
         ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
             Err(oncl_pki::http::HttpError("down".to_owned()))
         }

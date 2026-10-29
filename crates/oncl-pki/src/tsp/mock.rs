@@ -4,7 +4,7 @@ use super::asn1::{MessageImprint, PkiStatusInfo, TimeStampReq, TimeStampResp, Ts
 use super::{BASICS_POLICY, TIMESTAMP_QUERY, TIMESTAMP_REPLY, TspError, TspHash, replace_token};
 use crate::asn1util::{RawGeneralizedTime, format_generalized_time, unsigned};
 use crate::cms::{SignOptions, sign_content};
-use crate::http::{HttpError, HttpReply, HttpTransport, percent_decode, text_reply};
+use crate::http::{GetOptions, HttpError, HttpReply, HttpTransport, percent_decode, text_reply};
 use crate::oid;
 use crate::pkcs12::KeyEntry;
 use base64::Engine;
@@ -89,6 +89,7 @@ impl MockTsa {
             Ok(body) => HttpReply {
                 status: 200,
                 content_type: Some(TIMESTAMP_REPLY.to_owned()),
+                location: None,
                 body,
             },
             Err(e) => text_reply(400, &e),
@@ -220,8 +221,9 @@ impl MockTsa {
     }
 }
 
+/// A mock server: the request options do not change what it answers.
 impl HttpTransport for MockTsa {
-    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
+    fn get_with(&self, url: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
         let serial = self.record(url);
         let encoded = url.rsplit('/').next().unwrap_or_default();
         Ok(
@@ -232,7 +234,13 @@ impl HttpTransport for MockTsa {
         )
     }
 
-    fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
+    fn post_with(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
+        _: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
         let serial = self.record(url);
         if content_type != TIMESTAMP_QUERY {
             return Ok(text_reply(415, content_type));

@@ -390,6 +390,7 @@ impl CrlCache {
             connect_timeout: CONNECT_TIMEOUT,
             max_len: MAX_CRL_LEN,
             https_only: false,
+            redirects: true,
         };
         let reply = http.get_with(url, opts).map_err(|e| CrlError::Http(e.0))?;
         if reply.status != 200 {

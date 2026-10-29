@@ -120,12 +120,18 @@ fn leaf_with_cdp(leaf: &Certificate, uris: &[&str]) -> Certificate {
 struct Fixed(Result<HttpReply, HttpError>);
 
 impl HttpTransport for Fixed {
-    fn get(&self, _: &str) -> Result<HttpReply, HttpError> {
+    fn get_with(&self, _: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
         self.0.clone()
     }
 
-    fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
-        self.get(url)
+    fn post_with(
+        &self,
+        url: &str,
+        _: &str,
+        _: &[u8],
+        o: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
+        self.get_with(url, o)
     }
 }
 
@@ -140,13 +146,19 @@ impl Down {
 }
 
 impl HttpTransport for Down {
-    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
+    fn get_with(&self, url: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
         self.0.lock().unwrap().push(url.to_owned());
         Err(HttpError("down".to_owned()))
     }
 
-    fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
-        self.get(url)
+    fn post_with(
+        &self,
+        url: &str,
+        _: &str,
+        _: &[u8],
+        o: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
+        self.get_with(url, o)
     }
 }
 
@@ -655,6 +667,7 @@ fn second_url_used_when_first_fails() {
     let http = Fixed(Ok(HttpReply {
         status: 503,
         content_type: Some("text/plain".to_owned()),
+        location: None,
         body: b"busy".to_vec(),
     }));
     assert_eq!(
@@ -675,18 +688,20 @@ fn second_url_used_when_first_fails() {
 struct Oversized(Mutex<Vec<GetOptions>>);
 
 impl HttpTransport for Oversized {
-    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
-        self.get_with(url, GetOptions::default())
-    }
-
     fn get_with(&self, _: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
         self.0.lock().unwrap().push(opts);
         assert!(MAX_CRL_LEN + 1 > opts.max_len, "the limit admits the body");
         Err(HttpError(format!("body exceeds {} bytes", opts.max_len)))
     }
 
-    fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
-        self.get(url)
+    fn post_with(
+        &self,
+        url: &str,
+        _: &str,
+        _: &[u8],
+        o: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
+        self.get_with(url, o)
     }
 }
 
@@ -708,6 +723,7 @@ fn oversized_body_is_rejected() {
             connect_timeout: CONNECT_TIMEOUT,
             max_len: MAX_CRL_LEN,
             https_only: false,
+            redirects: true,
         }]
     );
     assert!(files(dir.path()).is_empty());
@@ -720,6 +736,7 @@ fn oversized_body_is_rejected() {
         connect_timeout: CONNECT_TIMEOUT,
         max_len: len - 1,
         https_only: false,
+        redirects: true,
     };
     assert!(mock.get_with(INTER_CRL, tight).is_err());
     let roomy = GetOptions {
@@ -771,6 +788,7 @@ fn nca_root_crl_golden_vector() {
     let http = Fixed(Ok(HttpReply {
         status: 200,
         content_type: Some("application/pkix-crl".to_owned()),
+        location: None,
         body: der,
     }));
     assert_eq!(

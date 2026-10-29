@@ -42,10 +42,6 @@ impl FakeTransport {
 }
 
 impl HttpTransport for FakeTransport {
-    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
-        self.get_with(url, GetOptions::default())
-    }
-
     fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
         lock(&self.asked).push((url.to_owned(), opts.max_len, opts.https_only));
         lock(&self.timeouts).push(opts.timeout);
@@ -60,11 +56,12 @@ impl HttpTransport for FakeTransport {
         Ok(HttpReply {
             status,
             content_type: None,
+            location: None,
             body,
         })
     }
 
-    fn post(&self, _: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
+    fn post_with(&self, _: &str, _: &str, _: &[u8], _: GetOptions) -> Result<HttpReply, HttpError> {
         Err(HttpError("no POST here".to_owned()))
     }
 }

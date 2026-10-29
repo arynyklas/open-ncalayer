@@ -94,16 +94,18 @@ impl LiveProxyTransport {
 }
 
 impl HttpTransport for LiveProxyTransport {
-    fn get(&self, url: &str) -> Result<HttpReply, HttpError> {
-        self.transport().get(url)
-    }
-
     fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
         self.transport().get_with(url, opts)
     }
 
-    fn post(&self, url: &str, content_type: &str, body: &[u8]) -> Result<HttpReply, HttpError> {
-        self.transport().post(url, content_type, body)
+    fn post_with(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
+        opts: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
+        self.transport().post_with(url, content_type, body, opts)
     }
 }
 

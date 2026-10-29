@@ -357,17 +357,19 @@ fn raw_always_checks_ocsp() {
 struct Stuck;
 
 impl HttpTransport for Stuck {
-    fn get(&self, _: &str) -> Result<HttpReply, HttpError> {
+    fn get_with(&self, _: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
         thread::sleep(Duration::from_secs(30));
         Err(HttpError("stuck".to_owned()))
     }
 
-    fn get_with(&self, url: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
-        self.get(url)
-    }
-
-    fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
-        self.get(url)
+    fn post_with(
+        &self,
+        url: &str,
+        _: &str,
+        _: &[u8],
+        o: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
+        self.get_with(url, o)
     }
 }
 
@@ -600,13 +602,19 @@ impl Refused {
 }
 
 impl HttpTransport for Refused {
-    fn get(&self, _: &str) -> Result<HttpReply, HttpError> {
+    fn get_with(&self, _: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
         *self.0.lock().unwrap() += 1;
         Err(HttpError("connection refused".to_owned()))
     }
 
-    fn post(&self, url: &str, _: &str, _: &[u8]) -> Result<HttpReply, HttpError> {
-        self.get(url)
+    fn post_with(
+        &self,
+        url: &str,
+        _: &str,
+        _: &[u8],
+        o: GetOptions,
+    ) -> Result<HttpReply, HttpError> {
+        self.get_with(url, o)
     }
 }
 

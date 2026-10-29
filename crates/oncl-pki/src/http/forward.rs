@@ -366,6 +366,7 @@ fn read_reply<R: Read>(input: &mut Input<R>, max_len: u64) -> io::Result<Forward
         reply: HttpReply {
             status: head.status,
             content_type: head.content_type,
+            location: None,
             body,
         },
         location: head.location,
