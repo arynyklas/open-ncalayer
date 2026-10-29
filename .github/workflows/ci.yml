@@ -48,6 +48,10 @@ jobs:
         os: [ubuntu-24.04, windows-2025, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      # Line tables keep file:line in backtraces; full debug info makes linking the test
+      # binaries (above all on Windows) and the cache much slower.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v5
       - name: Install system libraries
@@ -59,12 +63,18 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Every platform's packages: the licences test (`committed_licenses_are_fresh`) reads
-      # their licence files offline.
+      # their licence files offline. Its result does not depend on the host, so it runs on
+      # Linux alone, where the fetch takes seconds (close to a minute on Windows).
       - name: Fetch packages
+        if: runner.os == 'Linux'
         run: cargo fetch --locked
       - name: Test
         shell: bash
-        run: cargo xtask fetch-fixtures && cargo test --workspace --all-features -- --include-ignored --skip live_
+        run: |
+          skip=()
+          if [ "$RUNNER_OS" != Linux ]; then skip=(--skip committed_licenses_are_fresh); fi
+          cargo xtask fetch-fixtures
+          cargo test --workspace --all-features -- --include-ignored --skip live_ "${skip[@]}"
       # The `clippy` job runs on Linux and never sees `cfg(windows)` code (oncl-ui foreground).
       - name: Clippy (Windows-only code)
         if: runner.os == 'Windows'
@@ -171,18 +181,37 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install toolchains (rust-toolchain.toml for xtask, pinned nightly for Win7)
+        shell: bash
         run: |
           rustup toolchain install
           rustup toolchain install nightly-2026-08-12 --profile minimal --component rust-src
+          # -Zbuild-std builds the standard library from rust-src, whose files cargo judges
+          # by mtime like any path package. rustup dates them at installation, which would
+          # make every cached build stale: a fixed date, older than any cache.
+          src="$(rustup run nightly-2026-08-12 rustc --print sysroot)/lib/rustlib/src"
+          find "$src" -exec touch -d 2026-08-12T00:00:00Z {} +
+      # Only xtask's own build and the registry now: a new key drops the Windows 7 builds
+      # the old one still holds.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: win7-${{ matrix.arch }}
+          key: win7-${{ matrix.arch }}-xtask
+      # The build's own target directory, cached whole and outside `target/`: rust-cache keeps
+      # only the packages `cargo metadata` lists, drops the standard library of -Zbuild-std,
+      # and then every crate rebuilds. The workspace crates rebuild anyway (a fresh checkout
+      # dates their files now), so the key changes only with what the dependencies build from.
+      - name: Cache the Windows 7 build
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/win7-target
+          key: win7-target-${{ matrix.arch }}-nightly-2026-08-12-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'vendor/*/Cargo.toml', 'xtask/Cargo.toml', '.cargo/config.toml', 'xtask/src/win7.rs') }}
+          restore-keys: win7-target-${{ matrix.arch }}-nightly-2026-08-12-
       - name: Build, check imports, start
         shell: bash
         run: |
           { echo '## Windows 7 ${{ matrix.arch }}'; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           status=0
-          cargo xtask win7 --arch ${{ matrix.arch }} | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          cargo xtask win7 --arch ${{ matrix.arch }} --target-dir "$RUNNER_TEMP/win7-target" \
+            | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
       - uses: actions/upload-artifact@v4

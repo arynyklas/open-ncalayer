@@ -85,6 +85,11 @@ enum Command {
         /// Output directory [default: target/win7].
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Cargo's target directory for the build [default: the workspace's `target/`]. CI
+        /// gives it one of its own to cache: the cache of `target/` drops the standard
+        /// library `-Zbuild-std` builds, and every crate then rebuilds.
+        #[arg(long)]
+        target_dir: Option<PathBuf>,
     },
 }
 
@@ -391,10 +396,14 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Command::Win7 { arch, out } => {
+        Command::Win7 {
+            arch,
+            out,
+            target_dir,
+        } => {
             let root = oncl_testkit::workspace_root();
             let out = out.unwrap_or_else(|| root.join("target").join("win7"));
-            xtask::win7::run(&root, arch, &out)
+            xtask::win7::run(&root, arch, &out, target_dir.as_deref())
         }
     }
 }

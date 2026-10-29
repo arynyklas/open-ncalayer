@@ -429,7 +429,7 @@ Then the import gate runs, also available as `cargo xtask check-imports <exe>…
 - these DLLs have the exe's bitness and import from and forward to `kernel32.dll` and `ole32.dll` only, by undecorated name;
 - `nmhost.exe` must do without them: `nm install` copies the relay apart from the program.
 
-On Windows, `cargo xtask win7` then starts the build from `target/win7/<arch>/`: `--help`, `nm install` and `nm status` in a sandbox, `tls init`, then `run` until it answers `GET /` over HTTPS, with the data directory in a temporary directory under `target/win7-smoke/`. In CI this is the blocking `win7` job (x64 and x86 on Windows Server 2025); checks on Windows 7 itself come with the lab (P9).
+On Windows, `cargo xtask win7` then starts the build from `target/win7/<arch>/`: `--help`, `nm install` and `nm status` in a sandbox, `tls init`, then `run` until it answers `GET /` over HTTPS, with the data directory in a temporary directory under `target/win7-smoke/`. In CI this is the blocking `win7` job (x64 and x86 on Windows Server 2025); checks on Windows 7 itself come with the lab (P9). `--target-dir <dir>` builds in a cargo target directory of its own instead of `target/`: the `win7` job caches that one whole, because rust-cache drops the `-Zbuild-std` standard library, and without it everything rebuilds.
 
 Before submitting changes:
 

@@ -93,14 +93,23 @@ impl Selection {
 }
 
 /// Builds, gates and (on Windows) starts the Windows 7 builds of `selection` in
-/// `<out>/<arch>/`. Fails on the first build error, after every gate if any import is
-/// missing on Windows 7, and on the first failed start.
-pub fn run(root: &Path, selection: Selection, out: &Path) -> anyhow::Result<()> {
+/// `<out>/<arch>/`, with cargo's target directory `target_dir` if given (the workspace's
+/// otherwise). Fails on the first build error, after every gate if any import is missing
+/// on Windows 7, and on the first failed start.
+pub fn run(
+    root: &Path,
+    selection: Selection,
+    out: &Path,
+    target_dir: Option<&Path>,
+) -> anyhow::Result<()> {
     let out = std::path::absolute(out).with_context(|| format!("{}", out.display()))?;
+    let target_dir = target_dir
+        .map(|dir| std::path::absolute(dir).with_context(|| format!("{}", dir.display())))
+        .transpose()?;
     let mut dirs = Vec::new();
     let mut violations = 0;
     for &arch in selection.arches() {
-        let dir = build(root, arch, &out)?;
+        let dir = build(root, arch, &out, target_dir.as_deref())?;
         violations += gate(&dir)?;
         dirs.push(dir);
     }
@@ -119,9 +128,15 @@ pub fn run(root: &Path, selection: Selection, out: &Path) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Builds the packages of a Windows 7 build for `arch` and copies the files under their
-/// shipping names into `<out>/<arch>/`, which it returns.
-pub fn build(root: &Path, arch: Arch, out: &Path) -> anyhow::Result<PathBuf> {
+/// Builds the packages of a Windows 7 build for `arch`, in cargo's target directory
+/// `target_dir` if given, and copies the files under their shipping names into
+/// `<out>/<arch>/`, which it returns.
+pub fn build(
+    root: &Path,
+    arch: Arch,
+    out: &Path,
+    target_dir: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
     let mut cargo = Command::new("rustup");
     cargo
         .current_dir(root)
@@ -131,6 +146,9 @@ pub fn build(root: &Path, arch: Arch, out: &Path) -> anyhow::Result<PathBuf> {
         // The pinned nightly is older than the workspace `rust-version`.
         .arg("--ignore-rust-version")
         .arg("--message-format=json-render-diagnostics");
+    if let Some(dir) = target_dir {
+        cargo.arg("--target-dir").arg(dir);
+    }
     for package in PACKAGES {
         cargo.args(["-p", package]);
     }

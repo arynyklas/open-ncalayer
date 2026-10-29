@@ -433,7 +433,7 @@ cargo xtask win7 --arch all   # → target/win7/x64/, target/win7/x86/
 - сами эти DLL той же разрядности, что и exe, и импортируют и переадресуют только в `kernel32.dll` и `ole32.dll`, по недекорированным именам;
 - `nmhost.exe` должен обходиться без них: `nm install` копирует relay отдельно от программы.
 
-В Windows `cargo xtask win7` после гейта запускает сборку из `target/win7/<arch>/`: `--help`, `nm install` и `nm status` в песочнице, `tls init`, затем `run` до ответа на `GET /` по HTTPS. Каталог данных — во временном каталоге под `target/win7-smoke/`. В CI это блокирующий job `win7` (x64 и x86 на Windows Server 2025); проверки в самой Windows 7 появятся с лабораторией (P9).
+В Windows `cargo xtask win7` после гейта запускает сборку из `target/win7/<arch>/`: `--help`, `nm install` и `nm status` в песочнице, `tls init`, затем `run` до ответа на `GET /` по HTTPS. Каталог данных — во временном каталоге под `target/win7-smoke/`. В CI это блокирующий job `win7` (x64 и x86 на Windows Server 2025); проверки в самой Windows 7 появятся с лабораторией (P9). `--target-dir <каталог>` — свой каталог сборки cargo вместо `target/`: job `win7` кэширует его целиком, потому что rust-cache выбрасывает стандартную библиотеку `-Zbuild-std`, а без неё пересобирается всё.
 
 Перед отправкой изменений:
 
