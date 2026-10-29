@@ -571,6 +571,36 @@ fn disabled_updates_skip_schedule_but_allow_on_demand() {
 }
 
 #[test]
+fn a_package_managers_copy_still_checks_and_updates_the_catalog() {
+    use crate::update::{Checks, UpdaterHandle};
+    use oncl_ui::settings_view::{UpdateStatus, Updates};
+
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    sandbox.publish(1, vec![sandbox.release("0.1.0", &example("0.1.0"))]);
+    service.install_from_catalog(ID, None);
+    assert_eq!(
+        sandbox.notices(),
+        [PluginNotice::Installed { name: name() }]
+    );
+    let old = sandbox.release("0.1.0", &example("0.1.0"));
+    let new = sandbox.release("0.2.0", &example("0.2.0"));
+    sandbox.publish(2, vec![old, new]);
+
+    // The core does not update itself; the tray's «Проверить обновления» still updates the
+    // plugins from the catalog.
+    let pacman = UpdateStatus::PackageManaged("pacman".to_owned());
+    let checks = Checks {
+        core: UpdaterHandle::Off(pacman.clone()),
+        plugins: Some(Arc::clone(&service)),
+    };
+    assert_eq!(checks.check_now(None), pacman);
+    assert_eq!(checks.status(), pacman);
+    assert_eq!(sandbox.installed_version(), Some(v("0.2.0")));
+    assert_eq!(sandbox.store().state().last_seq[&Channel::Stable], 2);
+}
+
+#[test]
 fn no_keys_means_no_catalog_but_file_install_works() {
     let sandbox = Sandbox::new(true);
     let service = sandbox.service_with(Vec::new());
