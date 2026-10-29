@@ -40,3 +40,7 @@ tracing-subscriber.workspace = true
 [[test]]
 name = "emulator"
 required-features = ["emulator"]
+
+[[test]]
+name = "kaztoken"
+required-features = ["emulator"]

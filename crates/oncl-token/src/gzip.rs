@@ -12,10 +12,6 @@ use std::io::Read;
 ///
 /// [`TokenError::Malformed`] for more than [`MAX_GZ_CERT`] input bytes, a broken gzip
 /// member, or more than [`MAX_CERT`] decompressed bytes.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the drivers read certificates with it")
-)]
 pub(crate) fn cert_bytes(raw: &[u8]) -> Result<Vec<u8>, TokenError> {
     if raw.len() > MAX_GZ_CERT {
         return Err(TokenError::Malformed(format!(
