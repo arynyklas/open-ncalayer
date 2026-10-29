@@ -13,7 +13,8 @@ pub(crate) struct MessageImprint<'a> {
     pub hashed_message: &'a OctetStringRef,
 }
 
-/// `TimeStampReq`.
+/// `TimeStampReq`. The nonce is an INTEGER; only our requests use this structure, and their
+/// nonces are never negative.
 #[derive(Clone, Copy, Debug, Sequence)]
 pub(crate) struct TimeStampReq<'a> {
     pub version: u8,
@@ -41,7 +42,8 @@ pub(crate) struct PkiStatusInfo<'a> {
     pub fail_info: Option<BitStringRef<'a>>,
 }
 
-/// `TSTInfo`. The nonce is unsigned: a negative one is malformed.
+/// `TSTInfo`. The nonce is an INTEGER and may be negative: other clients' TSAs echo
+/// whatever their requests carried (Kalkan's are signed random numbers).
 #[derive(Clone, Copy, Debug, Sequence)]
 pub(crate) struct TstInfo<'a> {
     pub version: u8,
@@ -52,7 +54,7 @@ pub(crate) struct TstInfo<'a> {
     pub accuracy: Option<RawSequence<'a>>,
     /// `DEFAULT FALSE`.
     pub ordering: Option<bool>,
-    pub nonce: Option<UintRef<'a>>,
+    pub nonce: Option<IntRef<'a>>,
     #[asn1(context_specific = "0", tag_mode = "EXPLICIT", optional = "true")]
     pub tsa: Option<AnyRef<'a>>,
     #[asn1(context_specific = "1", tag_mode = "IMPLICIT", optional = "true")]

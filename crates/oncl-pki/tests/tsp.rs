@@ -241,11 +241,11 @@ fn timestamp_roundtrip_with_mock() {
     );
     assert_eq!(tst.imprint_alg.to_string(), STREEBOG_512);
     assert_eq!(tst.policy.to_string(), BASICS_POLICY);
-    assert!(
-        tst.nonce
-            .as_ref()
-            .is_some_and(|n| !n.is_empty() && n[0] != 0)
-    );
+    // The token echoes the request's nonce INTEGER, contents octets and all.
+    let calls = mock.calls();
+    let tail = calls[0].strip_prefix("http://tsp.pki.gov.kz/").unwrap();
+    let req = decode_timestamp_req(&base64_decode(&percent_decode(tail)));
+    assert_eq!(tst.nonce, Some(req.nonce));
     let age = time::OffsetDateTime::now_utc() - tst.gen_time;
     assert!(age.whole_minutes().abs() < 5, "{}", tst.gen_time);
     assert_eq!(unsigned_attrs(&cms, 0), [(TIME_STAMP_TOKEN.to_owned(), 1)]);
@@ -333,6 +333,42 @@ fn nonce_mismatch_rejected() {
         &mock,
     );
     assert_eq!(r, Err(TspError::NonceMismatch));
+}
+
+#[test]
+fn negative_nonce_echo_rejected() {
+    let mock = tsa().with_tamper(MockTamper::NegativeNonce);
+    let r = timestamp_signer(
+        &signed("user-gost2015-sign"),
+        0,
+        &TsaProfile::basics_default(),
+        &mock,
+    );
+    assert_eq!(r, Err(TspError::NonceMismatch));
+}
+
+#[test]
+fn token_with_negative_nonce_verifies() {
+    // Kalkan's TSA clients send signed random nonces: about half of real tokens carry a
+    // negative one, and they are valid tokens all the same.
+    for nonce in [
+        &[0x80][..],
+        &[0xff],
+        &[0x9c, 0x3e, 0x51, 0x07, 0xaa, 0x10, 0x2d, 0x48],
+        &[0xff, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    ] {
+        let cms = tsa()
+            .stamp_with_nonce(&signed("user-gost2015-sign"), 0, nonce)
+            .unwrap();
+        let s = verify(&cms, None).unwrap();
+        assert_eq!(unsigned_attrs(&cms, 0), [(TIME_STAMP_TOKEN.to_owned(), 1)]);
+        let token = s[0].timestamp_token.as_ref().unwrap();
+        let (tst, tsa) = verify_token_for(token, &s[0].signature).unwrap();
+        assert_eq!(tst.nonce.as_deref(), Some(nonce));
+        assert_eq!(tst.imprint, streebog512(&s[0].signature));
+        assert_eq!(tst.policy.to_string(), BASICS_POLICY);
+        assert_eq!(tsa, entry("tsa-gost2015").cert);
+    }
 }
 
 #[test]

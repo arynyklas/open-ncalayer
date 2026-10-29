@@ -474,6 +474,25 @@ fn offline_reports_not_checked_revocation() {
 }
 
 #[test]
+fn timestamp_with_negative_nonce_is_valid() {
+    // A token another client requested with a negative nonce, as Kalkan's often are.
+    let june = datetime!(2026-06-01 00:00 UTC);
+    let cms = signed("inter-user-gost2015-sign", june, None);
+    let cms = tsa_at(june)
+        .stamp_with_nonce(&cms, 0, &[0x9c, 0x3e, 0x51, 0x07, 0xaa, 0x10, 0x2d, 0x48])
+        .unwrap();
+    let (text, ok) = report(&cms, synthetic_cas(), None);
+    assert!(ok, "{text}");
+    let lines = body(&text);
+    assert_eq!(lines[0], "timestamp: yes");
+    assert_eq!(lines[1], inter_chain());
+    assert_eq!(lines[2], "validity: ok at 2026-06-01T00:00:00Z");
+    assert_eq!(lines[3], tsa_chain());
+    assert_eq!(lines[4], "revocation: not checked (--offline)");
+    assert_eq!(lines[6], "OK");
+}
+
+#[test]
 fn default_roots_reject_synthetic_chain() {
     let cms = signed("inter-user-gost2015-sign", now(), Some(&tsa_at(now())));
     let net = Net::good();

@@ -2,14 +2,15 @@
 //!
 //! - The request is `TimeStampReq { v1, messageImprint { hash with NULL parameters,
 //!   H(SignerInfo.signature) }, reqPolicy, nonce, certReq TRUE }`; the nonce is 8 random
-//!   bytes, an unsigned INTEGER.
+//!   bytes read as a non-negative INTEGER.
 //! - The NCA TSA takes it by GET: `url/` and the percent-encoded base64 of the DER request
 //!   ([`TsaMethod::Get`]); RFC 3161 POST is supported too ([`TsaMethod::Post`]).
 //! - The reply comes over plain HTTP, so it is hostile input: it must be HTTP 200 with
 //!   `Content-Type: application/timestamp-reply`, status granted (0) or grantedWithMods (1),
 //!   carry a token signed by a certificate with the timeStamping extended key usage, and
-//!   echo the request's nonce, policy and message imprint. As in the original, the TSA
-//!   certificate chain is not checked.
+//!   echo the request's nonce (the same INTEGER), policy and message imprint. As in the
+//!   original, the TSA certificate chain is not checked. Tokens requested by others may
+//!   carry any INTEGER as their nonce, negative ones included.
 //! - The token goes into the signer's unsigned attributes as id-aa-timeStampToken.
 
 mod asn1;
@@ -140,7 +141,9 @@ pub struct TstInfo {
     pub imprint_alg: ObjectIdentifier,
     /// Message imprint.
     pub imprint: Vec<u8>,
-    /// Nonce: unsigned big-endian bytes without leading zeros.
+    /// Nonce: the contents octets of its DER INTEGER, i.e. minimal big-endian two's
+    /// complement. A negative nonce starts with a set top bit; a non-negative one whose top
+    /// bit is set has a leading `00` (as Java's `BigInteger.toByteArray()`).
     pub nonce: Option<Vec<u8>>,
     /// Time of the stamp.
     pub gen_time: OffsetDateTime,
@@ -198,7 +201,7 @@ impl From<BerError> for TspError {
 }
 
 /// DER `TimeStampReq` for `imprint` (already hashed with `profile.hash`) and `nonce`, an
-/// unsigned big-endian number (an empty slice is zero).
+/// unsigned big-endian number (an empty slice is zero) sent as a non-negative INTEGER.
 ///
 /// # Panics
 ///
@@ -361,6 +364,41 @@ pub fn timestamp_signer(
     profile: &TsaProfile,
     http: &dyn HttpTransport,
 ) -> Result<Vec<u8>, TspError> {
+    replace_token(cms, signer_index, |signature| {
+        let imprint = profile.hash.digest(signature);
+        let mut nonce = [0; 8];
+        getrandom::fill(&mut nonce).expect("operating system RNG failed");
+        let request = request_der(profile, &imprint, &nonce);
+        let reply = match profile.method {
+            TsaMethod::Get => http.get(&nca_get_url(&profile.url, &request))?,
+            TsaMethod::Post => http.post(&profile.url, TIMESTAMP_QUERY, &request)?,
+        };
+        if reply.status != 200 {
+            return Err(TspError::Status(reply.status));
+        }
+        if !is_timestamp_reply(reply.content_type.as_deref()) {
+            return Err(TspError::ContentType(reply.content_type));
+        }
+        let (token, tst) = parse_response(&reply.body)?;
+        check_answers(&tst, profile, &imprint, &nonce)?;
+        Ok(token)
+    })
+}
+
+/// `cms` (a DER or BER `ContentInfo{SignedData}`) as DER, with the token `stamp` returns for
+/// the `SignerInfo.signature` value of signer `signer_index` as that signer's
+/// id-aa-timeStampToken unsigned attribute, replacing an earlier one. Other signers are
+/// kept byte for byte.
+///
+/// # Errors
+///
+/// [`TspError::Cms`] for an invalid CMS; [`TspError::Malformed`] if there is no such
+/// signer; errors of `stamp`.
+fn replace_token(
+    cms: &[u8],
+    signer_index: usize,
+    stamp: impl FnOnce(&[u8]) -> Result<Vec<u8>, TspError>,
+) -> Result<Vec<u8>, TspError> {
     let der = ber::to_der(cms).map_err(CmsError::from)?;
     let content_info = ContentInfo::from_der(&der).map_err(CmsError::from)?;
     if content_info.content_type != oid::SIGNED_DATA {
@@ -379,23 +417,7 @@ pub fn timestamp_signer(
         ))
     })?;
     let info = SignerInfo::from_der(target).map_err(CmsError::from)?;
-
-    let imprint = profile.hash.digest(info.signature.as_bytes());
-    let mut nonce = [0; 8];
-    getrandom::fill(&mut nonce).expect("operating system RNG failed");
-    let request = request_der(profile, &imprint, &nonce);
-    let reply = match profile.method {
-        TsaMethod::Get => http.get(&nca_get_url(&profile.url, &request))?,
-        TsaMethod::Post => http.post(&profile.url, TIMESTAMP_QUERY, &request)?,
-    };
-    if reply.status != 200 {
-        return Err(TspError::Status(reply.status));
-    }
-    if !is_timestamp_reply(reply.content_type.as_deref()) {
-        return Err(TspError::ContentType(reply.content_type));
-    }
-    let (token, tst) = parse_response(&reply.body)?;
-    check_answers(&tst, profile, &imprint, &nonce)?;
+    let token = stamp(info.signature.as_bytes())?;
 
     let stamped = with_token(info, &token)?;
     signers[signer_index] = &stamped;
@@ -419,14 +441,16 @@ fn is_timestamp_reply(content_type: Option<&str>) -> bool {
 }
 
 /// Whether `tst` answers a request with `imprint` (hashed with `profile.hash`), `nonce` and
-/// `profile.policy`. Nonces compare as unsigned numbers.
+/// `profile.policy`. The token's nonce must be the same INTEGER as the request's unsigned
+/// `nonce`: a sign octet before a set top bit is part of its encoding, a negative echo is a
+/// mismatch.
 fn check_answers(
     tst: &TstInfo,
     profile: &TsaProfile,
     imprint: &[u8],
     nonce: &[u8],
 ) -> Result<(), TspError> {
-    if tst.nonce.as_deref() != Some(unsigned(nonce)) {
+    if !tst.nonce.as_deref().is_some_and(|n| is_uint(n, nonce)) {
         return Err(TspError::NonceMismatch);
     }
     if tst.imprint_alg != profile.hash.oid() || tst.imprint != imprint {
@@ -436,6 +460,19 @@ fn check_answers(
         return Err(TspError::PolicyMismatch);
     }
     Ok(())
+}
+
+/// Whether `contents`, the contents octets of a DER INTEGER (minimal two's complement), are
+/// the encoding of the unsigned big-endian number `n` (leading zeros allowed, an empty
+/// slice is zero): `n` itself, with a `00` sign octet before a set top bit, and `00` for
+/// zero.
+fn is_uint(contents: &[u8], n: &[u8]) -> bool {
+    let magnitude = match contents {
+        [0, rest @ ..] => rest,
+        [first, ..] if first & 0x80 != 0 => return false,
+        positive => positive,
+    };
+    magnitude == unsigned(n)
 }
 
 /// DER `SignerInfo` with `token` as its only id-aa-timeStampToken unsigned attribute.
@@ -476,7 +513,7 @@ fn tst_info(der: &[u8]) -> Result<TstInfo, TspError> {
         policy: tst.policy,
         imprint_alg: tst.message_imprint.hash_algorithm.oid,
         imprint: tst.message_imprint.hashed_message.as_bytes().to_vec(),
-        nonce: tst.nonce.map(|n| unsigned(n.as_bytes()).to_vec()),
+        nonce: tst.nonce.map(|n| n.as_bytes().to_vec()),
         gen_time: generalized_time(tst.gen_time.0)
             .map_err(|e| TspError::Malformed(format!("genTime: {e}")))?,
     })
@@ -485,6 +522,7 @@ fn tst_info(der: &[u8]) -> Result<TstInfo, TspError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use der::asn1::IntRef;
     use time::macros::datetime;
 
     fn tst(nonce: &[u8]) -> TstInfo {
@@ -549,5 +587,86 @@ mod tests {
             check_answers(&other_policy, &p, &imprint, &[1]),
             Err(TspError::PolicyMismatch)
         );
+    }
+
+    /// [`tst_info`] of a DER `TSTInfo` with the basics policy and hash, the imprint of
+    /// [`tst`] and the nonce INTEGER whose contents octets are `nonce`.
+    fn parsed(nonce: &[u8]) -> TstInfo {
+        let p = TsaProfile::basics_default();
+        let imprint = [7; 64];
+        let der = asn1::TstInfo {
+            version: 1,
+            policy: p.policy,
+            message_imprint: asn1::MessageImprint {
+                hash_algorithm: AlgorithmIdentifierRef {
+                    oid: p.hash.oid(),
+                    parameters: Some(AnyRef::NULL),
+                },
+                hashed_message: OctetStringRef::new(&imprint).unwrap(),
+            },
+            serial_number: IntRef::new(&[1]).unwrap(),
+            gen_time: crate::asn1util::RawGeneralizedTime(b"20260301100000Z"),
+            accuracy: None,
+            ordering: None,
+            nonce: Some(IntRef::new(nonce).unwrap()),
+            tsa: None,
+            extensions: None,
+        }
+        .to_der()
+        .unwrap();
+        tst_info(&der).unwrap()
+    }
+
+    #[test]
+    fn nonce_echo_must_be_the_same_integer() {
+        let p = TsaProfile::basics_default();
+        let imprint = [7; 64];
+        // A request nonce with the top bit set goes out as 00 80 … 01; its echo matches.
+        let request = [0x80, 0, 0, 0, 0, 0, 0, 1];
+        let echo = parsed(&[0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(
+            echo.nonce.as_deref(),
+            Some(&[0, 0x80, 0, 0, 0, 0, 0, 0, 1][..])
+        );
+        assert_eq!(check_answers(&echo, &p, &imprint, &request), Ok(()));
+        // Leading zero bytes of the request do not matter.
+        assert_eq!(
+            check_answers(&parsed(&[0x7f, 1]), &p, &imprint, &[0, 0, 0x7f, 1]),
+            Ok(())
+        );
+
+        // The same octets without the sign octet: a negative INTEGER, another number.
+        let flipped = parsed(&request);
+        assert_eq!(flipped.nonce.as_deref(), Some(&request[..]));
+        assert_eq!(
+            check_answers(&flipped, &p, &imprint, &request),
+            Err(TspError::NonceMismatch)
+        );
+        // The negated request: −0x8000000000000001.
+        let negated = parsed(&[0xff, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(
+            check_answers(&negated, &p, &imprint, &request),
+            Err(TspError::NonceMismatch)
+        );
+        // Another positive number.
+        let altered = parsed(&[0, 0x80, 0, 0, 0, 0, 0, 0, 3]);
+        assert_eq!(
+            check_answers(&altered, &p, &imprint, &request),
+            Err(TspError::NonceMismatch)
+        );
+        // Zero is a single 00 octet, whatever leading zeros the request had.
+        assert_eq!(check_answers(&parsed(&[0]), &p, &imprint, &[0, 0]), Ok(()));
+        assert_eq!(check_answers(&parsed(&[0]), &p, &imprint, &[]), Ok(()));
+        assert_eq!(
+            check_answers(&parsed(&[0x80]), &p, &imprint, &[0]),
+            Err(TspError::NonceMismatch)
+        );
+    }
+
+    #[test]
+    fn negative_nonce_is_read() {
+        assert_eq!(parsed(&[0x80]).nonce, Some(vec![0x80]));
+        assert_eq!(parsed(&[0xff]).nonce, Some(vec![0xff]));
+        assert_eq!(parsed(&[0]).nonce, Some(vec![0]));
     }
 }
