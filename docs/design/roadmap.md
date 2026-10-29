@@ -84,6 +84,7 @@ flowchart LR
 | `oncl-pki` | BER→DER, PKCS#12, PKCS#8 (GOST/RSA), разбор сертификатов и KZ-атрибутов, CMS (подпись, со-подпись, проверка), TSP; позднее OCSP/PKIX/XMLDSig |
 | `oncl-protocol` | Конверт NCALayer (приветствие, heartbeat, маршрутизация, `MODULE_NOT_FOUND`), диалекты ответов, семантика `CommonInvoker` |
 | `oncl-basics` | Модуль `kz.gov.pki.knca.basics` и трейт `Prompter` (UI-абстракция) |
+| `oncl-plugin` | Плагины: пакет `.onclp` и манифест `plugin.toml` (`docs/design/plugins.md`) |
 | `oncl-tls` | Мастер локального CA и leaf, импорт своего cert, файлы TLS, инструкции |
 | `oncl-ui` | Slint-диалоги, реализующие `Prompter`; позже трей и настройки |
 | `oncl-update` | Формат индекса обновлений, проверка minisign и `seq`, раскатка и отзыв, `UpdateSource` для Velopack, обновление плагинов |
