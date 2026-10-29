@@ -12,7 +12,7 @@ use crate::cert::Certificate;
 use crate::csr::KeyStoreInfo;
 use crate::fsutil::{Access, write_atomically};
 use crate::info::cert_info;
-use crate::key::{PrivateKey, PublicKey};
+use crate::key::{KeyError, PrivateKey, PublicKey};
 use crate::keygen::{KeySpec, applet_key_id, key_id};
 use crate::oid;
 use crate::pkcs12::{self, Contents, Pkcs12Error, WriteEntry, WriteOptions};
@@ -154,6 +154,11 @@ fn malformed(e: impl std::fmt::Display) -> KeystoreError {
     KeystoreError::Malformed(e.to_string())
 }
 
+/// Key files hold software keys; a token key cannot be written into one.
+fn not_exportable(_: KeyError) -> KeystoreError {
+    KeystoreError::UnsupportedStorage
+}
+
 /// Writes `key` alone (no certificate) into `<dir>/<PREFIX><keyId>.p12` with the Kalkan
 /// profile, `friendlyName` = `localKeyId` = the key identifier ([`key_id`]), encrypted with
 /// `password`. The prefix follows `spec`: `GOST512_`, `GOSTKNCA_`, `RSA256_` or `RSA_`. An
@@ -211,7 +216,7 @@ fn create_key_file_as(
     let path = dir.join(format!("{}{alias}.p12", spec.file_prefix()));
     let entry = WriteEntry {
         alias: alias.to_owned(),
-        pkcs8_der: std::mem::take(&mut *key.to_pkcs8_der()),
+        pkcs8_der: std::mem::take(&mut *key.to_pkcs8_der().map_err(not_exportable)?),
         cert_der: None,
     };
     store(&path, &[entry], &[], password)?;
@@ -500,7 +505,7 @@ fn rewrite(
         };
         entries.push(WriteEntry {
             alias: stored.alias.clone(),
-            pkcs8_der: std::mem::take(&mut *stored.key.to_pkcs8_der()),
+            pkcs8_der: std::mem::take(&mut *stored.key.to_pkcs8_der().map_err(not_exportable)?),
             cert_der,
         });
     }

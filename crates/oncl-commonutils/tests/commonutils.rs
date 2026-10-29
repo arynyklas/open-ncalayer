@@ -664,12 +664,12 @@ fn keys_are_listed_newest_first_and_expired_ones_may_sign() {
         &[
             WriteEntry {
                 alias: "a-old".to_owned(),
-                pkcs8_der: old.key.to_pkcs8_der().to_vec(),
+                pkcs8_der: old.key.to_pkcs8_der().unwrap().to_vec(),
                 cert_der: Some(old.cert.to_der().unwrap()),
             },
             WriteEntry {
                 alias: "b-new".to_owned(),
-                pkcs8_der: new.key.to_pkcs8_der().to_vec(),
+                pkcs8_der: new.key.to_pkcs8_der().unwrap().to_vec(),
                 cert_der: Some(new.cert.to_der().unwrap()),
             },
         ],
@@ -1311,7 +1311,7 @@ fn page_paths_and_passwords_stay_out_of_the_log() {
     let p12 = write(
         &[WriteEntry {
             alias: e.alias.clone(),
-            pkcs8_der: e.key.to_pkcs8_der().to_vec(),
+            pkcs8_der: e.key.to_pkcs8_der().unwrap().to_vec(),
             cert_der: Some(e.cert.to_der().unwrap()),
         }],
         &[],

@@ -42,6 +42,7 @@ pub(crate) fn another_key(key: &PrivateKey) -> PrivateKey {
         PrivateKey::Rsa(_) => {
             PrivateKey::from_pkcs8_der(OTHER_RSA_KEY, None).expect("fixture RSA key parses")
         }
+        PrivateKey::Token(_) => panic!("issue_cert signs with software keys"),
     };
     let same = match (key, &other) {
         (PrivateKey::Gost(a), PrivateKey::Gost(b)) => a.verifying_key() == b.verifying_key(),
