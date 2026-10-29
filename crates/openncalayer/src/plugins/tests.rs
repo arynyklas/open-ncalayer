@@ -601,7 +601,7 @@ fn a_package_managers_copy_still_checks_and_updates_the_catalog() {
     sandbox.publish(2, vec![old, new]);
 
     // The core does not update itself; the tray's «Проверить обновления» still updates the
-    // plugins from the catalog.
+    // plugins from the catalog, on a thread of its own (the core's status returns at once).
     let pacman = UpdateStatus::PackageManaged("pacman".to_owned());
     let checks = Checks {
         core: UpdaterHandle::Off(pacman.clone()),
@@ -609,7 +609,14 @@ fn a_package_managers_copy_still_checks_and_updates_the_catalog() {
     };
     assert_eq!(checks.check_now(None), pacman);
     assert_eq!(checks.status(), pacman);
-    assert_eq!(sandbox.installed_version(), Some(v("0.2.0")));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while sandbox.installed_version() != Some(v("0.2.0")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the plugin check did not update the plugin"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert_eq!(sandbox.store().state().last_seq[&Channel::Stable], 2);
 }
 
