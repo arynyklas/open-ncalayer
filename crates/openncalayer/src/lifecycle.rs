@@ -18,9 +18,9 @@
 //!   user left them.
 //! - **Uninstall** removes only what is ours (the relay, its config, manifests and
 //!   registry keys, our autostart entry) and puts back the original's entries we disabled
-//!   ([`restore_original`]); `settings.json`, the TLS files and the logs stay. Each choice
-//!   undone leaves the record, which goes once none is left, so an installation after a
-//!   partly failed uninstallation makes again what was undone.
+//!   ([`restore_original`]); `settings.json`, the TLS files and the logs stay. It removes
+//!   the record even if a step failed: every install step is safe to repeat, so a later
+//!   installation makes all of them again.
 //!
 //! Each step runs even if an earlier one failed; the outcome lists every failure. The
 //! record is written after install and update with the choices done; it names this program
@@ -419,14 +419,12 @@ impl Integration {
         };
     }
 
-    /// Undoes each choice, forgetting it in the record once its undo succeeded: a later
-    /// installation makes again whatever is no longer there. The record goes once nothing
-    /// is left in it.
+    /// Undoes each choice and removes the record, whatever failed: every install step is
+    /// safe to repeat, so a later installation makes all of them again, and what an undo
+    /// left behind stays visible in `integration status`.
     fn uninstall(&self) -> Outcome {
-        let prior = self.prior();
-        let mut done = prior.as_ref().map(|r| r.done.clone()).unwrap_or_default();
         let mut outcome = Outcome::default();
-        if outcome.run(Step::UnregisterRelay, || {
+        outcome.run(Step::UnregisterRelay, || {
             let report = nm::uninstall(&self.nm)?;
             if report.has_in_use() {
                 return Err(io::Error::other(
@@ -434,37 +432,19 @@ impl Integration {
                 ));
             }
             failures(&report)
-        }) {
-            done.remove(&Choice::Relay);
-        }
-        if outcome.run(Step::RemoveAutostart, || {
+        });
+        outcome.run(Step::RemoveAutostart, || {
             self.autostart.set(false, &self.executables.program)
-        }) {
-            done.remove(&Choice::Autostart);
-        }
-        if outcome.run(Step::RestoreOriginal, || {
+        });
+        outcome.run(Step::RestoreOriginal, || {
             restore_original(&self.original, &self.journal()).map(drop)
-        }) {
-            done.remove(&Choice::Original);
-        }
-        match prior {
-            Some(prior) if !done.is_empty() => {
-                let record = Record {
-                    done,
-                    failed: false,
-                    ..prior
-                };
-                outcome.run(Step::SaveRecord, || self.write_record(&record));
+        });
+        outcome.run(Step::RemoveRecord, || {
+            match std::fs::remove_file(self.record_path()) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
             }
-            _ => {
-                outcome.run(Step::RemoveRecord, || {
-                    match std::fs::remove_file(self.record_path()) {
-                        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-                        _ => Ok(()),
-                    }
-                });
-            }
-        }
+        });
         outcome
     }
 

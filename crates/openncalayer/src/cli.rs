@@ -905,11 +905,12 @@ fn step_text(step: Step) -> &'static str {
     }
 }
 
-/// Prints how this user's desktop is integrated; exit code 1 if it is not as installing
-/// leaves it ([`integration_ok`]).
+/// Prints how this user's desktop is integrated and what to do about it; exit code 1 if it
+/// is not as installing leaves it ([`integration_ok`]).
 fn integration_status(integration: &Integration) -> ExitCode {
     let exe = std::env::current_exe().unwrap_or_default();
-    let kind = match Installation::detect(&exe) {
+    let installation = Installation::detect(&exe);
+    let kind = match &installation {
         Installation::Velopack => "установлена установщиком (обновляется сама)".to_owned(),
         Installation::PackageManager(manager) => {
             format!("установлена пакетным менеджером {manager} (обновляет он)")
@@ -939,15 +940,8 @@ fn integration_status(integration: &Integration) -> ExitCode {
                     }
                 );
             }
-            if !record.complete() {
-                println!("Установка не закончена: выполните `openncalayer integration install`");
-            } else if record.failed {
-                println!(
-                    "Последнее обновление встраивания не удалось: оно повторится при следующем запуске программы"
-                );
-            }
         }
-        Ok(None) => println!("Не встроена: выполните `openncalayer integration install`"),
+        Ok(None) => println!("Не встроена"),
         Err(e) => println!("Запись об установке не читается: {e}"),
     }
     let relay = nm::status(&integration.nm);
@@ -955,14 +949,17 @@ fn integration_status(integration: &Integration) -> ExitCode {
         "Relay браузеров: {}",
         if relay.is_healthy() {
             "зарегистрирован"
+        } else if lifecycle::relay_registered(&relay) {
+            "повреждён (`openncalayer nm status`)"
         } else {
-            "не зарегистрирован или повреждён (`openncalayer nm status`)"
+            "не зарегистрирован"
         }
     );
-    match integration.autostart.enabled() {
+    let autostart = integration.autostart.enabled();
+    match &autostart {
         Ok(on) => println!(
             "Автозапуск OpenNCALayer: {}",
-            if on {
+            if *on {
                 "включён"
             } else {
                 "выключен"
@@ -977,10 +974,43 @@ fn integration_status(integration: &Integration) -> ExitCode {
             .filter(|e| e.state == EntryState::DisabledByUs)
             .count();
     println!("Записей автозапуска оригинала, отключённых OpenNCALayer: {disabled}");
+    let leftovers = lifecycle::relay_registered(&relay)
+        || matches!(autostart, Ok(true) | Err(_))
+        || disabled > 0;
+    if let Some(advice) = integration_advice(&record, &installation, leftovers) {
+        println!("{advice}");
+    }
     if integration_ok(&record, &relay) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// What to do about the integration, if anything: finish an unfinished installation, have
+/// a failed refresh redone (the daemon of an installed copy does it at its start; a portable
+/// copy never does), or, without a record, install, or remove what a failed uninstallation
+/// left behind (`leftovers`: our relay, our autostart or the original disabled by us).
+fn integration_advice(
+    record: &io::Result<Option<lifecycle::Record>>,
+    installation: &Installation,
+    leftovers: bool,
+) -> Option<&'static str> {
+    match record {
+        Ok(Some(r)) if !r.complete() => {
+            Some("Установка не закончена: выполните `openncalayer integration install`")
+        }
+        Ok(Some(r)) if r.failed && *installation == Installation::Portable => Some(
+            "Последнее обновление встраивания не удалось: выполните `openncalayer integration install` ещё раз",
+        ),
+        Ok(Some(r)) if r.failed => Some(
+            "Последнее обновление встраивания не удалось: оно повторится при следующем запуске программы",
+        ),
+        Ok(Some(_)) => None,
+        Ok(None) | Err(_) if leftovers => Some(
+            "Остались следы встраивания (relay, автозапуск или отключённый оригинал): убрать их — `openncalayer integration uninstall`, встроить заново — `openncalayer integration install`",
+        ),
+        Ok(None) | Err(_) => Some("Встроить: `openncalayer integration install`"),
     }
 }
 
@@ -1071,6 +1101,52 @@ pub fn cms_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integration_advice_points_where_the_state_needs() {
+        let record = |done: &[Choice], failed| {
+            Ok(Some(lifecycle::Record {
+                program: PathBuf::from("/opt/openncalayer"),
+                version: "1.0.0".to_owned(),
+                done: done.iter().copied().collect(),
+                failed,
+            }))
+        };
+        let installed = Installation::Velopack;
+        let portable = Installation::Portable;
+        assert_eq!(
+            integration_advice(&record(&Choice::ALL, false), &installed, true),
+            None
+        );
+        let advice = |r: &io::Result<Option<lifecycle::Record>>, i: &Installation, l: bool| {
+            integration_advice(r, i, l).unwrap().to_owned()
+        };
+        assert!(
+            advice(&record(&[Choice::Relay], false), &installed, true)
+                .contains("integration install")
+        );
+        // A failed refresh is redone by an installed copy's daemon, not by a portable one.
+        assert!(
+            advice(&record(&Choice::ALL, true), &installed, true).contains("при следующем запуске")
+        );
+        let portable_advice = advice(&record(&Choice::ALL, true), &portable, true);
+        assert!(
+            portable_advice.contains("integration install"),
+            "{portable_advice}"
+        );
+        assert!(
+            !portable_advice.contains("при следующем запуске"),
+            "{portable_advice}"
+        );
+        // After a failed uninstallation (no record, leftovers) the advice is to finish it.
+        assert!(advice(&Ok(None), &installed, true).contains("integration uninstall"));
+        assert!(
+            advice(&Err(io::Error::other("bad")), &portable, true)
+                .contains("integration uninstall")
+        );
+        let clean = advice(&Ok(None), &installed, false);
+        assert!(clean.contains("integration install") && !clean.contains("uninstall"));
+    }
 
     #[test]
     fn integration_status_fails_until_installing_is_done() {

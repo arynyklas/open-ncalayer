@@ -403,8 +403,8 @@ fn a_failed_step_fails_the_event_and_the_others_still_run() {
     assert!(outcome.succeeded(), "{outcome:?}");
     assert_eq!(s.stored(), ["NCALayer.lnk", "ncalayer.desktop"]);
 
-    // Uninstall with a broken autostart: the relay and the original are still handled;
-    // the record keeps only what could not be undone.
+    // Uninstall with a broken autostart: the relay and the original are still handled, and
+    // the record goes anyway (every install step is safe to repeat).
     i.autostart = Box::new(Broken);
     let outcome = i.run(Event::Uninstall);
     assert_eq!(
@@ -413,10 +413,10 @@ fn a_failed_step_fails_the_event_and_the_others_still_run() {
     );
     assert!(!i.nm.relay().exists());
     assert!(s.shortcut().exists());
-    assert_eq!(
-        i.record().unwrap().unwrap().done,
-        [Choice::Autostart].into()
-    );
+    assert_eq!(i.record().unwrap(), None);
+    // Reinstated for the update below, which needs a record to keep.
+    i.autostart = Box::new(FileAutostart::desktop_entry(&s.autostart_paths()));
+    assert!(i.run(Event::Install).succeeded());
 
     // An update whose autostart cannot be read fails, and keeps the old record.
     let outcome = s.integration("bin2", "2.0.0");
@@ -454,18 +454,40 @@ fn installing_after_a_failed_uninstall_integrates_again() {
     assert!(!s.shortcut().exists(), "the original is disabled again");
     assert!(i.record().unwrap().unwrap().complete());
 
-    // An uninstallation that undoes everything removes the record.
+    // An uninstallation, failed or not, removes the record.
     assert!(i.run(Event::Uninstall).succeeded());
     assert_eq!(i.record().unwrap(), None);
-    // After a failed uninstallation, a second one that finishes the rest removes the
-    // record too.
+}
+
+#[test]
+fn installing_after_a_partial_restore_disables_the_original_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Sandbox::new(dir.path());
+    s.original_installed();
+    let i = s.integration("bin", "1.0.0");
     assert!(i.run(Event::Install).succeeded());
-    i.autostart = Box::new(Broken);
-    assert!(!i.run(Event::Uninstall).succeeded());
-    i.autostart = Box::new(FileAutostart::desktop_entry(&s.autostart_paths()));
-    i.autostart.set(false, &i.executables.program).unwrap();
-    assert!(i.run(Event::Uninstall).succeeded());
+    assert!(!s.shortcut().exists());
+
+    // The restore puts the shortcut back, then cannot write the desktop entry: the XDG
+    // autostart directory is a file now.
+    let autostart_dir = s.desktop_entry().parent().unwrap().to_owned();
+    fs::remove_dir_all(&autostart_dir).unwrap();
+    fs::write(&autostart_dir, b"not a directory").unwrap();
+    let outcome = i.run(Event::Uninstall);
+    assert_eq!(
+        outcome.failures().map(|(step, _)| step).collect::<Vec<_>>(),
+        [Step::RestoreOriginal]
+    );
+    assert!(s.shortcut().exists(), "the shortcut is back");
     assert_eq!(i.record().unwrap(), None);
+
+    // A fresh installation disables the original again.
+    fs::remove_file(&autostart_dir).unwrap();
+    let outcome = i.run(Event::Install);
+    assert!(outcome.succeeded(), "{outcome:?}");
+    assert!(steps(&outcome).contains(&Step::DisableOriginal));
+    assert!(!s.shortcut().exists(), "the original is disabled again");
+    assert!(i.record().unwrap().unwrap().complete());
 }
 
 #[test]
