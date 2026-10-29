@@ -589,12 +589,13 @@ mod tests {
         );
     }
 
-    /// [`tst_info`] of a DER `TSTInfo` with the basics policy and hash, the imprint of
-    /// [`tst`] and the nonce INTEGER whose contents octets are `nonce`.
-    fn parsed(nonce: &[u8]) -> TstInfo {
+    /// DER `TSTInfo` with the basics policy and hash, the imprint of [`tst`] and a nonce
+    /// INTEGER with the contents octets `nonce` (`IntRef::new` drops only redundant leading
+    /// `ff` octets).
+    fn tst_info_der(nonce: &[u8]) -> Vec<u8> {
         let p = TsaProfile::basics_default();
         let imprint = [7; 64];
-        let der = asn1::TstInfo {
+        asn1::TstInfo {
             version: 1,
             policy: p.policy,
             message_imprint: asn1::MessageImprint {
@@ -613,8 +614,12 @@ mod tests {
             extensions: None,
         }
         .to_der()
-        .unwrap();
-        tst_info(&der).unwrap()
+        .unwrap()
+    }
+
+    /// [`tst_info`] of [`tst_info_der`].
+    fn parsed(nonce: &[u8]) -> TstInfo {
+        tst_info(&tst_info_der(nonce)).unwrap()
     }
 
     #[test]
@@ -668,5 +673,22 @@ mod tests {
         assert_eq!(parsed(&[0x80]).nonce, Some(vec![0x80]));
         assert_eq!(parsed(&[0xff]).nonce, Some(vec![0xff]));
         assert_eq!(parsed(&[0]).nonce, Some(vec![0]));
+    }
+
+    #[test]
+    fn non_minimal_nonce_is_malformed() {
+        // A redundant 00 before a clear top bit: `IntRef::new` keeps it.
+        let der = tst_info_der(&[0, 1]);
+        assert!(der.windows(4).any(|w| w == [0x02, 0x02, 0x00, 0x01]));
+        assert!(matches!(tst_info(&der), Err(TspError::Malformed(_))));
+
+        // A redundant ff before a set top bit: `IntRef::new` would drop it, so the
+        // encoding of a placeholder nonce is patched.
+        let mut der = tst_info_der(&[0x12, 0x34]);
+        let placeholder: [u8; 4] = [0x02, 0x02, 0x12, 0x34];
+        let at = der.windows(4).position(|w| w == placeholder).unwrap();
+        assert!(!der[at + 1..].windows(4).any(|w| w == placeholder));
+        der[at + 2..at + 4].copy_from_slice(&[0xff, 0x80]);
+        assert!(matches!(tst_info(&der), Err(TspError::Malformed(_))));
     }
 }
