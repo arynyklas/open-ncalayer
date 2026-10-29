@@ -12,30 +12,35 @@ use std::time::{Duration, Instant, SystemTime};
 
 use clap::Parser;
 use oncl_accessory::UiRequest;
-use oncl_basics::{Locale, Prompter};
+use oncl_basics::{Locale, OcspCache, Prompter, RecentPathStore};
 use oncl_desktop::Settings;
 use oncl_desktop::port_owner;
 use oncl_ipc::IpcListener;
 use oncl_pki::http::HttpTransport;
+use oncl_pki::tsp::TsaProfile;
+use oncl_plugin::{Engine, HostServices, PluginModules};
 use oncl_protocol::Registry;
 use oncl_tls::{SelftestReports, TlsFiles};
 use oncl_ui::settings_view::Updates;
 use oncl_ui::{
-    AboutInfo, DesktopWindow, DesktopWindows, Notification, SlintPrompter, StopOriginal,
-    TrayCommand, TrayHandle, TrayState,
+    AboutInfo, DesktopWindow, DesktopWindows, Notification, PluginsServices, SlintPrompter,
+    StopOriginal, TrayCommand, TrayHandle, TrayState,
 };
 use oncl_update::{Flavor, Version, embedded_keys};
 use openncalayer::cli::{self, Cli, Command};
 use openncalayer::notices::TrayStatus;
+use openncalayer::plugins::window::{WindowInstallUi, WindowServices};
+use openncalayer::plugins::{PluginConfig, PluginNotice, PluginService};
 use openncalayer::renewal::{self, RenewalCheck};
 use openncalayer::update::installer::VelopackInstaller;
 use openncalayer::update::{
-    self, Host, Notice, RollBack, Startup, Updater, UpdaterConfig, UpdaterHandle,
+    self, Checks, Host, Notice, RollBack, Startup, Updater, UpdaterConfig, UpdaterHandle,
 };
 use openncalayer::wss::{Listening, PortState, WATCH_EVERY, Watcher, Wss};
 use openncalayer::{
-    JsonSettings, LiveProxyTransport, Paths, ServerConfig, build_registry, desktop, hold_requests,
-    listen_port, load_settings, release_requests, requests_idle, serve, serve_ipc,
+    JsonSettings, LiveProxyTransport, Paths, Plugins, ServerConfig, build_registry,
+    builtin_modules, desktop, hold_requests, listen_port, load_settings, release_requests,
+    requests_idle, serve, serve_ipc,
 };
 use time::OffsetDateTime;
 use tokio::runtime::Runtime;
@@ -239,12 +244,20 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     let windows = scripted.is_none();
     let settings = load_settings(&daemon.paths.settings());
     let locale = settings.ui_locale();
+    let prompter: Arc<dyn Prompter> = scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new()));
+    let recent: Arc<dyn RecentPathStore> = Arc::new(JsonSettings::new(daemon.paths.settings()));
+    let (plugins, plugin_modules) = start_plugins(&daemon.paths, &prompter, &recent, &http);
     let registry = build_registry(
-        scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new())),
-        Arc::new(JsonSettings::new(daemon.paths.settings())),
+        prompter,
+        recent,
         Arc::clone(&http) as _,
         Arc::new(open_requested_window),
+        plugin_modules,
     );
+    let checks = Checks {
+        core: updates.clone(),
+        plugins: plugins.as_ref().ok().cloned(),
+    };
     // A failure only a tray lets the daemon live with.
     let (opened, waits_for_tray) = match daemon.wss {
         Ok(opened) => (Ok(opened), None),
@@ -259,7 +272,7 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             status.tray_state(),
             Arc::clone(&stop),
             Arc::clone(&wss),
-            updates.clone(),
+            checks.clone(),
             waits_for_tray.is_some(),
         )
         .map(Rc::new)
@@ -303,11 +316,11 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         oncl_ui::set_desktop_windows(desktop_windows(
             &daemon.paths,
             locale,
-            registry.names(),
             on_settings_saved(http, tray.as_ref().map_or_else(Weak::new, Rc::downgrade)),
             Arc::clone(&reports),
             Arc::clone(&wss),
-            updates.clone(),
+            checks,
+            Box::new(WindowServices(plugins)),
         ));
         if wss.off().is_some() {
             let watched = Arc::clone(&wss);
@@ -470,12 +483,75 @@ fn exit_code(server: thread::Result<io::Result<()>>) -> ExitCode {
 fn open_requested_window(window: UiRequest) {
     match window {
         UiRequest::Settings => oncl_ui::open_window(DesktopWindow::Settings),
-        UiRequest::BundleManager => oncl_ui::open_window(DesktopWindow::Modules),
-        UiRequest::InstallBundle => {
-            post_to_tray(|status| status.bundle_notification(Instant::now()));
+        UiRequest::BundleManager => oncl_ui::open_window(DesktopWindow::Plugins),
+        UiRequest::InstallBundle { symname, origin } => {
+            post_to_tray(move |status| {
+                status.bundle_notification(&symname, &origin, Instant::now())
+            });
         }
         UiRequest::KeystoreExplorer | UiRequest::AdesSigning | UiRequest::AdesValidation => {
             tracing::info!(?window, "window requested; not available");
+        }
+    }
+}
+
+/// The plugins: their modules, loaded with the dialogs of `prompter`, the network of `http`
+/// and an OCSP memory shared with the basics module; their service, which installs and
+/// updates them from the catalog (or why they are off: logged, shown in their window). A
+/// change is told in the tray and refreshes the plugin window.
+fn start_plugins(
+    paths: &Paths,
+    prompter: &Arc<dyn Prompter>,
+    recent: &Arc<dyn RecentPathStore>,
+    http: &Arc<LiveProxyTransport>,
+) -> (Result<Arc<PluginService>, String>, Option<Plugins>) {
+    let ocsp_cache = Arc::new(OcspCache::new());
+    let settings = paths.settings();
+    let services = HostServices {
+        prompter: Arc::clone(prompter),
+        recent: Arc::clone(recent),
+        http: Arc::clone(http) as _,
+        ocsp_cache: Arc::clone(&ocsp_cache),
+        tsa: TsaProfile::basics_default(),
+        clock: OffsetDateTime::now_utc,
+        // The language the settings window saved last.
+        locale: Arc::new(move || load_settings(&settings).ui_locale()),
+    };
+    let modules = Arc::new(PluginModules::new(
+        Arc::new(Engine::new()),
+        services,
+        builtin_modules(),
+    ));
+    let keys = embedded_keys().unwrap_or_else(|e| {
+        tracing::error!(error = %e, "the update keys are unusable: no plugin catalog");
+        Vec::new()
+    });
+    let started = PluginService::start(PluginConfig {
+        data_dir: paths.data.clone(),
+        settings: paths.settings(),
+        keys,
+        base: update::index_base(),
+        core: Version::parse(env!("CARGO_PKG_VERSION")).expect("the package version"),
+        http: Arc::clone(http) as _,
+        modules: Arc::clone(&modules),
+        ui: Arc::new(WindowInstallUi),
+        notify: Arc::new(|notice: PluginNotice| {
+            post_to_tray(move |status| status.plugin_notification(&notice, Instant::now()));
+            oncl_ui::refresh_plugins_window();
+        }),
+    });
+    match started {
+        Ok(service) => {
+            let plugins = Plugins {
+                modules,
+                bundles: Arc::clone(&service) as _,
+                ocsp_cache,
+            };
+            (Ok(service), Some(plugins))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "the plugins' data cannot be opened: plugins are off");
+            (Err(e.to_string()), None)
         }
     }
 }
@@ -520,19 +596,21 @@ fn start_renewal(files: TlsFiles, wss: Arc<Wss>) {
     }
 }
 
-/// What the settings, TLS wizard and About windows show and change. A save runs
+/// What the settings, TLS wizard, About and plugin windows show and change. A save runs
 /// `on_saved`. A certificate the wizard saves goes to `wss` at once: served, or wss started
 /// with it, or kept for when the port is free or for the next start ([`Wss::apply_saved`]).
-/// The settings window shows the `updates` and checks for them.
+/// The settings window shows the `updates` and checks for them. About lists the built-in
+/// modules; the plugins' are in the plugin window.
 fn desktop_windows(
     paths: &Paths,
     locale: Locale,
-    modules: Vec<String>,
     on_saved: Box<dyn Fn(&Settings)>,
     reports: Arc<SelftestReports>,
     wss: Arc<Wss>,
-    updates: UpdaterHandle,
+    updates: Checks,
+    plugins: Box<dyn PluginsServices>,
 ) -> DesktopWindows {
+    let modules = builtin_modules();
     let exe = std::env::current_exe().unwrap_or_else(|e| {
         tracing::warn!(error = %e, "the program's path is unknown; autostart cannot be set");
         PathBuf::new()
@@ -561,6 +639,7 @@ fn desktop_windows(
             });
             look_for_tray(&saved_to);
         }),
+        plugins,
         on_saved,
     }
 }
@@ -596,7 +675,7 @@ fn start_tray(
     state: TrayState,
     stop: Arc<Notify>,
     wss: Arc<Wss>,
-    updates: UpdaterHandle,
+    updates: Checks,
     needed: bool,
 ) -> Option<TrayHandle> {
     let tray = oncl_ui::start_tray(locale, move |command| match command {
@@ -608,6 +687,7 @@ fn start_tray(
         TrayCommand::Settings => oncl_ui::open_window(DesktopWindow::Settings),
         TrayCommand::About => oncl_ui::open_window(DesktopWindow::About),
         TrayCommand::TlsWizard => oncl_ui::open_window(DesktopWindow::TlsWizard),
+        TrayCommand::Plugins => oncl_ui::open_window(DesktopWindow::Plugins),
         TrayCommand::StopOriginal => offer_to_stop_original(&wss),
         TrayCommand::CheckUpdates => {
             let updates = updates.clone();

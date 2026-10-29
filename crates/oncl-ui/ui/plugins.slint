@@ -1,0 +1,229 @@
+// «Плагины»: the catalog's state, the installed plugins (turn off or on, remove after a
+// question), the plugins the catalog offers (install), a plugin from a file, and a new
+// download of the catalog. The rows' texts are composed in Rust.
+
+import { Button, ScrollView, VerticalBox } from "std-widgets.slint";
+
+export struct InstalledRow {
+    // The name and version.
+    title: string,
+    // What it replaces, where it came from.
+    details: string,
+    // On, off, withdrawn, or the error.
+    state: string,
+    error: bool,
+    // Withdrawn plugins cannot be turned on: no button.
+    can-toggle: bool,
+    enabled: bool,
+}
+
+export struct AvailableRow {
+    title: string,
+    details: string,
+    // «Нужен сайту …», or empty.
+    needed: string,
+}
+
+export component PluginsWindow inherits Window {
+    title: @tr("Plugins");
+    min-width: 600px;
+    min-height: 500px;
+
+    in property <string> catalog;
+    in property <bool> catalog-error;
+    in property <[InstalledRow]> installed;
+    in property <[AvailableRow]> available;
+    // The outcome of the last action, and whether it failed.
+    in property <string> message;
+    in property <bool> message-is-error;
+    // An action runs: the buttons wait.
+    in property <bool> busy;
+    // The installed row whose removal is asked about; -1: none.
+    in-out property <int> removing: -1;
+    in property <string> remove-question;
+
+    callback toggle(int);
+    callback remove(int);
+    callback confirm-remove(int);
+    callback install(int);
+    callback install-file();
+    callback refresh();
+    callback dismiss();
+
+    VerticalBox {
+        Text {
+            text: root.catalog;
+            wrap: word-wrap;
+            color: root.catalog-error ? #c42b1c : #888888;
+        }
+
+        Text {
+            text: @tr("Installed");
+            font-weight: 700;
+        }
+
+        if root.installed.length == 0: Text {
+            text: @tr("No plugins are installed.");
+            color: #888888;
+        }
+
+        ScrollView {
+            vertical-stretch: 1;
+            min-height: 120px;
+            VerticalLayout {
+                spacing: 8px;
+                alignment: start;
+                for row[i] in root.installed: HorizontalLayout {
+                    spacing: 8px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        Text {
+                            text: row.title;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                        }
+
+                        Text {
+                            text: row.details;
+                            wrap: word-wrap;
+                        }
+
+                        Text {
+                            text: row.state;
+                            wrap: word-wrap;
+                            color: row.error ? #c42b1c : #888888;
+                        }
+                    }
+
+                    if row.can-toggle: Button {
+                        text: row.enabled ? @tr("Turn off") : @tr("Turn on");
+                        enabled: !root.busy;
+                        clicked => {
+                            root.toggle(i);
+                        }
+                    }
+
+                    Button {
+                        text: @tr("Remove");
+                        enabled: !root.busy;
+                        clicked => {
+                            root.remove(i);
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.removing >= 0: HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: root.remove-question;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+
+            Button {
+                text: @tr("Remove");
+                enabled: !root.busy;
+                clicked => {
+                    root.confirm-remove(root.removing);
+                }
+            }
+
+            Button {
+                text: @tr("Cancel");
+                primary: true;
+                clicked => {
+                    root.removing = -1;
+                }
+            }
+        }
+
+        Text {
+            text: @tr("Available in the catalog");
+            font-weight: 700;
+        }
+
+        if root.available.length == 0: Text {
+            text: @tr("The catalog offers no other plugins.");
+            color: #888888;
+        }
+
+        ScrollView {
+            vertical-stretch: 1;
+            min-height: 100px;
+            VerticalLayout {
+                spacing: 8px;
+                alignment: start;
+                for row[i] in root.available: HorizontalLayout {
+                    spacing: 8px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        Text {
+                            text: row.title;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                        }
+
+                        Text {
+                            text: row.details;
+                            wrap: word-wrap;
+                        }
+
+                        if row.needed != "": Text {
+                            text: row.needed;
+                            wrap: word-wrap;
+                            color: #1a73e8;
+                        }
+                    }
+
+                    Button {
+                        text: @tr("Install…");
+                        enabled: !root.busy;
+                        clicked => {
+                            root.install(i);
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.message != "": Text {
+            text: root.message;
+            wrap: word-wrap;
+            color: root.message-is-error ? #c42b1c : #2e7d32;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: @tr("Install from file…");
+                enabled: !root.busy;
+                clicked => {
+                    root.install-file();
+                }
+            }
+
+            Button {
+                text: @tr("Refresh the catalog");
+                enabled: !root.busy;
+                clicked => {
+                    root.refresh();
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            Button {
+                text: @tr("Close");
+                enabled: !root.busy;
+                clicked => {
+                    root.dismiss();
+                }
+            }
+        }
+    }
+}

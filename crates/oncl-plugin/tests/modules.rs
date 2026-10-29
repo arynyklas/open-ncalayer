@@ -259,6 +259,21 @@ fn other(modules: &str) -> Package {
 }
 
 #[test]
+fn check_does_not_load() {
+    let modules = modules_with(services(), Vec::new());
+    modules.check(&example()).unwrap();
+    assert!(modules.loaded().is_empty());
+    assert!(modules.module(MODULE).is_none());
+    modules.load(example()).unwrap();
+    // Its own module again: fine; another plugin's taking it: not.
+    modules.check(&example()).unwrap();
+    assert!(matches!(
+        modules.check(&other(&format!("\"{MODULE}\""))),
+        Err(LoadError::ModuleTaken { .. })
+    ));
+}
+
+#[test]
 fn two_plugins_same_module_conflict() {
     let modules = loaded();
     assert_eq!(

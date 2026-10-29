@@ -39,6 +39,8 @@ pub enum TrayCommand {
     Settings,
     /// «Сертификат для браузера…»: the TLS wizard.
     TlsWizard,
+    /// «Плагины…»: the plugin window.
+    Plugins,
     /// «Журнал»: the log directory in the file manager.
     OpenLogs,
     /// «О программе».
@@ -55,9 +57,10 @@ pub enum TrayCommand {
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 impl TrayCommand {
     /// Every command, for [`TrayCommand::from_id`].
-    const ALL: [TrayCommand; 7] = [
+    const ALL: [TrayCommand; 8] = [
         TrayCommand::Settings,
         TrayCommand::TlsWizard,
+        TrayCommand::Plugins,
         TrayCommand::OpenLogs,
         TrayCommand::About,
         TrayCommand::StopOriginal,
@@ -70,6 +73,7 @@ impl TrayCommand {
         match self {
             TrayCommand::Settings => "settings",
             TrayCommand::TlsWizard => "tls-wizard",
+            TrayCommand::Plugins => "plugins",
             TrayCommand::OpenLogs => "open-logs",
             TrayCommand::About => "about",
             TrayCommand::StopOriginal => "stop-original",
@@ -343,7 +347,7 @@ impl TrayModel {
 
     fn menu(&self) -> Vec<MenuRow> {
         let t = self.texts;
-        let mut rows = Vec::with_capacity(8);
+        let mut rows = Vec::with_capacity(9);
         if self.state.stop_original {
             rows.extend([
                 MenuRow::Item(TrayCommand::StopOriginal, t.stop_original),
@@ -353,6 +357,7 @@ impl TrayModel {
         rows.extend([
             MenuRow::Item(TrayCommand::Settings, t.settings),
             MenuRow::Item(TrayCommand::TlsWizard, t.tls_wizard),
+            MenuRow::Item(TrayCommand::Plugins, t.plugins),
             MenuRow::Item(TrayCommand::OpenLogs, t.logs),
             MenuRow::Item(TrayCommand::CheckUpdates, t.check_updates),
             MenuRow::Item(TrayCommand::About, t.about),
@@ -405,6 +410,7 @@ struct Texts {
     stop_original: &'static str,
     settings: &'static str,
     tls_wizard: &'static str,
+    plugins: &'static str,
     logs: &'static str,
     check_updates: &'static str,
     about: &'static str,
@@ -418,6 +424,7 @@ impl Texts {
                 stop_original: "Түпнұсқаны тоқтату…",
                 settings: "Баптаулар…",
                 tls_wizard: "Браузерге арналған сертификат…",
+                plugins: "Плагиндер…",
                 logs: "Журнал",
                 check_updates: "Жаңартуларды тексеру",
                 about: "Бағдарлама туралы",
@@ -427,6 +434,7 @@ impl Texts {
                 stop_original: "Остановить оригинал…",
                 settings: "Настройки…",
                 tls_wizard: "Сертификат для браузера…",
+                plugins: "Плагины…",
                 logs: "Журнал",
                 check_updates: "Проверить обновления",
                 about: "О программе",
@@ -436,6 +444,7 @@ impl Texts {
                 stop_original: "Stop the original…",
                 settings: "Settings…",
                 tls_wizard: "Certificate for browsers…",
+                plugins: "Plugins…",
                 logs: "Log",
                 check_updates: "Check for updates",
                 about: "About",
@@ -478,6 +487,7 @@ mod tests {
             [
                 MenuRow::Item(TrayCommand::Settings, "Настройки…"),
                 MenuRow::Item(TrayCommand::TlsWizard, "Сертификат для браузера…"),
+                MenuRow::Item(TrayCommand::Plugins, "Плагины…"),
                 MenuRow::Item(TrayCommand::OpenLogs, "Журнал"),
                 MenuRow::Item(TrayCommand::CheckUpdates, "Проверить обновления"),
                 MenuRow::Item(TrayCommand::About, "О программе"),
@@ -498,7 +508,7 @@ mod tests {
                     MenuRow::Separator => None,
                 })
                 .collect();
-            assert_eq!(labels.len(), 6, "{locale:?}");
+            assert_eq!(labels.len(), 7, "{locale:?}");
             assert!(labels.iter().all(|l| !l.is_empty()), "{locale:?}");
         }
         assert_eq!(

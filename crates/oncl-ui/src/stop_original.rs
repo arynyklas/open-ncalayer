@@ -318,6 +318,7 @@ mod tests {
             settings: services(root, FakeOriginal::default()),
             about: AboutInfo::default(),
             tls: crate::tls_wizard::fakes::services(root, Vec::new(), None),
+            plugins: Box::new(crate::plugins_view::fakes::FakePlugins::default()),
             on_saved: Box::new(|_: &oncl_desktop::Settings| {}),
         });
         windows::desktop().unwrap()

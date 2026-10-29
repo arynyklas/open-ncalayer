@@ -166,9 +166,20 @@ The `kz.gov.pki.knca.applet.Applet` module (legacy; it answers requests without 
 
 #### accessory
 
-- `getBundles` lists the original's framework (`org.apache.felix.framework`) and its core bundles whose functions OpenNCALayer implements, with the versions of the original's current update manifest, and OpenNCALayer itself (`io.github.arynyklas.openncalayer`). The original lists every installed bundle, other vendors' modules included.
-- `installBundle` with a non-empty `symname` and an `Origin` header always answers `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED`, without a dialog: there are no ports of other vendors' modules until P11 (D21). For a module it can install, the original asks the user to confirm first. The request is logged; since P5 the OpenNCALayer icon also shows a notification linking to the plugin list `https://arynyklas.github.io/open-ncalayer/plugins/` (at most once in 10 minutes; the page itself arrives in P12). Without an `Origin` header the answer is `org.json.JSONException: JSONObject["origin"] is not a string.`, as from the original.
-- `showBundleManager` opens the About window on its Modules tab, `showSettings` OpenNCALayer's settings window (the original's shows its proxy settings; OpenNCALayer's proxy is in the same window). `showKeystoreExplorer`, `showAdesSigning` and `showAdesValidation` open no window: the request is only logged. All five answer `{}`, as the original does.
+- `getBundles` lists the original's framework (`org.apache.felix.framework`) and its core bundles whose functions OpenNCALayer implements, with the versions of the original's current update manifest, OpenNCALayer itself (`io.github.arynyklas.openncalayer`), and the original bundles the enabled plugins port. The original lists every installed bundle, other vendors' modules included.
+- `installBundle` looks in the plugin catalog for a plugin, not installed, porting the bundle `symname`: if there is one it answers `NONE` at once and asks the user to install it, as the original does; otherwise `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED`, and the icon shows a notification linking to the plugin registry `https://arynyklas.github.io/open-ncalayer/plugins/` (at most once in 10 minutes). Without an `Origin` header the answer is `org.json.JSONException: JSONObject["origin"] is not a string.`, as from the original. Details: [Plugins](#plugins).
+- `showBundleManager` opens the Plugins window, `showSettings` OpenNCALayer's settings window (the original's shows its proxy settings; OpenNCALayer's proxy is in the same window). `showKeystoreExplorer`, `showAdesSigning` and `showAdesValidation` open no window: the request is only logged. All five answer `{}`, as the original does.
+
+### Plugins
+
+A plugin is a WebAssembly module serving its own `module` names (a port of a third-party module of the original NCALayer, for example) in a sandbox: it sees only the request and the page's `origin`, and reaches keys, windows, files and the network only through the capabilities its manifest declares. Its window is «Плагины…» (Plugins…) in the icon's menu (or `showBundleManager` from a page): the installed plugins with their version, source and state (turn off/on, remove), those available in the catalog (install), install from a file (`*.onclp`), and refresh the catalog.
+
+- **From the catalog.** The catalog is part of OpenNCALayer's signed update index; a package is checked against the index's size, sha256 and manifest. Before installing, the «Установка плагина» (Plugin installation) window shows who asks, what the plugin replaces and what it will be able to do: choose your key and sign with it, show windows, open and save files you choose, reach the listed addresses.
+- **From a file.** Allowed, with a warning that the plugin is not in the catalog and has not been reviewed by the maintainer. Such a plugin is marked local and never updated by the catalog.
+- **Automatic updates.** Catalog plugins update themselves without a restart while updates are on in the settings; a revoked version with nothing to replace it is turned off. A request in progress finishes on the old version. «Проверить сейчас» (Check now) and refreshing the catalog download it even with updates off.
+- Each page connection (a WebSocket or an extension socket) gets its own plugin instance. A page calling a module of a catalog plugin that is not installed gets `MODULE_NOT_FOUND`, and the icon suggests installing it. A build without the index keys has no catalog: install from a file only.
+
+Design: [`docs/design/plugins.md`](docs/design/plugins.md) (Russian).
 
 ## Desktop
 
@@ -178,6 +189,7 @@ The `kz.gov.pki.knca.applet.Applet` module (legacy; it answers requests without 
 - «Настройки…» (Settings…);
 - «Сертификат для браузера…» (Browser certificate…) — the TLS wizard;
 - «Журнал» (Log) — opens the `logs/` directory in the file manager;
+- «Плагины…» (Plugins…) — the plugin window (see [Plugins](#plugins));
 - «О программе» (About);
 - «Выход» (Quit) — stops the servers and ends the process. Closing a window does not end it.
 
@@ -230,8 +242,8 @@ The About window: version, build commit, the Apache-2.0 licence, `Copyright 2026
 
 ### P5 differences from the original
 
-- `showSettings` opens OpenNCALayer's settings (language, autostart, proxy, the original, the extension), not the original's proxy window; `showBundleManager` a list of modules without install or removal.
-- `installBundle` installs no third-party modules (D21): the icon shows a notification linking to the plugin list.
+- `showSettings` opens OpenNCALayer's settings (language, autostart, proxy, the original, the extension), not the original's proxy window; `showBundleManager` the Plugins window.
+- `installBundle` installs only plugins of the OpenNCALayer catalog (module ports), not OSGi bundles.
 - Proxy: no SOCKS and no `https://` proxies; no proxy by default, even if the system has one.
 - The certificate for `wss` is issued on the user's computer and installed into trust stores only by a wizard button (D5); the original ships its own certificate.
 - The original's autostart is disabled by moving it aside, not deleting it; `HKLM\…\Run` is not changed without administrator rights.

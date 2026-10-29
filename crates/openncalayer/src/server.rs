@@ -10,12 +10,12 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use oncl_accessory::{Accessory, UiCallback};
+use oncl_accessory::{Accessory, Bundles, UiCallback};
 use oncl_applet::Applet;
-use oncl_basics::{Basics, Prompter, RecentPathStore};
+use oncl_basics::{Basics, OcspCache, Prompter, RecentPathStore};
 use oncl_commonutils::CommonUtils;
 use oncl_pki::http::HttpTransport;
-use oncl_protocol::{HEARTBEAT, Registry, greeting};
+use oncl_protocol::{DynamicModules, HEARTBEAT, Registry, greeting};
 use oncl_tls::SelftestReports;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -108,34 +108,85 @@ impl ServerConfig {
     }
 }
 
+/// The plugins of the daemon, served after its own modules.
+pub struct Plugins {
+    /// The plugins' modules.
+    pub modules: Arc<dyn DynamicModules>,
+    /// What `getServices`, `getBundles` and `installBundle` see of them.
+    pub bundles: Arc<dyn Bundles>,
+    /// The OCSP memory the plugins' key choice shares with `kz.gov.pki.knca.basics`.
+    pub ocsp_cache: Arc<OcspCache>,
+}
+
+/// No plugins: `getServices` and `getBundles` list the built-in ones only, and
+/// `installBundle` finds nothing to install.
+struct NoPlugins;
+
+impl Bundles for NoPlugins {
+    fn services(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn bundles(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    fn request_install(&self, _: &str, _: &str) -> bool {
+        false
+    }
+}
+
+/// The names of the built-in modules of [`build_registry`], which no plugin may take.
+pub fn builtin_modules() -> Vec<String> {
+    let mut names = [
+        oncl_basics::MODULE_NAME,
+        oncl_commonutils::MODULE_NAME,
+        oncl_applet::MODULE_NAME,
+        oncl_accessory::MODULE_NAME,
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    names.sort_unstable();
+    names
+}
+
 /// The module registry of the daemon: `kz.gov.pki.knca.basics`,
 /// `kz.gov.pki.knca.commonUtils` and `kz.gov.pki.knca.applet.Applet` (the default module),
 /// which share the dialogs of `prompter` and reach the NCA time-stamping and OCSP services
 /// through `http`, and `kz.gov.pki.ncalayerservices.accessory`, which asks `ui` to open the
-/// daemon's windows.
+/// daemon's windows; then the modules of `plugins`, if any.
 pub fn build_registry(
     prompter: Arc<dyn Prompter>,
     recent: Arc<dyn RecentPathStore>,
     http: Arc<dyn HttpTransport>,
     ui: UiCallback,
+    plugins: Option<Plugins>,
 ) -> Registry {
     let mut registry = Registry::default();
     let common_utils = CommonUtils::new(Arc::clone(&prompter), Arc::clone(&http));
     let applet = Applet::new(Arc::clone(&prompter));
-    registry.register(
-        oncl_basics::MODULE_NAME,
-        Arc::new(Basics::new(prompter, recent, http)),
-    );
+    let mut basics = Basics::new(prompter, recent, http);
+    if let Some(plugins) = &plugins {
+        basics = basics.with_ocsp_cache(Arc::clone(&plugins.ocsp_cache));
+    }
+    registry.register(oncl_basics::MODULE_NAME, Arc::new(basics));
     registry.register(oncl_commonutils::MODULE_NAME, Arc::new(common_utils));
     registry.register(oncl_applet::MODULE_NAME, Arc::new(applet));
-    // Registered last: its `getServices` snapshot must see every other module.
+    // Registered last: its built-in modules are every other one and itself.
     let mut services = registry.names();
     services.push(oncl_accessory::MODULE_NAME.to_owned());
     services.sort_unstable();
+    let bundles: Arc<dyn Bundles> = match &plugins {
+        Some(plugins) => Arc::clone(&plugins.bundles),
+        None => Arc::new(NoPlugins),
+    };
     registry.register(
         oncl_accessory::MODULE_NAME,
-        Arc::new(Accessory::new(services, ui)),
+        Arc::new(Accessory::new(services, bundles, ui)),
     );
+    if let Some(plugins) = plugins {
+        registry.set_dynamic(plugins.modules);
+    }
     registry
 }
 

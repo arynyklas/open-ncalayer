@@ -4136,6 +4136,7 @@ dependencies = [
  "oncl-desktop",
  "oncl-ipc",
  "oncl-pki",
+ "oncl-plugin",
  "oncl-protocol",
  "oncl-registry",
  "oncl-testkit",

@@ -100,6 +100,18 @@ impl PluginModules {
         }
     }
 
+    /// Whether `package` would load ([`PluginModules::load`]), without loading it.
+    ///
+    /// # Errors
+    ///
+    /// What [`PluginModules::load`] would fail with.
+    pub fn check(&self, package: &Package) -> Result<(), LoadError> {
+        let manifest = &package.manifest;
+        let compiled = self.inner.engine.compile(manifest, &package.wasm)?;
+        drop(compiled.instantiate(&self.inner.services, context(manifest, 0))?);
+        self.inner.free_modules(&self.inner.lock(), manifest)
+    }
+
     /// Loads `package` as the new generation of its plugin: compiled, instantiated once
     /// (the ABI version), its modules checked against the built-in ones and those of other
     /// plugins. A plugin of the same id loaded before is replaced; its idle instances go.
@@ -114,22 +126,7 @@ impl PluginModules {
         drop(compiled.instantiate(&self.inner.services, context(&manifest, 0))?);
         let mut garbage = Vec::new();
         let mut state = self.inner.lock();
-        for module in &manifest.modules {
-            if self.inner.builtin.contains(module) {
-                return Err(LoadError::ModuleTaken {
-                    module: module.clone(),
-                    owner: BUILT_IN.to_owned(),
-                });
-            }
-            if let Some(owner) = state.modules.get(module)
-                && *owner != manifest.id
-            {
-                return Err(LoadError::ModuleTaken {
-                    module: module.clone(),
-                    owner: owner.clone(),
-                });
-            }
-        }
+        self.inner.free_modules(&state, &manifest)?;
         let id = manifest.id.clone();
         state.next_generation += 1;
         let generation = state.next_generation;
@@ -291,6 +288,26 @@ impl Module for PluginModule {
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, State> {
         lock(&self.state)
+    }
+
+    /// Whether every module of `manifest` is free for it: served by neither a built-in
+    /// module nor another plugin (its own earlier generation may serve it).
+    fn free_modules(&self, state: &State, manifest: &Manifest) -> Result<(), LoadError> {
+        for module in &manifest.modules {
+            let owner = if self.builtin.contains(module) {
+                BUILT_IN
+            } else {
+                match state.modules.get(module) {
+                    Some(owner) if *owner != manifest.id => owner.as_str(),
+                    _ => continue,
+                }
+            };
+            return Err(LoadError::ModuleTaken {
+                module: module.clone(),
+                owner: owner.to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// The instance a call of `session` to `module` of the plugin `id` runs on, taken for

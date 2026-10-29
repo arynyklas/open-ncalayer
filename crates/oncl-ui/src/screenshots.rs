@@ -131,6 +131,7 @@ fn screenshots() {
             .to_vec(),
         },
         tls: Arc::new(wizard_services()),
+        plugins: Arc::new(Box::new(crate::plugins_view::fakes::FakePlugins::default())),
         on_saved: Box::new(|_| {}),
     });
     about_view::open(&desktop, AboutTab::Program);

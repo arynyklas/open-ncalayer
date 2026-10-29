@@ -105,6 +105,16 @@ impl Basics {
         Basics { clock: f, ..self }
     }
 
+    /// The same module keeping its OCSP answers in `cache`, which the plugins' key choice
+    /// shares.
+    #[must_use]
+    pub fn with_ocsp_cache(self, cache: Arc<OcspCache>) -> Self {
+        Basics {
+            ocsp_cache: cache,
+            ..self
+        }
+    }
+
     /// The key choice of this module's dialogs, checks and clock.
     fn key_chooser(&self) -> KeyChooser {
         KeyChooser {

@@ -22,6 +22,7 @@ oncl-commonutils.workspace = true
 oncl-desktop.workspace = true
 oncl-ipc.workspace = true
 oncl-pki.workspace = true
+oncl-plugin.workspace = true
 oncl-protocol.workspace = true
 oncl-registry.workspace = true
 oncl-tls.workspace = true

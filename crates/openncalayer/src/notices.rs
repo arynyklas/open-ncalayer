@@ -1,7 +1,7 @@
 //! What the tray tells the user: its warning (wss off, the original NCALayer holding the
 //! port, the certificate due or not renewed), whether it offers «Остановить оригинал…», and
 //! its notifications (wss off at the start, the certificate's renewal, a page's
-//! `installBundle`, the updates), in the user's language.
+//! `installBundle`, the updates, the plugins), in the user's language.
 
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,7 @@ use oncl_ui::settings_view::{UpdateStatus, update_view};
 use oncl_ui::{ActionTarget, Notification, NotificationAction, TrayCommand, TrayState};
 
 use crate::cli::WssOff;
+use crate::plugins::PluginNotice;
 use crate::renewal::{RenewFailure, RenewalCheck};
 use crate::update::Notice;
 
@@ -18,6 +19,8 @@ use crate::update::Notice;
 pub const PLUGIN_REGISTRY: &str = "https://arynyklas.github.io/open-ncalayer/plugins/";
 /// A page asking for bundles again and again is told about the registry at most this often.
 const BUNDLE_NOTICE_EVERY: Duration = Duration::from_secs(10 * 60);
+/// Pages needing plugins of the catalog are told about at most this often.
+const NEEDED_NOTICE_EVERY: Duration = Duration::from_secs(10 * 60);
 
 /// The tray's state of the daemon.
 #[derive(Debug)]
@@ -30,6 +33,7 @@ pub struct TrayStatus {
     /// The last renewal check.
     pub renewal: RenewalCheck,
     last_bundle_notice: Option<Instant>,
+    last_needed_notice: Option<Instant>,
 }
 
 impl TrayStatus {
@@ -40,6 +44,7 @@ impl TrayStatus {
             original: None,
             renewal: RenewalCheck::Nothing,
             last_bundle_notice: None,
+            last_needed_notice: None,
         }
     }
 
@@ -252,9 +257,15 @@ impl TrayStatus {
         })
     }
 
-    /// The notification of a page's `installBundle`, unless one was shown within the last
-    /// ten minutes (at `now`).
-    pub fn bundle_notification(&mut self, now: Instant) -> Option<Notification> {
+    /// The notification of a page's `installBundle` of `symname` that no plugin of the
+    /// catalog serves, unless one was shown within the last ten minutes (at `now`). `origin`
+    /// and `symname` come from the page: they are shown as text only.
+    pub fn bundle_notification(
+        &mut self,
+        symname: &str,
+        origin: &str,
+        now: Instant,
+    ) -> Option<Notification> {
         if self
             .last_bundle_notice
             .is_some_and(|last| now.duration_since(last) < BUNDLE_NOTICE_EVERY)
@@ -272,24 +283,157 @@ impl TrayStatus {
             .to_owned(),
             body: match l {
                 Locale::Ru => format!(
-                    "Модули OpenNCALayer встроены, установить новый нельзя. Список плагинов: {PLUGIN_REGISTRY}"
+                    "Сайт {origin} запросил модуль {symname}. В каталоге OpenNCALayer его нет."
                 ),
                 Locale::Kk => format!(
-                    "OpenNCALayer модульдері кірістірілген, жаңасын орнату мүмкін емес. Плагиндер тізімі: {PLUGIN_REGISTRY}"
+                    "{origin} сайты {symname} модулін сұрады. OpenNCALayer каталогында ол жоқ."
                 ),
                 Locale::En => format!(
-                    "OpenNCALayer's modules are built in; no other can be installed. The list of plugins: {PLUGIN_REGISTRY}"
+                    "The site {origin} asked for the module {symname}. The OpenNCALayer catalog does not have it."
                 ),
             },
             action: Some(NotificationAction {
                 label: match l {
-                    Locale::Ru => "Открыть список плагинов",
-                    Locale::Kk => "Плагиндер тізімін ашу",
-                    Locale::En => "Open the list of plugins",
+                    Locale::Ru => "Реестр плагинов",
+                    Locale::Kk => "Плагиндер тізілімі",
+                    Locale::En => "Plugin registry",
                 }
                 .to_owned(),
                 target: ActionTarget::Url(PLUGIN_REGISTRY.to_owned()),
             }),
+        })
+    }
+
+    /// The notification of a plugin `notice` (at `now`); a page's need of a plugin
+    /// ([`PluginNotice::Needed`]) only if none was told within the last ten minutes.
+    pub fn plugin_notification(
+        &mut self,
+        notice: &PluginNotice,
+        now: Instant,
+    ) -> Option<Notification> {
+        let l = self.locale;
+        let (title, body, action) = match notice {
+            PluginNotice::Installed { name } => {
+                let name = name.get(l);
+                (
+                    match l {
+                        Locale::Ru => "Плагин установлен",
+                        Locale::Kk => "Плагин орнатылды",
+                        Locale::En => "Plugin installed",
+                    }
+                    .to_owned(),
+                    match l {
+                        Locale::Ru => format!("Плагин «{name}» установлен."),
+                        Locale::Kk => format!("«{name}» плагині орнатылды."),
+                        Locale::En => format!("The plugin «{name}» is installed."),
+                    },
+                    None,
+                )
+            }
+            PluginNotice::Updated { name, version } => {
+                let name = name.get(l);
+                (
+                    match l {
+                        Locale::Ru => "Плагин обновлён",
+                        Locale::Kk => "Плагин жаңартылды",
+                        Locale::En => "Plugin updated",
+                    }
+                    .to_owned(),
+                    match l {
+                        Locale::Ru => format!("Плагин «{name}» обновлён до версии {version}."),
+                        Locale::Kk => format!("«{name}» плагині {version} нұсқасына жаңартылды."),
+                        Locale::En => {
+                            format!("The plugin «{name}» is updated to version {version}.")
+                        }
+                    },
+                    None,
+                )
+            }
+            PluginNotice::Withdrawn { name } => {
+                let name = name.get(l);
+                (
+                    match l {
+                        Locale::Ru => "Плагин выключен",
+                        Locale::Kk => "Плагин өшірілді",
+                        Locale::En => "Plugin turned off",
+                    }
+                    .to_owned(),
+                    match l {
+                        Locale::Ru => format!(
+                            "Версия плагина «{name}» отозвана в каталоге OpenNCALayer, а замены нет: плагин выключен."
+                        ),
+                        Locale::Kk => format!(
+                            "«{name}» плагинінің нұсқасы OpenNCALayer каталогында кері қайтарылды, ал оны алмастыратын нұсқа жоқ: плагин өшірілді."
+                        ),
+                        Locale::En => format!(
+                            "The version of the plugin «{name}» is revoked in the OpenNCALayer catalog, with nothing to replace it: the plugin is turned off."
+                        ),
+                    },
+                    None,
+                )
+            }
+            PluginNotice::Failed { name, error } => (
+                match l {
+                    Locale::Ru => "Ошибка плагина",
+                    Locale::Kk => "Плагин қатесі",
+                    Locale::En => "Plugin error",
+                }
+                .to_owned(),
+                format!("«{}»: {error}", name.get(l)),
+                None,
+            ),
+            PluginNotice::Needed { origin, name, .. } => {
+                if self
+                    .last_needed_notice
+                    .is_some_and(|last| now.duration_since(last) < NEEDED_NOTICE_EVERY)
+                {
+                    return None;
+                }
+                self.last_needed_notice = Some(now);
+                let name = name.get(l);
+                (
+                    match l {
+                        Locale::Ru => "Сайту нужен плагин",
+                        Locale::Kk => "Сайтқа плагин қажет",
+                        Locale::En => "A site needs a plugin",
+                    }
+                    .to_owned(),
+                    match (l, origin) {
+                        (Locale::Ru, Some(origin)) => format!(
+                            "Сайту {origin} нужен плагин «{name}» из каталога OpenNCALayer."
+                        ),
+                        (Locale::Ru, None) => {
+                            format!("Сайту нужен плагин «{name}» из каталога OpenNCALayer.")
+                        }
+                        (Locale::Kk, Some(origin)) => format!(
+                            "{origin} сайтына OpenNCALayer каталогындағы «{name}» плагині қажет."
+                        ),
+                        (Locale::Kk, None) => {
+                            format!("Сайтқа OpenNCALayer каталогындағы «{name}» плагині қажет.")
+                        }
+                        (Locale::En, Some(origin)) => format!(
+                            "The site {origin} needs the plugin «{name}» from the OpenNCALayer catalog."
+                        ),
+                        (Locale::En, None) => format!(
+                            "A site needs the plugin «{name}» from the OpenNCALayer catalog."
+                        ),
+                    },
+                    Some(NotificationAction {
+                        label: match l {
+                            Locale::Ru => "Установить…",
+                            Locale::Kk => "Орнату…",
+                            Locale::En => "Install…",
+                        }
+                        .to_owned(),
+                        target: ActionTarget::Command(TrayCommand::Plugins),
+                    }),
+                )
+            }
+        };
+        Some(Notification {
+            title,
+            body,
+            action,
         })
     }
 
@@ -758,21 +902,32 @@ mod tests {
     fn bundle_requests_point_to_the_registry_once_in_a_while() {
         let mut status = TrayStatus::new(Locale::Ru, None);
         let t0 = Instant::now();
-        let first = status.bundle_notification(t0).unwrap();
-        assert!(first.body.contains(PLUGIN_REGISTRY));
+        let first = status
+            .bundle_notification("kz.x", "https://shop.kz", t0)
+            .unwrap();
         assert_eq!(
-            first.action.unwrap().target,
-            ActionTarget::Url(PLUGIN_REGISTRY.to_owned())
+            first.body,
+            "Сайт https://shop.kz запросил модуль kz.x. В каталоге OpenNCALayer его нет."
         );
+        let action = first.action.unwrap();
+        assert_eq!(action.label, "Реестр плагинов");
+        assert_eq!(action.target, ActionTarget::Url(PLUGIN_REGISTRY.to_owned()));
         assert_eq!(
-            status.bundle_notification(t0 + Duration::from_secs(60)),
+            status.bundle_notification("kz.x", "https://shop.kz", t0 + Duration::from_secs(60)),
             None
         );
         assert!(
             status
-                .bundle_notification(t0 + Duration::from_secs(11 * 60))
+                .bundle_notification("kz.y", "https://a.kz", t0 + Duration::from_secs(11 * 60))
                 .is_some()
         );
+        for l in [Locale::Kk, Locale::En] {
+            let n = TrayStatus::new(l, None)
+                .bundle_notification("kz.x", "https://shop.kz", t0)
+                .unwrap();
+            assert!(n.body.contains("kz.x") && n.body.contains("https://shop.kz"));
+            assert_ne!(n.body, first.body);
+        }
     }
 
     #[test]
@@ -845,6 +1000,111 @@ mod tests {
                     "{l:?} {notice:?}"
                 );
                 assert_ne!(n.title, ours.title, "{l:?} {notice:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn plugin_notifications_in_each_language() {
+        let name = oncl_plugin::Localized {
+            ru: "Пример".to_owned(),
+            kk: "Үлгі".to_owned(),
+            en: "Example".to_owned(),
+        };
+        let notices = [
+            PluginNotice::Installed { name: name.clone() },
+            PluginNotice::Updated {
+                name: name.clone(),
+                version: oncl_update::Version::new(0, 2, 0),
+            },
+            PluginNotice::Withdrawn { name: name.clone() },
+            PluginNotice::Failed {
+                name: name.clone(),
+                error: "boom".to_owned(),
+            },
+        ];
+        let t0 = Instant::now();
+        let mut ru = TrayStatus::new(Locale::Ru, None);
+        let n = ru.plugin_notification(&notices[1], t0).unwrap();
+        assert_eq!(n.title, "Плагин обновлён");
+        assert_eq!(n.body, "Плагин «Пример» обновлён до версии 0.2.0.");
+        assert_eq!(
+            ru.plugin_notification(&notices[3], t0).unwrap().body,
+            "«Пример»: boom"
+        );
+        for l in [Locale::Kk, Locale::En] {
+            let mut status = TrayStatus::new(l, None);
+            for notice in &notices {
+                let n = status.plugin_notification(notice, t0).unwrap();
+                let ours = ru.plugin_notification(notice, t0).unwrap();
+                assert!(
+                    !n.title.is_empty() && !n.body.is_empty(),
+                    "{l:?} {notice:?}"
+                );
+                assert_ne!(n.title, ours.title, "{l:?} {notice:?}");
+                assert!(n.body.contains(name.get(l)), "{l:?} {notice:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_needed_plugin_is_told_once_in_a_while() {
+        let needed = |origin: Option<&str>| PluginNotice::Needed {
+            origin: origin.map(str::to_owned),
+            name: oncl_plugin::Localized {
+                ru: "Пример".to_owned(),
+                kk: "Үлгі".to_owned(),
+                en: "Example".to_owned(),
+            },
+            id: "kz.example".to_owned(),
+        };
+        let mut status = TrayStatus::new(Locale::Ru, None);
+        let t0 = Instant::now();
+        let first = status
+            .plugin_notification(&needed(Some("https://shop.kz")), t0)
+            .unwrap();
+        assert_eq!(first.title, "Сайту нужен плагин");
+        assert_eq!(
+            first.body,
+            "Сайту https://shop.kz нужен плагин «Пример» из каталога OpenNCALayer."
+        );
+        assert_eq!(
+            status.plugin_notification(&needed(None), t0 + Duration::from_secs(60)),
+            None
+        );
+        // Other plugin notices are not held back.
+        assert!(
+            status
+                .plugin_notification(
+                    &PluginNotice::Withdrawn {
+                        name: oncl_plugin::Localized {
+                            ru: "Пример".to_owned(),
+                            kk: "Үлгі".to_owned(),
+                            en: "Example".to_owned(),
+                        }
+                    },
+                    t0
+                )
+                .is_some()
+        );
+        let later = status
+            .plugin_notification(&needed(None), t0 + Duration::from_secs(11 * 60))
+            .unwrap();
+        assert_eq!(
+            later.body,
+            "Сайту нужен плагин «Пример» из каталога OpenNCALayer."
+        );
+        for l in [Locale::Kk, Locale::En] {
+            let mut status = TrayStatus::new(l, None);
+            for origin in [Some("https://shop.kz"), None] {
+                status.last_needed_notice = None;
+                let n = status.plugin_notification(&needed(origin), t0).unwrap();
+                assert!(n.body.contains(if l == Locale::Kk {
+                    "Үлгі"
+                } else {
+                    "Example"
+                }));
+                assert_eq!(n.body.contains("https://shop.kz"), origin.is_some());
             }
         }
     }

@@ -248,19 +248,17 @@ fn asset(version: &Version, package: &Package, kind: &str) -> Result<VelopackAss
     })
 }
 
-/// Downloads `package` over HTTPS only (redirects included) into `path` within `timeout`,
-/// then checks it against the size and sha256 of the index; a file that does not match is
-/// removed.
+/// The file of `package`, downloaded over HTTPS only (redirects included) within `timeout`,
+/// at most its size; not checked against the index yet.
 ///
 /// # Errors
 ///
-/// What failed.
-pub fn download_package(
+/// What failed: the request, or a status other than 200.
+pub fn fetch_package(
     transport: &dyn HttpTransport,
     package: &Package,
-    path: &Path,
     timeout: Duration,
-) -> Result<(), String> {
+) -> Result<Vec<u8>, String> {
     let url = &package.url;
     let opts = GetOptions {
         timeout,
@@ -275,12 +273,28 @@ pub fn download_package(
     if reply.status != 200 {
         return Err(format!("{url}: HTTP {}", reply.status));
     }
-    std::fs::write(path, &reply.body).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(reply.body)
+}
+
+/// Downloads `package` ([`fetch_package`]) into `path`, then checks it against the size and
+/// sha256 of the index; a file that does not match is removed.
+///
+/// # Errors
+///
+/// What failed.
+pub fn download_package(
+    transport: &dyn HttpTransport,
+    package: &Package,
+    path: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let body = fetch_package(transport, package, timeout)?;
+    std::fs::write(path, &body).map_err(|e| format!("{}: {e}", path.display()))?;
     if let Err(e) = package.check_file(path) {
         if let Err(removed) = std::fs::remove_file(path) {
             tracing::warn!(path = %path.display(), error = %removed, "cannot remove a package that does not match the index");
         }
-        return Err(format!("{url}: {e}"));
+        return Err(format!("{}: {e}", package.url));
     }
     Ok(())
 }

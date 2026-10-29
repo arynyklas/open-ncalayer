@@ -1,0 +1,80 @@
+// «Установка плагина»: who asks, the plugin, what it replaces, what it may do and, for a file
+// the user chose, a warning; «Установить» or «Отмена». The texts are composed in Rust.
+
+import { Button, VerticalBox } from "std-widgets.slint";
+
+export component InstallPluginWindow inherits Window {
+    title: @tr("Plugin installation");
+    always-on-top: true;
+    min-width: 460px;
+    max-width: 640px;
+    forward-focus: cancel-button;
+
+    // «Сайт … просит установить плагин», or empty.
+    in property <string> asker;
+    // The plugin's name and version.
+    in property <string> plugin;
+    // What original bundle it replaces, or empty.
+    in property <string> replaces;
+    // The heading of `capabilities`.
+    in property <string> may;
+    in property <[string]> capabilities;
+    // Not from the catalog: the warning, or empty.
+    in property <string> warning;
+
+    callback answer(bool);
+
+    VerticalBox {
+        if root.asker != "": Text {
+            text: root.asker;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: root.plugin;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+
+        if root.replaces != "": Text {
+            text: root.replaces;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: root.may;
+            wrap: word-wrap;
+        }
+
+        for line in root.capabilities: Text {
+            text: "• " + line;
+            wrap: word-wrap;
+        }
+
+        if root.warning != "": Text {
+            text: root.warning;
+            wrap: word-wrap;
+            color: #c42b1c;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Button {
+                text: @tr("Install");
+                clicked => {
+                    root.answer(true);
+                }
+            }
+
+            // The default: Enter alone does not install.
+            cancel-button := Button {
+                text: @tr("Cancel");
+                primary: true;
+                clicked => {
+                    root.answer(false);
+                }
+            }
+        }
+    }
+}
