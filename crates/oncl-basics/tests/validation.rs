@@ -93,6 +93,7 @@ fn process(basics: &Basics, args: Value) -> String {
         &request,
         &AddInfo {
             origin: Some("https://x.kz".to_owned()),
+            ..AddInfo::default()
         },
     )
 }

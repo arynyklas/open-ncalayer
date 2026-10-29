@@ -95,6 +95,7 @@ fn req(args: Value) -> String {
 fn origin(o: &str) -> AddInfo {
     AddInfo {
         origin: Some(o.to_owned()),
+        ..AddInfo::default()
     }
 }
 
@@ -1262,7 +1263,7 @@ fn origin_and_locale_reach_the_prompts() {
     let (b, p) = basics(script![Step::CancelStorage]);
     let mut args = raw_args(json!("x"), json!({}));
     args["locale"] = json!("ru");
-    b.process(&req(args), &AddInfo { origin: None });
+    b.process(&req(args), &AddInfo::default());
     assert_eq!(p.storage_prompts()[0].origin, "UNIDENTIFIED");
     assert_eq!(p.storage_prompts()[0].locale, Locale::Ru);
 }

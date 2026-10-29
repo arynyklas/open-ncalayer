@@ -245,6 +245,7 @@ fn failure_shapes() {
 fn args_and_add_info_reach_the_method() {
     let add_info = AddInfo {
         origin: Some("https://example.kz".into()),
+        ..AddInfo::default()
     };
     assert_json_eq(
         run_with(r#"{"method":"echo","args":{"a":[1,"x"]}}"#, &add_info),

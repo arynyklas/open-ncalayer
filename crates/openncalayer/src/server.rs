@@ -27,7 +27,7 @@ use tokio_tungstenite::tungstenite::{self, Message, Utf8Bytes};
 use tracing::{debug, info, warn};
 
 use crate::http::{self, Response};
-use crate::session::process;
+use crate::session::{Session, process};
 
 /// The NCALayer port.
 pub const DEFAULT_PORT: u16 = 13579;
@@ -252,10 +252,13 @@ async fn connection(
         }
     };
     info!(%peer, origin = request.origin.as_deref().unwrap_or("-"), "websocket connected");
+    // Closed when the connection ends, however it does.
+    let session = Session::new(&cfg.registry);
     websocket(
         ws,
         AddInfo {
             origin: request.origin,
+            session: session.id(),
         },
         cfg,
     )

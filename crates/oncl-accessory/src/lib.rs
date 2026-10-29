@@ -186,6 +186,7 @@ mod tests {
     fn call(m: &Accessory, request: Value, origin: Option<&str>) -> Value {
         let add_info = AddInfo {
             origin: origin.map(str::to_owned),
+            ..AddInfo::default()
         };
         serde_json::from_str(&m.process(&request.to_string(), &add_info)).unwrap()
     }

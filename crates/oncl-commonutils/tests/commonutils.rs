@@ -86,6 +86,7 @@ fn setup(steps: Vec<Step>) -> Setup {
 fn origin() -> AddInfo {
     AddInfo {
         origin: Some("https://x.kz".to_owned()),
+        ..AddInfo::default()
     }
 }
 

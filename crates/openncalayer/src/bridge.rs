@@ -24,7 +24,7 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use crate::server::{IDLE_TIMEOUT, MAX_MESSAGE};
-use crate::session::process;
+use crate::session::{Session, process};
 
 /// Largest serialized frame the daemon sends. The relay forwards frames to the browser,
 /// which accepts at most 1 MiB per native message.
@@ -451,7 +451,7 @@ async fn relay_frames(
                         pieces_rx,
                         out.clone(),
                         Arc::clone(registry),
-                        AddInfo { origin },
+                        origin,
                         limits,
                     );
                     let ended = ended_tx.clone();
@@ -553,15 +553,21 @@ async fn write_frames<W: AsyncWrite>(
 
 /// A socket: assembles messages from `pieces` and answers them in order. The daemon closes
 /// the socket (a `close` frame) on a request that is not a JSON object, a message over
-/// [`Limits::max_message`], a failed module call or [`Limits::idle`] without a frame.
+/// [`Limits::max_message`], a failed module call or [`Limits::idle`] without a frame. The
+/// socket is a session of its own, closed when the task ends or is aborted.
 async fn socket(
     sid: u32,
     mut pieces: mpsc::UnboundedReceiver<Queued>,
     out: mpsc::Sender<String>,
     registry: Arc<Registry>,
-    add_info: AddInfo,
+    origin: Option<String>,
     limits: Limits,
 ) {
+    let session = Session::new(&registry);
+    let add_info = AddInfo {
+        origin,
+        session: session.id(),
+    };
     let mut message = String::new();
     // The budget share of `message`, kept until it is answered.
     let mut message_held: Option<Held> = None;
@@ -802,6 +808,109 @@ mod tests {
             relay.next().await,
             r#"{"t":"msg","sid":2,"data":"{\"success\":false,\"errorCode\":\"MODULE_NOT_FOUND\"}"}"#
         );
+    }
+
+    /// Dynamic modules that serve nothing and record what they are told.
+    #[derive(Default)]
+    struct Recorder {
+        missing: std::sync::Mutex<Vec<(String, AddInfo)>>,
+        closed: std::sync::Mutex<Vec<oncl_protocol::SessionId>>,
+    }
+
+    impl oncl_protocol::DynamicModules for Recorder {
+        fn module(&self, _name: &str) -> Option<Arc<dyn oncl_protocol::Module>> {
+            None
+        }
+
+        fn names(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn session_closed(&self, session: oncl_protocol::SessionId) {
+            self.closed.lock().unwrap().push(session);
+        }
+
+        fn missing(&self, name: &str, add_info: &AddInfo) {
+            self.missing
+                .lock()
+                .unwrap()
+                .push((name.to_owned(), add_info.clone()));
+        }
+    }
+
+    /// Waits until `recorder` has seen `n` closed sessions; returns them sorted.
+    async fn closed(recorder: &Recorder, n: usize) -> Vec<oncl_protocol::SessionId> {
+        timeout(Duration::from_secs(60), async {
+            loop {
+                let mut closed = recorder.closed.lock().unwrap().clone();
+                if closed.len() >= n {
+                    closed.sort_unstable();
+                    return closed;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("sessions not closed in time")
+    }
+
+    #[tokio::test]
+    async fn sockets_are_sessions_closed_once_and_report_missing_modules() {
+        let recorder = Arc::new(Recorder::default());
+        let mut registry = Registry::default();
+        registry.set_dynamic(Arc::clone(&recorder) as Arc<dyn oncl_protocol::DynamicModules>);
+        let mut relay = Relay::start(registry, SMALL).await;
+        for sid in 1..=3 {
+            relay.open(sid).await;
+            relay.piece(sid, r#"{"module":"x.Y"}"#, false).await;
+            assert_eq!(
+                relay.next().await,
+                format!(
+                    r#"{{"t":"msg","sid":{sid},"data":"{{\"success\":false,\"errorCode\":\"MODULE_NOT_FOUND\"}}"}}"#
+                )
+            );
+        }
+        let missing = recorder.missing.lock().unwrap().clone();
+        assert_eq!(missing.len(), 3);
+        let mut sessions: Vec<_> = missing.iter().map(|(_, info)| info.session).collect();
+        for (name, info) in &missing {
+            assert_eq!(name, "x.Y");
+            assert_eq!(info.origin.as_deref(), Some("https://t.test"));
+            assert_ne!(info.session, 0);
+        }
+        sessions.sort_unstable();
+        sessions.dedup();
+        assert_eq!(sessions.len(), 3, "every socket is a session of its own");
+        // Closed by the extension (the task is aborted), by the daemon on an invalid request,
+        // and with the whole connection.
+        relay
+            .send(serde_json::json!({"t": "close", "sid": 1}))
+            .await;
+        relay.piece(2, "nope", false).await;
+        assert_eq!(relay.next().await, r#"{"t":"close","sid":2}"#);
+        drop(relay);
+        assert_eq!(closed(&recorder, 3).await, sessions);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(recorder.closed.lock().unwrap().len(), 3, "closed once each");
+    }
+
+    #[tokio::test]
+    async fn idle_socket_closes_its_session() {
+        let recorder = Arc::new(Recorder::default());
+        let mut registry = Registry::default();
+        registry.set_dynamic(Arc::clone(&recorder) as Arc<dyn oncl_protocol::DynamicModules>);
+        let limits = Limits {
+            idle: Duration::from_millis(50),
+            ..SMALL
+        };
+        let mut relay = Relay::start(registry, limits).await;
+        relay.open(1).await;
+        assert_eq!(relay.next().await, r#"{"t":"close","sid":1}"#);
+        assert_eq!(closed(&recorder, 1).await.len(), 1);
+        relay.open(1).await;
+        assert_eq!(relay.next().await, r#"{"t":"close","sid":1}"#);
+        let both = closed(&recorder, 2).await;
+        assert_ne!(both[0], both[1], "a reopened sid is a new session");
     }
 
     /// Answers once the test lets it.

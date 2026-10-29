@@ -50,6 +50,7 @@ fn setup(steps: Vec<Step>) -> (Applet, Arc<ScriptedPrompter>) {
 fn origin() -> AddInfo {
     AddInfo {
         origin: Some("https://x.kz".to_owned()),
+        ..AddInfo::default()
     }
 }
 
@@ -504,6 +505,7 @@ fn try_count_is_the_modules() {
     );
     let other = AddInfo {
         origin: Some("https://other.kz".to_owned()),
+        ..AddInfo::default()
     };
     assert_eq!(
         a.process(r#"{"method":"getTryCount"}"#, &other),

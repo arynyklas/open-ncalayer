@@ -5,11 +5,11 @@
 use std::thread;
 
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use oncl_protocol::{AddInfo, Registry, Route, module_not_found};
+use oncl_protocol::{AddInfo, Registry, Route, SessionId, module_not_found};
 use tracing::debug;
 
 /// The module requests being answered, by the wss servers and the bridge together, and when
@@ -111,8 +111,44 @@ pub fn release_requests() {
     ACTIVITY.release();
 }
 
+/// The next session id; ids start at 1, `0` is no session.
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
+
+/// A new session id, unique within the process.
+pub fn new_session() -> SessionId {
+    NEXT_SESSION.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A session of a WebSocket connection or a bridge socket: a new id, and
+/// [`Registry::session_closed`] when dropped, however the session ends (a closed or failed
+/// connection, an idle timeout, an aborted task).
+pub(crate) struct Session {
+    registry: Arc<Registry>,
+    id: SessionId,
+}
+
+impl Session {
+    pub(crate) fn new(registry: &Arc<Registry>) -> Self {
+        Session {
+            registry: Arc::clone(registry),
+            id: new_session(),
+        }
+    }
+
+    pub(crate) fn id(&self) -> SessionId {
+        self.id
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.registry.session_closed(self.id);
+    }
+}
+
 /// The reply to a request, or `None` to drop the connection (the request is not a JSON
-/// object). The heartbeat is echoed.
+/// object). The heartbeat is echoed. A string `module` that nothing serves is reported to
+/// [`Registry::missing`]; the reply is [`module_not_found`] all the same.
 pub(crate) fn dispatch(registry: &Registry, text: &str, add_info: &AddInfo) -> Option<String> {
     match registry.route(text) {
         Route::Heartbeat => Some(text.to_owned()),
@@ -120,7 +156,12 @@ pub(crate) fn dispatch(registry: &Registry, text: &str, add_info: &AddInfo) -> O
             let _answering = ACTIVITY.begin();
             Some(module.process(text, add_info))
         }
-        Route::NotFound => Some(module_not_found()),
+        Route::NotFound { module } => {
+            if let Some(name) = module {
+                registry.missing(&name, add_info);
+            }
+            Some(module_not_found())
+        }
         Route::InvalidJson => None,
     }
 }

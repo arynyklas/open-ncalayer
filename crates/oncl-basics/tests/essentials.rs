@@ -64,6 +64,7 @@ fn call(b: &Basics, class: Option<&str>, method: &str, args: Value) -> Value {
         &request.to_string(),
         &AddInfo {
             origin: Some("https://test.pki.gov.kz".to_owned()),
+            ..AddInfo::default()
         },
     );
     serde_json::from_str(&reply).unwrap()
