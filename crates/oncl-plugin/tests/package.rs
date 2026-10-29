@@ -581,8 +581,35 @@ fn http_prefix_allows() {
     // Dot segments are resolved before the comparison.
     assert!(!api.allows("https://a.kz/api/../secret"));
     assert!(!api.allows("https://a.kz/api/%2e%2e/secret"));
+    // Encoded separators and path parameters, which servers may resolve outside `/api/`.
+    for url in [
+        "https://a.kz/api/..%2fsecret",
+        "https://a.kz/api/%2e%2e%2Fsecret",
+        "https://a.kz/api/..;/secret",
+        "https://a.kz/api/..%5csecret",
+        "https://a.kz/api/..%5Csecret",
+        "https://a.kz/api/x;y",
+    ] {
+        assert!(!api.allows(url), "{url:?} allowed");
+        assert_eq!(api.check(url), None);
+    }
+    // Under `/` there is nothing to escape from.
+    assert!(prefix.allows("https://tsp.pki.gov.kz/a;b%2Fc%5c"));
+    // A prefix with them could allow nothing.
+    for bad in [
+        "https://a.kz/x;y/",
+        "https://a.kz/x%2Fy/",
+        "https://a.kz/x%5cy/",
+    ] {
+        assert!(bad.parse::<HttpPrefix>().is_err(), "{bad:?} accepted");
+    }
 
     let port: HttpPrefix = "https://a.kz:8443/".parse().unwrap();
     assert!(port.allows("https://a.kz:8443/x"));
     assert!(!port.allows("https://a.kz/x"));
+
+    // `check` gives the URL to send: normalized, the same parse `allows` judged.
+    let sent = api.check("https://A.kz:443/api/./x/../y?q=1#f").unwrap();
+    assert_eq!(sent.as_str(), "https://a.kz/api/y?q=1#f");
+    assert_eq!(api.check("https://a.kz/apix"), None);
 }

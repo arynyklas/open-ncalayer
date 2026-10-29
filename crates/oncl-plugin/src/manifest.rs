@@ -142,16 +142,41 @@ impl HttpPrefix {
         &self.path
     }
 
-    /// Whether `url` is under this prefix: `https`, no user info, the same host and port, a
-    /// path starting with the prefix's. The query and fragment of `url` do not matter.
+    /// Whether `url` is under this prefix: [`check`](Self::check) accepts it.
     pub fn allows(&self, url: &str) -> bool {
-        let Ok(url) = parse_https(url) else {
-            return false;
-        };
-        url.host_str() == Some(self.host.as_str())
-            && url.port_or_known_default() == Some(self.port)
-            && url.path().starts_with(&self.path)
+        self.check(url).is_some()
     }
+
+    /// `url`, parsed and normalized, if it is under this prefix: `https`, no user info, the
+    /// same host and port, a path starting with the prefix's. The query and fragment of `url`
+    /// do not matter.
+    ///
+    /// Under a prefix path other than `/`, a path with `;` or an encoded `/` or `\` (`%2f`,
+    /// `%5c`, any case) is refused: the parser leaves `..%2f` and `..;` in the path as they
+    /// are, while servers that decode before resolving `..` or strip `;` parameters resolve
+    /// them outside the prefix.
+    ///
+    /// The request must be sent to [`Url::as_str`] of the result, not to `url`: what was
+    /// checked is then what is sent. Every redirect is checked again, hop by hop.
+    pub fn check(&self, url: &str) -> Option<Url> {
+        let url = parse_https(url).ok()?;
+        let path = url.path();
+        let under = url.host_str() == Some(self.host.as_str())
+            && url.port_or_known_default() == Some(self.port)
+            && path.starts_with(&self.path)
+            && (self.path == "/" || !has_hidden_separator(path));
+        under.then_some(url)
+    }
+}
+
+/// Whether `path` has `;` or an encoded `/` or `\`, which servers may turn into a segment
+/// boundary the URL parser did not see.
+fn has_hidden_separator(path: &str) -> bool {
+    path.contains(';')
+        || path
+            .as_bytes()
+            .windows(3)
+            .any(|w| w.eq_ignore_ascii_case(b"%2f") || w.eq_ignore_ascii_case(b"%5c"))
 }
 
 impl FromStr for HttpPrefix {
@@ -169,6 +194,9 @@ impl FromStr for HttpPrefix {
         }
         if !text.ends_with('/') || !url.path().ends_with('/') {
             return Err(bad("the path does not end with `/`"));
+        }
+        if has_hidden_separator(url.path()) {
+            return Err(bad("the path has `;`, `%2f` or `%5c`"));
         }
         let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
             return Err(bad("has no host"));

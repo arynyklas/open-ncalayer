@@ -12,6 +12,7 @@ pub mod package;
 
 pub use manifest::{Capabilities, HttpPrefix, Localized, Manifest, Replaces};
 pub use package::{MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, PACKAGE_EXT, Package};
+pub use url::Url;
 
 use std::io;
 
