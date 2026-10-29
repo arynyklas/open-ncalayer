@@ -313,7 +313,8 @@ jobs:
       - name: Installer and update packages
         shell: bash
         env:
-          APPLE_INSTALL_IDENTITY: ${{ secrets.APPLE_INSTALL_IDENTITY }}
+          # Only the macOS run sees it.
+          APPLE_INSTALL_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_INSTALL_IDENTITY || '' }}
         run: |
           common=(--version "$VERSION" --packages packages --dist packaged)
           case "$RUNNER_OS" in
