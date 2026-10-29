@@ -23,6 +23,12 @@ enum Command {
         #[arg(required = true)]
         exes: Vec<PathBuf>,
     },
+    /// Fail on an ELF file that needs a glibc newer than 2.28 (the floor of the Linux
+    /// packages) or a private glibc symbol; prints what each needs.
+    CheckElf {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
     /// Browser extension tasks.
     Ext {
         #[command(subcommand)]
@@ -70,6 +76,12 @@ enum Command {
         /// The encrypted secret key made by `sign keygen`.
         #[arg(long, required = true)]
         key: Option<PathBuf>,
+    },
+    /// Installers and update packages of a release (Velopack's `vpk` on the `PATH`, or
+    /// `$VPK`); every command copies what is published into `--dist`.
+    Package {
+        #[command(subcommand)]
+        command: PackageCommand,
     },
     /// Update index tasks (`updates/v1/<channel>.json`).
     Index {
@@ -223,6 +235,177 @@ fn print_written(written: &xtask::index::Written) {
     );
 }
 
+/// What every packaging command takes.
+#[derive(clap::Args)]
+struct PackageArgs {
+    /// The version of the release.
+    #[arg(long, value_parser = parse_version)]
+    version: Version,
+    /// Velopack's output: the previous full package for the delta goes here first.
+    #[arg(long, default_value = "packages")]
+    packages: PathBuf,
+    /// Where the published files are copied.
+    #[arg(long, default_value = "dist")]
+    dist: PathBuf,
+}
+
+#[derive(Subcommand)]
+enum PackageCommand {
+    /// `Setup.exe` and the update packages of a Windows flavor (Windows 7 flavors through
+    /// the import gate).
+    Windows {
+        /// `win-x64`, `win-x86`, `win7-x64` or `win7-x86`.
+        #[arg(long)]
+        flavor: String,
+        /// The built programs (with the app-local DLLs for Windows 7).
+        #[arg(long)]
+        bin: PathBuf,
+        #[command(flatten)]
+        args: PackageArgs,
+    },
+    /// The universal macOS `.app` as `.zip` and `.pkg`, and the update packages (macOS).
+    Macos {
+        /// The universal programs.
+        #[arg(long)]
+        bin: PathBuf,
+        /// A "Developer ID Installer" identity to sign the `.pkg`.
+        #[arg(long)]
+        install_identity: Option<String>,
+        /// The keychain of the signing identities.
+        #[arg(long)]
+        keychain: Option<PathBuf>,
+        /// A `notarytool` keychain profile: the `.pkg` is notarized and stapled.
+        #[arg(long)]
+        notary_profile: Option<String>,
+        #[command(flatten)]
+        args: PackageArgs,
+    },
+    /// Build the Linux programs and the AppDir in the glibc 2.28 container (Docker), into
+    /// `target/linux-x64/`.
+    LinuxBuild {
+        /// The version of the release.
+        #[arg(long, value_parser = parse_version)]
+        version: Version,
+        /// A Docker volume keeping the toolchain and cargo's files between runs.
+        #[arg(long)]
+        cache_volume: Option<String>,
+    },
+    /// Lay out and check the AppDir (inside the glibc 2.28 container).
+    Appdir {
+        /// The built programs.
+        #[arg(long)]
+        bin: PathBuf,
+        /// The version of the release.
+        #[arg(long, value_parser = parse_version)]
+        version: Version,
+        /// The AppDir to write.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// The AppImage and the update packages from the AppDir, checked (Linux, Docker).
+    Linux {
+        /// The AppDir of `linux-build`.
+        #[arg(long, default_value = "target/linux-x64/OpenNCALayer.AppDir")]
+        appdir: PathBuf,
+        #[command(flatten)]
+        args: PackageArgs,
+    },
+    /// `PKGBUILD`, `.SRCINFO` and the install script of the AUR package `openncalayer-bin`.
+    Aur {
+        /// The version of the release.
+        #[arg(long, value_parser = parse_version)]
+        version: Version,
+        /// The sha256 of the release's Linux archive.
+        #[arg(long)]
+        sha256: String,
+        /// The package release of this version.
+        #[arg(long, default_value_t = 1)]
+        pkgrel: u32,
+        /// Where to write the files.
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+fn parse_version(text: &str) -> Result<Version, String> {
+    Version::parse(text).map_err(|e| format!("{text:?} is not a version: {e}"))
+}
+
+/// Prints the published files.
+fn print_published(files: &[PathBuf]) {
+    for file in files {
+        println!("published: {}", file.display());
+    }
+}
+
+/// `cargo xtask package …`.
+fn package(command: PackageCommand) -> anyhow::Result<()> {
+    use xtask::package::{aur, linux, macos, windows};
+    let root = oncl_testkit::workspace_root();
+    match command {
+        PackageCommand::Windows { flavor, bin, args } => {
+            let flavor = windows::flavor(&flavor)?;
+            print_published(&windows::package(
+                &root,
+                &flavor,
+                &bin,
+                &args.version,
+                &args.packages,
+                &args.dist,
+            )?);
+        }
+        PackageCommand::Macos {
+            bin,
+            install_identity,
+            keychain,
+            notary_profile,
+            args,
+        } => {
+            let signing = macos::PkgSigning {
+                identity: install_identity,
+                keychain,
+                notary_profile,
+            };
+            print_published(&macos::package(
+                &root,
+                &bin,
+                &args.version,
+                &args.packages,
+                &args.dist,
+                &signing,
+            )?);
+        }
+        PackageCommand::LinuxBuild {
+            version,
+            cache_volume,
+        } => {
+            let appdir = linux::build_in_container(&root, &version, cache_volume.as_deref())?;
+            println!("{}", appdir.display());
+        }
+        PackageCommand::Appdir { bin, version, out } => linux::appdir(&root, &bin, &version, &out)?,
+        PackageCommand::Linux { appdir, args } => {
+            print_published(&linux::package(
+                &root,
+                &appdir,
+                &args.version,
+                &args.packages,
+                &args.dist,
+            )?);
+        }
+        PackageCommand::Aur {
+            version,
+            sha256,
+            pkgrel,
+            out,
+        } => {
+            for file in aur::Package::new(version, pkgrel, &sha256)?.write(&out)? {
+                println!("{}", file.display());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Subcommand)]
 enum PluginCommand {
     /// Build a plugin crate for wasm32-unknown-unknown and write `<id>-<version>.onclp`:
@@ -248,6 +431,13 @@ fn main() -> anyhow::Result<()> {
             0 => Ok(()),
             found => anyhow::bail!("{found} violations of the Windows 7 import gate"),
         },
+        Command::CheckElf { files } => {
+            for file in &files {
+                xtask::package::linux::check_elf(file, None)?;
+            }
+            Ok(())
+        }
+        Command::Package { command } => package(command),
         Command::Ext {
             command: ExtCommand::Build,
         } => {

@@ -15,6 +15,7 @@ use oncl_ui::SettingsServices;
 use oncl_ui::settings_view::Updates;
 use oncl_ui::tls_wizard::{SystemTrust, TlsWizardServices};
 
+use crate::lifecycle::Executables;
 use crate::nm::{self, Item, NmLayout, Report, State};
 use crate::wss::Wss;
 use crate::{Paths, cli};
@@ -83,7 +84,7 @@ impl BrowserExtension for NmExtension {
 }
 
 /// The failed entries of `report` as one error, if any.
-fn failures(report: &Report) -> io::Result<()> {
+pub(crate) fn failures(report: &Report) -> io::Result<()> {
     let failed: Vec<String> = report
         .entries
         .iter()
@@ -137,12 +138,13 @@ impl Autostart for NoAutostart {
     }
 }
 
-/// The settings window's services for this user and the daemon `exe` with the data
-/// directory of `paths`: the original NCALayer of this user, its journal
+/// The settings window's services for this user and the `executables` with the data
+/// directory of `paths`: our autostart and the relay start [`Executables::program`], the
+/// relay installed is [`Executables::relay`]; the original NCALayer of this user, its journal
 /// `<data>/original-autostart.json`, wss's `port` to tell who holds it, and the `updates`.
 pub fn settings_services(
     paths: &Paths,
-    exe: PathBuf,
+    executables: Executables,
     port: u16,
     updates: Box<dyn Updates>,
 ) -> SettingsServices {
@@ -154,12 +156,8 @@ pub fn settings_services(
         tracing::warn!(error = %e, "the native messaging host's place is unknown");
         e.to_string()
     });
-    let extension = NmExtension::new(
-        layout,
-        exe.with_file_name(nm::relay_file_name()),
-        exe.clone(),
-        paths.data.clone(),
-    );
+    let Executables { program, relay } = executables;
+    let extension = NmExtension::new(layout, relay, program.clone(), paths.data.clone());
     let original = OriginalNcaLayer::new(
         OriginalLocations::detect(),
         paths.data.join(ORIGINAL_JOURNAL),
@@ -167,7 +165,7 @@ pub fn settings_services(
     );
     SettingsServices {
         settings_path: paths.settings(),
-        exe,
+        exe: program,
         autostart,
         original: Box::new(original),
         extension: Box::new(extension),

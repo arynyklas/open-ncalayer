@@ -336,6 +336,18 @@ pub fn update(path: &Path, change: impl FnOnce(&mut Map<String, Value>)) -> io::
     write_file(path, &json, Access::Private)
 }
 
+/// Records in the file `path` whether our autostart is on ([`Settings::autostart`]), as the
+/// settings window saves it, without writing any other key ([`update`]).
+///
+/// # Errors
+///
+/// As [`update`].
+pub fn set_autostart(path: &Path, on: bool) -> io::Result<()> {
+    update(path, |object| {
+        object.insert(AUTOSTART.to_owned(), Value::Bool(on));
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,5 +604,20 @@ mod tests {
         assert_eq!(locale_of(""), None);
         // A language that is not ours is ignored like no setting.
         assert_eq!(with("de").ui_locale(), Settings::default().ui_locale());
+    }
+
+    #[test]
+    fn set_autostart_writes_only_that_key() {
+        let (_d, f) = file_with(r#"{"recentPath": "k.p12", "proxy": {"mode": "system"}}"#);
+        set_autostart(&f, true).unwrap();
+        assert_eq!(
+            on_disk(&f),
+            json!({"recentPath": "k.p12", "proxy": {"mode": "system"}, "autostart": true})
+        );
+        // A missing file gets only the key: no default channel is pinned.
+        let d = tempfile::tempdir().unwrap();
+        let missing = d.path().join("data").join("settings.json");
+        set_autostart(&missing, false).unwrap();
+        assert_eq!(on_disk(&missing), json!({"autostart": false}));
     }
 }

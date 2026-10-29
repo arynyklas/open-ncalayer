@@ -1222,27 +1222,46 @@ fn availability_needs_a_flavor_an_installation_and_keys() {
     let installed = || Ok::<_, String>(());
     let not_installed = || Err::<(), _>("not installed".to_owned());
     assert_eq!(
-        availability(Ok(vec![key.clone()]), None, installed).err(),
+        availability(Ok(vec![key.clone()]), None, None, installed).err(),
         Some(UpdateStatus::NotInstalled)
     );
     assert_eq!(
-        availability(Ok(vec![key.clone()]), Some(Flavor::LinuxX64), not_installed).err(),
+        availability(
+            Ok(vec![key.clone()]),
+            Some(Flavor::LinuxX64),
+            None,
+            not_installed
+        )
+        .err(),
         Some(UpdateStatus::NotInstalled)
     );
+    // A package manager's copy is off whatever else holds: Velopack is not even asked.
     assert_eq!(
-        availability(Ok(Vec::new()), Some(Flavor::LinuxX64), installed).err(),
+        availability(
+            Ok(vec![key.clone()]),
+            Some(Flavor::LinuxX64),
+            Some("pacman"),
+            || -> Result<(), String> { panic!("Velopack asked for a package manager's copy") }
+        )
+        .err(),
+        Some(UpdateStatus::PackageManaged("pacman".to_owned()))
+    );
+    assert_eq!(
+        availability(Ok(Vec::new()), Some(Flavor::LinuxX64), None, installed).err(),
         Some(UpdateStatus::NoKeys)
     );
     assert_eq!(
         availability(
             Err(UpdateError::BadKey("x".to_owned())),
             Some(Flavor::LinuxX64),
+            None,
             installed
         )
         .err(),
         Some(UpdateStatus::NoKeys)
     );
-    let (keys, flavor, ()) = availability(Ok(vec![key]), Some(Flavor::Osx), installed).unwrap();
+    let (keys, flavor, ()) =
+        availability(Ok(vec![key]), Some(Flavor::Osx), None, installed).unwrap();
     assert_eq!((keys.len(), flavor), (1, Flavor::Osx));
     // Off: the window says why, and a check says the same.
     let off = UpdaterHandle::Off(UpdateStatus::NoKeys);

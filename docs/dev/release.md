@@ -35,7 +35,9 @@ cp <каталог>/oncl-index.pub crates/oncl-update/keys/current.pub
 Необязательно — секреты подписи кода. Без них шаги подписи пропускаются с уведомлением в журнале сборки, релиз выходит неподписанным:
 
 - Authenticode через SignPath: секрет `SIGNPATH_API_TOKEN`, переменные `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_SIGNING_POLICY_SLUG`;
-- Apple: секреты `APPLE_CERTIFICATE_P12` (base64), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`.
+- Apple: секреты `APPLE_CERTIFICATE_P12` (base64), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` подписывают и нотаризуют `.app` (пакет обновления, `.zip`, содержимое `.pkg`); сам `.pkg` подписывается и нотаризуется, только если есть ещё `APPLE_INSTALL_IDENTITY` — идентичность «Developer ID Installer» из того же `APPLE_CERTIFICATE_P12`.
+
+Необязательно — публикация пакета AUR `openncalayer-bin` (`.github/workflows/aur.yml`): переменная `AUR_PUBLISH` = `true` и секрет `AUR_SSH_PRIVATE_KEY` — SSH-ключ аккаунта AUR, который сопровождает пакет. Без `AUR_PUBLISH` workflow только собирает и проверяет `PKGBUILD` и `.SRCINFO` (артефакт `aur-v<версия>`); с `AUR_PUBLISH` и без ключа он падает.
 
 ## 3. Выпуск версии
 
@@ -48,8 +50,8 @@ cp <каталог>/oncl-index.pub crates/oncl-update/keys/current.pub
    ```
 
    Первым делом job `version` сверяет тег с версией в `Cargo.toml` и останавливает сборку при расхождении. Версия с суффиксом (`0.1.0-alpha.1`) выходит как pre-release и идёт только в канал `beta`, версия без суффикса — как обычный релиз и в оба канала, `stable` и `beta`.
-3. `release.yml` собирает по флейворам (`win-x64`, `win-x86`, `win7-x64`, `win7-x86`, `linux-x64`, `osx`) архивы и пакеты Velopack с дельтами, расширение, SBOM и `SHA256SUMS`, выпускает аттестацию происхождения на каждый файл и создаёт релиз. Флейворы `win7-*` собираются `cargo xtask win7`, а содержимое их пакетов, вместе с `Squirrel.exe` и заглушкой Velopack, проходит гейт импортов Windows 7.
-4. Job `index` скачивает ассеты релиза, выполняет `cargo xtask index add --channel <канал> --tag v<версия>` для каждого канала версии (для pre-release — `beta`, для релиза — `stable` и `beta`; у каждого индекса свой следующий `seq`, прежние записи сохраняются) и открывает PR «chore(updates): add …» с веткой `updates/v<версия>`. Индексы в нём **не подписаны**, и `index check` не пропустит PR, пока не подписан каждый из них.
+3. `release.yml` собирает по флейворам (`win-x64`, `win-x86`, `win7-x64`, `win7-x86`, `linux-x64`, `osx`) архивы, установщики и пакеты Velopack с дельтами (`cargo xtask package windows|macos|linux`, Linux — в контейнере с glibc 2.28 через `cargo xtask package linux-build`), расширение, SBOM и `SHA256SUMS`, выпускает аттестацию происхождения на каждый файл и создаёт релиз. Установщики: `openncalayer-<версия>-<флейвор>-setup.exe` (четыре флейвора Windows), `openncalayer-<версия>-osx.pkg` и `openncalayer-<версия>-osx.zip`, `openncalayer-<версия>-linux-x64.AppImage`. Флейворы `win7-*` собираются `cargo xtask win7`, а содержимое их пакетов, вместе с `Squirrel.exe` и заглушкой Velopack, и их `Setup.exe` проходят гейт импортов Windows 7. После успешного релиза без суффикса `aur.yml` готовит пакет AUR.
+4. Job `index` скачивает ассеты релиза, выполняет `cargo xtask index add --channel <канал> --tag v<версия>` для каждого канала версии (для pre-release — `beta`, для релиза — `stable` и `beta`; у каждого индекса свой следующий `seq`, прежние записи сохраняются) и открывает PR «chore(updates): add …» с веткой `updates/v<версия>`. Флейвор `osx` в индексы пока не попадает: универсальная сборка ещё не запускалась на Mac с Intel (лаборатория, P9). Индексы в PR **не подписаны**, и `index check` не пропустит PR, пока не подписан каждый из них.
 
 ## 4. Подпись индекса в PR
 
@@ -174,4 +176,5 @@ Workflow сборки плагинов появится вместе с перв
 
 - Проверить происхождение файлов релиза: `gh attestation verify <файл> --repo arynyklas/open-ncalayer`.
 - Убедиться, что индекс опубликован: `curl -fsS https://arynyklas.github.io/open-ncalayer/updates/v1/<канал>.json.minisig`.
-- Установщики (`Setup.exe`, `.pkg`, AppImage) в этой фазе не собираются; релиз содержит архивы и пакеты Velopack. Сам себя обновляет только экземпляр, установленный через Velopack: из архива программа работает, но обновления у неё выключены.
+- Сам себя обновляет только экземпляр, установленный установщиком (`Setup.exe`, `.pkg`, `.zip`, AppImage): из архива программа работает, но обновления у неё выключены; копию из AUR обновляет pacman.
+- Пакет AUR вручную (например, исправление самого пакета): Actions → AUR → Run workflow с тегом и `pkgrel` 2, 3…

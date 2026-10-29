@@ -28,6 +28,7 @@ use oncl_ui::{
 };
 use oncl_update::{Flavor, Version, embedded_keys};
 use openncalayer::cli::{self, Cli, Command};
+use openncalayer::lifecycle::{self, Executables};
 use openncalayer::notices::TrayStatus;
 use openncalayer::plugins::window::{WindowInstallUi, WindowServices};
 use openncalayer::plugins::{PluginConfig, PluginNotice, PluginService};
@@ -161,12 +162,7 @@ fn offer_to_stop_original(wss: &Arc<Wss>) {
 }
 
 fn main() -> ExitCode {
-    // Velopack's install, update and uninstall hooks run here and exit; a copy that was not
-    // installed through Velopack carries on. A downloaded update is applied only by the
-    // updater, when no signing is in progress (not on the next start).
-    velopack::VelopackApp::build()
-        .set_auto_apply_on_startup(false)
-        .run();
+    velopack_app().run();
     let command = Cli::parse().command.unwrap_or(Command::Run {
         allow_no_wss: false,
         no_tray: false,
@@ -184,7 +180,24 @@ fn main() -> ExitCode {
             offline,
         } => cli::cms_verify(&file, content.as_deref(), &chain, offline),
         Command::Nm { command } => cli::nm(command),
+        Command::Integration { command } => cli::integration(command),
     }
+}
+
+/// Velopack's start: its hooks (Windows: after installing and updating, before
+/// uninstalling) run the lifecycle events for this user and exit, with code 1 if a step
+/// failed; a copy that was not installed through Velopack carries on. A downloaded update is
+/// applied only by the updater, when no signing is in progress (not on the next start).
+fn velopack_app<'a>() -> velopack::VelopackApp<'a> {
+    let app = velopack::VelopackApp::build().set_auto_apply_on_startup(false);
+    #[cfg(windows)]
+    let app = {
+        use lifecycle::Event;
+        app.on_after_install_fast_callback(|_| lifecycle::run_hook(Event::Install))
+            .on_after_update_fast_callback(|_| lifecycle::run_hook(Event::Update))
+            .on_before_uninstall_fast_callback(|_| lifecycle::run_hook(Event::Uninstall))
+    };
+    app
 }
 
 /// The servers run on a tokio runtime in a background thread; the main thread runs the
@@ -611,9 +624,12 @@ fn desktop_windows(
     plugins: Box<dyn PluginsServices>,
 ) -> DesktopWindows {
     let modules = builtin_modules();
-    let exe = std::env::current_exe().unwrap_or_else(|e| {
+    let executables = lifecycle::executables().unwrap_or_else(|e| {
         tracing::warn!(error = %e, "the program's path is unknown; autostart cannot be set");
-        PathBuf::new()
+        Executables {
+            program: PathBuf::new(),
+            relay: PathBuf::new(),
+        }
     });
     let bundles = oncl_accessory::bundles()
         .into_iter()
@@ -622,7 +638,7 @@ fn desktop_windows(
     let saved_to = Arc::clone(&wss);
     DesktopWindows {
         locale,
-        settings: desktop::settings_services(paths, exe, wss.port(), Box::new(updates)),
+        settings: desktop::settings_services(paths, executables, wss.port(), Box::new(updates)),
         about: AboutInfo {
             commit: env!("ONCL_GIT_COMMIT").to_owned(),
             bundles,
@@ -814,6 +830,9 @@ impl cli::AtStart for UpdateStart {
                 RollBack::GaveUp => {}
             }
         }
+        // An installed copy that this user has not integrated yet, or that changed version
+        // or place since (an update applied, a hook that failed or ran out of time).
+        lifecycle::at_daemon_start(paths);
         self.started = Some(Started {
             http,
             updates,
@@ -831,8 +850,9 @@ impl cli::AtStart for UpdateStart {
 }
 
 /// The updater of this copy and what it found at the start, or why it is off: only a copy
-/// installed through Velopack, built with the keys of the update index, updates itself.
-/// It downloads through `http` (the proxy of the settings) and exits through `stop`.
+/// installed through Velopack, built with the keys of the update index, updates itself; a
+/// package manager's copy is its to update. It downloads through `http` (the proxy of the
+/// settings) and exits through `stop`.
 fn updater(
     paths: &Paths,
     http: Arc<LiveProxyTransport>,
@@ -840,9 +860,15 @@ fn updater(
     loop_runs: Arc<AtomicBool>,
 ) -> (UpdaterHandle, Startup) {
     let transport: Arc<dyn HttpTransport> = http;
-    let available = update::availability(embedded_keys(), Flavor::current(), || {
-        VelopackInstaller::detect(Arc::clone(&transport))
-    });
+    let manager = std::env::current_exe()
+        .ok()
+        .and_then(|exe| lifecycle::package_manager(&exe));
+    let available = update::availability(
+        embedded_keys(),
+        Flavor::current(),
+        manager.as_deref(),
+        || VelopackInstaller::detect(Arc::clone(&transport)),
+    );
     let (keys, flavor, installer) = match available {
         Ok(available) => available,
         Err(status) => return (UpdaterHandle::Off(status), Startup::Normal),

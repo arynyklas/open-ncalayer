@@ -23,6 +23,19 @@ const KEEP_FILES: usize = 7;
 ///
 /// The log directory cannot be created or opened; logging to stderr is set up anyway.
 pub fn init(dir: &Path) -> io::Result<()> {
+    init_with(dir, true)
+}
+
+/// As [`init`], but to the files only: for commands that print for the user themselves.
+///
+/// # Errors
+///
+/// The log directory cannot be created or opened; nothing is logged then.
+pub fn init_files(dir: &Path) -> io::Result<()> {
+    init_with(dir, false)
+}
+
+fn init_with(dir: &Path, stderr: bool) -> io::Result<()> {
     let file = std::fs::create_dir_all(dir).and_then(|()| {
         RollingFileAppender::builder()
             .rotation(Rotation::DAILY)
@@ -41,7 +54,7 @@ pub fn init(dir: &Path) -> io::Result<()> {
     };
     tracing_subscriber::registry()
         .with(LevelFilter::INFO)
-        .with(fmt::layer().with_writer(io::stderr))
+        .with(stderr.then(|| fmt::layer().with_writer(io::stderr)))
         .with(file_layer)
         .init();
     result
