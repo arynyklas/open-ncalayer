@@ -1,0 +1,13 @@
+# The emulated Kaztoken that `cargo xtask token-emu` serves to vpcd in CI; key paths are
+# relative to the workspace root.
+
+[[reader]]
+name = "OpenNCALayer Emulated Kaztoken 0"
+kind = "AKKaztokenStore"
+pin = "123456"
+tries = 10
+protocol = "T1"
+keys = [
+    { p12 = "fixtures/synthetic/user-gost2015-sign.p12", password = "Qwerty12" },
+    { p12 = "fixtures/synthetic/user-rsa-sign.p12", password = "Qwerty12" },
+]

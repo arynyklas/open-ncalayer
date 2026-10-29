@@ -13,11 +13,13 @@ pub mod emulator;
 mod error;
 mod gzip;
 mod kind;
+pub mod pcsc;
 mod service;
 
 pub use drivers::IdCardInfo;
 pub use error::TokenError;
 pub use kind::{ATRS, TokenKind};
+pub use pcsc::PcscBackend;
 pub use service::{Present, Scan, ScanProblem, Tokens};
 
 /// Environment variable that turns the APDU trace on (`1`). PINs never reach the trace.

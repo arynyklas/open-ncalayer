@@ -31,6 +31,14 @@ rsa = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 
+[target.'cfg(windows)'.dependencies]
+# winscard.dll: the PC/SC functions of Windows XP and later.
+windows-sys = { workspace = true, features = ["Win32_Security_Credentials"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# libpcsclite.so.1 opened at run time: no link-time dependency on pcsc-lite.
+libloading.workspace = true
+
 [dev-dependencies]
 oncl-pki = { workspace = true, features = ["testing"] }
 oncl-testkit.workspace = true
@@ -68,4 +76,8 @@ required-features = ["emulator"]
 
 [[test]]
 name = "akey"
+required-features = ["emulator"]
+
+[[test]]
+name = "vpcd"
 required-features = ["emulator"]
