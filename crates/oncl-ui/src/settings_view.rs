@@ -186,6 +186,9 @@ pub enum UpdateStatus {
     /// This copy is not installed by the installer (a release archive, a build of its own):
     /// only an installed version updates itself.
     NotInstalled,
+    /// A package manager (named) installed this copy and updates it: it does not update
+    /// itself.
+    PackageManaged(String),
     /// This build carries no update signing keys.
     NoKeys,
     /// Not looked for yet since the start.
@@ -206,7 +209,10 @@ pub enum UpdateStatus {
 impl UpdateStatus {
     /// Whether this installation can look for a new version.
     pub fn can_check(&self) -> bool {
-        !matches!(self, UpdateStatus::NotInstalled | UpdateStatus::NoKeys)
+        !matches!(
+            self,
+            UpdateStatus::NotInstalled | UpdateStatus::PackageManaged(_) | UpdateStatus::NoKeys
+        )
     }
 }
 
@@ -480,6 +486,7 @@ pub fn update_view(status: &UpdateStatus, l: Locale) -> String {
     let t = Texts::of(l);
     match status {
         UpdateStatus::NotInstalled => t.update_not_installed.to_owned(),
+        UpdateStatus::PackageManaged(manager) => t.update_package_managed.replace("{0}", manager),
         UpdateStatus::NoKeys => t.update_no_keys.to_owned(),
         UpdateStatus::NotChecked => t.update_not_checked.to_owned(),
         UpdateStatus::UpToDate => t.update_up_to_date.to_owned(),
@@ -709,6 +716,12 @@ mod tests {
             update_view(&UpdateStatus::NoKeys, Locale::Ru),
             "Ключи подписи обновлений не встроены в эту сборку: обновления выключены."
         );
+        let pacman = UpdateStatus::PackageManaged("pacman".to_owned());
+        assert_eq!(
+            update_view(&pacman, Locale::Ru),
+            "Эту копию установил пакетный менеджер pacman: обновляет её он."
+        );
+        assert!(!pacman.can_check());
         let available = |installing| UpdateStatus::Available {
             version: "0.2.0".to_owned(),
             installing,

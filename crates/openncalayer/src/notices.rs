@@ -368,7 +368,11 @@ impl TrayStatus {
                 e.clone(),
                 None,
             ),
-            Notice::Checked(off @ (UpdateStatus::NotInstalled | UpdateStatus::NoKeys)) => (
+            Notice::Checked(
+                off @ (UpdateStatus::NotInstalled
+                | UpdateStatus::PackageManaged(_)
+                | UpdateStatus::NoKeys),
+            ) => (
                 match l {
                     Locale::Ru => "Обновления недоступны",
                     Locale::Kk => "Жаңартулар қолжетімсіз",

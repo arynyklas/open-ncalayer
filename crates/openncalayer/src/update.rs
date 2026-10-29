@@ -973,7 +973,8 @@ fn mark_failed(state: &mut State, pending: &PendingHealth) -> Option<Version> {
 #[derive(Clone)]
 pub enum UpdaterHandle {
     Running(Arc<Updater>),
-    /// [`UpdateStatus::NotInstalled`] or [`UpdateStatus::NoKeys`].
+    /// [`UpdateStatus::NotInstalled`], [`UpdateStatus::PackageManaged`] or
+    /// [`UpdateStatus::NoKeys`].
     Off(UpdateStatus),
 }
 
@@ -993,14 +994,23 @@ impl Updates for UpdaterHandle {
     }
 }
 
-/// Whether this build can update itself: the keys built in, and `installer` (`Err` if this
-/// copy is not installed through Velopack, with the reason). `Err` is the status the
-/// settings window shows; the reason is logged.
+/// Whether this build can update itself: not if `package_manager` installed it (it updates
+/// the copy), otherwise with the keys built in and `installer` (`Err` if this copy is not
+/// installed through Velopack, with the reason). `Err` is the status the settings window
+/// shows; the reason is logged.
 pub fn availability<I>(
     keys: Result<Vec<PublicKey>, UpdateError>,
     flavor: Option<Flavor>,
+    package_manager: Option<&str>,
     installer: impl FnOnce() -> Result<I, String>,
 ) -> Result<(Vec<PublicKey>, Flavor, I), UpdateStatus> {
+    if let Some(manager) = package_manager {
+        info!(
+            manager,
+            "a package manager installed this copy and updates it: updates are off"
+        );
+        return Err(UpdateStatus::PackageManaged(manager.to_owned()));
+    }
     let Some(flavor) = flavor else {
         info!("no update packages are built for this platform: updates are off");
         return Err(UpdateStatus::NotInstalled);

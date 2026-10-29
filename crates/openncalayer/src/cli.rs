@@ -1,5 +1,5 @@
-//! The command line: `run` (the default), `tls init|import|status`, `cms-verify` and
-//! `nm install|uninstall|status`.
+//! The command line: `run` (the default), `tls init|import|status`, `cms-verify`,
+//! `nm install|uninstall|status` and `integration install|uninstall|status`.
 //!
 //! Messages for the user are in Russian, like the rest of the user-facing text.
 
@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use oncl_basics::Locale;
+use oncl_desktop::original::EntryState;
 use oncl_ipc::IpcListener;
 use oncl_pki::http::UreqTransport;
 use oncl_pki::pkix::CaSet;
@@ -26,6 +27,7 @@ use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 use crate::cms_verify::{Online, Options, cms_verify_report_with, parse_certificates};
+use crate::lifecycle::{self, Event, Executables, Installation, Integration, Step};
 use crate::nm::{self, Item, NmLayout, Report, State};
 use crate::paths::Paths;
 use crate::server::listen_port;
@@ -89,6 +91,13 @@ pub enum Command {
         #[command(subcommand)]
         command: NmCommand,
     },
+    #[command(
+        about = "Встраивание в систему этого пользователя: relay браузеров, наш автозапуск, автозапуск оригинального NCALayer"
+    )]
+    Integration {
+        #[command(subcommand)]
+        command: IntegrationCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -134,6 +143,20 @@ pub enum NmCommand {
         #[arg(long, help = "Каталог-песочница из `nm install --sandbox`")]
         sandbox: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IntegrationCommand {
+    #[command(
+        about = "Встроить, как при установке: зарегистрировать relay, включить наш автозапуск, отключить автозапуск оригинала"
+    )]
+    Install,
+    #[command(
+        about = "Убрать встраивание перед удалением программы: relay, наш автозапуск; вернуть автозапуск оригинала. Данные остаются"
+    )]
+    Uninstall,
+    #[command(about = "Показать, как программа встроена")]
+    Status,
 }
 
 /// Everything `run` sets up before the servers start: data paths, logging, the bound IPC
@@ -712,11 +735,9 @@ fn nm_install(relay: Option<PathBuf>, sandbox: Option<&Path>) -> Result<ExitCode
     // The relay reaches the daemon of this data directory, in a sandbox too.
     let paths = data_paths()?;
     let layout = nm_layout(sandbox)?;
-    let daemon = std::env::current_exe().map_err(|e| {
-        eprintln!("Не удалось определить путь к openncalayer: {e}");
-        ExitCode::FAILURE
-    })?;
-    let relay = relay.unwrap_or_else(|| daemon.with_file_name(nm::relay_file_name()));
+    let executables = executables()?;
+    let daemon = executables.program;
+    let relay = relay.unwrap_or(executables.relay);
     if !relay.is_file() {
         eprintln!(
             "Relay не найден: {}. Укажите его через --relay",
@@ -817,6 +838,125 @@ fn print_nm_report(report: &Report) {
             State::Invalid(why) => format!("ошибка: {why}").into(),
         };
         println!("{item}: {} — {state}", entry.location);
+    }
+}
+
+/// The programs of this process, or the message printed and exit code 1.
+fn executables() -> Result<Executables, ExitCode> {
+    lifecycle::executables().map_err(|e| {
+        eprintln!("Не удалось определить путь к openncalayer: {e}");
+        ExitCode::FAILURE
+    })
+}
+
+/// `integration install|uninstall|status`: exit code 0 on success, otherwise 1 (for
+/// `status`: when this user's desktop is not integrated as installing leaves it).
+pub fn integration(command: IntegrationCommand) -> ExitCode {
+    let run = || -> Result<ExitCode, ExitCode> {
+        let paths = data_paths()?;
+        let integration = Integration::for_this_user(&paths).map_err(|e| {
+            eprintln!("Не удалось определить автозапуск и браузеры этого пользователя: {e}");
+            ExitCode::FAILURE
+        })?;
+        let event = match command {
+            IntegrationCommand::Install => Event::Install,
+            IntegrationCommand::Uninstall => Event::Uninstall,
+            IntegrationCommand::Status => return Ok(integration_status(&integration)),
+        };
+        let outcome = integration.run(event);
+        for (step, result) in &outcome.steps {
+            match result {
+                Ok(()) => println!("{}", step_text(*step)),
+                Err(e) => eprintln!("{}: ошибка: {e}", step_text(*step)),
+            }
+        }
+        if !outcome.succeeded() {
+            eprintln!("Не всё удалось: исправьте ошибки выше и повторите команду");
+        } else if event == Event::Uninstall {
+            println!(
+                "Каталог данных остаётся: {} (настройки, сертификаты, журналы)",
+                paths.data.display()
+            );
+        }
+        Ok(lifecycle::exit_code(&outcome))
+    };
+    run().unwrap_or_else(|code| code)
+}
+
+/// What a lifecycle step did, for the user.
+fn step_text(step: Step) -> &'static str {
+    match step {
+        Step::RegisterRelay => "Relay браузеров зарегистрирован",
+        Step::RefreshRelay => "Relay браузеров обновлён",
+        Step::RelayLeftOff => "Relay браузеров не зарегистрирован и оставлен так",
+        Step::UnregisterRelay => "Relay браузеров и его регистрация удалены",
+        Step::EnableAutostart => "Автозапуск OpenNCALayer включён",
+        Step::RefreshAutostart => "Автозапуск OpenNCALayer обновлён",
+        Step::AutostartLeftOff => "Автозапуск OpenNCALayer выключен и оставлен так",
+        Step::RemoveAutostart => "Автозапуск OpenNCALayer удалён",
+        Step::DisableOriginal => "Автозапуск оригинального NCALayer этого пользователя отключён",
+        Step::RestoreOriginal => "Автозапуск оригинального NCALayer возвращён",
+        Step::SaveRecord => "Установка записана",
+        Step::RemoveRecord => "Запись об установке удалена",
+    }
+}
+
+/// Prints how this user's desktop is integrated; exit code 1 if it is not as installing
+/// leaves it (no record, or the relay is missing or broken).
+fn integration_status(integration: &Integration) -> ExitCode {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let kind = match Installation::detect(&exe) {
+        Installation::Velopack => "установлена установщиком (обновляется сама)".to_owned(),
+        Installation::PackageManager(manager) => {
+            format!("установлена пакетным менеджером {manager} (обновляет он)")
+        }
+        Installation::Portable => "переносная копия (сама не обновляется)".to_owned(),
+    };
+    println!(
+        "Программа: {} — {kind}",
+        integration.executables.program.display()
+    );
+    let record = integration.record();
+    match &record {
+        Ok(Some(record)) => println!(
+            "Встроена: версия {} для {}",
+            record.version,
+            record.program.display()
+        ),
+        Ok(None) => println!("Не встроена: выполните `openncalayer integration install`"),
+        Err(e) => println!("Запись об установке не читается: {e}"),
+    }
+    let relay = nm::status(&integration.nm);
+    println!(
+        "Relay браузеров: {}",
+        if relay.is_healthy() {
+            "зарегистрирован"
+        } else {
+            "не зарегистрирован или повреждён (`openncalayer nm status`)"
+        }
+    );
+    match integration.autostart.enabled() {
+        Ok(on) => println!(
+            "Автозапуск OpenNCALayer: {}",
+            if on {
+                "включён"
+            } else {
+                "выключен"
+            }
+        ),
+        Err(e) => println!("Автозапуск OpenNCALayer: не читается: {e}"),
+    }
+    let disabled =
+        oncl_desktop::original::original_autostart(&integration.original, &integration.journal())
+            .entries
+            .iter()
+            .filter(|e| e.state == EntryState::DisabledByUs)
+            .count();
+    println!("Записей автозапуска оригинала, отключённых OpenNCALayer: {disabled}");
+    if matches!(record, Ok(Some(_))) && relay.is_healthy() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
