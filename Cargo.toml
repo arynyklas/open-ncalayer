@@ -27,6 +27,7 @@ oncl-protocol = { path = "crates/oncl-protocol" }
 oncl-registry = { path = "crates/oncl-registry" }
 oncl-testkit = { path = "crates/oncl-testkit" }
 oncl-tls = { path = "crates/oncl-tls" }
+oncl-token = { path = "crates/oncl-token" }
 oncl-trust = { path = "crates/oncl-trust" }
 oncl-ui = { path = "crates/oncl-ui" }
 oncl-update = { path = "crates/oncl-update" }
@@ -42,6 +43,9 @@ clap = { version = "4.6.7", features = ["derive"] }
 crypto-bigint = { version = "0.7.7", default-features = false, features = ["alloc", "zeroize"] }
 der = { version = "0.8.2", features = ["alloc", "derive", "oid", "zeroize"] }
 des = "0.9.0"
+# Gzip-compressed certificates on hardware tokens (`oncl-token`): the version and the pure-Rust
+# zlib-rs backend zip already brings, no second backend.
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"] }
 getrandom = "0.4.3"
 gost94 = { version = "0.11.0", default-features = false }

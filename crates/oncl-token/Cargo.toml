@@ -1,0 +1,28 @@
+[package]
+name = "oncl-token"
+description = "Hardware tokens and ID cards for OpenNCALayer: APDU transport over PC/SC, a driver per token family, keys that sign on the card"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Software cards for tests and the e2e daemon; never in releases.
+emulator = []
+
+[dependencies]
+der.workspace = true
+flate2.workspace = true
+# The ATR table and the fixed APDUs of the drivers, as hex.
+hex-literal.workspace = true
+oncl-pki.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+x509-cert.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# Catches the APDU trace of a test.
+tracing-subscriber.workspace = true
