@@ -566,6 +566,35 @@ fn abi_encoding_details() {
     .unwrap();
     assert_eq!(args.filter, Filter::default());
     assert!(args.storages.is_empty() && args.detail.is_none());
+    // The shapes docs/design/plugins.md gives guests in other languages: a result is a map
+    // of one entry keyed "Ok" or "Err", `()` is null, a unit variant its snake_case name.
+    assert_eq!(
+        abi::encode(&HostResult::<()>::Ok(())),
+        [&[0xa1, 0x62][..], b"Ok", &[0xf6]].concat()
+    );
+    assert_eq!(
+        abi::encode(&HostResult::<()>::Err(HostError::new(
+            ErrorCode::Invalid,
+            ""
+        ))),
+        [
+            &[0xa1, 0x63][..],
+            b"Err",
+            &[0xa2, 0x64],
+            b"code",
+            &[0x67],
+            b"invalid",
+            &[0x67],
+            b"message",
+            &[0x60],
+        ]
+        .concat()
+    );
+    assert_eq!(
+        abi::encode(&Some(Action::KeyInfo)),
+        [&[0x68][..], b"key_info"].concat()
+    );
+    assert_eq!(abi::encode(&Option::<u32>::None), [0xf6]);
     // One value, nothing after it.
     let mut trailing = abi::encode(&RandomArgs { len: 1 });
     trailing.push(0);

@@ -24,8 +24,20 @@
 //! function may only be called while `oncl_process` runs, and not from `oncl_alloc` or
 //! `oncl_free` while the host is calling them.
 //!
-//! Byte strings are CBOR byte strings ([`Bytes`]), not arrays of integers. Enums are
-//! written by their variant names in `snake_case`.
+//! The CBOR is serde's data model as `ciborium` writes it, so a guest in another language
+//! reads and writes:
+//!
+//! - a struct as a map keyed by its field names (text strings); a field with
+//!   `#[serde(default)]` may be left out;
+//! - a byte string ([`Bytes`]) as a CBOR byte string (major type 2), not an array of integers;
+//! - `()` and `None` as `null`, `Some(v)` as `v`;
+//! - a unit enum variant ([`ErrorCode`], [`Level`], [`Action`], [`MessageKind`],
+//!   [`Method`]) as a text string, its name in `snake_case`;
+//! - a [`HostResult`] (Rust's `Result`) as a map of one entry: `{"Ok": value}` or
+//!   `{"Err": {"code": …, "message": …}}`, the keys as written.
+//!
+//! An argument a host function cannot decode is not a trap: the function answers
+//! `{"Err": {"code": "invalid", …}}`. An [`Output`] the host cannot decode fails the request.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

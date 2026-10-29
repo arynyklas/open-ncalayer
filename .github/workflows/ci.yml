@@ -43,6 +43,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Clippy of the example plugin (wasm32)
         run: cargo clippy --locked --manifest-path crates/oncl-pdk/example/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
+      - name: Clippy of the guest SDK (wasm32)
+        run: cargo clippy --locked -p oncl-pdk --target wasm32-unknown-unknown -- -D warnings
 
   test:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
