@@ -8,7 +8,7 @@
 
 use crate::backend::{Backend, Connection, NullBackend};
 use crate::card::{Card, trace_enabled};
-use crate::drivers::{Driver, KeySlot, check_pin, open_driver};
+use crate::drivers::{Driver, IdCardInfo, KeySlot, check_pin, open_driver, read_id_card};
 use crate::error::TokenError;
 use crate::kind::TokenKind;
 use der::Decode;
@@ -202,6 +202,25 @@ impl Tokens {
                 }
             })
             .collect())
+    }
+
+    /// The holder of the ID card in `reader`, read without the PIN.
+    ///
+    /// # Errors
+    ///
+    /// [`TokenError::Disabled`] with support off; [`TokenError::WrongCard`] when the card
+    /// is not an ID card; [`TokenError::NoDevice`] without a card; card and transport
+    /// errors.
+    pub fn id_card_info(&self, reader: &str) -> Result<IdCardInfo, TokenError> {
+        if !self.is_enabled() {
+            return Err(TokenError::Disabled);
+        }
+        let trace = self.trace();
+        let mut conn = self.backend.connect(reader)?;
+        if TokenKind::from_atr(conn.atr()) != Some(TokenKind::KzIdCard) {
+            return Err(TokenError::WrongCard);
+        }
+        in_transaction(&mut *conn, |conn| read_id_card(&mut Card::new(conn, trace)))
     }
 }
 

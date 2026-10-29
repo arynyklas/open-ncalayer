@@ -6,6 +6,7 @@ mod applet;
 mod backend;
 mod config;
 mod kaztoken;
+mod kzid;
 pub mod soft;
 mod vpcd;
 
@@ -141,6 +142,7 @@ pub fn card(spec: CardSpec) -> Box<dyn SoftCard> {
         TokenKind::Kaztoken => {
             applet::Emulated::boxed(kaztoken::Kaztoken::new(spec.clone()), &spec)
         }
+        TokenKind::KzIdCard => applet::Emulated::boxed(kzid::KzIdCard::new(spec.clone()), &spec),
         kind => panic!("no emulated {} yet", kind.storage_name()),
     }
 }

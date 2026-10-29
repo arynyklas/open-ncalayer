@@ -3,7 +3,10 @@
 //! ever written to a token.
 
 pub mod kaztoken;
+pub mod kzid;
 pub mod util;
+
+pub use kzid::read_id_card;
 
 use crate::card::Card;
 use crate::error::TokenError;
@@ -149,14 +152,10 @@ pub fn check_pin(kind: TokenKind, pin: &str) -> Result<(), TokenError> {
 pub fn open_driver(kind: TokenKind, card: &mut Card<'_>) -> Result<Box<dyn Driver>, TokenError> {
     match kind {
         TokenKind::Kaztoken => Ok(Box::new(kaztoken::Kaztoken::open(card)?)),
-        TokenKind::KzIdCard
-        | TokenKind::EToken72K
-        | TokenKind::EToken5110
-        | TokenKind::JaCarta
-        | TokenKind::AKey => Err(TokenError::Malformed(format!(
-            "no driver for {} yet",
-            kind.storage_name()
-        ))),
+        TokenKind::KzIdCard => Ok(Box::new(kzid::KzIdCard::open(card)?)),
+        TokenKind::EToken72K | TokenKind::EToken5110 | TokenKind::JaCarta | TokenKind::AKey => Err(
+            TokenError::Malformed(format!("no driver for {} yet", kind.storage_name())),
+        ),
     }
 }
 

@@ -49,3 +49,7 @@ required-features = ["emulator"]
 [[test]]
 name = "service"
 required-features = ["emulator"]
+
+[[test]]
+name = "kzid"
+required-features = ["emulator"]
