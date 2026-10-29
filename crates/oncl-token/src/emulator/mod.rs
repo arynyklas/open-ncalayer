@@ -2,6 +2,7 @@
 //! the commands its driver sends, with the synthetic keys of the test PKI. Never in release
 //! builds.
 
+mod akey;
 mod applet;
 mod backend;
 mod config;
@@ -135,10 +136,6 @@ impl CardSpec {
 }
 
 /// The emulated card of `spec`'s family.
-///
-/// # Panics
-///
-/// For a family without an emulated card yet.
 pub fn card(spec: CardSpec) -> Box<dyn SoftCard> {
     match spec.kind {
         TokenKind::Kaztoken => {
@@ -151,6 +148,6 @@ pub fn card(spec: CardSpec) -> Box<dyn SoftCard> {
         TokenKind::EToken5110 | TokenKind::JaCarta => {
             applet::Emulated::boxed(gamma::Gamma::new(spec.clone()), &spec)
         }
-        kind => panic!("no emulated {} yet", kind.storage_name()),
+        TokenKind::AKey => applet::Emulated::boxed(akey::AKey::new(spec.clone()), &spec),
     }
 }
