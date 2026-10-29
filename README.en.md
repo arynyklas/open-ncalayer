@@ -274,7 +274,7 @@ The Windows 7 archive has two small DLLs next to `openncalayer.exe` and `nmhost.
 - `combase.dll` forwards `CoTaskMemFree` and `CoCreateFreeThreadedMarshaler` to `ole32.dll`. The `windows` crates behind the windows (Slint and its dependencies) import these functions from `combase.dll`, which Windows 7 does not have;
 - `api-ms-win-core-winrt-error-l1-1-0.dll` holds stubs of `RoOriginateErrorW` and `RoOriginateError`: Windows 7 has no WinRT to report an error to, so they do nothing and return `FALSE`.
 
-The DLLs export only these functions and reach only `kernel32.dll` and `ole32.dll`. On Windows 8 and later neither DLL is loaded: `combase.dll` is a KnownDLL there and `api-ms-…` an API set, so the loader takes the system ones. The Windows 7 build therefore also runs on newer Windows: its start was checked on Windows 11; the CI job `win7` checks it on Windows Server 2025, but that job has not run yet; Windows 10 has not been checked. The relay `nmhost.exe` does not need the DLLs: `nm install` copies it on its own.
+The DLLs export only these functions and reach only `kernel32.dll` and `ole32.dll`. On Windows 8 and later neither DLL is loaded: `combase.dll` is a KnownDLL there and `api-ms-…` an API set, so the loader takes the system ones. The Windows 7 build therefore also runs on newer Windows: its start was checked on Windows 11 and on Windows Server 2025 (the CI job `win7`, x64 and x86); Windows 10 has not been checked. The relay `nmhost.exe` does not need the DLLs: `nm install` copies it on its own.
 
 For updates through Velopack the release builds packages of the flavors `win7-x64` and `win7-x86` from the same files. The executables of the package — ours, `Squirrel.exe` (Velopack's Update.exe) and its stub — go through the same import gate, in the release workflow and in the CI job `win7`.
 
@@ -282,7 +282,7 @@ On Windows 7 the windows take their default font size from the system metrics (`
 
 Browsers on Windows 7: Firefox ESR 115 and Chrome 109 are the last versions for it. The extension installs into Firefox ESR 115 just as into regular Firefox (see [Browser extension](#browser-extension)). There the shim works through Xray vision, which has limits of its own: a page subclass of `WebSocket` does not get its own class for any URL (in other browsers only for NCALayer URLs), and open tabs must be reloaded after the extension is disabled, removed or updated (see [Deviations and limits of the extension](#deviations-and-limits-of-the-extension-p2)). The end-to-end extension test passes in Firefox ESR 115 on Linux.
 
-Not checked yet: no real Windows 7 has run these builds; Windows 7 VMs come with the lab (P9). Checked automatically: every import (the import gate: no DLL or function from the Windows 8+ list) and starting the build on Windows 11. Not checked: start and tray icon on Windows 7, the signing window and its font, the eGov login through the extension in Firefox ESR 115 and Chrome 109, and matching the imports against the full Windows 7 SP1 export list. The checklist is in [`docs/dev/smoke-p6.md`](docs/dev/smoke-p6.md) (in Russian).
+Not checked yet: no real Windows 7 has run these builds; Windows 7 VMs come with the lab (P9). Checked automatically: every import (the import gate: no DLL or function from the Windows 8+ list) and starting the build on Windows 11 and Windows Server 2025 (CI). Not checked: start and tray icon on Windows 7, the signing window and its font, the eGov login through the extension in Firefox ESR 115 and Chrome 109, and matching the imports against the full Windows 7 SP1 export list. The checklist is in [`docs/dev/smoke-p6.md`](docs/dev/smoke-p6.md) (in Russian).
 
 ## Build and run
 
@@ -429,7 +429,7 @@ Then the import gate runs, also available as `cargo xtask check-imports <exe>…
 - these DLLs have the exe's bitness and import from and forward to `kernel32.dll` and `ole32.dll` only, by undecorated name;
 - `nmhost.exe` must do without them: `nm install` copies the relay apart from the program.
 
-On Windows, `cargo xtask win7` then starts the build from `target/win7/<arch>/`: `--help`, `nm install` and `nm status` in a sandbox, `tls init`, then `run` until it answers `GET /` over HTTPS, with the data directory in a temporary directory under `target/win7-smoke/`. In CI this is the blocking `win7` job (x64 and x86 on Windows Server 2025; it has not run yet); checks on Windows 7 itself come with the lab (P9).
+On Windows, `cargo xtask win7` then starts the build from `target/win7/<arch>/`: `--help`, `nm install` and `nm status` in a sandbox, `tls init`, then `run` until it answers `GET /` over HTTPS, with the data directory in a temporary directory under `target/win7-smoke/`. In CI this is the blocking `win7` job (x64 and x86 on Windows Server 2025); checks on Windows 7 itself come with the lab (P9).
 
 Before submitting changes:
 
