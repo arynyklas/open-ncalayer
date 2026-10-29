@@ -3766,7 +3766,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oncl-accessory"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oncl-protocol",
  "serde_json",
@@ -3775,7 +3775,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-applet"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "base64",
  "der 0.8.2",
@@ -3794,7 +3794,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-basics"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "base64",
  "der 0.8.2",
@@ -3813,7 +3813,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-commonutils"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "base64",
  "der 0.8.2",
@@ -3833,7 +3833,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-desktop"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "libc",
  "oncl-basics",
@@ -3848,7 +3848,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-gost"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "crypto-bigint",
  "getrandom 0.4.3",
@@ -3862,7 +3862,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-ipc"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "base64",
  "libc",
@@ -3874,7 +3874,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-nmhost"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oncl-ipc",
  "serde",
@@ -3885,7 +3885,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-pki"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "aes",
  "base64",
@@ -3919,7 +3919,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-protocol"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -3927,14 +3927,14 @@ dependencies = [
 
 [[package]]
 name = "oncl-registry"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "oncl-testkit"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "object",
  "serde",
@@ -3946,7 +3946,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-tls"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "der 0.8.2",
  "rand_chacha",
@@ -3966,7 +3966,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-trust"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oncl-tls",
  "rusqlite",
@@ -3982,7 +3982,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-ui"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "ksni",
  "oncl-basics",
@@ -4009,7 +4009,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-update"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "base64",
  "getrandom 0.4.3",
@@ -4029,7 +4029,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-win7shim-combase"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oncl-testkit",
  "windows-sys 0.61.2",
@@ -4037,14 +4037,14 @@ dependencies = [
 
 [[package]]
 name = "oncl-win7shim-winrt-error"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "oncl-testkit",
 ]
 
 [[package]]
 name = "openncalayer"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "base64",
  "clap",
@@ -7357,7 +7357,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "anyhow",
  "base64",
