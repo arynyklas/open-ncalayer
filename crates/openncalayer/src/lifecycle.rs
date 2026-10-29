@@ -18,12 +18,14 @@
 //!   user left them.
 //! - **Uninstall** removes only what is ours (the relay, its config, manifests and
 //!   registry keys, our autostart entry) and puts back the original's entries we disabled
-//!   ([`restore_original`]); `settings.json`, the TLS files and the logs stay.
+//!   ([`restore_original`]); `settings.json`, the TLS files and the logs stay. Each choice
+//!   undone leaves the record, which goes once none is left, so an installation after a
+//!   partly failed uninstallation makes again what was undone.
 //!
 //! Each step runs even if an earlier one failed; the outcome lists every failure. The
 //! record is written after install and update with the choices done; it names this program
-//! and version only once every step succeeded, so a failed event is due again at the next
-//! start.
+//! and version only once every step succeeded, and is marked failed otherwise, so a failed
+//! event is due again at the next start.
 //!
 //! Who runs them: Velopack's hooks on Windows ([`run_hook`]: `Setup.exe`, the updater and
 //! the uninstaller; a failure ends the hook with a nonzero code), `openncalayer integration
@@ -147,6 +149,9 @@ pub struct Record {
     /// Done once, never again: the user may change them since.
     #[serde(default)]
     pub done: BTreeSet<Choice>,
+    /// The last install or update failed a step: it is due again at the next start.
+    #[serde(default)]
+    pub failed: bool,
 }
 
 impl Record {
@@ -318,8 +323,8 @@ impl Integration {
 
     /// The event the daemon's start owes this user for an `installation`: none for a
     /// portable copy; install if this user's desktop was never integrated, if installing
-    /// did not make every choice yet, or if the record is unreadable; update if the record
-    /// names another program or version.
+    /// did not make every choice yet, or if the record is unreadable; update if the last
+    /// install or update failed a step or the record names another program or version.
     pub fn due_at_start(&self, installation: &Installation) -> Option<Event> {
         if *installation == Installation::Portable {
             return None;
@@ -332,7 +337,9 @@ impl Integration {
             }
             Ok(Some(record)) if !record.complete() => Some(Event::Install),
             Ok(Some(record))
-                if record.program != self.executables.program || record.version != self.version =>
+                if record.failed
+                    || record.program != self.executables.program
+                    || record.version != self.version =>
             {
                 Some(Event::Update)
             }
@@ -412,9 +419,14 @@ impl Integration {
         };
     }
 
+    /// Undoes each choice, forgetting it in the record once its undo succeeded: a later
+    /// installation makes again whatever is no longer there. The record goes once nothing
+    /// is left in it.
     fn uninstall(&self) -> Outcome {
+        let prior = self.prior();
+        let mut done = prior.as_ref().map(|r| r.done.clone()).unwrap_or_default();
         let mut outcome = Outcome::default();
-        outcome.run(Step::UnregisterRelay, || {
+        if outcome.run(Step::UnregisterRelay, || {
             let report = nm::uninstall(&self.nm)?;
             if report.has_in_use() {
                 return Err(io::Error::other(
@@ -422,20 +434,36 @@ impl Integration {
                 ));
             }
             failures(&report)
-        });
-        outcome.run(Step::RemoveAutostart, || {
+        }) {
+            done.remove(&Choice::Relay);
+        }
+        if outcome.run(Step::RemoveAutostart, || {
             self.autostart.set(false, &self.executables.program)
-        });
-        outcome.run(Step::RestoreOriginal, || {
+        }) {
+            done.remove(&Choice::Autostart);
+        }
+        if outcome.run(Step::RestoreOriginal, || {
             restore_original(&self.original, &self.journal()).map(drop)
-        });
-        if outcome.succeeded() {
-            outcome.run(Step::RemoveRecord, || {
-                match std::fs::remove_file(self.record_path()) {
-                    Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-                    _ => Ok(()),
-                }
-            });
+        }) {
+            done.remove(&Choice::Original);
+        }
+        match prior {
+            Some(prior) if !done.is_empty() => {
+                let record = Record {
+                    done,
+                    failed: false,
+                    ..prior
+                };
+                outcome.run(Step::SaveRecord, || self.write_record(&record));
+            }
+            _ => {
+                outcome.run(Step::RemoveRecord, || {
+                    match std::fs::remove_file(self.record_path()) {
+                        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                        _ => Ok(()),
+                    }
+                });
+            }
         }
         outcome
     }
@@ -454,28 +482,33 @@ impl Integration {
     }
 
     /// Writes the record with the choices `done`: for this program and version if every
-    /// step succeeded, otherwise for those of `prior` (if any), so the event is due again.
+    /// step succeeded; otherwise for those of `prior` (if any), marked failed, so the event
+    /// is due again.
     fn save_record(&self, outcome: &mut Outcome, prior: Option<&Record>, done: BTreeSet<Choice>) {
+        let failed = !outcome.succeeded();
         let (program, version) = match prior {
-            Some(prior) if !outcome.succeeded() => (prior.program.clone(), prior.version.clone()),
+            Some(prior) if failed => (prior.program.clone(), prior.version.clone()),
             _ => (self.executables.program.clone(), self.version.clone()),
         };
         let record = Record {
             program,
             version,
             done,
+            failed,
         };
-        outcome.run(Step::SaveRecord, || {
-            let json = serde_json::to_vec_pretty(&record).map_err(io::Error::other)?;
-            std::fs::create_dir_all(&self.paths.data)?;
-            write_atomically(&self.record_path(), &json, Access::Default)
-        });
+        outcome.run(Step::SaveRecord, || self.write_record(&record));
+    }
+
+    fn write_record(&self, record: &Record) -> io::Result<()> {
+        let json = serde_json::to_vec_pretty(record).map_err(io::Error::other)?;
+        std::fs::create_dir_all(&self.paths.data)?;
+        write_atomically(&self.record_path(), &json, Access::Default)
     }
 }
 
 /// Whether the relay is registered: any of its files, manifests or registry keys is there
 /// (as written, or not as written). Replaced relays and temporary files do not count.
-fn relay_registered(status: &nm::Report) -> bool {
+pub(crate) fn relay_registered(status: &nm::Report) -> bool {
     status.entries.iter().any(|entry| {
         matches!(
             entry.item,

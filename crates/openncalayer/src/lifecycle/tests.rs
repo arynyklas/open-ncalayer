@@ -207,6 +207,7 @@ fn install_integrates_this_user_and_repeats_as_a_repair() {
             program: i.executables.program.clone(),
             version: "1.0.0".to_owned(),
             done: Choice::ALL.into(),
+            failed: false,
         })
     );
     assert_eq!(i.due_at_start(&Installation::Velopack), None);
@@ -296,6 +297,7 @@ fn update_refreshes_what_the_user_kept_and_nothing_else() {
             program: new.executables.program.clone(),
             version: "1.1.0".to_owned(),
             done: Choice::ALL.into(),
+            failed: false,
         }
     );
 
@@ -401,8 +403,8 @@ fn a_failed_step_fails_the_event_and_the_others_still_run() {
     assert!(outcome.succeeded(), "{outcome:?}");
     assert_eq!(s.stored(), ["NCALayer.lnk", "ncalayer.desktop"]);
 
-    // Uninstall with a broken autostart: the relay and the original are still handled,
-    // the record stays.
+    // Uninstall with a broken autostart: the relay and the original are still handled;
+    // the record keeps only what could not be undone.
     i.autostart = Box::new(Broken);
     let outcome = i.run(Event::Uninstall);
     assert_eq!(
@@ -411,7 +413,10 @@ fn a_failed_step_fails_the_event_and_the_others_still_run() {
     );
     assert!(!i.nm.relay().exists());
     assert!(s.shortcut().exists());
-    assert!(i.record().unwrap().is_some());
+    assert_eq!(
+        i.record().unwrap().unwrap().done,
+        [Choice::Autostart].into()
+    );
 
     // An update whose autostart cannot be read fails, and keeps the old record.
     let outcome = s.integration("bin2", "2.0.0");
@@ -422,6 +427,73 @@ fn a_failed_step_fails_the_event_and_the_others_still_run() {
     let result = update.run(Event::Update);
     assert!(!result.succeeded());
     assert_eq!(update.record().unwrap().unwrap().version, "1.0.0");
+}
+
+#[test]
+fn installing_after_a_failed_uninstall_integrates_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Sandbox::new(dir.path());
+    s.original_installed();
+    let mut i = s.integration("bin", "1.0.0");
+    assert!(i.run(Event::Install).succeeded());
+
+    // The uninstaller's autostart step fails; the relay and the original are undone.
+    i.autostart = Box::new(Broken);
+    assert!(!i.run(Event::Uninstall).succeeded());
+    assert!(!i.nm.relay().exists() && s.shortcut().exists());
+
+    // A fresh installation (Setup.exe, the .pkg, `integration install`) integrates again.
+    i.autostart = Box::new(FileAutostart::desktop_entry(&s.autostart_paths()));
+    let outcome = i.run(Event::Install);
+    assert!(outcome.succeeded(), "{outcome:?}");
+    assert!(
+        nm::status(&i.nm).is_healthy(),
+        "the relay is registered again"
+    );
+    assert!(i.autostart.enabled().unwrap());
+    assert!(!s.shortcut().exists(), "the original is disabled again");
+    assert!(i.record().unwrap().unwrap().complete());
+
+    // An uninstallation that undoes everything removes the record.
+    assert!(i.run(Event::Uninstall).succeeded());
+    assert_eq!(i.record().unwrap(), None);
+    // After a failed uninstallation, a second one that finishes the rest removes the
+    // record too.
+    assert!(i.run(Event::Install).succeeded());
+    i.autostart = Box::new(Broken);
+    assert!(!i.run(Event::Uninstall).succeeded());
+    i.autostart = Box::new(FileAutostart::desktop_entry(&s.autostart_paths()));
+    i.autostart.set(false, &i.executables.program).unwrap();
+    assert!(i.run(Event::Uninstall).succeeded());
+    assert_eq!(i.record().unwrap(), None);
+}
+
+#[test]
+fn a_failed_refresh_is_due_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Sandbox::new(dir.path());
+    let mut i = s.integration("bin", "1.0.0");
+    assert!(i.run(Event::Install).succeeded());
+    assert_eq!(i.due_at_start(&Installation::Velopack), None);
+
+    // The same version installed again over itself; its autostart refresh fails.
+    i.autostart = Box::new(Broken);
+    let outcome = i.run(Event::Install);
+    assert_eq!(
+        outcome.failures().map(|(step, _)| step).collect::<Vec<_>>(),
+        [Step::RefreshAutostart]
+    );
+    let record = i.record().unwrap().unwrap();
+    assert!(record.complete() && record.failed);
+    assert_eq!(i.due_at_start(&Installation::Velopack), Some(Event::Update));
+
+    // The next start finishes it.
+    i.autostart = Box::new(FileAutostart::desktop_entry(&s.autostart_paths()));
+    let (event, outcome) = i.at_start(&Installation::Velopack).unwrap();
+    assert_eq!(event, Event::Update);
+    assert!(outcome.succeeded(), "{outcome:?}");
+    assert!(!i.record().unwrap().unwrap().failed);
+    assert_eq!(i.due_at_start(&Installation::Velopack), None);
 }
 
 #[test]

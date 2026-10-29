@@ -27,7 +27,7 @@ use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 use crate::cms_verify::{Online, Options, cms_verify_report_with, parse_certificates};
-use crate::lifecycle::{self, Event, Executables, Installation, Integration, Step};
+use crate::lifecycle::{self, Choice, Event, Executables, Installation, Integration, Step};
 use crate::nm::{self, Item, NmLayout, Report, State};
 use crate::paths::Paths;
 use crate::server::listen_port;
@@ -906,7 +906,7 @@ fn step_text(step: Step) -> &'static str {
 }
 
 /// Prints how this user's desktop is integrated; exit code 1 if it is not as installing
-/// leaves it (no record, or the relay is missing or broken).
+/// leaves it ([`integration_ok`]).
 fn integration_status(integration: &Integration) -> ExitCode {
     let exe = std::env::current_exe().unwrap_or_default();
     let kind = match Installation::detect(&exe) {
@@ -922,11 +922,31 @@ fn integration_status(integration: &Integration) -> ExitCode {
     );
     let record = integration.record();
     match &record {
-        Ok(Some(record)) => println!(
-            "Встроена: версия {} для {}",
-            record.version,
-            record.program.display()
-        ),
+        Ok(Some(record)) => {
+            println!(
+                "Встроена: версия {} для {}",
+                record.version,
+                record.program.display()
+            );
+            for choice in Choice::ALL {
+                println!(
+                    "  {}: {}",
+                    choice_text(choice),
+                    if record.done.contains(&choice) {
+                        "сделано"
+                    } else {
+                        "не сделано"
+                    }
+                );
+            }
+            if !record.complete() {
+                println!("Установка не закончена: выполните `openncalayer integration install`");
+            } else if record.failed {
+                println!(
+                    "Последнее обновление встраивания не удалось: оно повторится при следующем запуске программы"
+                );
+            }
+        }
         Ok(None) => println!("Не встроена: выполните `openncalayer integration install`"),
         Err(e) => println!("Запись об установке не читается: {e}"),
     }
@@ -957,11 +977,28 @@ fn integration_status(integration: &Integration) -> ExitCode {
             .filter(|e| e.state == EntryState::DisabledByUs)
             .count();
     println!("Записей автозапуска оригинала, отключённых OpenNCALayer: {disabled}");
-    if matches!(record, Ok(Some(_))) && relay.is_healthy() {
+    if integration_ok(&record, &relay) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// What installing does once, for the user.
+fn choice_text(choice: Choice) -> &'static str {
+    match choice {
+        Choice::Relay => "регистрация relay браузеров",
+        Choice::Autostart => "включение автозапуска OpenNCALayer",
+        Choice::Original => "отключение автозапуска оригинала",
+    }
+}
+
+/// Whether this user's desktop is integrated as installing leaves it: a record with every
+/// choice made and no failed refresh, and a relay that is either not registered (the user
+/// may have removed it) or registered whole.
+fn integration_ok(record: &io::Result<Option<lifecycle::Record>>, relay: &Report) -> bool {
+    let record_ok = matches!(record, Ok(Some(r)) if r.complete() && !r.failed);
+    record_ok && (relay.is_healthy() || !lifecycle::relay_registered(relay))
 }
 
 /// `cms-verify <file> [--content <file>] [--chain <file>]... [--offline]`: prints
@@ -1034,6 +1071,43 @@ pub fn cms_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integration_status_fails_until_installing_is_done() {
+        let record = |done: &[Choice], failed| {
+            Ok(Some(lifecycle::Record {
+                program: PathBuf::from("/opt/openncalayer"),
+                version: "1.0.0".to_owned(),
+                done: done.iter().copied().collect(),
+                failed,
+            }))
+        };
+        let entry = |item, state| nm::Entry {
+            item,
+            location: "x".to_owned(),
+            state,
+        };
+        let healthy = Report {
+            entries: vec![entry(Item::Relay, State::Present)],
+        };
+        let removed = Report {
+            entries: vec![entry(Item::Relay, State::Missing)],
+        };
+        let broken = Report {
+            entries: vec![
+                entry(Item::Relay, State::Missing),
+                entry(Item::RegistryKey, State::Present),
+            ],
+        };
+        assert!(integration_ok(&record(&Choice::ALL, false), &healthy));
+        // The user unregistered the extension: still as installing left it.
+        assert!(integration_ok(&record(&Choice::ALL, false), &removed));
+        assert!(!integration_ok(&record(&Choice::ALL, false), &broken));
+        assert!(!integration_ok(&record(&[Choice::Relay], false), &healthy));
+        assert!(!integration_ok(&record(&Choice::ALL, true), &healthy));
+        assert!(!integration_ok(&Ok(None), &healthy));
+        assert!(!integration_ok(&Err(io::Error::other("bad")), &healthy));
+    }
 
     /// What [`prepare_in`] told the start hooks: `started` calls, `ends_cleanly` calls.
     #[derive(Default)]
