@@ -71,6 +71,10 @@ pub enum LoadError {
     /// version call failed.
     #[error("the plugin could not be instantiated: {0}")]
     Instantiate(String),
+    /// A module the plugin serves is served already: by a built-in module or another
+    /// plugin. `owner` is that plugin's id, or [`BUILT_IN`](crate::BUILT_IN).
+    #[error("the module {module} is served by {owner} already")]
+    ModuleTaken { module: String, owner: String },
 }
 
 /// Why a request to a plugin failed: the page gets [`PLUGIN_ERROR_REPLY`].

@@ -6,25 +6,31 @@
 //!   ([`Package`]);
 //! - the runtime: a module checked against the ABI of [`oncl_pdk::abi`] ([`Engine`],
 //!   [`Compiled`]), instantiated per session ([`Instance`]) with the host functions of its
-//!   capabilities ([`HostServices`]).
+//!   capabilities ([`HostServices`]);
+//! - [`store`]: the installed plugins in `<data>/plugins/` ([`Store`]);
+//! - [`modules`]: the loaded plugins as the daemon's dynamic modules ([`PluginModules`]).
 //!
 //! The format, the ABI and the limits are described in `docs/design/plugins.md`.
 
 mod caps;
 mod host;
 pub mod manifest;
+pub mod modules;
 pub mod package;
 mod runtime;
+pub mod store;
 
 pub use caps::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_KEY_HANDLES};
 pub use host::HostServices;
 pub use manifest::{Capabilities, HttpPrefix, Localized, Manifest, Replaces};
+pub use modules::{BUILT_IN, LoadedInfo, OnMissing, PluginModules};
 pub use oncl_pdk::abi::ABI_VERSION;
 pub use package::{MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, PACKAGE_EXT, Package};
 pub use runtime::{
     Compiled, Engine, Instance, LoadError, MAX_INSTANCES, MAX_MEMORY, MAX_TRANSFER,
     PLUGIN_ERROR_REPLY, PROCESS_FUEL, PluginError, SessionContext,
 };
+pub use store::{Installed, Source, Store, StoreError, StoreState};
 pub use url::Url;
 
 use std::io;
