@@ -1,7 +1,7 @@
-//! The daemon's own windows, settings, the TLS wizard and About: [`set_desktop_windows`]
-//! gives them what they show and change, [`open_window`] opens one from any thread (the tray
-//! menu, a notification, a page's `showSettings` or `showBundleManager`). They live on the
-//! event loop of
+//! The daemon's own windows, settings, the TLS wizard, About and the plugins:
+//! [`set_desktop_windows`] gives them what they show and change, [`open_window`] opens one
+//! from any thread (the tray menu, a notification, a page's `showSettings` or
+//! `showBundleManager`). They live on the event loop of
 //! [`run_event_loop`](crate::run_event_loop); closing them does not end it.
 
 use std::cell::{Cell, RefCell};
@@ -12,6 +12,7 @@ use oncl_basics::Locale;
 use oncl_desktop::Settings;
 
 use crate::about_view::{self, AboutInfo, AboutTab};
+use crate::plugins_view::{self, PluginsServices};
 use crate::prompter::select_desktop_language;
 use crate::settings_view::{self, SettingsServices};
 use crate::tls_wizard::{self, TlsWizardServices};
@@ -25,8 +26,8 @@ pub enum DesktopWindow {
     TlsWizard,
     /// «О программе».
     About,
-    /// «О программе» on its «Модули» tab (`showBundleManager`).
-    Modules,
+    /// «Плагины» (the tray, `showBundleManager`).
+    Plugins,
 }
 
 /// What the windows show and change.
@@ -36,6 +37,7 @@ pub struct DesktopWindows {
     pub settings: SettingsServices,
     pub about: AboutInfo,
     pub tls: TlsWizardServices,
+    pub plugins: Box<dyn PluginsServices>,
     /// Runs on the event loop once the settings window has saved new settings.
     pub on_saved: Box<dyn Fn(&Settings)>,
 }
@@ -46,6 +48,7 @@ pub(crate) struct Desktop {
     pub(crate) settings: Arc<SettingsServices>,
     pub(crate) about: AboutInfo,
     pub(crate) tls: Arc<TlsWizardServices>,
+    pub(crate) plugins: Arc<Box<dyn PluginsServices>>,
     pub(crate) on_saved: Box<dyn Fn(&Settings)>,
 }
 
@@ -61,6 +64,7 @@ pub fn set_desktop_windows(windows: DesktopWindows) {
         settings: Arc::new(windows.settings),
         about: windows.about,
         tls: Arc::new(windows.tls),
+        plugins: Arc::new(windows.plugins),
         on_saved: windows.on_saved,
     };
     DESKTOP.set(Some(Rc::new(desktop)));
@@ -89,21 +93,24 @@ fn open_now(window: DesktopWindow) {
         DesktopWindow::Settings => settings_view::open(&desktop),
         DesktopWindow::TlsWizard => tls_wizard::open(&desktop),
         DesktopWindow::About => about_view::open(&desktop, AboutTab::Program),
-        DesktopWindow::Modules => about_view::open(&desktop, AboutTab::Modules),
+        DesktopWindow::Plugins => plugins_view::open(&desktop),
     }
 }
 
-/// Whether the settings, TLS wizard, About or stop-the-original window is open. On the
-/// event loop (each window lives in its thread's slot); elsewhere it is `false`.
+/// Whether a window of the daemon is open: settings, the TLS wizard, About, stopping the
+/// original, the plugins or a plugin's installation. On the event loop (each window lives in
+/// its thread's slot); elsewhere it is `false`.
 pub fn any_window_open() -> bool {
     settings_view::is_open()
         || tls_wizard::is_open()
         || about_view::is_open()
         || crate::stop_original::is_open()
+        || plugins_view::is_open()
+        || crate::install_plugin::is_open()
 }
 
-/// After a signing dialog: the open settings, TLS wizard, About or stop-the-original window
-/// gets its language back (the translation is the thread's, and the dialog had its page's).
+/// After a signing dialog: the open window of the daemon gets its language back (the
+/// translation is the thread's, and the dialog had its page's).
 pub(crate) fn restore_language() {
     if !any_window_open() {
         return;

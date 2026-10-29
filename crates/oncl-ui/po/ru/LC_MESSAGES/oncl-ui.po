@@ -179,8 +179,8 @@ msgstr "Бандлы (getBundles)"
 msgid "Modules of the daemon"
 msgstr "Модули демона"
 
-msgid "Bundles cannot be installed: OpenNCALayer has its modules built in."
-msgstr "Установка бандлов не поддерживается: модули OpenNCALayer встроены в программу."
+msgid "Plugins are installed, turned off and removed in the Plugins window of the tray menu."
+msgstr "Плагины устанавливаются, выключаются и удаляются в окне «Плагины» меню значка в трее."
 
 msgid "Third-party licences"
 msgstr "Сторонние лицензии"
@@ -283,3 +283,39 @@ msgstr "Нет"
 
 msgid "Save the file: {}"
 msgstr "Сохранить файл: {}"
+
+msgid "Plugin installation"
+msgstr "Установка плагина"
+
+msgid "Install"
+msgstr "Установить"
+
+msgid "Plugins"
+msgstr "Плагины"
+
+msgid "Installed"
+msgstr "Установленные"
+
+msgid "No plugins are installed."
+msgstr "Плагины не установлены."
+
+msgid "Turn off"
+msgstr "Выключить"
+
+msgid "Turn on"
+msgstr "Включить"
+
+msgid "Available in the catalog"
+msgstr "Доступные в каталоге"
+
+msgid "The catalog offers no other plugins."
+msgstr "Других плагинов в каталоге нет."
+
+msgid "Install…"
+msgstr "Установить…"
+
+msgid "Install from file…"
+msgstr "Установить из файла…"
+
+msgid "Refresh the catalog"
+msgstr "Обновить каталог"

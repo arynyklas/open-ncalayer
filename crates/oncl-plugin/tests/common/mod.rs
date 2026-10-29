@@ -234,3 +234,17 @@ pub fn probe_result<T: DeserializeOwned>(response: &str) -> HostResult<T> {
 pub fn wasm(wat: &str) -> Vec<u8> {
     wat::parse_str(wat).unwrap()
 }
+
+/// The example plugin's package with its `plugin.toml` changed by `edit`.
+pub fn repackaged_example(edit: impl FnOnce(String) -> String) -> Vec<u8> {
+    use std::io::Write;
+    let manifest = edit(oncl_testkit::plugin::example_manifest());
+    let options = zip::write::SimpleFileOptions::default();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("plugin.toml", options).unwrap();
+    zip.write_all(manifest.as_bytes()).unwrap();
+    zip.start_file("plugin.wasm", options).unwrap();
+    zip.write_all(&oncl_testkit::read(oncl_testkit::plugin::example_wasm()))
+        .unwrap();
+    zip.finish().unwrap().into_inner()
+}

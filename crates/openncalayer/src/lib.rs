@@ -14,6 +14,7 @@ mod logging;
 pub mod nm;
 pub mod notices;
 mod paths;
+pub mod plugins;
 pub mod renewal;
 mod server;
 mod session;
@@ -24,8 +25,8 @@ pub mod wss;
 pub use bridge::{NM_FRAME_LIMIT, serve_ipc, split_message};
 pub use paths::{DATA_DIR_VAR, Paths};
 pub use server::{
-    DEFAULT_PORT, IDLE_TIMEOUT, LiveTls, MAX_MESSAGE, MAX_PORT, PORT_VAR, ServerConfig,
-    build_registry, listen_port, listen_port_from, serve,
+    DEFAULT_PORT, IDLE_TIMEOUT, LiveTls, MAX_MESSAGE, MAX_PORT, PORT_VAR, Plugins, ServerConfig,
+    build_registry, builtin_modules, listen_port, listen_port_from, serve,
 };
 pub use session::{hold_requests, release_requests, requests_idle};
 pub use settings::{JsonSettings, LiveProxyTransport, load_settings};

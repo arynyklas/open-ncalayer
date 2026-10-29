@@ -179,8 +179,8 @@ msgstr "Бандлдар (getBundles)"
 msgid "Modules of the daemon"
 msgstr "Демон модульдері"
 
-msgid "Bundles cannot be installed: OpenNCALayer has its modules built in."
-msgstr "Бандлдарды орнату мүмкін емес: OpenNCALayer модульдері бағдарламаға кірістірілген."
+msgid "Plugins are installed, turned off and removed in the Plugins window of the tray menu."
+msgstr "Плагиндер науа белгішесі мәзіріндегі «Плагиндер» терезесінде орнатылады, өшіріледі және жойылады."
 
 msgid "Third-party licences"
 msgstr "Үшінші тарап лицензиялары"
@@ -283,3 +283,39 @@ msgstr "Жоқ"
 
 msgid "Save the file: {}"
 msgstr "Файлды сақтау: {}"
+
+msgid "Plugin installation"
+msgstr "Плагинді орнату"
+
+msgid "Install"
+msgstr "Орнату"
+
+msgid "Plugins"
+msgstr "Плагиндер"
+
+msgid "Installed"
+msgstr "Орнатылғандар"
+
+msgid "No plugins are installed."
+msgstr "Плагиндер орнатылмаған."
+
+msgid "Turn off"
+msgstr "Өшіру"
+
+msgid "Turn on"
+msgstr "Қосу"
+
+msgid "Available in the catalog"
+msgstr "Каталогта қолжетімді"
+
+msgid "The catalog offers no other plugins."
+msgstr "Каталогта басқа плагиндер жоқ."
+
+msgid "Install…"
+msgstr "Орнату…"
+
+msgid "Install from file…"
+msgstr "Файлдан орнату…"
+
+msgid "Refresh the catalog"
+msgstr "Каталогты жаңарту"

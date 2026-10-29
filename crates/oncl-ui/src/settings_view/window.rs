@@ -353,6 +353,7 @@ mod tests {
             settings: services(root, FakeOriginal::default()),
             about: AboutInfo::default(),
             tls: crate::tls_wizard::fakes::services(root, Vec::new(), None),
+            plugins: Box::new(crate::plugins_view::fakes::FakePlugins::default()),
             on_saved: Box::new(move |s: &Settings| record.borrow_mut().push(s.proxy.clone())),
         });
         (crate::windows::desktop().unwrap(), applied)

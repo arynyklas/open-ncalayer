@@ -21,8 +21,12 @@ oncl-pdk.workspace = true
 oncl-pki.workspace = true
 # `AddInfo`, `SessionId`: what a call comes with.
 oncl-protocol.workspace = true
+# `Store`: the catalog (the signed update index) kept and verified again, the package sums.
+oncl-update.workspace = true
 semver.workspace = true
 serde.workspace = true
+# `Store`: `state.json`.
+serde_json.workspace = true
 # `Package::sha256`: checked against the update index.
 sha2.workspace = true
 thiserror.workspace = true
@@ -36,12 +40,15 @@ zip.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+# Catalogs signed in the store's tests.
+minisign.workspace = true
 oncl-basics = { path = "../oncl-basics", features = ["testing"] }
 # `testing`: `tsp::MockTsa`, `RouteTransport`.
 oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 oncl-testkit.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 tracing-subscriber.workspace = true
 wat.workspace = true
+# `Prompter::password` of a test prompter.
+zeroize.workspace = true

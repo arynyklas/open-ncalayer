@@ -687,6 +687,7 @@ mod tests {
             ),
             about: AboutInfo::default(),
             tls,
+            plugins: Box::new(crate::plugins_view::fakes::FakePlugins::default()),
             on_saved: Box::new(|_| {}),
         });
         crate::windows::desktop().unwrap()

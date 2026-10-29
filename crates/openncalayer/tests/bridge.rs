@@ -127,6 +127,7 @@ fn scripted_registry(steps: Vec<Step>) -> (Arc<Registry>, Arc<ScriptedPrompter>)
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(MockTsa::new(entry("tsa-gost2015"))),
         Arc::new(|_| {}),
+        None,
     );
     (Arc::new(registry), prompter)
 }

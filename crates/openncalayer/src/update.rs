@@ -993,6 +993,29 @@ impl Updates for UpdaterHandle {
     }
 }
 
+/// What «Проверить сейчас» (the settings window) and «Проверить обновления» (the tray)
+/// check: the core's updates, then the plugin catalog, downloaded even with updates off
+/// ([`PluginService::check_now`](crate::plugins::PluginService::check_now)).
+#[derive(Clone)]
+pub struct Checks {
+    pub core: UpdaterHandle,
+    pub plugins: Option<Arc<crate::plugins::PluginService>>,
+}
+
+impl Updates for Checks {
+    fn status(&self) -> UpdateStatus {
+        self.core.status()
+    }
+
+    fn check_now(&self, settings: Option<UpdateSettings>) -> UpdateStatus {
+        let status = self.core.check_now(settings);
+        if let Some(plugins) = &self.plugins {
+            plugins.check_now();
+        }
+        status
+    }
+}
+
 /// Whether this build can update itself: the keys built in, and `installer` (`Err` if this
 /// copy is not installed through Velopack, with the reason). `Err` is the status the
 /// settings window shows; the reason is logged.
@@ -1023,7 +1046,7 @@ pub fn availability<I>(
 }
 
 /// A random time in `range`.
-fn jitter((low, high): (Duration, Duration)) -> Duration {
+pub(crate) fn jitter((low, high): (Duration, Duration)) -> Duration {
     let mut bytes = [0u8; 8];
     if getrandom::fill(&mut bytes).is_err() {
         return low;
@@ -1037,4 +1060,4 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
