@@ -491,6 +491,18 @@ impl Prompter for JksFirst {
     fn password(&self, _: &PasswordPrompt) -> Prompt<Zeroizing<String>> {
         Prompt::Cancelled
     }
+
+    fn message(&self, _: &oncl_basics::MessagePrompt) -> Prompt<()> {
+        Prompt::Cancelled
+    }
+
+    fn confirm(&self, _: &oncl_basics::ConfirmPrompt) -> Prompt<bool> {
+        Prompt::Cancelled
+    }
+
+    fn save_file(&self, _: &oncl_basics::SavePrompt) -> Prompt<PathBuf> {
+        Prompt::Cancelled
+    }
 }
 
 #[test]

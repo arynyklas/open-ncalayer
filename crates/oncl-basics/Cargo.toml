@@ -49,6 +49,10 @@ name = "essentials"
 required-features = ["testing"]
 
 [[test]]
+name = "keys"
+required-features = ["testing"]
+
+[[test]]
 name = "sign"
 required-features = ["testing"]
 

@@ -265,3 +265,21 @@ msgstr "Түпнұсқа NCALayer-ді тоқтату"
 
 msgid "Stop"
 msgstr "Тоқтату"
+
+msgid "Plugin: {}"
+msgstr "Плагин: {}"
+
+msgid "Information"
+msgstr "Хабарлама"
+
+msgid "Warning"
+msgstr "Ескерту"
+
+msgid "Error"
+msgstr "Қате"
+
+msgid "No"
+msgstr "Жоқ"
+
+msgid "Save the file: {}"
+msgstr "Файлды сақтау: {}"

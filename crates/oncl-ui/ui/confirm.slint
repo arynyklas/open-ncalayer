@@ -1,0 +1,61 @@
+// A plugin's yes/no question: who asks and the question (plain text, not markup).
+
+import { Button, VerticalBox } from "std-widgets.slint";
+
+export component ConfirmDialog inherits Window {
+    title: "OpenNCALayer";
+    always-on-top: true;
+    min-width: 420px;
+    max-width: 640px;
+    forward-focus: no-button;
+
+    // The requesting page's origin.
+    in property <string> origin;
+    // The plugin's name.
+    in property <string> source;
+    // The plugin's question.
+    in property <string> text;
+    // The translated header line.
+    out property <string> requester: @tr("Request from: {}", root.origin);
+
+    callback answer(bool);
+    callback cancel();
+
+    VerticalBox {
+        Text {
+            text: root.requester;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: @tr("Plugin: {}", root.source);
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: root.text;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Button {
+                text: @tr("Yes");
+                clicked => {
+                    root.answer(true);
+                }
+            }
+
+            // The default: a question answered by Enter alone is not a yes.
+            no-button := Button {
+                text: @tr("No");
+                primary: true;
+                clicked => {
+                    root.answer(false);
+                }
+            }
+        }
+    }
+}

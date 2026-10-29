@@ -1,10 +1,10 @@
 //! `PKIExtras.sign`: the arguments as the original reads them with org.json, then the
-//! storage → key → sign flow under the process-wide dialog-flow lock.
+//! storage → key → sign flow ([`KeyChooser`](crate::KeyChooser)) under the process-wide
+//! dialog-flow lock.
 
-use crate::filter::{ChainPolicy, KeyFilter, availabilities};
-use crate::prompt::{
-    Action, Busy, BusyPrompt, KeyPrompt, Locale, Prompt, StorageKind, StoragePrompt,
-};
+use crate::filter::{ChainPolicy, KeyFilter};
+use crate::keys::KeyRequest;
+use crate::prompt::{Action, Locale, StorageKind};
 use crate::{Basics, lock_dialog_flow};
 use base64::Engine;
 use base64::alphabet;
@@ -13,7 +13,6 @@ use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use der::Encode;
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::cms::{self, CmsError, SignOptions};
-use oncl_pki::info::{CertInfo, cert_info};
 use oncl_pki::key::{KeyAlg, KeyError, SigAlg};
 use oncl_pki::pkcs12::KeyEntry;
 use oncl_pki::pkix::CaSet;
@@ -75,26 +74,18 @@ enum Format {
 
 /// A parsed `sign` request; `data` borrows from the request unless base64-decoded.
 struct SignRequest<'a> {
-    storages: Vec<StorageKind>,
-    origin: String,
-    locale: Locale,
-    action: Action,
+    key: KeyRequest,
     format: Format,
     data: Vec<Cow<'a, [u8]>>,
-    filter: KeyFilter,
 }
 
 /// `PKIExtras.sign`.
 pub(crate) fn sign(basics: &Basics, args: &Map<String, Value>, add_info: &AddInfo) -> CallResult {
     let request = SignRequest::parse(args, add_info)?;
     let _flow = lock_dialog_flow();
-    let Some((mut entries, busy)) = open_storage(basics, &request) else {
+    let Some(entry) = basics.key_chooser().choose(&request.key) else {
         return Ok(json!({}));
     };
-    let Some(index) = choose_key(basics, &request, &entries, busy) else {
-        return Ok(json!({}));
-    };
-    let entry = entries.swap_remove(index);
     let result = match request.format {
         Format::Cms {
             encapsulate,
@@ -214,13 +205,16 @@ impl<'a> SignRequest<'a> {
             .collect::<Result<_, _>>()?;
 
         Ok(SignRequest {
-            storages,
-            origin,
-            locale,
-            action,
+            key: KeyRequest {
+                origin,
+                locale,
+                action,
+                storages,
+                filter,
+                detail: None,
+            },
             format,
             data,
-            filter,
         })
     }
 }
@@ -238,74 +232,6 @@ pub(crate) fn storage_list(names: &[Value]) -> Result<Vec<StorageKind>, Failure>
         }
     }
     Ok(storages)
-}
-
-/// Asks for a storage until one opens; `None` if the user cancels. Saves the opened path.
-/// The busy indicator shows from each answer on; it is returned with the opened store.
-fn open_storage(basics: &Basics, request: &SignRequest<'_>) -> Option<(Vec<KeyEntry>, Busy)> {
-    let mut prompt = StoragePrompt {
-        origin: request.origin.clone(),
-        locale: request.locale,
-        action: request.action,
-        storages: request.storages.clone(),
-        recent_path: basics.recent.load(),
-        error: None,
-        detail: None,
-    };
-    loop {
-        let answer = match basics.prompter.storage(&prompt) {
-            Prompt::Answer(answer) => answer,
-            Prompt::Cancelled => return None,
-        };
-        let busy = basics.prompter.busy(&BusyPrompt {
-            origin: request.origin.clone(),
-            locale: request.locale,
-        });
-        match answer.open(&prompt.storages) {
-            Ok(entries) => {
-                basics.recent.save(&answer.path);
-                return Some((entries, busy));
-            }
-            Err(e) => {
-                prompt.error = Some(e);
-                prompt.recent_path = Some(answer.path);
-            }
-        }
-    }
-}
-
-/// Asks for a key until an enabled one is picked; `None` if the user cancels. The paths
-/// are built and the OCSP checks started, once, before the dialog opens, which ends `busy`;
-/// the dialog follows the checks.
-fn choose_key(
-    basics: &Basics,
-    request: &SignRequest<'_>,
-    entries: &[KeyEntry],
-    busy: Busy,
-) -> Option<usize> {
-    let keys: Vec<(Certificate, CertInfo)> = entries
-        .iter()
-        .map(|entry| (entry.cert.clone(), cert_info(&entry.cert)))
-        .collect();
-    let live = availabilities(
-        &request.filter,
-        &keys,
-        &basics.http,
-        &basics.ocsp_cache,
-        (basics.clock)(),
-    );
-    let mut prompt = KeyPrompt::new(
-        request.origin.clone(),
-        request.locale,
-        request.action,
-        entries
-            .iter()
-            .zip(keys)
-            .map(|(entry, (_, info))| (entry.alias.clone(), info)),
-        live,
-    );
-    drop(busy);
-    prompt.ask(basics.prompter.as_ref())
 }
 
 /// A CAdES PEM of `data`, time-stamped on the new (last) signer if asked.

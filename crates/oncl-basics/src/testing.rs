@@ -2,8 +2,9 @@
 //! [`RecentPathStore`].
 
 use crate::prompt::{
-    Busy, BusyPrompt, CsrAnswer, CsrPrompt, FilePrompt, ImportAnswer, ImportPrompt, KeyPrompt,
-    PasswordPrompt, Prompt, Prompter, RecentPathStore, StorageAnswer, StorageKind, StoragePrompt,
+    Busy, BusyPrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FilePrompt, ImportAnswer, ImportPrompt,
+    KeyPrompt, MessagePrompt, PasswordPrompt, Prompt, Prompter, RecentPathStore, SavePrompt,
+    StorageAnswer, StorageKind, StoragePrompt,
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -59,6 +60,24 @@ pub enum Step {
     Password(String),
     /// Cancel a password dialog.
     CancelPassword,
+    /// Close a message with OK.
+    Message,
+    /// Close a message's window.
+    CancelMessage,
+    /// Answer a yes/no question.
+    Confirm {
+        /// Yes.
+        yes: bool,
+    },
+    /// Close a yes/no question's window.
+    CancelConfirm,
+    /// Answer a save dialog with this path.
+    Save {
+        /// Where to save.
+        path: PathBuf,
+    },
+    /// Cancel a save dialog.
+    CancelSave,
     /// Wait on the barrier (without holding the prompter), then take the next step for the
     /// same prompt.
     Wait(Arc<Barrier>),
@@ -81,6 +100,12 @@ impl Step {
             Step::CancelFile => "CancelFile",
             Step::Password(_) => "Password",
             Step::CancelPassword => "CancelPassword",
+            Step::Message => "Message",
+            Step::CancelMessage => "CancelMessage",
+            Step::Confirm { .. } => "Confirm",
+            Step::CancelConfirm => "CancelConfirm",
+            Step::Save { .. } => "Save",
+            Step::CancelSave => "CancelSave",
             Step::Wait(_) => "Wait",
         }
     }
@@ -104,6 +129,9 @@ struct State {
     import_prompts: Vec<ImportPrompt>,
     file_prompts: Vec<FilePrompt>,
     password_prompts: Vec<PasswordPrompt>,
+    message_prompts: Vec<MessagePrompt>,
+    confirm_prompts: Vec<ConfirmPrompt>,
+    save_prompts: Vec<SavePrompt>,
 }
 
 /// A [`Prompter`] answering from a queue of [`Step`]s and recording every prompt shown. An
@@ -129,7 +157,7 @@ impl ScriptedPrompter {
     }
 
     /// What was shown so far, in order: `"storage"`, `"busy"`, `"busy closed"`, `"key"`,
-    /// `"csr"`, `"import"`, `"file"`, `"password"`.
+    /// `"csr"`, `"import"`, `"file"`, `"password"`, `"message"`, `"confirm"`, `"save"`.
     pub fn timeline(&self) -> Vec<&'static str> {
         self.lock().timeline.clone()
     }
@@ -173,6 +201,21 @@ impl ScriptedPrompter {
     /// Password dialogs shown so far.
     pub fn password_prompts(&self) -> Vec<PasswordPrompt> {
         self.lock().password_prompts.clone()
+    }
+
+    /// Messages shown so far.
+    pub fn message_prompts(&self) -> Vec<MessagePrompt> {
+        self.lock().message_prompts.clone()
+    }
+
+    /// Yes/no questions shown so far.
+    pub fn confirm_prompts(&self) -> Vec<ConfirmPrompt> {
+        self.lock().confirm_prompts.clone()
+    }
+
+    /// Save dialogs shown so far.
+    pub fn save_prompts(&self) -> Vec<SavePrompt> {
+        self.lock().save_prompts.clone()
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -293,6 +336,30 @@ impl Prompter for ScriptedPrompter {
                 "ScriptedPrompter: password dialog answered by {}",
                 step.kind()
             ),
+        }
+    }
+
+    fn message(&self, p: &MessagePrompt) -> Prompt<()> {
+        match self.next("message", |s| s.message_prompts.push(p.clone())) {
+            Some(Step::Message) => Prompt::Answer(()),
+            Some(Step::CancelMessage) | None => Prompt::Cancelled,
+            Some(step) => panic!("ScriptedPrompter: message answered by {}", step.kind()),
+        }
+    }
+
+    fn confirm(&self, p: &ConfirmPrompt) -> Prompt<bool> {
+        match self.next("confirm", |s| s.confirm_prompts.push(p.clone())) {
+            Some(Step::Confirm { yes }) => Prompt::Answer(yes),
+            Some(Step::CancelConfirm) | None => Prompt::Cancelled,
+            Some(step) => panic!("ScriptedPrompter: question answered by {}", step.kind()),
+        }
+    }
+
+    fn save_file(&self, p: &SavePrompt) -> Prompt<PathBuf> {
+        match self.next("save", |s| s.save_prompts.push(p.clone())) {
+            Some(Step::Save { path }) => Prompt::Answer(path),
+            Some(Step::CancelSave) | None => Prompt::Cancelled,
+            Some(step) => panic!("ScriptedPrompter: save dialog answered by {}", step.kind()),
         }
     }
 }

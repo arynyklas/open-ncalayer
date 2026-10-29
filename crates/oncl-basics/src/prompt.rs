@@ -3,7 +3,8 @@
 //! flow, `CsrStage` (storage, folder, password) of `generateCsr`, `ImportCertStage`
 //! (folder, new password) of `importCertificate`, the file chooser other modules hand
 //! paths to pages with, and the legacy Applet's password dialog; between the storage and
-//! key dialogs, a busy indicator while the key store opens.
+//! key dialogs, a busy indicator while the key store opens. Plugins add a message, a
+//! yes/no question and the choice of where to save a file.
 
 use crate::filter::Availability;
 use crate::live::LiveAvailability;
@@ -468,6 +469,60 @@ pub struct PasswordPrompt {
     pub message: Option<String>,
 }
 
+/// How a [`MessagePrompt`] looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageKind {
+    /// Information.
+    Info,
+    /// A warning.
+    Warning,
+    /// An error.
+    Error,
+}
+
+/// A message with an OK button, from a plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessagePrompt {
+    /// The requesting page's origin, or `"UNIDENTIFIED"`.
+    pub origin: String,
+    /// Dialog language.
+    pub locale: Locale,
+    /// Who shows the message (a plugin's name), shown next to the origin.
+    pub source: String,
+    /// How it looks.
+    pub kind: MessageKind,
+    /// The text, shown as plain text (not markup).
+    pub text: String,
+}
+
+/// A yes/no question, from a plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmPrompt {
+    /// The requesting page's origin, or `"UNIDENTIFIED"`.
+    pub origin: String,
+    /// Dialog language.
+    pub locale: Locale,
+    /// Who asks (a plugin's name), shown next to the origin.
+    pub source: String,
+    /// The question, shown as plain text (not markup).
+    pub text: String,
+}
+
+/// Where to save a file, from a plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavePrompt {
+    /// The requesting page's origin, or `"UNIDENTIFIED"`.
+    pub origin: String,
+    /// Dialog language.
+    pub locale: Locale,
+    /// Who saves (a plugin's name), shown next to the origin.
+    pub source: String,
+    /// The file name the dialog suggests.
+    pub suggested_name: String,
+    /// Folder to start in, if any.
+    pub directory: Option<PathBuf>,
+}
+
 /// The outcome of a dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prompt<T> {
@@ -497,6 +552,13 @@ pub trait Prompter: Send + Sync {
     fn file(&self, p: &FilePrompt) -> Prompt<PathBuf>;
     /// Asks for a password.
     fn password(&self, p: &PasswordPrompt) -> Prompt<Zeroizing<String>>;
+    /// Shows a message until the user closes it: [`Prompt::Answer`] for OK,
+    /// [`Prompt::Cancelled`] if the window is closed otherwise or cannot be shown.
+    fn message(&self, p: &MessagePrompt) -> Prompt<()>;
+    /// Asks a yes/no question: `true` for yes; closing the dialog cancels.
+    fn confirm(&self, p: &ConfirmPrompt) -> Prompt<bool>;
+    /// Asks where to save a file: its path. The file is not written here.
+    fn save_file(&self, p: &SavePrompt) -> Prompt<PathBuf>;
 }
 
 /// Where the last opened key store path is kept (`recentPath` of settings.json).

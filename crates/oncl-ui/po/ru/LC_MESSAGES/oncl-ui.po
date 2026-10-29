@@ -265,3 +265,21 @@ msgstr "Остановить оригинальный NCALayer"
 
 msgid "Stop"
 msgstr "Остановить"
+
+msgid "Plugin: {}"
+msgstr "Плагин: {}"
+
+msgid "Information"
+msgstr "Сообщение"
+
+msgid "Warning"
+msgstr "Предупреждение"
+
+msgid "Error"
+msgstr "Ошибка"
+
+msgid "No"
+msgstr "Нет"
+
+msgid "Save the file: {}"
+msgstr "Сохранить файл: {}"

@@ -1,0 +1,60 @@
+// A plugin's message: who shows it, how it looks and its text (plain text, not markup).
+
+import { Button, Palette, VerticalBox } from "std-widgets.slint";
+
+export component MessageDialog inherits Window {
+    title: "OpenNCALayer";
+    always-on-top: true;
+    min-width: 420px;
+    max-width: 640px;
+    forward-focus: ok-button;
+
+    // The requesting page's origin.
+    in property <string> origin;
+    // The plugin's name.
+    in property <string> source;
+    // 0: information, 1: warning, 2: error.
+    in property <int> kind;
+    // The plugin's text.
+    in property <string> text;
+    // The translated header lines.
+    out property <string> requester: @tr("Request from: {}", root.origin);
+    out property <string> heading: root.kind == 2 ? @tr("Error") : root.kind == 1 ? @tr("Warning") : @tr("Information");
+
+    callback ok();
+    callback cancel();
+
+    VerticalBox {
+        Text {
+            text: root.requester;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: @tr("Plugin: {}", root.source);
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: root.heading;
+            font-weight: 700;
+            color: root.kind == 2 ? #c62828 : root.kind == 1 ? #a15c00 : Palette.foreground;
+        }
+
+        Text {
+            text: root.text;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            alignment: end;
+            ok-button := Button {
+                text: @tr("OK");
+                primary: true;
+                clicked => {
+                    root.ok();
+                }
+            }
+        }
+    }
+}

@@ -11,11 +11,12 @@
 //! verified answers ([`OcspCache`]).
 //!
 //! The crate also holds what the other modules share with it: the [`Prompter`] dialogs, the
-//! dialog-flow turn ([`lock_dialog_flow`]) and the rules for paths a page names
-//! ([`PageFile`], [`page_path`], [`remember_chosen_path`]).
+//! dialog-flow turn ([`lock_dialog_flow`]), the key choice ([`KeyChooser`]) and the rules for
+//! paths a page names ([`PageFile`], [`page_path`], [`remember_chosen_path`]).
 
 mod essentials;
 mod filter;
+mod keys;
 mod live;
 mod ocsp_cache;
 mod page_file;
@@ -27,6 +28,7 @@ pub mod testing;
 pub use filter::{
     Availability, ChainPolicy, DisabledReason, KeyFilter, OCSP_DEADLINE, availabilities,
 };
+pub use keys::{KeyChooser, KeyRequest};
 pub use live::LiveAvailability;
 pub use ocsp_cache::{ANSWER_FOR, OcspCache, UNREACHABLE_FOR};
 use oncl_pki::http::HttpTransport;
@@ -38,9 +40,10 @@ pub use page_file::{
     is_network_path, page_path, remember_chosen_path,
 };
 pub use prompt::{
-    Action, Busy, BusyPrompt, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer,
-    ImportPrompt, KeyCandidate, KeyPrompt, Locale, OpenError, PasswordPrompt, Prompt, Prompter,
-    RecentPathStore, StorageAnswer, StorageKind, StoragePrompt,
+    Action, Busy, BusyPrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FileKind, FilePrompt,
+    ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale, MessageKind, MessagePrompt,
+    OpenError, PasswordPrompt, Prompt, Prompter, RecentPathStore, SavePrompt, StorageAnswer,
+    StorageKind, StoragePrompt,
 };
 use serde_json::{Map, Value};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -100,6 +103,17 @@ impl Basics {
     #[must_use]
     pub fn with_clock(self, f: fn() -> OffsetDateTime) -> Self {
         Basics { clock: f, ..self }
+    }
+
+    /// The key choice of this module's dialogs, checks and clock.
+    fn key_chooser(&self) -> KeyChooser {
+        KeyChooser {
+            prompter: Arc::clone(&self.prompter),
+            recent: Arc::clone(&self.recent),
+            http: Arc::clone(&self.http),
+            ocsp_cache: Arc::clone(&self.ocsp_cache),
+            clock: self.clock,
+        }
     }
 }
 

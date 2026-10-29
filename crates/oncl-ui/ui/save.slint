@@ -1,0 +1,59 @@
+// Where a plugin saves a file: who asks, the file it suggests, and the system save dialog on
+// top of it.
+
+import { Button, VerticalBox } from "std-widgets.slint";
+
+export component SaveDialog inherits Window {
+    title: "OpenNCALayer";
+    always-on-top: true;
+    min-width: 420px;
+
+    // The requesting page's origin.
+    in property <string> origin;
+    // The plugin's name.
+    in property <string> source;
+    // The file name the plugin suggests.
+    in property <string> file-name;
+    // The translated header line.
+    out property <string> requester: @tr("Request from: {}", root.origin);
+
+    callback browse();
+    callback cancel();
+
+    VerticalBox {
+        Text {
+            text: root.requester;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: @tr("Plugin: {}", root.source);
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: @tr("Save the file: {}", root.file-name);
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Button {
+                text: @tr("Browse…");
+                primary: true;
+                clicked => {
+                    root.browse();
+                }
+            }
+
+            Button {
+                text: @tr("Cancel");
+                clicked => {
+                    root.cancel();
+                }
+            }
+        }
+    }
+}

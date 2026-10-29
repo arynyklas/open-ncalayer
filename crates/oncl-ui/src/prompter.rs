@@ -2,14 +2,14 @@
 
 use crate::foreground;
 use crate::ui::{
-    BusyDialog, CertItem, CsrDialog, FileDialog, ImportDialog, KeyDialog, KeyItem, PasswordDialog,
-    StorageDialog, StorageRow,
+    BusyDialog, CertItem, ConfirmDialog, CsrDialog, FileDialog, ImportDialog, KeyDialog, KeyItem,
+    MessageDialog, PasswordDialog, SaveDialog, StorageDialog, StorageRow,
 };
 use crate::view::{self, KeyRow};
 use oncl_basics::{
-    Action, Busy, BusyPrompt, CsrAnswer, CsrPrompt, FileKind, FilePrompt, ImportAnswer,
-    ImportPrompt, KeyCandidate, KeyPrompt, Locale, PasswordPrompt, Prompt, Prompter, StorageAnswer,
-    StorageKind, StoragePrompt,
+    Action, Busy, BusyPrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FileKind, FilePrompt,
+    ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale, MessageKind, MessagePrompt,
+    PasswordPrompt, Prompt, Prompter, SavePrompt, StorageAnswer, StorageKind, StoragePrompt,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
@@ -190,6 +190,18 @@ impl Prompter for SlintPrompter {
 
     fn password(&self, p: &PasswordPrompt) -> Prompt<Zeroizing<String>> {
         ask(p, show_password)
+    }
+
+    fn message(&self, p: &MessagePrompt) -> Prompt<()> {
+        ask(p, show_message)
+    }
+
+    fn confirm(&self, p: &ConfirmPrompt) -> Prompt<bool> {
+        ask(p, show_confirm)
+    }
+
+    fn save_file(&self, p: &SavePrompt) -> Prompt<PathBuf> {
+        ask(p, show_save)
     }
 }
 
@@ -743,6 +755,122 @@ fn show_password(
     show(&ui, pending)
 }
 
+/// A plugin's message for `p`; the outcome goes to `reply`.
+fn show_message(p: MessagePrompt, reply: Sender<Prompt<()>>) -> Result<(), PlatformError> {
+    let ui = MessageDialog::new()?;
+    let pending = wire_message(&ui, &p, reply);
+    show(&ui, pending)
+}
+
+/// Fills the message dialog with `p` and wires OK to an answer.
+fn wire_message(
+    ui: &MessageDialog,
+    p: &MessagePrompt,
+    reply: Sender<Prompt<()>>,
+) -> Rc<Pending<MessageDialog, ()>> {
+    select_language(p.locale);
+    ui.set_origin(p.origin.as_str().into());
+    ui.set_source(p.source.as_str().into());
+    ui.set_kind(match p.kind {
+        MessageKind::Info => 0,
+        MessageKind::Warning => 1,
+        MessageKind::Error => 2,
+    });
+    ui.set_text(p.text.as_str().into());
+    let pending = Pending::new(ui.clone_strong(), reply);
+    ui.on_ok({
+        let pending = pending.clone();
+        move || {
+            pending.finish(Prompt::Answer(()));
+        }
+    });
+    pending
+}
+
+/// A plugin's yes/no question for `p`; the outcome goes to `reply`.
+fn show_confirm(p: ConfirmPrompt, reply: Sender<Prompt<bool>>) -> Result<(), PlatformError> {
+    let ui = ConfirmDialog::new()?;
+    let pending = wire_confirm(&ui, &p, reply);
+    show(&ui, pending)
+}
+
+/// Fills the question dialog with `p` and wires Yes and No to answers.
+fn wire_confirm(
+    ui: &ConfirmDialog,
+    p: &ConfirmPrompt,
+    reply: Sender<Prompt<bool>>,
+) -> Rc<Pending<ConfirmDialog, bool>> {
+    select_language(p.locale);
+    ui.set_origin(p.origin.as_str().into());
+    ui.set_source(p.source.as_str().into());
+    ui.set_text(p.text.as_str().into());
+    let pending = Pending::new(ui.clone_strong(), reply);
+    ui.on_answer({
+        let pending = pending.clone();
+        move |yes| {
+            pending.finish(Prompt::Answer(yes));
+        }
+    });
+    pending
+}
+
+/// Where a plugin saves a file, for `p`: a small always-on-top window naming the page and
+/// the plugin, which opens the system save dialog over itself with the suggested name and
+/// start folder; the outcome goes to `reply`. As in [`browse`], the folder is not checked
+/// here.
+fn show_save(p: SavePrompt, reply: Sender<Prompt<PathBuf>>) -> Result<(), PlatformError> {
+    let ui = SaveDialog::new()?;
+    let pending = wire_save(&ui, &p, reply);
+    show(&ui, pending)?;
+    ui.invoke_browse();
+    Ok(())
+}
+
+/// Fills the save dialog with `p` and wires Browse… to the system save dialog.
+fn wire_save(
+    ui: &SaveDialog,
+    p: &SavePrompt,
+    reply: Sender<Prompt<PathBuf>>,
+) -> Rc<Pending<SaveDialog, PathBuf>> {
+    select_language(p.locale);
+    ui.set_origin(p.origin.as_str().into());
+    ui.set_source(p.source.as_str().into());
+    ui.set_file_name(p.suggested_name.as_str().into());
+    let pending = Pending::new(ui.clone_strong(), reply);
+    let weak = ui.as_weak();
+    let p = p.clone();
+    ui.on_browse({
+        let pending = pending.clone();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                pick_save(&ui, &p, pending.clone());
+            }
+        }
+    });
+    pending
+}
+
+/// Opens the system save dialog for `p` over `ui`; a choice answers `pending`, a cancel
+/// cancels it.
+fn pick_save(ui: &SaveDialog, p: &SavePrompt, pending: Rc<Pending<SaveDialog, PathBuf>>) {
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title(p.suggested_name.as_str())
+        .set_file_name(p.suggested_name.as_str())
+        .set_parent(&ui.window().window_handle());
+    if let Some(dir) = &p.directory {
+        dialog = dialog.set_directory(dir);
+    }
+    let picked = slint::spawn_local(async move {
+        match dialog.save_file().await {
+            Some(handle) => pending.finish(Prompt::Answer(handle.path().to_path_buf())),
+            None => pending.cancel(),
+        };
+    });
+    if let Err(e) = picked {
+        tracing::warn!(error = %e, "cannot open the save dialog");
+    }
+}
+
 /// A dialog's buttons and windowing callbacks shared by every dialog.
 trait Dialog: ComponentHandle + 'static {
     /// Registers the Cancel button's handler.
@@ -785,9 +913,38 @@ impl Dialog for PasswordDialog {
     }
 }
 
+impl Dialog for MessageDialog {
+    fn set_cancel(&self, f: impl FnMut() + 'static) {
+        MessageDialog::on_cancel(self, f);
+    }
+}
+
+impl Dialog for ConfirmDialog {
+    fn set_cancel(&self, f: impl FnMut() + 'static) {
+        ConfirmDialog::on_cancel(self, f);
+    }
+}
+
+impl Dialog for SaveDialog {
+    fn set_cancel(&self, f: impl FnMut() + 'static) {
+        SaveDialog::on_cancel(self, f);
+    }
+}
+
 /// Wires Cancel, the window's close button and the window's destruction to a cancelled
 /// outcome, then shows `ui` on top with the focus in it.
 fn show<C: Dialog, T: 'static>(ui: &C, pending: Rc<Pending<C, T>>) -> Result<(), PlatformError> {
+    wire_dismissal(ui, &pending);
+    ui.show().inspect_err(|_| {
+        pending.cancel();
+    })?;
+    foreground::take(ui);
+    Ok(())
+}
+
+/// Wires Cancel, the window's close button and the window's destruction to a cancelled
+/// outcome.
+fn wire_dismissal<C: Dialog, T: 'static>(ui: &C, pending: &Rc<Pending<C, T>>) {
     ui.set_cancel({
         let pending = pending.clone();
         move || {
@@ -804,11 +961,6 @@ fn show<C: Dialog, T: 'static>(ui: &C, pending: Rc<Pending<C, T>>) -> Result<(),
         let pending = pending.clone();
         move |_, event| on_window_event(&pending, event)
     });
-    ui.show().inspect_err(|_| {
-        pending.cancel();
-    })?;
-    foreground::take(ui);
-    Ok(())
 }
 
 /// The window's close button: cancelled.
@@ -1248,5 +1400,139 @@ mod key_selection {
         arrive(&ui, &p, 0, revoked());
         assert!(!ui.get_has_usable());
         assert_eq!(ui.get_selected(), 0);
+    }
+}
+
+/// The plugin dialogs (message, question, save), drawn offscreen: their texts in each
+/// language, their buttons, and their windows closed.
+#[cfg(test)]
+mod plugin_dialogs {
+    use super::*;
+    use slint::platform::WindowEvent as SlintWindowEvent;
+
+    const ORIGIN: &str = "https://idp.egov.kz";
+
+    /// The thread's windows are offscreen (each test runs on a thread of its own).
+    fn offscreen() {
+        thread_local! {
+            static OFFSCREEN: crate::offscreen::Last = crate::offscreen::install();
+        }
+        OFFSCREEN.with(|_| ());
+    }
+
+    /// The header in `locale` and the heading of an error message in it.
+    const LANGUAGES: [(Locale, &str, &str); 3] = [
+        (Locale::Ru, "Запрос от: https://idp.egov.kz", "Ошибка"),
+        (Locale::Kk, "Сұрау жіберген: https://idp.egov.kz", "Қате"),
+        (Locale::En, "Request from: https://idp.egov.kz", "Error"),
+    ];
+
+    fn message(locale: Locale, kind: MessageKind) -> MessagePrompt {
+        MessagePrompt {
+            origin: ORIGIN.to_owned(),
+            locale,
+            source: "Example".to_owned(),
+            kind,
+            text: "<b>not markup</b>".to_owned(),
+        }
+    }
+
+    fn close(window: &slint::Window) {
+        window.dispatch_event(SlintWindowEvent::CloseRequested);
+    }
+
+    #[test]
+    fn message_shows_its_texts_and_ok_answers() {
+        offscreen();
+        for (locale, requester, error) in LANGUAGES {
+            let ui = MessageDialog::new().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let pending = wire_message(&ui, &message(locale, MessageKind::Error), tx);
+            wire_dismissal(&ui, &pending);
+            assert_eq!(ui.get_requester(), requester);
+            assert_eq!(ui.get_heading(), error);
+            assert_eq!(ui.get_source(), "Example");
+            assert_eq!(ui.get_text(), "<b>not markup</b>", "the text as given");
+            ui.invoke_ok();
+            assert_eq!(rx.try_recv(), Ok(Prompt::Answer(())));
+        }
+        let ui = MessageDialog::new().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        wire_message(&ui, &message(Locale::Ru, MessageKind::Warning), tx);
+        assert_eq!(ui.get_heading(), "Предупреждение");
+    }
+
+    #[test]
+    fn closed_message_is_cancelled() {
+        offscreen();
+        let ui = MessageDialog::new().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let pending = wire_message(&ui, &message(Locale::En, MessageKind::Info), tx);
+        wire_dismissal(&ui, &pending);
+        assert_eq!(ui.get_heading(), "Information");
+        close(ui.window());
+        assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled));
+        ui.invoke_ok();
+        assert!(rx.try_recv().is_err(), "nothing after the first outcome");
+    }
+
+    fn question(locale: Locale) -> ConfirmPrompt {
+        ConfirmPrompt {
+            origin: ORIGIN.to_owned(),
+            locale,
+            source: "Example".to_owned(),
+            text: "Sign the contract?".to_owned(),
+        }
+    }
+
+    #[test]
+    fn question_answers_yes_no_and_cancels() {
+        offscreen();
+        for (locale, requester, _) in LANGUAGES {
+            for yes in [true, false] {
+                let ui = ConfirmDialog::new().unwrap();
+                let (tx, rx) = mpsc::channel();
+                let pending = wire_confirm(&ui, &question(locale), tx);
+                wire_dismissal(&ui, &pending);
+                assert_eq!(ui.get_requester(), requester);
+                assert_eq!(ui.get_text(), "Sign the contract?");
+                ui.invoke_answer(yes);
+                assert_eq!(rx.try_recv(), Ok(Prompt::Answer(yes)));
+            }
+        }
+        let ui = ConfirmDialog::new().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let pending = wire_confirm(&ui, &question(Locale::Kk), tx);
+        wire_dismissal(&ui, &pending);
+        close(ui.window());
+        assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled), "closing is not a no");
+    }
+
+    #[test]
+    fn save_dialog_cancel_and_close_are_cancelled() {
+        offscreen();
+        let save = |locale| SavePrompt {
+            origin: ORIGIN.to_owned(),
+            locale,
+            source: "Example".to_owned(),
+            suggested_name: "report.pdf".to_owned(),
+            directory: None,
+        };
+        for (locale, requester, _) in LANGUAGES {
+            let ui = SaveDialog::new().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let pending = wire_save(&ui, &save(locale), tx);
+            wire_dismissal(&ui, &pending);
+            assert_eq!(ui.get_requester(), requester);
+            assert_eq!(ui.get_file_name(), "report.pdf");
+            ui.invoke_cancel();
+            assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled));
+        }
+        let ui = SaveDialog::new().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let pending = wire_save(&ui, &save(Locale::Ru), tx);
+        wire_dismissal(&ui, &pending);
+        close(ui.window());
+        assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled));
     }
 }

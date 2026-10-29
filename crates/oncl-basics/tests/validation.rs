@@ -964,6 +964,18 @@ impl Prompter for Hasty {
     fn password(&self, _: &PasswordPrompt) -> Prompt<zeroize::Zeroizing<String>> {
         Prompt::Cancelled
     }
+
+    fn message(&self, _: &oncl_basics::MessagePrompt) -> Prompt<()> {
+        Prompt::Cancelled
+    }
+
+    fn confirm(&self, _: &oncl_basics::ConfirmPrompt) -> Prompt<bool> {
+        Prompt::Cancelled
+    }
+
+    fn save_file(&self, _: &oncl_basics::SavePrompt) -> Prompt<std::path::PathBuf> {
+        Prompt::Cancelled
+    }
 }
 
 #[test]
