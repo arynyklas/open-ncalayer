@@ -53,9 +53,9 @@ log = "0.4.34"
 minisign = "0.10.0"
 # Verification of the update index signatures (`oncl-update`): no dependencies of its own.
 minisign-verify = "0.3.0"
-# PE reading only: in xtask (`check-imports`) and oncl-testkit (export tables of the Windows 7
-# app-local DLLs).
-object = { version = "0.40.0", default-features = false, features = ["read_core", "pe", "std"] }
+# PE and ELF reading only: in xtask (`check-imports`, the glibc floor of the Linux packages)
+# and oncl-testkit (export tables of the Windows 7 app-local DLLs).
+object = { version = "0.40.0", default-features = false, features = ["read_core", "pe", "elf", "std"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 pkcs8 = { version = "0.11.0", features = ["alloc"] }
 # The tray icons (PNG files bundled into oncl-ui).

@@ -1,22 +1,25 @@
 name: Release
 
 # A `v*` tag publishes a GitHub release: the daemon and the relay for Windows (x64, x86, and
-# Windows 7 x64/x86 with their app-local DLLs), Linux and macOS as archives and as Velopack
-# packages (the update index points at those), the browser extension, a CycloneDX SBOM and
-# SHA256SUMS, every file with a build provenance attestation. A tag with a pre-release
-# suffix (`v0.1.0-alpha.1`) makes a pre-release.
+# Windows 7 x64/x86 with their app-local DLLs), Linux and macOS as archives, as installers
+# (`Setup.exe` per Windows flavor, the macOS `.pkg` and `.zip`, the Linux AppImage) and as
+# Velopack update packages (the update index points at those), the browser extension, a
+# CycloneDX SBOM and SHA256SUMS, every file with a build provenance attestation. A tag with
+# a pre-release suffix (`v0.1.0-alpha.1`) makes a pre-release. The installers and packages
+# are made by `cargo xtask package` (roadmap P8), the same commands CI runs.
 # Then a pull request adds the version to the update indexes (`updates/v1/<channel>.json`:
 # a pre-release to beta, a release to stable and beta), unsigned: the maintainer signs them
-# locally (`cargo xtask sign`), never CI.
+# locally (`cargo xtask sign`), never CI. The AUR package follows a release (aur.yml).
 #
 # Code signing runs only with its secrets, otherwise it is skipped with a notice:
 # Authenticode through SignPath (secret SIGNPATH_API_TOKEN, variables
 # SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG) signs
-# openncalayer.exe and nmhost.exe of both the archive and the package (the app-local DLLs of
-# the Windows 7 builds stay unsigned); Apple signing and notarization
+# openncalayer.exe and nmhost.exe of the archive and the package, then each `Setup.exe`
+# (the app-local DLLs of the Windows 7 builds stay unsigned); Apple signing and notarization
 # (secrets APPLE_CERTIFICATE_P12 (base64), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGN_IDENTITY,
-# APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD) covers the macOS Velopack package only: the
-# macOS archive stays unsigned.
+# APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD) covers the macOS `.app` of the package, the
+# `.zip` and the `.pkg`; the `.pkg` itself is signed and notarized only with the "Developer
+# ID Installer" identity in APPLE_INSTALL_IDENTITY too. The macOS archive stays unsigned.
 #
 # Third-party actions are pinned to a commit, with the release tag in a comment.
 on:
@@ -56,49 +59,44 @@ jobs:
             *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
           esac
 
-  # One build per Velopack flavor (`oncl_update::Flavor`): the archive and the package.
+  # One build per Velopack flavor (`oncl_update::Flavor`): the archive, the installer and
+  # the update packages (`cargo xtask package`).
   binaries:
     needs: version
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Windows 10 and 11: `Setup.exe` with RID win10-* refuses Windows 7 and 8.
           - os: windows-2025
             target: x86_64-pc-windows-msvc
             flavor: win-x64
-            runtime: win-x64
           - os: windows-2025
             target: i686-pc-windows-msvc
             flavor: win-x86
-            runtime: win-x86
+          # Built in the glibc 2.28 container (`cargo xtask package linux-build`): the
+          # archive and the AppImage start on glibc 2.28 and newer.
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             flavor: linux-x64
-            runtime: linux-x64
           # The `osx` flavor is every Mac's (`Flavor::current`, Intel and Apple silicon):
-          # both architectures, joined by lipo. vpk 1.3.39 takes no runtime for both
-          # (`--runtime osx` is refused): osx-arm64 only labels the package (its nuspec
-          # `rid` and `machineArchitecture`); the client picks it by the channel `osx`, the
-          # packed binaries stay universal (checked in CI, job macos-universal) and
-          # Velopack's UpdateMac is universal itself.
+          # both architectures, joined by lipo; `cargo xtask package macos` refuses a
+          # program without both slices.
           - os: macos-15
             target: universal-apple-darwin
             flavor: osx
-            runtime: osx-arm64
           # Windows 7 SP1 (roadmap D14): `cargo xtask win7` builds the executables and the
           # app-local DLLs, checks them against the denylist of imports missing on Windows 7
           # and starts them; the package's contents, Velopack's own executables included,
-          # pass the same gate after `vpk pack`.
+          # and `Setup.exe` (RID win7-*) pass the same gate in `cargo xtask package windows`.
           - os: windows-2025
             target: x86_64-win7-windows-msvc
             win7: x64
             flavor: win7-x64
-            runtime: win-x64
           - os: windows-2025
             target: i686-win7-windows-msvc
             win7: x86
             flavor: win7-x86
-            runtime: win-x86
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.win7 && 90 || 60 }}
     # `actions: read` for SignPath: its `github-token` reads the job details and downloads
@@ -111,19 +109,15 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       PRERELEASE: ${{ needs.version.outputs.prerelease }}
       FLAVOR: ${{ matrix.flavor }}
-      BIN: ${{ matrix.win7 && format('target/win7/{0}', matrix.win7) || format('target/{0}/release', matrix.target) }}
+      BIN: ${{ matrix.win7 && format('target/win7/{0}', matrix.win7) || matrix.flavor == 'linux-x64' && 'target/linux-x64' || format('target/{0}/release', matrix.target) }}
       # The archive's name: `openncalayer-<version>-<archive>`.
       ARCHIVE: ${{ matrix.win7 && format('win7-{0}', matrix.win7) || matrix.target }}
       # Only whether the signing secrets exist: the secrets reach their signing steps alone.
       SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' && vars.SIGNPATH_ORGANIZATION_ID != '' && vars.SIGNPATH_PROJECT_SLUG != '' && vars.SIGNPATH_SIGNING_POLICY_SLUG != '' }}
       APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGN_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != '' }}
+      APPLE_PKG_SIGNING: ${{ secrets.APPLE_INSTALL_IDENTITY != '' }}
     steps:
       - uses: actions/checkout@v5
-      - name: Install system libraries
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev
       - name: Install toolchain (rust-toolchain.toml)
         shell: bash
         run: |
@@ -133,16 +127,21 @@ jobs:
             rustup toolchain install nightly-2026-08-12 --profile minimal --component rust-src
           elif [ "${{ matrix.target }}" = universal-apple-darwin ]; then
             rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          else
+          elif [ "$RUNNER_OS" = Windows ]; then
             rustup target add "${{ matrix.target }}"
           fi
       - name: Build
-        if: matrix.target != 'universal-apple-darwin' && !matrix.win7
+        if: runner.os == 'Windows' && !matrix.win7
         run: cargo build --locked --release --target ${{ matrix.target }} -p openncalayer -p oncl-nmhost
       - name: Build, check imports, start (Windows 7)
         if: matrix.win7
         run: cargo xtask win7 --arch ${{ matrix.win7 }}
-      # Both slices, joined; a slice missing fails the job (no arm64-only `osx` package).
+      # The programs and the AppDir, built, checked against glibc 2.28 and started in the
+      # pinned glibc 2.28 container.
+      - name: Build in the glibc 2.28 container (Linux)
+        if: runner.os == 'Linux'
+        run: cargo xtask package linux-build --version "$VERSION"
+      # Both slices, joined; `cargo xtask package macos` refuses a program without both.
       - name: Build (macOS universal)
         if: matrix.target == 'universal-apple-darwin'
         shell: bash
@@ -154,15 +153,6 @@ jobs:
           for exe in openncalayer nmhost; do
             lipo -create -output "$BIN/$exe" \
               "target/x86_64-apple-darwin/release/$exe" "target/aarch64-apple-darwin/release/$exe"
-            archs="$(lipo -archs "$BIN/$exe")"
-            echo "$exe: $archs"
-            # Each architecture on its own: in " x86_64 arm64 " the two names share a space.
-            for arch in x86_64 arm64; do
-              case " $archs " in
-                *" $arch "*) ;;
-                *) echo "::error::$exe is not universal: $archs"; exit 1 ;;
-              esac
-            done
           done
 
       # Authenticode before anything is packed: the archive and the package get the signed
@@ -294,13 +284,14 @@ jobs:
           security unlock-keychain -p "$password" "$keychain"
           printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
           security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/productsign
+            -T /usr/bin/codesign -T /usr/bin/productsign -T /usr/bin/productbuild
           rm "$RUNNER_TEMP/signing.p12"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
           security list-keychains -d user -s "$keychain" login.keychain-db
           xcrun notarytool store-credentials openncalayer --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --keychain "$keychain"
-          # `vpk pack` reads these: it signs the app bundle and notarizes it.
+          # `vpk pack` reads these: it signs the app bundle and notarizes it; `cargo xtask
+          # package macos` takes the keychain and the profile for the .pkg.
           {
             echo "VPK_KEYCHAIN=$keychain"
             echo "VPK_NOTARY_PROFILE=openncalayer"
@@ -309,93 +300,65 @@ jobs:
       - name: Apple notarization skipped
         if: runner.os == 'macOS' && env.APPLE_SIGNING != 'true'
         run: |
-          echo "::notice::Apple signing is not configured (secrets APPLE_*): the $FLAVOR package is not signed or notarized"
-      # Packages only: the installers (Setup.exe, .pkg) come later; Velopack's portable
-      # bundle and the AppImage are not published.
-      - name: Velopack package
-        shell: bash
+          echo "::notice::Apple signing is not configured (secrets APPLE_*): the $FLAVOR .app, .zip and .pkg are not signed or notarized"
+      # vpk makes the AppImage's file system with mksquashfs.
+      - name: Install squashfs-tools
+        if: runner.os == 'Linux'
         run: |
-          mkdir pack
+          sudo apt-get update
+          sudo apt-get install -y squashfs-tools
+      # The installer and the update packages (`cargo xtask package`): this version's
+      # packages, the flavor's feed (`cargo xtask index add` reads the delta's base version
+      # from it) and the installers go to `packaged/`, not the downloaded previous package.
+      - name: Installer and update packages
+        shell: bash
+        env:
+          APPLE_INSTALL_IDENTITY: ${{ secrets.APPLE_INSTALL_IDENTITY }}
+        run: |
+          common=(--version "$VERSION" --packages packages --dist packaged)
           case "$RUNNER_OS" in
             Windows)
-              exe=openncalayer.exe
-              cp "$BIN/openncalayer.exe" "$BIN/nmhost.exe" pack/
-              if [ -n "${{ matrix.win7 }}" ]; then
-                cp "$BIN/combase.dll" "$BIN/api-ms-win-core-winrt-error-l1-1-0.dll" pack/
-              fi
-              # The tray icon as a one-image .ico (a PNG entry, Windows Vista and later). The
-              # directory entry below says 32x32, 32 bpp: the PNG must be exactly that.
-              png=crates/oncl-ui/assets/tray-ok.png
-              # IHDR: width, height (big-endian 32-bit), bit depth 8, colour type 6 (RGBA).
-              ihdr="$(od -An -tu1 -j16 -N10 "$png" | tr -s ' ' | sed 's/^ //')"
-              if [ "$ihdr" != "0 0 0 32 0 0 0 32 8 6" ]; then
-                echo "::error::$png is not a 32x32 RGBA PNG (IHDR $ihdr): fix the .ico header"
-                exit 1
-              fi
-              # A 32-bit little-endian number.
-              le32() {
-                for shift in 0 8 16 24; do
-                  printf '%b' "\\x$(printf %02x $(($1 >> shift & 255)))"
-                done
-              }
-              {
-                printf '\x00\x00\x01\x00\x01\x00\x20\x20\x00\x00\x01\x00\x20\x00'
-                le32 "$(wc -c < "$png")"
-                le32 22
-                cat "$png"
-              } > "$RUNNER_TEMP/openncalayer.ico"
-              options=(--noInst --icon "$RUNNER_TEMP/openncalayer.ico")
+              cargo xtask package windows --flavor "$FLAVOR" --bin "$BIN" "${common[@]}"
               ;;
             Linux)
-              exe=openncalayer
-              cp "$BIN/openncalayer" "$BIN/nmhost" pack/
-              # The Linux pack makes only the AppImage, and has no --noInst.
-              options=(--icon crates/oncl-ui/assets/tray-ok.png)
+              cargo xtask package linux --appdir "$BIN/OpenNCALayer.AppDir" "${common[@]}"
               ;;
             macOS)
-              exe=openncalayer
-              cp "$BIN/openncalayer" "$BIN/nmhost" pack/
-              # vpk takes only an .icns icon on macOS, and there is none yet.
-              options=(--noInst)
+              signing=()
+              if [ "$APPLE_SIGNING" = true ] && [ "$APPLE_PKG_SIGNING" = true ]; then
+                signing=(--install-identity "$APPLE_INSTALL_IDENTITY" --keychain "$VPK_KEYCHAIN" \
+                  --notary-profile "$VPK_NOTARY_PROFILE")
+              else
+                echo "::notice::the .pkg is not signed or notarized: it needs the secret APPLE_INSTALL_IDENTITY besides the Apple signing secrets"
+              fi
+              cargo xtask package macos --bin "$BIN" "${common[@]}" "${signing[@]}"
               ;;
           esac
-          cp README.md README.en.md LICENSE NOTICE pack/
-          vpk --skip-updates pack --packId OpenNCALayer --packVersion "$VERSION" \
-            --packTitle OpenNCALayer --packAuthors "OpenNCALayer contributors" \
-            --packDir pack --mainExe "$exe" --channel "$FLAVOR" --runtime "${{ matrix.runtime }}" \
-            --outputDir packages "${options[@]}"
-          # This version's packages and the flavor's feed (`cargo xtask index add` reads the
-          # delta's base version from it); not the downloaded previous package.
-          mkdir velopack
-          cp "packages/OpenNCALayer-$VERSION-$FLAVOR-full.nupkg" "packages/releases.$FLAVOR.json" velopack/
-          for file in "packages/OpenNCALayer-$VERSION-$FLAVOR-delta.nupkg" "packages/RELEASES-$FLAVOR"; do
-            if [ -f "$file" ]; then
-              cp "$file" velopack/
-            fi
-          done
-          ls -l velopack
-      # What a Windows 7 installation runs from the package: our executables beside their
-      # app-local DLLs, Velopack's Update.exe (`Squirrel.exe` in the package) and its stub.
-      - name: Windows 7 package through the import gate
-        if: matrix.win7
-        shell: bash
-        run: |
-          package="packages/OpenNCALayer-$VERSION-$FLAVOR-full.nupkg"
-          7z x "$package" -owin7-package > /dev/null
-          app=win7-package/lib/app
-          for file in openncalayer.exe nmhost.exe combase.dll api-ms-win-core-winrt-error-l1-1-0.dll Squirrel.exe; do
-            if [ ! -f "$app/$file" ]; then
-              echo "::error::$file is not in $package"
-              ls -l "$app"
-              exit 1
-            fi
-          done
-          mapfile -t exes < <(find "$app" -maxdepth 1 -iname '*.exe')
-          cargo xtask check-imports "${exes[@]}"
+          ls -l packaged
+      # Authenticode of each Setup.exe after vpk made it, as vpk's own signing would.
+      - name: Keep the unsigned installer for SignPath
+        id: unsigned-setup
+        if: runner.os == 'Windows' && env.SIGNPATH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signpath-unsigned-setup-${{ matrix.flavor }}
+          path: packaged/*-setup.exe
+          if-no-files-found: error
+      - name: Sign the installer (Authenticode, SignPath)
+        if: runner.os == 'Windows' && env.SIGNPATH == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-setup.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: packaged
       - uses: actions/upload-artifact@v4
         with:
-          name: release-velopack-${{ matrix.flavor }}
-          path: velopack/*
+          name: release-packages-${{ matrix.flavor }}
+          path: packaged/*
           if-no-files-found: error
 
   extension:
@@ -520,6 +483,9 @@ jobs:
             echo "::notice::$GITHUB_REF_NAME has no crates/oncl-update/keys/current.pub: its build cannot update itself; it is not added to the update indexes"
             echo "keyed=false" >> "$GITHUB_OUTPUT"
           fi
+      # The `osx` flavor stays out of the indexes until the universal build has run on an
+      # Intel Mac (the lab, P9): an installation would otherwise be moved onto it untried.
+      # Its packages and installers are still in the release.
       - name: Download the release
         if: steps.key.outputs.keyed == 'true'
         env:
@@ -528,6 +494,8 @@ jobs:
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/assets" \
             --pattern '*.nupkg' --pattern 'releases.*.json' \
             --pattern 'openncalayer-chromium-*.zip' --pattern 'openncalayer-firefox-*.xpi'
+          rm -f "$RUNNER_TEMP/assets/"OpenNCALayer-*-osx-*.nupkg "$RUNNER_TEMP/assets/releases.osx.json"
+          echo "::notice::the osx flavor is not added to the update indexes until it runs on an Intel Mac"
       - name: Add the version to the indexes
         if: steps.key.outputs.keyed == 'true'
         id: add

@@ -1,0 +1,159 @@
+name: AUR
+
+# The AUR package `openncalayer-bin` (roadmap D12) of a release: after the Release workflow
+# of a tag succeeds, or by hand for a tag. `cargo xtask package aur` writes PKGBUILD,
+# .SRCINFO and the install script for the release's Linux archive, whose sha256 must match
+# the release's SHA256SUMS; in a pinned Arch Linux container makepkg must print the same
+# .SRCINFO, download the archive at its immutable release URL, check its sha256 and build the
+# package.
+#
+# Pre-releases go only to the beta update channel, and not to the AUR: the AUR has one
+# package, for releases. Publishing is opt-in: the repository variable AUR_PUBLISH set to
+# `true`, and the secret AUR_SSH_PRIVATE_KEY of the AUR account maintaining
+# openncalayer-bin. With AUR_PUBLISH on and no key the job fails; without AUR_PUBLISH the
+# files stay an artifact of the run. The AUR's host key must match the fingerprint the AUR
+# publishes (aur.archlinux.org, "SSH fingerprints").
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag, v<version>
+        required: true
+      pkgrel:
+        description: The package release of this version (1, then 2… for a fix of the package alone)
+        required: true
+        default: "1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aur
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # makepkg's container: Arch Linux with base-devel, pinned by digest.
+  ARCH_IMAGE: archlinux:base-devel@sha256:624bdc7fc6615155d67bc34cf7146c0c9fd0e3c92943977da63a630e4ca49c30
+  # The AUR's Ed25519 host key, as aur.archlinux.org lists it.
+  AUR_HOST_KEY: SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4
+
+jobs:
+  aur:
+    # A tag's Release run (its `head_branch` is the tag), or a manual run.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+        && startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+      PKGREL: ${{ github.event_name == 'workflow_dispatch' && inputs.pkgrel || '1' }}
+      PUBLISH: ${{ vars.AUR_PUBLISH == 'true' }}
+      # Only whether the key exists: the key itself reaches the publishing step alone.
+      HAS_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: The release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$TAG" in
+            v*) ;;
+            *) echo "::error::$TAG is not a release tag"; exit 1 ;;
+          esac
+          prerelease="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          if [ "$prerelease" = true ]; then
+            echo "::notice::$TAG is a pre-release: pre-releases are not published to the AUR"
+          fi
+      - name: Install toolchain (rust-toolchain.toml)
+        if: steps.release.outputs.prerelease == 'false'
+        run: rustup toolchain install
+      - name: PKGBUILD and .SRCINFO
+        if: steps.release.outputs.prerelease == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          archive="openncalayer-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/release" \
+            --pattern "$archive" --pattern SHA256SUMS
+          expected="$(awk -v name="$archive" '$2 == name { print $1 }' "$RUNNER_TEMP/release/SHA256SUMS")"
+          actual="$(sha256sum < "$RUNNER_TEMP/release/$archive" | cut -d ' ' -f 1)"
+          if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+            echo "::error::$archive does not match the release's SHA256SUMS (${expected:-no entry}, got $actual)"
+            exit 1
+          fi
+          cargo xtask package aur --version "$VERSION" --sha256 "$actual" --pkgrel "$PKGREL" --out aur
+      # makepkg as an unprivileged user: .SRCINFO as makepkg prints it, the archive from the
+      # release URL checked by sha256, the package built (without installing its dependencies:
+      # packaging needs none) and listed.
+      - name: makepkg in Arch Linux
+        if: steps.release.outputs.prerelease == 'false'
+        run: |
+          docker run --rm -v "$PWD/aur:/aur:ro" "$ARCH_IMAGE" bash -euo pipefail -c '
+            useradd -m builder
+            cp -r /aur /home/builder/pkg
+            chown -R builder: /home/builder/pkg
+            cd /home/builder/pkg
+            runuser -u builder -- makepkg --printsrcinfo > /tmp/srcinfo
+            diff -u .SRCINFO /tmp/srcinfo
+            runuser -u builder -- makepkg --nodeps --noconfirm
+            pacman -Qlp openncalayer-bin-*.pkg.tar.*
+          '
+      - uses: actions/upload-artifact@v4
+        if: steps.release.outputs.prerelease == 'false'
+        with:
+          name: aur-${{ env.TAG }}
+          path: |
+            aur/PKGBUILD
+            aur/.SRCINFO
+            aur/openncalayer-bin.install
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Publishing to the AUR is off
+        if: steps.release.outputs.prerelease == 'false' && env.PUBLISH != 'true'
+        run: |
+          echo "::notice::not published to the AUR: set the repository variable AUR_PUBLISH to true and the secret AUR_SSH_PRIVATE_KEY; the files are in the artifact aur-$TAG"
+      - name: Publish to the AUR
+        if: steps.release.outputs.prerelease == 'false' && env.PUBLISH == 'true'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          if [ "$HAS_KEY" != true ]; then
+            echo "::error::AUR_PUBLISH is true, but the secret AUR_SSH_PRIVATE_KEY is not set: nothing is published"
+            exit 1
+          fi
+          ssh-keyscan -t ed25519 aur.archlinux.org > "$RUNNER_TEMP/known_hosts"
+          fingerprint="$(ssh-keygen -lf "$RUNNER_TEMP/known_hosts" -E sha256 | awk '{ print $2 }')"
+          if [ "$fingerprint" != "$AUR_HOST_KEY" ]; then
+            echo "::error::aur.archlinux.org presents $fingerprint, not $AUR_HOST_KEY"
+            exit 1
+          fi
+          key="$RUNNER_TEMP/aur_key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$key")
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
+          repo="$RUNNER_TEMP/openncalayer-bin"
+          git clone ssh://aur@aur.archlinux.org/openncalayer-bin.git "$repo"
+          cp aur/PKGBUILD aur/.SRCINFO aur/openncalayer-bin.install "$repo/"
+          cd "$repo"
+          git add PKGBUILD .SRCINFO openncalayer-bin.install
+          if git diff --cached --quiet; then
+            echo "::notice::the AUR has $VERSION-$PKGREL already"
+          else
+            git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "Update to $VERSION-$PKGREL"
+            git push origin HEAD:master
+          fi
