@@ -43,10 +43,15 @@ jobs:
             && git cat-file -e "$BEFORE^{commit}" 2> /dev/null; then
             base="$BEFORE"
             changed="$(git diff --name-only --no-renames "$base" HEAD)"
-          else
+          elif [ -e updates ] || [ -e crates/oncl-update/keys ]; then
             # A new branch or a history this clone does not have: check without a base.
             base=""
             changed="updates/"
+          else
+            # No base and neither indexes nor keys in the tree (before the maintainer's
+            # keys exist): there is nothing to check.
+            base=""
+            changed=""
           fi
           if printf '%s\n' "$changed" | grep -qE '^(updates/|crates/oncl-update/keys/)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
