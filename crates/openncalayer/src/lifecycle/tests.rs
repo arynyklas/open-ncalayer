@@ -205,7 +205,8 @@ fn install_integrates_this_user_and_repeats_as_a_repair() {
         i.record().unwrap(),
         Some(Record {
             program: i.executables.program.clone(),
-            version: "1.0.0".to_owned()
+            version: "1.0.0".to_owned(),
+            done: Choice::ALL.into(),
         })
     );
     assert_eq!(i.due_at_start(&Installation::Velopack), None);
@@ -293,7 +294,8 @@ fn update_refreshes_what_the_user_kept_and_nothing_else() {
         new.record().unwrap().unwrap(),
         Record {
             program: new.executables.program.clone(),
-            version: "1.1.0".to_owned()
+            version: "1.1.0".to_owned(),
+            done: Choice::ALL.into(),
         }
     );
 
@@ -381,9 +383,14 @@ fn a_failed_step_fails_the_event_and_the_others_still_run() {
         outcome.failures().collect::<Vec<_>>(),
         [(Step::EnableAutostart, "the autostart is broken")]
     );
-    // No record: the next start installs again. What could be done is done.
-    assert_eq!(steps(&outcome).last(), Some(&Step::DisableOriginal));
-    assert_eq!(i.record().unwrap(), None);
+    // What could be done is done and recorded; the next start installs the rest.
+    assert_eq!(steps(&outcome).last(), Some(&Step::SaveRecord));
+    let record = i.record().unwrap().unwrap();
+    assert_eq!(record.done, [Choice::Relay, Choice::Original].into());
+    assert_eq!(
+        i.due_at_start(&Installation::Velopack),
+        Some(Event::Install)
+    );
     assert!(nm::status(&i.nm).is_healthy());
     assert!(!s.shortcut().exists());
 
@@ -415,6 +422,115 @@ fn a_failed_step_fails_the_event_and_the_others_still_run() {
     let result = update.run(Event::Update);
     assert!(!result.succeeded());
     assert_eq!(update.record().unwrap().unwrap().version, "1.0.0");
+}
+
+#[test]
+fn installing_again_keeps_the_users_choices() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Sandbox::new(dir.path());
+    s.original_installed();
+    let first = s.integration("bin", "1.0.0");
+    assert!(first.run(Event::Install).succeeded());
+
+    // The user puts the original back and turns our autostart off in the settings window.
+    restore_original(&first.original, &first.journal()).unwrap();
+    first
+        .autostart
+        .set(false, &first.executables.program)
+        .unwrap();
+    oncl_desktop::settings::set_autostart(&first.paths.settings(), false).unwrap();
+    // Setup.exe run again over the installation moves its directory aside: the relay and
+    // its config are gone, the browsers' registration (here the manifests) stays.
+    fs::remove_file(first.nm.relay()).unwrap();
+    fs::remove_file(first.nm.relay_config()).unwrap();
+
+    // A newer installer (or the .pkg's postinstall) runs Install, not Update.
+    let again = s.integration("bin2", "1.1.0");
+    let outcome = again.run(Event::Install);
+    assert!(outcome.succeeded(), "{outcome:?}");
+    assert_eq!(
+        steps(&outcome),
+        [Step::RefreshRelay, Step::AutostartLeftOff, Step::SaveRecord]
+    );
+    // The registered relay is put back for the new program.
+    assert!(nm::status(&again.nm).is_healthy());
+    assert_eq!(s.relay_daemon(&again), again.executables.program);
+    // The choices stay: the original enabled, our autostart off.
+    assert!(s.shortcut().exists());
+    assert_eq!(
+        s.original_states(&again),
+        [EntryState::Enabled, EntryState::Enabled]
+    );
+    assert!(!again.autostart.enabled().unwrap());
+    assert!(!Settings::load(&again.paths.settings()).unwrap().autostart);
+    assert_eq!(again.due_at_start(&Installation::Velopack), None);
+
+    // The extension unregistered by the user stays unregistered; our autostart, on, is
+    // rewritten for the program.
+    nm::uninstall(&again.nm).unwrap();
+    again
+        .autostart
+        .set(true, &again.executables.program)
+        .unwrap();
+    let third = s.integration("bin3", "1.2.0");
+    let outcome = third.run(Event::Install);
+    assert!(outcome.succeeded(), "{outcome:?}");
+    assert_eq!(
+        steps(&outcome),
+        [Step::RelayLeftOff, Step::RefreshAutostart, Step::SaveRecord]
+    );
+    assert!(!third.nm.relay().exists() && !third.nm.relay_config().exists());
+    assert_eq!(
+        fs::read_to_string(s.our_entry()).unwrap(),
+        s.entry_for(&third.executables.program)
+    );
+    assert!(s.shortcut().exists());
+}
+
+#[test]
+fn a_step_failing_at_every_start_does_not_override_the_user() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Sandbox::new(dir.path());
+    s.original_installed();
+    let mut i = s.integration("bin", "1.0.0");
+    i.autostart = Box::new(Broken);
+    assert!(!i.run(Event::Install).succeeded());
+    // What succeeded is recorded; the event is still due.
+    assert_eq!(
+        i.due_at_start(&Installation::Velopack),
+        Some(Event::Install)
+    );
+    assert!(!s.shortcut().exists());
+
+    // The user puts the original back and unregisters the extension; the autostart keeps
+    // failing at every start.
+    restore_original(&i.original, &i.journal()).unwrap();
+    nm::uninstall(&i.nm).unwrap();
+    for _ in 0..2 {
+        let (event, outcome) = i.at_start(&Installation::Velopack).unwrap();
+        assert_eq!(event, Event::Install);
+        assert_eq!(
+            outcome.failures().map(|(step, _)| step).collect::<Vec<_>>(),
+            [Step::EnableAutostart]
+        );
+        assert!(s.shortcut().exists(), "the original is not disabled again");
+        assert!(
+            !i.nm.relay().exists(),
+            "the extension is not registered again"
+        );
+    }
+
+    // Once the autostart works, only it is done.
+    i.autostart = Box::new(FileAutostart::desktop_entry(&s.autostart_paths()));
+    let (_, outcome) = i.at_start(&Installation::Velopack).unwrap();
+    assert!(outcome.succeeded(), "{outcome:?}");
+    assert_eq!(
+        steps(&outcome),
+        [Step::RelayLeftOff, Step::EnableAutostart, Step::SaveRecord]
+    );
+    assert!(i.autostart.enabled().unwrap());
+    assert!(s.shortcut().exists());
+    assert_eq!(i.due_at_start(&Installation::Velopack), None);
 }
 
 #[test]

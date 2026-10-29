@@ -854,6 +854,10 @@ fn executables() -> Result<Executables, ExitCode> {
 pub fn integration(command: IntegrationCommand) -> ExitCode {
     let run = || -> Result<ExitCode, ExitCode> {
         let paths = data_paths()?;
+        // Every step goes to the log too (the .pkg's postinstall output is Installer's).
+        if let Err(e) = crate::logging::init_files(&paths.logs()) {
+            eprintln!("Журнал не пишется в {}: {e}", paths.logs().display());
+        }
         let integration = Integration::for_this_user(&paths).map_err(|e| {
             eprintln!("Не удалось определить автозапуск и браузеры этого пользователя: {e}");
             ExitCode::FAILURE

@@ -5,17 +5,25 @@
 //!
 //! - **Install** registers the relay ([`nm::install`]), turns our autostart on (the entry
 //!   and `settings.json`) and disables the original's autostart entries of this user
-//!   ([`disable_original`], journaled). Running it again repairs: every step is idempotent.
+//!   ([`disable_original`], journaled), each [`Choice`] once: the record of the installation
+//!   (`installation.json`) lists those done. Installing again (a second or newer
+//!   `Setup.exe`, the `.pkg`'s postinstall) or after a failed step does again only what is
+//!   not done yet, and treats the rest as an update does, so it never undoes a choice the
+//!   user made since.
 //! - **Update** refreshes what the user kept: the relay and its config if the relay is
-//!   registered, our autostart entry if it is on (the program may have moved). It never
-//!   turns anything on again and never touches the original, so «Вернуть оригинал» and an
-//!   autostart switched off stay as the user left them.
+//!   registered (any of its files, manifests or registry keys still there: an installer
+//!   run over the installation deletes the files but not the keys), our autostart entry if
+//!   it is on (the program may have moved). It never turns anything on again and never
+//!   touches the original, so «Вернуть оригинал» and an autostart switched off stay as the
+//!   user left them.
 //! - **Uninstall** removes only what is ours (the relay, its config, manifests and
 //!   registry keys, our autostart entry) and puts back the original's entries we disabled
 //!   ([`restore_original`]); `settings.json`, the TLS files and the logs stay.
 //!
-//! Each step runs even if an earlier one failed; the outcome lists every failure, and the
-//! record of the installation (`installation.json`) is written only when all succeeded.
+//! Each step runs even if an earlier one failed; the outcome lists every failure. The
+//! record is written after install and update with the choices done; it names this program
+//! and version only once every step succeeded, so a failed event is due again at the next
+//! start.
 //!
 //! Who runs them: Velopack's hooks on Windows ([`run_hook`]: `Setup.exe`, the updater and
 //! the uninstaller; a failure ends the hook with a nonzero code), `openncalayer integration
@@ -23,6 +31,7 @@
 //! its start ([`Integration::at_start`]) for an installed copy that this user has not
 //! integrated yet or that changed version or place since.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
@@ -129,11 +138,38 @@ fn appimage_of(exe: &Path, var: impl Fn(&str) -> Option<OsString>) -> Option<Pat
         .then_some(image)
 }
 
-/// The record of the installation: what was integrated, for which program and version.
+/// The record of the installation: for which program and version this user's desktop is
+/// integrated, and which of the user's choices installing made already.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub program: PathBuf,
     pub version: String,
+    /// Done once, never again: the user may change them since.
+    #[serde(default)]
+    pub done: BTreeSet<Choice>,
+}
+
+impl Record {
+    /// Whether installing made every choice.
+    pub fn complete(&self) -> bool {
+        Choice::ALL.iter().all(|c| self.done.contains(c))
+    }
+}
+
+/// What installing sets up once for the user, who may change it afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Choice {
+    /// The browsers' relay registered.
+    Relay,
+    /// Our autostart turned on.
+    Autostart,
+    /// The original's autostart disabled.
+    Original,
+}
+
+impl Choice {
+    pub const ALL: [Choice; 3] = [Choice::Relay, Choice::Autostart, Choice::Original];
 }
 
 /// A lifecycle event.
@@ -202,13 +238,16 @@ impl Outcome {
             .filter_map(|(step, result)| result.as_ref().err().map(|e| (*step, e.as_str())))
     }
 
-    fn run(&mut self, step: Step, f: impl FnOnce() -> io::Result<()>) {
+    /// Runs `step` and records how it went; whether it succeeded.
+    fn run(&mut self, step: Step, f: impl FnOnce() -> io::Result<()>) -> bool {
         let result = f().map_err(|e| e.to_string());
         match &result {
             Ok(()) => info!(?step, "lifecycle step done"),
             Err(e) => error!(?step, error = %e, "lifecycle step failed"),
         }
+        let ok = result.is_ok();
         self.steps.push((step, result));
+        ok
     }
 }
 
@@ -278,8 +317,9 @@ impl Integration {
     }
 
     /// The event the daemon's start owes this user for an `installation`: none for a
-    /// portable copy; install if this user's desktop was never integrated (or its record is
-    /// unreadable); update if the record names another program or version.
+    /// portable copy; install if this user's desktop was never integrated, if installing
+    /// did not make every choice yet, or if the record is unreadable; update if the record
+    /// names another program or version.
     pub fn due_at_start(&self, installation: &Installation) -> Option<Event> {
         if *installation == Installation::Portable {
             return None;
@@ -290,6 +330,7 @@ impl Integration {
                 warn!(error = %e, "the installation record is unreadable; installing again");
                 Some(Event::Install)
             }
+            Ok(Some(record)) if !record.complete() => Some(Event::Install),
             Ok(Some(record))
                 if record.program != self.executables.program || record.version != self.version =>
             {
@@ -305,36 +346,70 @@ impl Integration {
         Some((event, self.run(event)))
     }
 
+    /// The record as it is, or `None` (logged) if it is missing or unreadable.
+    fn prior(&self) -> Option<Record> {
+        self.record()
+            .inspect_err(|e| warn!(error = %e, "the installation record is unreadable"))
+            .ok()
+            .flatten()
+    }
+
     fn install(&self) -> Outcome {
+        let prior = self.prior();
+        let mut done = prior.as_ref().map(|r| r.done.clone()).unwrap_or_default();
         let mut outcome = Outcome::default();
-        outcome.run(Step::RegisterRelay, || self.register_relay());
-        outcome.run(Step::EnableAutostart, || {
+        if done.contains(&Choice::Relay) {
+            self.refresh_relay(&mut outcome);
+        } else if outcome.run(Step::RegisterRelay, || self.register_relay()) {
+            done.insert(Choice::Relay);
+        }
+        if done.contains(&Choice::Autostart) {
+            self.refresh_autostart(&mut outcome);
+        } else if outcome.run(Step::EnableAutostart, || {
             self.autostart.set(true, &self.executables.program)?;
             oncl_desktop::settings::set_autostart(&self.paths.settings(), true)
-        });
-        outcome.run(Step::DisableOriginal, || {
-            disable_original(&self.original, &self.journal()).map(drop)
-        });
-        self.save_record(&mut outcome);
+        }) {
+            done.insert(Choice::Autostart);
+        }
+        if !done.contains(&Choice::Original)
+            && outcome.run(Step::DisableOriginal, || {
+                disable_original(&self.original, &self.journal()).map(drop)
+            })
+        {
+            done.insert(Choice::Original);
+        }
+        self.save_record(&mut outcome, prior.as_ref(), done);
         outcome
     }
 
     fn update(&self) -> Outcome {
+        let prior = self.prior();
         let mut outcome = Outcome::default();
-        if self.nm.relay().exists() || self.nm.relay_config().exists() {
+        self.refresh_relay(&mut outcome);
+        self.refresh_autostart(&mut outcome);
+        let done = prior.as_ref().map(|r| r.done.clone()).unwrap_or_default();
+        self.save_record(&mut outcome, prior.as_ref(), done);
+        outcome
+    }
+
+    /// Installs the relay again if it is registered, otherwise leaves it so.
+    fn refresh_relay(&self, outcome: &mut Outcome) {
+        if relay_registered(&nm::status(&self.nm)) {
             outcome.run(Step::RefreshRelay, || self.register_relay());
         } else {
             outcome.run(Step::RelayLeftOff, || Ok(()));
         }
+    }
+
+    /// Writes our autostart entry for the program again if it is on, otherwise leaves it.
+    fn refresh_autostart(&self, outcome: &mut Outcome) {
         match self.autostart.enabled() {
             Ok(true) => outcome.run(Step::RefreshAutostart, || {
                 self.autostart.set(true, &self.executables.program)
             }),
             Ok(false) => outcome.run(Step::AutostartLeftOff, || Ok(())),
             Err(e) => outcome.run(Step::RefreshAutostart, || Err(e)),
-        }
-        self.save_record(&mut outcome);
-        outcome
+        };
     }
 
     fn uninstall(&self) -> Outcome {
@@ -378,21 +453,38 @@ impl Integration {
         failures(&report)
     }
 
-    /// Writes the record once every step before succeeded.
-    fn save_record(&self, outcome: &mut Outcome) {
-        if !outcome.succeeded() {
-            return;
-        }
+    /// Writes the record with the choices `done`: for this program and version if every
+    /// step succeeded, otherwise for those of `prior` (if any), so the event is due again.
+    fn save_record(&self, outcome: &mut Outcome, prior: Option<&Record>, done: BTreeSet<Choice>) {
+        let (program, version) = match prior {
+            Some(prior) if !outcome.succeeded() => (prior.program.clone(), prior.version.clone()),
+            _ => (self.executables.program.clone(), self.version.clone()),
+        };
+        let record = Record {
+            program,
+            version,
+            done,
+        };
         outcome.run(Step::SaveRecord, || {
-            let record = Record {
-                program: self.executables.program.clone(),
-                version: self.version.clone(),
-            };
             let json = serde_json::to_vec_pretty(&record).map_err(io::Error::other)?;
             std::fs::create_dir_all(&self.paths.data)?;
             write_atomically(&self.record_path(), &json, Access::Default)
         });
     }
+}
+
+/// Whether the relay is registered: any of its files, manifests or registry keys is there
+/// (as written, or not as written). Replaced relays and temporary files do not count.
+fn relay_registered(status: &nm::Report) -> bool {
+    status.entries.iter().any(|entry| {
+        matches!(
+            entry.item,
+            nm::Item::Relay
+                | nm::Item::RelayConfig
+                | nm::Item::Manifest { .. }
+                | nm::Item::RegistryKey
+        ) && matches!(entry.state, nm::State::Present | nm::State::Invalid(_))
+    })
 }
 
 /// Velopack's hook for `event` (Windows: `Setup.exe` after installing, the updater after
