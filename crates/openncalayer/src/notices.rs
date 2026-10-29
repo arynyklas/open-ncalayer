@@ -703,10 +703,15 @@ fn date(rfc3339: &str) -> String {
 /// The longest text of a page shown in a notification, in characters.
 pub const MAX_PAGE_TEXT: usize = 128;
 
-/// `text` from a page as a notification shows it: without control characters, at most
-/// [`MAX_PAGE_TEXT`] characters (then `…`).
+/// `text` from a page as a notification shows it: without control characters, line and
+/// paragraph separators (U+2028, U+2029) and bidirectional controls (U+202A–U+202E,
+/// U+2066–U+2069), at most [`MAX_PAGE_TEXT`] characters (then `…`).
 fn page_text(text: &str) -> String {
-    let mut chars = text.chars().filter(|c| !c.is_control());
+    let shown = |c: &char| {
+        !c.is_control()
+            && !matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    };
+    let mut chars = text.chars().filter(shown);
     let mut shown: String = chars.by_ref().take(MAX_PAGE_TEXT).collect();
     if chars.next().is_some() {
         shown.push('…');
@@ -1133,6 +1138,14 @@ mod tests {
 
     #[test]
     fn page_text_is_cleaned_and_cut() {
+        assert_eq!(
+            page_text(
+                "a\u{2028}b\u{2029}c\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}d\u{2066}\u{2067}\u{2068}\u{2069}e"
+            ),
+            "abcde"
+        );
+        // Other format characters (a zero-width joiner in an emoji) stay.
+        assert_eq!(page_text("x\u{200D}y"), "x\u{200D}y");
         let mut status = TrayStatus::new(Locale::En, None);
         let long = "a".repeat(MAX_PAGE_TEXT + 10);
         let n = status
