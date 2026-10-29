@@ -37,6 +37,7 @@ jobs:
           sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev openssl
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
+      - uses: ./.github/actions/pinned-toolchains
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
@@ -61,6 +62,7 @@ jobs:
           sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev openssl
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
+      - uses: ./.github/actions/pinned-toolchains
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Every platform's packages: the licences test (`committed_licenses_are_fresh`) reads
       # their licence files offline. Its result does not depend on the host, so it runs on
@@ -112,6 +114,7 @@ jobs:
       - run: node --test "extension/test/*.test.mjs"
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
+      - uses: ./.github/actions/pinned-toolchains
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo xtask ext build
       # Unlisted AMO signing (roadmap D6). Skipped without the secrets; release tags (`v*`)
@@ -147,6 +150,7 @@ jobs:
           sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev openssl libdbus-glib-1-2
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
+      - uses: ./.github/actions/pinned-toolchains
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --release -p openncalayer --features e2e-prompter -p oncl-nmhost
       - run: cargo xtask ext build
@@ -190,8 +194,10 @@ jobs:
           # make every cached build stale: a fixed date, older than any cache.
           src="$(rustup run nightly-2026-08-12 rustc --print sysroot)/lib/rustlib/src"
           find "$src" -exec touch -d 2026-08-12T00:00:00Z {} +
-      # Only xtask's own build and the registry now: a new key drops the Windows 7 builds
-      # the old one still holds.
+      - uses: ./.github/actions/pinned-toolchains
+        with:
+          keep: nightly-2026-08-12
+      # Only xtask's own build and the registry: the Windows 7 build has a cache of its own.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: win7-${{ matrix.arch }}-xtask
@@ -284,6 +290,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - uses: ./.github/actions/pinned-toolchains
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build both slices and join them
         run: |
@@ -366,6 +373,7 @@ jobs:
           sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgtk-3-dev openssl
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
+      - uses: ./.github/actions/pinned-toolchains
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Fetch fixtures
         run: cargo xtask fetch-fixtures
