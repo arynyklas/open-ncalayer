@@ -21,6 +21,8 @@ pub(crate) struct FakeTransport {
     asked: Mutex<Vec<(String, u64, bool)>>,
     timeouts: Mutex<Vec<Duration>>,
     hook: Mutex<Option<Hook>>,
+    /// Hooks that run during the next request of their URL.
+    url_hooks: Mutex<BTreeMap<String, Hook>>,
 }
 
 impl FakeTransport {
@@ -39,6 +41,11 @@ impl FakeTransport {
     fn timeouts(&self) -> Vec<Duration> {
         lock(&self.timeouts).clone()
     }
+
+    /// Runs `hook` during the next request of `url`, before it is answered.
+    pub(crate) fn during(&self, url: &str, hook: impl FnOnce() + Send + 'static) {
+        lock(&self.url_hooks).insert(url.to_owned(), Box::new(hook));
+    }
 }
 
 impl HttpTransport for FakeTransport {
@@ -47,6 +54,10 @@ impl HttpTransport for FakeTransport {
         lock(&self.timeouts).push(opts.timeout);
         let hook = lock(&self.hook).take();
         if let Some(hook) = hook {
+            hook();
+        }
+        let url_hook = lock(&self.url_hooks).remove(url);
+        if let Some(hook) = url_hook {
             hook();
         }
         let (status, body) = lock(&self.bodies)

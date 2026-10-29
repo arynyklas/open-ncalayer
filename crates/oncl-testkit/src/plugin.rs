@@ -69,11 +69,17 @@ pub fn example_manifest() -> String {
 
 /// The example as a `.onclp` package: its `plugin.toml` and the module of [`example_wasm`].
 pub fn example_package() -> Vec<u8> {
+    example_package_with(|manifest| manifest)
+}
+
+/// The example as a `.onclp` package with its `plugin.toml` changed by `edit` (another id,
+/// version or modules), the module of [`example_wasm`] as it is.
+pub fn example_package_with(edit: impl FnOnce(String) -> String) -> Vec<u8> {
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     zip.start_file("plugin.toml", options).unwrap();
-    zip.write_all(example_manifest().as_bytes()).unwrap();
+    zip.write_all(edit(example_manifest()).as_bytes()).unwrap();
     zip.start_file("plugin.wasm", options).unwrap();
     zip.write_all(&crate::read(example_wasm())).unwrap();
     zip.finish().unwrap().into_inner()
