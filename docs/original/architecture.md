@@ -286,20 +286,22 @@ sequenceDiagram
 
 Модуль — это OSGi-бандл. Его активатор регистрирует один или несколько `ModuleService` со свойством `module`. Сторонние модули используют четыре конвенции:
 
-1. **`CommonInvoker` v2.** Хост-класс из NCALayerServices, методы помечены `@NCALayerMethod`. Используется в 7 модулях.
-2. **Рефлексия «по образцу commonUtils».** Позиционные `args`; через `getDeclaredMethods` достижимы даже приватные методы. Используется в 9 модулях.
-3. **Собственный switch** по полю `method`, `type` или `command`. Например, семейство ecc.kz: `NURSign`, `K2Sign`, `MarketSign`, `EFactoringSign`.
-4. **Одна операция** с позиционными `{uuid, args:[b64, fileNames]}`.
+1. **`CommonInvoker` v2.** Хост-класс из NCALayerServices, методы помечены `@NCALayerMethod`. Используется в 7 модулях; Everflow 1.16.5 принимает и этот формат, и прежний — одну операцию с именованными полями (`keyType`, `filePath`/`tokenName`, `filesNames`, `dataForSign`).
+2. **Рефлексия «по образцу commonUtils».** Позиционные `args`; метод ищется через `getDeclaredMethods` по имени и числу аргументов. Приватные методы при этом находятся, но `setAccessible` никто не вызывает, поэтому их вызов завершается ошибкой доступа: со страницы доступны только публичные методы. Используется в 9 модулях.
+3. **Собственный switch** по полю `method`, `type` или `command`. Например, семейство ecc.kz (`NURSign`, `K2Sign`, `MarketSign`, `EFactoringSign`) выбирает операцию по `type`, кабинет налогоплательщика КГД — по `command`.
+4. **Одна операция** с позиционными `{uuid, args:[b64, fileNames]}` (2 модуля).
 
 Чтобы сторонние модули работали, хост должен давать им:
-- KALKAN-провайдер (`NCALayerService.getProvider`) и `knca_provider_util` (`KeyStoreUtil.getDefaultCACerts` нужен примерно 30 модулям);
+- KALKAN-провайдер (`NCALayerService.getProvider`) и `knca_provider_util`: пакет `kz.gov.pki.provider.utils` импортируют 30 модулей, а `KeyStoreUtil.getDefaultCACerts` (напрямую или через `getSigningEntityDefaultChained`) нужен 8 из них;
 - `javax.smartcardio`;
 - JavaFX/Swing;
 - файловую систему;
 - исходящий HTTP (TSP, OCSP, сервера вендоров);
 - org.json и slf4j.
 
-Нативного кода нет ни в одном модуле. Три модуля тащат собственную копию kalkan, а один — даже Felix.
+Заголовка `Bundle-NativeCode` нет ни в одном модуле, но ezSigner 1.2.1 несёт JNA с 27 нативными сборками `jnidispatch` и через неё вызывает Windows API (`WNetGetConnection`, `GetDriveType`). Три модуля (Buhta, AC Bank, Documentolog) несут собственную полную копию kalkan, а AC Bank — ещё и Apache Felix.
+
+Подсчёты сделаны по 34 из 40 сторонних модулей манифеста от 2026‑10‑28; JAR-файлы шести модулей недоступны.
 
 ---
 
