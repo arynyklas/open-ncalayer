@@ -93,6 +93,8 @@ fn origin() -> AddInfo {
 /// The raw reply to `request`.
 fn raw(cu: &CommonUtils, request: Value) -> String {
     cu.process(&request.to_string(), &origin())
+        .into_text()
+        .unwrap()
 }
 
 /// The reply to `method(args)`.

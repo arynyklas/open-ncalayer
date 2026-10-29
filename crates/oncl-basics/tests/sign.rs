@@ -18,7 +18,7 @@ use oncl_pki::info::{CertInfo, cert_info};
 use oncl_pki::key::{PublicKey, SigAlg};
 use oncl_pki::pkcs12::{KeyEntry, WriteEntry, WriteOptions, load, write};
 use oncl_pki::tsp::{MockTsa, verify_token};
-use oncl_protocol::{AddInfo, Module};
+use oncl_protocol::{AddInfo, Module, Reply};
 use oncl_testkit::{fixture, read, synthetic};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -99,8 +99,8 @@ fn origin(o: &str) -> AddInfo {
     }
 }
 
-fn json(reply: String) -> Value {
-    serde_json::from_str(&reply).unwrap()
+fn json(reply: Reply) -> Value {
+    serde_json::from_str(reply.text().expect("a text reply")).unwrap()
 }
 
 /// The failure `code` of a request answered without any prompt.

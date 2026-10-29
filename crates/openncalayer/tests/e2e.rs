@@ -13,6 +13,7 @@ use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::{MockTsa, TsaProfile, timestamp_signer, verify_token};
+use oncl_protocol::{AddInfo, Module, Registry, Reply};
 use oncl_testkit::{read, synthetic, synthetic_cert};
 use oncl_tls::{SelftestReports, TlsFiles};
 use openncalayer::cms_verify::{NOT_CHECKED, Options, cms_verify_report_with};
@@ -106,6 +107,11 @@ struct Srv {
 }
 
 async fn start(steps: Vec<Step>) -> Srv {
+    start_with(steps, |_| {}).await
+}
+
+/// [`start`] with `extra` modules registered besides the daemon's.
+async fn start_with(steps: Vec<Step>, extra: impl FnOnce(&mut Registry)) -> Srv {
     let dir = tempfile::tempdir().unwrap();
     let material = oncl_tls::generate(OffsetDateTime::now_utc(), "e2e").unwrap();
     let files = TlsFiles {
@@ -118,13 +124,14 @@ async fn start(steps: Vec<Step>) -> Srv {
     let reports = Arc::new(SelftestReports::new());
     let prompter = Arc::new(ScriptedPrompter::new(steps));
     let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
-    let registry = build_registry(
+    let mut registry = build_registry(
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         tsa.clone(),
         Arc::new(|_| {}),
         None,
     );
+    extra(&mut registry);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(serve(
@@ -442,6 +449,33 @@ async fn invalid_json_drops_connection_without_close_frame() {
     let mut c = connect(&srv).await;
     next_text(&mut c).await;
     send(&mut c, "nope").await;
+    match timeout(PATIENCE, c.next())
+        .await
+        .expect("no reaction in time")
+    {
+        None | Some(Err(_)) => {}
+        Some(Ok(message)) => panic!("expected a dropped connection, got {message:?}"),
+    }
+}
+
+/// Asks for the connection to be dropped.
+struct Dropping;
+
+impl Module for Dropping {
+    fn process(&self, _request: &str, _add_info: &AddInfo) -> Reply {
+        Reply::Drop
+    }
+}
+
+#[tokio::test]
+async fn dropped_reply_closes_without_frame() {
+    let srv = start_with(vec![], |registry| {
+        registry.register("test.Drop", Arc::new(Dropping));
+    })
+    .await;
+    let mut c = connect(&srv).await;
+    next_text(&mut c).await;
+    send(&mut c, r#"{"module":"test.Drop","method":"x"}"#).await;
     match timeout(PATIENCE, c.next())
         .await
         .expect("no reaction in time")

@@ -57,7 +57,10 @@ fn in_session(session: u64) -> AddInfo {
 /// `method` of the example, in `session`, routed as the server routes it.
 fn call(modules: &Arc<PluginModules>, session: u64, method: &str) -> String {
     let module = modules.module(MODULE).expect("the module is served");
-    module.process(&request(method, json!({})), &in_session(session))
+    module
+        .process(&request(method, json!({})), &in_session(session))
+        .into_text()
+        .unwrap()
 }
 
 fn count(modules: &Arc<PluginModules>, session: u64) -> u64 {

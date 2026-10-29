@@ -57,6 +57,8 @@ fn origin() -> AddInfo {
 /// The raw reply to `request`.
 fn raw(a: &Applet, request: Value) -> String {
     a.process(&request.to_string(), &origin())
+        .into_text()
+        .unwrap()
 }
 
 /// The reply to `method(args)`, sent without `module` as the original's pages do.

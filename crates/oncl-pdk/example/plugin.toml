@@ -1,6 +1,6 @@
 id = "io.github.arynyklas.openncalayer.example"
 version = "0.1.0"
-min_core = "0.1.0-alpha.2"
+min_core = "0.1.0-alpha.3"
 modules = ["io.github.arynyklas.openncalayer.Example"]
 
 [name]

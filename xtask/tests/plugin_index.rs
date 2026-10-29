@@ -137,7 +137,7 @@ fn add_plugin_takes_everything_from_the_package() {
     let bytes = fs::read(&path).unwrap();
     assert_eq!(release.id, EXAMPLE_ID);
     assert_eq!(release.version.to_string(), "0.1.0");
-    assert_eq!(release.min_core.to_string(), "0.1.0-alpha.2");
+    assert_eq!(release.min_core.to_string(), "0.1.0-alpha.3");
     assert_eq!(
         release.modules,
         ["io.github.arynyklas.openncalayer.Example"]

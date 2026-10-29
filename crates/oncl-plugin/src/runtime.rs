@@ -8,7 +8,7 @@ use crate::caps::DialogTurn;
 use crate::host::{self, HostServices, HostState, Phase};
 use crate::manifest::{Capabilities, Localized, Manifest};
 use oncl_pdk::abi::{self, ABI_VERSION, Capability, IMPORT_MODULE, Import, Input, Output, exports};
-use oncl_protocol::{AddInfo, SessionId};
+use oncl_protocol::{AddInfo, Reply, SessionId};
 use std::sync::Arc;
 use wasmi::{
     CompilationMode, Config, EnforcedLimits, ExternType, FuncType, Linker, Memory, Module, Store,
@@ -333,14 +333,15 @@ const _: fn() = || {
 };
 
 impl Instance {
-    /// Has the guest answer `request`. The dialog-flow turn, once a host function takes it,
+    /// Has the guest answer `request`: its reply, or [`Reply::Drop`] if it called
+    /// `reply_drop` during this call. The dialog-flow turn, once a host function takes it,
     /// is held until this returns. After a failure the instance is spent: every later call
     /// is [`PluginError::Poisoned`] without running the guest, and its keys are let go.
     ///
     /// # Errors
     ///
     /// [`PluginError`]: the page gets [`PLUGIN_ERROR_REPLY`].
-    pub fn process(&mut self, request: &str, add_info: &AddInfo) -> Result<String, PluginError> {
+    pub fn process(&mut self, request: &str, add_info: &AddInfo) -> Result<Reply, PluginError> {
         if self.poisoned {
             return Err(PluginError::Poisoned);
         }
@@ -350,6 +351,7 @@ impl Instance {
             .data_mut()
             .begin_call(add_info.origin.clone(), locale);
         let result = self.run(request, add_info, locale);
+        let dropped = self.store.data().call.drop;
         self.store.data_mut().end_call();
         drop(turn);
         if let Err(e) = &result {
@@ -362,7 +364,7 @@ impl Instance {
             self.poisoned = true;
             self.store.data_mut().release_all();
         }
-        result
+        result.map(|text| if dropped { Reply::Drop } else { text.into() })
     }
 
     /// Whether a call failed: the instance only answers [`PluginError::Poisoned`] now.

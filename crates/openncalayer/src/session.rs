@@ -147,15 +147,20 @@ impl Drop for Session {
     }
 }
 
-/// The reply to a request, or `None` to drop the connection (the request is not a JSON
-/// object). The heartbeat is echoed. A string `module` that nothing serves is reported to
-/// [`Registry::missing`]; the reply is [`module_not_found`] all the same.
+/// What the page sees when a request ends without a reply: the TCP connection (or the
+/// bridge's virtual socket) closes without a close frame, close code 1006 in the browser.
+pub(crate) const DROP_CLOSE: u16 = 1006;
+
+/// The reply to a request, or `None` to drop the connection ([`DROP_CLOSE`]): the request is
+/// not a JSON object, or its module answered [`oncl_protocol::Reply::Drop`]. The heartbeat is echoed. A
+/// string `module` that nothing serves is reported to [`Registry::missing`]; the reply is
+/// [`module_not_found`] all the same.
 pub(crate) fn dispatch(registry: &Registry, text: &str, add_info: &AddInfo) -> Option<String> {
     match registry.route(text) {
         Route::Heartbeat => Some(text.to_owned()),
         Route::Module(module) => {
             let _answering = ACTIVITY.begin();
-            Some(module.process(text, add_info))
+            module.process(text, add_info).into_text()
         }
         Route::NotFound { module } => {
             if let Some(name) = module {

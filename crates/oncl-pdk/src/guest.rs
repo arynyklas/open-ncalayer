@@ -43,6 +43,8 @@ mod imports {
         pub fn file_save(ptr: i32, len: i32) -> i64;
         #[link_name = "http_request"]
         pub fn http_request(ptr: i32, len: i32) -> i64;
+        #[link_name = "reply_drop"]
+        pub fn reply_drop(ptr: i32, len: i32) -> i64;
     }
 }
 
@@ -66,6 +68,7 @@ fn host_fn(import: Import) -> HostFn {
         Import::FileOpen => imports::file_open,
         Import::FileSave => imports::file_save,
         Import::HttpRequest => imports::http_request,
+        Import::ReplyDrop => imports::reply_drop,
     }
 }
 
@@ -263,6 +266,13 @@ pub mod host {
                 der: Bytes::from(der.to_vec()),
             },
         )
+    }
+
+    /// Ends the request being answered with the connection dropped, without a reply: the
+    /// page sees the socket close (code 1006), as for a request that is not JSON. The
+    /// handler still returns its reply, which is not sent.
+    pub fn reply_drop() -> HostResult<()> {
+        call(imports::reply_drop, &())
     }
 }
 

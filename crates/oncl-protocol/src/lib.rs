@@ -7,6 +7,6 @@ pub mod invoker;
 pub mod orgjson;
 
 pub use envelope::{
-    AddInfo, COMPAT_VERSION, DEFAULT_MODULE, DynamicModules, HEARTBEAT, Module, Registry, Route,
-    SessionId, greeting, module_not_found,
+    AddInfo, COMPAT_VERSION, DEFAULT_MODULE, DynamicModules, HEARTBEAT, Module, Registry, Reply,
+    Route, SessionId, greeting, module_not_found,
 };

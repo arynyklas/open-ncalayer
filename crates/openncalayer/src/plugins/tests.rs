@@ -241,7 +241,7 @@ impl Sandbox {
                 session: 1,
             },
         );
-        serde_json::from_str::<serde_json::Value>(&reply).unwrap()["body"].clone()
+        serde_json::from_str::<serde_json::Value>(reply.text().unwrap()).unwrap()["body"].clone()
     }
 }
 

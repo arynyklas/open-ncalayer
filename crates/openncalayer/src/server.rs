@@ -27,7 +27,7 @@ use tokio_tungstenite::tungstenite::{self, Message, Utf8Bytes};
 use tracing::{debug, info, warn};
 
 use crate::http::{self, Response};
-use crate::session::{Session, process};
+use crate::session::{DROP_CLOSE, Session, process};
 
 /// The NCALayer port.
 pub const DEFAULT_PORT: u16 = 13579;
@@ -387,7 +387,8 @@ where
                 // As the original: drop the TCP connection, no close frame.
                 info!(
                     request_len = len,
-                    "request is not a JSON object; dropping the connection"
+                    close_code = DROP_CLOSE,
+                    "request without a reply (not a JSON object, or the module dropped it); dropping the connection"
                 );
                 return Ok(());
             }

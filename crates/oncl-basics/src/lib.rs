@@ -34,7 +34,7 @@ pub use ocsp_cache::{ANSWER_FOR, OcspCache, UNREACHABLE_FOR};
 use oncl_pki::http::HttpTransport;
 use oncl_pki::tsp::TsaProfile;
 use oncl_protocol::invoker::{self, CallResult, Failure, NlClass};
-use oncl_protocol::{AddInfo, Module};
+use oncl_protocol::{AddInfo, Module, Reply};
 pub use page_file::{
     MAX_CHOSEN_NETWORK_PATHS, MAX_PAGE_FILE, PageFile, PageFileError, is_device_path,
     is_network_path, page_path, remember_chosen_path,
@@ -128,8 +128,8 @@ impl Basics {
 }
 
 impl Module for Basics {
-    fn process(&self, request: &str, add_info: &AddInfo) -> String {
-        invoker::invoke(request, add_info, &[&PkiExtras(self), &PkiEssentials(self)])
+    fn process(&self, request: &str, add_info: &AddInfo) -> Reply {
+        invoker::invoke(request, add_info, &[&PkiExtras(self), &PkiEssentials(self)]).into()
     }
 }
 

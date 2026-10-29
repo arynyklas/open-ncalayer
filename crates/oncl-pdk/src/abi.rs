@@ -218,11 +218,14 @@ pub enum Import {
     FileSave,
     /// `http_request`: [`HttpArgs`] → [`HttpResponse`].
     HttpRequest,
+    /// `reply_drop`: `()` → `()`. The request being answered ends with the connection
+    /// dropped, without a reply; the plugin still returns its [`Output`], which is not sent.
+    ReplyDrop,
 }
 
 impl Import {
     /// Every host function.
-    pub const ALL: [Import; 14] = [
+    pub const ALL: [Import; 15] = [
         Import::Log,
         Import::Now,
         Import::Random,
@@ -237,6 +240,7 @@ impl Import {
         Import::FileOpen,
         Import::FileSave,
         Import::HttpRequest,
+        Import::ReplyDrop,
     ];
 
     /// Its import name in [`IMPORT_MODULE`].
@@ -256,13 +260,16 @@ impl Import {
             Import::FileOpen => "file_open",
             Import::FileSave => "file_save",
             Import::HttpRequest => "http_request",
+            Import::ReplyDrop => "reply_drop",
         }
     }
 
     /// The capability it needs; `None` for the basic functions every plugin has.
     pub fn capability(&self) -> Option<Capability> {
         match self {
-            Import::Log | Import::Now | Import::Random | Import::CertInfo => None,
+            Import::Log | Import::Now | Import::Random | Import::CertInfo | Import::ReplyDrop => {
+                None
+            }
             Import::KeysChoose
             | Import::KeysSignCms
             | Import::KeysSignRaw
@@ -272,6 +279,31 @@ impl Import {
             Import::FileOpen | Import::FileSave => Some(Capability::Files),
             Import::HttpRequest => Some(Capability::Http),
         }
+    }
+
+    /// The core version it appeared in: a plugin importing it needs at least that core
+    /// (its manifest's `min_core`). A core without it refuses to load the plugin
+    /// ([`IMPORT_MODULE`] imports are linked by name).
+    pub fn since(&self) -> semver::Version {
+        let version = match self {
+            // The first core with plugins.
+            Import::Log
+            | Import::Now
+            | Import::Random
+            | Import::CertInfo
+            | Import::KeysChoose
+            | Import::KeysSignCms
+            | Import::KeysSignRaw
+            | Import::KeysSignXml
+            | Import::KeysRelease
+            | Import::DialogMessage
+            | Import::DialogConfirm
+            | Import::FileOpen
+            | Import::FileSave
+            | Import::HttpRequest
+            | Import::ReplyDrop => "0.1.0-alpha.3",
+        };
+        semver::Version::parse(version).expect("a valid version")
     }
 
     /// The host function imported as `name`.

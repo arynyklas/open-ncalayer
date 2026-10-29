@@ -67,7 +67,7 @@ fn call(b: &Basics, class: Option<&str>, method: &str, args: Value) -> Value {
             ..AddInfo::default()
         },
     );
-    serde_json::from_str(&reply).unwrap()
+    serde_json::from_str(reply.text().unwrap()).unwrap()
 }
 
 fn essentials(b: &Basics, method: &str, args: Value) -> Value {

@@ -36,7 +36,7 @@ fn reply(instance: &mut Instance, method: &str, args: Value) -> Value {
     let reply = instance
         .process(&call(method, args), &from("https://a.kz"))
         .unwrap();
-    serde_json::from_str(&reply).unwrap()
+    serde_json::from_str(reply.text().unwrap()).unwrap()
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn echo_roundtrip() {
     let mut instance = example();
     assert_eq!(
         instance.process(&call("echo", json!({"text": "hi"})), &from("https://a.kz")),
-        Ok(r#"{"status":true,"body":"hi"}"#.to_owned())
+        Ok(r#"{"status":true,"body":"hi"}"#.into())
     );
 }
 
@@ -55,11 +55,12 @@ fn unknown_method_uses_invoker_dialect() {
     let expected = oncl_protocol::invoker::invoke(&request, &AddInfo::default(), &[&NoMethods]);
     let reply = instance.process(&request, &from("o")).unwrap();
     assert_eq!(reply, expected);
-    let reply: Value = serde_json::from_str(&reply).unwrap();
+    let reply: Value = serde_json::from_str(reply.text().unwrap()).unwrap();
     assert_eq!(reply["status"], false);
     assert_eq!(reply["code"], "GENERAL_ERROR");
     // Not JSON at all: the same dialect.
-    let reply: Value = serde_json::from_str(&instance.process("[", &from("o")).unwrap()).unwrap();
+    let reply: Value =
+        serde_json::from_str(instance.process("[", &from("o")).unwrap().text().unwrap()).unwrap();
     assert_eq!(reply["code"], "GENERAL_ERROR");
 }
 
@@ -97,6 +98,8 @@ fn origin_reaches_the_guest() {
     let reply: Value = serde_json::from_str(
         &instance
             .process(&call("origin", json!({})), &from("https://idp.egov.kz"))
+            .unwrap()
+            .into_text()
             .unwrap(),
     )
     .unwrap();
@@ -104,6 +107,8 @@ fn origin_reaches_the_guest() {
     let none: Value = serde_json::from_str(
         &instance
             .process(&call("origin", json!({})), &AddInfo::default())
+            .unwrap()
+            .into_text()
             .unwrap(),
     )
     .unwrap();

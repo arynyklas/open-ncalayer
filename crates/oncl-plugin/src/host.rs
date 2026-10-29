@@ -59,6 +59,8 @@ pub(crate) struct CallContext {
     pub(crate) origin: Option<String>,
     /// The language of the windows during this request.
     pub(crate) locale: Locale,
+    /// The plugin asked for the connection to be dropped instead of a reply (`reply_drop`).
+    pub(crate) drop: bool,
 }
 
 /// An instance's store data.
@@ -89,6 +91,7 @@ impl HostState {
             call: CallContext {
                 origin: None,
                 locale: Locale::Ru,
+                drop: false,
             },
             keys: KeyTable::default(),
             guest: None,
@@ -102,7 +105,11 @@ impl HostState {
 
     /// A request from `origin` starts.
     pub(crate) fn begin_call(&mut self, origin: Option<String>, locale: Locale) {
-        self.call = CallContext { origin, locale };
+        self.call = CallContext {
+            origin,
+            locale,
+            drop: false,
+        };
     }
 
     /// The request is answered.
@@ -224,6 +231,10 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
         Import::FileOpen => run(args, |()| caps::file_open(state)),
         Import::FileSave => run(args, |a| caps::file_save(state, a)),
         Import::HttpRequest => run(args, |a| caps::http_request(state, a)),
+        Import::ReplyDrop => run(args, |()| {
+            state.call.drop = true;
+            Ok(())
+        }),
     }
 }
 

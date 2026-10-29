@@ -12,6 +12,7 @@ use oncl_pdk::abi::{
     SignRawArgs, SignXmlArgs,
 };
 use oncl_plugin::{Engine, LoadError, MAX_MEMORY, PLUGIN_ERROR_REPLY, PluginError};
+use oncl_protocol::Reply;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -41,7 +42,7 @@ fn echo_guest_answers() {
     for _ in 0..3 {
         assert_eq!(
             instance.process(r#"{"method":"ping"}"#, &from("https://a.kz")),
-            Ok(r#"{"status":true,"body":"pong"}"#.to_owned())
+            Ok(r#"{"status":true,"body":"pong"}"#.into())
         );
     }
 }
@@ -110,7 +111,7 @@ fn undeclared_capability_import_is_rejected() {
         compiled.instantiate(&services(), session(1)).unwrap();
     }
     // The basic functions need no capability.
-    for name in ["log", "now", "random", "cert_info"] {
+    for name in ["log", "now", "random", "cert_info", "reply_drop"] {
         compile(&importing("oncl", name, HOST_FN), "").unwrap();
     }
 }
@@ -317,6 +318,56 @@ fn trap_poisons_the_instance() {
     );
 }
 
+/// A guest answering `"x"` that calls `reply_drop` first: on its first call only if
+/// `first_only`, else on every call; `then` runs between that and the answer.
+fn dropping(first_only: bool, then: &str) -> String {
+    let output = abi::encode(&Output {
+        response: "x".to_owned(),
+    });
+    format!(
+        r#"(module
+  (import "oncl" "reply_drop" (func $drop (param i32 i32) (result i64)))
+{}
+  (global $calls (mut i32) (i32.const 0))
+  (data (i32.const 1024) "{}")
+  (data (i32.const 2048) "\f6")
+  (func (export "oncl_process") (param i32 i32) (result i64)
+    (if (i32.eqz (global.get $calls))
+      (then (drop (call $drop (i32.const 2048) (i32.const 1)))))
+    (global.set $calls (i32.add (global.get $calls) (i32.const {})))
+    {then}
+    (i64.or (i64.shl (i64.const 1024) (i64.const 32)) (i64.const {})))
+)"#,
+        standard_exports(2),
+        wat_bytes(&output),
+        i32::from(first_only),
+        output.len()
+    )
+}
+
+#[test]
+fn reply_drop_turns_the_reply_into_drop() {
+    let mut instance = start(&dropping(false, ""));
+    assert_eq!(instance.process("{}", &from("o")), Ok(Reply::Drop));
+    assert_eq!(instance.process("{}", &from("o")), Ok(Reply::Drop));
+}
+
+#[test]
+fn reply_drop_is_per_call() {
+    let mut instance = start(&dropping(true, ""));
+    assert_eq!(instance.process("{}", &from("o")), Ok(Reply::Drop));
+    assert_eq!(instance.process("{}", &from("o")), Ok("x".into()));
+}
+
+#[test]
+fn reply_drop_then_trap_is_plugin_error() {
+    let mut instance = start(&dropping(false, "(unreachable)"));
+    assert!(matches!(
+        instance.process("{}", &from("o")),
+        Err(PluginError::Trap(_))
+    ));
+}
+
 #[test]
 fn abi_version_mismatch_is_rejected() {
     let wat = answering("x").replace(
@@ -364,7 +415,11 @@ fn log_and_now_work() {
         .with_ansi(false)
         .finish();
     let response = tracing::subscriber::with_default(subscriber, || {
-        instance.process("{}", &from("o")).unwrap()
+        instance
+            .process("{}", &from("o"))
+            .unwrap()
+            .into_text()
+            .unwrap()
     });
     let now: i64 = probe_result(&response).unwrap();
     assert_eq!(i128::from(now), NOW.unix_timestamp_nanos() / 1_000_000);
@@ -375,7 +430,11 @@ fn log_and_now_work() {
 
     // The log call itself answers Ok.
     let mut instance = start(&probe(&[(Import::Log, log)]));
-    let response = instance.process("{}", &from("o")).unwrap();
+    let response = instance
+        .process("{}", &from("o"))
+        .unwrap()
+        .into_text()
+        .unwrap();
     assert_eq!(probe_result::<()>(&response), Ok(()));
 }
 
@@ -385,7 +444,11 @@ fn random_over_1024_is_limit_error() {
         Import::Random,
         abi::encode(&RandomArgs { len: 1025 }),
     )]));
-    let response = instance.process("{}", &from("o")).unwrap();
+    let response = instance
+        .process("{}", &from("o"))
+        .unwrap()
+        .into_text()
+        .unwrap();
     let error = probe_result::<Bytes>(&response).unwrap_err();
     assert_eq!(error.code, ErrorCode::Limit);
 
@@ -393,7 +456,11 @@ fn random_over_1024_is_limit_error() {
         Import::Random,
         abi::encode(&RandomArgs { len: 1024 }),
     )]));
-    let response = instance.process("{}", &from("o")).unwrap();
+    let response = instance
+        .process("{}", &from("o"))
+        .unwrap()
+        .into_text()
+        .unwrap();
     assert_eq!(probe_result::<Bytes>(&response).unwrap().len(), 1024);
 }
 
@@ -406,7 +473,11 @@ fn cert_info_reads_a_certificate() {
             der: Bytes::from(der.clone()),
         }),
     )]));
-    let response = instance.process("{}", &from("o")).unwrap();
+    let response = instance
+        .process("{}", &from("o"))
+        .unwrap()
+        .into_text()
+        .unwrap();
     let info: CertInfo = probe_result(&response).unwrap();
     let expected = oncl_pki::info::cert_info(&oncl_pki::cert::parse(&der).unwrap());
     assert_eq!(info.subject_cn, expected.subject_cn);
@@ -423,7 +494,11 @@ fn cert_info_reads_a_certificate() {
             der: Bytes::from(b"not a certificate".to_vec()),
         }),
     )]));
-    let response = instance.process("{}", &from("o")).unwrap();
+    let response = instance
+        .process("{}", &from("o"))
+        .unwrap()
+        .into_text()
+        .unwrap();
     assert_eq!(
         probe_result::<CertInfo>(&response).unwrap_err().code,
         ErrorCode::Invalid
@@ -433,7 +508,11 @@ fn cert_info_reads_a_certificate() {
 #[test]
 fn malformed_argument_is_invalid() {
     let mut instance = start(&probe(&[(Import::Random, vec![0xff, 0x00])]));
-    let response = instance.process("{}", &from("o")).unwrap();
+    let response = instance
+        .process("{}", &from("o"))
+        .unwrap()
+        .into_text()
+        .unwrap();
     assert_eq!(
         probe_result::<Bytes>(&response).unwrap_err().code,
         ErrorCode::Invalid

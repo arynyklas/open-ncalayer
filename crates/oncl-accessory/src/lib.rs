@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use oncl_protocol::orgjson::{get_string, opt_string};
-use oncl_protocol::{AddInfo, Module};
+use oncl_protocol::{AddInfo, Module, Reply};
 use serde_json::{Map, Value, json};
 use tracing::{error, info};
 
@@ -204,12 +204,12 @@ fn json_exception(message: &str) -> String {
 }
 
 impl Module for Accessory {
-    fn process(&self, request: &str, add_info: &AddInfo) -> String {
+    fn process(&self, request: &str, add_info: &AddInfo) -> Reply {
         match self.handle(request, add_info) {
-            Ok(obj) => Value::Object(obj).to_string(),
+            Ok(obj) => Value::Object(obj).to_string().into(),
             Err(exception) => {
                 error!(%exception, "accessory request failed");
-                json!({ "errorCode": exception }).to_string()
+                json!({ "errorCode": exception }).to_string().into()
             }
         }
     }
@@ -268,7 +268,8 @@ mod tests {
             origin: origin.map(str::to_owned),
             ..AddInfo::default()
         };
-        serde_json::from_str(&m.process(&request.to_string(), &add_info)).unwrap()
+        let reply = m.process(&request.to_string(), &add_info);
+        serde_json::from_str(reply.text().unwrap()).unwrap()
     }
 
     fn not_found(symname: &str) -> UiRequest {
