@@ -40,7 +40,7 @@ pub struct AboutInfo {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AboutTab {
     Program,
-    /// `showBundleManager`.
+    /// The bundles of `getBundles` and the built-in modules.
     Modules,
 }
 

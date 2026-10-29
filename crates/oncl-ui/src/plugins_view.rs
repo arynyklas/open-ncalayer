@@ -25,9 +25,19 @@ pub trait PluginsServices: Send + Sync {
     fn view(&self) -> PluginsView;
     /// Installs `id` from the catalog: downloads it, then asks the user (in a window of its
     /// own). Blocks for the download.
-    fn install(&self, id: &str);
+    ///
+    /// # Errors
+    ///
+    /// Why the user is not asked (for the window): the catalog or the package failed, or
+    /// the plugin is installed or being installed already.
+    fn install(&self, id: &str) -> Result<(), String>;
     /// Installs the package file at `path`, once the user agreed.
-    fn install_file(&self, path: PathBuf);
+    ///
+    /// # Errors
+    ///
+    /// Why the user is not asked: the file is not a valid package, or that plugin is being
+    /// installed already.
+    fn install_file(&self, path: PathBuf) -> Result<(), String>;
     /// Turns `id` on or off.
     ///
     /// # Errors
@@ -343,14 +353,7 @@ fn install(open: &Open, row: i32) {
         &Texts::of(l).downloading.replace("{0}", plugin.name.get(l)),
         false,
     );
-    run_action(
-        open,
-        move |services| {
-            services.install(&plugin.id);
-            Ok(())
-        },
-        None,
-    );
+    run_action(open, move |services| services.install(&plugin.id), None);
 }
 
 /// «Установить из файла…»: the system file dialog, `*.onclp` only.
@@ -376,14 +379,7 @@ fn pick_file(open: &Open) {
 
 /// Installs the package file at `path`, once the user agrees.
 fn install_file(open: &Open, path: PathBuf) {
-    run_action(
-        open,
-        move |services| {
-            services.install_file(path);
-            Ok(())
-        },
-        None,
-    );
+    run_action(open, move |services| services.install_file(path), None);
 }
 
 /// «Обновить каталог».
@@ -721,12 +717,14 @@ pub(crate) mod fakes {
             })
         }
 
-        fn install(&self, id: &str) {
+        fn install(&self, id: &str) -> Result<(), String> {
             self.log(Call::Install(id.to_owned()));
+            self.outcome()
         }
 
-        fn install_file(&self, path: PathBuf) {
+        fn install_file(&self, path: PathBuf) -> Result<(), String> {
             self.log(Call::InstallFile(path));
+            self.outcome()
         }
 
         fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
@@ -946,6 +944,28 @@ mod tests {
         assert!(ui.get_message_is_error());
         // The list is read again all the same.
         assert_eq!(taken(&o.calls).last(), Some(&Call::View));
+        // An install that cannot start (no catalog, being installed already) says why.
+        *o.fail.lock().unwrap() =
+            Some("the plugin kz.example.four is being installed already".to_owned());
+        ui.invoke_install(0);
+        worker::manual::run_all();
+        assert_eq!(
+            ui.get_message(),
+            "the plugin kz.example.four is being installed already"
+        );
+        assert!(ui.get_message_is_error());
+        install_file(&o.open, PathBuf::from("bad.onclp"));
+        worker::manual::run_all();
+        assert!(ui.get_message_is_error());
+        assert_eq!(
+            taken(&o.calls),
+            [
+                Call::Install("kz.example.four".to_owned()),
+                Call::View,
+                Call::InstallFile(PathBuf::from("bad.onclp")),
+                Call::View,
+            ]
+        );
     }
 
     #[test]

@@ -149,7 +149,12 @@ impl TrayHandle {
 
     /// Shows `notification`. A failure is only logged: a notification is a hint.
     pub fn notify(&self, notification: Notification) {
-        tracing::info!(title = %notification.title, body = %notification.body, "tray notification");
+        // `&str` fields: the log escapes them (the body may carry a page's text).
+        tracing::info!(
+            title = notification.title.as_str(),
+            body = notification.body.as_str(),
+            "tray notification"
+        );
         if let Err(e) = self.tray.notify(notification) {
             tracing::warn!(error = %e, "cannot show the notification");
         }

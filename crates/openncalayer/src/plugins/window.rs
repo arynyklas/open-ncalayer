@@ -74,16 +74,18 @@ impl PluginsServices for WindowServices {
         }
     }
 
-    fn install(&self, id: &str) {
-        if let Ok(service) = &self.0 {
-            service.install_from_catalog(id, None);
-        }
+    fn install(&self, id: &str) -> Result<(), String> {
+        self.0
+            .as_ref()
+            .map_err(Clone::clone)?
+            .install_from_catalog(id, None)
     }
 
-    fn install_file(&self, path: PathBuf) {
-        if let Ok(service) = &self.0 {
-            service.install_from_file(path);
-        }
+    fn install_file(&self, path: PathBuf) -> Result<(), String> {
+        self.0
+            .as_ref()
+            .map_err(Clone::clone)?
+            .install_from_file(path)
     }
 
     fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {

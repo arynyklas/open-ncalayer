@@ -188,8 +188,9 @@ Design: [`docs/design/plugins.md`](docs/design/plugins.md) (Russian).
 `openncalayer run` shows the OpenNCALayer icon (`tray-icon` on Windows and macOS, a StatusNotifierItem over D-Bus on Linux). Its menu:
 - «Настройки…» (Settings…);
 - «Сертификат для браузера…» (Browser certificate…) — the TLS wizard;
-- «Журнал» (Log) — opens the `logs/` directory in the file manager;
 - «Плагины…» (Plugins…) — the plugin window (see [Plugins](#plugins));
+- «Журнал» (Log) — opens the `logs/` directory in the file manager;
+- «Проверить обновления» (Check for updates);
 - «О программе» (About);
 - «Выход» (Quit) — stops the servers and ends the process. Closing a window does not end it.
 

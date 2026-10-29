@@ -3,9 +3,8 @@
 
 mod common;
 
-use common::repackaged_example;
 use oncl_plugin::{Package, Source, Store, StoreError};
-use oncl_testkit::plugin::example_package;
+use oncl_testkit::plugin::{example_package, example_package_with};
 use oncl_update::{Channel, Index, PublicKey, Version};
 use std::io::Cursor;
 use time::{Duration, OffsetDateTime};
@@ -127,7 +126,8 @@ fn an_update_replaces_the_old_package_file() {
     let store = Store::open(dir.path()).unwrap();
     let (package, bytes) = example();
     store.install(&package, &bytes, Source::Catalog).unwrap();
-    let newer = repackaged_example(|m| m.replacen("version = \"0.1.0\"", "version = \"0.2.0\"", 1));
+    let newer =
+        example_package_with(|m| m.replacen("version = \"0.1.0\"", "version = \"0.2.0\"", 1));
     store
         .install(&Package::read(&newer).unwrap(), &newer, Source::Catalog)
         .unwrap();

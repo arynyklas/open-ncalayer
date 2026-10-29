@@ -14,7 +14,7 @@ use oncl_plugin::{
     PluginModules,
 };
 use oncl_protocol::{AddInfo, DynamicModules, Registry, Route, module_not_found};
-use oncl_testkit::plugin::example_package;
+use oncl_testkit::plugin::{example_package, example_package_with};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -247,7 +247,7 @@ fn builtin_name_conflict_is_rejected() {
 
 /// The example's module under another plugin id.
 fn other(modules: &str) -> Package {
-    let bytes = repackaged_example(|m| {
+    let bytes = example_package_with(|m| {
         m.replacen(&format!("id = \"{ID}\""), "id = \"kz.example.other\"", 1)
             .replacen(
                 &format!("modules = [\"{MODULE}\"]"),
@@ -338,4 +338,79 @@ fn missing_calls_hook() {
         *seen.lock().unwrap(),
         [("kz.example.Gone".to_owned(), in_session(4))]
     );
+}
+
+/// Holds every request until it is opened; tells each one's start.
+struct GatedHttp {
+    entered: Mutex<Sender<()>>,
+    open: Mutex<bool>,
+    opened: std::sync::Condvar,
+}
+
+impl oncl_pki::http::HttpTransport for GatedHttp {
+    fn get_with(
+        &self,
+        _: &str,
+        _: oncl_pki::http::GetOptions,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        self.entered.lock().unwrap().send(()).unwrap();
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.opened.wait(open).unwrap();
+        }
+        Ok(oncl_pki::http::HttpReply {
+            status: 200,
+            content_type: None,
+            location: None,
+            body: b"ok".to_vec(),
+        })
+    }
+
+    fn post_with(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: oncl_pki::http::GetOptions,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        Err(oncl_pki::http::HttpError("no POST here".to_owned()))
+    }
+}
+
+#[test]
+fn busy_instances_are_never_evicted() {
+    let (entered_tx, entered) = channel();
+    let http = Arc::new(GatedHttp {
+        entered: Mutex::new(entered_tx),
+        open: Mutex::new(false),
+        opened: std::sync::Condvar::new(),
+    });
+    let mut services = services();
+    services.http = Arc::clone(&http) as _;
+    let modules = modules_with(services, Vec::new());
+    modules.load(example()).unwrap();
+    let fetch = json!({"module": MODULE, "class": "Example", "method": "fetch",
+        "args": {"url": "https://example.invalid/x"}})
+    .to_string();
+    let calls: Vec<_> = (1..=MAX_INSTANCES as u64)
+        .map(|session| {
+            let module = modules.module(MODULE).unwrap();
+            let fetch = fetch.clone();
+            std::thread::spawn(move || module.process(&fetch, &in_session(session)))
+        })
+        .collect();
+    for _ in 0..MAX_INSTANCES {
+        entered.recv_timeout(Duration::from_secs(120)).unwrap();
+    }
+    // Every instance is busy: another session's call is refused, none is evicted.
+    assert_eq!(call(&modules, 1000, "count"), PLUGIN_ERROR_REPLY);
+    assert_eq!(call(&modules, 0, "count"), PLUGIN_ERROR_REPLY);
+    *http.open.lock().unwrap() = true;
+    http.opened.notify_all();
+    for running in calls {
+        let reply: Value = serde_json::from_str(&running.join().unwrap()).unwrap();
+        assert_eq!(reply["status"], true, "{reply}");
+    }
+    // Idle now: the one used longest ago makes room.
+    assert_eq!(count(&modules, 1000), 1);
 }
