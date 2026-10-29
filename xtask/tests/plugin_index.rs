@@ -70,6 +70,28 @@ fn pack_is_deterministic_and_passes_the_daemons_checks() {
 }
 
 #[test]
+fn packed_modules_carry_no_paths_of_the_machine_that_built_them() {
+    let root = oncl_testkit::workspace_root();
+    let out = tempfile::tempdir().unwrap();
+    let path =
+        xtask::plugin::pack(&root, &root.join("crates/oncl-pdk/example"), out.path()).unwrap();
+    let package = oncl_plugin::Package::read(&fs::read(path).unwrap()).unwrap();
+    let text = String::from_utf8_lossy(&package.wasm);
+    let home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|h| h.join(".cargo")))
+        .unwrap();
+    for prefix in [root.as_path(), home.as_path()] {
+        for form in [
+            prefix.display().to_string(),
+            prefix.display().to_string().replace('\\', "/"),
+        ] {
+            assert!(!text.contains(&form), "the module names {form}");
+        }
+    }
+}
+
+#[test]
 fn pack_refuses_a_manifest_version_other_than_the_crates() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("src")).unwrap();

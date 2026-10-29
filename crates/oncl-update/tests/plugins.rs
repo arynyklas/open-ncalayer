@@ -57,12 +57,47 @@ fn plugin_release_shape_and_https_and_rollout_are_enforced() {
     let mut entry = release("kz.example.one", "1.0.0");
     entry["modules"] = json!([]);
     reject(vec![entry], "modules");
+}
+
+#[test]
+fn plugin_details_the_installer_checks_do_not_reject_the_core_index() {
+    // The package's own manifest is compared with the entry before installing; the index
+    // parser keeps only the rules a client needs to read it, so a stricter or newer manifest
+    // grammar never stops a core from updating itself.
     let mut entry = release("kz.example.one", "1.0.0");
-    entry["id"] = json!("../outside");
-    reject(vec![entry], "id");
-    let mut entry = release("kz.example.one", "1.0.0");
-    entry["modules"] = json!(["x.Module", "x.Module"]);
-    reject(vec![entry], "modules");
+    entry["name"]["ru"] = json!("");
+    entry["modules"] = json!(["any name the plugin format allows later"]);
+    entry["replaces"] = json!({"symname": "x", "version": ""});
+    let mut doc = document(vec![entry]);
+    doc["core"] = json!([{
+        "version": "0.2.0", "rollout": 100,
+        "flavors": {"win-x64": {"url": "https://example.invalid/full.nupkg", "sha256": "00".repeat(32), "size": 1}}
+    }]);
+    let parsed = Index::from_json(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    assert_eq!(parsed.core[0].version, version("0.2.0"));
+    assert_eq!(parsed.plugins.len(), 1);
+}
+
+#[test]
+fn plugin_entries_parse_and_roundtrip() {
+    let mut revoked = release("kz.example.one", "1.0.0");
+    revoked["revoked"] = json!(true);
+    let mut bare = release("kz.example.two", "2.0.0-beta.1");
+    bare.as_object_mut().unwrap().remove("replaces");
+    let parsed = index(vec![revoked, bare]);
+    let text = serde_json::to_vec(&parsed).unwrap();
+    let again = Index::from_json(&text).unwrap();
+    assert_eq!(again, parsed);
+    assert!(again.plugins[0].revoked);
+    assert_eq!(again.plugins[0].package.size, 120);
+    assert_eq!(again.plugins[0].replaces.as_ref().unwrap().version, "1.2.1");
+    assert!(again.plugins[1].replaces.is_none());
+    // Optional members are not written when absent, as in the core entries.
+    assert!(
+        !String::from_utf8(text)
+            .unwrap()
+            .contains("\"replaces\":null")
+    );
 }
 
 #[test]
@@ -150,6 +185,55 @@ fn revoked_current_bypasses_rollout_and_only_then_allows_downgrade() {
         ),
         PluginChoice::Withdrawn
     ));
+}
+
+#[test]
+fn revoked_current_takes_a_newer_version_outside_its_rollout() {
+    let id = "kz.example.one";
+    let mut current = release(id, "2.0.0");
+    current["revoked"] = json!(true);
+    let mut fix = release(id, "2.0.1");
+    fix["rollout"] = json!(0);
+    let parsed = index(vec![current, fix, release(id, "1.0.0")]);
+    let PluginChoice::Update(target) = choose_plugin(
+        &parsed,
+        id,
+        &version("2.0.0"),
+        &version("1.0.0"),
+        &[7; 16],
+        &BTreeSet::new(),
+    ) else {
+        panic!("the fix was not chosen");
+    };
+    assert_eq!(target.version, version("2.0.1"));
+}
+
+#[test]
+fn offer_finds_a_plugin_by_module_and_skips_bad_and_revoked_ones() {
+    let mut revoked = release("kz.example.one", "3.0.0");
+    revoked["revoked"] = json!(true);
+    let parsed = index(vec![
+        revoked,
+        release("kz.example.one", "2.0.0"),
+        release("kz.example.one", "1.0.0"),
+        release("kz.example.two", "9.0.0"),
+    ]);
+    let bad = BTreeMap::from([(
+        "kz.example.one".to_owned(),
+        BTreeSet::from([version("2.0.0")]),
+    )]);
+    let selected = offer(&parsed, &version("1.0.0"), &[7; 16], &bad, |r| {
+        r.modules.iter().any(|m| m == "kz.example.one.Module")
+    })
+    .unwrap();
+    assert_eq!(selected.version, version("1.0.0"));
+    assert!(
+        offer(&parsed, &version("1.0.0"), &[7; 16], &bad, |r| r
+            .modules
+            .iter()
+            .any(|m| m == "absent"))
+        .is_none()
+    );
 }
 
 #[test]

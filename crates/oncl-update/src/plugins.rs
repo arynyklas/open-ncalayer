@@ -55,66 +55,24 @@ pub struct PluginName {
 }
 
 impl PluginRelease {
+    /// The rules a client needs to read the entry: an `https://` package (checked by the
+    /// caller with the other URLs), `rollout` up to 100 and at least one module. The rest of
+    /// the entry (id, module names, name, `replaces`) is compared with the package's own
+    /// manifest before anything is installed, so a grammar of the plugin format is not
+    /// repeated here: an index carrying a plugin the core cannot install still updates the
+    /// core.
     pub(crate) fn check(&self) -> Result<(), UpdateError> {
-        let invalid = |field| {
-            UpdateError::Malformed(format!(
-                "plugin {} {}: invalid {field}",
-                self.id, self.version
-            ))
+        let invalid = |what: &str| {
+            UpdateError::Malformed(format!("plugin {} {}: {what}", self.id, self.version))
         };
-        if !valid_id(&self.id) {
-            return Err(invalid("id"));
-        }
         if self.rollout > 100 {
-            return Err(invalid("rollout (must not exceed 100)"));
+            return Err(invalid(&format!("rollout {} is over 100", self.rollout)));
         }
-        let mut names = BTreeSet::new();
-        if self.modules.is_empty()
-            || self.modules.len() > 32
-            || self
-                .modules
-                .iter()
-                .any(|name| !valid_module(name) || !names.insert(name))
-        {
-            return Err(invalid("modules"));
-        }
-        for name in [&self.name.ru, &self.name.kk, &self.name.en] {
-            if name.trim().is_empty() || name.chars().count() > 128 {
-                return Err(invalid("name"));
-            }
-        }
-        if let Some(replaces) = &self.replaces
-            && (!valid_module(&replaces.symname)
-                || replaces.version.trim().is_empty()
-                || replaces.version.chars().count() > 64)
-        {
-            return Err(invalid("replaces"));
+        if self.modules.is_empty() {
+            return Err(invalid("no modules"));
         }
         Ok(())
     }
-}
-
-fn valid_id(id: &str) -> bool {
-    (3..=64).contains(&id.len())
-        && id.contains('.')
-        && id
-            .as_bytes()
-            .first()
-            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        && id
-            .as_bytes()
-            .last()
-            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-'))
-}
-
-fn valid_module(name: &str) -> bool {
-    (1..=128).contains(&name.len())
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// The rollout bucket of `install_id` for one plugin release, from zero to 99.

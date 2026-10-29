@@ -153,7 +153,7 @@ cargo xtask index check updates/v1 --base origin/main
    cargo xtask plugin pack <каталог крейта плагина>
    ```
 
-   Пакет `target/plugins/<id>-<версия>.onclp` воспроизводим: тот же исходник даёт те же байты.
+   Пакет `target/plugins/<id>-<версия>.onclp` детерминирован: те же исходники тем же тулчейном дают те же байты, а пути машины сборки в модуль не попадают.
 2. Создать релиз `plugins-ГГГГММДД` с пакетами как ассетами (`gh release create plugins-ГГГГММДД --latest=false target/plugins/*.onclp`).
 3. Дописать пакеты в индексы каналов, подписать и проверить:
 

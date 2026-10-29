@@ -1,7 +1,7 @@
 //! The update index of a channel, `updates/v1/<channel>.json`: core versions by flavor with
-//! their staged rollout and revocation, the browser extension, plugins (left opaque until
-//! their format exists). [`Index::from_json`] reads one and checks the rules of the format
-//! that JSON alone does not express.
+//! their staged rollout and revocation, the browser extension and plugin versions
+//! ([`crate::PluginRelease`]). [`Index::from_json`] reads one and checks the rules of the
+//! format that JSON alone does not express.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -296,7 +296,7 @@ pub struct Asset {
 impl Index {
     /// Reads an index from its JSON and checks the format's rules: [`SCHEMA`], `https://`
     /// URLs only, `rollout` up to 100, each core version once, `contents_sha256` beside any
-    /// `delta_from`. Unknown members are
+    /// `delta_from`, each plugin `id` + `version` once with at least one module. Unknown members are
     /// ignored, so later versions of schema 1 may add some. The signature is not checked
     /// here: see [`crate::verify()`].
     ///

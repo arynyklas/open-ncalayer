@@ -124,9 +124,11 @@ pub fn pack(root: &Path, directory: &Path, out: &Path) -> anyhow::Result<PathBuf
         .arg(&cargo_manifest)
         .arg("--target-dir")
         .arg(&target_dir)
-        // Flags meant for the host build are not the plugin's.
+        // Flags meant for the host build are not the plugin's; the package is published, so
+        // the paths of the machine that built it (source files named in panic locations) are
+        // replaced by fixed names.
         .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env("CARGO_ENCODED_RUSTFLAGS", remap_flags(root, directory)?)
         .status()
         .context("building the plugin for wasm32-unknown-unknown")?;
     if !status.success() {
@@ -148,6 +150,43 @@ pub fn pack(root: &Path, directory: &Path, out: &Path) -> anyhow::Result<PathBuf
     write_atomically(&path, &bytes, Access::Default)
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
+}
+
+/// `--remap-path-prefix` flags (separated by 0x1f, as `CARGO_ENCODED_RUSTFLAGS` takes them)
+/// for the directories whose paths end up in a module: the cargo home (registry sources),
+/// the toolchain, the workspace and the plugin crate. rustc applies the last matching one,
+/// so the more specific directories come later.
+fn remap_flags(root: &Path, crate_dir: &Path) -> anyhow::Result<String> {
+    let home = match std::env::var_os("CARGO_HOME") {
+        Some(home) => PathBuf::from(home),
+        None => std::env::home_dir()
+            .context("the home directory is unknown")?
+            .join(".cargo"),
+    };
+    let sysroot = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .current_dir(crate_dir)
+        .output()
+        .context("asking rustc for its sysroot")?;
+    if !sysroot.status.success() {
+        bail!("rustc --print sysroot failed");
+    }
+    let sysroot = PathBuf::from(
+        String::from_utf8(sysroot.stdout)
+            .context("the sysroot is not UTF-8")?
+            .trim(),
+    );
+    let mut flags = Vec::new();
+    for (from, to) in [
+        (std::path::absolute(home)?, "/cargo"),
+        (sysroot, "/rustc"),
+        (std::path::absolute(root)?, "/workspace"),
+        (std::path::absolute(crate_dir)?, "/plugin"),
+    ] {
+        let from = from.to_str().context("a build path is not UTF-8")?;
+        flags.push(format!("--remap-path-prefix={from}={to}"));
+    }
+    Ok(flags.join("\u{1f}"))
 }
 
 fn check_version(manifest: &Manifest, cargo_version: &str) -> anyhow::Result<()> {
