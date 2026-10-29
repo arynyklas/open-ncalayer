@@ -12,6 +12,8 @@ publish.workspace = true
 oncl-gost.workspace = true
 oncl-ipc.workspace = true
 oncl-pki = { workspace = true, features = ["testing"] }
+# `plugin pack` and `index add-plugin`: the package format and the ABI check the daemon uses.
+oncl-plugin.workspace = true
 oncl-protocol.workspace = true
 oncl-testkit.workspace = true
 oncl-update.workspace = true

@@ -7555,6 +7555,7 @@ dependencies = [
  "oncl-gost",
  "oncl-ipc",
  "oncl-pki",
+ "oncl-plugin",
  "oncl-protocol",
  "oncl-testkit",
  "oncl-update",

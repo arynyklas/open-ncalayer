@@ -76,6 +76,11 @@ enum Command {
         #[command(subcommand)]
         command: IndexCommand,
     },
+    /// Plugin tasks (`.onclp` packages).
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
     /// Build the Windows 7 programs with their app-local DLLs into `<out>/<arch>/`, run the
     /// import gate on them and, on Windows, start them there.
     Win7 {
@@ -141,6 +146,26 @@ enum IndexCommand {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// Append plugin packages of a `plugins-YYYYMMDD[.N]` release to the channel's index:
+    /// id, version, modules and hashes come from the packages. A prerelease plugin is not
+    /// added to `stable`. The result is unsigned.
+    AddPlugin {
+        /// `stable` or `beta`.
+        #[arg(long, value_parser = parse_channel)]
+        channel: Channel,
+        /// The release tag, `plugins-YYYYMMDD[.N]`.
+        #[arg(long)]
+        tag: String,
+        /// The `.onclp` packages of the release.
+        #[arg(long = "package", required = true)]
+        packages: Vec<PathBuf>,
+        /// Percentage of installations offered the new plugin versions.
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u8).range(0..=100))]
+        rollout: u8,
+        /// The directory of the indexes [default: `updates/v1/` of the workspace].
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
     /// Check the indexes in a directory before publishing: format, signature by
     /// `current.pub` only (a `next.pub` is for clients, not for signing), validity, asset URLs
     /// on the project's releases, `seq` growth against the base branch, and that every asset
@@ -196,6 +221,19 @@ fn print_written(written: &xtask::index::Written) {
         "unsigned: cargo xtask sign {} --key <secret key>",
         written.path.display()
     );
+}
+
+#[derive(Subcommand)]
+enum PluginCommand {
+    /// Build a plugin crate for wasm32-unknown-unknown and write `<id>-<version>.onclp`:
+    /// the manifest's version must be the crate's, and the module must pass the ABI check.
+    Pack {
+        /// The plugin crate's directory (with `Cargo.toml` and `plugin.toml`).
+        dir: PathBuf,
+        /// Output directory [default: target/plugins].
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -342,6 +380,42 @@ fn main() -> anyhow::Result<()> {
                 xtask::index::refresh(&index_dir(dir), channel, OffsetDateTime::now_utc())?;
             println!("{}: seq {}", written.path.display(), written.seq);
             print_written(&written);
+            Ok(())
+        }
+        Command::Index {
+            command:
+                IndexCommand::AddPlugin {
+                    channel,
+                    tag,
+                    packages,
+                    rollout,
+                    dir,
+                },
+        } => {
+            let written = xtask::index::add_plugins(
+                &index_dir(dir),
+                channel,
+                &tag,
+                &packages,
+                rollout,
+                OffsetDateTime::now_utc(),
+            )?;
+            println!(
+                "{}: seq {}, {} plugin package(s) of {tag}",
+                written.path.display(),
+                written.seq,
+                packages.len()
+            );
+            print_written(&written);
+            Ok(())
+        }
+        Command::Plugin {
+            command: PluginCommand::Pack { dir, out },
+        } => {
+            let root = oncl_testkit::workspace_root();
+            let out = out.unwrap_or_else(|| root.join("target").join("plugins"));
+            let path = xtask::plugin::pack(&root, &dir, &out)?;
+            println!("{}", path.display());
             Ok(())
         }
         Command::Index {

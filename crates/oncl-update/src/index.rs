@@ -172,9 +172,9 @@ pub struct Index {
     /// The browser extension, if one is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension: Option<Extension>,
-    /// Plugins; their entries are not read yet.
+    /// Independently versioned plugins available in this channel.
     #[serde(default)]
-    pub plugins: Vec<serde_json::Value>,
+    pub plugins: Vec<crate::plugins::PluginRelease>,
 }
 
 /// A version of the core.
@@ -359,6 +359,19 @@ impl Index {
                 "extension chromium_zip".to_owned()
             })?;
             https(&ext.firefox_xpi.url, || "extension firefox_xpi".to_owned())?;
+        }
+        let mut plugin_versions = BTreeSet::new();
+        for release in &self.plugins {
+            release.check()?;
+            if !plugin_versions.insert((&release.id, &release.version)) {
+                return Err(malformed(format!(
+                    "plugin {} {} is listed twice",
+                    release.id, release.version
+                )));
+            }
+            https(&release.package.url, || {
+                format!("plugin {} {}", release.id, release.version)
+            })?;
         }
         Ok(())
     }

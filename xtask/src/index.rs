@@ -11,7 +11,7 @@
 //!   base branch and, with a [`Remote`], that every asset answers `HEAD` with 200 and,
 //!   behind a flag, that new versions passed `vm-smoke`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use oncl_update::{
-    Asset, Channel, CoreRelease, Extension, Flavor, FlavorPackage, Index, Package, PublicKey,
-    Sha256, Version,
+    Asset, Channel, CoreRelease, Extension, Flavor, FlavorPackage, Index, Package, PluginName,
+    PluginRelease, PluginReplaces, PublicKey, Sha256, Version,
 };
 use serde_json::Value;
 use sha2::Digest;
@@ -77,6 +77,39 @@ pub fn release_notes_url(version: &Version) -> String {
     format!("{REPOSITORY}/releases/tag/v{version}")
 }
 
+/// The immutable asset name of a plugin release.
+pub fn plugin_package_name(id: &str, version: &Version) -> String {
+    format!("{id}-{version}.onclp")
+}
+
+/// Whether `tag` names a dated batch of plugin releases.
+pub fn is_plugin_tag(tag: &str) -> bool {
+    let Some(date) = tag.strip_prefix("plugins-") else {
+        return false;
+    };
+    let (date, revision) = date
+        .split_once('.')
+        .map_or((date, None), |(d, r)| (d, Some(r)));
+    date.len() == 8
+        && date.bytes().all(|b| b.is_ascii_digit())
+        && revision.is_none_or(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The URL of one package in a dated plugin release.
+///
+/// # Errors
+///
+/// A tag not of the form `plugins-YYYYMMDD[.N]`.
+pub fn plugin_asset_url(tag: &str, id: &str, version: &Version) -> anyhow::Result<String> {
+    if !is_plugin_tag(tag) {
+        bail!("the tag {tag:?} is not plugins-YYYYMMDD[.N]");
+    }
+    Ok(format!(
+        "{REPOSITORY}/releases/download/{tag}/{}",
+        plugin_package_name(id, version)
+    ))
+}
+
 /// Refuses an index whose files are not where the release workflow puts them: every URL
 /// must be exactly [`release_asset_url`] of the entry's own version and the file name of
 /// its kind (full or delta package of that flavor, Chromium or Firefox extension), and
@@ -130,6 +163,40 @@ pub fn check_asset_urls(index: &Index) -> anyhow::Result<()> {
             &ext.firefox_xpi.url,
             release_asset_url(v, &firefox_name(v)),
         )?;
+    }
+    let plugin_base = format!("{REPOSITORY}/releases/download/");
+    let mut owners = BTreeMap::new();
+    for plugin in &index.plugins {
+        let (tag, _) = plugin
+            .package
+            .url
+            .strip_prefix(&plugin_base)
+            .and_then(|tail| tail.split_once('/'))
+            .with_context(|| {
+                format!(
+                    "plugin {}: URL is not an asset of the project's release",
+                    plugin.id
+                )
+            })?;
+        expect(
+            &format!("plugin {} {}", plugin.id, plugin.version),
+            &plugin.package.url,
+            plugin_asset_url(tag, &plugin.id, &plugin.version)?,
+        )?;
+        if index.channel == Channel::Stable && !plugin.version.pre.is_empty() {
+            bail!(
+                "plugin {} {} is a prerelease in stable",
+                plugin.id,
+                plugin.version
+            );
+        }
+        for module in &plugin.modules {
+            if let Some(owner) = owners.insert(module, &plugin.id)
+                && owner != &plugin.id
+            {
+                bail!("module {module} is owned by both {owner} and {}", plugin.id);
+            }
+        }
     }
     Ok(())
 }
@@ -288,6 +355,90 @@ pub fn add(
 pub fn refresh(dir: &Path, channel: Channel, now: OffsetDateTime) -> anyhow::Result<Written> {
     let path = index_path(dir, channel);
     let index = read_index(&path, channel)?;
+    write_next(&path, index, now)
+}
+
+/// Appends validated plugin packages to a channel's index, leaving the result unsigned.
+///
+/// Package hashes and metadata come from their bytes, never from their file names.
+///
+/// # Errors
+///
+/// An invalid tag or package, an existing version, a prerelease in stable, conflicting
+/// module owners, an invalid existing index, or an I/O failure.
+pub fn add_plugins(
+    dir: &Path,
+    channel: Channel,
+    tag: &str,
+    packages: &[PathBuf],
+    rollout: u8,
+    now: OffsetDateTime,
+) -> anyhow::Result<Written> {
+    if !is_plugin_tag(tag) {
+        bail!("the tag {tag:?} is not plugins-YYYYMMDD[.N]");
+    }
+    if packages.is_empty() || rollout > 100 {
+        bail!("at least one plugin package and rollout from 0 to 100 are required");
+    }
+    let path = index_path(dir, channel);
+    let mut index = if path.exists() {
+        read_index(&path, channel)?
+    } else {
+        Index {
+            schema: oncl_update::index::SCHEMA,
+            channel,
+            seq: 0,
+            generated: now,
+            expires: now,
+            core: Vec::new(),
+            extension: None,
+            plugins: Vec::new(),
+        }
+    };
+    for path in packages {
+        let (bytes, package) = crate::plugin::read_package(path)?;
+        let manifest = package.manifest;
+        if channel == Channel::Stable && !manifest.version.pre.is_empty() {
+            bail!(
+                "plugin {} {} is a prerelease; add it to beta",
+                manifest.id,
+                manifest.version
+            );
+        }
+        if index
+            .plugins
+            .iter()
+            .any(|r| r.id == manifest.id && r.version == manifest.version)
+        {
+            bail!(
+                "plugin {} {} is in the index already",
+                manifest.id,
+                manifest.version
+            );
+        }
+        index.plugins.push(PluginRelease {
+            package: Package {
+                url: plugin_asset_url(tag, &manifest.id, &manifest.version)?,
+                sha256: Sha256(package.sha256),
+                size: bytes.len() as u64,
+            },
+            id: manifest.id,
+            version: manifest.version,
+            min_core: manifest.min_core,
+            modules: manifest.modules,
+            replaces: manifest.replaces.map(|r| PluginReplaces {
+                symname: r.symname,
+                version: r.version,
+            }),
+            name: PluginName {
+                ru: manifest.name.ru,
+                kk: manifest.name.kk,
+                en: manifest.name.en,
+            },
+            rollout,
+            revoked: false,
+        });
+    }
     write_next(&path, index, now)
 }
 
@@ -673,6 +824,7 @@ fn asset_urls(index: &Index) -> BTreeSet<&str> {
         urls.insert(ext.chromium_zip.url.as_str());
         urls.insert(ext.firefox_xpi.url.as_str());
     }
+    urls.extend(index.plugins.iter().map(|p| p.package.url.as_str()));
     urls
 }
 

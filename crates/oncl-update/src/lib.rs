@@ -22,6 +22,7 @@ pub mod fetch;
 mod hex;
 pub mod index;
 mod keys;
+pub mod plugins;
 pub mod state;
 pub mod verify;
 
@@ -33,6 +34,9 @@ pub use index::{
 };
 pub use keys::embedded_keys;
 pub use minisign_verify::PublicKey;
+pub use plugins::{
+    PluginChoice, PluginName, PluginRelease, PluginReplaces, choose_plugin, offer, plugin_bucket,
+};
 pub use semver::Version;
 pub use state::{PendingHealth, State};
 pub use verify::{MAX_AGE, MAX_INDEX_LEN, trusted_comment, verify};
