@@ -117,6 +117,8 @@ depends=({depends})
 optdepends=({optdepends})
 provides=('openncalayer')
 conflicts=('openncalayer')
+# The release's programs as they are: not stripped again, no debug package.
+options=('!strip' '!debug')
 install={INSTALL}
 source=('{source}')
 sha256sums=('{sha256}')
@@ -172,6 +174,8 @@ package() {{
         }
         field("provides", "openncalayer");
         field("conflicts", "openncalayer");
+        field("options", "!strip");
+        field("options", "!debug");
         field("source", &self.source());
         field("sha256sums", &self.sha256);
         let _ = writeln!(out, "\npkgname = {PKGNAME}");

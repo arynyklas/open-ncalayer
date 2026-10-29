@@ -53,7 +53,7 @@ pub const BUNDLED: [&str; 3] = [
 
 /// Libraries every desktop distribution has, as the AppImage exclude list says; the host's
 /// copies must be used (glibc, the graphics and font stacks, D-Bus).
-pub const HOST_LIBS: [&str; 22] = [
+pub const HOST_LIBS: [&str; 24] = [
     "ld-linux-x86-64.so.2",
     "libc.so.6",
     "libm.so.6",
@@ -72,6 +72,8 @@ pub const HOST_LIBS: [&str; 22] = [
     "libdbus-1.so.3",
     "libX11.so.6",
     "libxcb.so.1",
+    "libXau.so.6",
+    "libXdmcp.so.6",
     "libGL.so.1",
     "libEGL.so.1",
     "libwayland-client.so.0",

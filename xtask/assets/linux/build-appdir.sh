@@ -30,8 +30,9 @@ if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
     /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none
 fi
 export PATH="$CARGO_HOME/bin:$PATH"
-# The checkout belongs to another user: git (the build's commit id) must still read it.
-git config --global --add safe.directory /src
+# The checkout belongs to another user: git (the build's commit id) must still read it. Set
+# from outside it: a linked worktree's .git points to a path of the host.
+(cd / && git config --global --add safe.directory /src)
 
 cd /src
 cargo build --locked --release --target-dir "$cache/target" \
