@@ -9,7 +9,11 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+crc32fast.workspace = true
+flate2.workspace = true
 md-5.workspace = true
 oncl-pdk.workspace = true
 url.workspace = true
+
+[dev-dependencies]
 zip.workspace = true
