@@ -42,12 +42,15 @@ cp <каталог>/oncl-index.pub crates/oncl-update/keys/current.pub
 ## 3. Выпуск версии
 
 1. Поднять версию в `[workspace.package]` файла `Cargo.toml`, обновить `Cargo.lock` (`cargo check --workspace`), прогнать проверки из раздела «Перед отправкой изменений» README и закоммитить.
-2. Поставить тег и запушить его:
+2. Поставить подписанный тег, проверить подпись и запушить его:
 
    ```sh
-   git tag v<версия>
+   git tag -s v<версия> -m "OpenNCALayer <версия>"
+   git tag -v v<версия>
    git push origin v<версия>
    ```
+
+   Тег аннотированный и подписан ключом мейнтейнера (`user.signingkey`, тем же, что подписывает коммиты). `git tag -v` должен сообщить о верной подписи; если подписи нет или она не сходится, тег удаляется (`git tag -d v<версия>`) и ставится заново, пока он не отправлен.
 
    Первым делом job `version` сверяет тег с версией в `Cargo.toml` и останавливает сборку при расхождении. Версия с суффиксом (`0.1.0-alpha.1`) выходит как pre-release и идёт только в канал `beta`, версия без суффикса — как обычный релиз и в оба канала, `stable` и `beta`.
 3. `release.yml` собирает по флейворам (`win-x64`, `win-x86`, `win7-x64`, `win7-x86`, `linux-x64`, `osx`) архивы, установщики и пакеты Velopack с дельтами (`cargo xtask package windows|macos|linux`, Linux — в контейнере с glibc 2.28 через `cargo xtask package linux-build`), расширение, SBOM и `SHA256SUMS`, выпускает аттестацию происхождения на каждый файл и создаёт релиз. Установщики: `openncalayer-<версия>-<флейвор>-setup.exe` (четыре флейвора Windows), `openncalayer-<версия>-osx.pkg` и `openncalayer-<версия>-osx.zip`, `openncalayer-<версия>-linux-x64.AppImage`. Флейворы `win7-*` собираются `cargo xtask win7`, а содержимое их пакетов, вместе с `Squirrel.exe` и заглушкой Velopack, и их `Setup.exe` проходят гейт импортов Windows 7. После успешного релиза без суффикса `aur.yml` готовит пакет AUR.
@@ -156,7 +159,7 @@ cargo xtask index check updates/v1 --base origin/main
    ```
 
    Команда печатает каталоги `plugins/<порт>`, чьей пары `(id, version)` ещё нет в индексе `beta`; пустой вывод — выпускать нечего.
-2. Поставить тег на `main` и отправить его: `git tag plugins-ГГГГММДД && git push origin plugins-ГГГГММДД`. Workflow проверяет имя тега, собирает каждый порт из `pending` дважды (`cargo xtask plugin pack`) и сравнивает пакеты байт в байт — пакеты детерминированы, пути машины сборки в модуль не попадают; кладёт рядом `plugins/THIRD-PARTY.txt` и `SHA256SUMS`, подписывает всё аттестацией происхождения и создаёт релиз. Если выпускать нечего, workflow заканчивается с notice и без релиза.
+2. Поставить тег на `main` и отправить его: `git tag plugins-ГГГГММДД && git push origin plugins-ГГГГММДД`. Workflow проверяет имя тега, собирает каждый порт из `pending` дважды (`cargo xtask plugin pack`) и сравнивает пакеты байт в байт — пакеты детерминированы, пути машины сборки в модуль не попадают; проверяет, что `plugins/THIRD-PARTY.txt` свежий (`cargo xtask licenses --plugins --check`), и кладёт его рядом с пакетами: в нём лицензии крейтов портов и шрифтов, которые порты встраивают в модуль (`plugins/<порт>/fonts/`: файл шрифта, источник из `fonts/README.md` и текст `OFL.txt`); затем `SHA256SUMS`, аттестация происхождения всех файлов и релиз. Если выпускать нечего, workflow заканчивается с notice и без релиза. Новый шрифт в порте кладётся с `OFL.txt` и `README.md` со строкой `Источник: <URL>`, иначе `cargo xtask licenses --plugins` откажется.
 3. Затем workflow открывает PR `updates/<тег>` с пакетами в индексе `beta` (`cargo xtask index add-plugin --channel beta`), неподписанным. На ветке PR:
 
    ```sh

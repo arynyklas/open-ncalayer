@@ -3,8 +3,9 @@ name: Plugins
 # A `plugins-YYYYMMDD[.N]` tag releases the plugin ports (`plugins/<dir>`) whose version is
 # not in the beta index yet (`cargo xtask plugin pending`): each is packed twice and the two
 # packages compared (the packages are deterministic), then published as a pre-release
-# without the Latest flag (the core stays the latest release) with THIRD-PARTY.txt,
-# SHA256SUMS and a build provenance attestation of every file. Then a pull request adds the
+# without the Latest flag (the core stays the latest release) with THIRD-PARTY.txt (the
+# licences of the crates and the fonts the ports embed, checked fresh first), SHA256SUMS
+# and a build provenance attestation of every file. Then a pull request adds the
 # packages to the beta index, unsigned: the maintainer signs it locally
 # (`cargo xtask sign`), never CI. Stable gets a plugin version only by hand
 # (`cargo xtask index add-plugin --channel stable`), once it has proved itself in beta.
@@ -64,6 +65,8 @@ jobs:
               exit 1
             fi
           done < "$RUNNER_TEMP/pending"
+          # The licence texts the packages need (crates and fonts): fresh, then published.
+          cargo xtask licenses --plugins --check
           cp plugins/THIRD-PARTY.txt dist/
       - name: Checksums
         if: steps.pending.outputs.any == 'true'

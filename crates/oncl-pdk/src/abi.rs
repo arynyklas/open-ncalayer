@@ -248,7 +248,7 @@ pub enum Import {
     /// `keys_open`: [`OpenArgs`] → [`OpenOutcome`].
     KeysOpen,
     /// `dialog_password`: [`PasswordArgs`] → `Option<`[`SecretRef`]`>`; `None` if the user
-    /// cancels.
+    /// cancels. An instance keeps the 8 newest passwords; an older id is `invalid`.
     DialogPassword,
     /// `keys_sign_cms_ex`: [`SignCmsExArgs`] → [`CmsOutcome`].
     KeysSignCmsEx,
@@ -458,9 +458,9 @@ impl Import {
             | Import::DialogConfirm
             | Import::FileOpen
             | Import::FileSave
-            | Import::HttpRequest
-            | Import::ReplyDrop
-            // The plugin ports' functions, in the same core.
+            | Import::HttpRequest => "0.1.0-alpha.3",
+            // The plugin ports' functions.
+            Import::ReplyDrop
             | Import::Hash
             | Import::CertDetails
             | Import::LocalTime
@@ -490,7 +490,7 @@ impl Import {
             | Import::SettingsPut
             | Import::SharedGet
             | Import::SharedPut
-            | Import::KeysSignXades => "0.1.0-alpha.3",
+            | Import::KeysSignXades => "0.1.0-alpha.4",
         };
         semver::Version::parse(version).expect("a valid version")
     }
@@ -1805,7 +1805,8 @@ pub enum XadesLevel {
     B,
     /// XAdES-BASELINE-T: and a signature time-stamp.
     T,
-    /// XAdES-BASELINE-LT: and the chain and OCSP responses.
+    /// XAdES-BASELINE-LT: and the chain and the revocation data of every certificate but
+    /// a self-signed root: OCSP responses, or the CRLs of a certificate naming no responder.
     Lt,
 }
 
@@ -1822,7 +1823,7 @@ pub struct XadesArgs {
     /// The TSA of T and LT.
     pub tsa: TsaChoice,
     /// The signer's issuers, from its issuer up (DER): the certificates of LT and the
-    /// issuers its OCSP requests name.
+    /// issuers its OCSP requests and CRLs name.
     #[serde(default)]
     pub chain: Vec<Bytes>,
     /// The `SignatureMethod` URI; `None`: Kalkan's for the key.
@@ -1839,9 +1840,11 @@ pub struct XadesArgs {
 pub enum XadesOutcome {
     /// The signed document.
     Signed(Bytes),
-    /// The time-stamp or an OCSP request failed.
+    /// The time-stamp, an OCSP request or a CRL download failed, or a certificate names
+    /// neither a responder nor a distribution point.
     Failed(NetFailure),
-    /// A certificate of the chain is revoked or unknown to its responder.
+    /// A certificate of the chain is revoked or unknown to its responder, or its CRL does
+    /// not verify.
     Invalid(Problem),
 }
 

@@ -11,14 +11,38 @@ use oncl_pdk::abi::{
     MAX_HEADER_BYTES, MAX_HEADERS, Method,
 };
 use oncl_pki::http::{CONNECT_TIMEOUT, GetOptions, HttpMethod, HttpRequest, HttpTransport};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use url::Url;
 
 /// The largest body of an HTTP request or reply.
 pub const MAX_HTTP_BODY: u64 = 32 << 20;
 
-/// The most HTTP requests of one `oncl_process` call: more are a `limit` error.
+/// The most HTTP requests of one `oncl_process` call, the plugin's own and those the core
+/// sends to the PKI hosts for it together: more are a `limit` error (a failed PKI request).
 pub const MAX_HTTP_REQUESTS: u32 = 64;
+
+/// The HTTP requests of one call, counted against [`MAX_HTTP_REQUESTS`]; clones share the
+/// count.
+#[derive(Clone, Default)]
+pub(crate) struct RequestBudget(Arc<AtomicU32>);
+
+impl RequestBudget {
+    /// Counts one more request, or refuses it past [`MAX_HTTP_REQUESTS`].
+    pub(crate) fn take(&self) -> HostResult<()> {
+        self.0
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |sent| {
+                (sent < MAX_HTTP_REQUESTS).then_some(sent + 1)
+            })
+            .map(drop)
+            .map_err(|_| {
+                limit(format!(
+                    "at most {MAX_HTTP_REQUESTS} HTTP requests in one call"
+                ))
+            })
+    }
+}
 
 /// The timeout of an HTTP request, connecting to reading the reply.
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -30,12 +54,7 @@ pub(crate) fn http_request(state: &mut HostState, args: HttpArgs) -> HostResult<
     if args.body.len() as u64 > MAX_HTTP_BODY {
         return Err(limit(format!("the body is over {MAX_HTTP_BODY} bytes")));
     }
-    if state.call.http_requests >= MAX_HTTP_REQUESTS {
-        return Err(limit(format!(
-            "at most {MAX_HTTP_REQUESTS} HTTP requests in one call"
-        )));
-    }
-    state.call.http_requests += 1;
+    state.call.http_requests.take()?;
     let opts = GetOptions {
         timeout: HTTP_TIMEOUT,
         connect_timeout: CONNECT_TIMEOUT,
@@ -118,12 +137,7 @@ pub(crate) fn http_request_ex(state: &mut HostState, args: HttpExArgs) -> HostRe
         &args.url,
         args.relative_to_origin,
     )?;
-    if state.call.http_requests >= MAX_HTTP_REQUESTS {
-        return Err(limit(format!(
-            "at most {MAX_HTTP_REQUESTS} HTTP requests in one call"
-        )));
-    }
-    state.call.http_requests += 1;
+    state.call.http_requests.take()?;
     let request = HttpRequest {
         method: match args.method {
             Method::Get => HttpMethod::Get,

@@ -7,10 +7,11 @@
 //!   are signed by a second reference of the type `http://uri.etsi.org/01903#SignedProperties`;
 //! - **T**: and an unsigned `SignatureTimeStamp` over the `ds:SignatureValue` element,
 //!   canonicalized with Exclusive XML Canonicalization;
-//! - **LT**: and `CertificateValues` (the chain given) and `RevocationValues` (an OCSP
-//!   response for the signer's certificate and each certificate of the chain other than a
-//!   self-signed root or a CA naming no responder, each from the responder of the
-//!   certificate's AIA through [`ocsp::fetch`]).
+//! - **LT**: and `CertificateValues` (the chain given) and `RevocationValues` (for the
+//!   signer's certificate and each certificate of the chain other than a self-signed root:
+//!   an OCSP response from the responder of the certificate's AIA through [`ocsp::fetch`],
+//!   or, for a certificate naming no responder, the CRLs of its distribution points through
+//!   [`crl::fetch_for`]; a certificate with neither is an error).
 //!
 //! The signature and algorithm URIs follow the signer's certificate as Kalkan's do (GOST
 //! 2015-512, GOST 2004, RSA-SHA256), unless the spec names them. Byte-for-byte equality
@@ -18,6 +19,7 @@
 //! [`xmldsig::verify`].
 
 use crate::cert::{self, Certificate};
+use crate::crl::{self, CrlError, CrlStatus};
 use crate::http::{HttpTransport, NonceSpec, PkiMethod};
 use crate::key::{HashAlg, PrivateKey};
 use crate::ocsp::{self, CertStatus, OcspError};
@@ -35,6 +37,9 @@ const SHA256_URI: &str = "http://www.w3.org/2001/04/xmlenc#sha256";
 
 /// Timeout of each OCSP request of [`XadesLevel::Lt`].
 const OCSP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout of each CRL download of [`XadesLevel::Lt`].
+const CRL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How much a XAdES signature carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,8 +99,9 @@ pub enum XadesError {
         /// The `OCSPResponseStatus`.
         status: u8,
     },
-    /// A certificate of the chain is not good: revoked, or unknown to its responder.
-    #[error("OCSP of {subject}: {status:?}")]
+    /// A certificate of the chain is not good: revoked (in its OCSP response or CRL), or
+    /// unknown to its responder.
+    #[error("status of {subject}: {status:?}")]
     NotGood {
         /// The certificate's subject.
         subject: String,
@@ -105,6 +111,17 @@ pub enum XadesError {
     /// The chain has no issuer of a certificate that is not self-signed.
     #[error("the chain has no issuer of {0}")]
     NoIssuer(String),
+    /// No CRL of a certificate that names no OCSP responder, from its distribution point
+    /// at `url` (empty if it names none: then it has no revocation data at all).
+    #[error("CRL of {subject}: {error}")]
+    Crl {
+        /// The certificate's subject.
+        subject: String,
+        /// The first distribution point's URL.
+        url: String,
+        /// What failed.
+        error: CrlError,
+    },
 }
 
 /// Signs the whole of `xml` with `key` (certificate `cert`) as a XAdES-BASELINE signature
@@ -113,7 +130,8 @@ pub enum XadesError {
 /// # Errors
 ///
 /// [`XadesError::Xml`] as [`xmldsig::sign_spec`] fails, and for T or LT without a TSA;
-/// [`XadesError::Tsp`]; for LT, [`XadesError::NoIssuer`], the OCSP failures, and a
+/// [`XadesError::Tsp`]; for LT, [`XadesError::NoIssuer`], the OCSP and CRL failures
+/// (including a certificate naming neither a responder nor a distribution point), and a
 /// certificate that is not good.
 pub fn sign(
     xml: &[u8],
@@ -191,7 +209,7 @@ pub fn sign(
         STANDARD.encode(&stamp.token),
     );
     if spec.level == XadesLevel::Lt {
-        let responses = ocsp_responses(cert, &spec.chain, http)?;
+        let revocation = revocation_values(cert, &spec.chain, http, now)?;
         unsigned.push_str("<xades:CertificateValues>");
         for issuer in &spec.chain {
             let der = issuer
@@ -202,14 +220,25 @@ pub fn sign(
                 STANDARD.encode(der)
             ));
         }
-        unsigned.push_str("</xades:CertificateValues><xades:RevocationValues><xades:OCSPValues>");
-        for response in responses {
-            unsigned.push_str(&format!(
-                "<xades:EncapsulatedOCSPValue>{}</xades:EncapsulatedOCSPValue>",
-                STANDARD.encode(response)
-            ));
+        unsigned.push_str("</xades:CertificateValues><xades:RevocationValues>");
+        let lists = [
+            ("CRLValues", "EncapsulatedCRLValue", &revocation.crls),
+            ("OCSPValues", "EncapsulatedOCSPValue", &revocation.ocsp),
+        ];
+        for (list, value, items) in lists {
+            if items.is_empty() {
+                continue;
+            }
+            unsigned.push_str(&format!("<xades:{list}>"));
+            for item in items {
+                unsigned.push_str(&format!(
+                    "<xades:{value}>{}</xades:{value}>",
+                    STANDARD.encode(item)
+                ));
+            }
+            unsigned.push_str(&format!("</xades:{list}>"));
         }
-        unsigned.push_str("</xades:OCSPValues></xades:RevocationValues>");
+        unsigned.push_str("</xades:RevocationValues>");
     }
     unsigned.push_str("</xades:UnsignedSignatureProperties></xades:UnsignedProperties>");
     Ok(xmldsig::append_qualifying(&signed, &id, &unsigned)?)
@@ -233,14 +262,25 @@ fn self_signed(cert: &Certificate) -> bool {
         && cert::verify_signature(cert, cert).is_ok()
 }
 
-/// The `OCSPResponse` about `signer` and each certificate of `chain` that is neither
-/// self-signed nor without a responder URL, in that order, each good, from the responder
-/// of the certificate's AIA.
-fn ocsp_responses(
+/// The revocation data of an LT signature, as `RevocationValues` carries it.
+struct RevocationValues {
+    /// The CRLs, as received.
+    crls: Vec<Vec<u8>>,
+    /// The `OCSPResponse`s, as received.
+    ocsp: Vec<Vec<u8>>,
+}
+
+/// The revocation data of `signer` and each certificate of `chain` that is not self-signed,
+/// in that order, each saying the certificate is good: an `OCSPResponse` from the
+/// responder of the certificate's AIA, or, for a certificate naming no responder, the CRLs
+/// of its distribution points ([`crl::fetch_for`]). A certificate naming neither has no
+/// revocation data, which is an error, not a gap.
+fn revocation_values(
     signer: &Certificate,
     chain: &[Certificate],
     http: &dyn HttpTransport,
-) -> Result<Vec<Vec<u8>>, XadesError> {
+    now: OffsetDateTime,
+) -> Result<RevocationValues, XadesError> {
     let request = ocsp::RequestSpec {
         cert_id_hash: HashAlg::Sha1,
         nonce: NonceSpec::None,
@@ -248,22 +288,38 @@ fn ocsp_responses(
         url: None,
         timeout: OCSP_TIMEOUT,
     };
-    let mut responses = Vec::new();
+    let mut values = RevocationValues {
+        crls: Vec::new(),
+        ocsp: Vec::new(),
+    };
     for cert in std::iter::once(signer).chain(chain) {
         if self_signed(cert) {
             continue;
         }
         let subject = cert.tbs_certificate().subject().to_string();
-        let is_signer = std::ptr::eq(cert, signer);
-        // A CA that names no responder (as the NCA's intermediates) has no OCSP to carry.
-        if !is_signer && ocsp::ocsp_url(cert).is_none() {
-            continue;
-        }
         let issuer = chain
             .iter()
             .find(|candidate| cert::verify_signature(cert, candidate).is_ok())
             .ok_or_else(|| XadesError::NoIssuer(subject.clone()))?;
-        let url = ocsp::ocsp_url(cert).unwrap_or_default();
+        let Some(url) = ocsp::ocsp_url(cert) else {
+            // A CA naming no responder (as the NCA's intermediates): its CRL.
+            let (crls, status) =
+                crl::fetch_for(cert, issuer, http, CRL_TIMEOUT, now).map_err(|error| {
+                    XadesError::Crl {
+                        subject: subject.clone(),
+                        url: crl::crl_urls(cert).into_iter().next().unwrap_or_default(),
+                        error,
+                    }
+                })?;
+            if let CrlStatus::Revoked { time, reason } = status {
+                return Err(XadesError::NotGood {
+                    subject,
+                    status: CertStatus::Revoked { time, reason },
+                });
+            }
+            values.crls.extend(crls);
+            continue;
+        };
         let fetched =
             ocsp::fetch(cert, issuer, &request, http, None).map_err(|error| XadesError::Ocsp {
                 subject: subject.clone(),
@@ -286,7 +342,7 @@ fn ocsp_responses(
                 });
             }
         }
-        responses.push(fetched.response);
+        values.ocsp.push(fetched.response);
     }
-    Ok(responses)
+    Ok(values)
 }

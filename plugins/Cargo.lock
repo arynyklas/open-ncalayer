@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-pdk"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "ciborium",
  "oncl-protocol",
@@ -885,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-protocol"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "serde",
  "serde_json",

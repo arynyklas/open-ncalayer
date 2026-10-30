@@ -17,7 +17,7 @@ use oncl_pdk::abi::{
 use oncl_pki::cert;
 use oncl_pki::pkcs12::{WriteEntry, WriteOptions, load, write};
 use oncl_pki::pkix::CaSet;
-use oncl_plugin::{Engine, HostServices, Instance, MAX_KEY_HANDLES, Manifest};
+use oncl_plugin::{Engine, HostServices, Instance, MAX_KEY_HANDLES, MAX_SECRETS, Manifest};
 use oncl_testkit::{read, synthetic, synthetic_cert};
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
@@ -623,6 +623,34 @@ fn open_over_handle_limit_inserts_nothing() {
 }
 
 #[test]
+fn page_store_with_more_keys_than_handles_is_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let open = |count: usize| {
+        let path = store_of(dir.path(), &vec!["user-gost2015-sign"; count]);
+        let mut plugin = guest(
+            &services(),
+            "keys = true",
+            &[(
+                Import::KeysOpen,
+                open_args(
+                    "PKCS12",
+                    KeySource::Bytes(Bytes::from(read(&path))),
+                    text(PASSWORD),
+                ),
+            )],
+        );
+        run::<OpenOutcome>(&mut plugin)
+    };
+    // As many keys as an instance keeps open.
+    assert_eq!(
+        opened(open(MAX_KEY_HANDLES).unwrap()).len(),
+        MAX_KEY_HANDLES
+    );
+    // One more: refused before any key is decrypted.
+    assert_eq!(open(MAX_KEY_HANDLES + 1).unwrap(), OpenOutcome::Corrupt);
+}
+
+#[test]
 fn open_terminal_is_no_device_with_tokens_off() {
     let mut plugin = guest(
         &services(),
@@ -768,6 +796,42 @@ fn unknown_secret_is_invalid() {
         run::<OpenOutcome>(&mut plugin).unwrap_err().code,
         ErrorCode::Invalid
     );
+}
+
+#[test]
+fn password_asks_past_the_limit_evict_the_oldest() {
+    let asks = MAX_SECRETS + 1;
+    let answers = || vec![Step::Password(PASSWORD.to_owned()); asks];
+    // Every ask of one session gets a new id, also past the limit.
+    let (_, services) = scripted(answers());
+    let mut plugin = guest(
+        &services,
+        "dialogs = true",
+        &[(Import::DialogPassword, password_args())],
+    );
+    for id in 1..=asks as u32 {
+        assert_eq!(
+            run::<Option<SecretRef>>(&mut plugin).unwrap(),
+            Some(SecretRef { id })
+        );
+    }
+    // The oldest password is gone, the newer ones are kept.
+    let open_with = |id: u32| {
+        let (_, services) = scripted(answers());
+        let mut calls = vec![(Import::DialogPassword, password_args()); asks];
+        calls.push((
+            Import::KeysOpen,
+            open_args(
+                "PKCS12",
+                bytes_of("user-gost2015-sign"),
+                Password::Secret(id),
+            ),
+        ));
+        let mut plugin = guest(&services, "keys = true\ndialogs = true", &calls);
+        run::<OpenOutcome>(&mut plugin)
+    };
+    assert_eq!(open_with(1).unwrap_err().code, ErrorCode::Invalid);
+    assert_eq!(opened(open_with(2).unwrap()).len(), 1);
 }
 
 // keys_chain, ca_list, ca_issuer

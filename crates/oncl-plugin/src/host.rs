@@ -3,7 +3,7 @@
 //! its CBOR argument from the guest, runs, and writes its CBOR [`HostResult`] into a buffer
 //! of the guest's `oncl_alloc`.
 
-use crate::caps::{self, Consents, KeyTable, Secrets};
+use crate::caps::{self, Consents, KeyTable, RequestBudget, Secrets};
 use crate::manifest::Capabilities;
 use crate::runtime::{MAX_TRANSFER, SessionContext};
 use oncl_basics::{Locale, OcspCache, PagePins, Prompter, RecentPathStore};
@@ -75,8 +75,8 @@ pub(crate) struct CallContext {
     pub(crate) locale: Locale,
     /// The plugin asked for the connection to be dropped instead of a reply (`reply_drop`).
     pub(crate) drop: bool,
-    /// The HTTP requests sent during this request.
-    pub(crate) http_requests: u32,
+    /// The HTTP requests sent during this request, the core's PKI requests included.
+    pub(crate) http_requests: RequestBudget,
 }
 
 /// An instance's store data.
@@ -114,7 +114,7 @@ impl HostState {
                 origin: None,
                 locale: Locale::Ru,
                 drop: false,
-                http_requests: 0,
+                http_requests: RequestBudget::default(),
             },
             keys: KeyTable::default(),
             secrets: Secrets::default(),
@@ -135,7 +135,7 @@ impl HostState {
             origin,
             locale,
             drop: false,
-            http_requests: 0,
+            http_requests: RequestBudget::default(),
         };
     }
 

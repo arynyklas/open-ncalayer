@@ -306,15 +306,18 @@ fn xades_args(level: XadesLevel) -> XadesArgs {
     }
 }
 
-/// The synthetic OCSP responder and the mock TSA at the basics module's URL.
+/// The synthetic OCSP responder, the root's CRL (of the intermediate CA, which names no
+/// responder) and the mock TSA at the basics module's URL.
 fn responder_and_tsa() -> Arc<dyn HttpTransport> {
     let tsa = oncl_pki::tsp::MockTsa::new(entry("tsa-gost2015"));
+    let root_crl = oncl_pki::crl::MockCrl::new(entry("root-gost2015.key"));
     Arc::new(RouteTransport::new(vec![
         (
             oncl_pki::tsp::TsaProfile::basics_default().url,
             Arc::new(tsa) as Arc<dyn HttpTransport>,
         ),
         ("http://ocsp.synthetic.test".to_owned(), responder()),
+        ("http://crl.synthetic.test".to_owned(), Arc::new(root_crl)),
     ]))
 }
 
@@ -330,7 +333,10 @@ fn xades(services: &HostServices, key: &str, level: XadesLevel) -> HostResult<Xa
 
 #[test]
 fn xades_through_abi() {
-    let services = services(responder_and_tsa(), &["ocsp.synthetic.test"]);
+    let services = services(
+        responder_and_tsa(),
+        &["ocsp.synthetic.test", "crl.synthetic.test"],
+    );
     let signed = match xades(&services, "inter-user-gost2015-sign", XadesLevel::Lt).unwrap() {
         XadesOutcome::Signed(signed) => signed,
         other => panic!("{other:?}"),
@@ -338,10 +344,21 @@ fn xades_through_abi() {
     let text = std::str::from_utf8(&signed).unwrap();
     assert!(text.contains("<xades:SignatureTimeStamp"));
     assert!(text.contains("<xades:EncapsulatedOCSPValue>"));
+    assert!(text.contains("<xades:EncapsulatedCRLValue>"));
     assert_eq!(
         xmldsig::verify(&signed).unwrap()[0].cert,
         entry("inter-user-gost2015-sign").cert
     );
+
+    // The intermediate's CRL is not on a PKI host: no signature without its status.
+    let no_crl = self::services(responder_and_tsa(), &["ocsp.synthetic.test"]);
+    match xades(&no_crl, "inter-user-gost2015-sign", XadesLevel::Lt).unwrap() {
+        XadesOutcome::Failed(failure) => {
+            assert_eq!(failure.stage, NetStage::Crl);
+            assert_eq!(failure.address, "crl.synthetic.test");
+        }
+        other => panic!("{other:?}"),
+    }
 
     // A revoked signer: no signature.
     assert_eq!(

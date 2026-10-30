@@ -3698,18 +3698,21 @@ impl HttpTransport for Efis {
 const CACERTS: &str = "https://portal.efis.kz/pub/cacerts_v2";
 const TEMPLATE: &str = "https://portal.efis.kz/pub/template.xml";
 
-/// A harness with SKF's portal `efis` and the synthetic responder (revoking
-/// `inter-revoked-gost2015-sign`), the page's key files allowed.
+/// A harness with SKF's portal `efis`, the synthetic responder (revoking
+/// `inter-revoked-gost2015-sign`) and the root's CRL (of the intermediate CA, which names no
+/// responder), the page's key files allowed.
 fn skf_harness(efis: &Arc<Efis>) -> Harness {
     let portal: Arc<dyn HttpTransport> = efis.clone();
+    let root_crl = oncl_pki::crl::MockCrl::new(entry("root-gost2015.key"));
     Harness::new(
         vec![Step::Confirm { yes: true }, Step::Confirm { yes: true }],
         vec![
             ("https://portal.efis.kz".to_owned(), portal),
             synthetic_ocsp(Some(("inter-revoked-gost2015-sign", at(1_780_000_000)))),
+            ("http://crl.synthetic.test".to_owned(), Arc::new(root_crl)),
         ],
     )
-    .with_pki_hosts(&["ocsp.synthetic.test"])
+    .with_pki_hosts(&["ocsp.synthetic.test", "crl.synthetic.test"])
     .with_clock(time::OffsetDateTime::now_utc)
 }
 

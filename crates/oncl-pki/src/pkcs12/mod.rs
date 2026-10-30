@@ -13,7 +13,7 @@ mod kdf;
 mod read;
 mod write;
 
-pub use read::{load, load_contents};
+pub use read::{Limits, Loaded, load, load_contents, load_within};
 pub use write::{Pbe, WriteEntry, WriteOptions, write};
 
 use crate::ber::BerError;

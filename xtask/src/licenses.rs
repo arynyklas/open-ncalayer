@@ -148,11 +148,12 @@ pub fn check_plugins(root: &Path) -> anyhow::Result<bool> {
 
 /// The licence file of the plugin ports: the third-party crates of every member of the
 /// `plugins/` workspace for wasm32 (normal dependencies, no procedural macros), with the
-/// texts, rules and accepted licences of [`generate`].
+/// texts, rules and accepted licences of [`generate`]; then the fonts the ports embed
+/// ([`font_assets`]) with their licence texts.
 ///
 /// # Errors
 ///
-/// As [`generate`].
+/// As [`generate`], and as [`font_assets`].
 pub fn generate_plugins(root: &Path) -> anyhow::Result<String> {
     let dir = root.join(PLUGINS);
     let out = cargo(
@@ -193,7 +194,120 @@ pub fn generate_plugins(root: &Path) -> anyhow::Result<String> {
         .collect();
     let accepted = accepted_licenses(root)?;
     let standard = standard_texts(&root.join(STANDARD_TEXTS))?;
-    render(&crates, &accepted, &standard)
+    let mut text = render(&crates, &accepted, &standard)?;
+    let assets = font_assets(&dir)?;
+    if !assets.is_empty() {
+        let first = text.matches("\n[text ").count() + 1;
+        text.push_str(&render_assets(first, &assets));
+    }
+    Ok(text)
+}
+
+/// The fonts of a port, with their licence: the files of its `fonts/` directory.
+#[derive(Debug)]
+struct FontAsset {
+    /// The font files (`.ttf`, `.otf`), relative to the ports' workspace, sorted.
+    files: Vec<String>,
+    /// The licence's place, relative to the ports' workspace.
+    licence_path: String,
+    /// The licence text, normalized.
+    licence: String,
+    /// The first URL of the `Источник` (source) line of its `README.md`.
+    source: String,
+}
+
+/// The fonts the ports under `plugins` embed: for each `<port>/fonts/` directory holding
+/// `.ttf` or `.otf` files, its SIL Open Font License (`OFL.txt`) and the source its
+/// `README.md` names; by port, sorted.
+///
+/// # Errors
+///
+/// A directory cannot be read, or a port's fonts have no `OFL.txt`, a licence that is not
+/// the SIL Open Font License, or no `README.md` with a source URL.
+fn font_assets(plugins: &Path) -> anyhow::Result<Vec<FontAsset>> {
+    let mut ports = Vec::new();
+    for entry in fs::read_dir(plugins).with_context(|| format!("reading {}", plugins.display()))? {
+        let entry = entry?;
+        if entry.path().join("fonts").is_dir() {
+            ports.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    ports.sort();
+    let mut assets = Vec::new();
+    for port in ports {
+        let dir = plugins.join(&port).join("fonts");
+        let mut files = Vec::new();
+        for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with(".ttf") || lower.ends_with(".otf") {
+                files.push(format!("{port}/fonts/{name}"));
+            }
+        }
+        if files.is_empty() {
+            continue;
+        }
+        files.sort();
+        let licence_path = format!("{port}/fonts/OFL.txt");
+        let Ok(licence) = fs::read(dir.join("OFL.txt")) else {
+            bail!("{port}/fonts has fonts but no OFL.txt");
+        };
+        let licence = normalize(&licence);
+        if !licence
+            .to_ascii_lowercase()
+            .contains("sil open font license")
+        {
+            bail!("{licence_path} is not the SIL Open Font License");
+        }
+        let readme = dir.join("README.md");
+        let readme = fs::read_to_string(&readme)
+            .with_context(|| format!("reading {port}/fonts/README.md (the fonts' source)"))?;
+        let source = readme
+            .lines()
+            .find(|line| line.contains("Источник:"))
+            .and_then(|line| {
+                let start = line.find("<http")? + 1;
+                let len = line[start..].find('>')?;
+                Some(line[start..start + len].to_owned())
+            })
+            .with_context(|| {
+                format!("{port}/fonts/README.md names no source (an `Источник: <URL>` line)")
+            })?;
+        assets.push(FontAsset {
+            files,
+            licence_path,
+            licence,
+            source,
+        });
+    }
+    Ok(assets)
+}
+
+/// The `[assets]` section of the ports' licence file: a line per font file, then the
+/// licence texts, numbered from `first`, each written once.
+fn render_assets(first: usize, assets: &[FontAsset]) -> String {
+    let mut texts: Vec<(&str, &str)> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut out = String::from(
+        "\n[assets]\n\
+         Fonts embedded in the plugin ports' modules. Each line names the font file, its \
+         licence, its source and the number of its licence text, which follows the list.\n",
+    );
+    for asset in assets {
+        let number = *seen.entry(dedup_key(&asset.licence)).or_insert_with(|| {
+            texts.push((&asset.licence_path, &asset.licence));
+            first + texts.len() - 1
+        });
+        for file in &asset.files {
+            // Writing to a `String` cannot fail.
+            let _ = writeln!(out, "{file} | OFL-1.1 | {} | {number}", asset.source);
+        }
+    }
+    for (i, (path, text)) in texts.iter().enumerate() {
+        let place = path.strip_suffix("/OFL.txt").unwrap_or(path);
+        let _ = write!(out, "\n[text {}] OFL.txt of {place}\n\n{text}\n", first + i);
+    }
+    out
 }
 
 /// The licence file of the workspace at `root`.
@@ -760,5 +874,85 @@ mod tests {
         assert!(!needs_download(
             "error: the lock file needs to be updated but --locked was passed"
         ));
+    }
+
+    /// A port `name` under `plugins` with a `fonts/` directory of `files`.
+    fn port_fonts(plugins: &Path, name: &str, files: &[(&str, &str)]) {
+        let fonts = plugins.join(name).join("fonts");
+        fs::create_dir_all(&fonts).unwrap();
+        for (file, text) in files {
+            fs::write(fonts.join(file), text).unwrap();
+        }
+    }
+
+    const OFL: &str = "Copyright 2010 Example Foundry, with Reserved Font Name 'Ex'.\r\n\r\n\
+                       This Font Software is licensed under the SIL Open Font License, \
+                       Version 1.1.\r\n";
+    const README: &str = "# Fonts\n\n- Источник: репозиторий <https://example.test/fonts>, тег \
+                          `1.0`, файл `TTF/Ex.ttf` (<https://example.test/raw/Ex.ttf>).\n";
+
+    #[test]
+    fn fonts_of_the_ports_carry_their_licence() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = dir.path();
+        port_fonts(
+            plugins,
+            "zeta",
+            &[
+                ("Ex-Light.ttf", "font"),
+                ("OFL.txt", OFL),
+                ("README.md", README),
+            ],
+        );
+        port_fonts(
+            plugins,
+            "alpha",
+            &[
+                ("Ex-Bold.otf", "font"),
+                ("OFL.txt", OFL),
+                ("README.md", README),
+            ],
+        );
+        fs::create_dir_all(plugins.join("beta/src")).unwrap();
+        let assets = font_assets(plugins).unwrap();
+        let out = render_assets(3, &assets);
+        assert_eq!(
+            out,
+            "\n[assets]\n\
+             Fonts embedded in the plugin ports' modules. Each line names the font file, its \
+             licence, its source and the number of its licence text, which follows the list.\n\
+             alpha/fonts/Ex-Bold.otf | OFL-1.1 | https://example.test/fonts | 3\n\
+             zeta/fonts/Ex-Light.ttf | OFL-1.1 | https://example.test/fonts | 3\n\
+             \n[text 3] OFL.txt of alpha/fonts\n\n\
+             Copyright 2010 Example Foundry, with Reserved Font Name 'Ex'.\n\n\
+             This Font Software is licensed under the SIL Open Font License, Version 1.1.\n"
+        );
+    }
+
+    #[test]
+    fn a_font_without_its_licence_or_source_is_refused() {
+        let error = |files: &[(&str, &str)]| {
+            let dir = tempfile::tempdir().unwrap();
+            port_fonts(dir.path(), "port", files);
+            format!("{:#}", font_assets(dir.path()).unwrap_err())
+        };
+        assert!(error(&[("Ex.ttf", "font"), ("README.md", README)]).contains("no OFL.txt"),);
+        assert!(error(&[("Ex.ttf", "font"), ("OFL.txt", OFL)]).contains("README.md"));
+        assert!(
+            error(&[
+                ("Ex.ttf", "font"),
+                ("OFL.txt", OFL),
+                ("README.md", "# Fonts\n")
+            ])
+            .contains("names no source")
+        );
+        assert!(
+            error(&[
+                ("Ex.ttf", "font"),
+                ("OFL.txt", "MIT License"),
+                ("README.md", README)
+            ])
+            .contains("not the SIL Open Font License")
+        );
     }
 }

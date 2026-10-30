@@ -38,7 +38,7 @@ pub(crate) use keys::{
     keys_terminals,
 };
 pub use net::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS};
-pub(crate) use net::{http_request, http_request_ex};
+pub(crate) use net::{RequestBudget, http_request, http_request_ex};
 pub use state::SharedState;
 pub(crate) use state::{settings_get, settings_put, shared_get, shared_put};
 
