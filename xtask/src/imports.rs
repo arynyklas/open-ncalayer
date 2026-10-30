@@ -263,6 +263,38 @@ pub fn app_local_violations(dll: &AppLocalDll) -> Vec<String> {
         .collect()
 }
 
+/// File name prefixes of the DLLs the Visual C++ Redistributable installs: a clean Windows 10
+/// or 11 has none of them (`msvcp_win.dll`, `msvcrt.dll`, `ucrtbase.dll` and the
+/// `api-ms-win-crt-*` API sets are part of Windows itself).
+const REDISTRIBUTABLE_PREFIXES: &[&str] = &[
+    "vcruntime",
+    "msvcp1",
+    "msvcr1",
+    "vccorlib",
+    "concrt",
+    "vcomp1",
+    "mfc1",
+];
+
+/// Describes every import of `exe` from a DLL of the Visual C++ Redistributable, one line each:
+/// a program with such an import does not start on a Windows without that package.
+pub fn redistributable_imports(exe: &Image) -> Vec<String> {
+    exe.imports
+        .iter()
+        .filter(|import| {
+            let dll = import.dll.to_ascii_lowercase();
+            REDISTRIBUTABLE_PREFIXES.iter().any(|p| dll.starts_with(p))
+        })
+        .map(|import| {
+            format!(
+                "{}!{}: the Visual C++ Redistributable is not part of Windows",
+                import.dll,
+                import.symbol.as_deref().unwrap_or("<ordinal>")
+            )
+        })
+        .collect()
+}
+
 fn read_file(path: &Path) -> anyhow::Result<Image> {
     let pe = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     read_image(&pe).with_context(|| format!("parsing {}", path.display()))
@@ -652,6 +684,51 @@ mod tests {
                 .iter()
                 .any(|i| i.dll.eq_ignore_ascii_case("kernel32.dll"))
         );
+    }
+
+    #[test]
+    fn flags_visual_cpp_redistributable_dlls_only() {
+        let flagged = [
+            "VCRUNTIME140.dll",
+            "vcruntime140_1.dll",
+            "MSVCP140.dll",
+            "msvcp140_1.dll",
+            "msvcr120.dll",
+            "VCCORLIB140.dll",
+            "concrt140.dll",
+            "vcomp140.dll",
+            "mfc140u.dll",
+        ];
+        let system = [
+            "msvcp_win.dll",
+            "msvcrt.dll",
+            "ucrtbase.dll",
+            "api-ms-win-crt-runtime-l1-1-0.dll",
+            "KERNEL32.dll",
+        ];
+        let imports: Vec<Import> = flagged
+            .iter()
+            .chain(&system)
+            .map(|dll| imp(dll, "f"))
+            .collect();
+        let found = redistributable_imports(&exe(&imports));
+        assert_eq!(found.len(), flagged.len(), "{found:#?}");
+        for dll in flagged {
+            assert!(
+                found.iter().any(|line| line.starts_with(dll)),
+                "{dll}: {found:#?}"
+            );
+        }
+    }
+
+    /// The workspace builds Windows programs with the static CRT: a clean Windows 10 or 11
+    /// has no Visual C++ Redistributable. This test binary is built the same way.
+    #[cfg(all(windows, target_env = "msvc"))]
+    #[test]
+    fn this_build_needs_no_visual_cpp_redistributable() {
+        let me = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let found = redistributable_imports(&read_image(&me).unwrap());
+        assert!(found.is_empty(), "{found:#?}");
     }
 
     #[test]

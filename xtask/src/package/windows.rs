@@ -95,8 +95,9 @@ const PROGRAMS: [&str; 2] = ["openncalayer.exe", "nmhost.exe"];
 ///
 /// # Errors
 ///
-/// A file is missing, vpk fails, the package's OS or architecture is not the flavor's, or a
-/// Windows 7 payload or installer fails the import gate.
+/// A file is missing, vpk fails, the package's OS or architecture is not the flavor's, a
+/// Windows 7 payload or installer fails the import gate, or a Windows 10/11 program or
+/// installer needs the Visual C++ Redistributable.
 pub fn package(
     root: &Path,
     flavor: &WindowsFlavor,
@@ -114,6 +115,9 @@ pub fn package(
     };
     for file in files {
         copy(&bin.join(file), &pack.join(file))?;
+    }
+    if !flavor.win7 {
+        no_redistributable(PROGRAMS.iter().map(|file| bin.join(file)))?;
     }
     copy_docs(root, &pack)?;
     let icon = work.path().join("openncalayer.ico");
@@ -152,6 +156,8 @@ pub fn package(
     }
     if flavor.win7 {
         gate(&full, &setup, &work.path().join("payload"))?;
+    } else {
+        no_redistributable([setup.clone()])?;
     }
 
     fs::create_dir_all(dist).with_context(|| format!("creating {}", dist.display()))?;
@@ -182,6 +188,33 @@ pub fn check_manifest(nuspec: &str, flavor: &WindowsFlavor) -> anyhow::Result<()
                 found.unwrap_or("(none)")
             );
         }
+    }
+    Ok(())
+}
+
+/// Fails if any of `exes` imports a DLL of the Visual C++ Redistributable, which a clean
+/// Windows 10 or 11 does not have: such a program exits at once with STATUS_DLL_NOT_FOUND.
+///
+/// # Errors
+///
+/// An executable cannot be read or has such an import.
+pub fn no_redistributable(exes: impl IntoIterator<Item = PathBuf>) -> anyhow::Result<()> {
+    let mut found = Vec::new();
+    for exe in exes {
+        let pe = fs::read(&exe).with_context(|| format!("reading {}", exe.display()))?;
+        let image =
+            imports::read_image(&pe).with_context(|| format!("reading {}", exe.display()))?;
+        found.extend(
+            imports::redistributable_imports(&image)
+                .into_iter()
+                .map(|line| format!("{}: {line}", exe.display())),
+        );
+    }
+    if !found.is_empty() {
+        bail!(
+            "the programs need the Visual C++ Redistributable (build with the static CRT):\n{}",
+            found.join("\n")
+        );
     }
     Ok(())
 }

@@ -304,7 +304,7 @@ mkcert: центр сертификации ищется в `$CAROOT` или к�
 
 ## Windows 7
 
-Для Windows 7 SP1 есть отдельные архивы: `openncalayer-<версия>-win7-x64.zip` (64-битная система) и `openncalayer-<версия>-win7-x86.zip` (32-битная). На Windows 10 и 11 берите обычные `openncalayer-<версия>-x86_64-pc-windows-msvc.zip` и `openncalayer-<версия>-i686-pc-windows-msvc.zip` (x86). Сборки Windows 7 собраны со статическим CRT: Visual C++ Redistributable не нужен.
+Для Windows 7 SP1 есть отдельные архивы: `openncalayer-<версия>-win7-x64.zip` (64-битная система) и `openncalayer-<версия>-win7-x86.zip` (32-битная). На Windows 10 и 11 берите обычные `openncalayer-<версия>-x86_64-pc-windows-msvc.zip` и `openncalayer-<версия>-i686-pc-windows-msvc.zip` (x86). Все сборки для Windows собраны со статическим CRT: Visual C++ Redistributable не нужен (до `0.1.0-alpha.3` включительно обычные сборки Windows 10/11 его требовали и без него не запускались). `cargo xtask package windows` не выпустит программу или установщик Windows 10/11, которым он нужен.
 
 В архиве Windows 7 рядом с `openncalayer.exe` и `nmhost.exe` лежат две маленькие DLL. Распаковывайте архив целиком и держите их в одном каталоге с программой:
 - `combase.dll` — передаёт `CoTaskMemFree` и `CoCreateFreeThreadedMarshaler` в `ole32.dll`. Библиотеки `windows`, на которых построены окна (Slint и его зависимости), импортируют эти функции из `combase.dll`, а её в Windows 7 нет;

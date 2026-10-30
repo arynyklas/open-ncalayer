@@ -298,7 +298,7 @@ The format of the index, its signature and the choice of a version are described
 
 ## Windows 7
 
-Windows 7 SP1 has archives of its own: `openncalayer-<version>-win7-x64.zip` (64-bit system) and `openncalayer-<version>-win7-x86.zip` (32-bit). On Windows 10 and 11 take the regular `openncalayer-<version>-x86_64-pc-windows-msvc.zip` and `openncalayer-<version>-i686-pc-windows-msvc.zip` (x86). The Windows 7 builds link the CRT statically: no Visual C++ Redistributable is needed.
+Windows 7 SP1 has archives of its own: `openncalayer-<version>-win7-x64.zip` (64-bit system) and `openncalayer-<version>-win7-x86.zip` (32-bit). On Windows 10 and 11 take the regular `openncalayer-<version>-x86_64-pc-windows-msvc.zip` and `openncalayer-<version>-i686-pc-windows-msvc.zip` (x86). Every Windows build links the CRT statically: no Visual C++ Redistributable is needed (up to and including `0.1.0-alpha.3` the regular Windows 10/11 builds needed it and did not start without it). `cargo xtask package windows` refuses a Windows 10/11 program or installer that needs it.
 
 The Windows 7 archive has two small DLLs next to `openncalayer.exe` and `nmhost.exe`. Unpack the whole archive and keep them in the program's folder:
 - `combase.dll` forwards `CoTaskMemFree` and `CoCreateFreeThreadedMarshaler` to `ole32.dll`. The `windows` crates behind the windows (Slint and its dependencies) import these functions from `combase.dll`, which Windows 7 does not have;
