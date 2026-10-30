@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}{{ config.title }}{% endblock title %}
+{% block main %}
+<h1>{{ section.title }}</h1>
+<p class="lead">{{ trans(key="home_lead", lang=lang) }}</p>
+<h2>{{ trans(key="home_sections", lang=lang) }}</h2>
+<ul class="sections">
+<li><a href="{{ get_url(path='@/plugins/_index.md', lang=lang) }}">{{ trans(key="nav_plugins", lang=lang) }}</a> — {{ trans(key="home_plugins", lang=lang) }}</li>
+<li><a href="{{ get_url(path='@/download/_index.md', lang=lang) }}">{{ trans(key="nav_download", lang=lang) }}</a> — {{ trans(key="home_download", lang=lang) }}</li>
+<li><a href="{{ get_url(path='@/upstream/_index.md', lang=lang) }}">{{ trans(key="nav_upstream", lang=lang) }}</a> — {{ trans(key="home_upstream", lang=lang) }}</li>
+</ul>
+<p><a href="https://github.com/arynyklas/open-ncalayer/">{{ trans(key="home_repo", lang=lang) }}</a></p>
+{% endblock main %}

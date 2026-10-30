@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>{{ section.title }}</h1>
+{%- if data.releases.available %}
+{%- for which in ["release", "prerelease"] %}
+{%- set release = data.releases[which] %}
+<section aria-labelledby="{{ which }}-heading">
+<h2 id="{{ which }}-heading">{{ trans(key="download_" ~ which, lang=lang) }}{% if release %} {{ release.version }}{% endif %}</h2>
+{%- if release %}
+{%- if release.published %}
+<p>{{ trans(key="download_published", lang=lang) }}: {{ release.published }}</p>
+{%- endif %}
+<ul class="assets">
+{%- for asset in release.assets %}
+<li><a href="{{ asset.url }}">{{ trans(key="asset_" ~ (asset.kind | replace(from="-", to="_")), lang=lang) }}</a> <code>{{ asset.name }}</code></li>
+{%- endfor %}
+</ul>
+<p><a href="{{ release.notes_url }}">{{ trans(key="download_notes", lang=lang) }}</a></p>
+{%- else %}
+<p>{{ trans(key="download_no_" ~ which, lang=lang) }}</p>
+{%- endif %}
+</section>
+{%- endfor %}
+{%- else %}
+{%- set nodata_key = "nodata_releases" %}
+{% include "parts/nodata.html" %}
+{%- endif %}
+<h2>{{ trans(key="download_other", lang=lang) }}</h2>
+<ul>
+<li><a href="https://github.com/arynyklas/open-ncalayer/releases/latest">{{ trans(key="download_latest", lang=lang) }}</a></li>
+<li><a href="https://github.com/arynyklas/open-ncalayer/releases">{{ trans(key="download_all_releases", lang=lang) }}</a></li>
+<li><a href="https://aur.archlinux.org/packages/openncalayer-bin">{{ trans(key="download_aur", lang=lang) }}</a> <code>openncalayer-bin</code></li>
+</ul>
+<h2>{{ trans(key="download_verify", lang=lang) }}</h2>
+<p>{{ trans(key="download_verify_sums", lang=lang) }}</p>
+<pre><code>gh attestation verify &lt;file&gt; --repo arynyklas/open-ncalayer</code></pre>
+{% include "parts/channels.html" %}
+{% endblock main %}

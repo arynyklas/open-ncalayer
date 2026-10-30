@@ -1,0 +1,79 @@
+/* The project site: system fonts, no external resources. Light by default, dark on request
+   of the system; text contrast at least 4.5:1 in both. */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1b1f24;
+  --muted: #4a525c;
+  --link: #0b57b0;
+  --border: #c9cfd6;
+  --head: #f2f4f7;
+  --focus: #b3470b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b;
+    --fg: #e7eaee;
+    --muted: #b4bcc6;
+    --link: #8cc2ff;
+    --border: #3b434d;
+    --head: #1f242a;
+    --focus: #ffb070;
+  }
+}
+* { box-sizing: border-box; }
+html { font-size: 100%; }
+body {
+  margin: 0 auto;
+  max-width: 72rem;
+  padding: 0 1rem 2rem;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+  line-height: 1.5;
+}
+a { color: var(--link); text-underline-offset: 0.15em; }
+a:focus-visible, [tabindex]:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+.skip {
+  position: absolute;
+  left: -100vw;
+  top: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--bg);
+}
+.skip:focus { left: 1rem; }
+header.top {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem 2rem;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--border);
+}
+nav ul { display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; margin: 0; padding: 0; list-style: none; }
+nav a[aria-current="page"] { font-weight: 700; text-decoration: none; }
+main { padding-top: 1rem; }
+h1 { font-size: 2rem; line-height: 1.2; }
+.lead { font-size: 1.125rem; max-width: 48rem; }
+.note, .nodata { color: var(--muted); }
+code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.9em; overflow-wrap: anywhere; }
+.hash { font-size: 0.8em; }
+pre { overflow-x: auto; padding: 0.75rem; background: var(--head); border: 1px solid var(--border); }
+.table { overflow-x: auto; margin: 1.5rem 0; border: 1px solid var(--border); }
+table { border-collapse: collapse; width: 100%; }
+caption { text-align: left; font-weight: 700; padding: 0.5rem; }
+th, td { text-align: left; vertical-align: top; padding: 0.4rem 0.6rem; border-top: 1px solid var(--border); }
+thead th { background: var(--head); }
+dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }
+dl.facts dt { font-weight: 700; }
+dl.facts dd { margin: 0; overflow-wrap: anywhere; }
+.differences li { white-space: pre-line; }
+.entry { border-top: 1px solid var(--border); padding-top: 0.5rem; }
+footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); }
+@media (max-width: 40rem) {
+  dl.facts { grid-template-columns: 1fr; }
+  dl.facts dd { margin-bottom: 0.5rem; }
+}

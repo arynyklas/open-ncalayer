@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}{{ trans(key="nf_title", lang=lang) }} · {{ config.title }}{% endblock title %}
+{% block main %}
+<h1>{{ trans(key="nf_title", lang=lang) }}</h1>
+<p>{{ trans(key="nf_text", lang=lang) }} <a href="{{ get_url(path='@/_index.md', lang=lang) }}">{{ trans(key="nav_home", lang=lang) }}</a></p>
+{% endblock main %}

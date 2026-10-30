@@ -1,0 +1,7 @@
+{#- Whether the original changed after the port, as text: `plugin` is the port's data. -#}
+{%- set state = plugin.original.state %}
+{%- if state == "changed" -%}
+{{ trans(key="original_changed", lang=lang) }}: {{ plugin.original_version }} → {{ plugin.original.current }}
+{%- else -%}
+{{ trans(key="original_" ~ state, lang=lang) }}
+{%- endif -%}

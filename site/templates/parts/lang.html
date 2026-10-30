@@ -1,0 +1,11 @@
+{#- The language switch: the same page in each language, the current one marked. -#}
+<nav class="langs" aria-label="{{ trans(key='lang_label', lang=lang) }}">
+<ul>
+{%- for code in ["ru", "kk", "en"] %}
+{%- set label = {"ru": "Русский", "kk": "Қазақша", "en": "English"}[code] %}
+{%- set others = [t.permalink for t in item.translations if t.lang == code] if item else [] %}
+{%- set href = others[0] if others else get_url(path="@/_index.md", lang=code) %}
+<li><a href="{{ href }}" hreflang="{{ code }}" lang="{{ code }}"{% if code == lang %} aria-current="page"{% endif %}>{{ label }}</a></li>
+{%- endfor %}
+</ul>
+</nav>

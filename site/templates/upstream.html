@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>{{ section.title }}</h1>
+<p class="lead">{{ trans(key="upstream_lead", lang=lang) }}</p>
+{%- if data.upstream.available %}
+{%- if data.upstream.version %}
+<p>{{ trans(key="upstream_version", lang=lang) }}: <strong>{{ data.upstream.version }}</strong></p>
+{%- endif %}
+{%- if data.upstream.bundles %}
+<div class="table" role="region" aria-labelledby="bundles-caption" tabindex="0">
+<table>
+<caption id="bundles-caption">{{ trans(key="upstream_bundles", lang=lang) }}</caption>
+<thead><tr>
+<th scope="col">{{ trans(key="col_symname", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_original_version", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_kind", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_our_port", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_ours", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_changed", lang=lang) }}</th>
+</tr></thead>
+<tbody>
+{%- for bundle in data.upstream.bundles %}
+<tr>
+<th scope="row"><code>{{ bundle.symname }}</code></th>
+<td>{{ bundle.version }}</td>
+<td>{{ trans(key="bundle_core", lang=lang) if bundle.required else trans(key="bundle_plugin", lang=lang) }}</td>
+<td>{% if bundle.port %}<a href="{{ get_url(path='@/plugins/' ~ bundle.port ~ '.md', lang=lang) }}">{{ data.plugins[bundle.port].name[lang] }}</a>{% else %}—{% endif %}</td>
+<td>{{ bundle.ours or "—" }}</td>
+<td>{% if bundle.ours %}{{ trans(key="original_changed", lang=lang) if bundle.changed else trans(key="original_same", lang=lang) }}{% else %}—{% endif %}</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{%- endif %}
+<h2>{{ trans(key="upstream_history", lang=lang) }}</h2>
+{%- for entry in data.upstream.history %}
+<article class="entry" aria-labelledby="entry-{{ loop.index }}">
+<h3 id="entry-{{ loop.index }}">{{ entry.date }} · {{ entry.version }} · {{ trans(key="kind_" ~ entry.kind, lang=lang) }}</h3>
+{%- if entry.core %}
+<p>{{ trans(key="upstream_core_changed", lang=lang) }}: {% for name in entry.core %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+{%- endif %}
+{%- if entry.plugins %}
+<p>{{ trans(key="upstream_plugins_changed", lang=lang) }}:</p>
+<ul>
+{%- for change in entry.plugins %}
+<li><code>{{ change.symname }}</code>: {{ trans(key="change_" ~ change.change, lang=lang) }}{% if change.from or change.to %} ({{ change.from or "—" }} → {{ change.to or "—" }}){% endif %}</li>
+{%- endfor %}
+</ul>
+{%- endif %}
+{%- if entry.notes %}
+<p>{{ trans(key="upstream_notes", lang=lang) }}:</p>
+<ul>
+{%- for note in entry.notes %}
+<li>{{ note }}</li>
+{%- endfor %}
+</ul>
+{%- endif %}
+{%- if entry.url or entry.issues %}
+<p>
+{%- if entry.url %}<a href="{{ entry.url }}">{{ trans(key="upstream_facts", lang=lang) }}</a>{% endif %}
+{%- if entry.issues %} {{ trans(key="upstream_issues", lang=lang) }}: {% for issue in entry.issues %}<a href="{{ issue.url }}">#{{ issue.number }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
+</p>
+{%- endif %}
+</article>
+{%- else %}
+<p>{{ trans(key="upstream_history_none", lang=lang) }}</p>
+{%- endfor %}
+{%- else %}
+{%- set nodata_key = "nodata_upstream" %}
+{% include "parts/nodata.html" %}
+{%- endif %}
+{% endblock main %}

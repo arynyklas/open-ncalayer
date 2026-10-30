@@ -9,6 +9,7 @@ pub mod data;
 pub mod generate;
 pub mod inputs;
 pub mod ports;
+pub mod site;
 
 pub use generate::generate;
 

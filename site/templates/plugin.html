@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{%- block title %}{{ data.plugins[page.extra.short].name[lang] }} · {{ config.title }}{% endblock title %}
+{% block main %}
+{%- set plugin = data.plugins[page.extra.short] %}
+<h1>{{ plugin.name[lang] }}</h1>
+{%- if plugin.description %}
+<p class="lead">{{ plugin.description[lang] }}</p>
+{%- endif %}
+<h2>{{ trans(key="plugin_about", lang=lang) }}</h2>
+<dl class="facts">
+<dt>{{ trans(key="plugin_id", lang=lang) }}</dt><dd><code>{{ plugin.id }}</code></dd>
+<dt>{{ trans(key="plugin_modules", lang=lang) }}</dt><dd>{% for module in plugin.modules %}<code>{{ module }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</dd>
+<dt>{{ trans(key="col_repo_version", lang=lang) }}</dt><dd>{{ plugin.version }}</dd>
+<dt>{{ trans(key="plugin_min_core", lang=lang) }}</dt><dd>{{ plugin.min_core }}</dd>
+<dt>{{ trans(key="col_replaces", lang=lang) }}</dt><dd><code>{{ plugin.symname }}</code> {{ plugin.original_version }}</dd>
+<dt>{{ trans(key="col_vendor", lang=lang) }}</dt><dd>{{ plugin.vendor }}</dd>
+<dt>{{ trans(key="col_status", lang=lang) }}</dt><dd>{{ trans(key="status_" ~ (plugin.status | replace(from="-", to="_")), lang=lang) }}</dd>
+<dt>{{ trans(key="col_conformance", lang=lang) }}</dt><dd>{{ trans(key="conformance_" ~ plugin.conformance, lang=lang) }}</dd>
+<dt>{{ trans(key="col_original_changed", lang=lang) }}</dt><dd>{% include "parts/original.html" %}</dd>
+</dl>
+<h2>{{ trans(key="plugin_capabilities", lang=lang) }}</h2>
+{%- if plugin.capabilities[lang] %}
+<ul>
+{%- for line in plugin.capabilities[lang] %}
+<li>{{ line }}</li>
+{%- endfor %}
+</ul>
+{%- else %}
+<p>{{ trans(key="plugin_no_capabilities", lang=lang) }}</p>
+{%- endif %}
+<h2>{{ trans(key="plugin_differences", lang=lang) }}</h2>
+{%- if plugin.differences %}
+{%- if lang != "ru" %}
+<p class="note">({{ trans(key="in_russian", lang=lang) }})</p>
+{%- endif %}
+<div lang="ru">
+<ul class="differences">
+{%- for difference in plugin.differences %}
+<li>{{ difference }}</li>
+{%- endfor %}
+</ul>
+</div>
+{%- else %}
+<p>{{ trans(key="plugin_no_differences", lang=lang) }}</p>
+{%- endif %}
+<h2>{{ trans(key="plugin_channels", lang=lang) }}</h2>
+{%- if plugin.channels %}
+<div class="table" role="region" aria-labelledby="plugin-channels-caption" tabindex="0">
+<table>
+<caption id="plugin-channels-caption">{{ trans(key="plugin_channels", lang=lang) }}</caption>
+<thead><tr>
+<th scope="col">{{ trans(key="col_channel", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_version", lang=lang) }}</th>
+<th scope="col">{{ trans(key="plugin_min_core", lang=lang) }}</th>
+<th scope="col">{{ trans(key="rollout", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_package", lang=lang) }}</th>
+<th scope="col">sha256</th>
+<th scope="col">{{ trans(key="col_size", lang=lang) }}</th>
+</tr></thead>
+<tbody>
+{%- for name in ["stable", "beta"] %}
+{%- if name in plugin.channels %}
+{%- set offered = plugin.channels[name] %}
+<tr>
+<th scope="row">{{ name }}</th>
+<td>{{ offered.version }}</td>
+<td>{{ offered.min_core }}</td>
+<td>{{ offered.rollout }} %</td>
+<td><a href="{{ offered.url }}">.onclp</a></td>
+<td><code class="hash">{{ offered.sha256 }}</code></td>
+<td>{{ offered.size }}</td>
+</tr>
+{%- endif %}
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{%- else %}
+<p>{{ trans(key="plugin_not_published", lang=lang) }}</p>
+{%- endif %}
+<h2>{{ trans(key="plugin_install", lang=lang) }}</h2>
+<p>{{ trans(key="plugin_install_text", lang=lang) }} <a href="https://github.com/arynyklas/open-ncalayer/{{ 'blob/main/README.md' if lang == 'ru' else 'blob/main/README.en.md' }}">{{ trans(key="plugin_install_link", lang=lang) }}</a></p>
+<p><a href="{{ get_url(path='@/plugins/_index.md', lang=lang) }}#{{ plugin.symname }}">{{ trans(key="plugin_back", lang=lang) }}</a></p>
+{% endblock main %}

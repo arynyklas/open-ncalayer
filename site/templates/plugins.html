@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>{{ section.title }}</h1>
+<p class="lead">{{ trans(key="plugins_lead", lang=lang) }}</p>
+{% include "parts/channels.html" %}
+<div class="table" role="region" aria-labelledby="ports-caption" tabindex="0">
+<table class="ports">
+<caption id="ports-caption">{{ trans(key="ports_caption", lang=lang) }}</caption>
+<thead><tr>
+<th scope="col">{{ trans(key="col_name", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_replaces", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_vendor", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_status", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_conformance", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_repo_version", lang=lang) }}</th>
+<th scope="col">beta</th>
+<th scope="col">stable</th>
+<th scope="col">{{ trans(key="col_original_changed", lang=lang) }}</th>
+</tr></thead>
+<tbody>
+{%- for short in data.order[lang] %}
+{%- set plugin = data.plugins[short] %}
+<tr id="{{ plugin.symname }}">
+<th scope="row"><a href="{{ get_url(path='@/plugins/' ~ short ~ '.md', lang=lang) }}">{{ plugin.name[lang] }}</a></th>
+<td><code>{{ plugin.symname }}</code> {{ plugin.original_version }}</td>
+<td>{{ plugin.vendor }}</td>
+<td>{{ trans(key="status_" ~ (plugin.status | replace(from="-", to="_")), lang=lang) }}</td>
+<td>{{ trans(key="conformance_" ~ plugin.conformance, lang=lang) }}</td>
+<td>{{ plugin.version }}</td>
+{%- for name in ["beta", "stable"] %}
+{%- set offered = plugin.channels[name] if name in plugin.channels else none %}
+<td>{% if offered %}{{ offered.version }}{% if offered.rollout < 100 %} ({{ trans(key="rollout", lang=lang) }} {{ offered.rollout }} %){% endif %}{% else %}{{ trans(key="not_in_channel", lang=lang) }}{% endif %}</td>
+{%- endfor %}
+<td>{% include "parts/original.html" %}</td>
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{%- if data.upstream.available %}
+{%- set unported = [b for b in data.upstream.bundles if not b.required and not b.port] %}
+<div class="table" role="region" aria-labelledby="unported-caption" tabindex="0">
+<table>
+<caption id="unported-caption">{{ trans(key="unported_caption", lang=lang) }}</caption>
+<thead><tr>
+<th scope="col">{{ trans(key="col_symname", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_original_version", lang=lang) }}</th>
+</tr></thead>
+<tbody>
+{%- for bundle in unported %}
+<tr{% if bundle.anchor %} id="{{ bundle.symname }}"{% endif %}>
+<th scope="row"><code>{{ bundle.symname }}</code></th>
+<td>{{ bundle.version }}</td>
+</tr>
+{%- else %}
+<tr><td colspan="2">{{ trans(key="unported_none", lang=lang) }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{%- endif %}
+{% endblock main %}

@@ -1,0 +1,39 @@
+{#- Every page: the policy, the skip link, the navigation and the language switch. The
+    data is read once here; every text in it is untrusted and printed escaped. -#}
+{%- set data = load_data(path="data/site.json") -%}
+{%- set item = page if page is defined else (section if section is defined else none) -%}
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}{{ item.title }} · {{ config.title }}{% endblock title %}</title>
+<meta name="description" content="{{ config.description }}">
+<link rel="stylesheet" href="{{ get_url(path='style.css') }}">
+{%- if item %}{% for t in item.translations %}
+<link rel="alternate" hreflang="{{ t.lang }}" href="{{ t.permalink }}">
+{%- endfor %}{% endif %}
+</head>
+<body>
+<a class="skip" href="#content">{{ trans(key="skip_link", lang=lang) }}</a>
+<header class="top">
+<nav aria-label="{{ trans(key='nav_label', lang=lang) }}">
+<ul>
+<li><a href="{{ get_url(path='@/_index.md', lang=lang) }}">{{ trans(key="nav_home", lang=lang) }}</a></li>
+<li><a href="{{ get_url(path='@/plugins/_index.md', lang=lang) }}">{{ trans(key="nav_plugins", lang=lang) }}</a></li>
+<li><a href="{{ get_url(path='@/download/_index.md', lang=lang) }}">{{ trans(key="nav_download", lang=lang) }}</a></li>
+<li><a href="{{ get_url(path='@/upstream/_index.md', lang=lang) }}">{{ trans(key="nav_upstream", lang=lang) }}</a></li>
+</ul>
+</nav>
+{% include "parts/lang.html" %}
+</header>
+<main id="content">
+{% block main %}{% endblock main %}
+</main>
+<footer>
+<p>{{ trans(key="footer_license", lang=lang) }} <a href="https://github.com/arynyklas/open-ncalayer/">{{ trans(key="footer_repo", lang=lang) }}</a></p>
+</footer>
+</body>
+</html>

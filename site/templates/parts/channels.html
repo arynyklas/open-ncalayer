@@ -1,0 +1,27 @@
+{#- The channels' indexes: number, validity and the core version. -#}
+<div class="table" role="region" aria-labelledby="channels-caption" tabindex="0">
+<table>
+<caption id="channels-caption">{{ trans(key="channels_caption", lang=lang) }}</caption>
+<thead><tr>
+<th scope="col">{{ trans(key="col_channel", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_seq", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_valid_until", lang=lang) }}</th>
+<th scope="col">{{ trans(key="col_core", lang=lang) }}</th>
+</tr></thead>
+<tbody>
+{%- for name in ["stable", "beta"] %}
+{%- set channel = data.channels[name] if name in data.channels else none %}
+<tr>
+<th scope="row">{{ name }}</th>
+{%- if channel %}
+<td>{{ channel.seq }}</td>
+<td>{{ channel.expires }}</td>
+<td>{{ channel.core or "—" }}</td>
+{%- else %}
+<td colspan="3">{{ trans(key="no_index", lang=lang) }}</td>
+{%- endif %}
+</tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
