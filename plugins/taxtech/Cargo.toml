@@ -1,0 +1,15 @@
+[package]
+name = "oncl-port-taxtech"
+description = "OpenNCALayer port of the Digital TaxTech multisign module: a key chosen once per site, then CMS, XML and raw signatures"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oncl-pdk.workspace = true

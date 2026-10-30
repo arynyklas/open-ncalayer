@@ -112,6 +112,7 @@ pub struct Harness {
     http: Arc<Logged>,
     clock: fn() -> OffsetDateTime,
     locale: Locale,
+    settings_dir: Option<PathBuf>,
 }
 
 impl Harness {
@@ -137,6 +138,7 @@ impl Harness {
             }),
             clock: default_clock,
             locale: Locale::Ru,
+            settings_dir: None,
         }
     }
 
@@ -150,6 +152,16 @@ impl Harness {
     #[must_use]
     pub fn with_locale(self, locale: Locale) -> Harness {
         Harness { locale, ..self }
+    }
+
+    /// The same harness with the plugins' settings kept in `dir` (`<dir>/<id>.json`); without
+    /// it, `settings_get` and `settings_put` fail.
+    #[must_use]
+    pub fn with_settings_dir(self, dir: PathBuf) -> Harness {
+        Harness {
+            settings_dir: Some(dir),
+            ..self
+        }
     }
 
     /// The prompter: the dialogs shown.
@@ -175,7 +187,7 @@ impl Harness {
             // The synthetic PKI's CAs, as the ports' keys are synthetic.
             cas: Arc::new(synthetic_cas()),
             pki_hosts: oncl_plugin::nca_pki_hosts(),
-            settings_dir: None,
+            settings_dir: self.settings_dir.clone(),
         }
     }
 

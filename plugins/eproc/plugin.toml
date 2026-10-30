@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.eproc"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.sapa.eproc.osgi.EprocModule"]
+
+[name]
+ru = "Закупки Самрук-Казына"
+kk = "Самұрық-Қазына сатып алулары"
+en = "Samruk-Kazyna e-procurement"
+
+[description]
+ru = "Подпись XML для портала закупок Самрук-Казына"
+kk = "Самұрық-Қазына сатып алу порталы үшін XML қолтаңбасы"
+en = "XML signatures for the Samruk-Kazyna procurement portal"
+
+[replaces]
+symname = "kz.sapa.eproc.osgi.EprocModule"
+version = "1.0"
+
+[capabilities]
+keys = true
