@@ -6,7 +6,7 @@
 use crate::caps::{self, Consents, KeyTable, Secrets};
 use crate::manifest::Capabilities;
 use crate::runtime::{MAX_TRANSFER, SessionContext};
-use oncl_basics::{Locale, OcspCache, Prompter, RecentPathStore};
+use oncl_basics::{Locale, OcspCache, PagePins, Prompter, RecentPathStore};
 use oncl_pdk::abi::{
     self, CertArgs, CertInfo, ErrorCode, HostError, HostResult, IMPORT_MODULE, Import, KeyUsage,
     Level, LocalTime, LocalTimeArgs, LogArgs, MAX_RANDOM, Os, Platform, RandomArgs,
@@ -92,6 +92,8 @@ pub(crate) struct HostState {
     pub(crate) secrets: Secrets,
     /// The page files the user allowed the pages to open in this session.
     pub(crate) consents: Consents,
+    /// The token PINs from the pages the user allowed in this session.
+    pub(crate) page_pins: PagePins,
     guest: Option<(Memory, TypedFunc<i32, i32>)>,
 }
 
@@ -117,6 +119,7 @@ impl HostState {
             keys: KeyTable::default(),
             secrets: Secrets::default(),
             consents: Consents::default(),
+            page_pins: PagePins::default(),
             guest: None,
         }
     }

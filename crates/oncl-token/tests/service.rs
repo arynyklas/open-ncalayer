@@ -768,3 +768,78 @@ fn id_card_shared_certificate_file_is_not_a_warning() {
     let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     assert!(text.is_empty(), "{text}");
 }
+
+/// The PIN of a card of `kind` in these tests, and a wrong one that fits it.
+fn pins(kind: TokenKind) -> (&'static str, &'static str) {
+    match kind {
+        TokenKind::KzIdCard => ("1234", "0000"),
+        _ => (PIN, "000000"),
+    }
+}
+
+#[test]
+fn pin_tries_are_read_without_spending_one() {
+    for kind in [TokenKind::Kaztoken, TokenKind::KzIdCard, TokenKind::AKey] {
+        let (pin, wrong) = pins(kind);
+        let emu = backend(spec(kind, pin, &["user-gost2015-sign"]));
+        let tokens = Tokens::new(emu.clone(), true);
+        assert_eq!(tokens.pin_tries(READER, kind), Ok(Some(10)), "{kind:?}");
+        assert_eq!(tokens.pin_tries(READER, kind), Ok(Some(10)), "{kind:?}");
+        assert_eq!(
+            tokens.open(READER, kind, wrong).err(),
+            Some(TokenError::WrongPin {
+                tries_left: Some(9)
+            }),
+            "{kind:?}: reading the tries spent none"
+        );
+        assert_eq!(tokens.pin_tries(READER, kind), Ok(Some(9)), "{kind:?}");
+        // A right PIN restores them.
+        tokens.open(READER, kind, pin).unwrap();
+        assert_eq!(tokens.pin_tries(READER, kind), Ok(Some(10)), "{kind:?}");
+    }
+}
+
+#[test]
+fn pin_tries_of_a_blocked_pin_are_zero() {
+    for kind in [TokenKind::Kaztoken, TokenKind::KzIdCard, TokenKind::AKey] {
+        let (pin, _) = pins(kind);
+        let mut s = spec(kind, pin, &["user-gost2015-sign"]);
+        s.tries = 0;
+        let tokens = Tokens::new(backend(s), true);
+        assert_eq!(tokens.pin_tries(READER, kind), Ok(Some(0)), "{kind:?}");
+    }
+}
+
+#[test]
+fn pin_tries_unknown_without_a_command_for_tokens_that_do_not_tell() {
+    for kind in [
+        TokenKind::EToken72K,
+        TokenKind::EToken5110,
+        TokenKind::JaCarta,
+    ] {
+        let emu = backend(spec(kind, PIN, &["user-rsa-sign"]));
+        let tokens = Tokens::new(emu.clone(), true);
+        assert_eq!(tokens.pin_tries(READER, kind), Ok(None), "{kind:?}");
+        assert!(emu.exchanges(READER).is_empty(), "{kind:?}");
+    }
+}
+
+#[test]
+fn pin_tries_off_absent_or_another_card() {
+    let (tokens, counts) = counting(kaztoken(), false);
+    assert_eq!(
+        tokens.pin_tries(READER, TokenKind::Kaztoken),
+        Err(TokenError::Disabled)
+    );
+    assert_eq!(counts.readers.load(Ordering::SeqCst), 0);
+    let tokens = Tokens::new(kaztoken(), true);
+    assert_eq!(
+        tokens.pin_tries("No such reader", TokenKind::Kaztoken),
+        Err(TokenError::NoDevice)
+    );
+    assert_eq!(
+        tokens.pin_tries(READER, TokenKind::AKey),
+        Err(TokenError::NoDevice),
+        "the ATR is a Kaztoken's"
+    );
+}

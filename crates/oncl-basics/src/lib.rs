@@ -11,8 +11,9 @@
 //! verified answers ([`OcspCache`]).
 //!
 //! The crate also holds what the other modules share with it: the [`Prompter`] dialogs, the
-//! dialog-flow turn ([`lock_dialog_flow`]), the key choice ([`KeyChooser`]) and the rules for
-//! paths a page names ([`PageFile`], [`page_path`], [`remember_chosen_path`]).
+//! dialog-flow turn ([`lock_dialog_flow`]), the key choice ([`KeyChooser`]), the rules for
+//! paths a page names ([`PageFile`], [`page_path`], [`remember_chosen_path`]), and the
+//! consent a token PIN from a page needs ([`PagePins`]).
 
 mod essentials;
 mod filter;
@@ -20,6 +21,7 @@ mod keys;
 mod live;
 mod ocsp_cache;
 mod page_file;
+mod page_pin;
 mod prompt;
 mod sign;
 #[cfg(feature = "testing")]
@@ -41,6 +43,7 @@ pub use page_file::{
     MAX_CHOSEN_NETWORK_PATHS, MAX_PAGE_FILE, PageFile, PageFileError, is_device_path,
     is_network_path, page_path, remember_chosen_path,
 };
+pub use page_pin::{ASK_EVERY_TIME_AT, PagePins, PinFrom, PinRefusal, PinUse, page_pin_text};
 pub use prompt::{
     Action, Busy, BusyPrompt, ChoiceAnswer, ChoicePrompt, ConfirmPrompt, CsrAnswer, CsrPrompt,
     FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale, MessageKind,

@@ -75,6 +75,16 @@ pub trait Driver: Send {
     /// transport and card errors.
     fn verify_pin(&mut self, card: &mut Card<'_>, pin: &str) -> Result<(), TokenError>;
 
+    /// The PIN tries left, read without spending one; `None` when the token does not
+    /// tell them (no command is sent then). `Some(0)`: the PIN is blocked.
+    ///
+    /// # Errors
+    ///
+    /// Transport and card errors.
+    fn pin_tries(&mut self, _card: &mut Card<'_>) -> Result<Option<u8>, TokenError> {
+        Ok(None)
+    }
+
     /// The keys on the token, in its order.
     ///
     /// # Errors

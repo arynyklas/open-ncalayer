@@ -9,7 +9,7 @@ use oncl_basics::StorageKind;
 use oncl_basics::testing::{ScriptedPrompter, Step};
 use oncl_pdk::abi::{
     self, Action, Bytes, ChooseArgs, Chosen, ErrorCode, Filter, Handle, HostResult, Import,
-    KeySource, OpenArgs, OpenOutcome, Password, SignCmsArgs, TerminalsArgs,
+    KeySource, OpenArgs, OpenOutcome, Password, PasswordArgs, SignCmsArgs, TerminalsArgs,
 };
 use oncl_pki::pkcs12::load;
 use oncl_plugin::{Engine, HostServices, Instance};
@@ -214,16 +214,18 @@ fn terminals_empty_when_disabled() {
 #[test]
 fn open_with_wrong_pin_reports_tries_and_spends_one() {
     let emu = emulator(kaztoken());
-    let (_, services) = services_on(&emu, true, Vec::new());
+    let yes = Step::Confirm { yes: true };
+    let (_, services) = services_on(&emu, true, vec![yes.clone(), yes.clone(), yes]);
+    let mut plugin = guest(&services, &[open_call("AKKaztokenStore", "000000")]);
     assert_eq!(
-        open(&services, "AKKaztokenStore", "000000"),
+        run::<OpenOutcome>(&mut plugin).unwrap(),
         OpenOutcome::WrongPassword {
             tries_left: Some(9)
         }
     );
     assert_eq!(pin_tries(&emu), 1);
     assert_eq!(
-        open(&services, "AKKaztokenStore", "000000"),
+        run::<OpenOutcome>(&mut plugin).unwrap(),
         OpenOutcome::WrongPassword {
             tries_left: Some(8)
         }
@@ -239,6 +241,160 @@ fn open_with_wrong_pin_reports_tries_and_spends_one() {
         keys[0].certificate.to_vec(),
         der::Encode::to_der(&cert_of(KEY)).unwrap()
     );
+}
+
+#[test]
+fn page_pin_declined_sends_nothing() {
+    let emu = emulator(kaztoken());
+    let (prompter, services) = services_on(&emu, true, vec![Step::Confirm { yes: false }]);
+    assert_eq!(
+        open(&services, "AKKaztokenStore", PIN),
+        OpenOutcome::Declined
+    );
+    assert_eq!(pin_tries(&emu), 0, "no VERIFY with a PIN");
+    let prompts = prompter.confirm_prompts();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].origin, ORIGIN);
+    for part in [ORIGIN, READER, "Kaztoken", ": 10."] {
+        assert!(
+            prompts[0].text.contains(part),
+            "{part}: {}",
+            prompts[0].text
+        );
+    }
+}
+
+#[test]
+fn page_pin_consent_once_per_instance() {
+    let emu = emulator(kaztoken());
+    let (prompter, services) = services_on(&emu, true, vec![Step::Confirm { yes: true }]);
+    let mut plugin = guest(&services, &[open_call("AKKaztokenStore", PIN)]);
+    for _ in 0..3 {
+        assert!(matches!(
+            run::<OpenOutcome>(&mut plugin).unwrap(),
+            OpenOutcome::Opened(_)
+        ));
+    }
+    assert_eq!(prompter.confirm_prompts().len(), 1);
+    assert_eq!(pin_tries(&emu), 3);
+}
+
+#[test]
+fn wrong_page_pin_is_one_verify_then_a_new_consent() {
+    let emu = emulator(kaztoken());
+    let (prompter, services) = services_on(
+        &emu,
+        true,
+        vec![Step::Confirm { yes: true }, Step::Confirm { yes: false }],
+    );
+    let mut plugin = guest(&services, &[open_call("AKKaztokenStore", "000000")]);
+    assert_eq!(
+        run::<OpenOutcome>(&mut plugin).unwrap(),
+        OpenOutcome::WrongPassword {
+            tries_left: Some(9)
+        }
+    );
+    assert_eq!(pin_tries(&emu), 1, "exactly one VERIFY");
+    assert_eq!(
+        run::<OpenOutcome>(&mut plugin).unwrap(),
+        OpenOutcome::Declined
+    );
+    assert_eq!(pin_tries(&emu), 1);
+    let prompts = prompter.confirm_prompts();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].text.contains(": 9."), "{}", prompts[1].text);
+}
+
+#[test]
+fn few_tries_ask_before_every_page_pin() {
+    let mut spec = kaztoken();
+    spec.tries = 2;
+    spec.max_tries = 2;
+    let emu = emulator(spec);
+    let yes = Step::Confirm { yes: true };
+    let (prompter, services) = services_on(
+        &emu,
+        true,
+        vec![yes.clone(), yes, Step::Confirm { yes: false }],
+    );
+    let mut plugin = guest(&services, &[open_call("AKKaztokenStore", PIN)]);
+    for _ in 0..2 {
+        assert!(matches!(
+            run::<OpenOutcome>(&mut plugin).unwrap(),
+            OpenOutcome::Opened(_)
+        ));
+    }
+    assert_eq!(
+        run::<OpenOutcome>(&mut plugin).unwrap(),
+        OpenOutcome::Declined
+    );
+    assert_eq!(prompter.confirm_prompts().len(), 3, "asked every time");
+    assert_eq!(pin_tries(&emu), 2);
+}
+
+#[test]
+fn a_site_cannot_spend_tries_without_clicks() {
+    let emu = emulator(kaztoken());
+    let (_, services) = services_on(&emu, true, vec![Step::Confirm { yes: true }]);
+    let mut plugin = guest(&services, &[open_call("AKKaztokenStore", "000000")]);
+    for _ in 0..12 {
+        let _ = run::<OpenOutcome>(&mut plugin);
+    }
+    assert_eq!(pin_tries(&emu), 1, "one click, one try");
+    assert_eq!(
+        services
+            .tokens
+            .pin_tries(READER, TokenKind::Kaztoken)
+            .unwrap(),
+        Some(9)
+    );
+}
+
+#[test]
+fn typed_pin_needs_no_question_until_the_card_refused_it() {
+    let emu = emulator(kaztoken());
+    let (prompter, services) = services_on(
+        &emu,
+        true,
+        vec![
+            Step::Password("000000".to_owned()),
+            Step::Confirm { yes: false },
+        ],
+    );
+    let ask = (
+        Import::DialogPassword,
+        abi::encode(&PasswordArgs {
+            title: "Подписание".to_owned(),
+            label: "PIN".to_owned(),
+            ok: "OK".to_owned(),
+            cancel: "Отмена".to_owned(),
+            allow_empty: false,
+        }),
+    );
+    let typed = (
+        Import::KeysOpen,
+        abi::encode(&OpenArgs {
+            storage: "AKKaztokenStore".to_owned(),
+            source: KeySource::Terminal(READER.to_owned()),
+            password: Password::Secret(1),
+        }),
+    );
+    // The typed PIN goes at once; sent again after the card refused it, it is a retry the
+    // user is asked about.
+    let mut plugin = Engine::new()
+        .compile(
+            &manifest("keys = true\ndialogs = true"),
+            &wasm(&probe(&[ask, typed.clone(), typed])),
+        )
+        .unwrap()
+        .instantiate(&services, session(1))
+        .unwrap();
+    assert_eq!(
+        run::<OpenOutcome>(&mut plugin).unwrap(),
+        OpenOutcome::Declined
+    );
+    assert_eq!(pin_tries(&emu), 1);
+    assert_eq!(prompter.confirm_prompts().len(), 1);
 }
 
 #[test]
@@ -285,7 +441,8 @@ fn open_id_card_bad_pin_spends_nothing() {
 #[test]
 fn released_token_handle_is_invalid() {
     let emu = emulator(kaztoken());
-    let (_, services) = services_on(&emu, true, Vec::new());
+    let yes = Step::Confirm { yes: true };
+    let (_, services) = services_on(&emu, true, vec![yes.clone(), yes]);
     let release = (Import::KeysRelease, abi::encode(&Handle { handle: 1 }));
     let mut plugin = guest(
         &services,
@@ -306,7 +463,7 @@ fn released_token_handle_is_invalid() {
 #[test]
 fn support_off_stops_open_token_handles() {
     let emu = emulator(kaztoken());
-    let (_, services) = services_on(&emu, true, Vec::new());
+    let (_, services) = services_on(&emu, true, vec![Step::Confirm { yes: true }]);
     let mut plugin = guest(
         &services,
         &[open_call("AKKaztokenStore", PIN), sign_call(1)],

@@ -379,6 +379,8 @@ fn sign_xml_without_reader_is_empty_slot() {
     assert!(prompter.storage_prompts().is_empty());
 }
 
+/// The methods that take a password or PIN from the page answer without a command to a
+/// connected token: a page's PIN never reaches the card through the Applet.
 #[test]
 fn write_methods_refuse_without_apdus() {
     let emu = emulator(vec![kaztoken(), etoken72k()]);

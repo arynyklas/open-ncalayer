@@ -216,6 +216,17 @@ impl Driver for KzIdCard {
         }
     }
 
+    fn pin_tries(&mut self, card: &mut Card<'_>) -> Result<Option<u8>, TokenError> {
+        // VERIFY without data asks for the PIN's state (ISO 7816-4).
+        select_mf(card)?;
+        let status = card.transmit(&Command::new(0x00, 0x20, 0x00, 0x02))?;
+        Ok(match status.sw {
+            0x6983 | 0x6984 => Some(0),
+            sw if sw >> 8 == 0x63 => Some(status.sw2() & 0x0F),
+            _ => None,
+        })
+    }
+
     fn keys(&mut self, card: &mut Card<'_>) -> Result<Vec<KeySlot>, TokenError> {
         let mut slots = Vec::new();
         self.public.clear();

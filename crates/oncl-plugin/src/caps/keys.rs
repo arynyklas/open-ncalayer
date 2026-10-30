@@ -2,7 +2,8 @@
 //! from a store the plugin names ([`keys_open`]), behind a handle of the instance;
 //! signatures made here, the private key never reaching the guest. With token support on,
 //! the storage dialog offers the tokens plugged in, and `keys_open` opens a token in a
-//! reader with the PIN the plugin passes.
+//! reader with the PIN the plugin passes, once the user allows it
+//! ([`PagePins`](oncl_basics::PagePins)).
 
 use super::{
     ConsentKind, DialogTurn, MAX_KEY_HANDLES, MAX_LINE, check_line, crypto, denied, failed,
@@ -15,6 +16,7 @@ use oncl_basics::{
     KeyRequest, Locale, MAX_PAGE_FILE, OpenError, PageFile, PageFileError, Prompt, StorageAnswer,
     StorageKind, page_path,
 };
+use oncl_basics::{PinFrom, PinRefusal, PinUse, page_pin_text};
 use oncl_pdk::abi::{
     self, Action, Bytes, ChooseArgs, Chosen, ErrorCode, Filter, FilterMore, Handle, HostError,
     HostResult, KeySource, KeyUsageBit, OpenArgs, OpenOutcome, OpenedKey, Password, SelectArgs,
@@ -300,7 +302,11 @@ pub(crate) fn keys_open(state: &mut HostState, args: OpenArgs) -> HostResult<Ope
                 return Err(invalid(format!("{} has no terminals", storage.name())));
             }
             check_line("the reader", &reader, MAX_LINE)?;
-            return open_token(state, storage, &reader, &password);
+            let from = match args.password {
+                Password::Text(_) => PinFrom::Page,
+                Password::Secret(id) => PinFrom::Typed(id),
+            };
+            return open_token(state, storage, &reader, &password, from);
         }
         _ if !storage.readable() => {
             return Err(invalid(format!(
@@ -474,19 +480,45 @@ pub(crate) fn token_readers(
 
 /// Opens the token of `storage` in `reader` with `pin`: every key of the token with a
 /// certificate, in the token's order, each behind a handle that keeps the PIN in memory for
-/// its signatures until it is released or the instance ends.
+/// its signatures until it is released or the instance ends. A PIN from the page (or a
+/// typed one the card refused before) is sent only once the user allows it
+/// ([`PagePins`]); declined, the outcome is [`OpenOutcome::Declined`] and nothing reaches
+/// the card.
 pub(crate) fn open_token(
     state: &mut HostState,
     storage: StorageKind,
     reader: &str,
     pin: &str,
+    from: PinFrom,
 ) -> HostResult<OpenOutcome> {
     let Some(kind) = storage.token_kind() else {
         return Ok(OpenOutcome::NoDevice);
     };
-    let entries = match state.services.tokens.open(reader, kind, pin) {
+    let origin = origin(state);
+    let (locale, plugin) = (state.call.locale, source(state));
+    let prompter = Arc::clone(&state.services.prompter);
+    let ask = |tries| {
+        let prompt = ConfirmPrompt {
+            origin: origin.clone(),
+            locale,
+            text: page_pin_text(locale, &origin, &plugin, kind, reader, tries),
+            source: plugin.clone(),
+        };
+        DialogTurn::hold();
+        prompter.confirm(&prompt) == Prompt::Answer(true)
+    };
+    let pin_use = PinUse {
+        origin: &origin,
+        reader,
+        kind,
+        pin,
+        from,
+    };
+    let opened = state.page_pins.open(&state.services.tokens, pin_use, ask);
+    let entries = match opened {
         Ok(entries) => entries,
-        Err(e) => {
+        Err(PinRefusal::Declined) => return Ok(OpenOutcome::Declined),
+        Err(PinRefusal::Token(e)) => {
             return match e {
                 TokenError::WrongPin { tries_left } => {
                     Ok(OpenOutcome::WrongPassword { tries_left })

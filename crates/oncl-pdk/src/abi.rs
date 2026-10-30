@@ -1006,7 +1006,7 @@ pub enum OpenOutcome {
     Corrupt,
     /// The store holds no key with a certificate.
     NoKeys,
-    /// The user did not allow the page to open the file.
+    /// The user did not allow the page to open the file, or to send its PIN to the token.
     Declined,
 }
 

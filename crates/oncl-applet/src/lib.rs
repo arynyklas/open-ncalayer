@@ -12,9 +12,11 @@
 //! hardware tokens answer as if no device were connected (`EMPTY_SLOT`, or the original's
 //! answer without a device). With it on, the readers holding tokens are listed and chosen,
 //! an ID card's holder is read, and XML is signed on a token; the methods that would write
-//! to a token refuse with the original's generic codes. `genExt`, `getProvider`,
-//! `setProvider` and `showTokenChooser` are not offered. Dialog flows take
-//! [`oncl_basics::lock_dialog_flow`]; dialogs are Russian, as the original's.
+//! to a token refuse with the original's generic codes. A password or PIN the page passes
+//! is therefore never sent to a token: the only PIN a token gets is the one typed in the
+//! storage dialog. `genExt`, `getProvider`, `setProvider` and `showTokenChooser` are not
+//! offered. Dialog flows take [`oncl_basics::lock_dialog_flow`]; dialogs are Russian, as
+//! the original's.
 //!
 //! As in the original, the password of the password dialog and the last PIN try count are
 //! the module's, shared by every connection.
