@@ -302,3 +302,23 @@ fn released_token_handle_is_invalid() {
     let cms: Bytes = run(&mut plugin).unwrap();
     assert_eq!(oncl_pki::cms::verify(&cms, None).unwrap().len(), 1);
 }
+
+#[test]
+fn support_off_stops_open_token_handles() {
+    let emu = emulator(kaztoken());
+    let (_, services) = services_on(&emu, true, Vec::new());
+    let mut plugin = guest(
+        &services,
+        &[open_call("AKKaztokenStore", PIN), sign_call(1)],
+    );
+    let cms: Bytes = run(&mut plugin).unwrap();
+    assert_eq!(oncl_pki::cms::verify(&cms, None).unwrap().len(), 1);
+
+    // The handle survives into the next request; the switch applies to it at once.
+    services.tokens.set_enabled(false);
+    emu.clear_exchanges(READER);
+    let err = run::<Bytes>(&mut plugin).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Failed);
+    assert!(err.message.contains("token support is off"), "{err:?}");
+    assert!(emu.exchanges(READER).is_empty(), "no command to the card");
+}

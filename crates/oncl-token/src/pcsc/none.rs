@@ -25,6 +25,8 @@ impl Context {
 pub(super) struct Card;
 
 impl Card {
+    pub(super) fn reset_on_disconnect(&mut self) {}
+
     pub(super) fn begin_transaction(&mut self) -> SysResult<()> {
         Err(SysError::Unavailable)
     }

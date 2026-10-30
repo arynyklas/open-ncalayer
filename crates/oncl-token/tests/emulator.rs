@@ -119,20 +119,28 @@ fn removal_after_n_apdus() {
 }
 
 #[test]
-fn connection_drop_resets_card() {
+fn connection_drop_resets_card_only_when_asked() {
     let emu = EmulatorBackend::new();
     emu.add_reader("Reader A");
     let (card, resets) = echo();
     emu.insert("Reader A", card);
     let mut conn = emu.connect("Reader A").unwrap();
     conn.begin_transaction().unwrap();
-    assert_eq!(resets.load(Ordering::SeqCst), 0);
+    drop(conn);
+    assert_eq!(
+        resets.load(Ordering::SeqCst),
+        0,
+        "the card is left as it is"
+    );
+    // A transaction left open by a dropped connection is over.
+    let mut other = emu.connect("Reader A").unwrap();
+    other.begin_transaction().unwrap();
+    other.end_transaction().unwrap();
+    let mut conn = emu.connect("Reader A").unwrap();
+    conn.reset_on_disconnect();
     drop(conn);
     assert_eq!(resets.load(Ordering::SeqCst), 1);
-    // A transaction left open by a dropped connection is over.
-    let mut conn = emu.connect("Reader A").unwrap();
-    conn.begin_transaction().unwrap();
-    conn.end_transaction().unwrap();
+    assert_eq!(other.begin_transaction(), Err(BackendError::Reset));
 }
 
 #[test]

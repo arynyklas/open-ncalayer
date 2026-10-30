@@ -38,8 +38,9 @@ pub trait Backend: Send + Sync {
     fn connect(&self, reader: &str) -> Result<Box<dyn Connection>, BackendError>;
 }
 
-/// A connection to a card. Dropping it disconnects and resets the card, which ends a PIN
-/// verification for everyone.
+/// A connection to a card. Dropping it disconnects, leaving the card as it is, or resetting
+/// it after [`Connection::reset_on_disconnect`]: the reset ends a PIN verification for
+/// everyone, and every other connection to the card then reports [`BackendError::Reset`].
 pub trait Connection: Send {
     /// Protocol of the connection.
     fn protocol(&self) -> Protocol;
@@ -67,6 +68,9 @@ pub trait Connection: Send {
     ///
     /// [`BackendError::Removed`] when the card is gone, others as the service reports them.
     fn transmit(&mut self, apdu: &[u8]) -> Result<Vec<u8>, BackendError>;
+
+    /// The card is reset when the connection is dropped (a PIN was sent to it).
+    fn reset_on_disconnect(&mut self);
 }
 
 /// Error of the smart card service.

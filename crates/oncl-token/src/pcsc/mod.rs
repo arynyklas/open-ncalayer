@@ -223,6 +223,10 @@ impl Connection for PcscConnection {
             .map_err(backend_error)?;
         Ok(self.buf[..n].to_vec())
     }
+
+    fn reset_on_disconnect(&mut self) {
+        self.card.reset_on_disconnect();
+    }
 }
 
 #[cfg(test)]

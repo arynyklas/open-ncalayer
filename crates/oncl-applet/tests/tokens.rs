@@ -8,6 +8,7 @@ use oncl_basics::{OpenError, ReaderEntry, StorageKind};
 use oncl_pki::xmldsig;
 use oncl_protocol::{AddInfo, Module};
 use oncl_testkit::synthetic;
+use oncl_token::backend::Backend;
 use oncl_token::emulator::{CardSpec, EmuKey, EmulatorBackend, card};
 use oncl_token::{IdCardInfo, TokenKind, Tokens};
 use serde_json::{Value, json};
@@ -219,12 +220,19 @@ fn public_part_info_from_id_card() {
 fn public_part_info_for_kaztoken_is_exception() {
     let emu = emulator(vec![kaztoken()]);
     let (a, _) = setup(&emu, true, vec![]);
+    // Another application's connection to the token.
+    let mut other = emu.connect(R0).unwrap();
     for terminal in [json!(R0), json!("no such reader"), Value::Null] {
         assert_code(
             &call(&a, "getPublicPartInfo", json!([terminal])),
             "GETPUBLICPART_EXCEPTION",
         );
     }
+    assert_eq!(
+        other.begin_transaction(),
+        Ok(()),
+        "the token was neither connected to nor reset"
+    );
 }
 
 #[test]

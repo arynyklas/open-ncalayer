@@ -195,7 +195,10 @@ impl Driver for KzIdCard {
 
     fn verify_pin(&mut self, card: &mut Card<'_>, pin: &str) -> Result<(), TokenError> {
         self.check_pin(pin)?;
-        let mut padded = pin.as_bytes().to_vec();
+        // Sized once: a reallocation would leave a copy of the PIN behind. The command
+        // wipes it.
+        let mut padded = Vec::with_capacity(8.max(pin.len()));
+        padded.extend_from_slice(pin.as_bytes());
         padded.resize(8, b'0');
         select_mf(card)?;
         let resp = card.transmit(

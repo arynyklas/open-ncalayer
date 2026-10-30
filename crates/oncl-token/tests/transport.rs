@@ -63,6 +63,8 @@ impl Connection for ScriptedConnection {
         );
         Ok(response)
     }
+
+    fn reset_on_disconnect(&mut self) {}
 }
 
 impl Drop for ScriptedConnection {

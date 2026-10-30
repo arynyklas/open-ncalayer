@@ -140,6 +140,7 @@ impl Context {
             Card {
                 api: self.api,
                 handle: card,
+                reset: false,
             },
             to_u32(protocol),
         ))
@@ -153,13 +154,19 @@ impl Drop for Context {
     }
 }
 
-/// A connected card, disconnected with a reset on drop.
+/// A connected card, disconnected on drop: with a reset after
+/// [`Card::reset_on_disconnect`], else leaving the card.
 pub(super) struct Card {
     api: &'static Api,
     handle: Handle,
+    reset: bool,
 }
 
 impl Card {
+    pub(super) fn reset_on_disconnect(&mut self) {
+        self.reset = true;
+    }
+
     pub(super) fn begin_transaction(&mut self) -> SysResult<()> {
         // SAFETY: the handle is connected.
         Ok(check("SCardBeginTransaction", unsafe {
@@ -203,8 +210,14 @@ impl Card {
 
 impl Drop for Card {
     fn drop(&mut self) {
-        // SAFETY: the handle is connected and disconnected once; the reset ends the PIN
-        // verification.
-        unsafe { (self.api.disconnect)(self.handle, SCARD_RESET_CARD as Dword) };
+        // A reset ends the PIN verification for every process; without a PIN sent, leaving
+        // the card keeps the other connections to it working.
+        let disposition = if self.reset {
+            SCARD_RESET_CARD
+        } else {
+            SCARD_LEAVE_CARD
+        };
+        // SAFETY: the handle is connected and disconnected once.
+        unsafe { (self.api.disconnect)(self.handle, disposition as Dword) };
     }
 }

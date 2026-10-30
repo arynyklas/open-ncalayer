@@ -2,11 +2,16 @@
 //! entries, and keys that sign on the card.
 //!
 //! Every operation runs in one transaction of its own: connect, begin, the commands, end,
-//! disconnect with a reset of the card (which ends the PIN verification for every process).
-//! A key keeps the PIN in memory for its signatures; once the token refused it, the key
-//! never sends it again.
+//! disconnect. An operation that sent a PIN resets the card on disconnect: the PIN
+//! verification would otherwise stay open for every process until the card is reset or
+//! pulled out. The others leave the card as it is, so they never break another
+//! application's (or another operation's) connection; an operation that finds its fresh
+//! connection reset by another one reconnects once.
+//!
+//! The keys of one opened token keep the PIN in memory for their signatures; once the token
+//! refused it, none of them sends it again. Turning token support off stops them too.
 
-use crate::backend::{Backend, Connection, NullBackend};
+use crate::backend::{Backend, BackendError, Connection, NullBackend, Protocol};
 use crate::card::{Card, trace_enabled};
 use crate::drivers::{Driver, IdCardInfo, KeySlot, check_pin, open_driver, read_id_card};
 use crate::error::TokenError;
@@ -49,7 +54,8 @@ pub struct Scan {
 /// The process's tokens: one service behind it, support on or off.
 pub struct Tokens {
     backend: Arc<dyn Backend>,
-    enabled: AtomicBool,
+    /// Shared with the keys of the opened tokens.
+    enabled: Arc<AtomicBool>,
     trace: AtomicBool,
 }
 
@@ -59,7 +65,7 @@ impl Tokens {
     pub fn new(backend: Arc<dyn Backend>, enabled: bool) -> Arc<Tokens> {
         Arc::new(Tokens {
             backend,
-            enabled: AtomicBool::new(enabled),
+            enabled: Arc::new(AtomicBool::new(enabled)),
             trace: AtomicBool::new(trace_enabled()),
         })
     }
@@ -69,7 +75,7 @@ impl Tokens {
         Tokens::new(Arc::new(NullBackend), false)
     }
 
-    /// Turns token support on or off.
+    /// Turns token support on or off; off, the keys already open refuse to sign.
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::SeqCst);
     }
@@ -167,8 +173,8 @@ impl Tokens {
         }
         check_pin(kind, pin)?;
         let trace = self.trace();
-        let mut conn = connect(&*self.backend, reader, kind)?;
-        let (token_id, keys) = in_transaction(&mut *conn, |conn| {
+        let not_kind = || TokenError::NoDevice;
+        let (token_id, keys) = on_card(&*self.backend, reader, kind, not_kind, |conn| {
             let mut card = Card::new(conn, trace);
             let mut driver = open_driver(kind, &mut card)?;
             driver.verify_pin(&mut card, pin)?;
@@ -181,19 +187,23 @@ impl Tokens {
             logout(&mut *driver, &mut card);
             Ok((driver.token_id().to_owned(), keys))
         })?;
+        let token = Arc::new(OpenToken {
+            backend: self.backend.clone(),
+            enabled: self.enabled.clone(),
+            reader: reader.to_owned(),
+            kind,
+            token_id,
+            pin: Zeroizing::new(pin.to_owned()),
+            pin_rejected: AtomicBool::new(false),
+            trace,
+        });
         Ok(keys
             .into_iter()
             .map(|(slot, public, cert)| {
                 let key = CardKey {
-                    backend: self.backend.clone(),
-                    reader: reader.to_owned(),
-                    kind,
-                    token_id: token_id.clone(),
+                    token: token.clone(),
                     slot,
                     public,
-                    pin: Zeroizing::new(pin.to_owned()),
-                    pin_rejected: AtomicBool::new(false),
-                    trace,
                 };
                 KeyEntry {
                     alias: key.slot.alias.clone(),
@@ -204,53 +214,119 @@ impl Tokens {
             .collect())
     }
 
-    /// The holder of the ID card in `reader`, read without the PIN.
+    /// The holder of the ID card in `reader`, read without the PIN. The reader's card is
+    /// checked by its ATR before connecting: any other card is never touched.
     ///
     /// # Errors
     ///
     /// [`TokenError::Disabled`] with support off; [`TokenError::WrongCard`] when the card
-    /// is not an ID card; [`TokenError::NoDevice`] without a card; card and transport
-    /// errors.
+    /// is not an ID card; [`TokenError::NoDevice`] without a card or reader; card and
+    /// transport errors.
     pub fn id_card_info(&self, reader: &str) -> Result<IdCardInfo, TokenError> {
         if !self.is_enabled() {
             return Err(TokenError::Disabled);
         }
-        let trace = self.trace();
-        let mut conn = self.backend.connect(reader)?;
-        if TokenKind::from_atr(conn.atr()) != Some(TokenKind::KzIdCard) {
+        let state = self
+            .backend
+            .readers()?
+            .into_iter()
+            .find(|r| r.name == reader)
+            .ok_or(TokenError::NoDevice)?;
+        let atr = state.atr.ok_or(TokenError::NoDevice)?;
+        if TokenKind::from_atr(&atr) != Some(TokenKind::KzIdCard) {
             return Err(TokenError::WrongCard);
         }
-        in_transaction(&mut *conn, |conn| read_id_card(&mut Card::new(conn, trace)))
+        let trace = self.trace();
+        let wrong = || TokenError::WrongCard;
+        on_card(&*self.backend, reader, TokenKind::KzIdCard, wrong, |conn| {
+            read_id_card(&mut Card::new(conn, trace))
+        })
     }
 }
 
-/// Connects to `reader`, whose card must have an ATR of `kind`.
-fn connect(
+/// Runs `f` on the card of `reader`, which must have an ATR of `kind` (else `not_kind()`),
+/// in a transaction of its own; the transaction ends whatever `f` returns, then the
+/// connection is dropped. A connection reset by another one before anything was sent (the
+/// begin or the first command reports it) is replaced once by a new one.
+fn on_card<T>(
     backend: &dyn Backend,
     reader: &str,
     kind: TokenKind,
-) -> Result<Box<dyn Connection>, TokenError> {
-    let conn = backend.connect(reader)?;
-    if TokenKind::from_atr(conn.atr()) != Some(kind) {
-        return Err(TokenError::NoDevice);
-    }
-    Ok(conn)
-}
-
-/// Runs `f` in a transaction, which ends whatever `f` returns.
-fn in_transaction<T>(
-    conn: &mut dyn Connection,
-    f: impl FnOnce(&mut dyn Connection) -> Result<T, TokenError>,
+    not_kind: impl Fn() -> TokenError,
+    mut f: impl FnMut(&mut dyn Connection) -> Result<T, TokenError>,
 ) -> Result<T, TokenError> {
-    conn.begin_transaction()?;
-    let out = f(conn);
-    if let Err(e) = conn.end_transaction() {
-        tracing::debug!("ending the smart card transaction: {e}");
+    let mut reconnect = true;
+    loop {
+        let mut conn = backend.connect(reader)?;
+        if TokenKind::from_atr(conn.atr()) != Some(kind) {
+            return Err(not_kind());
+        }
+        match conn.begin_transaction() {
+            Err(BackendError::Reset) if reconnect => {
+                reconnect = false;
+                continue;
+            }
+            begun => begun?,
+        }
+        let mut first = FirstCommand {
+            conn: &mut *conn,
+            sent: false,
+            reset: false,
+        };
+        let out = f(&mut first);
+        let reset_before_sending = first.reset;
+        if let Err(e) = conn.end_transaction() {
+            tracing::debug!("ending the smart card transaction: {e}");
+        }
+        if reset_before_sending && reconnect {
+            reconnect = false;
+            continue;
+        }
+        return out;
     }
-    out
 }
 
-/// Logs out; a failure only matters to the log, the disconnect resets the card anyway.
+/// A connection that notes whether its first command found the card reset by another
+/// connection (nothing reached the card then).
+struct FirstCommand<'c> {
+    conn: &'c mut dyn Connection,
+    sent: bool,
+    reset: bool,
+}
+
+impl Connection for FirstCommand<'_> {
+    fn protocol(&self) -> Protocol {
+        self.conn.protocol()
+    }
+
+    fn atr(&self) -> &[u8] {
+        self.conn.atr()
+    }
+
+    fn begin_transaction(&mut self) -> Result<(), BackendError> {
+        self.conn.begin_transaction()
+    }
+
+    fn end_transaction(&mut self) -> Result<(), BackendError> {
+        self.conn.end_transaction()
+    }
+
+    fn transmit(&mut self, apdu: &[u8]) -> Result<Vec<u8>, BackendError> {
+        let out = self.conn.transmit(apdu);
+        if !self.sent {
+            self.sent = true;
+            self.reset = out == Err(BackendError::Reset);
+        }
+        out
+    }
+
+    fn reset_on_disconnect(&mut self) {
+        self.conn.reset_on_disconnect();
+    }
+}
+
+/// Logs out; a failure only matters to the log, the disconnect resets the card anyway (a
+/// PIN was sent).
 fn logout(driver: &mut dyn Driver, card: &mut Card<'_>) {
     if let Err(e) = driver.logout(card) {
         tracing::debug!("{}: logging out: {e}", driver.kind().storage_name());
@@ -296,46 +372,57 @@ fn pair(
     };
     match PublicKey::from_spki(cert.tbs_certificate().subject_public_key_info()) {
         Ok(certified) if certified == public => Ok(Some((slot, public, cert))),
+        // Normal on an ID card: its RSA and GOST keys share a certificate file.
         _ => {
-            skipped(&slot.alias, "the certificate is another key's");
+            tracing::debug!("{family}: key {} has no certificate of its own", slot.alias);
             Ok(None)
         }
     }
 }
 
-/// A key on a token: signs in a transaction of its own, after checking that the same token
-/// is in the reader.
-pub(crate) struct CardKey {
+/// A token opened with its PIN: what its keys share.
+struct OpenToken {
     backend: Arc<dyn Backend>,
+    /// Token support is on (the [`Tokens`]' flag).
+    enabled: Arc<AtomicBool>,
     reader: String,
     kind: TokenKind,
     token_id: String,
-    slot: KeySlot,
-    public: PublicKey,
     pin: Zeroizing<String>,
-    /// The token refused the PIN: it is not sent again.
+    /// The token refused the PIN: none of its keys sends it again.
     pin_rejected: AtomicBool,
     trace: bool,
+}
+
+/// A key on a token: signs in a transaction of its own, after checking that the same token
+/// is in the reader.
+pub(crate) struct CardKey {
+    token: Arc<OpenToken>,
+    slot: KeySlot,
+    public: PublicKey,
 }
 
 const PIN_REFUSED: &str = "the token refused the PIN";
 
 impl CardKey {
     fn sign_on_card(&self, alg: SigAlg, data: &[u8]) -> Result<Vec<u8>, TokenError> {
-        let mut conn = connect(&*self.backend, &self.reader, self.kind).map_err(|e| match e {
-            TokenError::NoDevice => TokenError::WrongCard,
-            e => e,
-        })?;
-        in_transaction(&mut *conn, |conn| {
-            let mut card = Card::new(conn, self.trace);
-            let mut driver = open_driver(self.kind, &mut card)?;
-            if driver.token_id() != self.token_id {
+        let t = &*self.token;
+        let wrong = || TokenError::WrongCard;
+        on_card(&*t.backend, &t.reader, t.kind, wrong, |conn| {
+            let mut card = Card::new(conn, t.trace);
+            let mut driver = open_driver(t.kind, &mut card)?;
+            if driver.token_id() != t.token_id {
                 return Err(TokenError::WrongCard);
             }
-            driver.verify_pin(&mut card, &self.pin)?;
+            driver.verify_pin(&mut card, &t.pin)?;
             let sig = driver.sign(&mut card, &self.slot, alg, data);
             logout(&mut *driver, &mut card);
             sig
+        })
+        .map_err(|e| match e {
+            // No card (or no reader) any more.
+            TokenError::NoDevice => TokenError::CardRemoved,
+            e => e,
         })
     }
 }
@@ -350,7 +437,11 @@ impl TokenSigner for CardKey {
     }
 
     fn sign_digest(&self, alg: SigAlg, digest: &[u8]) -> Result<Vec<u8>, KeyError> {
-        if self.pin_rejected.load(Ordering::SeqCst) {
+        let t = &*self.token;
+        if !t.enabled.load(Ordering::SeqCst) {
+            return Err(KeyError::Token(TokenError::Disabled.to_string()));
+        }
+        if t.pin_rejected.load(Ordering::SeqCst) {
             return Err(KeyError::Token(PIN_REFUSED.to_owned()));
         }
         let data = match self.slot.alg {
@@ -359,7 +450,7 @@ impl TokenSigner for CardKey {
         };
         self.sign_on_card(alg, &data).map_err(|e| match e {
             TokenError::WrongPin { .. } | TokenError::PinBlocked | TokenError::InvalidPin => {
-                self.pin_rejected.store(true, Ordering::SeqCst);
+                t.pin_rejected.store(true, Ordering::SeqCst);
                 KeyError::Token(PIN_REFUSED.to_owned())
             }
             TokenError::WrongCard => KeyError::Token("another token is in the reader".to_owned()),
@@ -370,8 +461,8 @@ impl TokenSigner for CardKey {
     fn describe(&self) -> String {
         format!(
             "{} in {}, {}",
-            self.kind.storage_name(),
-            self.reader,
+            self.token.kind.storage_name(),
+            self.token.reader,
             self.slot.alias
         )
     }

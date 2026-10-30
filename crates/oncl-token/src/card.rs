@@ -7,6 +7,7 @@ use crate::backend::{Connection, Protocol};
 use crate::error::TokenError;
 use crate::{MAX_GET_RESPONSE, MAX_RESPONSE, TRACE_VAR};
 use std::fmt::Write;
+use zeroize::Zeroize;
 
 /// A card on a connection.
 pub struct Card<'c> {
@@ -147,7 +148,15 @@ impl<'c> Card<'c> {
     }
 
     fn exchange(&mut self, cmd: &Command, le: Option<u32>) -> Result<Response, TokenError> {
-        let raw = self.conn.transmit(&cmd.encode_with_le(le));
+        if cmd.redact {
+            // A PIN: the verification must not outlive the connection.
+            self.conn.reset_on_disconnect();
+        }
+        let mut apdu = cmd.encode_with_le(le);
+        let raw = self.conn.transmit(&apdu);
+        if cmd.redact {
+            apdu.zeroize();
+        }
         if self.trace {
             log(cmd, le, &raw);
         }

@@ -1,8 +1,9 @@
 //! Command and response APDUs (ISO/IEC 7816-4): short and extended encodings.
 
 use crate::error::TokenError;
+use zeroize::Zeroize;
 
-/// A command APDU.
+/// A command APDU. The data of a redacted command is wiped when it is dropped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command {
     /// Class byte.
@@ -17,8 +18,17 @@ pub struct Command {
     pub data: Vec<u8>,
     /// Expected response length, 1..=65536; `None` when no data is expected.
     pub le: Option<u32>,
-    /// The data is secret (a PIN): the trace shows its length only.
+    /// The data is secret (a PIN): the trace shows its length only, the bytes are wiped
+    /// on drop.
     pub redact: bool,
+}
+
+impl Drop for Command {
+    fn drop(&mut self) {
+        if self.redact {
+            self.data.zeroize();
+        }
+    }
 }
 
 impl Command {
@@ -38,6 +48,9 @@ impl Command {
     /// With command data.
     #[must_use]
     pub fn with_data(mut self, data: impl Into<Vec<u8>>) -> Command {
+        if self.redact {
+            self.data.zeroize();
+        }
         self.data = data.into();
         self
     }

@@ -12,7 +12,7 @@ use oncl_pki::pkcs12::KeyEntry;
 use oncl_pki::xmldsig;
 use oncl_token::backend::{Backend, BackendError, Connection, Protocol, ReaderState};
 use oncl_token::emulator::{EmuKey, EmulatorBackend, SoftCard, card};
-use oncl_token::{Present, ScanProblem, TokenError, TokenKind, Tokens};
+use oncl_token::{IdCardInfo, Present, ScanProblem, TokenError, TokenKind, Tokens};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -78,6 +78,10 @@ impl Connection for CountingConnection {
 
     fn transmit(&mut self, apdu: &[u8]) -> Result<Vec<u8>, BackendError> {
         self.inner.transmit(apdu)
+    }
+
+    fn reset_on_disconnect(&mut self) {
+        self.inner.reset_on_disconnect();
     }
 }
 
@@ -463,6 +467,248 @@ fn waits_for_foreign_transaction() {
     thread.join().unwrap().unwrap();
 }
 
+#[test]
+fn support_off_stops_keys_already_open() {
+    let emu = kaztoken();
+    let (tokens, counts) = counting(emu.clone(), true);
+    let entry = gost2015_entry(tokens.open(READER, TokenKind::Kaztoken, PIN).unwrap());
+    tokens.set_enabled(false);
+    let connects = counts.connects.load(Ordering::SeqCst);
+    match entry.key.sign(SigAlg::Gost2015_512, b"m") {
+        Err(KeyError::Token(msg)) => assert_eq!(msg, "token support is off"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        counts.connects.load(Ordering::SeqCst),
+        connects,
+        "no connection with support off"
+    );
+    tokens.set_enabled(true);
+    entry.key.sign(SigAlg::Gost2015_512, b"m").unwrap();
+}
+
+#[test]
+fn pin_refused_once_for_all_keys_of_the_token() {
+    let emu = kaztoken();
+    let tokens = Tokens::new(emu.clone(), true);
+    let entries = tokens.open(READER, TokenKind::Kaztoken, PIN).unwrap();
+    assert_eq!(entries.len(), 3);
+    emu.insert(READER, card(spec(TokenKind::Kaztoken, "654321", &KEYS)));
+    emu.clear_exchanges(READER);
+    for (entry, alg) in
+        entries
+            .iter()
+            .zip([SigAlg::Gost2004, SigAlg::Gost2015_512, SigAlg::RsaSha256])
+    {
+        match entry.key.sign(alg, b"m") {
+            Err(KeyError::Token(msg)) => assert!(msg.contains("refused the PIN"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    let verifies = emu
+        .exchanges(READER)
+        .iter()
+        .filter(|e| e.command.starts_with(&[0x00, 0x20, 0x00, 0x02]) && e.command.len() > 4)
+        .count();
+    assert_eq!(verifies, 1, "one try for the three keys");
+}
+
+#[test]
+fn token_removed_between_open_and_sign_is_removed() {
+    let emu = kaztoken();
+    let tokens = Tokens::new(emu.clone(), true);
+    let entry = gost2015_entry(tokens.open(READER, TokenKind::Kaztoken, PIN).unwrap());
+    emu.remove(READER);
+    match entry.key.sign(SigAlg::Gost2015_512, b"m") {
+        Err(KeyError::Token(msg)) => assert!(msg.contains("removed"), "{msg}"),
+        other => panic!("{other:?}"),
+    }
+    // Another kind of card in the reader is another token.
+    emu.insert(READER, Box::new(Unknown));
+    match entry.key.sign(SigAlg::Gost2015_512, b"m") {
+        Err(KeyError::Token(msg)) => assert!(msg.contains("another token"), "{msg}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn overlapping_operations_on_one_reader_succeed() {
+    let emu = kaztoken();
+    let (tokens, counts) = counting(emu.clone(), true);
+    let entries = tokens.open(READER, TokenKind::Kaztoken, PIN).unwrap();
+    let begins = counts.begins.load(Ordering::SeqCst);
+    // Both signatures connect while another process holds the card: the first to sign
+    // resets the card under the other's connection.
+    let guard = emu.foreign_transaction(READER);
+    let threads: Vec<_> = entries
+        .into_iter()
+        .zip([SigAlg::Gost2004, SigAlg::Gost2015_512])
+        .map(|(entry, alg)| std::thread::spawn(move || entry.key.sign(alg, b"m")))
+        .collect();
+    while counts.begins.load(Ordering::SeqCst) < begins + 2 {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(guard);
+    for thread in threads {
+        thread.join().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn id_card_info_of_another_card_never_connects() {
+    let emu = kaztoken();
+    emu.add_reader("Empty reader");
+    let (tokens, counts) = counting(emu, true);
+    assert_eq!(tokens.id_card_info(READER), Err(TokenError::WrongCard));
+    assert_eq!(
+        tokens.id_card_info("Empty reader"),
+        Err(TokenError::NoDevice)
+    );
+    assert_eq!(
+        tokens.id_card_info("No such reader"),
+        Err(TokenError::NoDevice)
+    );
+    assert_eq!(counts.connects.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn only_operations_with_a_pin_reset_the_card() {
+    let mut s = spec(
+        TokenKind::KzIdCard,
+        "1234",
+        &["user-gost2015-auth", "user-gost2015-sign"],
+    );
+    s.id_card = Some(IdCardInfo {
+        iin: "123456789012".to_owned(),
+        last_name: "ТЕСТОВ".to_owned(),
+        first_name: "ТЕСТ".to_owned(),
+        middle_name: None,
+    });
+    let emu = backend(s);
+    let tokens = Tokens::new(emu.clone(), true);
+    let mut other = emu.connect(READER).unwrap();
+    tokens.id_card_info(READER).unwrap();
+    other.begin_transaction().unwrap();
+    other.end_transaction().unwrap();
+    tokens.open(READER, TokenKind::KzIdCard, "1234").unwrap();
+    assert_eq!(
+        other.begin_transaction(),
+        Err(BackendError::Reset),
+        "the reset after the PIN ends its verification for everyone"
+    );
+}
+
+#[test]
+fn emulator_reset_reaches_other_connections() {
+    let emu = kaztoken();
+    let mut conn = emu.connect(READER).unwrap();
+    emu.reset_card(READER);
+    assert_eq!(conn.begin_transaction(), Err(BackendError::Reset));
+    assert_eq!(
+        conn.transmit(&[0x00, 0xA4, 0x04, 0x00]),
+        Err(BackendError::Reset)
+    );
+    let mut fresh = emu.connect(READER).unwrap();
+    fresh.begin_transaction().unwrap();
+}
+
+/// Connections that report a reset by another handle: at `begin` or at the first command,
+/// on the first `connections` connections.
+struct Resetting {
+    inner: Arc<EmulatorBackend>,
+    at_begin: bool,
+    connections: AtomicUsize,
+    connects: AtomicUsize,
+}
+
+struct ResettingConnection {
+    inner: Box<dyn Connection>,
+    reset: Option<bool>,
+}
+
+impl Backend for Resetting {
+    fn readers(&self) -> Result<Vec<ReaderState>, BackendError> {
+        self.inner.readers()
+    }
+
+    fn connect(&self, reader: &str) -> Result<Box<dyn Connection>, BackendError> {
+        self.connects.fetch_add(1, Ordering::SeqCst);
+        let reset = self
+            .connections
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+            .then_some(self.at_begin);
+        Ok(Box::new(ResettingConnection {
+            inner: self.inner.connect(reader)?,
+            reset,
+        }))
+    }
+}
+
+impl Connection for ResettingConnection {
+    fn protocol(&self) -> Protocol {
+        self.inner.protocol()
+    }
+
+    fn atr(&self) -> &[u8] {
+        self.inner.atr()
+    }
+
+    fn begin_transaction(&mut self) -> Result<(), BackendError> {
+        if self.reset == Some(true) {
+            return Err(BackendError::Reset);
+        }
+        self.inner.begin_transaction()
+    }
+
+    fn end_transaction(&mut self) -> Result<(), BackendError> {
+        self.inner.end_transaction()
+    }
+
+    fn transmit(&mut self, apdu: &[u8]) -> Result<Vec<u8>, BackendError> {
+        if self.reset.is_some() {
+            return Err(BackendError::Reset);
+        }
+        self.inner.transmit(apdu)
+    }
+
+    fn reset_on_disconnect(&mut self) {
+        self.inner.reset_on_disconnect();
+    }
+}
+
+fn resetting(at_begin: bool, connections: usize) -> Resetting {
+    Resetting {
+        inner: kaztoken(),
+        at_begin,
+        connections: AtomicUsize::new(connections),
+        connects: AtomicUsize::new(0),
+    }
+}
+
+#[test]
+fn reset_by_another_handle_reconnects_once() {
+    for at_begin in [true, false] {
+        let backend = Arc::new(resetting(at_begin, 1));
+        let tokens = Tokens::new(backend.clone(), true);
+        assert_eq!(
+            tokens.open(READER, TokenKind::Kaztoken, PIN).unwrap().len(),
+            3,
+            "at begin: {at_begin}"
+        );
+        assert_eq!(backend.connects.load(Ordering::SeqCst), 2);
+
+        let backend = Arc::new(resetting(at_begin, 2));
+        let tokens = Tokens::new(backend.clone(), true);
+        assert_eq!(
+            tokens.open(READER, TokenKind::Kaztoken, PIN).err(),
+            Some(TokenError::CardRemoved),
+            "at begin: {at_begin}"
+        );
+        assert_eq!(backend.connects.load(Ordering::SeqCst), 2, "once");
+    }
+}
+
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
 
@@ -496,4 +742,29 @@ fn trace_never_contains_pin() {
     assert_eq!(text.matches("<redacted 6 bytes>").count(), 2, "{text}");
     assert!(!text.contains("31 32 33 34 35 36"), "{text}");
     assert!(!text.contains("313233343536"), "{text}");
+}
+
+#[test]
+fn id_card_shared_certificate_file_is_not_a_warning() {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let entries = tracing::subscriber::with_default(subscriber, || {
+        // The RSA key and a GOST key share a certificate file: one of them has none.
+        let s = spec(
+            TokenKind::KzIdCard,
+            "1234",
+            &["user-gost2015-auth", "user-gost2015-sign", "user-rsa-sign"],
+        );
+        Tokens::new(backend(s), true)
+            .open(READER, TokenKind::KzIdCard, "1234")
+            .unwrap()
+    });
+    assert_eq!(entries.len(), 2);
+    let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(text.is_empty(), "{text}");
 }

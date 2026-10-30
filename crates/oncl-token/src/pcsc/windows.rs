@@ -106,7 +106,13 @@ impl Context {
                 &mut protocol,
             )
         })?;
-        Ok((Card(card), protocol))
+        Ok((
+            Card {
+                handle: card,
+                reset: false,
+            },
+            protocol,
+        ))
     }
 }
 
@@ -117,21 +123,29 @@ impl Drop for Context {
     }
 }
 
-/// A connected card, disconnected with a reset on drop.
-pub(super) struct Card(usize);
+/// A connected card, disconnected on drop: with a reset after
+/// [`Card::reset_on_disconnect`], else leaving the card.
+pub(super) struct Card {
+    handle: usize,
+    reset: bool,
+}
 
 impl Card {
+    pub(super) fn reset_on_disconnect(&mut self) {
+        self.reset = true;
+    }
+
     pub(super) fn begin_transaction(&mut self) -> SysResult<()> {
         // SAFETY: the handle is connected.
         Ok(check("SCardBeginTransaction", unsafe {
-            SCardBeginTransaction(self.0)
+            SCardBeginTransaction(self.handle)
         })?)
     }
 
     pub(super) fn end_transaction(&mut self) -> SysResult<()> {
         // SAFETY: the handle is connected.
         Ok(check("SCardEndTransaction", unsafe {
-            SCardEndTransaction(self.0, SCARD_LEAVE_CARD)
+            SCardEndTransaction(self.handle, SCARD_LEAVE_CARD)
         })?)
     }
 
@@ -149,7 +163,7 @@ impl Card {
         // SAFETY: the buffers are valid for the lengths given.
         check("SCardTransmit", unsafe {
             SCardTransmit(
-                self.0,
+                self.handle,
                 &pci,
                 apdu.as_ptr(),
                 apdu.len() as u32,
@@ -164,8 +178,14 @@ impl Card {
 
 impl Drop for Card {
     fn drop(&mut self) {
-        // SAFETY: the handle is connected and disconnected once; the reset ends the PIN
-        // verification.
-        unsafe { SCardDisconnect(self.0, SCARD_RESET_CARD) };
+        // A reset ends the PIN verification for every process; without a PIN sent, leaving
+        // the card keeps the other connections to it working.
+        let disposition = if self.reset {
+            SCARD_RESET_CARD
+        } else {
+            SCARD_LEAVE_CARD
+        };
+        // SAFETY: the handle is connected and disconnected once.
+        unsafe { SCardDisconnect(self.handle, disposition) };
     }
 }

@@ -19,11 +19,24 @@ struct Reader {
     card: Option<Box<dyn SoftCard>>,
     /// Changes on every insertion and removal: a connection to an earlier card is dead.
     generation: u64,
+    /// Changes on every reset of the card: a connection opened before sees
+    /// [`BackendError::Reset`], as a PC/SC handle does after another handle's reset.
+    resets: u64,
     /// Commands left before the card is pulled out.
     remove_after: Option<usize>,
     exchanges: Vec<Exchange>,
     /// The connection (or foreign holder) in a transaction.
     holder: Option<u64>,
+}
+
+impl Reader {
+    /// Resets the card: its security state ends, the other connections see the reset.
+    fn reset(&mut self) {
+        if let Some(card) = self.card.as_mut() {
+            card.reset();
+            self.resets += 1;
+        }
+    }
 }
 
 struct State {
@@ -120,6 +133,7 @@ impl EmulatorBackend {
             remove_after: None,
             exchanges: Vec::new(),
             holder: None,
+            resets: 0,
         });
     }
 
@@ -175,6 +189,12 @@ impl EmulatorBackend {
     /// Forgets the exchanges of `reader`.
     pub fn clear_exchanges(&self, reader: &str) {
         self.with_reader(reader, |r| r.exchanges.clear());
+    }
+
+    /// Resets the card of `reader` as another process disconnecting with a reset does:
+    /// connections opened before see [`BackendError::Reset`].
+    pub fn reset_card(&self, reader: &str) {
+        self.with_reader(reader, Reader::reset);
     }
 
     /// Holds a transaction on `reader` as another process would, until the guard is
@@ -244,9 +264,11 @@ impl Backend for EmulatorBackend {
             shared: self.shared.clone(),
             reader: reader.to_owned(),
             generation: r.generation,
+            resets: r.resets,
             id,
             atr: card.atr(),
             protocol: card.protocol(),
+            reset_on_drop: false,
         }))
     }
 }
@@ -255,9 +277,12 @@ struct EmuConnection {
     shared: Arc<Shared>,
     reader: String,
     generation: u64,
+    resets: u64,
     id: u64,
     atr: Vec<u8>,
     protocol: Protocol,
+    /// Disconnect with a reset.
+    reset_on_drop: bool,
 }
 
 impl EmuConnection {
@@ -274,6 +299,9 @@ impl EmuConnection {
             let r = state.reader(&self.reader).ok_or(BackendError::Removed)?;
             if r.generation != self.generation || r.card.is_none() {
                 return Err(BackendError::Removed);
+            }
+            if r.resets != self.resets {
+                return Err(BackendError::Reset);
             }
             match r.holder {
                 Some(holder) if holder != self.id => state = self.shared.wait(state),
@@ -326,6 +354,10 @@ impl Connection for EmuConnection {
         });
         Ok(response)
     }
+
+    fn reset_on_disconnect(&mut self) {
+        self.reset_on_drop = true;
+    }
 }
 
 impl Drop for EmuConnection {
@@ -335,10 +367,8 @@ impl Drop for EmuConnection {
             if r.holder == Some(self.id) {
                 r.holder = None;
             }
-            if r.generation == self.generation
-                && let Some(card) = r.card.as_mut()
-            {
-                card.reset();
+            if self.reset_on_drop && r.generation == self.generation {
+                r.reset();
             }
         }
         drop(state);
