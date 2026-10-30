@@ -243,11 +243,18 @@ fn is_current(path: &Path, expected_hex: &str) -> anyhow::Result<bool> {
     }
 }
 
-fn download(url: &str) -> anyhow::Result<Vec<u8>> {
+/// The largest body [`download`] reads: the NCANode fixtures and the site generator's
+/// archive.
+const MAX_DOWNLOAD: u64 = 64 * 1024 * 1024;
+
+/// The body of `url`, at most [`MAX_DOWNLOAD`] bytes.
+pub(crate) fn download(url: &str) -> anyhow::Result<Vec<u8>> {
     ureq::get(url)
         .call()
         .with_context(|| format!("GET {url}"))?
         .body_mut()
+        .with_config()
+        .limit(MAX_DOWNLOAD)
         .read_to_vec()
         .with_context(|| format!("reading body of {url}"))
 }

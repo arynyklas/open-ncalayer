@@ -96,6 +96,11 @@ enum Command {
         #[command(subcommand)]
         command: PluginCommand,
     },
+    /// The project site (`site/`): build it with the pinned Zola, check a built one.
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCommand,
+    },
     /// Serve the first card of an emulator configuration to vpcd (vsmartcard's virtual
     /// reader for pcscd) until the process is stopped: the PC/SC test of CI.
     TokenEmu {
@@ -120,6 +125,36 @@ enum Command {
         /// library `-Zbuild-std` builds, and every crate then rebuilds.
         #[arg(long)]
         target_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryCommand {
+    /// Generate the build copy into `<out>/src`, build it into `<out>/public` and check it.
+    Build {
+        /// The ports [default: `plugins/` of the workspace].
+        #[arg(long)]
+        plugins: Option<PathBuf>,
+        /// The update indexes [default: `updates/v1/` of the workspace, if there].
+        #[arg(long)]
+        updates: Option<PathBuf>,
+        /// The project's releases, JSON Lines (`gh api …/releases`).
+        #[arg(long)]
+        releases: Option<PathBuf>,
+        /// A copy of the `upstream` branch's `index.json` and `latest/facts.json`.
+        #[arg(long)]
+        upstream: Option<PathBuf>,
+        /// Output directory [default: target/site].
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// The Zola binary [default: the pinned one, downloaded into target/tools].
+        #[arg(long)]
+        zola: Option<PathBuf>,
+    },
+    /// Check a built site offline: links, fragments, external places and page rules.
+    Check {
+        /// The built site.
+        dir: PathBuf,
     },
 }
 
@@ -451,6 +486,45 @@ enum ExtCommand {
     Build,
 }
 
+fn registry(command: RegistryCommand) -> anyhow::Result<()> {
+    let root = oncl_testkit::workspace_root();
+    match command {
+        RegistryCommand::Build {
+            plugins,
+            updates,
+            releases,
+            upstream,
+            out,
+            zola,
+        } => {
+            let updates = updates.or_else(|| {
+                let dir = root.join(xtask::index::INDEX_DIR);
+                dir.is_dir().then_some(dir)
+            });
+            let inputs = xtask::registry::Inputs {
+                plugins: plugins.unwrap_or_else(|| root.join("plugins")),
+                updates,
+                releases,
+                upstream,
+            };
+            let out = out.unwrap_or_else(|| root.join("target/site"));
+            xtask::registry::build(&root, &inputs, &out, zola.as_deref())?;
+            Ok(())
+        }
+        RegistryCommand::Check { dir } => {
+            let base_url = xtask::registry::site::site_config(&root)?.base_url;
+            let report = xtask::registry::check(&dir, &base_url)?;
+            println!(
+                "{}: {} pages, {} links checked",
+                dir.display(),
+                report.pages,
+                report.links
+            );
+            Ok(())
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::CheckImports { exes } => match xtask::imports::check_imports(&exes)? {
@@ -483,6 +557,7 @@ fn main() -> anyhow::Result<()> {
             xtask::e2e::run(&oncl_testkit::workspace_root(), browser, download)
         }
         Command::FetchFixtures => xtask::fetch::fetch_fixtures(),
+        Command::Registry { command } => registry(command),
         Command::TokenEmu { config, vpcd } => {
             xtask::token_emu::token_emu(&oncl_testkit::workspace_root(), &config, vpcd.as_deref())
         }
