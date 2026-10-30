@@ -55,20 +55,73 @@ impl KeyBag {
 /// [`Pkcs12Error::Malformed`] for invalid structures or keys that do not match their
 /// certificates, [`Pkcs12Error::Unsupported`] for unsupported algorithms.
 pub fn load(pfx: &[u8], password: &str) -> Result<Vec<KeyEntry>, Pkcs12Error> {
-    let (keys, certs) = bags(pfx, password)?;
-    let mut entries = Vec::with_capacity(keys.len());
+    let (keys, certs) = bags(pfx, password, None)?;
+    Ok(paired(keys, certs)?.entries)
+}
+
+/// How much of a key store [`load_within`] reads: more is refused before any key
+/// derivation that the excess would cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// The most key bags (encrypted or not), counted across the store.
+    pub key_bags: usize,
+    /// The most encrypted safes (each opened with a key derivation).
+    pub encrypted_safes: usize,
+}
+
+/// What [`load_within`] reads from a key store.
+#[derive(Clone, Debug)]
+pub struct Loaded {
+    /// The key entries, as [`load`] returns them.
+    pub entries: Vec<KeyEntry>,
+    /// The certificates no key pairs with, in stored order.
+    pub other_certs: Vec<Certificate>,
+}
+
+/// Opens a key store from an untrusted source (such as a page) like [`load`], in one pass
+/// that also returns the certificates no key pairs with. A store with more encrypted safes
+/// than `limits` allows is refused before the MAC or any decryption; one with more key bags,
+/// as soon as they are counted: before the MAC for the bags in plain safes, and before any
+/// key is decrypted for the rest.
+///
+/// # Errors
+///
+/// As [`load`]; [`Pkcs12Error::Unsupported`] for a store over `limits`.
+pub fn load_within(pfx: &[u8], password: &str, limits: &Limits) -> Result<Loaded, Pkcs12Error> {
+    let (keys, certs) = bags(pfx, password, Some(limits))?;
+    paired(keys, certs)
+}
+
+/// The keys that pair with a certificate, sorted by alias, and the certificates no key
+/// pairs with.
+fn paired(keys: Vec<KeyBag>, certs: Vec<CertBagEntry>) -> Result<Loaded, Pkcs12Error> {
+    let mut used = vec![false; certs.len()];
+    let mut pairs = Vec::with_capacity(keys.len());
     for key in keys {
-        let Some((private, cert)) = key_with_cert(&key, &certs)? else {
-            continue;
-        };
-        entries.push(KeyEntry {
-            alias: key.alias(),
-            key: private,
-            cert: certs[cert].cert.clone(),
-        });
+        if let Some((private, cert)) = key_with_cert(&key, &certs)? {
+            used[cert] = true;
+            pairs.push((key.alias(), private, cert));
+        }
     }
+    let mut entries: Vec<KeyEntry> = pairs
+        .into_iter()
+        .map(|(alias, key, cert)| KeyEntry {
+            alias,
+            key,
+            cert: certs[cert].cert.clone(),
+        })
+        .collect();
     entries.sort_by(|a, b| a.alias.cmp(&b.alias));
-    Ok(entries)
+    let other_certs = certs
+        .into_iter()
+        .zip(used)
+        .filter(|(_, used)| !used)
+        .map(|(entry, _)| entry.cert)
+        .collect();
+    Ok(Loaded {
+        entries,
+        other_certs,
+    })
 }
 
 /// Opens a PKCS#12 key store like [`load`], keeping every key. A key that no certificate
@@ -81,7 +134,7 @@ pub fn load(pfx: &[u8], password: &str) -> Result<Vec<KeyEntry>, Pkcs12Error> {
 /// As [`load`]; also [`Pkcs12Error::Malformed`] / [`Pkcs12Error::Unsupported`] for a key
 /// without a certificate that has no `localKeyId`, matches none, or cannot be read.
 pub fn load_contents(pfx: &[u8], password: &str) -> Result<Contents, Pkcs12Error> {
-    let (keys, certs) = bags(pfx, password)?;
+    let (keys, certs) = bags(pfx, password, None)?;
     let mut paired = vec![false; certs.len()];
     let mut stored = Vec::with_capacity(keys.len());
     for key in keys {
@@ -124,11 +177,74 @@ pub fn load_contents(pfx: &[u8], password: &str) -> Result<Contents, Pkcs12Error
     })
 }
 
-/// The key and certificate bags of a key store, decrypted, in stored order.
-fn bags(pfx: &[u8], password: &str) -> Result<(Vec<KeyBag>, Vec<CertBagEntry>), Pkcs12Error> {
+/// A safe of the authenticated safe: its bags, or still encrypted.
+enum Safe<'a> {
+    Bags(Vec<SafeBag>),
+    Encrypted(&'a ContentInfo),
+}
+
+/// The number of key bags among `bags`.
+fn key_bag_count(bags: &[SafeBag]) -> usize {
+    bags.iter()
+        .filter(|bag| matches!(bag.bag_id, oid::PKCS8_SHROUDED_KEY_BAG | oid::KEY_BAG))
+        .count()
+}
+
+/// `Err` if `key_bags` are more than `limits` allows.
+fn check_key_bags(key_bags: usize, limits: Option<&Limits>) -> Result<(), Pkcs12Error> {
+    match limits {
+        Some(limits) if key_bags > limits.key_bags => Err(Pkcs12Error::Unsupported(format!(
+            "more than {} key bags",
+            limits.key_bags
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// The key and certificate bags of a key store, decrypted, in stored order; within
+/// `limits`, if given, checked before the key derivations they bound.
+fn bags(
+    pfx: &[u8],
+    password: &str,
+    limits: Option<&Limits>,
+) -> Result<(Vec<KeyBag>, Vec<CertBagEntry>), Pkcs12Error> {
     let der = ber::to_der(pfx)?;
     let pfx = Pfx::from_der(&der)?;
     let auth_safe = data_content(&pfx.auth_safe)?;
+    let infos = Vec::<ContentInfo>::from_der(&ber::to_der(auth_safe.as_bytes())?)?;
+    let mut safes = Vec::with_capacity(infos.len());
+    for info in &infos {
+        safes.push(match info.content_type {
+            oid::DATA => Safe::Bags(safe_bags(data_content(info)?.as_bytes())?),
+            oid::ENCRYPTED_DATA => Safe::Encrypted(info),
+            other => {
+                return Err(Pkcs12Error::Unsupported(format!(
+                    "authenticated safe content type {other}"
+                )));
+            }
+        });
+    }
+    if let Some(limits) = limits {
+        let encrypted = safes
+            .iter()
+            .filter(|safe| matches!(safe, Safe::Encrypted(_)))
+            .count();
+        if encrypted > limits.encrypted_safes {
+            return Err(Pkcs12Error::Unsupported(format!(
+                "more than {} encrypted safes",
+                limits.encrypted_safes
+            )));
+        }
+    }
+    let plain_key_bags = safes
+        .iter()
+        .map(|safe| match safe {
+            Safe::Bags(bags) => key_bag_count(bags),
+            Safe::Encrypted(_) => 0,
+        })
+        .sum();
+    check_key_bags(plain_key_bags, limits)?;
+
     let mut passwords = Passwords::new(password);
     if let Some(mac) = &pfx.mac_data
         && !mac_matches(mac, &passwords.bmp, auth_safe.as_bytes())?
@@ -142,30 +258,33 @@ fn bags(pfx: &[u8], password: &str) -> Result<(Vec<KeyBag>, Vec<CertBagEntry>), 
         }
     }
 
-    let mut keys = Vec::new();
-    let mut certs = Vec::new();
-    let infos = Vec::<ContentInfo>::from_der(&ber::to_der(auth_safe.as_bytes())?)?;
-    for info in &infos {
-        let safe_contents = match info.content_type {
-            oid::DATA => Zeroizing::new(data_content(info)?.as_bytes().to_vec()),
-            oid::ENCRYPTED_DATA => {
+    let mut opened = Vec::with_capacity(safes.len());
+    for safe in safes {
+        opened.push(match safe {
+            Safe::Bags(bags) => bags,
+            Safe::Encrypted(info) => {
                 let data: EncryptedData = content(info)?.decode_as()?;
                 let eci = &data.encrypted_content_info;
                 let encrypted = encrypted_content(eci.encrypted_content.as_ref())?;
-                decrypt(&eci.content_encryption_algorithm, &passwords, &encrypted)?
+                let decrypted = decrypt(&eci.content_encryption_algorithm, &passwords, &encrypted)?;
+                safe_bags(&decrypted)?
             }
-            other => {
-                return Err(Pkcs12Error::Unsupported(format!(
-                    "authenticated safe content type {other}"
-                )));
-            }
-        };
-        let safe_contents = Zeroizing::new(ber::to_der(&safe_contents)?);
-        for bag in Vec::<SafeBag>::from_der(&safe_contents)? {
-            collect_bag(bag, &passwords, &mut keys, &mut certs)?;
-        }
+        });
+    }
+    check_key_bags(opened.iter().map(|bags| key_bag_count(bags)).sum(), limits)?;
+
+    let mut keys = Vec::new();
+    let mut certs = Vec::new();
+    for bag in opened.into_iter().flatten() {
+        collect_bag(bag, &passwords, &mut keys, &mut certs)?;
     }
     Ok((keys, certs))
+}
+
+/// The bags of a safe's contents (DER or BER).
+fn safe_bags(contents: &[u8]) -> Result<Vec<SafeBag>, Pkcs12Error> {
+    let der = Zeroizing::new(ber::to_der(contents)?);
+    Ok(Vec::<SafeBag>::from_der(&der)?)
 }
 
 fn content(info: &ContentInfo) -> Result<&Any, Pkcs12Error> {
@@ -567,5 +686,132 @@ mod tests {
         assert_eq!(string_value(&bmp).unwrap(), "Тест");
         let utf8 = Any::from_der(&hex!("0c03 616263")).unwrap();
         assert_eq!(string_value(&utf8).unwrap(), "abc");
+    }
+
+    /// A MAC no password matches: refused only after its key derivation.
+    fn bogus_mac() -> MacData {
+        MacData {
+            mac: super::super::DigestInfo {
+                algorithm: spki::AlgorithmIdentifierOwned {
+                    oid: oid::SHA1,
+                    parameters: None,
+                },
+                digest: octets(vec![0; 20]),
+            },
+            mac_salt: octets(vec![1; 20]),
+            iterations: 1,
+        }
+    }
+
+    /// An encrypted safe that opens only through a key derivation.
+    fn encrypted_safe() -> ContentInfo {
+        let params = super::super::Pkcs12PbeParams {
+            salt: octets(vec![2; 20]),
+            iterations: 1,
+        };
+        ContentInfo {
+            content_type: oid::ENCRYPTED_DATA,
+            content: Some(any(&EncryptedData {
+                version: 0,
+                encrypted_content_info: super::super::EncryptedContentInfo {
+                    content_type: oid::DATA,
+                    content_encryption_algorithm: spki::AlgorithmIdentifierOwned {
+                        oid: oid::PBE_SHA_3DES,
+                        parameters: Some(any(&params)),
+                    },
+                    encrypted_content: Some(
+                        Any::new(
+                            Tag::ContextSpecific {
+                                constructed: false,
+                                number: TagNumber(0),
+                            },
+                            vec![0u8; 16],
+                        )
+                        .unwrap(),
+                    ),
+                },
+            })),
+        }
+    }
+
+    /// A PFX of `safes` with a MAC no password matches.
+    fn pfx_of(safes: Vec<ContentInfo>) -> Vec<u8> {
+        Pfx {
+            version: 3,
+            auth_safe: ContentInfo {
+                content_type: oid::DATA,
+                content: Some(any(&octets(safes.to_der().unwrap()))),
+            },
+            mac_data: Some(bogus_mac()),
+        }
+        .to_der()
+        .unwrap()
+    }
+
+    fn plain_safe(bags: Vec<SafeBag>) -> ContentInfo {
+        ContentInfo {
+            content_type: oid::DATA,
+            content: Some(any(&octets(bags.to_der().unwrap()))),
+        }
+    }
+
+    const LIMITS: Limits = Limits {
+        key_bags: 2,
+        encrypted_safes: 1,
+    };
+
+    #[test]
+    fn too_many_key_bags_are_refused_before_any_key_derivation() {
+        let store = pfx_of(vec![plain_safe(key_bags(3))]);
+        // Without limits the MAC is checked first, and fails.
+        assert!(matches!(load(&store, "x"), Err(Pkcs12Error::WrongPassword)));
+        let e = load_within(&store, "x", &LIMITS).unwrap_err();
+        assert!(
+            matches!(&e, Pkcs12Error::Unsupported(text) if text.contains("key bags")),
+            "{e}"
+        );
+        // At the limit the store is read as usual.
+        let store = pfx_of(vec![plain_safe(key_bags(2))]);
+        assert_eq!(
+            load_within(&store, "x", &LIMITS).unwrap_err(),
+            Pkcs12Error::WrongPassword
+        );
+    }
+
+    #[test]
+    fn too_many_encrypted_safes_are_refused_before_any_key_derivation() {
+        let store = pfx_of(vec![encrypted_safe(), encrypted_safe()]);
+        assert!(matches!(load(&store, "x"), Err(Pkcs12Error::WrongPassword)));
+        let e = load_within(&store, "x", &LIMITS).unwrap_err();
+        assert!(
+            matches!(&e, Pkcs12Error::Unsupported(text) if text.contains("encrypted")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn load_within_returns_entries_and_unpaired_certificates() {
+        let p12 = pfx(vec![
+            cert_bag("nca/prod/ncarsa22.der"),
+            key_bag(None),
+            cert_bag("openssl/rsa.cer"),
+        ]);
+        let loaded = load_within(&p12, "", &LIMITS).unwrap();
+        assert_eq!(loaded.entries.len(), 1);
+        assert_key_matches_cert(&loaded.entries[0]);
+        assert_eq!(
+            loaded.other_certs[0].to_der().unwrap(),
+            read(fixture("nca/prod/ncarsa22.der"))
+        );
+        assert_eq!(loaded.other_certs.len(), 1);
+        // A key no certificate pairs with is skipped, as `load` does.
+        let p12 = pfx(vec![key_bag(None), cert_bag("nca/prod/ncarsa22.der")]);
+        let loaded = load_within(&p12, "", &LIMITS).unwrap();
+        assert!(loaded.entries.is_empty());
+        assert_eq!(loaded.other_certs.len(), 1);
+    }
+
+    fn key_bags(count: usize) -> Vec<SafeBag> {
+        (0..count).map(|_| key_bag(None)).collect()
     }
 }

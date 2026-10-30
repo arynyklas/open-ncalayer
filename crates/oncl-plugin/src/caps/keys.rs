@@ -32,7 +32,7 @@ use oncl_pki::cms::{
 use oncl_pki::info::{KeyUsageBits, KncaCertType};
 use oncl_pki::key::{KeyAlg, SigAlg};
 use oncl_pki::ocsp::CertStatus;
-use oncl_pki::pkcs12::{self, KeyEntry};
+use oncl_pki::pkcs12::{self, KeyEntry, Pkcs12Error};
 use oncl_pki::pkix::CaSet;
 use oncl_pki::xades;
 use oncl_pki::{cert, tsp, xmldsig};
@@ -327,44 +327,68 @@ pub(crate) fn keys_open(state: &mut HostState, args: OpenArgs) -> HostResult<Ope
             }
         }
     };
+    let (entries, store_certs) = match open_file_store(storage, &data, password) {
+        Ok(opened) => opened,
+        Err(outcome) => return Ok(outcome),
+    };
+    keep_opened(state, entries, store_certs)
+}
+
+/// The most encrypted safes a key store from a plugin may have: real stores have one or
+/// two; each costs a key derivation before any key is read.
+const MAX_ENCRYPTED_SAFES: usize = 4;
+
+/// The keys of a key store file's contents, with the CA certificates a PKCS#12 store keeps
+/// beside its keys (for `keys_chain`). A PKCS#12 store is read once, and refused as corrupt
+/// before the work it would cost when it holds more keys than an instance keeps
+/// ([`MAX_KEY_HANDLES`]) or more than [`MAX_ENCRYPTED_SAFES`] encrypted safes.
+fn open_file_store(
+    storage: StorageKind,
+    data: &[u8],
+    password: Zeroizing<String>,
+) -> Result<(Vec<KeyEntry>, Arc<[Certificate]>), OpenOutcome> {
+    if storage == StorageKind::Pkcs12 {
+        let limits = pkcs12::Limits {
+            key_bags: MAX_KEY_HANDLES,
+            encrypted_safes: MAX_ENCRYPTED_SAFES,
+        };
+        let loaded = pkcs12::load_within(data, &password, &limits).map_err(|e| match e {
+            Pkcs12Error::WrongPassword => OpenOutcome::WrongPassword { tries_left: None },
+            Pkcs12Error::Malformed(_) | Pkcs12Error::Unsupported(_) => OpenOutcome::Corrupt,
+        })?;
+        if loaded.entries.is_empty() {
+            return Err(OpenOutcome::NoKeys);
+        }
+        return Ok((loaded.entries, loaded.other_certs.into()));
+    }
     let answer = StorageAnswer {
         storage,
         path: PathBuf::new(),
         password,
         reader: None,
     };
-    let entries = match answer.open_data(&data) {
-        Ok(entries) => entries,
-        Err(e) => {
-            return Ok(match e {
-                OpenError::WrongPassword
-                | OpenError::EmptyPassword
-                | OpenError::InnerPasswordPolicy => OpenOutcome::WrongPassword { tries_left: None },
-                OpenError::FileNotFound => OpenOutcome::NotFound,
-                OpenError::NoKeys | OpenError::NoSigningKeys | OpenError::NoAuthKeys => {
-                    OpenOutcome::NoKeys
-                }
-                // A file's data opens with none of a token's errors.
-                OpenError::NotPkcs12
-                | OpenError::NotJks
-                | OpenError::UnsupportedStorage
-                | OpenError::TokenAbsent
-                | OpenError::TokenService
-                | OpenError::WrongPin { .. }
-                | OpenError::PinBlocked
-                | OpenError::InvalidPin
-                | OpenError::TokenFailure => OpenOutcome::Corrupt,
-            });
-        }
-    };
-    // The CA certificates the store keeps beside its keys, for `keys_chain`.
-    let store_certs: Arc<[Certificate]> = match storage {
-        StorageKind::Pkcs12 => pkcs12::load_contents(&data, &answer.password)
-            .map(|contents| contents.other_certs.into())
-            .unwrap_or_else(|_| Arc::from([])),
-        StorageKind::Jks | StorageKind::Token(_) => Arc::from([]),
-    };
-    keep_opened(state, entries, store_certs)
+    match answer.open_data(data) {
+        Ok(entries) => Ok((entries, Arc::from([]))),
+        Err(e) => Err(match e {
+            OpenError::WrongPassword
+            | OpenError::EmptyPassword
+            | OpenError::InnerPasswordPolicy => OpenOutcome::WrongPassword { tries_left: None },
+            OpenError::FileNotFound => OpenOutcome::NotFound,
+            OpenError::NoKeys | OpenError::NoSigningKeys | OpenError::NoAuthKeys => {
+                OpenOutcome::NoKeys
+            }
+            // A file's data opens with none of a token's errors.
+            OpenError::NotPkcs12
+            | OpenError::NotJks
+            | OpenError::UnsupportedStorage
+            | OpenError::TokenAbsent
+            | OpenError::TokenService
+            | OpenError::WrongPin { .. }
+            | OpenError::PinBlocked
+            | OpenError::InvalidPin
+            | OpenError::TokenFailure => OpenOutcome::Corrupt,
+        }),
+    }
 }
 
 /// Keeps every key of `entries` under a handle of its own, with the other certificates of

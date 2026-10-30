@@ -623,6 +623,34 @@ fn open_over_handle_limit_inserts_nothing() {
 }
 
 #[test]
+fn page_store_with_more_keys_than_handles_is_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let open = |count: usize| {
+        let path = store_of(dir.path(), &vec!["user-gost2015-sign"; count]);
+        let mut plugin = guest(
+            &services(),
+            "keys = true",
+            &[(
+                Import::KeysOpen,
+                open_args(
+                    "PKCS12",
+                    KeySource::Bytes(Bytes::from(read(&path))),
+                    text(PASSWORD),
+                ),
+            )],
+        );
+        run::<OpenOutcome>(&mut plugin)
+    };
+    // As many keys as an instance keeps open.
+    assert_eq!(
+        opened(open(MAX_KEY_HANDLES).unwrap()).len(),
+        MAX_KEY_HANDLES
+    );
+    // One more: refused before any key is decrypted.
+    assert_eq!(open(MAX_KEY_HANDLES + 1).unwrap(), OpenOutcome::Corrupt);
+}
+
+#[test]
 fn open_terminal_is_no_device_with_tokens_off() {
     let mut plugin = guest(
         &services(),
