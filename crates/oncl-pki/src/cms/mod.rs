@@ -84,6 +84,37 @@ pub fn signer_index_of(cms: &[u8], cert: &Certificate) -> Result<Option<usize>, 
     Ok(None)
 }
 
+/// The encapsulated content (`eContent`) of a DER or BER `ContentInfo{SignedData}`, or
+/// `None` for a detached CMS. No signature is checked: [`verify`] does that.
+///
+/// # Errors
+///
+/// [`CmsError::Malformed`] if `cms` is not a readable `ContentInfo{SignedData}`.
+pub fn content(cms: &[u8]) -> Result<Option<Vec<u8>>, CmsError> {
+    let der = ber::to_der(cms)?;
+    let content_info = ContentInfo::from_der(&der)?;
+    Ok(signed_data(&content_info)?
+        .encap_content_info
+        .e_content
+        .map(|c| c.as_bytes().to_vec()))
+}
+
+/// The certificates (`certificates` field) of a DER or BER `ContentInfo{SignedData}`, in
+/// their order; other `CertificateChoices` are skipped. No signature is checked.
+///
+/// # Errors
+///
+/// [`CmsError::Malformed`] if `cms` is not a readable `ContentInfo{SignedData}` or a
+/// certificate does not parse.
+pub fn certificates(cms: &[u8]) -> Result<Vec<Certificate>, CmsError> {
+    let der = ber::to_der(cms)?;
+    let content_info = ContentInfo::from_der(&der)?;
+    Ok(verify::certificates(&signed_data(&content_info)?)?
+        .into_iter()
+        .map(|(cert, _)| cert)
+        .collect())
+}
+
 /// The `SignedData` of a `ContentInfo`, which must be of type id-signedData.
 fn signed_data<'a>(content_info: &ContentInfo<'a>) -> Result<SignedData<'a>, CmsError> {
     if content_info.content_type != oid::SIGNED_DATA {
