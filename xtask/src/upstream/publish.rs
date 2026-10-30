@@ -272,6 +272,7 @@ pub fn publish(emit: &Path, opts: &PublishOptions) -> anyhow::Result<PublishRepo
             &opts.branch_dir,
             &opts.git_env,
         )?;
+        keeps_history(&branch.dir, checked.index.as_ref())?;
         branch.apply(emit)?;
         let entry = checked.history.iter().next();
         let old_facts = entry.and_then(|(id, _)| previous_facts(&branch.dir, id));
@@ -371,6 +372,53 @@ fn publish_entry_issues(
         report.actions.insert(issue.key, action);
     }
     Ok(refs)
+}
+
+/// Refuses an `index.json` that lacks an entry of the branch's: an emit built from another
+/// state than the branch would replace its history.
+fn keeps_history(branch_dir: &Path, emitted: Option<&Index>) -> anyhow::Result<()> {
+    let Some(emitted) = emitted else {
+        return Ok(());
+    };
+    let Ok(bytes) = std::fs::read(branch_dir.join(INDEX)) else {
+        return Ok(());
+    };
+    let current: Index = serde_json::from_slice(&bytes).context("the branch's index.json")?;
+    let missing: Vec<&str> = current
+        .entries
+        .iter()
+        .filter(|e| !emitted.entries.iter().any(|n| n.id == e.id))
+        .map(|e| e.id.as_str())
+        .collect();
+    ensure!(
+        missing.is_empty(),
+        "the emitted index.json lacks entries of the upstream branch ({missing:?}): \
+         it was built from another state; run with the branch checked out as --state"
+    );
+    Ok(())
+}
+
+/// One cycle published: the `upstream` branch is opened first and its worktree is the state
+/// of the run (`run_opts.state_dir` is replaced), then the emit directory is published.
+///
+/// # Errors
+///
+/// git, run or publication errors.
+pub fn run_and_publish(
+    mut run_opts: super::run::RunOptions,
+    opts: &PublishOptions,
+) -> anyhow::Result<(super::run::RunOutcome, PublishReport)> {
+    let branch = branch::open(
+        &opts.repo_dir,
+        &opts.remote,
+        BRANCH,
+        &opts.branch_dir,
+        &opts.git_env,
+    )?;
+    run_opts.state_dir = branch.dir.clone();
+    let outcome = super::run::run(&run_opts)?;
+    let report = publish(&run_opts.emit, opts)?;
+    Ok((outcome, report))
 }
 
 /// The facts of the entry before `id` in the branch's `index.json`.

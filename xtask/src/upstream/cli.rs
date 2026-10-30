@@ -11,7 +11,7 @@ use super::github::Client;
 use super::http::Fetcher;
 use super::poll::AlertKind;
 use super::poll::poll;
-use super::publish::{PublishOptions, alert, issues_for_entry, publish};
+use super::publish::{PublishOptions, alert, issues_for_entry, publish, run_and_publish};
 use super::report::PortRef;
 use super::run::{self as cycle, RunOptions};
 use super::state::State;
@@ -41,9 +41,10 @@ pub enum UpstreamCommand {
     /// files of the `upstream` branch and `run.json` go to `--emit` (JSON only). Without
     /// `--dry-run` the emit directory is then published (as `upstream publish`).
     Run {
-        /// A checkout of the `upstream` branch (or an empty directory).
-        #[arg(long, default_value = "target/upstream/state")]
-        state: PathBuf,
+        /// With `--dry-run`: a checkout of the `upstream` branch (or an empty directory)
+        /// [default: target/upstream/state]. Without it the branch itself is the state.
+        #[arg(long)]
+        state: Option<PathBuf>,
         /// Where the originals are downloaded and unpacked.
         #[arg(long, default_value = "target/upstream/work")]
         work: PathBuf,
@@ -248,10 +249,17 @@ pub fn run(command: UpstreamCommand) -> anyhow::Result<()> {
                 innounp: tools.innounp.as_ref().map(|_| "2.71.2".to_owned()),
                 sevenzip,
             };
-            let outcome = cycle::run(&RunOptions {
-                state_dir: state,
+            if !dry_run {
+                anyhow::ensure!(
+                    state.is_none(),
+                    "--state only with --dry-run: a published run reads the upstream branch"
+                );
+            }
+            let run_opts = RunOptions {
+                state_dir: state
+                    .unwrap_or_else(|| root.join("target").join("upstream").join("state")),
                 work,
-                emit: emit.clone(),
+                emit,
                 endpoints: Endpoints::default(),
                 trusted: oncl_pki::roots::nca_production().to_vec(),
                 tools,
@@ -260,25 +268,39 @@ pub fn run(command: UpstreamCommand) -> anyhow::Result<()> {
                 fetcher: Fetcher::new(),
                 now: time::OffsetDateTime::now_utc(),
                 github_output,
-            })?;
-            println!(
-                "run: changed={} entry={} alerts={}",
-                outcome.changed,
-                outcome.entry.as_deref().unwrap_or("-"),
-                outcome.alerts.len()
-            );
+            };
+            let print = |outcome: &super::run::RunOutcome| {
+                println!(
+                    "run: changed={} entry={} alerts={}",
+                    outcome.changed,
+                    outcome.entry.as_deref().unwrap_or("-"),
+                    outcome.alerts.len()
+                );
+            };
             if dry_run {
+                print(&cycle::run(&run_opts)?);
                 return Ok(());
             }
-            // The same code as `upstream publish --from <emit>`.
-            publish_cli(
-                &root,
-                &emit,
-                &PublishArgs {
-                    remote: "origin".to_owned(),
-                    ..PublishArgs::default()
-                },
+            // The branch is opened first and is the state; then the same code as
+            // `upstream publish --from <emit>`.
+            let (outcome, report) = run_and_publish(
+                run_opts,
+                &publish_options(
+                    &root,
+                    &PublishArgs {
+                        remote: "origin".to_owned(),
+                        ..PublishArgs::default()
+                    },
+                )?,
             )?;
+            print(&outcome);
+            println!(
+                "publish: committed={} pushed={} dispatched={} issues={}",
+                report.committed,
+                report.pushed,
+                report.dispatched,
+                report.actions.len()
+            );
             Ok(())
         }
     }

@@ -68,7 +68,7 @@ gh workflow run upstream.yml -f mode=issues-only   # issues последней �
 cargo xtask upstream run --dry-run --emit target/upstream/emit
 ```
 
-Без `--dry-run` `run` сразу публикует каталог emit тем же кодом, что и `upstream publish` (нужны `GITHUB_TOKEN` и `GITHUB_REPOSITORY`). MSI и DMG распаковывает 7-Zip 25.01 или новее (путь — `ONCL_7Z`; пакет `7zip` Ubuntu 24.04 старее, с ним MSI и DMG получают `skipped`); без innounp установщики Inno Setup получают статус `skipped`. `cargo xtask upstream poll` печатает только изменения источников.
+Без `--dry-run` `run` сначала открывает ветку `upstream` (её worktree и есть состояние, `--state` тогда запрещён), затем публикует каталог emit тем же кодом, что и `upstream publish` (нужны `GITHUB_TOKEN` и `GITHUB_REPOSITORY`). `publish` отказывается от каталога emit, в `index.json` которого нет какой-либо записи ветки: такой каталог собран не из её состояния и стёр бы историю. MSI и DMG распаковывает 7-Zip 25.01 или новее (путь — `ONCL_7Z`; пакет `7zip` Ubuntu 24.04 старее, с ним MSI и DMG получают `skipped`); без innounp установщики Inno Setup получают статус `skipped`. `cargo xtask upstream poll` печатает только изменения источников.
 
 ## 6. Разбор `upstream-alert`
 

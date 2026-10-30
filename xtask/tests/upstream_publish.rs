@@ -16,7 +16,7 @@ use xtask::upstream::github::Client;
 use xtask::upstream::http::Fetcher;
 use xtask::upstream::poll::AlertKind;
 use xtask::upstream::publish::{
-    Action, PublishOptions, alert, issues_for_entry, publish, validate_emit,
+    Action, PublishOptions, alert, issues_for_entry, publish, run_and_publish, validate_emit,
 };
 use xtask::upstream::report::{PortRef, key_marker};
 use xtask::upstream::run::{RunOptions, files_under, run};
@@ -263,10 +263,15 @@ impl Setup {
             }
         }
         let emit = self.root.join(format!("emit{n}"));
-        run(&RunOptions {
+        run(&self.run_opts(state, &emit)).unwrap();
+        emit
+    }
+
+    fn run_opts(&self, state: PathBuf, emit: &Path) -> RunOptions {
+        RunOptions {
             state_dir: state,
             work: self.root.join("work"),
-            emit: emit.clone(),
+            emit: emit.to_owned(),
             endpoints: endpoints(&self.world),
             trusted: synthetic_issuers(),
             tools: Tools::default(),
@@ -275,9 +280,11 @@ impl Setup {
             fetcher: Fetcher::for_tests(),
             now: time::OffsetDateTime::from_unix_timestamp(1_793_448_000).unwrap(),
             github_output: None,
-        })
-        .unwrap();
-        emit
+        }
+    }
+
+    fn branch_index(&self) -> Index {
+        serde_json::from_str(&self.git(&self.origin(), &["show", "upstream:index.json"])).unwrap()
     }
 
     /// The world moves the demo plugin to 1.1.0.
@@ -655,4 +662,49 @@ fn issues_only_mode_from_branch() {
     let index: Index =
         serde_json::from_str(&s.git(&s.origin(), &["show", "upstream:index.json"])).unwrap();
     assert_eq!(index.entries.last().unwrap().issues.len(), 1);
+}
+
+#[test]
+fn emit_that_drops_branch_history_is_refused() {
+    let s = Setup::new();
+    let first = s.emit(1);
+    publish(&first, &s.opts("b1")).unwrap();
+    s.bump_demo();
+    // A run from an empty state directory, not from the branch: a baseline index.
+    let emit = s.root.join("stale-emit");
+    let empty = s.root.join("empty-state");
+    std::fs::create_dir_all(&empty).unwrap();
+    run(&s.run_opts(empty, &emit)).unwrap();
+    let err = publish(&emit, &s.opts("b2")).unwrap_err();
+    assert!(format!("{err:#}").contains("index.json"), "{err:#}");
+    assert_eq!(s.commits().len(), 1);
+    assert_eq!(s.branch_index().entries.len(), 1);
+}
+
+#[test]
+fn run_and_publish_reads_the_branch() {
+    let s = Setup::new();
+    let emit = s.root.join("emit");
+    let opts = s.opts("branch");
+    run_and_publish(s.run_opts(s.root.join("unused"), &emit), &opts).unwrap();
+    // Unchanged world: nothing new.
+    let (outcome, report) =
+        run_and_publish(s.run_opts(s.root.join("unused"), &emit), &opts).unwrap();
+    assert!(!outcome.changed && !report.committed);
+    s.bump_demo();
+    run_and_publish(s.run_opts(s.root.join("unused"), &emit), &opts).unwrap();
+    let index = s.branch_index();
+    assert_eq!(index.entries.len(), 2);
+    assert_eq!(s.commits().len(), 2);
+}
+
+#[test]
+fn published_run_refuses_a_state_directory() {
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["upstream", "run", "--state", "somewhere"])
+        .env_remove("ONCL_7Z")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--state only with --dry-run"));
 }
