@@ -1229,6 +1229,10 @@ fn show_file_chooser_kinds_and_answers() {
     assert_eq!(prompts[1].directory, Some(dir.path().to_path_buf()));
     assert_eq!(prompts[0].origin, "https://x.kz");
     assert_eq!(prompts[0].locale, Locale::Ru);
+    assert!(
+        prompts.iter().all(|p| p.source.is_none()),
+        "the page asks itself"
+    );
 
     // An unknown kind is Java's `valueOf` failure, before any dialog.
     let s = setup(script![]);

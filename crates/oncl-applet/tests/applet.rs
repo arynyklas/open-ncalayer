@@ -257,6 +257,7 @@ fn show_file_chooser() {
     assert_eq!(prompts[0].kind, FileKind::P12);
     assert_eq!(prompts[0].directory.as_deref(), Some(dir.path()));
     assert_eq!(prompts[0].origin, "https://x.kz");
+    assert_eq!(prompts[0].source, None, "the page asks itself");
     assert_eq!(prompts[0].locale, Locale::Ru);
     assert_eq!(
         (prompts[1].kind, prompts[1].directory.clone()),

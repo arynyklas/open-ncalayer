@@ -114,6 +114,7 @@ fn choose_file(
             .and_then(page_path)
             .filter(|d| !d.as_os_str().is_empty())
             .map(Path::to_path_buf),
+        source: None,
     };
     let answer = {
         let _flow = lock_dialog_flow();

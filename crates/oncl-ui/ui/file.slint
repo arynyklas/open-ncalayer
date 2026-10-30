@@ -9,8 +9,12 @@ export component FileDialog inherits Window {
 
     // The requesting page's origin.
     in property <string> origin;
+    // Who asks besides the page (a plugin's name); empty: the page itself.
+    in property <string> source;
     // What to choose: a file or a folder.
     in property <string> heading;
+    // The translated line naming who asks; empty without a source.
+    out property <string> source-line: root.source == "" ? "" : @tr("Plugin: {}", root.source);
 
     callback browse();
     callback cancel();
@@ -18,6 +22,11 @@ export component FileDialog inherits Window {
     VerticalBox {
         Text {
             text: @tr("Request from: {}", root.origin);
+            wrap: word-wrap;
+        }
+
+        if root.source != "": Text {
+            text: root.source-line;
             wrap: word-wrap;
         }
 

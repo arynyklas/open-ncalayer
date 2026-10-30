@@ -681,8 +681,22 @@ fn pick_folder(window: &slint::Window, current: &str, set: impl FnOnce(String) +
 /// [`browse`], the start folder is not checked here.
 fn show_file(p: FilePrompt, reply: Sender<Prompt<PathBuf>>) -> Result<(), PlatformError> {
     let ui = FileDialog::new()?;
+    let pending = wire_file(&ui, p, reply);
+    show(&ui, pending)?;
+    ui.invoke_browse();
+    Ok(())
+}
+
+/// Fills the file chooser with `p` (the plugin asking, if any, under the origin) and wires
+/// Browse… to the system dialog.
+fn wire_file(
+    ui: &FileDialog,
+    p: FilePrompt,
+    reply: Sender<Prompt<PathBuf>>,
+) -> Rc<Pending<FileDialog, PathBuf>> {
     select_language(p.locale);
     ui.set_origin(p.origin.as_str().into());
+    ui.set_source(p.source.as_deref().unwrap_or_default().into());
     ui.set_heading(view::file_dialog_title(p.kind, p.locale).into());
     let pending = Pending::new(ui.clone_strong(), reply);
     let weak = ui.as_weak();
@@ -694,9 +708,7 @@ fn show_file(p: FilePrompt, reply: Sender<Prompt<PathBuf>>) -> Result<(), Platfo
             }
         }
     });
-    show(&ui, pending)?;
-    ui.invoke_browse();
-    Ok(())
+    pending
 }
 
 /// Opens the system dialog for `p` over `ui`; a choice answers `pending`, a cancel cancels
@@ -1506,6 +1518,36 @@ mod plugin_dialogs {
         wire_dismissal(&ui, &pending);
         close(ui.window());
         assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled), "closing is not a no");
+    }
+
+    #[test]
+    fn file_dialog_names_the_plugin_asking() {
+        offscreen();
+        let file = |locale, source: Option<&str>| FilePrompt {
+            origin: ORIGIN.to_owned(),
+            locale,
+            kind: FileKind::All,
+            directory: None,
+            source: source.map(str::to_owned),
+        };
+        for (locale, line) in [
+            (Locale::Ru, "Плагин: Example"),
+            (Locale::Kk, "Плагин: Example"),
+            (Locale::En, "Plugin: Example"),
+        ] {
+            let ui = FileDialog::new().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let pending = wire_file(&ui, file(locale, Some("Example")), tx);
+            wire_dismissal(&ui, &pending);
+            assert_eq!(ui.get_source_line(), line);
+            ui.invoke_cancel();
+            assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled));
+        }
+        // The page asking itself (basics, commonUtils, the Applet): no plugin line.
+        let ui = FileDialog::new().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        wire_file(&ui, file(Locale::Ru, None), tx);
+        assert_eq!(ui.get_source_line(), "");
     }
 
     #[test]

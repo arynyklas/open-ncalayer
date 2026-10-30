@@ -358,6 +358,10 @@ fn open_reads_chosen_file() {
     );
     assert_eq!(prompter.file_prompts()[0].kind, FileKind::All);
     assert_eq!(prompter.file_prompts()[0].origin, ORIGIN);
+    assert_eq!(
+        prompter.file_prompts()[0].source.as_deref(),
+        Some("Пример плагина")
+    );
     assert_eq!(reply(&mut plugin, "open", json!({}))["body"], Value::Null);
 
     // A folder is not a file.
