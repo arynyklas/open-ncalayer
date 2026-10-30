@@ -9,14 +9,14 @@ use base64::engine::general_purpose::STANDARD;
 use common::*;
 use oncl_basics::testing::{ScriptedPrompter, Step};
 use oncl_basics::{FileKind, MessageKind, lock_dialog_flow};
-use oncl_pdk::abi::{self, ConfirmArgs, Import};
+use oncl_pdk::abi::{self, Bytes, ConfirmArgs, ErrorCode, HttpArgs, HttpResponse, Import, Method};
 use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport};
 use oncl_pki::key::{KeyAlg, SigAlg};
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::MockTsa;
 use oncl_plugin::{
-    Engine, HTTP_TIMEOUT, HostServices, Instance, MAX_HTTP_BODY, MAX_KEY_HANDLES, Manifest,
-    PluginError, SessionContext,
+    Engine, HTTP_TIMEOUT, HostServices, Instance, MAX_HTTP_BODY, MAX_HTTP_REQUESTS,
+    MAX_KEY_HANDLES, Manifest, PluginError, SessionContext,
 };
 use oncl_testkit::plugin::example_wasm;
 use oncl_testkit::{read, synthetic};
@@ -561,6 +561,55 @@ fn http_inside_allowlist_reaches_transport_https_only() {
         assert_eq!(asked.opts.max_len, MAX_HTTP_BODY);
         assert_eq!(asked.opts.timeout, HTTP_TIMEOUT);
     }
+}
+
+/// A guest whose `oncl_process` sends `times` GET requests within its prefix.
+fn fetching_instance(services: &HostServices, times: usize) -> Instance {
+    let args = abi::encode(&HttpArgs {
+        method: Method::Get,
+        url: "https://example.invalid/".to_owned(),
+        content_type: None,
+        body: Bytes::default(),
+    });
+    let calls: Vec<_> = (0..times)
+        .map(|_| (Import::HttpRequest, args.clone()))
+        .collect();
+    Engine::new()
+        .compile(
+            &manifest(r#"http = ["https://example.invalid/"]"#),
+            &wasm(&probe(&calls)),
+        )
+        .unwrap()
+        .instantiate(services, session(1))
+        .unwrap()
+}
+
+#[test]
+fn http_requests_per_call_are_capped() {
+    let transport = Recording::new(HttpReply {
+        status: 200,
+        content_type: None,
+        location: None,
+        body: Vec::new(),
+    });
+    let services = services_with(
+        Arc::new(ScriptedPrompter::new(Vec::new())),
+        transport.clone(),
+    );
+    let cap = MAX_HTTP_REQUESTS as usize;
+    // As many as allowed, call after call: the count starts again with each call.
+    let mut at_cap = fetching_instance(&services, cap);
+    for _ in 0..2 {
+        let response = at_cap.process("{}", &from(ORIGIN)).unwrap();
+        assert_eq!(probe_result::<HttpResponse>(&response).unwrap().status, 200);
+    }
+    assert_eq!(transport.asked().len(), 2 * cap);
+    // One more within a call is a limit error, not sent.
+    let mut over = fetching_instance(&services, cap + 1);
+    let response = over.process("{}", &from(ORIGIN)).unwrap();
+    let error = probe_result::<HttpResponse>(&response).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Limit, "{error:?}");
+    assert_eq!(transport.asked().len(), 3 * cap);
 }
 
 /// A guest whose `oncl_process` asks `dialog_confirm` `times` times, then answers `{}` or,

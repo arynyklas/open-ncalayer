@@ -59,6 +59,8 @@ pub(crate) struct CallContext {
     pub(crate) origin: Option<String>,
     /// The language of the windows during this request.
     pub(crate) locale: Locale,
+    /// The HTTP requests sent during this request.
+    pub(crate) http_requests: u32,
 }
 
 /// An instance's store data.
@@ -89,6 +91,7 @@ impl HostState {
             call: CallContext {
                 origin: None,
                 locale: Locale::Ru,
+                http_requests: 0,
             },
             keys: KeyTable::default(),
             guest: None,
@@ -102,7 +105,11 @@ impl HostState {
 
     /// A request from `origin` starts.
     pub(crate) fn begin_call(&mut self, origin: Option<String>, locale: Locale) {
-        self.call = CallContext { origin, locale };
+        self.call = CallContext {
+            origin,
+            locale,
+            http_requests: 0,
+        };
     }
 
     /// The request is answered.

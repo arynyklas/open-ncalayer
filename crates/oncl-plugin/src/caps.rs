@@ -41,6 +41,9 @@ pub const MAX_KEY_HANDLES: usize = 16;
 /// The largest body of an HTTP request or reply.
 pub const MAX_HTTP_BODY: u64 = 32 << 20;
 
+/// The most HTTP requests of one `oncl_process` call: more are a `limit` error.
+pub const MAX_HTTP_REQUESTS: u32 = 64;
+
 /// The timeout of an HTTP request, connecting to reading the reply.
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -408,12 +411,18 @@ pub(crate) fn file_save(state: &mut HostState, args: SaveArgs) -> HostResult<Opt
 }
 
 /// `http_request`: one HTTPS request to a URL under a prefix of the manifest, sent as
-/// checked, without following redirects.
+/// checked, without following redirects; at most [`MAX_HTTP_REQUESTS`] in one call.
 pub(crate) fn http_request(state: &mut HostState, args: HttpArgs) -> HostResult<HttpResponse> {
     let url = allowed_url(&state.capabilities.http, &args.url)?;
     if args.body.len() as u64 > MAX_HTTP_BODY {
         return Err(limit(format!("the body is over {MAX_HTTP_BODY} bytes")));
     }
+    if state.call.http_requests >= MAX_HTTP_REQUESTS {
+        return Err(limit(format!(
+            "at most {MAX_HTTP_REQUESTS} HTTP requests in one call"
+        )));
+    }
+    state.call.http_requests += 1;
     let opts = GetOptions {
         timeout: HTTP_TIMEOUT,
         connect_timeout: CONNECT_TIMEOUT,
