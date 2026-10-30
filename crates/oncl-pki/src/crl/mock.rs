@@ -2,7 +2,7 @@
 
 use super::CertificateList;
 use crate::asn1util::{Enumerated, unsigned};
-use crate::http::{GetOptions, HttpError, HttpReply, HttpTransport, text_reply};
+use crate::http::{HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport, text_reply};
 use crate::pkcs12::KeyEntry;
 use crate::testing::{another_key, signature_alg};
 use der::Encode;
@@ -171,11 +171,15 @@ impl MockCrl {
 }
 
 impl HttpTransport for MockCrl {
-    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        self.lock_calls().push(url.to_owned());
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        self.lock_calls().push(request.url.to_owned());
+        if request.method == HttpMethod::Post {
+            return Ok(text_reply(405, "GET only"));
+        }
+        let max_len = request.opts.max_len;
         let body = self.der();
-        if u64::try_from(body.len()).map_or(true, |len| len > opts.max_len) {
-            return Err(HttpError(format!("body exceeds {} bytes", opts.max_len)));
+        if u64::try_from(body.len()).map_or(true, |len| len > max_len) {
+            return Err(HttpError::other(format!("body exceeds {max_len} bytes")));
         }
         Ok(HttpReply {
             status: 200,
@@ -183,17 +187,6 @@ impl HttpTransport for MockCrl {
             location: None,
             body,
         })
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        _: &str,
-        _: &[u8],
-        _: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.lock_calls().push(url.to_owned());
-        Ok(text_reply(405, "GET only"))
     }
 }
 

@@ -94,7 +94,7 @@ impl Settings {
     pub fn save(&self, path: &Path) -> io::Result<()> {
         self.proxy
             .validate()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.0))?;
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.message))?;
         update(path, |object| self.store(object))
     }
 

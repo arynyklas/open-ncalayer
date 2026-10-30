@@ -6,7 +6,7 @@ use oncl_basics::{
     MessagePrompt, OcspCache, OpenError, Prompt, Prompter, SavePrompt, StorageKind,
     lock_dialog_flow,
 };
-use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport};
+use oncl_pki::http::{HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport};
 use oncl_testkit::synthetic;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,12 +16,22 @@ use time::OffsetDateTime;
 struct Offline;
 
 impl HttpTransport for Offline {
-    fn get_with(&self, _: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
-        Err(HttpError("offline".to_owned()))
-    }
-
-    fn post_with(&self, _: &str, _: &str, _: &[u8], _: GetOptions) -> Result<HttpReply, HttpError> {
-        Err(HttpError("offline".to_owned()))
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (_, _) = (request.url, request.opts);
+                Err(HttpError::other("offline"))
+            }
+            HttpMethod::Post => {
+                let (_, _, _, _) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                Err(HttpError::other("offline"))
+            }
+        }
     }
 }
 

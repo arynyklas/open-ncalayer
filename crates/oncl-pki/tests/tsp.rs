@@ -7,13 +7,15 @@ use der::asn1::{AnyRef, ObjectIdentifier};
 use der::{Decode, Encode, Reader, SliceReader, Tag, Tagged};
 use oncl_pki::cms::{SignOptions, sign, verify};
 use oncl_pki::http::{
-    GetOptions, HttpError, HttpReply, HttpTransport, ProxySetting, UreqTransport,
+    HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport, NetKind, NonceSpec, PkiMethod,
+    ProxySetting, UreqTransport,
 };
-use oncl_pki::key::SigAlg;
+use oncl_pki::key::{HashAlg, SigAlg};
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::{
-    MockTamper, MockTsa, TsaMethod, TsaProfile, TspError, TspHash, parse_response, request_der,
-    timestamp_signer, verify_token, verify_token_for,
+    self, MockTamper, MockTsa, SignerSel, StampMode, TokenForm, TsaMethod, TsaProfile, TsaSpec,
+    TspError, TspHash, parse_response, request_der, stamp, timestamp_signer, verify_token,
+    verify_token_for,
 };
 use oncl_testkit::{ncanode, read, synthetic};
 use sha1::Digest as _;
@@ -455,20 +457,24 @@ impl Fixed {
 }
 
 impl HttpTransport for Fixed {
-    fn get_with(&self, url: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
-        self.seen.lock().unwrap().push(url.as_bytes().to_vec());
-        Ok(self.reply.clone())
-    }
-
-    fn post_with(
-        &self,
-        _url: &str,
-        _content_type: &str,
-        body: &[u8],
-        _: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.seen.lock().unwrap().push(body.to_vec());
-        Ok(self.reply.clone())
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (url, _) = (request.url, request.opts);
+                self.seen.lock().unwrap().push(url.as_bytes().to_vec());
+                Ok(self.reply.clone())
+            }
+            HttpMethod::Post => {
+                let (_url, _content_type, body, _) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                self.seen.lock().unwrap().push(body.to_vec());
+                Ok(self.reply.clone())
+            }
+        }
     }
 }
 
@@ -844,4 +850,226 @@ fn live_test_tsa() {
         let tst = verify_token(s[0].timestamp_token.as_ref().unwrap()).unwrap();
         println!("{method:?}: {tst:?}");
     }
+}
+
+/// The value of the first id-aa-timeStampToken attribute of signer `index`, DER.
+fn token_value(cms: &[u8], index: usize) -> Vec<u8> {
+    let si = signer_info(cms, index);
+    let attrs = si
+        .iter()
+        .find(|e| e.tag().is_context_specific() && e.tag().number() == der::TagNumber(1))
+        .unwrap();
+    let attr = children(children(*attrs)[0]);
+    assert_eq!(oid(attr[0]), TIME_STAMP_TOKEN);
+    children(attr[1])[0].to_der().unwrap()
+}
+
+fn basics_spec() -> TsaSpec {
+    TsaSpec::from(TsaProfile::basics_default())
+}
+
+#[test]
+fn stamp_replace_vs_append() {
+    let mock = tsa();
+    let spec = basics_spec();
+    let stamp_with = |cms: &[u8], mode| {
+        stamp(cms, SignerSel::Last, &spec, mode, TokenForm::Token, &mock).unwrap()
+    };
+    let once = stamp_with(&signed("user-gost2015-sign"), StampMode::Replace);
+    let replaced = stamp_with(&once, StampMode::Replace);
+    assert_eq!(
+        unsigned_attrs(&replaced, 0),
+        [(TIME_STAMP_TOKEN.to_owned(), 1)]
+    );
+    let appended = stamp_with(&once, StampMode::Append);
+    assert_eq!(
+        unsigned_attrs(&appended, 0),
+        [
+            (TIME_STAMP_TOKEN.to_owned(), 1),
+            (TIME_STAMP_TOKEN.to_owned(), 1)
+        ]
+    );
+    verify(&appended, None).unwrap();
+}
+
+#[test]
+fn stamp_all_unstamped() {
+    let mock = tsa();
+    let spec = basics_spec();
+    let first = stamp(
+        &signed("user-gost2015-sign"),
+        SignerSel::Index(0),
+        &spec,
+        StampMode::Replace,
+        TokenForm::Token,
+        &mock,
+    )
+    .unwrap();
+    let first_token = token_value(&first, 0);
+    let two = sign(&entry("user-rsa-sign"), &first, &opts(true)).unwrap();
+    let three = sign(&entry("user-gost2004-sign"), &two, &opts(true)).unwrap();
+    let all = stamp(
+        &three,
+        SignerSel::AllUnstamped,
+        &spec,
+        StampMode::Replace,
+        TokenForm::Token,
+        &mock,
+    )
+    .unwrap();
+    assert_eq!(
+        mock.calls().len(),
+        3,
+        "the stamped signer is not asked again"
+    );
+    for index in 0..3 {
+        assert_eq!(
+            unsigned_attrs(&all, index),
+            [(TIME_STAMP_TOKEN.to_owned(), 1)]
+        );
+    }
+    assert_eq!(token_value(&all, 0), first_token);
+    assert_eq!(verify(&all, None).unwrap().len(), 3);
+}
+
+#[test]
+fn whole_response_token_form() {
+    let mock = tsa();
+    let cms = stamp(
+        &signed("user-gost2015-sign"),
+        SignerSel::Last,
+        &basics_spec(),
+        StampMode::Replace,
+        TokenForm::WholeResponse,
+        &mock,
+    )
+    .unwrap();
+    let (token, _) = parse_response(&token_value(&cms, 0)).unwrap();
+    verify_token_for(&token, &signer_signature(&cms, 0)).unwrap();
+}
+
+#[test]
+fn sha1_and_sha512_imprints() {
+    for hash in [HashAlg::Sha1, HashAlg::Sha512, HashAlg::Gost34311] {
+        let spec = TsaSpec {
+            hash,
+            ..basics_spec()
+        };
+        let cms = stamp(
+            &signed("user-rsa-sign"),
+            SignerSel::Last,
+            &spec,
+            StampMode::Replace,
+            TokenForm::Token,
+            &tsa(),
+        )
+        .unwrap();
+        let (tst, _) = verify_token_for(&token_value(&cms, 0), &signer_signature(&cms, 0)).unwrap();
+        assert_eq!(tst.imprint_alg, hash.oid(), "{hash:?}");
+    }
+}
+
+#[test]
+fn post_with_path_binding() {
+    let mock = tsa();
+    let spec = TsaSpec {
+        method: PkiMethod::PostWithPath,
+        ..basics_spec()
+    };
+    let reply = tsp::request(&spec, &[7; 64], &mock).unwrap();
+    let url = &mock.calls()[0];
+    let encoded = url.strip_prefix("http://tsp.pki.gov.kz/").unwrap();
+    let requests = mock.requests();
+    assert_eq!(
+        percent_decode(encoded),
+        STANDARD.encode(&requests[0]).as_bytes()
+    );
+    assert_eq!(reply.tst.imprint, [7; 64]);
+
+    // The raw GET binding: the base64 as it is, `+`, `/` and `=` included.
+    let raw = TsaSpec {
+        method: PkiMethod::Get,
+        ..basics_spec()
+    };
+    let mock = tsa();
+    tsp::request(&raw, &[0xfb; 64], &mock).unwrap();
+    let url = &mock.calls()[0];
+    assert_eq!(
+        url.strip_prefix("http://tsp.pki.gov.kz/").unwrap(),
+        STANDARD.encode(&mock.requests()[0])
+    );
+}
+
+#[test]
+fn no_policy_request() {
+    let mock = tsa();
+    let spec = TsaSpec {
+        policy: None,
+        nonce: NonceSpec::None,
+        cert_req: false,
+        ..basics_spec()
+    };
+    tsp::request(&spec, &[7; 64], &mock).unwrap();
+    let request = mock.requests().remove(0);
+    let fields = children(AnyRef::from_der(&request).unwrap());
+    // version and messageImprint only.
+    assert_eq!(fields.len(), 2);
+
+    // A given nonce goes out as it is.
+    let spec = TsaSpec {
+        nonce: NonceSpec::Value(vec![1, 2, 3]),
+        ..basics_spec()
+    };
+    let reply = tsp::request(&spec, &[7; 64], &mock).unwrap();
+    assert_eq!(reply.tst.nonce.as_deref(), Some(&[1, 2, 3][..]));
+}
+
+#[test]
+fn retries_until_success() {
+    let spec = TsaSpec {
+        retries: 2,
+        ..basics_spec()
+    };
+    let mock = tsa().with_failures(2);
+    tsp::request(&spec, &[7; 64], &mock).unwrap();
+    assert_eq!(mock.calls().len(), 3);
+    let spec = TsaSpec {
+        retries: 1,
+        ..basics_spec()
+    };
+    let mock = tsa().with_failures(2);
+    let e = tsp::request(&spec, &[7; 64], &mock).unwrap_err();
+    assert_eq!(e, TspError::Status(503));
+    assert_eq!(e.kind(), NetKind::Http(503));
+    assert_eq!(mock.calls().len(), 2);
+}
+
+#[test]
+fn skew_check_rejects() {
+    let hour_ago = time::OffsetDateTime::now_utc() - time::Duration::HOUR;
+    let spec = TsaSpec {
+        check_skew: Some(std::time::Duration::from_secs(300)),
+        ..basics_spec()
+    };
+    let e = tsp::request(&spec, &[7; 64], &tsa().with_gen_time(hour_ago)).unwrap_err();
+    assert_eq!(e, TspError::ClockSkew);
+    assert_eq!(e.kind(), NetKind::ClockSkew);
+    tsp::request(&spec, &[7; 64], &tsa()).unwrap();
+    tsp::request(&basics_spec(), &[7; 64], &tsa().with_gen_time(hour_ago)).unwrap();
+}
+
+#[test]
+fn tsa_eku_required() {
+    // A TSA whose certificate lacks the timeStamping key usage.
+    let mock = MockTsa::new(entry("user-gost2015-sign"));
+    assert_eq!(
+        tsp::request(&basics_spec(), &[7; 64], &mock).unwrap_err(),
+        TspError::NoTsaCertificate
+    );
+    let lenient = TsaSpec {
+        require_tsa_eku: false,
+        ..basics_spec()
+    };
+    let reply = tsp::request(&lenient, &[7; 64], &mock).unwrap();
+    assert_eq!(reply.tsa_cert, entry("user-gost2015-sign").cert);
 }

@@ -351,32 +351,35 @@ struct GatedHttp {
 }
 
 impl oncl_pki::http::HttpTransport for GatedHttp {
-    fn get_with(
+    fn send(
         &self,
-        _: &str,
-        _: oncl_pki::http::GetOptions,
+        request: &oncl_pki::http::HttpRequest<'_>,
     ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
-        self.entered.lock().unwrap().send(()).unwrap();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.opened.wait(open).unwrap();
+        match request.method {
+            oncl_pki::http::HttpMethod::Get => {
+                let (_, _) = (request.url, request.opts);
+                self.entered.lock().unwrap().send(()).unwrap();
+                let mut open = self.open.lock().unwrap();
+                while !*open {
+                    open = self.opened.wait(open).unwrap();
+                }
+                Ok(oncl_pki::http::HttpReply {
+                    status: 200,
+                    content_type: None,
+                    location: None,
+                    body: b"ok".to_vec(),
+                })
+            }
+            oncl_pki::http::HttpMethod::Post => {
+                let (_, _, _, _) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                Err(oncl_pki::http::HttpError::other("no POST here"))
+            }
         }
-        Ok(oncl_pki::http::HttpReply {
-            status: 200,
-            content_type: None,
-            location: None,
-            body: b"ok".to_vec(),
-        })
-    }
-
-    fn post_with(
-        &self,
-        _: &str,
-        _: &str,
-        _: &[u8],
-        _: oncl_pki::http::GetOptions,
-    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
-        Err(oncl_pki::http::HttpError("no POST here".to_owned()))
     }
 }
 

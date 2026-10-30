@@ -14,7 +14,7 @@ use oncl_basics::{
     availabilities,
 };
 use oncl_pki::cert::{self, Certificate};
-use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport};
+use oncl_pki::http::{HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport};
 use oncl_pki::info::{CertInfo, cert_info};
 use oncl_pki::ocsp::{CertStatus, MockOcsp, OcspTamper};
 use oncl_pki::pkcs12::{KeyEntry, load};
@@ -360,19 +360,23 @@ fn raw_always_checks_ocsp() {
 struct Stuck;
 
 impl HttpTransport for Stuck {
-    fn get_with(&self, _: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
-        thread::sleep(Duration::from_secs(30));
-        Err(HttpError("stuck".to_owned()))
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        _: &str,
-        _: &[u8],
-        o: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.get_with(url, o)
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (_, _) = (request.url, request.opts);
+                thread::sleep(Duration::from_secs(30));
+                Err(HttpError::other("stuck"))
+            }
+            HttpMethod::Post => {
+                let (url, _, _, o) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                self.get_with(url, o)
+            }
+        }
     }
 }
 
@@ -606,19 +610,23 @@ impl Refused {
 }
 
 impl HttpTransport for Refused {
-    fn get_with(&self, _: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
-        *self.0.lock().unwrap() += 1;
-        Err(HttpError("connection refused".to_owned()))
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        _: &str,
-        _: &[u8],
-        o: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.get_with(url, o)
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (_, _) = (request.url, request.opts);
+                *self.0.lock().unwrap() += 1;
+                Err(HttpError::other("connection refused"))
+            }
+            HttpMethod::Post => {
+                let (url, _, _, o) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                self.get_with(url, o)
+            }
+        }
     }
 }
 

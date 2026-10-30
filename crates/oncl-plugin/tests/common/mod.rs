@@ -6,7 +6,7 @@
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{Locale, OcspCache};
 use oncl_pdk::abi::{self, HostResult, Import};
-use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport};
+use oncl_pki::http::{HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport};
 use oncl_pki::tsp::TsaProfile;
 use oncl_plugin::{HostServices, Localized, Manifest, SessionContext};
 use oncl_protocol::AddInfo;
@@ -27,12 +27,22 @@ pub fn clock() -> OffsetDateTime {
 pub struct Offline;
 
 impl HttpTransport for Offline {
-    fn get_with(&self, _: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
-        Err(HttpError("offline".to_owned()))
-    }
-
-    fn post_with(&self, _: &str, _: &str, _: &[u8], _: GetOptions) -> Result<HttpReply, HttpError> {
-        Err(HttpError("offline".to_owned()))
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (_, _) = (request.url, request.opts);
+                Err(HttpError::other("offline"))
+            }
+            HttpMethod::Post => {
+                let (_, _, _, _) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                Err(HttpError::other("offline"))
+            }
+        }
     }
 }
 
@@ -49,6 +59,7 @@ pub fn services_with(
         tsa: TsaProfile::basics_default(),
         clock,
         cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
+        pki_hosts: oncl_plugin::nca_pki_hosts(),
         locale: Arc::new(|| Locale::Ru),
     }
 }

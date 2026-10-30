@@ -6,12 +6,13 @@ use super::asn1::{
 };
 use super::{CertStatus, OCSP_RESPONSE, key_hash};
 use crate::asn1util::{Enumerated, RawGeneralizedTime, format_generalized_time, unsigned};
-use crate::http::{GetOptions, HttpError, HttpReply, HttpTransport, percent_decode, text_reply};
+use crate::http::{
+    HttpError, HttpErrorKind, HttpMethod, HttpReply, HttpRequest, HttpTransport, request_in_url,
+    text_reply,
+};
 use crate::oid;
 use crate::pkcs12::KeyEntry;
 use crate::testing::{another_key, signature_alg};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use der::asn1::{AnyRef, BitStringRef, IntRef, OctetStringRef};
 use der::{Decode, Encode, Tag, TagNumber};
 use spki::AlgorithmIdentifierRef;
@@ -68,16 +69,19 @@ pub enum OcspTamper {
     Hang(Duration),
 }
 
-/// An OCSP responder answering GET requests of the NCA binding with a successful
-/// `BasicOCSPResponse` signed with `responder`'s key and carrying its certificate: the
-/// status set for the requested serial number (`good` for any other), thisUpdate a minute
-/// ago and nextUpdate in an hour. Unreadable requests get HTTP 400, POSTs HTTP 405. Every
-/// requested URL is recorded.
+/// An OCSP responder answering requests of any binding (GET, the NCA GET binding, POST)
+/// with a successful `BasicOCSPResponse` signed with `responder`'s key and carrying its
+/// certificate: the status set for the requested serial number (`good` for any other),
+/// thisUpdate a minute ago, nextUpdate in an hour, and the request's extensions (its
+/// nonce) echoed as the response's. The `CertID` is echoed with its hash algorithm.
+/// Unreadable requests get HTTP 400. Every requested URL and every request read are
+/// recorded.
 pub struct MockOcsp {
     responder: KeyEntry,
     statuses: BTreeMap<Vec<u8>, CertStatus>,
     tamper: OcspTamper,
     calls: Mutex<Vec<String>>,
+    requests: Mutex<Vec<Vec<u8>>>,
 }
 
 impl MockOcsp {
@@ -88,6 +92,7 @@ impl MockOcsp {
             statuses: BTreeMap::new(),
             tamper: OcspTamper::None,
             calls: Mutex::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -112,6 +117,14 @@ impl MockOcsp {
     /// URLs requested so far, in order.
     pub fn calls(&self) -> Vec<String> {
         self.lock_calls().clone()
+    }
+
+    /// The DER `OCSPRequest`s read so far, in order.
+    pub fn requests(&self) -> Vec<Vec<u8>> {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn lock_calls(&self) -> MutexGuard<'_, Vec<String>> {
@@ -206,7 +219,7 @@ impl MockOcsp {
                 .map_err(der_error)?,
             produced_at: RawGeneralizedTime(produced_at.as_bytes()),
             responses,
-            response_extensions: None,
+            response_extensions: request.tbs_request.request_extensions,
         }
         .to_der()
         .map_err(der_error)?;
@@ -244,13 +257,14 @@ impl MockOcsp {
 }
 
 impl HttpTransport for MockOcsp {
-    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        self.lock_calls().push(url.to_owned());
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        self.lock_calls().push(request.url.to_owned());
+        let timeout = request.opts.timeout;
         match self.tamper {
             OcspTamper::Hang(hang) => {
-                thread::sleep(hang.min(opts.timeout));
-                if hang > opts.timeout {
-                    return Err(HttpError("timed out".to_owned()));
+                thread::sleep(hang.min(timeout));
+                if hang > timeout {
+                    return Err(HttpError::new(HttpErrorKind::Timeout, "timed out"));
                 }
             }
             OcspTamper::HttpStatus(status) => return Ok(text_reply(status, "tampered")),
@@ -264,15 +278,22 @@ impl HttpTransport for MockOcsp {
             }
             _ => {}
         }
-        let encoded = url.rsplit('/').next().unwrap_or_default();
-        let Some(request) = percent_decode(encoded).and_then(|b| STANDARD.decode(b).ok()) else {
-            return Ok(text_reply(400, "request is not percent-encoded base64"));
+        let der = match request.method {
+            HttpMethod::Post => Some(request.body.to_vec()),
+            HttpMethod::Get => request_in_url(request.url),
         };
+        let Some(der) = der else {
+            return Ok(text_reply(400, "request is not base64"));
+        };
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(der.clone());
         let content_type = match self.tamper {
             OcspTamper::ContentType(content_type) => content_type,
             _ => OCSP_RESPONSE,
         };
-        Ok(match self.respond(&request) {
+        Ok(match self.respond(&der) {
             Ok(body) => HttpReply {
                 status: 200,
                 content_type: Some(content_type.to_owned()),
@@ -281,17 +302,6 @@ impl HttpTransport for MockOcsp {
             },
             Err(e) => text_reply(400, &e),
         })
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        _: &str,
-        _: &[u8],
-        _: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.lock_calls().push(url.to_owned());
-        Ok(text_reply(405, "GET only"))
     }
 }
 

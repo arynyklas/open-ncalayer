@@ -2,7 +2,7 @@
 //! indexes signed by a key made for the test.
 
 use super::*;
-use oncl_pki::http::{GetOptions, HttpError, HttpReply};
+use oncl_pki::http::{HttpError, HttpMethod, HttpReply, HttpRequest};
 use oncl_update::{Channel, CoreRelease, FlavorPackage, Index, Package, Sha256};
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -49,31 +49,41 @@ impl FakeTransport {
 }
 
 impl HttpTransport for FakeTransport {
-    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        lock(&self.asked).push((url.to_owned(), opts.max_len, opts.https_only));
-        lock(&self.timeouts).push(opts.timeout);
-        let hook = lock(&self.hook).take();
-        if let Some(hook) = hook {
-            hook();
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (url, opts) = (request.url, request.opts);
+                lock(&self.asked).push((url.to_owned(), opts.max_len, opts.https_only));
+                lock(&self.timeouts).push(opts.timeout);
+                let hook = lock(&self.hook).take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+                let url_hook = lock(&self.url_hooks).remove(url);
+                if let Some(hook) = url_hook {
+                    hook();
+                }
+                let (status, body) = lock(&self.bodies)
+                    .get(url)
+                    .cloned()
+                    .ok_or_else(|| HttpError::other("connection refused"))?;
+                Ok(HttpReply {
+                    status,
+                    content_type: None,
+                    location: None,
+                    body,
+                })
+            }
+            HttpMethod::Post => {
+                let (_, _, _, _) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                Err(HttpError::other("no POST here"))
+            }
         }
-        let url_hook = lock(&self.url_hooks).remove(url);
-        if let Some(hook) = url_hook {
-            hook();
-        }
-        let (status, body) = lock(&self.bodies)
-            .get(url)
-            .cloned()
-            .ok_or_else(|| HttpError("connection refused".to_owned()))?;
-        Ok(HttpReply {
-            status,
-            content_type: None,
-            location: None,
-            body,
-        })
-    }
-
-    fn post_with(&self, _: &str, _: &str, _: &[u8], _: GetOptions) -> Result<HttpReply, HttpError> {
-        Err(HttpError("no POST here".to_owned()))
     }
 }
 

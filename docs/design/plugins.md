@@ -207,7 +207,7 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 
 | Код | Когда |
 |---|---|
-| `denied` | Не разрешено: адрес вне префиксов `http` |
+| `denied` | Не разрешено: адрес вне префиксов `http`, адрес TSA, OCSP или CRL вне хостов PKI |
 | `invalid` | Неверные аргументы: CBOR не того типа, неизвестное хранилище, handle, за которым нет ключа |
 | `limit` | Превышен лимит: размер, число ключей, длина текста |
 | `failed` | Операция не удалась: ввод-вывод, сеть, подпись |
@@ -231,6 +231,11 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 | `keys_open` | `OpenArgs { storage, source, password }` | `OpenOutcome`: `opened` (все ключи хранилища с сертификатом, по handle на каждый), `wrong_password { tries_left }`, `blocked`, `no_device`, `not_found`, `corrupt`, `no_keys`, `declined` |
 | `keys_chain` | `Handle { handle }` | цепочка сертификатов ключа от него вверх (DER): сначала сертификаты его хранилища, недостающие — из CA ядра, до самоподписанного |
 | `keys_terminals` | `TerminalsArgs { storage }` | считыватели токенов хранилища (`AKKaztokenStore`, …); пока ядро не открывает токены — `[]` |
+| `keys_sign_cms_ex` | `SignCmsExArgs { handle, content, encapsulate, cosign, econtent_type, digest, attrs, certificates, timestamp }` | `CmsOutcome`: `signed` (CMS, DER) или `tsp_failed` (`NetFailure`: CMS подписан, метка не получена) |
+| `tsp_stamp` | `StampArgs { cms, signers, tsa, mode, token }` | `StampOutcome`: `stamped` (CMS, DER) или `failed` (`NetFailure`) |
+| `tsp_request` | `TspRequestArgs { tsa, imprint }` | `TspOutcome`: `ok { response, token, gen_time_ms, tsa_cert }` или `failed` |
+| `ocsp_fetch` | `OcspArgs { cert, issuer, cert_id_hash, nonce, url, method, timeout_ms, check }` | `OcspOutcome`: `ok { http_status, response, basic, response_status, cert_status, produced_at_ms, problem }` или `failed` |
+| `crl_fetch` | `CrlArgs { cert, issuer, timeout_ms }` | `CrlOutcome`: `ok { crls, status }`, `failed` или `invalid(problem)` |
 
 `keys_choose` показывает те же окна, что `PKIExtras.sign`: выбор хранилища (PKCS#12 и JKS; по умолчанию оба), пароль, затем выбор ключа. В окнах видны сайт, название плагина и `detail`. `filter` — те же условия, что `signerParams` и `signingParams`: назначения ключа, ИИН, БИН, серийный номер, просроченные, цепочка CA (по умолчанию — CA НУЦ; пустая — без построения пути и OCSP) и проверка OCSP.
 
@@ -243,6 +248,16 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 - пару (сайт, путь к файлу) пользователь разрешает в окне ядра «Сайт … через плагин … просит открыть хранилище ключей: <путь>» — один раз за сессию; отказ или закрытое окно — `declined`.
 
 Байты хранилища открываются без окна: они и пароль уже есть у страницы. Хранилища — PKCS#12 и JKS; токены (`terminal`) до их поддержки в ядре отвечают `no_device`. Если все ключи хранилища не помещаются в 16 handle — `limit`, и не открывается ни один.
+
+`keys_sign_cms_ex` собирает CMS по профилю плагина в одном месте с `keys_sign_cms`: `content` — `data` (подписываются данные) или `digest` (готовый хеш идёт в messageDigest как есть, в CMS не вкладывается); `cosign` — `auto` (подписанный CMS с вложенным контентом подписывается вторым подписантом, как `createCAdES`), `never` или `into` (новый подписант добавляется в данный CMS, подписывается `content`); `econtent_type` — OID типа содержимого (и атрибута contentType); `digest` — только хеш алгоритма подписи сертификата, другой — `invalid` (получатели НУЦ проверяют только эту пару). `attrs`: флаги contentType, messageDigest, signingCertificateV2 (SHA-256 сертификата), `signing_time { at: now | unix_ms, form: auto | utc | generalized }` и `extra` — атрибуты плагина: OID и значения готовым DER (значение, которое не разбирается как DER, и тип, который уже добавил флаг, — `invalid`); атрибуты ложатся в DER SET в порядке сортировки. Без единого атрибута подписываются сами данные. `certificates` — `signer`, `chain` (цепочка `keys_chain`) или `extra` (сертификат подписанта и данные). `timestamp` — метка TSA на новом подписанте (как `tsp_stamp` с `replace`).
+
+Метки времени, OCSP и CRL запрашивает ядро, а не плагин, и только у хостов PKI: `tsp.pki.gov.kz`, `ocsp.pki.gov.kz`, `crl.pki.gov.kz`, `pki.gov.kz`, `test.pki.gov.kz` и их поддоменов, по `http://` или `https://`. Адрес задаёт `PkiUrl`: `default` (`http://tsp.pki.gov.kz`, `http://ocsp.pki.gov.kz`), `fixed` (адрес) или `from_cert` (адрес из сертификата: OCSP — authorityInfoAccess, TSA — time-stamping в subjectInfoAccess или authorityInfoAccess; сертификат без адреса — `failed` с `other`). Адрес другого хоста, в том числе из сертификата и точки распространения CRL, — `denied`. Таймаут — от 1 мс до 60 с, повторов метки — не больше 10, иначе `invalid`. `PkiMethod`: `get` (base64 запроса после `/` как есть), `get_url_encoded` (base64 в кодировке URL, как NCALayer), `post { content_type }` (без типа — тип протокола), `post_with_path` (POST тела на адрес GET), `get_under(n)` (GET, пока закодированный запрос короче `n`, иначе POST). `Nonce`: `none`, `random(n)` или `value(bytes)`.
+
+`TsaChoice` — `basics` (Стрибог-512, политика 1.2.398.3.3.2.6.4), `kalkan` (SHA-256, политика 1.2.398.3.3.2.6.2), оба — GET с кодировкой URL на `tsp.pki.gov.kz`, или `custom(TsaSpec { url, method, hash, policy, nonce, cert_req, retries, timeout_ms, check_skew_ms, require_tsa_eku })`. Ответ TSA проверяется всегда: HTTP 200 с `application/timestamp-reply`, статус granted, подпись токена, nonce, отпечаток и политика запроса (без политики — любая), с `require_tsa_eku` — назначение timeStamping у подписанта токена, с `check_skew_ms` — genTime не дальше от часов ядра. `tsp_stamp` ставит метку на подписантов `signers` (`last`, `index(i)`, `all_unstamped`), заменяя прежнюю (`replace`) или добавляя ещё одну (`append`); в атрибут идёт токен (`token`) или весь `TimeStampResp` (`whole_response`).
+
+`ocsp_fetch` спрашивает о сертификате, издатель которого — `host_cas` (CA ядра), `given` или первый из `verifies_cert`, чей ключ проверяет подпись сертификата (не найден — `invalid`); `cert_id_hash` — хеш CertID, `nonce` — расширение nonce запроса. Ответ — каким пришёл, с `BasicOCSPResponse` и статусом сертификата; с `check` ответ проверяется как проверки OCSP ядра (ответчик по цепочке CA ядра с OCSPSigning и nocheck, подпись, актуальность, CertID, эхо nonce), а то, что не так, — `problem` (`responder_unverified`, `ocsp_stale`, `nonce_mismatch`, `malformed`), и тогда статус не сообщается. `crl_fetch` скачивает полный CRL из точек распространения сертификата и, если у сертификата есть FreshestCRL, дельта-CRL (без полного не используется); статус по дельте (запись removeFromCRL — не отозван) решает поверх полного.
+
+Сетевой сбой — не ошибка host-функции, а `NetFailure { stage, kind, address, detail }`: `stage` — `tsp`, `ocsp`, `crl`; `kind` — `unknown_host`, `connect`, `timeout`, `tls`, `http(status)`, `invalid_response`, `rejected(status)`, `clock_skew`, `other`; `address` — хост; `detail` — текст для журнала.
 
 Закрытый ключ остаётся в ядре: плагин получает только handle — номер ключа в своём экземпляре. Номера идут по возрастанию и не повторяются, поэтому handle после `keys_release` не может указать на другой ключ. Handle действует до `keys_release` или до конца экземпляра; handle другого экземпляра, освобождённый или неизвестный — `invalid`.
 

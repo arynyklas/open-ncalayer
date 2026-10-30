@@ -18,13 +18,16 @@ mod files;
 mod keys;
 mod net;
 
-pub(crate) use crypto::{ca_issuer, ca_list, cert_details, hash};
+pub use crypto::{NCA_PKI_HOSTS, nca_pki_hosts};
+pub(crate) use crypto::{
+    ca_issuer, ca_list, cert_details, crl_fetch, hash, ocsp_fetch, tsp_request, tsp_stamp,
+};
 pub use dialogs::MAX_SECRETS;
 pub(crate) use dialogs::{Secrets, dialog_confirm, dialog_message, dialog_password};
 pub(crate) use files::{file_open, file_save};
 pub(crate) use keys::{
     KeyTable, keys_chain, keys_choose, keys_open, keys_release, keys_select, keys_sign_cms,
-    keys_sign_raw, keys_sign_xml, keys_terminals,
+    keys_sign_cms_ex, keys_sign_raw, keys_sign_xml, keys_terminals,
 };
 pub(crate) use net::http_request;
 pub use net::{HTTP_TIMEOUT, MAX_HTTP_BODY};

@@ -4,11 +4,11 @@ use super::asn1::{MessageImprint, PkiStatusInfo, TimeStampReq, TimeStampResp, Ts
 use super::{BASICS_POLICY, TIMESTAMP_QUERY, TIMESTAMP_REPLY, TspError, TspHash, replace_token};
 use crate::asn1util::{RawGeneralizedTime, format_generalized_time, unsigned};
 use crate::cms::{SignOptions, sign_content};
-use crate::http::{GetOptions, HttpError, HttpReply, HttpTransport, percent_decode, text_reply};
+use crate::http::{
+    HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport, request_in_url, text_reply,
+};
 use crate::oid;
 use crate::pkcs12::KeyEntry;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use der::asn1::{AnyRef, IntRef, ObjectIdentifier, OctetStringRef};
 use der::{Decode, Encode};
 use spki::AlgorithmIdentifierRef;
@@ -28,17 +28,21 @@ pub enum MockTamper {
     NegativeNonce,
 }
 
-/// A TSA answering GET (NCA binding) and POST requests with a granted `TimeStampResp`: a
-/// `TSTInfo` with the request's policy (or the basics one), message imprint and nonce, the
-/// current time (or the one set with [`MockTsa::with_gen_time`]) and a serial counting the
-/// requests, signed with `entry` through `cms::sign_content` as id-ct-TSTInfo. Unreadable
-/// requests get HTTP 400, a POST of another content type HTTP 415. Every requested URL is
-/// recorded. [`MockTsa::stamp_with_nonce`] stamps a CMS directly, as for another client.
+/// A TSA answering GET (raw or percent-encoded base64 of the request after the host) and
+/// POST requests with a granted `TimeStampResp`: a `TSTInfo` with the request's policy (or
+/// the basics one), message imprint and nonce, the current time (or the one set with
+/// [`MockTsa::with_gen_time`]) and a serial counting the requests, signed with `entry`
+/// through `cms::sign_content` as id-ct-TSTInfo. Unreadable requests get HTTP 400, a POST
+/// of another content type HTTP 415, the first [`MockTsa::with_failures`] requests HTTP
+/// 503. Every requested URL and every request read are recorded.
+/// [`MockTsa::stamp_with_nonce`] stamps a CMS directly, as for another client.
 pub struct MockTsa {
     entry: KeyEntry,
     tamper: MockTamper,
     gen_time: Option<OffsetDateTime>,
+    failures: usize,
     calls: Mutex<Vec<String>>,
+    requests: Mutex<Vec<Vec<u8>>>,
 }
 
 impl MockTsa {
@@ -48,8 +52,24 @@ impl MockTsa {
             entry,
             tamper: MockTamper::None,
             gen_time: None,
+            failures: 0,
             calls: Mutex::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The same TSA, answering HTTP 503 to its first `failures` requests.
+    #[must_use]
+    pub fn with_failures(self, failures: usize) -> Self {
+        MockTsa { failures, ..self }
+    }
+
+    /// The DER `TimeStampReq`s read so far, in order.
+    pub fn requests(&self) -> Vec<Vec<u8>> {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The same TSA, spoiling its answers as `tamper` says.
@@ -85,6 +105,13 @@ impl MockTsa {
     }
 
     fn respond(&self, request: &[u8], serial: u32) -> HttpReply {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(request.to_vec());
+        if usize::try_from(serial).is_ok_and(|n| n <= self.failures) {
+            return text_reply(503, "try later");
+        }
         match self.time_stamp(request, serial) {
             Ok(body) => HttpReply {
                 status: 200,
@@ -223,29 +250,22 @@ impl MockTsa {
 
 /// A mock server: the request options do not change what it answers.
 impl HttpTransport for MockTsa {
-    fn get_with(&self, url: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
-        let serial = self.record(url);
-        let encoded = url.rsplit('/').next().unwrap_or_default();
-        Ok(
-            match percent_decode(encoded).and_then(|b| STANDARD.decode(b).ok()) {
-                Some(request) => self.respond(&request, serial),
-                None => text_reply(400, "request is not percent-encoded base64"),
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        let serial = self.record(request.url);
+        Ok(match request.method {
+            HttpMethod::Post => {
+                let content_type = request.content_type.unwrap_or_default();
+                if content_type != TIMESTAMP_QUERY {
+                    text_reply(415, content_type)
+                } else {
+                    self.respond(request.body, serial)
+                }
+            }
+            HttpMethod::Get => match request_in_url(request.url) {
+                Some(der) => self.respond(&der, serial),
+                None => text_reply(400, "request is not base64"),
             },
-        )
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        content_type: &str,
-        body: &[u8],
-        _: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        let serial = self.record(url);
-        if content_type != TIMESTAMP_QUERY {
-            return Ok(text_reply(415, content_type));
-        }
-        Ok(self.respond(body, serial))
+        })
     }
 }
 

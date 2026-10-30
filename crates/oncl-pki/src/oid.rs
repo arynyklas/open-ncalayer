@@ -116,8 +116,12 @@ pub const ISSUING_DISTRIBUTION_POINT: Oid = Oid::new_unwrap("2.5.29.28");
 pub const AD_OCSP: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1");
 /// id-ad-caIssuers: the issuer certificates access method of AuthorityInfoAccess.
 pub const AD_CA_ISSUERS: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.2");
+/// id-ad-timeStamping: the TSA access method of SubjectInfoAccess and AuthorityInfoAccess.
+pub const AD_TIME_STAMPING: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.3");
 /// id-pkix-ocsp-basic: the `BasicOCSPResponse` response type.
 pub const OCSP_BASIC: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1.1");
+/// id-pkix-ocsp-nonce: the nonce extension of an OCSP request and response.
+pub const OCSP_NONCE: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1.2");
 
 // PKCS#12 bags and attributes.
 /// keyBag.

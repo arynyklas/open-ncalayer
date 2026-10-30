@@ -27,13 +27,14 @@ use crate::cms::asn1::{
     Attribute, ContentInfo, RawSet, SignedContentInfo, SignedData, SignerInfo, der_set_contents,
 };
 use crate::cms::{self, CmsError};
-use crate::http::{HttpError, HttpTransport, nca_get_url};
+use crate::http::{GetOptions, HttpError, HttpTransport, NetKind, NonceSpec, PkiMethod, pki_send};
 use crate::info::cert_info;
-use crate::key::SigAlg;
+use crate::key::{HashAlg, SigAlg};
 use crate::oid;
 use der::asn1::{AnyRef, ObjectIdentifier, OctetStringRef, UintRef};
 use der::{Decode, Encode};
 use spki::AlgorithmIdentifierRef;
+use std::time::Duration;
 use time::OffsetDateTime;
 
 /// Policy `kz.gov.pki.knca.basics` asks the NCA TSA for.
@@ -132,6 +133,107 @@ impl TsaProfile {
     }
 }
 
+/// Where and how to time-stamp, as each client of the NCA TSA does it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TsaSpec {
+    /// TSA URL.
+    pub url: String,
+    /// HTTP binding; a POST is `application/timestamp-query` unless it names its own type.
+    pub method: PkiMethod,
+    /// Message imprint hash.
+    pub hash: HashAlg,
+    /// Requested (and then required) TSA policy; `None` asks for none and takes any.
+    pub policy: Option<ObjectIdentifier>,
+    /// The request's nonce, echoed by the token.
+    pub nonce: NonceSpec,
+    /// `certReq`.
+    pub cert_req: bool,
+    /// Requests repeated after a failure before the TSA answered (no reply, an HTTP status
+    /// other than 200, another content type).
+    pub retries: u8,
+    /// Timeout of each request.
+    pub timeout: Duration,
+    /// The genTime may be at most this far from the core's clock.
+    pub check_skew: Option<Duration>,
+    /// The token's signer must have the timeStamping extended key usage.
+    pub require_tsa_eku: bool,
+}
+
+impl From<TsaProfile> for TsaSpec {
+    /// The requests of [`timestamp_signer`]: an 8-byte nonce, `certReq`, no retries, 10
+    /// seconds, the TSA's key usage required.
+    fn from(profile: TsaProfile) -> Self {
+        TsaSpec {
+            url: profile.url,
+            method: match profile.method {
+                TsaMethod::Get => PkiMethod::GetUrlEncoded,
+                TsaMethod::Post => PkiMethod::Post { content_type: None },
+            },
+            hash: profile.hash.hash_alg(),
+            policy: Some(profile.policy),
+            nonce: NonceSpec::Random(8),
+            cert_req: true,
+            retries: 0,
+            timeout: GetOptions::default().timeout,
+            check_skew: None,
+            require_tsa_eku: true,
+        }
+    }
+}
+
+/// The signers [`stamp`] time-stamps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignerSel {
+    /// The last one.
+    Last,
+    /// The one at this index.
+    Index(usize),
+    /// Every signer without an id-aa-timeStampToken yet.
+    AllUnstamped,
+}
+
+/// What [`stamp`] does with an earlier id-aa-timeStampToken of a signer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StampMode {
+    /// Replaces it.
+    Replace,
+    /// Keeps it, adding another attribute.
+    Append,
+}
+
+/// What goes into the id-aa-timeStampToken attribute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenForm {
+    /// The token (`ContentInfo`), as RFC 3161 says.
+    Token,
+    /// The whole `TimeStampResp`, as some clients put it.
+    WholeResponse,
+}
+
+/// A time-stamp the TSA granted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TspReply {
+    /// The `TimeStampResp`, as received.
+    pub response: Vec<u8>,
+    /// Its token, DER.
+    pub token: Vec<u8>,
+    /// The token's `TSTInfo`.
+    pub tst: TstInfo,
+    /// The certificate that signed the token.
+    pub tsa_cert: Certificate,
+}
+
+impl TspHash {
+    /// The same hash.
+    pub fn hash_alg(self) -> HashAlg {
+        match self {
+            TspHash::Streebog512 => HashAlg::Streebog512,
+            TspHash::Sha256 => HashAlg::Sha256,
+            TspHash::Gost34311 => HashAlg::Gost34311,
+        }
+    }
+}
+
 /// Fields of a `TSTInfo`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TstInfo {
@@ -180,12 +282,37 @@ pub enum TspError {
     /// extended key usage.
     #[error("time-stamp token has no TSA certificate with the timeStamping key usage")]
     NoTsaCertificate,
+    /// The token's genTime is further from the core's clock than the request allows.
+    #[error("time-stamp genTime is too far from the local clock")]
+    ClockSkew,
     /// The token does not verify as a CMS, or the CMS to time-stamp is invalid.
     #[error("CMS: {0}")]
     Cms(#[from] CmsError),
     /// The TSA's response is not a valid `TimeStampResp`.
     #[error("malformed time-stamp response: {0}")]
     Malformed(String),
+}
+
+impl TspError {
+    /// What kind of network failure it is, as the plugins see it.
+    pub fn kind(&self) -> NetKind {
+        match self {
+            TspError::Http(e) => e.kind.into(),
+            TspError::Status(status) => NetKind::Http(*status),
+            TspError::Rejected(status) => {
+                NetKind::Rejected(u8::try_from(*status).unwrap_or(u8::MAX))
+            }
+            TspError::ClockSkew => NetKind::ClockSkew,
+            TspError::ContentType(_)
+            | TspError::NonceMismatch
+            | TspError::ImprintMismatch
+            | TspError::UnsupportedImprintAlgorithm(_)
+            | TspError::PolicyMismatch
+            | TspError::NoTsaCertificate
+            | TspError::Cms(_)
+            | TspError::Malformed(_) => NetKind::InvalidResponse,
+        }
+    }
 }
 
 impl From<der::Error> for TspError {
@@ -207,19 +334,25 @@ impl From<BerError> for TspError {
 ///
 /// If `imprint` or `nonce` is longer than DER allows (256 MiB).
 pub fn request_der(profile: &TsaProfile, imprint: &[u8], nonce: &[u8]) -> Vec<u8> {
-    let nonce = if nonce.is_empty() { &[0][..] } else { nonce };
+    request_spec_der(&TsaSpec::from(profile.clone()), imprint, Some(nonce))
+}
+
+/// DER `TimeStampReq` of `spec` for `imprint` (already hashed with `spec.hash`) and
+/// `nonce`, as [`request_der`]; `None` sends no nonce.
+fn request_spec_der(spec: &TsaSpec, imprint: &[u8], nonce: Option<&[u8]>) -> Vec<u8> {
+    let nonce = nonce.map(|n| if n.is_empty() { &[0][..] } else { n });
     asn1::TimeStampReq {
         version: 1,
         message_imprint: asn1::MessageImprint {
             hash_algorithm: AlgorithmIdentifierRef {
-                oid: profile.hash.oid(),
+                oid: spec.hash.oid(),
                 parameters: Some(AnyRef::NULL),
             },
             hashed_message: OctetStringRef::new(imprint).expect("imprint fits DER"),
         },
-        req_policy: Some(profile.policy),
-        nonce: Some(UintRef::new(nonce).expect("nonce fits DER")),
-        cert_req: Some(true),
+        req_policy: spec.policy,
+        nonce: nonce.map(|n| UintRef::new(n).expect("nonce fits DER")),
+        cert_req: spec.cert_req.then_some(true),
         extensions: None,
     }
     .to_der()
@@ -235,6 +368,15 @@ pub fn request_der(profile: &TsaProfile, imprint: &[u8], nonce: &[u8]) -> Vec<u8
 /// [`TspError::Rejected`] for another status; [`TspError::Malformed`] for a response that
 /// cannot be read or has no token; errors of [`verify_token`].
 pub fn parse_response(resp: &[u8]) -> Result<(Vec<u8>, TstInfo), TspError> {
+    parse_response_signed(resp, true).map(|(token, tst, _)| (token, tst))
+}
+
+/// [`parse_response`], the TSA's key usage required or not, also returning the TSA
+/// certificate.
+fn parse_response_signed(
+    resp: &[u8],
+    require_eku: bool,
+) -> Result<(Vec<u8>, TstInfo, Certificate), TspError> {
     let der = ber::to_der(resp)?;
     let resp = asn1::TimeStampResp::from_der(&der)?;
     let status = resp.status.status;
@@ -245,8 +387,8 @@ pub fn parse_response(resp: &[u8]) -> Result<(Vec<u8>, TstInfo), TspError> {
         .time_stamp_token
         .ok_or_else(|| TspError::Malformed("granted response without a token".to_owned()))?
         .to_der()?;
-    let tst = verify_token(&token)?;
-    Ok((token, tst))
+    let (tst, tsa) = verify_token_signed(&token, require_eku)?;
+    Ok((token, tst, tsa))
 }
 
 /// Verifies a time-stamp token (a DER or BER `ContentInfo{SignedData}` of a `TSTInfo`): a
@@ -263,11 +405,15 @@ pub fn parse_response(resp: &[u8]) -> Result<(Vec<u8>, TstInfo), TspError> {
 /// usage; [`TspError::Cms`] if the signature does not verify; [`TspError::Malformed`] for
 /// another number of signers, another content type or an invalid `TSTInfo`.
 pub fn verify_token(token: &[u8]) -> Result<TstInfo, TspError> {
-    verify_token_signed(token).map(|(tst, _)| tst)
+    verify_token_signed(token, true).map(|(tst, _)| tst)
 }
 
-/// [`verify_token`], also returning the TSA certificate that signed the token.
-fn verify_token_signed(token: &[u8]) -> Result<(TstInfo, Certificate), TspError> {
+/// [`verify_token`], the TSA's key usage required or not, also returning the TSA
+/// certificate that signed the token.
+fn verify_token_signed(
+    token: &[u8],
+    require_eku: bool,
+) -> Result<(TstInfo, Certificate), TspError> {
     let der = ber::to_der(token)?;
     let content_info = ContentInfo::from_der(&der)?;
     if content_info.content_type != oid::SIGNED_DATA {
@@ -304,9 +450,10 @@ fn verify_token_signed(token: &[u8]) -> Result<(TstInfo, Certificate), TspError>
         .next()
         .ok_or(TspError::NoTsaCertificate)?
         .cert;
-    if !cert_info(&tsa)
-        .ext_key_usages
-        .contains(&oid::TIME_STAMPING.to_string())
+    if require_eku
+        && !cert_info(&tsa)
+            .ext_key_usages
+            .contains(&oid::TIME_STAMPING.to_string())
     {
         return Err(TspError::NoTsaCertificate);
     }
@@ -318,9 +465,9 @@ fn verify_token_signed(token: &[u8]) -> Result<(TstInfo, Certificate), TspError>
 /// token's own imprint algorithm), as [`timestamp_signer`] requests it. Returns the
 /// `TSTInfo` and the TSA certificate that signed the token (its chain is up to the caller).
 ///
-/// Besides the [`TspHash`] algorithms, a SHA-1 imprint is accepted here: the NCA TSA stamps
-/// SHA-1 imprints for clients that ask for them, and CAdES-T made by such clients must
-/// verify. Requests never use SHA-1.
+/// Besides the [`TspHash`] algorithms, any imprint hash of [`HashAlg`] is accepted here
+/// (SHA-1 included): the NCA TSA stamps them for clients that ask, and CAdES-T made by such
+/// clients must verify.
 ///
 /// # Errors
 ///
@@ -331,13 +478,9 @@ pub fn verify_token_for(
     token: &[u8],
     signature: &[u8],
 ) -> Result<(TstInfo, Certificate), TspError> {
-    let (tst, tsa) = verify_token_signed(token)?;
-    let expected = match TspHash::from_oid(&tst.imprint_alg) {
+    let (tst, tsa) = verify_token_signed(token, true)?;
+    let expected = match HashAlg::from_oid(&tst.imprint_alg) {
         Some(hash) => hash.digest(signature),
-        None if tst.imprint_alg == oid::SHA1 => {
-            use sha1::Digest as _;
-            sha1::Sha1::digest(signature).to_vec()
-        }
         None => return Err(TspError::UnsupportedImprintAlgorithm(tst.imprint_alg)),
     };
     if tst.imprint != expected {
@@ -364,29 +507,107 @@ pub fn timestamp_signer(
     profile: &TsaProfile,
     http: &dyn HttpTransport,
 ) -> Result<Vec<u8>, TspError> {
-    replace_token(cms, signer_index, |signature| {
-        let imprint = profile.hash.digest(signature);
-        let mut nonce = [0; 8];
-        getrandom::fill(&mut nonce).expect("operating system RNG failed");
-        let request = request_der(profile, &imprint, &nonce);
-        let reply = match profile.method {
-            TsaMethod::Get => http.get(&nca_get_url(&profile.url, &request))?,
-            TsaMethod::Post => http.post(&profile.url, TIMESTAMP_QUERY, &request)?,
-        };
-        if reply.status != 200 {
-            return Err(TspError::Status(reply.status));
+    stamp(
+        cms,
+        SignerSel::Index(signer_index),
+        &TsaSpec::from(profile.clone()),
+        StampMode::Replace,
+        TokenForm::Token,
+        http,
+    )
+}
+
+/// Asks the TSA of `spec` for a time-stamp of `imprint` (already hashed with `spec.hash`),
+/// repeating the request up to `spec.retries` times while the TSA does not answer, and
+/// checks the answer: granted, a valid token (signed by a certificate with the
+/// timeStamping key usage if `spec` requires it) answering this request, its genTime
+/// within `spec.check_skew` of the core's clock.
+///
+/// # Errors
+///
+/// The transport's (after the retries); [`TspError::Status`] or [`TspError::ContentType`]
+/// for an unexpected HTTP reply; the errors of [`parse_response`]; the mismatches of the
+/// answer; [`TspError::ClockSkew`].
+pub fn request(
+    spec: &TsaSpec,
+    imprint: &[u8],
+    http: &dyn HttpTransport,
+) -> Result<TspReply, TspError> {
+    let nonce = spec.nonce.draw();
+    let request = request_spec_der(spec, imprint, nonce.as_deref());
+    let opts = GetOptions {
+        timeout: spec.timeout,
+        ..GetOptions::default()
+    };
+    let mut attempt = 0;
+    let body = loop {
+        let answer = pki_send(
+            http,
+            &spec.method,
+            &spec.url,
+            TIMESTAMP_QUERY,
+            &request,
+            opts,
+        )
+        .map_err(TspError::from)
+        .and_then(|reply| {
+            if reply.status != 200 {
+                return Err(TspError::Status(reply.status));
+            }
+            if !is_timestamp_reply(reply.content_type.as_deref()) {
+                return Err(TspError::ContentType(reply.content_type));
+            }
+            Ok(reply.body)
+        });
+        match answer {
+            Err(_) if attempt < spec.retries => attempt += 1,
+            answer => break answer?,
         }
-        if !is_timestamp_reply(reply.content_type.as_deref()) {
-            return Err(TspError::ContentType(reply.content_type));
-        }
-        let (token, tst) = parse_response(&reply.body)?;
-        check_answers(&tst, profile, &imprint, &nonce)?;
-        Ok(token)
+    };
+    let (token, tst, tsa_cert) = parse_response_signed(&body, spec.require_tsa_eku)?;
+    check_answers(&tst, spec, imprint, nonce.as_deref())?;
+    if let Some(skew) = spec.check_skew
+        && (tst.gen_time - OffsetDateTime::now_utc()).unsigned_abs() > skew
+    {
+        return Err(TspError::ClockSkew);
+    }
+    Ok(TspReply {
+        response: body,
+        token,
+        tst,
+        tsa_cert,
     })
 }
 
-/// `cms` (a DER or BER `ContentInfo{SignedData}`) as DER, with the token `stamp` returns for
-/// the `SignerInfo.signature` value of signer `signer_index` as that signer's
+/// Time-stamps the signers `signers` of a DER or BER `ContentInfo{SignedData}`: for each,
+/// requests a token for its `SignerInfo.signature` value ([`request`]) and puts it (or the
+/// whole response, per `form`) into its unsigned attributes as id-aa-timeStampToken,
+/// replacing or keeping an earlier one per `mode`. Other signers are kept byte for byte.
+/// Returns the CMS as DER.
+///
+/// # Errors
+///
+/// [`TspError::Cms`] for an invalid CMS; [`TspError::Malformed`] if there is no such
+/// signer; the errors of [`request`].
+pub fn stamp(
+    cms: &[u8],
+    signers: SignerSel,
+    spec: &TsaSpec,
+    mode: StampMode,
+    form: TokenForm,
+    http: &dyn HttpTransport,
+) -> Result<Vec<u8>, TspError> {
+    attach_tokens(cms, signers, mode, |signature| {
+        let reply = request(spec, &spec.hash.digest(signature), http)?;
+        Ok(match form {
+            TokenForm::Token => reply.token,
+            TokenForm::WholeResponse => reply.response,
+        })
+    })
+}
+
+/// `cms` (a DER or BER `ContentInfo{SignedData}`) as DER, with the value `stamp` returns
+/// for the `SignerInfo.signature` value of signer `signer_index` as that signer's
 /// id-aa-timeStampToken unsigned attribute, replacing an earlier one. Other signers are
 /// kept byte for byte.
 ///
@@ -394,10 +615,27 @@ pub fn timestamp_signer(
 ///
 /// [`TspError::Cms`] for an invalid CMS; [`TspError::Malformed`] if there is no such
 /// signer; errors of `stamp`.
+#[cfg(feature = "testing")]
 fn replace_token(
     cms: &[u8],
     signer_index: usize,
-    stamp: impl FnOnce(&[u8]) -> Result<Vec<u8>, TspError>,
+    stamp: impl FnMut(&[u8]) -> Result<Vec<u8>, TspError>,
+) -> Result<Vec<u8>, TspError> {
+    attach_tokens(
+        cms,
+        SignerSel::Index(signer_index),
+        StampMode::Replace,
+        stamp,
+    )
+}
+
+/// `cms` as DER, with the value `stamp` returns for each selected signer's signature as
+/// its id-aa-timeStampToken attribute, per `mode`.
+fn attach_tokens(
+    cms: &[u8],
+    signers: SignerSel,
+    mode: StampMode,
+    mut stamp: impl FnMut(&[u8]) -> Result<Vec<u8>, TspError>,
 ) -> Result<Vec<u8>, TspError> {
     let der = ber::to_der(cms).map_err(CmsError::from)?;
     let content_info = ContentInfo::from_der(&der).map_err(CmsError::from)?;
@@ -409,19 +647,41 @@ fn replace_token(
         .into());
     }
     let signed_data: SignedData<'_> = content_info.content.decode_as().map_err(CmsError::from)?;
-    let mut signers = signed_data.signer_infos.tlvs().map_err(CmsError::from)?;
-    let target = *signers.get(signer_index).ok_or_else(|| {
-        TspError::Malformed(format!(
-            "no signer {signer_index} among {} signers",
-            signers.len()
-        ))
-    })?;
-    let info = SignerInfo::from_der(target).map_err(CmsError::from)?;
-    let token = stamp(info.signature.as_bytes())?;
-
-    let stamped = with_token(info, &token)?;
-    signers[signer_index] = &stamped;
-    let signer_infos = signers.concat();
+    let tlvs = signed_data.signer_infos.tlvs().map_err(CmsError::from)?;
+    let infos = tlvs
+        .iter()
+        .map(|tlv| SignerInfo::from_der(tlv))
+        .collect::<der::Result<Vec<_>>>()
+        .map_err(CmsError::from)?;
+    let targets: Vec<usize> = match signers {
+        SignerSel::Index(index) if index < infos.len() => vec![index],
+        SignerSel::Index(index) => {
+            return Err(TspError::Malformed(format!(
+                "no signer {index} among {} signers",
+                infos.len()
+            )));
+        }
+        SignerSel::Last => match infos.len() {
+            0 => return Err(TspError::Malformed("the CMS has no signers".to_owned())),
+            len => vec![len - 1],
+        },
+        SignerSel::AllUnstamped => {
+            let mut unstamped = Vec::new();
+            for (index, info) in infos.iter().enumerate() {
+                if !has_token(info).map_err(TspError::from)? {
+                    unstamped.push(index);
+                }
+            }
+            unstamped
+        }
+    };
+    let mut stamped: Vec<Vec<u8>> = tlvs.iter().map(|tlv| tlv.to_vec()).collect();
+    for index in targets {
+        let info = infos[index];
+        let token = stamp(info.signature.as_bytes())?;
+        stamped[index] = with_token(info, &token, mode)?;
+    }
+    let signer_infos = stamped.concat();
     let signed_data = SignedData {
         signer_infos: RawSet(&signer_infos),
         ..signed_data
@@ -433,6 +693,19 @@ fn replace_token(
     .map_err(CmsError::from)?)
 }
 
+/// Whether a signer has an id-aa-timeStampToken unsigned attribute.
+fn has_token(info: &SignerInfo<'_>) -> Result<bool, CmsError> {
+    let Some(attrs) = info.unsigned_attrs else {
+        return Ok(false);
+    };
+    for tlv in attrs.tlvs()? {
+        if Attribute::from_der(tlv)?.attr_type == oid::TIME_STAMP_TOKEN {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Whether a `Content-Type` is `application/timestamp-reply`, ignoring case and parameters.
 fn is_timestamp_reply(content_type: Option<&str>) -> bool {
     content_type
@@ -440,23 +713,25 @@ fn is_timestamp_reply(content_type: Option<&str>) -> bool {
         .is_some_and(|mime| mime.trim().eq_ignore_ascii_case(TIMESTAMP_REPLY))
 }
 
-/// Whether `tst` answers a request with `imprint` (hashed with `profile.hash`), `nonce` and
-/// `profile.policy`. The token's nonce must be the same INTEGER as the request's unsigned
-/// `nonce`: a sign octet before a set top bit is part of its encoding, a negative echo is a
-/// mismatch.
+/// Whether `tst` answers a request of `spec` with `imprint` and `nonce` (`None`: the
+/// request had none, and any echo is accepted). The token's nonce must be the same INTEGER
+/// as the request's unsigned `nonce`: a sign octet before a set top bit is part of its
+/// encoding, a negative echo is a mismatch. Without a requested policy any policy is taken.
 fn check_answers(
     tst: &TstInfo,
-    profile: &TsaProfile,
+    spec: &TsaSpec,
     imprint: &[u8],
-    nonce: &[u8],
+    nonce: Option<&[u8]>,
 ) -> Result<(), TspError> {
-    if !tst.nonce.as_deref().is_some_and(|n| is_uint(n, nonce)) {
+    if let Some(nonce) = nonce
+        && !tst.nonce.as_deref().is_some_and(|n| is_uint(n, nonce))
+    {
         return Err(TspError::NonceMismatch);
     }
-    if tst.imprint_alg != profile.hash.oid() || tst.imprint != imprint {
+    if tst.imprint_alg != spec.hash.oid() || tst.imprint != imprint {
         return Err(TspError::ImprintMismatch);
     }
-    if tst.policy != profile.policy {
+    if spec.policy.is_some_and(|policy| tst.policy != policy) {
         return Err(TspError::PolicyMismatch);
     }
     Ok(())
@@ -475,8 +750,9 @@ fn is_uint(contents: &[u8], n: &[u8]) -> bool {
     magnitude == unsigned(n)
 }
 
-/// DER `SignerInfo` with `token` as its only id-aa-timeStampToken unsigned attribute.
-fn with_token(info: SignerInfo<'_>, token: &[u8]) -> Result<Vec<u8>, CmsError> {
+/// DER `SignerInfo` with `token` as an id-aa-timeStampToken unsigned attribute: its only
+/// one ([`StampMode::Replace`]) or another one ([`StampMode::Append`]).
+fn with_token(info: SignerInfo<'_>, token: &[u8], mode: StampMode) -> Result<Vec<u8>, CmsError> {
     let mut attrs = vec![
         Attribute {
             attr_type: oid::TIME_STAMP_TOKEN,
@@ -486,7 +762,9 @@ fn with_token(info: SignerInfo<'_>, token: &[u8]) -> Result<Vec<u8>, CmsError> {
     ];
     if let Some(existing) = info.unsigned_attrs {
         for tlv in existing.tlvs()? {
-            if Attribute::from_der(tlv)?.attr_type != oid::TIME_STAMP_TOKEN {
+            if mode == StampMode::Append
+                || Attribute::from_der(tlv)?.attr_type != oid::TIME_STAMP_TOKEN
+            {
                 attrs.push(tlv.to_vec());
             }
         }
@@ -552,11 +830,21 @@ mod tests {
         let p = TsaProfile::basics_default();
         let imprint = [7; 64];
         assert_eq!(
-            check_answers(&tst(&[1, 2]), &p, &imprint, &[0, 0, 1, 2]),
+            check_answers(
+                &tst(&[1, 2]),
+                &TsaSpec::from(p.clone()),
+                &imprint,
+                Some(&[0, 0, 1, 2])
+            ),
             Ok(())
         );
         assert_eq!(
-            check_answers(&tst(&[1, 3]), &p, &imprint, &[1, 2]),
+            check_answers(
+                &tst(&[1, 3]),
+                &TsaSpec::from(p.clone()),
+                &imprint,
+                Some(&[1, 2])
+            ),
             Err(TspError::NonceMismatch)
         );
         let no_nonce = TstInfo {
@@ -564,11 +852,11 @@ mod tests {
             ..tst(&[1])
         };
         assert_eq!(
-            check_answers(&no_nonce, &p, &imprint, &[1]),
+            check_answers(&no_nonce, &TsaSpec::from(p.clone()), &imprint, Some(&[1])),
             Err(TspError::NonceMismatch)
         );
         assert_eq!(
-            check_answers(&tst(&[1]), &p, &[8; 64], &[1]),
+            check_answers(&tst(&[1]), &TsaSpec::from(p.clone()), &[8; 64], Some(&[1])),
             Err(TspError::ImprintMismatch)
         );
         let other_alg = TstInfo {
@@ -576,7 +864,7 @@ mod tests {
             ..tst(&[1])
         };
         assert_eq!(
-            check_answers(&other_alg, &p, &imprint, &[1]),
+            check_answers(&other_alg, &TsaSpec::from(p.clone()), &imprint, Some(&[1])),
             Err(TspError::ImprintMismatch)
         );
         let other_policy = TstInfo {
@@ -584,7 +872,12 @@ mod tests {
             ..tst(&[1])
         };
         assert_eq!(
-            check_answers(&other_policy, &p, &imprint, &[1]),
+            check_answers(
+                &other_policy,
+                &TsaSpec::from(p.clone()),
+                &imprint,
+                Some(&[1])
+            ),
             Err(TspError::PolicyMismatch)
         );
     }
@@ -633,10 +926,18 @@ mod tests {
             echo.nonce.as_deref(),
             Some(&[0, 0x80, 0, 0, 0, 0, 0, 0, 1][..])
         );
-        assert_eq!(check_answers(&echo, &p, &imprint, &request), Ok(()));
+        assert_eq!(
+            check_answers(&echo, &TsaSpec::from(p.clone()), &imprint, Some(&request)),
+            Ok(())
+        );
         // Leading zero bytes of the request do not matter.
         assert_eq!(
-            check_answers(&parsed(&[0x7f, 1]), &p, &imprint, &[0, 0, 0x7f, 1]),
+            check_answers(
+                &parsed(&[0x7f, 1]),
+                &TsaSpec::from(p.clone()),
+                &imprint,
+                Some(&[0, 0, 0x7f, 1])
+            ),
             Ok(())
         );
 
@@ -644,26 +945,62 @@ mod tests {
         let flipped = parsed(&request);
         assert_eq!(flipped.nonce.as_deref(), Some(&request[..]));
         assert_eq!(
-            check_answers(&flipped, &p, &imprint, &request),
+            check_answers(
+                &flipped,
+                &TsaSpec::from(p.clone()),
+                &imprint,
+                Some(&request)
+            ),
             Err(TspError::NonceMismatch)
         );
         // The negated request: −0x8000000000000001.
         let negated = parsed(&[0xff, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
         assert_eq!(
-            check_answers(&negated, &p, &imprint, &request),
+            check_answers(
+                &negated,
+                &TsaSpec::from(p.clone()),
+                &imprint,
+                Some(&request)
+            ),
             Err(TspError::NonceMismatch)
         );
         // Another positive number.
         let altered = parsed(&[0, 0x80, 0, 0, 0, 0, 0, 0, 3]);
         assert_eq!(
-            check_answers(&altered, &p, &imprint, &request),
+            check_answers(
+                &altered,
+                &TsaSpec::from(p.clone()),
+                &imprint,
+                Some(&request)
+            ),
             Err(TspError::NonceMismatch)
         );
         // Zero is a single 00 octet, whatever leading zeros the request had.
-        assert_eq!(check_answers(&parsed(&[0]), &p, &imprint, &[0, 0]), Ok(()));
-        assert_eq!(check_answers(&parsed(&[0]), &p, &imprint, &[]), Ok(()));
         assert_eq!(
-            check_answers(&parsed(&[0x80]), &p, &imprint, &[0]),
+            check_answers(
+                &parsed(&[0]),
+                &TsaSpec::from(p.clone()),
+                &imprint,
+                Some(&[0, 0])
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            check_answers(
+                &parsed(&[0]),
+                &TsaSpec::from(p.clone()),
+                &imprint,
+                Some(&[])
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            check_answers(
+                &parsed(&[0x80]),
+                &TsaSpec::from(p.clone()),
+                &imprint,
+                Some(&[0])
+            ),
             Err(TspError::NonceMismatch)
         );
     }

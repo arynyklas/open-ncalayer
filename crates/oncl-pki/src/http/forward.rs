@@ -21,7 +21,7 @@ use base64::engine::general_purpose::STANDARD;
 use ureq::Proxy;
 use ureq::http::Uri;
 
-use super::{HttpError, HttpReply};
+use super::{HttpError, HttpReply, io_kind};
 
 /// The most bytes of all response heads (interim ones included) of one exchange.
 const MAX_HEAD: usize = 64 * 1024;
@@ -42,9 +42,9 @@ pub(super) struct Forwarded {
     pub(super) location: Option<String>,
 }
 
-/// Sends `url` (an `http://` URL) to `proxy`: GET, or POST of `post` (content type and
-/// body), with a response body of at most `max_len` bytes. Any status is a reply, the
-/// proxy's own (e.g. 407 or 502) and redirects included.
+/// Sends `url` (an `http://` URL) to `proxy` with `headers`: GET, or POST of `post`
+/// (content type, if any, and body), with a response body of at most `max_len` bytes. Any
+/// status is a reply, the proxy's own (e.g. 407 or 502) and redirects included.
 ///
 /// # Errors
 ///
@@ -54,14 +54,15 @@ pub(super) struct Forwarded {
 pub(super) fn send(
     proxy: &Proxy,
     url: &str,
-    post: Option<(&str, &[u8])>,
+    headers: &[(&str, &str)],
+    post: Option<(Option<&str>, &[u8])>,
     deadline: Instant,
     connect_timeout: Duration,
     max_len: u64,
 ) -> Result<Forwarded, HttpError> {
     let at = format!("proxy {}:{}", proxy.host(), proxy.port());
-    let fail = |e: io::Error| HttpError(format!("{at}: {e}"));
-    let head = request_head(proxy, url, post)?;
+    let fail = |e: io::Error| HttpError::new(io_kind(&e), format!("{at}: {e}"));
+    let head = request_head(proxy, url, headers, post)?;
     let mut stream = connect(proxy, deadline, connect_timeout).map_err(fail)?;
     stream.write_all(head.as_bytes()).map_err(fail)?;
     if let Some((_, body)) = post {
@@ -75,14 +76,15 @@ pub(super) fn send(
 fn request_head(
     proxy: &Proxy,
     url: &str,
-    post: Option<(&str, &[u8])>,
+    headers: &[(&str, &str)],
+    post: Option<(Option<&str>, &[u8])>,
 ) -> Result<String, HttpError> {
     let uri: Uri = url
         .parse()
-        .map_err(|e| HttpError(format!("invalid URL {url}: {e}")))?;
+        .map_err(|e| HttpError::other(format!("invalid URL {url}: {e}")))?;
     let host = match (uri.scheme_str(), uri.host()) {
         (Some("http"), Some(host)) if !host.is_empty() => host,
-        _ => return Err(HttpError(format!("not an http:// URL: {url}"))),
+        _ => return Err(HttpError::other(format!("not an http:// URL: {url}"))),
     };
     // Host and port only: any user information of the URL is not sent.
     let authority = match uri.port_u16() {
@@ -102,15 +104,24 @@ fn request_head(
             STANDARD.encode(credentials)
         );
     }
-    if let Some((content_type, body)) = post {
-        if content_type.chars().any(char::is_control) {
-            return Err(HttpError("invalid Content-Type".to_owned()));
+    for (name, value) in headers {
+        let token = !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+        if !token || value.chars().any(char::is_control) {
+            return Err(HttpError::other(format!("invalid header {name}")));
         }
-        let _ = write!(
-            head,
-            "Content-Type: {content_type}\r\nContent-Length: {}\r\n",
-            body.len()
-        );
+        let _ = write!(head, "{name}: {value}\r\n");
+    }
+    if let Some((content_type, body)) = post {
+        if let Some(content_type) = content_type {
+            if content_type.chars().any(char::is_control) {
+                return Err(HttpError::other("invalid Content-Type"));
+            }
+            let _ = write!(head, "Content-Type: {content_type}\r\n");
+        }
+        let _ = write!(head, "Content-Length: {}\r\n", body.len());
     }
     head.push_str("Connection: close\r\n\r\n");
     Ok(head)
@@ -540,7 +551,8 @@ mod tests {
         send(
             &Proxy::new(proxy).unwrap(),
             url,
-            post,
+            &[],
+            post.map(|(content_type, body)| (Some(content_type), body)),
             deadline(),
             CONNECT_TIMEOUT,
             100,
@@ -663,17 +675,17 @@ mod tests {
             let (proxy, _) = stub("", reply.to_vec());
             let e = send_to(&proxy, "http://x/", None).unwrap_err();
             assert!(
-                e.0.contains(expected),
+                e.message.contains(expected),
                 "{e} for {:?}",
                 String::from_utf8_lossy(reply)
             );
-            assert!(e.0.starts_with("proxy 127.0.0.1:"), "{e}");
+            assert!(e.message.starts_with("proxy 127.0.0.1:"), "{e}");
         }
         let mut long = b"HTTP/1.1 200 OK\r\n".to_vec();
         long.extend(std::iter::repeat_n(b'a', MAX_HEAD + 1));
         let (proxy, _) = stub("", long);
         let e = send_to(&proxy, "http://x/", None).unwrap_err();
-        assert!(e.0.contains("head too long"), "{e}");
+        assert!(e.message.contains("head too long"), "{e}");
         // Close-delimited past the limit.
         let mut big = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
         big.extend([0; 101]);
@@ -681,7 +693,7 @@ mod tests {
         assert!(
             send_to(&proxy, "http://x/", None)
                 .unwrap_err()
-                .0
+                .message
                 .contains("longer than 100")
         );
     }
@@ -703,36 +715,37 @@ mod tests {
         });
         let start = Instant::now();
         let quick = Instant::now() + Duration::from_millis(300);
-        let e = send(&proxy, "http://x/", None, quick, CONNECT_TIMEOUT, 100)
+        let e = send(&proxy, "http://x/", &[], None, quick, CONNECT_TIMEOUT, 100)
             .map(|f| f.reply)
             .unwrap_err();
         assert!(start.elapsed() < Duration::from_secs(2), "{e}");
-        assert!(e.0.contains("timed out"), "{e}");
+        assert!(e.message.contains("timed out"), "{e}");
     }
 
     #[test]
     fn only_http_urls_with_plain_content_types() {
         let proxy = Proxy::new("http://127.0.0.1:1").unwrap();
         for url in ["https://x/", "ftp://x/", "x/y", "http:///y"] {
-            let e = send(&proxy, url, None, deadline(), CONNECT_TIMEOUT, 100)
+            let e = send(&proxy, url, &[], None, deadline(), CONNECT_TIMEOUT, 100)
                 .map(|f| f.reply)
                 .unwrap_err();
             assert!(
-                e.0.contains(url) || e.0.contains("invalid URL"),
+                e.message.contains(url) || e.message.contains("invalid URL"),
                 "{url}: {e}"
             );
         }
         let e = send(
             &proxy,
             "http://x/",
-            Some(("a\r\nX-Evil: 1", b"")),
+            &[],
+            Some((Some("a\r\nX-Evil: 1"), b"")),
             deadline(),
             CONNECT_TIMEOUT,
             100,
         )
         .map(|f| f.reply)
         .unwrap_err();
-        assert_eq!(e.0, "invalid Content-Type");
+        assert_eq!(e.message, "invalid Content-Type");
     }
 
     /// A response of `prefix`, then `repeated` without end, handed out `piece` bytes per
@@ -848,10 +861,21 @@ mod tests {
             }
         });
         let start = Instant::now();
-        let e = send(&proxy, "http://x/", None, deadline(), CONNECT_TIMEOUT, 100)
-            .map(|f| f.reply)
-            .unwrap_err();
-        assert!(e.0.ends_with("too many interim (1xx) responses"), "{e}");
+        let e = send(
+            &proxy,
+            "http://x/",
+            &[],
+            None,
+            deadline(),
+            CONNECT_TIMEOUT,
+            100,
+        )
+        .map(|f| f.reply)
+        .unwrap_err();
+        assert!(
+            e.message.ends_with("too many interim (1xx) responses"),
+            "{e}"
+        );
         assert!(start.elapsed() < Duration::from_secs(5), "{e}");
     }
 

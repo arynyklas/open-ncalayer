@@ -10,7 +10,8 @@ use oncl_pki::crl::{
     self, CrlCache, CrlError, CrlStatus, MAX_BER_CRL_LEN, MAX_CRL_LEN, MockCrl, TIMEOUT,
 };
 use oncl_pki::http::{
-    CONNECT_TIMEOUT, GetOptions, HttpError, HttpReply, HttpTransport, RouteTransport, UreqTransport,
+    CONNECT_TIMEOUT, GetOptions, HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport,
+    RouteTransport, UreqTransport,
 };
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
@@ -120,18 +121,22 @@ fn leaf_with_cdp(leaf: &Certificate, uris: &[&str]) -> Certificate {
 struct Fixed(Result<HttpReply, HttpError>);
 
 impl HttpTransport for Fixed {
-    fn get_with(&self, _: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
-        self.0.clone()
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        _: &str,
-        _: &[u8],
-        o: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.get_with(url, o)
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (_, _) = (request.url, request.opts);
+                self.0.clone()
+            }
+            HttpMethod::Post => {
+                let (url, _, _, o) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                self.get_with(url, o)
+            }
+        }
     }
 }
 
@@ -146,19 +151,23 @@ impl Down {
 }
 
 impl HttpTransport for Down {
-    fn get_with(&self, url: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
-        self.0.lock().unwrap().push(url.to_owned());
-        Err(HttpError("down".to_owned()))
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        _: &str,
-        _: &[u8],
-        o: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.get_with(url, o)
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (url, _) = (request.url, request.opts);
+                self.0.lock().unwrap().push(url.to_owned());
+                Err(HttpError::other("down"))
+            }
+            HttpMethod::Post => {
+                let (url, _, _, o) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                self.get_with(url, o)
+            }
+        }
     }
 }
 
@@ -335,7 +344,7 @@ fn issuer_mismatch_and_bad_signature() {
 
     // `check` of a certificate the given issuer did not issue.
     let leaf = entry("inter-user-gost2015-sign").cert;
-    let http = Fixed(Err(HttpError("must not be asked".to_owned())));
+    let http = Fixed(Err(HttpError::other("must not be asked")));
     let dir = temp_dir();
     assert_eq!(
         crl::check(
@@ -642,7 +651,7 @@ fn second_url_used_when_first_fails() {
     let later = now() + 2 * time::Duration::HOUR;
     assert_eq!(
         crl::check(&leaf, &issuer, &cache, &down, later),
-        Err(CrlError::Http("down".to_owned()))
+        Err(CrlError::Http(HttpError::other("down")))
     );
     assert_eq!(
         down.calls(),
@@ -662,7 +671,7 @@ fn second_url_used_when_first_fails() {
     )]);
     assert_eq!(
         crl::check(&leaf, &issuer, &cache, &http, now()),
-        Err(CrlError::Http("no route".to_owned()))
+        Err(CrlError::Http(HttpError::other("no route")))
     );
     let http = Fixed(Ok(HttpReply {
         status: 503,
@@ -688,20 +697,27 @@ fn second_url_used_when_first_fails() {
 struct Oversized(Mutex<Vec<GetOptions>>);
 
 impl HttpTransport for Oversized {
-    fn get_with(&self, _: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        self.0.lock().unwrap().push(opts);
-        assert!(MAX_CRL_LEN + 1 > opts.max_len, "the limit admits the body");
-        Err(HttpError(format!("body exceeds {} bytes", opts.max_len)))
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        _: &str,
-        _: &[u8],
-        o: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.get_with(url, o)
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (_, opts) = (request.url, request.opts);
+                self.0.lock().unwrap().push(opts);
+                assert!(MAX_CRL_LEN + 1 > opts.max_len, "the limit admits the body");
+                Err(HttpError::other(format!(
+                    "body exceeds {} bytes",
+                    opts.max_len
+                )))
+            }
+            HttpMethod::Post => {
+                let (url, _, _, o) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                self.get_with(url, o)
+            }
+        }
     }
 }
 
@@ -714,7 +730,9 @@ fn oversized_body_is_rejected() {
     let cache = CrlCache::new(dir.path());
     assert_eq!(
         cache.fetch(INTER_CRL, &cer("inter-gost2015"), &http, now()),
-        Err(CrlError::Http(format!("body exceeds {MAX_CRL_LEN} bytes")))
+        Err(CrlError::Http(HttpError::other(format!(
+            "body exceeds {MAX_CRL_LEN} bytes"
+        ))))
     );
     assert_eq!(
         *http.0.lock().unwrap(),
@@ -807,4 +825,95 @@ fn live_crl_nca_root_gost_2022() {
     let status = crl::check(&nca, &root, &cache, &UreqTransport::default(), now());
     println!("CRL {:?}: {status:?}", crl::crl_urls(&nca));
     assert_eq!(status, Ok(CrlStatus::Good));
+}
+
+#[test]
+fn fetch_for_cdp_and_freshest() {
+    use x509_cert::ext::pkix::FreshestCrl;
+    const BASE: &str = "http://crl.synthetic.test/base.crl";
+    const DELTA: &str = "http://crl.synthetic.test/delta.crl";
+    let issuer = cer("inter-gost2015");
+    let key = entry("inter-gost2015.key");
+    let revoked = entry("inter-revoked-gost2015-sign").cert;
+    let good = entry("inter-user-gost2015-sign").cert;
+    let at = now() - time::Duration::DAY;
+    // A leaf with a distribution point and a FreshestCRL.
+    let with_freshest = |leaf: &Certificate| {
+        let base = leaf_with_cdp(leaf, &[BASE]);
+        let freshest = FreshestCrl(vec![DistributionPoint {
+            distribution_point: Some(DistributionPointName::FullName(vec![
+                GeneralName::UniformResourceIdentifier(Ia5String::new(DELTA).unwrap()),
+            ])),
+            reasons: None,
+            crl_issuer: None,
+        }]);
+        let mut spec = TestCertSpec::from_cert(&base);
+        spec.extensions.push(Extension {
+            extn_id: FreshestCrl::OID,
+            critical: false,
+            extn_value: OctetString::new(freshest.to_der().unwrap()).unwrap(),
+        });
+        issue_cert(&key, spec)
+    };
+    let delta_indicator = Extension {
+        extn_id: "2.5.29.27".parse().unwrap(),
+        critical: true,
+        extn_value: OctetString::new(vec![2, 1, 1]).unwrap(),
+    };
+    // The complete CRL lists the good key; the delta takes it off (removeFromCRL) and
+    // lists the revoked one.
+    let base = Arc::new(MockCrl::new(key.clone()).revoke(serial(&good), at));
+    let delta = Arc::new(
+        MockCrl::new(key.clone())
+            .extension(delta_indicator)
+            .revoke_with_reason(serial(&good), at, 8)
+            .revoke(serial(&revoked), at),
+    );
+    let http = RouteTransport::new(vec![
+        (BASE.to_owned(), Arc::clone(&base) as Arc<dyn HttpTransport>),
+        (
+            DELTA.to_owned(),
+            Arc::clone(&delta) as Arc<dyn HttpTransport>,
+        ),
+    ]);
+    let (crls, status) =
+        crl::fetch_for(&with_freshest(&good), &issuer, &http, TIMEOUT, now()).unwrap();
+    assert_eq!(status, CrlStatus::Good);
+    assert_eq!(crls.len(), 2);
+    let (_, status) =
+        crl::fetch_for(&with_freshest(&revoked), &issuer, &http, TIMEOUT, now()).unwrap();
+    assert!(matches!(status, CrlStatus::Revoked { .. }));
+    // Without a FreshestCRL only the complete CRL is fetched.
+    let (crls, status) = crl::fetch_for(
+        &leaf_with_cdp(&good, &[BASE]),
+        &issuer,
+        &http,
+        TIMEOUT,
+        now(),
+    )
+    .unwrap();
+    assert_eq!(crls.len(), 1);
+    assert!(matches!(status, CrlStatus::Revoked { .. }));
+    // A delta is never used without its complete CRL, and a complete CRL is not a delta.
+    let only_delta = RouteTransport::new(vec![
+        (
+            BASE.to_owned(),
+            Arc::clone(&delta) as Arc<dyn HttpTransport>,
+        ),
+        (
+            DELTA.to_owned(),
+            Arc::clone(&base) as Arc<dyn HttpTransport>,
+        ),
+    ]);
+    assert!(matches!(
+        crl::fetch_for(&with_freshest(&good), &issuer, &only_delta, TIMEOUT, now()),
+        Err(CrlError::Malformed(_))
+    ));
+    let down = RouteTransport::new(Vec::new());
+    assert_eq!(
+        crl::fetch_for(&with_freshest(&good), &issuer, &down, TIMEOUT, now())
+            .unwrap_err()
+            .kind(),
+        oncl_pki::http::NetKind::Other
+    );
 }

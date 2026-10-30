@@ -460,6 +460,28 @@ pub fn aia_urls(cert: &Certificate, method: ObjectIdentifier) -> Vec<String> {
         .collect()
 }
 
+/// The URIs of `cert`'s SubjectInfoAccess with the access method `method` (e.g.
+/// [`oid::AD_TIME_STAMPING`] of a TSA), in order; none without the extension (or with a
+/// malformed one).
+pub fn sia_urls(cert: &Certificate, method: ObjectIdentifier) -> Vec<String> {
+    let Ok(Some((_, sia))) = cert
+        .tbs_certificate()
+        .get_extension::<x509_cert::ext::pkix::SubjectInfoAccessSyntax>()
+    else {
+        return Vec::new();
+    };
+    sia.0
+        .iter()
+        .filter(|access| access.access_method == method)
+        .filter_map(|access| match &access.access_location {
+            x509_cert::ext::pkix::name::GeneralName::UniformResourceIdentifier(uri) => {
+                Some(uri.to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Lowercase hex, as Kalkan's `Hex.encodeStr` writes it.
 pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     let mut hex = String::with_capacity(bytes.len() * 2);

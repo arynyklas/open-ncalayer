@@ -10,7 +10,7 @@ use common::*;
 use oncl_basics::testing::{ScriptedPrompter, Step};
 use oncl_basics::{FileKind, MessageKind, lock_dialog_flow};
 use oncl_pdk::abi::{self, ConfirmArgs, Import};
-use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport};
+use oncl_pki::http::{GetOptions, HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport};
 use oncl_pki::key::{KeyAlg, SigAlg};
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::MockTsa;
@@ -432,28 +432,32 @@ impl Recording {
 }
 
 impl HttpTransport for Recording {
-    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        self.asked.lock().unwrap().push(Asked {
-            url: url.to_owned(),
-            post: None,
-            opts,
-        });
-        Ok(self.reply.clone())
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        content_type: &str,
-        body: &[u8],
-        opts: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.asked.lock().unwrap().push(Asked {
-            url: url.to_owned(),
-            post: Some((content_type.to_owned(), body.to_vec())),
-            opts,
-        });
-        Ok(self.reply.clone())
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (url, opts) = (request.url, request.opts);
+                self.asked.lock().unwrap().push(Asked {
+                    url: url.to_owned(),
+                    post: None,
+                    opts,
+                });
+                Ok(self.reply.clone())
+            }
+            HttpMethod::Post => {
+                let (url, content_type, body, opts) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                self.asked.lock().unwrap().push(Asked {
+                    url: url.to_owned(),
+                    post: Some((content_type.to_owned(), body.to_vec())),
+                    opts,
+                });
+                Ok(self.reply.clone())
+            }
+        }
     }
 }
 

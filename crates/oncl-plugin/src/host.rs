@@ -43,6 +43,9 @@ pub struct HostServices {
     /// The CAs of `ca_list`, `ca_issuer` and the chains of `keys_chain`: the NCA's
     /// ([`CaSet::nca_production`]).
     pub cas: Arc<CaSet>,
+    /// The only hosts (and their subdomains) the core asks for time-stamps, OCSP and CRLs
+    /// on a plugin's behalf: the NCA's ([`crate::nca_pki_hosts`]).
+    pub pki_hosts: Arc<[String]>,
 }
 
 /// Who runs in an instance now.
@@ -261,6 +264,11 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
         Import::KeysTerminals => run(args, |a| caps::keys_terminals(state, a)),
         Import::KeysOpen => run(args, |a| caps::keys_open(state, a)),
         Import::DialogPassword => run(args, |a| caps::dialog_password(state, a)),
+        Import::KeysSignCmsEx => run(args, |a| caps::keys_sign_cms_ex(state, a)),
+        Import::TspStamp => run(args, |a| caps::tsp_stamp(state, a)),
+        Import::TspRequest => run(args, |a| caps::tsp_request(state, a)),
+        Import::OcspFetch => run(args, |a| caps::ocsp_fetch(state, a)),
+        Import::CrlFetch => run(args, |a| caps::crl_fetch(state, a)),
     }
 }
 

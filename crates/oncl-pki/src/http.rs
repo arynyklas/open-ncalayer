@@ -39,10 +39,45 @@ pub struct HttpReply {
     pub body: Vec<u8>,
 }
 
+/// What kind of failure an [`HttpError`] is, as the plugins' network failures name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpErrorKind {
+    /// The server's name does not resolve.
+    UnknownHost,
+    /// No connection to the server (or its proxy): refused, unreachable, reset.
+    Connect,
+    /// The request ran past its timeout.
+    Timeout,
+    /// The TLS handshake failed.
+    Tls,
+    /// Anything else: a refused request, an unreadable or oversized reply.
+    Other,
+}
+
 /// No HTTP response arrived: connection, timeout, size-limit or protocol failure.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub struct HttpError(pub String);
+#[error("{message}")]
+pub struct HttpError {
+    /// What kind of failure it is.
+    pub kind: HttpErrorKind,
+    /// What went wrong, for the log.
+    pub message: String,
+}
+
+impl HttpError {
+    /// A failure of `kind`.
+    pub fn new(kind: HttpErrorKind, message: impl Into<String>) -> Self {
+        HttpError {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// A failure of kind [`HttpErrorKind::Other`].
+    pub fn other(message: impl Into<String>) -> Self {
+        HttpError::new(HttpErrorKind::Other, message)
+    }
+}
 
 /// Limits of a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,17 +111,86 @@ impl Default for GetOptions {
     }
 }
 
+/// The method of an [`HttpRequest`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpMethod {
+    /// `GET`, without a body.
+    Get,
+    /// `POST` of the request's body.
+    Post,
+}
+
+/// One HTTP request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HttpRequest<'a> {
+    /// The method.
+    pub method: HttpMethod,
+    /// The URL.
+    pub url: &'a str,
+    /// Headers sent as given, besides those of the transport (`Host`, `Content-Length`, …).
+    /// They are not sent again to the target of a redirect.
+    pub headers: &'a [(&'a str, &'a str)],
+    /// The `Content-Type` of a POST body; `None` sends none.
+    pub content_type: Option<&'a str>,
+    /// The body of a POST; empty for a GET.
+    pub body: &'a [u8],
+    /// The limits.
+    pub opts: GetOptions,
+}
+
+impl<'a> HttpRequest<'a> {
+    /// `GET url` within `opts`, without headers of its own.
+    pub fn get(url: &'a str, opts: GetOptions) -> Self {
+        HttpRequest {
+            method: HttpMethod::Get,
+            url,
+            headers: &[],
+            content_type: None,
+            body: &[],
+            opts,
+        }
+    }
+
+    /// `POST url` of `body` of type `content_type` within `opts`, without headers of its
+    /// own.
+    pub fn post(
+        url: &'a str,
+        content_type: Option<&'a str>,
+        body: &'a [u8],
+        opts: GetOptions,
+    ) -> Self {
+        HttpRequest {
+            method: HttpMethod::Post,
+            url,
+            headers: &[],
+            content_type,
+            body,
+            opts,
+        }
+    }
+}
+
 /// Sends HTTP requests. Any status code is a reply, not an error.
 ///
-/// A transport implements both requests with their [`GetOptions`]: every option is a limit
-/// or a refusal its caller relies on, so none has a default that drops it.
+/// A transport implements [`HttpTransport::send`] with the request's [`GetOptions`]: every
+/// option is a limit or a refusal its caller relies on, so none has a default that drops
+/// it. The other methods are shorthands for it.
 pub trait HttpTransport: Send + Sync {
+    /// Sends `request`.
+    ///
+    /// # Errors
+    ///
+    /// [`HttpError`] if no response arrived, or the request's options refuse it.
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError>;
+
     /// `GET url` within `opts`.
     ///
     /// # Errors
     ///
     /// [`HttpError`] if no response arrived, or `opts` refuses the request.
-    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError>;
+    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
+        self.send(&HttpRequest::get(url, opts))
+    }
 
     /// `POST url` with `body` of type `content_type`, within `opts`.
     ///
@@ -99,7 +203,9 @@ pub trait HttpTransport: Send + Sync {
         content_type: &str,
         body: &[u8],
         opts: GetOptions,
-    ) -> Result<HttpReply, HttpError>;
+    ) -> Result<HttpReply, HttpError> {
+        self.send(&HttpRequest::post(url, Some(content_type), body, opts))
+    }
 
     /// `GET url` with the default [`GetOptions`].
     ///
@@ -181,7 +287,7 @@ fn without_userinfo(url: &str) -> String {
 /// The proxy of the URL `url`, if it is an HTTP proxy.
 fn parse_proxy(url: &str) -> Result<Proxy, HttpError> {
     // The URL may hold a password: it is not repeated in the errors.
-    let proxy = Proxy::new(url).map_err(|_| HttpError("invalid proxy URL".to_owned()))?;
+    let proxy = Proxy::new(url).map_err(|_| HttpError::other("invalid proxy URL"))?;
     usable(proxy)
 }
 
@@ -190,7 +296,7 @@ fn usable(proxy: Proxy) -> Result<Proxy, HttpError> {
     if proxy.protocol() == ProxyProtocol::Http {
         Ok(proxy)
     } else {
-        Err(HttpError(format!(
+        Err(HttpError::other(format!(
             "unsupported proxy type {}: only http:// proxies are supported",
             proxy.protocol()
         )))
@@ -250,7 +356,7 @@ impl UreqTransport {
         };
         let uri: Uri = url
             .parse()
-            .map_err(|e| HttpError(format!("invalid URL {url}: {e}")))?;
+            .map_err(|e| HttpError::other(format!("invalid URL {url}: {e}")))?;
         Ok(if proxy.is_no_proxy(&uri) {
             Route::Direct
         } else if uri.scheme_str() == Some("http") {
@@ -274,30 +380,36 @@ impl UreqTransport {
             .into()
     }
 
-    /// `url` with `post` (content type and body) or GET, within `opts`, following
-    /// redirects if `opts` says so.
-    fn send(
-        &self,
-        url: &str,
-        mut post: Option<(&str, &[u8])>,
-        opts: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
+    /// `request`, following redirects if its options say so. A redirect is followed with a
+    /// GET without the request's headers.
+    fn send_following(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        let opts = request.opts;
         let deadline = Instant::now() + opts.timeout;
-        let mut url = url.to_owned();
+        let mut url = request.url.to_owned();
+        let mut current = *request;
         for _ in 0..=MAX_REDIRECTS {
             if opts.https_only && !is_https(&url) {
-                return Err(HttpError(format!("{url} is not an https URL")));
+                return Err(HttpError::other(format!("{url} is not an https URL")));
             }
-            let (mut reply, location) = self.send_once(&url, post, deadline, opts)?;
+            let step = HttpRequest {
+                url: &url,
+                ..current
+            };
+            let (mut reply, location) = self.send_once(&step, deadline)?;
             let next = if opts.redirects {
-                redirect(&url, &reply, location.as_deref(), post.is_some())?
+                redirect(
+                    &url,
+                    &reply,
+                    location.as_deref(),
+                    step.method == HttpMethod::Post,
+                )?
             } else {
                 None
             };
             match next {
                 Some(next) => {
                     url = next;
-                    post = None;
+                    current = HttpRequest::get("", opts);
                 }
                 None => {
                     if (300..400).contains(&reply.status) {
@@ -307,7 +419,7 @@ impl UreqTransport {
                 }
             }
         }
-        Err(HttpError(format!(
+        Err(HttpError::other(format!(
             "too many redirects (more than {MAX_REDIRECTS})"
         )))
     }
@@ -315,16 +427,21 @@ impl UreqTransport {
     /// One request without following redirects: the reply and its `Location`.
     fn send_once(
         &self,
-        url: &str,
-        post: Option<(&str, &[u8])>,
+        request: &HttpRequest<'_>,
         deadline: Instant,
-        opts: GetOptions,
     ) -> Result<(HttpReply, Option<String>), HttpError> {
+        let url = request.url;
+        let opts = request.opts;
         let proxy = match self.route(url)? {
             Route::Forward(proxy) => {
+                let post = match request.method {
+                    HttpMethod::Post => Some((request.content_type, request.body)),
+                    HttpMethod::Get => None,
+                };
                 let forwarded = forward::send(
                     &proxy,
                     url,
+                    request.headers,
                     post,
                     deadline,
                     opts.connect_timeout,
@@ -337,18 +454,71 @@ impl UreqTransport {
         };
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err(HttpError("timed out".to_owned()));
+            return Err(HttpError::new(HttpErrorKind::Timeout, "timed out"));
         }
         let agent = Self::agent(proxy, left, opts.connect_timeout);
-        let response = match post {
-            Some((content_type, body)) => agent
-                .post(url)
-                .header("Content-Type", content_type)
-                .send(body),
-            None => agent.get(url).call(),
+        let response = match request.method {
+            HttpMethod::Post => {
+                let mut builder = agent.post(url);
+                for (name, value) in request.headers {
+                    builder = builder.header(*name, *value);
+                }
+                if let Some(content_type) = request.content_type {
+                    builder = builder.header("Content-Type", content_type);
+                }
+                builder.send(request.body)
+            }
+            HttpMethod::Get => {
+                let mut builder = agent.get(url);
+                for (name, value) in request.headers {
+                    builder = builder.header(*name, *value);
+                }
+                builder.call()
+            }
         };
         reply(response, opts.max_len)
     }
+}
+
+/// The kind of an I/O failure of a request.
+pub(crate) fn io_kind(e: &std::io::Error) -> HttpErrorKind {
+    use std::io::ErrorKind;
+    // A failed name lookup: WSAHOST_NOT_FOUND and WSANO_DATA on Windows; getaddrinfo's
+    // errors elsewhere, which the standard library reports by their text.
+    let text = e.to_string();
+    if matches!(e.raw_os_error(), Some(11001 | 11004) if cfg!(windows))
+        || text.contains("failed to lookup address")
+    {
+        return HttpErrorKind::UnknownHost;
+    }
+    match e.kind() {
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => HttpErrorKind::Timeout,
+        ErrorKind::ConnectionRefused
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::NotConnected
+        | ErrorKind::HostUnreachable
+        | ErrorKind::NetworkUnreachable
+        | ErrorKind::AddrNotAvailable => HttpErrorKind::Connect,
+        _ => HttpErrorKind::Other,
+    }
+}
+
+/// The [`HttpError`] of a `ureq` failure.
+fn ureq_error(e: ureq::Error) -> HttpError {
+    let kind = match &e {
+        ureq::Error::HostNotFound => HttpErrorKind::UnknownHost,
+        ureq::Error::Timeout(_) => HttpErrorKind::Timeout,
+        ureq::Error::ConnectionFailed | ureq::Error::ConnectProxyFailed(_) => {
+            HttpErrorKind::Connect
+        }
+        ureq::Error::Io(io) => io_kind(io),
+        ureq::Error::Tls(_) | ureq::Error::TlsRequired | ureq::Error::Rustls(_) => {
+            HttpErrorKind::Tls
+        }
+        _ => HttpErrorKind::Other,
+    };
+    HttpError::new(kind, e.to_string())
 }
 
 /// The URL a reply to `url` redirects to, if it is followed (see [`UreqTransport`]).
@@ -367,15 +537,15 @@ fn redirect(
         307 | 308 if !post => {}
         _ => return Ok(None),
     }
-    let location =
-        location.ok_or_else(|| HttpError(format!("redirect {} without Location", reply.status)))?;
+    let location = location
+        .ok_or_else(|| HttpError::other(format!("redirect {} without Location", reply.status)))?;
     join_url(url, location).map(Some)
 }
 
 /// `location` (absolute, scheme-relative, absolute-path or relative) resolved against
 /// `base`; only `http://` and `https://` results.
 fn join_url(base: &str, location: &str) -> Result<String, HttpError> {
-    let bad = || HttpError(format!("unusable redirect to {location}"));
+    let bad = || HttpError::other(format!("unusable redirect to {location}"));
     let location = location.trim();
     let base: Uri = base.parse().map_err(|_| bad())?;
     let (scheme, authority) = match (base.scheme_str(), base.authority()) {
@@ -413,18 +583,8 @@ fn is_https(url: &str) -> bool {
 }
 
 impl HttpTransport for UreqTransport {
-    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        self.send(url, None, opts)
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        content_type: &str,
-        body: &[u8],
-        opts: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.send(url, Some((content_type, body)), opts)
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        self.send_following(request)
     }
 }
 
@@ -434,7 +594,7 @@ fn reply(
     response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     max_len: u64,
 ) -> Result<(HttpReply, Option<String>), HttpError> {
-    let http_error = |e: ureq::Error| HttpError(e.to_string());
+    let http_error = ureq_error;
     let mut response = response.map_err(http_error)?;
     let header = |name| {
         response
@@ -481,18 +641,151 @@ pub fn nca_get_url(base: &str, request: &[u8]) -> String {
     url
 }
 
+/// How a request reaches a PKI service (a TSA or an OCSP responder), as the clients of the
+/// NCA services differ in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PkiMethod {
+    /// `GET url/<base64 of the DER request>`, the base64 not percent-encoded.
+    Get,
+    /// The NCA GET binding: [`nca_get_url`].
+    GetUrlEncoded,
+    /// `POST url` of the DER request, with this `Content-Type` or, without one, the
+    /// protocol's own.
+    Post {
+        /// The `Content-Type`.
+        content_type: Option<String>,
+    },
+    /// `POST` of the DER request to the URL of the NCA GET binding, with the protocol's
+    /// `Content-Type`.
+    PostWithPath,
+    /// The NCA GET binding while the percent-encoded request is shorter than this many
+    /// bytes, else a POST with the protocol's `Content-Type` (RFC 6960 appendix A.1 uses
+    /// 255).
+    GetUnder(u16),
+}
+
+/// The nonce of a request to a PKI service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NonceSpec {
+    /// No nonce.
+    None,
+    /// This many random bytes, drawn for each request.
+    Random(u8),
+    /// These bytes.
+    Value(Vec<u8>),
+}
+
+impl NonceSpec {
+    /// The nonce of a request now: `None` for [`NonceSpec::None`].
+    ///
+    /// # Panics
+    ///
+    /// If the operating system's generator fails.
+    pub fn draw(&self) -> Option<Vec<u8>> {
+        match self {
+            NonceSpec::None => None,
+            NonceSpec::Random(len) => {
+                let mut nonce = vec![0; usize::from(*len)];
+                getrandom::fill(&mut nonce).expect("operating system RNG failed");
+                Some(nonce)
+            }
+            NonceSpec::Value(nonce) => Some(nonce.clone()),
+        }
+    }
+}
+
+/// Sends the DER `request` to the PKI service at `url` by `method`; `media_type` is the
+/// protocol's `Content-Type` of a POSTed request.
+///
+/// # Errors
+///
+/// The transport's.
+pub fn pki_send(
+    http: &dyn HttpTransport,
+    method: &PkiMethod,
+    url: &str,
+    media_type: &str,
+    request: &[u8],
+    opts: GetOptions,
+) -> Result<HttpReply, HttpError> {
+    match method {
+        PkiMethod::Get => {
+            let base = url.strip_suffix('/').unwrap_or(url);
+            let url = format!("{base}/{}", STANDARD.encode(request));
+            http.send(&HttpRequest::get(&url, opts))
+        }
+        PkiMethod::GetUrlEncoded => http.send(&HttpRequest::get(&nca_get_url(url, request), opts)),
+        PkiMethod::Post { content_type } => http.send(&HttpRequest::post(
+            url,
+            Some(content_type.as_deref().unwrap_or(media_type)),
+            request,
+            opts,
+        )),
+        PkiMethod::PostWithPath => http.send(&HttpRequest::post(
+            &nca_get_url(url, request),
+            Some(media_type),
+            request,
+            opts,
+        )),
+        PkiMethod::GetUnder(limit) => {
+            let get = nca_get_url(url, request);
+            let encoded = get.len() - url.strip_suffix('/').unwrap_or(url).len() - 1;
+            if encoded < usize::from(*limit) {
+                http.send(&HttpRequest::get(&get, opts))
+            } else {
+                http.send(&HttpRequest::post(url, Some(media_type), request, opts))
+            }
+        }
+    }
+}
+
+/// What went wrong talking to a PKI service, as the plugins see it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetKind {
+    /// The service's name does not resolve.
+    UnknownHost,
+    /// No connection to the service.
+    Connect,
+    /// No answer in time.
+    Timeout,
+    /// The TLS handshake failed.
+    Tls,
+    /// An HTTP status other than 200.
+    Http(u16),
+    /// An answer that is not a valid one of the protocol, or not to this request.
+    InvalidResponse,
+    /// The service refused the request: its status (PKIStatus, OCSPResponseStatus).
+    Rejected(u8),
+    /// The answer's time is too far from the core's clock.
+    ClockSkew,
+    /// Anything else.
+    Other,
+}
+
+impl From<HttpErrorKind> for NetKind {
+    fn from(kind: HttpErrorKind) -> Self {
+        match kind {
+            HttpErrorKind::UnknownHost => NetKind::UnknownHost,
+            HttpErrorKind::Connect => NetKind::Connect,
+            HttpErrorKind::Timeout => NetKind::Timeout,
+            HttpErrorKind::Tls => NetKind::Tls,
+            HttpErrorKind::Other => NetKind::Other,
+        }
+    }
+}
+
 #[cfg(feature = "testing")]
 pub use route::RouteTransport;
 #[cfg(feature = "testing")]
-pub(crate) use route::{percent_decode, text_reply};
+pub(crate) use route::{request_in_url, text_reply};
 
 #[cfg(feature = "testing")]
 mod route {
-    use super::{GetOptions, HttpError, HttpReply, HttpTransport};
+    use super::{HttpError, HttpReply, HttpRequest, HttpTransport};
     use std::sync::Arc;
 
     /// An [`HttpTransport`] that hands each request to the first transport whose URL prefix
-    /// the request URL starts with; a URL no prefix matches gets `HttpError("no route")`.
+    /// the request URL starts with; a URL no prefix matches gets `HttpError::other("no route")`.
     pub struct RouteTransport {
         routes: Vec<(String, Arc<dyn HttpTransport>)>,
     }
@@ -508,23 +801,13 @@ mod route {
                 .iter()
                 .find(|(prefix, _)| url.starts_with(prefix.as_str()))
                 .map(|(_, transport)| transport.as_ref())
-                .ok_or_else(|| HttpError("no route".to_owned()))
+                .ok_or_else(|| HttpError::other("no route"))
         }
     }
 
     impl HttpTransport for RouteTransport {
-        fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-            self.route(url)?.get_with(url, opts)
-        }
-
-        fn post_with(
-            &self,
-            url: &str,
-            content_type: &str,
-            body: &[u8],
-            opts: GetOptions,
-        ) -> Result<HttpReply, HttpError> {
-            self.route(url)?.post_with(url, content_type, body, opts)
+        fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+            self.route(request.url)?.send(request)
         }
     }
 
@@ -552,6 +835,20 @@ mod route {
             }
         }
         Some(out)
+    }
+
+    /// The DER request a GET binding carries in `url`: the base64 (percent-encoded or not)
+    /// of a DER value that ends the URL's path, after one of its `/`.
+    pub(crate) fn request_in_url(url: &str) -> Option<Vec<u8>> {
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD;
+        use der::Decode;
+        let path = url.splitn(4, '/').nth(3)?;
+        let starts = std::iter::once(0).chain(path.match_indices('/').map(|(i, _)| i + 1));
+        starts
+            .filter_map(|start| percent_decode(&path[start..]))
+            .filter_map(|b64| STANDARD.decode(b64).ok())
+            .find(|der| der::AnyRef::from_der(der).is_ok())
     }
 }
 
@@ -759,7 +1056,7 @@ mod tests {
                 );
                 assert!(got.is_err(), "{url} {target}");
             }
-            validated.unwrap_err().0
+            validated.unwrap_err().message
         };
         assert_eq!(unsupported("http://u:p@[x"), "invalid proxy URL");
         assert_eq!(unsupported(""), "invalid proxy URL");
@@ -931,19 +1228,19 @@ mod tests {
         let (proxy, heads) = serve_in_turn(loops);
         let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
         let e = through.get("http://nca.invalid/").unwrap_err();
-        assert_eq!(e.0, "too many redirects (more than 10)");
+        assert_eq!(e.message, "too many redirects (more than 10)");
         assert_eq!(heads.join().unwrap().len(), MAX_REDIRECTS + 1);
 
         let no_location = "HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n".to_owned();
         let (proxy, _) = serve_in_turn(vec![no_location]);
         let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
         let e = through.get("http://nca.invalid/").unwrap_err();
-        assert_eq!(e.0, "redirect 302 without Location");
+        assert_eq!(e.message, "redirect 302 without Location");
 
         let (proxy, _) = serve_in_turn(vec![redirect_to(302, "ftp://x/")]);
         let through = UreqTransport::with_proxy(ProxySetting::Manual(proxy));
         let e = through.get("http://nca.invalid/").unwrap_err();
-        assert_eq!(e.0, "unusable redirect to ftp://x/");
+        assert_eq!(e.message, "unusable redirect to ftp://x/");
     }
 
     #[test]
@@ -957,7 +1254,7 @@ mod tests {
             ..GetOptions::default()
         };
         let e = through.get_with("http://nca.invalid/x", opts).unwrap_err();
-        assert_eq!(e.0, "http://nca.invalid/x is not an https URL");
+        assert_eq!(e.message, "http://nca.invalid/x is not an https URL");
         assert!(heads.join().unwrap().is_empty());
         assert!(is_https("https://h/") && is_https("HTTPS://h/"));
         assert!(!is_https("http://h/") && !is_https("https:/") && !is_https(""));
@@ -1017,7 +1314,7 @@ mod tests {
         let e = through
             .post_with("http://nca.invalid/x", "t/q", b"x", https_only)
             .unwrap_err();
-        assert_eq!(e.0, "http://nca.invalid/x is not an https URL");
+        assert_eq!(e.message, "http://nca.invalid/x is not an https URL");
         assert!(heads.join().unwrap().is_empty(), "nothing was sent");
 
         let body = "z".repeat(2048);
@@ -1065,10 +1362,13 @@ mod tests {
     #[cfg(feature = "testing")]
     #[test]
     fn percent_decoding() {
-        assert_eq!(percent_decode("a%2Bb%2f").as_deref(), Some(&b"a+b/"[..]));
-        assert_eq!(percent_decode("%2"), None);
-        assert_eq!(percent_decode("%zz"), None);
-        assert_eq!(percent_decode("%+1"), None);
+        assert_eq!(
+            route::percent_decode("a%2Bb%2f").as_deref(),
+            Some(&b"a+b/"[..])
+        );
+        assert_eq!(route::percent_decode("%2"), None);
+        assert_eq!(route::percent_decode("%zz"), None);
+        assert_eq!(route::percent_decode("%+1"), None);
     }
 
     #[test]
@@ -1092,23 +1392,27 @@ mod tests {
 
         struct Fixed(u16);
         impl HttpTransport for Fixed {
-            /// The reply's content type is the body limit it was asked with.
-            fn get_with(&self, _: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-                Ok(HttpReply {
-                    status: self.0,
-                    content_type: Some(opts.max_len.to_string()),
-                    location: None,
-                    body: Vec::new(),
-                })
-            }
-            fn post_with(
-                &self,
-                url: &str,
-                _: &str,
-                _: &[u8],
-                opts: GetOptions,
-            ) -> Result<HttpReply, HttpError> {
-                self.get_with(url, opts)
+            fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+                match request.method {
+                    HttpMethod::Get => {
+                        let (_, opts) = (request.url, request.opts);
+                        Ok(HttpReply {
+                            status: self.0,
+                            content_type: Some(opts.max_len.to_string()),
+                            location: None,
+                            body: Vec::new(),
+                        })
+                    }
+                    HttpMethod::Post => {
+                        let (url, _, _, opts) = (
+                            request.url,
+                            request.content_type.unwrap_or_default(),
+                            request.body,
+                            request.opts,
+                        );
+                        self.get_with(url, opts)
+                    }
+                }
             }
         }
 
@@ -1136,9 +1440,85 @@ mod tests {
             routes.post("http://a.test/x", "t", b"").map(|r| r.status),
             Ok(201)
         );
-        assert_eq!(
-            status("http://b.test"),
-            Err(HttpError("no route".to_owned()))
+        assert_eq!(status("http://b.test"), Err(HttpError::other("no route")));
+    }
+
+    #[test]
+    fn send_with_headers() {
+        let ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_owned();
+        let headers = [("Cookie", "a=1"), ("X-Requested-With", "XMLHttpRequest")];
+        // Directly and through a proxy (absolute form): the headers go, no Content-Type.
+        let (url, heads) = serve_in_turn(vec![ok.clone()]);
+        UreqTransport::default()
+            .send(&HttpRequest {
+                headers: &headers,
+                ..HttpRequest::post(&format!("{url}/a"), None, b"body", GetOptions::default())
+            })
+            .unwrap();
+        let (proxy, proxied) = serve_in_turn(vec![ok.clone()]);
+        UreqTransport::with_proxy(ProxySetting::Manual(proxy))
+            .send(&HttpRequest {
+                headers: &headers,
+                ..HttpRequest::post("http://nca.invalid/a", None, b"body", GetOptions::default())
+            })
+            .unwrap();
+        for head in [heads.join().unwrap(), proxied.join().unwrap()] {
+            let head = head[0].to_ascii_lowercase();
+            assert!(head.starts_with("post "), "{head}");
+            assert!(head.contains("\r\ncookie: a=1\r\n"), "{head}");
+            assert!(
+                head.contains("\r\nx-requested-with: xmlhttprequest\r\n"),
+                "{head}"
+            );
+            assert!(head.contains("\r\ncontent-length: 4\r\n"), "{head}");
+            assert!(!head.contains("content-type"), "{head}");
+        }
+        // A redirect is followed with a GET without them.
+        let (url, heads) = serve_in_turn(vec![redirect_to(302, "/b"), ok]);
+        let target = format!("{url}/a");
+        let get = HttpRequest {
+            headers: &headers,
+            ..HttpRequest::get(&target, GetOptions::default())
+        };
+        UreqTransport::default().send(&get).unwrap();
+        let heads = heads.join().unwrap();
+        assert!(
+            heads[0].contains("Cookie: a=1")
+                || heads[0].to_ascii_lowercase().contains("cookie: a=1")
+        );
+        assert!(
+            !heads[1].to_ascii_lowercase().contains("cookie"),
+            "{}",
+            heads[1]
+        );
+        // A header that does not fit a request line is refused.
+        let bad = [("X-Evil", "a\r\nHost: b")];
+        let refused = HttpRequest {
+            headers: &bad,
+            ..HttpRequest::get("http://nca.invalid/", GetOptions::default())
+        };
+        let (proxy, _) = serve_in_turn(Vec::new());
+        assert!(
+            UreqTransport::with_proxy(ProxySetting::Manual(proxy))
+                .send(&refused)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn errors_have_kinds() {
+        let e = UreqTransport::default()
+            .get("http://nca.invalid/")
+            .unwrap_err();
+        assert_eq!(e.kind, HttpErrorKind::UnknownHost, "{e}");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        drop(listener);
+        let e = UreqTransport::default().get(&url).unwrap_err();
+        // Refused at once, or (Windows retries a refused SYN) past the connect timeout.
+        assert!(
+            matches!(e.kind, HttpErrorKind::Connect | HttpErrorKind::Timeout),
+            "{e}"
         );
     }
 }

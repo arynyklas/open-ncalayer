@@ -7,7 +7,9 @@
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{Locale, OcspCache};
 use oncl_pki::crl::MockCrl;
-use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport, RouteTransport};
+use oncl_pki::http::{
+    HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport, RouteTransport,
+};
 use oncl_pki::ocsp::MockOcsp;
 use oncl_pki::pkcs12::{self, KeyEntry};
 use oncl_pki::pkix::CaSet;
@@ -90,20 +92,16 @@ struct Logged {
 }
 
 impl HttpTransport for Logged {
-    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        self.log.lock().unwrap().push(format!("GET {url}"));
-        self.routes.get_with(url, opts)
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        content_type: &str,
-        body: &[u8],
-        opts: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.log.lock().unwrap().push(format!("POST {url}"));
-        self.routes.post_with(url, content_type, body, opts)
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        let method = match request.method {
+            HttpMethod::Get => "GET",
+            HttpMethod::Post => "POST",
+        };
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("{method} {}", request.url));
+        self.routes.send(request)
     }
 }
 
@@ -176,6 +174,7 @@ impl Harness {
             locale: Arc::new(move || locale),
             // The synthetic PKI's CAs, as the ports' keys are synthetic.
             cas: Arc::new(synthetic_cas()),
+            pki_hosts: oncl_plugin::nca_pki_hosts(),
         }
     }
 

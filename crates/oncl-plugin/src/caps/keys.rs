@@ -3,9 +3,11 @@
 //! signatures made here, the private key never reaching the guest.
 
 use super::{
-    DialogTurn, MAX_KEY_HANDLES, MAX_LINE, check_line, denied, failed, invalid, origin, source,
+    DialogTurn, MAX_KEY_HANDLES, MAX_LINE, check_line, crypto, denied, failed, invalid, origin,
+    source,
 };
 use crate::host::HostState;
+use der::asn1::ObjectIdentifier;
 use oncl_basics::{
     ChainPolicy, ConfirmPrompt, FilterMore as BasicsMore, KeyChooser, KeyFilter, KeyOrder,
     KeyRequest, Locale, MAX_PAGE_FILE, OpenError, PageFile, PageFileError, Prompt, StorageAnswer,
@@ -16,8 +18,11 @@ use oncl_pdk::abi::{
     HostResult, KeySource, KeyUsageBit, OpenArgs, OpenOutcome, OpenedKey, Password, SelectArgs,
     SignCmsArgs, SignRawArgs, SignXmlArgs, TerminalsArgs,
 };
+use oncl_pdk::abi::{CmsCerts, CmsContent, CmsOutcome, SignCmsExArgs, TimeSource};
 use oncl_pki::cert::Certificate;
-use oncl_pki::cms::{self, SignOptions};
+use oncl_pki::cms::{
+    self, AttrSpec, CertSpec, CmsError, CoSign, Content, SignOptions, SignSpec, TimeForm,
+};
 use oncl_pki::info::{KeyUsageBits, KncaCertType};
 use oncl_pki::key::{KeyAlg, SigAlg};
 use oncl_pki::pkcs12::{self, KeyEntry};
@@ -26,6 +31,7 @@ use oncl_pki::{cert, tsp, xmldsig};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use time::OffsetDateTime;
 use zeroize::Zeroizing;
 
 /// A key an instance holds: the key with its certificate, and the other certificates of
@@ -451,7 +457,15 @@ const MAX_CHAIN: usize = 16;
 /// `keys_chain`: the key's certificate, then its issuers up to a self-signed one: from its
 /// store's certificates first, then from the CAs the core trusts.
 pub(crate) fn keys_chain(state: &mut HostState, args: Handle) -> HostResult<Vec<Bytes>> {
-    let held = state.keys.held(args.handle)?;
+    chain_of(state, args.handle)?
+        .iter()
+        .map(|cert| der_of(cert).map(Bytes::from))
+        .collect()
+}
+
+/// The certificate of the key `handle`, then its issuers up to a self-signed one.
+fn chain_of(state: &HostState, handle: u32) -> HostResult<Vec<Certificate>> {
+    let held = state.keys.held(handle)?;
     let store = CaSet::new(held.store_certs.to_vec());
     let mut chain = vec![held.entry.cert.clone()];
     while chain.len() < MAX_CHAIN {
@@ -469,10 +483,7 @@ pub(crate) fn keys_chain(state: &mut HostState, args: Handle) -> HostResult<Vec<
             _ => break,
         }
     }
-    chain
-        .iter()
-        .map(|cert| der_of(cert).map(Bytes::from))
-        .collect()
+    Ok(chain)
 }
 
 /// `keys_sign_cms`: a CAdES signature, time-stamped on its new signer if asked.
@@ -498,6 +509,111 @@ pub(crate) fn keys_sign_cms(state: &mut HostState, args: SignCmsArgs) -> HostRes
         .map_err(failed)?;
     }
     Ok(Bytes::from(der))
+}
+
+/// `keys_sign_cms_ex`: a CMS signature as the plugin's profile says, time-stamped on its
+/// new signer if asked; a failed time-stamp is an outcome, not an error.
+pub(crate) fn keys_sign_cms_ex(
+    state: &mut HostState,
+    args: SignCmsExArgs,
+) -> HostResult<CmsOutcome> {
+    let tsa = args
+        .timestamp
+        .as_ref()
+        .map(|choice| crypto::tsa_spec(state, choice))
+        .transpose()?;
+    let chain = match args.certificates {
+        CmsCerts::Chain => chain_of(state, args.handle)?,
+        CmsCerts::Signer | CmsCerts::Extra(_) => Vec::new(),
+    };
+    let certificates = match &args.certificates {
+        CmsCerts::Signer => CertSpec::Signer,
+        CmsCerts::Chain => CertSpec::Chain,
+        CmsCerts::Extra(certs) => CertSpec::Extra(
+            certs
+                .iter()
+                .map(|der| crypto::parse(der))
+                .collect::<HostResult<_>>()?,
+        ),
+    };
+    let oid =
+        |text: &str| ObjectIdentifier::new(text).map_err(|e| invalid(format!("OID {text:?}: {e}")));
+    let signing_time = match &args.attrs.signing_time {
+        None => None,
+        Some(time) => {
+            let at = match time.at {
+                TimeSource::Now => (state.services.clock)(),
+                TimeSource::UnixMs(ms) => {
+                    OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
+                        .map_err(|e| invalid(format!("signing time: {e}")))?
+                }
+            };
+            let form = match time.form {
+                abi::TimeForm::Auto => TimeForm::Auto,
+                abi::TimeForm::Utc => TimeForm::Utc,
+                abi::TimeForm::Generalized => TimeForm::Generalized,
+            };
+            Some((at, form))
+        }
+    };
+    let extra = args
+        .attrs
+        .extra
+        .iter()
+        .map(|attr| {
+            Ok((
+                oid(&attr.oid)?,
+                attr.values.iter().map(|v| v.to_vec()).collect(),
+            ))
+        })
+        .collect::<HostResult<_>>()?;
+    let spec = SignSpec {
+        content: match &args.content {
+            CmsContent::Data(data) => Content::Data(data),
+            CmsContent::Digest(digest) => Content::Digest(digest),
+        },
+        encapsulate: args.encapsulate,
+        cosign: match &args.cosign {
+            abi::CoSign::Auto => CoSign::Auto,
+            abi::CoSign::Never => CoSign::Never,
+            abi::CoSign::Into(cms) => CoSign::Into(cms),
+        },
+        econtent_type: args.econtent_type.as_deref().map(oid).transpose()?,
+        digest: args.digest.map(crypto::hash_alg),
+        attrs: AttrSpec {
+            content_type: args.attrs.content_type,
+            message_digest: args.attrs.message_digest,
+            signing_certificate_v2: args.attrs.signing_certificate_v2,
+            signing_time,
+            extra,
+        },
+        certificates,
+    };
+    let entry = state.keys.get(args.handle)?;
+    let der = cms::sign_spec(entry, &chain, &spec).map_err(|e| match e {
+        CmsError::Key(_) | CmsError::UnknownAlgorithm(_) => failed(e),
+        e => invalid(e.to_string()),
+    })?;
+    let Some(tsa) = tsa else {
+        return Ok(CmsOutcome::Signed(Bytes::from(der)));
+    };
+    let spec = match tsa {
+        Ok(spec) => spec,
+        Err(failure) => return Ok(CmsOutcome::TspFailed(failure)),
+    };
+    Ok(
+        match tsp::stamp(
+            &der,
+            tsp::SignerSel::Last,
+            &spec,
+            tsp::StampMode::Replace,
+            tsp::TokenForm::Token,
+            state.services.http.as_ref(),
+        ) {
+            Ok(stamped) => CmsOutcome::Signed(Bytes::from(stamped)),
+            Err(e) => CmsOutcome::TspFailed(crypto::tsp_failure(&spec, &e)),
+        },
+    )
 }
 
 /// `keys_sign_raw`: the key's algorithm, RSA with SHA-256.

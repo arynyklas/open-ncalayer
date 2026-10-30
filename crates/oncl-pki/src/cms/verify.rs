@@ -333,7 +333,7 @@ fn hash(alg: &ObjectIdentifier, data: &[u8]) -> Result<Vec<u8>, CmsError> {
 mod tests {
     use super::*;
     use crate::cms::asn1::{EncapsulatedContentInfo, SignedContentInfo, der_set_contents};
-    use crate::cms::sign::{SignOptions, sign_content, signed_attributes};
+    use crate::cms::sign::{AttrSpec, SignOptions, sign_content, signed_attributes};
     use crate::pkcs12::{KeyEntry, load};
     use oncl_testkit::{read, synthetic};
     use time::macros::datetime;
@@ -382,11 +382,12 @@ mod tests {
     fn attrs_for(e: &KeyEntry, attrs_cert: &Certificate, content: &[u8]) -> Vec<u8> {
         let alg = crate::info::cert_info(&e.cert).signing_alg().unwrap();
         signed_attributes(
+            &AttrSpec::cades(opts().signing_time),
             &oid::DATA,
-            opts().signing_time,
             &alg.digest(content),
             &attrs_cert.to_der().unwrap(),
         )
+        .unwrap()
         .unwrap()
     }
 

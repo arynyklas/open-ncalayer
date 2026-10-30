@@ -67,6 +67,16 @@ mod imports {
         pub fn keys_open(ptr: i32, len: i32) -> i64;
         #[link_name = "dialog_password"]
         pub fn dialog_password(ptr: i32, len: i32) -> i64;
+        #[link_name = "keys_sign_cms_ex"]
+        pub fn keys_sign_cms_ex(ptr: i32, len: i32) -> i64;
+        #[link_name = "tsp_stamp"]
+        pub fn tsp_stamp(ptr: i32, len: i32) -> i64;
+        #[link_name = "tsp_request"]
+        pub fn tsp_request(ptr: i32, len: i32) -> i64;
+        #[link_name = "ocsp_fetch"]
+        pub fn ocsp_fetch(ptr: i32, len: i32) -> i64;
+        #[link_name = "crl_fetch"]
+        pub fn crl_fetch(ptr: i32, len: i32) -> i64;
     }
 }
 
@@ -102,6 +112,11 @@ fn host_fn(import: Import) -> HostFn {
         Import::KeysTerminals => imports::keys_terminals,
         Import::KeysOpen => imports::keys_open,
         Import::DialogPassword => imports::dialog_password,
+        Import::KeysSignCmsEx => imports::keys_sign_cms_ex,
+        Import::TspStamp => imports::tsp_stamp,
+        Import::TspRequest => imports::tsp_request,
+        Import::OcspFetch => imports::ocsp_fetch,
+        Import::CrlFetch => imports::crl_fetch,
     }
 }
 
@@ -367,6 +382,10 @@ pub mod keys {
     use crate::abi::{
         Chosen, Handle, OpenedKey, SignCmsArgs, SignRawArgs, SignXmlArgs, TerminalsArgs,
     };
+    pub use crate::abi::{
+        CmsCerts, CmsContent, CmsOutcome, CoSign, RawAttribute, SignCmsExArgs, SignedAttrs,
+        SigningTime, TimeForm, TimeSource,
+    };
 
     /// A key the user chose: it stays usable until dropped.
     #[derive(Debug)]
@@ -458,6 +477,16 @@ pub mod keys {
                 timestamp,
             };
             call::<_, Bytes>(imports::keys_sign_cms, &args).map(Bytes::into_vec)
+        }
+
+        /// A CMS signature as `args` says (its `handle` is this key's): the CMS, or the
+        /// signed CMS's failed time-stamp.
+        pub fn sign_cms_ex(&self, args: SignCmsExArgs) -> HostResult<CmsOutcome> {
+            let args = SignCmsExArgs {
+                handle: self.handle,
+                ..args
+            };
+            call(imports::keys_sign_cms_ex, &args)
         }
 
         /// A signature of `data` with the key's algorithm (RSA: SHA-256).
@@ -600,5 +629,39 @@ pub mod http {
                 body: Bytes::from(body.to_vec()),
             },
         )
+    }
+}
+
+/// Time-stamps, OCSP and CRL, requested by the core from the PKI hosts (`keys`).
+pub mod pki {
+    use super::*;
+    pub use crate::abi::{
+        CertStatusAbi, CrlArgs, CrlOutcome, IssuerSel, NetFailure, NetKind, NetStage, Nonce,
+        OcspArgs, OcspOutcome, PkiMethod, PkiUrl, Problem, SignerSel, StampArgs, StampMode,
+        StampOutcome, TokenForm, TsaChoice, TsaSpec, TspOutcome, TspRequestArgs,
+    };
+
+    /// Time-stamps signers of a CMS.
+    pub fn stamp(args: &StampArgs) -> HostResult<StampOutcome> {
+        call(imports::tsp_stamp, args)
+    }
+
+    /// A time-stamp of `imprint` (hashed with `tsa.hash`).
+    pub fn tsp_request(tsa: &TsaSpec, imprint: &[u8]) -> HostResult<TspOutcome> {
+        let args = TspRequestArgs {
+            tsa: tsa.clone(),
+            imprint: Bytes::from(imprint.to_vec()),
+        };
+        call(imports::tsp_request, &args)
+    }
+
+    /// An OCSP response about a certificate.
+    pub fn ocsp_fetch(args: &OcspArgs) -> HostResult<OcspOutcome> {
+        call(imports::ocsp_fetch, args)
+    }
+
+    /// The CRLs of a certificate and its status in them.
+    pub fn crl_fetch(args: &CrlArgs) -> HostResult<CrlOutcome> {
+        call(imports::crl_fetch, args)
     }
 }

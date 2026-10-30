@@ -32,7 +32,7 @@ use crate::asn1util::{Enumerated, unsigned};
 use crate::ber::{self, BerError};
 use crate::cert::Certificate;
 use crate::fsutil::{Access, write_atomically};
-use crate::http::{CONNECT_TIMEOUT, GetOptions, HttpTransport};
+use crate::http::{CONNECT_TIMEOUT, GetOptions, HttpError, HttpTransport, NetKind};
 use crate::key::{PublicKey, SigAlg};
 use crate::oid;
 use crate::pkix::time_of;
@@ -89,7 +89,7 @@ pub enum CrlError {
     NoUrl,
     /// No HTTP response from the distribution point: connection, timeout or size limit.
     #[error("HTTP request to the CRL distribution point failed: {0}")]
-    Http(String),
+    Http(HttpError),
     /// The distribution point answered with an HTTP status other than 200.
     #[error("CRL distribution point answered HTTP status {0}")]
     HttpStatus(u16),
@@ -110,6 +110,18 @@ pub enum CrlError {
     Outdated,
 }
 
+impl CrlError {
+    /// What kind of network failure it is, as the plugins see it.
+    pub fn kind(&self) -> NetKind {
+        match self {
+            CrlError::NoUrl => NetKind::Other,
+            CrlError::Http(e) => e.kind.into(),
+            CrlError::HttpStatus(status) => NetKind::Http(*status),
+            _ => NetKind::InvalidResponse,
+        }
+    }
+}
+
 impl From<der::Error> for CrlError {
     fn from(e: der::Error) -> Self {
         CrlError::Malformed(e.to_string())
@@ -127,15 +139,28 @@ impl From<BerError> for CrlError {
 /// one). A URI value is split on ASCII whitespace and a leading `URL=` of a part is
 /// dropped (see the module documentation).
 pub fn crl_urls(cert: &Certificate) -> Vec<String> {
-    let Ok(Some((_, points))) = cert
+    match cert
         .tbs_certificate()
         .get_extension::<CrlDistributionPoints>()
-    else {
-        return Vec::new();
-    };
+    {
+        Ok(Some((_, points))) => point_urls(&points.0),
+        _ => Vec::new(),
+    }
+}
+
+/// The `http://` and `https://` URLs of `cert`'s FreshestCRL (delta CRLs), read as
+/// [`crl_urls`] reads its distribution points.
+pub fn freshest_urls(cert: &Certificate) -> Vec<String> {
+    match cert.tbs_certificate().get_extension::<FreshestCrl>() {
+        Ok(Some((_, points))) => point_urls(&points.0),
+        _ => Vec::new(),
+    }
+}
+
+/// The http(s) fullName URIs of distribution points, in order and without repeats.
+fn point_urls(points: &[x509_cert::ext::pkix::crl::dp::DistributionPoint]) -> Vec<String> {
     let mut urls: Vec<String> = Vec::new();
     let uris = points
-        .0
         .iter()
         .filter_map(|point| match &point.distribution_point {
             Some(DistributionPointName::FullName(names)) => Some(names),
@@ -232,6 +257,17 @@ pub fn verify_crl(
     issuer: &Certificate,
     now: OffsetDateTime,
 ) -> Result<CertificateList, CrlError> {
+    verify_any_crl(crl_der, issuer, now, false)
+}
+
+/// [`verify_crl`] of a complete CRL, or (`delta`) of a delta CRL, which must have a
+/// deltaCRLIndicator.
+fn verify_any_crl(
+    crl_der: &[u8],
+    issuer: &Certificate,
+    now: OffsetDateTime,
+    delta: bool,
+) -> Result<CertificateList, CrlError> {
     let strict = crl_der.len() > MAX_BER_CRL_LEN;
     let der: Cow<'_, [u8]> = if strict {
         Cow::Borrowed(crl_der)
@@ -271,8 +307,13 @@ pub fn verify_crl(
 
     let crl = CertificateList::from_der(&der)?;
     let tbs = &crl.tbs_cert_list;
+    let mut indicated = false;
     for extension in tbs.crl_extensions.iter().flatten() {
         let id = extension.extn_id;
+        if delta && id == oid::DELTA_CRL_INDICATOR {
+            indicated = true;
+            continue;
+        }
         if REFUSED_CRL_EXTENSIONS.contains(&id) {
             return Err(CrlError::Malformed(format!(
                 "unsupported CRL extension {id}"
@@ -283,6 +324,11 @@ pub fn verify_crl(
                 "unsupported critical CRL extension {id}"
             )));
         }
+    }
+    if delta && !indicated {
+        return Err(CrlError::Malformed(
+            "a delta CRL without deltaCRLIndicator".to_owned(),
+        ));
     }
 
     if time_of(&tbs.this_update) > now {
@@ -392,7 +438,7 @@ impl CrlCache {
             https_only: false,
             redirects: true,
         };
-        let reply = http.get_with(url, opts).map_err(|e| CrlError::Http(e.0))?;
+        let reply = http.get_with(url, opts).map_err(CrlError::Http)?;
         if reply.status != 200 {
             return Err(CrlError::HttpStatus(reply.status));
         }
@@ -452,6 +498,80 @@ pub fn check(
     }
     Err(last)
 }
+
+/// The CRLs of `cert`'s distribution points as received, without the cache: the first
+/// complete CRL of `issuer` its CRLDistributionPoints give, then the first delta CRL its
+/// FreshestCRL gives (if it has one), each downloaded within `timeout`; and `cert`'s
+/// status in them at `now`. An entry of the delta CRL decides over the complete CRL; one
+/// with the reason removeFromCRL (8) means good.
+///
+/// # Errors
+///
+/// [`CrlError::NoUrl`] without a distribution point URL, [`CrlError::IssuerMismatch`] if
+/// `issuer` did not issue `cert`; the error of the last URL tried when none gives a valid
+/// CRL (a delta CRL is never used without its complete CRL).
+pub fn fetch_for(
+    cert: &Certificate,
+    issuer: &Certificate,
+    http: &dyn HttpTransport,
+    timeout: Duration,
+    now: OffsetDateTime,
+) -> Result<(Vec<Vec<u8>>, CrlStatus), CrlError> {
+    let urls = crl_urls(cert);
+    if urls.is_empty() {
+        return Err(CrlError::NoUrl);
+    }
+    let tbs = cert.tbs_certificate();
+    if tbs.issuer() != issuer.tbs_certificate().subject() {
+        return Err(CrlError::IssuerMismatch);
+    }
+    let opts = GetOptions {
+        timeout,
+        connect_timeout: CONNECT_TIMEOUT,
+        max_len: MAX_CRL_LEN,
+        https_only: false,
+        redirects: true,
+    };
+    let download = |url: &str, delta: bool| -> Result<(Vec<u8>, CertificateList), CrlError> {
+        let reply = http.get_with(url, opts).map_err(CrlError::Http)?;
+        if reply.status != 200 {
+            return Err(CrlError::HttpStatus(reply.status));
+        }
+        let crl = verify_any_crl(&reply.body, issuer, now, delta)?;
+        Ok((reply.body, crl))
+    };
+    let first = |urls: &[String], delta: bool| {
+        let mut last = CrlError::NoUrl;
+        for url in urls {
+            match download(url, delta) {
+                Ok(found) => return Ok(found),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    };
+    let serial = tbs.serial_number().as_bytes();
+    let (base_der, base) = first(&urls, false)?;
+    let mut status = lookup(&base, serial);
+    let mut crls = vec![base_der];
+    let deltas = freshest_urls(cert);
+    if !deltas.is_empty() {
+        let (delta_der, delta) = first(&deltas, true)?;
+        match lookup(&delta, serial) {
+            CrlStatus::Revoked {
+                reason: Some(REMOVE_FROM_CRL),
+                ..
+            } => status = CrlStatus::Good,
+            revoked @ CrlStatus::Revoked { .. } => status = revoked,
+            CrlStatus::Good => {}
+        }
+        crls.push(delta_der);
+    }
+    Ok((crls, status))
+}
+
+/// CRLReason removeFromCRL: a delta CRL's entry taking a certificate off the list.
+const REMOVE_FROM_CRL: u8 = 8;
 
 #[cfg(test)]
 mod tests {

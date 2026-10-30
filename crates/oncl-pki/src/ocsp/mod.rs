@@ -28,11 +28,14 @@ mod mock;
 #[cfg(feature = "testing")]
 pub use mock::{MockOcsp, OcspTamper};
 
-use crate::asn1util::{TimeError, generalized_time};
+use crate::asn1util::{RawSequence, TimeError, generalized_time};
 use crate::ber::{self, BerError};
 use crate::cert::Certificate;
-use crate::http::{CONNECT_TIMEOUT, GetOptions, HttpTransport, MAX_RESPONSE_LEN, nca_get_url};
-use crate::key::{PublicKey, SigAlg};
+use crate::http::{
+    CONNECT_TIMEOUT, GetOptions, HttpError, HttpTransport, MAX_RESPONSE_LEN, NetKind, NonceSpec,
+    PkiMethod, nca_get_url, pki_send,
+};
+use crate::key::{HashAlg, PublicKey, SigAlg};
 use crate::oid;
 use crate::pkix::{CaSet, PathError, build_path};
 use der::asn1::{AnyRef, IntRef, OctetStringRef};
@@ -93,7 +96,7 @@ pub enum OcspError {
     NoUrl,
     /// No HTTP response from the responder: connection, timeout or size limit.
     #[error("HTTP request to the OCSP responder failed: {0}")]
-    Http(String),
+    Http(HttpError),
     /// The responder answered with an HTTP status other than 200.
     #[error("OCSP responder answered HTTP status {0}")]
     HttpStatus(u16),
@@ -139,6 +142,22 @@ pub enum OcspError {
     /// The `SingleResponse` is about another `CertID` than the requested one.
     #[error("OCSP response is about another certificate")]
     CertIdMismatch,
+    /// The response does not echo the request's nonce.
+    #[error("OCSP response nonce does not match the request")]
+    NonceMismatch,
+}
+
+impl OcspError {
+    /// What kind of network failure it is, as the plugins see it.
+    pub fn kind(&self) -> NetKind {
+        match self {
+            OcspError::NoUrl => NetKind::Other,
+            OcspError::Http(e) => e.kind.into(),
+            OcspError::HttpStatus(status) => NetKind::Http(*status),
+            OcspError::NotSuccessful(status) => NetKind::Rejected(*status),
+            _ => NetKind::InvalidResponse,
+        }
+    }
 }
 
 impl From<der::Error> for OcspError {
@@ -185,7 +204,163 @@ pub fn ocsp_url(cert: &Certificate) -> Option<String> {
 ///
 /// If the issuer's subject does not re-encode (it was decoded, so it does).
 pub fn request_der(cert: &Certificate, issuer: &Certificate) -> Vec<u8> {
-    RequestedId::new(cert, issuer).request_der()
+    RequestedId::new(cert, issuer).request_der(None)
+}
+
+/// How [`fetch`] asks a responder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestSpec {
+    /// The hash of the request's `CertID`.
+    pub cert_id_hash: HashAlg,
+    /// The request's nonce extension.
+    pub nonce: NonceSpec,
+    /// The binding; a POST is `application/ocsp-request` unless it names its own type.
+    pub method: PkiMethod,
+    /// The responder; `None`: the certificate's ([`ocsp_url`]).
+    pub url: Option<String>,
+    /// Timeout of the request.
+    pub timeout: Duration,
+}
+
+/// What a responder answered [`fetch`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fetched {
+    /// The HTTP status (200).
+    pub http_status: u16,
+    /// The `OCSPResponse`, as received.
+    pub response: Vec<u8>,
+    /// Its `BasicOCSPResponse`, if it has one (DER).
+    pub basic: Option<Vec<u8>>,
+    /// `OCSPResponseStatus`.
+    pub response_status: u8,
+    /// The answer about the certificate: without a check, as the response says; with one,
+    /// only if the response passed it.
+    pub answer: Option<OcspAnswer>,
+    /// producedAt.
+    pub produced_at: Option<OffsetDateTime>,
+    /// Why the response failed the check, if it was asked for.
+    pub problem: Option<OcspError>,
+}
+
+/// Media type of a POSTed `OCSPRequest` (RFC 6960 appendix A.1).
+const OCSP_REQUEST: &str = "application/ocsp-request";
+
+/// Asks a responder about `cert` (issued by `issuer`) as `spec` says, and reads the
+/// answer. With `check` (the CA set and the time), the response must also pass what
+/// [`check`] requires, and echo the request's nonce; how it fails is
+/// [`Fetched::problem`], not an error.
+///
+/// # Errors
+///
+/// [`OcspError::NoUrl`] without a responder URL; [`OcspError::Http`] without a response;
+/// [`OcspError::HttpStatus`] for a status other than 200; [`OcspError::Malformed`] for a
+/// body that is not an `OCSPResponse`.
+pub fn fetch(
+    cert: &Certificate,
+    issuer: &Certificate,
+    spec: &RequestSpec,
+    http: &dyn HttpTransport,
+    check: Option<(&CaSet, OffsetDateTime)>,
+) -> Result<Fetched, OcspError> {
+    let url = match &spec.url {
+        Some(url) => url.clone(),
+        None => ocsp_url(cert).ok_or(OcspError::NoUrl)?,
+    };
+    let requested = RequestedId::with_hash(cert, issuer, spec.cert_id_hash);
+    let nonce = spec.nonce.draw();
+    let request = requested.request_der(nonce.as_deref());
+    let opts = GetOptions {
+        timeout: spec.timeout,
+        ..GetOptions::default()
+    };
+    let reply = pki_send(http, &spec.method, &url, OCSP_REQUEST, &request, opts)
+        .map_err(OcspError::Http)?;
+    if reply.status != 200 {
+        return Err(OcspError::HttpStatus(reply.status));
+    }
+    let der = ber::to_der(&reply.body)?;
+    let response = asn1::OcspResponse::from_der(&der)?;
+    let response_status = response.response_status.0;
+    let basic = response
+        .response_bytes
+        .filter(|bytes| bytes.response_type == oid::OCSP_BASIC)
+        .map(|bytes| ber::to_der(bytes.response.as_bytes()))
+        .transpose()?;
+    let read = basic
+        .as_deref()
+        .map(|basic| read_unchecked(basic, &requested));
+    let (unchecked, produced_at, echoed) = match read {
+        Some(Ok(read)) => read,
+        Some(Err(_)) | None => (None, None, None),
+    };
+    let (answer, problem) = match check {
+        None => (unchecked, None),
+        Some((cas, now)) => match read_response(&reply.body, &requested, cas, now) {
+            Ok(_) if nonce.is_some() && echoed != nonce => (None, Some(OcspError::NonceMismatch)),
+            Ok(answer) => (Some(answer), None),
+            Err(e) => (None, Some(e)),
+        },
+    };
+    Ok(Fetched {
+        http_status: reply.status,
+        response: reply.body,
+        basic,
+        response_status,
+        answer,
+        produced_at,
+        problem,
+    })
+}
+
+/// What a `BasicOCSPResponse` says, unverified: the answer about the requested
+/// certificate, producedAt and the nonce it echoes.
+type Unchecked = (Option<OcspAnswer>, Option<OffsetDateTime>, Option<Vec<u8>>);
+
+/// The answer of a DER `BasicOCSPResponse` about `requested` as it says, unverified, its
+/// producedAt and the nonce it echoes.
+fn read_unchecked(basic: &[u8], requested: &RequestedId<'_>) -> Result<Unchecked, OcspError> {
+    let basic = asn1::BasicOcspResponse::from_der(basic)?;
+    let data: asn1::ResponseData<'_> = basic.tbs_response_data.decode_as()?;
+    let produced_at = generalized_time(data.produced_at.0)?;
+    let answer = data
+        .responses
+        .iter()
+        .find(|single| requested.matches(&single.cert_id))
+        .map(|single| -> Result<OcspAnswer, OcspError> {
+            Ok(OcspAnswer {
+                status: cert_status(single.cert_status)?,
+                this_update: generalized_time(single.this_update.0)?,
+                next_update: single
+                    .next_update
+                    .map(|t| generalized_time(t.0))
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
+    let nonce = match data.response_extensions {
+        Some(extensions) => nonce_of(extensions.0)?,
+        None => None,
+    };
+    Ok((answer, Some(produced_at), nonce))
+}
+
+/// The nonce of the contents of an `Extensions` SEQUENCE, if it has one.
+fn nonce_of(extensions: &[u8]) -> Result<Option<Vec<u8>>, OcspError> {
+    let mut reader = der::SliceReader::new(extensions)?;
+    while !der::Reader::is_finished(&reader) {
+        let extension: x509_cert::ext::Extension = der::Reader::decode(&mut reader)?;
+        if extension.extn_id == oid::OCSP_NONCE {
+            let value = extension.extn_value.as_bytes();
+            // RFC 8954: an OCTET STRING in the extension's value; older responders put the
+            // nonce bytes there directly.
+            let nonce = match der::asn1::OctetString::from_der(value) {
+                Ok(inner) => inner.as_bytes().to_vec(),
+                Err(_) => value.to_vec(),
+            };
+            return Ok(Some(nonce));
+        }
+    }
+    Ok(None)
 }
 
 /// Asks the OCSP responder of `cert` (issued by `issuer`) for its status at `now`, through
@@ -231,8 +406,8 @@ pub fn check_answer(
         redirects: true,
     };
     let reply = http
-        .get_with(&nca_get_url(&url, &requested.request_der()), opts)
-        .map_err(|e| OcspError::Http(e.0))?;
+        .get_with(&nca_get_url(&url, &requested.request_der(None)), opts)
+        .map_err(OcspError::Http)?;
     if reply.status != 200 {
         return Err(OcspError::HttpStatus(reply.status));
     }
@@ -244,21 +419,33 @@ pub fn check_answer(
 
 /// The `CertID` of a request.
 struct RequestedId<'a> {
-    name_hash: [u8; 20],
-    key_hash: [u8; 20],
+    hash: HashAlg,
+    name_hash: Vec<u8>,
+    key_hash: Vec<u8>,
     serial: IntRef<'a>,
 }
 
 impl<'a> RequestedId<'a> {
+    /// The `CertID` of SHA-1 hashes.
     fn new(cert: &'a Certificate, issuer: &Certificate) -> Self {
+        RequestedId::with_hash(cert, issuer, HashAlg::Sha1)
+    }
+
+    fn with_hash(cert: &'a Certificate, issuer: &Certificate, hash: HashAlg) -> Self {
         let subject = issuer
             .tbs_certificate()
             .subject()
             .to_der()
             .expect("decoded Name re-encodes");
+        let key = issuer
+            .tbs_certificate()
+            .subject_public_key_info()
+            .subject_public_key
+            .raw_bytes();
         RequestedId {
-            name_hash: Sha1::digest(subject).into(),
-            key_hash: key_hash(issuer),
+            hash,
+            name_hash: hash.digest(&subject),
+            key_hash: hash.digest(key),
             serial: IntRef::new(cert.tbs_certificate().serial_number().as_bytes())
                 .expect("decoded serial number fits DER"),
         }
@@ -267,16 +454,31 @@ impl<'a> RequestedId<'a> {
     fn cert_id(&self) -> asn1::CertId<'_> {
         asn1::CertId {
             hash_algorithm: AlgorithmIdentifierRef {
-                oid: oid::SHA1,
+                oid: self.hash.oid(),
                 parameters: Some(AnyRef::NULL),
             },
-            issuer_name_hash: OctetStringRef::new(&self.name_hash).expect("20 bytes fit DER"),
-            issuer_key_hash: OctetStringRef::new(&self.key_hash).expect("20 bytes fit DER"),
+            issuer_name_hash: OctetStringRef::new(&self.name_hash).expect("a hash fits DER"),
+            issuer_key_hash: OctetStringRef::new(&self.key_hash).expect("a hash fits DER"),
             serial_number: self.serial,
         }
     }
 
-    fn request_der(&self) -> Vec<u8> {
+    /// The DER `OCSPRequest`, with the nonce extension (RFC 8954) of `nonce` if any.
+    fn request_der(&self, nonce: Option<&[u8]>) -> Vec<u8> {
+        let extensions = nonce.map(|nonce| {
+            x509_cert::ext::Extension {
+                extn_id: oid::OCSP_NONCE,
+                critical: false,
+                extn_value: der::asn1::OctetString::new(
+                    OctetStringRef::new(nonce)
+                        .and_then(|n| n.to_der())
+                        .expect("a nonce fits DER"),
+                )
+                .expect("a nonce fits DER"),
+            }
+            .to_der()
+            .expect("an extension encodes")
+        });
         asn1::OcspRequest {
             tbs_request: asn1::TbsRequest {
                 version: None,
@@ -285,7 +487,7 @@ impl<'a> RequestedId<'a> {
                     req_cert: self.cert_id(),
                     single_request_extensions: None,
                 }],
-                request_extensions: None,
+                request_extensions: extensions.as_deref().map(RawSequence),
             },
             optional_signature: None,
         }
@@ -295,7 +497,7 @@ impl<'a> RequestedId<'a> {
 
     /// Whether `id` is this `CertID`; the hash parameters (NULL or absent) are not compared.
     fn matches(&self, id: &asn1::CertId<'_>) -> bool {
-        id.hash_algorithm.oid == oid::SHA1
+        id.hash_algorithm.oid == self.hash.oid()
             && id.issuer_name_hash.as_bytes() == self.name_hash
             && id.issuer_key_hash.as_bytes() == self.key_hash
             && id.serial_number == self.serial

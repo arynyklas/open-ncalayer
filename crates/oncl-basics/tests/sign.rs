@@ -945,21 +945,25 @@ fn tsa_profile_adds_timestamp() {
 fn tsp_failure_code() {
     struct Down;
     impl oncl_pki::http::HttpTransport for Down {
-        fn get_with(
+        fn send(
             &self,
-            _: &str,
-            _: oncl_pki::http::GetOptions,
+            request: &oncl_pki::http::HttpRequest<'_>,
         ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
-            Err(oncl_pki::http::HttpError("down".to_owned()))
-        }
-        fn post_with(
-            &self,
-            _: &str,
-            _: &str,
-            _: &[u8],
-            _: oncl_pki::http::GetOptions,
-        ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
-            Err(oncl_pki::http::HttpError("down".to_owned()))
+            match request.method {
+                oncl_pki::http::HttpMethod::Get => {
+                    let (_, _) = (request.url, request.opts);
+                    Err(oncl_pki::http::HttpError::other("down"))
+                }
+                oncl_pki::http::HttpMethod::Post => {
+                    let (_, _, _, _) = (
+                        request.url,
+                        request.content_type.unwrap_or_default(),
+                        request.body,
+                        request.opts,
+                    );
+                    Err(oncl_pki::http::HttpError::other("down"))
+                }
+            }
         }
     }
     let prompter = Arc::new(ScriptedPrompter::new(script![

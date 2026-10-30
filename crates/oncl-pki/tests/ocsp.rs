@@ -6,9 +6,10 @@ use der::asn1::{AnyRef, IntRef, OctetStringRef};
 use der::{Decode, Encode, Sequence};
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::http::{
-    CONNECT_TIMEOUT, GetOptions, HttpError, HttpReply, HttpTransport, MAX_RESPONSE_LEN,
-    UreqTransport, nca_get_url,
+    CONNECT_TIMEOUT, GetOptions, HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport,
+    MAX_RESPONSE_LEN, NonceSpec, PkiMethod, UreqTransport, nca_get_url,
 };
+use oncl_pki::key::HashAlg;
 use oncl_pki::ocsp::{
     self, ALLOWED_PERIOD, CLOCK_SKEW, CertStatus, MockOcsp, OcspError, OcspTamper, TIMEOUT,
 };
@@ -79,18 +80,22 @@ impl Fixed {
 }
 
 impl HttpTransport for Fixed {
-    fn get_with(&self, _: &str, _: GetOptions) -> Result<HttpReply, HttpError> {
-        self.0.clone()
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        _: &str,
-        _: &[u8],
-        o: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.get_with(url, o)
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (_, _) = (request.url, request.opts);
+                self.0.clone()
+            }
+            HttpMethod::Post => {
+                let (url, _, _, o) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                self.get_with(url, o)
+            }
+        }
     }
 }
 
@@ -275,7 +280,10 @@ fn every_tamper_is_an_error_not_a_status() {
         (OcspTamper::Garbage, OcspError::Malformed(any())),
         (
             OcspTamper::Hang(Duration::from_secs(30)),
-            OcspError::Http("timed out".to_owned()),
+            OcspError::Http(HttpError::new(
+                oncl_pki::http::HttpErrorKind::Timeout,
+                "timed out",
+            )),
         ),
     ];
     for (tamper, expected) in table {
@@ -316,10 +324,10 @@ fn http_failures_are_errors() {
         check_leaf(leaf, &no_content_type, TIMEOUT),
         Err(OcspError::ContentType(None))
     );
-    let refused = Fixed(Err(HttpError("connection refused".to_owned())));
+    let refused = Fixed(Err(HttpError::other("connection refused")));
     assert_eq!(
         check_leaf(leaf, &refused, TIMEOUT),
-        Err(OcspError::Http("connection refused".to_owned()))
+        Err(OcspError::Http(HttpError::other("connection refused")))
     );
     let error = check_leaf(leaf, &refused, TIMEOUT).unwrap_err();
     assert_eq!(
@@ -453,13 +461,23 @@ fn hang_returns_http_error_within_timeout() {
 struct Recording(Mutex<Vec<GetOptions>>);
 
 impl HttpTransport for Recording {
-    fn get_with(&self, _: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        self.0.lock().unwrap().push(opts);
-        Err(HttpError("unreachable".to_owned()))
-    }
-
-    fn post_with(&self, _: &str, _: &str, _: &[u8], _: GetOptions) -> Result<HttpReply, HttpError> {
-        unreachable!("OCSP uses GET")
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        match request.method {
+            HttpMethod::Get => {
+                let (_, opts) = (request.url, request.opts);
+                self.0.lock().unwrap().push(opts);
+                Err(HttpError::other("unreachable"))
+            }
+            HttpMethod::Post => {
+                let (_, _, _, _) = (
+                    request.url,
+                    request.content_type.unwrap_or_default(),
+                    request.body,
+                    request.opts,
+                );
+                unreachable!("OCSP uses GET")
+            }
+        }
     }
 }
 
@@ -592,4 +610,167 @@ fn live_ocsp_nca_test_certificate() {
     );
     println!("OCSP {url}: {status:?}");
     assert!(status.is_ok(), "{status:?}");
+}
+
+/// Elements of a constructed value.
+fn elements(any: AnyRef<'_>) -> Vec<AnyRef<'_>> {
+    let mut reader = der::SliceReader::new(any.value()).unwrap();
+    let mut out = Vec::new();
+    while !der::Reader::is_finished(&reader) {
+        out.push(der::Reader::decode::<AnyRef<'_>>(&mut reader).unwrap());
+    }
+    out
+}
+
+/// The hash OID of the `CertID` of a DER `OCSPRequest`, and its nonce if it has one.
+fn read_request(request: &[u8]) -> (String, Option<Vec<u8>>) {
+    let tbs = elements(elements(AnyRef::from_der(request).unwrap())[0]);
+    let request_list = elements(tbs[0]);
+    let cert_id = elements(elements(request_list[0])[0]);
+    let alg = elements(cert_id[0])[0]
+        .decode_as::<der::asn1::ObjectIdentifier>()
+        .unwrap()
+        .to_string();
+    let nonce = tbs.get(1).map(|extensions| {
+        let extension = elements(elements(elements(*extensions)[0])[0]);
+        assert_eq!(
+            extension[0]
+                .decode_as::<der::asn1::ObjectIdentifier>()
+                .unwrap(),
+            oid::OCSP_NONCE
+        );
+        let value = extension.last().unwrap().value();
+        <&OctetStringRef>::from_der(value)
+            .unwrap()
+            .as_bytes()
+            .to_vec()
+    });
+    (alg, nonce)
+}
+
+fn fetch_spec() -> ocsp::RequestSpec {
+    ocsp::RequestSpec {
+        cert_id_hash: HashAlg::Sha1,
+        nonce: NonceSpec::None,
+        method: PkiMethod::GetUrlEncoded,
+        url: Some(OCSP_URL.to_owned()),
+        timeout: TIMEOUT,
+    }
+}
+
+fn fetch_leaf(
+    leaf: &str,
+    spec: &ocsp::RequestSpec,
+    http: &dyn HttpTransport,
+    check: bool,
+) -> Result<ocsp::Fetched, OcspError> {
+    let cas = cas();
+    ocsp::fetch(
+        &entry(leaf).cert,
+        &cer("inter-gost2015"),
+        spec,
+        http,
+        check.then(|| (&cas, OffsetDateTime::now_utc())),
+    )
+}
+
+#[test]
+fn fetch_cert_id_hashes() {
+    for hash in [HashAlg::Sha1, HashAlg::Sha256, HashAlg::Gost34311] {
+        let mock = MockOcsp::new(entry("ocsp-gost2015"));
+        let spec = ocsp::RequestSpec {
+            cert_id_hash: hash,
+            ..fetch_spec()
+        };
+        let fetched = fetch_leaf("inter-user-gost2015-sign", &spec, &mock, true).unwrap();
+        assert_eq!(fetched.problem, None, "{hash:?}");
+        assert_eq!(fetched.answer.unwrap().status, CertStatus::Good);
+        assert_eq!(read_request(&mock.requests()[0]).0, hash.oid().to_string());
+    }
+}
+
+#[test]
+fn fetch_nonce_lengths() {
+    for len in [8, 16, 32] {
+        let mock = MockOcsp::new(entry("ocsp-gost2015"));
+        let spec = ocsp::RequestSpec {
+            nonce: NonceSpec::Random(len),
+            ..fetch_spec()
+        };
+        let fetched = fetch_leaf("inter-user-gost2015-sign", &spec, &mock, true).unwrap();
+        assert_eq!(fetched.problem, None);
+        let nonce = read_request(&mock.requests()[0]).1.unwrap();
+        assert_eq!(nonce.len(), usize::from(len));
+    }
+    // Without a nonce, the request has no extensions.
+    let mock = MockOcsp::new(entry("ocsp-gost2015"));
+    fetch_leaf("inter-user-gost2015-sign", &fetch_spec(), &mock, true).unwrap();
+    assert_eq!(read_request(&mock.requests()[0]).1, None);
+}
+
+#[test]
+fn fetch_get_under_256() {
+    let mock = MockOcsp::new(entry("ocsp-gost2015"));
+    let short = ocsp::RequestSpec {
+        method: PkiMethod::GetUnder(256),
+        ..fetch_spec()
+    };
+    fetch_leaf("inter-user-gost2015-sign", &short, &mock, true).unwrap();
+    assert!(mock.calls()[0].len() > OCSP_URL.len() + 1, "a GET");
+    // A long request (a SHA-512... nonce of 255 bytes) goes by POST.
+    let long = ocsp::RequestSpec {
+        nonce: NonceSpec::Random(255),
+        ..short
+    };
+    let fetched = fetch_leaf("inter-user-gost2015-sign", &long, &mock, true).unwrap();
+    assert_eq!(fetched.problem, None);
+    assert_eq!(mock.calls()[1], OCSP_URL, "a POST");
+}
+
+#[test]
+fn fetch_returns_raw_and_basic() {
+    let leaf = entry("inter-revoked-gost2015-sign").cert;
+    let revoked_at = datetime!(2026-01-15 08:00 UTC);
+    let mock = MockOcsp::new(entry("ocsp-gost2015")).status(
+        &serial_hex(&leaf),
+        CertStatus::Revoked {
+            time: revoked_at,
+            reason: Some(1),
+        },
+    );
+    let spec = ocsp::RequestSpec {
+        method: PkiMethod::Post { content_type: None },
+        ..fetch_spec()
+    };
+    let fetched = fetch_leaf("inter-revoked-gost2015-sign", &spec, &mock, false).unwrap();
+    assert_eq!(fetched.http_status, 200);
+    assert_eq!(fetched.response_status, 0);
+    assert_eq!(
+        fetched.answer.unwrap().status,
+        CertStatus::Revoked {
+            time: revoked_at,
+            reason: Some(1)
+        }
+    );
+    assert!(fetched.produced_at.is_some());
+    // The basic response is the contents of the responseBytes OCTET STRING.
+    let basic = fetched.basic.unwrap();
+    let response = elements(AnyRef::from_der(&fetched.response).unwrap());
+    let bytes = elements(elements(response[1])[0]);
+    assert_eq!(bytes[1].value(), basic.as_slice());
+}
+
+#[test]
+fn fetch_check_reports_problem() {
+    let mock = MockOcsp::new(entry("ocsp-gost2015")).tamper(OcspTamper::WrongKey);
+    let unchecked = fetch_leaf("inter-user-gost2015-sign", &fetch_spec(), &mock, false).unwrap();
+    assert_eq!(unchecked.problem, None);
+    assert_eq!(unchecked.answer.unwrap().status, CertStatus::Good);
+    let checked = fetch_leaf("inter-user-gost2015-sign", &fetch_spec(), &mock, true).unwrap();
+    assert!(matches!(checked.problem, Some(OcspError::BadSignature(_))));
+    assert_eq!(checked.answer, None);
+    // A status other than 200 is an error with its kind.
+    let failing = MockOcsp::new(entry("ocsp-gost2015")).tamper(OcspTamper::HttpStatus(503));
+    let e = fetch_leaf("inter-user-gost2015-sign", &fetch_spec(), &failing, true).unwrap_err();
+    assert_eq!(e.kind(), oncl_pki::http::NetKind::Http(503));
 }

@@ -8,7 +8,7 @@ use std::sync::{PoisonError, RwLock};
 use oncl_basics::RecentPathStore;
 use oncl_desktop::ProxySetting;
 use oncl_desktop::settings::{self, Settings};
-use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport, UreqTransport};
+use oncl_pki::http::{HttpError, HttpReply, HttpRequest, HttpTransport, UreqTransport};
 use serde_json::Value;
 
 const RECENT_PATH: &str = "recentPath";
@@ -94,18 +94,8 @@ impl LiveProxyTransport {
 }
 
 impl HttpTransport for LiveProxyTransport {
-    fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-        self.transport().get_with(url, opts)
-    }
-
-    fn post_with(
-        &self,
-        url: &str,
-        content_type: &str,
-        body: &[u8],
-        opts: GetOptions,
-    ) -> Result<HttpReply, HttpError> {
-        self.transport().post_with(url, content_type, body, opts)
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        self.transport().send(request)
     }
 }
 
@@ -137,7 +127,7 @@ mod tests {
         let http = LiveProxyTransport::new(ProxySetting::Manual("socks5://127.0.0.1:1".to_owned()));
         // An unusable proxy fails the request without connecting directly.
         let e = http.get(&url).unwrap_err();
-        assert!(e.0.contains("proxy"), "{e}");
+        assert!(e.message.contains("proxy"), "{e}");
         http.set_proxy(ProxySetting::None);
         let reply = http.get(&url).unwrap();
         assert_eq!(

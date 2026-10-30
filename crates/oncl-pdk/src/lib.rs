@@ -3,7 +3,7 @@
 //! - [`abi`]: the ABI between the core and a plugin (exports, host functions, the CBOR
 //!   values they exchange); the core builds on it too.
 //! - On `wasm32`, the guest SDK: [`plugin!`] exports a request handler as a plugin, and the
-//!   host functions are wrapped in [`host`], [`keys`], [`dialogs`], [`files`] and [`http`].
+//!   host functions are wrapped in [`host`], [`keys`], [`pki`], [`dialogs`], [`files`] and [`http`].
 //!
 //! The Java dialects of the original's modules are re-exported for plugins that must answer
 //! as an original did, byte for byte: [`orgjson`] (org.json reading, parsing and writing in
@@ -48,7 +48,7 @@ mod guest;
 #[doc(hidden)]
 pub use guest::__rt;
 #[cfg(target_arch = "wasm32")]
-pub use guest::{call_host, dialogs, files, host, http, keys};
+pub use guest::{call_host, dialogs, files, host, http, keys, pki};
 pub use oncl_protocol::{AddInfo, Reply, invoker, javab64, javaexc, javamap, legacy, orgjson};
 pub use serde_json;
 

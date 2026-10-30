@@ -102,7 +102,7 @@ fn get(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oncl_pki::http::{HttpError, HttpReply};
+    use oncl_pki::http::{HttpError, HttpMethod, HttpReply, HttpRequest};
     use std::sync::Mutex;
 
     /// Replies from a table by URL and records the limit, `https_only` and timeout asked
@@ -114,34 +114,39 @@ mod tests {
     }
 
     impl HttpTransport for Table {
-        fn get_with(&self, url: &str, opts: GetOptions) -> Result<HttpReply, HttpError> {
-            self.asked
-                .lock()
-                .unwrap()
-                .push((url.to_owned(), opts.max_len, opts.https_only));
-            self.timeouts.lock().unwrap().push(opts.timeout);
-            assert!(opts.connect_timeout <= opts.timeout);
-            let (_, status, body) = self
-                .replies
-                .iter()
-                .find(|(u, _, _)| *u == url)
-                .ok_or_else(|| HttpError("connection refused".to_owned()))?;
-            Ok(HttpReply {
-                status: *status,
-                content_type: None,
-                location: None,
-                body: body.clone(),
-            })
-        }
-
-        fn post_with(
-            &self,
-            _: &str,
-            _: &str,
-            _: &[u8],
-            _: GetOptions,
-        ) -> Result<HttpReply, HttpError> {
-            unreachable!()
+        fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+            match request.method {
+                HttpMethod::Get => {
+                    let (url, opts) = (request.url, request.opts);
+                    self.asked.lock().unwrap().push((
+                        url.to_owned(),
+                        opts.max_len,
+                        opts.https_only,
+                    ));
+                    self.timeouts.lock().unwrap().push(opts.timeout);
+                    assert!(opts.connect_timeout <= opts.timeout);
+                    let (_, status, body) = self
+                        .replies
+                        .iter()
+                        .find(|(u, _, _)| *u == url)
+                        .ok_or_else(|| HttpError::other("connection refused"))?;
+                    Ok(HttpReply {
+                        status: *status,
+                        content_type: None,
+                        location: None,
+                        body: body.clone(),
+                    })
+                }
+                HttpMethod::Post => {
+                    let (_, _, _, _) = (
+                        request.url,
+                        request.content_type.unwrap_or_default(),
+                        request.body,
+                        request.opts,
+                    );
+                    unreachable!()
+                }
+            }
         }
     }
 

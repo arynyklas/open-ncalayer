@@ -20,7 +20,9 @@ pub mod package;
 mod runtime;
 pub mod store;
 
-pub use caps::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_KEY_HANDLES, MAX_SECRETS};
+pub use caps::{
+    HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_KEY_HANDLES, MAX_SECRETS, NCA_PKI_HOSTS, nca_pki_hosts,
+};
 pub use host::HostServices;
 pub use manifest::{Capabilities, HttpPrefix, Localized, Manifest, Replaces};
 pub use modules::{BUILT_IN, LoadedInfo, OnMissing, PluginModules};

@@ -109,6 +109,7 @@ impl Sandbox {
             clock: OffsetDateTime::now_utc,
             locale: Arc::new(|| Locale::Ru),
             cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
+            pki_hosts: oncl_plugin::nca_pki_hosts(),
         };
         let builtin = vec![oncl_basics::MODULE_NAME.to_owned()];
         Sandbox {

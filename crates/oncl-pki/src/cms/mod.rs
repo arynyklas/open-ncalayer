@@ -27,7 +27,9 @@ use x509_cert::Certificate;
 
 #[cfg(feature = "testing")]
 pub(crate) use sign::sign_content;
-pub use sign::{SignOptions, sign};
+pub use sign::{
+    AttrSpec, CertSpec, CoSign, Content, SignOptions, SignSpec, TimeForm, sign, sign_spec,
+};
 pub use verify::{VerifiedSigner, verify};
 
 /// A DER CMS as `-----BEGIN CMS-----` PEM ([`crate::pem::encode`]).
@@ -116,6 +118,9 @@ pub enum CmsError {
     /// The key cannot be used with the algorithm.
     #[error("key: {0}")]
     Key(KeyError),
+    /// The signature asked for cannot be made: why.
+    #[error("{0}")]
+    Constraint(String),
 }
 
 impl From<der::Error> for CmsError {
