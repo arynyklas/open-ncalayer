@@ -2665,7 +2665,10 @@ fn motiw_token_storages_and_containers() {
 
 #[test]
 fn motiw_token_certificate_list_and_errors() {
-    let harness = Harness::new(vec![], vec![]).with_tokens(kaztoken_emulator("user-gost2015-sign"));
+    // The page's PIN reaches a reader only after the user allows it, once per reader.
+    let yes = Step::Confirm { yes: true };
+    let harness = Harness::new(vec![yes.clone(), yes], vec![])
+        .with_tokens(kaztoken_emulator("user-gost2015-sign"));
     let mut session = harness.session("motiw");
     let list =
         |session: &mut oncl_port_tests::SessionHandle, storage: &str, reader: &str, pin: &str| {
@@ -2720,11 +2723,15 @@ fn motiw_token_certificate_list_and_errors() {
         list(&mut session, "BKS", TOKEN_READER, TOKEN_PIN),
         r#"{"responseObject":"","code":"500","uuid":"7"}"#
     );
+    // Two readers, two questions: the wrong PIN went through the allowance it already had,
+    // and neither an unknown reader nor an unknown storage reaches the question.
+    assert_eq!(harness.prompter().confirm_prompts().len(), 2);
 }
 
 #[test]
 fn motiw_token_sign_and_verify_with_time_stamp() {
-    let harness = Harness::new(vec![], vec![]).with_tokens(kaztoken_emulator("user-gost2015-sign"));
+    let harness = Harness::new(vec![Step::Confirm { yes: true }], vec![])
+        .with_tokens(kaztoken_emulator("user-gost2015-sign"));
     let mut session = harness.session("motiw");
     let listed = text(session.call(
         &motiw(
@@ -2785,6 +2792,8 @@ fn motiw_token_sign_and_verify_with_time_stamp() {
         sign(&mut session, "nope", 1),
         r#"{"responseObject":"","code":"500","uuid":"7"}"#
     );
+    // One question for the reader; the later calls of the session use that allowance.
+    assert_eq!(harness.prompter().confirm_prompts().len(), 1);
 }
 
 /// [`with_synthetic_ocsp`] whose responder says the synthetic key `name` is revoked.
