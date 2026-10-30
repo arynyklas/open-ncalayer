@@ -25,23 +25,52 @@ pub trait PluginsServices: Send + Sync {
     fn view(&self) -> PluginsView;
     /// Installs `id` from the catalog: downloads it, then asks the user (in a window of its
     /// own). Blocks for the download.
-    fn install(&self, id: &str);
+    ///
+    /// # Errors
+    ///
+    /// Why the user is not asked: the catalog or the package failed, or the plugin is
+    /// installed or being installed already.
+    fn install(&self, id: &str) -> Result<(), PluginActionError>;
     /// Installs the package file at `path`, once the user agreed.
-    fn install_file(&self, path: PathBuf);
+    ///
+    /// # Errors
+    ///
+    /// Why the user is not asked: the file is not a valid package, it needs a newer
+    /// OpenNCALayer, or that plugin is being installed already.
+    fn install_file(&self, path: PathBuf) -> Result<(), PluginActionError>;
     /// Turns `id` on or off.
     ///
     /// # Errors
     ///
-    /// What failed, for the user.
-    fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), String>;
+    /// What failed.
+    fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), PluginActionError>;
     /// Uninstalls `id`.
     ///
     /// # Errors
     ///
-    /// What failed, for the user.
-    fn remove(&self, id: &str) -> Result<(), String>;
+    /// What failed.
+    fn remove(&self, id: &str) -> Result<(), PluginActionError>;
     /// Downloads the catalog again. Blocks for the download.
     fn refresh(&self);
+}
+
+/// Why an action on a plugin failed; the window says it in its language.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginActionError {
+    /// The plugin is installed already.
+    InstalledAlready,
+    /// The plugin is being installed already (downloaded, or waiting for the user).
+    BeingInstalled,
+    /// There is no catalog: none can be downloaded, or the build has no keys.
+    NoCatalog,
+    /// The catalog does not offer the plugin to this installation.
+    NotOffered,
+    /// The plugin needs this version of OpenNCALayer or newer.
+    NeedsCore(String),
+    /// The plugin is not installed.
+    NotInstalled,
+    /// Anything else: the technical detail, shown after a translated prefix.
+    Failed(String),
 }
 
 /// The plugins, as the window shows them.
@@ -234,14 +263,23 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
 
 /// Reads the plugins on a worker thread, then shows them.
 fn load(open: &Open) {
-    run_action(open, |_| Ok(()), None);
+    run_action(open, |_| Ok(()), Action::Install, None);
+}
+
+/// Which action failed: the prefix of its error.
+#[derive(Clone, Copy)]
+enum Action {
+    Install,
+    Toggle,
+    Remove,
 }
 
 /// Runs `action` on a worker thread, then reads the plugins and shows them with the
-/// action's outcome: its error, or `done` if given.
+/// action's outcome: its error (after `kind`'s prefix), or `done` if given.
 fn run_action(
     open: &Open,
-    action: impl FnOnce(&dyn PluginsServices) -> Result<(), String> + Send + 'static,
+    action: impl FnOnce(&dyn PluginsServices) -> Result<(), PluginActionError> + Send + 'static,
+    kind: Action,
     done: Option<String>,
 ) {
     run(
@@ -258,10 +296,33 @@ fn run_action(
             show(open, view);
             match outcome {
                 Ok(()) => show_message(&open.ui, done.as_deref().unwrap_or(""), false),
-                Err(e) => show_message(&open.ui, &e, true),
+                Err(e) => {
+                    let text = action_error_text(&e, kind, open.desktop.locale.get());
+                    show_message(&open.ui, &text, true);
+                }
             }
         },
     );
+}
+
+/// `e` of `kind` for the user, in `l`: what failed, then why.
+fn action_error_text(e: &PluginActionError, kind: Action, l: Locale) -> String {
+    let t = Texts::of(l);
+    let failed = match kind {
+        Action::Install => t.install_failed,
+        Action::Toggle => t.toggle_failed,
+        Action::Remove => t.remove_failed,
+    };
+    let why = match e {
+        PluginActionError::InstalledAlready => t.installed_already.to_owned(),
+        PluginActionError::BeingInstalled => t.being_installed.to_owned(),
+        PluginActionError::NoCatalog => t.no_catalog.to_owned(),
+        PluginActionError::NotOffered => t.not_offered.to_owned(),
+        PluginActionError::NeedsCore(version) => t.needs_core.replace("{0}", version),
+        PluginActionError::NotInstalled => t.not_installed.to_owned(),
+        PluginActionError::Failed(detail) => detail.clone(),
+    };
+    failed.replace("{0}", &why)
 }
 
 /// Shows `view`.
@@ -295,6 +356,7 @@ fn toggle(open: &Open, row: i32) {
     run_action(
         open,
         move |services| services.set_enabled(&plugin.id, enable),
+        Action::Toggle,
         None,
     );
 }
@@ -325,6 +387,7 @@ fn remove(open: &Open, row: i32) {
     run_action(
         open,
         move |services| services.remove(&plugin.id),
+        Action::Remove,
         Some(done),
     );
 }
@@ -345,10 +408,8 @@ fn install(open: &Open, row: i32) {
     );
     run_action(
         open,
-        move |services| {
-            services.install(&plugin.id);
-            Ok(())
-        },
+        move |services| services.install(&plugin.id),
+        Action::Install,
         None,
     );
 }
@@ -378,10 +439,8 @@ fn pick_file(open: &Open) {
 fn install_file(open: &Open, path: PathBuf) {
     run_action(
         open,
-        move |services| {
-            services.install_file(path);
-            Ok(())
-        },
+        move |services| services.install_file(path),
+        Action::Install,
         None,
     );
 }
@@ -396,6 +455,7 @@ fn refresh(open: &Open) {
             services.refresh();
             Ok(())
         },
+        Action::Install,
         None,
     );
 }
@@ -592,6 +652,19 @@ struct Texts {
     pick_title: &'static str,
     filter: &'static str,
     cannot_start: &'static str,
+    /// `{0}`: why.
+    install_failed: &'static str,
+    /// `{0}`: why.
+    toggle_failed: &'static str,
+    /// `{0}`: why.
+    remove_failed: &'static str,
+    installed_already: &'static str,
+    being_installed: &'static str,
+    no_catalog: &'static str,
+    not_offered: &'static str,
+    /// `{0}`: the version.
+    needs_core: &'static str,
+    not_installed: &'static str,
 }
 
 impl Texts {
@@ -621,6 +694,15 @@ impl Texts {
                 pick_title: "Плагин файлын таңдаңыз",
                 filter: "OpenNCALayer плагині",
                 cannot_start: "Әрекетті орындау мүмкін болмады",
+                install_failed: "Плагинді орнату мүмкін болмады: {0}",
+                toggle_failed: "Плагинді қосу немесе өшіру мүмкін болмады: {0}",
+                remove_failed: "Плагинді жою мүмкін болмады: {0}",
+                installed_already: "ол орнатылып қойған",
+                being_installed: "ол қазір орнатылуда",
+                no_catalog: "плагиндер каталогы қолжетімсіз",
+                not_offered: "каталог оны ұсынбайды",
+                needs_core: "OpenNCALayer {0} немесе жаңарақ нұсқасы қажет",
+                not_installed: "ол орнатылмаған",
             },
             Locale::Ru => &Texts {
                 unavailable: "Каталог плагинов недоступен в этой сборке",
@@ -646,6 +728,15 @@ impl Texts {
                 pick_title: "Выберите файл плагина",
                 filter: "Плагин OpenNCALayer",
                 cannot_start: "Не удалось выполнить действие",
+                install_failed: "Не удалось установить плагин: {0}",
+                toggle_failed: "Не удалось включить или выключить плагин: {0}",
+                remove_failed: "Не удалось удалить плагин: {0}",
+                installed_already: "он уже установлен",
+                being_installed: "он уже устанавливается",
+                no_catalog: "каталог плагинов недоступен",
+                not_offered: "каталог его не предлагает",
+                needs_core: "нужен OpenNCALayer {0} или новее",
+                not_installed: "он не установлен",
             },
             Locale::En => &Texts {
                 unavailable: "The plugin catalog is unavailable in this build",
@@ -671,6 +762,15 @@ impl Texts {
                 pick_title: "Choose a plugin file",
                 filter: "OpenNCALayer plugin",
                 cannot_start: "Cannot carry out the action",
+                install_failed: "Cannot install the plugin: {0}",
+                toggle_failed: "Cannot turn the plugin on or off: {0}",
+                remove_failed: "Cannot remove the plugin: {0}",
+                installed_already: "it is installed already",
+                being_installed: "it is being installed already",
+                no_catalog: "the plugin catalog is unavailable",
+                not_offered: "the catalog does not offer it",
+                needs_core: "it needs OpenNCALayer {0} or newer",
+                not_installed: "it is not installed",
             },
         }
     }
@@ -697,8 +797,8 @@ pub(crate) mod fakes {
     pub(crate) struct FakePlugins {
         pub(crate) view: Mutex<Option<PluginsView>>,
         pub(crate) calls: Arc<Mutex<Vec<Call>>>,
-        /// What `set_enabled` and `remove` answer.
-        pub(crate) fail: Arc<Mutex<Option<String>>>,
+        /// What every action answers.
+        pub(crate) fail: Arc<Mutex<Option<PluginActionError>>>,
     }
 
     impl FakePlugins {
@@ -706,7 +806,7 @@ pub(crate) mod fakes {
             self.calls.lock().unwrap().push(call);
         }
 
-        fn outcome(&self) -> Result<(), String> {
+        fn outcome(&self) -> Result<(), PluginActionError> {
             self.fail.lock().unwrap().clone().map_or(Ok(()), Err)
         }
     }
@@ -721,20 +821,22 @@ pub(crate) mod fakes {
             })
         }
 
-        fn install(&self, id: &str) {
+        fn install(&self, id: &str) -> Result<(), PluginActionError> {
             self.log(Call::Install(id.to_owned()));
+            self.outcome()
         }
 
-        fn install_file(&self, path: PathBuf) {
+        fn install_file(&self, path: PathBuf) -> Result<(), PluginActionError> {
             self.log(Call::InstallFile(path));
+            self.outcome()
         }
 
-        fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
+        fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), PluginActionError> {
             self.log(Call::SetEnabled(id.to_owned(), enabled));
             self.outcome()
         }
 
-        fn remove(&self, id: &str) -> Result<(), String> {
+        fn remove(&self, id: &str) -> Result<(), PluginActionError> {
             self.log(Call::Remove(id.to_owned()));
             self.outcome()
         }
@@ -818,7 +920,7 @@ mod tests {
         _dir: tempfile::TempDir,
         open: Rc<Open>,
         calls: Arc<Mutex<Vec<Call>>>,
-        fail: Arc<Mutex<Option<String>>>,
+        fail: Arc<Mutex<Option<PluginActionError>>>,
     }
 
     fn opened(l: Locale) -> Opened {
@@ -938,14 +1040,90 @@ mod tests {
     #[test]
     fn a_failure_is_shown() {
         let o = opened(Locale::Ru);
-        *o.fail.lock().unwrap() = Some("нет прав".to_owned());
+        *o.fail.lock().unwrap() = Some(PluginActionError::Failed("access denied".to_owned()));
         let ui = &o.open.ui;
         ui.invoke_toggle(0);
         worker::manual::run_all();
-        assert_eq!(ui.get_message(), "нет прав");
+        assert_eq!(
+            ui.get_message(),
+            "Не удалось включить или выключить плагин: access denied"
+        );
         assert!(ui.get_message_is_error());
         // The list is read again all the same.
         assert_eq!(taken(&o.calls).last(), Some(&Call::View));
+        ui.invoke_remove(0);
+        ui.invoke_confirm_remove(0);
+        worker::manual::run_all();
+        assert_eq!(ui.get_message(), "Не удалось удалить плагин: access denied");
+        // An install that cannot start says why, in the window's language.
+        *o.fail.lock().unwrap() = Some(PluginActionError::BeingInstalled);
+        ui.invoke_install(0);
+        worker::manual::run_all();
+        assert_eq!(
+            ui.get_message(),
+            "Не удалось установить плагин: он уже устанавливается"
+        );
+        assert!(ui.get_message_is_error());
+        *o.fail.lock().unwrap() = Some(PluginActionError::NeedsCore("0.3.0".to_owned()));
+        install_file(&o.open, PathBuf::from("bad.onclp"));
+        worker::manual::run_all();
+        assert_eq!(
+            ui.get_message(),
+            "Не удалось установить плагин: нужен OpenNCALayer 0.3.0 или новее"
+        );
+        assert_eq!(
+            taken(&o.calls),
+            [
+                Call::Remove("kz.example.one".to_owned()),
+                Call::View,
+                Call::Install("kz.example.four".to_owned()),
+                Call::View,
+                Call::InstallFile(PathBuf::from("bad.onclp")),
+                Call::View,
+            ]
+        );
+    }
+
+    #[test]
+    fn errors_in_every_language() {
+        let errors = [
+            PluginActionError::InstalledAlready,
+            PluginActionError::BeingInstalled,
+            PluginActionError::NoCatalog,
+            PluginActionError::NotOffered,
+            PluginActionError::NeedsCore("0.3.0".to_owned()),
+            PluginActionError::NotInstalled,
+            PluginActionError::Failed("disk full".to_owned()),
+        ];
+        let actions = [Action::Install, Action::Toggle, Action::Remove];
+        for l in [Locale::Ru, Locale::Kk, Locale::En] {
+            let mut texts = Vec::new();
+            for e in &errors {
+                for kind in actions {
+                    let text = action_error_text(e, kind, l);
+                    assert!(!text.contains("{0}"), "{text}");
+                    if l != Locale::En {
+                        assert_ne!(text, action_error_text(e, kind, Locale::En), "{l:?}");
+                    }
+                    texts.push(text);
+                }
+            }
+            let mut distinct = texts.clone();
+            distinct.sort();
+            distinct.dedup();
+            assert_eq!(distinct.len(), texts.len(), "{l:?}");
+            let failed = action_error_text(&errors[6], Action::Install, l);
+            assert!(failed.ends_with(": disk full"), "{failed}");
+            assert!(action_error_text(&errors[4], Action::Install, l).contains("0.3.0"));
+        }
+        assert_eq!(
+            action_error_text(&PluginActionError::NoCatalog, Action::Install, Locale::En),
+            "Cannot install the plugin: the plugin catalog is unavailable"
+        );
+        assert_eq!(
+            action_error_text(&PluginActionError::NotInstalled, Action::Remove, Locale::Kk),
+            "Плагинді жою мүмкін болмады: ол орнатылмаған"
+        );
     }
 
     #[test]

@@ -25,7 +25,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError, Weak};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -33,9 +34,11 @@ use oncl_accessory::Bundles;
 use oncl_desktop::UpdateSettings;
 use oncl_pki::http::HttpTransport;
 use oncl_plugin::{
-    Capabilities, Localized, MAX_PACKAGE, Package, PluginModules, Replaces, Source, Store,
+    Capabilities, Installed, Localized, MAX_PACKAGE, Package, PluginModules, Replaces, Source,
+    Store,
 };
 use oncl_protocol::{AddInfo, DynamicModules};
+use oncl_ui::PluginActionError;
 use oncl_update::{
     Channel, Index, MAX_AGE, PluginChoice, PluginName, PluginRelease, PublicKey, Sha256,
     UpdateError, Version, choose_plugin, fetch, offer, verify,
@@ -52,6 +55,9 @@ use crate::update::{
 /// The first download of the catalog when none is kept, this long after the start.
 pub const FIRST_CHECK_WITHOUT_CATALOG: (Duration, Duration) =
     (Duration::from_secs(10), Duration::from_secs(60));
+
+/// How often a bounded wait looks whether a catalog download running has ended.
+const CATALOG_POLL: Duration = Duration::from_millis(20);
 
 /// The longest sleep of the schedule: the wall clock is compared at least this often.
 const WAKE_EVERY: Duration = Duration::from_secs(3600);
@@ -197,6 +203,13 @@ pub struct PluginService {
     installing: Mutex<BTreeSet<String>>,
     /// One catalog download at a time.
     checking: Mutex<()>,
+    /// One application of the catalog at a time.
+    applying: Mutex<()>,
+    /// An application asked for while one ran: the running one goes over the catalog again.
+    apply_pending: AtomicBool,
+    /// Every change of an installed plugin (turned on or off, removed, installed, updated,
+    /// withdrawn): each acts on the state as it is once it holds this.
+    changing: Mutex<()>,
 }
 
 /// The catalog in use.
@@ -254,6 +267,9 @@ impl PluginService {
             needed: Mutex::default(),
             installing: Mutex::default(),
             checking: Mutex::new(()),
+            applying: Mutex::new(()),
+            apply_pending: AtomicBool::new(false),
+            changing: Mutex::new(()),
         });
         for (id, installed) in service.store.state().plugins {
             if installed.enabled && !installed.withdrawn {
@@ -423,67 +439,105 @@ impl PluginService {
     /// package is downloaded and checked, then the user is asked; `origin` is the page that
     /// asked for it. Blocks for the downloads, not for the user. An installed plugin, or one
     /// being installed, is left alone; a failure is told ([`PluginNotice::Failed`]).
-    pub fn install_from_catalog(self: &Arc<Self>, id: &str, origin: Option<String>) {
+    ///
+    /// # Errors
+    ///
+    /// Why nothing is asked, for the plugin window (also told in the tray, but for a plugin
+    /// installed or being installed already).
+    pub fn install_from_catalog(
+        self: &Arc<Self>,
+        id: &str,
+        origin: Option<String>,
+    ) -> Result<(), PluginActionError> {
         if self.store.state().plugins.contains_key(id) {
             info!(plugin = id, "installed already");
-            return;
+            return Err(PluginActionError::InstalledAlready);
         }
         let Some(guard) = self.begin_install(id) else {
-            return;
+            return Err(PluginActionError::BeingInstalled);
         };
-        let failed = |error: String| self.failed(same_name(id), error);
-        let Some(index) = self.ensure_index(INDEX_TIMEOUT) else {
-            return failed("the plugin catalog is unavailable".to_owned());
+        let Some(index) = self.ensure_index(INDEX_TIMEOUT, true) else {
+            self.failed(
+                same_name(id),
+                "the plugin catalog is unavailable".to_owned(),
+            );
+            return Err(PluginActionError::NoCatalog);
         };
         let state = self.store.state();
         let Some(release) = offer(&index, &self.cfg.core, &state.install_id, &state.bad, |r| {
             r.id == id
         })
         .cloned() else {
-            return failed("the plugin catalog does not offer it".to_owned());
+            self.failed(
+                same_name(id),
+                "the plugin catalog does not offer it".to_owned(),
+            );
+            return Err(PluginActionError::NotOffered);
         };
         let (package, bytes) = match self.download(&release) {
             Ok(downloaded) => downloaded,
-            Err(Download::Unreachable(e)) => return self.failed(localized(&release.name), e),
-            Err(Download::Bad(e)) => return self.bad(&release, e),
+            Err(Download::Unreachable(e)) => {
+                self.failed(localized(&release.name), e.clone());
+                return Err(PluginActionError::Failed(e));
+            }
+            Err(Download::Bad(e)) => {
+                self.bad(&release, e.clone());
+                return Err(PluginActionError::Failed(e));
+            }
         };
         if let Err(e) = self.cfg.modules.check(&package) {
-            return self.bad(&release, e.to_string());
+            self.bad(&release, e.to_string());
+            return Err(PluginActionError::Failed(e.to_string()));
         }
         self.ask(package, bytes, Source::Catalog, origin, guard);
+        Ok(())
     }
 
     /// Installs the package file at `path` as a local plugin, once the user agreed (warned
     /// that nobody reviewed it). A failure is told ([`PluginNotice::Failed`]).
-    pub fn install_from_file(self: &Arc<Self>, path: PathBuf) {
+    ///
+    /// # Errors
+    ///
+    /// Why nothing is asked, for the plugin window.
+    pub fn install_from_file(self: &Arc<Self>, path: PathBuf) -> Result<(), PluginActionError> {
         let file_name = path.file_name().map_or_else(
             || path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        let checked = read_package(&path).and_then(|(package, bytes)| {
-            if package.manifest.min_core > self.cfg.core {
-                return Err(format!(
-                    "the plugin needs OpenNCALayer {} or newer",
-                    package.manifest.min_core
-                ));
-            }
-            self.cfg
-                .modules
-                .check(&package)
-                .map_err(|e| e.to_string())?;
-            Ok((package, bytes))
-        });
+        let checked = read_package(&path)
+            .map_err(PluginActionError::Failed)
+            .and_then(|(package, bytes)| {
+                if package.manifest.min_core > self.cfg.core {
+                    return Err(PluginActionError::NeedsCore(
+                        package.manifest.min_core.to_string(),
+                    ));
+                }
+                self.cfg
+                    .modules
+                    .check(&package)
+                    .map_err(|e| PluginActionError::Failed(e.to_string()))?;
+                Ok((package, bytes))
+            });
         let (package, bytes) = match checked {
             Ok(checked) => checked,
             Err(e) => {
-                warn!(path = %path.display(), error = %e, "cannot install the plugin file");
-                return self.failed(same_name(&file_name), e);
+                let detail = match &e {
+                    PluginActionError::NeedsCore(v) => {
+                        format!("the plugin needs OpenNCALayer {v} or newer")
+                    }
+                    PluginActionError::Failed(detail) => detail.clone(),
+                    other => format!("{other:?}"),
+                };
+                warn!(path = %path.display(), error = %detail, "cannot install the plugin file");
+                self.failed(same_name(&file_name), detail);
+                return Err(e);
             }
         };
         let Some(guard) = self.begin_install(&package.manifest.id) else {
-            return;
+            return Err(PluginActionError::BeingInstalled);
         };
         self.ask(package, bytes, Source::Local, None, guard);
+        Ok(())
     }
 
     /// Turns the installed `id` on (loaded, unless withdrawn) or off (unloaded).
@@ -492,13 +546,14 @@ impl PluginService {
     ///
     /// What failed, for the user: it is not installed, the state cannot be saved, or it
     /// cannot be loaded (it stays on, in error).
-    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), PluginActionError> {
+        let _change = lock(&self.changing);
         let Some(installed) = self.store.state().plugins.get(id).cloned() else {
-            return Err(format!("the plugin {id} is not installed"));
+            return Err(PluginActionError::NotInstalled);
         };
         self.store
             .set_enabled(id, enabled)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| PluginActionError::Failed(e.to_string()))?;
         if !enabled {
             self.cfg.modules.unload(id);
             lock(&self.errors).remove(id);
@@ -507,33 +562,46 @@ impl PluginService {
         if installed.withdrawn {
             return Ok(());
         }
-        self.load_installed(id)
+        self.load_installed(id).map_err(PluginActionError::Failed)
     }
 
-    /// Uninstalls `id`: unloaded, then removed from `<data>/plugins/`.
+    /// Uninstalls `id`: removed from `<data>/plugins/`, then unloaded. If its record is gone
+    /// but its package file stays, it is unloaded all the same (and the error returned); if
+    /// the record cannot be saved, it stays installed and loaded.
     ///
     /// # Errors
     ///
-    /// What failed, for the user.
-    pub fn remove(&self, id: &str) -> Result<(), String> {
-        self.cfg.modules.unload(id);
-        lock(&self.errors).remove(id);
-        let removed = self.store.remove(id).map_err(|e| e.to_string());
-        if removed.is_ok() {
+    /// What failed.
+    pub fn remove(&self, id: &str) -> Result<(), PluginActionError> {
+        let _change = lock(&self.changing);
+        let removed = self.store.remove(id).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound
+                && !self.store.state().plugins.contains_key(id)
+                && !self.cfg.modules.loaded().iter().any(|p| p.id == id)
+            {
+                PluginActionError::NotInstalled
+            } else {
+                PluginActionError::Failed(e.to_string())
+            }
+        });
+        if !self.store.state().plugins.contains_key(id) {
+            self.cfg.modules.unload(id);
+            lock(&self.errors).remove(id);
             lock(&self.known).remove(id);
         }
         removed
     }
 
     /// The newest release of the catalog porting the original's bundle `symname`, if the
-    /// catalog has one for this installation; the catalog is downloaded within `timeout`
-    /// first if none is in use.
+    /// catalog has one for this installation. Without a catalog in use one is downloaded,
+    /// all within `timeout`: a download already running is waited for within it, and then
+    /// used.
     pub fn catalog_offer_for_symname(
         &self,
         symname: &str,
         timeout: Duration,
     ) -> Option<PluginRelease> {
-        let index = self.ensure_index(timeout)?;
+        let index = self.ensure_index(timeout, false)?;
         let state = self.store.state();
         offer(&index, &self.cfg.core, &state.install_id, &state.bad, |r| {
             r.replaces.as_ref().is_some_and(|p| p.symname == symname)
@@ -571,7 +639,12 @@ impl PluginService {
         if self.cfg.keys.is_empty() {
             return Err(Refresh::NoKeys);
         }
-        let _one = lock(&self.checking);
+        let one = lock(&self.checking);
+        self.refresh_locked(&one, timeout)
+    }
+
+    /// [`PluginService::refresh`], `checking` held.
+    fn refresh_locked(&self, _one: &MutexGuard<'_, ()>, timeout: Duration) -> Result<(), Refresh> {
         let channel = self.update_settings().channel;
         let result = self.download_catalog(channel, timeout);
         let mut catalog = lock(&self.catalog);
@@ -644,28 +717,100 @@ impl PluginService {
         kept
     }
 
-    /// [`PluginService::valid_index`], or one downloaded within `timeout`.
-    fn ensure_index(&self, timeout: Duration) -> Option<Index> {
+    /// [`PluginService::valid_index`], or one downloaded within `timeout`. A download
+    /// already running is waited for: fully (`wait`), or only within `timeout` (then
+    /// `None` once it runs out); a catalog it brought is used, else a download of our own
+    /// gets the time left. With updates on, a catalog downloaded here is applied in the
+    /// background.
+    fn ensure_index(&self, timeout: Duration, wait: bool) -> Option<Index> {
+        if let Some(index) = self.valid_index() {
+            return Some(index);
+        }
+        if self.cfg.keys.is_empty() {
+            return None;
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        let one = if wait {
+            lock(&self.checking)
+        } else {
+            loop {
+                match self.checking.try_lock() {
+                    Ok(one) => break one,
+                    Err(TryLockError::Poisoned(e)) => break e.into_inner(),
+                    Err(TryLockError::WouldBlock) => {
+                        if std::time::Instant::now() >= deadline {
+                            info!("the plugin catalog download running took too long; not waiting");
+                            return None;
+                        }
+                        thread::sleep(CATALOG_POLL);
+                    }
+                }
+            }
+        };
+        if let Some(index) = self.valid_index() {
+            return Some(index);
+        }
+        let left = if wait {
+            timeout
+        } else {
+            deadline.saturating_duration_since(std::time::Instant::now())
+        };
+        if left.is_zero() {
+            return None;
+        }
+        self.refresh_locked(&one, left).ok()?;
+        drop(one);
+        if self.update_settings().enabled
+            && let Some(service) = self.me.upgrade()
+        {
+            let spawned = thread::Builder::new()
+                .name("plugins-apply".into())
+                .spawn(move || service.apply_catalog());
+            if let Err(e) = spawned {
+                warn!(error = %e, "cannot start a thread: the plugin catalog is not applied");
+            }
+        }
         self.valid_index()
-            .or_else(|| self.refresh(timeout).ok().and_then(|()| self.valid_index()))
     }
 
     /// Moves each plugin installed from the catalog to the version the catalog in use
-    /// chooses for it.
+    /// chooses for it. One application at a time: one asked for while another runs marks
+    /// itself pending, and the running one goes over the newest catalog once more. Each
+    /// plugin is changed under `changing`, and only if it is still the one installed from
+    /// the catalog at the version the choice was made for.
     fn apply_catalog(&self) {
-        let Some(index) = self.valid_index() else {
-            return;
+        let _one = match self.applying.try_lock() {
+            Ok(one) => one,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                info!("the plugin catalog is being applied already; it goes over it again");
+                self.apply_pending.store(true, Ordering::SeqCst);
+                return;
+            }
         };
+        loop {
+            self.apply_pending.store(false, Ordering::SeqCst);
+            if let Some(index) = self.valid_index() {
+                self.apply_index(&index);
+            }
+            if !self.apply_pending.swap(false, Ordering::SeqCst) {
+                break;
+            }
+        }
+    }
+
+    /// One pass of [`PluginService::apply_catalog`] over `index`.
+    fn apply_index(&self, index: &Index) {
         let state = self.store.state();
-        for (id, installed) in &state.plugins {
-            if installed.source != Source::Catalog {
+        for (id, snapshot) in &state.plugins {
+            if snapshot.source != Source::Catalog {
                 continue;
             }
             let bad = state.bad.get(id).cloned().unwrap_or_default();
             match choose_plugin(
-                &index,
+                index,
                 id,
-                &installed.version,
+                &snapshot.version,
                 &self.cfg.core,
                 &state.install_id,
                 &bad,
@@ -674,21 +819,30 @@ impl PluginService {
                     let listed = index
                         .plugins
                         .iter()
-                        .any(|r| r.id == *id && r.version == installed.version && !r.revoked);
-                    if installed.withdrawn && listed {
-                        info!(plugin = %id, "the plugin's version is no longer revoked");
-                        if let Err(e) = self.store.set_withdrawn(id, false) {
-                            warn!(plugin = %id, error = %e, "cannot record the plugin's state");
-                        } else if installed.enabled {
-                            let _ = self.load_installed(id);
-                        }
+                        .any(|r| r.id == *id && r.version == snapshot.version && !r.revoked);
+                    if !(snapshot.withdrawn && listed) {
+                        continue;
+                    }
+                    let _change = lock(&self.changing);
+                    let Some(fresh) = self.still(id, snapshot) else {
+                        continue;
+                    };
+                    info!(plugin = %id, "the plugin's version is no longer revoked");
+                    if let Err(e) = self.store.set_withdrawn(id, false) {
+                        warn!(plugin = %id, error = %e, "cannot record the plugin's state");
+                    } else if fresh.enabled {
+                        let _ = self.load_installed(id);
                     }
                 }
                 PluginChoice::Update(release) | PluginChoice::Downgrade(release) => {
-                    self.update_to(release, installed.enabled);
+                    self.update_to(release, snapshot);
                 }
-                PluginChoice::Withdrawn if !installed.withdrawn => {
-                    warn!(plugin = %id, version = %installed.version, "the plugin's version is revoked; it is turned off");
+                PluginChoice::Withdrawn if !snapshot.withdrawn => {
+                    let _change = lock(&self.changing);
+                    if self.still(id, snapshot).is_none() {
+                        continue;
+                    }
+                    warn!(plugin = %id, version = %snapshot.version, "the plugin's version is revoked; it is turned off");
                     self.cfg.modules.unload(id);
                     if let Err(e) = self.store.set_withdrawn(id, true) {
                         warn!(plugin = %id, error = %e, "cannot record the plugin's state");
@@ -702,9 +856,26 @@ impl PluginService {
         }
     }
 
-    /// Installs `release` over the installed version: downloaded and checked, loaded (if
-    /// `enabled`; else checked only), recorded.
-    fn update_to(&self, release: &PluginRelease, enabled: bool) {
+    /// The installed `id` as it is now, if it is still `snapshot`'s: from the catalog, at
+    /// the same version. Call it holding `changing`.
+    fn still(&self, id: &str, snapshot: &Installed) -> Option<Installed> {
+        let fresh = self.store.state().plugins.get(id).cloned();
+        let same = fresh
+            .as_ref()
+            .is_some_and(|f| f.source == Source::Catalog && f.version == snapshot.version);
+        if !same {
+            info!(
+                plugin = id,
+                "the plugin changed meanwhile; the catalog leaves it alone"
+            );
+        }
+        fresh.filter(|_| same)
+    }
+
+    /// Installs `release` over `snapshot`, the version installed when it was chosen:
+    /// downloaded and checked, then, under `changing` and only if the plugin is still
+    /// `snapshot`, loaded (if it is on; else checked only) and recorded.
+    fn update_to(&self, release: &PluginRelease, snapshot: &Installed) {
         info!(plugin = %release.id, version = %release.version, "updating the plugin");
         let (package, bytes) = match self.download(release) {
             Ok(downloaded) => downloaded,
@@ -715,6 +886,11 @@ impl PluginService {
             }
             Err(Download::Bad(e)) => return self.bad(release, e),
         };
+        let _change = lock(&self.changing);
+        let Some(fresh) = self.still(&release.id, snapshot) else {
+            return;
+        };
+        let enabled = fresh.enabled;
         let loaded = if enabled {
             self.cfg.modules.load(package.clone())
         } else {
@@ -806,6 +982,7 @@ impl PluginService {
 
     /// Loads `package`, then records it.
     fn finish_install(&self, package: Package, bytes: &[u8], source: Source) {
+        let _change = lock(&self.changing);
         let id = package.manifest.id.clone();
         let name = package.manifest.name.clone();
         if let Err(e) = self.cfg.modules.load(package.clone()) {
@@ -1043,9 +1220,9 @@ impl Bundles for PluginService {
             return false;
         };
         let installed = self.store.state().plugins.contains_key(&release.id)
-            || lock(&self.known)
-                .values()
-                .any(|k| k.replaces.as_ref().is_some_and(|r| r.symname == symname));
+            || self.cfg.modules.loaded().iter().any(|p| {
+                p.id == release.id || p.replaces.as_ref().is_some_and(|r| r.symname == symname)
+            });
         if installed {
             return false;
         }

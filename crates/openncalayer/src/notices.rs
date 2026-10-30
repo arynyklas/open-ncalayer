@@ -257,9 +257,11 @@ impl TrayStatus {
         })
     }
 
-    /// The notification of a page's `installBundle` of `symname` that no plugin of the
-    /// catalog serves, unless one was shown within the last ten minutes (at `now`). `origin`
-    /// and `symname` come from the page: they are shown as text only.
+    /// The notification of a page's `installBundle` of `symname` that the catalog offers
+    /// nothing to install for (no port, one installed already — maybe turned off or
+    /// withdrawn —, or no catalog), unless one was shown within the last ten minutes (at
+    /// `now`). `origin` and `symname` come from the page: control characters go, and each is
+    /// cut to [`MAX_PAGE_TEXT`] characters.
     pub fn bundle_notification(
         &mut self,
         symname: &str,
@@ -274,6 +276,7 @@ impl TrayStatus {
         }
         self.last_bundle_notice = Some(now);
         let l = self.locale;
+        let (symname, origin) = (page_text(symname), page_text(origin));
         Some(Notification {
             title: match l {
                 Locale::Ru => "Сайт просит установить модуль",
@@ -283,13 +286,13 @@ impl TrayStatus {
             .to_owned(),
             body: match l {
                 Locale::Ru => format!(
-                    "Сайт {origin} запросил модуль {symname}. В каталоге OpenNCALayer его нет."
+                    "Сайт {origin} запросил модуль {symname}. Каталог OpenNCALayer не предлагает его установить: его там нет или он уже установлен."
                 ),
                 Locale::Kk => format!(
-                    "{origin} сайты {symname} модулін сұрады. OpenNCALayer каталогында ол жоқ."
+                    "{origin} сайты {symname} модулін сұрады. OpenNCALayer каталогы оны орнатуды ұсынбайды: ол онда жоқ немесе орнатылып қойған."
                 ),
                 Locale::En => format!(
-                    "The site {origin} asked for the module {symname}. The OpenNCALayer catalog does not have it."
+                    "The site {origin} asked for the module {symname}. The OpenNCALayer catalog offers nothing to install: it does not have it, or it is installed already."
                 ),
             },
             action: Some(NotificationAction {
@@ -383,6 +386,7 @@ impl TrayStatus {
                 None,
             ),
             PluginNotice::Needed { origin, name, .. } => {
+                let origin = origin.as_deref().map(page_text);
                 if self
                     .last_needed_notice
                     .is_some_and(|last| now.duration_since(last) < NEEDED_NOTICE_EVERY)
@@ -696,6 +700,25 @@ fn date(rfc3339: &str) -> String {
     }
 }
 
+/// The longest text of a page shown in a notification, in characters.
+pub const MAX_PAGE_TEXT: usize = 128;
+
+/// `text` from a page as a notification shows it: without control characters, line and
+/// paragraph separators (U+2028, U+2029) and bidirectional controls (U+202A–U+202E,
+/// U+2066–U+2069), at most [`MAX_PAGE_TEXT`] characters (then `…`).
+fn page_text(text: &str) -> String {
+    let shown = |c: &char| {
+        !c.is_control()
+            && !matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    };
+    let mut chars = text.chars().filter(shown);
+    let mut shown: String = chars.by_ref().take(MAX_PAGE_TEXT).collect();
+    if chars.next().is_some() {
+        shown.push('…');
+    }
+    shown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -911,7 +934,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             first.body,
-            "Сайт https://shop.kz запросил модуль kz.x. В каталоге OpenNCALayer его нет."
+            "Сайт https://shop.kz запросил модуль kz.x. Каталог OpenNCALayer не предлагает его установить: его там нет или он уже установлен."
         );
         let action = first.action.unwrap();
         assert_eq!(action.label, "Реестр плагинов");
@@ -1111,5 +1134,51 @@ mod tests {
                 assert_eq!(n.body.contains("https://shop.kz"), origin.is_some());
             }
         }
+    }
+
+    #[test]
+    fn page_text_is_cleaned_and_cut() {
+        assert_eq!(
+            page_text(
+                "a\u{2028}b\u{2029}c\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}d\u{2066}\u{2067}\u{2068}\u{2069}e"
+            ),
+            "abcde"
+        );
+        // Other format characters (a zero-width joiner in an emoji) stay.
+        assert_eq!(page_text("x\u{200D}y"), "x\u{200D}y");
+        let mut status = TrayStatus::new(Locale::En, None);
+        let long = "a".repeat(MAX_PAGE_TEXT + 10);
+        let n = status
+            .bundle_notification(
+                &format!("kz.x\n\u{1b}[31m{long}"),
+                "https://e.kz\r\nX: 1",
+                Instant::now(),
+            )
+            .unwrap();
+        assert!(!n.body.chars().any(char::is_control), "{:?}", n.body);
+        assert!(n.body.contains("https://e.kzX: 1"));
+        let shown = format!("kz.x[31m{}…", "a".repeat(MAX_PAGE_TEXT - 8));
+        assert!(n.body.contains(&shown), "{}", n.body);
+        assert_eq!(page_text("short"), "short");
+        assert_eq!(
+            page_text(&"я".repeat(MAX_PAGE_TEXT)),
+            "я".repeat(MAX_PAGE_TEXT)
+        );
+        let mut status = TrayStatus::new(Locale::Ru, None);
+        let needed = status
+            .plugin_notification(
+                &PluginNotice::Needed {
+                    origin: Some("https://e.kz\n".to_owned()),
+                    name: oncl_plugin::Localized {
+                        ru: "П".to_owned(),
+                        kk: "П".to_owned(),
+                        en: "P".to_owned(),
+                    },
+                    id: "kz.p".to_owned(),
+                },
+                Instant::now(),
+            )
+            .unwrap();
+        assert!(!needed.body.chars().any(char::is_control));
     }
 }

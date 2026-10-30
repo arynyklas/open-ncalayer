@@ -995,8 +995,10 @@ impl Updates for UpdaterHandle {
 }
 
 /// What «Проверить сейчас» (the settings window) and «Проверить обновления» (the tray)
-/// check: the core's updates, then the plugin catalog, downloaded even with updates off
-/// ([`PluginService::check_now`](crate::plugins::PluginService::check_now)).
+/// check: the core's updates, and the plugin catalog, downloaded even with updates off
+/// ([`PluginService::check_now`](crate::plugins::PluginService::check_now)) on a thread of
+/// its own, so the core's answer does not wait for plugin downloads. The plugin check uses
+/// the saved settings (channel, updates on or off), not the form's unsaved ones.
 #[derive(Clone)]
 pub struct Checks {
     pub core: UpdaterHandle,
@@ -1009,11 +1011,16 @@ impl Updates for Checks {
     }
 
     fn check_now(&self, settings: Option<UpdateSettings>) -> UpdateStatus {
-        let status = self.core.check_now(settings);
         if let Some(plugins) = &self.plugins {
-            plugins.check_now();
+            let plugins = Arc::clone(plugins);
+            let spawned = thread::Builder::new()
+                .name("plugins-check".into())
+                .spawn(move || plugins.check_now());
+            if let Err(e) = spawned {
+                warn!(error = %e, "cannot start a thread: the plugin catalog is not checked");
+            }
         }
-        status
+        self.core.check_now(settings)
     }
 }
 
