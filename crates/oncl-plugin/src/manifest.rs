@@ -113,6 +113,30 @@ pub struct Capabilities {
     pub key_files: bool,
 }
 
+impl Capabilities {
+    /// Whether nothing is asked for.
+    pub fn is_empty(&self) -> bool {
+        *self == Capabilities::default()
+    }
+
+    /// What these capabilities allow that `old` does not: the flags `old` lacks, and the
+    /// prefixes no prefix of `old` [covers](HttpPrefix::covers). Empty: nothing new.
+    pub fn added_over(&self, old: &Capabilities) -> Capabilities {
+        Capabilities {
+            keys: self.keys && !old.keys,
+            dialogs: self.dialogs && !old.dialogs,
+            files: self.files && !old.files,
+            http: self
+                .http
+                .iter()
+                .filter(|new| !old.http.iter().any(|o| o.covers(new)))
+                .cloned()
+                .collect(),
+            key_files: self.key_files && !old.key_files,
+        }
+    }
+}
+
 /// A URL prefix of `capabilities.http`: `https://`, a host, an optional port and a path
 /// ending with `/`, without user info, query or fragment.
 ///
@@ -143,6 +167,12 @@ impl HttpPrefix {
     /// The path, ending with `/`.
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Whether every URL under `other` is under this prefix too: the same host and port, and
+    /// `other`'s path starts with this one's.
+    pub fn covers(&self, other: &HttpPrefix) -> bool {
+        self.host == other.host && self.port == other.port && other.path.starts_with(&self.path)
     }
 
     /// Whether `url` is under this prefix: [`check`](Self::check) accepts it.

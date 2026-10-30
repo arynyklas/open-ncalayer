@@ -319,3 +319,6 @@ msgstr "Файлдан орнату…"
 
 msgid "Refresh the catalog"
 msgstr "Каталогты жаңарту"
+
+msgid "Allow the update"
+msgstr "Жаңартуға рұқсат беру"

@@ -439,6 +439,38 @@ fn log_and_now_work() {
 }
 
 #[test]
+fn logged_text_cannot_forge_a_line() {
+    let forged = "fine\n2026-01-01T00:00:00Z ERROR openncalayer: forged";
+    let log = abi::encode(&LogArgs {
+        level: Level::Info,
+        message: forged.to_owned(),
+    });
+    let mut instance = start(&probe(&[(Import::Log, log)]));
+    let captured = Captured::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer({
+            let captured = captured.clone();
+            move || captured.clone()
+        })
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        instance.process("{}", &from("o")).unwrap();
+    });
+    let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    let line = logged
+        .lines()
+        .find(|line| line.contains("fine"))
+        .unwrap_or_else(|| panic!("{logged}"));
+    // The text is a quoted field of one line: its newline is escaped.
+    assert!(line.contains(r"\n2026-01-01T00:00:00Z ERROR"), "{logged}");
+    assert!(
+        !logged.lines().any(|line| line.starts_with("2026-01-01")),
+        "{logged}"
+    );
+}
+
+#[test]
 fn random_over_1024_is_limit_error() {
     let mut instance = start(&probe(&[(
         Import::Random,

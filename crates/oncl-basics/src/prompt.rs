@@ -454,6 +454,8 @@ pub struct FilePrompt {
     pub kind: FileKind,
     /// Folder to start in, if the page names one.
     pub directory: Option<PathBuf>,
+    /// Who asks, if not the page itself (a plugin's name), shown next to the origin.
+    pub source: Option<String>,
 }
 
 /// A password dialog: the legacy Applet's `setPassword` (a password the module keeps for

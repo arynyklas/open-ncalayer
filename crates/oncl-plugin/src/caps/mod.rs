@@ -30,7 +30,7 @@ pub(crate) use keys::{
     keys_sign_cms_ex, keys_sign_raw, keys_sign_xml, keys_terminals,
 };
 pub(crate) use net::http_request;
-pub use net::{HTTP_TIMEOUT, MAX_HTTP_BODY};
+pub use net::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS};
 
 use crate::host::HostState;
 use oncl_basics::lock_dialog_flow;

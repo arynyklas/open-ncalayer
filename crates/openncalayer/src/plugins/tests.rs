@@ -518,11 +518,26 @@ fn local_plugin_is_not_updated() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].local);
     assert_eq!(requests[0].origin, None);
+    assert_eq!(requests[0].replacing, None);
     assert_eq!(
         sandbox.notices(),
         [PluginNotice::Installed { name: name() }]
     );
     assert_eq!(sandbox.store().state().plugins[ID].source, Source::Local);
+    // Another file of the same plugin: the window says what it replaces.
+    service
+        .install_from_file(example_file(&sandbox, "0.1.1"))
+        .unwrap();
+    assert_eq!(
+        sandbox.requests()[0].replacing,
+        Some((v("0.1.0"), Source::Local))
+    );
+    sandbox.notices();
+    service
+        .install_from_file(example_file(&sandbox, "0.1.0"))
+        .unwrap();
+    sandbox.requests();
+    sandbox.notices();
 
     let mut revoked = sandbox.release("0.1.0", &example("0.1.0"));
     revoked.revoked = true;
@@ -764,6 +779,24 @@ fn missing_module_offers_install() {
     );
     let view = service.view();
     assert_eq!(view.available[0].needed_by, Some(Some(ORIGIN.to_owned())));
+    // Told again only when the entry changes: another page.
+    sandbox.modules.missing(MODULE, &page);
+    assert!(sandbox.notices().is_empty(), "the same page again");
+    let other = AddInfo {
+        origin: Some("https://bank.kz".to_owned()),
+        session: 4,
+    };
+    sandbox.modules.missing(MODULE, &other);
+    assert_eq!(
+        sandbox.notices(),
+        [PluginNotice::Needed {
+            origin: Some("https://bank.kz".to_owned()),
+            name: name(),
+            id: ID.to_owned(),
+        }]
+    );
+    sandbox.modules.missing(MODULE, &other);
+    assert!(sandbox.notices().is_empty());
     // Installed: no longer needed, nor told.
     service
         .install_from_catalog(ID, Some(ORIGIN.to_owned()))
@@ -843,6 +876,345 @@ fn install_bundle_without_a_catalog_finds_nothing() {
         ORIGIN
     ));
     assert!(sandbox.transport.asked().is_empty());
+}
+
+/// How often the catalog was asked for.
+fn index_requests(sandbox: &Sandbox) -> usize {
+    sandbox
+        .transport
+        .asked()
+        .iter()
+        .filter(|(url, ..)| url == INDEX)
+        .count()
+}
+
+/// `at` moved `by` into the past (or as far as the clock goes).
+fn earlier(at: &mut Option<std::time::Instant>, by: Duration) {
+    if let Some(at) = at {
+        *at = at.checked_sub(by).unwrap_or(*at);
+    }
+}
+
+#[test]
+fn a_failed_catalog_is_not_downloaded_again_for_pages() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    let bundles: &dyn Bundles = &*service;
+    // Nothing published: the download fails, and the next page's request does not repeat it.
+    assert!(!bundles.request_install("kz.example.echo", ORIGIN));
+    assert_eq!(index_requests(&sandbox), 1);
+    assert!(!bundles.request_install("kz.example.echo", ORIGIN));
+    assert!(
+        service
+            .catalog_offer_for_symname("kz.example.echo", OFFER_TIMEOUT)
+            .is_none()
+    );
+    assert_eq!(index_requests(&sandbox), 1);
+    // The user tries again whenever they ask.
+    sandbox.publish(1, vec![sandbox.release("0.1.0", &example("0.1.0"))]);
+    sandbox.transport.reply(INDEX, 503, b"");
+    service.check_now();
+    assert_eq!(index_requests(&sandbox), 2);
+    sandbox.publish(1, vec![sandbox.release("0.1.0", &example("0.1.0"))]);
+    assert!(!bundles.request_install("kz.example.echo", ORIGIN));
+    assert_eq!(index_requests(&sandbox), 2);
+    // Once the failure is old enough, a page's request downloads the catalog again.
+    earlier(&mut lock(&service.catalog).failed_at, PAGE_RETRY_AFTER);
+    assert!(bundles.request_install("kz.example.echo", ORIGIN));
+    assert_eq!(index_requests(&sandbox), 3);
+    assert_eq!(
+        wait_for_notices(&sandbox, 1),
+        [PluginNotice::Installed { name: name() }]
+    );
+}
+
+#[test]
+fn a_page_install_that_fails_is_told_once_in_a_while() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    let mut release = sandbox.release("0.1.0", &example("0.1.0"));
+    release.package.url = "https://example.org/plugins/gone.onclp".to_owned();
+    sandbox.publish(1, vec![release]);
+    let bundles: &dyn Bundles = &*service;
+    let tries = |n: usize| {
+        assert!(bundles.request_install("kz.example.echo", ORIGIN));
+        // The install runs in the background: wait until it has tried and given up.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let asked = sandbox
+                .transport
+                .asked()
+                .iter()
+                .filter(|(url, ..)| url.ends_with("gone.onclp"))
+                .count();
+            if asked == n && lock(&service.installing).is_empty() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{asked} tries");
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    tries(1);
+    let notices = sandbox.notices();
+    assert!(
+        matches!(&notices[..], [PluginNotice::Failed { name: n, .. }] if *n == name()),
+        "{notices:?}"
+    );
+    // The page asks again and again: told once.
+    tries(2);
+    tries(3);
+    assert!(sandbox.notices().is_empty());
+    // The user's own try is told at once.
+    assert!(service.install_from_catalog(ID, None).is_err());
+    assert_eq!(sandbox.notices().len(), 1);
+    // Ten minutes on, the page's failure is told again.
+    let mut told = lock(&service.page_failures);
+    let mut at = told.get(ID).copied();
+    earlier(&mut at, PAGE_FAILURE_EVERY);
+    told.insert(ID.to_owned(), at.unwrap());
+    drop(told);
+    tries(5);
+    assert_eq!(sandbox.notices().len(), 1);
+}
+
+/// The example under another id serving `modules`, as a file of the sandbox.
+fn other_plugin_file(sandbox: &Sandbox, modules: &str) -> PathBuf {
+    let bytes = example_at("1.0.0", |m| {
+        m.replacen(&format!("id = \"{ID}\""), "id = \"kz.example.local\"", 1)
+            .replacen(&format!("modules = [\"{MODULE}\"]"), modules, 1)
+    });
+    let path = sandbox.dir.path().join("other.onclp");
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn a_local_plugin_on_the_module_does_not_make_the_catalog_version_bad() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    service
+        .install_from_file(other_plugin_file(
+            &sandbox,
+            &format!("modules = [\"{MODULE}\"]"),
+        ))
+        .unwrap();
+    sandbox.notices();
+    sandbox.publish(1, vec![sandbox.release("0.1.0", &example("0.1.0"))]);
+    assert!(matches!(
+        service.install_from_catalog(ID, None),
+        Err(PluginActionError::Failed(e)) if e.contains("kz.example.local")
+    ));
+    assert!(!sandbox.store().state().bad.contains_key(ID), "not bad");
+    assert!(
+        matches!(&sandbox.notices()[..], [PluginNotice::Failed { .. }]),
+        "the user is told"
+    );
+    // Still offered; once the local plugin is gone it installs.
+    assert_eq!(service.view().available.len(), 1);
+    service.remove("kz.example.local").unwrap();
+    service.install_from_catalog(ID, None).unwrap();
+    assert_eq!(sandbox.installed_version(), Some(v("0.1.0")));
+
+    // A local plugin taking the module while the user decides: the load fails, not bad.
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    sandbox.publish(1, vec![sandbox.release("0.1.0", &example("0.1.0"))]);
+    *lock(&sandbox.ui.answer) = None;
+    service.install_from_catalog(ID, None).unwrap();
+    let decide = lock(&sandbox.ui.waiting).pop().unwrap();
+    *lock(&sandbox.ui.answer) = Some(true);
+    service
+        .install_from_file(other_plugin_file(
+            &sandbox,
+            &format!("modules = [\"{MODULE}\"]"),
+        ))
+        .unwrap();
+    sandbox.notices();
+    decide(true);
+    assert!(matches!(
+        &sandbox.notices()[..],
+        [PluginNotice::Failed { .. }]
+    ));
+    assert!(sandbox.installed_version().is_none());
+    assert!(!sandbox.store().state().bad.contains_key(ID), "not bad");
+}
+
+#[test]
+fn an_update_blocked_by_a_local_plugin_waits_for_it_to_go() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    sandbox.installed_from_catalog(&service, 1, "0.1.0");
+    service
+        .install_from_file(other_plugin_file(
+            &sandbox,
+            "modules = [\"kz.example.Extra\"]",
+        ))
+        .unwrap();
+    sandbox.notices();
+    // 0.2.0 serves a module of the local plugin too.
+    let both = format!("modules = [\"{MODULE}\", \"kz.example.Extra\"]");
+    let old = sandbox.release("0.1.0", &example("0.1.0"));
+    let mut new = sandbox.release(
+        "0.2.0",
+        &example_at("0.2.0", |m| {
+            m.replacen(&format!("modules = [\"{MODULE}\"]"), &both, 1)
+        }),
+    );
+    new.modules.push("kz.example.Extra".to_owned());
+    sandbox.publish(2, vec![old, new]);
+    service.check_now();
+    assert!(matches!(
+        &sandbox.notices()[..],
+        [PluginNotice::Failed { .. }]
+    ));
+    assert_eq!(sandbox.installed_version(), Some(v("0.1.0")));
+    assert!(!sandbox.store().state().bad.contains_key(ID), "not bad");
+    let downloads = |sandbox: &Sandbox| {
+        sandbox
+            .transport
+            .asked()
+            .iter()
+            .filter(|(url, ..)| *url == package_url("0.2.0"))
+            .count()
+    };
+    // Not tried again while the local plugin stays.
+    service.check_now();
+    assert!(sandbox.notices().is_empty());
+    assert_eq!(downloads(&sandbox), 1);
+    service.remove("kz.example.local").unwrap();
+    service.check_now();
+    assert_eq!(sandbox.installed_version(), Some(v("0.2.0")));
+    assert_eq!(
+        sandbox.notices(),
+        [PluginNotice::Updated {
+            name: name(),
+            version: v("0.2.0"),
+        }]
+    );
+}
+
+/// The example at `version` that may also reach `https://wider.example/`.
+fn example_wider(version: &str) -> Vec<u8> {
+    example_at(version, |m| {
+        m.replacen(
+            r#"http = ["https://example.invalid/"]"#,
+            r#"http = ["https://example.invalid/", "https://wider.example/"]"#,
+            1,
+        )
+    })
+}
+
+/// How often the package of `version` was downloaded.
+fn package_downloads(sandbox: &Sandbox, version: &str) -> usize {
+    sandbox
+        .transport
+        .asked()
+        .iter()
+        .filter(|(url, ..)| *url == package_url(version))
+        .count()
+}
+
+#[test]
+fn an_update_that_may_do_more_waits_for_the_user() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    sandbox.installed_from_catalog(&service, 1, "0.1.0");
+    assert_eq!(sandbox.count(), 1);
+    let old = sandbox.release("0.1.0", &example("0.1.0"));
+    let wider = sandbox.release("0.2.0", &example_wider("0.2.0"));
+    sandbox.publish(2, vec![old.clone(), wider.clone()]);
+    service.check_now();
+    let waits = PluginNotice::UpdateNeedsConfirmation {
+        name: name(),
+        version: v("0.2.0"),
+    };
+    assert_eq!(sandbox.notices(), std::slice::from_ref(&waits));
+    // The installed version runs on, its instances kept.
+    assert_eq!(sandbox.installed_version(), Some(v("0.1.0")));
+    assert_eq!(sandbox.modules.loaded()[0].version, v("0.1.0"));
+    assert_eq!(sandbox.count(), 2);
+    let pending = service.view().installed[0].pending_update.clone().unwrap();
+    assert_eq!(pending.version, v("0.2.0"));
+    assert_eq!(
+        pending.added,
+        Capabilities {
+            http: vec!["https://wider.example/".parse().unwrap()],
+            ..Capabilities::default()
+        }
+    );
+    // Told once, downloaded once.
+    service.check_now();
+    assert!(sandbox.notices().is_empty());
+    assert_eq!(package_downloads(&sandbox, "0.2.0"), 1);
+    // Withdrawn from the catalog before the user answered: nothing waits any more.
+    sandbox.publish(3, vec![old.clone()]);
+    service.check_now();
+    assert_eq!(service.view().installed[0].pending_update, None);
+    assert_eq!(
+        service.confirm_update(ID),
+        Err(PluginActionError::NothingToConfirm)
+    );
+    // Offered again, and allowed.
+    sandbox.publish(4, vec![old, wider]);
+    service.check_now();
+    assert_eq!(sandbox.notices(), [waits]);
+    service.confirm_update(ID).unwrap();
+    assert_eq!(
+        sandbox.notices(),
+        [PluginNotice::Updated {
+            name: name(),
+            version: v("0.2.0"),
+        }]
+    );
+    assert_eq!(sandbox.installed_version(), Some(v("0.2.0")));
+    assert_eq!(sandbox.modules.loaded()[0].version, v("0.2.0"));
+    assert_eq!(service.view().installed[0].pending_update, None);
+    assert_eq!(
+        service.confirm_update(ID),
+        Err(PluginActionError::NothingToConfirm)
+    );
+}
+
+#[test]
+fn an_update_that_may_do_less_applies_at_once() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    let bytes = example_wider("0.1.0");
+    sandbox.publish(1, vec![sandbox.release("0.1.0", &bytes)]);
+    service.install_from_catalog(ID, None).unwrap();
+    sandbox.notices();
+    let old = sandbox.release("0.1.0", &bytes);
+    let narrower = sandbox.release("0.2.0", &example("0.2.0"));
+    sandbox.publish(2, vec![old, narrower]);
+    service.check_now();
+    assert_eq!(
+        sandbox.notices(),
+        [PluginNotice::Updated {
+            name: name(),
+            version: v("0.2.0"),
+        }]
+    );
+}
+
+#[test]
+fn a_removal_during_a_wider_updates_download_leaves_nothing_waiting() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    sandbox.installed_from_catalog(&service, 1, "0.1.0");
+    let old = sandbox.release("0.1.0", &example("0.1.0"));
+    let wider = sandbox.release("0.2.0", &example_wider("0.2.0"));
+    sandbox.publish(2, vec![old, wider]);
+    let removing = Arc::clone(&service);
+    sandbox
+        .transport
+        .during(&package_url("0.2.0"), move || removing.remove(ID).unwrap());
+    service.check_now();
+    assert!(sandbox.notices().is_empty());
+    assert!(service.view().installed.is_empty());
+    assert_eq!(
+        service.confirm_update(ID),
+        Err(PluginActionError::NothingToConfirm)
+    );
 }
 
 fn package_url(version: &str) -> String {

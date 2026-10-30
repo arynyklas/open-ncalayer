@@ -28,14 +28,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError, Weak};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use oncl_accessory::Bundles;
 use oncl_desktop::UpdateSettings;
 use oncl_pki::http::HttpTransport;
 use oncl_plugin::{
-    Capabilities, Installed, Localized, MAX_PACKAGE, Package, PluginModules, Replaces, Source,
-    Store,
+    BUILT_IN, Capabilities, Installed, LoadError, Localized, MAX_PACKAGE, Package, PluginModules,
+    Replaces, Source, Store,
 };
 use oncl_protocol::{AddInfo, DynamicModules};
 use oncl_ui::PluginActionError;
@@ -59,6 +59,13 @@ pub const FIRST_CHECK_WITHOUT_CATALOG: (Duration, Duration) =
 /// How often a bounded wait looks whether a catalog download running has ended.
 const CATALOG_POLL: Duration = Duration::from_millis(20);
 
+/// How long after a catalog download failed a page's request (`installBundle`, an install
+/// a page started) does without a catalog instead of downloading it again.
+pub const PAGE_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
+
+/// How often an install a page started may tell that it failed, per plugin.
+pub const PAGE_FAILURE_EVERY: Duration = Duration::from_secs(10 * 60);
+
 /// The longest sleep of the schedule: the wall clock is compared at least this often.
 const WAKE_EVERY: Duration = Duration::from_secs(3600);
 
@@ -77,6 +84,8 @@ pub struct InstallRequest {
     pub name: Localized,
     pub version: Version,
     pub replaces: Option<Replaces>,
+    /// The installed plugin of the same id it would replace: its version and source.
+    pub replacing: Option<(Version, Source)>,
     /// What its manifest declares it may do.
     pub capabilities: Capabilities,
     /// From a file the user chose, not from the catalog: nobody has reviewed it.
@@ -94,6 +103,9 @@ pub enum PluginNotice {
     Withdrawn { name: Localized },
     /// Installing or updating a plugin failed.
     Failed { name: Localized, error: String },
+    /// An update of a plugin to `version` may do more than the version installed: it waits
+    /// for the user, in the plugin window; the installed version runs on.
+    UpdateNeedsConfirmation { name: Localized, version: Version },
     /// A page (`origin`) called a module of the plugin `id` of the catalog, not installed.
     Needed {
         origin: Option<String>,
@@ -162,6 +174,16 @@ pub struct InstalledView {
     pub replaces: Option<Replaces>,
     pub source: Source,
     pub state: PluginState,
+    /// An update that waits for the user: it may do more than this version.
+    pub pending_update: Option<PendingView>,
+}
+
+/// An update waiting for the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingView {
+    pub version: Version,
+    /// What it may do that the installed version may not.
+    pub added: Capabilities,
 }
 
 /// Whether an installed plugin serves its modules.
@@ -201,6 +223,14 @@ pub struct PluginService {
     needed: Mutex<BTreeMap<String, Option<String>>>,
     /// Plugins being installed (downloaded, or waiting for the user), by id.
     installing: Mutex<BTreeSet<String>>,
+    /// When an install a page started last told that it failed, by plugin id.
+    page_failures: Mutex<BTreeMap<String, Instant>>,
+    /// Versions of the catalog that could not load because another plugin serves one of
+    /// their modules, by id: not updated to until the plugins change. Not recorded: the
+    /// package is not at fault.
+    conflicts: Mutex<BTreeMap<String, BTreeSet<Version>>>,
+    /// Updates that may do more than the version installed, waiting for the user, by id.
+    pending: Mutex<BTreeMap<String, PendingUpdate>>,
     /// One catalog download at a time.
     checking: Mutex<()>,
     /// One application of the catalog at a time.
@@ -220,12 +250,36 @@ struct Catalog {
     checked: Option<OffsetDateTime>,
     /// Why the last download failed.
     error: Option<String>,
+    /// When the last download failed to bring a catalog; `None` after one that did.
+    failed_at: Option<Instant>,
+}
+
+/// Who wants the catalog: how long they wait for a download running, and whether a recent
+/// failure is tried again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asker {
+    /// The user, in the plugin window: waits for a download running, and downloads again.
+    User,
+    /// A page: waits only within its time, and does without a catalog for
+    /// [`PAGE_RETRY_AFTER`] after a download failed.
+    Page,
 }
 
 #[derive(Clone)]
 struct Known {
     name: Localized,
     replaces: Option<Replaces>,
+    capabilities: Capabilities,
+}
+
+/// An update downloaded and checked, waiting for the user: it may do more (`added`) than
+/// `snapshot`, the version installed.
+struct PendingUpdate {
+    release: PluginRelease,
+    package: Package,
+    bytes: Vec<u8>,
+    snapshot: Installed,
+    added: Capabilities,
 }
 
 /// Why a catalog download did not bring a catalog.
@@ -266,6 +320,9 @@ impl PluginService {
             known: Mutex::default(),
             needed: Mutex::default(),
             installing: Mutex::default(),
+            page_failures: Mutex::default(),
+            conflicts: Mutex::default(),
+            pending: Mutex::default(),
             checking: Mutex::new(()),
             applying: Mutex::new(()),
             apply_pending: AtomicBool::new(false),
@@ -360,6 +417,16 @@ impl PluginService {
         let state = self.store.state();
         let errors = lock(&self.errors).clone();
         let known = lock(&self.known).clone();
+        let pending: BTreeMap<String, PendingView> = lock(&self.pending)
+            .iter()
+            .map(|(id, p)| {
+                let view = PendingView {
+                    version: p.release.version.clone(),
+                    added: p.added.clone(),
+                };
+                (id.clone(), view)
+            })
+            .collect();
         let installed = state
             .plugins
             .iter()
@@ -380,6 +447,7 @@ impl PluginService {
                     } else {
                         PluginState::Enabled
                     },
+                    pending_update: pending.get(id).cloned(),
                 }
             })
             .collect();
@@ -438,7 +506,9 @@ impl PluginService {
     /// Installs the plugin `id` of the catalog (downloaded first if none is in use): its
     /// package is downloaded and checked, then the user is asked; `origin` is the page that
     /// asked for it. Blocks for the downloads, not for the user. An installed plugin, or one
-    /// being installed, is left alone; a failure is told ([`PluginNotice::Failed`]).
+    /// being installed, is left alone; a failure is told ([`PluginNotice::Failed`]), for an
+    /// install a page started at most once per [`PAGE_FAILURE_EVERY`]. For a page the
+    /// catalog is not downloaded again within [`PAGE_RETRY_AFTER`] of a failed download.
     ///
     /// # Errors
     ///
@@ -456,8 +526,14 @@ impl PluginService {
         let Some(guard) = self.begin_install(id) else {
             return Err(PluginActionError::BeingInstalled);
         };
-        let Some(index) = self.ensure_index(INDEX_TIMEOUT, true) else {
-            self.failed(
+        let asker = if origin.is_some() {
+            Asker::Page
+        } else {
+            Asker::User
+        };
+        let failed = |name: Localized, error: String| self.install_failed(id, name, error, asker);
+        let Some(index) = self.ensure_index(INDEX_TIMEOUT, asker) else {
+            failed(
                 same_name(id),
                 "the plugin catalog is unavailable".to_owned(),
             );
@@ -468,7 +544,7 @@ impl PluginService {
             r.id == id
         })
         .cloned() else {
-            self.failed(
+            failed(
                 same_name(id),
                 "the plugin catalog does not offer it".to_owned(),
             );
@@ -477,16 +553,18 @@ impl PluginService {
         let (package, bytes) = match self.download(&release) {
             Ok(downloaded) => downloaded,
             Err(Download::Unreachable(e)) => {
-                self.failed(localized(&release.name), e.clone());
+                failed(localized(&release.name), e.clone());
                 return Err(PluginActionError::Failed(e));
             }
             Err(Download::Bad(e)) => {
-                self.bad(&release, e.clone());
+                self.mark_bad(&release, &e);
+                failed(localized(&release.name), e.clone());
                 return Err(PluginActionError::Failed(e));
             }
         };
         if let Err(e) = self.cfg.modules.check(&package) {
-            self.bad(&release, e.to_string());
+            self.refused(&release.id, &release.version, &e);
+            failed(localized(&release.name), e.to_string());
             return Err(PluginActionError::Failed(e.to_string()));
         }
         self.ask(package, bytes, Source::Catalog, origin, guard);
@@ -557,6 +635,7 @@ impl PluginService {
         if !enabled {
             self.cfg.modules.unload(id);
             lock(&self.errors).remove(id);
+            lock(&self.conflicts).clear();
             return Ok(());
         }
         if installed.withdrawn {
@@ -588,6 +667,8 @@ impl PluginService {
             self.cfg.modules.unload(id);
             lock(&self.errors).remove(id);
             lock(&self.known).remove(id);
+            lock(&self.conflicts).clear();
+            lock(&self.pending).remove(id);
         }
         removed
     }
@@ -595,13 +676,13 @@ impl PluginService {
     /// The newest release of the catalog porting the original's bundle `symname`, if the
     /// catalog has one for this installation. Without a catalog in use one is downloaded,
     /// all within `timeout`: a download already running is waited for within it, and then
-    /// used.
+    /// used; none within [`PAGE_RETRY_AFTER`] of a failed one.
     pub fn catalog_offer_for_symname(
         &self,
         symname: &str,
         timeout: Duration,
     ) -> Option<PluginRelease> {
-        let index = self.ensure_index(timeout, false)?;
+        let index = self.ensure_index(timeout, Asker::Page)?;
         let state = self.store.state();
         offer(&index, &self.cfg.core, &state.install_id, &state.bad, |r| {
             r.replaces.as_ref().is_some_and(|p| p.symname == symname)
@@ -610,7 +691,9 @@ impl PluginService {
     }
 
     /// A request named `module`, which nothing serves: if a plugin of the catalog in use
-    /// would, and is not installed, the page's need is told and listed. Never downloads.
+    /// would, and is not installed, the page's need is listed, and told (the plugin window
+    /// read again) when its entry changes: a plugin newly needed, or by another page. Never
+    /// downloads.
     fn missing(&self, module: &str, add_info: &AddInfo) {
         let Some(index) = self.valid_index() else {
             return;
@@ -624,8 +707,11 @@ impl PluginService {
         if state.plugins.contains_key(&release.id) {
             return;
         }
+        let before = lock(&self.needed).insert(release.id.clone(), add_info.origin.clone());
+        if before.as_ref() == Some(&add_info.origin) {
+            return;
+        }
         info!(plugin = %release.id, module, origin = ?add_info.origin, "a page needs a plugin of the catalog");
-        lock(&self.needed).insert(release.id.clone(), add_info.origin.clone());
         (self.cfg.notify)(PluginNotice::Needed {
             origin: add_info.origin.clone(),
             name: localized(&release.name),
@@ -654,10 +740,15 @@ impl PluginService {
                 catalog.index = Some(index.clone());
                 catalog.checked = Some(OffsetDateTime::now_utc());
                 catalog.error = None;
+                catalog.failed_at = None;
             }
-            Err(Refresh::NotPublished) => catalog.error = None,
+            Err(Refresh::NotPublished) => {
+                catalog.error = None;
+                catalog.failed_at = Some(Instant::now());
+            }
             Err(Refresh::Unreachable(e) | Refresh::Refused(e)) => {
                 catalog.error = Some(e.clone());
+                catalog.failed_at = Some(Instant::now());
             }
             Err(Refresh::NoKeys) => {}
         }
@@ -718,17 +809,19 @@ impl PluginService {
     }
 
     /// [`PluginService::valid_index`], or one downloaded within `timeout`. A download
-    /// already running is waited for: fully (`wait`), or only within `timeout` (then
-    /// `None` once it runs out); a catalog it brought is used, else a download of our own
-    /// gets the time left. With updates on, a catalog downloaded here is applied in the
+    /// already running is waited for: fully for the user, or only within `timeout` for a
+    /// page (then `None` once it runs out); a catalog it brought is used, else a download of
+    /// our own gets the time left. A page does not download within [`PAGE_RETRY_AFTER`] of a
+    /// failed download. With updates on, a catalog downloaded here is applied in the
     /// background.
-    fn ensure_index(&self, timeout: Duration, wait: bool) -> Option<Index> {
+    fn ensure_index(&self, timeout: Duration, asker: Asker) -> Option<Index> {
         if let Some(index) = self.valid_index() {
             return Some(index);
         }
-        if self.cfg.keys.is_empty() {
+        if self.cfg.keys.is_empty() || self.page_waits_out_failure(asker) {
             return None;
         }
+        let wait = asker == Asker::User;
         let deadline = std::time::Instant::now() + timeout;
         let one = if wait {
             lock(&self.checking)
@@ -749,6 +842,9 @@ impl PluginService {
         };
         if let Some(index) = self.valid_index() {
             return Some(index);
+        }
+        if self.page_waits_out_failure(asker) {
+            return None;
         }
         let left = if wait {
             timeout
@@ -771,6 +867,19 @@ impl PluginService {
             }
         }
         self.valid_index()
+    }
+
+    /// Whether `asker` is a page and the last catalog download failed within
+    /// [`PAGE_RETRY_AFTER`]: the page does without a catalog then.
+    fn page_waits_out_failure(&self, asker: Asker) -> bool {
+        let recent = lock(&self.catalog)
+            .failed_at
+            .is_some_and(|at| at.elapsed() < PAGE_RETRY_AFTER);
+        if asker == Asker::Page && recent {
+            info!("the plugin catalog failed to download a moment ago; not again for a page");
+            return true;
+        }
+        false
     }
 
     /// Moves each plugin installed from the catalog to the version the catalog in use
@@ -806,7 +915,8 @@ impl PluginService {
             if snapshot.source != Source::Catalog {
                 continue;
             }
-            let bad = state.bad.get(id).cloned().unwrap_or_default();
+            let mut bad = state.bad.get(id).cloned().unwrap_or_default();
+            bad.extend(lock(&self.conflicts).get(id).into_iter().flatten().cloned());
             match choose_plugin(
                 index,
                 id,
@@ -816,6 +926,7 @@ impl PluginService {
                 &bad,
             ) {
                 PluginChoice::Keep => {
+                    lock(&self.pending).remove(id);
                     let listed = index
                         .plugins
                         .iter()
@@ -838,12 +949,14 @@ impl PluginService {
                     self.update_to(release, snapshot);
                 }
                 PluginChoice::Withdrawn if !snapshot.withdrawn => {
+                    lock(&self.pending).remove(id);
                     let _change = lock(&self.changing);
                     if self.still(id, snapshot).is_none() {
                         continue;
                     }
                     warn!(plugin = %id, version = %snapshot.version, "the plugin's version is revoked; it is turned off");
                     self.cfg.modules.unload(id);
+                    lock(&self.conflicts).clear();
                     if let Err(e) = self.store.set_withdrawn(id, true) {
                         warn!(plugin = %id, error = %e, "cannot record the plugin's state");
                     }
@@ -851,7 +964,9 @@ impl PluginService {
                         name: self.name_of(id),
                     });
                 }
-                PluginChoice::Withdrawn => {}
+                PluginChoice::Withdrawn => {
+                    lock(&self.pending).remove(id);
+                }
             }
         }
     }
@@ -874,8 +989,16 @@ impl PluginService {
 
     /// Installs `release` over `snapshot`, the version installed when it was chosen:
     /// downloaded and checked, then, under `changing` and only if the plugin is still
-    /// `snapshot`, loaded (if it is on; else checked only) and recorded.
+    /// `snapshot`, loaded (if it is on; else checked only) and recorded. A release whose
+    /// capabilities go beyond the installed version's is not installed: it waits for the
+    /// user ([`PluginService::confirm_update`]), told once, and the installed version runs on.
     fn update_to(&self, release: &PluginRelease, snapshot: &Installed) {
+        let waiting = lock(&self.pending).get(&release.id).is_some_and(|p| {
+            p.release.version == release.version && p.snapshot.version == snapshot.version
+        });
+        if waiting {
+            return;
+        }
         info!(plugin = %release.id, version = %release.version, "updating the plugin");
         let (package, bytes) = match self.download(release) {
             Ok(downloaded) => downloaded,
@@ -886,9 +1009,87 @@ impl PluginService {
             }
             Err(Download::Bad(e)) => return self.bad(release, e),
         };
+        let added = package
+            .manifest
+            .capabilities
+            .added_over(&self.capabilities_of(&release.id));
+        if added.is_empty() {
+            let _ = self.install_update(release, package, &bytes, snapshot);
+            return;
+        }
+        let _change = lock(&self.changing);
+        if self.still(&release.id, snapshot).is_none() {
+            return;
+        }
+        info!(plugin = %release.id, version = %release.version, ?added, "the plugin's update asks for more; it waits for the user");
+        let notice = PluginNotice::UpdateNeedsConfirmation {
+            name: package.manifest.name.clone(),
+            version: release.version.clone(),
+        };
+        lock(&self.pending).insert(
+            release.id.clone(),
+            PendingUpdate {
+                release: release.clone(),
+                package,
+                bytes,
+                snapshot: snapshot.clone(),
+                added,
+            },
+        );
+        (self.cfg.notify)(notice);
+    }
+
+    /// Installs the update of `id` waiting for the user ([`PluginNotice::UpdateNeedsConfirmation`]):
+    /// the user has seen what more it may do and agrees.
+    ///
+    /// # Errors
+    ///
+    /// No update of `id` waits, or it failed (also told in the tray); the plugin changed
+    /// meanwhile: nothing is done.
+    pub fn confirm_update(&self, id: &str) -> Result<(), PluginActionError> {
+        let Some(pending) = lock(&self.pending).remove(id) else {
+            return Err(PluginActionError::NothingToConfirm);
+        };
+        info!(plugin = id, version = %pending.release.version, "the user agrees to the plugin's update");
+        self.install_update(
+            &pending.release,
+            pending.package,
+            &pending.bytes,
+            &pending.snapshot,
+        )
+        .map_err(PluginActionError::Failed)
+    }
+
+    /// What the installed `id` may do: its package's capabilities (none known: nothing).
+    fn capabilities_of(&self, id: &str) -> Capabilities {
+        if let Some(known) = lock(&self.known).get(id) {
+            return known.capabilities.clone();
+        }
+        match self.store.load_package(id) {
+            Ok(package) => {
+                self.remember(&package);
+                package.manifest.capabilities
+            }
+            Err(e) => {
+                warn!(plugin = id, error = %e, "cannot read the installed plugin");
+                Capabilities::default()
+            }
+        }
+    }
+
+    /// The rest of [`PluginService::update_to`]: `package` of `release` installed over
+    /// `snapshot`, under `changing`, if the plugin is still `snapshot`. Why not, if it was
+    /// not.
+    fn install_update(
+        &self,
+        release: &PluginRelease,
+        package: Package,
+        bytes: &[u8],
+        snapshot: &Installed,
+    ) -> Result<(), String> {
         let _change = lock(&self.changing);
         let Some(fresh) = self.still(&release.id, snapshot) else {
-            return;
+            return Err("the plugin changed meanwhile".to_owned());
         };
         let enabled = fresh.enabled;
         let loaded = if enabled {
@@ -897,22 +1098,28 @@ impl PluginService {
             self.cfg.modules.check(&package)
         };
         if let Err(e) = loaded {
-            return self.bad(release, e.to_string());
+            self.refused(&release.id, &release.version, &e);
+            self.failed(localized(&release.name), e.to_string());
+            return Err(e.to_string());
         }
-        if let Err(e) = self.store.install(&package, &bytes, Source::Catalog) {
+        if let Err(e) = self.store.install(&package, bytes, Source::Catalog) {
             warn!(plugin = %release.id, error = %e, "cannot record the plugin's update");
             if enabled {
                 // The version recorded runs again.
                 let _ = self.load_installed(&release.id);
             }
-            return self.failed(localized(&release.name), e.to_string());
+            self.failed(localized(&release.name), e.to_string());
+            return Err(e.to_string());
         }
         self.remember(&package);
         lock(&self.errors).remove(&release.id);
+        lock(&self.conflicts).clear();
+        lock(&self.pending).remove(&release.id);
         (self.cfg.notify)(PluginNotice::Updated {
             name: package.manifest.name.clone(),
             version: package.manifest.version.clone(),
         });
+        Ok(())
     }
 
     /// Downloads the package of `release` and checks it against the index and this core.
@@ -960,6 +1167,12 @@ impl PluginService {
             name: m.name.clone(),
             version: m.version.clone(),
             replaces: m.replaces.clone(),
+            replacing: self
+                .store
+                .state()
+                .plugins
+                .get(&m.id)
+                .map(|installed| (installed.version.clone(), installed.source)),
             capabilities: m.capabilities.clone(),
             local: source == Source::Local,
         };
@@ -987,10 +1200,8 @@ impl PluginService {
         let name = package.manifest.name.clone();
         if let Err(e) = self.cfg.modules.load(package.clone()) {
             warn!(plugin = %id, error = %e, "cannot load the plugin");
-            if source == Source::Catalog
-                && let Err(e) = self.store.mark_bad(&id, &package.manifest.version)
-            {
-                warn!(plugin = %id, error = %e, "cannot record the plugin's failure");
+            if source == Source::Catalog {
+                self.refused(&id, &package.manifest.version, &e);
             }
             return self.failed(name, e.to_string());
         }
@@ -1014,6 +1225,8 @@ impl PluginService {
             self.cfg.modules.unload(&id);
         }
         info!(plugin = %id, version = %package.manifest.version, ?source, "plugin installed");
+        lock(&self.conflicts).clear();
+        lock(&self.pending).remove(&id);
         self.remember(&package);
         lock(&self.errors).remove(&id);
         lock(&self.needed).remove(&id);
@@ -1065,6 +1278,7 @@ impl PluginService {
             Known {
                 name: package.manifest.name.clone(),
                 replaces: package.manifest.replaces.clone(),
+                capabilities: package.manifest.capabilities.clone(),
             },
         );
     }
@@ -1090,11 +1304,53 @@ impl PluginService {
 
     /// `release` failed its checks here: marked bad, the user told.
     fn bad(&self, release: &PluginRelease, error: String) {
-        warn!(plugin = %release.id, version = %release.version, error = %error, "the plugin's package is refused; the version is marked bad");
-        if let Err(e) = self.store.mark_bad(&release.id, &release.version) {
-            warn!(plugin = %release.id, error = %e, "cannot record the plugin's failure");
-        }
+        self.mark_bad(release, &error);
         self.failed(localized(&release.name), error);
+    }
+
+    /// `release` failed its checks here: marked bad.
+    fn mark_bad(&self, release: &PluginRelease, error: &str) {
+        self.mark_version_bad(&release.id, &release.version, error);
+    }
+
+    fn mark_version_bad(&self, id: &str, version: &Version, error: &str) {
+        warn!(plugin = id, %version, error = %error, "the plugin's package is refused; the version is marked bad");
+        if let Err(e) = self.store.mark_bad(id, version) {
+            warn!(plugin = id, error = %e, "cannot record the plugin's failure");
+        }
+    }
+
+    /// The catalog's `version` of `id` could not be loaded (or checked): marked bad if the
+    /// package is at fault; if another plugin serves one of its modules, which depends on
+    /// this installation and not on the package, only kept from updates until the plugins
+    /// change.
+    fn refused(&self, id: &str, version: &Version, e: &LoadError) {
+        if matches!(e, LoadError::ModuleTaken { owner, .. } if owner != BUILT_IN) {
+            warn!(plugin = id, %version, error = %e, "another plugin serves a module of the plugin; the version is not marked bad");
+            lock(&self.conflicts)
+                .entry(id.to_owned())
+                .or_default()
+                .insert(version.clone());
+        } else {
+            self.mark_version_bad(id, version, &e.to_string());
+        }
+    }
+
+    /// The install of `id` failed: told, but for one a page started only if no failure of
+    /// `id`'s was told within [`PAGE_FAILURE_EVERY`] (a page may ask again and again).
+    fn install_failed(&self, id: &str, name: Localized, error: String, asker: Asker) {
+        if asker == Asker::Page {
+            let mut told = lock(&self.page_failures);
+            if told
+                .get(id)
+                .is_some_and(|at| at.elapsed() < PAGE_FAILURE_EVERY)
+            {
+                info!(plugin = id, error = %error, "a page's install of the plugin failed again; told already");
+                return;
+            }
+            told.insert(id.to_owned(), Instant::now());
+        }
+        self.failed(name, error);
     }
 
     fn failed(&self, name: Localized, error: String) {
@@ -1225,6 +1481,11 @@ impl Bundles for PluginService {
             });
         if installed {
             return false;
+        }
+        if lock(&self.installing).contains(&release.id) {
+            // Going on already: the page's request is served by it.
+            info!(plugin = %release.id, "being installed already");
+            return true;
         }
         let Some(service) = self.me.upgrade() else {
             return false;

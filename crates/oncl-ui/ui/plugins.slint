@@ -1,6 +1,6 @@
 // «Плагины»: the catalog's state, the installed plugins (turn off or on, remove after a
-// question), the plugins the catalog offers (install), a plugin from a file, and a new
-// download of the catalog. The rows' texts are composed in Rust.
+// question, allow an update that may do more), the plugins the catalog offers (install), a
+// plugin from a file, and a new download of the catalog. The rows' texts are composed in Rust.
 
 import { Button, ScrollView, VerticalBox } from "std-widgets.slint";
 
@@ -15,6 +15,8 @@ export struct InstalledRow {
     // Withdrawn plugins cannot be turned on: no button.
     can-toggle: bool,
     enabled: bool,
+    // An update waiting for permission and what more it may do, or empty.
+    update: string,
 }
 
 export struct AvailableRow {
@@ -45,6 +47,7 @@ export component PluginsWindow inherits Window {
     callback toggle(int);
     callback remove(int);
     callback confirm-remove(int);
+    callback confirm-update(int);
     callback install(int);
     callback install-file();
     callback refresh();
@@ -92,6 +95,20 @@ export component PluginsWindow inherits Window {
                             text: row.state;
                             wrap: word-wrap;
                             color: row.error ? #c42b1c : #888888;
+                        }
+
+                        if row.update != "": Text {
+                            text: row.update;
+                            wrap: word-wrap;
+                            color: #1a73e8;
+                        }
+                    }
+
+                    if row.update != "": Button {
+                        text: @tr("Allow the update");
+                        enabled: !root.busy;
+                        clicked => {
+                            root.confirm-update(i);
                         }
                     }
 

@@ -7,10 +7,12 @@ use std::sync::Arc;
 
 use oncl_plugin::{Capabilities, Localized, Replaces, Source};
 use oncl_ui::plugins_view::{
-    AvailablePlugin, CapabilityLine, CatalogLine, InstalledPlugin, LocalizedText, PluginStatus,
-    ReplacedBundle,
+    AvailablePlugin, CapabilityLine, CatalogLine, InstalledPlugin, LocalizedText, PendingUpdate,
+    PluginStatus, ReplacedBundle,
 };
-use oncl_ui::{InstallPluginRequest, PluginActionError, PluginsServices, PluginsView};
+use oncl_ui::{
+    InstallPluginRequest, InstalledVersion, PluginActionError, PluginsServices, PluginsView,
+};
 
 use super::{CatalogView, InstallRequest, InstallUi, PluginService, PluginState, ServiceView};
 
@@ -33,6 +35,10 @@ pub fn install_request(
         name: text(&request.name),
         version: request.version.to_string(),
         replaces: request.replaces.as_ref().map(bundle),
+        replacing: request.replacing.map(|(version, source)| InstalledVersion {
+            version: version.to_string(),
+            local: source == Source::Local,
+        }),
         capabilities: capability_lines(&request.capabilities),
         local: request.local,
         decide,
@@ -90,6 +96,10 @@ impl PluginsServices for WindowServices {
         self.service()?.remove(id)
     }
 
+    fn confirm_update(&self, id: &str) -> Result<(), PluginActionError> {
+        self.service()?.confirm_update(id)
+    }
+
     fn refresh(&self) {
         if let Ok(service) = &self.0 {
             service.check_now();
@@ -140,6 +150,10 @@ pub fn plugins_view(view: ServiceView) -> PluginsView {
                     PluginState::Withdrawn => PluginStatus::Withdrawn,
                     PluginState::Error(e) => PluginStatus::Error(e),
                 },
+                pending_update: p.pending_update.map(|update| PendingUpdate {
+                    version: update.version.to_string(),
+                    added: capability_lines(&update.added),
+                }),
                 id: p.id,
             })
             .collect(),
@@ -176,7 +190,7 @@ fn bundle(replaces: &Replaces) -> ReplacedBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::{AvailableView, InstalledView};
+    use crate::plugins::{AvailableView, InstalledView, PendingView};
     use oncl_plugin::HttpPrefix;
     use oncl_update::{Channel, Version};
     use time::macros::datetime;
@@ -199,6 +213,7 @@ mod tests {
                 symname: "kz.example.echo".to_owned(),
                 version: "1.0.0".to_owned(),
             }),
+            replacing: Some((Version::new(1, 0, 0), Source::Local)),
             capabilities: Capabilities {
                 keys: true,
                 dialogs: false,
@@ -216,6 +231,13 @@ mod tests {
         assert_eq!(shown.name.kk, "Үлгі");
         assert_eq!(shown.version, "1.2.3");
         assert_eq!(shown.replaces.unwrap().symname, "kz.example.echo");
+        assert_eq!(
+            shown.replacing,
+            Some(InstalledVersion {
+                version: "1.0.0".to_owned(),
+                local: true,
+            })
+        );
         assert_eq!(
             shown.capabilities,
             [
@@ -248,6 +270,7 @@ mod tests {
                     replaces: None,
                     source: Source::Local,
                     state: PluginState::Error("broken".to_owned()),
+                    pending_update: None,
                 },
                 InstalledView {
                     id: "kz.b".to_owned(),
@@ -256,6 +279,13 @@ mod tests {
                     replaces: None,
                     source: Source::Catalog,
                     state: PluginState::Withdrawn,
+                    pending_update: Some(PendingView {
+                        version: Version::new(2, 1, 0),
+                        added: Capabilities {
+                            files: true,
+                            ..Capabilities::default()
+                        },
+                    }),
                 },
             ],
             available: vec![
@@ -291,6 +321,14 @@ mod tests {
         );
         assert!(!shown.installed[1].local);
         assert_eq!(shown.installed[1].state, PluginStatus::Withdrawn);
+        assert_eq!(shown.installed[0].pending_update, None);
+        assert_eq!(
+            shown.installed[1].pending_update,
+            Some(PendingUpdate {
+                version: "2.1.0".to_owned(),
+                added: vec![CapabilityLine::Files],
+            })
+        );
         assert!(shown.available[0].needed && shown.available[0].needed_by.is_none());
         assert!(!shown.available[1].needed);
         // Plugins that could not start: the window says why.

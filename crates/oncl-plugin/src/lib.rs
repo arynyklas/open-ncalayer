@@ -21,16 +21,17 @@ mod runtime;
 pub mod store;
 
 pub use caps::{
-    HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_KEY_HANDLES, MAX_SECRETS, NCA_PKI_HOSTS, nca_pki_hosts,
+    HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS, MAX_KEY_HANDLES, MAX_SECRETS, NCA_PKI_HOSTS,
+    nca_pki_hosts,
 };
 pub use host::HostServices;
 pub use manifest::{Capabilities, HttpPrefix, Localized, Manifest, Replaces};
-pub use modules::{BUILT_IN, LoadedInfo, OnMissing, PluginModules};
+pub use modules::{BUILT_IN, LoadedInfo, MemoryLimits, OnMissing, PluginModules};
 pub use oncl_pdk::abi::ABI_VERSION;
 pub use package::{MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, PACKAGE_EXT, Package, archive};
 pub use runtime::{
-    Compiled, Engine, Instance, LoadError, MAX_INSTANCES, MAX_MEMORY, MAX_TRANSFER,
-    PLUGIN_ERROR_REPLY, PROCESS_FUEL, PluginError, SessionContext,
+    Compiled, Engine, INSTANCE_HIGH_WATER, Instance, LoadError, MAX_INSTANCES, MAX_MEMORY,
+    MAX_TRANSFER, MEMORY_BUDGET, PLUGIN_ERROR_REPLY, PROCESS_FUEL, PluginError, SessionContext,
 };
 pub use store::{Installed, Source, Store, StoreError, StoreState};
 pub use url::Url;
