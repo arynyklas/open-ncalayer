@@ -132,14 +132,14 @@ fn oversized_manifest_rejected() {
 #[test]
 #[ignore = "network: the live manifest of the original"]
 fn live_manifest_verifies() {
-    let body = ureq::get(xtask::upstream::MANIFEST_URL)
-        .call()
+    let body = xtask::upstream::http::Fetcher::new()
+        .get(
+            xtask::upstream::MANIFEST_URL,
+            xtask::upstream::MANIFEST_MAX,
+            &Default::default(),
+        )
         .unwrap()
-        .into_body()
-        .with_config()
-        .limit(xtask::upstream::MANIFEST_MAX)
-        .read_to_vec()
-        .unwrap();
+        .body;
     let v = verify_and_parse(&body, oncl_pki::roots::nca_production()).unwrap();
     assert!(!v.manifest.version.is_empty());
     assert!(v.manifest.bundles.iter().any(|b| b.required));
