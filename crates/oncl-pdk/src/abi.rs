@@ -1805,7 +1805,8 @@ pub enum XadesLevel {
     B,
     /// XAdES-BASELINE-T: and a signature time-stamp.
     T,
-    /// XAdES-BASELINE-LT: and the chain and OCSP responses.
+    /// XAdES-BASELINE-LT: and the chain and the revocation data of every certificate but
+    /// a self-signed root: OCSP responses, or the CRLs of a certificate naming no responder.
     Lt,
 }
 
@@ -1822,7 +1823,7 @@ pub struct XadesArgs {
     /// The TSA of T and LT.
     pub tsa: TsaChoice,
     /// The signer's issuers, from its issuer up (DER): the certificates of LT and the
-    /// issuers its OCSP requests name.
+    /// issuers its OCSP requests and CRLs name.
     #[serde(default)]
     pub chain: Vec<Bytes>,
     /// The `SignatureMethod` URI; `None`: Kalkan's for the key.
@@ -1839,9 +1840,11 @@ pub struct XadesArgs {
 pub enum XadesOutcome {
     /// The signed document.
     Signed(Bytes),
-    /// The time-stamp or an OCSP request failed.
+    /// The time-stamp, an OCSP request or a CRL download failed, or a certificate names
+    /// neither a responder nor a distribution point.
     Failed(NetFailure),
-    /// A certificate of the chain is revoked or unknown to its responder.
+    /// A certificate of the chain is revoked or unknown to its responder, or its CRL does
+    /// not verify.
     Invalid(Problem),
 }
 

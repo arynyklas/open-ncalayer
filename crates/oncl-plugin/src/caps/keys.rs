@@ -29,6 +29,7 @@ use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{
     self, AttrSpec, CertSpec, CmsError, CoSign, Content, SignOptions, SignSpec, TimeForm,
 };
+use oncl_pki::crl::CrlError;
 use oncl_pki::info::{KeyUsageBits, KncaCertType};
 use oncl_pki::key::{KeyAlg, SigAlg};
 use oncl_pki::ocsp::CertStatus;
@@ -853,6 +854,17 @@ pub(crate) fn keys_sign_xades(state: &mut HostState, args: XadesArgs) -> HostRes
                 },
                 CertStatus::Good | CertStatus::Unknown => Problem::StatusUnknown,
             }),
+            Err(xades::XadesError::Crl {
+                url,
+                error: error @ (CrlError::NoUrl | CrlError::Http(_) | CrlError::HttpStatus(_)),
+                ..
+            }) => XadesOutcome::Failed(crypto::net_failure(
+                NetStage::Crl,
+                &url,
+                error.kind(),
+                error.to_string(),
+            )),
+            Err(xades::XadesError::Crl { .. }) => XadesOutcome::Invalid(Problem::CrlInvalid),
             Err(e @ xades::XadesError::NoIssuer(_)) => return Err(invalid(e.to_string())),
             Err(xades::XadesError::Xml(e)) => return Err(failed(e)),
         },

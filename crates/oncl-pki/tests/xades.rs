@@ -6,8 +6,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_pki::cert::{self, Certificate};
+use oncl_pki::crl::{CrlError, MockCrl};
 use oncl_pki::http::{HttpError, HttpReply, HttpRequest, HttpTransport, RouteTransport};
-use oncl_pki::ocsp::MockOcsp;
+use oncl_pki::ocsp::{CertStatus, MockOcsp};
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::{self, MockTsa, TsaProfile, TsaSpec};
 use oncl_pki::xades::{XadesError, XadesLevel, XadesSpec, sign};
@@ -22,6 +23,8 @@ const DOC: &[u8] = b"<?xml version=\"1.0\"?>\n<doc xmlns=\"urn:x\"><a>1</a></doc
 const NOW: OffsetDateTime = datetime!(2026-10-29 12:00 UTC);
 const DSIG: &str = "http://www.w3.org/2000/09/xmldsig#";
 const OCSP_URL: &str = "http://ocsp.synthetic.test";
+/// The distribution point the intermediate CA's certificate names.
+const ROOT_CRL: &str = "http://crl.synthetic.test/root-gost2015.crl";
 
 fn entry(name: &str) -> KeyEntry {
     let key = synthetic(name);
@@ -68,6 +71,21 @@ fn pki(ocsp: bool) -> RouteTransport {
         ));
     }
     RouteTransport::new(routes)
+}
+
+/// [`pki`] with the responder, and `crl` serving the synthetic distribution points.
+fn pki_with_crl(crl: Arc<MockCrl>) -> RouteTransport {
+    RouteTransport::new(vec![
+        (
+            tsa_spec().url,
+            Arc::new(MockTsa::new(entry("tsa-gost2015"))) as Arc<dyn HttpTransport>,
+        ),
+        (
+            OCSP_URL.to_owned(),
+            Arc::new(MockOcsp::new(entry("ocsp-gost2015"))),
+        ),
+        ("http://crl.synthetic.test".to_owned(), crl),
+    ])
 }
 
 fn text(xml: &[u8]) -> &str {
@@ -178,27 +196,37 @@ fn xades_t_timestamp_over_signature_value() {
 fn xades_lt_certificate_and_revocation_values() {
     let signer = entry("inter-user-gost2015-sign");
     let chain = vec![cer("inter-gost2015"), cer("root-gost2015")];
+    let root_crl = Arc::new(MockCrl::new(entry("root-gost2015.key")));
+    // The mock CRL is issued now.
+    let now = OffsetDateTime::now_utc();
     let signed = sign(
         DOC,
         &spec(XadesLevel::Lt, chain.clone()),
         &signer.key,
         &signer.cert,
-        &pki(true),
-        NOW,
+        &pki_with_crl(Arc::clone(&root_crl)),
+        now,
     )
     .unwrap();
     let xml = text(&signed);
     let certs = all_base64(xml, "xades:EncapsulatedX509Certificate");
     let expected: Vec<Vec<u8>> = chain.iter().map(|c| c.to_der().unwrap()).collect();
     assert_eq!(certs, expected);
-    // The signer's alone: the root is self-signed, the intermediate names no responder.
+    // The signer's from its responder; the intermediate names none, so its status comes
+    // from the root's CRL; the root is self-signed.
     let responses = all_base64(xml, "xades:EncapsulatedOCSPValue");
     assert_eq!(responses.len(), 1);
     assert!(responses.iter().all(|r| r[0] == 0x30));
+    let crls = all_base64(xml, "xades:EncapsulatedCRLValue");
+    assert_eq!(crls.len(), 1);
+    oncl_pki::crl::verify_crl(&crls[0], &cer("root-gost2015"), now).unwrap();
+    assert_eq!(root_crl.calls(), [ROOT_CRL]);
     let order = [
         "SignatureTimeStamp",
         "CertificateValues",
         "RevocationValues",
+        "CRLValues",
+        "OCSPValues",
     ]
     .map(|name| xml.find(&format!("<xades:{name}")).unwrap());
     assert!(order.is_sorted(), "{order:?}");
@@ -213,6 +241,62 @@ fn xades_lt_certificate_and_revocation_values() {
         NOW,
     );
     assert!(matches!(result, Err(XadesError::NoIssuer(_))), "{result:?}");
+}
+
+#[test]
+fn xades_lt_never_leaves_a_ca_without_revocation_data() {
+    let signer = entry("inter-user-gost2015-sign");
+    let chain = vec![cer("inter-gost2015"), cer("root-gost2015")];
+    let lt = |http: &dyn HttpTransport| {
+        sign(
+            DOC,
+            &spec(XadesLevel::Lt, chain.clone()),
+            &signer.key,
+            &signer.cert,
+            http,
+            OffsetDateTime::now_utc(),
+        )
+    };
+    // The intermediate's CRL is not reachable: no signature without it.
+    match lt(&pki(true)) {
+        Err(XadesError::Crl { url, .. }) => assert_eq!(url, ROOT_CRL),
+        other => panic!("{other:?}"),
+    }
+    // The root's CRL lists the intermediate.
+    let serial = cer("inter-gost2015")
+        .tbs_certificate()
+        .serial_number()
+        .as_bytes()
+        .to_vec();
+    let revoked_at = datetime!(2026-01-15 08:00 UTC);
+    let revoking = MockCrl::new(entry("root-gost2015.key")).revoke(&serial, revoked_at);
+    match lt(&pki_with_crl(Arc::new(revoking))) {
+        Err(XadesError::NotGood {
+            status: CertStatus::Revoked { time, .. },
+            ..
+        }) => assert_eq!(time, revoked_at),
+        other => panic!("{other:?}"),
+    }
+    // A certificate naming neither a responder nor a distribution point.
+    let plain = entry("user-gost2015-sign");
+    let result = sign(
+        DOC,
+        &spec(XadesLevel::Lt, vec![cer("root-gost2015")]),
+        &plain.key,
+        &plain.cert,
+        &pki(true),
+        NOW,
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(XadesError::Crl {
+                error: CrlError::NoUrl,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
 }
 
 #[test]
