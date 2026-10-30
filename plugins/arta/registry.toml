@@ -1,0 +1,35 @@
+id = "io.github.arynyklas.openncalayer.port.arta"
+modules = ["kz.arta.synergy.signmodule"]
+
+[original]
+symname = "kz.arta.synergy.signmodule"
+version = "6.0"
+vendor = "Arta Software"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Ключ, выбранный в getKeyInfo/getFullKeyInfo, хранится только в этом соединении (сессии) и пароль модулю неизвестен. Оригинал хранил ключ с паролем на весь процесс, и любая страница могла подписать им без окна."
+
+[[differences]]
+ru = "Поле CERT в signDocument (INFO) — сертификат в Base64. Оригинал отдавал байты DER, прочитанные как текст в кодировке системы (нечитаемая строка)."
+
+[[differences]]
+ru = "signXML для ключей ГОСТ 2015 подписывает алгоритмом ключа (URI Kalkan). Оригинал указывал URI ГОСТ 34.310-2004 для любого ключа, кроме RSA, и такой ключ им не подписывал."
+
+[[differences]]
+ru = "Ключи sha1RSA не подписывают (ядро не делает подписей SHA-1): signXML отвечает null, ЕСЭДО-подпись — ошибкой."
+
+[[differences]]
+ru = "Чтение файла, названного страницей, и запись .cms рядом с ним — только после разрешения пользователя (один раз за сессию)."
+
+[[differences]]
+ru = "Токены появятся вместе с поддержкой токенов в ядре; до тех пор ответ «storage.empty»."
+
+[[differences]]
+ru = "Значение атрибута 1.3.6.1.4.1.6801.2.8 (DN подписанта), форма ответа OCSP в ЕСЭДО-подписи и порядок ключей в INFO вычислены по правилам Kalkan и org.json и не сверены с оригиналом."
+
+[[differences]]
+ru = "signXML без ключа без uuid обрывает соединение без кадра закрытия (код 1006), а не 1011 оригинала."

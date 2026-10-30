@@ -407,6 +407,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-arta"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-kit",
+ "oncl-port-legacy",
+ "oncl-port-pki",
+]
+
+[[package]]
 name = "oncl-port-eot"
 version = "1.0.0-beta.1"
 dependencies = [
@@ -443,6 +453,17 @@ dependencies = [
  "oncl-pdk",
  "oncl-port-pki",
  "x509-cert",
+]
+
+[[package]]
+name = "oncl-port-metadoc"
+version = "1.0.0-beta.1"
+dependencies = [
+ "cms",
+ "der",
+ "oncl-pdk",
+ "oncl-port-legacy",
+ "oncl-port-pki",
 ]
 
 [[package]]

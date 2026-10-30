@@ -1674,3 +1674,559 @@ fn uchet_multi_key_unexpected_error() {
         r#"{"code":"500","message":"Носитель не обнаружен"}"#
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// arta Synergy
+
+const ARTA: &str = "arta";
+
+#[test]
+fn arta_check_module_availability_raw_ok() {
+    let h = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(h.call(ARTA, &call("checkModuleAvailability", json!([])), None)),
+        "OK"
+    );
+    let request = json!({"method": "checkModuleAvailability", "uuid": "1"}).to_string();
+    assert_eq!(
+        text(h.call(ARTA, &request, None)),
+        r#"{"code":"500","message":"A JSONObject text must begin with '{' at 1 [character 2 line 1]"}"#
+    );
+    assert_eq!(
+        text(h.call(ARTA, &call("sign", json!(["x"])), None)),
+        r#"{"code":"500","message":"java.lang.IllegalAccessException: Class kz.arta.synergy.agent.SynergySignActivator can not access a member of class kz.arta.synergy.signmodule.SignService with modifiers \"private\". Method: sign"}"#
+    );
+}
+
+#[test]
+fn arta_get_key_info_sign_info_object() {
+    let h = Harness::new(key("user-gost2015-sign"), vec![]);
+    let reply = text(h.call(ARTA, &call("getKeyInfo", json!(["PKCS12"])), None));
+    let e = entry("user-gost2015-sign");
+    let mut info = JObject::hash_map();
+    info.put("pem", b64(&der_of(&e.cert)));
+    info.put("cn", "ТЕСТОВ ТЕСТ");
+    info.put("algorithm", "ECGOST3410-2015");
+    let mut expected = JObject::hash_map();
+    expected.put("code", "200");
+    expected.put("signInfoObject", JValue::Obj(info));
+    assert_eq!(reply, expected.to_json());
+    // The official KeyInfo.
+    let h = Harness::new(key("user-gost2015-sign"), vec![]);
+    let reply = parse(&text(h.call(
+        ARTA,
+        &call("getFullKeyInfo", json!(["PKCS12"])),
+        None,
+    )));
+    let object = &reply["responseObject"];
+    assert_eq!(object["alias"], e.alias.as_str());
+    assert_eq!(
+        object["subjectDn"],
+        kalkan_dn(e.cert.tbs_certificate().subject())
+    );
+    assert_eq!(object["algorithm"], "ECGOST3410-2015");
+    assert_eq!(
+        text(Harness::new(vec![Step::CancelStorage], vec![]).call(
+            ARTA,
+            &call("getKeyInfo", json!(["PKCS12"])),
+            None
+        )),
+        r#"{"code":"500","message":"action.canceled"}"#
+    );
+}
+
+#[test]
+fn arta_key_kept_in_session_not_across() {
+    let h = Harness::new(key("user-gost2015-sign"), vec![]);
+    let mut s = h.session(ARTA);
+    s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
+    let reply = parse(&text(
+        s.call(&call("signBase64File", json!([b64(b"abc"), "a.txt"])), None),
+    ));
+    assert_eq!(reply["message"], "cms.signed");
+    let cms = unb64(reply["responseObject"].as_str().unwrap());
+    assert_eq!(cms_view(&cms).econtent.unwrap(), b"abc");
+    assert!(
+        oncl_pki::cms::verify(&cms, None).unwrap()[0]
+            .timestamp_token
+            .is_some()
+    );
+    // Another session has no key: no dialog either.
+    let other = Harness::new(vec![], vec![]);
+    let mut s = other.session(ARTA);
+    assert_eq!(
+        text(s.call(&call("signFilePath", json!(["C:\\a\\b.pdf", ""])), None)),
+        r#"{"code":"500","message":"EXCEPTION"}"#
+    );
+    assert!(other.prompter().storage_prompts().is_empty());
+}
+
+#[test]
+fn arta_sign_file_path_dir_rule() {
+    // A folder named like the file: every occurrence of the name leaves the path.
+    let root = tempfile::tempdir().unwrap();
+    let inner = root.path().join("doc.pdf");
+    std::fs::create_dir(&inner).unwrap();
+    let file = inner.join("doc.pdf");
+    std::fs::write(&file, b"content").unwrap();
+    let mut steps = key("user-gost2015-sign");
+    steps.extend([yes(), yes()]);
+    let h = Harness::new(steps, vec![]);
+    let mut s = h.session(ARTA);
+    s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
+    let reply = parse(&text(s.call(
+        &call("signFilePath", json!([file.to_str().unwrap(), "ignored"])),
+        None,
+    )));
+    assert_eq!(reply["code"], "200", "{reply}");
+    assert_eq!(reply["message"], "cms.signed");
+    let written = root.path().join("doc.pdf.cms");
+    assert!(written.is_file(), "{reply}");
+    assert!(!inner.join("doc.pdf.cms").exists());
+    let cms = std::fs::read(written).unwrap();
+    assert_eq!(cms_view(&cms).econtent.unwrap(), b"content");
+    assert_eq!(
+        text(s.call(&call("signFilePath", json!([" ", ""])), None)),
+        r#"{"code":"500","message":"404"}"#
+    );
+}
+
+#[test]
+fn arta_sign_base64_file_swallows_errors() {
+    let h = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(h.call(
+            ARTA,
+            &call("signBase64File", json!([b64(b"abc"), "a.txt"])),
+            None
+        )),
+        r#"{"responseObject":"","code":"200","message":"cms.signed"}"#
+    );
+    assert_eq!(
+        text(h.call(ARTA, &call("signBase64File", json!(["", "a.txt"])), None)),
+        r#"{"code":"500","message":"404"}"#
+    );
+    assert_eq!(
+        text(h.call(ARTA, &call("signBase64File", json!(["a b", "a.txt"])), None)),
+        r#"{"code":"500","message":"internalError"}"#
+    );
+}
+
+#[test]
+fn arta_sign_document_info_json_string() {
+    let h = Harness::new(key("user-gost2015-sign"), vec![]);
+    let mut s = h.session(ARTA);
+    let no_key = text(s.call(&call("signDocument", json!(["", "INFO", ""])), None));
+    assert_eq!(
+        no_key,
+        r#"{"code":"500","message":"java.lang.reflect.InvocationTargetException. Method: signDocument"}"#
+    );
+    s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
+    let reply = parse(&text(
+        s.call(&call("signDocument", json!(["", "info", ""])), None),
+    ));
+    let info = parse(reply["responseObject"].as_str().unwrap());
+    let e = entry("user-gost2015-sign");
+    assert_eq!(info["ALGORITHM"], "ECGOST3410-2015");
+    assert_eq!(info["FORMAT"], "X.509");
+    assert_eq!(info["KEY_CN"], "ТЕСТОВ ТЕСТ");
+    assert_eq!(info["KEY_SERIALNUMBER"], "IIN123456789011");
+    assert_eq!(info["SERIAL_NUMBER"], oncl_pki::info::serial_dec(&e.cert));
+    assert_eq!(info["CERT"], b64(&der_of(&e.cert)));
+    assert_eq!(
+        text(s.call(&call("signDocument", json!(["", "x", ""])), None)),
+        r#"{"code":"500","message":"TYPE NOT RECOGNIZED"}"#
+    );
+}
+
+#[test]
+fn arta_sign_document_esedo_attrs() {
+    let tsa = Arc::new(Recorder {
+        inner: Arc::new(oncl_pki::tsp::MockTsa::new(entry("tsa-gost2015"))),
+        bodies: Mutex::new(Vec::new()),
+    });
+    let route: Arc<dyn HttpTransport> = tsa.clone();
+    let h = Harness::new(
+        key("user-rsa-sign"),
+        vec![("http://tsp.pki.gov.kz".to_owned(), route)],
+    );
+    let mut s = h.session(ARTA);
+    s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
+    let document = b"the document";
+    let digest = HashAlg::Sha256.digest(document);
+    let esedo = json!({"digest": b64(&digest), "fileNames": ["a.pdf", "b.pdf"]}).to_string();
+    let raw = text(s.call(
+        &call("signDocument", json!([esedo, "SIGN", b64(b"raw data")])),
+        None,
+    ));
+    let reply = parse(&raw);
+    assert_eq!(reply["code"], "200", "{reply}");
+    let object = &reply["responseObject"];
+    let e = entry("user-rsa-sign");
+    assert_eq!(object["dataForSign"], b64(b"raw data"));
+    assert_eq!(object["certificate"], b64(&der_of(&e.cert)));
+    // `id` is a JSON number of every digit (serde_json would round it to a float).
+    let id = format!("\"id\":{}", oncl_pki::info::serial_dec(&e.cert));
+    assert!(raw.contains(&id), "{raw}");
+    assert!(!object["signedData"].as_str().unwrap().is_empty());
+    let cms = unb64(object["esedoSign"].as_str().unwrap());
+    oncl_pki::cms::verify(&cms, Some(document)).unwrap();
+    let view = cms_view(&cms);
+    assert!(view.econtent.is_none());
+    let (signed, unsigned) = &view.signers[0];
+    assert_eq!(
+        attribute(signed, "1.2.840.113549.1.9.4").unwrap(),
+        [&[0x04, 32][..], &digest].concat()
+    );
+    assert_eq!(
+        attribute(signed, "1.2.840.113549.1.9.77").unwrap(),
+        [&[0x0c, 12][..], b"a.pdf<>b.pdf"].concat()
+    );
+    assert_eq!(
+        attribute(signed, "1.2.840.113549.1.9.13").unwrap(),
+        b"\x13\x05ESEDO"
+    );
+    let (tag, basic, _) = tlv(attribute(signed, "1.3.6.1.5.5.7.48.1.1").unwrap());
+    assert_eq!((tag, tlv(basic).0), (0x04, 0x30));
+    assert!(attribute(signed, "1.2.840.113549.1.9.16.2.47").is_none());
+    assert!(attribute(unsigned, TIMESTAMP_TOKEN).is_some());
+    // OCSP: GET to the default responder; TSA: POST, GOST 34.311 imprint, policy GOST 2015.
+    let log = h.http_log();
+    assert!(log[0].starts_with("GET http://ocsp.pki.gov.kz/"), "{log:?}");
+    assert_eq!(log[1], "POST http://tsp.pki.gov.kz", "{log:?}");
+    let bodies = tsa.bodies.lock().unwrap().clone();
+    let policy = der::asn1::ObjectIdentifier::new_unwrap("1.2.398.3.3.2.6.4");
+    let gost = HashAlg::Gost34311.oid();
+    assert!(
+        bodies[0]
+            .1
+            .windows(policy.as_bytes().len())
+            .any(|w| w == policy.as_bytes())
+    );
+    assert!(
+        bodies[0]
+            .1
+            .windows(gost.as_bytes().len())
+            .any(|w| w == gost.as_bytes())
+    );
+}
+
+#[test]
+fn arta_sign_xml_first_child_xmldsig_more() {
+    let h = Harness::new(key("user-rsa-sign"), vec![]);
+    let mut s = h.session(ARTA);
+    let request = call("signXML", json!(["<a><b>1</b><!-- note --></a>"]));
+    // No key: a null reply drops the connection, with a uuid it is a 500.
+    assert_eq!(s.call(&request, None), Reply::Drop);
+    let with_uuid = json!({"method": "signXML", "args": ["<a/>"], "uuid": "1"}).to_string();
+    assert_eq!(text(s.call(&with_uuid, None)), r#"{"code":"500"}"#);
+    s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
+    let xml = text(s.call(&request, None));
+    assert!(
+        xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\""),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("http://www.w3.org/2001/04/xmlenc#sha256"),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments"),
+        "{xml}"
+    );
+    assert!(
+        xml.trim_end().ends_with("</ds:Signature></a>") || xml.contains("Signature></a>"),
+        "{xml}"
+    );
+    assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------------------
+// Metadoc
+
+const METADOC: &str = "metadoc";
+
+/// A harness reaching the synthetic OCSP responder (answering `revoked` for
+/// `inter-revoked-gost2015-sign`), at the real time of the mock services.
+fn metadoc_harness(steps: Vec<Step>, extra: Vec<(String, Arc<dyn HttpTransport>)>) -> Harness {
+    let revoked = cert_info(&entry("inter-revoked-gost2015-sign").cert).serial_hex;
+    let responder: Arc<dyn HttpTransport> = Arc::new(MockOcsp::new(entry("ocsp-gost2015")).status(
+        &revoked,
+        oncl_pki::ocsp::CertStatus::Revoked {
+            time: time::OffsetDateTime::from_unix_timestamp(1_768_464_000).unwrap(),
+            reason: None,
+        },
+    ));
+    let mut routes = extra;
+    routes.push(("http://ocsp.synthetic.test".to_owned(), responder));
+    Harness::new(steps, routes)
+        .with_pki_hosts(&["ocsp.synthetic.test"])
+        .with_clock(time::OffsetDateTime::now_utc)
+}
+
+/// A `sign` request with the key file `path` and its password.
+fn metadoc_sign(method: &str, path: &std::path::Path, password: &str, data: &[u8]) -> String {
+    json!({
+        "method": method, "keyType": "file", "filePath": path.to_str().unwrap(),
+        "password": password, "filesNames": "a.pdf", "dataForSign": b64(data),
+        "skipCheckPermissions": true,
+    })
+    .to_string()
+}
+
+#[test]
+fn metadoc_bad_json_drops() {
+    let h = Harness::new(vec![], vec![]);
+    for request in [
+        "x".to_owned(),
+        json!({"args": []}).to_string(),
+        json!({"method": 1}).to_string(),
+        json!({"method": "getKeyInfo"}).to_string(),
+        json!({"method": "getKeyInfo", "args": [1]}).to_string(),
+        json!({"method": "getKeyInfoByFilePathAndPassword", "password": "p"}).to_string(),
+    ] {
+        assert_eq!(h.call(METADOC, &request, None), Reply::Drop, "{request}");
+    }
+}
+
+#[test]
+fn metadoc_module_version() {
+    let h = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(h.call(
+            METADOC,
+            &json!({"method": "getModuleVersion"}).to_string(),
+            None
+        )),
+        r#"{"responseObject":"1.7.0","code":"200","message":"NONE"}"#
+    );
+}
+
+#[test]
+fn metadoc_unknown_method_signs() {
+    let (path, password) = p12("inter-user-gost2015-sign");
+    let h = metadoc_harness(vec![yes()], vec![]);
+    let reply = text(h.call(
+        METADOC,
+        &metadoc_sign("anything", &path, password, b"doc"),
+        None,
+    ));
+    let parsed = parse(&reply);
+    assert_eq!(parsed["code"], "200", "{reply}");
+    assert_eq!(parsed["message"], "NONE");
+    let cms = unb64(parsed["responseObject"].as_str().unwrap());
+    oncl_pki::cms::verify(&cms, Some(b"doc")).unwrap();
+    let view = cms_view(&cms);
+    assert!(view.econtent.is_none());
+    let (signed, _) = &view.signers[0];
+    assert_eq!(
+        attribute(signed, "1.2.840.113549.1.9.13").unwrap(),
+        b"\x0c\x06ESEDO "
+    );
+    assert_eq!(
+        attribute(signed, "1.2.840.113549.1.9.77").unwrap(),
+        [&[0x0c, 5][..], b"a.pdf"].concat()
+    );
+    let e = entry("inter-user-gost2015-sign");
+    assert_eq!(
+        attribute(signed, "1.3.6.1.4.1.6801.2.8").unwrap(),
+        der_of_name(&e.cert)
+    );
+}
+
+#[test]
+fn metadoc_password_dialog_before_validation() {
+    let h = Harness::new(vec![Step::Password("secret".to_owned())], vec![]);
+    let request = json!({"method": "sign", "keyType": "file"}).to_string();
+    assert_eq!(
+        text(h.call(METADOC, &request, None)),
+        r#"{"code":"500","message":"JSONObject[\"filePath\"] not found."}"#
+    );
+    let prompts = h.prompter().password_prompts();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(
+        text(h.call(METADOC, &json!({"method": "sign"}).to_string(), None)),
+        r#"{"code":"500","message":"JSONObject[\"keyType\"] not found."}"#
+    );
+    let h = Harness::new(vec![], vec![]);
+    let request = json!({"method": "sign", "keyType": "disk", "password": "p"}).to_string();
+    assert_eq!(
+        text(h.call(METADOC, &request, None)),
+        r#"{"code":"500","message":"KeyType: \"disk\" is not allowed! Required \"file\" or \"token\"."}"#
+    );
+}
+
+#[test]
+fn metadoc_file_key_users_private_key_alias() {
+    use oncl_pki::pkcs12::{WriteEntry, WriteOptions, write};
+    let dir = tempfile::tempdir().unwrap();
+    let entries: Vec<WriteEntry> = [
+        ("inter-user-gost2015-sign", "Users private key"),
+        ("inter-revoked-gost2015-sign", "zzz"),
+    ]
+    .iter()
+    .map(|(name, alias)| {
+        let e = entry(name);
+        WriteEntry {
+            alias: (*alias).to_owned(),
+            pkcs8_der: e.key.to_pkcs8_der().to_vec(),
+            cert_der: Some(der_of(&e.cert)),
+        }
+    })
+    .collect();
+    let mut n = 0u8;
+    let pfx = write(
+        &entries,
+        &[],
+        "Qwerty12",
+        &WriteOptions::default(),
+        &mut |buf| {
+            for b in buf {
+                n = n.wrapping_add(7);
+                *b = n;
+            }
+        },
+    )
+    .unwrap();
+    let path = dir.path().join("two.p12");
+    std::fs::write(&path, pfx).unwrap();
+    let h = metadoc_harness(vec![yes()], vec![]);
+    let reply = parse(&text(h.call(
+        METADOC,
+        &metadoc_sign("sign", &path, "Qwerty12", b"d"),
+        None,
+    )));
+    assert_eq!(reply["code"], "200", "{reply}");
+    let cms = unb64(reply["responseObject"].as_str().unwrap());
+    let signers = oncl_pki::cms::verify(&cms, Some(b"d")).unwrap();
+    assert_eq!(signers[0].cert, entry("inter-user-gost2015-sign").cert);
+    // A wrong password; a missing file.
+    let h = metadoc_harness(vec![yes()], vec![]);
+    assert_eq!(
+        text(h.call(METADOC, &metadoc_sign("sign", &path, "wrong", b"d"), None)),
+        r#"{"code":"500","message":"WRONG_PASSWORD"}"#
+    );
+    let h = metadoc_harness(vec![], vec![]);
+    let missing = dir.path().join("none.p12");
+    assert_eq!(
+        text(h.call(METADOC, &metadoc_sign("sign", &missing, "x", b"d"), None)),
+        r#"{"code":"500","message":"FILE_NOT_FOUND"}"#
+    );
+}
+
+/// The `producedAt` of the `OCSPResponse` in `octets` (OCTET STRING { OCSPResponse }), as
+/// its GeneralizedTime text.
+fn produced_at(octets: &[u8]) -> String {
+    let (_, response, _) = tlv(tlv(octets).1);
+    let bytes = children(response)[1].1;
+    let response_bytes = children(tlv(bytes).1);
+    // BasicOCSPResponse's content: its first element is tbsResponseData.
+    let basic = tlv(response_bytes[1].1).1;
+    let tbs = tlv(basic).1;
+    let produced = children(tbs)
+        .into_iter()
+        .find(|(tag, _, _)| *tag == 0x18)
+        .unwrap();
+    String::from_utf8(produced.1.to_vec()).unwrap()
+}
+
+#[test]
+fn metadoc_esedo_signing_time_is_produced_at() {
+    let (path, password) = p12("inter-user-gost2015-sign");
+    let h = metadoc_harness(vec![yes()], vec![]);
+    let reply = parse(&text(h.call(
+        METADOC,
+        &metadoc_sign("sign", &path, password, b"x"),
+        None,
+    )));
+    let cms = unb64(reply["responseObject"].as_str().unwrap());
+    let view = cms_view(&cms);
+    let (signed, _) = &view.signers[0];
+    let ocsp = attribute(signed, "1.3.6.1.5.5.7.48.1.1").unwrap();
+    let time = attribute(signed, "1.2.840.113549.1.9.5").unwrap();
+    let (tag, utc, _) = tlv(time);
+    assert_eq!(tag, 0x17, "UTCTime");
+    // GeneralizedTime `YYYYMMDDHHMMSSZ`, UTCTime `YYMMDDHHMMSSZ`.
+    assert_eq!(std::str::from_utf8(utc).unwrap(), &produced_at(ocsp)[2..]);
+    // OCTET STRING { OCSPResponse }: the response's status first.
+    let (_, response, _) = tlv(tlv(ocsp).1);
+    assert_eq!(children(response)[0].0, 0x0a);
+    // The request: a GET of 16-byte nonce, the CertID with GOST 34.311.
+    assert!(
+        h.http_log()[0].starts_with("GET http://ocsp.synthetic.test/"),
+        "{:?}",
+        h.http_log()
+    );
+}
+
+#[test]
+fn metadoc_whole_tsp_response_attr() {
+    let (path, password) = p12("inter-user-gost2015-sign");
+    let h = metadoc_harness(vec![yes()], vec![]);
+    let reply = parse(&text(h.call(
+        METADOC,
+        &metadoc_sign("sign", &path, password, b"x"),
+        None,
+    )));
+    let cms = unb64(reply["responseObject"].as_str().unwrap());
+    let view = cms_view(&cms);
+    let response = attribute(&view.signers[0].1, TIMESTAMP_TOKEN).unwrap();
+    // TimeStampResp { PKIStatusInfo { status 0 }, ContentInfo }.
+    let parts = children(tlv(response).1);
+    assert_eq!(parts[0].0, 0x30);
+    assert_eq!(children(parts[0].1)[0].2, [0x02, 0x01, 0x00]);
+    assert_eq!(parts[1].0, 0x30);
+    let log = h.http_log();
+    assert!(
+        log.iter()
+            .any(|l| l.starts_with("GET http://tsp.pki.gov.kz/")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn metadoc_tsp_failure_could_not_create_sign() {
+    let down: Arc<dyn HttpTransport> = Arc::new(Fixed {
+        status: 503,
+        body: Vec::new(),
+    });
+    let (path, password) = p12("inter-user-gost2015-sign");
+    let h = metadoc_harness(
+        vec![yes()],
+        vec![("http://tsp.pki.gov.kz".to_owned(), down)],
+    );
+    assert_eq!(
+        text(h.call(METADOC, &metadoc_sign("sign", &path, password, b"x"), None)),
+        r#"{"code":"500","message":"Could not create sign!"}"#
+    );
+}
+
+#[test]
+fn metadoc_revoked_code() {
+    let (path, password) = p12("inter-revoked-gost2015-sign");
+    let h = metadoc_harness(vec![yes()], vec![]);
+    assert_eq!(
+        text(h.call(METADOC, &metadoc_sign("sign", &path, password, b"x"), None)),
+        r#"{"code":"500","message":"CERTIFICATE_REVOKED"}"#
+    );
+}
+
+#[test]
+fn metadoc_cancel_cancelled() {
+    let h = Harness::new(vec![Step::CancelPassword], vec![]);
+    let request = json!({"method": "sign", "keyType": "file", "password": ""}).to_string();
+    assert_eq!(
+        text(h.call(METADOC, &request, None)),
+        r#"{"code":"500","message":"action.cancelled"}"#
+    );
+    let h = Harness::new(vec![Step::CancelStorage], vec![]);
+    let request = json!({"method": "getKeyInfo", "args": ["PKCS12"]}).to_string();
+    assert_eq!(
+        text(h.call(METADOC, &request, None)),
+        r#"{"code":"500","message":"action.canceled"}"#
+    );
+}

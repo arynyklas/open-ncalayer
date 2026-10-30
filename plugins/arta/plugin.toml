@@ -1,0 +1,25 @@
+id = "io.github.arynyklas.openncalayer.port.arta"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.arta.synergy.signmodule"]
+
+[name]
+ru = "Arta Synergy (порт OpenNCALayer)"
+kk = "Arta Synergy (OpenNCALayer порты)"
+en = "Arta Synergy (OpenNCALayer port)"
+
+[description]
+ru = "Подписание документов, файлов и XML для системы Arta Synergy, в том числе в формате ЕСЭДО"
+kk = "Arta Synergy жүйесі үшін құжаттарға, файлдарға және XML-ге, оның ішінде ЕСЭДО пішімінде қол қою"
+en = "Document, file and XML signatures for Arta Synergy, ESEDO included"
+
+[replaces]
+symname = "kz.arta.synergy.signmodule"
+version = "6.0"
+
+[capabilities]
+keys = true
+dialogs = true
+files = true
+page_files = true
+page_files_ext = ["cms"]
