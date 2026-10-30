@@ -82,20 +82,18 @@ jobs:
       # Nothing unsigned, expired or pointing elsewhere is published, even if pushed past the
       # pull request check. Changed content needs a greater `seq` than the base: on a push the
       # commit before it; otherwise the commit Pages serves now (the newest successful
-      # deployment of `github-pages`), so a scheduled or manual run publishes nothing a push
-      # would have refused. Without a deployment yet, the check runs without a base.
+      # deployment of `github-pages`), so no run publishes anything a push would have
+      # refused. Without a deployment yet, the check runs without a base. A tree without
+      # `updates/v1` is published only if the base had none either: removing the indexes
+      # would leave the installed clients without updates.
       - name: Check the indexes
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: |
-          if [ ! -d updates/v1 ]; then
-            echo "::notice::no updates/v1 yet: no indexes to check"
-            exit 0
-          fi
           base=""
           if [ "$EVENT" = push ]; then
-            if [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
+            if [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
               base="$BEFORE"
             fi
           else
@@ -112,6 +110,16 @@ jobs:
           fi
           if [ -n "$base" ]; then
             git cat-file -e "$base^{commit}"
+          fi
+          if [ ! -d updates/v1 ]; then
+            if [ -n "$base" ] && git cat-file -e "$base:updates/v1" 2> /dev/null; then
+              echo "::error::updates/v1 is gone, but $base has it: the indexes would be unpublished"
+              exit 1
+            fi
+            echo "::notice::no updates/v1 yet: no indexes to check"
+            exit 0
+          fi
+          if [ -n "$base" ]; then
             cargo xtask index check updates/v1 --base "$base"
           else
             cargo xtask index check updates/v1 --no-base
