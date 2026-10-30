@@ -572,6 +572,27 @@ fn token_service_in(
     ))
 }
 
+/// One line on the hardware tokens for the start of the log: support on or off and, with
+/// support on, whether the smart card service answers (with support off it is not asked).
+pub fn token_state(tokens: &oncl_token::Tokens) -> String {
+    if !tokens.is_enabled() {
+        return "hardware token support: off".to_owned();
+    }
+    let scan = tokens.scan();
+    match scan.problem {
+        None => format!(
+            "hardware token support: on; smart card service available, tokens: {}",
+            scan.present.len()
+        ),
+        Some(oncl_token::ScanProblem::NoService) => {
+            "hardware token support: on; smart card service unavailable".to_owned()
+        }
+        Some(oncl_token::ScanProblem::Failed(e)) => {
+            format!("hardware token support: on; smart card service failed: {e}")
+        }
+    }
+}
+
 /// `tls init|import|status`.
 pub fn tls(command: TlsCommand) -> ExitCode {
     let paths = match data_paths() {
@@ -1551,5 +1572,28 @@ mod tests {
         assert!(token_service_in(true, &missing).is_err());
         let none = |_: &str| None;
         assert!(!token_service_in(false, &none).unwrap().is_enabled());
+    }
+
+    /// The start's line on tokens: support off without touching the service, else whether
+    /// the service answers.
+    #[cfg(feature = "token-emulator")]
+    #[test]
+    fn token_state_line() {
+        use oncl_token::emulator::EmulatorBackend;
+
+        let emu = Arc::new(EmulatorBackend::new());
+        emu.add_reader("Reader 0");
+        let tokens = oncl_token::Tokens::new(emu.clone(), false);
+        assert_eq!(token_state(&tokens), "hardware token support: off");
+        tokens.set_enabled(true);
+        assert_eq!(
+            token_state(&tokens),
+            "hardware token support: on; smart card service available, tokens: 0"
+        );
+        emu.set_service(false);
+        assert_eq!(
+            token_state(&tokens),
+            "hardware token support: on; smart card service unavailable"
+        );
     }
 }

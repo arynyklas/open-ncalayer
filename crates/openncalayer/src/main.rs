@@ -262,6 +262,7 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         Ok(tokens) => tokens,
         Err(code) => return code,
     };
+    tracing::info!("{}", cli::token_state(&tokens));
     let prompter: Arc<dyn Prompter> = scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new()));
     let recent: Arc<dyn RecentPathStore> = Arc::new(JsonSettings::new(daemon.paths.settings()));
     let (plugins, plugin_modules) =
