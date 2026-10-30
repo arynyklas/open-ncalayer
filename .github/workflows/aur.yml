@@ -62,15 +62,19 @@ jobs:
           persist-credentials: false
       - name: The release
         id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           case "$TAG" in
             v*) ;;
             *) echo "::error::$TAG is not a release tag"; exit 1 ;;
           esac
-          prerelease="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          # A pre-release is a version with a suffix, as release.yml decides it (its release
+          # is a draft until the maintainer publishes it, so it is not asked for here).
+          version="${TAG#v}"
+          case "$version" in
+            *-*) prerelease=true ;;
+            *) prerelease=false ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           if [ "$prerelease" = true ]; then
             echo "::notice::$TAG is a pre-release: pre-releases are not published to the AUR"

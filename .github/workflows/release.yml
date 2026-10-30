@@ -487,13 +487,16 @@ jobs:
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/*
+      # A pre-release is created as a draft: the lab tests this run's installers and sets the
+      # commit status `vm-smoke`, and the maintainer publishes the draft once it is green
+      # (docs/dev/release.md). A release without a suffix is published at once, as before.
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           flags=()
           if [ "$PRERELEASE" = true ]; then
-            flags+=(--prerelease)
+            flags+=(--prerelease --draft)
           fi
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
