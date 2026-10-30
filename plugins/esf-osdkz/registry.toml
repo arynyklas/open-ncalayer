@@ -1,0 +1,26 @@
+id = "io.github.arynyklas.openncalayer.port.esf-osdkz"
+modules = ["com.osdkz.esf.signer.esfSigner"]
+
+[original]
+symname = "com.osdkz.esf.signer"
+version = "1.2"
+vendor = "ТОО «Open Systems Development»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Файл esf_settings.json (последний каталог ключей) не ведётся: окно выбора хранилища OpenNCALayer помнит последний путь само."
+
+[[differences]]
+ru = "Журнал ncalayer.log при запуске не переписывается: плагин не имеет к нему доступа, а OpenNCALayer не пишет в журнал тела запросов."
+
+[[differences]]
+ru = "auth: если в первом окне ключ не выбран (в хранилище нет ключей аутентификации или окно закрыто), открывается второе окно с ключами подписи; принимается только ключ ГОСТ 2015, иначе action.canceled."
+
+[[differences]]
+ru = "Ключи на сертификатах sha1RSA не подписывают (OpenNCALayer не делает подписей RSA-SHA1): ответ 500 «no such algorithm: SHA1WithRSAEncryption for provider KALKAN». Ключи ГОСТ 2015-256 OpenNCALayer не открывает."
+
+[[differences]]
+ru = "Ключи на токенах — после поддержки токенов в OpenNCALayer; до этого токен отвечает storage.empty."

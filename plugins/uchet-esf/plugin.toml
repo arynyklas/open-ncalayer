@@ -1,0 +1,22 @@
+id = "io.github.arynyklas.openncalayer.port.uchet-esf"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.uchet.esfSignUtil"]
+
+[name]
+ru = "Учёт.kz: подпись ЭСФ"
+kk = "Учёт.kz: ЭШФ қолтаңбасы"
+en = "Uchet.kz ESF signing"
+
+[description]
+ru = "Подпись XML и счетов-фактур ключом из файла, который называет сайт Учёт.kz"
+kk = "Учёт.kz сайты атаған файлдағы кілтпен XML және шот-фактураларға қол қою"
+en = "Signs XML and e-invoices with the key file the Uchet.kz site names"
+
+[replaces]
+symname = "kz.uchet.esfSignUtil"
+version = "1.0"
+
+[capabilities]
+keys = true
+key_files = true

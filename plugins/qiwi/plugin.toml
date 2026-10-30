@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.qiwi"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.qiwi.osgi.SecurityUtils"]
+
+[name]
+ru = "QIWI SecurityUtils"
+kk = "QIWI SecurityUtils"
+en = "QIWI SecurityUtils"
+
+[description]
+ru = "Подпись XML для АРМ QIWI Казахстан"
+kk = "QIWI Қазақстан АЖО үшін XML қолтаңбасы"
+en = "XML signatures for the QIWI Kazakhstan workstation"
+
+[replaces]
+symname = "kz.qiwi.osgi.SecurityUtils"
+version = "1.3"
+
+[capabilities]
+keys = true

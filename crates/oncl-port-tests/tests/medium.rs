@@ -758,3 +758,580 @@ fn eproc_bad_key_type_enum_text() {
     );
     assert!(harness.prompter().timeline().is_empty());
 }
+
+/// `s` as a JSON string literal.
+fn js(s: &str) -> String {
+    serde_json::to_string(s).unwrap()
+}
+
+/// The certificate of the synthetic store `name`'s first key, DER.
+fn cert_der(name: &str) -> Vec<u8> {
+    use der::Encode;
+    entry(name).cert.to_der().unwrap()
+}
+
+/// Verifies a raw signature (base64) of `data` by the synthetic store `name`'s key.
+fn verify_raw(name: &str, alg: SigAlg, data: &[u8], signature: &str) {
+    let cert = entry(name).cert;
+    let key = PublicKey::from_spki(cert.tbs_certificate().subject_public_key_info()).unwrap();
+    key.verify(alg, data, &decode_java(signature).unwrap())
+        .unwrap();
+}
+
+/// The text of `json` from the key `key` on.
+fn from_key<'a>(json: &'a str, key: &str) -> &'a str {
+    &json[json.find(&format!("\"{key}\":")).unwrap()..]
+}
+
+// osdkz ESF signer
+
+const ESF: &str = "com.osdkz.esf.signer.esfSigner";
+
+fn esf(fields: &str) -> String {
+    format!(r#"{{"module":"{ESF}",{fields}}}"#)
+}
+
+/// The keyInfo keys in the order a certificate with SKI and AKI gives.
+const ESF_KEY_INFO: [&str; 13] = [
+    "certNotBefore",
+    "issuerCn",
+    "authorityKeyIdentifier",
+    "serialNumber",
+    "certNotAfter",
+    "issuerDn",
+    "keyId",
+    "base64Pem",
+    "alias",
+    "pem",
+    "subjectCn",
+    "algorithm",
+    "subjectDn",
+];
+
+#[test]
+fn esf_missing_fields_drop() {
+    let harness = Harness::new(vec![], vec![]);
+    let mut session = harness.session("esf-osdkz");
+    for fields in [
+        r#""storageName":"PKCS12","data":"x""#,
+        r#""method":"signPlainData","data":"x""#,
+        r#""method":"signPlainData","storageName":"PKCS12","data":{}"#,
+        r#""method":"auth","storageName":"PKCS12""#,
+        r#""method":"signPlainDataMap","storageName":"PKCS12","data":"x""#,
+    ] {
+        assert_eq!(session.call(&esf(fields), None), Reply::Drop, "{fields}");
+    }
+    assert!(harness.prompter().timeline().is_empty());
+}
+
+#[test]
+fn esf_unknown_404() {
+    let harness = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(harness.call("esf-osdkz", &esf(r#""method":"sign""#), None)),
+        r#"{"code":"404"}"#
+    );
+}
+
+#[test]
+fn esf_sign_plain_data_reply_order() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call(
+        "esf-osdkz",
+        &esf(r#""method":"signPlainData","storageName":"PKCS12","data":"счёт-фактура""#),
+        None,
+    ));
+    assert!(
+        reply.starts_with(r#"{"responseObject":{"signature":""#),
+        "{reply}"
+    );
+    assert!(reply.ends_with(r#"},"code":"200"}"#));
+    let response = from_key(&reply, "signature");
+    assert!(response.find("\"pem\":").unwrap() < response.find("\"keyInfo\":").unwrap());
+    assert_key_order(from_key(&reply, "keyInfo"), &ESF_KEY_INFO);
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    let object = &value["responseObject"];
+    verify_raw(
+        "user-gost2015-sign",
+        SigAlg::Gost2015_512,
+        "счёт-фактура".as_bytes(),
+        object["signature"].as_str().unwrap(),
+    );
+    let info = &object["keyInfo"];
+    assert_eq!(info["alias"], "a3c1901ac6b0bfaed7b9b4b0610ac07243210e31");
+    assert_eq!(info["algorithm"], "ECGOST3410-2015");
+    assert_eq!(info["subjectDn"], subject_dn("user-gost2015-sign"));
+    assert_eq!(
+        decode_java(info["base64Pem"].as_str().unwrap()).unwrap(),
+        cert_der("user-gost2015-sign")
+    );
+    assert_eq!(info["pem"], object["pem"]);
+}
+
+#[test]
+fn esf_storage_errors_and_cancel() {
+    let harness = Harness::new(vec![Step::CancelStorage], vec![]);
+    let mut session = harness.session("esf-osdkz");
+    for (storage, message) in [
+        ("PKCS12", "action.canceled"),
+        (" ", "storageName.param.empty"),
+        ("BKS", "storage.unknown"),
+        ("AKKaztokenStore", "storage.empty"),
+    ] {
+        assert_eq!(
+            text(session.call(
+                &esf(&format!(
+                    r#""method":"signPlainData","storageName":"{storage}","data":"x""#
+                )),
+                None
+            )),
+            format!(r#"{{"code":"500","message":"{message}"}}"#)
+        );
+    }
+}
+
+#[test]
+fn esf_map_non_string_value() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    assert_eq!(
+        text(harness.call(
+            "esf-osdkz",
+            &esf(r#""method":"signPlainDataMap","storageName":"PKCS12","data":{"esf1":5}"#),
+            None
+        )),
+        r#"{"code":"500","message":"java.lang.Integer cannot be cast to java.lang.String"}"#
+    );
+}
+
+#[test]
+fn esf_map_keyinfo_overwrite() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call(
+        "esf-osdkz",
+        &esf(r#""method":"signPlainDataMap","storageName":"PKCS12","data":{"esf1":"a","keyInfo":"b"}"#),
+        None,
+    ));
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    let object = value["responseObject"].as_object().unwrap();
+    assert_eq!(object.len(), 2, "{reply}");
+    for (key, data) in [("esf1", "a"), ("keyInfo", "b")] {
+        verify_raw(
+            "user-gost2015-sign",
+            SigAlg::Gost2015_512,
+            data.as_bytes(),
+            object[key].as_str().unwrap(),
+        );
+    }
+    // Without the page's keyInfo: the key's details, and no pem.
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call(
+        "esf-osdkz",
+        &esf(
+            r#""method":"signPlainDataMap","storageName":"PKCS12","data":{"esf1":"a","esf2":"b"}"#,
+        ),
+        None,
+    ));
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    let object = value["responseObject"].as_object().unwrap();
+    assert_eq!(object.len(), 3, "{reply}");
+    assert!(object["keyInfo"].is_object());
+}
+
+#[test]
+fn esf_auth_fallback_to_gost2015_sign() {
+    // The first dialog ends without a key (closed): the GOST 2015 signing keys are offered.
+    let mut steps = vec![
+        Step::Storage {
+            path: p12("user-gost2015-sign").0,
+            password: "Qwerty12".to_owned(),
+        },
+        Step::CancelKey,
+    ];
+    steps.extend(pick("user-gost2015-sign", 0));
+    let harness = Harness::new(steps, vec![]);
+    let reply = text(harness.call(
+        "esf-osdkz",
+        &esf(r#""method":"auth","storageName":"PKCS12","data":"challenge""#),
+        None,
+    ));
+    assert!(
+        reply.starts_with(r#"{"responseObject":{"data":"challenge","signature":""#),
+        "{reply}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    verify_raw(
+        "user-gost2015-sign",
+        SigAlg::Gost2015_512,
+        b"challenge",
+        value["responseObject"]["signature"].as_str().unwrap(),
+    );
+    assert_eq!(harness.prompter().storage_prompts().len(), 2);
+    // A GOST 2015 signing certificate is an authentication one too for Kalkan: one dialog.
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call(
+        "esf-osdkz",
+        &esf(r#""method":"auth","storageName":"PKCS12","data":"c""#),
+        None,
+    ));
+    assert!(reply.ends_with(r#""code":"200"}"#), "{reply}");
+    assert_eq!(harness.prompter().storage_prompts().len(), 1);
+    // A GOST 2004 signing key is not offered in its place.
+    let mut steps = vec![
+        Step::Storage {
+            path: p12("user-gost2004-sign").0,
+            password: "Qwerty12".to_owned(),
+        },
+        Step::CancelKey,
+    ];
+    steps.extend(pick("user-gost2004-sign", 0));
+    let harness = Harness::new(steps, vec![]);
+    assert_eq!(
+        text(harness.call(
+            "esf-osdkz",
+            &esf(r#""method":"auth","storageName":"PKCS12","data":"c""#),
+            None
+        )),
+        r#"{"code":"500","message":"action.canceled"}"#
+    );
+}
+
+#[test]
+fn esf_key_info_with_and_without_ski() {
+    let harness = Harness::new(pick("inter-noaki-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call(
+        "esf-osdkz",
+        &esf(r#""method":"signPlainData","storageName":"PKCS12","data":"x""#),
+        None,
+    ));
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    let info = &value["responseObject"]["keyInfo"];
+    let cert = entry("inter-noaki-gost2015-sign").cert;
+    assert_eq!(
+        info.get("keyId").and_then(|v| v.as_str()),
+        oncl_pki::info::ski_hex(&cert).as_deref()
+    );
+    assert!(info.get("authorityKeyIdentifier").is_none(), "{reply}");
+    assert!(info.get("certificate").is_none());
+}
+
+// uchet esfSignUtil
+
+const UCHET_ESF: &str = "kz.uchet.esfSignUtil";
+
+fn uchet_esf(method: &str, store: &str, password: &str, extra: &str) -> String {
+    let path = p12(store).0.display().to_string();
+    format!(
+        r#"{{"module":"{UCHET_ESF}","method":"{method}","args":{{"pkcsPath":{},"pkcsPassword":"{password}",{extra}}}}}"#,
+        js(&path)
+    )
+}
+
+#[test]
+fn uchet_esf_sign_xml_status_number() {
+    let harness = Harness::new(vec![Step::Confirm { yes: true }], vec![]);
+    let mut session = harness.session("uchet-esf");
+    let request = uchet_esf(
+        "signXml",
+        "user-gost2015-sign",
+        "Qwerty12",
+        r#""data":"<esf><a>1</a></esf>""#,
+    );
+    let reply = text(session.call(&request, None));
+    assert!(
+        reply.starts_with(r#"{"signedXml":"<esf><a>1<\/a>"#),
+        "{reply}"
+    );
+    assert!(reply.ends_with(r#"","status":200}"#));
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    oncl_pki::xmldsig::verify(value["signedXml"].as_str().unwrap().as_bytes()).unwrap();
+    // The page's file is allowed once in the session.
+    assert!(text(session.call(&request, None)).ends_with(r#""status":200}"#));
+    assert_eq!(harness.prompter().confirm_prompts().len(), 1);
+}
+
+#[test]
+fn uchet_esf_list_reply() {
+    let harness = Harness::new(vec![Step::Confirm { yes: true }], vec![]);
+    let reply = text(harness.call(
+        "uchet-esf",
+        &uchet_esf(
+            "signEsfList",
+            "multi-gost2015",
+            "Qwerty12",
+            r#""esfList":["<a/>","<b/>"]"#,
+        ),
+        None,
+    ));
+    assert!(
+        reply.starts_with(r#"{"signedEsf":[{"signature":""#),
+        "{reply}"
+    );
+    assert_key_order(&reply, &["signedEsf", "x509"]);
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    // The last key of the store signs.
+    let store =
+        oncl_pki::pkcs12::load(&std::fs::read(p12("multi-gost2015").0).unwrap(), "Qwerty12")
+            .unwrap();
+    let last = &store.last().unwrap().cert;
+    use der::Encode;
+    assert_eq!(
+        decode_java(value["x509"].as_str().unwrap()).unwrap(),
+        last.to_der().unwrap()
+    );
+    let key = PublicKey::from_spki(last.tbs_certificate().subject_public_key_info()).unwrap();
+    let items = value["signedEsf"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    for (item, data) in items.iter().zip(["<a/>", "<b/>"]) {
+        let signature = decode_java(item["signature"].as_str().unwrap()).unwrap();
+        key.verify(SigAlg::Gost2015_512, data.as_bytes(), &signature)
+            .unwrap();
+        assert!(
+            item["pem"]
+                .as_str()
+                .unwrap()
+                .starts_with("-----BEGIN CERTIFICATE-----")
+        );
+    }
+    // An empty list.
+    let harness = Harness::new(vec![Step::Confirm { yes: true }], vec![]);
+    let reply = text(harness.call(
+        "uchet-esf",
+        &uchet_esf(
+            "signEsfList",
+            "user-gost2015-sign",
+            "Qwerty12",
+            r#""esfList":[]"#,
+        ),
+        None,
+    ));
+    assert!(
+        reply.starts_with(r#"{"signedEsf":[],"x509":"MII"#),
+        "{reply}"
+    );
+}
+
+#[test]
+fn uchet_esf_wrong_password_drops() {
+    let harness = Harness::new(vec![Step::Confirm { yes: true }], vec![]);
+    let mut session = harness.session("uchet-esf");
+    assert_eq!(
+        session.call(
+            &uchet_esf("signXml", "user-gost2015-sign", "wrong", r#""data":"<a/>""#),
+            None
+        ),
+        Reply::Drop
+    );
+    // Malformed requests and documents drop the connection too.
+    for request in [
+        uchet_esf(
+            "signXml",
+            "user-gost2015-sign",
+            "Qwerty12",
+            r#""data":"<a>""#,
+        ),
+        uchet_esf("signXml", "user-gost2015-sign", "Qwerty12", r#""x":1"#),
+        uchet_esf(
+            "signEsfList",
+            "user-gost2015-sign",
+            "Qwerty12",
+            r#""esfList":[1]"#,
+        ),
+        format!(r#"{{"module":"{UCHET_ESF}","method":"signXml"}}"#),
+    ] {
+        assert_eq!(session.call(&request, None), Reply::Drop, "{request}");
+    }
+}
+
+#[test]
+fn uchet_esf_consent_declined_drops() {
+    let harness = Harness::new(vec![Step::Confirm { yes: false }], vec![]);
+    assert_eq!(
+        harness.call(
+            "uchet-esf",
+            &uchet_esf(
+                "signXml",
+                "user-gost2015-sign",
+                "Qwerty12",
+                r#""data":"<a/>""#
+            ),
+            None
+        ),
+        Reply::Drop
+    );
+    assert_eq!(harness.prompter().confirm_prompts().len(), 1);
+}
+
+#[test]
+fn uchet_esf_unknown_method() {
+    let harness = Harness::new(vec![], vec![]);
+    for request in [
+        format!(r#"{{"module":"{UCHET_ESF}","method":"sign","args":{{}}}}"#),
+        format!(r#"{{"module":"{UCHET_ESF}"}}"#),
+    ] {
+        assert_eq!(
+            text(harness.call("uchet-esf", &request, None)),
+            r#"{"success":false,"errorCode":"method_not_defined"}"#
+        );
+    }
+}
+
+// qiwi
+
+const QIWI: &str = "kz.qiwi.osgi.SecurityUtils";
+
+fn qiwi(method: &str, args: &str) -> String {
+    format!(r#"{{"module":"{QIWI}","method":"{method}","args":{args}}}"#)
+}
+
+const QIWI_XML: &str = r#"["42","<?xml version=\"1.0\"?><root><a>1</a></root>"]"#;
+
+const QIWI_500: &str = r#"{"code":"500"}"#;
+
+#[test]
+fn qiwi_prologue_drops() {
+    let harness = Harness::new(vec![], vec![]);
+    let mut session = harness.session("qiwi");
+    for request in [
+        format!(r#"{{"module":"{QIWI}","args":["1"]}}"#),
+        format!(r#"{{"module":"{QIWI}","method":"logOut"}}"#),
+        qiwi("logOut", r#"{"0":"1"}"#),
+        qiwi("logOut", "[]"),
+        qiwi("signXml", "[1]"),
+    ] {
+        assert_eq!(session.call(&request, None), Reply::Drop, "{request}");
+    }
+    assert_eq!(
+        text(session.call(&qiwi("other", r#"["1"]"#), None)),
+        QIWI_500
+    );
+}
+
+#[test]
+fn qiwi_sign_xml_reply_bytes() {
+    let harness = Harness::new(pick("user-gost2004-sign", 0), vec![]);
+    let reply = text(harness.call("qiwi", &qiwi("signXml", QIWI_XML), None));
+    assert!(
+        reply.starts_with(
+            r#"{"responseObject":{"callID":"42","verificationResult":true,"logOutResult":false,"signedXml":"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?><root><a>1<\/a><ds:Signature"#
+        ),
+        "{reply}"
+    );
+    assert!(
+        reply.ends_with(r#"<\/ds:Signature><\/root>"},"code":"200"}"#),
+        "{reply}"
+    );
+}
+
+#[test]
+fn qiwi_signature_layout_and_uris() {
+    for (store, signature, digest) in [
+        (
+            "user-gost2004-sign",
+            "http://www.w3.org/2001/04/xmldsig-more#gost34310-gost34311",
+            "http://www.w3.org/2001/04/xmldsig-more#gost34311",
+        ),
+        (
+            "user-rsa-sign",
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+            "http://www.w3.org/2001/04/xmlenc#sha256",
+        ),
+    ] {
+        let harness = Harness::new(pick(store, 0), vec![]);
+        let reply = text(harness.call("qiwi", &qiwi("signXml", QIWI_XML), None));
+        let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        let xml = value["responseObject"]["signedXml"].as_str().unwrap();
+        for needle in [
+            format!(r#"<ds:SignatureMethod Algorithm="{signature}""#),
+            format!(r#"<ds:DigestMethod Algorithm="{digest}""#),
+            r#"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315""#.to_owned(),
+            r#"<ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature""#.to_owned(),
+            r#"<ds:Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments""#.to_owned(),
+            r#"<ds:Reference URI="""#.to_owned(),
+            "<ds:X509Certificate>".to_owned(),
+        ] {
+            assert!(xml.contains(&needle), "{store}: {needle} in {xml}");
+        }
+        assert_eq!(
+            value["responseObject"]["verificationResult"], true,
+            "{store}"
+        );
+        oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap();
+    }
+}
+
+#[test]
+fn qiwi_failure_200_without_signed_xml() {
+    let harness = Harness::new(pick("user-gost2004-sign", 0), vec![]);
+    let mut session = harness.session("qiwi");
+    // The document's first node is a comment: the signature has nowhere to go.
+    let failed = r#"{"responseObject":{"callID":"42","verificationResult":false,"logOutResult":false},"code":"200"}"#;
+    assert_eq!(
+        text(session.call(&qiwi("signXml", r#"["42","<!--c--><root/>"]"#), None)),
+        failed
+    );
+    // The session stays: the next document is signed without a dialog.
+    let shown = harness.prompter().timeline().len();
+    let reply = text(session.call(&qiwi("signXml", QIWI_XML), None));
+    assert!(reply.contains(r#""verificationResult":true"#), "{reply}");
+    assert_eq!(harness.prompter().timeline().len(), shown);
+    // A missing document is an error: the session ends.
+    assert_eq!(
+        text(session.call(&qiwi("signXml", r#"["42"]"#), None)),
+        QIWI_500
+    );
+    assert_eq!(
+        text(session.call(&qiwi("signXml", QIWI_XML), None)),
+        QIWI_500
+    );
+}
+
+#[test]
+fn qiwi_logout() {
+    let harness = Harness::new(pick("user-gost2004-sign", 0), vec![]);
+    let mut session = harness.session("qiwi");
+    session.call(&qiwi("signXml", QIWI_XML), None);
+    assert_eq!(
+        text(session.call(&qiwi("logOut", r#"["7"]"#), None)),
+        r#"{"responseObject":{"callID":"7","verificationResult":false,"logOutResult":true},"code":"200"}"#
+    );
+    // Logged out: the dialog again (the script is empty: cancelled).
+    assert_eq!(
+        text(session.call(&qiwi("signXml", QIWI_XML), None)),
+        QIWI_500
+    );
+}
+
+static QIWI_NOW: AtomicI64 = AtomicI64::new(0);
+
+fn qiwi_clock() -> OffsetDateTime {
+    default_clock() + time::Duration::seconds(QIWI_NOW.load(Ordering::SeqCst))
+}
+
+#[test]
+fn qiwi_session_expires_after_20_min() {
+    let harness = Harness::new(pick("user-gost2004-sign", 0), vec![]).with_clock(qiwi_clock);
+    let mut session = harness.session("qiwi");
+    session.call(&qiwi("signXml", QIWI_XML), None);
+    let shown = harness.prompter().timeline().len();
+    QIWI_NOW.store(19 * 60, Ordering::SeqCst);
+    assert!(text(session.call(&qiwi("signXml", QIWI_XML), None)).contains(r#""code":"200""#));
+    assert_eq!(harness.prompter().timeline().len(), shown);
+    // 20 minutes after the last signature, not the first.
+    QIWI_NOW.store(38 * 60, Ordering::SeqCst);
+    assert!(text(session.call(&qiwi("signXml", QIWI_XML), None)).contains(r#""code":"200""#));
+    QIWI_NOW.store(58 * 60 + 1, Ordering::SeqCst);
+    assert_eq!(
+        text(session.call(&qiwi("signXml", QIWI_XML), None)),
+        QIWI_500
+    );
+    assert!(harness.prompter().timeline().len() > shown);
+}
+
+#[test]
+fn qiwi_cancel_500() {
+    let harness = Harness::new(vec![Step::CancelStorage], vec![]);
+    assert_eq!(
+        text(harness.call("qiwi", &qiwi("signXml", QIWI_XML), None)),
+        QIWI_500
+    );
+}

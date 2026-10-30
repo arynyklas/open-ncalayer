@@ -24,4 +24,6 @@ time.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+# DER of the synthetic certificates the ports' replies carry.
+der.workspace = true
 serde_json.workspace = true

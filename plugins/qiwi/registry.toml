@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.qiwi"
+modules = ["kz.qiwi.osgi.SecurityUtils"]
+
+[original]
+symname = "kz.qiwi.osgi.SecurityUtils"
+version = "1.3"
+vendor = "АО «QIWI Казахстан»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Сессия 20 минут живёт только в текущем соединении и держит открытый ключ, а не путь и пароль (у оригинала — на весь процесс для всех сайтов)."
+
+[[differences]]
+ru = "Подписывает ключ, выбранный в окне (оригинал выбирал в окне ключ, но подписывал последним ключом файла)."
+
+[[differences]]
+ru = "Окна выбора файла и ключа — общие окна OpenNCALayer."
+
+[[differences]]
+ru = "Ключи на сертификатах sha1RSA не подписывают (OpenNCALayer не делает подписей RSA-SHA1): ответ 200 без signedXml, как у оригинала при сбое подписи. Ключ ГОСТ 2015 с адресами алгоритмов ГОСТ 2004 тоже не подписывает (ответ такой же); как вёл себя оригинал, не проверено."
