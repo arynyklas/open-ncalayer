@@ -24,4 +24,8 @@ time.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+# Reading the ports' replies: Base64 CMS, their DER (signed attributes, certificates).
+base64.workspace = true
+der.workspace = true
 serde_json.workspace = true
+x509-cert.workspace = true

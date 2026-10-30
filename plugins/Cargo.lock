@@ -407,6 +407,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-eot"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-legacy",
+ "oncl-port-pki",
+]
+
+[[package]]
 name = "oncl-port-kit"
 version = "0.1.0"
 dependencies = [
@@ -419,6 +428,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-legacy"
+version = "0.1.0"
+dependencies = [
+ "der",
+ "oncl-pdk",
+ "oncl-port-pki",
+ "x509-cert",
+]
+
+[[package]]
 name = "oncl-port-pki"
 version = "0.1.0"
 dependencies = [
@@ -428,6 +447,24 @@ dependencies = [
  "oncl-pdk",
  "spki",
  "x509-cert",
+]
+
+[[package]]
+name = "oncl-port-rating1c"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-kit",
+ "oncl-port-legacy",
+ "oncl-port-pki",
+]
+
+[[package]]
+name = "oncl-port-xdox"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-legacy",
 ]
 
 [[package]]

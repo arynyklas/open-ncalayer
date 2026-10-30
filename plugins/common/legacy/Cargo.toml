@@ -1,0 +1,15 @@
+[package]
+name = "oncl-port-legacy"
+description = "What the OpenNCALayer ports of the commonUtils clones share: the replies of their beans, the storage and key checks of their dialogs, their KeyInfo and Base64"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+der.workspace = true
+oncl-pdk.workspace = true
+oncl-port-pki.workspace = true
+x509-cert.workspace = true

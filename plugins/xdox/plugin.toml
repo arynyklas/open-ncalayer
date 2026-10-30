@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.xdox"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.xdox.signerbundle"]
+
+[name]
+ru = "xdox.kz Signer (порт OpenNCALayer)"
+kk = "xdox.kz Signer (OpenNCALayer порты)"
+en = "xdox.kz Signer (OpenNCALayer port)"
+
+[description]
+ru = "Подписание манифестов документов CMS для xdox.kz"
+kk = "xdox.kz үшін құжат манифестеріне CMS қолтаңбасы"
+en = "CMS signatures of document manifests for xdox.kz"
+
+[replaces]
+symname = "kz.xdox.osgi.SignerBundle"
+version = "1.1"
+
+[capabilities]
+keys = true
+dialogs = true
+files = true
