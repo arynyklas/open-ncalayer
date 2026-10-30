@@ -35,6 +35,10 @@
 
 - `openssl-request-inter-user-gost2015-sign.der` — `openssl ocsp -issuer inter-gost2015.pem -cert inter-user-gost2015-sign.pem -no_nonce -reqout …` (OpenSSL 3.0.13; лист извлечён `openssl pkcs12 -legacy -nokeys -clcerts` из `synthetic/inter-user-gost2015-sign.p12`). Тест сверяет с ним `ocsp::request_der` байт в байт. Синтетические данные, лицензия репозитория. Пересоздаётся той же командой после `cargo xtask gen-fixtures`, если меняется синтетический PKI.
 
+## `upstream/` — синтетика наблюдателя за оригиналом (коммитится)
+
+Синтетический манифест `ncalayer.der` и (с ним) дистрибутивы и бандлы, собранные из наших исходников, для тестов `cargo xtask upstream`. Состав и пересоздание — в [`upstream/README.md`](upstream/README.md). Файлов оригинального NCALayer там нет.
+
 ## `target/fixtures/ncanode/` — фикстуры NCANode (не коммитятся)
 
 Тестовые PKCS#12-ключи и сопутствующие файлы проекта [NCANode](https://github.com/ncanode-kz/NCANode), лицензия MIT.

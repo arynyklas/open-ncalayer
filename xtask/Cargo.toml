@@ -38,7 +38,7 @@ rand_chacha.workspace = true
 rsa.workspace = true
 # `sign`: passwords without echo.
 rpassword.workspace = true
-# `registry`: the schema of the ports' `registry.toml`.
+# `registry`: the schema of the ports' `registry.toml`; `upstream`: the facts and state schemas.
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
