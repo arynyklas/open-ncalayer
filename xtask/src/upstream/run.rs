@@ -38,8 +38,6 @@ pub struct RunOptions {
     pub work: PathBuf,
     /// The emit directory (emptied first).
     pub emit: PathBuf,
-    /// Only emit (the CLI publishes otherwise).
-    pub dry_run: bool,
     /// The sources.
     pub endpoints: Endpoints,
     /// The CAs of the manifest signer.

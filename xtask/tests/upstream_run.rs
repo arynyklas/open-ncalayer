@@ -46,7 +46,6 @@ fn opts(server: &MockServer, state: &Path, work: &Path, emit: &Path) -> RunOptio
         state_dir: state.to_owned(),
         work: work.to_owned(),
         emit: emit.to_owned(),
-        dry_run: true,
         endpoints: endpoints(server),
         trusted: synthetic_issuers(),
         tools: Tools::default(),

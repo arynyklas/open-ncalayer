@@ -108,8 +108,9 @@ pub fn innounp_args(archive: &Path, out: &Path) -> Vec<OsString> {
     ]
 }
 
-/// 7-Zip: `x -y -bd -bso0 -bsp0 -snld20 -o<out> <archive>` (no progress, no output, links
-/// pointing out of `out` refused).
+/// 7-Zip: `x -y -bd -bso0 -bsp0 -o<out> <archive>` (no progress, no output). 7-Zip 25.01
+/// and newer refuse links that point out of `out` by default; older versions are not used
+/// ([`super::tools::sevenzip_supported`]).
 pub fn sevenzip_args(archive: &Path, out: &Path) -> Vec<OsString> {
     let mut o = OsString::from("-o");
     o.push(out);
@@ -119,7 +120,6 @@ pub fn sevenzip_args(archive: &Path, out: &Path) -> Vec<OsString> {
         "-bd".into(),
         "-bso0".into(),
         "-bsp0".into(),
-        "-snld20".into(),
         o,
         archive.into(),
     ]

@@ -386,12 +386,7 @@ fn innounp_command_line() {
 #[test]
 fn sevenzip_command_line() {
     let args = sevenzip_args(Path::new("a.msi"), Path::new("out"));
-    assert_eq!(
-        args,
-        [
-            "x", "-y", "-bd", "-bso0", "-bsp0", "-snld20", "-oout", "a.msi"
-        ]
-    );
+    assert_eq!(args, ["x", "-y", "-bd", "-bso0", "-bsp0", "-oout", "a.msi"]);
 }
 
 #[test]
@@ -464,4 +459,77 @@ fn tools_rejects_wrong_sha256() {
     )
     .unwrap();
     assert!(exe.exists());
+}
+
+#[test]
+fn sevenzip_version_gate() {
+    use xtask::upstream::tools::sevenzip_supported;
+    assert!(sevenzip_supported(
+        "7-Zip 25.01 (x64) : Copyright (c) 1999-2025 Igor Pavlov"
+    ));
+    assert!(sevenzip_supported("7-Zip 26.00 (x64)"));
+    assert!(sevenzip_supported("7-Zip (z) 25.02 (x64)"));
+    assert!(!sevenzip_supported("7-Zip 25.00 (x64)"));
+    assert!(!sevenzip_supported(
+        "7-Zip 23.01 (x64) : Copyright (c) 1999-2023 Igor Pavlov"
+    ));
+    assert!(!sevenzip_supported("p7zip Version 16.02"));
+    assert!(!sevenzip_supported(""));
+}
+
+/// A ZIP with a symbolic link `link` to `target` and a file written through it.
+fn zip_with_link(target: &str) -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut out);
+        let opts = zip::write::SimpleFileOptions::default();
+        w.add_symlink("link", target, opts).unwrap();
+        w.start_file("link/pwned.txt", opts).unwrap();
+        w.write_all(b"pwned").unwrap();
+        w.start_file("plain.txt", opts).unwrap();
+        w.write_all(b"plain").unwrap();
+        w.finish().unwrap();
+    }
+    out.into_inner()
+}
+
+#[test]
+fn zip_symlink_entries_are_skipped() {
+    let inv = inventory_of_bytes(&zip_with_link("../outside"), &Limits::default()).unwrap();
+    assert!(!inv.files.contains_key("link"), "{:?}", inv.files.keys());
+    assert!(inv.files.contains_key("plain.txt"));
+}
+
+#[test]
+fn sevenzip_does_not_follow_a_link_out_of_the_output() {
+    use xtask::upstream::tools::{find_7z, sevenzip_supported, sevenzip_version};
+    use xtask::upstream::unpack::{Extractor, SevenZip};
+    let Some(exe) =
+        find_7z().filter(|e| sevenzip_version(e).is_some_and(|v| sevenzip_supported(&v)))
+    else {
+        eprintln!("no 7-Zip 25.01 or newer: the watcher does not use older ones");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let archive = dir.path().join("a.zip");
+    std::fs::write(&archive, zip_with_link("../outside")).unwrap();
+    let out = dir.path().join("out");
+    // Refused (an error) or extracted without the link: never written outside `out`.
+    let _ = SevenZip { exe }.extract(&archive, &out);
+    assert!(!outside.join("pwned.txt").exists());
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    if out.exists() {
+        let tree = Tree {
+            root: TreeRoot::Dir(out),
+            meta: Default::default(),
+        };
+        let inv = inventory(&tree, &Limits::default()).unwrap();
+        assert!(
+            inv.files
+                .keys()
+                .all(|k| !k.contains("pwned") || k.starts_with("link/"))
+        );
+    }
 }

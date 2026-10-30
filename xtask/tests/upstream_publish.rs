@@ -267,7 +267,6 @@ impl Setup {
             state_dir: state,
             work: self.root.join("work"),
             emit: emit.clone(),
-            dry_run: true,
             endpoints: endpoints(&self.world),
             trusted: synthetic_issuers(),
             tools: Tools::default(),

@@ -230,18 +230,28 @@ pub fn run(command: UpstreamCommand) -> anyhow::Result<()> {
             dry_run,
             github_output,
         } => {
-            let tools = Tools::from_env();
+            let mut tools = Tools::from_env();
+            // 7-Zip older than 25.01 would write through links out of its output directory.
+            let sevenzip = std::env::var_os("ONCL_7Z")
+                .filter(|v| !v.is_empty())
+                .map(|p| super::tools::sevenzip_version(std::path::Path::new(&p)));
+            let sevenzip = match sevenzip {
+                Some(Some(v)) if super::tools::sevenzip_supported(&v) => Some(v),
+                Some(_) => {
+                    eprintln!("ONCL_7Z is not 7-Zip 25.01 or newer: not used");
+                    tools.sevenzip = None;
+                    None
+                }
+                None => None,
+            };
             let tool_versions = ToolVersions {
                 innounp: tools.innounp.as_ref().map(|_| "2.71.2".to_owned()),
-                sevenzip: std::env::var_os("ONCL_7Z")
-                    .filter(|v| !v.is_empty())
-                    .and_then(|p| super::tools::sevenzip_version(std::path::Path::new(&p))),
+                sevenzip,
             };
             let outcome = cycle::run(&RunOptions {
                 state_dir: state,
                 work,
-                emit,
-                dry_run,
+                emit: emit.clone(),
                 endpoints: Endpoints::default(),
                 trusted: oncl_pki::roots::nca_production().to_vec(),
                 tools,
@@ -257,10 +267,18 @@ pub fn run(command: UpstreamCommand) -> anyhow::Result<()> {
                 outcome.entry.as_deref().unwrap_or("-"),
                 outcome.alerts.len()
             );
-            anyhow::ensure!(
-                dry_run,
-                "run without --dry-run: publish with `upstream publish`"
-            );
+            if dry_run {
+                return Ok(());
+            }
+            // The same code as `upstream publish --from <emit>`.
+            publish_cli(
+                &root,
+                &emit,
+                &PublishArgs {
+                    remote: "origin".to_owned(),
+                    ..PublishArgs::default()
+                },
+            )?;
             Ok(())
         }
     }

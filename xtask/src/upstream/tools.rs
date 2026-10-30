@@ -82,6 +82,31 @@ pub fn sevenzip_version(exe: &Path) -> Option<String> {
         .map(|l| l.chars().take(80).collect())
 }
 
+/// The oldest 7-Zip used: 25.01 refuses, by default, symbolic links that point out of the
+/// output directory (CVE-2025-55188); older versions would write through them.
+pub const SEVENZIP_MIN: (u32, u32) = (25, 1);
+
+/// Whether the version line of `7z i` names 7-Zip [`SEVENZIP_MIN`] or newer.
+pub fn sevenzip_supported(version_line: &str) -> bool {
+    if !version_line.starts_with("7-Zip") {
+        return false;
+    }
+    version_line
+        .split_whitespace()
+        .find_map(|word| {
+            let (major, minor) = word.split_once('.')?;
+            Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?))
+        })
+        .is_some_and(|v| v >= SEVENZIP_MIN)
+}
+
+/// 7-Zip if found and [`sevenzip_supported`]: its path and version line.
+pub fn usable_7z() -> Option<(PathBuf, String)> {
+    let exe = find_7z()?;
+    let version = sevenzip_version(&exe)?;
+    sevenzip_supported(&version).then_some((exe, version))
+}
+
 /// `cargo xtask upstream tools --out <dir>`: prints `ONCL_INNOUNP=…` (Windows) and
 /// `ONCL_7Z=…` for `$GITHUB_ENV`.
 ///
@@ -99,13 +124,13 @@ pub fn tools(out: &Path) -> anyhow::Result<()> {
         )?;
         println!("ONCL_INNOUNP={}", exe.display());
     }
-    match find_7z() {
-        Some(p) => println!("ONCL_7Z={}", p.display()),
+    match usable_7z() {
+        Some((p, _)) => println!("ONCL_7Z={}", p.display()),
         None => {
             if cfg!(windows) {
-                bail!("7-Zip not found");
+                bail!("7-Zip 25.01 or newer not found");
             }
-            eprintln!("7-Zip not found: MSI and DMG distributions will be skipped");
+            eprintln!("7-Zip 25.01 or newer not found: MSI and DMG distributions will be skipped");
         }
     }
     Ok(())
