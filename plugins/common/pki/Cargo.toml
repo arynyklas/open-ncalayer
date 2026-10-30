@@ -1,6 +1,6 @@
 [package]
 name = "oncl-port-pki"
-description = "DER for the OpenNCALayer plugin ports: signed attribute values, names, CMS reading and the original's certificate texts"
+description = "DER for the OpenNCALayer plugin ports: signed attribute values, names, CMS reading, the ESEDO signed attributes and the original's certificate texts"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -12,5 +12,6 @@ publish.workspace = true
 cms.workspace = true
 const-oid.workspace = true
 der.workspace = true
+oncl-pdk.workspace = true
 spki.workspace = true
 x509-cert.workspace = true

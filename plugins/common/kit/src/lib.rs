@@ -5,6 +5,7 @@
 //! - [`zip`]: deflated archives;
 //! - [`props`]: Java's `Properties.storeToXML`;
 //! - [`date`]: `SimpleDateFormat` patterns;
+//! - [`reply`]: the replies of the ecc.kz family;
 //! - [`md5_hex`].
 //!
 //! The JSON dialects (org.json, Java's `HashMap` order, the dispatchers) are
@@ -13,6 +14,7 @@
 pub mod date;
 pub mod http;
 pub mod props;
+pub mod reply;
 pub mod url;
 pub mod zip;
 
