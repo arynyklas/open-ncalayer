@@ -8,7 +8,7 @@ OpenNCALayer is an independent project and is not affiliated with the National C
 
 ## Status
 
-Early development; the latest pre-release is `0.1.0-alpha.2` ([Releases](https://github.com/arynyklas/open-ncalayer/releases)). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. Builds for Windows 7 SP1 x64 and x86 exist but have not yet run on a real Windows 7 (see [Windows 7](#windows-7)). The self-update from a signed index is written but not active yet: the builds carry no maintainer key, Pages has no signed index, and there are no installers yet (see [Updates](#updates)). Tokens, the installers, turning the self-update on and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
+Early development; the latest pre-release is `0.1.0-alpha.2` ([Releases](https://github.com/arynyklas/open-ncalayer/releases)). The original's protocol for file key stores works (the eGov login was checked on Windows 11 in Chrome, both over `wss` with the CA trusted and through the extension), as do NCA certificate validation, the browser extension and the tray program. Builds for Windows 7 SP1 x64 and x86 exist but have not yet run on a real Windows 7 (see [Windows 7](#windows-7)). Releases after `0.1.0-alpha.2` build installers for Windows, macOS and Linux, and releases without a suffix an AUR package (see [Installation](#installation)); installing on real systems has not been checked yet, that is the lab's job (P9). Plugins (WebAssembly) install from the catalog or from a file (see [Plugins](#plugins)), but the catalog has no ports of the original's plugins yet. The self-update from a signed index is written but not active yet: the builds carry no maintainer key and Pages has no signed index (see [Updates](#updates)). Plugin ports, tokens, turning the self-update on and the plugin registry are ahead (see the [roadmap](docs/design/roadmap.md)).
 
 P1 provides:
 - the `kz.gov.pki.knca.basics` module, method `sign`, formats `cms` and `raw`;
@@ -188,8 +188,9 @@ Design: [`docs/design/plugins.md`](docs/design/plugins.md) (Russian).
 `openncalayer run` shows the OpenNCALayer icon (`tray-icon` on Windows and macOS, a StatusNotifierItem over D-Bus on Linux). Its menu:
 - «Настройки…» (Settings…);
 - «Сертификат для браузера…» (Browser certificate…) — the TLS wizard;
-- «Журнал» (Log) — opens the `logs/` directory in the file manager;
 - «Плагины…» (Plugins…) — the plugin window (see [Plugins](#plugins));
+- «Журнал» (Log) — opens the `logs/` directory in the file manager;
+- «Проверить обновления» (Check for updates);
 - «О программе» (About);
 - «Выход» (Quit) — stops the servers and ends the process. Closing a window does not end it.
 

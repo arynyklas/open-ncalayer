@@ -491,8 +491,9 @@ fn exit_code(server: thread::Result<io::Result<()>>) -> ExitCode {
 }
 
 /// Opens the window a page asks for: `showSettings` the settings, `showBundleManager` the
-/// About window's «Модули» tab; `installBundle` points the user to the plugin registry in a
-/// tray notification. There is no key store explorer and no AdES window.
+/// plugin window; an `installBundle` the catalog offers nothing for points the user to the
+/// plugin registry in a tray notification. There is no key store explorer and no AdES
+/// window.
 fn open_requested_window(window: UiRequest) {
     match window {
         UiRequest::Settings => oncl_ui::open_window(DesktopWindow::Settings),

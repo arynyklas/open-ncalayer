@@ -10,7 +10,7 @@ use oncl_ui::plugins_view::{
     AvailablePlugin, CapabilityLine, CatalogLine, InstalledPlugin, LocalizedText, PluginStatus,
     ReplacedBundle,
 };
-use oncl_ui::{InstallPluginRequest, PluginsServices, PluginsView};
+use oncl_ui::{InstallPluginRequest, PluginActionError, PluginsServices, PluginsView};
 
 use super::{CatalogView, InstallRequest, InstallUi, PluginService, PluginState, ServiceView};
 
@@ -74,33 +74,35 @@ impl PluginsServices for WindowServices {
         }
     }
 
-    fn install(&self, id: &str) {
-        if let Ok(service) = &self.0 {
-            service.install_from_catalog(id, None);
-        }
+    fn install(&self, id: &str) -> Result<(), PluginActionError> {
+        self.service()?.install_from_catalog(id, None)
     }
 
-    fn install_file(&self, path: PathBuf) {
-        if let Ok(service) = &self.0 {
-            service.install_from_file(path);
-        }
+    fn install_file(&self, path: PathBuf) -> Result<(), PluginActionError> {
+        self.service()?.install_from_file(path)
     }
 
-    fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
-        self.0
-            .as_ref()
-            .map_err(Clone::clone)?
-            .set_enabled(id, enabled)
+    fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), PluginActionError> {
+        self.service()?.set_enabled(id, enabled)
     }
 
-    fn remove(&self, id: &str) -> Result<(), String> {
-        self.0.as_ref().map_err(Clone::clone)?.remove(id)
+    fn remove(&self, id: &str) -> Result<(), PluginActionError> {
+        self.service()?.remove(id)
     }
 
     fn refresh(&self) {
         if let Ok(service) = &self.0 {
             service.check_now();
         }
+    }
+}
+
+impl WindowServices {
+    /// The service, or why the plugins are off.
+    fn service(&self) -> Result<&Arc<PluginService>, PluginActionError> {
+        self.0
+            .as_ref()
+            .map_err(|e| PluginActionError::Failed(e.clone()))
     }
 }
 
@@ -296,6 +298,9 @@ mod tests {
             off.view().catalog,
             CatalogLine::Off("access denied".to_owned())
         );
-        assert_eq!(off.remove("kz.a"), Err("access denied".to_owned()));
+        assert_eq!(
+            off.remove("kz.a"),
+            Err(PluginActionError::Failed("access denied".to_owned()))
+        );
     }
 }
