@@ -35,6 +35,7 @@ Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
 - [`docs/design/roadmap.md`](docs/design/roadmap.md) — decisions and roadmap;
 - [`docs/design/update-index.md`](docs/design/update-index.md) — the update index: format, signature, choice of a version;
+- [`docs/design/tokens.md`](docs/design/tokens.md) — tokens and ID cards (experimental): families, PIN, emulator;
 - [`docs/dev/release.md`](docs/dev/release.md) — releasing a version and signing the index: the maintainer's instructions;
 - [`docs/original/architecture.md`](docs/original/architecture.md) — architecture of the original NCALayer.
 
@@ -52,7 +53,7 @@ The modules answer as the original's modules of the same names do: reply shapes,
 Storages:
 - `PKCS12` (`.p12`, `.pfx`): read and write;
 - `JKS`: read only, RSA and GOST keys;
-- until P14, tokens (`AK…Store`) answer as if no device were connected: they are unavailable in the `basics` dialogs, commonUtils answers `storage.empty`, the Applet `EMPTY_SLOT`, `getActiveTokens` `[]`.
+- tokens (`AK…Store`) are experimental and off by default (see [Tokens (experimental)](#tokens-experimental)). While their support is off they answer as if no device were connected: they are unavailable in the `basics` dialogs, commonUtils answers `storage.empty`, the Applet `EMPTY_SLOT`, `getActiveTokens` `[]`.
 
 XML signatures (`basics` with `format:"xml"`, commonUtils `signXml` and `signXmls`, the Applet's `signXml`) have the shape Kalkan makes:
 - the whole document: `ds:Signature` is the last child of the root element; one `Reference URI=""` with the enveloped-signature and Canonical XML with comments transforms; SignedInfo is canonicalized with Canonical XML 1.0;
@@ -181,6 +182,19 @@ A plugin is a WebAssembly module serving its own `module` names (a port of a thi
 
 Design: [`docs/design/plugins.md`](docs/design/plugins.md) (Russian).
 
+### Tokens (experimental)
+
+OpenNCALayer reads keys and signs on the tokens of the six families Kalkan knows: Kaztoken, the Kazakhstan ID card, eToken PRO 72K, eToken 5110, JaCarta and AKey. The support is experimental: every driver has been checked only against a software emulator of its token, not on real tokens yet. That is why it is **off by default**.
+
+- **Turning it on:** «Настройки…» (Settings…) → «Токены и удостоверение личности (экспериментально)» (Tokens and ID cards (experimental)). The box applies at once, without a restart.
+- **What works:** tokens in the storage dialog (the reader, a Refresh button, the PIN and the tries left), CMS, CAdES and XML signatures with a token's key, `getActiveTokens`, `loadSlotList`, `browseKeyStore`, `getPublicPartInfo`, token keys in plugins. A token's signature is checked against its certificate before a site gets it.
+- **What does not:** writing to a token — generating keys, writing a certificate, deleting a key, formatting, changing the PIN. With a token connected these calls answer the original's generic error code and send the token nothing.
+- **What it needs:** Windows — the Smart Card service; macOS — nothing beyond the system; Linux — `pcscd` and the USB reader driver `ccid` (Debian and Ubuntu: `sudo apt install pcscd`; Arch: `sudo pacman -S pcsclite ccid` and `sudo systemctl enable --now pcscd.socket`). Without the service OpenNCALayer works as usual, and the storage dialog says that the smart card service is unavailable.
+
+> **Warning.** Like the original NCALayer, OpenNCALayer answers `getActiveTokens`, `loadSlotList` and `getPublicPartInfo` without asking the user. While token support is on, **any open site can learn which tokens are connected and read the IIN and full name of the holder of an inserted ID card.** Turn it on only when you actually need a token.
+
+Design, the family table, the PIN, the emulator and the `ONCL_TOKEN_TRACE=1` trace for problem reports: [`docs/design/tokens.md`](docs/design/tokens.md) (Russian).
+
 ## Desktop
 
 ### Tray icon
@@ -204,7 +218,8 @@ The settings window saves into `settings.json` of the data directory (other keys
 - `locale` — the language of the windows and the icon: `ru`, `kk` or `en`; without the key, the system's language if it is one of these three, else Russian;
 - `autostart` — "start at login": our autostart entry `"<exe>" run` — the value `OpenNCALayer` of `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows), `~/.config/autostart/openncalayer.desktop` (Linux), `~/Library/LaunchAgents/io.github.arynyklas.openncalayer.plist` with `RunAtLoad` (macOS). The window shows the entry's real state; an entry disabled in Task Manager → Startup counts as off;
 - `proxy` — the proxy of time-stamping (TSP), OCSP and CRL requests: `{"mode":"none"}` (the default, direct connections as in P4), `{"mode":"system"}` (`ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY` with `NO_PROXY`, and without them on Windows the manual proxy of the Internet Options) or `{"mode":"manual","url":"http://host:port"}`. Plain HTTP goes to the proxy as an absolute-form request (`GET http://…`), HTTPS through a `CONNECT` tunnel. SOCKS and `https://` proxies are not supported. A new proxy applies at once, without a restart. The file may hold a proxy password, so on macOS and Linux only its owner can read it (mode `0600`).
-- `updates` — the self-update: `{"enabled": true, "channel": "stable"}`, the channel `stable` or `beta`; see [Updates](#updates).
+- `updates` — the self-update: `{"enabled": true, "channel": "stable"}`, the channel `stable` or `beta`; see [Updates](#updates);
+- `tokens` — tokens and ID cards: `{"enabled": false}` (the default); the key appears in the file only once the support was turned on. See [Tokens (experimental)](#tokens-experimental).
 
 The same window has:
 - an "Original NCALayer" block: whether it is found, its autostart entries and their state, and the buttons «Отключить автозапуск оригинала» (Disable the original's autostart) and «Вернуть оригинал» (Restore the original);
