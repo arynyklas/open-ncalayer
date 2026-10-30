@@ -1,0 +1,161 @@
+name: Plugins
+
+# A `plugins-YYYYMMDD[.N]` tag releases the plugin ports (`plugins/<dir>`) whose version is
+# not in the beta index yet (`cargo xtask plugin pending`): each is packed twice and the two
+# packages compared (the packages are deterministic), then published as a pre-release
+# without the Latest flag (the core stays the latest release) with THIRD-PARTY.txt,
+# SHA256SUMS and a build provenance attestation of every file. Then a pull request adds the
+# packages to the beta index, unsigned: the maintainer signs it locally
+# (`cargo xtask sign`), never CI. Stable gets a plugin version only by hand
+# (`cargo xtask index add-plugin --channel stable`), once it has proved itself in beta.
+#
+# Third-party actions are pinned to a commit, with the release tag in a comment.
+on:
+  push:
+    tags: ["plugins-*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: The tag is plugins-YYYYMMDD[.N]
+        run: |
+          if ! [[ "$GITHUB_REF_NAME" =~ ^plugins-[0-9]{8}(\.[0-9]+)?$ ]]; then
+            echo "::error::the tag $GITHUB_REF_NAME is not plugins-YYYYMMDD[.N]"
+            exit 1
+          fi
+
+  build:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      any: ${{ steps.pending.outputs.any }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (rust-toolchain.toml, with wasm32-unknown-unknown)
+        run: rustup toolchain install
+      - name: The ports to release
+        id: pending
+        run: |
+          cargo xtask plugin pending --channel beta > "$RUNNER_TEMP/pending"
+          cat "$RUNNER_TEMP/pending"
+          if [ -s "$RUNNER_TEMP/pending" ]; then
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::every plugin version is in the beta index already: nothing to release"
+            echo "any=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Pack, twice, and compare
+        if: steps.pending.outputs.any == 'true'
+        run: |
+          while read -r dir; do
+            first="$(cargo xtask plugin pack "$dir" --out dist)"
+            second="$(cargo xtask plugin pack "$dir" --out "$RUNNER_TEMP/again")"
+            if ! cmp "$first" "$second"; then
+              echo "::error::two packs of $dir differ"
+              exit 1
+            fi
+          done < "$RUNNER_TEMP/pending"
+          cp plugins/THIRD-PARTY.txt dist/
+      - name: Checksums
+        if: steps.pending.outputs.any == 'true'
+        run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        if: steps.pending.outputs.any == 'true'
+        with:
+          name: plugins
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: needs.build.outputs.any == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: plugins
+          path: dist
+      - name: Build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "OpenNCALayer plugins ${GITHUB_REF_NAME#plugins-}" \
+            --generate-notes \
+            --prerelease \
+            --latest=false
+
+  # The packages into the beta index, with its next `seq`, as a pull request with the
+  # unsigned index; the maintainer signs it on the PR branch, and the index check then runs
+  # on that push.
+  index:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          # The build below runs build scripts; create-pull-request brings its own token.
+          persist-credentials: false
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Download the packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/packages" --pattern '*.onclp'
+      - name: Add the packages to the beta index
+        run: |
+          cargo xtask index add-plugin --channel beta --tag "$GITHUB_REF_NAME" \
+            --package "$RUNNER_TEMP"/packages/*.onclp
+          {
+            echo "Adds the plugin packages of $GITHUB_REF_NAME to the beta index (\`cargo xtask index add-plugin\`, rollout 100 %):"
+            echo
+            for package in "$RUNNER_TEMP"/packages/*.onclp; do
+              echo "- \`$(basename "$package")\`"
+            done
+            echo
+            echo "The index is unsigned, and the index check refuses an unsigned one. To publish it, on this branch:"
+            echo
+            echo "1. optionally lower \`rollout\` of the new versions;"
+            echo "2. \`cargo xtask sign updates/v1/beta.json --key <secret key>\`;"
+            echo "3. \`cargo xtask index check updates/v1 --base origin/main\`;"
+            echo "4. commit the index and its \`.minisig\` file and push: the index check runs on that push;"
+            echo "5. merge: GitHub Pages publishes \`updates/\`."
+            echo
+            echo "Stable gets a plugin version by hand, once it has proved itself in beta: \`cargo xtask index add-plugin --channel stable\`."
+          } > "$RUNNER_TEMP/index-pr.md"
+      - name: Open the index pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          # The index and the removal of its stale signature.
+          add-paths: updates/v1
+          branch: updates/${{ github.ref_name }}
+          base: main
+          commit-message: "chore(updates): add the plugins of ${{ github.ref_name }} to the beta index"
+          title: "chore(updates): add the plugins of ${{ github.ref_name }} to the beta index"
+          body-path: ${{ runner.temp }}/index-pr.md

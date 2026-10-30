@@ -443,7 +443,7 @@ pub fn add_plugins(
 }
 
 /// The index at `path`, which must be of `channel` and pass [`check_asset_urls`].
-fn read_index(path: &Path, channel: Channel) -> anyhow::Result<Index> {
+pub(crate) fn read_index(path: &Path, channel: Channel) -> anyhow::Result<Index> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let index = Index::from_json(&bytes).with_context(|| format!("reading {}", path.display()))?;
     if index.channel != channel {

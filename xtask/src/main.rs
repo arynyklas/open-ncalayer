@@ -420,6 +420,19 @@ enum PluginCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Print the port directories (`plugins/<dir>`, by name) whose plugin version is not
+    /// in the channel's index yet; nothing if every one is.
+    Pending {
+        /// `stable` or `beta`.
+        #[arg(long, value_parser = parse_channel)]
+        channel: Channel,
+        /// The directory of the indexes [default: `updates/v1/` of the workspace].
+        #[arg(long)]
+        index: Option<PathBuf>,
+        /// The ports' directory [default: `plugins/` of the workspace].
+        #[arg(long)]
+        plugins: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -631,6 +644,20 @@ fn main() -> anyhow::Result<()> {
             let out = out.unwrap_or_else(|| root.join("target").join("plugins"));
             let path = xtask::plugin::pack(&root, &dir, &out)?;
             println!("{}", path.display());
+            Ok(())
+        }
+        Command::Plugin {
+            command:
+                PluginCommand::Pending {
+                    channel,
+                    index,
+                    plugins,
+                },
+        } => {
+            let plugins = plugins.unwrap_or_else(|| oncl_testkit::workspace_root().join("plugins"));
+            for dir in xtask::plugin::pending(&plugins, &index_dir(index), channel)? {
+                println!("plugins/{dir}");
+            }
             Ok(())
         }
         Command::Index {

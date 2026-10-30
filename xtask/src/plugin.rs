@@ -11,7 +11,8 @@ use oncl_pki::fsutil::{Access, write_atomically};
 use oncl_plugin::{MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, Manifest, Package};
 use serde_json::Value;
 
-use crate::index::plugin_package_name;
+use crate::index::{index_path, plugin_package_name, read_index};
+use oncl_update::Channel;
 
 /// Reads bounded package bytes and the checked plugin inside them.
 ///
@@ -218,4 +219,52 @@ pub fn check_min_core(manifest: &Manifest, imports: &[Import]) -> anyhow::Result
         );
     }
     Ok(())
+}
+
+/// The directories of `plugins` not shared by the ports: the guest libraries and the build
+/// output.
+const NOT_PORTS: [&str; 2] = ["common", "target"];
+
+/// The port directories (names under `plugins`) whose `plugin.toml` names an `(id,
+/// version)` that `channel`'s index in `index_dir` does not list yet, sorted by name;
+/// every port if the channel has no index.
+///
+/// # Errors
+///
+/// A port directory without a valid `plugin.toml`, an invalid index, or an I/O failure.
+pub fn pending(plugins: &Path, index_dir: &Path, channel: Channel) -> anyhow::Result<Vec<String>> {
+    let path = index_path(index_dir, channel);
+    let published = if path.exists() {
+        read_index(&path, channel)?.plugins
+    } else {
+        Vec::new()
+    };
+    let mut names = Vec::new();
+    for entry in fs::read_dir(plugins).with_context(|| format!("reading {}", plugins.display()))? {
+        let entry = entry.with_context(|| format!("reading {}", plugins.display()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            bail!("{} is not a UTF-8 name", entry.path().display());
+        };
+        if !entry.file_type()?.is_dir() || NOT_PORTS.contains(&name) || name.starts_with('.') {
+            continue;
+        }
+        names.push(name.to_owned());
+    }
+    names.sort();
+    let mut pending = Vec::new();
+    for name in names {
+        let manifest_path = plugins.join(&name).join("plugin.toml");
+        let text = String::from_utf8(read_limited(&manifest_path, MAX_MANIFEST)?)
+            .with_context(|| format!("reading {}", manifest_path.display()))?;
+        let manifest = Manifest::from_toml(&text)
+            .with_context(|| format!("reading {}", manifest_path.display()))?;
+        if !published
+            .iter()
+            .any(|r| r.id == manifest.id && r.version == manifest.version)
+        {
+            pending.push(name);
+        }
+    }
+    Ok(pending)
 }

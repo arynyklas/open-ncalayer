@@ -1,4 +1,4 @@
-//! `cargo xtask plugin pack` and `cargo xtask index add-plugin`.
+//! `cargo xtask plugin pack`, `cargo xtask plugin pending` and `cargo xtask index add-plugin`.
 
 use std::fs;
 use std::io::{Cursor, Write};
@@ -276,4 +276,111 @@ fn plugin_urls_off_the_project_releases_are_refused() {
     let before = read(&written.path).plugins;
     let refreshed = index::refresh(dir.path(), Channel::Beta, now()).unwrap();
     assert_eq!(read(&refreshed.path).plugins, before);
+}
+
+/// A `plugins/` directory with a port `dir` per entry, whose `plugin.toml` is the
+/// example's with `id` and `version`.
+fn ports(entries: &[(&str, &str, &str)]) -> tempfile::TempDir {
+    let plugins = tempfile::tempdir().unwrap();
+    for (dir, id, version) in entries {
+        let port = plugins.path().join(dir);
+        fs::create_dir_all(&port).unwrap();
+        let manifest = oncl_testkit::plugin::example_manifest()
+            .replace(EXAMPLE_ID, id)
+            .replace("version = \"0.1.0\"", &format!("version = \"{version}\""));
+        fs::write(port.join("plugin.toml"), manifest).unwrap();
+    }
+    plugins
+}
+
+/// The beta index in a new directory, with the example 0.1.0 published.
+fn index_with_example() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let packages = tempfile::tempdir().unwrap();
+    index::add_plugins(
+        dir.path(),
+        Channel::Beta,
+        TAG,
+        &[example(packages.path())],
+        100,
+        now(),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn pending_lists_versions_absent_from_index() {
+    let indexes = index_with_example();
+    let plugins = ports(&[
+        ("zeta", "kz.example.zeta", "1.0.0"),
+        ("example", EXAMPLE_ID, "0.1.0"),
+        ("example-next", EXAMPLE_ID, "0.2.0"),
+    ]);
+    let pending = xtask::plugin::pending(plugins.path(), indexes.path(), Channel::Beta).unwrap();
+    assert_eq!(pending, ["example-next", "zeta"]);
+    // Without an index of the channel, every port is pending.
+    let pending = xtask::plugin::pending(plugins.path(), indexes.path(), Channel::Stable).unwrap();
+    assert_eq!(pending, ["example", "example-next", "zeta"]);
+    // A port without a manifest is an error, not skipped.
+    fs::create_dir(plugins.path().join("broken")).unwrap();
+    let result = xtask::plugin::pending(plugins.path(), indexes.path(), Channel::Beta);
+    assert!(error_text(result).contains("plugin.toml"));
+}
+
+#[test]
+fn pending_ignores_common() {
+    let indexes = index_with_example();
+    let plugins = ports(&[("a", "kz.example.a", "1.0.0")]);
+    for shared in [
+        "common/kit/src",
+        "common/pki",
+        "target/wasm32-unknown-unknown",
+    ] {
+        fs::create_dir_all(plugins.path().join(shared)).unwrap();
+    }
+    fs::write(plugins.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::write(plugins.path().join("THIRD-PARTY.txt"), "").unwrap();
+    let pending = xtask::plugin::pending(plugins.path(), indexes.path(), Channel::Beta).unwrap();
+    assert_eq!(pending, ["a"]);
+}
+
+#[test]
+fn pending_empty_when_all_published() {
+    let indexes = index_with_example();
+    let plugins = ports(&[("example", EXAMPLE_ID, "0.1.0")]);
+    let pending = xtask::plugin::pending(plugins.path(), indexes.path(), Channel::Beta).unwrap();
+    assert!(pending.is_empty());
+    // The command prints nothing and succeeds.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["plugin", "pending", "--channel", "beta", "--index"])
+        .arg(indexes.path())
+        .arg("--plugins")
+        .arg(plugins.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    // Another port: printed as `plugins/<dir>`.
+    let more = ports(&[
+        ("example", EXAMPLE_ID, "0.1.0"),
+        ("b", "kz.example.b", "1.0.0"),
+    ]);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["plugin", "pending", "--channel", "beta", "--index"])
+        .arg(indexes.path())
+        .arg("--plugins")
+        .arg(more.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "plugins/b\n");
 }
