@@ -213,6 +213,34 @@ impl Harness {
     pub fn call(&self, short: &str, request: &str, origin: Option<&str>) -> Reply {
         self.session(short).call(request, origin)
     }
+
+    /// `n` sessions of the port `short` from one load of it: what one instance puts with
+    /// `shared_put` the others get (as the sessions of several pages do).
+    ///
+    /// # Panics
+    ///
+    /// As [`Harness::session`].
+    pub fn shared_sessions(&self, short: &str, n: usize) -> Vec<SessionHandle> {
+        let package = Package::read(&port_package(short)).expect("a valid package");
+        let compiled = self
+            .engine
+            .compile(&package.manifest, &package.wasm)
+            .expect("the port loads");
+        let shared: Arc<oncl_plugin::SharedState> = Arc::default();
+        (1..=n as u64)
+            .map(|session| {
+                let context = SessionContext {
+                    session,
+                    shared: Arc::clone(&shared),
+                    ..context(&package.manifest)
+                };
+                let instance = compiled
+                    .instantiate(&self.services(), context)
+                    .expect("the port instantiates");
+                SessionHandle { instance }
+            })
+            .collect()
+    }
 }
 
 fn context(manifest: &Manifest) -> SessionContext {

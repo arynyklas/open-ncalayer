@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.acbank"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.acbank.business.api.ncalayer.module"]
+
+[name]
+ru = "Alatau City Bank (порт OpenNCALayer)"
+kk = "Alatau City Bank (OpenNCALayer порты)"
+en = "Alatau City Bank (OpenNCALayer port)"
+
+[description]
+ru = "Подпись JSON-документов Alatau City Bank Business API в формате JWS ключом ГОСТ 2015"
+kk = "Alatau City Bank Business API JSON құжаттарына ГОСТ 2015 кілтімен JWS пішімінде қол қою"
+en = "Signs Alatau City Bank Business API JSON documents as JWS with a GOST 2015 key"
+
+[replaces]
+symname = "kz.acbank.business.api.ncalayer.module"
+version = "1.0.445"
+
+[capabilities]
+keys = true
+dialogs = true
+shared = true

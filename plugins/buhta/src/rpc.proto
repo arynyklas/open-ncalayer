@@ -1,0 +1,84 @@
+// The RPC of Buhta NcaModule, version v1alpha1: the messages `rpc.rs` declares by hand for
+// `prost` (no code is generated from this file).
+syntax = "proto3";
+
+package buhta.cert.ncamodule.rpc.v1alpha1;
+
+enum NcaModuleCommand {
+  NCA_MODULE_COMMAND_UNSPECIFIED = 0;
+  NCA_MODULE_COMMAND_SELECT_SIGN_CERT = 1;
+  NCA_MODULE_COMMAND_SIGN_DOCUMENT = 2;
+  NCA_MODULE_COMMAND_BULK_SIGN_DOCUMENT = 3;
+}
+
+message Metadata {
+  string name = 1;
+  string value = 2;
+}
+
+message XmlDocument {
+  string data = 1;
+}
+
+message FileDocument {
+  bytes data = 1;
+  optional string name = 2;
+  optional string mime_type = 3;
+  bool attached = 4;
+}
+
+message Signable {
+  optional string id = 1;
+  repeated Metadata meta = 2;
+  oneof content {
+    XmlDocument xml = 3;
+    FileDocument file = 4;
+  }
+}
+
+message SignedDocument {
+  optional string id = 1;
+  oneof content {
+    XmlDocument xml = 3;
+    FileDocument file = 4;
+  }
+  optional bytes x509_cert = 5;
+}
+
+message SignCert {
+  string cert = 1;
+}
+
+message SelectSignCertArgs {
+  optional string tin = 1;
+}
+
+message SelectSignCertResult {
+  optional SignCert cert = 1;
+}
+
+message SignDocumentArgs {
+  oneof sign {
+    string sign_cert = 1;
+    SelectSignCertArgs sign_cert_args = 2;
+  }
+  Signable document = 3;
+  bool include_x509 = 6;
+}
+
+message BulkSignDocumentArgs {
+  oneof sign {
+    string sign_cert = 1;
+    SelectSignCertArgs sign_cert_args = 2;
+  }
+  repeated Signable documents = 3;
+  bool include_x509 = 4;
+}
+
+message SignDocumentResult {
+  SignedDocument document = 1;
+}
+
+message BulkSignDocumentResult {
+  repeated SignedDocument documents = 1;
+}

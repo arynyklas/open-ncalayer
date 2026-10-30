@@ -1,0 +1,20 @@
+id = "io.github.arynyklas.openncalayer.port.acbank"
+modules = ["kz.acbank.business.api.ncalayer.module"]
+
+[original]
+symname = "kz.acbank.business.api.ncalayer.module"
+version = "1.0.445"
+vendor = "АО «First Heartland Jusan Bank»"
+
+[port]
+status = "full"
+conformance = "computed"
+
+[[differences]]
+ru = "Окно подписи — окна OpenNCALayer: список документов с кнопками «Подписать», «Посмотреть», «Отмена», затем общее окно выбора ключа PKCS#12 (тип SIGNATURE). Меню масштаба, файл settings.json и блокировка окна через 15 минут без ввода не переносятся."
+
+[[differences]]
+ru = "healthcheck видит открытое окно подписи 15 минут с его открытия (без учёта ввода пользователя); ответ healthcheck.session.not-found не возникает."
+
+[[differences]]
+ru = "Ключ не ГОСТ 2015-512, повреждённый JWS JSON в SUBSEQUENT и multiSignJsonWithJws без signatureOperation дают ncalayer.module.unexpected-error вместо зависания окна."

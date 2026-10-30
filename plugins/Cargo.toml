@@ -39,6 +39,12 @@ crc32fast = { version = "1.5.3", default-features = false }
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 # Reads the archives back in tests (native only).
 zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# Base64 of signatures, certificates and documents in the ports' replies (standard and
+# URL-safe alphabets), as in the core.
+base64 = "0.23.1"
+# Protocol Buffers of Buhta's RPC payloads (binary form); the messages are written by hand
+# with its derive macros, without `protoc`.
+prost = "0.14.4"
 
 [profile.release]
 codegen-units = 1

@@ -1,0 +1,18 @@
+[package]
+name = "oncl-port-buhta"
+description = "OpenNCALayer port of Buhta NcaModule: a Protocol Buffers RPC behind CommonInvoker that picks a key by TIN and makes CAdES-T and XML signatures"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64.workspace = true
+oncl-pdk.workspace = true
+oncl-port-pki.workspace = true
+prost.workspace = true

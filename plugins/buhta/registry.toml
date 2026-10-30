@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.buhta"
+modules = ["com.buhta.cert.ncamodule"]
+
+[original]
+symname = "com.buhta.cert.ncamodule"
+version = "0.1.3"
+vendor = "ТОО «Buhta.kz»"
+
+[port]
+status = "full"
+conformance = "computed"
+
+[[differences]]
+ru = "Окно выбора сертификата — общее окно OpenNCALayer (хранилище PKCS#12, ключ из списка) с условием «БИН, а без него ИИН, равен tin»; ключ — любой из хранилища, а не только первый."
+
+[[differences]]
+ru = "Выбранный ключ (uuid из SELECT_SIGN_CERT) живёт в сеансе страницы, а не во всём процессе с путём и паролем: на другом соединении uuid неизвестен (INVALID_CERT_SELECTED)."
+
+[[differences]]
+ru = "Пустой tin, как у оригинала, ключа не даёт; окно выбора при этом не открывается."
+
+[[differences]]
+ru = "Глобальное свойство org.apache.xml.security.ignoreLineBreaks не ставится: base64 без переносов только в подписях этого модуля."
