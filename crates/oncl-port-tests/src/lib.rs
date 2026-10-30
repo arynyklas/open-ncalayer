@@ -114,6 +114,7 @@ pub struct Harness {
     locale: Locale,
     pki_hosts: Arc<[String]>,
     settings_dir: Option<PathBuf>,
+    tokens: Arc<oncl_token::Tokens>,
 }
 
 impl Harness {
@@ -141,6 +142,7 @@ impl Harness {
             locale: Locale::Ru,
             pki_hosts: oncl_plugin::nca_pki_hosts(),
             settings_dir: None,
+            tokens: oncl_token::Tokens::disabled(),
         }
     }
 
@@ -177,6 +179,17 @@ impl Harness {
             ..self
         }
     }
+
+    /// The same harness whose hardware tokens are the readers and cards of `emu`, token
+    /// support on.
+    #[must_use]
+    pub fn with_tokens(self, emu: Arc<oncl_token::emulator::EmulatorBackend>) -> Harness {
+        Harness {
+            tokens: oncl_token::Tokens::new(emu, true),
+            ..self
+        }
+    }
+
     /// The prompter: the dialogs shown.
     pub fn prompter(&self) -> &ScriptedPrompter {
         &self.prompter
@@ -201,7 +214,7 @@ impl Harness {
             cas: Arc::new(synthetic_cas()),
             pki_hosts: Arc::clone(&self.pki_hosts),
             settings_dir: self.settings_dir.clone(),
-            tokens: oncl_token::Tokens::disabled(),
+            tokens: Arc::clone(&self.tokens),
         }
     }
 

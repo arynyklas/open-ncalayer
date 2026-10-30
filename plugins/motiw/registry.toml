@@ -7,14 +7,17 @@ version = "1.0"
 vendor = "ООО «Мотивэа»"
 
 [port]
-status = "needs-tokens"
+status = "partial"
 conformance = "computed"
 
 [[differences]]
-ru = "Без поддержки токенов в OpenNCALayer плагин, как и оригинал у живого NCALayer, ничего не подписывает: файлы PKCS12 недоступны (getContainerList отвечает [], getCertificateList и sign — 404), список хранилищ — [\"PKCS12\"]."
+ru = "Токены работают только при включённой экспериментальной поддержке токенов; без неё, как и оригинал у живого NCALayer, плагин ничего не подписывает: файлы PKCS12 недоступны (getContainerList отвечает [], getCertificateList и sign — 404), список хранилищ — [\"PKCS12\"]."
+
+[[differences]]
+ru = "Тексты ошибок токена (неверный PIN, токен заблокирован или не найден) — свои; ответ, как у оригинала, — код 500 с \"responseObject\":\"\"."
 
 [[differences]]
 ru = "showStorageKey показывает окно OpenNCALayer со сведениями о ключе вместо вызова модуля commonUtils; результат, как у оригинала, не возвращается."
 
 [[differences]]
-ru = "verify: в certificates нет сведений о метке времени; тексты прочих ошибок проверки — свои."
+ru = "verify: тексты прочих ошибок проверки — свои."

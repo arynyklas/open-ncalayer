@@ -18,8 +18,8 @@ oncl-plugin.workspace = true
 oncl-protocol.workspace = true
 # The ports' workspace built once per process, the synthetic key stores.
 oncl-testkit.workspace = true
-# `Tokens::disabled()`: the ports run without hardware tokens.
-oncl-token.workspace = true
+# The ports' hardware tokens: off, or the emulator's cards (`Harness::with_tokens`).
+oncl-token = { workspace = true, features = ["emulator"] }
 semver.workspace = true
 serde.workspace = true
 time.workspace = true
