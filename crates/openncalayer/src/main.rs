@@ -21,6 +21,7 @@ use oncl_pki::tsp::TsaProfile;
 use oncl_plugin::{Engine, HostServices, PluginModules};
 use oncl_protocol::Registry;
 use oncl_tls::{SelftestReports, TlsFiles};
+use oncl_token::Tokens;
 use oncl_ui::settings_view::Updates;
 use oncl_ui::{
     AboutInfo, DesktopWindow, DesktopWindows, Notification, PluginsServices, SlintPrompter,
@@ -257,13 +258,19 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     let windows = scripted.is_none();
     let settings = load_settings(&daemon.paths.settings());
     let locale = settings.ui_locale();
+    let tokens = match cli::token_service(settings.tokens.enabled) {
+        Ok(tokens) => tokens,
+        Err(code) => return code,
+    };
     let prompter: Arc<dyn Prompter> = scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new()));
     let recent: Arc<dyn RecentPathStore> = Arc::new(JsonSettings::new(daemon.paths.settings()));
-    let (plugins, plugin_modules) = start_plugins(&daemon.paths, &prompter, &recent, &http);
+    let (plugins, plugin_modules) =
+        start_plugins(&daemon.paths, &prompter, &recent, &http, &tokens);
     let registry = build_registry(
         prompter,
         recent,
         Arc::clone(&http) as _,
+        Arc::clone(&tokens),
         Arc::new(open_requested_window),
         plugin_modules,
     );
@@ -329,7 +336,11 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         oncl_ui::set_desktop_windows(desktop_windows(
             &daemon.paths,
             locale,
-            on_settings_saved(http, tray.as_ref().map_or_else(Weak::new, Rc::downgrade)),
+            on_settings_saved(
+                http,
+                tokens,
+                tray.as_ref().map_or_else(Weak::new, Rc::downgrade),
+            ),
             Arc::clone(&reports),
             Arc::clone(&wss),
             checks,
@@ -509,15 +520,16 @@ fn open_requested_window(window: UiRequest) {
     }
 }
 
-/// The plugins: their modules, loaded with the dialogs of `prompter`, the network of `http`
-/// and an OCSP memory shared with the basics module; their service, which installs and
-/// updates them from the catalog (or why they are off: logged, shown in their window). A
-/// change is told in the tray and refreshes the plugin window.
+/// The plugins: their modules, loaded with the dialogs of `prompter`, the network of `http`,
+/// the hardware tokens of `tokens` and an OCSP memory shared with the basics module; their
+/// service, which installs and updates them from the catalog (or why they are off: logged,
+/// shown in their window). A change is told in the tray and refreshes the plugin window.
 fn start_plugins(
     paths: &Paths,
     prompter: &Arc<dyn Prompter>,
     recent: &Arc<dyn RecentPathStore>,
     http: &Arc<LiveProxyTransport>,
+    tokens: &Arc<Tokens>,
 ) -> (Result<Arc<PluginService>, String>, Option<Plugins>) {
     let ocsp_cache = Arc::new(OcspCache::new());
     let settings = paths.settings();
@@ -531,7 +543,7 @@ fn start_plugins(
         // The language the settings window saved last.
         locale: Arc::new(move || load_settings(&settings).ui_locale()),
         cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
-        tokens: oncl_token::Tokens::disabled(),
+        tokens: Arc::clone(tokens),
     };
     let modules = Arc::new(PluginModules::new(
         Arc::new(Engine::new()),
@@ -663,14 +675,17 @@ fn desktop_windows(
     }
 }
 
-/// What a save of the settings window changes in the daemon: the proxy of `http`, and the
-/// language of the tray, if it is still there.
+/// What a save of the settings window changes in the daemon: the proxy of `http`, token
+/// support of `tokens` (at once, for every module and plugin), and the language of the tray,
+/// if it is still there.
 fn on_settings_saved(
     http: Arc<LiveProxyTransport>,
+    tokens: Arc<Tokens>,
     tray: Weak<TrayHandle>,
 ) -> Box<dyn Fn(&Settings)> {
     Box::new(move |settings: &Settings| {
         http.set_proxy(settings.proxy.clone());
+        tokens_saved(&tokens, settings);
         let locale = settings.ui_locale();
         if let Some(tray) = tray.upgrade() {
             tray.set_locale(locale);
@@ -680,6 +695,14 @@ fn on_settings_saved(
             None
         });
     })
+}
+
+/// Turns token support on or off as the saved `settings` say.
+fn tokens_saved(tokens: &Tokens, settings: &Settings) {
+    if tokens.is_enabled() != settings.tokens.enabled {
+        tracing::info!(enabled = settings.tokens.enabled, "hardware token support");
+    }
+    tokens.set_enabled(settings.tokens.enabled);
 }
 
 /// The tray in `locale` showing `state`, or `None` (logged) if it cannot be shown. Its
@@ -1202,5 +1225,56 @@ mod tests {
         };
         assert_eq!(command.get_program(), expected);
         assert_eq!(command.get_args().collect::<Vec<_>>(), [dir.as_os_str()]);
+    }
+
+    /// A saved setting turns token support off (and on) at once, for the running modules.
+    #[cfg(feature = "token-emulator")]
+    #[test]
+    fn toggle_off_hides_tokens_live() {
+        use oncl_protocol::{AddInfo, Route};
+        use oncl_token::emulator::EmulatorBackend;
+
+        let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tokens.toml");
+        let emu = EmulatorBackend::from_config(
+            &std::fs::read_to_string(&config).unwrap(),
+            config.parent().unwrap(),
+        )
+        .unwrap();
+        let tokens = Tokens::new(Arc::new(emu), true);
+        let registry = build_registry(
+            Arc::new(oncl_basics::testing::ScriptedPrompter::new(Vec::new())),
+            Arc::new(oncl_basics::testing::MemoryRecentPath::new(None)),
+            Arc::new(LiveProxyTransport::new(oncl_desktop::ProxySetting::None)),
+            Arc::clone(&tokens),
+            Arc::new(|_| {}),
+            None,
+        );
+        let active = || {
+            let request =
+                r#"{"module":"kz.gov.pki.knca.commonUtils","method":"getActiveTokens","args":[]}"#;
+            let Route::Module(module) = registry.route(request) else {
+                panic!("commonUtils is registered");
+            };
+            let reply = module.process(request, &AddInfo::default());
+            serde_json::from_str::<serde_json::Value>(reply.text().unwrap()).unwrap()
+                ["responseObject"]
+                .clone()
+        };
+        assert_eq!(
+            active(),
+            serde_json::json!(["AKKaztokenStore", "AKKZIDCardStore"])
+        );
+
+        let mut settings = Settings::default();
+        assert!(!settings.tokens.enabled, "off by default");
+        tokens_saved(&tokens, &settings);
+        assert_eq!(active(), serde_json::json!([]));
+
+        settings.tokens.enabled = true;
+        tokens_saved(&tokens, &settings);
+        assert_eq!(
+            active(),
+            serde_json::json!(["AKKaztokenStore", "AKKZIDCardStore"])
+        );
     }
 }

@@ -128,6 +128,7 @@ async fn start_with(steps: Vec<Step>, extra: impl FnOnce(&mut Registry)) -> Srv 
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         tsa.clone(),
+        oncl_token::Tokens::disabled(),
         Arc::new(|_| {}),
         None,
     );

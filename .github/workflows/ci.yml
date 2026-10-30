@@ -91,6 +91,11 @@ jobs:
           fi
           cargo xtask fetch-fixtures
           cargo test --workspace --all-features -- --include-ignored --skip live_ "${skip[@]}"
+      # The daemon as releases build it (no `e2e-prompter`, no `token-emulator`): the token
+      # emulator's variable changes nothing.
+      - name: Daemon without the test features
+        if: runner.os == 'Linux'
+        run: cargo test -p openncalayer --lib release_build_ignores_emulator_var
       # The `clippy` job runs on Linux and never sees `cfg(windows)` code (oncl-ui foreground).
       - name: Clippy (Windows-only code)
         if: runner.os == 'Windows'

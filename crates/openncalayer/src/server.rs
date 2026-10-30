@@ -17,6 +17,7 @@ use oncl_commonutils::CommonUtils;
 use oncl_pki::http::HttpTransport;
 use oncl_protocol::{DynamicModules, HEARTBEAT, Registry, greeting};
 use oncl_tls::SelftestReports;
+use oncl_token::Tokens;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -152,20 +153,23 @@ pub fn builtin_modules() -> Vec<String> {
 
 /// The module registry of the daemon: `kz.gov.pki.knca.basics`,
 /// `kz.gov.pki.knca.commonUtils` and `kz.gov.pki.knca.applet.Applet` (the default module),
-/// which share the dialogs of `prompter` and reach the NCA time-stamping and OCSP services
-/// through `http`, and `kz.gov.pki.ncalayerservices.accessory`, which asks `ui` to open the
-/// daemon's windows; then the modules of `plugins`, if any.
+/// which share the dialogs of `prompter`, the hardware tokens of `tokens` (while their
+/// support is on) and reach the NCA time-stamping and OCSP services through `http`, and
+/// `kz.gov.pki.ncalayerservices.accessory`, which asks `ui` to open the daemon's windows;
+/// then the modules of `plugins`, if any.
 pub fn build_registry(
     prompter: Arc<dyn Prompter>,
     recent: Arc<dyn RecentPathStore>,
     http: Arc<dyn HttpTransport>,
+    tokens: Arc<Tokens>,
     ui: UiCallback,
     plugins: Option<Plugins>,
 ) -> Registry {
     let mut registry = Registry::default();
-    let common_utils = CommonUtils::new(Arc::clone(&prompter), Arc::clone(&http));
-    let applet = Applet::new(Arc::clone(&prompter));
-    let mut basics = Basics::new(prompter, recent, http);
+    let common_utils =
+        CommonUtils::new(Arc::clone(&prompter), Arc::clone(&http)).with_tokens(Arc::clone(&tokens));
+    let applet = Applet::new(Arc::clone(&prompter)).with_tokens(Arc::clone(&tokens));
+    let mut basics = Basics::new(prompter, recent, http).with_tokens(tokens);
     if let Some(plugins) = &plugins {
         basics = basics.with_ocsp_cache(Arc::clone(&plugins.ocsp_cache));
     }

@@ -13,6 +13,10 @@ publish.workspace = true
 # dialogs from that script and opens no windows (end-to-end tests); with
 # `ONCL_UPDATE_INDEX_BASE` set, the updater reads its index there. Never in releases.
 e2e-prompter = ["oncl-basics/testing"]
+# `token-emulator`: with `ONCL_TOKEN_EMULATOR=<config.toml>` set, `run` reads hardware tokens
+# from the emulated readers and cards of that file, with token support on (end-to-end tests).
+# Never in releases.
+token-emulator = ["oncl-token/emulator"]
 
 [dependencies]
 oncl-accessory.workspace = true
@@ -69,3 +73,7 @@ tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 # Velopack packages (zip archives) in the installer's tests.
 zip.workspace = true
+
+[[test]]
+name = "tokens"
+required-features = ["e2e-prompter", "token-emulator"]
