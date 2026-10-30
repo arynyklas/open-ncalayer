@@ -115,11 +115,12 @@ pub fn plugin_asset_url(tag: &str, id: &str, version: &Version) -> anyhow::Resul
 /// its kind (full or delta package of that flavor, Chromium or Firefox extension), and
 /// `notes_url` [`release_notes_url`]. So no host, repository, tag, query or fragment other
 /// than the project's releases gets signed or published. Flavors this version does not
-/// know are refused too.
+/// know are refused too, and so are plugins sharing a module or a replaced bundle
+/// (`replaces.symname`) with another plugin id.
 ///
 /// # Errors
 ///
-/// The first URL that differs.
+/// The first URL that differs, or the first module or bundle of two plugins.
 pub fn check_asset_urls(index: &Index) -> anyhow::Result<()> {
     let expect = |what: &str, url: &str, expected: String| {
         if url == expected {
@@ -166,6 +167,7 @@ pub fn check_asset_urls(index: &Index) -> anyhow::Result<()> {
     }
     let plugin_base = format!("{REPOSITORY}/releases/download/");
     let mut owners = BTreeMap::new();
+    let mut replacers = BTreeMap::new();
     for plugin in &index.plugins {
         let (tag, _) = plugin
             .package
@@ -196,6 +198,18 @@ pub fn check_asset_urls(index: &Index) -> anyhow::Result<()> {
             {
                 bail!("module {module} is owned by both {owner} and {}", plugin.id);
             }
+        }
+        // A bundle of the original is replaced by one plugin, whatever its version:
+        // `installBundle` picks the plugin to install by it.
+        if let Some(replaces) = &plugin.replaces
+            && let Some(owner) = replacers.insert(&replaces.symname, &plugin.id)
+            && owner != &plugin.id
+        {
+            bail!(
+                "the bundle {} is replaced by both {owner} and {}",
+                replaces.symname,
+                plugin.id
+            );
         }
     }
     Ok(())
@@ -365,7 +379,8 @@ pub fn refresh(dir: &Path, channel: Channel, now: OffsetDateTime) -> anyhow::Res
 /// # Errors
 ///
 /// An invalid tag or package, an existing version, a prerelease in stable, conflicting
-/// module owners, an invalid existing index, or an I/O failure.
+/// module owners or bundles replaced by two plugins (checked before anything is written),
+/// an invalid existing index, or an I/O failure.
 pub fn add_plugins(
     dir: &Path,
     channel: Channel,
@@ -439,6 +454,8 @@ pub fn add_plugins(
             revoked: false,
         });
     }
+    check_asset_urls(&index)
+        .with_context(|| format!("the plugins of {tag} do not fit {}", path.display()))?;
     write_next(&path, index, now)
 }
 

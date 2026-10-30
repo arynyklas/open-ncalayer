@@ -278,6 +278,66 @@ fn plugin_urls_off_the_project_releases_are_refused() {
     assert_eq!(read(&refreshed.path).plugins, before);
 }
 
+#[test]
+fn a_replaced_bundle_belongs_to_one_plugin() {
+    let dir = tempfile::tempdir().unwrap();
+    let packages = tempfile::tempdir().unwrap();
+    let written = index::add_plugins(
+        dir.path(),
+        Channel::Beta,
+        TAG,
+        &[example(packages.path())],
+        100,
+        now(),
+    )
+    .unwrap();
+    let before = fs::read(&written.path).unwrap();
+    // Another plugin, with modules of its own, replacing the same bundle of the original.
+    let manifest = oncl_testkit::plugin::example_manifest();
+    let other = manifest.replace(EXAMPLE_ID, "kz.example.other").replace(
+        "io.github.arynyklas.openncalayer.Example",
+        "kz.example.Other",
+    );
+    assert!(other.contains("symname = \"kz.example.echo\""), "{other}");
+    let other = package(packages.path(), "other.onclp", &other);
+    let result = index::add_plugins(
+        dir.path(),
+        Channel::Beta,
+        TAG,
+        std::slice::from_ref(&other),
+        100,
+        now(),
+    );
+    let error = error_text(result);
+    assert!(
+        error.contains("kz.example.echo is replaced by both"),
+        "{error}"
+    );
+    assert_eq!(fs::read(&written.path).unwrap(), before, "nothing written");
+
+    // `index check` reads the rule from the index itself.
+    let text = String::from_utf8(before).unwrap();
+    let mut index = Index::from_json(text.as_bytes()).unwrap();
+    let mut twin = index.plugins[0].clone();
+    twin.id = "kz.example.other".to_owned();
+    twin.modules = vec!["kz.example.Other".to_owned()];
+    twin.package.url = twin.package.url.replace(EXAMPLE_ID, "kz.example.other");
+    index.plugins.push(twin.clone());
+    let error = error_text(index::check_asset_urls(&index));
+    assert!(
+        error.contains("kz.example.echo is replaced by both"),
+        "{error}"
+    );
+    // A plugin without `replaces`, or a newer version of the same plugin, is fine.
+    index.plugins[1].replaces = None;
+    index::check_asset_urls(&index).unwrap();
+    let mut newer = index.plugins[0].clone();
+    newer.version = "0.2.0".parse().unwrap();
+    newer.package.url = newer.package.url.replace("-0.1.0.onclp", "-0.2.0.onclp");
+    index.plugins.push(newer);
+    index::check_asset_urls(&index).unwrap();
+}
+
 /// A `plugins/` directory with a port `dir` per entry, whose `plugin.toml` is the
 /// example's with `id` and `version`.
 fn ports(entries: &[(&str, &str, &str)]) -> tempfile::TempDir {
