@@ -274,6 +274,62 @@ jobs:
           path: target/win7/${{ matrix.arch }}/
           if-no-files-found: ignore
 
+  # The Windows 10/11 installers and update packages as the release makes them (release.yml,
+  # flavors win-x64 and win-x86, `cargo xtask package windows`), unsigned and not published:
+  # the programs and Setup.exe must not need the Visual C++ Redistributable, which a clean
+  # Windows does not have (the workspace links the CRT statically, .cargo/config.toml).
+  windows-package:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            flavor: win-x64
+          - target: i686-pc-windows-msvc
+            flavor: win-x86
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      VPK_VERSION: 1.3.39-g8d2844f
+      BIN: target/${{ matrix.target }}/release
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - uses: ./.github/actions/pinned-toolchains
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: windows-package-${{ matrix.target }}
+      - name: Build (as release.yml)
+        run: cargo build --locked --release --target ${{ matrix.target }} -p openncalayer -p oncl-nmhost
+      - name: Start
+        shell: bash
+        run: |
+          "$BIN/openncalayer.exe" --version
+          # The relay exits 1 without its config; a program the loader cannot start exits
+          # with STATUS_DLL_NOT_FOUND instead.
+          status=0
+          "$BIN/nmhost.exe" < /dev/null || status=$?
+          test "$status" -eq 1
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.427
+      - name: Install the Velopack CLI
+        shell: bash
+        run: |
+          dotnet tool install --tool-path "$RUNNER_TEMP/vpk" vpk --version "$VPK_VERSION"
+          echo "$RUNNER_TEMP/vpk" >> "$GITHUB_PATH"
+      - name: Installer and update package (as release.yml, unsigned)
+        shell: bash
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          cargo xtask package windows --flavor ${{ matrix.flavor }} --bin "$BIN" --version "$version" \
+            --packages packages --dist packaged
+
   # The macOS installer and update package as the release makes them (release.yml, flavor
   # osx, `cargo xtask package macos`): both architectures joined by lipo, packed by the pinned
   # vpk, the update package, the .app and the .pkg checked for both slices and for hosts
