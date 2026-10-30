@@ -975,6 +975,122 @@ fn a_page_install_that_fails_is_told_once_in_a_while() {
     assert_eq!(sandbox.notices().len(), 1);
 }
 
+/// The example under another id serving `modules`, as a file of the sandbox.
+fn other_plugin_file(sandbox: &Sandbox, modules: &str) -> PathBuf {
+    let bytes = example_at("1.0.0", |m| {
+        m.replacen(&format!("id = \"{ID}\""), "id = \"kz.example.local\"", 1)
+            .replacen(&format!("modules = [\"{MODULE}\"]"), modules, 1)
+    });
+    let path = sandbox.dir.path().join("other.onclp");
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn a_local_plugin_on_the_module_does_not_make_the_catalog_version_bad() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    service
+        .install_from_file(other_plugin_file(
+            &sandbox,
+            &format!("modules = [\"{MODULE}\"]"),
+        ))
+        .unwrap();
+    sandbox.notices();
+    sandbox.publish(1, vec![sandbox.release("0.1.0", &example("0.1.0"))]);
+    assert!(matches!(
+        service.install_from_catalog(ID, None),
+        Err(PluginActionError::Failed(e)) if e.contains("kz.example.local")
+    ));
+    assert!(!sandbox.store().state().bad.contains_key(ID), "not bad");
+    assert!(
+        matches!(&sandbox.notices()[..], [PluginNotice::Failed { .. }]),
+        "the user is told"
+    );
+    // Still offered; once the local plugin is gone it installs.
+    assert_eq!(service.view().available.len(), 1);
+    service.remove("kz.example.local").unwrap();
+    service.install_from_catalog(ID, None).unwrap();
+    assert_eq!(sandbox.installed_version(), Some(v("0.1.0")));
+
+    // A local plugin taking the module while the user decides: the load fails, not bad.
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    sandbox.publish(1, vec![sandbox.release("0.1.0", &example("0.1.0"))]);
+    *lock(&sandbox.ui.answer) = None;
+    service.install_from_catalog(ID, None).unwrap();
+    let decide = lock(&sandbox.ui.waiting).pop().unwrap();
+    *lock(&sandbox.ui.answer) = Some(true);
+    service
+        .install_from_file(other_plugin_file(
+            &sandbox,
+            &format!("modules = [\"{MODULE}\"]"),
+        ))
+        .unwrap();
+    sandbox.notices();
+    decide(true);
+    assert!(matches!(
+        &sandbox.notices()[..],
+        [PluginNotice::Failed { .. }]
+    ));
+    assert!(sandbox.installed_version().is_none());
+    assert!(!sandbox.store().state().bad.contains_key(ID), "not bad");
+}
+
+#[test]
+fn an_update_blocked_by_a_local_plugin_waits_for_it_to_go() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    sandbox.installed_from_catalog(&service, 1, "0.1.0");
+    service
+        .install_from_file(other_plugin_file(
+            &sandbox,
+            "modules = [\"kz.example.Extra\"]",
+        ))
+        .unwrap();
+    sandbox.notices();
+    // 0.2.0 serves a module of the local plugin too.
+    let both = format!("modules = [\"{MODULE}\", \"kz.example.Extra\"]");
+    let old = sandbox.release("0.1.0", &example("0.1.0"));
+    let mut new = sandbox.release(
+        "0.2.0",
+        &example_at("0.2.0", |m| {
+            m.replacen(&format!("modules = [\"{MODULE}\"]"), &both, 1)
+        }),
+    );
+    new.modules.push("kz.example.Extra".to_owned());
+    sandbox.publish(2, vec![old, new]);
+    service.check_now();
+    assert!(matches!(
+        &sandbox.notices()[..],
+        [PluginNotice::Failed { .. }]
+    ));
+    assert_eq!(sandbox.installed_version(), Some(v("0.1.0")));
+    assert!(!sandbox.store().state().bad.contains_key(ID), "not bad");
+    let downloads = |sandbox: &Sandbox| {
+        sandbox
+            .transport
+            .asked()
+            .iter()
+            .filter(|(url, ..)| *url == package_url("0.2.0"))
+            .count()
+    };
+    // Not tried again while the local plugin stays.
+    service.check_now();
+    assert!(sandbox.notices().is_empty());
+    assert_eq!(downloads(&sandbox), 1);
+    service.remove("kz.example.local").unwrap();
+    service.check_now();
+    assert_eq!(sandbox.installed_version(), Some(v("0.2.0")));
+    assert_eq!(
+        sandbox.notices(),
+        [PluginNotice::Updated {
+            name: name(),
+            version: v("0.2.0"),
+        }]
+    );
+}
+
 fn package_url(version: &str) -> String {
     format!("https://example.org/plugins/{ID}-{version}.onclp")
 }

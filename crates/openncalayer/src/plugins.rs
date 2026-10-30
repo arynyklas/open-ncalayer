@@ -34,8 +34,8 @@ use oncl_accessory::Bundles;
 use oncl_desktop::UpdateSettings;
 use oncl_pki::http::HttpTransport;
 use oncl_plugin::{
-    Capabilities, Installed, Localized, MAX_PACKAGE, Package, PluginModules, Replaces, Source,
-    Store,
+    BUILT_IN, Capabilities, Installed, LoadError, Localized, MAX_PACKAGE, Package, PluginModules,
+    Replaces, Source, Store,
 };
 use oncl_protocol::{AddInfo, DynamicModules};
 use oncl_ui::PluginActionError;
@@ -212,6 +212,10 @@ pub struct PluginService {
     installing: Mutex<BTreeSet<String>>,
     /// When an install a page started last told that it failed, by plugin id.
     page_failures: Mutex<BTreeMap<String, Instant>>,
+    /// Versions of the catalog that could not load because another plugin serves one of
+    /// their modules, by id: not updated to until the plugins change. Not recorded: the
+    /// package is not at fault.
+    conflicts: Mutex<BTreeMap<String, BTreeSet<Version>>>,
     /// One catalog download at a time.
     checking: Mutex<()>,
     /// One application of the catalog at a time.
@@ -291,6 +295,7 @@ impl PluginService {
             needed: Mutex::default(),
             installing: Mutex::default(),
             page_failures: Mutex::default(),
+            conflicts: Mutex::default(),
             checking: Mutex::new(()),
             applying: Mutex::new(()),
             apply_pending: AtomicBool::new(false),
@@ -520,7 +525,7 @@ impl PluginService {
             }
         };
         if let Err(e) = self.cfg.modules.check(&package) {
-            self.mark_bad(&release, &e.to_string());
+            self.refused(&release.id, &release.version, &e);
             failed(localized(&release.name), e.to_string());
             return Err(PluginActionError::Failed(e.to_string()));
         }
@@ -592,6 +597,7 @@ impl PluginService {
         if !enabled {
             self.cfg.modules.unload(id);
             lock(&self.errors).remove(id);
+            lock(&self.conflicts).clear();
             return Ok(());
         }
         if installed.withdrawn {
@@ -623,6 +629,7 @@ impl PluginService {
             self.cfg.modules.unload(id);
             lock(&self.errors).remove(id);
             lock(&self.known).remove(id);
+            lock(&self.conflicts).clear();
         }
         removed
     }
@@ -869,7 +876,8 @@ impl PluginService {
             if snapshot.source != Source::Catalog {
                 continue;
             }
-            let bad = state.bad.get(id).cloned().unwrap_or_default();
+            let mut bad = state.bad.get(id).cloned().unwrap_or_default();
+            bad.extend(lock(&self.conflicts).get(id).into_iter().flatten().cloned());
             match choose_plugin(
                 index,
                 id,
@@ -907,6 +915,7 @@ impl PluginService {
                     }
                     warn!(plugin = %id, version = %snapshot.version, "the plugin's version is revoked; it is turned off");
                     self.cfg.modules.unload(id);
+                    lock(&self.conflicts).clear();
                     if let Err(e) = self.store.set_withdrawn(id, true) {
                         warn!(plugin = %id, error = %e, "cannot record the plugin's state");
                     }
@@ -960,7 +969,8 @@ impl PluginService {
             self.cfg.modules.check(&package)
         };
         if let Err(e) = loaded {
-            return self.bad(release, e.to_string());
+            self.refused(&release.id, &release.version, &e);
+            return self.failed(localized(&release.name), e.to_string());
         }
         if let Err(e) = self.store.install(&package, &bytes, Source::Catalog) {
             warn!(plugin = %release.id, error = %e, "cannot record the plugin's update");
@@ -972,6 +982,7 @@ impl PluginService {
         }
         self.remember(&package);
         lock(&self.errors).remove(&release.id);
+        lock(&self.conflicts).clear();
         (self.cfg.notify)(PluginNotice::Updated {
             name: package.manifest.name.clone(),
             version: package.manifest.version.clone(),
@@ -1056,10 +1067,8 @@ impl PluginService {
         let name = package.manifest.name.clone();
         if let Err(e) = self.cfg.modules.load(package.clone()) {
             warn!(plugin = %id, error = %e, "cannot load the plugin");
-            if source == Source::Catalog
-                && let Err(e) = self.store.mark_bad(&id, &package.manifest.version)
-            {
-                warn!(plugin = %id, error = %e, "cannot record the plugin's failure");
+            if source == Source::Catalog {
+                self.refused(&id, &package.manifest.version, &e);
             }
             return self.failed(name, e.to_string());
         }
@@ -1083,6 +1092,7 @@ impl PluginService {
             self.cfg.modules.unload(&id);
         }
         info!(plugin = %id, version = %package.manifest.version, ?source, "plugin installed");
+        lock(&self.conflicts).clear();
         self.remember(&package);
         lock(&self.errors).remove(&id);
         lock(&self.needed).remove(&id);
@@ -1165,9 +1175,29 @@ impl PluginService {
 
     /// `release` failed its checks here: marked bad.
     fn mark_bad(&self, release: &PluginRelease, error: &str) {
-        warn!(plugin = %release.id, version = %release.version, error = %error, "the plugin's package is refused; the version is marked bad");
-        if let Err(e) = self.store.mark_bad(&release.id, &release.version) {
-            warn!(plugin = %release.id, error = %e, "cannot record the plugin's failure");
+        self.mark_version_bad(&release.id, &release.version, error);
+    }
+
+    fn mark_version_bad(&self, id: &str, version: &Version, error: &str) {
+        warn!(plugin = id, %version, error = %error, "the plugin's package is refused; the version is marked bad");
+        if let Err(e) = self.store.mark_bad(id, version) {
+            warn!(plugin = id, error = %e, "cannot record the plugin's failure");
+        }
+    }
+
+    /// The catalog's `version` of `id` could not be loaded (or checked): marked bad if the
+    /// package is at fault; if another plugin serves one of its modules, which depends on
+    /// this installation and not on the package, only kept from updates until the plugins
+    /// change.
+    fn refused(&self, id: &str, version: &Version, e: &LoadError) {
+        if matches!(e, LoadError::ModuleTaken { owner, .. } if owner != BUILT_IN) {
+            warn!(plugin = id, %version, error = %e, "another plugin serves a module of the plugin; the version is not marked bad");
+            lock(&self.conflicts)
+                .entry(id.to_owned())
+                .or_default()
+                .insert(version.clone());
+        } else {
+            self.mark_version_bad(id, version, &e.to_string());
         }
     }
 
