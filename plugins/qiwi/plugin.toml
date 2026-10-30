@@ -4,9 +4,9 @@ min_core = "0.1.0-alpha.3"
 modules = ["kz.qiwi.osgi.SecurityUtils"]
 
 [name]
-ru = "QIWI SecurityUtils"
-kk = "QIWI SecurityUtils"
-en = "QIWI SecurityUtils"
+ru = "QIWI SecurityUtils (порт OpenNCALayer)"
+kk = "QIWI SecurityUtils (OpenNCALayer порты)"
+en = "QIWI SecurityUtils (OpenNCALayer port)"
 
 [description]
 ru = "Подпись XML для АРМ QIWI Казахстан"

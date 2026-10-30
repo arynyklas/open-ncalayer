@@ -4,9 +4,9 @@ min_core = "0.1.0-alpha.3"
 modules = ["kz.uchet.esfSignUtil"]
 
 [name]
-ru = "Учёт.kz: подпись ЭСФ"
-kk = "Учёт.kz: ЭШФ қолтаңбасы"
-en = "Uchet.kz ESF signing"
+ru = "Учёт.kz: подпись ЭСФ (порт OpenNCALayer)"
+kk = "Учёт.kz: ЭШФ қолтаңбасы (OpenNCALayer порты)"
+en = "Uchet.kz ESF signing (OpenNCALayer port)"
 
 [description]
 ru = "Подпись XML и счетов-фактур ключом из файла, который называет сайт Учёт.kz"

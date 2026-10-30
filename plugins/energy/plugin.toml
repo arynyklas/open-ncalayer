@@ -4,9 +4,9 @@ min_core = "0.1.0-alpha.3"
 modules = ["kz.energy.sign.SignEnergy"]
 
 [name]
-ru = "Sign Energy"
-kk = "Sign Energy"
-en = "Sign Energy"
+ru = "Sign Energy (порт OpenNCALayer)"
+kk = "Sign Energy (OpenNCALayer порты)"
+en = "Sign Energy (OpenNCALayer port)"
 
 [description]
 ru = "Подписание документов системы «Тезис» (energy.kz) в формате CMS"

@@ -4,9 +4,9 @@ min_core = "0.1.0-alpha.3"
 modules = ["ru.motiw.ModuleService"]
 
 [name]
-ru = "Motiware Service"
-kk = "Motiware Service"
-en = "Motiware Service"
+ru = "Motiware Service (порт OpenNCALayer)"
+kk = "Motiware Service (OpenNCALayer порты)"
+en = "Motiware Service (OpenNCALayer port)"
 
 [description]
 ru = "Хранилища, контейнеры, подпись на токенах и проверка CMS для Motiware"

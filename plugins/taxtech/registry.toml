@@ -24,3 +24,9 @@ ru = "Ключи на токенах — только при включённо�
 
 [[differences]]
 ru = "Порядок ключей ответа в общих бакетах HashMap (success/bin, subjectDN/iin) вычислен, не сверен с оригиналом."
+
+[[differences]]
+ru = "signCms с digested=true и encapsulate=true (encapsulate по умолчанию — true) отвечает SIGNING_FAILURE: OpenNCALayer не вкладывает переданный хеш в подпись; оригинал (Kalkan, DIGEST_NULL) создавал такую подпись. С encapsulate=false хеш подписывается."
+
+[[differences]]
+ru = "Сертификаты RSA-SHA1: все такие сертификаты НУЦ просрочены, а просроченные ключи плагин отклоняет раньше подписи, поэтому ответ — обычная ошибка просроченного сертификата."
