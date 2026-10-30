@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use oncl_pki::cert::Certificate;
 use serde::{Deserialize, Serialize};
 
+use super::artifact::{Format, TAIL_BYTES, detect_format};
 use super::http::{CookieJar, FetchError, Fetcher, RequestCtx};
 use super::manifest::{Verified, verify_and_parse};
 use super::sources::{PageLink, Source, SourceKind, discover, parse_download_page, without_query};
@@ -140,23 +141,40 @@ pub fn poll(
         .get("manifest")
         .is_some_and(|s| s.sha256.is_some());
 
-    let manifest = match fetcher.get(&endpoints.manifest, MANIFEST_MAX, &RequestCtx::default()) {
+    // An HTML page (error, captcha) with status 200 is a failed fetch, not a bad signature.
+    let fetched = fetcher
+        .get(&endpoints.manifest, MANIFEST_MAX, &RequestCtx::default())
+        .map_err(|e| e.to_string())
+        .and_then(|got| {
+            let html_type = got
+                .content_type
+                .as_deref()
+                .is_some_and(|t| t.trim().to_ascii_lowercase().starts_with("text/html"));
+            let tail = &got.body[got.body.len().saturating_sub(TAIL_BYTES)..];
+            if html_type || detect_format(&got.body, tail) != Format::Der {
+                Err("not a DER manifest (an HTML page or another file)".to_owned())
+            } else {
+                Ok(got)
+            }
+        });
+    let manifest = match fetched {
         Err(e) => {
             let entry = next.sources.entry("manifest".to_owned()).or_default();
             entry.url = endpoints.manifest.clone();
-            entry.failures += 1;
+            // Capped, so that the state stops changing while the manifest stays unreachable.
+            entry.failures = (entry.failures + 1).min(FAILURES_TO_REMOVE);
             entry.status = SourceStatus::Failing;
             if entry.failures >= FAILURES_TO_REMOVE || !had_baseline {
                 alerts.push(Alert {
                     kind: AlertKind::ManifestUnreachable,
                     detail: if had_baseline {
-                        format!("{} polls in a row: {e}", entry.failures)
+                        format!("{FAILURES_TO_REMOVE} polls or more in a row: {e}")
                     } else {
                         format!("first run: {e}")
                     },
                 });
             }
-            Err(PollFailure::Unreachable(e.to_string()))
+            Err(PollFailure::Unreachable(e))
         }
         Ok(got) => match verify_and_parse(&got.body, trusted) {
             Err(e) => {

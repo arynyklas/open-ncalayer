@@ -471,3 +471,47 @@ fn live_sources_discovered() {
     assert!(count("dist:") >= 2);
     assert!(count("page:") >= 4, "{:?}", r.sources);
 }
+
+#[test]
+fn html_on_the_manifest_url_is_unreachable_not_bad_signature() {
+    let server = world('a');
+    let error = read(fixture("upstream/error.html"));
+    // First run: an error page with status 200 is "unreachable".
+    server.route(
+        "GET",
+        "/updates/ncalayer.der",
+        Response::html(error.clone()),
+    );
+    let r = run(&server, &State::default());
+    assert_eq!(
+        r.alerts.iter().map(|a| a.kind).collect::<Vec<_>>(),
+        [AlertKind::ManifestUnreachable]
+    );
+    // After a baseline: a counted failure, no alert before the third.
+    let server = world('a');
+    let state = run(&server, &State::default()).next;
+    server.route(
+        "GET",
+        "/updates/ncalayer.der",
+        Response::ok(error).header("Content-Type", "application/octet-stream"),
+    );
+    let r = run(&server, &state);
+    assert!(r.alerts.is_empty(), "{:?}", r.alerts);
+    assert_eq!(r.next.sources["manifest"].failures, 1);
+}
+
+#[test]
+fn manifest_failures_are_capped() {
+    let server = world('a');
+    let mut state = run(&server, &State::default()).next;
+    server.route("GET", "/updates/ncalayer.der", Response::status(503));
+    let mut seen = Vec::new();
+    for _ in 0..5 {
+        let r = run(&server, &state);
+        state = r.next;
+        seen.push(state.sources["manifest"].failures);
+    }
+    assert_eq!(seen, [1, 2, 3, 3, 3]);
+    // The state no longer changes while the manifest stays unreachable.
+    assert_eq!(run(&server, &state).next.to_json(), state.to_json());
+}
