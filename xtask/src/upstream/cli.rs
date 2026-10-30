@@ -6,9 +6,12 @@ use anyhow::Context;
 use clap::Subcommand;
 
 use super::Endpoints;
+use super::branch_layout::ToolVersions;
 use super::http::Fetcher;
 use super::poll::poll;
+use super::run::{self as cycle, RunOptions};
 use super::state::State;
+use super::unpack::{Limits, Tools};
 
 /// `cargo xtask upstream …`.
 #[derive(Debug, Subcommand)]
@@ -29,6 +32,26 @@ pub enum UpstreamCommand {
         /// Also write the changes as JSON here.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// One cycle: poll, download what changed into `--work`, unpack, facts, diff; the changed
+    /// files of the `upstream` branch and `run.json` go to `--emit` (JSON only). Without
+    /// `--dry-run` the emit directory is then published (as `upstream publish`).
+    Run {
+        /// A checkout of the `upstream` branch (or an empty directory).
+        #[arg(long, default_value = "target/upstream/state")]
+        state: PathBuf,
+        /// Where the originals are downloaded and unpacked.
+        #[arg(long, default_value = "target/upstream/work")]
+        work: PathBuf,
+        /// The emit directory.
+        #[arg(long, default_value = "target/upstream/emit")]
+        emit: PathBuf,
+        /// Only write the emit directory.
+        #[arg(long)]
+        dry_run: bool,
+        /// Append `changed=` and `alert=` lines here (`$GITHUB_OUTPUT`).
+        #[arg(long)]
+        github_output: Option<PathBuf>,
     },
     /// Fetch and check the pinned external unpackers into `--out`; prints `ONCL_INNOUNP=…`
     /// (Windows) and `ONCL_7Z=…` lines for `$GITHUB_ENV`.
@@ -72,5 +95,45 @@ pub fn run(command: UpstreamCommand) -> anyhow::Result<()> {
             Ok(())
         }
         UpstreamCommand::Tools { out } => super::tools::tools(&out),
+        UpstreamCommand::Run {
+            state,
+            work,
+            emit,
+            dry_run,
+            github_output,
+        } => {
+            let tools = Tools::from_env();
+            let tool_versions = ToolVersions {
+                innounp: tools.innounp.as_ref().map(|_| "2.71.2".to_owned()),
+                sevenzip: std::env::var_os("ONCL_7Z")
+                    .filter(|v| !v.is_empty())
+                    .and_then(|p| super::tools::sevenzip_version(std::path::Path::new(&p))),
+            };
+            let outcome = cycle::run(&RunOptions {
+                state_dir: state,
+                work,
+                emit,
+                dry_run,
+                endpoints: Endpoints::default(),
+                trusted: oncl_pki::roots::nca_production().to_vec(),
+                tools,
+                tool_versions,
+                limits: Limits::default(),
+                fetcher: Fetcher::new(),
+                now: time::OffsetDateTime::now_utc(),
+                github_output,
+            })?;
+            println!(
+                "run: changed={} entry={} alerts={}",
+                outcome.changed,
+                outcome.entry.as_deref().unwrap_or("-"),
+                outcome.alerts.len()
+            );
+            anyhow::ensure!(
+                dry_run,
+                "run without --dry-run: publish with `upstream publish`"
+            );
+            Ok(())
+        }
     }
 }

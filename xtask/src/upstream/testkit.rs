@@ -41,9 +41,25 @@ pub fn synthetic_root() -> KeyEntry {
 
 /// The key of `user-gost2015-sign` with a certificate re-issued by `root-gost2015` to
 /// `CN=<common_name>, O=OpenNCALayer synthetic, C=KZ` (serial `0x17000001`,
-/// 2026-01-01 – 2036-01-01, keyUsage digitalSignature).
+/// 2026-01-01 – 2036-01-01, keyUsage digitalSignature). A GOST signature is randomized, so
+/// for `CN=NCALayer` the certificate of the committed `fixtures/upstream/manifest.der` is
+/// reused: every synthetic manifest then has the same signer.
 pub fn synthetic_signer(common_name: &str) -> KeyEntry {
     let user = synthetic_entry(SIGNER_KEY);
+    if common_name == "NCALayer"
+        && let Ok(der) = std::fs::read(oncl_testkit::fixture("upstream/manifest.der"))
+        && let Ok(certs) = oncl_pki::cms::certificates(&der)
+        && let Some(cert) = certs.into_iter().find(|c| {
+            c.tbs_certificate().subject_public_key_info()
+                == user.cert.tbs_certificate().subject_public_key_info()
+        })
+    {
+        return KeyEntry {
+            alias: common_name.to_owned(),
+            key: user.key,
+            cert,
+        };
+    }
     let subject = Name::from_str(&format!("CN={common_name},O=OpenNCALayer synthetic,C=KZ"))
         .expect("valid name");
     let key_usage = KeyUsage(KeyUsages::DigitalSignature.into());

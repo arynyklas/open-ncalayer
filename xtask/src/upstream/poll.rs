@@ -258,6 +258,9 @@ pub fn poll(
         match &source.kind {
             SourceKind::Manifest => {}
             SourceKind::Bundle { .. } => {
+                // A bundle's failures are of its download (counted by the run), not of the
+                // manifest that lists it.
+                let before = prev.sources.get(&source.id);
                 let hash = source.expected_sha256.clone();
                 let entry = next.sources.entry(source.id.clone()).or_default();
                 match before {

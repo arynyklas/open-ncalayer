@@ -18,6 +18,7 @@ pub mod manifest;
 pub mod meta;
 pub mod poll;
 pub mod report;
+pub mod run;
 pub mod sources;
 pub mod state;
 pub mod testkit;

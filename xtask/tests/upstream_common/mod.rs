@@ -306,3 +306,63 @@ pub fn serve_manifest_and_page(server: &MockServer, der: Vec<u8>, page: &str) {
         Response::html(page.as_bytes().to_vec()).header("Set-Cookie", "sid=synthetic; Path=/"),
     );
 }
+
+/// The download page's files: (key char, fixture).
+pub const PAGE_FILES: [(char, &str); 4] = [
+    ('1', "inno-like.exe"),
+    ('2', "fake.dmg"),
+    ('3', "dist.zip"),
+    ('4', "msi-like.msi"),
+];
+
+fn sha1_hex(bytes: &[u8]) -> String {
+    use sha1::Digest;
+    sha1::Sha1::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The download page of [`PAGE_FILES`] with their real SHA-1.
+pub fn world_page() -> String {
+    let keys: Vec<String> = PAGE_FILES.iter().map(|(c, _)| key(*c)).collect();
+    let sha1s: Vec<String> = PAGE_FILES
+        .iter()
+        .map(|(_, f)| sha1_hex(&read(fixture(&format!("upstream/{f}")))))
+        .collect();
+    page_html(
+        [&keys[0], &keys[1], &keys[2], &keys[3]],
+        [&sha1s[0], &sha1s[1], &sha1s[2], &sha1s[3]],
+    )
+}
+
+/// Serves every file of the synthetic world; the manifest is `manifest_json` edited by
+/// `edit`, signed.
+pub fn serve_world(server: &MockServer, edit: impl FnOnce(String) -> String) {
+    let json = manifest_json(server, edit);
+    serve_manifest_and_page(server, signed(&json), &world_page());
+    for (c, file) in PAGE_FILES {
+        server.route(
+            "GET",
+            &format!("/download.php?key={}", key(c)),
+            Response::ok(read(fixture(&format!("upstream/{file}")))).header(
+                "Content-Disposition",
+                &format!("attachment; filename={file}"),
+            ),
+        );
+    }
+    for (path, file) in [
+        ("/updates/lite.exe", "lite.exe"),
+        ("/updates/installer.sh", "installer.sh"),
+        ("/updates/ncalayer.zip", "dist.zip"),
+        ("/updates/jre/tzdb.dat", "tzdb.dat"),
+        ("/updates/bundles/app.jar", "app.jar"),
+        ("/updates/bundles/bundle-a.jar", "bundle-a.jar"),
+    ] {
+        server.route(
+            "GET",
+            path,
+            Response::ok(read(fixture(&format!("upstream/{file}")))),
+        );
+    }
+}
