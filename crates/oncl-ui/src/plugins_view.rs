@@ -1,8 +1,9 @@
 //! The «Плагины» window: what the daemon's plugins are ([`PluginsView`], from
 //! [`PluginsServices::view`]) and the actions on them, each a job ([`worker`]) after which
 //! the list is read again; the daemon also has it read again when its plugins change
-//! ([`refresh_plugins_window`]). Removing a plugin is asked about first. The rows' texts are
-//! composed here.
+//! ([`refresh_plugins_window`]). Removing a plugin is asked about first; an update that may
+//! do more than the installed version waits for «Разрешить обновление», its new
+//! capabilities listed. The rows' texts are composed here.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -50,6 +51,12 @@ pub trait PluginsServices: Send + Sync {
     ///
     /// What failed.
     fn remove(&self, id: &str) -> Result<(), PluginActionError>;
+    /// Installs the update of `id` that waits for the user ([`InstalledPlugin::pending_update`]).
+    ///
+    /// # Errors
+    ///
+    /// None waits, or what failed.
+    fn confirm_update(&self, id: &str) -> Result<(), PluginActionError>;
     /// Downloads the catalog again. Blocks for the download.
     fn refresh(&self);
 }
@@ -69,6 +76,8 @@ pub enum PluginActionError {
     NeedsCore(String),
     /// The plugin is not installed.
     NotInstalled,
+    /// No update of the plugin waits for the user.
+    NothingToConfirm,
     /// Anything else: the technical detail, shown after a translated prefix.
     Failed(String),
 }
@@ -112,6 +121,16 @@ pub struct InstalledPlugin {
     /// From a file the user chose, not from the catalog.
     pub local: bool,
     pub state: PluginStatus,
+    /// An update that may do more than this version, waiting for the user.
+    pub pending_update: Option<PendingUpdate>,
+}
+
+/// An update waiting for the user: its version and what it may do that the installed
+/// version may not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingUpdate {
+    pub version: String,
+    pub added: Vec<CapabilityLine>,
 }
 
 /// Whether an installed plugin serves its modules.
@@ -243,6 +262,7 @@ fn create(desktop: &Rc<Desktop>) -> Result<(), PlatformError> {
     ui.on_toggle(move |row| with(id, |open: &Open| toggle(open, row)));
     ui.on_remove(move |row| with(id, |open: &Open| ask_remove(open, row)));
     ui.on_confirm_remove(move |row| with(id, |open: &Open| remove(open, row)));
+    ui.on_confirm_update(move |row| with(id, |open: &Open| confirm_update(open, row)));
     ui.on_install(move |row| with(id, |open: &Open| install(open, row)));
     ui.on_install_file(move || with(id, pick_file));
     ui.on_refresh(move || with(id, refresh));
@@ -272,6 +292,7 @@ enum Action {
     Install,
     Toggle,
     Remove,
+    Update,
 }
 
 /// Runs `action` on a worker thread, then reads the plugins and shows them with the
@@ -312,6 +333,7 @@ fn action_error_text(e: &PluginActionError, kind: Action, l: Locale) -> String {
         Action::Install => t.install_failed,
         Action::Toggle => t.toggle_failed,
         Action::Remove => t.remove_failed,
+        Action::Update => t.plugin_update_failed,
     };
     let why = match e {
         PluginActionError::InstalledAlready => t.installed_already.to_owned(),
@@ -320,6 +342,7 @@ fn action_error_text(e: &PluginActionError, kind: Action, l: Locale) -> String {
         PluginActionError::NotOffered => t.not_offered.to_owned(),
         PluginActionError::NeedsCore(version) => t.needs_core.replace("{0}", version),
         PluginActionError::NotInstalled => t.not_installed.to_owned(),
+        PluginActionError::NothingToConfirm => t.nothing_to_confirm.to_owned(),
         PluginActionError::Failed(detail) => detail.clone(),
     };
     failed.replace("{0}", &why)
@@ -389,6 +412,19 @@ fn remove(open: &Open, row: i32) {
         move |services| services.remove(&plugin.id),
         Action::Remove,
         Some(done),
+    );
+}
+
+/// «Разрешить обновление»: the update waiting is installed.
+fn confirm_update(open: &Open, row: i32) {
+    let Some(plugin) = installed_at(open, row) else {
+        return;
+    };
+    run_action(
+        open,
+        move |services| services.confirm_update(&plugin.id),
+        Action::Update,
+        None,
     );
 }
 
@@ -579,6 +615,20 @@ fn installed_row(plugin: &InstalledPlugin, l: Locale) -> InstalledRow {
         PluginStatus::Withdrawn => (t.withdrawn.to_owned(), true),
         PluginStatus::Error(e) => (t.error.replace("{0}", e), true),
     };
+    let update = plugin
+        .pending_update
+        .as_ref()
+        .map(|update| {
+            let added: Vec<String> = update
+                .added
+                .iter()
+                .map(|c| crate::install_plugin::capability_text(c, l))
+                .collect();
+            t.pending_update
+                .replace("{version}", &update.version)
+                .replace("{0}", &added.join("; "))
+        })
+        .unwrap_or_default();
     InstalledRow {
         title: title(&plugin.name, &plugin.version, l).into(),
         details: details.join(" · ").into(),
@@ -586,6 +636,7 @@ fn installed_row(plugin: &InstalledPlugin, l: Locale) -> InstalledRow {
         error,
         can_toggle: plugin.state != PluginStatus::Withdrawn,
         enabled: plugin.state != PluginStatus::Disabled,
+        update: update.into(),
     }
 }
 
@@ -658,6 +709,11 @@ struct Texts {
     toggle_failed: &'static str,
     /// `{0}`: why.
     remove_failed: &'static str,
+    /// `{0}`: why.
+    plugin_update_failed: &'static str,
+    /// `{version}`, `{0}`: what it may do besides.
+    pending_update: &'static str,
+    nothing_to_confirm: &'static str,
     installed_already: &'static str,
     being_installed: &'static str,
     no_catalog: &'static str,
@@ -697,6 +753,9 @@ impl Texts {
                 install_failed: "Плагинді орнату мүмкін болмады: {0}",
                 toggle_failed: "Плагинді қосу немесе өшіру мүмкін болмады: {0}",
                 remove_failed: "Плагинді жою мүмкін болмады: {0}",
+                plugin_update_failed: "Плагинді жаңарту мүмкін болмады: {0}",
+                pending_update: "{version} нұсқасына жаңарту сіздің рұқсатыңызды күтеді: плагин қосымша мыналарды істей алады: {0}",
+                nothing_to_confirm: "рұқсат күтетін жаңарту жоқ",
                 installed_already: "ол орнатылып қойған",
                 being_installed: "ол қазір орнатылуда",
                 no_catalog: "плагиндер каталогы қолжетімсіз",
@@ -731,6 +790,9 @@ impl Texts {
                 install_failed: "Не удалось установить плагин: {0}",
                 toggle_failed: "Не удалось включить или выключить плагин: {0}",
                 remove_failed: "Не удалось удалить плагин: {0}",
+                plugin_update_failed: "Не удалось обновить плагин: {0}",
+                pending_update: "Обновление до версии {version} ждёт вашего разрешения: плагин сможет ещё {0}",
+                nothing_to_confirm: "обновление не ждёт разрешения",
                 installed_already: "он уже установлен",
                 being_installed: "он уже устанавливается",
                 no_catalog: "каталог плагинов недоступен",
@@ -765,6 +827,9 @@ impl Texts {
                 install_failed: "Cannot install the plugin: {0}",
                 toggle_failed: "Cannot turn the plugin on or off: {0}",
                 remove_failed: "Cannot remove the plugin: {0}",
+                plugin_update_failed: "Cannot update the plugin: {0}",
+                pending_update: "The update to version {version} waits for your permission: the plugin will also be able to {0}",
+                nothing_to_confirm: "no update waits for permission",
                 installed_already: "it is installed already",
                 being_installed: "it is being installed already",
                 no_catalog: "the plugin catalog is unavailable",
@@ -790,6 +855,7 @@ pub(crate) mod fakes {
         InstallFile(PathBuf),
         SetEnabled(String, bool),
         Remove(String),
+        ConfirmUpdate(String),
         Refresh,
     }
 
@@ -841,6 +907,11 @@ pub(crate) mod fakes {
             self.outcome()
         }
 
+        fn confirm_update(&self, id: &str) -> Result<(), PluginActionError> {
+            self.log(Call::ConfirmUpdate(id.to_owned()));
+            self.outcome()
+        }
+
         fn refresh(&self) {
             self.log(Call::Refresh);
         }
@@ -886,6 +957,13 @@ mod tests {
                     }),
                     local: false,
                     state: PluginStatus::Enabled,
+                    pending_update: Some(PendingUpdate {
+                        version: "1.1.0".to_owned(),
+                        added: vec![
+                            CapabilityLine::Dialogs,
+                            CapabilityLine::Http(vec!["https://b.kz/".to_owned()]),
+                        ],
+                    }),
                 },
                 InstalledPlugin {
                     id: "kz.example.two".to_owned(),
@@ -894,6 +972,7 @@ mod tests {
                     replaces: None,
                     local: true,
                     state: PluginStatus::Disabled,
+                    pending_update: None,
                 },
                 InstalledPlugin {
                     id: "kz.example.three".to_owned(),
@@ -902,6 +981,7 @@ mod tests {
                     replaces: None,
                     local: false,
                     state: PluginStatus::Withdrawn,
+                    pending_update: None,
                 },
             ],
             available: vec![AvailablePlugin {
@@ -970,6 +1050,11 @@ mod tests {
         assert_eq!(rows[0].details, "из каталога · заменяет kz.gov.one 0.3.1");
         assert_eq!(rows[0].state, "Включён");
         assert!(rows[0].enabled && rows[0].can_toggle && !rows[0].error);
+        assert_eq!(
+            rows[0].update,
+            "Обновление до версии 1.1.0 ждёт вашего разрешения: плагин сможет ещё показывать окна; обращаться к https://b.kz/"
+        );
+        assert_eq!(rows[1].update, "");
         assert_eq!(rows[1].details, "локальный");
         assert_eq!(rows[1].state, "Выключен");
         assert!(!rows[1].enabled);
@@ -998,6 +1083,8 @@ mod tests {
         worker::manual::run_all();
         ui.invoke_refresh();
         worker::manual::run_all();
+        ui.invoke_confirm_update(0);
+        worker::manual::run_all();
         assert_eq!(
             taken(calls),
             [
@@ -1010,6 +1097,8 @@ mod tests {
                 Call::InstallFile(PathBuf::from("plugin.onclp")),
                 Call::View,
                 Call::Refresh,
+                Call::View,
+                Call::ConfirmUpdate("kz.example.one".to_owned()),
                 Call::View,
             ]
         );
@@ -1093,9 +1182,15 @@ mod tests {
             PluginActionError::NotOffered,
             PluginActionError::NeedsCore("0.3.0".to_owned()),
             PluginActionError::NotInstalled,
+            PluginActionError::NothingToConfirm,
             PluginActionError::Failed("disk full".to_owned()),
         ];
-        let actions = [Action::Install, Action::Toggle, Action::Remove];
+        let actions = [
+            Action::Install,
+            Action::Toggle,
+            Action::Remove,
+            Action::Update,
+        ];
         for l in [Locale::Ru, Locale::Kk, Locale::En] {
             let mut texts = Vec::new();
             for e in &errors {
@@ -1112,7 +1207,7 @@ mod tests {
             distinct.sort();
             distinct.dedup();
             assert_eq!(distinct.len(), texts.len(), "{l:?}");
-            let failed = action_error_text(&errors[6], Action::Install, l);
+            let failed = action_error_text(&errors[7], Action::Install, l);
             assert!(failed.ends_with(": disk full"), "{failed}");
             assert!(action_error_text(&errors[4], Action::Install, l).contains("0.3.0"));
         }
@@ -1140,6 +1235,8 @@ mod tests {
                     .collect();
                 let rows: Vec<InstalledRow> = ui.get_installed().iter().collect();
                 let suffix = if l == Locale::Kk { " kk " } else { " en " };
+                assert_ne!(rows[0].update, ru_rows[0].update, "{l:?}");
+                assert!(rows[0].update.contains("https://b.kz/"), "{l:?}");
                 for (row, ru) in rows.iter().zip(&ru_rows) {
                     assert!(row.title.contains(suffix), "{l:?}");
                     assert_ne!(row.state, ru.state, "{l:?}");

@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use oncl_plugin::{Capabilities, Localized, Replaces, Source};
 use oncl_ui::plugins_view::{
-    AvailablePlugin, CapabilityLine, CatalogLine, InstalledPlugin, LocalizedText, PluginStatus,
-    ReplacedBundle,
+    AvailablePlugin, CapabilityLine, CatalogLine, InstalledPlugin, LocalizedText, PendingUpdate,
+    PluginStatus, ReplacedBundle,
 };
 use oncl_ui::{
     InstallPluginRequest, InstalledVersion, PluginActionError, PluginsServices, PluginsView,
@@ -96,6 +96,10 @@ impl PluginsServices for WindowServices {
         self.service()?.remove(id)
     }
 
+    fn confirm_update(&self, id: &str) -> Result<(), PluginActionError> {
+        self.service()?.confirm_update(id)
+    }
+
     fn refresh(&self) {
         if let Ok(service) = &self.0 {
             service.check_now();
@@ -146,6 +150,10 @@ pub fn plugins_view(view: ServiceView) -> PluginsView {
                     PluginState::Withdrawn => PluginStatus::Withdrawn,
                     PluginState::Error(e) => PluginStatus::Error(e),
                 },
+                pending_update: p.pending_update.map(|update| PendingUpdate {
+                    version: update.version.to_string(),
+                    added: capability_lines(&update.added),
+                }),
                 id: p.id,
             })
             .collect(),
@@ -182,7 +190,7 @@ fn bundle(replaces: &Replaces) -> ReplacedBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::{AvailableView, InstalledView};
+    use crate::plugins::{AvailableView, InstalledView, PendingView};
     use oncl_plugin::HttpPrefix;
     use oncl_update::{Channel, Version};
     use time::macros::datetime;
@@ -261,6 +269,7 @@ mod tests {
                     replaces: None,
                     source: Source::Local,
                     state: PluginState::Error("broken".to_owned()),
+                    pending_update: None,
                 },
                 InstalledView {
                     id: "kz.b".to_owned(),
@@ -269,6 +278,13 @@ mod tests {
                     replaces: None,
                     source: Source::Catalog,
                     state: PluginState::Withdrawn,
+                    pending_update: Some(PendingView {
+                        version: Version::new(2, 1, 0),
+                        added: Capabilities {
+                            files: true,
+                            ..Capabilities::default()
+                        },
+                    }),
                 },
             ],
             available: vec![
@@ -304,6 +320,14 @@ mod tests {
         );
         assert!(!shown.installed[1].local);
         assert_eq!(shown.installed[1].state, PluginStatus::Withdrawn);
+        assert_eq!(shown.installed[0].pending_update, None);
+        assert_eq!(
+            shown.installed[1].pending_update,
+            Some(PendingUpdate {
+                version: "2.1.0".to_owned(),
+                added: vec![CapabilityLine::Files],
+            })
+        );
         assert!(shown.available[0].needed && shown.available[0].needed_by.is_none());
         assert!(!shown.available[1].needed);
         // Plugins that could not start: the window says why.

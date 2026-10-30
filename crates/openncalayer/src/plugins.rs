@@ -103,6 +103,9 @@ pub enum PluginNotice {
     Withdrawn { name: Localized },
     /// Installing or updating a plugin failed.
     Failed { name: Localized, error: String },
+    /// An update of a plugin to `version` may do more than the version installed: it waits
+    /// for the user, in the plugin window; the installed version runs on.
+    UpdateNeedsConfirmation { name: Localized, version: Version },
     /// A page (`origin`) called a module of the plugin `id` of the catalog, not installed.
     Needed {
         origin: Option<String>,
@@ -171,6 +174,16 @@ pub struct InstalledView {
     pub replaces: Option<Replaces>,
     pub source: Source,
     pub state: PluginState,
+    /// An update that waits for the user: it may do more than this version.
+    pub pending_update: Option<PendingView>,
+}
+
+/// An update waiting for the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingView {
+    pub version: Version,
+    /// What it may do that the installed version may not.
+    pub added: Capabilities,
 }
 
 /// Whether an installed plugin serves its modules.
@@ -216,6 +229,8 @@ pub struct PluginService {
     /// their modules, by id: not updated to until the plugins change. Not recorded: the
     /// package is not at fault.
     conflicts: Mutex<BTreeMap<String, BTreeSet<Version>>>,
+    /// Updates that may do more than the version installed, waiting for the user, by id.
+    pending: Mutex<BTreeMap<String, PendingUpdate>>,
     /// One catalog download at a time.
     checking: Mutex<()>,
     /// One application of the catalog at a time.
@@ -254,6 +269,17 @@ enum Asker {
 struct Known {
     name: Localized,
     replaces: Option<Replaces>,
+    capabilities: Capabilities,
+}
+
+/// An update downloaded and checked, waiting for the user: it may do more (`added`) than
+/// `snapshot`, the version installed.
+struct PendingUpdate {
+    release: PluginRelease,
+    package: Package,
+    bytes: Vec<u8>,
+    snapshot: Installed,
+    added: Capabilities,
 }
 
 /// Why a catalog download did not bring a catalog.
@@ -296,6 +322,7 @@ impl PluginService {
             installing: Mutex::default(),
             page_failures: Mutex::default(),
             conflicts: Mutex::default(),
+            pending: Mutex::default(),
             checking: Mutex::new(()),
             applying: Mutex::new(()),
             apply_pending: AtomicBool::new(false),
@@ -390,6 +417,16 @@ impl PluginService {
         let state = self.store.state();
         let errors = lock(&self.errors).clone();
         let known = lock(&self.known).clone();
+        let pending: BTreeMap<String, PendingView> = lock(&self.pending)
+            .iter()
+            .map(|(id, p)| {
+                let view = PendingView {
+                    version: p.release.version.clone(),
+                    added: p.added.clone(),
+                };
+                (id.clone(), view)
+            })
+            .collect();
         let installed = state
             .plugins
             .iter()
@@ -410,6 +447,7 @@ impl PluginService {
                     } else {
                         PluginState::Enabled
                     },
+                    pending_update: pending.get(id).cloned(),
                 }
             })
             .collect();
@@ -630,6 +668,7 @@ impl PluginService {
             lock(&self.errors).remove(id);
             lock(&self.known).remove(id);
             lock(&self.conflicts).clear();
+            lock(&self.pending).remove(id);
         }
         removed
     }
@@ -887,6 +926,7 @@ impl PluginService {
                 &bad,
             ) {
                 PluginChoice::Keep => {
+                    lock(&self.pending).remove(id);
                     let listed = index
                         .plugins
                         .iter()
@@ -909,6 +949,7 @@ impl PluginService {
                     self.update_to(release, snapshot);
                 }
                 PluginChoice::Withdrawn if !snapshot.withdrawn => {
+                    lock(&self.pending).remove(id);
                     let _change = lock(&self.changing);
                     if self.still(id, snapshot).is_none() {
                         continue;
@@ -923,7 +964,9 @@ impl PluginService {
                         name: self.name_of(id),
                     });
                 }
-                PluginChoice::Withdrawn => {}
+                PluginChoice::Withdrawn => {
+                    lock(&self.pending).remove(id);
+                }
             }
         }
     }
@@ -946,8 +989,16 @@ impl PluginService {
 
     /// Installs `release` over `snapshot`, the version installed when it was chosen:
     /// downloaded and checked, then, under `changing` and only if the plugin is still
-    /// `snapshot`, loaded (if it is on; else checked only) and recorded.
+    /// `snapshot`, loaded (if it is on; else checked only) and recorded. A release whose
+    /// capabilities go beyond the installed version's is not installed: it waits for the
+    /// user ([`PluginService::confirm_update`]), told once, and the installed version runs on.
     fn update_to(&self, release: &PluginRelease, snapshot: &Installed) {
+        let waiting = lock(&self.pending).get(&release.id).is_some_and(|p| {
+            p.release.version == release.version && p.snapshot.version == snapshot.version
+        });
+        if waiting {
+            return;
+        }
         info!(plugin = %release.id, version = %release.version, "updating the plugin");
         let (package, bytes) = match self.download(release) {
             Ok(downloaded) => downloaded,
@@ -958,9 +1009,87 @@ impl PluginService {
             }
             Err(Download::Bad(e)) => return self.bad(release, e),
         };
+        let added = package
+            .manifest
+            .capabilities
+            .added_over(&self.capabilities_of(&release.id));
+        if added.is_empty() {
+            let _ = self.install_update(release, package, &bytes, snapshot);
+            return;
+        }
+        let _change = lock(&self.changing);
+        if self.still(&release.id, snapshot).is_none() {
+            return;
+        }
+        info!(plugin = %release.id, version = %release.version, ?added, "the plugin's update asks for more; it waits for the user");
+        let notice = PluginNotice::UpdateNeedsConfirmation {
+            name: package.manifest.name.clone(),
+            version: release.version.clone(),
+        };
+        lock(&self.pending).insert(
+            release.id.clone(),
+            PendingUpdate {
+                release: release.clone(),
+                package,
+                bytes,
+                snapshot: snapshot.clone(),
+                added,
+            },
+        );
+        (self.cfg.notify)(notice);
+    }
+
+    /// Installs the update of `id` waiting for the user ([`PluginNotice::UpdateNeedsConfirmation`]):
+    /// the user has seen what more it may do and agrees.
+    ///
+    /// # Errors
+    ///
+    /// No update of `id` waits, or it failed (also told in the tray); the plugin changed
+    /// meanwhile: nothing is done.
+    pub fn confirm_update(&self, id: &str) -> Result<(), PluginActionError> {
+        let Some(pending) = lock(&self.pending).remove(id) else {
+            return Err(PluginActionError::NothingToConfirm);
+        };
+        info!(plugin = id, version = %pending.release.version, "the user agrees to the plugin's update");
+        self.install_update(
+            &pending.release,
+            pending.package,
+            &pending.bytes,
+            &pending.snapshot,
+        )
+        .map_err(PluginActionError::Failed)
+    }
+
+    /// What the installed `id` may do: its package's capabilities (none known: nothing).
+    fn capabilities_of(&self, id: &str) -> Capabilities {
+        if let Some(known) = lock(&self.known).get(id) {
+            return known.capabilities.clone();
+        }
+        match self.store.load_package(id) {
+            Ok(package) => {
+                self.remember(&package);
+                package.manifest.capabilities
+            }
+            Err(e) => {
+                warn!(plugin = id, error = %e, "cannot read the installed plugin");
+                Capabilities::default()
+            }
+        }
+    }
+
+    /// The rest of [`PluginService::update_to`]: `package` of `release` installed over
+    /// `snapshot`, under `changing`, if the plugin is still `snapshot`. Why not, if it was
+    /// not.
+    fn install_update(
+        &self,
+        release: &PluginRelease,
+        package: Package,
+        bytes: &[u8],
+        snapshot: &Installed,
+    ) -> Result<(), String> {
         let _change = lock(&self.changing);
         let Some(fresh) = self.still(&release.id, snapshot) else {
-            return;
+            return Err("the plugin changed meanwhile".to_owned());
         };
         let enabled = fresh.enabled;
         let loaded = if enabled {
@@ -970,23 +1099,27 @@ impl PluginService {
         };
         if let Err(e) = loaded {
             self.refused(&release.id, &release.version, &e);
-            return self.failed(localized(&release.name), e.to_string());
+            self.failed(localized(&release.name), e.to_string());
+            return Err(e.to_string());
         }
-        if let Err(e) = self.store.install(&package, &bytes, Source::Catalog) {
+        if let Err(e) = self.store.install(&package, bytes, Source::Catalog) {
             warn!(plugin = %release.id, error = %e, "cannot record the plugin's update");
             if enabled {
                 // The version recorded runs again.
                 let _ = self.load_installed(&release.id);
             }
-            return self.failed(localized(&release.name), e.to_string());
+            self.failed(localized(&release.name), e.to_string());
+            return Err(e.to_string());
         }
         self.remember(&package);
         lock(&self.errors).remove(&release.id);
         lock(&self.conflicts).clear();
+        lock(&self.pending).remove(&release.id);
         (self.cfg.notify)(PluginNotice::Updated {
             name: package.manifest.name.clone(),
             version: package.manifest.version.clone(),
         });
+        Ok(())
     }
 
     /// Downloads the package of `release` and checks it against the index and this core.
@@ -1093,6 +1226,7 @@ impl PluginService {
         }
         info!(plugin = %id, version = %package.manifest.version, ?source, "plugin installed");
         lock(&self.conflicts).clear();
+        lock(&self.pending).remove(&id);
         self.remember(&package);
         lock(&self.errors).remove(&id);
         lock(&self.needed).remove(&id);
@@ -1144,6 +1278,7 @@ impl PluginService {
             Known {
                 name: package.manifest.name.clone(),
                 replaces: package.manifest.replaces.clone(),
+                capabilities: package.manifest.capabilities.clone(),
             },
         );
     }

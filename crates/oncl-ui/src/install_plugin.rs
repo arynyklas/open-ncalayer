@@ -266,7 +266,7 @@ fn texts(request: &InstallPluginRequest, l: Locale) -> WindowTexts {
 }
 
 /// What `capability` lets a plugin do, in `l`.
-fn capability_text(capability: &CapabilityLine, l: Locale) -> String {
+pub(crate) fn capability_text(capability: &CapabilityLine, l: Locale) -> String {
     let t = Texts::of(l);
     match capability {
         CapabilityLine::Keys => t.keys.to_owned(),

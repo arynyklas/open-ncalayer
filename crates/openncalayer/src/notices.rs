@@ -386,6 +386,37 @@ impl TrayStatus {
                 format!("«{}»: {error}", name.get(l)),
                 None,
             ),
+            PluginNotice::UpdateNeedsConfirmation { name, version } => {
+                let name = name.get(l);
+                (
+                    match l {
+                        Locale::Ru => "Обновление плагина ждёт разрешения",
+                        Locale::Kk => "Плагин жаңартуы рұқсат күтеді",
+                        Locale::En => "A plugin update waits for permission",
+                    }
+                    .to_owned(),
+                    match l {
+                        Locale::Ru => format!(
+                            "Версия {version} плагина «{name}» сможет больше, чем установленная. Установленная работает, пока вы не разрешите обновление в окне «Плагины»."
+                        ),
+                        Locale::Kk => format!(
+                            "«{name}» плагинінің {version} нұсқасы орнатылғаннан көп нәрсе істей алады. «Плагиндер» терезесінде жаңартуға рұқсат бермейінше, орнатылған нұсқа жұмыс істей береді."
+                        ),
+                        Locale::En => format!(
+                            "Version {version} of the plugin «{name}» can do more than the installed one. The installed one runs until you allow the update in the Plugins window."
+                        ),
+                    },
+                    Some(NotificationAction {
+                        label: match l {
+                            Locale::Ru => "Плагины…",
+                            Locale::Kk => "Плагиндер…",
+                            Locale::En => "Plugins…",
+                        }
+                        .to_owned(),
+                        target: ActionTarget::Command(TrayCommand::Plugins),
+                    }),
+                )
+            }
             PluginNotice::Needed { origin, name, .. } => {
                 let origin = origin.as_deref().map(page_text);
                 if self
@@ -1032,6 +1063,10 @@ mod tests {
                 name: name.clone(),
                 error: "boom".to_owned(),
             },
+            PluginNotice::UpdateNeedsConfirmation {
+                name: name.clone(),
+                version: oncl_update::Version::new(0, 3, 0),
+            },
         ];
         let t0 = Instant::now();
         let mut ru = TrayStatus::new(Locale::Ru, None);
@@ -1041,6 +1076,13 @@ mod tests {
         assert_eq!(
             ru.plugin_notification(&notices[3], t0).unwrap().body,
             "«Пример»: boom"
+        );
+        let n = ru.plugin_notification(&notices[4], t0).unwrap();
+        assert_eq!(n.title, "Обновление плагина ждёт разрешения");
+        assert!(n.body.contains("0.3.0"), "{}", n.body);
+        assert_eq!(
+            n.action.map(|a| a.target),
+            Some(ActionTarget::Command(TrayCommand::Plugins))
         );
         for l in [Locale::Kk, Locale::En] {
             let mut status = TrayStatus::new(l, None);

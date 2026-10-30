@@ -319,3 +319,6 @@ msgstr "Установить из файла…"
 
 msgid "Refresh the catalog"
 msgstr "Обновить каталог"
+
+msgid "Allow the update"
+msgstr "Разрешить обновление"

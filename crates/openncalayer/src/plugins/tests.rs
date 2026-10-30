@@ -1091,6 +1091,130 @@ fn an_update_blocked_by_a_local_plugin_waits_for_it_to_go() {
     );
 }
 
+/// The example at `version` that may also reach `https://wider.example/`.
+fn example_wider(version: &str) -> Vec<u8> {
+    example_at(version, |m| {
+        m.replacen(
+            r#"http = ["https://example.invalid/"]"#,
+            r#"http = ["https://example.invalid/", "https://wider.example/"]"#,
+            1,
+        )
+    })
+}
+
+/// How often the package of `version` was downloaded.
+fn package_downloads(sandbox: &Sandbox, version: &str) -> usize {
+    sandbox
+        .transport
+        .asked()
+        .iter()
+        .filter(|(url, ..)| *url == package_url(version))
+        .count()
+}
+
+#[test]
+fn an_update_that_may_do_more_waits_for_the_user() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    sandbox.installed_from_catalog(&service, 1, "0.1.0");
+    assert_eq!(sandbox.count(), 1);
+    let old = sandbox.release("0.1.0", &example("0.1.0"));
+    let wider = sandbox.release("0.2.0", &example_wider("0.2.0"));
+    sandbox.publish(2, vec![old.clone(), wider.clone()]);
+    service.check_now();
+    let waits = PluginNotice::UpdateNeedsConfirmation {
+        name: name(),
+        version: v("0.2.0"),
+    };
+    assert_eq!(sandbox.notices(), std::slice::from_ref(&waits));
+    // The installed version runs on, its instances kept.
+    assert_eq!(sandbox.installed_version(), Some(v("0.1.0")));
+    assert_eq!(sandbox.modules.loaded()[0].version, v("0.1.0"));
+    assert_eq!(sandbox.count(), 2);
+    let pending = service.view().installed[0].pending_update.clone().unwrap();
+    assert_eq!(pending.version, v("0.2.0"));
+    assert_eq!(
+        pending.added,
+        Capabilities {
+            http: vec!["https://wider.example/".parse().unwrap()],
+            ..Capabilities::default()
+        }
+    );
+    // Told once, downloaded once.
+    service.check_now();
+    assert!(sandbox.notices().is_empty());
+    assert_eq!(package_downloads(&sandbox, "0.2.0"), 1);
+    // Withdrawn from the catalog before the user answered: nothing waits any more.
+    sandbox.publish(3, vec![old.clone()]);
+    service.check_now();
+    assert_eq!(service.view().installed[0].pending_update, None);
+    assert_eq!(
+        service.confirm_update(ID),
+        Err(PluginActionError::NothingToConfirm)
+    );
+    // Offered again, and allowed.
+    sandbox.publish(4, vec![old, wider]);
+    service.check_now();
+    assert_eq!(sandbox.notices(), [waits]);
+    service.confirm_update(ID).unwrap();
+    assert_eq!(
+        sandbox.notices(),
+        [PluginNotice::Updated {
+            name: name(),
+            version: v("0.2.0"),
+        }]
+    );
+    assert_eq!(sandbox.installed_version(), Some(v("0.2.0")));
+    assert_eq!(sandbox.modules.loaded()[0].version, v("0.2.0"));
+    assert_eq!(service.view().installed[0].pending_update, None);
+    assert_eq!(
+        service.confirm_update(ID),
+        Err(PluginActionError::NothingToConfirm)
+    );
+}
+
+#[test]
+fn an_update_that_may_do_less_applies_at_once() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    let bytes = example_wider("0.1.0");
+    sandbox.publish(1, vec![sandbox.release("0.1.0", &bytes)]);
+    service.install_from_catalog(ID, None).unwrap();
+    sandbox.notices();
+    let old = sandbox.release("0.1.0", &bytes);
+    let narrower = sandbox.release("0.2.0", &example("0.2.0"));
+    sandbox.publish(2, vec![old, narrower]);
+    service.check_now();
+    assert_eq!(
+        sandbox.notices(),
+        [PluginNotice::Updated {
+            name: name(),
+            version: v("0.2.0"),
+        }]
+    );
+}
+
+#[test]
+fn a_removal_during_a_wider_updates_download_leaves_nothing_waiting() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    sandbox.installed_from_catalog(&service, 1, "0.1.0");
+    let old = sandbox.release("0.1.0", &example("0.1.0"));
+    let wider = sandbox.release("0.2.0", &example_wider("0.2.0"));
+    sandbox.publish(2, vec![old, wider]);
+    let removing = Arc::clone(&service);
+    sandbox
+        .transport
+        .during(&package_url("0.2.0"), move || removing.remove(ID).unwrap());
+    service.check_now();
+    assert!(sandbox.notices().is_empty());
+    assert!(service.view().installed.is_empty());
+    assert_eq!(
+        service.confirm_update(ID),
+        Err(PluginActionError::NothingToConfirm)
+    );
+}
+
 fn package_url(version: &str) -> String {
     format!("https://example.org/plugins/{ID}-{version}.onclp")
 }
