@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "channel": "beta",
+  "seq": 7,
+  "generated": "2026-11-01T00:00:00Z",
+  "expires": "2026-12-01T00:00:00Z",
+  "core": [
+    {
+      "version": "0.2.0",
+      "flavors": {
+        "win-x64": {
+          "url": "https://github.com/arynyklas/open-ncalayer/releases/download/v0.2.0/OpenNCALayer-0.2.0-win-x64-full.nupkg",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "size": 1000
+        }
+      },
+      "rollout": 100,
+      "revoked": false,
+      "notes_url": "https://github.com/arynyklas/open-ncalayer/releases/tag/v0.2.0"
+    },
+    {
+      "version": "0.3.0-beta.1",
+      "flavors": {
+        "win-x64": {
+          "url": "https://github.com/arynyklas/open-ncalayer/releases/download/v0.3.0-beta.1/OpenNCALayer-0.3.0-beta.1-win-x64-full.nupkg",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "size": 1000
+        }
+      },
+      "rollout": 50,
+      "revoked": false,
+      "notes_url": "https://github.com/arynyklas/open-ncalayer/releases/tag/v0.3.0-beta.1"
+    },
+    {
+      "version": "0.3.0-beta.2",
+      "flavors": {
+        "win-x64": {
+          "url": "https://github.com/arynyklas/open-ncalayer/releases/download/v0.3.0-beta.2/OpenNCALayer-0.3.0-beta.2-win-x64-full.nupkg",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "size": 1000
+        }
+      },
+      "rollout": 100,
+      "revoked": true,
+      "notes_url": "https://github.com/arynyklas/open-ncalayer/releases/tag/v0.3.0-beta.2"
+    }
+  ],
+  "plugins": [
+    {
+      "id": "io.github.arynyklas.openncalayer.port.alpha",
+      "version": "1.0.0",
+      "url": "https://github.com/arynyklas/open-ncalayer/releases/download/plugins-20261101/io.github.arynyklas.openncalayer.port.alpha-1.0.0.onclp",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "size": 4096,
+      "min_core": "0.2.0",
+      "modules": [
+        "ExampleAlpha"
+      ],
+      "replaces": {
+        "symname": "kz.example.alpha",
+        "version": "1.0"
+      },
+      "name": {
+        "ru": "Альфа (пример)",
+        "kk": "Альфа (мысал)",
+        "en": "Alpha (example)"
+      },
+      "rollout": 100,
+      "revoked": false
+    },
+    {
+      "id": "io.github.arynyklas.openncalayer.port.alpha",
+      "version": "1.1.0-beta.1",
+      "url": "https://github.com/arynyklas/open-ncalayer/releases/download/plugins-20261101/io.github.arynyklas.openncalayer.port.alpha-1.1.0-beta.1.onclp",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "size": 4096,
+      "min_core": "0.2.0",
+      "modules": [
+        "ExampleAlpha"
+      ],
+      "replaces": {
+        "symname": "kz.example.alpha",
+        "version": "1.0"
+      },
+      "name": {
+        "ru": "Альфа (пример)",
+        "kk": "Альфа (мысал)",
+        "en": "Alpha (example)"
+      },
+      "rollout": 25,
+      "revoked": false
+    },
+    {
+      "id": "io.github.arynyklas.openncalayer.port.alpha",
+      "version": "1.2.0-beta.1",
+      "url": "https://github.com/arynyklas/open-ncalayer/releases/download/plugins-20261101/io.github.arynyklas.openncalayer.port.alpha-1.2.0-beta.1.onclp",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "size": 4096,
+      "min_core": "0.2.0",
+      "modules": [
+        "ExampleAlpha"
+      ],
+      "replaces": {
+        "symname": "kz.example.alpha",
+        "version": "1.0"
+      },
+      "name": {
+        "ru": "Альфа (пример)",
+        "kk": "Альфа (мысал)",
+        "en": "Alpha (example)"
+      },
+      "rollout": 100,
+      "revoked": true
+    },
+    {
+      "id": "io.github.arynyklas.openncalayer.port.hostile",
+      "version": "0.1.0-beta.1",
+      "url": "https://github.com/arynyklas/open-ncalayer/releases/download/plugins-20261101/io.github.arynyklas.openncalayer.port.hostile-0.1.0-beta.1.onclp",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "size": 4096,
+      "min_core": "0.3.0-beta.1",
+      "modules": [
+        "ExampleHostile"
+      ],
+      "replaces": {
+        "symname": "kz.example.hostile",
+        "version": "1.0"
+      },
+      "name": {
+        "ru": "<script>alert(1)</script>",
+        "kk": "<script>alert(1)</script>",
+        "en": "<script>alert(1)</script>"
+      },
+      "rollout": 100,
+      "revoked": false
+    }
+  ]
+}

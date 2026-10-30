@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "manifest": {
+    "version": "1.4",
+    "info": "<script>alert(1)</script> \"><img src=x onerror=alert(1)> {{ config.base_url }} {% raw %} &amp; '"
+  },
+  "bundles": {
+    "kz.example.alpha": {
+      "version": "1.0",
+      "required": false,
+      "name": "<script>alert(1)</script> \"><img src=x onerror=alert(1)> {{ config.base_url }} {% raw %} &amp; '"
+    },
+    "kz.example.gamma": {
+      "version": "1.1",
+      "required": false
+    },
+    "kz.gov.pki.kalkan.xmldsig": {
+      "version": "0.5.9",
+      "required": true
+    },
+    "kz.example.unported": {
+      "version": "2.0",
+      "required": false
+    },
+    "kz.example.core-only": {
+      "version": "3.0",
+      "required": true
+    }
+  }
+}

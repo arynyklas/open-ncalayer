@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "channel": "stable",
+  "seq": 3,
+  "generated": "2026-11-01T00:00:00Z",
+  "expires": "2026-12-01T00:00:00Z",
+  "core": [
+    {
+      "version": "0.1.0",
+      "flavors": {
+        "win-x64": {
+          "url": "https://github.com/arynyklas/open-ncalayer/releases/download/v0.1.0/OpenNCALayer-0.1.0-win-x64-full.nupkg",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "size": 1000
+        }
+      },
+      "rollout": 100,
+      "revoked": false,
+      "notes_url": "https://github.com/arynyklas/open-ncalayer/releases/tag/v0.1.0"
+    },
+    {
+      "version": "0.2.0",
+      "flavors": {
+        "win-x64": {
+          "url": "https://github.com/arynyklas/open-ncalayer/releases/download/v0.2.0/OpenNCALayer-0.2.0-win-x64-full.nupkg",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "size": 1000
+        }
+      },
+      "rollout": 100,
+      "revoked": false,
+      "notes_url": "https://github.com/arynyklas/open-ncalayer/releases/tag/v0.2.0"
+    }
+  ],
+  "plugins": [
+    {
+      "id": "io.github.arynyklas.openncalayer.port.alpha",
+      "version": "1.0.0",
+      "url": "https://github.com/arynyklas/open-ncalayer/releases/download/plugins-20261101/io.github.arynyklas.openncalayer.port.alpha-1.0.0.onclp",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "size": 4096,
+      "min_core": "0.2.0",
+      "modules": [
+        "ExampleAlpha"
+      ],
+      "replaces": {
+        "symname": "kz.example.alpha",
+        "version": "1.0"
+      },
+      "name": {
+        "ru": "Альфа (пример)",
+        "kk": "Альфа (мысал)",
+        "en": "Alpha (example)"
+      },
+      "rollout": 100,
+      "revoked": false
+    }
+  ]
+}

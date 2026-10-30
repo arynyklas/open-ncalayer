@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "id": "2026-10-01-1.3-0a1b2c3d",
+      "date": "2026-10-01",
+      "observed": "2026-10-01T06:00:00Z",
+      "version": "1.3",
+      "key8": "0a1b2c3d",
+      "path": "history/2026-10-01-1.3-0a1b2c3d/",
+      "kind": "baseline",
+      "summary": {
+        "core": [],
+        "plugins": [],
+        "distributions": [],
+        "notes": [
+          "Первое наблюдение"
+        ]
+      },
+      "issues": []
+    },
+    {
+      "id": "2026-10-20-1.4-4e5f6a7b",
+      "date": "2026-10-20",
+      "observed": "2026-10-20T12:00:00Z",
+      "version": "1.4",
+      "key8": "4e5f6a7b",
+      "path": "../x",
+      "kind": "change",
+      "summary": {
+        "core": [
+          "kz.gov.pki.kalkan.xmldsig"
+        ],
+        "plugins": [
+          {
+            "symname": "kz.example.gamma",
+            "from": "1.0",
+            "to": "1.1",
+            "change": "changed"
+          },
+          {
+            "symname": "kz.example.hostile",
+            "from": "1.0",
+            "to": null,
+            "change": "removed"
+          },
+          {
+            "symname": "kz.example.unported",
+            "from": null,
+            "to": "2.0",
+            "change": "added"
+          }
+        ],
+        "distributions": [
+          "setupexe"
+        ],
+        "notes": [
+          "<script>alert(1)</script> \"><img src=x onerror=alert(1)> {{ config.base_url }} {% raw %} &amp; '"
+        ]
+      },
+      "issues": [
+        {
+          "key": "bundle:kz.example.gamma",
+          "number": 17,
+          "label": "upstream"
+        }
+      ],
+      "extra_field": true
+    }
+  ]
+}
