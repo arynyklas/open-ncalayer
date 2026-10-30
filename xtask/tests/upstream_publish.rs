@@ -585,14 +585,32 @@ fn labels_created_once() {
 fn alert_dedup_by_day() {
     let s = Setup::new();
     let client = s.client();
+    let run = |n: u32| format!("https://github.com/o/r/actions/runs/{n}");
     assert_eq!(
-        alert(AlertKind::CollectFailed, "x", None, &client, "2026-10-31").unwrap(),
+        alert(
+            AlertKind::CollectFailed,
+            "x",
+            Some(&run(1)),
+            &client,
+            "2026-10-31"
+        )
+        .unwrap(),
         Action::Created(1)
     );
+    s.github.clear_requests();
+    // Another run the same day, with another URL and detail: created or skipped, no edits.
     assert_eq!(
-        alert(AlertKind::CollectFailed, "x", None, &client, "2026-10-31").unwrap(),
+        alert(
+            AlertKind::CollectFailed,
+            "y",
+            Some(&run(2)),
+            &client,
+            "2026-10-31"
+        )
+        .unwrap(),
         Action::Skipped(1)
     );
+    assert!(s.writes().is_empty(), "{:?}", s.writes());
     assert_eq!(
         alert(AlertKind::CollectFailed, "x", None, &client, "2026-11-01").unwrap(),
         Action::Created(2)

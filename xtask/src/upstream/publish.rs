@@ -20,7 +20,7 @@ use super::facts::{Facts, key8};
 use super::github::{Client, IssueState};
 use super::poll::{AlertKind, Change};
 use super::pretty_json;
-use super::report::{Issue, PortRef, RenderCtx, render, render_alert};
+use super::report::{Issue, Label, PortRef, RenderCtx, render, render_alert};
 use super::run::files_under;
 use super::state::State;
 
@@ -228,12 +228,13 @@ fn apply_issue(
             Action::Created(number)
         }
         Some(s) if s.body.trim_end() == issue.body.trim_end() => Action::Skipped(s.number),
-        Some(s) if dry_run => Action::Skipped(s.number),
+        // An alert is one issue per kind and day: later runs of the day leave it as it is.
+        Some(s) if dry_run || issue.label == Label::UpstreamAlert => Action::Skipped(s.number),
         Some(s) => {
-            let note = match entry {
-                Some(id) => format!("Обновлено {date}: факты записи {id}"),
-                None => format!("Повторилось {date}"),
-            };
+            let note = format!(
+                "Обновлено {date}: факты записи {}",
+                entry.unwrap_or_default()
+            );
             if s.open {
                 client.update_body(s.number, &issue.body)?;
                 client.comment(s.number, &note)?;
