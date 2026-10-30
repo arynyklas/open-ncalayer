@@ -6,17 +6,20 @@
 //! and the issues are written from it (`docs/dev/upstream-watch.md`).
 
 pub mod artifact;
+pub mod branch;
 pub mod branch_layout;
 pub mod classfile;
 pub mod cli;
 pub mod diff;
 pub mod facts;
+pub mod github;
 pub mod http;
 pub mod inventory;
 pub mod jar;
 pub mod manifest;
 pub mod meta;
 pub mod poll;
+pub mod publish;
 pub mod report;
 pub mod run;
 pub mod sources;
