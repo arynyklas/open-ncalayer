@@ -96,13 +96,14 @@ jobs:
         run: rustup toolchain install
       - uses: ./.github/actions/pinned-toolchains
       # No cache here: this job can write, and the artifact is checked, not trusted.
+      # Facts only from a collect job that finished, its JSON-only check included.
       - uses: actions/download-artifact@v5
-        if: needs.collect.outputs.changed == 'true' || needs.collect.outputs.alert == 'true'
+        if: needs.collect.result == 'success' && (needs.collect.outputs.changed == 'true' || needs.collect.outputs.alert == 'true')
         with:
           name: upstream-facts
           path: out
       - name: Publish
-        if: needs.collect.outputs.changed == 'true' || needs.collect.outputs.alert == 'true'
+        if: needs.collect.result == 'success' && (needs.collect.outputs.changed == 'true' || needs.collect.outputs.alert == 'true')
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -112,8 +113,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo xtask upstream issues --branch-dir "$RUNNER_TEMP/upstream"
+      # Raised even if a step above failed.
       - name: Alert
-        if: needs.collect.result == 'failure'
+        if: ${{ !cancelled() && needs.collect.result == 'failure' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
