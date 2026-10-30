@@ -13,4 +13,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 oncl-pdk.workspace = true
+oncl-port-kit.workspace = true
 oncl-port-pki.workspace = true

@@ -2059,13 +2059,50 @@ fn workspace_body_codes_numbers() {
             workspace_sign(r#"["aGVsbG8="]"#),
             r#"{"code":500,"message":"отмена ввода пароля"}"#,
         ),
+        // The password window comes first; closing it cancels.
         (
             workspace("getKaztokenKeys", "{}"),
-            r#"{"code":200,"body":[]}"#,
+            r#"{"code":500,"message":"отмена ввода пароля"}"#,
         ),
     ] {
         assert_eq!(text(session.call(&request, None)), reply, "{request}");
     }
+}
+
+#[test]
+fn workspace_kaztoken_keys() {
+    let name = "user-gost2015-sign";
+    let harness = Harness::new(
+        vec![
+            Step::Password(TOKEN_PIN.to_owned()),
+            Step::Password("000000".to_owned()),
+        ],
+        vec![],
+    )
+    .with_tokens(kaztoken_emulator(name));
+    let mut session = harness.session("workspace");
+    let reply = text(session.call(&workspace("getKaztokenKeys", "{}"), None));
+    assert!(
+        reply.starts_with(r#"{"code":200,"body":[{"notAfter":""#),
+        "{reply}"
+    );
+    assert_key_order(&reply, &["notAfter", "alias", "dn", "alg"]);
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    let keys = value["body"].as_array().unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["dn"], subject_dn(name));
+    assert_eq!(keys[0]["alg"], "ECGOST3410-2015");
+    let date = keys[0]["notAfter"].as_str().unwrap();
+    assert!(
+        date.len() == 10 && date.as_bytes()[2] == b'.' && date.as_bytes()[5] == b'.',
+        "{date}"
+    );
+    assert!(keys[0]["alias"].as_str().is_some_and(|a| !a.is_empty()));
+    assert_eq!(
+        text(session.call(&workspace("getKaztokenKeys", "{}"), None)),
+        r#"{"code":500,"message":"Неверный пароль"}"#
+    );
+    assert_eq!(harness.prompter().password_prompts().len(), 2);
 }
 
 #[test]
@@ -2747,5 +2784,48 @@ fn motiw_token_sign_and_verify_with_time_stamp() {
     assert_eq!(
         sign(&mut session, "nope", 1),
         r#"{"responseObject":"","code":"500","uuid":"7"}"#
+    );
+}
+
+/// [`with_synthetic_ocsp`] whose responder says the synthetic key `name` is revoked.
+fn with_revoked_ocsp(steps: Vec<Step>, name: &str) -> Harness {
+    let serial: String = entry(name)
+        .cert
+        .tbs_certificate()
+        .serial_number()
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let ocsp = oncl_pki::ocsp::MockOcsp::new(entry("ocsp-gost2015")).status(
+        &serial,
+        oncl_pki::ocsp::CertStatus::Revoked {
+            time: OffsetDateTime::now_utc() - time::Duration::days(1),
+            reason: Some(1),
+        },
+    );
+    let ocsp: std::sync::Arc<dyn oncl_pki::http::HttpTransport> = std::sync::Arc::new(ocsp);
+    Harness::new(steps, vec![("http://ocsp.synthetic.test".to_owned(), ocsp)])
+        .with_pki_hosts(&["ocsp.synthetic.test"])
+        .with_clock(OffsetDateTime::now_utc)
+}
+
+#[test]
+fn revoked_signer_texts_are_fixed() {
+    let name = "inter-user-gost2015-sign";
+    let harness = with_revoked_ocsp(pick(name, 0), name);
+    assert_eq!(
+        text(harness.call("workspace", &workspace_sign(r#"["aGVsbG8="]"#), None)),
+        r#"{"code":500,"message":"Certificate is revoked"}"#
+    );
+    let harness = with_revoked_ocsp(simourg_pick(name), name);
+    let reply = text(harness.call(
+        "simourg",
+        &simourg("createCMSSignatureWithTspFromBase64", SIMOURG_ARGS),
+        None,
+    ));
+    assert!(
+        reply.contains("Ошибка: Certificate is revoked\""),
+        "{reply}"
     );
 }
