@@ -7,9 +7,12 @@
 
 pub mod artifact;
 pub mod branch_layout;
+pub mod classfile;
 pub mod cli;
+pub mod facts;
 pub mod http;
 pub mod inventory;
+pub mod jar;
 pub mod manifest;
 pub mod meta;
 pub mod poll;
