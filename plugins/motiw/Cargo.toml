@@ -1,0 +1,18 @@
+[package]
+name = "oncl-port-motiw"
+description = "OpenNCALayer port of the Motiware module service (ru.motiw.ModuleService): storages, containers, CMS on tokens and CMS verification"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+der.workspace = true
+x509-cert.workspace = true
+oncl-pdk.workspace = true
+oncl-port-pki.workspace = true

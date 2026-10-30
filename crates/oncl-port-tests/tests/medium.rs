@@ -1987,3 +1987,600 @@ fn dogovor24_client_auth_rejected() {
         r#"{"code":"500","message":"Необходимо использовать ключ для подписи!","uuid":"d-1"}"#
     );
 }
+
+/// The synthetic certificate `name` (`fixtures/synthetic/<name>.cer`) as base64.
+fn cer_b64(name: &str) -> String {
+    oncl_protocol::javab64::encode_mime(&oncl_testkit::synthetic_cert(name)).replace("\r\n", "")
+}
+
+/// A harness whose `http://ocsp.synthetic.test`, the responder the certificates of the
+/// intermediate CA name, is a PKI host answered by the synthetic responder. Its clock is
+/// the system's: the responder dates its answers now, and checked answers must be fresh.
+fn with_synthetic_ocsp(steps: Vec<Step>) -> Harness {
+    let ocsp: std::sync::Arc<dyn oncl_pki::http::HttpTransport> =
+        std::sync::Arc::new(oncl_pki::ocsp::MockOcsp::new(entry("ocsp-gost2015")));
+    Harness::new(steps, vec![("http://ocsp.synthetic.test".to_owned(), ocsp)])
+        .with_pki_hosts(&["ocsp.synthetic.test"])
+        .with_clock(OffsetDateTime::now_utc)
+}
+
+// workspace
+
+const WORKSPACE: &str = "kz.workspace.Signer";
+
+fn workspace(method: &str, args: &str) -> String {
+    format!(r#"{{"module":"{WORKSPACE}","method":"{method}","args":{args}}}"#)
+}
+
+/// `sign` of `files` (base64) for the user key under root-gost2015.
+fn workspace_sign(files: &str) -> String {
+    workspace(
+        "sign",
+        &format!(
+            r#"{{"files":{files},"fileNames":"a.pdf<>b.pdf","storagePath":"C:\\ignored.p12","issuerCert":"{}"}}"#,
+            cer_b64("inter-gost2015")
+        ),
+    )
+}
+
+/// The CMSs of a workspace reply's `body`.
+fn workspace_body(reply: &str) -> Vec<Vec<u8>> {
+    let value: serde_json::Value = serde_json::from_str(reply).unwrap();
+    value["body"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|cms| decode_java(cms.as_str().unwrap()).unwrap())
+        .collect()
+}
+
+#[test]
+fn workspace_body_codes_numbers() {
+    let harness = with_synthetic_ocsp(pick("inter-user-gost2015-sign", 0));
+    let reply = text(harness.call(
+        "workspace",
+        &workspace_sign(r#"["aGVsbG8=","d29ybGQ="]"#),
+        None,
+    ));
+    assert!(reply.starts_with(r#"{"code":200,"body":["MI"#), "{reply}");
+    assert_eq!(workspace_body(&reply).len(), 2);
+    let harness = Harness::new(vec![Step::CancelStorage], vec![]);
+    let mut session = harness.session("workspace");
+    for (request, reply) in [
+        (
+            workspace("signCms", "{}"),
+            r#"{"code":500,"message":"Wrong method. Try 'createCMSSignature'"}"#,
+        ),
+        (
+            format!(r#"{{"module":"{WORKSPACE}","method":"sign"}}"#),
+            r#"{"code":500,"message":"JSONObject[\"args\"] not found."}"#,
+        ),
+        (
+            workspace_sign(r#"["aGVsbG8="]"#),
+            r#"{"code":500,"message":"отмена ввода пароля"}"#,
+        ),
+        (
+            workspace("getKaztokenKeys", "{}"),
+            r#"{"code":200,"body":[]}"#,
+        ),
+    ] {
+        assert_eq!(text(session.call(&request, None)), reply, "{request}");
+    }
+}
+
+#[test]
+fn workspace_sled_and_attachments() {
+    let harness = with_synthetic_ocsp(pick("inter-user-gost2015-sign", 0));
+    let reply = text(harness.call(
+        "workspace",
+        &workspace_sign(r#"["aGVsbG8=","d29ybGQ="]"#),
+        None,
+    ));
+    let body = workspace_body(&reply);
+    // The SLED card: detached, the ESEDO attributes with the names and the OCSP answer.
+    let sled = cms_view(&body[0]);
+    oncl_pki::cms::verify(&body[0], Some(b"hello")).unwrap();
+    assert!(sled.econtent.is_none());
+    let mut types = sled.signed_types();
+    types.sort_unstable();
+    assert_eq!(
+        types,
+        [
+            "1.2.840.113549.1.9.13",
+            "1.2.840.113549.1.9.3",
+            "1.2.840.113549.1.9.4",
+            "1.2.840.113549.1.9.5",
+            "1.2.840.113549.1.9.77",
+            "1.3.6.1.4.1.6801.2.8",
+            "1.3.6.1.5.5.7.48.1.1",
+        ]
+    );
+    assert_eq!(sled.signed("1.2.840.113549.1.9.13")[0], ESEDO_DESCRIPTION);
+    assert_eq!(sled.signed("1.2.840.113549.1.9.5")[0][0], 0x18);
+    // OCTET STRING { BasicOCSPResponse { tbsResponseData, … } }.
+    let ocsp = &sled.signed("1.3.6.1.5.5.7.48.1.1")[0];
+    assert_eq!(ocsp[0], 0x04);
+    assert_eq!(children(tlv(tlv(ocsp).2).2)[0].0, 0x30);
+    assert!(sled.tokens().is_empty());
+    // The attachment: attached, no names, no OCSP, a time-stamp (SHA-1, policy …6.1).
+    let attachment = cms_view(&body[1]);
+    assert_eq!(attachment.econtent.as_deref(), Some(&b"world"[..]));
+    let mut types = attachment.signed_types();
+    types.sort_unstable();
+    assert_eq!(
+        types,
+        [
+            "1.2.840.113549.1.9.13",
+            "1.2.840.113549.1.9.3",
+            "1.2.840.113549.1.9.4",
+            "1.2.840.113549.1.9.5",
+            "1.3.6.1.4.1.6801.2.8",
+        ]
+    );
+    let tokens = attachment.tokens();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(
+        token_policy_and_hash(&tokens[0]),
+        ("1.2.398.3.3.2.6.1".to_owned(), "1.3.14.3.2.26".to_owned())
+    );
+    let log = harness.http_log();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert!(
+        log[0].starts_with("GET http://ocsp.synthetic.test/"),
+        "{log:?}"
+    );
+    assert!(log[1].starts_with("GET http://tsp.pki.gov.kz/"), "{log:?}");
+}
+
+#[test]
+fn workspace_repeats_files_1() {
+    let harness = with_synthetic_ocsp(pick("inter-user-gost2015-sign", 0));
+    let reply = text(harness.call(
+        "workspace",
+        &workspace_sign(r#"["aGVsbG8=","d29ybGQ=","b3RoZXI="]"#),
+        None,
+    ));
+    let body = workspace_body(&reply);
+    assert_eq!(body.len(), 3);
+    for cms in &body[1..] {
+        assert_eq!(cms_view(cms).econtent.as_deref(), Some(&b"world"[..]));
+    }
+}
+
+#[test]
+fn workspace_argument_errors() {
+    for (files, message) in [
+        ("[]", "Index: 0, Size: 0"),
+        (r#"["aGVsbG8=",5]"#, "JSONArray[1] is not a String."),
+    ] {
+        let harness = with_synthetic_ocsp(pick("inter-user-gost2015-sign", 0));
+        assert_eq!(
+            text(harness.call("workspace", &workspace_sign(files), None)),
+            format!(r#"{{"code":500,"message":"{message}"}}"#),
+            "{files}"
+        );
+    }
+    // Without the page's issuer certificate the OCSP request cannot be made.
+    let harness = with_synthetic_ocsp(pick("inter-user-gost2015-sign", 0));
+    assert_eq!(
+        text(harness.call(
+            "workspace",
+            &workspace("sign", r#"{"files":["aGVsbG8="]}"#),
+            None
+        )),
+        r#"{"code":500,"message":"TARGET_CERT_ISSUER_NOT_FOUND"}"#
+    );
+}
+
+static WORKSPACE_TICKS: AtomicI64 = AtomicI64::new(0);
+
+/// The system's clock, moving 3 seconds more every time it is read.
+fn workspace_clock() -> OffsetDateTime {
+    OffsetDateTime::now_utc()
+        + time::Duration::seconds(WORKSPACE_TICKS.fetch_add(3, Ordering::SeqCst))
+}
+
+#[test]
+fn workspace_watchdog_timeout_text() {
+    let harness =
+        with_synthetic_ocsp(pick("inter-user-gost2015-sign", 0)).with_clock(workspace_clock);
+    assert_eq!(
+        text(harness.call(
+            "workspace",
+            &workspace_sign(r#"["aGVsbG8=","d29ybGQ=","d29ybGQ=","d29ybGQ=","d29ybGQ="]"#),
+            None
+        )),
+        r#"{"code":500,"message":"процесс остановлен по таймауту"}"#
+    );
+}
+
+// Simourg
+
+const SIMOURG: &str = "kz.Simourg.SimBASEModule";
+
+fn simourg(method: &str, args: &str) -> String {
+    format!(r#"{{"module":"{SIMOURG}","method":"{method}","args":{args}}}"#)
+}
+
+/// Picks the synthetic key `name` and presses «Подписать».
+fn simourg_pick(name: &str) -> Vec<Step> {
+    let mut steps = pick(name, 0);
+    steps.push(Step::Choice {
+        button: 0,
+        option: None,
+    });
+    steps
+}
+
+const SIMOURG_ARGS: &str = r#"["PKCS12","SIGNATURE","aGVsbG8=",true,"a.pdf<>b.pdf"]"#;
+
+#[test]
+fn simourg_salem_ait() {
+    let harness = Harness::new(vec![], vec![]);
+    let mut session = harness.session("simourg");
+    assert_eq!(
+        text(session.call(&simourg("salemAit", r#"{"username":"Aryn"}"#), None)),
+        r#"{"success":true,"body":{"result":"Salem, Aryn"}}"#
+    );
+    assert_eq!(
+        text(session.call(&simourg("salemAit", "{}"), None)),
+        r#"{"success":true,"body":{"result":"Salem, Silent Bob"}}"#
+    );
+    assert_eq!(session.call(&simourg("salemAit", "[]"), None), Reply::Drop);
+    assert_eq!(
+        text(session.call(&simourg("sign", "{}"), None)),
+        r#"{"success":false,"errorCode":"method_not_defined","message":"Error method sign is not defined"}"#
+    );
+}
+
+#[test]
+fn simourg_cades_bare_basic_ocsp_attr() {
+    let harness = with_synthetic_ocsp(simourg_pick("inter-user-gost2015-sign"));
+    let reply = text(harness.call(
+        "simourg",
+        &simourg("createCMSSignatureWithTspFromBase64", SIMOURG_ARGS),
+        None,
+    ));
+    assert!(reply.starts_with(r#"{"responseObject":"MI"#), "{reply}");
+    assert!(
+        reply.ends_with(r#"","code":"200","message":"Ok"}"#),
+        "{reply}"
+    );
+    let cms = reply_cms(&reply);
+    oncl_pki::cms::verify(&cms, None).unwrap();
+    let view = cms_view(&cms);
+    assert_eq!(view.econtent.as_deref(), Some(&b"hello"[..]));
+    let mut types = view.signed_types();
+    types.sort_unstable();
+    assert_eq!(
+        types,
+        [
+            "1.2.840.113549.1.9.16.2.47",
+            "1.2.840.113549.1.9.3",
+            "1.2.840.113549.1.9.4",
+            "1.2.840.113549.1.9.5",
+            "1.2.840.113549.1.9.77",
+            "1.3.6.1.5.5.7.48.1.1",
+        ]
+    );
+    // The BasicOCSPResponse itself in the SET: SEQUENCE { tbsResponseData, … }.
+    let ocsp = &view.signed("1.3.6.1.5.5.7.48.1.1")[0];
+    assert_eq!(ocsp[0], 0x30);
+    assert_eq!(children(tlv(ocsp).2)[0].0, 0x30);
+    let tokens = view.tokens();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(token_policy_and_hash(&tokens[0]).0, "1.2.398.3.3.2.6.2");
+    let log = harness.http_log();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert!(
+        log[0].starts_with("GET http://ocsp.synthetic.test/"),
+        "{log:?}"
+    );
+    assert!(log[1].starts_with("GET http://tsp.pki.gov.kz"), "{log:?}");
+}
+
+#[test]
+fn simourg_esedo_double_stamp_replaced() {
+    let harness = Harness::new(simourg_pick("user-gost2015-sign"), vec![]);
+    let reply = text(harness.call("simourg", &simourg("createCMSForEsedo", SIMOURG_ARGS), None));
+    assert!(
+        reply.ends_with(r#"","code":"200","message":"Ok"}"#),
+        "{reply}"
+    );
+    let cms = reply_cms(&reply);
+    oncl_pki::cms::verify(&cms, Some(b"hello")).unwrap();
+    let view = cms_view(&cms);
+    assert!(view.econtent.is_none());
+    let mut types = view.signed_types();
+    types.sort_unstable();
+    assert_eq!(
+        types,
+        [
+            "1.2.840.113549.1.9.13",
+            "1.2.840.113549.1.9.3",
+            "1.2.840.113549.1.9.4",
+            "1.2.840.113549.1.9.5",
+            "1.2.840.113549.1.9.77",
+            "1.3.6.1.5.5.7.48.1.1",
+        ]
+    );
+    assert_eq!(
+        view.signed("1.2.840.113549.1.9.13")[0],
+        [0x13, 5, b'E', b'S', b'E', b'D', b'O']
+    );
+    assert_eq!(view.signed("1.3.6.1.5.5.7.48.1.1")[0][0], 0x04);
+    // The GOST time-stamp is replaced by Kalkan's.
+    let tokens = view.tokens();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(token_policy_and_hash(&tokens[0]).0, "1.2.398.3.3.2.6.2");
+    let log = harness.http_log();
+    assert_eq!(log.len(), 3, "{log:?}");
+    assert_eq!(log[0], "POST http://ocsp.pki.gov.kz/");
+    assert!(log[1].starts_with("GET http://tsp.pki.gov.kz/"), "{log:?}");
+    assert!(log[2].starts_with("GET http://tsp.pki.gov.kz"), "{log:?}");
+}
+
+#[test]
+fn simourg_choose_other_keys_loop() {
+    let mut steps = pick("user-gost2004-sign", 0);
+    steps.push(Step::Choice {
+        button: 1,
+        option: None,
+    });
+    steps.extend(simourg_pick("user-gost2015-sign"));
+    let harness = Harness::new(steps, vec![]);
+    let reply = text(harness.call("simourg", &simourg("createCMSForEsedo", SIMOURG_ARGS), None));
+    assert!(
+        reply.ends_with(r#""code":"200","message":"Ok"}"#),
+        "{reply}"
+    );
+    let cms = reply_cms(&reply);
+    let signers = oncl_pki::cms::verify(&cms, Some(b"hello")).unwrap();
+    assert_eq!(signers[0].sig_alg, SigAlg::Gost2015_512);
+    let choices = harness.prompter().choice_prompts();
+    assert_eq!(choices.len(), 2);
+}
+
+#[test]
+fn simourg_error_prefix() {
+    let harness = Harness::new(vec![], vec![]);
+    let mut session = harness.session("simourg");
+    for (storage, message) in [
+        ("", "Error: storageName.param.empty"),
+        ("BKS", "Error: Unknown storage"),
+        ("AKKaztokenStore", "Error: Empty storage"),
+        // The empty script closes the dialog.
+        ("PKCS12", "Cancel"),
+    ] {
+        assert_eq!(
+            text(session.call(
+                &simourg(
+                    "createCMSForEsedo",
+                    &format!(r#"["{storage}","SIGNATURE","aGVsbG8=",false,"x"]"#)
+                ),
+                None
+            )),
+            format!(r#"{{"code":"500","message":"{message}"}}"#)
+        );
+    }
+    let harness = Harness::new(simourg_pick("user-gost2015-sign"), vec![]);
+    assert_eq!(
+        text(harness.call(
+            "simourg",
+            &simourg(
+                "createCMSSignatureWithTspFromBase64",
+                r#"["PKCS12","NONE","a-b=",false,"x"]"#
+            ),
+            None
+        )),
+        r#"{"code":"500","message":"Error: Illegal base64 character 2d"}"#
+    );
+}
+
+#[test]
+fn simourg_missing_args_drop() {
+    let harness = Harness::new(vec![], vec![]);
+    let mut session = harness.session("simourg");
+    for request in [
+        format!(r#"{{"module":"{SIMOURG}","method":"createCMSForEsedo"}}"#),
+        simourg(
+            "createCMSForEsedo",
+            r#"["PKCS12","SIGNATURE","aGVsbG8=",false]"#,
+        ),
+        simourg("createCMSSignatureWithTspFromBase64", r#"{"a":1}"#),
+    ] {
+        assert_eq!(session.call(&request, None), Reply::Drop, "{request}");
+    }
+    assert!(harness.prompter().timeline().is_empty());
+}
+
+// motiw
+
+const MOTIW: &str = "ru.motiw.ModuleService";
+
+fn motiw(method: &str, args: &str) -> String {
+    format!(r#"{{"module":"{MOTIW}","method":"{method}","uuid":"7","args":{args}}}"#)
+}
+
+#[test]
+fn motiw_storages_list() {
+    let harness = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(harness.call(
+            "motiw",
+            &format!(r#"{{"module":"{MOTIW}","method":"getStoragesList","uuid":"7"}}"#),
+            None
+        )),
+        r#"{"responseObject":["PKCS12"],"code":"200","message":"","uuid":"7"}"#
+    );
+    assert_eq!(
+        text(harness.call("motiw", &motiw("sing", "[]"), None)),
+        r#"{"code":"404","message":"Method not found","uuid":"7"}"#
+    );
+}
+
+#[test]
+fn motiw_container_list_files_empty() {
+    let harness = Harness::new(vec![], vec![]);
+    let mut session = harness.session("motiw");
+    assert_eq!(
+        text(session.call(&motiw("getContainerList", r#"["PKCS12"]"#), None)),
+        r#"{"responseObject":[],"code":"200","message":"","uuid":"7"}"#
+    );
+    assert_eq!(
+        text(session.call(&motiw("getContainerList", r#"["AKKaztokenStore"]"#), None)),
+        r#"{"responseObject":[],"code":"200","message":"","uuid":"7"}"#
+    );
+    assert_eq!(
+        text(session.call(&motiw("getContainerList", "[]"), None)),
+        r#"{"responseObject":"","code":"400","message":"Error length params. Actual 0, expected: 1","uuid":"7"}"#
+    );
+    assert_eq!(
+        text(session.call(&motiw("getContainerList", "[1]"), None)),
+        r#"{"responseObject":"","code":"400","message":"Error type param[0]. Actual class java.lang.Integer, expected: class java.lang.String","uuid":"7"}"#
+    );
+    // An unknown storage and missing arguments drop the connection.
+    assert_eq!(
+        session.call(&motiw("getContainerList", r#"["BKS"]"#), None),
+        Reply::Drop
+    );
+    assert_eq!(
+        session.call(
+            &format!(r#"{{"module":"{MOTIW}","method":"getContainerList"}}"#),
+            None
+        ),
+        Reply::Drop
+    );
+    assert_eq!(
+        session.call(&format!(r#"{{"module":"{MOTIW}","uuid":"7"}}"#), None),
+        Reply::Drop
+    );
+}
+
+#[test]
+fn motiw_certificate_list_404() {
+    let harness = Harness::new(vec![], vec![]);
+    let mut session = harness.session("motiw");
+    assert_eq!(
+        text(session.call(
+            &motiw("getCertificateList", r#"["PKCS12","abc","Qwerty12"]"#),
+            None
+        )),
+        r#"{"responseObject":"","code":"404","message":"Not found container by serial: abc","uuid":"7"}"#
+    );
+    assert_eq!(
+        text(session.call(
+            &motiw(
+                "sign",
+                r#"["PKCS12","abc","Qwerty12","alias","aGVsbG8=",1,true]"#
+            ),
+            None
+        )),
+        r#"{"responseObject":"","code":"404","message":"Not found container by serial: abc","uuid":"7"}"#
+    );
+    assert_eq!(
+        text(session.call(
+            &motiw(
+                "sign",
+                r#"["PKCS12","abc","Qwerty12","alias","aGVsbG8=","1",true]"#
+            ),
+            None
+        )),
+        r#"{"responseObject":"","code":"400","message":"Error type param[5]. Actual class java.lang.String, expected: class java.lang.Integer","uuid":"7"}"#
+    );
+}
+
+/// A CMS of `data` by the synthetic key `name`, attached or not, signed at `default_clock`.
+fn motiw_cms(name: &str, data: &[u8], attached: bool) -> String {
+    let cms = oncl_pki::cms::sign(
+        &entry(name),
+        data,
+        &oncl_pki::cms::SignOptions {
+            encapsulate: attached,
+            digested: false,
+            signing_time: default_clock(),
+        },
+    )
+    .unwrap();
+    oncl_protocol::javab64::encode_mime(&cms).replace("\r\n", "")
+}
+
+#[test]
+fn motiw_verify_ok_and_codes() {
+    let harness = Harness::new(vec![], vec![]);
+    let mut session = harness.session("motiw");
+    let verify = |session: &mut oncl_port_tests::SessionHandle, cms: &str, data: &str| {
+        text(session.call(&motiw("verify", &format!(r#"["{cms}","{data}"]"#)), None))
+    };
+    let reply = verify(
+        &mut session,
+        &motiw_cms("user-gost2015-sign", b"hello", true),
+        "",
+    );
+    assert!(
+        reply.starts_with(r#"{"responseObject":{"certificates":[{"#),
+        "{reply}"
+    );
+    assert!(
+        reply.ends_with(r#"}]},"code":"200","message":"","uuid":"7"}"#),
+        "{reply}"
+    );
+    assert_key_order(
+        &reply,
+        &[
+            "notAfter",
+            "serialNumber",
+            "subject",
+            "issuer",
+            "notBefore",
+            "algorithm",
+            "sigAlgName",
+        ],
+    );
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    let info = &value["responseObject"]["certificates"][0];
+    assert_eq!(info["sigAlgName"], "ECGOST3410-2015-512");
+    assert_eq!(info["algorithm"], "ECGOST3410-2015");
+    assert!(info["notAfter"].is_i64());
+    let detached = motiw_cms("user-gost2015-sign", b"hello", false);
+    assert!(verify(&mut session, &detached, "aGVsbG8=").contains(r#""code":"200""#));
+    for (cms, data, code) in [
+        (detached.clone(), "", "CMS_NO_ENCAPSULATED_DATA"),
+        (detached, "d29ybGQ=", "CMS_SIGNATURE_NOT_VALID"),
+        (
+            motiw_cms("expired-gost2015-sign", b"hello", true),
+            "",
+            "CERTIFICATE_DATE_NOT_VALID",
+        ),
+    ] {
+        assert_eq!(
+            verify(&mut session, &cms, data),
+            format!(r#"{{"code":"500","message":"{code}","uuid":"7"}}"#)
+        );
+    }
+}
+
+#[test]
+fn motiw_bad_base64_drops() {
+    let harness = Harness::new(vec![], vec![]);
+    let mut session = harness.session("motiw");
+    for args in [r#"["a-b=",""]"#, r#"["aGVsbG8=","!"]"#] {
+        assert_eq!(
+            session.call(&motiw("verify", args), None),
+            Reply::Drop,
+            "{args}"
+        );
+    }
+}
+
+#[test]
+fn motiw_show_storage_key() {
+    for steps in [pick("user-gost2015-sign", 0), vec![Step::CancelStorage]] {
+        let harness = Harness::new(steps, vec![]);
+        assert_eq!(
+            text(harness.call("motiw", &motiw("showStorageKey", "[]"), None)),
+            r#"{"code":"200","uuid":"7"}"#
+        );
+        assert_eq!(harness.prompter().storage_prompts().len(), 1);
+    }
+}

@@ -466,6 +466,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-motiw"
+version = "1.0.0-beta.1"
+dependencies = [
+ "der",
+ "oncl-pdk",
+ "oncl-port-pki",
+ "x509-cert",
+]
+
+[[package]]
 name = "oncl-port-pki"
 version = "0.1.0"
 dependencies = [
@@ -485,6 +495,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-simourg"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
+]
+
+[[package]]
 name = "oncl-port-taxtech"
 version = "1.0.0-beta.1"
 dependencies = [
@@ -496,6 +514,14 @@ name = "oncl-port-uchet-esf"
 version = "1.0.0-beta.1"
 dependencies = [
  "oncl-pdk",
+]
+
+[[package]]
+name = "oncl-port-workspace"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
 ]
 
 [[package]]

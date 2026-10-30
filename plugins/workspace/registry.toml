@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.workspace"
+modules = ["kz.workspace.Signer"]
+
+[original]
+symname = "kz.workspace.Signer"
+version = "1.3"
+vendor = "ТОО «Quant Tech»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Путь к файлу ключа от страницы (storagePath) и окно пароля заменены общими окнами OpenNCALayer: пользователь выбирает хранилище и ключ (оригинал брал последний ключ файла)."
+
+[[differences]]
+ru = "Ответ OCSP о подписанте проверяет OpenNCALayer по своим сертификатам УЦ; issuerCert страницы — издатель в запросе (у оригинала он же — единственный доверенный для ответчика). Тексты ошибок проверки OCSP — свои."
+
+[[differences]]
+ru = "«Процесс уже запущен» отслеживается в соединении, а не во всём процессе. Ключи Kaztoken (isKaztoken, getKaztokenKeys) — после поддержки токенов в OpenNCALayer; до этого getKaztokenKeys отвечает пустым списком без окна."
+
+[[differences]]
+ru = "Как у оригинала: каждое вложение после первого — подпись files[1]; задание прерывается через 10 секунд после начала."

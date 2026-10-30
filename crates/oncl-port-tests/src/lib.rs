@@ -112,6 +112,7 @@ pub struct Harness {
     http: Arc<Logged>,
     clock: fn() -> OffsetDateTime,
     locale: Locale,
+    pki_hosts: Arc<[String]>,
     settings_dir: Option<PathBuf>,
 }
 
@@ -138,6 +139,7 @@ impl Harness {
             }),
             clock: default_clock,
             locale: Locale::Ru,
+            pki_hosts: oncl_plugin::nca_pki_hosts(),
             settings_dir: None,
         }
     }
@@ -152,6 +154,18 @@ impl Harness {
     #[must_use]
     pub fn with_locale(self, locale: Locale) -> Harness {
         Harness { locale, ..self }
+    }
+
+    /// The same harness whose PKI hosts are the NCA's and `extra` (the synthetic PKI's
+    /// responders, `ocsp.synthetic.test`).
+    #[must_use]
+    pub fn with_pki_hosts(self, extra: &[&str]) -> Harness {
+        let pki_hosts = oncl_plugin::NCA_PKI_HOSTS
+            .iter()
+            .chain(extra)
+            .map(|h| (*h).to_owned())
+            .collect();
+        Harness { pki_hosts, ..self }
     }
 
     /// The same harness with the plugins' settings kept in `dir` (`<dir>/<id>.json`); without
@@ -186,7 +200,7 @@ impl Harness {
             locale: Arc::new(move || locale),
             // The synthetic PKI's CAs, as the ports' keys are synthetic.
             cas: Arc::new(synthetic_cas()),
-            pki_hosts: oncl_plugin::nca_pki_hosts(),
+            pki_hosts: Arc::clone(&self.pki_hosts),
             settings_dir: self.settings_dir.clone(),
         }
     }

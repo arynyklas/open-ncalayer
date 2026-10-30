@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.workspace"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.workspace.Signer"]
+
+[name]
+ru = "Workspace Signer"
+kk = "Workspace Signer"
+en = "Workspace Signer"
+
+[description]
+ru = "Подпись карточки документа (ЕСЭДО) и вложений для qt.workspace.kz"
+kk = "qt.workspace.kz үшін құжат карточкасына (ЕСЭДО) және тіркемелерге қол қою"
+en = "Signs the document card (ESEDO) and its attachments for qt.workspace.kz"
+
+[replaces]
+symname = "kz.workspace.Signer"
+version = "1.3"
+
+[capabilities]
+keys = true
