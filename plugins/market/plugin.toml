@@ -1,0 +1,22 @@
+id = "io.github.arynyklas.openncalayer.port.market"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["MarketSign"]
+
+[name]
+ru = "MarketSign (порт OpenNCALayer)"
+kk = "MarketSign (OpenNCALayer порты)"
+en = "MarketSign (OpenNCALayer port)"
+
+[description]
+ru = "Подпись текста и XML для портала omarket.kz, как модуль MarketSign"
+kk = "omarket.kz порталына мәтін мен XML қол қою, MarketSign модулі сияқты"
+en = "Text and XML signatures for omarket.kz, as the MarketSign module made them"
+
+[replaces]
+symname = "kz.ecc.MarketSignBundle"
+version = "1.0.7"
+
+[capabilities]
+keys = true
+dialogs = true
