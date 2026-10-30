@@ -429,3 +429,40 @@ cargo build --release --target wasm32-unknown-unknown --manifest-path crates/onc
 - не найден, уже установлен (в том числе выключен или отозван) или каталога нет (сборка без ключей, офлайн, индекс истёк, не успел за 10 с) — `BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED`, а значок сообщает «Сайт {origin} запросил модуль {symname}. Каталог OpenNCALayer не предлагает его установить: его там нет или он уже установлен» с кнопкой «Реестр плагинов» (не чаще раза в 10 минут). `origin` и `symname` показываются без управляющих символов, разделителей строк и символов направления письма, не длиннее 128 символов.
 
 `uuid` запроса возвращается, как раньше. `getBundles` добавляет к бандлам оригинала `replaces.symname → replaces.version` включённых загруженных плагинов, `getServices` — модули плагинов: оба списка живые и видят плагин сразу после установки. `showBundleManager` открывает окно «Плагины».
+
+## Порты
+
+Порты сторонних плагинов оригинала лежат в `plugins/`: 34 каталога `plugins/<short>`, по одному на плагин оригинала, и общие библиотеки в `plugins/common/`. Это отдельный workspace для `wasm32-unknown-unknown`: в workspace ядра и в его релизы он не входит. Один порт собирается в пакет командой `cargo xtask plugin pack plugins/<short>`; job `conformance` в `release.yml` собирает пакеты всех портов, но не публикует их (`docs/dev/release.md`).
+
+В каталоге порта:
+- `plugin.toml` — манифест (раздел [«Манифест»](#манифест)): `id` вида `io.github.arynyklas.openncalayer.port.<short>`, имена `module`, которые порт обслуживает, `replaces` — `symname` и версия бандла оригинала, и только нужные порту capabilities;
+- `registry.toml` — данные реестра: бандл оригинала (`symname`, версия, поставщик), состояние порта (`full` — всё, что делает оригинал; `partial` — с оговорками) и отличия от оригинала (`[[differences]]`), которые реестр показывает пользователю;
+- исходники крейта `oncl-port-<short>`.
+
+Порты по группам D9:
+
+| D9 | Семейство | Порты |
+|---|---|---|
+| 2 | ecc.kz | market, efactoring, nursign, k2sign |
+| 3 | клоны commonUtils | rating1c, xdox, eot, ezsigner, uchet, arta, metadoc |
+| 4 | CommonInvoker | idocs, fhs, doodocs, devart, thundercrypt |
+| 5 | прочие средние | taxtech, energy, eproc, esf-osdkz, uchet-esf, qiwi, bas, eup, dogovor24, workspace, simourg, motiw |
+| 6 | тяжёлые | buhta, acbank, knp, documentolog, qoltanba, skf |
+
+Состояние `full` — у buhta, acbank и doodocs, у остальных `partial`.
+
+Общие библиотеки:
+- `oncl-port-kit` (`common/kit`) — то, что плагины оригинала собирали средствами Java: тела `multipart/form-data` байт в байт, `new URL(context, spec)` и origin, zip-архивы, `Properties.storeToXML`, шаблоны `SimpleDateFormat`, ответы семейства ecc.kz;
+- `oncl-port-legacy` (`common/legacy`) — общее у клонов commonUtils (рефлексивный диспетчер `oncl_pdk::legacy`): бин `ResponseMessage`, проверки `StorageInfo`, типы ключей и выбор ключа, `KeyInfo`, Base64 Java, тексты сетевых исключений Java;
+- `oncl-port-pki` (`common/pki`) — DER в госте (RustCrypto `der`, `x509-cert`, `cms`; без ключей и случайности — подписывает хост): подписанные атрибуты и имена из строк DN, чтение CMS, атрибуты и запрос OCSP ЕСЭДО, доверенные сертификаты Java KeyStore, тексты сертификатов Java и Kalkan.
+
+Диалекты JSON (org.json, порядок `HashMap` Java, диспетчеры) — в `oncl-pdk`. Тесты портов — крейт `oncl-port-tests` (`crates/oncl-port-tests`): он грузит собранный `.wasm` в настоящий хост плагинов с тестовым PKI и, где нужно, эмулятором токенов.
+
+Правила порта:
+- **Сохраняется** то, что видит страница: форма ответов, коды и тексты ошибок, порядок проверок, порядок полей (в том числе порядок `HashMap` Java), байты подписей и запросов к серверам.
+- **Исправляется** то, что небезопасно или опирается на состояние вне песочницы: подписи на SHA-1 (sha1RSA) не создаются; HTTPS — только с проверкой сертификата и по адресам из манифеста; ключи и пароли не запоминаются между соединениями и не пишутся на диск (то, что порт сохраняет, например путь к хранилищу, идёт через capability `settings`); файлы настроек и кэши оригинала не читаются; пути к файлам от страницы заменяются окнами хоста. Каждое такое отличие записывается в `registry.toml`.
+- Токены — только через экспериментальную поддержку ядра ([`tokens.md`](tokens.md)); пока она выключена, хранилища токенов пусты.
+
+Ожидаемые ответы в тестах выведены из поведения оригинала, но байт в байт с оригиналом порты ещё не сверялись: это P10.
+
+Новый порт: каталог `plugins/<short>` (имя не начинается с `c` — так workspace отделяет порты от `common/`), `plugin.toml` и `registry.toml`, тесты в `oncl-port-tests`; при новых зависимостях — `cargo xtask licenses --plugins`.
