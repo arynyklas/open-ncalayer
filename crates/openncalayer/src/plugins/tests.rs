@@ -587,7 +587,7 @@ fn a_package_managers_copy_still_checks_and_updates_the_catalog() {
     let sandbox = Sandbox::new(true);
     let service = sandbox.service();
     sandbox.publish(1, vec![sandbox.release("0.1.0", &example("0.1.0"))]);
-    service.install_from_catalog(ID, None);
+    service.install_from_catalog(ID, None).unwrap();
     assert_eq!(
         sandbox.notices(),
         [PluginNotice::Installed { name: name() }]
