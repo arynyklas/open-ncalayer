@@ -24,4 +24,9 @@ time.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+# The Documentolog server of the tests: AES-CBC of its fields, RSA-PKCS#1 v1.5 of its
+# challenge with a test key.
+aes.workspace = true
+cbc.workspace = true
+rsa.workspace = true
 serde_json.workspace = true

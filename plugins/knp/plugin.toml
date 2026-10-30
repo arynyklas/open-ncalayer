@@ -1,0 +1,22 @@
+id = "io.github.arynyklas.openncalayer.port.knp"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.inessoft.kgd.knp.ncalayer.KNPModuleService"]
+
+[name]
+ru = "Кабинет налогоплательщика, ИС СОНО (порт OpenNCALayer)"
+kk = "Салық төлеушінің кабинеті, СОНО АЖ (OpenNCALayer порты)"
+en = "Taxpayer's cabinet, SONO (OpenNCALayer port)"
+
+[description]
+ru = "Подпись XML и соглашений SmartAuth для кабинета налогоплательщика КГД"
+kk = "МКК салық төлеуші кабинетіне арналған XML және SmartAuth келісімдеріне қол қою"
+en = "XML and SmartAuth agreement signatures for the State Revenue Committee's taxpayer cabinet"
+
+[replaces]
+symname = "kz.inessoft.kgd.knp.sono_knp_ncalayer_module"
+version = "1.2.0"
+
+[capabilities]
+keys = true
+origins = ["https://*.kgd.gov.kz"]

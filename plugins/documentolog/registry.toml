@@ -1,0 +1,32 @@
+id = "io.github.arynyklas.openncalayer.port.documentolog"
+modules = ["kz.documentolog.agent.SignService", "kz.documentolog.agent.KalkanService"]
+
+[original]
+symname = "kz.documentolog.Agent"
+version = "0.2"
+vendor = "Documentolog"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Хранилища УЦГО (Tumar/Gamma) не поддерживаются: ветка ca = «УЦГО» отвечает result:\"\", как оригинал при сбое."
+
+[[differences]]
+ru = "Пароль, введённый в окне «Пароль для ЭЦП», хранится в OpenNCALayer до конца сеанса страницы (у оригинала — до перезапуска процесса для всех сайтов); плагин его не видит."
+
+[[differences]]
+ru = "Файл ключа по пути страницы или сервера открывается только после согласия пользователя в окне OpenNCALayer (раз на сеанс и путь)."
+
+[[differences]]
+ru = "Данные и ответы сервера загружаются только по HTTPS с сайта https://*.documentolog.kz, с которого пришёл запрос; file: и другие адреса не загружаются (result:\"\")."
+
+[[differences]]
+ru = "getCurrentUser не читает keys.json агента Documentolog и отвечает \"\"."
+
+[[differences]]
+ru = "Токены — после поддержки токенов в OpenNCALayer; сброс PC/SC не выполняется."
+
+[[differences]]
+ru = "Подписи RSA-SHA1 не создаются: сертификат sha1RSA даёт result:\"\"."

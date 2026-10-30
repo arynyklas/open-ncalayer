@@ -3999,12 +3999,15 @@ dependencies = [
 name = "oncl-port-tests"
 version = "0.1.0-alpha.3"
 dependencies = [
+ "aes",
+ "cbc",
  "oncl-basics",
  "oncl-pdk",
  "oncl-pki",
  "oncl-plugin",
  "oncl-protocol",
  "oncl-testkit",
+ "rsa",
  "semver",
  "serde",
  "serde_json",

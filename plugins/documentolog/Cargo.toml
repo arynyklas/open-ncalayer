@@ -1,0 +1,25 @@
+[package]
+name = "oncl-port-documentolog"
+description = "OpenNCALayer port of the Documentolog agent: key stores by path with a password kept in the session, ESEDO and simple CMS, the server-driven signing of Documentolog's service"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+# Tests only: the server challenge is encrypted with a test key instead of the vendor's,
+# so a test server can answer it. Never in a release.
+test-key = []
+
+[dependencies]
+aes.workspace = true
+base64.workspace = true
+cbc.workspace = true
+num-bigint.workspace = true
+oncl-pdk.workspace = true
+oncl-port-pki.workspace = true

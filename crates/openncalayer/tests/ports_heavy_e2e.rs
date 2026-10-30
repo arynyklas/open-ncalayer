@@ -215,3 +215,33 @@ async fn acbank_healthcheck_from_second_socket_e2e() {
         r#"{"code":"ncalayer.module.healthcheck.session.inactive","status":false}"#
     );
 }
+
+const KNP: &str = "kz.inessoft.kgd.knp.ncalayer.KNPModuleService";
+
+#[tokio::test]
+async fn knp_missing_command_closes_without_frame_e2e() {
+    let srv = start(vec![], &["knp"]).await;
+    let mut c = connect(&srv, "https://cabinet.kgd.gov.kz").await;
+    send(
+        &mut c,
+        &json!({"module": KNP, "command": "info", "requestId": "1"}).to_string(),
+    )
+    .await;
+    assert_eq!(
+        next_text(&mut c).await,
+        r#"{"resultStatus":{"resultCode":"OK"},"requestId":"1","type":"personal","version":"1.1.0","status":"READY"}"#
+    );
+    // Without `command` the original's exception leaves the module.
+    send(
+        &mut c,
+        &json!({"module": KNP, "requestId": "2"}).to_string(),
+    )
+    .await;
+    match timeout(PATIENCE, c.next())
+        .await
+        .expect("no reaction in time")
+    {
+        None | Some(Err(_)) => {}
+        Some(Ok(message)) => panic!("expected a dropped connection, got {message:?}"),
+    }
+}

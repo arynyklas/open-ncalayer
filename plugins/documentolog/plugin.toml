@@ -1,0 +1,25 @@
+id = "io.github.arynyklas.openncalayer.port.documentolog"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.documentolog.agent.SignService", "kz.documentolog.agent.KalkanService"]
+
+[name]
+ru = "СЭД «Documentolog» (порт OpenNCALayer)"
+kk = "«Documentolog» ЭҚЖ (OpenNCALayer порты)"
+en = "Documentolog EDMS (OpenNCALayer port)"
+
+[description]
+ru = "Подпись документов СЭД Documentolog: ЕСЭДО и CMS, подпись по запросу сервера"
+kk = "Documentolog ЭҚЖ құжаттарына қол қою: ЭҚЕЖ және CMS, сервер сұрауы бойынша қол қою"
+en = "Signs Documentolog EDMS documents: ESEDO and CMS, signing on the server's request"
+
+[replaces]
+symname = "kz.documentolog.Agent"
+version = "0.2"
+
+[capabilities]
+keys = true
+key_files = true
+dialogs = true
+files = true
+origins = ["https://*.documentolog.kz"]
