@@ -515,3 +515,19 @@ fn manifest_failures_are_capped() {
     // The state no longer changes while the manifest stays unreachable.
     assert_eq!(run(&server, &state).next.to_json(), state.to_json());
 }
+
+#[test]
+fn sha1_found_before_multibyte_text() {
+    let sha1 = "abcdef0123456789abcdef0123456789abcdef01";
+    for pad in 0..2 {
+        let html = format!(
+            "<a href='download.php?key={}'>NCALayer для Linux</a><td>SHA1: {sha1}</td>{}{}",
+            key('d'),
+            "x".repeat(pad),
+            "текст ".repeat(400)
+        );
+        let links = parse_download_page(&html, "https://example.test/");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].published_sha1.as_deref(), Some(sha1), "pad {pad}");
+    }
+}

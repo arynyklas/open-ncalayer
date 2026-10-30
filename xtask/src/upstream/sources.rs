@@ -98,7 +98,10 @@ pub fn parse_download_page(html: &str, base: &str) -> Vec<PageLink> {
     let mut links: Vec<PageLink> = Vec::new();
     for (i, (_, close, label, url)) in found.iter().enumerate() {
         let next = found.get(i + 1).map_or(html.len(), |n| n.0);
-        let end = next.min(close + SHA1_WINDOW).min(html.len());
+        let mut end = next.min(close + SHA1_WINDOW).min(html.len());
+        while !html.is_char_boundary(end) {
+            end -= 1;
+        }
         let window = html.get(*close..end).unwrap_or_default();
         let mut slug = slugify(label);
         let mut n = 2;
