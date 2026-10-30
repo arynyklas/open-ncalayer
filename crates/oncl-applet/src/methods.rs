@@ -3,10 +3,14 @@
 //! throws (a `null` it dereferences, an unknown file chooser type).
 //!
 //! Storage names are Kalkan's `Storage` names (exact). A name Kalkan does not know is
-//! `UNKNOWN_STORAGE`. Hardware tokens answer as with no device connected: `EMPTY_SLOT`, or
-//! the original's own code for a missing device (`browseKeyStore`: `TOKEN_CHOOSE_CANCEL`;
-//! `deleteEntry`, `resetStorage`: `COMMON`; `getPublicPartInfo`:
-//! `GETPUBLICPART_EXCEPTION`), without a dialog. `JKS` is read, never written.
+//! `UNKNOWN_STORAGE`. With token support off, hardware tokens answer as with no device
+//! connected: `EMPTY_SLOT`, or the original's own code for a missing device
+//! (`browseKeyStore`: `TOKEN_CHOOSE_CANCEL`; `deleteEntry`, `resetStorage`: `COMMON`;
+//! `getPublicPartInfo`: `GETPUBLICPART_EXCEPTION`), without a dialog. With it on,
+//! `loadSlotList` lists the readers holding a token of the storage, `browseKeyStore` asks
+//! for one of them, `getPublicPartInfo` reads an ID card's holder and `signXml` signs on
+//! the token; the methods that would write to a connected token answer the original's
+//! generic codes without a command to the card. `JKS` is read, never written.
 //!
 //! Paths a page names are never logged. A key file or folder the page names is used only if
 //! [`page_path`] accepts it: a local path, or a network path the user chose in the file
@@ -20,8 +24,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_basics::{
     Action, Availability, BusyPrompt, FileKind, FilePrompt, KeyPrompt, LiveAvailability, Locale,
-    OpenError, PageFile, PasswordPrompt, Prompt, StorageAnswer, StorageKind, StoragePrompt,
-    lock_dialog_flow, page_path, remember_chosen_path,
+    OpenError, PageFile, PasswordPrompt, Prompt, ReaderEntry, ReaderList, ReaderPrompt,
+    StorageAnswer, StorageKind, StoragePrompt, lock_dialog_flow, page_path, remember_chosen_path,
 };
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::info::{CertInfo, KncaCertType, cert_info, kcert_types};
@@ -33,8 +37,10 @@ use oncl_pki::oid;
 use oncl_pki::pkcs12::KeyEntry;
 use oncl_pki::xmldsig;
 use oncl_protocol::AddInfo;
+use oncl_token::TokenKind;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 // The original's `AECodes` this module answers with.
@@ -45,6 +51,8 @@ pub(crate) const UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION: &str =
 pub(crate) const EMPTY_SLOT: &str = "EMPTY_SLOT";
 const TOKEN_CHOOSE_CANCEL: &str = "TOKEN_CHOOSE_CANCEL";
 const GETPUBLICPART_EXCEPTION: &str = "GETPUBLICPART_EXCEPTION";
+const LOAD_SLOT_LIST_EXCEPTION: &str = "LOAD_SLOT_LIST_EXCEPTION";
+const UNKNOWN_SMARTCARD: &str = "UNKNOWN_SMARTCARD";
 const SETCERT_WRONG_PASSWORD: &str = "SETCERT_WRONG_PASSWORD";
 const SETCERT_COMMON: &str = "SETCERT_COMMON";
 const INAPPROPRIATE_CERT: &str = "INAPPROPRIATE_CERT";
@@ -57,11 +65,14 @@ const SIGN_CANCEL: &str = "SIGN_CANCEL";
 
 /// `<@>`: the original's separator of key details and installed key files.
 const DETAILS_SEPARATOR: &str = "<@>";
+/// `<:>`: the original's separator of readers.
+const SLOT_SEPARATOR: &str = "<:>";
 /// Origin shown when the connection sent none.
 const UNIDENTIFIED: &str = "UNIDENTIFIED";
 /// The applet's dialogs are Russian: no request changes their language.
 const LOCALE: Locale = Locale::Ru;
-/// The PIN tries left that a wrong key file password reports (Kalkan's `-1`).
+/// The PIN tries left that a wrong key file password reports (Kalkan's `-1`); so does a
+/// wrong PIN of a token that does not tell its tries.
 const FILE_TRY_COUNT: i32 = -1;
 
 /// `showFileChooser(fileExtension, currentDirectory)`: the path of a chosen file (or
@@ -72,13 +83,17 @@ pub(crate) fn show_file_chooser(a: &Applet, args: &Args<'_>, add_info: &AddInfo)
 }
 
 /// `browseKeyStore(storageName, fileExtension, currentDirectory)`: the file chooser for a
-/// file storage, `KEYSTORE` becoming `P12` or `JKS` after the storage; a token is the
-/// token chooser cancelled (no token is connected).
+/// file storage, `KEYSTORE` becoming `P12` or `JKS` after the storage. For a token, with
+/// token support on, the reader dialog: the chosen reader; with it off (and for the cloud
+/// storage) the token chooser cancelled.
 pub(crate) fn browse_key_store(a: &Applet, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
     let Some(storage) = storage(args.str(0)) else {
         return Ok(Wrapper::error(UNKNOWN_STORAGE));
     };
     let extension = match storage {
+        StorageKind::Token(_) if storage.token_kind().is_some() && a.tokens.is_enabled() => {
+            return Ok(choose_reader(a, storage, add_info));
+        }
         StorageKind::Token(_) => return Ok(Wrapper::error(TOKEN_CHOOSE_CANCEL)),
         StorageKind::Pkcs12 | StorageKind::Jks => match args.str(1).ok_or(NPE)? {
             "KEYSTORE" if storage == StorageKind::Pkcs12 => "P12",
@@ -87,6 +102,24 @@ pub(crate) fn browse_key_store(a: &Applet, args: &Args<'_>, add_info: &AddInfo) 
         },
     };
     choose_file(a, Some(extension), args.str(2), add_info)
+}
+
+/// The reader dialog for a token of `storage`, opened even without one (it scans again on
+/// request): the chosen reader, `TOKEN_CHOOSE_CANCEL` if cancelled.
+fn choose_reader(a: &Applet, storage: StorageKind, add_info: &AddInfo) -> Wrapper {
+    let answer = {
+        let _flow = lock_dialog_flow();
+        a.prompter.reader(&ReaderPrompt {
+            origin: origin(add_info),
+            locale: LOCALE,
+            storage,
+            readers: ReaderList::new(Arc::clone(&a.tokens)),
+        })
+    };
+    match answer {
+        Prompt::Answer(reader) => Wrapper::ok(reader),
+        Prompt::Cancelled => Wrapper::error(TOKEN_CHOOSE_CANCEL),
+    }
 }
 
 /// The original's `FileChooserDialog`: a `null` type throws, an unknown one too
@@ -164,16 +197,46 @@ fn ask_password(a: &Applet, message: Option<&str>, add_info: &AddInfo) -> Outcom
     Ok(Wrapper::ok(answered))
 }
 
-/// `loadSlotList(storageName)`: the readers with a card of that storage; there are none,
-/// whatever the name (the original looks the name up only for a present card).
-pub(crate) fn load_slot_list(_: &Applet, _: &Args<'_>, _: &AddInfo) -> Outcome {
-    Ok(Wrapper::error(EMPTY_SLOT))
+/// `loadSlotList(storageName)`: the readers holding a token of that storage, separated by
+/// `<:>`; `EMPTY_SLOT` without one, and always with token support off.
+pub(crate) fn load_slot_list(a: &Applet, args: &Args<'_>, _: &AddInfo) -> Outcome {
+    if !a.tokens.is_enabled() {
+        return Ok(Wrapper::error(EMPTY_SLOT));
+    }
+    let Some(kind) = storage(args.str(0)).and_then(|s| s.token_kind()) else {
+        // Unverified against the original: a name of no token family with a card of any
+        // kind in some reader is taken for an unknown card.
+        return Ok(Wrapper::error(if a.tokens.any_card() {
+            UNKNOWN_SMARTCARD
+        } else {
+            EMPTY_SLOT
+        }));
+    };
+    Ok(match a.tokens.readers(kind) {
+        Ok(readers) if readers.is_empty() => Wrapper::error(EMPTY_SLOT),
+        Ok(readers) => Wrapper::ok(readers.join(SLOT_SEPARATOR)),
+        Err(e) => {
+            tracing::warn!(error = %e, "Applet: the readers cannot be listed");
+            Wrapper::error(LOAD_SLOT_LIST_EXCEPTION)
+        }
+    })
 }
 
-/// `getPublicPartInfo(terminalName)`: the owner of an ID card in the reader; there is
-/// none.
-pub(crate) fn get_public_part_info(_: &Applet, _: &Args<'_>, _: &AddInfo) -> Outcome {
-    Ok(Wrapper::error(GETPUBLICPART_EXCEPTION))
+/// `getPublicPartInfo(terminalName)`: the holder of the ID card in the reader, read without
+/// the PIN: `IIN<iin> <full name>`; `GETPUBLICPART_EXCEPTION` without one, and always with
+/// token support off.
+pub(crate) fn get_public_part_info(a: &Applet, args: &Args<'_>, _: &AddInfo) -> Outcome {
+    let Some(reader) = args.str(0) else {
+        return Ok(Wrapper::error(GETPUBLICPART_EXCEPTION));
+    };
+    match a.tokens.id_card_info(reader) {
+        // Unverified against the original: the layout of the holder's name.
+        Ok(info) => Ok(Wrapper::ok(format!("IIN{} {}", info.iin, info.full_name()))),
+        Err(e) => {
+            tracing::debug!(error = %e, "Applet: no ID card details");
+            Ok(Wrapper::error(GETPUBLICPART_EXCEPTION))
+        }
+    }
 }
 
 /// `getTryCount()`: the PIN tries left after the last wrong password.
@@ -221,6 +284,10 @@ fn set_certificates(
         return Ok(Wrapper::error(UNKNOWN_STORAGE));
     };
     let storage_oid = match storage {
+        StorageKind::Token(_) if a.token_connected(storage) => {
+            tracing::info!("Applet: installing certificates is not supported for tokens");
+            return Ok(Wrapper::error(SETCERT_COMMON));
+        }
         StorageKind::Token(_) => return Ok(Wrapper::error(EMPTY_SLOT)),
         StorageKind::Pkcs12 => oid::STORAGE_PKCS12,
         // Refused by `certificate_alias`: JKS is not written.
@@ -308,8 +375,11 @@ pub(crate) fn change_password(a: &Applet, args: &Args<'_>, _: &AddInfo) -> Outco
             Some(max) if !pin_pattern_ok(new, max) => CHANGEPASS_INCORRECT_NEWPASS_PATTERN,
             // JKS is not written.
             Some(_) if storage == StorageKind::Jks => UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION,
-            // The token cannot be opened: no device is connected.
-            Some(_) => CHANGEPASS_COMMON,
+            // OpenNCALayer does not write to tokens; without one the device is missing.
+            Some(_) => {
+                refused_on_token(a, storage, "changing the PIN");
+                CHANGEPASS_COMMON
+            }
         },
     };
     Ok(Wrapper::error(code))
@@ -357,18 +427,40 @@ fn pin_pattern_ok(password: &str, max: usize) -> bool {
 /// is `SIGN_CANCEL`. A wrong password or a store without such keys asks again, as the
 /// original's dialog does. A document that does not sign keeps the key dialog open with
 /// the error, as the original's dialog stays open; the user can only cancel then.
+///
+/// A token (with token support on) is asked for in the readers holding one, `container`
+/// first if it names one of them, with its PIN; a wrong PIN sets the try count and asks
+/// again; a blocked PIN is not tried again. Without such a reader it is `EMPTY_SLOT`.
 pub(crate) fn sign_xml(a: &Applet, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
     let Some(storage) = storage(args.str(0)) else {
         return Ok(Wrapper::error(UNKNOWN_STORAGE));
     };
     // `inKeyType.toUpperCase()` in the dialog's constructor.
     let key_type = KeyType::of(args.str(2).ok_or(NPE)?);
-    if let StorageKind::Token(_) = storage {
-        return Ok(Wrapper::error(EMPTY_SLOT));
-    }
+    let readers = match storage {
+        StorageKind::Token(_) => {
+            let mut readers = a.token_readers(storage);
+            if readers.is_empty() {
+                return Ok(Wrapper::error(EMPTY_SLOT));
+            }
+            if let Some(i) = args
+                .str(1)
+                .and_then(|c| readers.iter().position(|r| r == c))
+            {
+                let container = readers.remove(i);
+                readers.insert(0, container);
+            }
+            let entries = readers
+                .into_iter()
+                .map(|reader| ReaderEntry { storage, reader })
+                .collect();
+            Some(ReaderList::fixed(entries, None))
+        }
+        StorageKind::Pkcs12 | StorageKind::Jks => None,
+    };
     let origin = origin(add_info);
     let _flow = lock_dialog_flow();
-    let Some(mut keys) = open_store(a, storage, args.str(1), key_type, &origin) else {
+    let Some(mut keys) = open_store(a, storage, args.str(1), key_type, &origin, readers) else {
         return Ok(Wrapper::error(SIGN_CANCEL));
     };
     let mut prompt = KeyPrompt::new(
@@ -469,29 +561,34 @@ fn inner_password_ok(password: &str) -> bool {
 /// The storage dialog until a key store with keys of `key_type` opens; `None` if it is
 /// cancelled. The page's `container` pre-fills it unless a page may not name it (a device
 /// path, or a network path the user did not choose in the file chooser). The busy
-/// indicator shows while the key store opens.
+/// indicator shows while the key store opens. A token is opened in one of `readers`.
 fn open_store(
     a: &Applet,
     storage: StorageKind,
     container: Option<&str>,
     key_type: KeyType,
     origin: &str,
+    readers: Option<ReaderList>,
 ) -> Option<Vec<(KeyEntry, CertInfo)>> {
+    let token = readers.is_some();
     let mut prompt = StoragePrompt {
         origin: origin.to_owned(),
         locale: LOCALE,
         action: key_type.action(),
         storages: vec![storage],
         recent_path: container
+            .filter(|_| !token)
             .and_then(page_path)
             .filter(|p| !p.as_os_str().is_empty())
             .map(Path::to_path_buf),
         error: None,
         detail: None,
-        tokens: None,
+        tokens: readers,
         chosen: None,
         reader: None,
     };
+    // The reader whose token refused the PIN as blocked: it is not tried again.
+    let mut blocked: Option<String> = None;
     loop {
         let Prompt::Answer(answer) = a.prompter.storage(&prompt) else {
             return None;
@@ -500,8 +597,25 @@ fn open_store(
             origin: origin.to_owned(),
             locale: LOCALE,
         });
-        match open_keys(&answer, storage, key_type) {
+        let opened = if token && blocked.is_some() && answer.reader == blocked {
+            Err(OpenError::PinBlocked)
+        } else {
+            open_keys(a, &answer, storage, key_type)
+        };
+        match opened {
             Ok(keys) => return Some(keys),
+            Err(e) if token => {
+                match e {
+                    OpenError::WrongPin { tries_left } => {
+                        a.set_try_count(token_try_count(storage, tries_left));
+                    }
+                    OpenError::PinBlocked => blocked.clone_from(&answer.reader),
+                    _ => {}
+                }
+                prompt.error = Some(e);
+                prompt.chosen = Some(answer.storage);
+                prompt.reader = answer.reader;
+            }
             Err(e) => {
                 prompt.error = Some(e);
                 prompt.recent_path = Some(answer.path);
@@ -510,12 +624,22 @@ fn open_store(
     }
 }
 
+/// `getTryCount` after a wrong PIN: the tries left for Kaztoken and the ID card, else `-1`
+/// (AKey tells its tries too, but the original answers `-1` for it).
+fn token_try_count(storage: StorageKind, tries_left: Option<u8>) -> i32 {
+    match (storage.token_kind(), tries_left) {
+        (Some(TokenKind::Kaztoken | TokenKind::KzIdCard), Some(n)) => i32::from(n),
+        _ => FILE_TRY_COUNT,
+    }
+}
+
 /// The keys of `key_type` in the answer's key store, oldest certificate first (the
-/// original dialog's order). The password is checked first, as the original dialog does.
-/// The file is the user's choice (pre-filled with a [`page_path`] at most), read as
-/// [`PageFile::read_chosen`]: a regular disk file of at most 64 MiB, on a network share
-/// too.
+/// original dialog's order). The password (or PIN) is checked first, as the original
+/// dialog does. The file is the user's choice (pre-filled with a [`page_path`] at most),
+/// read as [`PageFile::read_chosen`]: a regular disk file of at most 64 MiB, on a network
+/// share too. A token opens in the answer's reader.
 fn open_keys(
+    a: &Applet,
     answer: &StorageAnswer,
     storage: StorageKind,
     key_type: KeyType,
@@ -529,8 +653,13 @@ fn open_keys(
     if answer.storage != storage {
         return Err(OpenError::UnsupportedStorage);
     }
-    let file = PageFile::read_chosen(&answer.path).map_err(|_| OpenError::FileNotFound)?;
-    let entries = match answer.open_data(&file.data) {
+    let opened = if storage.token_kind().is_some() {
+        answer.open_with(&[storage], &a.tokens)
+    } else {
+        let file = PageFile::read_chosen(&answer.path).map_err(|_| OpenError::FileNotFound)?;
+        answer.open_data(&file.data)
+    };
+    let entries = match opened {
         Err(OpenError::NoKeys) => Vec::new(),
         opened => opened?,
     };
@@ -553,26 +682,43 @@ fn open_keys(
     Ok(keys)
 }
 
-/// `deleteEntry(storageName, container, alias)`: only token keys are deleted; no token is
-/// connected yet.
-pub(crate) fn delete_entry(_: &Applet, args: &Args<'_>, _: &AddInfo) -> Outcome {
+/// `deleteEntry(storageName, container, alias)`: only token keys are deleted, and
+/// OpenNCALayer does not write to tokens: the generic failure, connected or not.
+pub(crate) fn delete_entry(a: &Applet, args: &Args<'_>, _: &AddInfo) -> Outcome {
     Ok(Wrapper::error(match storage(args.str(0)) {
         None => UNKNOWN_STORAGE,
-        Some(StorageKind::Token(name)) if name != "AKKZIDCardStore" => COMMON,
-        Some(_) => UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION,
-    }))
-}
-
-/// `resetStorage(storageName, container)`: formats an eToken or JaCarta; no token is
-/// connected yet.
-pub(crate) fn reset_storage(_: &Applet, args: &Args<'_>, _: &AddInfo) -> Outcome {
-    Ok(Wrapper::error(match storage(args.str(0)) {
-        None => UNKNOWN_STORAGE,
-        Some(StorageKind::Token("AKEToken72KStore" | "AKJaCartaStore" | "AKEToken5110Store")) => {
+        Some(token @ StorageKind::Token(name)) if name != "AKKZIDCardStore" => {
+            refused_on_token(a, token, "deleting keys");
             COMMON
         }
         Some(_) => UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION,
     }))
+}
+
+/// `resetStorage(storageName, container)`: formats an eToken or JaCarta, which OpenNCALayer
+/// does not do: the generic failure, connected or not.
+pub(crate) fn reset_storage(a: &Applet, args: &Args<'_>, _: &AddInfo) -> Outcome {
+    Ok(Wrapper::error(match storage(args.str(0)) {
+        None => UNKNOWN_STORAGE,
+        Some(
+            token @ StorageKind::Token("AKEToken72KStore" | "AKJaCartaStore" | "AKEToken5110Store"),
+        ) => {
+            refused_on_token(a, token, "formatting");
+            COMMON
+        }
+        Some(_) => UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION,
+    }))
+}
+
+/// Logs that `what`, a write to a connected token of `storage`, is refused; nothing is sent
+/// to the card.
+pub(crate) fn refused_on_token(a: &Applet, storage: StorageKind, what: &str) {
+    if a.token_connected(storage) {
+        tracing::info!(
+            storage = storage.name(),
+            "Applet: {what} is not supported for tokens"
+        );
+    }
 }
 
 /// Kalkan's `Storage.get`: the storage of that exact name; `null` names none.

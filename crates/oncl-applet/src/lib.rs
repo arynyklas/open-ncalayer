@@ -8,10 +8,13 @@
 //!
 //! The subset the original's pages use is implemented for the file storages `PKCS12` and
 //! `JKS` (read-only): the file chooser, the password dialog, key files with their requests,
-//! certificate installation, password change and XML signing. Hardware tokens answer as if
-//! no device were connected (`EMPTY_SLOT`, or the original's answer without a device), and
-//! `genExt`, `getProvider`, `setProvider` and `showTokenChooser` are not offered. Dialog
-//! flows take [`oncl_basics::lock_dialog_flow`]; dialogs are Russian, as the original's.
+//! certificate installation, password change and XML signing. With token support off,
+//! hardware tokens answer as if no device were connected (`EMPTY_SLOT`, or the original's
+//! answer without a device). With it on, the readers holding tokens are listed and chosen,
+//! an ID card's holder is read, and XML is signed on a token; the methods that would write
+//! to a token refuse with the original's generic codes. `genExt`, `getProvider`,
+//! `setProvider` and `showTokenChooser` are not offered. Dialog flows take
+//! [`oncl_basics::lock_dialog_flow`]; dialogs are Russian, as the original's.
 //!
 //! As in the original, the password of the password dialog and the last PIN try count are
 //! the module's, shared by every connection.
@@ -20,8 +23,9 @@ mod dispatch;
 mod keygen;
 mod methods;
 
-use oncl_basics::Prompter;
+use oncl_basics::{Prompter, StorageKind};
 use oncl_protocol::{AddInfo, Module};
+use oncl_token::Tokens;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use zeroize::Zeroizing;
@@ -33,22 +37,44 @@ pub const MODULE_NAME: &str = "kz.gov.pki.knca.applet.Applet";
 pub struct Applet {
     prompter: Arc<dyn Prompter>,
     /// The original's `password`: what the password dialog was last answered with, or the
-    /// key file password of the last operation that sets it. Only token operations read it,
-    /// so nothing reads it until tokens are supported; it is never logged.
+    /// key file password of the last operation that sets it. Only the original's token
+    /// writes read it, which OpenNCALayer does not do; it is never logged.
     password: Mutex<Option<Zeroizing<String>>>,
-    /// The original's `tryCount`: the PIN tries left after the last wrong password, `-1`
-    /// for a key file.
+    /// The original's `tryCount`: the PIN tries left after the last wrong password or PIN,
+    /// `-1` for a key file and for tokens that do not tell.
     try_count: AtomicI32,
+    tokens: Arc<Tokens>,
 }
 
 impl Applet {
-    /// The module, showing its dialogs with `prompter`.
+    /// The module, showing its dialogs with `prompter`, without tokens.
     pub fn new(prompter: Arc<dyn Prompter>) -> Self {
         Applet {
             prompter,
             password: Mutex::new(None),
             try_count: AtomicI32::new(-1),
+            tokens: Tokens::disabled(),
         }
+    }
+
+    /// The same module with the hardware tokens of `tokens`, while their support is on.
+    #[must_use]
+    pub fn with_tokens(self, tokens: Arc<Tokens>) -> Self {
+        Applet { tokens, ..self }
+    }
+
+    /// The readers holding a token of `storage`'s family: none with token support off, for
+    /// a file or the cloud storage, or when the service fails.
+    fn token_readers(&self, storage: StorageKind) -> Vec<String> {
+        storage
+            .token_kind()
+            .and_then(|kind| self.tokens.readers(kind).ok())
+            .unwrap_or_default()
+    }
+
+    /// A token of `storage`'s family is connected (with token support on).
+    fn token_connected(&self, storage: StorageKind) -> bool {
+        !self.token_readers(storage).is_empty()
     }
 
     fn set_password(&self, password: Option<Zeroizing<String>>) {
