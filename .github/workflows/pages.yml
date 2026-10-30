@@ -90,38 +90,45 @@ jobs:
       # commit before it; otherwise the commit Pages serves now (the newest successful
       # deployment of `github-pages`), so no run publishes anything a push would have
       # refused. Without a deployment yet, the check runs without a base. A tree without
-      # `updates/v1` is published only if the base had none either: removing the indexes
-      # would leave the installed clients without updates.
+      # `updates/v1` is published only if neither the base nor the deployed commit has it:
+      # removing the indexes would leave the installed clients without updates.
       - name: Check the indexes
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: |
-          base=""
+          deployed=""
+          deployments=$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=github-pages&per_page=30" \
+            --jq '.[] | "\(.id) \(.sha)"')
+          while read -r id sha; do
+            [ -n "$id" ] || continue
+            state=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" --jq '.[0].state')
+            if [ "$state" = success ]; then
+              deployed="$sha"
+              break
+            fi
+          done <<< "$deployments"
+          base="$deployed"
           if [ "$EVENT" = push ]; then
+            base=""
             if [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
               base="$BEFORE"
             fi
-          else
-            deployments=$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=github-pages&per_page=30" \
-              --jq '.[] | "\(.id) \(.sha)"')
-            while read -r id sha; do
-              [ -n "$id" ] || continue
-              state=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" --jq '.[0].state')
-              if [ "$state" = success ]; then
-                base="$sha"
-                break
-              fi
-            done <<< "$deployments"
           fi
-          if [ -n "$base" ]; then
-            git cat-file -e "$base^{commit}"
-          fi
-          if [ ! -d updates/v1 ]; then
-            if [ -n "$base" ] && git cat-file -e "$base:updates/v1" 2> /dev/null; then
-              echo "::error::updates/v1 is gone, but $base has it: the indexes would be unpublished"
-              exit 1
+          for commit in "$base" "$deployed"; do
+            if [ -n "$commit" ]; then
+              git cat-file -e "$commit^{commit}"
             fi
+          done
+          if [ ! -d updates/v1 ]; then
+            for commit in "$base" "$deployed"; do
+              if [ -n "$commit" ]; then
+                if git cat-file -e "$commit:updates/v1" 2> /dev/null; then
+                  echo "::error::updates/v1 is gone, but $commit has it: the indexes would be unpublished"
+                  exit 1
+                fi
+              fi
+            done
             echo "::notice::no updates/v1 yet: no indexes to check"
             exit 0
           fi
