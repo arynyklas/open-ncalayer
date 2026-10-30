@@ -5,8 +5,14 @@
 //! and diffs them with the previous facts. Only JSON leaves the run: the `upstream` branch
 //! and the issues are written from it (`docs/dev/upstream-watch.md`).
 
+pub mod artifact;
+pub mod branch_layout;
 pub mod cli;
+pub mod http;
 pub mod manifest;
+pub mod poll;
+pub mod sources;
+pub mod state;
 pub mod testkit;
 
 /// Largest manifest, in bytes.
@@ -76,4 +82,12 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 pub fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     hex(&sha2::Sha256::digest(bytes))
+}
+
+/// `value` as pretty JSON with a final newline: the one form of every JSON file the watcher
+/// writes.
+pub fn pretty_json<T: serde::Serialize + ?Sized>(value: &T) -> Vec<u8> {
+    let mut json = serde_json::to_vec_pretty(value).expect("watcher JSON serializes");
+    json.push(b'\n');
+    json
 }
