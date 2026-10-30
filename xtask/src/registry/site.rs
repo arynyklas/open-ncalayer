@@ -141,10 +141,8 @@ mod tests {
         }
     }
 
-    /// The keys templates build from data: every value the data may hold has a text.
-    #[test]
-    fn dynamic_translation_keys_exist() {
-        let table = &translations()[0].1;
+    /// The keys templates build from data: every value the data may hold.
+    fn dynamic_keys() -> Vec<String> {
         let mut keys: Vec<String> = Vec::new();
         for status in ["full", "partial", "needs_tokens"] {
             keys.push(format!("status_{status}"));
@@ -179,9 +177,27 @@ mod tests {
         ] {
             keys.push(format!("asset_{}", asset.replace('-', "_")));
         }
-        keys.extend(["nodata_releases".to_owned(), "nodata_upstream".to_owned()]);
-        for key in keys {
+        keys
+    }
+
+    #[test]
+    fn dynamic_translation_keys_exist() {
+        let table = &translations()[0].1;
+        for key in dynamic_keys() {
             assert!(table.contains_key(&key), "{key}");
+        }
+    }
+
+    #[test]
+    fn every_translation_key_is_used() {
+        let dynamic = dynamic_keys();
+        let templates: Vec<String> = templates().into_iter().map(|(_, text)| text).collect();
+        for key in translations()[0].1.keys() {
+            let used = dynamic.contains(key)
+                || templates.iter().any(|text| {
+                    text.contains(&format!("\"{key}\"")) || text.contains(&format!("'{key}'"))
+                });
+            assert!(used, "{key} is not used by any template");
         }
     }
 

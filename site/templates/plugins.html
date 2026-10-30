@@ -37,7 +37,8 @@
 </tbody>
 </table>
 </div>
-{%- if data.upstream.available %}
+{#- Bundles without a port come from the facts: the history alone does not list them. #}
+{%- if data.upstream.version %}
 {%- set unported = [b for b in data.upstream.bundles if not b.required and not b.port] %}
 <div class="table" role="region" aria-labelledby="unported-caption" tabindex="0">
 <table>

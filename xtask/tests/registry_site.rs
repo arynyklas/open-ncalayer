@@ -1,6 +1,6 @@
 //! The project site from the fixtures of `fixtures/registry` and from the repository's own
-//! ports. The tests that run Zola are `#[ignore]`d (they download the pinned Zola once): CI
-//! runs them in the `site` job.
+//! ports. The tests that run Zola download the pinned Zola once: they are `#[ignore]`d and
+//! named `live_…`, so the `test` job of CI leaves them out; the `site` job runs them.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -157,7 +157,7 @@ const LANG_PREFIXES: [&str; 3] = ["", "kk/", "en/"];
 
 #[test]
 #[ignore = "downloads and runs Zola"]
-fn site_builds_from_committed_data() {
+fn live_site_builds_from_committed_data() {
     let updates = root().join("updates/v1");
     let inputs = Inputs {
         plugins: root().join("plugins"),
@@ -179,7 +179,7 @@ fn site_builds_from_committed_data() {
 
 #[test]
 #[ignore = "downloads and runs Zola"]
-fn site_builds_from_fixtures() {
+fn live_site_builds_from_fixtures() {
     let (_out, public) = built(&fixture_inputs());
     assert!(!public.join("updates").exists());
     copy_tree(&fixtures().join("updates"), &public.join("updates"));
@@ -206,7 +206,7 @@ fn copy_tree(from: &Path, to: &Path) {
 
 #[test]
 #[ignore = "downloads and runs Zola"]
-fn site_escapes_hostile_fixture() {
+fn live_site_escapes_hostile_fixture() {
     let (_out, public) = built(&fixture_inputs());
     let mut pages: Vec<String> = LANG_PREFIXES
         .iter()
@@ -245,7 +245,7 @@ fn site_escapes_hostile_fixture() {
 
 #[test]
 #[ignore = "downloads and runs Zola"]
-fn site_works_without_any_optional_input() {
+fn live_site_works_without_any_optional_input() {
     let inputs = Inputs {
         plugins: fixtures().join("plugins"),
         updates: None,
@@ -266,7 +266,7 @@ fn site_works_without_any_optional_input() {
 
 #[test]
 #[ignore = "downloads and runs Zola"]
-fn catalog_anchor_for_every_port() {
+fn live_site_catalog_anchor_for_every_port() {
     let (_out, public) = built(&fixture_inputs());
     for prefix in LANG_PREFIXES {
         let html = read(&public, &format!("{prefix}plugins/index.html"));
@@ -279,4 +279,28 @@ fn catalog_anchor_for_every_port() {
         // The original's bundle without a port has its row too.
         assert!(html.contains("id=\"kz.example.unported\""), "{prefix}");
     }
+}
+
+#[test]
+#[ignore = "downloads and runs Zola"]
+fn live_site_catalog_lists_unported_bundles_only_from_facts() {
+    let (_out, public) = built(&fixture_inputs());
+    assert!(read(&public, "plugins/index.html").contains("id=\"unported-caption\""));
+    // The history alone says nothing about which bundles have no port.
+    let upstream = tempfile::tempdir().unwrap();
+    fs::copy(
+        fixtures().join("upstream/index.json"),
+        upstream.path().join("index.json"),
+    )
+    .unwrap();
+    let inputs = Inputs {
+        upstream: Some(upstream.path().to_path_buf()),
+        ..fixture_inputs()
+    };
+    let (_out, public) = built(&inputs);
+    for prefix in LANG_PREFIXES {
+        let catalog = read(&public, &format!("{prefix}plugins/index.html"));
+        assert!(!catalog.contains("unported-caption"), "{prefix}");
+    }
+    assert!(read(&public, "upstream/index.html").contains("2026-10-20"));
 }
