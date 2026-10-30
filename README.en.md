@@ -285,7 +285,7 @@ The latest release and pre-release, with each file explained, are on the [Downlo
 
 The site is made from `plugins/*/plugin.toml` and `registry.toml`, the update indexes `updates/v1/`, the list of releases and the `upstream` branch. It is published on GitHub Pages by the workflow that publishes the update indexes, which stay byte for byte as committed ([`docs/dev/release.md`](docs/dev/release.md), section 7в).
 
-Local build: `cargo xtask registry build` (Zola 0.23.6 is downloaded into `target/tools/` and checked against its sha256; the result is `target/site/public`, checked for links and page rules right after the build, or by `cargo xtask registry check <dir>`). To look at it: `target/tools/zola-v0.23.6/zola --root target/site/src serve`. The sources are in `site/` (configuration, templates, style, texts); the port pages and `data/site.json` are generated into `target/site/src` and not committed.
+Local build: `cargo xtask registry build` (Zola 0.23.6 is downloaded into `target/tools/` and checked against its sha256; the result is `target/site/public`, checked for links and page rules right after the build, or by `cargo xtask registry check <dir>`). To look at it: `target/tools/zola-v0.23.6/zola --root target/site/src serve`. The tests that build the site with Zola are named `zola_…` and skipped by default (`cargo test -p xtask --test registry_site -- --ignored zola_`); in CI the `site` job runs them. The sources are in `site/` (configuration, templates, style, texts); the port pages and `data/site.json` are generated into `target/site/src` and not committed.
 
 ## Installation
 

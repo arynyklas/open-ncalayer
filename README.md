@@ -287,7 +287,7 @@ mkcert: центр сертификации ищется в `$CAROOT` или к�
 
 Данные сайта — `plugins/*/plugin.toml` и `registry.toml`, индексы обновлений `updates/v1/`, список релизов и ветка `upstream`. Сайт публикуется на GitHub Pages тем же workflow, что и индексы обновлений, индексы при этом не меняются ни на байт ([`docs/dev/release.md`](docs/dev/release.md), раздел 7в).
 
-Собрать локально: `cargo xtask registry build` (Zola 0.23.6 скачивается в `target/tools/` и сверяется по sha256; результат — `target/site/public`, проверка ссылок и правил страниц — сразу после сборки, отдельно — `cargo xtask registry check <каталог>`). Посмотреть: `target/tools/zola-v0.23.6/zola --root target/site/src serve`. Исходники — в `site/` (конфигурация, шаблоны, стили, тексты); страницы портов и `data/site.json` генерируются в `target/site/src` и не коммитятся.
+Собрать локально: `cargo xtask registry build` (Zola 0.23.6 скачивается в `target/tools/` и сверяется по sha256; результат — `target/site/public`, проверка ссылок и правил страниц — сразу после сборки, отдельно — `cargo xtask registry check <каталог>`). Посмотреть: `target/tools/zola-v0.23.6/zola --root target/site/src serve`. Тесты сборки сайта с Zola называются `zola_…` и по умолчанию не запускаются (`cargo test -p xtask --test registry_site -- --ignored zola_`); в CI их запускает job `site`. Исходники — в `site/` (конфигурация, шаблоны, стили, тексты); страницы портов и `data/site.json` генерируются в `target/site/src` и не коммитятся.
 
 ## Установка
 

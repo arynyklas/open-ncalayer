@@ -90,7 +90,7 @@ jobs:
             skip=(--skip committed_licenses_are_fresh --skip committed_plugin_licenses_are_fresh)
           fi
           cargo xtask fetch-fixtures
-          cargo test --workspace --all-features -- --include-ignored --skip live_ "${skip[@]}"
+          cargo test --workspace --all-features -- --include-ignored --skip live_ --skip zola_ "${skip[@]}"
       # The daemon as releases build it (no `e2e-prompter`, no `token-emulator`): the token
       # emulator's variable changes nothing.
       - name: Daemon without the test features
@@ -177,8 +177,9 @@ jobs:
         run: rustup toolchain install
       - uses: ./.github/actions/pinned-toolchains
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The `zola_` tests (ignored, they download Zola) run here, not in `test`.
       - run: cargo xtask registry build
-      - run: cargo test -p xtask --test registry_site -- --ignored
+      - run: cargo test -p xtask --test registry_site -- --ignored zola_
 
   extension:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
