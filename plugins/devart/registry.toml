@@ -1,0 +1,26 @@
+id = "io.github.arynyklas.openncalayer.port.devart"
+modules = ["kz.devart.bundle.Devart"]
+
+[original]
+symname = "kz.devart.bundle.Devart"
+version = "1.1.4"
+vendor = "Devart"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Токен getSignerInfo действует только в соединении страницы и хранит выбранный ключ OpenNCALayer, а не путь и пароль хранилища; оригинал держал их в памяти процесса для любого сайта."
+
+[[differences]]
+ru = "ЭСФ и XML подписываются выбранным ключом (оригинал брал первый ключ хранилища)."
+
+[[differences]]
+ru = "Для OCSP-проверки сертификатов НУЦ RSA 2022 используется их издатель (у оригинала его не было в списке)."
+
+[[differences]]
+ru = "Ключ выбирается в общем окне OpenNCALayer; ключи с истёкшим сроком видны, но недоступны. Токены — после поддержки токенов в ядре."
+
+[[differences]]
+ru = "Подписи RSA-SHA1 (старые сертификаты sha1RSA) не создаются."

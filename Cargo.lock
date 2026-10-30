@@ -4002,6 +4002,7 @@ dependencies = [
  "base64",
  "der 0.8.2",
  "oncl-basics",
+ "oncl-gost",
  "oncl-pdk",
  "oncl-pki",
  "oncl-plugin",

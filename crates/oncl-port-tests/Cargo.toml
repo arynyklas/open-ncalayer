@@ -28,3 +28,5 @@ serde_json.workspace = true
 # The ports' replies carry base64 CMS; the tests read their DER.
 base64.workspace = true
 der.workspace = true
+# Streebog of the archive time-stamp's imprint, computed independently of the port.
+oncl-gost.workspace = true

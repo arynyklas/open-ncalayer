@@ -1,0 +1,29 @@
+id = "io.github.arynyklas.openncalayer.port.thundercrypt"
+modules = ["asia.dbt.thundercrypt.osgi.ThunderCryptModule"]
+
+[original]
+symname = "asia.dbt.thundercrypt.osgi.ThunderCryptModule"
+version = "1.16.5"
+vendor = "Dynamics Business Technologies"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Файл ключа по пути от страницы открывается после согласия пользователя в окне OpenNCALayer (один раз за сессию); пароль вводится в окне ядра и плагину не передаётся."
+
+[[differences]]
+ru = "Токены (keyType token) — после поддержки токенов в ядре; до этого ответ «Could not load key!»."
+
+[[differences]]
+ru = "Подписи с хешем GOST3411_GT и sha1RSA не создаются (SIGNING_FAILED)."
+
+[[differences]]
+ru = "Поле detail в params собирается из сведений OpenNCALayer о сбое сети, а не из текстов исключений JDK."
+
+[[differences]]
+ru = "Нет паузы 200 мс между подписью и проверкой; после B-LTA архивная метка отдельно не проверяется."
+
+[[differences]]
+ru = "Запросы OCSP, TSP и CRL идут только к узлам PKI НУЦ (*.pki.gov.kz)."
