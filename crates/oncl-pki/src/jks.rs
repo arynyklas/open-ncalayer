@@ -119,6 +119,73 @@ pub fn load(data: &[u8], password: &str) -> Result<Vec<KeyEntry>, JksError> {
     Ok(entries)
 }
 
+/// An entry of a JKS file, read without its password.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JksEntry {
+    /// The alias.
+    pub alias: String,
+    /// What it holds.
+    pub kind: JksEntryKind,
+}
+
+/// What a JKS entry holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JksEntryKind {
+    /// A private key (not returned: it stays encrypted) with its certificate chain.
+    PrivateKey {
+        /// The chain, the key's certificate first.
+        chain: Vec<Certificate>,
+    },
+    /// A trusted certificate.
+    TrustedCert(Box<Certificate>),
+}
+
+/// The entries of a JKS file in file order, without a password: the protected key blocks
+/// are skipped by their length and never returned, and the integrity digest is not checked.
+///
+/// # Errors
+///
+/// [`JksError::Malformed`] for an invalid layout or certificate (a truncated file
+/// included); [`JksError::Unsupported`] for certificate types other than X.509.
+pub fn entries(data: &[u8]) -> Result<Vec<JksEntry>, JksError> {
+    let mut r = Reader { data, pos: 0 };
+    let magic = r.u32()?;
+    let version = r.u32()?;
+    if magic != MAGIC || !(version == 1 || version == 2) {
+        return Err(JksError::Malformed("not a JKS file".to_owned()));
+    }
+    let count = r.u32()?;
+    let mut out = Vec::new();
+    for _ in 0..count {
+        match r.u32()? {
+            PRIVATE_KEY_TAG => {
+                let alias = r.utf()?;
+                r.take(8)?;
+                r.block()?;
+                let certs = r.u32()?;
+                let chain = (0..certs)
+                    .map(|_| r.cert(version))
+                    .collect::<Result<Vec<_>, _>>()?;
+                out.push(JksEntry {
+                    alias,
+                    kind: JksEntryKind::PrivateKey { chain },
+                });
+            }
+            TRUSTED_CERT_TAG => {
+                let alias = r.utf()?;
+                r.take(8)?;
+                let cert = r.cert(version)?;
+                out.push(JksEntry {
+                    alias,
+                    kind: JksEntryKind::TrustedCert(Box::new(cert)),
+                });
+            }
+            tag => return Err(JksError::Malformed(format!("unknown entry tag {tag}"))),
+        }
+    }
+    Ok(out)
+}
+
 /// The password as Java's key store code hashes it: each UTF-16 unit high byte first.
 fn password_bytes(password: &str) -> Zeroizing<Vec<u8>> {
     Zeroizing::new(password.encode_utf16().flat_map(u16::to_be_bytes).collect())

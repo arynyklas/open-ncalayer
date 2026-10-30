@@ -2,7 +2,7 @@
 //! format of Kalkan's `JavaKeyStore` and `KeyProtector`, which keytool cannot write.
 
 use der::Encode;
-use oncl_pki::jks::{JksError, is_jks, load};
+use oncl_pki::jks::{JksEntryKind, JksError, entries, is_jks, load};
 use oncl_pki::key::{KeyAlg, SigAlg};
 use oncl_pki::pkcs12::{self, KeyEntry};
 use oncl_testkit::{fixture, read, synthetic};
@@ -219,4 +219,44 @@ fn key_check_and_certificate_mismatch() {
         .finalize();
     data[digest_at..].copy_from_slice(&digest);
     assert!(load(&data, "Qwerty12").is_err());
+}
+
+#[test]
+fn entries_without_password() {
+    let data = read(fixture("jks/rsa.jks"));
+    let list = entries(&data).unwrap();
+    assert_eq!(list.len(), 2);
+    let key = list.iter().find(|e| e.alias == "openncalayer-rsa").unwrap();
+    assert!(matches!(&key.kind, JksEntryKind::PrivateKey { chain } if chain.len() == 1));
+    let root = list
+        .iter()
+        .find(|e| e.alias == "synthetic-root-rsa")
+        .unwrap();
+    let JksEntryKind::TrustedCert(c) = &root.kind else {
+        panic!("{root:?}")
+    };
+    assert_eq!(c.to_der().unwrap(), read(fixture("synthetic/root-rsa.cer")));
+}
+
+#[test]
+fn entries_rejects_truncated() {
+    let data = read(fixture("jks/rsa.jks"));
+    for len in [0, 4, 12, 40, data.len() / 2] {
+        assert!(
+            matches!(entries(&data[..len]), Err(JksError::Malformed(_))),
+            "{len}"
+        );
+    }
+}
+
+#[test]
+fn entries_ignore_password_digest() {
+    let mut data = read(fixture("jks/rsa.jks"));
+    let last = data.len() - 1;
+    data[last] ^= 0xff;
+    assert_eq!(entries(&data).unwrap().len(), 2);
+    assert!(matches!(
+        load(&data, "Qwerty12"),
+        Err(JksError::WrongPassword)
+    ));
 }
