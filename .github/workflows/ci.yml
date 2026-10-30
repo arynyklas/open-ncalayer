@@ -95,6 +95,36 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo xtask interop-openssl
 
+  # The real PC/SC backend (libpcsclite opened at run time) against an emulated Kaztoken:
+  # pcscd with vsmartcard's virtual reader (a CI tool only: not linked, not shipped), the
+  # card served by `cargo xtask token-emu`.
+  tokens-vpcd:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pcscd and vpcd
+        run: |
+          sudo apt-get update
+          if ! sudo apt-get install -y pcscd vsmartcard-vpcd; then
+            echo "::error::pcscd or vsmartcard-vpcd is not installable on this runner image"
+            exit 1
+          fi
+          sudo systemctl restart pcscd
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Build
+        run: |
+          cargo build -p xtask
+          cargo test --no-run -p oncl-token --features emulator --test vpcd
+      - name: Test against the emulated Kaztoken
+        run: |
+          cargo xtask token-emu --config crates/oncl-token/tests/vpcd-kaztoken.toml &
+          sleep 5
+          ONCL_TOKEN_VPCD=1 cargo test -p oncl-token --features emulator --test vpcd
+
   deny:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04

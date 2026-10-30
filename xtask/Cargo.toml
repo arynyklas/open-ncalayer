@@ -16,6 +16,8 @@ oncl-pki = { workspace = true, features = ["testing"] }
 oncl-plugin.workspace = true
 oncl-protocol.workspace = true
 oncl-testkit.workspace = true
+# `token-emu`: an emulated token served to vpcd (the PC/SC test of CI).
+oncl-token = { workspace = true, features = ["emulator"] }
 oncl-update.workspace = true
 
 anyhow.workspace = true
