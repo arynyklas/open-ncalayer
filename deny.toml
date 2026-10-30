@@ -3,7 +3,7 @@ all-features = true
 
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2023-0071", reason = "Marvin timing attack on rsa decryption/signing: oncl-pki uses rsa to generate keys and, blinded, for the RSA-SHA1 XML signatures a plugin names by URI (ring has no SHA-1 signing; every signature needs the user to open the key); other RSA signing is ring; xtask also signs public test fixtures" },
+    { id = "RUSTSEC-2023-0071", reason = "Marvin timing attack on rsa decryption/signing: oncl-pki uses rsa only to generate keys (RSA signing is ring); xtask also signs public test fixtures" },
     # Unmaintained (no vulnerability, no maintained release yet) deep in Slint's winit
     # backend on Linux: Wayland title bar fonts, and the zbus split crates of AT-SPI.
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser: transitive via winit/sctk-adwaita, unmaintained only" },

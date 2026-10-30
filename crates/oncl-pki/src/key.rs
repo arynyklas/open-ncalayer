@@ -34,8 +34,7 @@ pub enum SigAlg {
     Gost2015_512,
     /// sha256WithRSAEncryption (PKCS#1 v1.5).
     RsaSha256,
-    /// sha1WithRSAEncryption (PKCS#1 v1.5): verification, and signing only through
-    /// [`PrivateKey::sign_legacy`].
+    /// sha1WithRSAEncryption (PKCS#1 v1.5); verification only.
     RsaSha1,
 }
 
@@ -229,28 +228,6 @@ impl RsaKeyPair {
             .expect("RSA signing with a valid key and buffer");
         sig
     }
-
-    /// A PKCS#1 v1.5 signature of `message` with SHA-1, which `ring` does not make: `rsa`,
-    /// blinded with the operating system RNG.
-    fn sign_sha1(&self, message: &[u8]) -> Result<Vec<u8>, KeyError> {
-        use rsa::pkcs8::DecodePrivateKey;
-        /// `DigestInfo` of SHA-1 up to the hash (RFC 8017 §9.2, note 1).
-        const SHA1_PREFIX: [u8; 15] = [
-            0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04,
-            0x14,
-        ];
-        let key = rsa::RsaPrivateKey::from_pkcs8_der(&self.pkcs8).map_err(malformed)?;
-        let scheme = rsa::Pkcs1v15Sign {
-            hash_len: Some(20),
-            prefix: Box::new(SHA1_PREFIX),
-        };
-        key.sign_with_rng(
-            &mut crate::keygen::OsRng,
-            scheme,
-            &sha1::Sha1::digest(message),
-        )
-        .map_err(malformed)
-    }
 }
 
 impl std::fmt::Debug for RsaKeyPair {
@@ -361,7 +338,7 @@ impl PrivateKey {
     /// # Errors
     ///
     /// [`KeyError::UnsupportedAlgorithm`] if `alg` does not fit the key, and for
-    /// [`SigAlg::RsaSha1`] (see [`PrivateKey::sign_legacy`]).
+    /// [`SigAlg::RsaSha1`].
     ///
     /// # Panics
     ///
@@ -375,24 +352,6 @@ impl PrivateKey {
             }
             (PrivateKey::Rsa(key), SigAlg::RsaSha256) => Ok(key.sign_sha256(message)),
             _ => Err(KeyError::UnsupportedAlgorithm),
-        }
-    }
-
-    /// [`PrivateKey::sign`], and RSA with SHA-1 ([`SigAlg::RsaSha1`]) besides: only where a
-    /// signature format names that algorithm itself (an XML signature's `SignatureMethod`),
-    /// never because a certificate's algorithm is sha1WithRSA.
-    ///
-    /// # Errors
-    ///
-    /// [`KeyError::UnsupportedAlgorithm`] if `alg` does not fit the key.
-    ///
-    /// # Panics
-    ///
-    /// If the operating system RNG fails.
-    pub fn sign_legacy(&self, alg: SigAlg, message: &[u8]) -> Result<Vec<u8>, KeyError> {
-        match (self, alg) {
-            (PrivateKey::Rsa(key), SigAlg::RsaSha1) => key.sign_sha1(message),
-            _ => self.sign(alg, message),
         }
     }
 }

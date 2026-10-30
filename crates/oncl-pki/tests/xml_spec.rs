@@ -292,21 +292,18 @@ fn serialize_with_declaration_standalone_no_trim() {
 }
 
 #[test]
-fn rsa_sha1_signature_verifies() {
+fn rsa_sha1_signing_is_refused() {
     let rsa = entry("user-rsa-sign");
-    let spec = XmlSignSpec {
-        signature_method: Some(RSA_SHA1),
-        ..XmlSignSpec::kalkan(None, None)
-    };
-    let signed = sign(b"<a>1</a>", &spec, &rsa);
-    let sig = signature(&signed);
-    assert!(sig.contains(&format!("<ds:SignatureMethod Algorithm=\"{RSA_SHA1}\"/>")));
-    assert!(
-        sig.contains(
-            "<ds:DigestMethod Algorithm=\"http://www.w3.org/2001/04/xmldsig-more#sha1\"/>"
-        )
-    );
-    assert_eq!(verify(&signed).unwrap()[0].sig_alg, SigAlg::RsaSha1);
+    for uri in [RSA_SHA1, "http://www.w3.org/2000/09/xmldsig#rsa-sha1"] {
+        let spec = XmlSignSpec {
+            signature_method: Some(uri),
+            ..XmlSignSpec::kalkan(None, None)
+        };
+        match sign_spec(b"<a>1</a>", &spec, &rsa.key, &rsa.cert) {
+            Err(XmlError::Constraint(m)) => assert!(m.contains("SHA-1"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
 }
 
 #[test]

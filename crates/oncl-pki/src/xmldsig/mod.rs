@@ -18,8 +18,8 @@
 //! of 76 characters ended by `&#13;` (unless a spec says otherwise).
 //!
 //! Without a `SignatureMethod` URI of their own, signing algorithms follow the signature
-//! algorithm of the signer's certificate, and sha1RSA certificates are refused; RSA-SHA1 is
-//! made only when a spec names its URI. Same-document references (`URI=""`, `URI="#id"`)
+//! algorithm of the signer's certificate, and sha1RSA certificates are refused; RSA-SHA1
+//! signature methods are refused too (verification only). Same-document references (`URI=""`, `URI="#id"`)
 //! leave comments out whatever the canonicalization method says, as XMLDSig requires and
 //! Santuario does.
 //!
@@ -508,21 +508,17 @@ impl<'a> Algorithms<'a> {
             Some(uri) => {
                 let alg = signature_method(uri)
                     .ok_or_else(|| XmlError::UnsupportedAlgorithm(uri.to_owned()))?;
+                if alg == SigAlg::RsaSha1 {
+                    return Err(XmlError::Constraint(format!(
+                        "the signature method {uri} is unsupported: SHA-1 RSA signatures are not made"
+                    )));
+                }
                 if alg.key_alg() != key.alg() {
                     return Err(XmlError::Constraint(format!(
                         "the signature method {uri} does not fit the key"
                     )));
                 }
-                let paired = match uri {
-                    "http://www.w3.org/2000/09/xmldsig#rsa-sha1" => {
-                        "http://www.w3.org/2000/09/xmldsig#sha1"
-                    }
-                    "http://www.w3.org/2001/04/xmldsig-more#rsa-sha1" => {
-                        "http://www.w3.org/2001/04/xmldsig-more#sha1"
-                    }
-                    _ => signing_uris(alg).expect("a signing algorithm").1,
-                };
-                (alg, uri, paired)
+                (alg, uri, signing_uris(alg).expect("a signing algorithm").1)
             }
         };
         let digest_uri = spec.digest_method.unwrap_or(paired);
@@ -864,7 +860,7 @@ impl Template<'_> {
             canonicalizer(self.method).run(signed_info)
         })?;
         let value = key
-            .sign_legacy(self.algorithms.signature, &tbs)
+            .sign(self.algorithms.signature, &tbs)
             .map_err(XmlError::Key)?;
         Ok(point.splice(xml, &self.render(Some(&value), object_digest.as_deref())))
     }
