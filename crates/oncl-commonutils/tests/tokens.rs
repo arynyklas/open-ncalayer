@@ -9,7 +9,7 @@ use oncl_commonutils::{CommonUtils, MODULE_NAME};
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::cms::verify;
 use oncl_pki::pkcs12::load;
-use oncl_pki::pkix::CaSet;
+use oncl_pki::pkix::{CaSet, build_path, validation_time};
 use oncl_pki::tsp::{MockTsa, verify_token};
 use oncl_pki::xmldsig;
 use oncl_protocol::{AddInfo, Module};
@@ -18,6 +18,7 @@ use oncl_token::emulator::{CardSpec, EmuKey, EmulatorBackend, card};
 use oncl_token::{TokenKind, Tokens};
 use serde_json::{Value, json};
 use std::sync::{Arc, Barrier};
+use time::OffsetDateTime;
 
 const R0: &str = "OpenNCALayer Emulated Reader 0";
 const R1: &str = "OpenNCALayer Emulated Reader 1";
@@ -298,5 +299,101 @@ fn card_removed_mid_sign_is_500() {
         ok(&call(&cu, "getActiveTokens", json!([]))),
         &json!([]),
         "the card is gone"
+    );
+}
+
+/// commonUtils from end to end on an emulated Kaztoken, trusting the synthetic roots as
+/// these tests do (`with_cas`): the connected token, its certificate, a wrong PIN and the
+/// right one in the dialog, a CAdES whose signer chains to the synthetic root, its
+/// time-stamp, and an XML signature by the same key. The wrong PIN cost one try, which
+/// the right one restored.
+#[test]
+fn token_signing_end_to_end_against_synthetic_root() {
+    let emu = emulator(vec![spec(TokenKind::Kaztoken)]);
+    let s = setup(
+        &emu,
+        true,
+        vec![
+            token(R0, PIN),
+            Step::Key(0),
+            token(R0, "000000"),
+            token(R0, PIN),
+            Step::Key(0),
+            token(R0, PIN),
+            Step::Key(0),
+            token(R0, PIN),
+            Step::Key(0),
+        ],
+    );
+    let k = synthetic("user-gost2015-sign");
+    let cert = load(&read(&k.path), &k.password)
+        .unwrap()
+        .swap_remove(0)
+        .cert;
+
+    assert_eq!(
+        ok(&call(&s.cu, "getActiveTokens", json!([]))),
+        &json!(["AKKaztokenStore"])
+    );
+    let info = call(&s.cu, "getKeyInfo", json!(["AKKaztokenStore"]));
+    assert_eq!(ok(&info)["subjectCn"], "ТЕСТОВ ТЕСТ", "{info}");
+    assert_eq!(
+        ok(&info)["serialNumber"],
+        oncl_pki::info::cert_info(&cert).serial_hex
+    );
+
+    let cades = unb64(&call(
+        &s.cu,
+        "createCAdESFromBase64",
+        json!([
+            "AKKaztokenStore",
+            "SIGNATURE",
+            STANDARD.encode(b"doc"),
+            true
+        ]),
+    ));
+    let prompts = s.prompter.storage_prompts();
+    assert_eq!(
+        prompts[2].error,
+        Some(OpenError::WrongPin {
+            tries_left: Some(9)
+        })
+    );
+    let stamped = unb64(&call(
+        &s.cu,
+        "applyCAdEST",
+        json!(["AKKaztokenStore", "SIGNATURE", STANDARD.encode(&cades)]),
+    ));
+    let signers = verify(&stamped, None).unwrap();
+    assert_eq!(signers.len(), 1);
+    assert_eq!(signers[0].cert, cert);
+    verify_token(signers[0].timestamp_token.as_ref().unwrap()).unwrap();
+    assert_eq!(s.tsa.calls().len(), 1);
+    let path = build_path(
+        &signers[0].cert,
+        &synthetic_cas(),
+        validation_time(&signers[0].cert, OffsetDateTime::now_utc()),
+    )
+    .unwrap();
+    let root = cert::parse(&synthetic_cert("root-gost2015")).unwrap();
+    assert_eq!(path.last(), Some(&root));
+
+    let signed = call(
+        &s.cu,
+        "signXml",
+        json!([
+            "AKKaztokenStore",
+            "SIGNATURE",
+            "<root><a>x</a></root>",
+            "",
+            ""
+        ]),
+    );
+    let xml_signers = xmldsig::verify(ok(&signed).as_str().unwrap().as_bytes()).unwrap();
+    assert_eq!(xml_signers[0].cert, cert);
+
+    assert_eq!(
+        Tokens::new(emu.clone(), true).pin_tries(R0, TokenKind::Kaztoken),
+        Ok(Some(10))
     );
 }
