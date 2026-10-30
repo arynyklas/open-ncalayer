@@ -1,12 +1,15 @@
-// The storage dialog: storage, key store file and password.
+// The storage dialog: storage, then the key store file and its password, or the reader of
+// a hardware token and its PIN.
 
-import { AboutSlint, Button, CheckBox, HorizontalBox, LineEdit, Palette, VerticalBox } from "std-widgets.slint";
+import { AboutSlint, Button, CheckBox, ComboBox, HorizontalBox, LineEdit, Palette, VerticalBox } from "std-widgets.slint";
 
 // A storage in the list.
 export struct StorageRow {
     label: string,
     // Unsupported storages are greyed out and cannot be picked.
     supported: bool,
+    // A hardware token: it is opened in a reader, with a PIN.
+    token: bool,
 }
 
 export component StorageDialog inherits Window {
@@ -30,12 +33,25 @@ export component StorageDialog inherits Window {
     in-out property <string> password;
     // Why the previous answer could not be opened.
     in property <string> error;
+    // The readers holding a token of the chosen token storage.
+    in property <[string]> readers;
+    // Index of the chosen reader, -1 for none.
+    in-out property <int> reader-index: -1;
+    // Why no reader is listed, or that the readers are being searched for; empty otherwise.
+    in property <string> reader-note;
+    // The readers are being searched for: «Refresh» waits.
+    in property <bool> scanning;
 
     callback browse();
     callback open();
     callback cancel();
+    // The storage of row `i` was chosen.
+    callback storage-chosen(int);
+    // Search the readers again.
+    callback refresh();
 
-    private property <bool> can-open: root.selected >= 0 && !root.path.is-empty;
+    private property <bool> is-token: root.selected >= 0 && root.selected < root.storages.length && root.storages[root.selected].token;
+    private property <bool> can-open: root.selected >= 0 && (root.is-token ? root.reader-index >= 0 && root.reader-index < root.readers.length : !root.path.is-empty);
 
     VerticalBox {
         HorizontalLayout {
@@ -83,6 +99,7 @@ export component StorageDialog inherits Window {
                 accessible-action-default => {
                     if (row.supported) {
                         root.selected = i;
+                        root.storage-chosen(i);
                     }
                 }
                 TouchArea {
@@ -90,6 +107,7 @@ export component StorageDialog inherits Window {
                     mouse-cursor: row.supported ? pointer : default;
                     clicked => {
                         root.selected = i;
+                        root.storage-chosen(i);
                     }
                 }
 
@@ -116,11 +134,11 @@ export component StorageDialog inherits Window {
             }
         }
 
-        Text {
+        if !root.is-token: Text {
             text: @tr("Key store file");
         }
 
-        HorizontalLayout {
+        if !root.is-token: HorizontalLayout {
             spacing: 8px;
             LineEdit {
                 text <=> root.path;
@@ -135,8 +153,42 @@ export component StorageDialog inherits Window {
             }
         }
 
+        if root.is-token: Text {
+            text: @tr("Reader");
+        }
+
+        if root.is-token: HorizontalLayout {
+            spacing: 8px;
+            ComboBox {
+                horizontal-stretch: 1;
+                enabled: root.readers.length > 0;
+                model: root.readers;
+                current-index <=> root.reader-index;
+            }
+
+            Button {
+                text: @tr("Refresh");
+                enabled: !root.scanning;
+                clicked => {
+                    root.refresh();
+                }
+            }
+        }
+
+        if root.is-token && !root.reader-note.is-empty: Text {
+            text: root.reader-note;
+            wrap: word-wrap;
+        }
+
+        if root.is-token: Text {
+            text: @tr("Token support is experimental: checked on an emulator only");
+            wrap: word-wrap;
+            font-italic: true;
+            color: #888888;
+        }
+
         Text {
-            text: @tr("Password");
+            text: root.is-token ? @tr("PIN code") : @tr("Password");
         }
 
         password-input := LineEdit {

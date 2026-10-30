@@ -1,7 +1,8 @@
 //! `settings.json` in the data directory, one JSON object shared by the settings window
-//! ([`Settings`]: `locale`, `autostart`, `proxy`, `updates`) and other owners of single keys
-//! (the `recentPath` of the key store dialogs). Every change is a read-modify-write of the
-//! whole object ([`update`]) that keeps the keys it does not change, unknown ones included.
+//! ([`Settings`]: `locale`, `autostart`, `proxy`, `updates`, `tokens`) and other owners of
+//! single keys (the `recentPath` of the key store dialogs). Every change is a read-modify-
+//! write of the whole object ([`update`]) that keeps the keys it does not change, unknown
+//! ones included.
 //! The file may hold a proxy password: it is written readable by its owner only (mode
 //! `0600` on Unix).
 
@@ -26,6 +27,7 @@ const URL: &str = "url";
 const UPDATES: &str = "updates";
 const ENABLED: &str = "enabled";
 const CHANNEL: &str = "channel";
+const TOKENS: &str = "tokens";
 
 /// The settings of the settings window.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -41,6 +43,15 @@ pub struct Settings {
     pub proxy: ProxySetting,
     /// The self-update (`{"enabled": true, "channel": "stable" | "beta"}`).
     pub updates: UpdateSettings,
+    /// Hardware tokens and ID cards (`{"enabled": false}`): experimental, off by default.
+    pub tokens: TokenSettings,
+}
+
+/// Whether hardware tokens and ID cards are used.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenSettings {
+    /// The storage dialogs and the modules see the tokens plugged in; off by default.
+    pub enabled: bool,
 }
 
 /// Whether OpenNCALayer updates itself, and from which channel.
@@ -141,16 +152,25 @@ impl Settings {
                 defaults.updates
             }),
         };
+        let tokens = match object.get(TOKENS) {
+            None => defaults.tokens,
+            Some(v) => tokens_of(v).unwrap_or_else(|| {
+                ignored(TOKENS);
+                defaults.tokens
+            }),
+        };
         Settings {
             locale,
             autostart,
             proxy,
             updates,
+            tokens,
         }
     }
 
     /// Writes the settings into `object`. Other members of a `proxy` object stay; its `url`
-    /// goes when the mode is not manual, so no proxy password is kept that is not used.
+    /// goes when the mode is not manual, so no proxy password is kept that is not used. The
+    /// `tokens` key is written once support is turned on (absent, it is off).
     fn store(&self, object: &mut Map<String, Value>) {
         match &self.locale {
             Some(l) => object.insert(LOCALE.to_owned(), Value::String(l.clone())),
@@ -190,6 +210,17 @@ impl Settings {
                 Value::String(self.updates.channel.as_str().to_owned()),
             );
         }
+        if self.tokens.enabled || object.contains_key(TOKENS) {
+            let tokens = object
+                .entry(TOKENS)
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !tokens.is_object() {
+                *tokens = Value::Object(Map::new());
+            }
+            if let Value::Object(tokens) = tokens {
+                tokens.insert(ENABLED.to_owned(), Value::Bool(self.tokens.enabled));
+            }
+        }
     }
 }
 
@@ -224,6 +255,16 @@ fn updates_of(v: &Value) -> Option<UpdateSettings> {
         }
     };
     Some(UpdateSettings { enabled, channel })
+}
+
+/// The token settings of a `tokens` object: `enabled` missing keeps its default; `None` if it
+/// is not an object or `enabled` is not a boolean.
+fn tokens_of(v: &Value) -> Option<TokenSettings> {
+    let enabled = match v.as_object()?.get(ENABLED) {
+        None => TokenSettings::default().enabled,
+        Some(on) => on.as_bool()?,
+    };
+    Some(TokenSettings { enabled })
 }
 
 /// Our language of a locale name such as `ru`, `kk_KZ.UTF-8` or `en-US`; `None` for any
@@ -389,6 +430,7 @@ mod tests {
                     enabled: false,
                     channel: Channel::Beta,
                 },
+                tokens: TokenSettings::default(),
             }
         );
         s.save(&f).unwrap();
@@ -415,6 +457,44 @@ mod tests {
         s.proxy = ProxySetting::None;
         s.save(&f).unwrap();
         assert_eq!(Settings::load(&f).unwrap().proxy, ProxySetting::None);
+    }
+
+    #[test]
+    fn tokens_setting_defaults_off_and_keeps_unknown_keys() {
+        // Absent: off, and a save of the defaults does not add the key.
+        let (_d, f) = file_with(r#"{"recentPath": "k.p12"}"#);
+        let mut s = Settings::load(&f).unwrap();
+        assert_eq!(s.tokens, TokenSettings { enabled: false });
+        s.save(&f).unwrap();
+        assert!(on_disk(&f).get("tokens").is_none());
+
+        // Turned on, then off: the key stays with its other members.
+        s.tokens.enabled = true;
+        s.save(&f).unwrap();
+        assert_eq!(on_disk(&f)["tokens"], json!({"enabled": true}));
+        assert!(Settings::load(&f).unwrap().tokens.enabled);
+        let (_d, f) = file_with(r#"{"tokens": {"enabled": true, "later": [1]}}"#);
+        let mut s = Settings::load(&f).unwrap();
+        assert!(s.tokens.enabled);
+        s.tokens.enabled = false;
+        s.save(&f).unwrap();
+        assert_eq!(
+            on_disk(&f)["tokens"],
+            json!({"enabled": false, "later": [1]})
+        );
+        assert!(!Settings::load(&f).unwrap().tokens.enabled);
+
+        // Not understood: off.
+        for tokens in ["true", r#"{"enabled": "yes"}"#, "[]"] {
+            let (_d, f) = file_with(&format!(r#"{{"tokens": {tokens}}}"#));
+            assert_eq!(
+                Settings::load(&f).unwrap().tokens,
+                TokenSettings::default(),
+                "{tokens}"
+            );
+        }
+        let (_d, f) = file_with(r#"{"tokens": {}}"#);
+        assert!(!Settings::load(&f).unwrap().tokens.enabled);
     }
 
     #[test]

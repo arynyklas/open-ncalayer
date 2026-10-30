@@ -1,7 +1,7 @@
-//! The settings window: the language, our autostart, the proxy and the updates, saved
-//! together into `settings.json` and our autostart entry; the original NCALayer's autostart
-//! and the browser extension's registration, acted on at once; «Проверить сейчас», a check
-//! for a new version.
+//! The settings window: the language, our autostart, the proxy, the updates and the
+//! hardware tokens, saved together into `settings.json` and our autostart entry; the
+//! original NCALayer's autostart and the browser extension's registration, acted on at
+//! once; «Проверить сейчас», a check for a new version.
 //!
 //! The window's logic without a window is public: [`SettingsForm`] (what the form shows and
 //! the settings it gives), [`SettingsServices`] (loading and the actions, on sandboxes in
@@ -24,7 +24,7 @@ use oncl_desktop::original::{EntryKind, EntryState};
 use oncl_desktop::settings::Channel;
 use oncl_desktop::{
     Autostart, BrowserExtension, ExtensionError, ExtensionStatus, OriginalControl, OriginalStatus,
-    ProxySetting, Settings, UpdateSettings,
+    ProxySetting, Settings, TokenSettings, UpdateSettings,
 };
 
 use texts::Texts;
@@ -106,6 +106,8 @@ pub struct SettingsForm {
     /// «Обновлять автоматически».
     pub updates_enabled: bool,
     pub update_channel: Channel,
+    /// «Токены и удостоверение личности (экспериментально)».
+    pub tokens_enabled: bool,
 }
 
 /// Why the form cannot be saved.
@@ -133,6 +135,7 @@ impl SettingsForm {
             proxy_url,
             updates_enabled: settings.updates.enabled,
             update_channel: settings.updates.channel,
+            tokens_enabled: settings.tokens.enabled,
         }
     }
 
@@ -162,6 +165,9 @@ impl SettingsForm {
             updates: UpdateSettings {
                 enabled: self.updates_enabled,
                 channel: self.update_channel,
+            },
+            tokens: TokenSettings {
+                enabled: self.tokens_enabled,
             },
         })
     }
@@ -669,6 +675,7 @@ mod tests {
             proxy_url: url.to_owned(),
             updates_enabled: true,
             update_channel: Channel::Stable,
+            tokens_enabled: false,
         }
     }
 
@@ -684,6 +691,7 @@ mod tests {
                     enabled: false,
                     channel: Channel::Beta,
                 },
+                tokens: TokenSettings::default(),
             },
             Settings {
                 locale: Some("en".to_owned()),
@@ -704,6 +712,26 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(SettingsForm::new(&odd, false).language, Language::System);
+    }
+
+    #[test]
+    fn settings_tokens_checkbox_roundtrip() {
+        // Off by default; the box gives the setting and takes it back.
+        let form = SettingsForm::new(&Settings::default(), false);
+        assert!(!form.tokens_enabled);
+        assert!(!form.settings().unwrap().tokens.enabled);
+        let on = Settings {
+            tokens: TokenSettings { enabled: true },
+            ..Settings::default()
+        };
+        let form = SettingsForm::new(&on, false);
+        assert!(form.tokens_enabled);
+        assert_eq!(form.settings().unwrap(), on);
+        let off = SettingsForm {
+            tokens_enabled: false,
+            ..form
+        };
+        assert_eq!(off.settings().unwrap().tokens, TokenSettings::default());
     }
 
     #[test]

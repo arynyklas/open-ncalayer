@@ -319,3 +319,30 @@ msgstr "Файлдан орнату…"
 
 msgid "Refresh the catalog"
 msgstr "Каталогты жаңарту"
+
+msgid "Reader"
+msgstr "Оқу құрылғысы"
+
+msgid "Refresh"
+msgstr "Жаңарту"
+
+msgid "Token support is experimental: checked on an emulator only"
+msgstr "Токендерді қолдау тәжірибелік: тек эмуляторда тексерілген"
+
+msgid "PIN code"
+msgstr "PIN-код"
+
+msgid "Key storage selection"
+msgstr "Кілт қоймасын таңдау"
+
+msgid "Storage type: {}"
+msgstr "Қойма түрі: {}"
+
+msgid "Choose"
+msgstr "Таңдау"
+
+msgid "Tokens and ID cards (experimental)"
+msgstr "Токендер және жеке куәлік (тәжірибелік)"
+
+msgid "Sites will see the connected tokens and the ID card's details without asking, as with the original NCALayer."
+msgstr "Сайттар қосылған тасымалдағыштарды және жеке куәлік деректерін сұраусыз көре алады, түпнұсқа NCALayer сияқты"

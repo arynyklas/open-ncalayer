@@ -319,3 +319,30 @@ msgstr "Установить из файла…"
 
 msgid "Refresh the catalog"
 msgstr "Обновить каталог"
+
+msgid "Reader"
+msgstr "Считыватель"
+
+msgid "Refresh"
+msgstr "Обновить"
+
+msgid "Token support is experimental: checked on an emulator only"
+msgstr "Поддержка токенов экспериментальная: проверена только на эмуляторе"
+
+msgid "PIN code"
+msgstr "PIN-код"
+
+msgid "Key storage selection"
+msgstr "Выбор хранилища ключа"
+
+msgid "Storage type: {}"
+msgstr "Тип хранилища: {}"
+
+msgid "Choose"
+msgstr "Выбрать"
+
+msgid "Tokens and ID cards (experimental)"
+msgstr "Токены и удостоверение личности (экспериментально)"
+
+msgid "Sites will see the connected tokens and the ID card's details without asking, as with the original NCALayer."
+msgstr "Сайты смогут видеть подключённые носители и данные удостоверения личности без запроса, как в оригинальном NCALayer"

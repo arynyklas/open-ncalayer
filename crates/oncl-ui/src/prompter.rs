@@ -3,20 +3,20 @@
 use crate::foreground;
 use crate::ui::{
     BusyDialog, CertItem, ConfirmDialog, CsrDialog, FileDialog, ImportDialog, KeyDialog, KeyItem,
-    MessageDialog, PasswordDialog, SaveDialog, StorageDialog, StorageRow,
+    MessageDialog, PasswordDialog, ReaderDialog, SaveDialog, StorageDialog, StorageRow,
 };
 use crate::view::{self, KeyRow};
 use oncl_basics::{
     Action, Busy, BusyPrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FileKind, FilePrompt,
     ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale, MessageKind, MessagePrompt,
-    PasswordPrompt, Prompt, Prompter, ReaderPrompt, SavePrompt, StorageAnswer, StorageKind,
-    StoragePrompt,
+    PasswordPrompt, Prompt, Prompter, ReaderList, ReaderProblem, ReaderPrompt, SavePrompt,
+    StorageAnswer, StorageKind, StoragePrompt,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{
     CloseRequestResponse, ComponentHandle, EventLoopError, Model, ModelRc, PlatformError,
-    SharedString, VecModel,
+    SharedString, StandardListViewItem, VecModel,
 };
 use std::any::Any;
 use std::cell::RefCell;
@@ -205,9 +205,8 @@ impl Prompter for SlintPrompter {
         ask(p, show_save)
     }
 
-    fn reader(&self, _: &ReaderPrompt) -> Prompt<String> {
-        tracing::warn!("the reader dialog is not available");
-        Prompt::Cancelled
+    fn reader(&self, p: &ReaderPrompt) -> Prompt<String> {
+        ask(p, show_reader)
     }
 }
 
@@ -286,22 +285,61 @@ fn show_storage(
     reply: Sender<Prompt<StorageAnswer>>,
 ) -> Result<(), PlatformError> {
     let ui = StorageDialog::new()?;
+    let pending = wire_storage(&ui, &p, reply);
+    show(&ui, pending)
+}
+
+/// Whether the storage dialog of `p` lets `k` be picked: a file storage, or a token's with
+/// token support on.
+fn storage_usable(p: &StoragePrompt, k: &StorageKind) -> bool {
+    k.readable() || (p.tokens.is_some() && k.token_kind().is_some())
+}
+
+/// Fills the storage dialog with `p` and wires its buttons; Open answers. A token storage
+/// shows the readers of `p.tokens` holding one, scanned again by «Refresh».
+fn wire_storage(
+    ui: &StorageDialog,
+    p: &StoragePrompt,
+    reply: Sender<Prompt<StorageAnswer>>,
+) -> Rc<Pending<StorageDialog, StorageAnswer>> {
     select_language(p.locale);
     ui.set_origin(p.origin.as_str().into());
     ui.set_authenticate(p.action == Action::Authenticate);
     ui.set_key_info(p.action == Action::KeyInfo);
     ui.set_detail(p.detail.as_deref().unwrap_or_default().into());
-    ui.set_storages(storage_rows(&p.storages, p.locale, StorageKind::readable));
-    ui.set_selected(index(p.storages.iter().position(StorageKind::readable)));
+    ui.set_storages(storage_rows(&p.storages, p.locale, |k| {
+        storage_usable(p, k)
+    }));
+    // A retry after a token's error selects that token again; else the first file
+    // storage, else the first usable one.
+    let selected = p
+        .chosen
+        .and_then(|c| p.storages.iter().position(|k| *k == c))
+        .filter(|&i| storage_usable(p, &p.storages[i]))
+        .or_else(|| p.storages.iter().position(StorageKind::readable))
+        .or_else(|| p.storages.iter().position(|k| storage_usable(p, k)));
+    ui.set_selected(index(selected));
     if let Some(path) = &p.recent_path {
         ui.set_path(path.display().to_string().into());
     }
     if let Some(e) = p.error {
         ui.set_error(view::error_text(e, p.locale).into());
     }
+    let token_of = {
+        let (storages, tokens) = (p.storages.clone(), p.tokens.clone());
+        move |i: i32| -> Option<(StorageKind, ReaderList)> {
+            let storage = *usize::try_from(i).ok().and_then(|i| storages.get(i))?;
+            storage.token_kind()?;
+            Some((storage, tokens.clone()?))
+        }
+    };
+    if let Some((storage, list)) = token_of(ui.get_selected()) {
+        show_storage_readers(ui, &list, storage, p.reader.as_deref(), p.locale);
+    }
 
     let pending = Pending::new(ui.clone_strong(), reply);
     let weak = ui.as_weak();
+    let locale = p.locale;
     ui.on_browse({
         let weak = weak.clone();
         move || {
@@ -310,9 +348,28 @@ fn show_storage(
             }
         }
     });
+    ui.on_storage_chosen({
+        let (weak, token_of) = (weak.clone(), token_of.clone());
+        move |i| {
+            if let (Some(ui), Some((storage, list))) = (weak.upgrade(), token_of(i)) {
+                show_storage_readers(&ui, &list, storage, None, locale);
+            }
+        }
+    });
+    ui.on_refresh({
+        let (weak, token_of) = (weak.clone(), token_of.clone());
+        move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if let Some((_, list)) = token_of(ui.get_selected()) {
+                rescan_storage_readers(&ui, list, token_of.clone(), locale);
+            }
+        }
+    });
     ui.on_open({
         let pending = pending.clone();
-        let storages = p.storages;
+        let storages = p.storages.clone();
         move || {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -323,17 +380,186 @@ fn show_storage(
             else {
                 return;
             };
+            let reader = if token_of(ui.get_selected()).is_some() {
+                let Some(reader) = usize::try_from(ui.get_reader_index())
+                    .ok()
+                    .and_then(|i| ui.get_readers().row_data(i))
+                else {
+                    return;
+                };
+                Some(reader.to_string())
+            } else {
+                None
+            };
             let password = Zeroizing::new(ui.get_password().to_string());
             ui.set_password(SharedString::new());
             pending.finish(Prompt::Answer(StorageAnswer {
                 storage,
-                path: PathBuf::from(ui.get_path().as_str()),
+                path: if reader.is_some() {
+                    PathBuf::new()
+                } else {
+                    PathBuf::from(ui.get_path().as_str())
+                },
                 password,
-                reader: None,
+                reader,
             }));
         }
     });
+    pending
+}
+
+/// The readers of `storage` in `list`'s last scan: their names, and the index of
+/// `preferred` among them (else the first).
+fn readers_of(
+    list: &ReaderList,
+    storage: StorageKind,
+    preferred: Option<&str>,
+) -> (Vec<String>, Option<ReaderProblem>, Option<usize>) {
+    let (entries, problem) = list.current();
+    let names: Vec<String> = entries
+        .into_iter()
+        .filter(|e| e.storage == storage)
+        .map(|e| e.reader)
+        .collect();
+    let chosen = preferred
+        .and_then(|r| names.iter().position(|n| n == r))
+        .or((!names.is_empty()).then_some(0));
+    (names, problem, chosen)
+}
+
+/// Shows the readers of `storage` in the storage dialog, `preferred` selected if listed.
+fn show_storage_readers(
+    ui: &StorageDialog,
+    list: &ReaderList,
+    storage: StorageKind,
+    preferred: Option<&str>,
+    l: Locale,
+) {
+    let (names, problem, chosen) = readers_of(list, storage, preferred);
+    ui.set_reader_note(view::reader_note(names.len(), problem, false, l).into());
+    let names: Vec<SharedString> = names.into_iter().map(SharedString::from).collect();
+    ui.set_readers(ModelRc::new(VecModel::from(names)));
+    ui.set_reader_index(index(chosen));
+    ui.set_scanning(false);
+}
+
+/// «Refresh» of the storage dialog: scans on a thread of its own, then shows the readers of
+/// the storage selected then, keeping the selected reader.
+fn rescan_storage_readers(
+    ui: &StorageDialog,
+    list: ReaderList,
+    token_of: impl Fn(i32) -> Option<(StorageKind, ReaderList)> + Send + 'static,
+    l: Locale,
+) -> std::thread::JoinHandle<()> {
+    ui.set_scanning(true);
+    ui.set_reader_note(view::reader_note(0, None, true, l).into());
+    rescan_off_thread(ui.as_weak(), list, move |ui: StorageDialog| {
+        let preferred = usize::try_from(ui.get_reader_index())
+            .ok()
+            .and_then(|i| ui.get_readers().row_data(i));
+        match token_of(ui.get_selected()) {
+            Some((storage, list)) => {
+                show_storage_readers(&ui, &list, storage, preferred.as_deref(), l)
+            }
+            None => ui.set_scanning(false),
+        }
+    })
+}
+
+/// Scans `list` again on a thread of its own (the service may take its time), then runs
+/// `done` on the event loop with the dialog, if it is still there.
+fn rescan_off_thread<D: ComponentHandle + 'static>(
+    weak: slint::Weak<D>,
+    list: ReaderList,
+    done: impl FnOnce(D) + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        list.rescan();
+        // The dialog may be gone already.
+        let _ = weak.upgrade_in_event_loop(done);
+    })
+}
+
+/// The reader dialog for `p`; the outcome goes to `reply`.
+fn show_reader(p: ReaderPrompt, reply: Sender<Prompt<String>>) -> Result<(), PlatformError> {
+    let ui = ReaderDialog::new()?;
+    let pending = wire_reader(&ui, &p, reply);
     show(&ui, pending)
+}
+
+/// Fills the reader dialog with `p` and wires its buttons; «Choose» answers.
+fn wire_reader(
+    ui: &ReaderDialog,
+    p: &ReaderPrompt,
+    reply: Sender<Prompt<String>>,
+) -> Rc<Pending<ReaderDialog, String>> {
+    select_language(p.locale);
+    ui.set_origin(p.origin.as_str().into());
+    ui.set_storage(view::storage_label(p.storage, p.locale).into());
+    show_dialog_readers(ui, &p.readers, p.storage, None, p.locale);
+    let pending = Pending::new(ui.clone_strong(), reply);
+    let weak = ui.as_weak();
+    ui.on_refresh({
+        let (weak, list, storage, l) = (weak.clone(), p.readers.clone(), p.storage, p.locale);
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                rescan_dialog_readers(&ui, list.clone(), storage, l);
+            }
+        }
+    });
+    ui.on_choose({
+        let pending = pending.clone();
+        move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if let Some(item) = usize::try_from(ui.get_reader_index())
+                .ok()
+                .and_then(|i| ui.get_readers().row_data(i))
+            {
+                pending.finish(Prompt::Answer(item.text.to_string()));
+            }
+        }
+    });
+    pending
+}
+
+/// Shows the readers of `storage` in the reader dialog, `preferred` selected if listed.
+fn show_dialog_readers(
+    ui: &ReaderDialog,
+    list: &ReaderList,
+    storage: StorageKind,
+    preferred: Option<&str>,
+    l: Locale,
+) {
+    let (names, problem, chosen) = readers_of(list, storage, preferred);
+    ui.set_reader_note(view::reader_note(names.len(), problem, false, l).into());
+    let items: Vec<StandardListViewItem> = names
+        .iter()
+        .map(|n| StandardListViewItem::from(n.as_str()))
+        .collect();
+    ui.set_readers(ModelRc::new(VecModel::from(items)));
+    ui.set_reader_index(index(chosen));
+    ui.set_scanning(false);
+}
+
+/// «Refresh» of the reader dialog: as [`rescan_storage_readers`].
+fn rescan_dialog_readers(
+    ui: &ReaderDialog,
+    list: ReaderList,
+    storage: StorageKind,
+    l: Locale,
+) -> std::thread::JoinHandle<()> {
+    ui.set_scanning(true);
+    ui.set_reader_note(view::reader_note(0, None, true, l).into());
+    let shown = list.clone();
+    rescan_off_thread(ui.as_weak(), list, move |ui: ReaderDialog| {
+        let preferred = usize::try_from(ui.get_reader_index())
+            .ok()
+            .and_then(|i| ui.get_readers().row_data(i))
+            .map(|item| item.text.to_string());
+        show_dialog_readers(&ui, &shown, storage, preferred.as_deref(), l);
+    })
 }
 
 /// Picks the key store file with the system file dialog, starting in the current file's
@@ -647,17 +873,19 @@ fn take_new_password<D: FolderDialog>(ui: &D, l: Locale) -> Option<Zeroizing<Str
     Some(password)
 }
 
-/// The rows of a storage list; the storages `usable` accepts may be picked.
+/// The rows of a storage list; the storages `usable` accepts may be picked, a usable token
+/// storage asks for a reader.
 fn storage_rows(
     storages: &[StorageKind],
     l: Locale,
-    usable: fn(&StorageKind) -> bool,
+    usable: impl Fn(&StorageKind) -> bool,
 ) -> ModelRc<StorageRow> {
     let rows: Vec<StorageRow> = storages
         .iter()
         .map(|k| StorageRow {
             label: view::storage_label(*k, l).into(),
             supported: usable(k),
+            token: usable(k) && k.token_kind().is_some(),
         })
         .collect();
     ModelRc::new(VecModel::from(rows))
@@ -935,6 +1163,12 @@ impl Dialog for ConfirmDialog {
 impl Dialog for SaveDialog {
     fn set_cancel(&self, f: impl FnMut() + 'static) {
         SaveDialog::on_cancel(self, f);
+    }
+}
+
+impl Dialog for ReaderDialog {
+    fn set_cancel(&self, f: impl FnMut() + 'static) {
+        ReaderDialog::on_cancel(self, f);
     }
 }
 
@@ -1541,5 +1775,255 @@ mod plugin_dialogs {
         wire_dismissal(&ui, &pending);
         close(ui.window());
         assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled));
+    }
+}
+
+/// The storage dialog's token mode and the reader dialog, drawn offscreen.
+#[cfg(test)]
+mod token_dialogs {
+    use super::*;
+    use oncl_basics::{OpenError, ReaderEntry};
+    use slint::platform::WindowEvent as SlintWindowEvent;
+    use std::time::Instant;
+
+    const KAZTOKEN: StorageKind = StorageKind::Token("AKKaztokenStore");
+    const R0: &str = "Reader 0";
+    const R1: &str = "Reader 1";
+
+    /// The thread's windows are offscreen (each test runs on a thread of its own).
+    fn offscreen() {
+        thread_local! {
+            static OFFSCREEN: crate::offscreen::Last = crate::offscreen::install();
+        }
+        OFFSCREEN.with(|_| ());
+    }
+
+    fn entry(reader: &str) -> ReaderEntry {
+        ReaderEntry {
+            storage: KAZTOKEN,
+            reader: reader.to_owned(),
+        }
+    }
+
+    fn prompt(locale: Locale, tokens: Option<ReaderList>) -> StoragePrompt {
+        StoragePrompt {
+            origin: "https://idp.egov.kz".to_owned(),
+            locale,
+            action: Action::Sign,
+            storages: vec![KAZTOKEN, StorageKind::Pkcs12],
+            recent_path: None,
+            error: None,
+            detail: None,
+            tokens,
+            chosen: None,
+            reader: None,
+        }
+    }
+
+    type Answers = mpsc::Receiver<Prompt<StorageAnswer>>;
+
+    fn storage_dialog(p: &StoragePrompt) -> (StorageDialog, Answers) {
+        offscreen();
+        let ui = StorageDialog::new().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let pending = wire_storage(&ui, p, tx);
+        wire_dismissal(&ui, &pending);
+        (ui, rx)
+    }
+
+    fn readers(ui: &StorageDialog) -> Vec<String> {
+        ui.get_readers().iter().map(|r| r.to_string()).collect()
+    }
+
+    #[test]
+    fn storage_dialog_token_mode_on_three_languages() {
+        let list = ReaderList::fixed(vec![entry(R0), entry(R1)], None);
+        for locale in [Locale::Ru, Locale::Kk, Locale::En] {
+            let mut p = prompt(locale, Some(list.clone()));
+            p.error = Some(OpenError::WrongPin {
+                tries_left: Some(9),
+            });
+            p.chosen = Some(KAZTOKEN);
+            p.reader = Some(R1.to_owned());
+            let (ui, _) = storage_dialog(&p);
+            let rows: Vec<StorageRow> = ui.get_storages().iter().collect();
+            assert!(rows[0].supported && rows[0].token, "{locale:?}");
+            assert!(rows[1].supported && !rows[1].token);
+            assert_eq!(ui.get_selected(), 0, "the token of the retry");
+            assert_eq!(readers(&ui), [R0, R1]);
+            assert_eq!(ui.get_reader_index(), 1, "the reader of the retry");
+            assert!(ui.get_reader_note().is_empty());
+            assert!(ui.get_error().contains('9'), "{}", ui.get_error());
+        }
+        // A file storage chosen: no reader shown is used.
+        let (ui, _) = storage_dialog(&prompt(Locale::Ru, Some(list)));
+        assert_eq!(ui.get_selected(), 1, "files first by default");
+        ui.invoke_storage_chosen(0);
+        assert_eq!(readers(&ui), [R0, R1]);
+        assert_eq!(ui.get_reader_index(), 0);
+    }
+
+    #[test]
+    fn token_rows_are_inactive_without_token_support() {
+        let (ui, _) = storage_dialog(&prompt(Locale::Ru, None));
+        let rows: Vec<StorageRow> = ui.get_storages().iter().collect();
+        assert!(!rows[0].supported && !rows[0].token);
+        assert_eq!(ui.get_selected(), 1);
+        ui.invoke_storage_chosen(0);
+        assert!(readers(&ui).is_empty());
+    }
+
+    #[test]
+    fn refresh_rescans_off_thread() {
+        let list = ReaderList::fixed(vec![entry(R0)], None);
+        let mut p = prompt(Locale::Ru, Some(list.clone()));
+        p.chosen = Some(KAZTOKEN);
+        let (ui, _) = storage_dialog(&p);
+        let started = Instant::now();
+        ui.invoke_refresh();
+        // The click returns at once: the scan runs on another thread.
+        assert!(ui.get_scanning());
+        assert_eq!(ui.get_reader_note(), "Поиск носителей…");
+        while list.rescans() == 0 {
+            assert!(started.elapsed() < Duration::from_secs(10), "no rescan");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Its result reaches the dialog through the event loop (none in this test).
+        let token_of = {
+            let list = list.clone();
+            move |_: i32| Some((KAZTOKEN, list.clone()))
+        };
+        rescan_storage_readers(&ui, list.clone(), token_of, Locale::Ru)
+            .join()
+            .unwrap();
+        assert_eq!(list.rescans(), 2);
+    }
+
+    #[test]
+    fn open_disabled_without_reader() {
+        let mut p = prompt(Locale::Ru, Some(ReaderList::fixed(vec![], None)));
+        p.chosen = Some(KAZTOKEN);
+        let (ui, rx) = storage_dialog(&p);
+        assert!(readers(&ui).is_empty());
+        assert_eq!(ui.get_reader_index(), -1);
+        assert_eq!(
+            ui.get_reader_note(),
+            "Носитель не обнаружен. Убедитесь, что он подключён, и нажмите «Обновить»."
+        );
+        ui.set_password("123456".into());
+        ui.invoke_open();
+        assert!(rx.try_recv().is_err(), "no answer without a reader");
+    }
+
+    #[test]
+    fn answer_carries_reader_and_pin() {
+        let mut p = prompt(
+            Locale::En,
+            Some(ReaderList::fixed(vec![entry(R0), entry(R1)], None)),
+        );
+        p.chosen = Some(KAZTOKEN);
+        let (ui, rx) = storage_dialog(&p);
+        ui.set_path("ignored.p12".into());
+        ui.set_reader_index(1);
+        ui.set_password("123456".into());
+        ui.invoke_open();
+        let Ok(Prompt::Answer(answer)) = rx.try_recv() else {
+            panic!("an answer");
+        };
+        assert_eq!(answer.storage, KAZTOKEN);
+        assert_eq!(answer.reader.as_deref(), Some(R1));
+        assert_eq!(answer.path, PathBuf::new());
+        assert_eq!(answer.password.as_str(), "123456");
+        assert!(ui.get_password().is_empty(), "the PIN leaves the dialog");
+    }
+
+    #[test]
+    fn no_service_text_shown() {
+        let mut p = prompt(
+            Locale::Ru,
+            Some(ReaderList::fixed(vec![], Some(ReaderProblem::NoService))),
+        );
+        p.chosen = Some(KAZTOKEN);
+        let (ui, _) = storage_dialog(&p);
+        let note = ui.get_reader_note();
+        assert!(note.starts_with("Служба смарт-карт недоступна. "), "{note}");
+        assert_eq!(
+            note,
+            view::reader_note(0, Some(ReaderProblem::NoService), false, Locale::Ru)
+        );
+        for l in [Locale::Kk, Locale::En] {
+            let other = view::reader_note(0, Some(ReaderProblem::NoService), false, l);
+            assert!(!other.is_empty() && other != note.as_str(), "{l:?}");
+        }
+    }
+
+    fn reader_dialog(list: ReaderList) -> (ReaderDialog, mpsc::Receiver<Prompt<String>>) {
+        offscreen();
+        let ui = ReaderDialog::new().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let p = ReaderPrompt {
+            origin: "https://x.kz".to_owned(),
+            locale: Locale::Ru,
+            storage: KAZTOKEN,
+            readers: list,
+        };
+        let pending = wire_reader(&ui, &p, tx);
+        wire_dismissal(&ui, &pending);
+        (ui, rx)
+    }
+
+    #[test]
+    fn reader_dialog_choose_cancel_close() {
+        let list = ReaderList::fixed(vec![entry(R0), entry(R1)], None);
+        let (ui, rx) = reader_dialog(list.clone());
+        assert_eq!(ui.get_storage(), "Kaztoken");
+        assert_eq!(ui.get_readers().row_count(), 2);
+        assert_eq!(ui.get_reader_index(), 0);
+        ui.set_reader_index(1);
+        ui.invoke_choose();
+        assert_eq!(rx.try_recv(), Ok(Prompt::Answer(R1.to_owned())));
+
+        let (ui, rx) = reader_dialog(list.clone());
+        ui.invoke_cancel();
+        assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled));
+
+        let (ui, rx) = reader_dialog(list);
+        ui.window().dispatch_event(SlintWindowEvent::CloseRequested);
+        assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled));
+
+        // Without a reader the dialog opens all the same, and cannot choose.
+        let (ui, rx) = reader_dialog(ReaderList::fixed(vec![], None));
+        assert_eq!(ui.get_reader_index(), -1);
+        assert!(!ui.get_reader_note().is_empty());
+        ui.invoke_choose();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn error_texts_for_new_open_errors() {
+        for e in [
+            OpenError::TokenAbsent,
+            OpenError::TokenService,
+            OpenError::WrongPin {
+                tries_left: Some(3),
+            },
+            OpenError::WrongPin { tries_left: None },
+            OpenError::PinBlocked,
+            OpenError::InvalidPin,
+            OpenError::TokenFailure,
+        ] {
+            let texts = [Locale::Kk, Locale::Ru, Locale::En].map(|l| view::error_text(e, l));
+            assert!(texts.iter().all(|t| !t.is_empty()), "{e:?}");
+            assert_ne!(texts[0], texts[1], "{e:?}");
+        }
+        assert_eq!(
+            view::error_text(
+                OpenError::WrongPin {
+                    tries_left: Some(9)
+                },
+                Locale::Ru
+            ),
+            "Неверный PIN-код. Осталось попыток: 9"
+        );
     }
 }

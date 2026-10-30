@@ -297,6 +297,7 @@ fn show_form(ui: &SettingsWindow, form: &SettingsForm) {
     ui.set_proxy_url(form.proxy_url.as_str().into());
     ui.set_updates_enabled(form.updates_enabled);
     ui.set_update_channel(index_of(&CHANNELS, &form.update_channel));
+    ui.set_tokens_enabled(form.tokens_enabled);
 }
 
 fn form_of(ui: &SettingsWindow) -> SettingsForm {
@@ -307,6 +308,7 @@ fn form_of(ui: &SettingsWindow) -> SettingsForm {
         proxy_url: ui.get_proxy_url().to_string(),
         updates_enabled: ui.get_updates_enabled(),
         update_channel: item(&CHANNELS, ui.get_update_channel()),
+        tokens_enabled: ui.get_tokens_enabled(),
     }
 }
 
@@ -420,6 +422,7 @@ mod tests {
             proxy_url: String::new(),
             updates_enabled: true,
             update_channel: oncl_desktop::settings::Channel::Stable,
+            tokens_enabled: false,
         };
         let result = (desktop.settings.save(&form), desktop.settings.states());
         worker::finish::<Open, _>(id, Ok(result), saved);
@@ -435,6 +438,24 @@ mod tests {
         let result = (desktop.settings.save(&bad), desktop.settings.states());
         worker::finish::<Open, _>(id, Ok(result), saved);
         assert_eq!(applied.borrow().len(), 1);
+    }
+
+    #[test]
+    fn the_tokens_box_shows_and_gives_the_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = desktop(dir.path());
+        open(&crate::windows::desktop().unwrap());
+        let window = the_window();
+        let form = SettingsForm {
+            tokens_enabled: true,
+            ..form_of(&window.ui)
+        };
+        assert!(!window.ui.get_tokens_enabled(), "off by default");
+        show_form(&window.ui, &form);
+        assert!(window.ui.get_tokens_enabled());
+        assert_eq!(form_of(&window.ui), form);
+        window.ui.set_tokens_enabled(false);
+        assert!(!form_of(&window.ui).tokens_enabled);
     }
 
     #[test]
