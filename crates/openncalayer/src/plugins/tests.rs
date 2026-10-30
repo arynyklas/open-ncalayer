@@ -777,6 +777,24 @@ fn missing_module_offers_install() {
     );
     let view = service.view();
     assert_eq!(view.available[0].needed_by, Some(Some(ORIGIN.to_owned())));
+    // Told again only when the entry changes: another page.
+    sandbox.modules.missing(MODULE, &page);
+    assert!(sandbox.notices().is_empty(), "the same page again");
+    let other = AddInfo {
+        origin: Some("https://bank.kz".to_owned()),
+        session: 4,
+    };
+    sandbox.modules.missing(MODULE, &other);
+    assert_eq!(
+        sandbox.notices(),
+        [PluginNotice::Needed {
+            origin: Some("https://bank.kz".to_owned()),
+            name: name(),
+            id: ID.to_owned(),
+        }]
+    );
+    sandbox.modules.missing(MODULE, &other);
+    assert!(sandbox.notices().is_empty());
     // Installed: no longer needed, nor told.
     service
         .install_from_catalog(ID, Some(ORIGIN.to_owned()))
@@ -856,6 +874,105 @@ fn install_bundle_without_a_catalog_finds_nothing() {
         ORIGIN
     ));
     assert!(sandbox.transport.asked().is_empty());
+}
+
+/// How often the catalog was asked for.
+fn index_requests(sandbox: &Sandbox) -> usize {
+    sandbox
+        .transport
+        .asked()
+        .iter()
+        .filter(|(url, ..)| url == INDEX)
+        .count()
+}
+
+/// `at` moved `by` into the past (or as far as the clock goes).
+fn earlier(at: &mut Option<std::time::Instant>, by: Duration) {
+    if let Some(at) = at {
+        *at = at.checked_sub(by).unwrap_or(*at);
+    }
+}
+
+#[test]
+fn a_failed_catalog_is_not_downloaded_again_for_pages() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    let bundles: &dyn Bundles = &*service;
+    // Nothing published: the download fails, and the next page's request does not repeat it.
+    assert!(!bundles.request_install("kz.example.echo", ORIGIN));
+    assert_eq!(index_requests(&sandbox), 1);
+    assert!(!bundles.request_install("kz.example.echo", ORIGIN));
+    assert!(
+        service
+            .catalog_offer_for_symname("kz.example.echo", OFFER_TIMEOUT)
+            .is_none()
+    );
+    assert_eq!(index_requests(&sandbox), 1);
+    // The user tries again whenever they ask.
+    sandbox.publish(1, vec![sandbox.release("0.1.0", &example("0.1.0"))]);
+    sandbox.transport.reply(INDEX, 503, b"");
+    service.check_now();
+    assert_eq!(index_requests(&sandbox), 2);
+    sandbox.publish(1, vec![sandbox.release("0.1.0", &example("0.1.0"))]);
+    assert!(!bundles.request_install("kz.example.echo", ORIGIN));
+    assert_eq!(index_requests(&sandbox), 2);
+    // Once the failure is old enough, a page's request downloads the catalog again.
+    earlier(&mut lock(&service.catalog).failed_at, PAGE_RETRY_AFTER);
+    assert!(bundles.request_install("kz.example.echo", ORIGIN));
+    assert_eq!(index_requests(&sandbox), 3);
+    assert_eq!(
+        wait_for_notices(&sandbox, 1),
+        [PluginNotice::Installed { name: name() }]
+    );
+}
+
+#[test]
+fn a_page_install_that_fails_is_told_once_in_a_while() {
+    let sandbox = Sandbox::new(true);
+    let service = sandbox.service();
+    let mut release = sandbox.release("0.1.0", &example("0.1.0"));
+    release.package.url = "https://example.org/plugins/gone.onclp".to_owned();
+    sandbox.publish(1, vec![release]);
+    let bundles: &dyn Bundles = &*service;
+    let tries = |n: usize| {
+        assert!(bundles.request_install("kz.example.echo", ORIGIN));
+        // The install runs in the background: wait until it has tried and given up.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let asked = sandbox
+                .transport
+                .asked()
+                .iter()
+                .filter(|(url, ..)| url.ends_with("gone.onclp"))
+                .count();
+            if asked == n && lock(&service.installing).is_empty() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{asked} tries");
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    tries(1);
+    let notices = sandbox.notices();
+    assert!(
+        matches!(&notices[..], [PluginNotice::Failed { name: n, .. }] if *n == name()),
+        "{notices:?}"
+    );
+    // The page asks again and again: told once.
+    tries(2);
+    tries(3);
+    assert!(sandbox.notices().is_empty());
+    // The user's own try is told at once.
+    assert!(service.install_from_catalog(ID, None).is_err());
+    assert_eq!(sandbox.notices().len(), 1);
+    // Ten minutes on, the page's failure is told again.
+    let mut told = lock(&service.page_failures);
+    let mut at = told.get(ID).copied();
+    earlier(&mut at, PAGE_FAILURE_EVERY);
+    told.insert(ID.to_owned(), at.unwrap());
+    drop(told);
+    tries(5);
+    assert_eq!(sandbox.notices().len(), 1);
 }
 
 fn package_url(version: &str) -> String {
