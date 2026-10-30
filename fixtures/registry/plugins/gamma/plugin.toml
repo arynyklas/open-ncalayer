@@ -1,0 +1,16 @@
+id = "io.github.arynyklas.openncalayer.port.gamma"
+version = "1.0.0"
+min_core = "0.2.0"
+modules = ["ExampleGamma"]
+
+[name]
+ru = "Гамма (пример)"
+kk = "Гамма (мысал)"
+en = "Gamma (example)"
+
+[replaces]
+symname = "kz.example.gamma"
+version = "1.0"
+
+[capabilities]
+dialogs = true

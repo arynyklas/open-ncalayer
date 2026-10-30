@@ -1,0 +1,17 @@
+id = "io.github.arynyklas.openncalayer.port.hostile"
+modules = ["ExampleHostile"]
+
+[original]
+symname = "kz.example.hostile"
+version = "1.0"
+vendor = "<script>alert(1)</script> \"><img src=x onerror=alert(1)> {{ config.base_url }} {% raw %} &amp; '"
+
+[port]
+status = "needs-tokens"
+conformance = "computed"
+
+[[differences]]
+ru = "<script>alert(1)</script> \"><img src=x onerror=alert(1)> {{ config.base_url }} {% raw %} &amp; '"
+
+[[differences]]
+ru = "Вторая строка\nс переносом"

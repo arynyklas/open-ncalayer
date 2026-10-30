@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.hostile"
+version = "0.1.0-beta.1"
+min_core = "0.2.0"
+modules = ["ExampleHostile"]
+
+[name]
+ru = "<script>alert(1)</script> \"><img src=x onerror=alert(1)> {{ config.base_url }} {% raw %} &amp; '"
+kk = "<script>alert(1)</script> \"><img src=x onerror=alert(1)> {{ config.base_url }} {% raw %} &amp; '"
+en = "<script>alert(1)</script> \"><img src=x onerror=alert(1)> {{ config.base_url }} {% raw %} &amp; '"
+
+[description]
+ru = "<script>alert(1)</script> \"><img src=x onerror=alert(1)> {{ config.base_url }} {% raw %} &amp; '"
+kk = "<script>alert(1)</script> \"><img src=x onerror=alert(1)> {{ config.base_url }} {% raw %} &amp; '"
+en = "<script>alert(1)</script> \"><img src=x onerror=alert(1)> {{ config.base_url }} {% raw %} &amp; '"
+
+[replaces]
+symname = "kz.example.hostile"
+version = "1.0"
+
+[capabilities]
+settings = true

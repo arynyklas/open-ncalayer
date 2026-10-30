@@ -1,0 +1,22 @@
+id = "io.github.arynyklas.openncalayer.port.alpha"
+version = "1.1.0-beta.1"
+min_core = "0.2.0"
+modules = ["ExampleAlpha"]
+
+[name]
+ru = "Альфа (пример)"
+kk = "Альфа (мысал)"
+en = "Alpha (example)"
+
+[description]
+ru = "Вымышленный порт для проверки сайта"
+kk = "Сайтты тексеруге арналған ойдан шығарылған порт"
+en = "A made-up port to test the site"
+
+[replaces]
+symname = "kz.example.alpha"
+version = "1.0"
+
+[capabilities]
+keys = true
+http = ["https://*.example.kz/"]

@@ -1,0 +1,11 @@
+id = "io.github.arynyklas.openncalayer.port.gamma"
+modules = ["ExampleGamma"]
+
+[original]
+symname = "kz.example.gamma"
+version = "1.0"
+vendor = "Пример поставщика"
+
+[port]
+status = "partial"
+conformance = "computed"

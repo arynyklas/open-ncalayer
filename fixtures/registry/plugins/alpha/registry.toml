@@ -1,0 +1,14 @@
+id = "io.github.arynyklas.openncalayer.port.alpha"
+modules = ["ExampleAlpha"]
+
+[original]
+symname = "kz.example.alpha"
+version = "1.0"
+vendor = "Пример поставщика"
+
+[port]
+status = "full"
+conformance = "confirmed"
+
+[[differences]]
+ru = "Окно выбора ключа — общее окно OpenNCALayer."
