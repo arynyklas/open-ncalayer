@@ -261,9 +261,14 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
                 }
             }
         }
-        // Distributions of the last facts whose source is gone.
+        // Distributions of the last facts whose source is gone: dropped from the manifest or
+        // failed FAILURES_TO_REMOVE polls in a row (a page that failed once keeps its links).
         for (id, _) in prev_facts.iter().flat_map(|f| f.distributions.iter()) {
-            if !polled.sources.iter().any(|s| &s.id == id) {
+            let gone = next_state
+                .sources
+                .get(id)
+                .is_none_or(|s| s.status == SourceStatus::Gone);
+            if gone && !polled.sources.iter().any(|s| &s.id == id) {
                 updates.distributions.insert(id.clone(), None);
             }
         }
@@ -421,6 +426,21 @@ fn fetch_bundle(
     )
 }
 
+/// A download of a distribution failed: what this poll saw of the source is forgotten (so
+/// the next poll reports the change again) and the failure is counted.
+fn forget_and_fail(prev: &State, state: &mut State, id: &str) {
+    if let Some(entry) = state.sources.get_mut(id) {
+        let seen = prev.sources.get(id).cloned().unwrap_or_default();
+        entry.size = seen.size;
+        entry.etag = seen.etag;
+        entry.last_modified = seen.last_modified;
+        entry.published_sha1 = seen.published_sha1;
+        entry.manifest_hash = seen.manifest_hash;
+        entry.sha256 = seen.sha256;
+        super::poll::fail(entry, id);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fetch_dist(
     opts: &RunOptions,
@@ -437,9 +457,7 @@ fn fetch_dist(
         Ok(d) => d,
         Err(e) => {
             log.line(format!("fetch: {} failed: {e}", source.id));
-            if let Some(entry) = state.sources.get_mut(&source.id) {
-                super::poll::fail(entry, &source.id);
-            }
+            forget_and_fail(prev, state, &source.id);
             return None;
         }
     };
@@ -462,10 +480,7 @@ fn fetch_dist(
         Err(e) => {
             log.line(format!("fetch: {} refused file: {e}", source.id));
             let _ = std::fs::remove_file(dest);
-            if let Some(entry) = state.sources.get_mut(&source.id) {
-                entry.sha256 = before;
-                super::poll::fail(entry, &source.id);
-            }
+            forget_and_fail(prev, state, &source.id);
             return None;
         }
     };

@@ -364,3 +364,102 @@ fn github_output_lines() {
         "before=1\nchanged=true\nalert=false\n"
     );
 }
+
+fn page_ids(f: &Facts) -> Vec<String> {
+    f.distributions
+        .keys()
+        .filter(|k| k.starts_with("page:"))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn page_failure_keeps_page_distributions_until_three_strikes() {
+    let server = MockServer::start();
+    serve_world(&server, |j| j);
+    let dirs = Dirs::new();
+    cycle(&server, &dirs, 1);
+    let pages = page_ids(&facts(&dirs.state()));
+    assert_eq!(pages.len(), 4);
+    let page = upstream_common::world_page();
+    // One failure (503), one captcha-like page without links: no entry, links kept.
+    server.route("GET", "/", Response::status(503));
+    let out = cycle(&server, &dirs, 2);
+    assert!(out.entry.is_none(), "{:?}", out.log);
+    server.route(
+        "GET",
+        "/",
+        Response::html(b"<html><p>captcha</p></html>".to_vec()),
+    );
+    let out = cycle(&server, &dirs, 3);
+    assert!(out.entry.is_none(), "{:?}", out.log);
+    assert_eq!(page_ids(&facts(&dirs.state())), pages);
+    // The page is back: still no entry.
+    server.route(
+        "GET",
+        "/",
+        Response::html(page.clone().into_bytes()).header("Set-Cookie", "sid=synthetic; Path=/"),
+    );
+    let out = cycle(&server, &dirs, 4);
+    assert!(out.entry.is_none(), "{:?}", out.log);
+    assert_eq!(index(&dirs.state()).entries.len(), 1);
+    // Three failures in a row: removed.
+    server.route("GET", "/", Response::status(503));
+    for n in 5..=6 {
+        assert!(cycle(&server, &dirs, n).entry.is_none());
+    }
+    let out = cycle(&server, &dirs, 7);
+    assert!(out.entry.is_some());
+    assert!(page_ids(&facts(&dirs.state())).is_empty());
+}
+
+#[test]
+fn failed_download_of_a_change_is_retried() {
+    let server = MockServer::start();
+    serve_world(&server, |j| j);
+    let dirs = Dirs::new();
+    cycle(&server, &dirs, 1);
+    let old_sha = facts(&dirs.state()).distributions["page:windows-64-bit"]
+        .sha256
+        .clone();
+    // A new Windows installer is published; its download fails once.
+    let mut new = read(fixture("upstream/inno-like.exe"));
+    new.extend_from_slice(b"new build");
+    let mut sha1s: Vec<String> = upstream_common::PAGE_FILES
+        .iter()
+        .map(|(_, f)| upstream_common::sha1_hex(&read(fixture(&format!("upstream/{f}")))))
+        .collect();
+    sha1s[0] = upstream_common::sha1_hex(&new);
+    let keys: Vec<String> = upstream_common::PAGE_FILES
+        .iter()
+        .map(|(c, _)| upstream_common::key(*c))
+        .collect();
+    let page = upstream_common::page_html(
+        [&keys[0], &keys[1], &keys[2], &keys[3]],
+        [&sha1s[0], &sha1s[1], &sha1s[2], &sha1s[3]],
+    );
+    server.route(
+        "GET",
+        "/",
+        Response::html(page.into_bytes()).header("Set-Cookie", "sid=synthetic; Path=/"),
+    );
+    let target = format!("/download.php?key={}", keys[0]);
+    server.route("HEAD", &target, Response::ok(new.clone()));
+    server.route("GET", &target, Response::status(503));
+    let out = cycle(&server, &dirs, 2);
+    assert!(out.entry.is_none(), "{:?}", out.log);
+    // An HTML page instead of the file: also a failure, the change still pending.
+    server.route(
+        "GET",
+        &target,
+        Response::html(read(fixture("upstream/error.html"))),
+    );
+    let out = cycle(&server, &dirs, 3);
+    assert!(out.entry.is_none(), "{:?}", out.log);
+    server.route("GET", &target, Response::ok(new.clone()));
+    let out = cycle(&server, &dirs, 4);
+    assert!(out.entry.is_some(), "{:?}", out.log);
+    let d = &facts(&dirs.state()).distributions["page:windows-64-bit"];
+    assert_eq!(d.sha256.as_deref(), Some(sha256_hex(&new).as_str()));
+    assert_ne!(d.sha256, old_sha);
+}

@@ -315,7 +315,7 @@ pub const PAGE_FILES: [(char, &str); 4] = [
     ('4', "msi-like.msi"),
 ];
 
-fn sha1_hex(bytes: &[u8]) -> String {
+pub fn sha1_hex(bytes: &[u8]) -> String {
     use sha1::Digest;
     sha1::Sha1::digest(bytes)
         .iter()
