@@ -25,3 +25,5 @@ toml.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+# The archives K2Sign uploads, read back.
+zip.workspace = true

@@ -1,0 +1,25 @@
+id = "io.github.arynyklas.openncalayer.port.k2sign"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["K2Sign"]
+
+[name]
+ru = "K2Sign (порт OpenNCALayer)"
+kk = "K2Sign (OpenNCALayer порты)"
+en = "K2Sign (OpenNCALayer port)"
+
+[description]
+ru = "Подпись и отправка документов, проверка подписей для «Казначейство-Клиент», как модуль K2Sign"
+kk = "«Қазынашылық-Клиент» үшін құжаттарға қол қою және жіберу, қолтаңбаларды тексеру, K2Sign модулі сияқты"
+en = "Signed document uploads and signature checks for the Treasury client, as the K2Sign module made them"
+
+[replaces]
+symname = "kz.ecc.K2SignBundle"
+version = "1.1.5"
+
+[capabilities]
+keys = true
+dialogs = true
+files = true
+# Unverified against the original: the exact origins of the Treasury client's pages.
+origins = ["https://*.kazynashylyk.kz", "http://client2.kazynashylyk.kz"]

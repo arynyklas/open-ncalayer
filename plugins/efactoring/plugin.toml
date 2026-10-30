@@ -1,0 +1,22 @@
+id = "io.github.arynyklas.openncalayer.port.efactoring"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["EFactoringSign"]
+
+[name]
+ru = "EFactoringSign (порт OpenNCALayer)"
+kk = "EFactoringSign (OpenNCALayer порты)"
+en = "EFactoringSign (OpenNCALayer port)"
+
+[description]
+ru = "Подпись текста и XML для портала электронного факторинга, как модуль EFactoringSign"
+kk = "Электрондық факторинг порталына мәтін мен XML қол қою, EFactoringSign модулі сияқты"
+en = "Text and XML signatures for the e-factoring portal, as the EFactoringSign module made them"
+
+[replaces]
+symname = "kz.efactoring.EfactoringSignBundle"
+version = "1.2"
+
+[capabilities]
+keys = true
+dialogs = true

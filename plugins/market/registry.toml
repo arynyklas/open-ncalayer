@@ -1,0 +1,26 @@
+id = "io.github.arynyklas.openncalayer.port.market"
+modules = ["MarketSign"]
+
+[original]
+symname = "kz.ecc.MarketSignBundle"
+version = "1.0.7"
+vendor = "ТОО «E-Commerce Center»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Окно выбора ключа — общее окно OpenNCALayer; дерева хранилищ с запомненными контейнерами и последним ключом нет."
+
+[[differences]]
+ru = "Ключи на токенах станут доступны вместе с поддержкой токенов в ядре; до этого работают файлы PKCS#12."
+
+[[differences]]
+ru = "Пароль проверяет окно OpenNCALayer, поэтому ошибки «Неверный пароль» после выбора ключа не бывает."
+
+[[differences]]
+ru = "Окна показываются на языке OpenNCALayer: казахский — русскими текстами (у оригинала на казахской системе подпись обрывала соединение); иначе — по-русски или по-английски, как у оригинала."
+
+[[differences]]
+ru = "Окно ошибки — окно OpenNCALayer с теми же кнопками «Закрыть» (повтор) и «Отменить»."
