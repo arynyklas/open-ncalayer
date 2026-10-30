@@ -243,6 +243,42 @@ fn xades_lt_certificate_and_revocation_values() {
     assert!(matches!(result, Err(XadesError::NoIssuer(_))), "{result:?}");
 }
 
+/// A chain given as a whole CA list (as a plugin passes its known CAs): only the CAs on the
+/// signer's path get revocation data and go into CertificateValues; the others are left out,
+/// never fetched and never a failure.
+#[test]
+fn xades_lt_takes_only_the_signers_path_from_a_ca_list() {
+    let signer = entry("inter-user-gost2015-sign");
+    let cas = vec![
+        cer("root-rsa"),
+        cer("inter-gost2015-twin"),
+        cer("root-gost2004"),
+        cer("inter-gost2015"),
+        cer("root-gost2015"),
+    ];
+    let root_crl = Arc::new(MockCrl::new(entry("root-gost2015.key")));
+    let now = OffsetDateTime::now_utc();
+    let signed = sign(
+        DOC,
+        &spec(XadesLevel::Lt, cas),
+        &signer.key,
+        &signer.cert,
+        &pki_with_crl(Arc::clone(&root_crl)),
+        now,
+    )
+    .unwrap();
+    let xml = text(&signed);
+    let path: Vec<Vec<u8>> = [cer("inter-gost2015"), cer("root-gost2015")]
+        .iter()
+        .map(|c| c.to_der().unwrap())
+        .collect();
+    assert_eq!(all_base64(xml, "xades:EncapsulatedX509Certificate"), path);
+    assert_eq!(all_base64(xml, "xades:EncapsulatedOCSPValue").len(), 1);
+    assert_eq!(all_base64(xml, "xades:EncapsulatedCRLValue").len(), 1);
+    assert_eq!(root_crl.calls(), [ROOT_CRL]);
+    verify(&signed).unwrap();
+}
+
 #[test]
 fn xades_lt_never_leaves_a_ca_without_revocation_data() {
     let signer = entry("inter-user-gost2015-sign");

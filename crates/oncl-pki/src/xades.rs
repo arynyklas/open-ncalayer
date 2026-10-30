@@ -7,10 +7,11 @@
 //!   are signed by a second reference of the type `http://uri.etsi.org/01903#SignedProperties`;
 //! - **T**: and an unsigned `SignatureTimeStamp` over the `ds:SignatureValue` element,
 //!   canonicalized with Exclusive XML Canonicalization;
-//! - **LT**: and `CertificateValues` (the chain given) and `RevocationValues` (for the
-//!   signer's certificate and each certificate of the chain other than a self-signed root:
-//!   an OCSP response from the responder of the certificate's AIA through [`ocsp::fetch`],
-//!   or, for a certificate naming no responder, the CRLs of its distribution points through
+//! - **LT**: and `CertificateValues` (the signer's path: its issuer, that issuer's issuer
+//!   and so on, taken from the certificates given) and `RevocationValues` (for the signer's
+//!   certificate and each certificate of the path other than a self-signed root: an OCSP
+//!   response from the responder of the certificate's AIA through [`ocsp::fetch`], or, for
+//!   a certificate naming no responder, the CRLs of its distribution points through
 //!   [`crl::fetch_for`]; a certificate with neither is an error).
 //!
 //! The signature and algorithm URIs follow the signer's certificate as Kalkan's do (GOST
@@ -60,8 +61,10 @@ pub struct XadesSpec<'a> {
     /// The TSA of [`XadesLevel::T`] and [`XadesLevel::Lt`]; not used for
     /// [`XadesLevel::B`].
     pub tsa: Option<TsaSpec>,
-    /// The signer's issuers, from its issuer up (the root may be among them): the
-    /// `CertificateValues` of [`XadesLevel::Lt`], and the issuers its OCSP requests name.
+    /// The certificates the signer's path is taken from, in any order: its issuers (the
+    /// root may be among them), possibly a whole CA list. [`XadesLevel::Lt`] puts the path
+    /// into `CertificateValues` and asks about each certificate on it; the others are not
+    /// used.
     pub chain: Vec<Certificate>,
     /// The `SignatureMethod` URI; `None`: Kalkan's for the certificate's algorithm.
     pub signature_method: Option<&'a str>,
@@ -209,9 +212,10 @@ pub fn sign(
         STANDARD.encode(&stamp.token),
     );
     if spec.level == XadesLevel::Lt {
-        let revocation = revocation_values(cert, &spec.chain, http, now)?;
+        let path = signer_path(cert, &spec.chain)?;
+        let revocation = revocation_values(cert, &path, http, now)?;
         unsigned.push_str("<xades:CertificateValues>");
-        for issuer in &spec.chain {
+        for issuer in &path {
             let der = issuer
                 .to_der()
                 .map_err(|e| XmlError::Parse(format!("certificate: {e}")))?;
@@ -260,6 +264,30 @@ fn signature_id(xml: &[u8], cert_der: &[u8], now: OffsetDateTime) -> String {
 fn self_signed(cert: &Certificate) -> bool {
     cert.tbs_certificate().issuer() == cert.tbs_certificate().subject()
         && cert::verify_signature(cert, cert).is_ok()
+}
+
+/// The signer's path through `cas`: its issuer, the issuer's issuer, and so on, up to a
+/// self-signed certificate or a certificate whose issuer is not among `cas`. A certificate
+/// is its issuer's when the issuer's key verifies it; one certificate never appears twice.
+///
+/// # Errors
+///
+/// [`XadesError::NoIssuer`] when no certificate of `cas` issued the signer's.
+fn signer_path(signer: &Certificate, cas: &[Certificate]) -> Result<Vec<Certificate>, XadesError> {
+    let issued = |cert: &Certificate, path: &[Certificate]| {
+        cas.iter()
+            .find(|ca| !path.contains(ca) && cert::verify_signature(cert, ca).is_ok())
+            .cloned()
+    };
+    let first = issued(signer, &[])
+        .ok_or_else(|| XadesError::NoIssuer(signer.tbs_certificate().subject().to_string()))?;
+    let mut path = vec![first];
+    while let Some(last) = path.last().filter(|last| !self_signed(last))
+        && let Some(next) = issued(last, &path)
+    {
+        path.push(next);
+    }
+    Ok(path)
 }
 
 /// The revocation data of an LT signature, as `RevocationValues` carries it.
