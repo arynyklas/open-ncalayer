@@ -346,3 +346,6 @@ msgstr "Токендер және жеке куәлік (тәжірибелік)
 
 msgid "Sites will see the connected tokens and the ID card's details without asking, as with the original NCALayer."
 msgstr "Сайттар қосылған тасымалдағыштарды және жеке куәлік деректерін сұраусыз көре алады, түпнұсқа NCALayer сияқты"
+
+msgid "Allow the update"
+msgstr "Жаңартуға рұқсат беру"

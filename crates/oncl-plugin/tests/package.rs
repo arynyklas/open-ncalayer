@@ -3,7 +3,8 @@
 
 use oncl_basics::Locale;
 use oncl_plugin::{
-    HttpPrefix, MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, Manifest, PACKAGE_EXT, Package, PackageError,
+    Capabilities, HttpPrefix, MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, Manifest, PACKAGE_EXT, Package,
+    PackageError,
 };
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
@@ -627,4 +628,56 @@ fn http_prefix_allows() {
     let sent = api.check("https://A.kz:443/api/./x/../y?q=1#f").unwrap();
     assert_eq!(sent.as_str(), "https://a.kz/api/y?q=1#f");
     assert_eq!(api.check("https://a.kz/apix"), None);
+}
+
+#[test]
+fn capabilities_added_over_older_ones() {
+    let prefix = |text: &str| text.parse::<HttpPrefix>().unwrap();
+    let old = Capabilities {
+        keys: true,
+        dialogs: false,
+        files: false,
+        http: vec![prefix("https://a.kz/api/"), prefix("https://b.kz/")],
+        key_files: false,
+    };
+    // The same, fewer, or narrower: nothing new.
+    assert!(old.added_over(&old).is_empty());
+    let narrower = Capabilities {
+        keys: false,
+        http: vec![
+            prefix("https://a.kz/api/v2/"),
+            prefix("https://B.kz:443/x/"),
+        ],
+        ..Capabilities::default()
+    };
+    assert!(narrower.added_over(&old).is_empty());
+    // New flags and wider or other prefixes are what is added.
+    let wider = Capabilities {
+        keys: true,
+        dialogs: true,
+        files: true,
+        http: vec![
+            prefix("https://a.kz/"),
+            prefix("https://a.kz/api/"),
+            prefix("https://b.kz:8443/"),
+            prefix("https://c.kz/"),
+        ],
+        key_files: false,
+    };
+    assert_eq!(
+        wider.added_over(&old),
+        Capabilities {
+            keys: false,
+            dialogs: true,
+            files: true,
+            http: vec![
+                prefix("https://a.kz/"),
+                prefix("https://b.kz:8443/"),
+                prefix("https://c.kz/"),
+            ],
+            key_files: false,
+        }
+    );
+    assert!(Capabilities::default().is_empty());
+    assert!(!old.is_empty());
 }

@@ -346,3 +346,6 @@ msgstr "Токены и удостоверение личности (экспе�
 
 msgid "Sites will see the connected tokens and the ID card's details without asking, as with the original NCALayer."
 msgstr "Сайты смогут видеть подключённые носители и данные удостоверения личности без запроса, как в оригинальном NCALayer"
+
+msgid "Allow the update"
+msgstr "Разрешить обновление"

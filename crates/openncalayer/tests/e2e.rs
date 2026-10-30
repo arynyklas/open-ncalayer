@@ -13,7 +13,7 @@ use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::{MockTsa, TsaProfile, timestamp_signer, verify_token};
-use oncl_protocol::{AddInfo, Module, Registry, Reply};
+use oncl_protocol::{AddInfo, DynamicModules, Module, Registry, Reply, SessionId};
 use oncl_testkit::{read, synthetic, synthetic_cert};
 use oncl_tls::{SelftestReports, TlsFiles};
 use openncalayer::cms_verify::{NOT_CHECKED, Options, cms_verify_report_with};
@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use time::OffsetDateTime;
@@ -252,6 +252,83 @@ async fn unknown_module() {
         next_text(&mut c).await,
         r#"{"success":false,"errorCode":"MODULE_NOT_FOUND"}"#
     );
+}
+
+/// Dynamic modules serving nothing that record what they are told.
+#[derive(Default)]
+struct Recorder {
+    missing: Mutex<Vec<(String, AddInfo)>>,
+    closed: Mutex<Vec<SessionId>>,
+}
+
+impl DynamicModules for Recorder {
+    fn module(&self, _: &str) -> Option<Arc<dyn Module>> {
+        None
+    }
+
+    fn names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn session_closed(&self, session: SessionId) {
+        self.closed.lock().unwrap().push(session);
+    }
+
+    fn missing(&self, name: &str, add_info: &AddInfo) {
+        self.missing
+            .lock()
+            .unwrap()
+            .push((name.to_owned(), add_info.clone()));
+    }
+}
+
+#[tokio::test]
+async fn wss_connections_are_sessions_closed_once_each() {
+    let recorder = Arc::new(Recorder::default());
+    let dynamic: Arc<dyn DynamicModules> = Arc::clone(&recorder) as _;
+    let srv = start_with(vec![], move |registry| registry.set_dynamic(dynamic)).await;
+    let origins = ["https://a.e2e.test", "https://b.e2e.test"];
+    let mut clients = Vec::new();
+    for origin in origins {
+        let mut c = connect_from(&srv, origin).await;
+        next_text(&mut c).await;
+        send(&mut c, r#"{"module":"kz.example.Gone","method":"x"}"#).await;
+        assert_eq!(
+            next_text(&mut c).await,
+            r#"{"success":false,"errorCode":"MODULE_NOT_FOUND"}"#
+        );
+        clients.push(c);
+    }
+    let missing = recorder.missing.lock().unwrap().clone();
+    assert_eq!(missing.len(), 2, "{missing:?}");
+    for ((name, info), origin) in missing.iter().zip(origins) {
+        assert_eq!(name, "kz.example.Gone");
+        assert_eq!(info.origin.as_deref(), Some(origin));
+        assert_ne!(info.session, 0);
+    }
+    assert_ne!(missing[0].1.session, missing[1].1.session);
+    let mut sessions: Vec<_> = missing.iter().map(|(_, info)| info.session).collect();
+    sessions.sort_unstable();
+    // One closed by the client, the other dropped without a close frame.
+    let dropped = clients.pop().unwrap();
+    let mut closing = clients.pop().unwrap();
+    closing.close(None).await.unwrap();
+    drop(dropped);
+    let closed = timeout(PATIENCE, async {
+        loop {
+            let mut closed = recorder.closed.lock().unwrap().clone();
+            if closed.len() >= 2 {
+                closed.sort_unstable();
+                return closed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("sessions not closed in time");
+    assert_eq!(closed, sessions);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(recorder.closed.lock().unwrap().len(), 2, "closed once each");
 }
 
 #[tokio::test]

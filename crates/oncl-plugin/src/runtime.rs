@@ -18,9 +18,29 @@ use wasmi::{
 /// The largest linear memory of an instance: 1 GiB on 64-bit targets.
 #[cfg(target_pointer_width = "64")]
 pub const MAX_MEMORY: usize = 1 << 30;
-/// The largest linear memory of an instance: 256 MiB on 32-bit targets.
+/// The largest linear memory of an instance: 16 MiB on 32-bit targets, so that
+/// [`MAX_INSTANCES`] instances at their largest fit the address space.
 #[cfg(not(target_pointer_width = "64"))]
-pub const MAX_MEMORY: usize = 256 << 20;
+pub const MAX_MEMORY: usize = 16 << 20;
+
+/// The linear memory the live instances of a process take together, as measured when their
+/// calls return: over it, the idle instances used longest ago go, and with none idle a call
+/// needing a new instance is refused. 2 GiB on 64-bit targets.
+#[cfg(target_pointer_width = "64")]
+pub const MEMORY_BUDGET: usize = 2 << 30;
+/// The linear memory the live instances of a process take together: 256 MiB on 32-bit
+/// targets.
+#[cfg(not(target_pointer_width = "64"))]
+pub const MEMORY_BUDGET: usize = 256 << 20;
+
+/// An instance whose linear memory is over this after a call is dropped rather than kept
+/// for its session (the guest's memory never shrinks): 128 MiB on 64-bit targets.
+#[cfg(target_pointer_width = "64")]
+pub const INSTANCE_HIGH_WATER: usize = 128 << 20;
+/// An instance whose linear memory is over this after a call is dropped: 8 MiB on 32-bit
+/// targets.
+#[cfg(not(target_pointer_width = "64"))]
+pub const INSTANCE_HIGH_WATER: usize = 8 << 20;
 
 /// The fuel of one `oncl_process` call, the guest's allocator calls and the host functions'
 /// buffers included: about that many WebAssembly instructions.
@@ -29,6 +49,10 @@ pub const PROCESS_FUEL: u64 = 20_000_000_000;
 /// The most instances alive in the process; the one used longest ago and not busy goes
 /// first.
 pub const MAX_INSTANCES: usize = 64;
+
+// Every instance at its largest fits a 32-bit address space with room to spare.
+#[cfg(not(target_pointer_width = "64"))]
+const _: () = assert!(MAX_INSTANCES * MAX_MEMORY <= 1 << 30);
 
 /// The largest buffer passed between the core and a plugin (a request, a reply, the
 /// arguments or result of a host function), as the daemon's largest WebSocket message.
@@ -344,6 +368,11 @@ const _: fn() = || {
 };
 
 impl Instance {
+    /// The size of the guest's linear memory now, in bytes.
+    pub fn memory_size(&self) -> usize {
+        self.memory.data(&self.store).len()
+    }
+
     /// Has the guest answer `request`: its reply, or [`Reply::Drop`] if it called
     /// `reply_drop` during this call. The dialog-flow turn, once a host function takes it,
     /// is held until this returns. After a failure the instance is spent: every later call

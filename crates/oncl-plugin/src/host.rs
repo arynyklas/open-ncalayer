@@ -65,6 +65,8 @@ pub(crate) struct CallContext {
     pub(crate) locale: Locale,
     /// The plugin asked for the connection to be dropped instead of a reply (`reply_drop`).
     pub(crate) drop: bool,
+    /// The HTTP requests sent during this request.
+    pub(crate) http_requests: u32,
 }
 
 /// An instance's store data.
@@ -100,6 +102,7 @@ impl HostState {
                 origin: None,
                 locale: Locale::Ru,
                 drop: false,
+                http_requests: 0,
             },
             keys: KeyTable::default(),
             secrets: Secrets::default(),
@@ -119,6 +122,7 @@ impl HostState {
             origin,
             locale,
             drop: false,
+            http_requests: 0,
         };
     }
 
@@ -341,7 +345,8 @@ fn run<A: DeserializeOwned, R: Serialize>(
     abi::encode(&abi::decode(args).and_then(f))
 }
 
-/// `log`: the line in the log, with the plugin and the session.
+/// `log`: the text in the log as a field (quoted and escaped: it cannot forge a line), with
+/// the plugin and the session.
 fn log(state: &HostState, args: LogArgs) -> HostResult<()> {
     let mut message = args.message;
     if message.len() > MAX_LOG_LINE {
@@ -354,11 +359,12 @@ fn log(state: &HostState, args: LogArgs) -> HostResult<()> {
     }
     let plugin = state.session.plugin_id.as_str();
     let session = state.session.session;
+    let text = message.as_str();
     match args.level {
-        Level::Error => tracing::error!(plugin, session, "{message}"),
-        Level::Warn => tracing::warn!(plugin, session, "{message}"),
-        Level::Info => tracing::info!(plugin, session, "{message}"),
-        Level::Debug => tracing::debug!(plugin, session, "{message}"),
+        Level::Error => tracing::error!(plugin, session, text, "plugin log"),
+        Level::Warn => tracing::warn!(plugin, session, text, "plugin log"),
+        Level::Info => tracing::info!(plugin, session, text, "plugin log"),
+        Level::Debug => tracing::debug!(plugin, session, text, "plugin log"),
     }
     Ok(())
 }

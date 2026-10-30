@@ -17,6 +17,7 @@ pub(crate) fn file_open(state: &mut HostState) -> HostResult<Option<OpenedFile>>
         locale: state.call.locale,
         kind: FileKind::All,
         directory: None,
+        source: Some(source(state)),
     };
     DialogTurn::hold();
     let path = match state.services.prompter.file(&prompt) {

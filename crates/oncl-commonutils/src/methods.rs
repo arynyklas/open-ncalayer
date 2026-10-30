@@ -236,6 +236,7 @@ pub(crate) fn show_file_chooser(cu: &CommonUtils, args: &Args<'_>, add_info: &Ad
         directory: page_path(directory)
             .filter(|d| !d.as_os_str().is_empty())
             .map(Path::to_path_buf),
+        source: None,
     };
     let answer = {
         let _flow = lock_dialog_flow();

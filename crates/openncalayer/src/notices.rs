@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use oncl_basics::Locale;
 use oncl_desktop::PortOwner;
 use oncl_ui::settings_view::{UpdateStatus, update_view};
+use oncl_ui::view::page_text;
 use oncl_ui::{ActionTarget, Notification, NotificationAction, TrayCommand, TrayState};
 
 use crate::cli::WssOff;
@@ -261,7 +262,7 @@ impl TrayStatus {
     /// nothing to install for (no port, one installed already — maybe turned off or
     /// withdrawn —, or no catalog), unless one was shown within the last ten minutes (at
     /// `now`). `origin` and `symname` come from the page: control characters go, and each is
-    /// cut to [`MAX_PAGE_TEXT`] characters.
+    /// cut to [`MAX_PAGE_TEXT`](oncl_ui::view::MAX_PAGE_TEXT) characters.
     pub fn bundle_notification(
         &mut self,
         symname: &str,
@@ -385,6 +386,37 @@ impl TrayStatus {
                 format!("«{}»: {error}", name.get(l)),
                 None,
             ),
+            PluginNotice::UpdateNeedsConfirmation { name, version } => {
+                let name = name.get(l);
+                (
+                    match l {
+                        Locale::Ru => "Обновление плагина ждёт разрешения",
+                        Locale::Kk => "Плагин жаңартуы рұқсат күтеді",
+                        Locale::En => "A plugin update waits for permission",
+                    }
+                    .to_owned(),
+                    match l {
+                        Locale::Ru => format!(
+                            "Версия {version} плагина «{name}» сможет больше, чем установленная. Установленная работает, пока вы не разрешите обновление в окне «Плагины»."
+                        ),
+                        Locale::Kk => format!(
+                            "«{name}» плагинінің {version} нұсқасы орнатылғаннан көп нәрсе істей алады. «Плагиндер» терезесінде жаңартуға рұқсат бермейінше, орнатылған нұсқа жұмыс істей береді."
+                        ),
+                        Locale::En => format!(
+                            "Version {version} of the plugin «{name}» can do more than the installed one. The installed one runs until you allow the update in the Plugins window."
+                        ),
+                    },
+                    Some(NotificationAction {
+                        label: match l {
+                            Locale::Ru => "Плагины…",
+                            Locale::Kk => "Плагиндер…",
+                            Locale::En => "Plugins…",
+                        }
+                        .to_owned(),
+                        target: ActionTarget::Command(TrayCommand::Plugins),
+                    }),
+                )
+            }
             PluginNotice::Needed { origin, name, .. } => {
                 let origin = origin.as_deref().map(page_text);
                 if self
@@ -700,28 +732,10 @@ fn date(rfc3339: &str) -> String {
     }
 }
 
-/// The longest text of a page shown in a notification, in characters.
-pub const MAX_PAGE_TEXT: usize = 128;
-
-/// `text` from a page as a notification shows it: without control characters, line and
-/// paragraph separators (U+2028, U+2029) and bidirectional controls (U+202A–U+202E,
-/// U+2066–U+2069), at most [`MAX_PAGE_TEXT`] characters (then `…`).
-fn page_text(text: &str) -> String {
-    let shown = |c: &char| {
-        !c.is_control()
-            && !matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-    };
-    let mut chars = text.chars().filter(shown);
-    let mut shown: String = chars.by_ref().take(MAX_PAGE_TEXT).collect();
-    if chars.next().is_some() {
-        shown.push('…');
-    }
-    shown
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oncl_ui::view::MAX_PAGE_TEXT;
 
     #[test]
     fn wss_off_comes_before_the_certificate() {
@@ -1049,6 +1063,10 @@ mod tests {
                 name: name.clone(),
                 error: "boom".to_owned(),
             },
+            PluginNotice::UpdateNeedsConfirmation {
+                name: name.clone(),
+                version: oncl_update::Version::new(0, 3, 0),
+            },
         ];
         let t0 = Instant::now();
         let mut ru = TrayStatus::new(Locale::Ru, None);
@@ -1058,6 +1076,13 @@ mod tests {
         assert_eq!(
             ru.plugin_notification(&notices[3], t0).unwrap().body,
             "«Пример»: boom"
+        );
+        let n = ru.plugin_notification(&notices[4], t0).unwrap();
+        assert_eq!(n.title, "Обновление плагина ждёт разрешения");
+        assert!(n.body.contains("0.3.0"), "{}", n.body);
+        assert_eq!(
+            n.action.map(|a| a.target),
+            Some(ActionTarget::Command(TrayCommand::Plugins))
         );
         for l in [Locale::Kk, Locale::En] {
             let mut status = TrayStatus::new(l, None);

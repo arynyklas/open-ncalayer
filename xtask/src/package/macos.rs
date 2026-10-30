@@ -283,8 +283,6 @@ if [ ! -x "$exe" ]; then
     echo "OpenNCALayer: $exe is missing" >&2
     exit 1
 fi
-# Packages an older version downloaded must not be applied over this one.
-/bin/rm -rf /tmp/velopack/OpenNCALayer
 if [ "$(/usr/bin/id -u)" -eq 0 ]; then
     user="$(/usr/bin/stat -f %Su /dev/console)"
     case "$user" in
@@ -302,6 +300,8 @@ else
         "$@"
     }
 fi
+# Packages an older version downloaded (Velopack keeps them in the user's caches) must not be
+# applied over this one.
 as_user /bin/sh -c 'exec /bin/rm -rf "$HOME/Library/Caches/velopack/OpenNCALayer"'
 status=0
 as_user "$exe" integration install || status=$?
@@ -492,6 +492,8 @@ mod tests {
             assert!(!POSTINSTALL.contains(&format!("{tool} ")), "{tool}");
         }
         assert!(POSTINSTALL.starts_with("#!/bin/sh\n"));
+        // Nothing in a world-writable directory: root would follow a user's symlink there.
+        assert!(!POSTINSTALL.contains("/tmp"));
     }
 
     /// The postinstall runs under `sh` with what Installer passes; as a user it integrates
@@ -515,17 +517,13 @@ mod tests {
         .unwrap();
         make_executable(&exe).unwrap();
         let script = dir.path().join("postinstall");
-        // The machine's paths become the sandbox's, and `open` (macOS', `openvt` on some
-        // Linux) a command that records what it would start.
-        let velopack = dir.path().join("velopack");
-        fs::create_dir_all(velopack.join("OpenNCALayer")).unwrap();
+        // `open` (macOS', `openvt` on some Linux) becomes a command that records what it
+        // would start.
         let opened = dir.path().join("opened");
-        let sandboxed = POSTINSTALL
-            .replace("/tmp/velopack", velopack.to_str().unwrap())
-            .replace(
-                "/usr/bin/open",
-                &format!("/bin/sh -c 'echo \"$0\" > {}'", opened.display()),
-            );
+        let sandboxed = POSTINSTALL.replace(
+            "/usr/bin/open",
+            &format!("/bin/sh -c 'echo \"$0\" > {}'", opened.display()),
+        );
         fs::write(&script, sandboxed).unwrap();
         let home = dir.path().join("home");
         let cache = home.join("Library/Caches/velopack/OpenNCALayer");
@@ -545,6 +543,6 @@ mod tests {
             dir.path().join("OpenNCALayer.app").to_str().unwrap()
         );
         // Velopack's leftovers of an older version are gone.
-        assert!(!velopack.join("OpenNCALayer").exists() && !cache.exists());
+        assert!(!cache.exists());
     }
 }

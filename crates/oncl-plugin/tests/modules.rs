@@ -1,5 +1,6 @@
 //! The example plugin as a dynamic module: an instance per session, generations replaced
-//! under running calls, module names that cannot be taken twice, and the instance cap.
+//! under running calls, module names that cannot be taken twice, the instance cap and the
+//! memory budget.
 
 mod common;
 
@@ -10,8 +11,8 @@ use oncl_basics::{
     StoragePrompt,
 };
 use oncl_plugin::{
-    BUILT_IN, Engine, HostServices, LoadError, MAX_INSTANCES, PLUGIN_ERROR_REPLY, Package,
-    PluginModules,
+    BUILT_IN, Engine, HostServices, LoadError, MAX_INSTANCES, MemoryLimits, PLUGIN_ERROR_REPLY,
+    Package, PluginModules,
 };
 use oncl_protocol::{AddInfo, DynamicModules, Registry, Route, module_not_found};
 use oncl_testkit::plugin::{example_package, example_package_with};
@@ -419,4 +420,146 @@ fn busy_instances_are_never_evicted() {
     }
     // Idle now: the one used longest ago makes room.
     assert_eq!(count(&modules, 1000), 1);
+}
+
+/// Holds every request until it is opened.
+fn gated_http() -> (Arc<GatedHttp>, Receiver<()>) {
+    let (entered_tx, entered) = channel();
+    let http = Arc::new(GatedHttp {
+        entered: Mutex::new(entered_tx),
+        open: Mutex::new(false),
+        opened: std::sync::Condvar::new(),
+    });
+    (http, entered)
+}
+
+fn open_gate(http: &GatedHttp) {
+    *http.open.lock().unwrap() = true;
+    http.opened.notify_all();
+}
+
+/// The example loaded with its instances' memory limited by `limits`.
+fn limited(services: HostServices, limits: MemoryLimits) -> Arc<PluginModules> {
+    let modules = Arc::new(PluginModules::with_memory_limits(
+        Arc::new(Engine::new()),
+        services,
+        Vec::new(),
+        limits,
+    ));
+    modules.load(example()).unwrap();
+    modules
+}
+
+/// Has the example of `session` echo a 2 MiB text: its memory grows by several times that.
+fn echo_big(modules: &Arc<PluginModules>, session: u64) {
+    let text = "a".repeat(2 << 20);
+    let module = modules.module(MODULE).unwrap();
+    let reply = module.process(
+        &request("echo", json!({"text": text})),
+        &in_session(session),
+    );
+    let reply: Value = serde_json::from_str(reply.text().unwrap()).unwrap();
+    assert_eq!(reply["body"].as_str().map(str::len), Some(text.len()));
+}
+
+/// The memory of a fresh instance, and of one after [`echo_big`].
+fn sizes() -> (usize, usize) {
+    let modules = loaded();
+    assert_eq!(modules.memory_in_use(), 0);
+    assert_eq!(count(&modules, 1), 1);
+    let fresh = modules.memory_in_use();
+    echo_big(&modules, 1);
+    let big = modules.memory_in_use();
+    assert!(big > 4 * fresh, "fresh {fresh}, big {big}");
+    (fresh, big)
+}
+
+/// A call that waits in the gated HTTP transport.
+fn fetch_in(modules: &Arc<PluginModules>, session: u64) -> std::thread::JoinHandle<String> {
+    let module = modules.module(MODULE).unwrap();
+    let fetch = request("fetch", json!({"url": "https://example.invalid/x"}));
+    std::thread::spawn(move || {
+        module
+            .process(&fetch, &in_session(session))
+            .into_text()
+            .unwrap()
+    })
+}
+
+#[test]
+fn memory_budget_evicts_idle_used_longest_ago() {
+    let (_, big) = sizes();
+    let budget = big + big / 2;
+    let modules = limited(
+        services(),
+        MemoryLimits {
+            budget,
+            high_water: 2 * big,
+        },
+    );
+    assert_eq!(count(&modules, 1), 1);
+    echo_big(&modules, 1);
+    assert_eq!(count(&modules, 2), 1);
+    echo_big(&modules, 2);
+    // Two big instances are over the budget: session 1's, used longest ago, went.
+    assert!(modules.memory_in_use() <= budget);
+    assert_eq!(count(&modules, 2), 2);
+    assert_eq!(count(&modules, 1), 1);
+    assert!(modules.memory_in_use() <= budget);
+}
+
+#[test]
+fn over_memory_budget_with_every_instance_busy_refuses_new_ones() {
+    let (_, big) = sizes();
+    let (http, entered) = gated_http();
+    let mut services = services();
+    services.http = Arc::clone(&http) as _;
+    let modules = limited(
+        services,
+        MemoryLimits {
+            budget: big + big / 2,
+            high_water: 2 * big,
+        },
+    );
+    assert_eq!(count(&modules, 1), 1);
+    echo_big(&modules, 1);
+    let first = fetch_in(&modules, 1);
+    entered.recv_timeout(Duration::from_secs(120)).unwrap();
+    assert_eq!(count(&modules, 2), 1);
+    echo_big(&modules, 2);
+    let second = fetch_in(&modules, 2);
+    entered.recv_timeout(Duration::from_secs(120)).unwrap();
+    // Over the budget with nothing idle: a call needing a new instance is refused.
+    assert_eq!(call(&modules, 3, "count"), PLUGIN_ERROR_REPLY);
+    assert_eq!(call(&modules, 0, "count"), PLUGIN_ERROR_REPLY);
+    open_gate(&http);
+    for running in [first, second] {
+        let reply: Value = serde_json::from_str(&running.join().unwrap()).unwrap();
+        assert_eq!(reply["status"], true, "{reply}");
+    }
+    // Idle again: the call that returned last has made the other instance go.
+    assert!(modules.memory_in_use() <= big + big / 2);
+    assert_eq!(count(&modules, 3), 1);
+    let mut counts = [count(&modules, 1), count(&modules, 2)];
+    counts.sort_unstable();
+    assert_eq!(counts, [1, 2]);
+}
+
+#[test]
+fn instance_over_high_water_is_dropped_after_its_call() {
+    let (fresh, big) = sizes();
+    let modules = limited(
+        services(),
+        MemoryLimits {
+            budget: usize::MAX,
+            high_water: (fresh + big) / 2,
+        },
+    );
+    assert_eq!(count(&modules, 1), 1);
+    assert_eq!(count(&modules, 1), 2);
+    echo_big(&modules, 1);
+    // Grown over the mark: not kept for the session.
+    assert_eq!(modules.memory_in_use(), 0);
+    assert_eq!(count(&modules, 1), 1);
+    assert_eq!(modules.memory_in_use(), fresh);
 }

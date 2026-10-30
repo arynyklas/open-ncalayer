@@ -8,9 +8,11 @@
 //! then dropped; the session's next call gets the new generation, or `MODULE_NOT_FOUND`. A
 //! call that fails (or panics) answers [`PLUGIN_ERROR_REPLY`] and its instance is dropped;
 //! the other instances and plugins carry on. A call without a session (`0`) gets an instance
-//! of its own, dropped after it. At most [`MAX_INSTANCES`] instances live at once: the one
-//! used longest ago and not busy goes first; with every one busy, a call needing a new one
-//! answers [`PLUGIN_ERROR_REPLY`].
+//! of its own, dropped after it. At most [`MAX_INSTANCES`] instances live at once, and their
+//! linear memory together stays within [`MemoryLimits::budget`] (as measured when their calls
+//! return): the one used longest ago and not busy goes first; with every one busy, a call
+//! needing a new one answers [`PLUGIN_ERROR_REPLY`]. An instance whose memory is over
+//! [`MemoryLimits::high_water`] after a call is dropped rather than kept for its session.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::{self, AssertUnwindSafe};
@@ -20,8 +22,8 @@ use oncl_protocol::{AddInfo, DynamicModules, Module, Reply, SessionId, module_no
 use semver::Version;
 
 use crate::{
-    Compiled, Engine, HostServices, Instance, LoadError, Localized, MAX_INSTANCES, Manifest,
-    PLUGIN_ERROR_REPLY, Package, Replaces, SessionContext,
+    Compiled, Engine, HostServices, INSTANCE_HIGH_WATER, Instance, LoadError, Localized,
+    MAX_INSTANCES, MEMORY_BUDGET, Manifest, PLUGIN_ERROR_REPLY, Package, Replaces, SessionContext,
 };
 
 /// The owner [`LoadError::ModuleTaken`] names for a module built into OpenNCALayer.
@@ -41,6 +43,25 @@ pub struct LoadedInfo {
     pub name: Localized,
 }
 
+/// The memory the instances of [`PluginModules`] may take; see the [module](self).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryLimits {
+    /// The linear memory of the live instances together.
+    pub budget: usize,
+    /// The linear memory of an instance kept for its session after a call.
+    pub high_water: usize,
+}
+
+impl Default for MemoryLimits {
+    /// [`MEMORY_BUDGET`] and [`INSTANCE_HIGH_WATER`].
+    fn default() -> Self {
+        MemoryLimits {
+            budget: MEMORY_BUDGET,
+            high_water: INSTANCE_HIGH_WATER,
+        }
+    }
+}
+
 /// The loaded plugins and their instances; see the [module](self).
 pub struct PluginModules {
     inner: Arc<Inner>,
@@ -50,6 +71,7 @@ struct Inner {
     engine: Arc<Engine>,
     services: HostServices,
     builtin: HashSet<String>,
+    limits: MemoryLimits,
     state: Mutex<State>,
     /// Notified whenever a busy instance is given back or its slot freed.
     returned: Condvar,
@@ -66,6 +88,9 @@ struct State {
     instances: HashMap<(SessionId, String), Slot>,
     /// Instances of calls without a session, alive now.
     transient: usize,
+    /// The linear memory of the live instances: of the idle ones as kept in their slots, of
+    /// the busy ones as their leases count it.
+    memory: usize,
     next_generation: u64,
     /// Counts the takes of instances: the least recently used has the lowest.
     clock: u64,
@@ -81,18 +106,32 @@ struct Slot {
     generation: u64,
     /// `None` while a call runs on it.
     instance: Option<Instance>,
+    /// The linear memory of the idle instance; `0` while a call runs on it.
+    memory: usize,
     last_used: u64,
 }
 
 impl PluginModules {
     /// No plugins yet. Instances are compiled with `engine` and served by `services`;
-    /// `builtin` are the module names served by the core, which no plugin may take.
+    /// `builtin` are the module names served by the core, which no plugin may take. The
+    /// instances' memory is limited by [`MemoryLimits::default`].
     pub fn new(engine: Arc<Engine>, services: HostServices, builtin: Vec<String>) -> Self {
+        Self::with_memory_limits(engine, services, builtin, MemoryLimits::default())
+    }
+
+    /// [`PluginModules::new`] with the instances' memory limited by `limits`.
+    pub fn with_memory_limits(
+        engine: Arc<Engine>,
+        services: HostServices,
+        builtin: Vec<String>,
+        limits: MemoryLimits,
+    ) -> Self {
         PluginModules {
             inner: Arc::new(Inner {
                 engine,
                 services,
                 builtin: builtin.into_iter().collect(),
+                limits,
                 state: Mutex::new(State::default()),
                 returned: Condvar::new(),
                 on_missing: Mutex::new(None),
@@ -186,6 +225,12 @@ impl PluginModules {
             .collect()
     }
 
+    /// The linear memory of the live instances, as measured when they were made or their
+    /// calls returned.
+    pub fn memory_in_use(&self) -> usize {
+        self.inner.lock().memory
+    }
+
     /// Has `f` called for every request naming a module nothing serves.
     pub fn set_on_missing(&self, f: OnMissing) {
         *lock(&self.inner.on_missing) = Some(f);
@@ -232,13 +277,16 @@ fn drop_idle(
     garbage: &mut Vec<Instance>,
     which: impl Fn(&(SessionId, String), &Slot) -> bool,
 ) {
+    let mut freed = 0;
     state.instances.retain(|key, slot| {
         if slot.instance.is_none() || !which(key, slot) {
             return true;
         }
+        freed += slot.memory;
         garbage.extend(slot.instance.take());
         false
     });
+    state.memory -= freed;
 }
 
 fn context(manifest: &Manifest, session: SessionId) -> SessionContext {
@@ -345,20 +393,26 @@ impl Inner {
                 let slot = state.instances.get_mut(key).expect("looked up");
                 slot.last_used = clock;
                 let instance = slot.instance.take();
+                let counted = std::mem::take(&mut slot.memory);
                 return Ok(Lease {
                     inner: self,
                     key: Some(key.clone()),
                     generation,
                     instance,
+                    counted,
                     keep: false,
                 });
             }
             // An idle instance of an older generation.
-            garbage.extend(state.instances.remove(key).and_then(|s| s.instance));
+            drop_idle(&mut state, &mut garbage, |of, _| of == key);
             break generation;
         };
-        if !make_room(&mut state, &mut garbage) {
-            tracing::warn!(plugin = %id, "every plugin instance is busy; the call is refused");
+        if !evict(&mut state, &mut garbage, self.limits.budget, true, None) {
+            tracing::warn!(
+                plugin = %id,
+                memory = state.memory,
+                "every plugin instance is busy; the call is refused"
+            );
             return Err(PLUGIN_ERROR_REPLY.to_owned());
         }
         let plugin = &state.plugins[id];
@@ -370,6 +424,7 @@ impl Inner {
                 let slot = Slot {
                     generation,
                     instance: None,
+                    memory: 0,
                     last_used: state.clock,
                 };
                 state.instances.insert(key.clone(), slot);
@@ -384,10 +439,13 @@ impl Inner {
             key,
             generation,
             instance: None,
+            counted: 0,
             keep: false,
         };
         match compiled.instantiate(&self.services, ctx) {
             Ok(instance) => {
+                lease.counted = instance.memory_size();
+                self.lock().memory += lease.counted;
                 lease.instance = Some(instance);
                 Ok(lease)
             }
@@ -399,40 +457,56 @@ impl Inner {
     }
 }
 
-/// Frees room for one more instance: the idle ones used longest ago go into `garbage` while
-/// [`MAX_INSTANCES`] are alive. Whether there is room.
-fn make_room(state: &mut State, garbage: &mut Vec<Instance>) -> bool {
-    while state.instances.len() + state.transient >= MAX_INSTANCES {
+/// Brings the instances within `budget` of memory and, if `room`, below [`MAX_INSTANCES`]:
+/// the idle ones used longest ago, except `spare`, go into `garbage` meanwhile. Whether that
+/// was done; not when every instance left is busy (or `spare`).
+fn evict(
+    state: &mut State,
+    garbage: &mut Vec<Instance>,
+    budget: usize,
+    room: bool,
+    spare: Option<&(SessionId, String)>,
+) -> bool {
+    while state.memory > budget
+        || (room && state.instances.len() + state.transient >= MAX_INSTANCES)
+    {
         let oldest = state
             .instances
             .iter()
-            .filter(|(_, slot)| slot.instance.is_some())
+            .filter(|(key, slot)| slot.instance.is_some() && Some(*key) != spare)
             .min_by_key(|(_, slot)| slot.last_used)
             .map(|(key, _)| key.clone());
         let Some(oldest) = oldest else {
             return false;
         };
-        garbage.extend(state.instances.remove(&oldest).and_then(|s| s.instance));
+        drop_idle(state, garbage, |key, _| *key == oldest);
     }
     true
 }
 
 /// An instance taken for a call. Dropped, it goes back to its slot if the call succeeded
-/// (`keep`) and its plugin's generation is still current; otherwise it is dropped and its
-/// slot freed (a panic unwinding through the call included).
+/// (`keep`), its plugin's generation is still current and its memory is within
+/// [`MemoryLimits::high_water`]; otherwise it is dropped and its slot freed (a panic unwinding
+/// through the call included). Then the other idle instances go while over
+/// [`MemoryLimits::budget`].
 struct Lease<'a> {
     inner: &'a Inner,
     /// `None`: a call without a session.
     key: Option<(SessionId, String)>,
     generation: u64,
     instance: Option<Instance>,
+    /// The memory [`State::memory`] counts for the instance while the call runs.
+    counted: usize,
     keep: bool,
 }
 
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
-        let mut garbage = self.instance.take();
+        let mut instance = self.instance.take();
+        let size = instance.as_ref().map_or(0, Instance::memory_size);
+        let mut garbage = Vec::new();
         let mut state = self.inner.lock();
+        state.memory -= self.counted;
         match &self.key {
             None => state.transient -= 1,
             Some(key) => {
@@ -440,13 +514,26 @@ impl Drop for Lease<'_> {
                     .plugins
                     .get(&key.1)
                     .is_some_and(|p| p.generation == self.generation);
-                let healthy = garbage.as_ref().is_some_and(|i| !i.is_poisoned());
+                let healthy = instance.as_ref().is_some_and(|i| !i.is_poisoned());
+                let small = size <= self.inner.limits.high_water;
+                if self.keep && healthy && !small {
+                    tracing::info!(
+                        plugin = %key.1,
+                        session = key.0,
+                        memory = size,
+                        "the plugin instance has grown too large; it is dropped"
+                    );
+                }
                 let slot = state
                     .instances
                     .get_mut(key)
                     .filter(|slot| slot.generation == self.generation && slot.instance.is_none());
                 match slot {
-                    Some(slot) if self.keep && current && healthy => slot.instance = garbage.take(),
+                    Some(slot) if self.keep && current && healthy && small => {
+                        slot.instance = instance.take();
+                        slot.memory = size;
+                        state.memory += size;
+                    }
                     Some(_) => {
                         state.instances.remove(key);
                     }
@@ -454,8 +541,12 @@ impl Drop for Lease<'_> {
                 }
             }
         }
+        // The instance given back stays: it is within the high-water mark.
+        let budget = self.inner.limits.budget;
+        evict(&mut state, &mut garbage, budget, false, self.key.as_ref());
         drop(state);
         self.inner.returned.notify_all();
+        drop(instance);
         drop(garbage);
     }
 }
