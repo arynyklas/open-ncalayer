@@ -37,6 +37,7 @@ OpenNCALayer — независимый проект и не связан с Н�
 - [`docs/design/update-index.md`](docs/design/update-index.md) — индекс обновлений: формат, подпись, выбор версии;
 - [`docs/design/tokens.md`](docs/design/tokens.md) — токены и удостоверение личности (экспериментально): семейства, PIN-код, эмулятор;
 - [`docs/dev/release.md`](docs/dev/release.md) — выпуск версии и подпись индекса: инструкция мейнтейнера;
+- [`docs/dev/upstream-watch.md`](docs/dev/upstream-watch.md) — наблюдатель за оригиналом: ветка `upstream`, issues, резервный путь;
 - [`docs/original/architecture.md`](docs/original/architecture.md) — архитектура оригинального NCALayer.
 
 ### Модули
