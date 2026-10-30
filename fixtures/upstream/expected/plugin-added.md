@@ -3,7 +3,7 @@
 | Поле | До | После |
 |---|---|---|
 | version | — | 2.0 |
-| url | — | http://upstream.test/updates/bundles/bundle-a.jar |
+| url | — | `http://upstream.test/updates/bundles/bundle-a.jar` |
 | hash | — | 5a8f2ee5b84a80fa |
 | csernum | — |  |
 | chash | — |  |

@@ -132,7 +132,9 @@ fn finish(template: &str, values: &[(&str, String)], key: &str) -> String {
     body
 }
 
-/// Text for a table cell: `|`, `` ` ``, `<`, `>` escaped, line breaks as spaces.
+/// Fact text for prose and table cells: one line, nothing live. `|`, `` ` ``, `<`, `>`, `&`
+/// and Markdown punctuation (`\\ [ ] ! * _ ~`) are escaped; a word joiner (U+2060) after `@`
+/// and `#` keeps mentions and issue references from linking.
 pub fn cell(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -141,13 +143,35 @@ pub fn cell(s: &str) -> String {
             '`' => out.push('\''),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '\\' | '[' | ']' | '!' | '*' | '_' | '~' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '@' | '#' => {
+                out.push(c);
+                out.push('\u{2060}');
+            }
             '\r' => {}
             '\n' | '\t' => out.push(' '),
-            '&' => out.push_str("&amp;"),
             c => out.push(c),
         }
     }
     out
+}
+
+/// Fact text inside a code span in a table: one line, `|` escaped for the table, `` ` ``
+/// replaced; the rest is literal there.
+pub fn code(s: &str) -> String {
+    s.chars()
+        .filter(|&c| c != '\r')
+        .map(|c| match c {
+            '`' => "'".to_owned(),
+            '|' => "\\|".to_owned(),
+            '\n' | '\t' => " ".to_owned(),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 /// `s` as a block quote, escaped.
@@ -189,11 +213,11 @@ fn table(header: &str, rows: Vec<String>, max: usize) -> String {
 fn set_rows<T: Ord + ToString>(what: &str, d: &SetDiff<T>) -> Vec<String> {
     d.added
         .iter()
-        .map(|v| format!("| {what} | добавлено | `{}` |", cell(&v.to_string())))
+        .map(|v| format!("| {what} | добавлено | `{}` |", code(&v.to_string())))
         .chain(
             d.removed
                 .iter()
-                .map(|v| format!("| {what} | удалено | `{}` |", cell(&v.to_string()))),
+                .map(|v| format!("| {what} | удалено | `{}` |", code(&v.to_string()))),
         )
         .collect()
 }
@@ -354,7 +378,7 @@ fn render_core(
         };
         core_rows.push(format!(
             "| `{}` | {what} | {} | {} | {} |",
-            cell(name),
+            code(name),
             cell(before.map_or("—", |b| b.version.as_str())),
             cell(after.map_or("—", |b| b.version.as_str())),
             cell(&detail)
@@ -370,7 +394,7 @@ fn render_core(
             |v: Option<&Option<String>>| v.and_then(|v| v.as_deref()).map_or("—".to_owned(), short);
         dist_rows.push(format!(
             "| `{}` | {} | {} | +{} −{} ~{} |",
-            cell(id),
+            code(id),
             opt(sha.map(|c| &c.before)),
             opt(sha.map(|c| &c.after)),
             d.files.added.len(),
@@ -439,7 +463,7 @@ fn render_plugin(
             "version",
             (|b: &BundleFacts| cell(&b.version)) as fn(&BundleFacts) -> String,
         ),
-        ("url", |b| cell(&b.url)),
+        ("url", |b| format!("`{}`", code(&b.url))),
         ("hash", |b| short(&b.hash)),
         ("csernum", |b| cell(&b.csernum)),
         ("chash", |b| short(&b.chash)),
@@ -462,7 +486,7 @@ fn render_plugin(
         |p| {
             format!(
                 "Порт: `plugins/{}`, портирована версия {}.",
-                cell(&p.short),
+                code(&p.short),
                 cell(&p.version)
             )
         },
@@ -478,7 +502,7 @@ fn render_plugin(
             "name",
             cell(&after.or(before).map_or(String::new(), |b| b.name.clone())),
         ),
-        ("symname", cell(symname)),
+        ("symname", code(symname)),
         ("from", cell(before.map_or("—", |b| b.version.as_str()))),
         ("to", cell(after.map_or("—", |b| b.version.as_str()))),
         ("date", cell(&ctx.date)),
@@ -509,7 +533,17 @@ pub fn render_alert(kind: AlertKind, detail: &str, date: &str, run_url: Option<&
         }
         AlertKind::CollectFailed => format!("Сбор фактов упал: {}.", cell(detail)),
     };
-    let run = run_url.map_or(String::new(), |u| format!("Прогон: {}\n", cell(u)));
+    // The workflow's own URL; anything else is shown as code.
+    let run = run_url.map_or(String::new(), |u| {
+        let plain = u.starts_with("https://")
+            && u.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "/:.-_".contains(c));
+        if plain {
+            format!("Прогон: {u}\n")
+        } else {
+            format!("Прогон: `{}`\n", code(u))
+        }
+    });
     let key = format!("alert:{}:{date}", kind.name());
     let title_what = match kind {
         AlertKind::BadSignature => "подпись манифеста не проверилась",

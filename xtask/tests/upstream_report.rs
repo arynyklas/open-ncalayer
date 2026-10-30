@@ -414,3 +414,60 @@ fn uninventoried_distribution_change_is_not_a_repack() {
         Label::Upstream
     );
 }
+
+#[test]
+fn mentions_references_and_links_are_neutralised() {
+    let old = base();
+    let mut new = with_demo_jar(old.clone(), "bundle-a-v2.jar", "1.1.0");
+    let demo = new.bundles.get_mut(DEMO).unwrap();
+    demo.name = "@octocat [x](https://example.com)".to_owned();
+    demo.info = "Ask @octocat, see #1 and o/r#2, [x](https://example.com) ![i](https://example.com/i.png) *b* _c_ ~d~ \\[e]".to_owned();
+    demo.csernum = "#3 @team".to_owned();
+    let d = diff(Some(&old), &new);
+    let issues = render(&d, Some(&old), &new, &ctx());
+    let body = &one(&issues, Label::UpstreamPlugin).body;
+    for live in [
+        "@octocat", "@team", "#1", "#2", "#3", "[x](", "![i]", "*b*", "_c_", "~d~",
+    ] {
+        assert!(!body.contains(live), "{live} is live in:\n{body}");
+    }
+    assert!(body.contains("@\u{2060}octocat"));
+    // Inside code spans the text stays as it is.
+    assert!(
+        body.contains("`verify(Ljava/lang/String;)Ljava/lang/String;`"),
+        "{body}"
+    );
+    let alert = render_alert(
+        AlertKind::BadSignature,
+        "CN=@octocat [x](https://e.test)",
+        "2026-10-31",
+        None,
+    );
+    assert!(!alert.body.contains("@octocat") && !alert.body.contains("[x]("));
+}
+
+#[test]
+fn code_spans_keep_angle_brackets() {
+    let old = base();
+    let mut new = old.clone();
+    let sha = new.bundles[DEMO].jar.clone().unwrap();
+    new.jars
+        .get_mut(&sha)
+        .unwrap()
+        .api
+        .classes
+        .get_mut("kz.example.demo.DemoModule")
+        .unwrap()
+        .methods
+        .insert("<init>(Ljava/lang/String;)V".to_owned());
+    let b = new.bundles.get_mut(DEMO).unwrap();
+    b.version = "1.0.1".to_owned();
+    // A JAR of other bytes with this API.
+    let j = new.jars[&sha].clone();
+    new.jars.insert("ff".repeat(32), j);
+    new.bundles.get_mut(DEMO).unwrap().jar = Some("ff".repeat(32));
+    let d = diff(Some(&old), &new);
+    let issues = render(&d, Some(&old), &new, &ctx());
+    let body = &one(&issues, Label::UpstreamPlugin).body;
+    assert!(body.contains("`<init>(Ljava/lang/String;)V`"), "{body}");
+}

@@ -3,7 +3,7 @@
 | Поле | До | После |
 |---|---|---|
 | version | 1.0.0 | 1.1.0 |
-| url | http://upstream.test/updates/bundles/bundle-a.jar | http://upstream.test/updates/bundles/bundle-a.jar |
+| url | `http://upstream.test/updates/bundles/bundle-a.jar` | `http://upstream.test/updates/bundles/bundle-a.jar` |
 | hash | 5a8f2ee5b84a80fa | a2ce7f6deb14d4fe |
 | csernum |  |  |
 | chash |  |  |
