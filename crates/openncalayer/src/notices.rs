@@ -16,8 +16,24 @@ use crate::plugins::PluginNotice;
 use crate::renewal::{RenewFailure, RenewalCheck};
 use crate::update::Notice;
 
-/// Where the plugins of OpenNCALayer are to be listed (the page arrives with plugins, P12).
-pub const PLUGIN_REGISTRY: &str = "https://arynyklas.github.io/open-ncalayer/plugins/";
+/// The project site (`site/config.toml`'s `base_url`).
+pub const SITE: &str = "https://arynyklas.github.io/open-ncalayer";
+
+/// The plugin catalog of the site in `l`, at the row of the bundle `symname` when it is a
+/// symbolic name (otherwise at the top).
+pub fn plugin_registry(l: Locale, symname: &str) -> String {
+    let lang = match l {
+        Locale::Ru => "",
+        Locale::Kk => "/kk",
+        Locale::En => "/en",
+    };
+    if oncl_plugin::is_symbolic_name(symname) {
+        format!("{SITE}{lang}/plugins/#{symname}")
+    } else {
+        format!("{SITE}{lang}/plugins/")
+    }
+}
+
 /// A page asking for bundles again and again is told about the registry at most this often.
 const BUNDLE_NOTICE_EVERY: Duration = Duration::from_secs(10 * 60);
 /// Pages needing plugins of the catalog are told about at most this often.
@@ -277,6 +293,7 @@ impl TrayStatus {
         }
         self.last_bundle_notice = Some(now);
         let l = self.locale;
+        let registry = plugin_registry(l, symname);
         let (symname, origin) = (page_text(symname), page_text(origin));
         Some(Notification {
             title: match l {
@@ -303,7 +320,7 @@ impl TrayStatus {
                     Locale::En => "Plugin registry",
                 }
                 .to_owned(),
-                target: ActionTarget::Url(PLUGIN_REGISTRY.to_owned()),
+                target: ActionTarget::Url(registry),
             }),
         })
     }
@@ -940,6 +957,55 @@ mod tests {
     }
 
     #[test]
+    fn registry_link_per_locale_with_anchor() {
+        assert_eq!(
+            plugin_registry(Locale::Ru, "kz.x"),
+            "https://arynyklas.github.io/open-ncalayer/plugins/#kz.x"
+        );
+        assert_eq!(
+            plugin_registry(Locale::Kk, "kz.x"),
+            "https://arynyklas.github.io/open-ncalayer/kk/plugins/#kz.x"
+        );
+        assert_eq!(
+            plugin_registry(Locale::En, "kz.x"),
+            "https://arynyklas.github.io/open-ncalayer/en/plugins/#kz.x"
+        );
+    }
+
+    #[test]
+    fn registry_link_without_anchor_for_odd_symname() {
+        for symname in ["a b", "x#y", "<s>", ""] {
+            assert_eq!(
+                plugin_registry(Locale::En, symname),
+                "https://arynyklas.github.io/open-ncalayer/en/plugins/",
+                "{symname}"
+            );
+        }
+    }
+
+    #[test]
+    fn site_urls_follow_the_site_config() {
+        let path = oncl_testkit::workspace_root().join("site/config.toml");
+        let config: toml::Table = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let base_url = config["base_url"].as_str().unwrap();
+        assert_eq!(SITE, base_url);
+        assert_eq!(crate::update::INDEX_BASE, format!("{base_url}/updates/v1"));
+        assert_eq!(config["default_language"].as_str(), Some("ru"));
+        let languages = config["languages"].as_table().unwrap();
+        for (l, lang) in [(Locale::Kk, "kk"), (Locale::En, "en")] {
+            assert!(languages.contains_key(lang), "{lang}");
+            assert_eq!(
+                plugin_registry(l, "kz.x"),
+                format!("{base_url}/{lang}/plugins/#kz.x")
+            );
+        }
+        assert_eq!(
+            plugin_registry(Locale::Ru, "kz.x"),
+            format!("{base_url}/plugins/#kz.x")
+        );
+    }
+
+    #[test]
     fn bundle_requests_point_to_the_registry_once_in_a_while() {
         let mut status = TrayStatus::new(Locale::Ru, None);
         let t0 = Instant::now();
@@ -952,7 +1018,10 @@ mod tests {
         );
         let action = first.action.unwrap();
         assert_eq!(action.label, "Реестр плагинов");
-        assert_eq!(action.target, ActionTarget::Url(PLUGIN_REGISTRY.to_owned()));
+        assert_eq!(
+            action.target,
+            ActionTarget::Url(plugin_registry(Locale::Ru, "kz.x"))
+        );
         assert_eq!(
             status.bundle_notification("kz.x", "https://shop.kz", t0 + Duration::from_secs(60)),
             None
