@@ -1,0 +1,19 @@
+[package]
+name = "oncl-port-devart"
+description = "The Devart signing bundle as an OpenNCALayer plugin: ESF, XML and CMS signatures by token"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+der.workspace = true
+oncl-pdk.workspace = true
+oncl-port-kit.workspace = true
+oncl-port-pki.workspace = true
+x509-cert.workspace = true

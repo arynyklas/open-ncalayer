@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.idocs"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.idocs"]
+
+[name]
+ru = "idocs (порт OpenNCALayer)"
+kk = "idocs (OpenNCALayer порты)"
+en = "idocs (OpenNCALayer port)"
+
+[description]
+ru = "Подпись документов ЕСЭДО для idocs.kz"
+kk = "idocs.kz үшін ЭҚАБЖ құжаттарына қол қою"
+en = "ESEDO document signatures for idocs.kz"
+
+[replaces]
+symname = "kz.idocs"
+version = "1.0"
+
+[capabilities]
+keys = true

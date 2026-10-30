@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.doodocs"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.doodocs.moduleservice.SampleBundle"]
+
+[name]
+ru = "Облачное подписание Doodocs.kz (порт OpenNCALayer)"
+kk = "Doodocs.kz бұлттық қол қоюы (OpenNCALayer порты)"
+en = "Doodocs.kz cloud signing (OpenNCALayer port)"
+
+[description]
+ru = "Вход ключом, который передаёт сайт Doodocs.kz, и подпись CAdES-T"
+kk = "Doodocs.kz сайты беретін кілтпен кіру және CAdES-T қолтаңбасы"
+en = "Signs in with a key the Doodocs.kz site sends and makes CAdES-T signatures"
+
+[replaces]
+symname = "kz.doodocs.moduleservice"
+version = "1.0"
+
+[capabilities]
+keys = true

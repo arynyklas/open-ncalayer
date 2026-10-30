@@ -1,0 +1,20 @@
+id = "io.github.arynyklas.openncalayer.port.idocs"
+modules = ["kz.idocs"]
+
+[original]
+symname = "kz.idocs"
+version = "1.0"
+vendor = "idocs.kz"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Ключ выбирается в общем окне OpenNCALayer (хранилище PKCS#12), а не в окне idocs; закрытие окна выбора ключа отвечает «cancelled»."
+
+[[differences]]
+ru = "Имя файла в атрибуте 1.2.840.113549.1.9.77 записывается в UTF-8 на любой системе (оригинал портил не-ASCII имена кодировкой платформы)."
+
+[[differences]]
+ru = "Сертификат издателя для OCSP-запроса берётся из списка УЦ ядра, а не скачивается в каталог ./idocs-cache."

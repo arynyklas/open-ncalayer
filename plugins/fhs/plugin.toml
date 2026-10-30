@@ -1,0 +1,25 @@
+id = "io.github.arynyklas.openncalayer.port.fhs"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.fhs.cabinet.FHSCabinetSigner"]
+
+[name]
+ru = "First Heartland Securities Cabinet (порт OpenNCALayer)"
+kk = "First Heartland Securities Cabinet (OpenNCALayer порты)"
+en = "First Heartland Securities Cabinet (OpenNCALayer port)"
+
+[description]
+ru = "Подпись текста, XML и файлов в кабинете First Heartland Securities"
+kk = "First Heartland Securities кабинетінде мәтінге, XML-ге және файлдарға қол қою"
+en = "Signs text, XML and files in the First Heartland Securities cabinet"
+
+[replaces]
+symname = "kz.fhs.cabinet.FHSCabinet"
+version = "2.0.0"
+
+[capabilities]
+keys = true
+key_files = true
+dialogs = true
+files = true
+origins = ["https://*.fhs.kz"]

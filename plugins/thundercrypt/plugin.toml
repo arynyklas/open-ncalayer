@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.thundercrypt"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["asia.dbt.thundercrypt.osgi.ThunderCryptModule"]
+
+[name]
+ru = "ThunderCrypt (порт OpenNCALayer)"
+kk = "ThunderCrypt (OpenNCALayer порты)"
+en = "ThunderCrypt (OpenNCALayer port)"
+
+[description]
+ru = "Подпись ЕСЭДО с меткой времени и проверкой для систем Everflow"
+kk = "Everflow жүйелері үшін уақыт белгісі мен тексерісі бар ЭҚАБЖ қолтаңбасы"
+en = "ESEDO signatures with a time-stamp and checks for Everflow systems"
+
+[replaces]
+symname = "asia.dbt.thundercrypt.osgi.ThunderCryptModule"
+version = "1.16.5"
+
+[capabilities]
+keys = true
+key_files = true
+dialogs = true

@@ -1,0 +1,26 @@
+id = "io.github.arynyklas.openncalayer.port.fhs"
+modules = ["kz.fhs.cabinet.FHSCabinetSigner"]
+
+[original]
+symname = "kz.fhs.cabinet.FHSCabinet"
+version = "2.0.0"
+vendor = "First Heartland Securities"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Ключ по пути от страницы (getCertificateInfo, signTextV2, signXmlV2) открывается после согласия пользователя в окне OpenNCALayer, один раз за сессию."
+
+[[differences]]
+ru = "signFile скачивает файл только с адреса того же сайта (https://*.fhs.kz) и с проверкой TLS; оригинал скачивал с любого адреса и отключал проверку TLS для всего NCALayer."
+
+[[differences]]
+ru = "certificateType перечисляет типы в постоянном порядке [SIGNATURE, AUTHENTICATION]; у оригинала порядок не определён."
+
+[[differences]]
+ru = "Методы signXml, signFile и signText выбирают ключ в общем окне OpenNCALayer; списка загруженных ключей между вызовами нет. Хранилище облачной подписи (ABCloudServiceStore) не предлагается; токены — после поддержки токенов в ядре."
+
+[[differences]]
+ru = "Казахский язык OpenNCALayer показывает тексты Cabinet_kz (русские); оригинал на такой локали падал."
