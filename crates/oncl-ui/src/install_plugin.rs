@@ -368,7 +368,7 @@ impl Texts {
                 http_insecure: "обращаться по незащищённому соединению к {0}",
                 key_files: "открывать файлы ключей, которые назовут сайты, — каждый после вашего разрешения",
                 page_files_read: "читать файлы, которые назовут сайты, — каждый после вашего разрешения",
-                page_files: "читать файлы и записывать файлы {0} в папки, которые назовут сайты, — каждый раз после вашего разрешения",
+                page_files: "читать файлы и записывать файлы {0} в папки, которые назовут сайты, — каждый файл и каждую папку после вашего разрешения",
                 settings: "хранить свои настройки на этом компьютере",
                 shared: "делить данные между сайтами",
                 local: "Этого плагина нет в каталоге OpenNCALayer, его не проверял мейнтейнер. Устанавливайте только плагины из источника, которому доверяете.",
@@ -592,6 +592,21 @@ mod tests {
             "Заменит установленную версию 0.0.9 (локальную, из файла)"
         );
         assert!(texts(&request, Locale::Kk).replacing.contains("0.0.9"));
+    }
+
+    #[test]
+    fn page_files_say_when_permission_is_asked() {
+        let page_files = CapabilityLine::PageFiles(vec!["xml".to_owned(), "pdf".to_owned()]);
+        assert_eq!(
+            capability_text(&page_files, Locale::Ru),
+            "читать файлы и записывать файлы .xml, .pdf в папки, которые назовут сайты, — \
+             каждый файл и каждую папку после вашего разрешения"
+        );
+        assert_eq!(
+            capability_text(&page_files, Locale::En),
+            "read files and write .xml, .pdf files into folders the sites name, each once you \
+             allow it"
+        );
     }
 
     #[test]
