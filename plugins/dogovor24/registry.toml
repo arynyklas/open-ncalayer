@@ -1,0 +1,20 @@
+id = "io.github.arynyklas.openncalayer.port.dogovor24"
+modules = ["kz.dogovor24.module"]
+
+[original]
+symname = "kz.dogovor24.module"
+version = "1.0.5"
+vendor = "ТОО «Договор24»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Окно выбора файла и пароля заменено общими окнами OpenNCALayer (по-прежнему до разбора метода); пользователь выбирает ключ (оригинал брал последний ключ файла)."
+
+[[differences]]
+ru = "Путь к ключу (настройка D24ModulePath) не хранится: плагину путь не сообщается, окно OpenNCALayer само заполняет последний путь. Значение по умолчанию «D24ModulePath» как путь к файлу не воспроизводится."
+
+[[differences]]
+ru = "signEsedo: messageDigest считается тем же алгоритмом, что digestAlgorithm (у оригинала для RSA — ГОСТ 34.311). Для ключей ГОСТ ответ тот же. Запрос OCSP ждёт не дольше 60 с."

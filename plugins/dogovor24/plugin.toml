@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.dogovor24"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.dogovor24.module"]
+
+[name]
+ru = "Договор24"
+kk = "Договор24"
+en = "Dogovor24"
+
+[description]
+ru = "Подпись договоров на dogovor24.kz: CMS с меткой времени, пакеты, ЕСЭДО"
+kk = "dogovor24.kz сайтындағы шарттарға қол қою: уақыт белгісі бар CMS, топтамалар, ЕСЭДО"
+en = "Signs contracts on dogovor24.kz: time-stamped CMS, batches, ESEDO"
+
+[replaces]
+symname = "kz.dogovor24.module"
+version = "1.0.5"
+
+[capabilities]
+keys = true

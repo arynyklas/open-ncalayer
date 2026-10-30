@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.eup"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.nitec.eup.eupsigner"]
+
+[name]
+ru = "Заң көмегі"
+kk = "Заң көмегі"
+en = "Zan Komegi"
+
+[description]
+ru = "Подпись документов ЕСЭДО для портала «Заң көмегі» (eup.adilet.gov.kz)"
+kk = "«Заң көмегі» порталы (eup.adilet.gov.kz) үшін ЕСЭДО құжаттарына қол қою"
+en = "ESEDO document signatures for the Zan Komegi portal (eup.adilet.gov.kz)"
+
+[replaces]
+symname = "kz.nitec.eup.eupsigner"
+version = "1.0"
+
+[capabilities]
+keys = true

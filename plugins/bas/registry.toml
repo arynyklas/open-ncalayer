@@ -1,0 +1,20 @@
+id = "io.github.arynyklas.openncalayer.port.bas"
+modules = ["kz.bas.nca.multiSignService"]
+
+[original]
+symname = "kz.bas.nca.signer"
+version = "1.0.35"
+vendor = "ТОО «Business Applications Solutions»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Окно выбора файла и пароля заменено общими окнами OpenNCALayer: пользователь выбирает ключ (оригинал брал первый ключ файла); трёхминутного ожидания окна нет."
+
+[[differences]]
+ru = "messageDigest считается тем же алгоритмом, что digestAlgorithm (у оригинала для RSA — ГОСТ 34.311, и подпись не проверялась). Для ключей ГОСТ ответ тот же."
+
+[[differences]]
+ru = "Запрос OCSP ждёт не дольше 60 с (оригинал — без ограничения); тексты ошибки неверного пароля недостижимы: пароль проверяет окно OpenNCALayer."

@@ -407,6 +407,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-bas"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
+]
+
+[[package]]
+name = "oncl-port-dogovor24"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
+]
+
+[[package]]
 name = "oncl-port-energy"
 version = "1.0.0-beta.1"
 dependencies = [
@@ -423,6 +439,14 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-esf-osdkz"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
+]
+
+[[package]]
+name = "oncl-port-eup"
 version = "1.0.0-beta.1"
 dependencies = [
  "oncl-pdk",

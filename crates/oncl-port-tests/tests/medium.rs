@@ -1335,3 +1335,655 @@ fn qiwi_cancel_500() {
         QIWI_500
     );
 }
+
+// DER of the CMS the ESEDO ports make.
+
+/// The first DER TLV of `input`: its tag, the whole TLV, its content and what follows.
+fn tlv(input: &[u8]) -> (u8, &[u8], &[u8], &[u8]) {
+    let (len, head) = match input[1] {
+        short if short < 0x80 => (usize::from(short), 2),
+        long => {
+            let n = usize::from(long & 0x7f);
+            let len = input[2..2 + n]
+                .iter()
+                .fold(0usize, |len, b| (len << 8) | usize::from(*b));
+            (len, 2 + n)
+        }
+    };
+    (
+        input[0],
+        &input[..head + len],
+        &input[head..head + len],
+        &input[head + len..],
+    )
+}
+
+/// The TLVs inside `content`: tag, whole TLV, content.
+fn children(mut content: &[u8]) -> Vec<(u8, &[u8], &[u8])> {
+    let mut out = Vec::new();
+    while !content.is_empty() {
+        let (tag, whole, inner, rest) = tlv(content);
+        out.push((tag, whole, inner));
+        content = rest;
+    }
+    out
+}
+
+/// A dotted OID of the content of an OBJECT IDENTIFIER.
+fn oid(content: &[u8]) -> String {
+    let mut arcs = vec![u64::from(content[0] / 40), u64::from(content[0] % 40)];
+    let mut arc = 0u64;
+    for b in &content[1..] {
+        arc = (arc << 7) | u64::from(b & 0x7f);
+        if b & 0x80 == 0 {
+            arcs.push(arc);
+            arc = 0;
+        }
+    }
+    arcs.iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// What the tests read of a CMS: eContentType, eContent, and the first signer's
+/// attributes (type, values as whole TLVs).
+struct CmsView {
+    econtent_type: String,
+    econtent: Option<Vec<u8>>,
+    signed: Vec<(String, Vec<Vec<u8>>)>,
+    unsigned: Vec<(String, Vec<Vec<u8>>)>,
+}
+
+fn attributes(content: &[u8]) -> Vec<(String, Vec<Vec<u8>>)> {
+    children(content)
+        .into_iter()
+        .map(|(_, _, attr)| {
+            let parts = children(attr);
+            let values = children(parts[1].2)
+                .into_iter()
+                .map(|(_, whole, _)| whole.to_vec())
+                .collect();
+            (oid(parts[0].2), values)
+        })
+        .collect()
+}
+
+fn cms_view(der: &[u8]) -> CmsView {
+    let (_, _, content_info, _) = tlv(der);
+    let signed_data = children(children(content_info)[1].2)[0].2;
+    let parts = children(signed_data);
+    let encap = children(parts[2].2);
+    let econtent = encap
+        .get(1)
+        .map(|(_, _, explicit)| children(explicit)[0].2.to_vec());
+    let signer = children(parts.last().unwrap().2)[0].2;
+    let mut view = CmsView {
+        econtent_type: oid(encap[0].2),
+        econtent,
+        signed: Vec::new(),
+        unsigned: Vec::new(),
+    };
+    for (tag, _, content) in children(signer) {
+        match tag {
+            0xa0 => view.signed = attributes(content),
+            0xa1 => view.unsigned = attributes(content),
+            _ => {}
+        }
+    }
+    view
+}
+
+impl CmsView {
+    /// The values of the signed attribute `oid`.
+    fn signed(&self, oid: &str) -> &[Vec<u8>] {
+        self.signed
+            .iter()
+            .find(|(t, _)| t == oid)
+            .map(|(_, v)| v.as_slice())
+            .unwrap_or_else(|| panic!("no signed attribute {oid}"))
+    }
+
+    /// The signed attribute types.
+    fn signed_types(&self) -> Vec<&str> {
+        self.signed.iter().map(|(t, _)| t.as_str()).collect()
+    }
+
+    /// The tokens of the signatureTimeStampToken attributes.
+    fn tokens(&self) -> Vec<Vec<u8>> {
+        self.unsigned
+            .iter()
+            .filter(|(t, _)| t == "1.2.840.113549.1.9.16.2.14")
+            .flat_map(|(_, v)| v.clone())
+            .collect()
+    }
+}
+
+/// The policy and imprint hash OID of a time-stamp token.
+fn token_policy_and_hash(token: &[u8]) -> (String, String) {
+    let tst_info = cms_view(token).econtent.unwrap();
+    let fields = children(tlv(&tst_info).2);
+    let imprint = children(fields[2].2);
+    let alg = children(imprint[0].2);
+    (oid(fields[1].2), oid(alg[0].2))
+}
+
+/// The DER of the subject of the synthetic store `name`'s key.
+fn subject_der(name: &str) -> Vec<u8> {
+    use der::Encode;
+    entry(name)
+        .cert
+        .tbs_certificate()
+        .subject()
+        .to_der()
+        .unwrap()
+}
+
+/// An HTTP endpoint answering every request with `status` and no body.
+struct Status(u16);
+
+impl oncl_pki::http::HttpTransport for Status {
+    fn send(
+        &self,
+        _: &oncl_pki::http::HttpRequest<'_>,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        Ok(oncl_pki::http::HttpReply {
+            status: self.0,
+            content_type: None,
+            location: None,
+            body: Vec::new(),
+        })
+    }
+}
+
+/// `host` (`tsp`, `ocsp`) answering every request with `status`.
+fn down(
+    host: &str,
+    status: u16,
+) -> Vec<(String, std::sync::Arc<dyn oncl_pki::http::HttpTransport>)> {
+    ["http", "https"]
+        .map(|scheme| {
+            (
+                format!("{scheme}://{host}.pki.gov.kz"),
+                std::sync::Arc::new(Status(status)) as _,
+            )
+        })
+        .to_vec()
+}
+
+/// The base64 CMS of an ESEDO reply's `responseObject`.
+fn reply_cms(reply: &str) -> Vec<u8> {
+    let value: serde_json::Value = serde_json::from_str(reply).unwrap();
+    decode_java(value["responseObject"].as_str().unwrap()).unwrap()
+}
+
+const ESEDO_DESCRIPTION: [u8; 8] = [0x13, 6, b'E', b'S', b'E', b'D', b'O', 0];
+
+// bas
+
+const BAS: &str = "kz.bas.nca.multiSignService";
+
+fn bas(args: &str) -> String {
+    format!(r#"{{"module":"{BAS}","uuid":"u-1","args":{args}}}"#)
+}
+
+const BAS_HELLO: &str = r#"["aGVsbG8=","a.pdf<>b.pdf"]"#;
+
+#[test]
+fn esedo_profiles_attribute_sets() {
+    let names = "a.pdf<>b.pdf";
+    let check_common = |view: &CmsView| {
+        let mut types = view.signed_types();
+        types.sort_unstable();
+        assert_eq!(
+            types,
+            [
+                "1.2.840.113549.1.9.13",
+                "1.2.840.113549.1.9.3",
+                "1.2.840.113549.1.9.4",
+                "1.2.840.113549.1.9.5",
+                "1.2.840.113549.1.9.77",
+                "1.3.6.1.4.1.6801.2.8",
+                "1.3.6.1.5.5.7.48.1.1",
+            ]
+        );
+        assert_eq!(view.signed("1.2.840.113549.1.9.13")[0], ESEDO_DESCRIPTION);
+        let names_value = &view.signed("1.2.840.113549.1.9.77")[0];
+        assert_eq!(names_value[0], 0x0c);
+        assert_eq!(tlv(names_value).2, names.as_bytes());
+        // OCTET STRING { OCSPResponse { responseStatus, … } }.
+        let ocsp = &view.signed("1.3.6.1.5.5.7.48.1.1")[0];
+        assert_eq!(ocsp[0], 0x04);
+        let response = tlv(ocsp).2;
+        assert_eq!(children(tlv(response).2)[0].0, 0x0a);
+        assert!(view.econtent.is_none(), "detached");
+    };
+
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let view = cms_view(&reply_cms(&text(harness.call(
+        "bas",
+        &bas(BAS_HELLO),
+        None,
+    ))));
+    check_common(&view);
+    assert_eq!(view.econtent_type, "1.3.6.1.4.1.6801.11.1.9");
+    assert_eq!(
+        oid(tlv(&view.signed("1.2.840.113549.1.9.3")[0]).2),
+        "1.3.6.1.4.1.6801.11.1.9"
+    );
+    assert_eq!(view.signed("1.2.840.113549.1.9.5")[0][0], 0x17, "UTCTime");
+    assert_eq!(
+        view.signed("1.3.6.1.4.1.6801.2.8")[0],
+        subject_der("user-gost2015-sign")
+    );
+
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call(
+        "eup",
+        &format!(r#"{{"module":"{EUP}","uuid":"u-7","args":{BAS_HELLO}}}"#),
+        None,
+    ));
+    let view = cms_view(&reply_cms(&reply));
+    check_common(&view);
+    assert_eq!(view.econtent_type, "1.2.840.113549.1.7.1");
+    assert_eq!(
+        view.signed("1.2.840.113549.1.9.5")[0][0],
+        0x18,
+        "GeneralizedTime"
+    );
+    assert_eq!(
+        view.signed("1.3.6.1.4.1.6801.2.8")[0],
+        subject_der("user-gost2015-sign")
+    );
+    assert!(view.unsigned.is_empty(), "eup does not time-stamp");
+
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call(
+        "dogovor24",
+        &format!(
+            r#"{{"module":"{DOGOVOR24}","method":"signEsedo","uuid":"d","args":{BAS_HELLO}}}"#
+        ),
+        None,
+    ));
+    let view = cms_view(&reply_cms(&reply));
+    check_common(&view);
+    assert_eq!(view.econtent_type, "1.2.840.113549.1.7.1");
+    assert_eq!(
+        view.signed("1.2.840.113549.1.9.5")[0][0],
+        0x18,
+        "GeneralizedTime"
+    );
+    // The RFC 2253 text parsed in its order: the subject's RDNs reversed.
+    let subject = subject_der("user-gost2015-sign");
+    let mut rdns: Vec<&[u8]> = children(tlv(&subject).2)
+        .into_iter()
+        .map(|(_, whole, _)| whole)
+        .collect();
+    rdns.reverse();
+    let reversed = view.signed("1.3.6.1.4.1.6801.2.8")[0].clone();
+    assert_eq!(tlv(&reversed).2, rdns.concat());
+    assert_ne!(reversed, subject);
+}
+
+#[test]
+fn bas_reply_and_cms() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call("bas", &bas(BAS_HELLO), None));
+    assert!(reply.starts_with(r#"{"responseObject":"MI"#), "{reply}");
+    assert!(
+        reply.ends_with(r#"","code":"200","uuid":"u-1"}"#),
+        "{reply}"
+    );
+    oncl_pki::cms::verify(&reply_cms(&reply), Some(b"hello")).unwrap();
+    assert_eq!(
+        harness.http_log(),
+        ["POST http://ocsp.pki.gov.kz", "POST http://tsp.pki.gov.kz"]
+    );
+    // The method is not read; the uuid defaults to "".
+    let harness = Harness::new(vec![Step::CancelStorage], vec![]);
+    assert_eq!(
+        text(harness.call(
+            "bas",
+            &format!(r#"{{"module":"{BAS}","method":"x","args":{BAS_HELLO}}}"#),
+            None
+        )),
+        r#"{"code":"500","uuid":""}"#
+    );
+}
+
+#[test]
+fn bas_argument_errors() {
+    let harness = Harness::new(vec![], vec![]);
+    let mut session = harness.session("bas");
+    for (args, message) in [
+        ("null", "Invalid arguments"),
+        (r#"{"a":1}"#, "Invalid arguments"),
+        (r#"["x"]"#, "Invalid arguments"),
+        (r#"[1,"x"]"#, "JSONArray[0] is not a String."),
+        (r#"["x",2]"#, "JSONArray[1] is not a String."),
+    ] {
+        assert_eq!(
+            text(session.call(&bas(args), None)),
+            format!(r#"{{"code":"500","message":"{message}","uuid":"u-1"}}"#)
+        );
+    }
+    assert!(harness.prompter().timeline().is_empty());
+    // Base64 is decoded after the dialog and the OCSP request.
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    assert_eq!(
+        text(harness.call("bas", &bas(r#"["a-b=","x"]"#), None)),
+        r#"{"code":"500","message":"Illegal base64 character 2d","uuid":"u-1"}"#
+    );
+    assert_eq!(harness.http_log(), ["POST http://ocsp.pki.gov.kz"]);
+}
+
+#[test]
+fn bas_tsp_append_policy_by_alg() {
+    for (store, policy, hash) in [
+        (
+            "user-gost2015-sign",
+            "1.2.398.3.3.2.6.4",
+            "1.2.398.3.10.1.3.1",
+        ),
+        (
+            "user-gost2004-sign",
+            "1.2.398.3.3.2.6.1",
+            "1.2.398.3.10.1.3.1",
+        ),
+        (
+            "user-rsa-sign",
+            "1.2.398.3.3.2.6.2",
+            "2.16.840.1.101.3.4.2.1",
+        ),
+    ] {
+        let harness = Harness::new(pick(store, 0), vec![]);
+        let view = cms_view(&reply_cms(&text(harness.call(
+            "bas",
+            &bas(BAS_HELLO),
+            None,
+        ))));
+        let tokens = view.tokens();
+        assert_eq!(tokens.len(), 1, "{store}");
+        assert_eq!(
+            token_policy_and_hash(&tokens[0]),
+            (policy.to_owned(), hash.to_owned()),
+            "{store}"
+        );
+    }
+}
+
+#[test]
+fn bas_cms_error_code_200() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), down("tsp", 503));
+    assert_eq!(
+        text(harness.call("bas", &bas(BAS_HELLO), None)),
+        r#"{"code":"200","message":"Invalid TSP response status: 503","uuid":"u-1"}"#
+    );
+    // The original's ten attempts.
+    let posts = harness
+        .http_log()
+        .iter()
+        .filter(|line| line.starts_with("POST http://tsp"))
+        .count();
+    assert_eq!(posts, 10);
+}
+
+#[test]
+fn bas_expired_text() {
+    let harness = Harness::new(pick("expired-gost2015-sign", 0), vec![]);
+    assert_eq!(
+        text(harness.call("bas", &bas(BAS_HELLO), None)),
+        r#"{"code":"500","message":"The certificate has expired.","uuid":"u-1"}"#
+    );
+    assert!(harness.http_log().is_empty());
+}
+
+#[test]
+fn bas_ocsp_failure_text() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), down("ocsp", 500));
+    assert_eq!(
+        text(harness.call("bas", &bas(BAS_HELLO), None)),
+        r#"{"code":"500","message":"OCSP response generation error","uuid":"u-1"}"#
+    );
+}
+
+#[test]
+fn bas_rsa_message_digest_is_sha256() {
+    let harness = Harness::new(pick("user-rsa-sign", 0), vec![]);
+    let cms = reply_cms(&text(harness.call("bas", &bas(BAS_HELLO), None)));
+    // The messageDigest matches the SHA-256 digestAlgorithm: the CMS verifies.
+    oncl_pki::cms::verify(&cms, Some(b"hello")).unwrap();
+    let digest = cms_view(&cms).signed("1.2.840.113549.1.9.4")[0].clone();
+    let digest = &digest;
+    assert_eq!(tlv(digest).2, SigAlg::RsaSha256.digest(b"hello"));
+}
+
+// eup
+
+const EUP: &str = "kz.nitec.eup.eupsigner";
+
+fn eup(args: &str) -> String {
+    format!(r#"{{"module":"{EUP}","uuid":"u-7","args":{args}}}"#)
+}
+
+#[test]
+fn eup_reply() {
+    let harness = Harness::new(pick("user-gost2004-sign", 0), vec![]);
+    let reply = text(harness.call("eup", &eup(BAS_HELLO), None));
+    assert!(reply.starts_with(r#"{"responseObject":"MI"#), "{reply}");
+    assert!(
+        reply.ends_with(r#"","code":"200","uuid":"u-7"}"#),
+        "{reply}"
+    );
+    oncl_pki::cms::verify(&reply_cms(&reply), Some(b"hello")).unwrap();
+    assert_eq!(harness.http_log(), ["POST http://ocsp.pki.gov.kz"]);
+}
+
+#[test]
+fn eup_error_null_null() {
+    let harness = Harness::new(vec![Step::CancelStorage], vec![]);
+    let mut session = harness.session("eup");
+    let error = |message: &str| {
+        format!(
+            r#"{{"responseObject":"null null","code":"500","message":"{message}","uuid":"u-7"}}"#
+        )
+    };
+    assert_eq!(
+        text(session.call(&format!(r#"{{"module":"{EUP}","uuid":"u-7"}}"#), None)),
+        error("java.lang.NullPointerException")
+    );
+    assert_eq!(
+        text(session.call(&eup(r#"["x"]"#), None)),
+        error("org.json.JSONException: JSONArray[1] not found.")
+    );
+    // The dialog closed.
+    assert_eq!(
+        text(session.call(&eup(BAS_HELLO), None)),
+        error("java.lang.NullPointerException")
+    );
+    let harness = Harness::new(pick("user-gost2015-sign", 0), down("ocsp", 500));
+    assert_eq!(
+        text(harness.call("eup", &eup(BAS_HELLO), None)),
+        r#"{"responseObject":"102 Ошибка при формировании подписи. Возможная причина: отсутствие соединения с интернет.","code":"500","message":"java.lang.Exception: OCSP response generation error. Check internet connection","uuid":"u-7"}"#
+    );
+}
+
+#[test]
+fn eup_gost2015_signs() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let cms = reply_cms(&text(harness.call("eup", &eup(BAS_HELLO), None)));
+    oncl_pki::cms::verify(&cms, Some(b"hello")).unwrap();
+}
+
+#[test]
+fn eup_lenient_base64_errors() {
+    let error = |message: &str| {
+        format!(
+            r#"{{"responseObject":"null null","code":"500","message":"{message}","uuid":"u-7"}}"#
+        )
+    };
+    for (args, message) in [
+        (
+            r#"["ab","x"]"#,
+            "java.lang.StringIndexOutOfBoundsException: String index out of range: -2",
+        ),
+        (
+            r#"[123,"x"]"#,
+            "java.lang.StringIndexOutOfBoundsException: String index out of range: -1",
+        ),
+        (
+            r#"["абвгд","x"]"#,
+            "java.lang.ArrayIndexOutOfBoundsException: 1072",
+        ),
+    ] {
+        let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+        assert_eq!(
+            text(harness.call("eup", &eup(args), None)),
+            error(message),
+            "{args}"
+        );
+    }
+    // Whitespace is skipped, other characters outside the alphabet read as zero bits.
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let cms = reply_cms(&text(harness.call(
+        "eup",
+        &eup(r#"["aGVs bG8=",null]"#),
+        None,
+    )));
+    oncl_pki::cms::verify(&cms, Some(b"hello")).unwrap();
+    let names = cms_view(&cms).signed("1.2.840.113549.1.9.77")[0].clone();
+    let names = &names;
+    assert_eq!(tlv(names).2, b"null");
+}
+
+// dogovor24
+
+const DOGOVOR24: &str = "kz.dogovor24.module";
+
+fn dogovor24(method: &str, args: &str) -> String {
+    format!(r#"{{"module":"{DOGOVOR24}","method":"{method}","uuid":"d-1","args":{args}}}"#)
+}
+
+#[test]
+fn dogovor24_dialog_before_unknown_method_raw_text() {
+    let harness = Harness::new(vec![Step::CancelStorage], vec![]);
+    assert_eq!(
+        text(harness.call("dogovor24", &dogovor24("signXml", "[]"), None)),
+        "error: method not found [signXml]"
+    );
+    assert_eq!(harness.prompter().storage_prompts().len(), 1);
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    assert_eq!(
+        text(harness.call("dogovor24", &format!(r#"{{"module":"{DOGOVOR24}"}}"#), None)),
+        "error: method not found []"
+    );
+}
+
+#[test]
+fn dogovor24_sign_cms_kalkan_tsa() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call("dogovor24", &dogovor24("signCMS", r#"["aGVsbG8="]"#), None));
+    assert!(reply.starts_with(r#"{"responseObject":"MI"#), "{reply}");
+    assert!(reply.ends_with(r#"","code":"200"}"#), "{reply}");
+    let cms = reply_cms(&reply);
+    // Attached, time-stamped with Kalkan's default profile.
+    oncl_pki::cms::verify(&cms, None).unwrap();
+    let tokens = cms_view(&cms).tokens();
+    assert_eq!(
+        token_policy_and_hash(&tokens[0]),
+        (
+            "1.2.398.3.3.2.6.2".to_owned(),
+            "2.16.840.1.101.3.4.2.1".to_owned()
+        )
+    );
+    let log = harness.http_log();
+    assert_eq!(log.len(), 1);
+    assert!(log[0].starts_with("GET http://tsp.pki.gov.kz"), "{log:?}");
+    // Errors: the arguments, the base64, a closed dialog.
+    let harness = Harness::new(vec![Step::CancelStorage, Step::CancelStorage], vec![]);
+    let mut session = harness.session("dogovor24");
+    assert_eq!(
+        text(session.call(
+            &format!(r#"{{"module":"{DOGOVOR24}","method":"signCMS"}}"#),
+            None
+        )),
+        r#"{"code":"500","message":"JSONObject[\"args\"] not found."}"#
+    );
+    assert_eq!(
+        text(session.call(&dogovor24("signCMS", r#"["aGVsbG8="]"#), None)),
+        r#"{"code":"500"}"#
+    );
+}
+
+#[test]
+fn dogovor24_batch_missing_args_code_100() {
+    let harness = Harness::new(vec![Step::CancelStorage], vec![]);
+    assert_eq!(
+        text(harness.call(
+            "dogovor24",
+            &format!(r#"{{"module":"{DOGOVOR24}","method":"batchSignCMS"}}"#),
+            None
+        )),
+        r#"{"code":"100","message":"JSONObject[\"args\"] not found."}"#
+    );
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call(
+        "dogovor24",
+        &dogovor24("batchSignCMS", r#"["aGVsbG8=","d29ybGQ="]"#),
+        None,
+    ));
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    let items = value["responseObject"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(value["code"], "200");
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    assert_eq!(
+        text(harness.call(
+            "dogovor24",
+            &dogovor24("batchSignCMS", r#"["aGVsbG8=","!!"]"#),
+            None
+        )),
+        r#"{"code":"500","message":"action canceled"}"#
+    );
+}
+
+#[test]
+fn dogovor24_sign_esedo_uuid_echo() {
+    let harness = Harness::new(pick("user-gost2015-sign", 0), vec![]);
+    let reply = text(harness.call("dogovor24", &dogovor24("signEsedo", BAS_HELLO), None));
+    assert!(
+        reply.ends_with(r#"","code":"200","uuid":"d-1"}"#),
+        "{reply}"
+    );
+    oncl_pki::cms::verify(&reply_cms(&reply), Some(b"hello")).unwrap();
+    let harness = Harness::new(vec![Step::CancelStorage], vec![]);
+    assert_eq!(
+        text(harness.call("dogovor24", &dogovor24("signEsedo", BAS_HELLO), None)),
+        r#"{"code":"500","message":"java.security.KeyStoreException: Uninitialized keystore","uuid":"d-1"}"#
+    );
+    // The OCSP answer is left out when the responder fails.
+    let harness = Harness::new(pick("user-gost2015-sign", 0), down("ocsp", 500));
+    let reply = text(harness.call("dogovor24", &dogovor24("signEsedo", BAS_HELLO), None));
+    let view = cms_view(&reply_cms(&reply));
+    assert!(!view.signed_types().contains(&"1.3.6.1.5.5.7.48.1.1"));
+}
+
+#[test]
+fn dogovor24_client_auth_rejected() {
+    let auth = entry("user-gost2015-auth");
+    let info = oncl_pki::info::cert_info(&auth.cert);
+    assert!(
+        info.ext_key_usages.contains("1.3.6.1.5.5.7.3.2"),
+        "a clientAuth key"
+    );
+    let harness = Harness::new(pick("user-gost2015-auth", 0), vec![]);
+    assert_eq!(
+        text(harness.call("dogovor24", &dogovor24("signCMS", r#"["aGVsbG8="]"#), None)),
+        r#"{"code":"500","message":"Необходимо использовать ключ для подписи!"}"#
+    );
+    let harness = Harness::new(pick("user-gost2015-auth", 0), vec![]);
+    assert_eq!(
+        text(harness.call("dogovor24", &dogovor24("signEsedo", BAS_HELLO), None)),
+        r#"{"code":"500","message":"Необходимо использовать ключ для подписи!","uuid":"d-1"}"#
+    );
+}

@@ -1,0 +1,16 @@
+[package]
+name = "oncl-port-dogovor24"
+description = "OpenNCALayer port of the Dogovor24 module: CAdES with a time-stamp, batches, and ESEDO CMS"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oncl-pdk.workspace = true
+oncl-port-pki.workspace = true
