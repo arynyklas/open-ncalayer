@@ -6,7 +6,8 @@ use crate::live::LiveAvailability;
 use crate::ocsp_cache::OcspCache;
 use oncl_pki::cert::Certificate;
 use oncl_pki::http::HttpTransport;
-use oncl_pki::info::CertInfo;
+use oncl_pki::info::{CertInfo, KeyUsageBits, KncaCertType, kcert_types};
+use oncl_pki::key::SigAlg;
 use oncl_pki::ocsp::{self, CertStatus};
 use oncl_pki::pkix::{self, CaSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,6 +35,17 @@ pub enum DisabledReason {
     Bin,
     /// Its serial number differs from `serialNumber`.
     SerialNumber,
+    /// It has none of the extended key usages of which one is required
+    /// ([`FilterMore::any_ext_key_usages`]).
+    AnyExtKeyUsage,
+    /// It has an extended key usage that is excluded ([`FilterMore::exclude_ext_key_usages`]).
+    ExcludedExtKeyUsage,
+    /// It is of none of the required Kalkan types ([`FilterMore::knca_types`]).
+    KncaType,
+    /// Its BIN, or without one its IIN, differs from [`FilterMore::tin`].
+    Tin,
+    /// It lacks a required key usage bit ([`FilterMore::key_usage`]).
+    KeyUsage,
     /// No certification path leads from it through the CAs of `chain` to an anchor.
     Chain,
 }
@@ -96,6 +108,86 @@ pub struct KeyFilter {
     pub chain: ChainPolicy,
     /// Whether to skip the OCSP check (`signingParams.allowRevoked`).
     pub allow_revoked: bool,
+    /// The conditions plugins add.
+    pub more: FilterMore,
+}
+
+/// Conditions of plugins beyond those of `signerParams`; the default adds none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FilterMore {
+    /// Extended key usages of which the certificate must have at least one; empty: no
+    /// condition.
+    pub any_ext_key_usages: BTreeSet<String>,
+    /// Extended key usages the certificate must not have.
+    pub exclude_ext_key_usages: BTreeSet<String>,
+    /// Kalkan types of which the certificate must be at least one; empty: no condition.
+    pub knca_types: BTreeSet<KncaCertType>,
+    /// The required BIN (the first OU without `BIN`), or for a certificate without one its
+    /// IIN (SERIALNUMBER without `IIN`); empty: any.
+    pub tin: String,
+    /// Key usage bits the certificate must all have.
+    pub key_usage: KeyUsageBits,
+    /// A requested clientAuth also accepts every GOST 2015-512 certificate and sha256RSA
+    /// certificates with keyEncipherment (the obsolete authentication keys some plugins
+    /// accept).
+    pub obsolete_auth: bool,
+}
+
+impl FilterMore {
+    /// The conditions `info` fails, in [`DisabledReason`] order.
+    fn failed(&self, info: &CertInfo, ekus: &BTreeSet<String>, out: &mut Vec<DisabledReason>) {
+        if !self.any_ext_key_usages.is_empty() && self.any_ext_key_usages.is_disjoint(ekus) {
+            out.push(DisabledReason::AnyExtKeyUsage);
+        }
+        if !self
+            .exclude_ext_key_usages
+            .is_disjoint(&info.ext_key_usages)
+        {
+            out.push(DisabledReason::ExcludedExtKeyUsage);
+        }
+        if !self.knca_types.is_empty() && self.knca_types.is_disjoint(&kcert_types(info)) {
+            out.push(DisabledReason::KncaType);
+        }
+        if !self.tin.is_empty() {
+            let tin = info
+                .bin
+                .as_deref()
+                .filter(|bin| !bin.is_empty())
+                .or(info.iin.as_deref());
+            if tin != Some(self.tin.as_str()) {
+                out.push(DisabledReason::Tin);
+            }
+        }
+        let (want, has) = (&self.key_usage, &info.key_usage);
+        let lacks = (want.digital_signature && !has.digital_signature)
+            || (want.non_repudiation && !has.non_repudiation)
+            || (want.key_encipherment && !has.key_encipherment)
+            || (want.key_agreement && !has.key_agreement);
+        if lacks {
+            out.push(DisabledReason::KeyUsage);
+        }
+    }
+
+    /// `ekus` with clientAuth added under the obsolete-auth rule, if it applies.
+    fn with_obsolete_auth(
+        &self,
+        info: &CertInfo,
+        requested: &BTreeSet<String>,
+        mut ekus: BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        let client_auth = oncl_pki::oid::CLIENT_AUTH.to_string();
+        if self.obsolete_auth && requested.contains(&client_auth) {
+            let obsolete = match info.signing_alg() {
+                Ok(SigAlg::Gost2015_512) => true,
+                Ok(SigAlg::RsaSha256) => info.key_usage.key_encipherment,
+                Ok(SigAlg::Gost2004 | SigAlg::RsaSha1) | Err(_) => false,
+            };
+            if obsolete {
+                ekus.insert(client_auth);
+            }
+        }
+        ekus
+    }
 }
 
 impl KeyFilter {
@@ -105,10 +197,12 @@ impl KeyFilter {
     /// ([`CertInfo::effective_ekus`]).
     fn own_availability(&self, info: &CertInfo, now: OffsetDateTime) -> Availability {
         let mut reasons = Vec::new();
-        if !self
-            .ext_key_usages
-            .is_subset(&info.effective_ekus(&self.ext_key_usages))
-        {
+        let ekus = self.more.with_obsolete_auth(
+            info,
+            &self.ext_key_usages,
+            info.effective_ekus(&self.ext_key_usages),
+        );
+        if !self.ext_key_usages.is_subset(&ekus) {
             reasons.push(DisabledReason::ExtKeyUsage);
         }
         if !matches_required(&self.iin, info.iin.as_deref()) {
@@ -122,6 +216,7 @@ impl KeyFilter {
         {
             reasons.push(DisabledReason::SerialNumber);
         }
+        self.more.failed(info, &ekus, &mut reasons);
         if !reasons.is_empty() {
             Availability::Disabled(reasons)
         } else if !self.allow_expired && !info.is_within_validity(now) {

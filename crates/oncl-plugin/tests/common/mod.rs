@@ -48,6 +48,7 @@ pub fn services_with(
         ocsp_cache: Arc::new(OcspCache::new()),
         tsa: TsaProfile::basics_default(),
         clock,
+        cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
         locale: Arc::new(|| Locale::Ru),
     }
 }

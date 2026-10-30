@@ -10,6 +10,7 @@ use oncl_pki::crl::MockCrl;
 use oncl_pki::http::{GetOptions, HttpError, HttpReply, HttpTransport, RouteTransport};
 use oncl_pki::ocsp::MockOcsp;
 use oncl_pki::pkcs12::{self, KeyEntry};
+use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::{MockTsa, TsaProfile};
 use oncl_plugin::{Engine, HostServices, Instance, Manifest, Package, SessionContext};
 use oncl_protocol::{AddInfo, Reply};
@@ -52,6 +53,28 @@ pub fn entry(name: &str) -> KeyEntry {
     pkcs12::load(&oncl_testkit::read(&key.path), &key.password)
         .expect("the synthetic store opens")
         .remove(0)
+}
+
+/// The CAs of the synthetic PKI (its roots and intermediate), as `ca_list`, `ca_issuer` and
+/// `keys_chain` of [`Harness`] see them.
+///
+/// # Panics
+///
+/// If a fixture certificate does not parse.
+pub fn synthetic_cas() -> CaSet {
+    CaSet::new(
+        [
+            "root-gost2015",
+            "inter-gost2015",
+            "root-gost2004",
+            "root-rsa",
+        ]
+        .map(|name| {
+            oncl_pki::cert::parse(&oncl_testkit::synthetic_cert(name))
+                .expect("a fixture certificate parses")
+        })
+        .to_vec(),
+    )
 }
 
 /// The fixed time of [`Harness`]: 2026-10-29 12:00 UTC.
@@ -151,6 +174,8 @@ impl Harness {
             tsa: TsaProfile::basics_default(),
             clock: self.clock,
             locale: Arc::new(move || locale),
+            // The synthetic PKI's CAs, as the ports' keys are synthetic.
+            cas: Arc::new(synthetic_cas()),
         }
     }
 

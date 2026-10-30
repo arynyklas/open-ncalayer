@@ -3,15 +3,16 @@
 //! its CBOR argument from the guest, runs, and writes its CBOR [`HostResult`] into a buffer
 //! of the guest's `oncl_alloc`.
 
-use crate::caps::{self, KeyTable};
+use crate::caps::{self, Consents, KeyTable, Secrets};
 use crate::manifest::Capabilities;
 use crate::runtime::{MAX_TRANSFER, SessionContext};
 use oncl_basics::{Locale, OcspCache, Prompter, RecentPathStore};
 use oncl_pdk::abi::{
     self, CertArgs, CertInfo, ErrorCode, HostError, HostResult, IMPORT_MODULE, Import, KeyUsage,
-    Level, LogArgs, MAX_RANDOM, RandomArgs,
+    Level, LocalTime, LocalTimeArgs, LogArgs, MAX_RANDOM, Os, Platform, RandomArgs,
 };
 use oncl_pki::http::HttpTransport;
+use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::TsaProfile;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -39,6 +40,9 @@ pub struct HostServices {
     pub clock: fn() -> OffsetDateTime,
     /// The language of OpenNCALayer's windows now.
     pub locale: Arc<dyn Fn() -> Locale + Send + Sync>,
+    /// The CAs of `ca_list`, `ca_issuer` and the chains of `keys_chain`: the NCA's
+    /// ([`CaSet::nca_production`]).
+    pub cas: Arc<CaSet>,
 }
 
 /// Who runs in an instance now.
@@ -72,6 +76,10 @@ pub(crate) struct HostState {
     pub(crate) phase: Phase,
     pub(crate) call: CallContext,
     pub(crate) keys: KeyTable,
+    /// The passwords of `dialog_password`.
+    pub(crate) secrets: Secrets,
+    /// The page files the user allowed the pages to open in this session.
+    pub(crate) consents: Consents,
     guest: Option<(Memory, TypedFunc<i32, i32>)>,
 }
 
@@ -94,6 +102,8 @@ impl HostState {
                 drop: false,
             },
             keys: KeyTable::default(),
+            secrets: Secrets::default(),
+            consents: Consents::default(),
             guest: None,
         }
     }
@@ -118,9 +128,10 @@ impl HostState {
         self.call.origin = None;
     }
 
-    /// Lets go of every key: the instance is spent.
+    /// Lets go of every key and password: the instance is spent.
     pub(crate) fn release_all(&mut self) {
         self.keys = KeyTable::default();
+        self.secrets = Secrets::default();
     }
 }
 
@@ -235,7 +246,91 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
             state.call.drop = true;
             Ok(())
         }),
+        Import::Hash => run(args, caps::hash),
+        Import::CertDetails => run(args, caps::cert_details),
+        Import::LocalTime => run(args, |a: LocalTimeArgs| {
+            Ok(LocalTime {
+                offset_seconds: local_offset_seconds(a.unix_ms),
+            })
+        }),
+        Import::Platform => run(args, |()| Ok(platform())),
+        Import::CaList => run(args, |()| Ok(caps::ca_list(state))),
+        Import::CaIssuer => run(args, |a| caps::ca_issuer(state, a)),
+        Import::KeysSelect => run(args, |a| caps::keys_select(state, a)),
+        Import::KeysChain => run(args, |a| caps::keys_chain(state, a)),
+        Import::KeysTerminals => run(args, |a| caps::keys_terminals(state, a)),
+        Import::KeysOpen => run(args, |a| caps::keys_open(state, a)),
+        Import::DialogPassword => run(args, |a| caps::dialog_password(state, a)),
     }
+}
+
+/// `platform`: the operating system and its line separator.
+fn platform() -> Platform {
+    let os = if cfg!(windows) {
+        Os::Windows
+    } else if cfg!(target_os = "macos") {
+        Os::Macos
+    } else {
+        Os::Linux
+    };
+    Platform {
+        os,
+        line_separator: if cfg!(windows) { "\r\n" } else { "\n" }.to_owned(),
+    }
+}
+
+/// The offset from UTC of the system's time zone at `unix_ms`, in seconds; `0` if the
+/// system cannot say.
+#[cfg(windows)]
+fn local_offset_seconds(unix_ms: i64) -> i32 {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{
+        FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime,
+    };
+    /// 100 ns intervals from 1601-01-01 to 1970-01-01.
+    const EPOCH_DIFFERENCE: i64 = 116_444_736_000_000_000;
+    let Some(ticks) = unix_ms
+        .checked_mul(10_000)
+        .and_then(|t| t.checked_add(EPOCH_DIFFERENCE))
+        .filter(|t| *t >= 0)
+    else {
+        return 0;
+    };
+    let utc_file = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut utc: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    let mut local: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    let mut local_file = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    // SAFETY: valid pointers to initialized structures for the duration of the calls; a
+    // null time zone is the system's current one.
+    let converted = unsafe {
+        FileTimeToSystemTime(&utc_file, &mut utc) != 0
+            && SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) != 0
+            && SystemTimeToFileTime(&local, &mut local_file) != 0
+    };
+    if !converted {
+        return 0;
+    }
+    let local_ticks =
+        (i64::from(local_file.dwHighDateTime) << 32) | i64::from(local_file.dwLowDateTime);
+    // Both come from the same millisecond: the difference is whole seconds.
+    ((local_ticks - ticks) / 10_000_000) as i32
+}
+
+/// The offset from UTC of the system's time zone at `unix_ms`, in seconds; `0` if the
+/// system cannot say.
+#[cfg(unix)]
+fn local_offset_seconds(unix_ms: i64) -> i32 {
+    let seconds = unix_ms.div_euclid(1000) as libc::time_t;
+    // SAFETY: `tm` is plain data; `localtime_r` writes it and reads `seconds` only.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let converted = unsafe { !libc::localtime_r(&seconds, &mut tm).is_null() };
+    if converted { tm.tm_gmtoff as i32 } else { 0 }
 }
 
 /// `f` on `args` decoded, its result encoded.

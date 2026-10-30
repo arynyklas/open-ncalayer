@@ -26,9 +26,9 @@ mod sign;
 pub mod testing;
 
 pub use filter::{
-    Availability, ChainPolicy, DisabledReason, KeyFilter, OCSP_DEADLINE, availabilities,
+    Availability, ChainPolicy, DisabledReason, FilterMore, KeyFilter, OCSP_DEADLINE, availabilities,
 };
-pub use keys::{KeyChooser, KeyRequest};
+pub use keys::{KeyChooser, KeyOrder, KeyRequest};
 pub use live::LiveAvailability;
 pub use ocsp_cache::{ANSWER_FOR, OcspCache, UNREACHABLE_FOR};
 use oncl_pki::http::HttpTransport;

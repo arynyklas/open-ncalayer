@@ -3969,6 +3969,7 @@ dependencies = [
  "base64",
  "der 0.8.2",
  "getrandom 0.4.3",
+ "libc",
  "minisign",
  "oncl-basics",
  "oncl-pdk",
@@ -3989,6 +3990,7 @@ dependencies = [
  "url",
  "wasmi",
  "wat",
+ "windows-sys 0.61.2",
  "zeroize",
  "zip",
 ]

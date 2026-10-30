@@ -456,17 +456,27 @@ pub struct FilePrompt {
     pub directory: Option<PathBuf>,
 }
 
-/// The password dialog of the legacy Applet's `setPassword`: a password the module keeps
-/// for later operations.
+/// A password dialog: the legacy Applet's `setPassword` (a password the module keeps for
+/// later operations) and a plugin's (a password only the core sees).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PasswordPrompt {
     /// The requesting page's origin, or `"UNIDENTIFIED"`.
     pub origin: String,
     /// Dialog language.
     pub locale: Locale,
-    /// The page's text for the dialog; `None` shows the default request for the key store
-    /// password.
+    /// The page's or the plugin's text for the dialog; `None` shows the default request for
+    /// the key store password.
     pub message: Option<String>,
+    /// Who asks (a plugin's name), shown next to the origin; `None` for a module.
+    pub source: Option<String>,
+    /// The plugin's heading line; `None`: none.
+    pub title: Option<String>,
+    /// The plugin's text of the OK button; `None`: OK in the dialog's language.
+    pub ok: Option<String>,
+    /// The plugin's text of the Cancel button; `None`: Cancel in the dialog's language.
+    pub cancel: Option<String>,
+    /// Whether OK takes an empty password.
+    pub allow_empty: bool,
 }
 
 /// How a [`MessagePrompt`] looks.

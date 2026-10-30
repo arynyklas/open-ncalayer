@@ -8,5 +8,5 @@ mod kz;
 mod point;
 
 pub use curves::{CurveId, GostAlg};
-pub use hash::{gost34311, streebog512};
+pub use hash::{gost34311, streebog256, streebog512};
 pub use kz::{GostError, SigningKey, VerifyingKey};

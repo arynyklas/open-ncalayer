@@ -289,6 +289,7 @@ struct Texts {
     iin_differs: &'static str,
     bin_differs: &'static str,
     serial_differs: &'static str,
+    tin_differs: &'static str,
     chain: &'static str,
     /// Followed by the revocation date.
     revoked: &'static str,
@@ -308,6 +309,7 @@ impl Texts {
                 iin_differs: "ЖСН сұралғанмен сәйкес келмейді",
                 bin_differs: "БСН сұралғанмен сәйкес келмейді",
                 serial_differs: "Сериялық нөмір сұралғанмен сәйкес келмейді",
+                tin_differs: "ЖСН/БСН сұралғанмен сәйкес келмейді",
                 chain: "Сертификаттың сенімді куәландырушы орталыққа дейінгі тізбегі құрылмады",
                 revoked: "кері қайтарылған",
                 serial: "сериялық нөмірі",
@@ -321,6 +323,7 @@ impl Texts {
                 iin_differs: "ИИН не совпадает с запрошенным",
                 bin_differs: "БИН не совпадает с запрошенным",
                 serial_differs: "Серийный номер не совпадает с запрошенным",
+                tin_differs: "ИИН/БИН не совпадает с запрошенным",
                 chain: "Цепочка сертификата не строится до доверенного удостоверяющего центра",
                 revoked: "отозван",
                 serial: "серийный номер",
@@ -334,6 +337,7 @@ impl Texts {
                 iin_differs: "The IIN differs from the requested one",
                 bin_differs: "The BIN differs from the requested one",
                 serial_differs: "The serial number differs from the requested one",
+                tin_differs: "The IIN/BIN differs from the requested one",
                 chain: "The certificate does not chain to a trusted certification authority",
                 revoked: "revoked",
                 serial: "serial",
@@ -343,10 +347,15 @@ impl Texts {
 
     fn reason(&self, r: DisabledReason) -> &'static str {
         match r {
-            DisabledReason::ExtKeyUsage => self.eku,
+            DisabledReason::ExtKeyUsage
+            | DisabledReason::AnyExtKeyUsage
+            | DisabledReason::ExcludedExtKeyUsage
+            | DisabledReason::KncaType
+            | DisabledReason::KeyUsage => self.eku,
             DisabledReason::Iin => self.iin_differs,
             DisabledReason::Bin => self.bin_differs,
             DisabledReason::SerialNumber => self.serial_differs,
+            DisabledReason::Tin => self.tin_differs,
             DisabledReason::Chain => self.chain,
         }
     }

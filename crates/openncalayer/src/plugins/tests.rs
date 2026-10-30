@@ -108,6 +108,7 @@ impl Sandbox {
             tsa: TsaProfile::basics_default(),
             clock: OffsetDateTime::now_utc,
             locale: Arc::new(|| Locale::Ru),
+            cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
         };
         let builtin = vec![oncl_basics::MODULE_NAME.to_owned()];
         Sandbox {

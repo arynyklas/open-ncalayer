@@ -108,6 +108,9 @@ pub struct Capabilities {
     pub files: bool,
     /// The HTTPS URL prefixes the plugin may send requests to; empty: none.
     pub http: Vec<HttpPrefix>,
+    /// Open key stores whose path the page names (`keys_open` with a page path), each file
+    /// once the user allows it; needs `keys`.
+    pub key_files: bool,
 }
 
 /// A URL prefix of `capabilities.http`: `https://`, a host, an optional port and a path
@@ -280,6 +283,7 @@ struct RawCapabilities {
     dialogs: bool,
     files: bool,
     http: Vec<String>,
+    key_files: bool,
 }
 
 impl RawManifest {
@@ -329,6 +333,11 @@ impl RawManifest {
             }
         }
         let caps = self.capabilities;
+        if caps.key_files && !caps.keys {
+            return Err(bad(
+                "capabilities.key_files needs capabilities.keys".to_owned()
+            ));
+        }
         if caps.http.len() > MAX_HTTP_PREFIXES {
             return Err(bad(format!(
                 "capabilities.http has more than {MAX_HTTP_PREFIXES} prefixes"
@@ -352,6 +361,7 @@ impl RawManifest {
                 dialogs: caps.dialogs,
                 files: caps.files,
                 http,
+                key_files: caps.key_files,
             },
         })
     }

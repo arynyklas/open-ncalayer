@@ -379,6 +379,87 @@ fn serial_hex(cert: &Certificate) -> String {
     lower_hex(content)
 }
 
+/// The serial number in decimal, as Java's `BigInteger.toString()` writes it (two's
+/// complement content octets: a negative serial gets a `-`).
+pub fn serial_dec(cert: &Certificate) -> String {
+    let der = cert
+        .tbs_certificate()
+        .serial_number()
+        .to_der()
+        .expect("a decoded serial number re-encodes");
+    let content = AnyRef::try_from(der.as_slice())
+        .expect("a DER INTEGER parses as ANY")
+        .value()
+        .to_vec();
+    let negative = content.first().is_some_and(|b| b & 0x80 != 0);
+    let mut magnitude = content;
+    if negative {
+        // Two's complement: invert and add one.
+        for b in magnitude.iter_mut() {
+            *b = !*b;
+        }
+        for b in magnitude.iter_mut().rev() {
+            let (sum, carry) = b.overflowing_add(1);
+            *b = sum;
+            if !carry {
+                break;
+            }
+        }
+    }
+    let mut digits = Vec::new();
+    while magnitude.iter().any(|&b| b != 0) {
+        let mut remainder = 0u32;
+        for b in magnitude.iter_mut() {
+            let value = (remainder << 8) | u32::from(*b);
+            // value < 2560: the quotient fits a byte.
+            *b = (value / 10) as u8;
+            remainder = value % 10;
+        }
+        digits.push(b'0' + remainder as u8);
+    }
+    if digits.is_empty() {
+        digits.push(b'0');
+    }
+    if negative {
+        digits.push(b'-');
+    }
+    digits.reverse();
+    String::from_utf8(digits).expect("ASCII digits")
+}
+
+/// Lowercase hex of the subjectKeyIdentifier, if the certificate has one.
+pub fn ski_hex(cert: &Certificate) -> Option<String> {
+    crate::pkix::subject_key_id(cert).map(|id| lower_hex(&id))
+}
+
+/// Lowercase hex of the keyIdentifier of the authorityKeyIdentifier, if the certificate has
+/// one.
+pub fn aki_hex(cert: &Certificate) -> Option<String> {
+    crate::pkix::authority_key_id(cert).map(|id| lower_hex(&id))
+}
+
+/// The URIs of `cert`'s AuthorityInfoAccess with the access method `method`
+/// ([`oid::AD_OCSP`], [`oid::AD_CA_ISSUERS`]), in order; none without the extension (or
+/// with a malformed one).
+pub fn aia_urls(cert: &Certificate, method: ObjectIdentifier) -> Vec<String> {
+    let Ok(Some((_, aia))) = cert
+        .tbs_certificate()
+        .get_extension::<x509_cert::ext::pkix::AuthorityInfoAccessSyntax>()
+    else {
+        return Vec::new();
+    };
+    aia.0
+        .iter()
+        .filter(|access| access.access_method == method)
+        .filter_map(|access| match &access.access_location {
+            x509_cert::ext::pkix::name::GeneralName::UniformResourceIdentifier(uri) => {
+                Some(uri.to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Lowercase hex, as Kalkan's `Hex.encodeStr` writes it.
 pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     let mut hex = String::with_capacity(bytes.len() * 2);

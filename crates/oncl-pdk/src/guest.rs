@@ -45,6 +45,28 @@ mod imports {
         pub fn http_request(ptr: i32, len: i32) -> i64;
         #[link_name = "reply_drop"]
         pub fn reply_drop(ptr: i32, len: i32) -> i64;
+        #[link_name = "hash"]
+        pub fn hash(ptr: i32, len: i32) -> i64;
+        #[link_name = "cert_details"]
+        pub fn cert_details(ptr: i32, len: i32) -> i64;
+        #[link_name = "local_time"]
+        pub fn local_time(ptr: i32, len: i32) -> i64;
+        #[link_name = "platform"]
+        pub fn platform(ptr: i32, len: i32) -> i64;
+        #[link_name = "ca_list"]
+        pub fn ca_list(ptr: i32, len: i32) -> i64;
+        #[link_name = "ca_issuer"]
+        pub fn ca_issuer(ptr: i32, len: i32) -> i64;
+        #[link_name = "keys_select"]
+        pub fn keys_select(ptr: i32, len: i32) -> i64;
+        #[link_name = "keys_chain"]
+        pub fn keys_chain(ptr: i32, len: i32) -> i64;
+        #[link_name = "keys_terminals"]
+        pub fn keys_terminals(ptr: i32, len: i32) -> i64;
+        #[link_name = "keys_open"]
+        pub fn keys_open(ptr: i32, len: i32) -> i64;
+        #[link_name = "dialog_password"]
+        pub fn dialog_password(ptr: i32, len: i32) -> i64;
     }
 }
 
@@ -69,6 +91,17 @@ fn host_fn(import: Import) -> HostFn {
         Import::FileSave => imports::file_save,
         Import::HttpRequest => imports::http_request,
         Import::ReplyDrop => imports::reply_drop,
+        Import::Hash => imports::hash,
+        Import::CertDetails => imports::cert_details,
+        Import::LocalTime => imports::local_time,
+        Import::Platform => imports::platform,
+        Import::CaList => imports::ca_list,
+        Import::CaIssuer => imports::ca_issuer,
+        Import::KeysSelect => imports::keys_select,
+        Import::KeysChain => imports::keys_chain,
+        Import::KeysTerminals => imports::keys_terminals,
+        Import::KeysOpen => imports::keys_open,
+        Import::DialogPassword => imports::dialog_password,
     }
 }
 
@@ -235,7 +268,8 @@ macro_rules! plugin {
 /// The basic host functions every plugin has.
 pub mod host {
     use super::*;
-    pub use crate::abi::{CertInfo, Level};
+    pub use crate::abi::{CertDetails, CertInfo, HashAlg, Level, Os, Platform};
+    use crate::abi::{HashArgs, LocalTime, LocalTimeArgs};
 
     /// Writes `message` to OpenNCALayer's log, with the plugin's id.
     pub fn log(level: Level, message: &str) -> HostResult<()> {
@@ -274,13 +308,65 @@ pub mod host {
     pub fn reply_drop() -> HostResult<()> {
         call(imports::reply_drop, &())
     }
+
+    /// The `alg` digest of `data`.
+    pub fn hash(alg: HashAlg, data: &[u8]) -> HostResult<Vec<u8>> {
+        let args = HashArgs {
+            alg,
+            data: Bytes::from(data.to_vec()),
+        };
+        call::<_, Bytes>(imports::hash, &args).map(Bytes::into_vec)
+    }
+
+    /// The details of the certificate `der` as Kalkan renders them.
+    pub fn cert_details(der: &[u8]) -> HostResult<CertDetails> {
+        call(
+            imports::cert_details,
+            &CertArgs {
+                der: Bytes::from(der.to_vec()),
+            },
+        )
+    }
+
+    /// The offset from UTC of the system's time zone at `unix_ms`, in seconds.
+    pub fn local_offset(unix_ms: i64) -> HostResult<i32> {
+        call::<_, LocalTime>(imports::local_time, &LocalTimeArgs { unix_ms })
+            .map(|t| t.offset_seconds)
+    }
+
+    /// The system the core runs on.
+    pub fn platform() -> HostResult<Platform> {
+        call(imports::platform, &())
+    }
+
+    /// The NCA CA certificates the core trusts, DER.
+    pub fn ca_list() -> HostResult<Vec<Vec<u8>>> {
+        call::<_, Vec<Bytes>>(imports::ca_list, &())
+            .map(|certs| certs.into_iter().map(Bytes::into_vec).collect())
+    }
+
+    /// The CA certificate among [`ca_list`] that issued the certificate `der`, if any.
+    pub fn ca_issuer(der: &[u8]) -> HostResult<Option<Vec<u8>>> {
+        call::<_, Option<Bytes>>(
+            imports::ca_issuer,
+            &CertArgs {
+                der: Bytes::from(der.to_vec()),
+            },
+        )
+        .map(|issuer| issuer.map(Bytes::into_vec))
+    }
 }
 
 /// The user's keys (capability `keys`).
 pub mod keys {
     use super::*;
-    pub use crate::abi::{Action, ChooseArgs, Filter};
-    use crate::abi::{Chosen, Handle, SignCmsArgs, SignRawArgs, SignXmlArgs};
+    pub use crate::abi::{
+        Action, ChooseArgs, Filter, FilterMore, KeyOrder, KeySource, KeyUsageBit, OpenArgs,
+        OpenOutcome, Password, SelectArgs,
+    };
+    use crate::abi::{
+        Chosen, Handle, OpenedKey, SignCmsArgs, SignRawArgs, SignXmlArgs, TerminalsArgs,
+    };
 
     /// A key the user chose: it stays usable until dropped.
     #[derive(Debug)]
@@ -290,15 +376,55 @@ pub mod keys {
         certificate: Vec<u8>,
     }
 
+    impl From<Chosen> for Key {
+        fn from(c: Chosen) -> Key {
+            Key {
+                handle: c.handle,
+                alias: c.alias,
+                certificate: c.certificate.into_vec(),
+            }
+        }
+    }
+
+    impl From<OpenedKey> for Key {
+        fn from(k: OpenedKey) -> Key {
+            Key {
+                handle: k.handle,
+                alias: k.alias,
+                certificate: k.certificate.into_vec(),
+            }
+        }
+    }
+
     /// Asks the user for a key: the storage dialog, then the key dialog. `None` if the user
     /// cancels.
     pub fn choose(args: &ChooseArgs) -> HostResult<Option<Key>> {
         let chosen: Option<Chosen> = call(imports::keys_choose, args)?;
-        Ok(chosen.map(|c| Key {
-            handle: c.handle,
-            alias: c.alias,
-            certificate: c.certificate.into_vec(),
-        }))
+        Ok(chosen.map(Key::from))
+    }
+
+    /// [`choose`] with more conditions and the order of the keys.
+    pub fn select(args: &SelectArgs) -> HostResult<Option<Key>> {
+        let chosen: Option<Chosen> = call(imports::keys_select, args)?;
+        Ok(chosen.map(Key::from))
+    }
+
+    /// Opens every key of the store `args` names: the keys, in store order, or why not.
+    pub fn open(args: &OpenArgs) -> HostResult<Result<Vec<Key>, OpenOutcome>> {
+        Ok(match call::<_, OpenOutcome>(imports::keys_open, args)? {
+            OpenOutcome::Opened(keys) => Ok(keys.into_iter().map(Key::from).collect()),
+            other => Err(other),
+        })
+    }
+
+    /// The readers of the token storage `storage`.
+    pub fn terminals(storage: &str) -> HostResult<Vec<String>> {
+        call(
+            imports::keys_terminals,
+            &TerminalsArgs {
+                storage: storage.to_owned(),
+            },
+        )
     }
 
     impl Key {
@@ -359,6 +485,18 @@ pub mod keys {
             };
             call::<_, Bytes>(imports::keys_sign_xml, &args).map(Bytes::into_vec)
         }
+
+        /// The key's certificate chain, DER, from its certificate up: the key store's
+        /// certificates, then the CAs the core trusts.
+        pub fn chain(&self) -> HostResult<Vec<Vec<u8>>> {
+            call::<_, Vec<Bytes>>(
+                imports::keys_chain,
+                &Handle {
+                    handle: self.handle,
+                },
+            )
+            .map(|certs| certs.into_iter().map(Bytes::into_vec).collect())
+        }
     }
 
     impl Drop for Key {
@@ -376,8 +514,14 @@ pub mod keys {
 /// Dialogs (capability `dialogs`).
 pub mod dialogs {
     use super::*;
-    pub use crate::abi::MessageKind;
     use crate::abi::{ConfirmArgs, MessageArgs};
+    pub use crate::abi::{MessageKind, PasswordArgs, SecretRef};
+
+    /// Asks for a password the core keeps: its id, for [`crate::keys::Password::Secret`]
+    /// of this instance; `None` if the user cancels.
+    pub fn password(args: &PasswordArgs) -> HostResult<Option<SecretRef>> {
+        call(imports::dialog_password, args)
+    }
 
     /// Shows `text` with an OK button until the user closes it.
     pub fn message(kind: MessageKind, text: &str) -> HostResult<()> {

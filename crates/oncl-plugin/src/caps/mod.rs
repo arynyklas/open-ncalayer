@@ -1,8 +1,10 @@
-//! The host functions of the capabilities a manifest declares, by area:
+//! The host functions, by area:
 //!
-//! - [`keys`]: the user's key, chosen in the storage and key dialogs, behind a handle of
-//!   the instance; signatures made here, the private key never reaching the guest;
-//! - [`dialogs`]: a message and a yes/no question;
+//! - [`keys`]: the user's key, chosen in the storage and key dialogs or opened from a store
+//!   the plugin names, behind a handle of the instance; signatures made here, the private
+//!   key never reaching the guest;
+//! - [`crypto`]: digests, certificate details and the CAs the core trusts (every plugin);
+//! - [`dialogs`]: a message, a yes/no question and a password that stays in the core;
 //! - [`files`]: a file the user opens or saves in the system dialogs;
 //! - [`net`]: HTTPS requests to URLs under the manifest's prefixes, redirects not followed.
 //!
@@ -10,15 +12,19 @@
 //! ([`lock_dialog_flow`]) and holds it until `oncl_process` returns, trap or not
 //! ([`DialogTurn`]), so a plugin's dialogs and those of other modules do not interleave.
 
+mod crypto;
 mod dialogs;
 mod files;
 mod keys;
 mod net;
 
-pub(crate) use dialogs::{dialog_confirm, dialog_message};
+pub(crate) use crypto::{ca_issuer, ca_list, cert_details, hash};
+pub use dialogs::MAX_SECRETS;
+pub(crate) use dialogs::{Secrets, dialog_confirm, dialog_message, dialog_password};
 pub(crate) use files::{file_open, file_save};
 pub(crate) use keys::{
-    KeyTable, keys_choose, keys_release, keys_sign_cms, keys_sign_raw, keys_sign_xml,
+    KeyTable, keys_chain, keys_choose, keys_open, keys_release, keys_select, keys_sign_cms,
+    keys_sign_raw, keys_sign_xml, keys_terminals,
 };
 pub(crate) use net::http_request;
 pub use net::{HTTP_TIMEOUT, MAX_HTTP_BODY};
@@ -27,10 +33,16 @@ use crate::host::HostState;
 use oncl_basics::lock_dialog_flow;
 use oncl_pdk::abi::{ErrorCode, HostError, HostResult};
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::MutexGuard;
 
 /// The most keys an instance holds at once.
 pub const MAX_KEY_HANDLES: usize = 16;
+
+/// The page files the user allowed pages to open in an instance's session: (origin,
+/// canonical path).
+pub(crate) type Consents = HashSet<(String, PathBuf)>;
 
 /// Longest text of a message or a question, in bytes.
 const MAX_DIALOG_TEXT: usize = 16 << 10;
@@ -81,6 +93,10 @@ impl Drop for DialogTurn {
 
 fn invalid(message: impl Into<String>) -> HostError {
     HostError::new(ErrorCode::Invalid, message)
+}
+
+fn denied(message: impl Into<String>) -> HostError {
+    HostError::new(ErrorCode::Denied, message)
 }
 
 fn failed(message: impl std::fmt::Display) -> HostError {

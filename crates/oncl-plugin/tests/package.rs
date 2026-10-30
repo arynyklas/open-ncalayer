@@ -190,6 +190,21 @@ http = [\"https://tsp.pki.gov.kz/\", \"https://A.kz:8443/api/\"]
 }
 
 #[test]
+fn key_files_needs_keys() {
+    let with = |caps: &str| format!("{MANIFEST}\n[capabilities]\n{caps}\n");
+    let m = Manifest::from_toml(&with("keys = true\nkey_files = true")).unwrap();
+    assert!(m.capabilities.key_files);
+    assert!(
+        !Manifest::from_toml(&with("keys = true"))
+            .unwrap()
+            .capabilities
+            .key_files
+    );
+    let why = manifest_error(&with("key_files = true"));
+    assert!(why.contains("key_files"), "{why}");
+}
+
+#[test]
 fn rejects_package_over_limit() {
     let too_big = vec![0u8; usize::try_from(MAX_PACKAGE).unwrap() + 1];
     assert!(matches!(

@@ -394,6 +394,7 @@ fn inter_filter() -> KeyFilter {
         allow_expired: false,
         chain: ChainPolicy::Custom(Arc::new(CaSet::new(cas))),
         allow_revoked: false,
+        more: Default::default(),
     }
 }
 

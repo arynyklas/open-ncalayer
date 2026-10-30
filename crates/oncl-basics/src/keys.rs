@@ -12,6 +12,7 @@ use oncl_pki::cert::Certificate;
 use oncl_pki::http::HttpTransport;
 use oncl_pki::info::{CertInfo, cert_info};
 use oncl_pki::pkcs12::KeyEntry;
+use std::path::PathBuf;
 use std::sync::Arc;
 use time::OffsetDateTime;
 
@@ -45,6 +46,23 @@ pub struct KeyRequest {
     pub filter: KeyFilter,
     /// A line both dialogs show besides the request.
     pub detail: Option<String>,
+    /// The key store file the storage dialog starts with instead of the last opened one;
+    /// the caller has checked it ([`crate::page_path`]).
+    pub initial_path: Option<PathBuf>,
+    /// The order of the keys in the key dialog.
+    pub order: KeyOrder,
+}
+
+/// The order of the keys in the key dialog.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum KeyOrder {
+    /// As stored (the basics module).
+    #[default]
+    Store,
+    /// The latest notBefore first (the original's key dialog).
+    NewestFirst,
+    /// The earliest notBefore first (some plugins' older key dialog).
+    OldestFirst,
 }
 
 impl KeyChooser {
@@ -56,6 +74,12 @@ impl KeyChooser {
     /// flow: this does not take it.
     pub fn choose(&self, request: &KeyRequest) -> Option<KeyEntry> {
         let (mut entries, busy) = self.open_storage(request)?;
+        match request.order {
+            KeyOrder::Store => {}
+            // Stable: keys of the same notBefore keep their store order.
+            KeyOrder::NewestFirst => entries.sort_by_key(|e| std::cmp::Reverse(not_before(e))),
+            KeyOrder::OldestFirst => entries.sort_by_key(not_before),
+        }
         let index = self.choose_key(request, &entries, busy)?;
         Some(entries.swap_remove(index))
     }
@@ -69,7 +93,7 @@ impl KeyChooser {
             locale: request.locale,
             action: request.action,
             storages: request.storages.clone(),
-            recent_path: self.recent.load(),
+            recent_path: request.initial_path.clone().or_else(|| self.recent.load()),
             error: None,
             detail: request.detail.clone(),
         };
@@ -124,4 +148,14 @@ impl KeyChooser {
         drop(busy);
         prompt.ask(self.prompter.as_ref())
     }
+}
+
+/// The start of the validity of `entry`'s certificate.
+fn not_before(entry: &KeyEntry) -> std::time::Duration {
+    entry
+        .cert
+        .tbs_certificate()
+        .validity()
+        .not_before
+        .to_unix_duration()
 }
