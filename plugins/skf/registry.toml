@@ -1,0 +1,29 @@
+id = "io.github.arynyklas.openncalayer.port.skf"
+modules = ["org.skf.osgi.SKFModule"]
+
+[original]
+symname = "org.skf.osgi.SKFModule"
+version = "1.6.2"
+vendor = "SK-Pharmacy"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Проверка TLS не отключается (у оригинала — для всей JVM), системное свойство knca.ocsp.allowedperiod не ставится, временные файлы не создаются."
+
+[[differences]]
+ru = "Файл ключа, названный страницей, открывается только после согласия пользователя в окне OpenNCALayer (раз на сеанс и файл); отказ — «Открытие файла ключа не разрешено.»."
+
+[[differences]]
+ru = "Ключ getKeys и список CA портала хранятся в сеансе страницы (у оригинала — общие для процесса и всех сайтов); список CA загружается один раз за сеанс."
+
+[[differences]]
+ru = "Документ signXades загружается только по HTTPS с сайта https://*.efis.kz, с которого пришёл запрос, или из https://portal.efis.kz/pub/; другие адреса — «Загрузка с адреса не разрешена: <адрес>»."
+
+[[differences]]
+ru = "Проверка пути сертификата к списку CA портала сводится к издателю OCSP из этого списка и сроку действия сертификата."
+
+[[differences]]
+ru = "Токены — после поддержки токенов в OpenNCALayer: до неё выбор токена показывает «Защищенный носитель не обнаружен»."

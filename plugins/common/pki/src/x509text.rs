@@ -7,6 +7,22 @@ use der::{Decode, Encode, Tag, Tagged};
 use x509_cert::attr::AttributeTypeAndValue;
 use x509_cert::name::Name;
 
+/// The text values of the attributes of type `oid` (dotted) of `name`, in DER order (as
+/// BouncyCastle's `X500Name.getRDNs(oid)` gives them); values of no string type are left
+/// out.
+///
+/// # Errors
+///
+/// `name` is not the DER of a Name.
+pub fn attribute_values(name: &[u8], oid: &str) -> Result<Vec<String>, String> {
+    Ok(rdns(name)?
+        .iter()
+        .flatten()
+        .filter(|ava| ava.oid.to_string() == oid)
+        .filter_map(string_value)
+        .collect())
+}
+
 /// The text of a value of a string type (UTF8, Printable, IA5, Teletex as Latin-1, BMP,
 /// Universal, Numeric, Visible), else `None`.
 fn string_value(ava: &AttributeTypeAndValue) -> Option<String> {

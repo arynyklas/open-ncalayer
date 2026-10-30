@@ -1,0 +1,20 @@
+[package]
+name = "oncl-port-skf"
+description = "OpenNCALayer port of SK-Pharmacy's module for portal.efis.kz: key files and tokens chosen, the key checked against the portal's CA list and OCSP, XAdES-BASELINE-LT signatures of the portal's documents"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64.workspace = true
+der.workspace = true
+oncl-pdk.workspace = true
+oncl-port-kit.workspace = true
+oncl-port-pki.workspace = true
+x509-cert.workspace = true

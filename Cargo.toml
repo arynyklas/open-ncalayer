@@ -53,6 +53,9 @@ httparse = "1.10.1"
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 libc = "0.2.191"
 log = "0.4.34"
+# Only in the plugin port tests (`oncl-port-tests`): a PDF reader independent of the
+# Qoltanba port's writer, to count pages and read text back, and the source PDFs of the tests.
+lopdf = { version = "0.45.0", default-features = false }
 # Signing of update indexes: `cargo xtask sign` and the `oncl-update` tests; the reference
 # implementation's format.
 minisign = "0.10.0"

@@ -1,0 +1,26 @@
+id = "io.github.arynyklas.openncalayer.port.knp"
+modules = ["kz.inessoft.kgd.knp.ncalayer.KNPModuleService"]
+
+[original]
+symname = "kz.inessoft.kgd.knp.sono_knp_ncalayer_module"
+version = "1.2.0"
+vendor = "ТОО «ISERV»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "SmartAuth вызывается только у сайта https://*.kgd.gov.kz, с которого пришёл запрос, и только по HTTPS с проверкой сертификата (оригинал доверял любому сертификату). Страница с портом или по http получает общую ошибку."
+
+[[differences]]
+ru = "Токены (KAZTOKEN, KZIDCARD, ETOKEN_72K, JACARTA) — после поддержки токенов в OpenNCALayer; до неё список устройств пуст."
+
+[[differences]]
+ru = "Подпись кладётся в первый узел документа, только если он элемент: документ, который начинается с комментария или инструкции, даёт общую ошибку (оригинал вставлял подпись в этот узел)."
+
+[[differences]]
+ru = "Подписи RSA-SHA1 не создаются: сертификат sha1RSA даёт общую ошибку."
+
+[[differences]]
+ru = "Файл knpterminal оригинала не читается: режим терминала выключен."

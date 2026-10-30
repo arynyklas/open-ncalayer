@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.buhta"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["com.buhta.cert.ncamodule"]
+
+[name]
+ru = "Buhta NcaModule (порт OpenNCALayer)"
+kk = "Buhta NcaModule (OpenNCALayer порты)"
+en = "Buhta NcaModule (OpenNCALayer port)"
+
+[description]
+ru = "Подписи для сервисов Buhta.kz: выбор ключа по ИИН/БИН, CAdES-T и XML"
+kk = "Buhta.kz қызметтеріне арналған қолтаңбалар: ЖСН/БСН бойынша кілт таңдау, CAdES-T және XML"
+en = "Signatures for Buhta.kz services: a key chosen by IIN/BIN, CAdES-T and XML"
+
+[replaces]
+symname = "com.buhta.cert.ncamodule"
+version = "0.1.3"
+
+[capabilities]
+keys = true

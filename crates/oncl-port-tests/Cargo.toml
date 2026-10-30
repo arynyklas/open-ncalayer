@@ -24,9 +24,19 @@ time.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
-# DER of the synthetic certificates and of the CMS (base64) the ports' replies carry.
+# DER of the synthetic certificates and of the CMS (base64) the ports' replies carry; SKF's
+# OCSP issuer: an intermediate CA issued again with one of the serials SKF accepts.
 base64.workspace = true
 der.workspace = true
+# The Documentolog server of the tests: AES-CBC of its fields, RSA-PKCS#1 v1.5 of its
+# challenge with a test key.
+aes.workspace = true
+cbc.workspace = true
+rsa.workspace = true
+# Qoltanba's report: the PDFs of the tests, read back independently of the port.
+lopdf.workspace = true
+# SKF's CA list: a JKS of the tests, its integrity hash.
+sha1.workspace = true
 serde_json.workspace = true
 # The archives K2Sign uploads, read back.
 zip.workspace = true

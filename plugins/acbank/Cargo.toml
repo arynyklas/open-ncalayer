@@ -1,0 +1,16 @@
+[package]
+name = "oncl-port-acbank"
+description = "OpenNCALayer port of the Alatau City Bank Business API module: JSON documents signed as JWS (compact and JSON) with GOST 2015-512 keys"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64.workspace = true
+oncl-pdk.workspace = true

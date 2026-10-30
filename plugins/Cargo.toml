@@ -30,6 +30,8 @@ spki = { version = "0.8.1", features = ["alloc"] }
 x509-cert = { version = "0.3.0", default-features = false }
 # MD5 of files some sites ask for next to SHA-256 (not used for signatures).
 md-5 = "0.11.0"
+# The integrity hash of the Java KeyStores some ports download (SKF's CA list).
+sha1 = "0.11.0"
 # Origins of the page and of URLs the ports fetch.
 url = "2.5.8"
 # Zip archives some ports upload: the container written by `oncl-port-kit`, the entries
@@ -40,6 +42,18 @@ crc32fast = { version = "1.5.3", default-features = false }
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 # Reads the archives back in tests (native only).
 zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# Base64 of signatures, certificates and documents in the ports' replies (standard and
+# URL-safe alphabets), as in the core.
+base64 = "0.23.1"
+# Protocol Buffers of Buhta's RPC payloads (binary form); the messages are written by hand
+# with its derive macros, without `protoc`.
+prost = "0.14.4"
+# Documentolog's server challenge: AES-128-CBC of the fields its server sends (as in the
+# core), and RSA-PKCS#1 v1.5 encryption with the vendor's public key by plain modular
+# exponentiation (no private-key operation, so no `rsa` crate).
+aes = "0.9.0"
+cbc = { version = "0.2.1", features = ["alloc", "block-padding"] }
+num-bigint = { version = "0.4.6", default-features = false }
 
 [profile.release]
 codegen-units = 1
