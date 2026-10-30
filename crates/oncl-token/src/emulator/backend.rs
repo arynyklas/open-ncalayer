@@ -363,12 +363,24 @@ impl Connection for EmuConnection {
 impl Drop for EmuConnection {
     fn drop(&mut self) {
         let mut state = self.shared.lock();
-        if let Some(r) = state.reader(&self.reader) {
-            if r.holder == Some(self.id) {
-                r.holder = None;
-            }
-            if self.reset_on_drop && r.generation == self.generation {
-                r.reset();
+        if let Some(r) = state.reader(&self.reader)
+            && r.holder == Some(self.id)
+        {
+            r.holder = None;
+        }
+        // As pcsc-lite does, a disconnect with a reset waits for another connection's
+        // transaction to end.
+        if self.reset_on_drop {
+            while let Some(r) = state.reader(&self.reader)
+                && r.generation == self.generation
+            {
+                match r.holder {
+                    Some(holder) if holder != self.id => state = self.shared.wait(state),
+                    _ => {
+                        r.reset();
+                        break;
+                    }
+                }
             }
         }
         drop(state);

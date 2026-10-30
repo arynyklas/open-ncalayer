@@ -47,6 +47,12 @@ impl<'c> Card<'c> {
         self.conn.atr()
     }
 
+    /// The card is reset when the connection is dropped: for state on the card that must
+    /// not outlive the operation (a verified PIN, an open session).
+    pub fn reset_on_disconnect(&mut self) {
+        self.conn.reset_on_disconnect();
+    }
+
     /// Sends `cmd` and returns the whole response: under T=0 a case 4 command goes as case
     /// 3, `61xx` is followed by GET RESPONSE until the data is complete, `6Cxx` resends the
     /// command once with Le `xx`.

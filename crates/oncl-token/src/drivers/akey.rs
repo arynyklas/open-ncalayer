@@ -146,6 +146,9 @@ impl AKey {
             "select the applet",
         )
         .map_err(wrong_card)?;
+        // Whatever ends the operation from here on (another token, a failure before the
+        // login), the reset on disconnect closes the session.
+        card.reset_on_disconnect();
         card.expect(
             &Command::new(0x80, 0x03, 0x00, 0x00).with_le(5),
             "open a session",

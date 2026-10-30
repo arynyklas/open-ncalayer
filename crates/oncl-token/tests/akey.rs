@@ -6,8 +6,9 @@ mod common;
 
 use common::*;
 use oncl_pki::key::{KeyAlg, SigAlg};
+use oncl_token::backend::{Backend, Protocol};
 use oncl_token::drivers::{check_pin, open_driver};
-use oncl_token::emulator::EmulatorBackend;
+use oncl_token::emulator::{EmulatorBackend, SoftCard, card};
 use oncl_token::{TokenError, TokenKind, Tokens};
 use std::sync::Arc;
 
@@ -252,4 +253,75 @@ fn akey_raw_der_certificate() {
         .find(|e| e.command.starts_with(&[0x80, 0x0F, 0x01, 0x01]))
         .unwrap();
     assert_eq!(first.response[2..4], [0x30, 0x82]);
+}
+
+/// A session the last operation left open answers TOKEN INFO on a new connection without
+/// SELECT or OPEN SESSION; after a reset the applet is not even selected.
+fn session_left_open(emu: &EmulatorBackend) -> bool {
+    let mut conn = emu.connect(READER).unwrap();
+    let resp = conn.transmit(&[0x80, 0x0A, 0x00, 0x00, 0xB0]).unwrap();
+    resp.ends_with(&[0x90, 0x00])
+}
+
+#[test]
+fn akey_session_closed_after_another_token() {
+    let emu = akey();
+    let entry = Tokens::new(emu.clone(), true)
+        .open(READER, TokenKind::AKey, PIN)
+        .unwrap()
+        .swap_remove(0);
+    assert!(!session_left_open(&emu));
+    let mut other = spec(TokenKind::AKey, PIN, &KEYS);
+    other.serial = [9; 8];
+    emu.insert(READER, card(other));
+    match entry.key.sign(SigAlg::Gost2004, b"m") {
+        Err(oncl_pki::key::KeyError::Token(msg)) => assert!(msg.contains("another token"), "{msg}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        !session_left_open(&emu),
+        "no session left open after the mismatch"
+    );
+}
+
+/// An AKey whose token information is empty: opening fails after the session started.
+struct NoTokenInfo(Box<dyn SoftCard>);
+
+impl SoftCard for NoTokenInfo {
+    fn atr(&self) -> Vec<u8> {
+        self.0.atr()
+    }
+
+    fn protocol(&self) -> Protocol {
+        self.0.protocol()
+    }
+
+    fn process(&mut self, apdu: &[u8]) -> Vec<u8> {
+        let resp = self.0.process(apdu);
+        if apdu.starts_with(&[0x80, 0x0A]) && resp.ends_with(&[0x90, 0x00]) {
+            return vec![0x90, 0x00];
+        }
+        resp
+    }
+
+    fn reset(&mut self) {
+        self.0.reset();
+    }
+}
+
+#[test]
+fn akey_session_closed_after_failed_open() {
+    let emu = backend_with(Box::new(NoTokenInfo(card(spec(
+        TokenKind::AKey,
+        PIN,
+        &KEYS,
+    )))));
+    assert!(matches!(
+        Tokens::new(emu.clone(), true).open(READER, TokenKind::AKey, PIN),
+        Err(TokenError::Malformed(_))
+    ));
+    assert!(
+        !session_left_open(&emu),
+        "no session left open after the failure"
+    );
 }

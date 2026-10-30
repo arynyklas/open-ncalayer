@@ -337,3 +337,36 @@ fn vpcd_framing() {
     drop(vpcd);
     server.join().unwrap().unwrap();
 }
+
+#[test]
+fn reset_on_disconnect_waits_for_another_transaction() {
+    let emu = Arc::new(EmulatorBackend::new());
+    emu.add_reader("Reader A");
+    let (card, resets) = echo();
+    emu.insert("Reader A", card);
+    let mut resetting = emu.connect("Reader A").unwrap();
+    resetting.reset_on_disconnect();
+    let mut other = emu.connect("Reader A").unwrap();
+    other.begin_transaction().unwrap();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let thread = {
+        let dropped = dropped.clone();
+        std::thread::spawn(move || {
+            drop(resetting);
+            dropped.store(true, Ordering::SeqCst);
+        })
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "the reset waits for the transaction"
+    );
+    assert!(
+        other.transmit(&hex!("80400000")).is_ok(),
+        "not reset mid-transaction"
+    );
+    other.end_transaction().unwrap();
+    thread.join().unwrap();
+    assert_eq!(resets.load(Ordering::SeqCst), 1);
+    assert_eq!(other.begin_transaction(), Err(BackendError::Reset));
+}

@@ -2,9 +2,9 @@
 //! entries, and keys that sign on the card.
 //!
 //! Every operation runs in one transaction of its own: connect, begin, the commands, end,
-//! disconnect. An operation that sent a PIN resets the card on disconnect: the PIN
-//! verification would otherwise stay open for every process until the card is reset or
-//! pulled out. The others leave the card as it is, so they never break another
+//! disconnect. An operation that sent a PIN (or opened an AKey session) resets the card on
+//! disconnect: the PIN verification (the session) would otherwise stay open for every
+//! process until the card is reset or pulled out. The others leave the card as it is, so they never break another
 //! application's (or another operation's) connection; an operation that finds its fresh
 //! connection reset by another one reconnects once.
 //!
