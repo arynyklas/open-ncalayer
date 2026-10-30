@@ -25,3 +25,6 @@ toml.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+# The ports' replies carry base64 CMS; the tests read their DER.
+base64.workspace = true
+der.workspace = true

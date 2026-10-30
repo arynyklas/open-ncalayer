@@ -1,0 +1,19 @@
+[package]
+name = "oncl-port-fhs"
+description = "The FHS Cabinet signer of First Heartland Securities as an OpenNCALayer plugin"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+der.workspace = true
+oncl-pdk.workspace = true
+oncl-port-kit.workspace = true
+oncl-port-pki.workspace = true
+x509-cert.workspace = true

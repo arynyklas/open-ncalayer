@@ -1,0 +1,18 @@
+[package]
+name = "oncl-port-idocs"
+description = "The kz.idocs module of idocs.kz as an OpenNCALayer plugin: ESEDO CMS with an OCSP answer"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+der.workspace = true
+oncl-pdk.workspace = true
+oncl-port-pki.workspace = true
+x509-cert.workspace = true

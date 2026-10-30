@@ -3999,6 +3999,8 @@ dependencies = [
 name = "oncl-port-tests"
 version = "0.1.0-alpha.3"
 dependencies = [
+ "base64",
+ "der 0.8.2",
  "oncl-basics",
  "oncl-pdk",
  "oncl-pki",

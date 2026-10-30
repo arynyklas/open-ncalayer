@@ -1,0 +1,17 @@
+id = "io.github.arynyklas.openncalayer.port.doodocs"
+modules = ["kz.doodocs.moduleservice.SampleBundle"]
+
+[original]
+symname = "kz.doodocs.moduleservice"
+version = "1.0"
+vendor = "Doodocs.kz"
+
+[port]
+status = "full"
+conformance = "computed"
+
+[[differences]]
+ru = "Вход (auth) живёт в соединении страницы, а не во всём процессе NCALayer: другая вкладка или новое соединение входят заново."
+
+[[differences]]
+ru = "Тексты исключений подписи и метки времени в details собираются OpenNCALayer (префикс kz.gov.pki.provider.exception.ProviderUtilException сохранён)."
