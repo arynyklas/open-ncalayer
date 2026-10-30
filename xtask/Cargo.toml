@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 oncl-gost.workspace = true
 oncl-ipc.workspace = true
+# `plugin pack`: the core version each host function a plugin imports appeared in.
+oncl-pdk.workspace = true
 oncl-pki = { workspace = true, features = ["testing"] }
 # `plugin pack` and `index add-plugin`: the package format and the ABI check the daemon uses.
 oncl-plugin.workspace = true

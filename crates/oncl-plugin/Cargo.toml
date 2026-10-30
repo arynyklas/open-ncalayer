@@ -39,6 +39,16 @@ tracing.workspace = true
 url.workspace = true
 wasmi.workspace = true
 zip.workspace = true
+# The passwords of `dialog_password`, wiped when dropped.
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# `local_time`: the system's time zone at an instant.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Time"] }
+
+[target.'cfg(unix)'.dependencies]
+# `local_time`: the system's time zone at an instant (`localtime_r`).
+libc.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
@@ -52,5 +62,3 @@ tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 tracing-subscriber.workspace = true
 wat.workspace = true
-# `Prompter::password` of a test prompter.
-zeroize.workspace = true

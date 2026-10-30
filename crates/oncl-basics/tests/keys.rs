@@ -55,8 +55,11 @@ fn request() -> KeyRequest {
             allow_expired: true,
             chain: ChainPolicy::Empty,
             allow_revoked: true,
+            more: Default::default(),
         },
         detail: Some("Example: contract.pdf".to_owned()),
+        initial_path: None,
+        order: Default::default(),
     }
 }
 

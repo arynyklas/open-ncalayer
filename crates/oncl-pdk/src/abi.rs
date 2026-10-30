@@ -218,11 +218,37 @@ pub enum Import {
     FileSave,
     /// `http_request`: [`HttpArgs`] → [`HttpResponse`].
     HttpRequest,
+    /// `reply_drop`: `()` → `()`. The request being answered ends with the connection
+    /// dropped, without a reply; the plugin still returns its [`Output`], which is not sent.
+    ReplyDrop,
+    /// `hash`: [`HashArgs`] → [`Bytes`], the digest.
+    Hash,
+    /// `cert_details`: [`CertArgs`] → [`CertDetails`].
+    CertDetails,
+    /// `local_time`: [`LocalTimeArgs`] → [`LocalTime`], the system's time zone then.
+    LocalTime,
+    /// `platform`: `()` → [`Platform`].
+    Platform,
+    /// `ca_list`: `()` → `Vec<`[`Bytes`]`>`, the NCA CA certificates the core trusts.
+    CaList,
+    /// `ca_issuer`: [`CertArgs`] → `Option<`[`Bytes`]`>`, the CA certificate that issued it.
+    CaIssuer,
+    /// `keys_select`: [`SelectArgs`] → `Option<`[`Chosen`]`>`; `None` if the user cancels.
+    KeysSelect,
+    /// `keys_chain`: [`Handle`] → `Vec<`[`Bytes`]`>`, the key's certificate chain from it up.
+    KeysChain,
+    /// `keys_terminals`: [`TerminalsArgs`] → `Vec<String>`, the readers of a token storage.
+    KeysTerminals,
+    /// `keys_open`: [`OpenArgs`] → [`OpenOutcome`].
+    KeysOpen,
+    /// `dialog_password`: [`PasswordArgs`] → `Option<`[`SecretRef`]`>`; `None` if the user
+    /// cancels.
+    DialogPassword,
 }
 
 impl Import {
     /// Every host function.
-    pub const ALL: [Import; 14] = [
+    pub const ALL: [Import; 26] = [
         Import::Log,
         Import::Now,
         Import::Random,
@@ -237,6 +263,18 @@ impl Import {
         Import::FileOpen,
         Import::FileSave,
         Import::HttpRequest,
+        Import::ReplyDrop,
+        Import::Hash,
+        Import::CertDetails,
+        Import::LocalTime,
+        Import::Platform,
+        Import::CaList,
+        Import::CaIssuer,
+        Import::KeysSelect,
+        Import::KeysChain,
+        Import::KeysTerminals,
+        Import::KeysOpen,
+        Import::DialogPassword,
     ];
 
     /// Its import name in [`IMPORT_MODULE`].
@@ -256,22 +294,87 @@ impl Import {
             Import::FileOpen => "file_open",
             Import::FileSave => "file_save",
             Import::HttpRequest => "http_request",
+            Import::ReplyDrop => "reply_drop",
+            Import::Hash => "hash",
+            Import::CertDetails => "cert_details",
+            Import::LocalTime => "local_time",
+            Import::Platform => "platform",
+            Import::CaList => "ca_list",
+            Import::CaIssuer => "ca_issuer",
+            Import::KeysSelect => "keys_select",
+            Import::KeysChain => "keys_chain",
+            Import::KeysTerminals => "keys_terminals",
+            Import::KeysOpen => "keys_open",
+            Import::DialogPassword => "dialog_password",
         }
     }
 
     /// The capability it needs; `None` for the basic functions every plugin has.
     pub fn capability(&self) -> Option<Capability> {
         match self {
-            Import::Log | Import::Now | Import::Random | Import::CertInfo => None,
+            Import::Log
+            | Import::Now
+            | Import::Random
+            | Import::CertInfo
+            | Import::ReplyDrop
+            | Import::Hash
+            | Import::CertDetails
+            | Import::LocalTime
+            | Import::Platform
+            | Import::CaList
+            | Import::CaIssuer => None,
             Import::KeysChoose
             | Import::KeysSignCms
             | Import::KeysSignRaw
             | Import::KeysSignXml
-            | Import::KeysRelease => Some(Capability::Keys),
-            Import::DialogMessage | Import::DialogConfirm => Some(Capability::Dialogs),
+            | Import::KeysRelease
+            | Import::KeysSelect
+            | Import::KeysChain
+            | Import::KeysTerminals
+            | Import::KeysOpen => Some(Capability::Keys),
+            Import::DialogMessage | Import::DialogConfirm | Import::DialogPassword => {
+                Some(Capability::Dialogs)
+            }
             Import::FileOpen | Import::FileSave => Some(Capability::Files),
             Import::HttpRequest => Some(Capability::Http),
         }
+    }
+
+    /// The core version it appeared in: a plugin importing it needs at least that core
+    /// (its manifest's `min_core`). A core without it refuses to load the plugin
+    /// ([`IMPORT_MODULE`] imports are linked by name).
+    pub fn since(&self) -> semver::Version {
+        let version = match self {
+            // The first core with plugins.
+            Import::Log
+            | Import::Now
+            | Import::Random
+            | Import::CertInfo
+            | Import::KeysChoose
+            | Import::KeysSignCms
+            | Import::KeysSignRaw
+            | Import::KeysSignXml
+            | Import::KeysRelease
+            | Import::DialogMessage
+            | Import::DialogConfirm
+            | Import::FileOpen
+            | Import::FileSave
+            | Import::HttpRequest
+            | Import::ReplyDrop
+            // The plugin ports' functions, in the same core.
+            | Import::Hash
+            | Import::CertDetails
+            | Import::LocalTime
+            | Import::Platform
+            | Import::CaList
+            | Import::CaIssuer
+            | Import::KeysSelect
+            | Import::KeysChain
+            | Import::KeysTerminals
+            | Import::KeysOpen
+            | Import::DialogPassword => "0.1.0-alpha.3",
+        };
+        semver::Version::parse(version).expect("a valid version")
     }
 
     /// The host function imported as `name`.
@@ -549,4 +652,264 @@ pub struct HttpResponse {
     pub location: Option<String>,
     /// The body.
     pub body: Bytes,
+}
+
+// The functions the plugin ports need.
+
+/// A digest algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HashAlg {
+    /// SHA-1.
+    Sha1,
+    /// SHA-256.
+    Sha256,
+    /// SHA-512.
+    Sha512,
+    /// GOST 34.311-95 (Kalkan's parameters).
+    Gost34311,
+    /// GOST 34.11-2015, 256 bits.
+    Streebog256,
+    /// GOST 34.11-2015, 512 bits.
+    Streebog512,
+}
+
+/// `hash`: the digest of the data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HashArgs {
+    /// The algorithm.
+    pub alg: HashAlg,
+    /// The data.
+    pub data: Bytes,
+}
+
+/// The details of a certificate as Kalkan renders them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertDetails {
+    /// The subject as Kalkan writes it (`CN=…,SURNAME=…,C=KZ`).
+    pub subject_dn: String,
+    /// The issuer, likewise.
+    pub issuer_dn: String,
+    /// Kalkan's types (`SIGNATURE`, `AUTHENTICATION`, `SSL`, `OCSP_RESPONSE_SIGNING`,
+    /// `TSP_SIGNING`), in that order; empty where Kalkan has no type for it.
+    pub knca_types: Vec<String>,
+    /// Lowercase hex of the subjectKeyIdentifier.
+    pub ski_hex: Option<String>,
+    /// Lowercase hex of the keyIdentifier of the authorityKeyIdentifier.
+    pub aki_hex: Option<String>,
+    /// The serial number in decimal.
+    pub serial_dec: String,
+    /// The OCSP URLs of the authorityInfoAccess, in order.
+    pub ocsp_urls: Vec<String>,
+    /// The CA issuer URLs of the authorityInfoAccess, in order.
+    pub ca_issuers_urls: Vec<String>,
+    /// The `http(s)` URLs of the CRL distribution points, in order.
+    pub crl_urls: Vec<String>,
+    /// The algorithm the key signs with: `gost2004`, `gost2015_512`, `rsa_sha256` or
+    /// `rsa_sha1`; `None` for another.
+    pub signing_alg: Option<String>,
+}
+
+/// `local_time`: the offset of the system's time zone at an instant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalTimeArgs {
+    /// The instant, Unix milliseconds.
+    pub unix_ms: i64,
+}
+
+/// The system's time zone at an instant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalTime {
+    /// The offset from UTC, seconds (east positive).
+    pub offset_seconds: i32,
+}
+
+/// An operating system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Os {
+    /// Windows.
+    Windows,
+    /// macOS.
+    Macos,
+    /// Linux and other Unix systems.
+    Linux,
+}
+
+/// The system the core runs on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Platform {
+    /// The operating system.
+    pub os: Os,
+    /// Its line separator: `"\r\n"` on Windows, `"\n"` elsewhere.
+    pub line_separator: String,
+}
+
+/// A key usage bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyUsageBit {
+    /// digitalSignature.
+    DigitalSignature,
+    /// nonRepudiation (contentCommitment).
+    NonRepudiation,
+    /// keyEncipherment.
+    KeyEncipherment,
+    /// keyAgreement.
+    KeyAgreement,
+}
+
+/// Conditions of [`SelectArgs`] beyond [`Filter`]. Absent fields: no condition.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilterMore {
+    /// Extended key usage OIDs of which the certificate must have at least one.
+    pub any_ext_key_usages: Vec<String>,
+    /// Extended key usage OIDs the certificate must not have.
+    pub exclude_ext_key_usages: Vec<String>,
+    /// Kalkan types (`SIGNATURE`, `AUTHENTICATION`, …) of which the certificate must be at
+    /// least one.
+    pub knca_types: Vec<String>,
+    /// The required BIN, or for a certificate without one the IIN; empty: any.
+    pub tin: String,
+    /// Key usage bits the certificate must all have.
+    pub key_usage: Vec<KeyUsageBit>,
+    /// A requested clientAuth also accepts every GOST 2015-512 certificate and sha256RSA
+    /// certificates with keyEncipherment.
+    pub obsolete_auth: bool,
+}
+
+/// The order of the keys in the key dialog.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyOrder {
+    /// The latest notBefore first.
+    #[default]
+    NewestFirst,
+    /// The earliest notBefore first.
+    OldestFirst,
+}
+
+/// `keys_select`: `keys_choose` with more conditions and the dialogs' order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectArgs {
+    /// What the key is for.
+    pub action: Action,
+    /// Storage names to offer; empty: PKCS#12 and JKS.
+    #[serde(default)]
+    pub storages: Vec<String>,
+    /// The conditions of `keys_choose`.
+    #[serde(default)]
+    pub filter: Filter,
+    /// More conditions.
+    #[serde(default)]
+    pub more: FilterMore,
+    /// A line the dialogs show after the plugin's name.
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// A key store path the storage dialog starts with, if a page may name it (a local
+    /// file, or a network path the user chose before); otherwise the dialog starts as usual.
+    #[serde(default)]
+    pub initial_path: Option<String>,
+    /// The order of the keys.
+    #[serde(default)]
+    pub order: KeyOrder,
+}
+
+/// `keys_terminals`: the readers of a token storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalsArgs {
+    /// The storage's Kalkan name (`AKKaztokenStore`, …).
+    pub storage: String,
+}
+
+/// Where `keys_open` reads a key store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeySource {
+    /// A file the page names (manifest `key_files = true`).
+    PagePath(String),
+    /// The key store itself.
+    Bytes(Bytes),
+    /// A token in this reader ([`Import::KeysTerminals`]).
+    Terminal(String),
+}
+
+/// The password of a key store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Password {
+    /// As text.
+    Text(String),
+    /// The id of a password the user typed in `dialog_password`, which the guest never saw.
+    Secret(u32),
+}
+
+/// `keys_open`: a key store the plugin names, every key in it opened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenArgs {
+    /// The storage's Kalkan name: `PKCS12`, `JKS`, or a token.
+    pub storage: String,
+    /// Where it is.
+    pub source: KeySource,
+    /// Its password.
+    pub password: Password,
+}
+
+/// A key of an opened store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenedKey {
+    /// The key, until `keys_release` or the end of the plugin instance.
+    pub handle: u32,
+    /// Its alias in the key store.
+    pub alias: String,
+    /// Its certificate, DER.
+    pub certificate: Bytes,
+}
+
+/// What `keys_open` came to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenOutcome {
+    /// Every key of the store with a certificate, in store order.
+    Opened(Vec<OpenedKey>),
+    /// The password is wrong; a token may say how many tries are left.
+    WrongPassword {
+        /// Tries left before the token blocks, if it says.
+        tries_left: Option<u8>,
+    },
+    /// The token is blocked.
+    Blocked,
+    /// No such token or reader.
+    NoDevice,
+    /// No such file, or not one a page may name.
+    NotFound,
+    /// Not a key store of the storage, or too large.
+    Corrupt,
+    /// The store holds no key with a certificate.
+    NoKeys,
+    /// The user did not allow the page to open the file.
+    Declined,
+}
+
+/// `dialog_password`: a password the user types, which stays in the core.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasswordArgs {
+    /// The heading.
+    pub title: String,
+    /// The text above the field.
+    pub label: String,
+    /// The OK button's text.
+    pub ok: String,
+    /// The Cancel button's text.
+    pub cancel: String,
+    /// Whether an empty password is an answer.
+    pub allow_empty: bool,
+}
+
+/// A password the user typed, by id: for [`Password::Secret`] of this plugin instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretRef {
+    /// The id.
+    pub id: u32,
 }

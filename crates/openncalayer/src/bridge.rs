@@ -24,7 +24,7 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use crate::server::{IDLE_TIMEOUT, MAX_MESSAGE};
-use crate::session::{Session, process};
+use crate::session::{DROP_CLOSE, Session, process};
 
 /// Largest serialized frame the daemon sends. The relay forwards frames to the browser,
 /// which accepts at most 1 MiB per native message.
@@ -598,11 +598,13 @@ async fn socket(
             match process(&session, text).await {
                 Ok(Some(reply)) => reply,
                 Ok(None) => {
-                    // As the original drops the TCP connection.
+                    // As the original drops the TCP connection: the extension closes the
+                    // page's socket with DROP_CLOSE.
                     info!(
                         sid,
                         request_len = len,
-                        "request is not a JSON object; closing the socket"
+                        close_code = DROP_CLOSE,
+                        "request without a reply (not a JSON object, or the module dropped it); closing the socket"
                     );
                     break "invalid request";
                 }
@@ -631,7 +633,7 @@ async fn socket(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oncl_protocol::AddInfo;
+    use oncl_protocol::{AddInfo, Reply};
 
     #[test]
     fn escaped_len_matches_serde_json() {
@@ -779,6 +781,29 @@ mod tests {
         relay.heartbeat(5).await;
     }
 
+    /// Asks for the connection to be dropped.
+    struct Dropping;
+
+    impl oncl_protocol::Module for Dropping {
+        fn process(&self, _request: &str, _add_info: &AddInfo) -> Reply {
+            Reply::Drop
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_drop_closes_virtual_socket_1006() {
+        let mut registry = Registry::default();
+        registry.register("drop", Arc::new(Dropping));
+        let mut relay = Relay::start(registry, SMALL).await;
+        relay.open(1).await;
+        relay.open(2).await;
+        relay.piece(1, r#"{"module":"drop"}"#, false).await;
+        // The extension's shim turns a `close` from the daemon into close 1006 for the page.
+        assert_eq!(relay.next().await, r#"{"t":"close","sid":1}"#);
+        assert_eq!(crate::session::DROP_CLOSE, 1006);
+        relay.heartbeat(2).await;
+    }
+
     /// A request of exactly `len` bytes for a module that does not exist.
     fn unknown_module_request(len: usize) -> String {
         let head = r#"{"module":"none","pad":""#;
@@ -920,10 +945,10 @@ mod tests {
     }
 
     impl oncl_protocol::Module for Entered {
-        fn process(&self, _request: &str, _add_info: &AddInfo) -> String {
+        fn process(&self, _request: &str, _add_info: &AddInfo) -> Reply {
             let _ = self.entered.lock().unwrap().send(());
             let _ = self.release.lock().unwrap().recv();
-            r#"{"gate":"open"}"#.to_owned()
+            r#"{"gate":"open"}"#.into()
         }
     }
 
@@ -968,9 +993,9 @@ mod tests {
     struct Gate(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
 
     impl oncl_protocol::Module for Gate {
-        fn process(&self, _request: &str, _add_info: &AddInfo) -> String {
+        fn process(&self, _request: &str, _add_info: &AddInfo) -> Reply {
             let _ = self.0.lock().unwrap().recv();
-            r#"{"gate":"open"}"#.to_owned()
+            r#"{"gate":"open"}"#.into()
         }
     }
 
@@ -1043,8 +1068,8 @@ mod tests {
     struct Big(usize);
 
     impl oncl_protocol::Module for Big {
-        fn process(&self, _request: &str, _add_info: &AddInfo) -> String {
-            "b".repeat(self.0)
+        fn process(&self, _request: &str, _add_info: &AddInfo) -> Reply {
+            "b".repeat(self.0).into()
         }
     }
 

@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
-use oncl_protocol::{AddInfo, DynamicModules, Module, SessionId, module_not_found};
+use oncl_protocol::{AddInfo, DynamicModules, Module, Reply, SessionId, module_not_found};
 use semver::Version;
 
 use crate::{
@@ -261,13 +261,13 @@ struct PluginModule {
 }
 
 impl Module for PluginModule {
-    fn process(&self, request: &str, add_info: &AddInfo) -> String {
+    fn process(&self, request: &str, add_info: &AddInfo) -> Reply {
         let mut lease = match self.inner.lease(&self.id, &self.module, add_info.session) {
             Ok(lease) => lease,
-            Err(reply) => return reply,
+            Err(reply) => return reply.into(),
         };
         let Some(instance) = lease.instance.as_mut() else {
-            return PLUGIN_ERROR_REPLY.to_owned();
+            return PLUGIN_ERROR_REPLY.into();
         };
         let result = panic::catch_unwind(AssertUnwindSafe(|| instance.process(request, add_info)));
         match result {
@@ -276,10 +276,10 @@ impl Module for PluginModule {
                 reply
             }
             // The runtime has logged the failure.
-            Ok(Err(_)) => PLUGIN_ERROR_REPLY.to_owned(),
+            Ok(Err(_)) => PLUGIN_ERROR_REPLY.into(),
             Err(_) => {
                 tracing::error!(plugin = %self.id, "a plugin call panicked; its instance is dropped");
-                PLUGIN_ERROR_REPLY.to_owned()
+                PLUGIN_ERROR_REPLY.into()
             }
         }
     }

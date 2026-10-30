@@ -19,7 +19,7 @@ use oncl_basics::{Locale, Prompter};
 use oncl_pki::http::HttpTransport;
 use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::TsaProfile;
-use oncl_protocol::{AddInfo, Module};
+use oncl_protocol::{AddInfo, Module, Reply};
 use oncl_token::Tokens;
 use std::sync::{Arc, Mutex, PoisonError};
 use time::OffsetDateTime;
@@ -94,7 +94,7 @@ impl CommonUtils {
 }
 
 impl Module for CommonUtils {
-    fn process(&self, request: &str, add_info: &AddInfo) -> String {
-        dispatch::process(self, request, add_info)
+    fn process(&self, request: &str, add_info: &AddInfo) -> Reply {
+        dispatch::process(self, request, add_info).into()
     }
 }

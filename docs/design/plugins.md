@@ -76,6 +76,7 @@ http = ["https://tsp.pki.gov.kz/"]
 | `dialogs` | `false` | Показ диалогов |
 | `files` | `false` | Чтение и запись файлов, которые пользователь выбрал в диалоге |
 | `http` | `[]` | HTTPS-запросы по адресам с указанными префиксами, не больше 32 префиксов |
+| `key_files` | `false` | `keys_open` хранилища по пути, который назвала страница (нужен `keys`); каждый файл — только после согласия пользователя |
 
 Префикс `http`:
 
@@ -153,6 +154,19 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 | `now` | `()` | `i64` — время в миллисекундах Unix |
 | `random` | `RandomArgs { len }` | байты системного генератора, не больше 1024 |
 | `cert_info` | `CertArgs { der }` | `CertInfo`: CN, ИИН, БИН, организация, серийный номер, срок действия (мс Unix), расширенные и обычные назначения ключа, OID алгоритмов подписи и ключа и сертификат в PEM |
+| `reply_drop` | `()` | `()`; текущий запрос закончится обрывом соединения без ответа (см. [Ошибки](#ошибки)) |
+| `hash` | `HashArgs { alg, data }`, `alg` — `sha1`, `sha256`, `sha512`, `gost34311`, `streebog256`, `streebog512` | хеш данных; ГОСТ 34.311-95 — с параметрами Kalkan, как в подписях |
+| `cert_details` | `CertArgs { der }` | `CertDetails`: subject и issuer так, как их пишет Kalkan (`CN=…,SURNAME=…,C=KZ`), типы Kalkan (`SIGNATURE`, `AUTHENTICATION`, `SSL`, `OCSP_RESPONSE_SIGNING`, `TSP_SIGNING`), SKI и AKI строчным hex, серийный номер десятичным числом, адреса OCSP, CA Issuers и CRL, алгоритм подписи ключа (`gost2004`, `gost2015_512`, `rsa_sha256`, `rsa_sha1`) |
+| `local_time` | `LocalTimeArgs { unix_ms }` | `LocalTime { offset_seconds }` — смещение часового пояса системы от UTC в этот момент |
+| `platform` | `()` | `Platform { os, line_separator }`: `windows`, `macos` или `linux` и разделитель строк системы (`\r\n` в Windows, `\n` в остальных) |
+| `ca_list` | `()` | сертификаты CA НУЦ, которым доверяет ядро (DER) |
+| `ca_issuer` | `CertArgs { der }` | `Option<Bytes>` — CA из `ca_list`, выпустивший сертификат: по имени издателя, сначала тот, чей SKI совпал с AKI |
+
+У каждой host-функции есть версия ядра, в которой она появилась (`Import::since`). Ядро без функции не загрузит плагин, который её импортирует (неизвестный импорт — ошибка загрузки), поэтому `min_core` плагина должен быть не ниже `since` всех его импортов. Новые функции ABI добавляются только новыми импортами со своими типами; аргументы и результаты существующих функций не расширяются, `ABI_VERSION` остаётся `1`.
+
+| Функции | `since` |
+|---|---|
+| `log`, `now`, `random`, `cert_info`, `reply_drop`, `hash`, `cert_details`, `local_time`, `platform`, `ca_list`, `ca_issuer`, функции `keys`, `dialogs`, `files`, `http` из этого раздела | `0.1.0-alpha.3` |
 
 Функции capabilities — в разделе [Capabilities](#capabilities). Типы аргументов и результатов — модуль `oncl_pdk::abi`.
 
@@ -169,7 +183,8 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 | Таблица функций | 1 048 576 элементов |
 | Буфер между хостом и плагином (запрос, ответ, аргумент и результат host-функции) | 256 МиБ, как самое большое сообщение WebSocket |
 | Структура модуля | строгие лимиты Wasmi (`EnforcedLimits::strict`): не больше 10 000 функций, 1 000 глобальных переменных, 1 000 сегментов данных и 1 000 сегментов элементов, 100 таблиц (но экземпляру разрешена одна), одна память, не больше 32 параметров и 32 результатов у функции; если тела функций вместе занимают от 1000 байт, в среднем на функцию должно приходиться не меньше 40 байт. Модуль, который их нарушает, не загружается, даже если он меньше 16 МиБ |
-| Ключи, которые экземпляр держит одновременно | 16 |
+| Ключи, которые экземпляр держит одновременно | 16; `keys_open` открывает все ключи хранилища или ни одного |
+| Пароли `dialog_password`, которые держит экземпляр | 8 |
 | Тело HTTP-запроса и ответа | 32 МиБ |
 | HTTP-запрос целиком | 60 с |
 | Файл, который читает или пишет плагин | 64 МиБ |
@@ -185,6 +200,8 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 ```
 
 Экземпляр после такой ошибки больше не вызывается: следующий запрос сессии получает новый экземпляр. Причина пишется в журнал.
+
+Обрыв без ответа: если плагин во время запроса вызвал `reply_drop`, ответ не отправляется, а соединение закрывается так же, как на запрос, который не является объектом JSON: TCP-соединение — без кадра Close, виртуальный сокет моста — кадром `close`, после которого расширение закрывает сокет страницы с кодом 1006. Так оригинальные модули отвечали на исключение, выброшенное до ответа. Флаг действует только на текущий вызов; `Output` плагин возвращает всё равно (не разбирается — `PLUGIN_ERROR`, обрыва нет). Встроенные модули соединение не обрывают.
 
 Ошибка host-функции — не ошибка плагина: плагин получает `HostError` и решает сам, что ответить странице.
 
@@ -210,8 +227,22 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 | `keys_sign_raw` | `SignRawArgs { handle, data }` | подпись алгоритмом ключа (ГОСТ 34.10-2004, ГОСТ 34.10-2015 512; RSA — SHA-256) |
 | `keys_sign_xml` | `SignXmlArgs { handle, xml, element, parent }` | документ с enveloped XMLDSig: всего документа или элемента по XPath `element` (с `Id`), подпись — в элемент `parent` |
 | `keys_release` | `Handle { handle }` | `()` |
+| `keys_select` | `SelectArgs { action, storages, filter, more, detail, initial_path, order }` | `Option<Chosen>` — как `keys_choose`, с дополнительными условиями |
+| `keys_open` | `OpenArgs { storage, source, password }` | `OpenOutcome`: `opened` (все ключи хранилища с сертификатом, по handle на каждый), `wrong_password { tries_left }`, `blocked`, `no_device`, `not_found`, `corrupt`, `no_keys`, `declined` |
+| `keys_chain` | `Handle { handle }` | цепочка сертификатов ключа от него вверх (DER): сначала сертификаты его хранилища, недостающие — из CA ядра, до самоподписанного |
+| `keys_terminals` | `TerminalsArgs { storage }` | считыватели токенов хранилища (`AKKaztokenStore`, …); пока ядро не открывает токены — `[]` |
 
 `keys_choose` показывает те же окна, что `PKIExtras.sign`: выбор хранилища (PKCS#12 и JKS; по умолчанию оба), пароль, затем выбор ключа. В окнах видны сайт, название плагина и `detail`. `filter` — те же условия, что `signerParams` и `signingParams`: назначения ключа, ИИН, БИН, серийный номер, просроченные, цепочка CA (по умолчанию — CA НУЦ; пустая — без построения пути и OCSP) и проверка OCSP.
+
+`keys_select` добавляет к `filter` условия `more` (недоступный ключ виден в окне с причиной): `any_ext_key_usages` — хотя бы одно из назначений; `exclude_ext_key_usages` — ни одного из них; `knca_types` — хотя бы один тип Kalkan (`SIGNATURE`, `AUTHENTICATION`, …; неизвестное имя — `invalid`); `tin` — БИН сертификата, а если его нет — ИИН; `key_usage` — все биты из `digital_signature`, `non_repudiation`, `key_encipherment`, `key_agreement`; `obsolete_auth` — запрошенный clientAuth принимает и любой сертификат ГОСТ 2015-512, и sha256RSA с keyEncipherment. `initial_path` подставляется в окно хранилища, если страница вправе назвать этот путь (локальный файл или сетевой путь, ранее выбранный пользователем в окне ядра); иначе окно открывается как обычно. `order` — порядок ключей в окне по началу срока действия: `newest_first` (по умолчанию) или `oldest_first`.
+
+`keys_open` открывает хранилище, которое назвал плагин, без окна выбора: `source` — `page_path` (путь от страницы), `bytes` (само хранилище) или `terminal` (считыватель токена); `password` — `text` или `secret` (id пароля из `dialog_password`, который плагин не видел). Путь от страницы:
+
+- разрешён только с `key_files = true` в манифесте, иначе `denied` (проверяется при вызове: функция одна и для байтов);
+- читается по правилам путей страницы: устройства (`\\.\…`), каналы и каталоги — `not_found`, сетевой путь — только выбранный ранее в окне ядра, файл больше 64 МиБ — `corrupt`; ничего не читается до согласия;
+- пару (сайт, путь к файлу) пользователь разрешает в окне ядра «Сайт … через плагин … просит открыть хранилище ключей: <путь>» — один раз за сессию; отказ или закрытое окно — `declined`.
+
+Байты хранилища открываются без окна: они и пароль уже есть у страницы. Хранилища — PKCS#12 и JKS; токены (`terminal`) до их поддержки в ядре отвечают `no_device`. Если все ключи хранилища не помещаются в 16 handle — `limit`, и не открывается ни один.
 
 Закрытый ключ остаётся в ядре: плагин получает только handle — номер ключа в своём экземпляре. Номера идут по возрастанию и не повторяются, поэтому handle после `keys_release` не может указать на другой ключ. Handle действует до `keys_release` или до конца экземпляра; handle другого экземпляра, освобождённый или неизвестный — `invalid`.
 
@@ -221,6 +252,9 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 |---|---|---|
 | `dialog_message` | `MessageArgs { kind, text }`, `kind` — `info`, `warning`, `error` | `()` — когда пользователь закрыл окно |
 | `dialog_confirm` | `ConfirmArgs { text }` | `bool`: `true` — «Да»; «Нет» и закрытое окно — `false`. Кнопка по умолчанию — «Нет» |
+| `dialog_password` | `PasswordArgs { title, label, ok, cancel, allow_empty }` | `Option<SecretRef { id }>` — пароль остаётся в ядре, плагин получает его номер для `keys_open`; отмена — `None` |
+
+Окно пароля показывает сайт, название плагина, заголовок, текст и кнопки плагина; без `allow_empty` «ОК» не принимает пустой пароль. Пароль живёт в экземпляре (не больше 8) и годится только для `keys_open` этого экземпляра; неизвестный номер — `invalid`.
 
 ### `files`
 
@@ -244,8 +278,9 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 Плагин на Rust пишется с крейтом `oncl-pdk`. Под `wasm32` он даёт:
 
 - макрос `oncl_pdk::plugin!(handler)`: `handler: fn(&Request) -> String` получает запрос (`text`, `origin`, `locale`) и возвращает ответ странице; макрос экспортирует `oncl_abi_version`, `oncl_alloc`, `oncl_free`, `oncl_process`, а паника плагина перед trap пишется в журнал через `log`;
-- обёртки host-функций, которые возвращают `HostResult`: `host::{log, now, random, cert_info}`, `keys::{choose, Key}` (`Key::{sign_cms, sign_raw, sign_xml, alias, certificate, handle}`; при удалении `Key` вызывается `keys_release`), `dialogs::{message, confirm}`, `files::{open, save}`, `http::{get, post}`, а также `call_host` — вызов любой host-функции с типами ABI;
-- `Request::add_info()` и реэкспорт `oncl_protocol::{invoker, orgjson}` и `serde_json`: плагин, который отвечает в диалекте CommonInvoker (как `kz.gov.pki.knca.basics`), вызывает тот же `invoker::invoke`, что и встроенные модули.
+- обёртки host-функций, которые возвращают `HostResult`: `host::{log, now, random, cert_info, reply_drop}`, `keys::{choose, Key}` (`Key::{sign_cms, sign_raw, sign_xml, alias, certificate, handle}`; при удалении `Key` вызывается `keys_release`), `dialogs::{message, confirm}`, `files::{open, save}`, `http::{get, post}`, а также `call_host` — вызов любой host-функции с типами ABI;
+- `Request::add_info()` и реэкспорт `oncl_protocol::{invoker, orgjson}` и `serde_json`: плагин, который отвечает в диалекте CommonInvoker (как `kz.gov.pki.knca.basics`), вызывает тот же `invoker::invoke`, что и встроенные модули;
+- Java-диалекты оригинала для плагинов, которые должны отвечать как оригинал байт в байт (реэкспорт из `oncl-protocol`): `orgjson::{parse, reserialize}` — разбор org.json 20211205 с его текстами ошибок и позицией (`Duplicate key "a" at 11 [character 12 line 1]`), `orgjson::{JObject, JValue, quote}` — запись, как пишет `JSONObject.toString()`: порядок ключей `HashMap` (`JObject::hash_map()` для `new JSONObject()` и бинов, `JObject::from_map(n)` для `new JSONObject(map)`, `JObject::stringer()` для `JSONStringer`), числа без хвостовых нулей, `<\/`, `\u2028`; читатели `orgjson::{opt_boolean, get_boolean, opt_int, get_int, get_object, get_array, array_get_string, …}` с текстами `JSONException`; `javamap` — порядок `HashMap` для любого набора ключей; `javab64::{decode_java, decode_kalkan, encode_mime}`; `javaexc::Throwable` — тексты исключений Java; `legacy::dispatch` — рефлексивный диспетчер `commonUtils` и его клонов (поиск метода по имени и числу аргументов, преобразование массивов, тексты `NoSuchMethodException`/`IllegalAccessException`/`argument type mismatch`, `uuid` через org.json, `null` без `uuid` — обрыв соединения); `invoker::java::invoke_with` — `CommonInvoker` оригинала: `details` с классом исключения (`java.lang.IllegalArgumentException: Supported apiVersion is 2`), порядок `{"body":…,"status":true}` и `{"code":…,"details":…,"message":…,"status":false}`, таблица методов с аннотациями и числом параметров, а для запроса, который не дошёл до `try` оригинала, — выбор `BadRequest::{Reply, Drop, CatchAll}`. Встроенные модули пока отвечают по-прежнему (`invoker::invoke`, свой диспетчер `commonUtils`).
 
 Импортируются только те host-функции, которые плагин вызывает, поэтому плагину без `keys` не нужно заявлять `keys`. `call_host` ссылается на все функции, и плагину с ним нужны все capabilities.
 

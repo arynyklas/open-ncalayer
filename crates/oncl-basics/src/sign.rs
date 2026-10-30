@@ -3,7 +3,7 @@
 //! dialog-flow lock.
 
 use crate::filter::{ChainPolicy, KeyFilter};
-use crate::keys::KeyRequest;
+use crate::keys::{KeyOrder, KeyRequest};
 use crate::prompt::{Action, Locale, StorageKind};
 use crate::{Basics, lock_dialog_flow};
 use base64::Engine;
@@ -189,6 +189,7 @@ impl<'a> SignRequest<'a> {
             allow_expired,
             chain,
             allow_revoked,
+            more: Default::default(),
         };
 
         // P1 deviation: invalid base64 fails before the dialog (the original fails after it,
@@ -212,6 +213,8 @@ impl<'a> SignRequest<'a> {
                 storages,
                 filter,
                 detail: None,
+                initial_path: None,
+                order: KeyOrder::Store,
             },
             format,
             data,

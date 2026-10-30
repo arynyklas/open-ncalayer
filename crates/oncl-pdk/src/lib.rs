@@ -5,6 +5,12 @@
 //! - On `wasm32`, the guest SDK: [`plugin!`] exports a request handler as a plugin, and the
 //!   host functions are wrapped in [`host`], [`keys`], [`dialogs`], [`files`] and [`http`].
 //!
+//! The Java dialects of the original's modules are re-exported for plugins that must answer
+//! as an original did, byte for byte: [`orgjson`] (org.json reading, parsing and writing in
+//! the key order of Java's `HashMap`, see [`javamap`]), [`javab64`], [`javaexc`], the
+//! reflective dispatcher of `commonUtils` clones ([`legacy`]) and the original's
+//! `CommonInvoker` ([`invoker::java`]).
+//!
 //! A plugin answering in the `CommonInvoker` dialect of the basics module uses the same
 //! [`invoker::invoke`] the built-in modules use:
 //!
@@ -43,7 +49,7 @@ mod guest;
 pub use guest::__rt;
 #[cfg(target_arch = "wasm32")]
 pub use guest::{call_host, dialogs, files, host, http, keys};
-pub use oncl_protocol::{AddInfo, invoker, orgjson};
+pub use oncl_protocol::{AddInfo, Reply, invoker, javab64, javaexc, javamap, legacy, orgjson};
 pub use serde_json;
 
 /// The language of OpenNCALayer's windows.

@@ -1,15 +1,15 @@
 //! Build a Rust plugin for core Wasm and package its checked manifest and module.
 
 use std::fs::{self, File};
-use std::io::{Cursor, Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, bail};
+use oncl_pdk::abi::Import;
 use oncl_pki::fsutil::{Access, write_atomically};
 use oncl_plugin::{MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, Manifest, Package};
 use serde_json::Value;
-use zip::write::SimpleFileOptions;
 
 use crate::index::plugin_package_name;
 
@@ -140,10 +140,11 @@ pub fn pack(root: &Path, directory: &Path, out: &Path) -> anyhow::Result<PathBuf
             .join(format!("{target_name}.wasm")),
         MAX_WASM,
     )?;
-    oncl_plugin::Engine::new()
+    let compiled = oncl_plugin::Engine::new()
         .compile(&manifest, &wasm)
         .context("checking the plugin ABI")?;
-    let bytes = archive(&manifest_bytes, &wasm)?;
+    check_min_core(&manifest, compiled.imports())?;
+    let bytes = oncl_plugin::archive(&manifest_bytes, &wasm)?;
     Package::read(&bytes).context("checking the packaged plugin")?;
     fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     let path = out.join(plugin_package_name(&manifest.id, &manifest.version));
@@ -199,15 +200,22 @@ fn check_version(manifest: &Manifest, cargo_version: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-fn archive(manifest: &[u8], wasm: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(zip::DateTime::default())
-        .unix_permissions(0o644);
-    for (name, body) in [("plugin.toml", manifest), ("plugin.wasm", wasm)] {
-        zip.start_file(name, options)?;
-        zip.write_all(body)?;
+/// A core older than the newest of `imports` (their [`Import::since`]) cannot load the
+/// plugin: its `min_core` must be at least that.
+///
+/// # Errors
+///
+/// `min_core` is below the `since` of an import, which the message names.
+pub fn check_min_core(manifest: &Manifest, imports: &[Import]) -> anyhow::Result<()> {
+    if let Some(newest) = imports.iter().max_by_key(|import| import.since())
+        && manifest.min_core < newest.since()
+    {
+        bail!(
+            "plugin.toml min_core {} is below {}, where the host function {} appeared",
+            manifest.min_core,
+            newest.since(),
+            newest.name()
+        );
     }
-    Ok(zip.finish()?.into_inner())
+    Ok(())
 }

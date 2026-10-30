@@ -207,6 +207,7 @@ mod tests {
                     "https://a.kz/api/".parse::<HttpPrefix>().unwrap(),
                     "https://b.kz:8443/".parse::<HttpPrefix>().unwrap(),
                 ],
+                key_files: false,
             },
             local: true,
         };

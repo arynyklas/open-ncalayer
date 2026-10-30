@@ -7,18 +7,18 @@ use der::Encode;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{
     Action, Availability, Basics, Busy, BusyPrompt, ChainPolicy, CsrAnswer, CsrPrompt,
-    DisabledReason, FilePrompt, ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt, Locale,
-    MODULE_NAME, OcspCache, OpenError, PasswordPrompt, Prompt, Prompter, RecentPathStore,
+    DisabledReason, FilePrompt, FilterMore, ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt,
+    Locale, MODULE_NAME, OcspCache, OpenError, PasswordPrompt, Prompt, Prompter, RecentPathStore,
     StorageAnswer, StorageKind, StoragePrompt, availabilities,
 };
 use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{SignOptions, verify};
 use oncl_pki::http::HttpTransport;
-use oncl_pki::info::{CertInfo, cert_info};
+use oncl_pki::info::{CertInfo, KeyUsageBits, KncaCertType, cert_info};
 use oncl_pki::key::{PublicKey, SigAlg};
 use oncl_pki::pkcs12::{KeyEntry, WriteEntry, WriteOptions, load, write};
 use oncl_pki::tsp::{MockTsa, verify_token};
-use oncl_protocol::{AddInfo, Module};
+use oncl_protocol::{AddInfo, Module, Reply};
 use oncl_testkit::{fixture, read, synthetic};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -99,8 +99,8 @@ fn origin(o: &str) -> AddInfo {
     }
 }
 
-fn json(reply: String) -> Value {
-    serde_json::from_str(&reply).unwrap()
+fn json(reply: Reply) -> Value {
+    serde_json::from_str(reply.text().expect("a text reply")).unwrap()
 }
 
 /// The failure `code` of a request answered without any prompt.
@@ -666,6 +666,7 @@ fn key_filter_availability() {
         // No path building, no OCSP: the transport is never used.
         chain: ChainPolicy::Empty,
         allow_revoked: false,
+        more: Default::default(),
     };
     let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
     let http: Arc<dyn HttpTransport> = tsa.clone();
@@ -711,6 +712,163 @@ fn key_filter_availability() {
         Availability::Enabled
     );
     assert!(tsa.calls().is_empty());
+}
+
+#[test]
+fn filter_more_reasons() {
+    let key = |name: &str| {
+        let cert = entry(name).cert;
+        let info = cert_info(&cert);
+        (cert, info)
+    };
+    let filter = |ekus: &[&str], more: FilterMore| KeyFilter {
+        ext_key_usages: ekus.iter().map(|s| (*s).to_owned()).collect(),
+        iin: String::new(),
+        bin: String::new(),
+        serial_number: String::new(),
+        allow_expired: true,
+        chain: ChainPolicy::Empty,
+        allow_revoked: false,
+        more,
+    };
+    let http: Arc<dyn HttpTransport> = Arc::new(MockTsa::new(entry("tsa-gost2015")));
+    let availability = |filter: KeyFilter, key: &(Certificate, CertInfo)| {
+        let cache = Arc::new(OcspCache::new());
+        let now = datetime!(2026-01-01 0:00 UTC);
+        let live = availabilities(&filter, std::slice::from_ref(key), &http, &cache, now);
+        live.current().remove(0)
+    };
+    let set = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect();
+    let user = key("user-gost2015-sign");
+    let legal = key("legal-gost2015-sign");
+    let auth = key("user-gost2015-auth");
+    let rsa = key("user-rsa-sign");
+    let disabled = |reasons: &[DisabledReason]| Availability::Disabled(reasons.to_vec());
+
+    // At least one of.
+    let any = || FilterMore {
+        any_ext_key_usages: set(&["1.2.398.3.3.4.1.2.1", "1.3.6.1.5.5.7.3.2"]),
+        ..FilterMore::default()
+    };
+    assert_eq!(
+        availability(filter(&[], any()), &legal),
+        Availability::Enabled
+    );
+    assert_eq!(
+        availability(filter(&[], any()), &auth),
+        Availability::Enabled
+    );
+    assert_eq!(
+        availability(filter(&[], any()), &user),
+        disabled(&[DisabledReason::AnyExtKeyUsage])
+    );
+    // None of.
+    let exclude = FilterMore {
+        exclude_ext_key_usages: set(&["1.2.398.3.3.4.1.2.1"]),
+        ..FilterMore::default()
+    };
+    assert_eq!(
+        availability(filter(&[], exclude.clone()), &legal),
+        disabled(&[DisabledReason::ExcludedExtKeyUsage])
+    );
+    assert_eq!(
+        availability(filter(&[], exclude), &user),
+        Availability::Enabled
+    );
+    // Kalkan types: a GOST 2015 signing key is both, an authentication key with
+    // keyAgreement and no keyEncipherment is neither.
+    let types = |names: &[KncaCertType]| FilterMore {
+        knca_types: names.iter().copied().collect(),
+        ..FilterMore::default()
+    };
+    assert_eq!(
+        availability(filter(&[], types(&[KncaCertType::Signature])), &user),
+        Availability::Enabled
+    );
+    assert_eq!(
+        availability(filter(&[], types(&[KncaCertType::Signature])), &auth),
+        disabled(&[DisabledReason::KncaType])
+    );
+    // The BIN, else the IIN.
+    let tin = |tin: &str| FilterMore {
+        tin: tin.to_owned(),
+        ..FilterMore::default()
+    };
+    assert_eq!(
+        availability(filter(&[], tin("123456789021")), &legal),
+        Availability::Enabled
+    );
+    assert_eq!(
+        availability(filter(&[], tin("123456789022")), &legal),
+        disabled(&[DisabledReason::Tin]),
+        "a legal entity's certificate is matched by its BIN only"
+    );
+    assert_eq!(
+        availability(filter(&[], tin("123456789011")), &user),
+        Availability::Enabled
+    );
+    assert_eq!(
+        availability(filter(&[], tin("123456789021")), &user),
+        disabled(&[DisabledReason::Tin])
+    );
+    // Every bit.
+    let bits = FilterMore {
+        key_usage: KeyUsageBits {
+            digital_signature: true,
+            non_repudiation: true,
+            ..KeyUsageBits::default()
+        },
+        ..FilterMore::default()
+    };
+    assert_eq!(
+        availability(filter(&[], bits.clone()), &user),
+        Availability::Enabled
+    );
+    assert_eq!(
+        availability(filter(&[], bits), &auth),
+        disabled(&[DisabledReason::KeyUsage])
+    );
+    // Obsolete authentication: any GOST 2015-512 certificate counts as clientAuth; a
+    // sha256RSA one only with keyEncipherment.
+    let obsolete = || FilterMore {
+        obsolete_auth: true,
+        ..FilterMore::default()
+    };
+    assert_eq!(
+        availability(filter(&[CLIENT_AUTH], FilterMore::default()), &user),
+        disabled(&[DisabledReason::ExtKeyUsage])
+    );
+    assert_eq!(
+        availability(filter(&[CLIENT_AUTH], obsolete()), &user),
+        Availability::Enabled
+    );
+    assert_eq!(
+        availability(filter(&[CLIENT_AUTH], obsolete()), &rsa),
+        disabled(&[DisabledReason::ExtKeyUsage]),
+        "an RSA signing key has no keyEncipherment"
+    );
+    // Every failed condition, in order.
+    let all = FilterMore {
+        any_ext_key_usages: set(&["1.3.6.1.5.5.7.3.2"]),
+        exclude_ext_key_usages: set(&["1.2.398.3.3.4.1.2.1"]),
+        knca_types: [KncaCertType::Ssl].into_iter().collect(),
+        tin: "1".to_owned(),
+        key_usage: KeyUsageBits {
+            key_encipherment: true,
+            ..KeyUsageBits::default()
+        },
+        obsolete_auth: false,
+    };
+    assert_eq!(
+        availability(filter(&[], all), &legal),
+        disabled(&[
+            DisabledReason::AnyExtKeyUsage,
+            DisabledReason::ExcludedExtKeyUsage,
+            DisabledReason::KncaType,
+            DisabledReason::Tin,
+            DisabledReason::KeyUsage,
+        ])
+    );
 }
 
 #[test]

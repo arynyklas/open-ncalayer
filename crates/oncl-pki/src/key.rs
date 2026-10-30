@@ -100,6 +100,76 @@ impl SigAlg {
     }
 }
 
+/// A digest algorithm the plugins and the signature profiles name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HashAlg {
+    /// SHA-1.
+    Sha1,
+    /// SHA-256.
+    Sha256,
+    /// SHA-512.
+    Sha512,
+    /// GOST 34.311-95 (the Kalkan "D-TEST" parameters).
+    Gost34311,
+    /// GOST 34.11-2015, 256 bits.
+    Streebog256,
+    /// GOST 34.11-2015, 512 bits.
+    Streebog512,
+}
+
+impl HashAlg {
+    /// Every algorithm.
+    pub const ALL: [HashAlg; 6] = [
+        HashAlg::Sha1,
+        HashAlg::Sha256,
+        HashAlg::Sha512,
+        HashAlg::Gost34311,
+        HashAlg::Streebog256,
+        HashAlg::Streebog512,
+    ];
+
+    /// The digest of `data`.
+    pub fn digest(self, data: &[u8]) -> Vec<u8> {
+        match self {
+            HashAlg::Sha1 => sha1::Sha1::digest(data).to_vec(),
+            HashAlg::Sha256 => sha2::Sha256::digest(data).to_vec(),
+            HashAlg::Sha512 => sha2::Sha512::digest(data).to_vec(),
+            HashAlg::Gost34311 => oncl_gost::gost34311(data).to_vec(),
+            HashAlg::Streebog256 => oncl_gost::streebog256(data).to_vec(),
+            HashAlg::Streebog512 => oncl_gost::streebog512(data).to_vec(),
+        }
+    }
+
+    /// Its OID, as a CMS `digestAlgorithm` names it.
+    pub fn oid(self) -> ObjectIdentifier {
+        match self {
+            HashAlg::Sha1 => oid::SHA1,
+            HashAlg::Sha256 => oid::SHA256,
+            HashAlg::Sha512 => oid::SHA512,
+            HashAlg::Gost34311 => oid::GOST_34311,
+            HashAlg::Streebog256 => oid::STREEBOG_256,
+            HashAlg::Streebog512 => oid::STREEBOG_512,
+        }
+    }
+
+    /// The algorithm of `oid`.
+    pub fn from_oid(oid: &ObjectIdentifier) -> Option<HashAlg> {
+        HashAlg::ALL.into_iter().find(|alg| alg.oid() == *oid)
+    }
+}
+
+impl SigAlg {
+    /// The digest algorithm of this signature algorithm.
+    pub fn hash_alg(self) -> HashAlg {
+        match self {
+            SigAlg::Gost2004 => HashAlg::Gost34311,
+            SigAlg::Gost2015_512 => HashAlg::Streebog512,
+            SigAlg::RsaSha256 => HashAlg::Sha256,
+            SigAlg::RsaSha1 => HashAlg::Sha1,
+        }
+    }
+}
+
 /// Error of a key operation.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KeyError {

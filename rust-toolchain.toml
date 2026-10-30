@@ -1,5 +1,6 @@
 [toolchain]
 channel = "1.99.1"
 components = ["rustfmt", "clippy"]
-# The example plugin (`crates/oncl-pdk/example`), built by the `oncl-plugin` tests.
+# The example plugin (`crates/oncl-pdk/example`) and the plugin ports (`plugins/`, built by
+# the `oncl-port-tests` tests and `cargo xtask plugin pack`).
 targets = ["wasm32-unknown-unknown"]

@@ -970,12 +970,29 @@ fn show_password(
     reply: Sender<Prompt<Zeroizing<String>>>,
 ) -> Result<(), PlatformError> {
     let ui = PasswordDialog::new()?;
+    let pending = wire_password(&ui, &p, reply);
+    show(&ui, pending)
+}
+
+/// Fills the password dialog with `p` and wires OK to an answer: the password, which the
+/// dialog then forgets; an empty one only if `p` allows it.
+fn wire_password(
+    ui: &PasswordDialog,
+    p: &PasswordPrompt,
+    reply: Sender<Prompt<Zeroizing<String>>>,
+) -> Rc<Pending<PasswordDialog, Zeroizing<String>>> {
     select_language(p.locale);
     ui.set_origin(p.origin.as_str().into());
+    ui.set_source(p.source.as_deref().unwrap_or_default().into());
+    ui.set_heading(p.title.as_deref().unwrap_or_default().into());
     ui.set_message(p.message.as_deref().unwrap_or_default().into());
+    ui.set_ok_text(p.ok.as_deref().unwrap_or_default().into());
+    ui.set_cancel_text(p.cancel.as_deref().unwrap_or_default().into());
+    ui.set_allow_empty(p.allow_empty);
 
     let pending = Pending::new(ui.clone_strong(), reply);
     let weak = ui.as_weak();
+    let allow_empty = p.allow_empty;
     ui.on_confirm({
         let pending = pending.clone();
         move || {
@@ -983,11 +1000,14 @@ fn show_password(
                 return;
             };
             let password = Zeroizing::new(ui.get_password().to_string());
+            if password.is_empty() && !allow_empty {
+                return;
+            }
             ui.set_password(SharedString::new());
             pending.finish(Prompt::Answer(password));
         }
     });
-    show(&ui, pending)
+    pending
 }
 
 /// A plugin's message for `p`; the outcome goes to `reply`.
@@ -1775,6 +1795,85 @@ mod plugin_dialogs {
         wire_dismissal(&ui, &pending);
         close(ui.window());
         assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled));
+    }
+
+    /// The plugin's password dialog: its texts and buttons as given, the default texts in
+    /// each language, and an empty password refused unless allowed.
+    #[test]
+    fn password_dialog_shows_plugin_texts() {
+        offscreen();
+        let plugin = |locale| PasswordPrompt {
+            origin: ORIGIN.to_owned(),
+            locale,
+            message: Some("Пароль контейнера".to_owned()),
+            source: Some("Example".to_owned()),
+            title: Some("Подписание".to_owned()),
+            ok: Some("Подписать".to_owned()),
+            cancel: Some("Отменить".to_owned()),
+            allow_empty: false,
+        };
+        let plugin_lines = [
+            (Locale::Ru, "Плагин: Example"),
+            (Locale::Kk, "Плагин: Example"),
+            (Locale::En, "Plugin: Example"),
+        ];
+        for ((locale, requester, _), (_, plugin_line)) in LANGUAGES.into_iter().zip(plugin_lines) {
+            let ui = PasswordDialog::new().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let pending = wire_password(&ui, &plugin(locale), tx);
+            wire_dismissal(&ui, &pending);
+            assert_eq!(ui.get_requester(), requester);
+            assert_eq!(ui.get_plugin_line(), plugin_line);
+            assert_eq!(ui.get_heading(), "Подписание");
+            assert_eq!(ui.get_label(), "Пароль контейнера");
+            assert_eq!(ui.get_ok_label(), "Подписать");
+            assert_eq!(ui.get_cancel_label(), "Отменить");
+            assert!(!ui.get_can_confirm(), "an empty password is not taken");
+            ui.invoke_confirm();
+            assert!(rx.try_recv().is_err());
+            ui.set_password("secret".into());
+            assert!(ui.get_can_confirm());
+            ui.invoke_confirm();
+            match rx.try_recv() {
+                Ok(Prompt::Answer(password)) => assert_eq!(password.as_str(), "secret"),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(ui.get_password(), "", "the dialog forgets the password");
+        }
+        // The Applet's dialog: the default texts, and an empty password is an answer.
+        let defaults = [
+            (Locale::Ru, "Введите пароль на хранилище ключей:", "Отмена"),
+            (
+                Locale::Kk,
+                "Кілт сақтау орнының құпиясөзін енгізіңіз:",
+                "Бас тарту",
+            ),
+            (Locale::En, "Enter the key store password:", "Cancel"),
+        ];
+        for (locale, label, cancel) in defaults {
+            let ui = PasswordDialog::new().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let applet = PasswordPrompt {
+                origin: ORIGIN.to_owned(),
+                locale,
+                message: None,
+                source: None,
+                title: None,
+                ok: None,
+                cancel: None,
+                allow_empty: true,
+            };
+            let pending = wire_password(&ui, &applet, tx);
+            wire_dismissal(&ui, &pending);
+            assert_eq!(ui.get_plugin_line(), "");
+            assert_eq!(ui.get_label(), label);
+            assert_eq!(ui.get_cancel_label(), cancel);
+            ui.invoke_confirm();
+            match rx.try_recv() {
+                Ok(Prompt::Answer(password)) => assert!(password.is_empty()),
+                other => panic!("{other:?}"),
+            }
+        }
     }
 }
 

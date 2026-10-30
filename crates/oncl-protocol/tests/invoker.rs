@@ -269,3 +269,267 @@ fn uuid_is_not_echoed() {
         r#"{"status":true,"body":{"result":1}}"#
     );
 }
+
+/// The original's `CommonInvoker` to the byte: `invoker::java`.
+mod java {
+    use oncl_protocol::invoker::Failure;
+    use oncl_protocol::invoker::java::{
+        BadRequest, CallResult, InvokeOptions, NlClass, NlMethod, invoke_with,
+    };
+    use oncl_protocol::orgjson::JValue;
+    use oncl_protocol::{AddInfo, Reply};
+    use serde_json::{Map, Value, json};
+
+    struct Signer;
+
+    const METHODS: &[NlMethod] = &[
+        NlMethod {
+            name: "getVersion",
+            annotation: None,
+            params: 0,
+        },
+        NlMethod {
+            name: "signText",
+            annotation: Some("sign"),
+            params: 1,
+        },
+        NlMethod {
+            name: "nothing",
+            annotation: None,
+            params: 0,
+        },
+        NlMethod {
+            name: "fail",
+            annotation: None,
+            params: 0,
+        },
+        NlMethod {
+            name: "withOrigin",
+            annotation: None,
+            params: 2,
+        },
+    ];
+
+    impl NlClass for Signer {
+        fn class_name(&self) -> &'static str {
+            "SignerV2"
+        }
+
+        fn methods(&self) -> &'static [NlMethod] {
+            METHODS
+        }
+
+        fn call(
+            &self,
+            method: &NlMethod,
+            args: Option<&Map<String, Value>>,
+            add_info: &AddInfo,
+        ) -> CallResult {
+            match method.name {
+                "getVersion" => {
+                    assert!(args.is_none(), "a method without parameters gets no args");
+                    Ok(JValue::from("2.0.0"))
+                }
+                "signText" => Ok(JValue::from(Value::Object(args.unwrap().clone()))),
+                "nothing" => Ok(JValue::Null),
+                "fail" => Err(Failure::Invocation(Some(
+                    r#"org.json.JSONException: JSONObject["xml"] not found."#.to_owned(),
+                ))),
+                "withOrigin" => Ok(JValue::from(add_info.origin.clone().unwrap_or_default())),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    struct Other;
+
+    impl NlClass for Other {
+        fn class_name(&self) -> &'static str {
+            "Other"
+        }
+
+        fn methods(&self) -> &'static [NlMethod] {
+            &[]
+        }
+
+        fn call(&self, _: &NlMethod, _: Option<&Map<String, Value>>, _: &AddInfo) -> CallResult {
+            unreachable!()
+        }
+    }
+
+    fn invoke_as(bad_request: BadRequest, request: &str) -> Reply {
+        let add_info = AddInfo {
+            origin: Some("https://a.kz".to_owned()),
+            session: 0,
+        };
+        invoke_with(
+            request,
+            &add_info,
+            &[&Signer, &Other],
+            &InvokeOptions { bad_request },
+        )
+    }
+
+    fn invoke(request: Value) -> String {
+        invoke_as(BadRequest::Drop, &request.to_string())
+            .into_text()
+            .unwrap()
+    }
+
+    fn general(details: &str) -> String {
+        format!(
+            r#"{{"code":"GENERAL_ERROR","details":"{details}","message":"General error.","status":false}}"#
+        )
+    }
+
+    #[test]
+    fn success_order_is_body_status() {
+        assert_eq!(
+            invoke(json!({"method": "getVersion"})),
+            r#"{"body":"2.0.0","status":true}"#
+        );
+        // By the annotation's name too; the body object in `HashMap` order.
+        assert_eq!(
+            invoke(json!({"method": "sign", "args": {"errorCode": 1, "errorMessage": "</x>"}})),
+            r#"{"body":{"errorMessage":"<\/x>","errorCode":1},"status":true}"#
+        );
+        assert_eq!(
+            invoke(json!({"method": "withOrigin", "args": {}})),
+            r#"{"body":"https://a.kz","status":true}"#
+        );
+    }
+
+    #[test]
+    fn null_body_is_omitted() {
+        assert_eq!(invoke(json!({"method": "nothing"})), r#"{"status":true}"#);
+    }
+
+    #[test]
+    fn failure_order_is_code_details_message_status() {
+        assert_eq!(
+            invoke(json!({"method": "fail"})),
+            r#"{"code":"INVOCATION_ERROR","details":"org.json.JSONException: JSONObject[\"xml\"] not found.","message":"An invoked method threw an exception.","status":false}"#
+        );
+    }
+
+    #[test]
+    fn api_version_details_have_java_prefix() {
+        assert_eq!(
+            invoke(json!({"apiVersion": 3, "method": "getVersion"})),
+            general("java.lang.IllegalArgumentException: Supported apiVersion is 2")
+        );
+        // `optInt`: a numeric string counts, anything else is the default.
+        assert_eq!(
+            invoke(json!({"apiVersion": "2", "method": "getVersion"})),
+            r#"{"body":"2.0.0","status":true}"#
+        );
+        assert_eq!(
+            invoke(json!({"apiVersion": true, "method": "getVersion"})),
+            r#"{"body":"2.0.0","status":true}"#
+        );
+    }
+
+    #[test]
+    fn unknown_class_details() {
+        assert_eq!(
+            invoke(json!({"class": "Nope", "method": "getVersion"})),
+            general("java.lang.IllegalArgumentException: Nope is not found")
+        );
+        // An empty or null class is the first; another class by its name.
+        for class in [json!(""), Value::Null] {
+            assert_eq!(
+                invoke(json!({"class": class, "method": "getVersion"})),
+                r#"{"body":"2.0.0","status":true}"#
+            );
+        }
+        assert_eq!(
+            invoke(json!({"class": "Other", "method": "getVersion"})),
+            general("java.lang.IllegalArgumentException: getVersion is not defined in Other")
+        );
+    }
+
+    #[test]
+    fn non_string_class_is_stringified() {
+        assert_eq!(
+            invoke(json!({"class": 7, "method": "getVersion"})),
+            general("java.lang.IllegalArgumentException: 7 is not found")
+        );
+        assert_eq!(
+            invoke_as(BadRequest::Drop, r#"{"class":1.50,"method":"getVersion"}"#),
+            general("java.lang.IllegalArgumentException: 1.50 is not found")
+        );
+    }
+
+    #[test]
+    fn demands_arguments_from_arity() {
+        for args in [None, Some(json!([1])), Some(json!("x")), Some(Value::Null)] {
+            let mut request = json!({"method": "signText"});
+            if let Some(args) = args {
+                request["args"] = args;
+            }
+            assert_eq!(
+                invoke(request),
+                general("java.lang.IllegalArgumentException: signText demands arguments")
+            );
+        }
+    }
+
+    #[test]
+    fn zero_param_ignores_args() {
+        assert_eq!(
+            invoke(json!({"method": "getVersion", "args": {"a": 1}})),
+            r#"{"body":"2.0.0","status":true}"#
+        );
+    }
+
+    #[test]
+    fn empty_method_is_not_defined() {
+        assert_eq!(
+            invoke(json!({"method": ""})),
+            general("java.lang.IllegalArgumentException:  is not defined in SignerV2")
+        );
+        assert_eq!(
+            invoke(json!({"method": "nope"})),
+            general("java.lang.IllegalArgumentException: nope is not defined in SignerV2")
+        );
+    }
+
+    #[test]
+    fn bad_request_drop() {
+        for request in [
+            "[1]",
+            r#"{"class":"SignerV2"}"#,
+            r#"{"method":5}"#,
+            r#"{"method":"getVersion","method":"getVersion"}"#,
+        ] {
+            assert_eq!(
+                invoke_as(BadRequest::Drop, request),
+                Reply::Drop,
+                "{request}"
+            );
+        }
+        // Built-in modules' way: a reply without details.
+        assert_eq!(
+            invoke_as(BadRequest::Reply, r#"{"class":"SignerV2"}"#),
+            r#"{"code":"GENERAL_ERROR","message":"General error.","status":false}"#
+        );
+    }
+
+    #[test]
+    fn bad_request_catch_all_has_org_json_details() {
+        assert_eq!(
+            invoke_as(BadRequest::CatchAll, r#"{"class":"SignerV2"}"#),
+            general(r#"org.json.JSONException: JSONObject[\"method\"] not found."#)
+        );
+        assert_eq!(
+            invoke_as(BadRequest::CatchAll, r#"{"method":true}"#),
+            general(r#"org.json.JSONException: JSONObject[\"method\"] is not a string."#)
+        );
+        assert_eq!(
+            invoke_as(BadRequest::CatchAll, r#"{"method":"a","method":"b"}"#),
+            general(
+                r#"org.json.JSONException: Duplicate key \"method\" at 23 [character 24 line 1]"#
+            )
+        );
+    }
+}

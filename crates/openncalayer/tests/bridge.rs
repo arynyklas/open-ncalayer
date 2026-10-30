@@ -9,7 +9,7 @@ use oncl_basics::{Basics, MODULE_NAME};
 use oncl_ipc::{Endpoint, IpcStream, connect, endpoint, read_frame, write_frame};
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::MockTsa;
-use oncl_protocol::{AddInfo, HEARTBEAT, Module, Registry};
+use oncl_protocol::{AddInfo, HEARTBEAT, Module, Registry, Reply};
 use oncl_testkit::{read, synthetic};
 use oncl_tls::TlsFiles;
 use openncalayer::{NM_FRAME_LIMIT, ServerConfig, build_registry, serve, serve_ipc, split_message};
@@ -342,9 +342,9 @@ async fn heartbeat_and_module_not_found() {
 struct Capture(Mutex<Vec<AddInfo>>);
 
 impl Module for Capture {
-    fn process(&self, _request: &str, add_info: &AddInfo) -> String {
+    fn process(&self, _request: &str, add_info: &AddInfo) -> Reply {
         self.0.lock().unwrap().push(add_info.clone());
-        r#"{"captured":true}"#.to_owned()
+        r#"{"captured":true}"#.into()
     }
 }
 
@@ -581,7 +581,7 @@ async fn invalid_json_closes_only_that_sid() {
 struct Panics;
 
 impl Module for Panics {
-    fn process(&self, _request: &str, _add_info: &AddInfo) -> String {
+    fn process(&self, _request: &str, _add_info: &AddInfo) -> Reply {
         panic!("test module panics on purpose");
     }
 }

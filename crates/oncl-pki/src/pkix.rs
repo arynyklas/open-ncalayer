@@ -118,6 +118,11 @@ impl CaSet {
         self.certs.is_empty()
     }
 
+    /// The certificates, in set order.
+    pub fn certs(&self) -> &[Certificate] {
+        &self.certs
+    }
+
     /// CAs whose subject is `cert`'s issuer name, in set order, except that those whose
     /// subjectKeyIdentifier equals `cert`'s authorityKeyIdentifier come first.
     pub fn issuers_of<'a>(
@@ -250,7 +255,8 @@ fn is_self_issued(cert: &Certificate) -> bool {
     cert.tbs_certificate().subject() == cert.tbs_certificate().issuer()
 }
 
-fn subject_key_id(cert: &Certificate) -> Option<Vec<u8>> {
+/// The subjectKeyIdentifier of `cert`, if it has a well-formed one.
+pub fn subject_key_id(cert: &Certificate) -> Option<Vec<u8>> {
     match cert
         .tbs_certificate()
         .get_extension::<SubjectKeyIdentifier>()
@@ -260,7 +266,8 @@ fn subject_key_id(cert: &Certificate) -> Option<Vec<u8>> {
     }
 }
 
-fn authority_key_id(cert: &Certificate) -> Option<Vec<u8>> {
+/// The keyIdentifier of `cert`'s authorityKeyIdentifier, if it has a well-formed one.
+pub fn authority_key_id(cert: &Certificate) -> Option<Vec<u8>> {
     match cert
         .tbs_certificate()
         .get_extension::<AuthorityKeyIdentifier>()

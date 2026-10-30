@@ -56,7 +56,7 @@ fn reply(instance: &mut Instance, method: &str, args: Value) -> Value {
     let reply = instance
         .process(&request(method, args), &from(ORIGIN))
         .unwrap();
-    serde_json::from_str(&reply).unwrap()
+    serde_json::from_str(reply.text().unwrap()).unwrap()
 }
 
 /// The steps that open the synthetic key store and pick its first key.

@@ -89,13 +89,16 @@ fn args(format: &str, chain: Option<Value>, signing_params: Value) -> Value {
 
 fn process(basics: &Basics, args: Value) -> String {
     let request = json!({"module": MODULE_NAME, "method": "sign", "args": args}).to_string();
-    basics.process(
-        &request,
-        &AddInfo {
-            origin: Some("https://x.kz".to_owned()),
-            ..AddInfo::default()
-        },
-    )
+    basics
+        .process(
+            &request,
+            &AddInfo {
+                origin: Some("https://x.kz".to_owned()),
+                ..AddInfo::default()
+            },
+        )
+        .into_text()
+        .unwrap()
 }
 
 /// A module answering the prompts with `steps`, its HTTP transport `http`.
@@ -391,6 +394,7 @@ fn inter_filter() -> KeyFilter {
         allow_expired: false,
         chain: ChainPolicy::Custom(Arc::new(CaSet::new(cas))),
         allow_revoked: false,
+        more: Default::default(),
     }
 }
 

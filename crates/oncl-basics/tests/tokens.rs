@@ -100,7 +100,8 @@ fn sign(basics: &Basics, storages: &[&str]) -> Value {
         origin: Some("https://x.kz".to_owned()),
         ..AddInfo::default()
     };
-    serde_json::from_str(&basics.process(&request.to_string(), &add_info)).unwrap()
+    let reply = basics.process(&request.to_string(), &add_info);
+    serde_json::from_str(reply.text().expect("a text reply")).unwrap()
 }
 
 fn pem_to_der(pem: &str) -> Vec<u8> {

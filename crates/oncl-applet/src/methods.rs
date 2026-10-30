@@ -182,6 +182,11 @@ fn ask_password(a: &Applet, message: Option<&str>, add_info: &AddInfo) -> Outcom
         origin: origin(add_info),
         locale: LOCALE,
         message: message.filter(|m| !m.is_empty()).map(str::to_owned),
+        source: None,
+        title: None,
+        ok: None,
+        cancel: None,
+        allow_empty: true,
     };
     let answer = {
         let _flow = lock_dialog_flow();

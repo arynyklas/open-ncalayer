@@ -1,0 +1,27 @@
+[package]
+name = "oncl-port-tests"
+description = "Tests of OpenNCALayer's plugin ports (plugins/): the ports built for wasm32 and run in the plugin runtime with scripted dialogs and mock PKI services"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `ScriptedPrompter`, `MemoryRecentPath`: the dialogs of a port, answered by a script.
+oncl-basics = { workspace = true, features = ["testing"] }
+oncl-pdk.workspace = true
+# `MockTsa`, `MockOcsp`, `MockCrl`, `RouteTransport`: the PKI services ports reach.
+oncl-pki = { workspace = true, features = ["testing"] }
+oncl-plugin.workspace = true
+oncl-protocol.workspace = true
+# The ports' workspace built once per process, the synthetic key stores.
+oncl-testkit.workspace = true
+semver.workspace = true
+serde.workspace = true
+time.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

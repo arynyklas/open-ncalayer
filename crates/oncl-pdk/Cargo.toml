@@ -12,6 +12,8 @@ publish.workspace = true
 ciborium.workspace = true
 # `Request::add_info` and the CommonInvoker dialect plugins answer in.
 oncl-protocol.workspace = true
+# `Import::since`: the core version a host function appeared in.
+semver.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 # Re-exported: the JSON values of the CommonInvoker dialect.

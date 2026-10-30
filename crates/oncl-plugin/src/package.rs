@@ -6,9 +6,10 @@ use crate::{Manifest, PackageError};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs::File;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 use std::path::Path;
 use zip::ZipArchive;
+use zip::write::SimpleFileOptions;
 
 /// The extension of a package file.
 pub const PACKAGE_EXT: &str = "onclp";
@@ -84,6 +85,26 @@ impl Package {
         file.take(MAX_PACKAGE + 1).read_to_end(&mut bytes)?;
         Package::read(&bytes)
     }
+}
+
+/// The package of `manifest` (the bytes of `plugin.toml`) and `wasm`, the same bytes for the
+/// same input: both deflated, with a fixed time and mode. Not checked: [`Package::read`]
+/// the result.
+///
+/// # Errors
+///
+/// The zip writer failed.
+pub fn archive(manifest: &[u8], wasm: &[u8]) -> zip::result::ZipResult<Vec<u8>> {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip::DateTime::default())
+        .unix_permissions(0o644);
+    for (name, body) in [(MANIFEST_FILE, manifest), (WASM_FILE, wasm)] {
+        zip.start_file(name, options)?;
+        zip.write_all(body)?;
+    }
+    Ok(zip.finish()?.into_inner())
 }
 
 /// The indexes of `plugin.toml` and `plugin.wasm`, if they are the only entries: no other

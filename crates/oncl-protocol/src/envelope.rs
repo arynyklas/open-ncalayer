@@ -30,10 +30,68 @@ pub struct AddInfo {
     pub session: SessionId,
 }
 
+/// What a module answers a request with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reply {
+    /// This text goes back to the page.
+    Text(String),
+    /// No reply: the connection is dropped without a close frame, as for a request that is
+    /// not a JSON object ([`Route::InvalidJson`]).
+    Drop,
+}
+
+impl Reply {
+    /// The text of a [`Reply::Text`].
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Reply::Text(text) => Some(text),
+            Reply::Drop => None,
+        }
+    }
+
+    /// The text of a [`Reply::Text`].
+    pub fn into_text(self) -> Option<String> {
+        match self {
+            Reply::Text(text) => Some(text),
+            Reply::Drop => None,
+        }
+    }
+}
+
+impl From<String> for Reply {
+    fn from(text: String) -> Self {
+        Reply::Text(text)
+    }
+}
+
+impl From<&str> for Reply {
+    fn from(text: &str) -> Self {
+        Reply::Text(text.to_owned())
+    }
+}
+
+impl PartialEq<str> for Reply {
+    fn eq(&self, other: &str) -> bool {
+        self.text() == Some(other)
+    }
+}
+
+impl PartialEq<&str> for Reply {
+    fn eq(&self, other: &&str) -> bool {
+        self.text() == Some(*other)
+    }
+}
+
+impl PartialEq<String> for Reply {
+    fn eq(&self, other: &String) -> bool {
+        self.text() == Some(other.as_str())
+    }
+}
+
 /// A module reachable through the `module` field of a request. It receives the raw request text
 /// and parses it with its own grammar; its reply is sent back as is.
 pub trait Module: Send + Sync {
-    fn process(&self, request: &str, add_info: &AddInfo) -> String;
+    fn process(&self, request: &str, add_info: &AddInfo) -> Reply;
 }
 
 /// Modules that come and go while the daemon runs, looked up after the built-in ones.

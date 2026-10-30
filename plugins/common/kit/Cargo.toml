@@ -1,0 +1,15 @@
+[package]
+name = "oncl-port-kit"
+description = "What the OpenNCALayer plugin ports share: HTTP bodies, zip, Java Properties XML, URL resolution and dates as the original's plugins made them"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+md-5.workspace = true
+oncl-pdk.workspace = true
+url.workspace = true
+zip.workspace = true

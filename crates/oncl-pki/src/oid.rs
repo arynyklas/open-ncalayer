@@ -25,6 +25,8 @@ pub const SHA1_WITH_RSA: Oid = Oid::new_unwrap("1.2.840.113549.1.1.5");
 pub const GOST_34311: Oid = Oid::new_unwrap("1.2.398.3.10.1.3.1");
 /// GOST 34.11-2015, 512 bits.
 pub const STREEBOG_512: Oid = Oid::new_unwrap("1.2.398.3.10.1.3.3");
+/// GOST 34.11-2015, 256 bits.
+pub const STREEBOG_256: Oid = Oid::new_unwrap("1.2.398.3.10.1.3.2");
 /// id-sha256.
 pub const SHA256: Oid = Oid::new_unwrap("2.16.840.1.101.3.4.2.1");
 /// id-sha384.
@@ -112,6 +114,8 @@ pub const ISSUING_DISTRIBUTION_POINT: Oid = Oid::new_unwrap("2.5.29.28");
 // OCSP (RFC 6960).
 /// id-ad-ocsp: the OCSP access method of AuthorityInfoAccess.
 pub const AD_OCSP: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1");
+/// id-ad-caIssuers: the issuer certificates access method of AuthorityInfoAccess.
+pub const AD_CA_ISSUERS: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.2");
 /// id-pkix-ocsp-basic: the `BasicOCSPResponse` response type.
 pub const OCSP_BASIC: Oid = Oid::new_unwrap("1.3.6.1.5.5.7.48.1.1");
 

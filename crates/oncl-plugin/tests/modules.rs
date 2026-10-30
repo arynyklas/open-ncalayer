@@ -57,7 +57,10 @@ fn in_session(session: u64) -> AddInfo {
 /// `method` of the example, in `session`, routed as the server routes it.
 fn call(modules: &Arc<PluginModules>, session: u64, method: &str) -> String {
     let module = modules.module(MODULE).expect("the module is served");
-    module.process(&request(method, json!({})), &in_session(session))
+    module
+        .process(&request(method, json!({})), &in_session(session))
+        .into_text()
+        .unwrap()
 }
 
 fn count(modules: &Arc<PluginModules>, session: u64) -> u64 {
@@ -411,7 +414,7 @@ fn busy_instances_are_never_evicted() {
     *http.open.lock().unwrap() = true;
     http.opened.notify_all();
     for running in calls {
-        let reply: Value = serde_json::from_str(&running.join().unwrap()).unwrap();
+        let reply: Value = serde_json::from_str(running.join().unwrap().text().unwrap()).unwrap();
         assert_eq!(reply["status"], true, "{reply}");
     }
     // Idle now: the one used longest ago makes room.

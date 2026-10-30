@@ -92,7 +92,8 @@ fn call(cu: &CommonUtils, method: &str, args: Value) -> Value {
         origin: Some("https://x.kz".to_owned()),
         ..AddInfo::default()
     };
-    serde_json::from_str(&cu.process(&request.to_string(), &add_info)).unwrap()
+    let reply = cu.process(&request.to_string(), &add_info);
+    serde_json::from_str(reply.text().expect("a text reply")).unwrap()
 }
 
 fn ok(reply: &Value) -> &Value {

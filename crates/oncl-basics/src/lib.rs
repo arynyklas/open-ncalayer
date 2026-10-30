@@ -27,15 +27,15 @@ pub mod testing;
 mod tokens;
 
 pub use filter::{
-    Availability, ChainPolicy, DisabledReason, KeyFilter, OCSP_DEADLINE, availabilities,
+    Availability, ChainPolicy, DisabledReason, FilterMore, KeyFilter, OCSP_DEADLINE, availabilities,
 };
-pub use keys::{KeyChooser, KeyRequest};
+pub use keys::{KeyChooser, KeyOrder, KeyRequest};
 pub use live::LiveAvailability;
 pub use ocsp_cache::{ANSWER_FOR, OcspCache, UNREACHABLE_FOR};
 use oncl_pki::http::HttpTransport;
 use oncl_pki::tsp::TsaProfile;
 use oncl_protocol::invoker::{self, CallResult, Failure, NlClass};
-use oncl_protocol::{AddInfo, Module};
+use oncl_protocol::{AddInfo, Module, Reply};
 use oncl_token::Tokens;
 pub use page_file::{
     MAX_CHOSEN_NETWORK_PATHS, MAX_PAGE_FILE, PageFile, PageFileError, is_device_path,
@@ -141,8 +141,8 @@ impl Basics {
 }
 
 impl Module for Basics {
-    fn process(&self, request: &str, add_info: &AddInfo) -> String {
-        invoker::invoke(request, add_info, &[&PkiExtras(self), &PkiEssentials(self)])
+    fn process(&self, request: &str, add_info: &AddInfo) -> Reply {
+        invoker::invoke(request, add_info, &[&PkiExtras(self), &PkiEssentials(self)]).into()
     }
 }
 

@@ -24,7 +24,7 @@ mod keygen;
 mod methods;
 
 use oncl_basics::{Prompter, StorageKind};
-use oncl_protocol::{AddInfo, Module};
+use oncl_protocol::{AddInfo, Module, Reply};
 use oncl_token::Tokens;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -91,8 +91,8 @@ impl Applet {
 }
 
 impl Module for Applet {
-    fn process(&self, request: &str, add_info: &AddInfo) -> String {
-        dispatch::process(self, request, add_info)
+    fn process(&self, request: &str, add_info: &AddInfo) -> Reply {
+        dispatch::process(self, request, add_info).into()
     }
 }
 

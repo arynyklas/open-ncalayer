@@ -1,21 +1,22 @@
 use std::sync::{Arc, Mutex};
 
 use oncl_protocol::{
-    AddInfo, COMPAT_VERSION, DEFAULT_MODULE, DynamicModules, HEARTBEAT, Module, Registry, Route,
-    SessionId, greeting, module_not_found,
+    AddInfo, COMPAT_VERSION, DEFAULT_MODULE, DynamicModules, HEARTBEAT, Module, Registry, Reply,
+    Route, SessionId, greeting, module_not_found,
 };
 
 /// Answers every request with a fixed tag, so tests can tell modules apart.
 struct Tagged(&'static str);
 
 impl Module for Tagged {
-    fn process(&self, request: &str, add_info: &AddInfo) -> String {
+    fn process(&self, request: &str, add_info: &AddInfo) -> Reply {
         format!(
             "{}|{}|{}",
             self.0,
             request,
             add_info.origin.as_deref().unwrap_or("-")
         )
+        .into()
     }
 }
 
@@ -31,11 +32,23 @@ fn routed(registry: &Registry, text: &str) -> String {
         Route::InvalidJson => "invalid-json".into(),
         Route::Module(m) => m
             .process("", &AddInfo::default())
+            .into_text()
+            .unwrap()
             .split('|')
             .next()
             .unwrap()
             .into(),
     }
+}
+
+#[test]
+fn reply_from_string_is_text() {
+    let reply = Reply::from("{}".to_owned());
+    assert_eq!(reply, Reply::Text("{}".to_owned()));
+    assert_eq!(reply.text(), Some("{}"));
+    assert_eq!(reply, "{}");
+    assert_eq!(Reply::Drop.text(), None);
+    assert_eq!(Reply::Drop.into_text(), None);
 }
 
 #[test]

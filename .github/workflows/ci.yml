@@ -25,6 +25,7 @@ jobs:
         run: rustup toolchain install
       - run: cargo fmt --all --check
       - run: cargo fmt --manifest-path crates/oncl-pdk/example/Cargo.toml --check
+      - run: cargo fmt --manifest-path plugins/Cargo.toml --all --check
 
   clippy:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
@@ -45,6 +46,10 @@ jobs:
         run: cargo clippy --locked --manifest-path crates/oncl-pdk/example/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
       - name: Clippy of the guest SDK (wasm32)
         run: cargo clippy --locked -p oncl-pdk --target wasm32-unknown-unknown -- -D warnings
+      - name: Clippy of the plugin ports (wasm32)
+        run: cargo clippy --locked --manifest-path plugins/Cargo.toml --workspace --target wasm32-unknown-unknown -- -D warnings
+      - name: Tests of the ports' shared libraries
+        run: cargo test --locked --manifest-path plugins/Cargo.toml -p oncl-port-kit -p oncl-port-pki
 
   test:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
@@ -74,12 +79,16 @@ jobs:
       # Linux alone, where the fetch takes seconds (close to a minute on Windows).
       - name: Fetch packages
         if: runner.os == 'Linux'
-        run: cargo fetch --locked
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path plugins/Cargo.toml
       - name: Test
         shell: bash
         run: |
           skip=()
-          if [ "$RUNNER_OS" != Linux ]; then skip=(--skip committed_licenses_are_fresh); fi
+          if [ "$RUNNER_OS" != Linux ]; then
+            skip=(--skip committed_licenses_are_fresh --skip committed_plugin_licenses_are_fresh)
+          fi
           cargo xtask fetch-fixtures
           cargo test --workspace --all-features -- --include-ignored --skip live_ "${skip[@]}"
       # The `clippy` job runs on Linux and never sees `cfg(windows)` code (oncl-ui foreground).
@@ -132,6 +141,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      # The plugin ports' own lock file, under the core's rules.
+      - name: cargo deny of the plugin ports
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: plugins/Cargo.toml
+          arguments: --all-features --config deny.toml
 
   extension:
     if: github.event_name == 'push' || github.event_name == 'pull_request'

@@ -20,12 +20,12 @@ pub mod package;
 mod runtime;
 pub mod store;
 
-pub use caps::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_KEY_HANDLES};
+pub use caps::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_KEY_HANDLES, MAX_SECRETS};
 pub use host::HostServices;
 pub use manifest::{Capabilities, HttpPrefix, Localized, Manifest, Replaces};
 pub use modules::{BUILT_IN, LoadedInfo, OnMissing, PluginModules};
 pub use oncl_pdk::abi::ABI_VERSION;
-pub use package::{MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, PACKAGE_EXT, Package};
+pub use package::{MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, PACKAGE_EXT, Package, archive};
 pub use runtime::{
     Compiled, Engine, Instance, LoadError, MAX_INSTANCES, MAX_MEMORY, MAX_TRANSFER,
     PLUGIN_ERROR_REPLY, PROCESS_FUEL, PluginError, SessionContext,

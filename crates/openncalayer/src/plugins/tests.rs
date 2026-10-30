@@ -108,6 +108,7 @@ impl Sandbox {
             tsa: TsaProfile::basics_default(),
             clock: OffsetDateTime::now_utc,
             locale: Arc::new(|| Locale::Ru),
+            cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
         };
         let builtin = vec![oncl_basics::MODULE_NAME.to_owned()];
         Sandbox {
@@ -234,7 +235,7 @@ impl Sandbox {
                 session: 1,
             },
         );
-        serde_json::from_str::<serde_json::Value>(&reply).unwrap()["body"].clone()
+        serde_json::from_str::<serde_json::Value>(reply.text().unwrap()).unwrap()["body"].clone()
     }
 }
 

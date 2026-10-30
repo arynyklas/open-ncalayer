@@ -61,6 +61,9 @@ enum Command {
         /// Regenerate in memory and fail if the committed file differs.
         #[arg(long)]
         check: bool,
+        /// The licences of the plugin ports (`plugins/THIRD-PARTY.txt`) instead.
+        #[arg(long)]
+        plugins: bool,
     },
     /// Verify our XMLDSig and CMS signatures with NCANode (Kalkan) in Docker (Linux only).
     InteropNcanode,
@@ -482,19 +485,41 @@ fn main() -> anyhow::Result<()> {
             println!("fixtures/synthetic is up to date");
             Ok(())
         }
-        Command::Licenses { check: false } => {
-            let path = xtask::licenses::write(&oncl_testkit::workspace_root())?;
+        Command::Licenses {
+            check: false,
+            plugins,
+        } => {
+            let root = oncl_testkit::workspace_root();
+            let path = if plugins {
+                xtask::licenses::write_plugins(&root)?
+            } else {
+                xtask::licenses::write(&root)?
+            };
             println!("{}", path.display());
             Ok(())
         }
-        Command::Licenses { check: true } => {
-            if !xtask::licenses::check(&oncl_testkit::workspace_root())? {
-                anyhow::bail!(
-                    "{} is stale: run `cargo xtask licenses`",
-                    xtask::licenses::OUTPUT
-                );
+        Command::Licenses {
+            check: true,
+            plugins,
+        } => {
+            let root = oncl_testkit::workspace_root();
+            let (fresh, output, command) = if plugins {
+                (
+                    xtask::licenses::check_plugins(&root)?,
+                    xtask::licenses::PLUGINS_OUTPUT,
+                    "cargo xtask licenses --plugins",
+                )
+            } else {
+                (
+                    xtask::licenses::check(&root)?,
+                    xtask::licenses::OUTPUT,
+                    "cargo xtask licenses",
+                )
+            };
+            if !fresh {
+                anyhow::bail!("{output} is stale: run `{command}`");
             }
-            println!("{} is up to date", xtask::licenses::OUTPUT);
+            println!("{output} is up to date");
             Ok(())
         }
         Command::Sign {

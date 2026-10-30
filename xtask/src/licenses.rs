@@ -32,6 +32,16 @@ use serde_json::Value;
 /// The generated file, relative to the workspace root.
 pub const OUTPUT: &str = "crates/oncl-ui/assets/THIRD-PARTY.txt";
 
+/// The licences of the plugin ports' third-party crates (`cargo xtask licenses --plugins`),
+/// relative to the workspace root: published next to the plugin packages.
+pub const PLUGINS_OUTPUT: &str = "plugins/THIRD-PARTY.txt";
+
+/// The plugin ports' workspace, relative to the workspace root.
+const PLUGINS: &str = "plugins";
+
+/// The target of the plugin ports.
+const PLUGINS_TARGET: &str = "wasm32-unknown-unknown";
+
 /// Standard licence texts (`<SPDX id>.txt`), relative to the workspace root.
 pub const STANDARD_TEXTS: &str = "xtask/licenses";
 
@@ -112,6 +122,78 @@ pub fn write(root: &Path) -> anyhow::Result<PathBuf> {
 pub fn check(root: &Path) -> anyhow::Result<bool> {
     let expected = generate(root)?;
     Ok(fs::read(root.join(OUTPUT)).ok().as_deref() == Some(expected.as_bytes()))
+}
+
+/// Writes [`PLUGINS_OUTPUT`] under `root`.
+///
+/// # Errors
+///
+/// See [`generate_plugins`]; the file cannot be written.
+pub fn write_plugins(root: &Path) -> anyhow::Result<PathBuf> {
+    let text = generate_plugins(root)?;
+    let path = root.join(PLUGINS_OUTPUT);
+    fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
+/// Whether [`PLUGINS_OUTPUT`] under `root` is what [`generate_plugins`] gives.
+///
+/// # Errors
+///
+/// See [`generate_plugins`].
+pub fn check_plugins(root: &Path) -> anyhow::Result<bool> {
+    let expected = generate_plugins(root)?;
+    Ok(fs::read(root.join(PLUGINS_OUTPUT)).ok().as_deref() == Some(expected.as_bytes()))
+}
+
+/// The licence file of the plugin ports: the third-party crates of every member of the
+/// `plugins/` workspace for wasm32 (normal dependencies, no procedural macros), with the
+/// texts, rules and accepted licences of [`generate`].
+///
+/// # Errors
+///
+/// As [`generate`].
+pub fn generate_plugins(root: &Path) -> anyhow::Result<String> {
+    let dir = root.join(PLUGINS);
+    let out = cargo(
+        &dir,
+        &[
+            "tree",
+            "--locked",
+            "--offline",
+            "--workspace",
+            "--edges",
+            "normal,no-proc-macro",
+            "--target",
+            PLUGINS_TARGET,
+            "--prefix",
+            "none",
+            "--format",
+            "{p}",
+        ],
+    )?;
+    let mut packages = registry_packages(&dir)?;
+    let mut shipped = BTreeSet::new();
+    for line in out.lines().filter(|l| !l.trim().is_empty()) {
+        let mut words = line.split_whitespace();
+        let (Some(name), Some(version)) = (words.next(), words.next()) else {
+            bail!("unexpected `cargo tree` line {line:?}");
+        };
+        let version = version
+            .strip_prefix('v')
+            .with_context(|| format!("unexpected `cargo tree` line {line:?}"))?;
+        // Path packages (the ports, their libraries, the PDK) are ours.
+        if packages.contains_key(&(name.to_owned(), version.to_owned())) {
+            shipped.insert((name.to_owned(), version.to_owned()));
+        }
+    }
+    let crates: Vec<Package> = shipped
+        .into_iter()
+        .filter_map(|key| packages.remove(&key))
+        .collect();
+    let accepted = accepted_licenses(root)?;
+    let standard = standard_texts(&root.join(STANDARD_TEXTS))?;
+    render(&crates, &accepted, &standard)
 }
 
 /// The licence file of the workspace at `root`.

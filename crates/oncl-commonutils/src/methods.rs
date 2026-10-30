@@ -44,6 +44,7 @@ use oncl_pki::pkix::{self, PathError};
 use oncl_pki::xmldsig::{self, XmlError};
 use oncl_pki::{pem, tsp};
 use oncl_protocol::AddInfo;
+use oncl_protocol::javab64::decode_java;
 use oncl_token::TokenKind;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -291,7 +292,7 @@ enum Data<'a> {
 impl Data<'_> {
     fn bytes(self) -> Result<Vec<u8>, Option<String>> {
         match self {
-            Data::Base64(text) => java_base64_decode(text).map_err(Some),
+            Data::Base64(text) => decode_java(text).map_err(Some),
             Data::Bytes(bytes) => Ok(bytes),
         }
     }
@@ -720,137 +721,9 @@ fn file_detail(l: Locale, path: &str) -> String {
     }
 }
 
-/// Java 8's `Base64.getDecoder().decode(String)`, with its messages: the standard alphabet,
-/// no whitespace, padding optional but complete when present, trailing bits ignored.
-/// Characters beyond Latin-1 are one `?` each, a supplementary character included
-/// (`getBytes(ISO_8859_1)`).
-fn java_base64_decode(text: &str) -> Result<Vec<u8>, String> {
-    let src: Vec<u8> = text
-        .chars()
-        .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
-        .collect();
-    if src.is_empty() {
-        return Ok(Vec::new());
-    }
-    if src.len() < 2 {
-        return Err("Input byte[] should at least have 2 bytes for base64 bytes".to_owned());
-    }
-    let mut out = Vec::with_capacity(src.len() / 4 * 3 + 2);
-    let mut bits: u32 = 0;
-    let mut shift: i32 = 18;
-    let mut sp = 0;
-    while sp < src.len() {
-        let b = src[sp];
-        sp += 1;
-        let Some(v) = base64_value(b) else {
-            if b == b'=' {
-                // `=` where no padding may be, or a single `=` where two must be.
-                let incomplete = shift == 6 && (sp == src.len() || src[sp] != b'=');
-                if incomplete || shift == 18 {
-                    return Err("Input byte array has wrong 4-byte ending unit".to_owned());
-                }
-                if shift == 6 {
-                    sp += 1;
-                }
-                break;
-            }
-            return Err(format!("Illegal base64 character {}", java_byte_hex(b)));
-        };
-        bits |= u32::from(v) << shift;
-        shift -= 6;
-        if shift < 0 {
-            out.extend_from_slice(&[(bits >> 16) as u8, (bits >> 8) as u8, bits as u8]);
-            shift = 18;
-            bits = 0;
-        }
-    }
-    match shift {
-        6 => out.push((bits >> 16) as u8),
-        0 => out.extend_from_slice(&[(bits >> 16) as u8, (bits >> 8) as u8]),
-        12 => return Err("Last unit does not have enough valid bits".to_owned()),
-        _ => {}
-    }
-    if sp < src.len() {
-        return Err(format!(
-            "Input byte array has incorrect ending byte at {sp}"
-        ));
-    }
-    Ok(out)
-}
-
-fn base64_value(b: u8) -> Option<u8> {
-    match b {
-        b'A'..=b'Z' => Some(b - b'A'),
-        b'a'..=b'z' => Some(b - b'a' + 26),
-        b'0'..=b'9' => Some(b - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
-/// `Integer.toString(b, 16)` of a Java (signed) byte.
-fn java_byte_hex(b: u8) -> String {
-    if b < 0x80 {
-        format!("{b:x}")
-    } else {
-        format!("-{:x}", 0x100 - u16::from(b))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn java_base64() {
-        assert_eq!(java_base64_decode(""), Ok(vec![]));
-        assert_eq!(java_base64_decode("aGVsbG8="), Ok(b"hello".to_vec()));
-        assert_eq!(java_base64_decode("aGVsbG8"), Ok(b"hello".to_vec()));
-        assert_eq!(java_base64_decode("aGVsbA=="), Ok(b"hell".to_vec()));
-        assert_eq!(java_base64_decode("aGVsbA"), Ok(b"hell".to_vec()));
-        // Trailing bits are ignored.
-        assert_eq!(java_base64_decode("YR=="), Ok(b"a".to_vec()));
-        let err = |s: &str| java_base64_decode(s).unwrap_err();
-        assert_eq!(
-            err("a"),
-            "Input byte[] should at least have 2 bytes for base64 bytes"
-        );
-        assert_eq!(err("aGVs bG8="), "Illegal base64 character 20");
-        assert_eq!(err("aGVsbG8\n"), "Illegal base64 character a");
-        assert_eq!(err("aGVsbG-8"), "Illegal base64 character 2d");
-        // Latin-1 bytes print as negative Java bytes; other characters become `?`.
-        assert_eq!(err("aé"), "Illegal base64 character -17");
-        assert_eq!(err("aӘ"), "Illegal base64 character 3f");
-        // A supplementary character is one `?` too.
-        assert_eq!(
-            err("\u{1F600}"),
-            "Input byte[] should at least have 2 bytes for base64 bytes"
-        );
-        assert_eq!(err("a\u{1F600}"), "Illegal base64 character 3f");
-        assert_eq!(
-            err("aGVsbA="),
-            "Input byte array has wrong 4-byte ending unit"
-        );
-        assert_eq!(
-            err("aGVs="),
-            "Input byte array has wrong 4-byte ending unit"
-        );
-        assert_eq!(
-            err("=aGVs"),
-            "Input byte array has wrong 4-byte ending unit"
-        );
-        assert_eq!(err("aGVsb"), "Last unit does not have enough valid bits");
-        assert_eq!(err("aGVsb="), "Last unit does not have enough valid bits");
-        assert_eq!(
-            err("aGVsbA==aGVs"),
-            "Input byte array has incorrect ending byte at 8"
-        );
-        assert_eq!(
-            err("aGVsbG8=x"),
-            "Input byte array has incorrect ending byte at 8"
-        );
-    }
 
     #[test]
     fn equals_ignore_case() {
