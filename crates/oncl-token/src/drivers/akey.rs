@@ -203,6 +203,11 @@ impl Driver for AKey {
         }
     }
 
+    fn pin_tries(&mut self, card: &mut Card<'_>) -> Result<Option<u8>, TokenError> {
+        let info = card.expect(&token_info(), "token information")?;
+        Ok(info.get(85).copied())
+    }
+
     fn keys(&mut self, card: &mut Card<'_>) -> Result<Vec<KeySlot>, TokenError> {
         let mut stream = Stream {
             card,

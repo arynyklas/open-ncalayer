@@ -139,6 +139,16 @@ impl Driver for Kaztoken {
         })
     }
 
+    fn pin_tries(&mut self, card: &mut Card<'_>) -> Result<Option<u8>, TokenError> {
+        // VERIFY without data asks for the PIN's state.
+        let status = card.transmit(&verify())?;
+        Ok(match status.sw {
+            0x6983 => Some(0),
+            sw if sw >> 8 == 0x63 => Some(status.sw2() & 0x0F),
+            _ => None,
+        })
+    }
+
     fn keys(&mut self, card: &mut Card<'_>) -> Result<Vec<KeySlot>, TokenError> {
         // The map file is only read: a token without one has no keys, and none is created.
         let found = card.transmit(&select_path(&[0x10, 0x00, 0x10, 0x10, 0x10, 0x10]))?;

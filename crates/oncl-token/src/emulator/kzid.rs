@@ -262,6 +262,16 @@ impl Applet for KzIdCard {
             (0x00, 0xA4, p1, 0x0C) => self.select(p1, &apdu.data),
             (0x00, 0xB0, _, _) => self.read(apdu),
             (0x00, 0x20, 0x00, 0x02) => {
+                if apdu.data.is_empty() {
+                    // The PIN's state, no try spent.
+                    return if self.pin.is_verified() {
+                        sw(0x9000)
+                    } else if self.pin.is_blocked() {
+                        sw(0x6984)
+                    } else {
+                        sw(0x63C0 | u16::from(self.pin.tries()))
+                    };
+                }
                 if apdu.data.len() != 8 {
                     return sw(0x6700);
                 }

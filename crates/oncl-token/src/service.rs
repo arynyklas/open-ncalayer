@@ -214,6 +214,40 @@ impl Tokens {
             .collect())
     }
 
+    /// The PIN tries left of the token of `kind` in `reader`, read without spending one and
+    /// without sending a PIN; `None` when the family does not tell them (nothing is sent to
+    /// the card then beyond opening it). `Some(0)`: the PIN is blocked.
+    ///
+    /// # Errors
+    ///
+    /// [`TokenError::Disabled`] with support off; [`TokenError::NoDevice`] when the reader
+    /// holds no token of `kind`; card and transport errors.
+    pub fn pin_tries(&self, reader: &str, kind: TokenKind) -> Result<Option<u8>, TokenError> {
+        if !self.is_enabled() {
+            return Err(TokenError::Disabled);
+        }
+        if !kind.reports_tries() {
+            // Still the card must be there and be this token.
+            let atr = self
+                .backend
+                .readers()?
+                .into_iter()
+                .find(|r| r.name == reader)
+                .and_then(|r| r.atr)
+                .ok_or(TokenError::NoDevice)?;
+            return match TokenKind::from_atr(&atr) {
+                Some(k) if k == kind => Ok(None),
+                _ => Err(TokenError::NoDevice),
+            };
+        }
+        let trace = self.trace();
+        let not_kind = || TokenError::NoDevice;
+        on_card(&*self.backend, reader, kind, not_kind, |conn| {
+            let mut card = Card::new(conn, trace);
+            open_driver(kind, &mut card)?.pin_tries(&mut card)
+        })
+    }
+
     /// The holder of the ID card in `reader`, read without the PIN. The reader's card is
     /// checked by its ATR before connecting: any other card is never touched.
     ///
