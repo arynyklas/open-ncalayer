@@ -235,7 +235,7 @@ fn verify_all(req: &Map<String, Value>, origin: &str, locale: Locale) -> Outcome
     let results_url = orgjson::opt_string(req, "signVerifyResURL").unwrap_or_default();
     let items = orgjson::get_array(req, "items").map_err(|_| Failure::Drop)?;
 
-    // The original's `HashMap<Integer, String>`: a repeated id keeps its place.
+    // The original's `HashMap<String, String>` of the ids: a repeated id keeps its place.
     let mut results: Vec<(i32, bool)> = Vec::new();
     let mut count = 0usize;
     let failed = || k2("SIGN_VERIFICATION_FAILED");
@@ -281,7 +281,7 @@ fn verify_all(req: &Map<String, Value>, origin: &str, locale: Locale) -> Outcome
 }
 
 /// `POST <origin>/<results_url>`: the user and each id's `Y`/`N`, in the order of Java's
-/// `HashMap` of the ids. A failure is only shown.
+/// `HashMap` keyed by the ids as strings. A failure is only shown.
 fn send_results(
     origin: &str,
     results_url: &str,
@@ -289,14 +289,14 @@ fn send_results(
     results: &[(i32, bool)],
     locale: Locale,
 ) {
-    let ids: Vec<i32> = results.iter().map(|(id, _)| *id).collect();
+    let ids: Vec<String> = results.iter().map(|(id, _)| id.to_string()).collect();
+    let keys: Vec<&str> = ids.iter().map(String::as_str).collect();
     let mut body = format!("userName={}&verifyRes=", url_encode(user));
-    for i in integer_map_order(&ids) {
-        let (id, valid) = results[i];
+    for i in javamap::iteration_order(&keys, javamap::DEFAULT_CAPACITY) {
         body.push_str(&format!(
             "{}-{};",
-            url_encode(&id.to_string()),
-            yes_no(valid)
+            url_encode(keys[i]),
+            yes_no(results[i].1)
         ));
     }
     let args = HttpExArgs {
@@ -430,7 +430,12 @@ fn upload(
         Some(body.content_type()),
         body.body(),
     )
-    .map_err(|_| k2("UPLOAD_FILE_EXCEPTION"))?;
+    // A refused URL is the upload's error; any other failure to reach the site is the
+    // original's request error.
+    .map_err(|e| match e.code {
+        ErrorCode::Denied => k2("UPLOAD_FILE_EXCEPTION"),
+        _ => k2("CREATE_REQUEST_ERROR"),
+    })?;
     if reply.status != 200 {
         return Err(k2("UPLOAD_FILE_EXCEPTION"));
     }
@@ -546,24 +551,6 @@ fn cades(key: &Key, data: &[u8], timestamp: bool) -> Result<Vec<u8>, Failure> {
         Ok(CmsOutcome::Signed(cms)) => Ok(cms.into_vec()),
         Ok(CmsOutcome::TspFailed(_)) | Err(_) => Err(k2("CREATE_CMS_ERROR")),
     }
-}
-
-/// The iteration order of Java's `HashMap<Integer, _>` (16 buckets, doubled past three
-/// quarters full) into which the distinct `keys` were put in order: their indices. Resizing
-/// keeps the order within a bucket, so it is the insertion order sorted by final bucket.
-/// (A bucket of nine or more keys, which Java would turn into a tree, is not modelled.)
-fn integer_map_order(keys: &[i32]) -> Vec<usize> {
-    let mut capacity = javamap::DEFAULT_CAPACITY;
-    while keys.len() > capacity / 4 * 3 {
-        capacity *= 2;
-    }
-    let bucket = |key: i32| {
-        let h = key as u32;
-        ((h ^ (h >> 16)) as usize) & (capacity - 1)
-    };
-    let mut order: Vec<usize> = (0..keys.len()).collect();
-    order.sort_by_key(|&i| bucket(keys[i]));
-    order
 }
 
 /// `URLEncoder.encode(s, "UTF-8")`.

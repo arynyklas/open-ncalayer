@@ -2,7 +2,6 @@
 //! the owner check reads, and its `toString()` in the replies of the raw signatures.
 
 use oncl_pdk::orgjson::JObject;
-use oncl_port_kit::date::format_java;
 
 /// What the bean is made of: the key and its certificate as the host reads them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -84,8 +83,8 @@ impl KeyInfo {
 
     /// The bean as org.json writes it: its properties in the bean's field order (which
     /// decides the order of keys sharing a `HashMap` bucket); `datefrom` and `dateto` hold
-    /// notAfter and notBefore (the bean's setters swap them), as `dd.MM.yyyy (HH:mm)` in
-    /// Asia/Almaty; `usage` and `path` are never set for a key from the dialog.
+    /// notBefore and notAfter in epoch milliseconds, as `certNotBefore` and `certNotAfter`;
+    /// `usage` and `path` are never set for a key from the dialog.
     pub fn bean(&self) -> JObject {
         let f = &self.facts;
         let mut bean = JObject::hash_map();
@@ -100,10 +99,8 @@ impl KeyInfo {
         bean.put("issuerdn", f.issuer_dn.as_str());
         bean.put("certNotAfter", f.not_after_ms.to_string());
         bean.put("certNotBefore", f.not_before_ms.to_string());
-        // Unverified against the original: the dates' text in this reply and that the
-        // swapping setters fill it.
-        bean.put("datefrom", almaty(f.not_after_ms));
-        bean.put("dateto", almaty(f.not_before_ms));
+        bean.put("datefrom", f.not_before_ms.to_string());
+        bean.put("dateto", f.not_after_ms.to_string());
         bean.put_opt("authorityKeyIdentifier", f.aki.clone());
         bean.put("pem", f.pem.as_str());
         bean
@@ -131,17 +128,6 @@ impl KeyInfo {
             f.pem,
         )
     }
-}
-
-/// `dd.MM.yyyy (HH:mm)` in Asia/Almaty: UTC+6, UTC+5 from 2024-03-01 00:00 local time.
-pub fn almaty(unix_ms: i64) -> String {
-    const UTC5_FROM_MS: i64 = 1_709_229_600_000;
-    let offset = if unix_ms < UTC5_FROM_MS {
-        6 * 3600
-    } else {
-        5 * 3600
-    };
-    format_java("dd.MM.yyyy (HH:mm)", unix_ms, offset)
 }
 
 #[cfg(test)]
@@ -203,12 +189,5 @@ mod tests {
              issuerCn=null, issuerDn=, serialNumber=01, certNotAfter=0, certNotBefore=0, \
              authorityKeyIdentifier=null, pem=P)"
         );
-    }
-
-    #[test]
-    fn almaty_dates() {
-        // 2024-02-29 17:59 UTC is 23:59 at UTC+6; 2026-10-29 12:00 UTC is 17:00 at UTC+5.
-        assert_eq!(almaty(1_709_229_540_000), "29.02.2024 (23:59)");
-        assert_eq!(almaty(1_793_275_200_000), "29.10.2026 (17:00)");
     }
 }

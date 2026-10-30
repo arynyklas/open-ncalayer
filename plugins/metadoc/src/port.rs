@@ -332,7 +332,7 @@ fn open_key(storage: &str, source: KeySource, password: Password) -> Result<Key,
         // The user did not let the page open the file.
         Err(OpenOutcome::Declined) => return Err(CANCELLED.into()),
         // Unverified against the original: the text of a token that is blocked or not
-        // there (no tokens until the core has them).
+        // there (tokens open only with the core's experimental token support).
         Err(_) => return Err(COULD_NOT_LOAD_KEY.into()),
     };
     if token {

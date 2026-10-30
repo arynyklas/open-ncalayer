@@ -269,6 +269,20 @@ fn market_xml_escapes_closing_tags() {
     assert_eq!(signatures.len(), 1);
 }
 
+/// The original's serializer omits the XML declaration: a page's declaration is dropped.
+#[test]
+fn market_xml_drops_the_declaration() {
+    let harness = Harness::new(pick(), vec![]);
+    let request = serde_json::json!({
+        "type": "xml",
+        "data": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><doc><a>x</a></doc>",
+    });
+    let reply = harness.call("market", &request.to_string(), None);
+    let xml = result(&reply);
+    assert!(xml.starts_with("<doc><a>x</a>"), "{xml}");
+    assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+}
+
 #[test]
 fn market_xml_missing_data_is_a_bad_request() {
     let harness = Harness::new(steps(vec![pick(), vec![Step::CancelChoice]]), vec![]);
@@ -372,6 +386,33 @@ fn efactoring_xml_element_with_parent() {
     );
     let signatures = oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap();
     assert_eq!(signatures.len(), 1);
+}
+
+/// The original's serializer omits the XML declaration, for the document and an element.
+#[test]
+fn efactoring_xml_drops_the_declaration() {
+    for (data, element, parent) in [
+        ("<doc><a>x</a></doc>", None, None),
+        (
+            "<root><data Id=\"d1\">x</data><sig/></root>",
+            Some("/root/data"),
+            Some("/root/sig"),
+        ),
+    ] {
+        let harness = Harness::new(pick(), vec![]);
+        let mut request = serde_json::json!({
+            "type": "xml",
+            "data": format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>{data}"),
+        });
+        if let (Some(element), Some(parent)) = (element, parent) {
+            request["sign_element"] = element.into();
+            request["signature_parent_element"] = parent.into();
+        }
+        let reply = harness.call("efactoring", &request.to_string(), None);
+        let xml = result(&reply);
+        assert!(xml.starts_with(&data[..6]), "{xml}");
+        assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+    }
 }
 
 #[test]
@@ -1414,6 +1455,13 @@ fn k2_server_error_mapping() {
             "Период действия сертификата еще не наступил.",
         ),
         (200, "error: NO_SUCH_TYPE", "OTHER", " "),
+        // A text of the resources that is not a name of the original's error enum.
+        (
+            200,
+            "error: ALL_SIGN_ARE_VALID",
+            "OTHER",
+            "Все ЭЦП подлинны.",
+        ),
         (
             200,
             "error:",
@@ -1449,6 +1497,33 @@ fn k2_server_error_mapping() {
         let message = &harness.prompter().message_prompts()[0];
         assert_eq!(message.text, dialog, "{body}");
         assert_eq!(message.kind, MessageKind::Error);
+    }
+}
+
+/// The upload never reaching the site is the original's request error; only a refused URL
+/// and an HTTP status other than 200 are `UPLOAD_FILE_EXCEPTION`.
+#[test]
+fn k2_upload_network_failure_is_create_request_error() {
+    for kind in [
+        HttpErrorKind::Connect,
+        HttpErrorKind::Timeout,
+        HttpErrorKind::UnknownHost,
+    ] {
+        let path = temp_file("k2_down", "a.pdf", PDF);
+        let down: Arc<dyn HttpTransport> = Arc::new(Down(kind));
+        let harness = Harness::new(
+            vec![Step::Path(path), Step::Message],
+            vec![(K2_ORIGIN.to_owned(), down)],
+        );
+        let request = r#"{"type":"file","userName":"u","uploadURL":"/up","uploadOnly":"Y"}"#;
+        let reply = harness.call("k2sign", request, Some(K2_ORIGIN));
+        assert_eq!(
+            text(&reply),
+            r#"{"errorCode":"CREATE_REQUEST_ERROR"}"#,
+            "{kind:?}"
+        );
+        let message = &harness.prompter().message_prompts()[0];
+        assert_eq!(message.text, "Ошибка при формировании запроса");
     }
 }
 
@@ -1596,10 +1671,10 @@ fn k2_verify_all_posts_results_in_hashmap_order() {
         post.content_type.as_deref(),
         Some("application/x-www-form-urlencoded")
     );
-    // Java's HashMap of the ids: 17 and 33 share bucket 1, 2 is in bucket 2.
+    // Java's HashMap of the ids as strings ("33" in bucket 0, "2" in 2, "17" in 6).
     assert_eq!(
         String::from_utf8(post.body.clone()).unwrap(),
-        "userName=%D0%98%D0%B2%D0%B0%D0%BD+%D0%98%D0%B2%D0%B0%D0%BD%D0%BE%D0%B2&verifyRes=17-Y;33-Y;2-Y;"
+        "userName=%D0%98%D0%B2%D0%B0%D0%BD+%D0%98%D0%B2%D0%B0%D0%BD%D0%BE%D0%B2&verifyRes=33-Y;2-Y;17-Y;"
     );
 }
 

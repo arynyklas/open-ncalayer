@@ -19,7 +19,6 @@ version = "1.2.1"
 
 [capabilities]
 keys = true
-dialogs = true
 files = true
 page_files = true
 page_files_ext = ["cms"]

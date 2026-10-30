@@ -134,40 +134,52 @@ fn sign_binary(req: &Map<String, Value>, texts: &Texts) -> String {
 
 /// Kalkan's `createXmlSignature`: without `element`, the whole document; with it, the
 /// element (which has an `Id`) under `parent`. A `parent` that is empty or names the element
-/// itself fails, as in the original.
+/// itself fails, as in the original. Written without an XML declaration, as the original's
+/// serializer wrote it.
 fn xmldsig(key: &Key, xml: &str, element: &str, parent: &str) -> Option<String> {
-    let signed = if element.is_empty() {
-        key.sign_xml(xml.as_bytes(), None, None).ok()?
-    } else {
+    let mut args = SignXmlExArgs {
+        handle: key.handle(),
+        xml: xml.as_bytes().to_vec().into(),
+        element: None,
+        parent: None,
+        namespaces: Vec::new(),
+        other_prefix_uri: None,
+        placement: Placement::DocumentElement,
+        signature_method: None,
+        digest_method: None,
+        signed_info_c14n: None,
+        transforms: None,
+        signature_id: None,
+        signing_time_object: None,
+        strip_whitespace: false,
+        base64_line_breaks: None,
+        output: XmlOutput::Serialize {
+            declaration: false,
+            standalone_no: false,
+            trim: false,
+        },
+    };
+    if !element.is_empty() {
         if parent.is_empty() || equals_ignore_case(parent, element) {
             return None;
         }
-        let args = SignXmlExArgs {
-            handle: key.handle(),
-            xml: xml.as_bytes().to_vec().into(),
-            element: Some(element.to_owned()),
-            parent: Some(parent.to_owned()),
-            namespaces: vec![NsBinding {
-                prefix: "SOAP-ENV".to_owned(),
-                uri: SOAP_ENV_NS.to_owned(),
-            }],
-            other_prefix_uri: Some(XMLDSIG_NS.to_owned()),
-            placement: Placement::Parent,
-            signature_method: None,
-            digest_method: None,
-            signed_info_c14n: Some(C14n::Exclusive),
-            transforms: Some(vec![
-                Transform::Enveloped,
-                Transform::C14n(C14n::InclusiveWithComments),
-            ]),
-            signature_id: None,
-            signing_time_object: None,
-            strip_whitespace: false,
-            base64_line_breaks: None,
-            output: XmlOutput::AsIs,
-        };
-        key.sign_xml_ex(args).ok()?
-    };
+        args.element = Some(element.to_owned());
+        args.parent = Some(parent.to_owned());
+        args.namespaces = vec![NsBinding {
+            prefix: "SOAP-ENV".to_owned(),
+            uri: SOAP_ENV_NS.to_owned(),
+        }];
+        args.other_prefix_uri = Some(XMLDSIG_NS.to_owned());
+        args.placement = Placement::Parent;
+        args.signed_info_c14n = Some(C14n::Exclusive);
+        // A deliberate fix (registry.toml): the original used only the C14N transform; the
+        // enveloped one also lets a signature placed inside the signed element verify.
+        args.transforms = Some(vec![
+            Transform::Enveloped,
+            Transform::C14n(C14n::InclusiveWithComments),
+        ]);
+    }
+    let signed = key.sign_xml_ex(args).ok()?;
     Some(String::from_utf8_lossy(&signed).into_owned())
 }
 

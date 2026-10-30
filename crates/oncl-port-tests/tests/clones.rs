@@ -251,17 +251,6 @@ fn rating1c_key_info(name: &str) -> JObject {
     let info = cert_info(&e.cert);
     let tbs = e.cert.tbs_certificate();
     let ms = |t: time::OffsetDateTime| (t.unix_timestamp_nanos() / 1_000_000) as i64;
-    let almaty = |t: time::OffsetDateTime| {
-        let local = t.to_offset(time::UtcOffset::from_hms(5, 0, 0).unwrap());
-        format!(
-            "{:02}.{:02}.{} ({:02}:{:02})",
-            local.day(),
-            u8::from(local.month()),
-            local.year(),
-            local.hour(),
-            local.minute()
-        )
-    };
     let mut bean = JObject::hash_map();
     bean.put("alias", e.alias.as_str());
     bean.put_opt("keyId", oncl_pki::info::ski_hex(&e.cert));
@@ -277,8 +266,8 @@ fn rating1c_key_info(name: &str) -> JObject {
     bean.put("issuerdn", kalkan_dn(tbs.issuer()));
     bean.put("certNotAfter", ms(info.not_after).to_string());
     bean.put("certNotBefore", ms(info.not_before).to_string());
-    bean.put("datefrom", almaty(info.not_after));
-    bean.put("dateto", almaty(info.not_before));
+    bean.put("datefrom", ms(info.not_before).to_string());
+    bean.put("dateto", ms(info.not_after).to_string());
     bean.put_opt("authorityKeyIdentifier", oncl_pki::info::aki_hex(&e.cert));
     bean.put(
         "pem",
@@ -298,7 +287,7 @@ fn rating1c_get_key_info_bytes() {
         JValue::Obj(rating1c_key_info("user-gost2015-sign")),
     );
     assert_eq!(reply, expected.to_json());
-    // The fifteen keys in Java's HashMap order (32 buckets): the swapped dates included.
+    // The fifteen keys in Java's HashMap order (32 buckets).
     let keys: Vec<String> = parse(&reply)["responseObject"]
         .as_object()
         .unwrap()
@@ -355,7 +344,9 @@ fn rating1c_test_key_owner_bin_mismatch() {
 }
 
 #[test]
-fn rating1c_test_key_owner_cancel_is_500() {
+/// One window for storage and key: a cancel at either step is the key step's bare 500
+/// (registry.toml; the original's storage step added `action.canceled`).
+fn rating1c_test_key_owner_cancel_at_either_step_is_bare_500() {
     assert_eq!(
         r1c(
             vec![Step::CancelStorage],
@@ -403,6 +394,26 @@ fn rating1c_sign_xml_six_args() {
         json!(["PKCS12", "SIGNATURE", [xml, "<c/>"], "", "", ""]),
     ));
     assert_eq!(many["responseObject"].as_array().unwrap().len(), 2);
+}
+
+/// The original's serializer omits the XML declaration of the page's document.
+#[test]
+fn rating1c_sign_xml_drops_the_declaration() {
+    let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><a><b Id=\"x\">1</b></a>";
+    for (tbs, parent) in [("", ""), ("/a/b", "")] {
+        let reply = parse(&r1c(
+            key("user-gost2015-sign"),
+            "signXml",
+            json!(["PKCS12", "SIGNATURE", xml, tbs, parent, ""]),
+        ));
+        assert_eq!(reply["code"], "200", "{reply}");
+        let signed = reply["responseObject"].as_str().unwrap();
+        assert!(signed.starts_with("<a><b"), "{signed}");
+        assert_eq!(
+            oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap().len(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -631,7 +642,9 @@ fn xdox_createcms_attached_kalkan_tsa() {
 }
 
 #[test]
-fn xdox_cancel_misplaced_key() {
+/// One window for storage and key: a cancel at either step is the key step's `Misplaced
+/// key.` (registry.toml; the original's file chooser said `action.canceled`).
+fn xdox_cancel_at_either_step_is_misplaced_key() {
     let h = Harness::new(vec![Step::CancelStorage], vec![]);
     let request = xdox_request("createCms", json!({"storageName": "PKCS12"}));
     assert_eq!(
@@ -1358,10 +1371,8 @@ fn uchet_sign_xml_api_consent_and_message() {
         assert_eq!(reply["code"], "200");
         assert!(reply.get("responseObject").is_none());
         let xml = reply["message"].as_str().unwrap();
-        assert!(
-            xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?><doc>"),
-            "{xml}"
-        );
+        // The original prepended a declaration, which its serializer then omitted.
+        assert!(xml.starts_with("<doc>"), "{xml}");
         assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
     }
     // Asked once for the session.

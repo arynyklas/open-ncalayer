@@ -19,5 +19,3 @@ version = "1.9.5"
 
 [capabilities]
 keys = true
-dialogs = true
-files = true

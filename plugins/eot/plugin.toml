@@ -19,5 +19,3 @@ version = "1.0"
 
 [capabilities]
 keys = true
-dialogs = true
-files = true

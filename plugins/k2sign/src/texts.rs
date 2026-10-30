@@ -6,8 +6,8 @@ use oncl_pdk::Locale;
 /// The error types of K2Sign: a site may name any of them in its reply, the page then gets
 /// it as `errorCode`. Each with its texts in Russian, Kazakh and English; `None`: the
 /// resource files lack the key and the window shows a single space.
-// Unverified against the original: that the error types are exactly the keys of the
-// resource files' error table (with the two that have no text).
+// The original's error enum has these names; the resource keys that are not in it are in
+// `OTHER_KEYS`.
 pub const ERROR_TYPES: &[(&str, Option<[&str; 3]>)] = &[
     (
         "CANCEL",
@@ -555,49 +555,52 @@ pub const ERROR_TYPES: &[(&str, Option<[&str; 3]>)] = &[
             "Ошибка при проверке ключа!",
         ]),
     ),
+];
+
+/// Texts of other resource keys, which are not error types (a site's error type naming one
+/// is `OTHER` with its text), or that a site's error type may name once upper-cased.
+const OTHER_KEYS: &[(&str, [&str; 3])] = &[
+    (
+        "PKCS12",
+        ["Файловая система", "Файлдық жүйе", "File system"],
+    ),
     (
         "SIGN_VERIFICATION_SUCCESS",
-        Some(["ЭЦП подлинна.", "Қолтаңба түпнұсқа!", "Signature is valid!"]),
+        ["ЭЦП подлинна.", "Қолтаңба түпнұсқа!", "Signature is valid!"],
     ),
     (
         "ALL_SIGN_ARE_VALID",
-        Some([
+        [
             "Все ЭЦП подлинны.",
             "Барлық ЭЦҚ дәл.",
             "All signs are valid.",
-        ]),
+        ],
     ),
     (
         "ONE_NOT_VALID_SIGN_FOUND",
-        Some([
+        [
             "Обнаружена не подлинная ЭЦП!",
             "Дәл емес ЭЦҚ анықталды!",
             "Not valid sign found!",
-        ]),
+        ],
     ),
     (
         "MANY_NOT_VALID_SIGN_FOUND",
-        Some([
+        [
             "Обнаружены не подлинные ЭЦП!",
             "Дәл емес ЭЦҚ анықталды!",
             "Not valid signs found!",
-        ]),
+        ],
     ),
     (
         "UPLOAD_SIGN_VERIFY_RESULT_ERROR",
-        Some([
+        [
             "Ошибка закачивания результатов проверки на серве",
             "Тексеру нәтижелерін серверге жүктеу қатесі",
             "Ошибка закачивания результатов проверки на серве",
-        ]),
+        ],
     ),
 ];
-
-/// Texts of other keys a site's error type may name once upper-cased.
-const OTHER_KEYS: &[(&str, [&str; 3])] = &[(
-    "PKCS12",
-    ["Файловая система", "Файлдық жүйе", "File system"],
-)];
 
 /// The error type named `name`, if K2Sign has one.
 pub fn error_type(name: &str) -> Option<&'static str> {

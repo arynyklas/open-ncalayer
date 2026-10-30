@@ -8,7 +8,8 @@ mod texts;
 
 use oncl_pdk::abi::{
     Action, ChoiceArgs, ChooseArgs, CmsCerts, CmsContent, CmsOutcome, CoSign, Filter, MessageKind,
-    SignCmsExArgs, SignedAttrs, SigningTime, TimeForm, TimeSource, TsaChoice,
+    SignCmsExArgs, SignXmlExArgs, SignedAttrs, SigningTime, TimeForm, TimeSource, TsaChoice,
+    XmlOutput,
 };
 use oncl_pdk::keys::{self, Key};
 use oncl_pdk::orgjson::{self, JObject, JValue};
@@ -74,7 +75,8 @@ fn sign_text(req: &Map<String, Value>, texts: &Texts) -> String {
     }
 }
 
-/// `xml`: the whole document signed.
+/// `xml`: the whole document signed, without an XML declaration (the original's serializer
+/// omitted it).
 fn sign_xml(req: &Map<String, Value>, texts: &Texts) -> String {
     loop {
         let Some(key) = choose() else {
@@ -82,7 +84,7 @@ fn sign_xml(req: &Map<String, Value>, texts: &Texts) -> String {
         };
         let error = match orgjson::get_string(req, "data") {
             Err(_) => texts.bad_request,
-            Ok(xml) => match key.sign_xml(xml.as_bytes(), None, None) {
+            Ok(xml) => match key.sign_xml_ex(xmldsig_args(&key, xml)) {
                 Ok(signed) => {
                     let signed = String::from_utf8_lossy(&signed).into_owned();
                     return ecc(Some(signed.into()), Some("NONE"));
@@ -94,6 +96,32 @@ fn sign_xml(req: &Map<String, Value>, texts: &Texts) -> String {
         if !retry(texts, error) {
             return cancel();
         }
+    }
+}
+
+/// Kalkan's signature of the whole document, written without the XML declaration.
+fn xmldsig_args(key: &Key, xml: &str) -> SignXmlExArgs {
+    SignXmlExArgs {
+        handle: key.handle(),
+        xml: xml.as_bytes().to_vec().into(),
+        element: None,
+        parent: None,
+        namespaces: Vec::new(),
+        other_prefix_uri: None,
+        placement: Default::default(),
+        signature_method: None,
+        digest_method: None,
+        signed_info_c14n: None,
+        transforms: None,
+        signature_id: None,
+        signing_time_object: None,
+        strip_whitespace: false,
+        base64_line_breaks: None,
+        output: XmlOutput::Serialize {
+            declaration: false,
+            standalone_no: false,
+            trim: false,
+        },
     }
 }
 

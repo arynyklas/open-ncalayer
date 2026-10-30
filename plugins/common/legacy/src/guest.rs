@@ -4,7 +4,8 @@ use crate::{STORAGE_EMPTY, Storage, TSA_FAILED, common_name, storage, subject_an
 use oncl_pdk::Reply;
 use oncl_pdk::host;
 use oncl_pdk::keys::{
-    self, Action, CmsOutcome, Filter, FilterMore, Key, KeyOrder, SelectArgs, SignCmsExArgs,
+    self, Action, CmsOutcome, Filter, FilterMore, Key, KeyOrder, Placement, SelectArgs,
+    SignCmsExArgs, SignXmlExArgs, XmlOutput,
 };
 use oncl_pdk::orgjson::JObject;
 use oncl_port_pki::x509text::kalkan_key_alg_name;
@@ -27,30 +28,50 @@ pub fn cades(key: &Key, args: SignCmsExArgs) -> Result<Vec<u8>, String> {
 /// Kalkan's `XMLUtil.createXmlSignature`: the whole document for an empty `tbs`, else the
 /// element it selects, the signature into the element `parent` selects (the document
 /// element for an empty one); `tbs` and `parent` equal regardless of case are refused with
-/// Kalkan's text.
+/// Kalkan's text. Written without an XML declaration, as its serializer wrote it.
 ///
 /// # Errors
 ///
 /// That text, or the host's message.
 pub fn sign_xml(key: &Key, xml: &str, tbs: &str, parent: &str) -> Result<String, String> {
-    let signed = if tbs.is_empty() {
-        key.sign_xml(xml.as_bytes(), None, None)
-    } else {
-        if tbs.to_lowercase() == parent.to_lowercase() {
-            return Err(
-                "При подписи элемента XML, элемент подписи не может быть родительским элементом подписи."
-                    .to_owned(),
-            );
-        }
-        key.sign_xml(
-            xml.as_bytes(),
-            Some(tbs),
-            (!parent.is_empty()).then_some(parent),
-        )
+    if !tbs.is_empty() && tbs.to_lowercase() == parent.to_lowercase() {
+        return Err(
+            "При подписи элемента XML, элемент подписи не может быть родительским элементом подписи."
+                .to_owned(),
+        );
     }
-    // Unverified against the original: the messages of failed XML signatures (the host's
-    // text stands for Kalkan's).
-    .map_err(|e| e.message)?;
+    let element = (!tbs.is_empty()).then(|| tbs.to_owned());
+    let parent = (element.is_some() && !parent.is_empty()).then(|| parent.to_owned());
+    let signed = key
+        .sign_xml_ex(SignXmlExArgs {
+            handle: key.handle(),
+            xml: xml.as_bytes().to_vec().into(),
+            placement: if parent.is_some() {
+                Placement::Parent
+            } else {
+                Placement::DocumentElement
+            },
+            element,
+            parent,
+            namespaces: Vec::new(),
+            other_prefix_uri: None,
+            signature_method: None,
+            digest_method: None,
+            signed_info_c14n: None,
+            transforms: None,
+            signature_id: None,
+            signing_time_object: None,
+            strip_whitespace: false,
+            base64_line_breaks: None,
+            output: XmlOutput::Serialize {
+                declaration: false,
+                standalone_no: false,
+                trim: false,
+            },
+        })
+        // Unverified against the original: the messages of failed XML signatures (the host's
+        // text stands for Kalkan's).
+        .map_err(|e| e.message)?;
     String::from_utf8(signed).map_err(|e| e.to_string())
 }
 
