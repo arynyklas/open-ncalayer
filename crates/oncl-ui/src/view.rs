@@ -10,6 +10,26 @@ use oncl_pki::info::CertInfo;
 use std::path::Path;
 use time::OffsetDateTime;
 
+/// The longest text of a page shown in a notification or a window, in characters.
+pub const MAX_PAGE_TEXT: usize = 128;
+
+/// `text` from a page (its origin, a name it sends) as a notification or a window shows it:
+/// without control characters, line and paragraph separators (U+2028, U+2029) and
+/// bidirectional controls (U+202A–U+202E, U+2066–U+2069), at most [`MAX_PAGE_TEXT`]
+/// characters (then `…`).
+pub fn page_text(text: &str) -> String {
+    let shown = |c: &char| {
+        !c.is_control()
+            && !matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    };
+    let mut chars = text.chars().filter(shown);
+    let mut shown: String = chars.by_ref().take(MAX_PAGE_TEXT).collect();
+    if chars.next().is_some() {
+        shown.push('…');
+    }
+    shown
+}
+
 /// Characters a new key file password may have besides Latin letters and digits (the
 /// PKCS#12 password pattern).
 const PASSWORD_SPECIALS: &str = ".?#$^+=!*()@%&_-";

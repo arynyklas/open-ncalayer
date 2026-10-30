@@ -516,11 +516,26 @@ fn local_plugin_is_not_updated() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].local);
     assert_eq!(requests[0].origin, None);
+    assert_eq!(requests[0].replacing, None);
     assert_eq!(
         sandbox.notices(),
         [PluginNotice::Installed { name: name() }]
     );
     assert_eq!(sandbox.store().state().plugins[ID].source, Source::Local);
+    // Another file of the same plugin: the window says what it replaces.
+    service
+        .install_from_file(example_file(&sandbox, "0.1.1"))
+        .unwrap();
+    assert_eq!(
+        sandbox.requests()[0].replacing,
+        Some((v("0.1.0"), Source::Local))
+    );
+    sandbox.notices();
+    service
+        .install_from_file(example_file(&sandbox, "0.1.0"))
+        .unwrap();
+    sandbox.requests();
+    sandbox.notices();
 
     let mut revoked = sandbox.release("0.1.0", &example("0.1.0"));
     revoked.revoked = true;

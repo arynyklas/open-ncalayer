@@ -1,7 +1,10 @@
 //! «Установка плагина»: [`ask_install_plugin`] asks the user before a plugin is installed,
-//! saying who asks, what it replaces and what it may do, and warning about a plugin that is
-//! not from the catalog. One window at a time; requests coming meanwhile wait their turn.
-//! Closing the window is «Отмена». Its texts are composed here.
+//! saying who asks (the page's origin as [`page_text`] cleans it), the installed plugin it
+//! replaces, what it replaces of the original and what it may do, and warning about a
+//! plugin that is not from the catalog. «Установить» is enabled only [`INSTALL_DELAY`]
+//! after the window appears: a click or a key meant for another window does not install.
+//! One window at a time; requests coming meanwhile wait their turn. Closing the window is
+//! «Отмена». Its texts are composed here.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -18,7 +21,11 @@ use crate::foreground;
 use crate::plugins_view::{CapabilityLine, LocalizedText, ReplacedBundle};
 use crate::prompter::select_desktop_language;
 use crate::ui::InstallPluginWindow;
+use crate::view::page_text;
 use crate::windows::{self, Desktop};
+
+/// How long after the window appears «Установить» is enabled.
+pub const INSTALL_DELAY: Duration = Duration::from_millis(1500);
 
 /// A plugin about to be installed, and what to do with the user's answer.
 pub struct InstallPluginRequest {
@@ -27,6 +34,8 @@ pub struct InstallPluginRequest {
     pub name: LocalizedText,
     pub version: String,
     pub replaces: Option<ReplacedBundle>,
+    /// The installed plugin of the same id it replaces, if any.
+    pub replacing: Option<InstalledVersion>,
     /// What it may do.
     pub capabilities: Vec<CapabilityLine>,
     /// From a file the user chose, not from the catalog.
@@ -38,6 +47,14 @@ pub struct InstallPluginRequest {
 
 /// What takes the user's answer.
 pub type Decide = Box<dyn FnOnce(bool) + Send>;
+
+/// An installed plugin a new one replaces: its version and where it came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstalledVersion {
+    pub version: String,
+    /// From a file the user chose, not from the catalog.
+    pub local: bool,
+}
 
 /// The open window and the answer it waits for.
 struct Open {
@@ -117,6 +134,7 @@ fn create(desktop: &Rc<Desktop>, request: InstallPluginRequest) -> Result<(), Pl
     let texts = texts(&request, l);
     ui.set_asker(texts.asker.into());
     ui.set_plugin(texts.plugin.into());
+    ui.set_replacing(texts.replacing.into());
     ui.set_replaces(texts.replaces.into());
     ui.set_may(texts.may.into());
     let lines: Vec<SharedString> = texts.capabilities.into_iter().map(Into::into).collect();
@@ -140,12 +158,22 @@ fn create(desktop: &Rc<Desktop>, request: InstallPluginRequest) -> Result<(), Pl
         return Err(e);
     }
     foreground::take(&ui);
+    let weak = ui.as_weak();
+    slint::Timer::single_shot(INSTALL_DELAY, move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_can_install(true);
+        }
+    });
     Ok(())
 }
 
 /// «Установить» (`true`), «Отмена» or the close button: the window goes, the answer is
-/// handed on, and the next request waiting is shown.
+/// handed on, and the next request waiting is shown. «Установить» before
+/// [`INSTALL_DELAY`] is over does nothing.
 fn answer(yes: bool) {
+    if yes && OPEN.with_borrow(|open| open.as_ref().is_some_and(|o| !o.ui.get_can_install())) {
+        return;
+    }
     let Some(open) = OPEN.take() else {
         return;
     };
@@ -175,6 +203,7 @@ fn answer_with(decide: Box<dyn FnOnce(bool) + Send>, yes: bool) {
 struct WindowTexts {
     asker: String,
     plugin: String,
+    replacing: String,
     replaces: String,
     may: String,
     capabilities: Vec<String>,
@@ -187,12 +216,28 @@ fn texts(request: &InstallPluginRequest, l: Locale) -> WindowTexts {
         asker: request
             .origin
             .as_ref()
-            .map(|origin| t.asker.replace("{0}", origin))
+            .map(|origin| t.asker.replace("{0}", &page_text(origin)))
             .unwrap_or_default(),
         plugin: t
             .plugin
             .replace("{name}", request.name.get(l))
             .replace("{version}", &request.version),
+        replacing: request
+            .replacing
+            .as_ref()
+            .map(|installed| {
+                t.replacing
+                    .replace("{version}", &installed.version)
+                    .replace(
+                        "{source}",
+                        if installed.local {
+                            t.installed_local
+                        } else {
+                            t.installed_catalog
+                        },
+                    )
+            })
+            .unwrap_or_default(),
         replaces: request
             .replaces
             .as_ref()
@@ -237,6 +282,10 @@ struct Texts {
     asker: &'static str,
     /// `{name}`, `{version}`.
     plugin: &'static str,
+    /// `{version}`, `{source}`: [`Texts::installed_local`] or [`Texts::installed_catalog`].
+    replacing: &'static str,
+    installed_local: &'static str,
+    installed_catalog: &'static str,
     /// `{symname}`, `{version}`.
     replaces: &'static str,
     may: &'static str,
@@ -255,6 +304,9 @@ impl Texts {
             Locale::Kk => &Texts {
                 asker: "{0} сайты плагинді орнатуды сұрайды",
                 plugin: "{name}, {version} нұсқасы",
+                replacing: "Орнатылған {version} нұсқасын ({source}) алмастырады",
+                installed_local: "жергілікті, файлдан",
+                installed_catalog: "каталогтан",
                 replaces: "Түпнұсқа NCALayer-дің {symname} {version} бандлын алмастырады",
                 may: "Плагин мыналарды істей алады:",
                 nothing: "Плагин сайттардың сұрауларына ғана жауап береді.",
@@ -267,6 +319,9 @@ impl Texts {
             Locale::Ru => &Texts {
                 asker: "Сайт {0} просит установить плагин",
                 plugin: "{name}, версия {version}",
+                replacing: "Заменит установленную версию {version} ({source})",
+                installed_local: "локальную, из файла",
+                installed_catalog: "из каталога",
                 replaces: "Заменяет {symname} {version} оригинального NCALayer",
                 may: "Плагин сможет:",
                 nothing: "Плагин будет только отвечать на запросы сайтов.",
@@ -279,6 +334,9 @@ impl Texts {
             Locale::En => &Texts {
                 asker: "The site {0} asks to install a plugin",
                 plugin: "{name}, version {version}",
+                replacing: "Replaces the installed version {version} ({source})",
+                installed_local: "local, from a file",
+                installed_catalog: "from the catalog",
                 replaces: "Replaces {symname} {version} of the original NCALayer",
                 may: "The plugin will be able to:",
                 nothing: "The plugin will only answer the sites' requests.",
@@ -329,6 +387,7 @@ mod tests {
                 symname: "kz.example.echo".to_owned(),
                 version: "1.0.0".to_owned(),
             }),
+            replacing: None,
             capabilities: vec![
                 CapabilityLine::Keys,
                 CapabilityLine::Dialogs,
@@ -347,6 +406,16 @@ mod tests {
 
     fn answered(rx: &Receiver<bool>) -> bool {
         rx.recv_timeout(Duration::from_secs(30)).expect("an answer")
+    }
+
+    /// Waits out [`INSTALL_DELAY`]: «Установить» works then, not before.
+    fn armed(ui: &InstallPluginWindow) {
+        assert!(!ui.get_can_install());
+        ui.invoke_answer(true);
+        assert!(is_open(), "«Установить» does nothing yet");
+        std::thread::sleep(INSTALL_DELAY + Duration::from_millis(100));
+        slint::platform::update_timers_and_animations();
+        assert!(ui.get_can_install());
     }
 
     #[test]
@@ -381,6 +450,8 @@ mod tests {
             ]
         );
         assert_eq!(ui.get_warning(), "", "a catalog plugin is not warned about");
+        assert_eq!(ui.get_replacing(), "");
+        armed(&ui);
         ui.invoke_answer(true);
         assert!(answered(&rx));
         assert!(!is_open());
@@ -390,7 +461,11 @@ mod tests {
     fn cancel_and_close_say_no() {
         let dir = tempfile::tempdir().unwrap();
         desktop(dir.path(), Locale::Ru);
-        let (first, first_rx) = request(true, None);
+        let (mut first, first_rx) = request(true, None);
+        first.replacing = Some(InstalledVersion {
+            version: "0.0.9".to_owned(),
+            local: false,
+        });
         let (second, second_rx) = request(false, None);
         enqueue(first);
         // Waits for the first.
@@ -403,6 +478,11 @@ mod tests {
             "{}",
             ui.get_warning()
         );
+        assert_eq!(
+            ui.get_replacing(),
+            "Заменит установленную версию 0.0.9 (из каталога)"
+        );
+        // «Отмена» works at once.
         ui.invoke_answer(false);
         assert!(!answered(&first_rx));
         // The second is shown now; closing it is no.
@@ -436,6 +516,33 @@ mod tests {
             texts(&request, Locale::Ru).may,
             "Плагин будет только отвечать на запросы сайтов."
         );
+    }
+
+    #[test]
+    fn the_origin_is_cleaned_and_the_replaced_version_named() {
+        let (mut request, _rx) = request(true, Some("https://shop.kz\u{202E}moc.live\n.kz"));
+        let ru = texts(&request, Locale::Ru);
+        assert_eq!(
+            ru.asker,
+            "Сайт https://shop.kzmoc.live.kz просит установить плагин"
+        );
+        assert_eq!(ru.replacing, "");
+        let long = format!("https://{}.kz", "a".repeat(200));
+        request.origin = Some(long);
+        assert!(texts(&request, Locale::En).asker.contains('…'));
+        request.replacing = Some(InstalledVersion {
+            version: "0.0.9".to_owned(),
+            local: true,
+        });
+        assert_eq!(
+            texts(&request, Locale::En).replacing,
+            "Replaces the installed version 0.0.9 (local, from a file)"
+        );
+        assert_eq!(
+            texts(&request, Locale::Ru).replacing,
+            "Заменит установленную версию 0.0.9 (локальную, из файла)"
+        );
+        assert!(texts(&request, Locale::Kk).replacing.contains("0.0.9"));
     }
 
     #[test]

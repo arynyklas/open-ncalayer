@@ -1,5 +1,7 @@
-// «Установка плагина»: who asks, the plugin, what it replaces, what it may do and, for a file
-// the user chose, a warning; «Установить» or «Отмена». The texts are composed in Rust.
+// «Установка плагина»: who asks, the plugin, the installed version it replaces, what it
+// replaces of the original, what it may do and, for a file the user chose, a warning;
+// «Установить» (enabled a moment after the window appears) or «Отмена». The texts are composed
+// in Rust.
 
 import { Button, VerticalBox } from "std-widgets.slint";
 
@@ -14,6 +16,8 @@ export component InstallPluginWindow inherits Window {
     in property <string> asker;
     // The plugin's name and version.
     in property <string> plugin;
+    // The installed version of the same plugin it replaces, or empty.
+    in property <string> replacing;
     // What original bundle it replaces, or empty.
     in property <string> replaces;
     // The heading of `capabilities`.
@@ -21,6 +25,8 @@ export component InstallPluginWindow inherits Window {
     in property <[string]> capabilities;
     // Not from the catalog: the warning, or empty.
     in property <string> warning;
+    // «Установить» works: set a moment after the window appears.
+    in-out property <bool> can-install: false;
 
     callback answer(bool);
 
@@ -33,6 +39,11 @@ export component InstallPluginWindow inherits Window {
         Text {
             text: root.plugin;
             font-weight: 700;
+            wrap: word-wrap;
+        }
+
+        if root.replacing != "": Text {
+            text: root.replacing;
             wrap: word-wrap;
         }
 
@@ -62,6 +73,7 @@ export component InstallPluginWindow inherits Window {
             alignment: end;
             Button {
                 text: @tr("Install");
+                enabled: root.can-install;
                 clicked => {
                     root.answer(true);
                 }

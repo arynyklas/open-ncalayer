@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use oncl_basics::Locale;
 use oncl_desktop::PortOwner;
 use oncl_ui::settings_view::{UpdateStatus, update_view};
+use oncl_ui::view::page_text;
 use oncl_ui::{ActionTarget, Notification, NotificationAction, TrayCommand, TrayState};
 
 use crate::cli::WssOff;
@@ -261,7 +262,7 @@ impl TrayStatus {
     /// nothing to install for (no port, one installed already — maybe turned off or
     /// withdrawn —, or no catalog), unless one was shown within the last ten minutes (at
     /// `now`). `origin` and `symname` come from the page: control characters go, and each is
-    /// cut to [`MAX_PAGE_TEXT`] characters.
+    /// cut to [`MAX_PAGE_TEXT`](oncl_ui::view::MAX_PAGE_TEXT) characters.
     pub fn bundle_notification(
         &mut self,
         symname: &str,
@@ -700,28 +701,10 @@ fn date(rfc3339: &str) -> String {
     }
 }
 
-/// The longest text of a page shown in a notification, in characters.
-pub const MAX_PAGE_TEXT: usize = 128;
-
-/// `text` from a page as a notification shows it: without control characters, line and
-/// paragraph separators (U+2028, U+2029) and bidirectional controls (U+202A–U+202E,
-/// U+2066–U+2069), at most [`MAX_PAGE_TEXT`] characters (then `…`).
-fn page_text(text: &str) -> String {
-    let shown = |c: &char| {
-        !c.is_control()
-            && !matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-    };
-    let mut chars = text.chars().filter(shown);
-    let mut shown: String = chars.by_ref().take(MAX_PAGE_TEXT).collect();
-    if chars.next().is_some() {
-        shown.push('…');
-    }
-    shown
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oncl_ui::view::MAX_PAGE_TEXT;
 
     #[test]
     fn wss_off_comes_before_the_certificate() {

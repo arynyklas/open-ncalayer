@@ -10,7 +10,9 @@ use oncl_ui::plugins_view::{
     AvailablePlugin, CapabilityLine, CatalogLine, InstalledPlugin, LocalizedText, PluginStatus,
     ReplacedBundle,
 };
-use oncl_ui::{InstallPluginRequest, PluginActionError, PluginsServices, PluginsView};
+use oncl_ui::{
+    InstallPluginRequest, InstalledVersion, PluginActionError, PluginsServices, PluginsView,
+};
 
 use super::{CatalogView, InstallRequest, InstallUi, PluginService, PluginState, ServiceView};
 
@@ -33,6 +35,10 @@ pub fn install_request(
         name: text(&request.name),
         version: request.version.to_string(),
         replaces: request.replaces.as_ref().map(bundle),
+        replacing: request.replacing.map(|(version, source)| InstalledVersion {
+            version: version.to_string(),
+            local: source == Source::Local,
+        }),
         capabilities: capability_lines(&request.capabilities),
         local: request.local,
         decide,
@@ -199,6 +205,7 @@ mod tests {
                 symname: "kz.example.echo".to_owned(),
                 version: "1.0.0".to_owned(),
             }),
+            replacing: Some((Version::new(1, 0, 0), Source::Local)),
             capabilities: Capabilities {
                 keys: true,
                 dialogs: false,
@@ -215,6 +222,13 @@ mod tests {
         assert_eq!(shown.name.kk, "Үлгі");
         assert_eq!(shown.version, "1.2.3");
         assert_eq!(shown.replaces.unwrap().symname, "kz.example.echo");
+        assert_eq!(
+            shown.replacing,
+            Some(InstalledVersion {
+                version: "1.0.0".to_owned(),
+                local: true,
+            })
+        );
         assert_eq!(
             shown.capabilities,
             [

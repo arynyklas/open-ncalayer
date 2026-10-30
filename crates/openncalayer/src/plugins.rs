@@ -77,6 +77,8 @@ pub struct InstallRequest {
     pub name: Localized,
     pub version: Version,
     pub replaces: Option<Replaces>,
+    /// The installed plugin of the same id it would replace: its version and source.
+    pub replacing: Option<(Version, Source)>,
     /// What its manifest declares it may do.
     pub capabilities: Capabilities,
     /// From a file the user chose, not from the catalog: nobody has reviewed it.
@@ -960,6 +962,12 @@ impl PluginService {
             name: m.name.clone(),
             version: m.version.clone(),
             replaces: m.replaces.clone(),
+            replacing: self
+                .store
+                .state()
+                .plugins
+                .get(&m.id)
+                .map(|installed| (installed.version.clone(), installed.source)),
             capabilities: m.capabilities.clone(),
             local: source == Source::Local,
         };
