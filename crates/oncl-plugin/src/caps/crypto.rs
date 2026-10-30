@@ -95,13 +95,16 @@ pub(crate) fn ca_issuer(state: &HostState, args: CertArgs) -> HostResult<Option<
 }
 
 /// The PKI hosts of the NCA: the only hosts the core asks for time-stamps, OCSP and CRLs
-/// on a plugin's behalf ([`crate::HostServices::pki_hosts`]), and their subdomains.
-pub const NCA_PKI_HOSTS: [&str; 5] = [
+/// on a plugin's behalf ([`crate::HostServices::pki_hosts`]), and their subdomains. The
+/// NCA's CAs publish their CRLs on `crl.root.gov.kz` and `crl1.root.gov.kz`.
+pub const NCA_PKI_HOSTS: [&str; 7] = [
     "tsp.pki.gov.kz",
     "ocsp.pki.gov.kz",
     "crl.pki.gov.kz",
     "pki.gov.kz",
     "test.pki.gov.kz",
+    "crl.root.gov.kz",
+    "crl1.root.gov.kz",
 ];
 
 /// [`NCA_PKI_HOSTS`], for [`crate::HostServices::pki_hosts`].
@@ -617,4 +620,38 @@ pub(crate) fn xml_verify(args: XmlVerifyArgs) -> HostResult<Vec<XmlSigReport>> {
             valid: check.result.is_ok(),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every CRL the NCA's certificates point to is on a host the core may ask: XAdES-LT
+    /// fetches the CRLs of the chain's CAs that name no OCSP responder.
+    #[test]
+    fn nca_certificates_crl_hosts_are_pki_hosts() {
+        let dir = oncl_testkit::fixture("nca/prod");
+        let mut urls = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let der = std::fs::read(entry.unwrap().path()).unwrap();
+            urls.extend(oncl_pki::crl::crl_urls(&parse(&der).unwrap()));
+        }
+        assert!(urls.len() >= 6, "{urls:?}");
+        for url in &urls {
+            check_pki_url_in(&nca_pki_hosts(), url)
+                .unwrap_or_else(|e| panic!("{url}: {}", e.message));
+        }
+    }
+
+    #[test]
+    fn the_nca_root_hosts_admit_no_look_alikes() {
+        for url in [
+            "http://crl.root.gov.kz.evil/x.crl",
+            "http://evilroot.gov.kz/x.crl",
+            "http://gov.kz/x.crl",
+            "file://crl.root.gov.kz/x.crl",
+        ] {
+            assert!(check_pki_url_in(&nca_pki_hosts(), url).is_err(), "{url}");
+        }
+    }
 }
