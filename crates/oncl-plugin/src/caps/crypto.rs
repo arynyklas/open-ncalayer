@@ -4,7 +4,7 @@
 //! OCSP ([`ocsp_fetch`]) and CRLs ([`crl_fetch`]), which the core requests itself, only
 //! from the PKI hosts ([`check_pki_url`]).
 
-use super::{denied, invalid};
+use super::{RequestBudget, denied, invalid};
 use crate::host::{HostState, unix_ms};
 use der::asn1::ObjectIdentifier;
 use oncl_pdk::abi::{
@@ -140,11 +140,13 @@ fn check_pki_url_in(pki_hosts: &[String], url: &str) -> HostResult<()> {
     }
 }
 
-/// The core's transport, for the URLs a certificate names: only to the PKI hosts, and
-/// never to where a redirect points (a 3xx reply is the reply).
+/// The core's transport for a plugin's PKI requests: only to the PKI hosts, never to where
+/// a redirect points (a 3xx reply is the reply), each request counted in the call's
+/// [`super::MAX_HTTP_REQUESTS`].
 pub(super) struct PkiOnly {
     hosts: Arc<[String]>,
     http: Arc<dyn HttpTransport>,
+    budget: RequestBudget,
 }
 
 impl PkiOnly {
@@ -152,6 +154,7 @@ impl PkiOnly {
         PkiOnly {
             hosts: Arc::clone(&state.services.pki_hosts),
             http: Arc::clone(&state.services.http),
+            budget: state.call.http_requests.clone(),
         }
     }
 }
@@ -159,6 +162,9 @@ impl PkiOnly {
 impl HttpTransport for PkiOnly {
     fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
         check_pki_url_in(&self.hosts, request.url).map_err(|e| HttpError::other(e.message))?;
+        self.budget
+            .take()
+            .map_err(|e| HttpError::other(e.message))?;
         let mut request = *request;
         request.opts.redirects = false;
         self.http.send(&request)
@@ -335,14 +341,7 @@ pub(crate) fn tsp_stamp(state: &HostState, args: StampArgs) -> HostResult<StampO
         TokenForm::WholeResponse => tsp::TokenForm::WholeResponse,
     };
     Ok(
-        match tsp::stamp(
-            &args.cms,
-            signers,
-            &spec,
-            mode,
-            form,
-            state.services.http.as_ref(),
-        ) {
+        match tsp::stamp(&args.cms, signers, &spec, mode, form, &PkiOnly::of(state)) {
             Ok(cms) => StampOutcome::Stamped(Bytes::from(cms)),
             Err(e) => StampOutcome::Failed(tsp_failure(&spec, &e)),
         },
@@ -356,7 +355,7 @@ pub(crate) fn tsp_request(state: &HostState, args: TspRequestArgs) -> HostResult
         Err(failure) => return Ok(TspOutcome::Failed(failure)),
     };
     Ok(
-        match tsp::request(&spec, &args.imprint, state.services.http.as_ref()) {
+        match tsp::request(&spec, &args.imprint, &PkiOnly::of(state)) {
             Ok(reply) => TspOutcome::Ok {
                 response: Bytes::from(reply.response),
                 token: Bytes::from(reply.token),
@@ -436,7 +435,7 @@ pub(crate) fn ocsp_fetch(state: &HostState, args: OcspArgs) -> HostResult<OcspOu
     let now = (state.services.clock)();
     let check = args.check.then_some((cas.as_ref(), now));
     Ok(
-        match ocsp::fetch(&cert, &issuer, &spec, state.services.http.as_ref(), check) {
+        match ocsp::fetch(&cert, &issuer, &spec, &PkiOnly::of(state), check) {
             Ok(fetched) => OcspOutcome::Ok {
                 http_status: fetched.http_status,
                 response: Bytes::from(fetched.response),
@@ -466,7 +465,7 @@ pub(crate) fn crl_fetch(state: &HostState, args: CrlArgs) -> HostResult<CrlOutco
     let address = urls.first().cloned().unwrap_or_default();
     let now = (state.services.clock)();
     Ok(
-        match crl::fetch_for(&cert, &issuer, state.services.http.as_ref(), timeout, now) {
+        match crl::fetch_for(&cert, &issuer, &PkiOnly::of(state), timeout, now) {
             Ok((crls, crl_status)) => CrlOutcome::Ok {
                 crls: crls.into_iter().map(Bytes::from).collect(),
                 status: match crl_status {

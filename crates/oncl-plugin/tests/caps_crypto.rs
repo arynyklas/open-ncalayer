@@ -11,7 +11,8 @@ use oncl_pdk::abi::{
     self, Bytes, CertStatusAbi, CmsContent, CmsOutcome, CoSign, CrlArgs, CrlOutcome, ErrorCode,
     HashAlg, HostResult, Import, IssuerSel, KeySource, NetKind, NetStage, Nonce, OcspArgs,
     OcspOutcome, OpenArgs, Password, PkiMethod, PkiUrl, RawAttribute, SignCmsExArgs, SignedAttrs,
-    SigningTime, TimeForm, TimeSource, TsaChoice, TsaSpec, TspOutcome, TspRequestArgs,
+    SignerSel, SigningTime, StampArgs, StampMode, StampOutcome, TimeForm, TimeSource, TokenForm,
+    TsaChoice, TsaSpec, TspOutcome, TspRequestArgs,
 };
 use oncl_pki::cert;
 use oncl_pki::crl::MockCrl;
@@ -22,10 +23,10 @@ use oncl_pki::ocsp::{CertStatus, MockOcsp};
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::MockTsa;
-use oncl_plugin::{Engine, HostServices, Instance};
+use oncl_plugin::{Engine, HostServices, Instance, MAX_HTTP_REQUESTS};
 use oncl_testkit::{read, synthetic, synthetic_cert};
 use serde::de::DeserializeOwned;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use time::macros::datetime;
 
 const ORIGIN: &str = "https://idp.egov.kz";
@@ -528,4 +529,136 @@ fn services_nca(http: Arc<dyn HttpTransport>) -> HostServices {
 
 fn services_with_crl(crl: MockCrl) -> HostServices {
     services(Arc::new(crl), &["crl.synthetic.test"])
+}
+
+/// Passes requests on to `inner`, recording each one's URL and whether it may follow
+/// redirects.
+struct Recorder {
+    inner: Arc<dyn HttpTransport>,
+    sent: Mutex<Vec<(String, bool)>>,
+}
+
+impl Recorder {
+    fn new(inner: Arc<dyn HttpTransport>) -> Arc<Recorder> {
+        Arc::new(Recorder {
+            inner,
+            sent: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn sent(&self) -> Vec<(String, bool)> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
+impl HttpTransport for Recorder {
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        self.sent
+            .lock()
+            .unwrap()
+            .push((request.url.to_owned(), request.opts.redirects));
+        self.inner.send(request)
+    }
+}
+
+#[test]
+fn pki_requests_never_follow_redirects() {
+    let (_, http) = pki(tsa());
+    let recorder = Recorder::new(http);
+    let crl = Recorder::new(Arc::new(MockCrl::new(entry("inter-gost2015.key"))));
+    let crl_services = services(crl.clone(), &["crl.synthetic.test"]);
+    let services = services(recorder.clone(), &[]);
+    // keys_sign_cms_ex with a time-stamp.
+    let stamped = sign_args(b"document", cades(), Some(TsaChoice::Kalkan));
+    signed(
+        run(
+            &services,
+            &[
+                open("user-gost2015-sign"),
+                (Import::KeysSignCmsEx, abi::encode(&stamped)),
+            ],
+        )
+        .unwrap(),
+    );
+    // tsp_stamp of a signature without one.
+    let plain = signed(
+        run(
+            &services,
+            &[
+                open("user-gost2015-sign"),
+                (
+                    Import::KeysSignCmsEx,
+                    abi::encode(&sign_args(b"document", cades(), None)),
+                ),
+            ],
+        )
+        .unwrap(),
+    );
+    let stamp = StampArgs {
+        cms: Bytes::from(plain),
+        signers: SignerSel::Last,
+        tsa: TsaChoice::Kalkan,
+        mode: StampMode::Replace,
+        token: TokenForm::Token,
+    };
+    let outcome: StampOutcome = run(&services, &[(Import::TspStamp, abi::encode(&stamp))]).unwrap();
+    assert!(matches!(outcome, StampOutcome::Stamped(_)), "{outcome:?}");
+    // tsp_request.
+    let request = TspRequestArgs {
+        tsa: TsaSpec {
+            url: PkiUrl::Default,
+            method: PkiMethod::Post { content_type: None },
+            hash: HashAlg::Sha256,
+            policy: None,
+            nonce: Nonce::Random(8),
+            cert_req: true,
+            retries: 0,
+            timeout_ms: 5000,
+            check_skew_ms: None,
+            require_tsa_eku: true,
+        },
+        imprint: Bytes::from(vec![7; 32]),
+    };
+    let outcome: TspOutcome =
+        run(&services, &[(Import::TspRequest, abi::encode(&request))]).unwrap();
+    assert!(matches!(outcome, TspOutcome::Ok { .. }), "{outcome:?}");
+    // ocsp_fetch.
+    let ocsp = ocsp_args(PkiUrl::Default, IssuerSel::HostCas);
+    let outcome: OcspOutcome = run(&services, &[(Import::OcspFetch, abi::encode(&ocsp))]).unwrap();
+    assert!(matches!(outcome, OcspOutcome::Ok { .. }), "{outcome:?}");
+    // crl_fetch.
+    let leaf = entry("inter-revoked-gost2015-sign").cert;
+    let args = CrlArgs {
+        cert: Bytes::from(der::Encode::to_der(&leaf).unwrap()),
+        issuer: IssuerSel::HostCas,
+        timeout_ms: 5000,
+    };
+    let outcome: CrlOutcome =
+        run(&crl_services, &[(Import::CrlFetch, abi::encode(&args))]).unwrap();
+    assert!(matches!(outcome, CrlOutcome::Ok { .. }), "{outcome:?}");
+
+    let sent: Vec<(String, bool)> = recorder.sent().into_iter().chain(crl.sent()).collect();
+    assert!(sent.len() >= 5, "{sent:?}");
+    for (url, redirects) in &sent {
+        assert!(!redirects, "{url} may follow redirects");
+    }
+}
+
+#[test]
+fn pki_requests_count_towards_the_call_limit() {
+    let (_, http) = pki(tsa());
+    let recorder = Recorder::new(http);
+    let services = services(recorder.clone(), &[]);
+    let ocsp = (
+        Import::OcspFetch,
+        abi::encode(&ocsp_args(PkiUrl::Default, IssuerSel::HostCas)),
+    );
+    let calls = vec![ocsp; MAX_HTTP_REQUESTS as usize + 1];
+    let outcome: OcspOutcome = run(&services, &calls).unwrap();
+    let OcspOutcome::Failed(failure) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(failure.stage, NetStage::Ocsp);
+    assert!(failure.detail.contains("HTTP requests"), "{failure:?}");
+    assert_eq!(recorder.sent().len(), MAX_HTTP_REQUESTS as usize);
 }

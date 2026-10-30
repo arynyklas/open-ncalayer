@@ -668,7 +668,7 @@ pub(crate) fn keys_sign_cms_ex(
             &spec,
             tsp::StampMode::Replace,
             tsp::TokenForm::Token,
-            state.services.http.as_ref(),
+            &crypto::PkiOnly::of(state),
         ) {
             Ok(stamped) => CmsOutcome::Signed(Bytes::from(stamped)),
             Err(e) => CmsOutcome::TspFailed(crypto::tsp_failure(&spec, &e)),

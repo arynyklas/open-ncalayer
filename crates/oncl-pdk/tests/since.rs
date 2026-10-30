@@ -50,7 +50,10 @@ fn the_first_plugin_core_has_its_functions() {
 
 #[test]
 fn later_functions_name_an_unreleased_core() {
-    let released: Vec<Version> = RELEASED.iter().map(|v| Version::parse(v).unwrap()).collect();
+    let released: Vec<Version> = RELEASED
+        .iter()
+        .map(|v| Version::parse(v).unwrap())
+        .collect();
     for import in Import::ALL.into_iter().filter(|i| !FIRST.contains(i)) {
         for version in &released {
             assert!(
