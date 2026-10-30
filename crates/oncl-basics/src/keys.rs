@@ -130,6 +130,8 @@ impl KeyChooser {
                         prompt.chosen = Some(answer.storage);
                         prompt.reader = answer.reader;
                     } else {
+                        prompt.chosen = None;
+                        prompt.reader = None;
                         prompt.recent_path = Some(answer.path);
                     }
                 }

@@ -200,6 +200,34 @@ fn wrong_pin_shows_tries_and_asks_again() {
 }
 
 #[test]
+fn file_retry_after_token_error_clears_token_choice() {
+    let emu = emulator(kaztoken());
+    let s = setup(
+        &emu,
+        true,
+        vec![
+            token(KAZTOKEN, "000000"),
+            Step::Storage {
+                path: PathBuf::from("keys/missing.p12"),
+                password: "wrong".to_owned(),
+            },
+            Step::CancelStorage,
+        ],
+    );
+    sign(&s.basics, &["PKCS12", "AKKaztokenStore"]);
+    let prompts = s.prompter.storage_prompts();
+    assert_eq!(prompts.len(), 3);
+    assert_eq!(prompts[1].chosen, Some(KAZTOKEN));
+    assert!(prompts[2].error.is_some());
+    assert_eq!(prompts[2].chosen, None, "the file was the last answer");
+    assert_eq!(prompts[2].reader, None);
+    assert_eq!(
+        prompts[2].recent_path,
+        Some(PathBuf::from("keys/missing.p12"))
+    );
+}
+
+#[test]
 fn blocked_pin_error() {
     let mut spec = kaztoken();
     spec.tries = 0;
