@@ -156,7 +156,7 @@ cargo xtask index check updates/v1 --base origin/main
    ```
 
    Команда печатает каталоги `plugins/<порт>`, чьей пары `(id, version)` ещё нет в индексе `beta`; пустой вывод — выпускать нечего.
-2. Поставить тег на `main` и отправить его: `git tag plugins-ГГГГММДД && git push origin plugins-ГГГГММДД`. Workflow проверяет имя тега, собирает каждый порт из `pending` дважды (`cargo xtask plugin pack`) и сравнивает пакеты байт в байт — пакеты детерминированы, пути машины сборки в модуль не попадают; кладёт рядом `plugins/THIRD-PARTY.txt` и `SHA256SUMS`, подписывает всё аттестацией происхождения и создаёт релиз. Если выпускать нечего, workflow заканчивается с notice и без релиза.
+2. Поставить тег на `main` и отправить его: `git tag plugins-ГГГГММДД && git push origin plugins-ГГГГММДД`. Workflow проверяет имя тега, собирает каждый порт из `pending` дважды (`cargo xtask plugin pack`) и сравнивает пакеты байт в байт — пакеты детерминированы, пути машины сборки в модуль не попадают; проверяет, что `plugins/THIRD-PARTY.txt` свежий (`cargo xtask licenses --plugins --check`), и кладёт его рядом с пакетами: в нём лицензии крейтов портов и шрифтов, которые порты встраивают в модуль (`plugins/<порт>/fonts/`: файл шрифта, источник из `fonts/README.md` и текст `OFL.txt`); затем `SHA256SUMS`, аттестация происхождения всех файлов и релиз. Если выпускать нечего, workflow заканчивается с notice и без релиза. Новый шрифт в порте кладётся с `OFL.txt` и `README.md` со строкой `Источник: <URL>`, иначе `cargo xtask licenses --plugins` откажется.
 3. Затем workflow открывает PR `updates/<тег>` с пакетами в индексе `beta` (`cargo xtask index add-plugin --channel beta`), неподписанным. На ветке PR:
 
    ```sh
