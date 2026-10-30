@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.energy"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.energy.sign.SignEnergy"]
+
+[name]
+ru = "Sign Energy"
+kk = "Sign Energy"
+en = "Sign Energy"
+
+[description]
+ru = "Подписание документов системы «Тезис» (energy.kz) в формате CMS"
+kk = "«Тезис» жүйесінің (energy.kz) құжаттарына CMS пішімінде қол қою"
+en = "Signs documents of the Tezis system (energy.kz) as CMS"
+
+[replaces]
+symname = "kz.energy.sign"
+version = "2.0.0"
+
+[capabilities]
+keys = true
+dialogs = true
+settings = true

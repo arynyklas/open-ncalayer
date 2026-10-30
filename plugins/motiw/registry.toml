@@ -1,0 +1,20 @@
+id = "io.github.arynyklas.openncalayer.port.motiw"
+modules = ["ru.motiw.ModuleService"]
+
+[original]
+symname = "ru.motiw.ModuleService"
+version = "1.0"
+vendor = "ООО «Мотивэа»"
+
+[port]
+status = "needs-tokens"
+conformance = "computed"
+
+[[differences]]
+ru = "Без поддержки токенов в OpenNCALayer плагин, как и оригинал у живого NCALayer, ничего не подписывает: файлы PKCS12 недоступны (getContainerList отвечает [], getCertificateList и sign — 404), список хранилищ — [\"PKCS12\"]."
+
+[[differences]]
+ru = "showStorageKey показывает окно OpenNCALayer со сведениями о ключе вместо вызова модуля commonUtils; результат, как у оригинала, не возвращается."
+
+[[differences]]
+ru = "verify: в certificates нет сведений о метке времени; тексты прочих ошибок проверки — свои."

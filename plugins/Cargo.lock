@@ -407,6 +407,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-bas"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
+]
+
+[[package]]
 name = "oncl-port-devart"
 version = "1.0.0-beta.1"
 dependencies = [
@@ -415,6 +423,14 @@ dependencies = [
  "oncl-port-kit",
  "oncl-port-pki",
  "x509-cert",
+]
+
+[[package]]
+name = "oncl-port-dogovor24"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
 ]
 
 [[package]]
@@ -432,6 +448,37 @@ version = "1.0.0-beta.1"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
+]
+
+[[package]]
+name = "oncl-port-energy"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
+]
+
+[[package]]
+name = "oncl-port-eproc"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+]
+
+[[package]]
+name = "oncl-port-esf-osdkz"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
+]
+
+[[package]]
+name = "oncl-port-eup"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
 ]
 
 [[package]]
@@ -484,6 +531,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-motiw"
+version = "1.0.0-beta.1"
+dependencies = [
+ "der",
+ "oncl-pdk",
+ "oncl-port-pki",
+ "x509-cert",
+]
+
+[[package]]
 name = "oncl-port-nursign"
 version = "1.0.0-beta.1"
 dependencies = [
@@ -505,6 +562,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-qiwi"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+]
+
+[[package]]
+name = "oncl-port-simourg"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
+]
+
+[[package]]
+name = "oncl-port-taxtech"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+]
+
+[[package]]
 name = "oncl-port-thundercrypt"
 version = "1.0.0-beta.1"
 dependencies = [
@@ -512,6 +591,21 @@ dependencies = [
  "oncl-pdk",
  "oncl-port-pki",
  "x509-cert",
+]
+
+[[package]]
+name = "oncl-port-uchet-esf"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+]
+
+[[package]]
+name = "oncl-port-workspace"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-pki",
 ]
 
 [[package]]

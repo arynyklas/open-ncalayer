@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.energy"
+modules = ["kz.energy.sign.SignEnergy"]
+
+[original]
+symname = "kz.energy.sign"
+version = "2.0.0"
+vendor = "ТОО «ENSOFT»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Тихая подпись по запомненному алиасу — только в текущем соединении; пароли не хранятся (у оригинала — кэш паролей с временем жизни на весь процесс и для всех сайтов). Выбор «Сохранить пароль» в окне не переносится."
+
+[[differences]]
+ru = "Путь к хранилищу ключей плагину не сообщается: окно выбора хранилища заполняет последний путь само OpenNCALayer. В настройках плагина по алиасу хранится только запись о ключе без секретов ({alias, subjectCn, certNotAfter, certNotBefore}); зашифрованные файлы store/*.enc в рабочем каталоге не создаются."
+
+[[differences]]
+ru = "После ошибки подписи окно выбора ключа показывается снова, а уже подписанные документы не дублируются в ответе (у оригинала — дубли)."
+
+[[differences]]
+ru = "Окна — общие окна OpenNCALayer на его языке; args.locale и args.coordinates не используются; keyStoreType — только хранилища, которые знает OpenNCALayer (иное — как ошибка загрузки хранилища)."

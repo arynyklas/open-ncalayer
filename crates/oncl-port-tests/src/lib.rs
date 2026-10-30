@@ -113,6 +113,7 @@ pub struct Harness {
     clock: fn() -> OffsetDateTime,
     locale: Locale,
     pki_hosts: Arc<[String]>,
+    settings_dir: Option<PathBuf>,
 }
 
 impl Harness {
@@ -139,6 +140,7 @@ impl Harness {
             clock: default_clock,
             locale: Locale::Ru,
             pki_hosts: oncl_plugin::nca_pki_hosts(),
+            settings_dir: None,
         }
     }
 
@@ -154,16 +156,26 @@ impl Harness {
         Harness { locale, ..self }
     }
 
-    /// The same harness with the PKI hosts of the NCA and `extra` (e.g.
-    /// `ocsp.synthetic.test`, so that the core reaches the synthetic responder).
+    /// The same harness whose PKI hosts are the NCA's and `extra` (the synthetic PKI's
+    /// responders, `ocsp.synthetic.test`).
     #[must_use]
     pub fn with_pki_hosts(self, extra: &[&str]) -> Harness {
-        let pki_hosts = oncl_plugin::nca_pki_hosts()
+        let pki_hosts = oncl_plugin::NCA_PKI_HOSTS
             .iter()
-            .cloned()
-            .chain(extra.iter().map(|h| (*h).to_owned()))
+            .chain(extra)
+            .map(|h| (*h).to_owned())
             .collect();
         Harness { pki_hosts, ..self }
+    }
+
+    /// The same harness with the plugins' settings kept in `dir` (`<dir>/<id>.json`); without
+    /// it, `settings_get` and `settings_put` fail.
+    #[must_use]
+    pub fn with_settings_dir(self, dir: PathBuf) -> Harness {
+        Harness {
+            settings_dir: Some(dir),
+            ..self
+        }
     }
 
     /// The prompter: the dialogs shown.
@@ -189,7 +201,7 @@ impl Harness {
             // The synthetic PKI's CAs, as the ports' keys are synthetic.
             cas: Arc::new(synthetic_cas()),
             pki_hosts: Arc::clone(&self.pki_hosts),
-            settings_dir: None,
+            settings_dir: self.settings_dir.clone(),
         }
     }
 

@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.motiw"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["ru.motiw.ModuleService"]
+
+[name]
+ru = "Motiware Service"
+kk = "Motiware Service"
+en = "Motiware Service"
+
+[description]
+ru = "Хранилища, контейнеры, подпись на токенах и проверка CMS для Motiware"
+kk = "Motiware үшін қоймалар, контейнерлер, токендегі қолтаңба және CMS тексеру"
+en = "Storages, containers, token signatures and CMS verification for Motiware"
+
+[replaces]
+symname = "ru.motiw.ModuleService"
+version = "1.0"
+
+[capabilities]
+keys = true

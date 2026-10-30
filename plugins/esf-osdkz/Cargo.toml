@@ -1,0 +1,16 @@
+[package]
+name = "oncl-port-esf-osdkz"
+description = "OpenNCALayer port of the ESF signer (com.osdkz.esf.signer): raw signatures of e-invoice texts and authentication"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oncl-pdk.workspace = true
+oncl-port-pki.workspace = true

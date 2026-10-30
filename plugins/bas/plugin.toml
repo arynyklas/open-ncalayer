@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.bas"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.bas.nca.multiSignService"]
+
+[name]
+ru = "BAS Signer"
+kk = "BAS Signer"
+en = "BAS Signer"
+
+[description]
+ru = "Подпись документов ЕСЭДО для esign.bas.kz: ответ OCSP внутри подписи и метка времени"
+kk = "esign.bas.kz үшін ЕСЭДО құжаттарына қол қою: қолтаңба ішінде OCSP жауабы және уақыт белгісі"
+en = "ESEDO document signatures for esign.bas.kz, with the OCSP answer inside and a time-stamp"
+
+[replaces]
+symname = "kz.bas.nca.signer"
+version = "1.0.35"
+
+[capabilities]
+keys = true

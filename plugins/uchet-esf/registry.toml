@@ -1,0 +1,17 @@
+id = "io.github.arynyklas.openncalayer.port.uchet-esf"
+modules = ["kz.uchet.esfSignUtil"]
+
+[original]
+symname = "kz.uchet.esfSignUtil"
+version = "1.0"
+vendor = "ТОО «Учёт.Бухгалтерия»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Файл ключа, названный страницей, открывается только после согласия пользователя в окне OpenNCALayer (раз за соединение); отказ — как ошибка у оригинала (соединение закрывается). Оригинал открывал файл молча."
+
+[[differences]]
+ru = "Ключи на сертификатах sha1RSA не подписывают счета-фактуры (OpenNCALayer не делает подписей RSA-SHA1): соединение закрывается, как при ошибке подписи у оригинала. Ключи ГОСТ 2015-256 OpenNCALayer не открывает."

@@ -1,0 +1,16 @@
+[package]
+name = "oncl-port-workspace"
+description = "OpenNCALayer port of the Workspace signer (kz.workspace.Signer): an ESEDO CMS of the document card with its OCSP answer and time-stamped CMS of the attachments"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oncl-pdk.workspace = true
+oncl-port-pki.workspace = true

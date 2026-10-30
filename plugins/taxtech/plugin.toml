@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.taxtech"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.digital.taxtech.documents.multisign.NCAModule"]
+
+[name]
+ru = "ЭДО ЦНТ"
+kk = "ЦСТ ЭҚА"
+en = "Digital TaxTech e-documents"
+
+[description]
+ru = "Подписание документов ЭДО Digital TaxTech: ключ выбирается один раз для сайта"
+kk = "Digital TaxTech ЭҚА құжаттарына қол қою: кілт сайт үшін бір рет таңдалады"
+en = "Signs Digital TaxTech e-documents with a key chosen once for the site"
+
+[replaces]
+symname = "digital.taxtech.documents.multisign"
+version = "1.0"
+
+[capabilities]
+keys = true

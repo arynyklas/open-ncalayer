@@ -1,0 +1,20 @@
+id = "io.github.arynyklas.openncalayer.port.eproc"
+modules = ["kz.sapa.eproc.osgi.EprocModule"]
+
+[original]
+symname = "kz.sapa.eproc.osgi.EprocModule"
+version = "1.0"
+vendor = "ТОО «Sapa Software»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Одноразовые токены chain/newChain действуют только в текущем соединении и держат открытый ключ, а не пароль (у оригинала — общий кэш на процесс с паролем для всех сайтов); в соединении хранится не больше 12 токенов (OpenNCALayer держит не больше 16 ключей на соединение), старейший вытесняется."
+
+[[differences]]
+ru = "Выбор файла хранилища и окно подписи заменены общими окнами OpenNCALayer; ключи фильтруются по типу Kalkan (keyType) тем же правилом."
+
+[[differences]]
+ru = "Ключи на токенах — после поддержки токенов в OpenNCALayer; до этого токен отвечает storage.empty."

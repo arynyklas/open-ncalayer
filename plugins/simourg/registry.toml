@@ -1,0 +1,20 @@
+id = "io.github.arynyklas.openncalayer.port.simourg"
+modules = ["kz.Simourg.SimBASEModule"]
+
+[original]
+symname = "kz.Simourg.SimBASE"
+version = "2.2"
+vendor = "ТОО «Simourg»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Окна выбора файла и ключа — общие окна OpenNCALayer; после выбора ключа окно «Подписать / Выбрать другие ключи / Отменить». Закрытое окно выбора файла отвечает Cancel (у оригинала — «Error: Отмена операции»)."
+
+[[differences]]
+ru = "Издатели для запросов OCSP — сертификаты УЦ, которым доверяет OpenNCALayer (шесть встроенных у оригинала и УЦ RSA 2022, без которого не работали действующие ключи RSA), а не сертификаты из пакета плагина."
+
+[[differences]]
+ru = "Тексты ошибок проверки OCSP и меток времени — свои (у оригинала — тексты исключений Java); ключи на токенах — после поддержки токенов в OpenNCALayer."

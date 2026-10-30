@@ -1,0 +1,26 @@
+id = "io.github.arynyklas.openncalayer.port.taxtech"
+modules = ["kz.digital.taxtech.documents.multisign.NCAModule"]
+
+[original]
+symname = "digital.taxtech.documents.multisign"
+version = "1.0"
+vendor = "ТОО «Digital TaxTech»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Выбранный ключ живёт только в текущем соединении (у оригинала — на весь процесс для всех вкладок того же сайта, вместе с паролем); после переподключения страница снова вызывает selectKey."
+
+[[differences]]
+ru = "Окна выбора хранилища и ключа — общие окна OpenNCALayer на его языке; args.locale не меняет язык окон."
+
+[[differences]]
+ru = "Правило сложности пароля для ключей с EKU 1.2.398.3.3.4.2* не переносится: пароль проверяет окно OpenNCALayer."
+
+[[differences]]
+ru = "Ключи на токенах — после поддержки токенов в OpenNCALayer; до этого хранилища токенов пусты."
+
+[[differences]]
+ru = "Порядок ключей ответа в общих бакетах HashMap (success/bin, subjectDN/iin) вычислен, не сверен с оригиналом."

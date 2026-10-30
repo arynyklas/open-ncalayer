@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.esf-osdkz"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["com.osdkz.esf.signer.esfSigner"]
+
+[name]
+ru = "Подпись ЭСФ"
+kk = "ЭШФ қолтаңбасы"
+en = "ESF signer"
+
+[description]
+ru = "Подпись электронных счетов-фактур и вход в ИС ЭСФ"
+kk = "Электрондық шот-фактураларға қол қою және ЭШФ АЖ-ге кіру"
+en = "Signs e-invoices and signs in to the ESF information system"
+
+[replaces]
+symname = "com.osdkz.esf.signer"
+version = "1.2"
+
+[capabilities]
+keys = true

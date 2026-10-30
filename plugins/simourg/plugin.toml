@@ -1,0 +1,22 @@
+id = "io.github.arynyklas.openncalayer.port.simourg"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.Simourg.SimBASEModule"]
+
+[name]
+ru = "Simourg SimBASE"
+kk = "Simourg SimBASE"
+en = "Simourg SimBASE"
+
+[description]
+ru = "Подпись CMS и ЕСЭДО для системы Simbase®"
+kk = "Simbase® жүйесі үшін CMS және ЕСЭДО қолтаңбасы"
+en = "CMS and ESEDO signatures for the Simbase® system"
+
+[replaces]
+symname = "kz.Simourg.SimBASE"
+version = "2.2"
+
+[capabilities]
+keys = true
+dialogs = true

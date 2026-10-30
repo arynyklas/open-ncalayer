@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.eup"
+modules = ["kz.nitec.eup.eupsigner"]
+
+[original]
+symname = "kz.nitec.eup.eupsigner"
+version = "1.0"
+vendor = "АО «НИТ»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Окно выбора файла и пароля заменено общими окнами OpenNCALayer: пользователь выбирает ключ (оригинал брал последний ключ файла)."
+
+[[differences]]
+ru = "Ключи ГОСТ 2015 подписывают (оригинал отвечал {\"code\":\"200\",\"uuid\"} без подписи); messageDigest считается тем же алгоритмом, что digestAlgorithm (у оригинала — всегда ГОСТ 34.311, неверно для RSA и ГОСТ 2015). Для ключей ГОСТ 2004 ответ тот же."
+
+[[differences]]
+ru = "Сертификаты со старым алгоритмом Tumar (1.3.6.1.4.1.6801.1.2.2) OpenNCALayer не открывает."
+
+[[differences]]
+ru = "Запрос OCSP ждёт не дольше 60 с (оригинал — без ограничения); ответы о неверном пароле (101) и пустом хранилище недостижимы: пароль и ключ проверяет окно OpenNCALayer."
