@@ -54,6 +54,12 @@ jobs:
             echo "::notice::every plugin version is in the beta index already: nothing to release"
             echo "any=false" >> "$GITHUB_OUTPUT"
           fi
+      # The licence check reads every platform's packages offline (as in ci.yml).
+      - name: Fetch packages
+        if: steps.pending.outputs.any == 'true'
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path plugins/Cargo.toml
       - name: Pack, twice, and compare
         if: steps.pending.outputs.any == 'true'
         run: |
