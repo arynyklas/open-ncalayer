@@ -1079,7 +1079,8 @@ fn ezsigner_sign_file_path_writes_cms() {
         &ez_request("signFilePath", json!([file, folder, "PKCS12"]), Some("kk")),
         None,
     ));
-    let written = dir.path().join("doc.pdf.cms");
+    // The real path of the folder the page named, as the host reports it.
+    let written = oncl_testkit::real_path(dir.path()).join("doc.pdf.cms");
     let mut expected = JObject::hash_map();
     expected.put("code", "200");
     expected.put("message", "Файлға сәтті қол қойылды");
@@ -1466,7 +1467,7 @@ fn uchet_license_ok_then_sign() {
     )));
     assert_eq!(reply["code"], "200", "{reply}");
     assert_eq!(reply["message"], "Файл успешно подписан");
-    let written = dir.path().join("doc.pdf.cms");
+    let written = oncl_testkit::real_path(dir.path()).join("doc.pdf.cms");
     assert_eq!(
         Some(reply["responseObject"].as_str().unwrap()),
         written.to_str()
