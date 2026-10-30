@@ -533,26 +533,60 @@ fn change_agreement(ctx: &Ctx) -> Result<String, Fail> {
     Ok(ok(ctx).to_json())
 }
 
-/// Whether `address` is an e-mail address by the original's simple pattern.
+/// Whether `address` is an e-mail address by the original's pattern (`find` of
+/// `^local@(ipv4(:port)?|(label.)+tld)$`, ASCII case-insensitive): the local part dot-separated
+/// runs of `[A-Za-z0-9_'+*/^&=?~{}-]`; the domain an IPv4 literal with an optional port of up
+/// to 3 digits, or labels of letters, digits and inner hyphens with a 2-6 letter top-level
+/// label. `$` also matches before a final line terminator.
 fn is_mail(address: &str) -> bool {
-    // Unverified against the original: its pattern, taken as the usual
-    // `^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,6}$` without case.
+    let address = ["\r\n", "\n", "\r", "\u{85}", "\u{2028}", "\u{2029}"]
+        .iter()
+        .find_map(|end| address.strip_suffix(end))
+        .unwrap_or(address);
     let Some((local, domain)) = address.split_once('@') else {
         return false;
     };
-    let Some((name, top)) = domain.rsplit_once('.') else {
+    let local_char = |c: char| c.is_ascii_alphanumeric() || "_'+*/^&=?~{}-".contains(c);
+    let local_ok = local
+        .split('.')
+        .all(|run| !run.is_empty() && run.chars().all(local_char));
+    local_ok && (is_ipv4_literal(domain) || is_host_name(domain))
+}
+
+/// `\d{1,3}(\.\d{1,3}){3}(:\d{1,3})?`.
+fn is_ipv4_literal(domain: &str) -> bool {
+    let digits = |s: &str| (1..=3).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+    let (address, port) = match domain.split_once(':') {
+        Some((address, port)) => (address, Some(port)),
+        None => (domain, None),
+    };
+    let parts: Vec<&str> = address.split('.').collect();
+    parts.len() == 4 && parts.iter().all(|p| digits(p)) && port.is_none_or(digits)
+}
+
+/// `(label\.)+[A-Za-z]{2,6}`, a label `[A-Za-z0-9][A-Za-z0-9-]+[A-Za-z0-9]` or
+/// `[A-Za-z0-9]{1,2}`.
+fn is_host_name(domain: &str) -> bool {
+    let Some((labels, top)) = domain.rsplit_once('.') else {
         return false;
     };
-    !local.is_empty()
-        && local
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c))
-        && !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || ".-".contains(c))
-        && (2..=6).contains(&top.len())
-        && top.chars().all(|c| c.is_ascii_alphabetic())
+    let label = |label: &str| {
+        let bytes = label.as_bytes();
+        match bytes.len() {
+            1 | 2 => bytes.iter().all(u8::is_ascii_alphanumeric),
+            n if n >= 3 => {
+                bytes[0].is_ascii_alphanumeric()
+                    && bytes[n - 1].is_ascii_alphanumeric()
+                    && bytes
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+            }
+            _ => false,
+        }
+    };
+    (2..=6).contains(&top.len())
+        && top.bytes().all(|b| b.is_ascii_alphabetic())
+        && labels.split('.').all(label)
 }
 
 /// `confirmationsSetting` of the page's `method` and `address`, the address checked.

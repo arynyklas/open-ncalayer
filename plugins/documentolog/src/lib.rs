@@ -188,21 +188,20 @@ fn password() -> Option<Password> {
     Some(password)
 }
 
-/// The Kalkan token storages; `PKCS12` is a file.
-const TOKENS: [&str; 6] = [
+/// The token storages the original's old applet knows.
+const TOKENS: [&str; 4] = [
     "AKKaztokenStore",
     "AKKZIDCardStore",
     "AKEToken72KStore",
-    "AKEToken5110Store",
     "AKJaCartaStore",
-    "AKAKEYStore",
 ];
+
+/// The file storages it knows.
+const FILES: [&str; 2] = ["PKCS12", "JKS"];
 
 /// Whether `storage` is one the original knows.
 fn known_storage(storage: &str) -> bool {
-    // Unverified against the original: the storage names its old applet accepts (taken as
-    // Kalkan's PKCS12 and token storages).
-    storage == "PKCS12" || TOKENS.contains(&storage)
+    FILES.contains(&storage) || TOKENS.contains(&storage)
 }
 
 /// `browseKeyStore`: a key store file or folder, or a token reader; its path.
@@ -227,7 +226,7 @@ fn browse(args: &Map<String, Value>) -> Out {
         clear_password();
         return done(unknown());
     }
-    if storage != "PKCS12" {
+    if !FILES.contains(&storage.as_str()) {
         let terminals = keys::terminals(&storage).unwrap_or_default();
         let chosen = if terminals.is_empty() {
             None
@@ -300,7 +299,15 @@ fn open(storage: &str, path: &str, password: Password) -> Option<Vec<Key>> {
     .ok()
 }
 
-/// `getKeys`: `ALG|CN|serialHex|alias` of each key, one per line.
+/// The signature algorithm OID of GOST 34.310-2004.
+const GOST2004_SIG_OID: &str = "1.2.398.3.10.1.1.1.2";
+
+/// The clientAuth extended key usage: the original's `"SIGN"` list leaves those out.
+const EKU_CLIENT_AUTH: &str = "1.3.6.1.5.5.7.3.2";
+
+/// `getKeys`: `ALG|CN|serialHex|alias` of each signing key, one per line; `ALG` is «ГОСТ»
+/// for a certificate signed with GOST 34.310-2004 and «RSA» for any other. No key left is
+/// an error.
 fn get_keys(args: &Map<String, Value>) -> Out {
     let storage = arg(args, "storage_name");
     let path = arg(args, "storage_path");
@@ -308,14 +315,18 @@ fn get_keys(args: &Map<String, Value>) -> Out {
         clear_password();
         return unknown();
     };
-    // Unverified against the original: the old applet's `getKeys(…, "SIGN")` is taken to
-    // list every key, its algorithm as the key's Kalkan name.
     let lines: Vec<String> = keys
         .iter()
         .filter_map(|key| {
             let info = host::cert_info(key.certificate()).ok()?;
-            let alg = oncl_port_pki::x509text::kalkan_key_alg_name(&info.spki_alg_oid)
-                .unwrap_or_default();
+            if info.ext_key_usages.iter().any(|eku| eku == EKU_CLIENT_AUTH) {
+                return None;
+            }
+            let alg = if info.signature_alg_oid == GOST2004_SIG_OID {
+                "ГОСТ"
+            } else {
+                "RSA"
+            };
             let serial = info.serial_hex.trim_start_matches('0');
             let serial = if serial.is_empty() { "0" } else { serial };
             Some(format!(
@@ -325,6 +336,10 @@ fn get_keys(args: &Map<String, Value>) -> Out {
             ))
         })
         .collect();
+    if lines.is_empty() {
+        clear_password();
+        return unknown();
+    }
     result(&lines.join("\n"))
 }
 
@@ -480,17 +495,19 @@ fn simple_cms(key: &Key, content: CmsContent, attached: bool) -> Option<String> 
     )
 }
 
-/// `createCMSEsedoSignature` and `createCMSSimpleSignature` of the page.
+/// `createCMSEsedoSignature` and `createCMSSimpleSignature` of the page: the password
+/// first (the window if none is kept), then the data, then the key.
 fn page_cms(args: &Map<String, Value>, esedo: bool) -> Option<String> {
-    // Unverified against the original: whether it downloads the data before it opens the
-    // key store (taken as first, so a bad URL asks for no password).
+    let password = password();
     let data = document(&arg(args, "sign_string_url"), -1)?;
-    let attached = arg(args, "attached").eq_ignore_ascii_case("true");
-    let key = page_key(
+    let attached = arg(args, "attached") == "true";
+    let key = open(
         &arg(args, "storage_alias"),
         &arg(args, "storage_path"),
-        &arg(args, "key_index"),
-    )?;
+        password?,
+    )?
+    .into_iter()
+    .find(|key| key.alias() == arg(args, "key_index"))?;
     if esedo {
         let ocsp = javab64::decode_kalkan(&arg(args, "ocsp_notification")).ok();
         esedo_cms(

@@ -29,25 +29,25 @@ impl Texts {
         content_invalid: "Содержимое документа (невалидный JSON?)",
     };
 
-    // Unverified against the original: apart from the window's title, the Kazakh and
-    // English texts of its dictionary are not known; these are translations.
+    // The texts of the original's dictionaries; «Отмена»/«Назад» and their translations are
+    // the buttons of OpenNCALayer's window, which the original's has not.
     pub(crate) const KK: Texts = Texts {
         title: "ЭЦҚ арқылы деректерге қол қою модулі",
         documents: "Қол қоюға арналған құжаттар:",
         main_buttons: ["Қол қою", "Қарау", "Болдырмау"],
         preview_title: "Деректерді қарау",
         preview_buttons: ["Қарау", "Артқа"],
-        content: "Құжаттың мазмұны",
-        content_invalid: "Құжаттың мазмұны (JSON жарамсыз ба?)",
+        content: "Құжат мазмұны",
+        content_invalid: "Құжат мазмұны (жарамсыз JSON?)",
     };
 
     pub(crate) const EN: Texts = Texts {
         title: "Data Signing with Digital Signature (Module)",
         documents: "Documents to sign:",
         main_buttons: ["Sign", "View", "Cancel"],
-        preview_title: "Data preview",
+        preview_title: "Data Preview",
         preview_buttons: ["View", "Back"],
-        content: "Document contents",
-        content_invalid: "Document contents (invalid JSON?)",
+        content: "Document Content",
+        content_invalid: "Document Content (invalid JSON?)",
     };
 }

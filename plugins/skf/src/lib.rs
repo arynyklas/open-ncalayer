@@ -503,8 +503,11 @@ fn get_keys(
     let key = opened
         .map_err(|outcome| open_failure(outcome, path))?
         .into_iter()
-        .next()
-        .ok_or_else(npe)?;
+        .next();
+    // The store opened: the original replaces its key here, before the checks. A key that
+    // then fails them is not kept either, so nothing signs until a `getKeys` passes.
+    *state.key.borrow_mut() = None;
+    let key = key.ok_or_else(npe)?;
     let cas = cas(state)?;
     let der = key.certificate();
     let cert = Certificate::from_der(der).map_err(|_| npe())?;
@@ -581,8 +584,6 @@ fn get_keys(
         property("C"),
     ]
     .join("|");
-    // Unverified against the original: whether a key failing the checks still replaces
-    // the one kept.
     *state.key.borrow_mut() = Some(key);
     Ok(line)
 }
