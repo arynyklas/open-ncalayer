@@ -6,9 +6,12 @@ name: Pages
 #
 # Runs on a push to main that changes the site's inputs, daily (the releases and the
 # `upstream` branch's facts change without a push), after the upstream watcher publishes
-# facts (`repository_dispatch`), when a release is published, edited or deleted, and by
-# hand. A `release` event runs on the release's tag, which the `github-pages` environment
-# does not deploy: it only starts this workflow again on the default branch.
+# facts (`repository_dispatch`), after each run of the Release workflow (`workflow_run`:
+# its `publish` job creates the release with GITHUB_TOKEN, and events of GITHUB_TOKEN start
+# no workflow, so `release` never fires for it), when the maintainer publishes, edits or
+# deletes a release (`release`), and by hand. `workflow_run` runs on the default branch; a
+# `release` event runs on the release's tag, which the `github-pages` environment does not
+# deploy: it only starts this workflow again on the default branch.
 #
 # Pages must be enabled with "GitHub Actions" as the source in the repository settings;
 # until then the site is built and checked, and nothing is deployed.
@@ -30,6 +33,9 @@ on:
     - cron: "41 4 * * *"
   repository_dispatch:
     types: [upstream]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   release:
     types: [published, edited, deleted]
   workflow_dispatch:
@@ -153,7 +159,7 @@ jobs:
         run: |
           dir="$RUNNER_TEMP/site/upstream"
           status=0
-          git ls-remote --exit-code --heads origin upstream > /dev/null || status=$?
+          git ls-remote --exit-code origin refs/heads/upstream > /dev/null || status=$?
           if [ "$status" = 2 ]; then
             echo "::notice::no upstream branch yet"
             exit 0
@@ -161,7 +167,10 @@ jobs:
             echo "::warning::the upstream branch could not be listed: the site shows no facts"
             exit 0
           fi
-          git fetch --no-tags --depth 1 origin upstream
+          if ! git fetch --no-tags --depth 1 origin refs/heads/upstream; then
+            echo "::warning::the upstream branch could not be fetched: the site shows no facts"
+            exit 0
+          fi
           mkdir -p "$dir/latest"
           git show FETCH_HEAD:index.json > "$dir/index.json" || rm -f "$dir/index.json"
           git show FETCH_HEAD:latest/facts.json > "$dir/latest/facts.json" || rm -f "$dir/latest/facts.json"
