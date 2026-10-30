@@ -1,6 +1,6 @@
 id = "io.github.arynyklas.openncalayer.port.devart"
 version = "1.0.0-beta.1"
-min_core = "0.1.0-alpha.3"
+min_core = "0.1.0-alpha.4"
 modules = ["kz.devart.bundle.Devart"]
 
 [name]

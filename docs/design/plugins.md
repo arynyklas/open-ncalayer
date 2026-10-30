@@ -186,7 +186,10 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 
 | Функции | `since` |
 |---|---|
-| `log`, `now`, `random`, `cert_info`, `reply_drop`, `hash`, `cert_details`, `local_time`, `platform`, `ca_list`, `ca_issuer`, функции `keys`, `dialogs`, `files`, `http`, `page_files`, `settings`, `shared` из этого раздела | `0.1.0-alpha.3` |
+| `log`, `now`, `random`, `cert_info`, `keys_choose`, `keys_sign_cms`, `keys_sign_raw`, `keys_sign_xml`, `keys_release`, `dialog_message`, `dialog_confirm`, `file_open`, `file_save`, `http_request` | `0.1.0-alpha.3` |
+| Остальные функции этого раздела: `reply_drop`, `hash`, `cert_details`, `local_time`, `platform`, `ca_list`, `ca_issuer` и новые функции `keys`, `dialogs`, `files`, `http`, `page_files`, `settings`, `shared` | `0.1.0-alpha.4` |
+
+Версия в `since` — версия ядра, в которой функция впервые вышла в релиз. Уже выпущенная версия ядра в `since` новой функции не ставится: если функция добавлена после выпуска, `since` и версия рабочего пространства поднимаются до следующей предварительной версии.
 
 Функции capabilities — в разделе [Capabilities](#capabilities). Типы аргументов и результатов — модуль `oncl_pdk::abi`.
 

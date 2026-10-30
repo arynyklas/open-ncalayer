@@ -458,9 +458,9 @@ impl Import {
             | Import::DialogConfirm
             | Import::FileOpen
             | Import::FileSave
-            | Import::HttpRequest
-            | Import::ReplyDrop
-            // The plugin ports' functions, in the same core.
+            | Import::HttpRequest => "0.1.0-alpha.3",
+            // The plugin ports' functions.
+            Import::ReplyDrop
             | Import::Hash
             | Import::CertDetails
             | Import::LocalTime
@@ -490,7 +490,7 @@ impl Import {
             | Import::SettingsPut
             | Import::SharedGet
             | Import::SharedPut
-            | Import::KeysSignXades => "0.1.0-alpha.3",
+            | Import::KeysSignXades => "0.1.0-alpha.4",
         };
         semver::Version::parse(version).expect("a valid version")
     }
