@@ -15,6 +15,7 @@
 //! paths a page names ([`PageFile`], [`page_path`], [`remember_chosen_path`]), and the
 //! consent a token PIN from a page needs ([`PagePins`]).
 
+pub mod capabilities;
 mod essentials;
 mod filter;
 mod keys;

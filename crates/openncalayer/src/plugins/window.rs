@@ -5,10 +5,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use oncl_plugin::{Capabilities, Localized, Replaces, Source};
+use oncl_plugin::{Localized, Replaces, Source};
 use oncl_ui::plugins_view::{
-    AvailablePlugin, CapabilityLine, CatalogLine, InstalledPlugin, LocalizedText, PendingUpdate,
-    PluginStatus, ReplacedBundle,
+    AvailablePlugin, CatalogLine, InstalledPlugin, LocalizedText, PendingUpdate, PluginStatus,
+    ReplacedBundle,
 };
 use oncl_ui::{
     InstallPluginRequest, InstalledVersion, PluginActionError, PluginsServices, PluginsView,
@@ -39,61 +39,10 @@ pub fn install_request(
             version: version.to_string(),
             local: source == Source::Local,
         }),
-        capabilities: capability_lines(&request.capabilities),
+        capabilities: request.capabilities.lines(),
         local: request.local,
         decide,
     }
-}
-
-fn capability_lines(capabilities: &Capabilities) -> Vec<CapabilityLine> {
-    let mut lines = Vec::new();
-    if capabilities.keys {
-        lines.push(CapabilityLine::Keys);
-    }
-    if capabilities.dialogs {
-        lines.push(CapabilityLine::Dialogs);
-    }
-    if capabilities.files {
-        lines.push(CapabilityLine::Files);
-    }
-    if !capabilities.http.is_empty() {
-        lines.push(CapabilityLine::Http(
-            capabilities.http.iter().map(ToString::to_string).collect(),
-        ));
-    }
-    if !capabilities.origins.is_empty() {
-        lines.push(CapabilityLine::Origins(
-            capabilities
-                .origins
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        ));
-    }
-    if !capabilities.http_insecure.is_empty() {
-        lines.push(CapabilityLine::HttpInsecure(
-            capabilities
-                .http_insecure
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        ));
-    }
-    if capabilities.key_files {
-        lines.push(CapabilityLine::KeyFiles);
-    }
-    if capabilities.page_files || !capabilities.page_files_ext.is_empty() {
-        lines.push(CapabilityLine::PageFiles(
-            capabilities.page_files_ext.clone(),
-        ));
-    }
-    if capabilities.settings {
-        lines.push(CapabilityLine::Settings);
-    }
-    if capabilities.shared {
-        lines.push(CapabilityLine::Shared);
-    }
-    lines
 }
 
 /// The plugin window's services: the plugins of `service`, or, if they could not start,
@@ -184,7 +133,7 @@ pub fn plugins_view(view: ServiceView) -> PluginsView {
                 },
                 pending_update: p.pending_update.map(|update| PendingUpdate {
                     version: update.version.to_string(),
-                    added: capability_lines(&update.added),
+                    added: update.added.lines(),
                 }),
                 id: p.id,
             })
@@ -223,7 +172,8 @@ fn bundle(replaces: &Replaces) -> ReplacedBundle {
 mod tests {
     use super::*;
     use crate::plugins::{AvailableView, InstalledView, PendingView};
-    use oncl_plugin::HttpPrefix;
+    use oncl_basics::capabilities::CapabilityLine;
+    use oncl_plugin::{Capabilities, HttpPrefix};
     use oncl_update::{Channel, Version};
     use time::macros::datetime;
 

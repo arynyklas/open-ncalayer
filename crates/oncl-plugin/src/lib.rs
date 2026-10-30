@@ -25,7 +25,9 @@ pub use caps::{
     SharedState, nca_pki_hosts,
 };
 pub use host::HostServices;
-pub use manifest::{Capabilities, HttpPrefix, Localized, Manifest, OriginPattern, Replaces};
+pub use manifest::{
+    Capabilities, HttpPrefix, Localized, Manifest, OriginPattern, Replaces, is_symbolic_name,
+};
 pub use modules::{BUILT_IN, LoadedInfo, MemoryLimits, OnMissing, PluginModules};
 pub use oncl_pdk::abi::ABI_VERSION;
 pub use package::{MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, PACKAGE_EXT, Package, archive};

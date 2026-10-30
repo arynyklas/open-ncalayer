@@ -4,6 +4,7 @@
 
 use crate::PackageError;
 use oncl_basics::Locale;
+use oncl_basics::capabilities::CapabilityLine;
 use semver::Version;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -140,6 +141,47 @@ impl Capabilities {
     /// Whether nothing is asked for.
     pub fn is_empty(&self) -> bool {
         *self == Capabilities::default()
+    }
+
+    /// What these capabilities allow, a line each, in the manifest's order.
+    pub fn lines(&self) -> Vec<CapabilityLine> {
+        let texts = |items: &[HttpPrefix]| -> Vec<String> {
+            items.iter().map(ToString::to_string).collect()
+        };
+        let mut lines = Vec::new();
+        if self.keys {
+            lines.push(CapabilityLine::Keys);
+        }
+        if self.dialogs {
+            lines.push(CapabilityLine::Dialogs);
+        }
+        if self.files {
+            lines.push(CapabilityLine::Files);
+        }
+        if !self.http.is_empty() {
+            lines.push(CapabilityLine::Http(texts(&self.http)));
+        }
+        if !self.origins.is_empty() {
+            lines.push(CapabilityLine::Origins(
+                self.origins.iter().map(ToString::to_string).collect(),
+            ));
+        }
+        if !self.http_insecure.is_empty() {
+            lines.push(CapabilityLine::HttpInsecure(texts(&self.http_insecure)));
+        }
+        if self.key_files {
+            lines.push(CapabilityLine::KeyFiles);
+        }
+        if self.page_files || !self.page_files_ext.is_empty() {
+            lines.push(CapabilityLine::PageFiles(self.page_files_ext.clone()));
+        }
+        if self.settings {
+            lines.push(CapabilityLine::Settings);
+        }
+        if self.shared {
+            lines.push(CapabilityLine::Shared);
+        }
+        lines
     }
 
     /// What these capabilities allow that `old` does not: the flags `old` lacks, the
@@ -706,7 +748,7 @@ fn is_plugin_id(id: &str) -> bool {
 }
 
 /// `^[A-Za-z0-9._-]{1,128}$`: a module name or an OSGi symbolic name.
-fn is_symbolic_name(name: &str) -> bool {
+pub fn is_symbolic_name(name: &str) -> bool {
     (1..=MAX_SYMBOLIC_NAME).contains(&name.len())
         && name
             .bytes()

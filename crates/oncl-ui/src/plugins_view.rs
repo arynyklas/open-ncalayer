@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::thread::LocalKey;
 
 use oncl_basics::Locale;
+use oncl_basics::capabilities::{CapabilityLine, capability_text};
 use slint::{ComponentHandle, ModelRc, PlatformError, SharedString, VecModel};
 use time::OffsetDateTime;
 
@@ -181,32 +182,6 @@ impl LocalizedText {
 pub struct ReplacedBundle {
     pub symname: String,
     pub version: String,
-}
-
-/// What a plugin may do, a line each in the install confirmation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CapabilityLine {
-    /// Choose the user's key and sign with it.
-    Keys,
-    /// Show windows.
-    Dialogs,
-    /// Open and save files the user chooses.
-    Files,
-    /// Reach these URL prefixes.
-    Http(Vec<String>),
-    /// Reach the sites of these origins themselves (the page's own site).
-    Origins(Vec<String>),
-    /// Reach these plain-HTTP prefixes: an unprotected connection.
-    HttpInsecure(Vec<String>),
-    /// Open key store files the sites name, each once you allow it.
-    KeyFiles,
-    /// Read files and write into folders the sites name, each once you allow it; written
-    /// files of these extensions.
-    PageFiles(Vec<String>),
-    /// Keep its settings on this computer.
-    Settings,
-    /// Share data between sites.
-    Shared,
 }
 
 /// The open window ([`worker::Slot`]).
@@ -632,11 +607,7 @@ fn installed_row(plugin: &InstalledPlugin, l: Locale) -> InstalledRow {
         .pending_update
         .as_ref()
         .map(|update| {
-            let added: Vec<String> = update
-                .added
-                .iter()
-                .map(|c| crate::install_plugin::capability_text(c, l))
-                .collect();
+            let added: Vec<String> = update.added.iter().map(|c| capability_text(c, l)).collect();
             t.pending_update
                 .replace("{version}", &update.version)
                 .replace("{0}", &added.join("; "))

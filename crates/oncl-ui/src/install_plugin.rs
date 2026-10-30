@@ -13,12 +13,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use oncl_basics::Locale;
+use oncl_basics::capabilities::{CapabilityLine, capability_text};
 use slint::{
     CloseRequestResponse, ComponentHandle, ModelRc, PlatformError, SharedString, VecModel,
 };
 
 use crate::foreground;
-use crate::plugins_view::{CapabilityLine, LocalizedText, ReplacedBundle};
+use crate::plugins_view::{LocalizedText, ReplacedBundle};
 use crate::prompter::select_desktop_language;
 use crate::ui::InstallPluginWindow;
 use crate::view::page_text;
@@ -265,35 +266,6 @@ fn texts(request: &InstallPluginRequest, l: Locale) -> WindowTexts {
     }
 }
 
-/// What `capability` lets a plugin do, in `l`.
-pub(crate) fn capability_text(capability: &CapabilityLine, l: Locale) -> String {
-    let t = Texts::of(l);
-    match capability {
-        CapabilityLine::Keys => t.keys.to_owned(),
-        CapabilityLine::Dialogs => t.dialogs.to_owned(),
-        CapabilityLine::Files => t.files.to_owned(),
-        CapabilityLine::Http(prefixes) => t.http.replace("{0}", &prefixes.join(", ")),
-        CapabilityLine::Origins(origins) => t.origins.replace("{0}", &origins.join(", ")),
-        CapabilityLine::HttpInsecure(prefixes) => {
-            t.http_insecure.replace("{0}", &prefixes.join(", "))
-        }
-        CapabilityLine::KeyFiles => t.key_files.to_owned(),
-        CapabilityLine::PageFiles(extensions) if extensions.is_empty() => {
-            t.page_files_read.to_owned()
-        }
-        CapabilityLine::PageFiles(extensions) => t.page_files.replace(
-            "{0}",
-            &extensions
-                .iter()
-                .map(|e| format!(".{e}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ),
-        CapabilityLine::Settings => t.settings.to_owned(),
-        CapabilityLine::Shared => t.shared.to_owned(),
-    }
-}
-
 /// The texts of the window, in one language.
 struct Texts {
     /// `{0}`: the page's origin.
@@ -308,21 +280,6 @@ struct Texts {
     replaces: &'static str,
     may: &'static str,
     nothing: &'static str,
-    keys: &'static str,
-    dialogs: &'static str,
-    files: &'static str,
-    /// `{0}`: the URL prefixes.
-    http: &'static str,
-    /// `{0}`: the origin patterns.
-    origins: &'static str,
-    /// `{0}`: the plain-HTTP prefixes.
-    http_insecure: &'static str,
-    key_files: &'static str,
-    page_files_read: &'static str,
-    /// `{0}`: the extensions written.
-    page_files: &'static str,
-    settings: &'static str,
-    shared: &'static str,
     local: &'static str,
 }
 
@@ -338,17 +295,6 @@ impl Texts {
                 replaces: "Түпнұсқа NCALayer-дің {symname} {version} бандлын алмастырады",
                 may: "Плагин мыналарды істей алады:",
                 nothing: "Плагин сайттардың сұрауларына ғана жауап береді.",
-                keys: "кілтіңізді таңдау және онымен қол қою",
-                dialogs: "терезелерді көрсету",
-                files: "өзіңіз таңдаған файлдарды ашу және сақтау",
-                http: "мына мекенжайларға жүгіну: {0}",
-                origins: "мына сайттардың өздеріне жүгіну: {0}",
-                http_insecure: "қорғалмаған байланыс арқылы жүгіну: {0}",
-                key_files: "сайттар атаған кілт файлдарын ашу, әрқайсысын сіз рұқсат еткеннен кейін",
-                page_files_read: "сайттар атаған файлдарды оқу, әрқайсысын сіз рұқсат еткеннен кейін",
-                page_files: "сайттар атаған файлдарды оқу және папкаларға {0} файлдарын жазу, әрқайсысын сіз рұқсат еткеннен кейін",
-                settings: "баптауларын осы компьютерде сақтау",
-                shared: "деректерді сайттар арасында бөлісу",
                 local: "Бұл плагин OpenNCALayer каталогында жоқ, оны мейнтейнер тексерген жоқ. Плагиндерді тек сенімді көзден орнатыңыз.",
             },
             Locale::Ru => &Texts {
@@ -360,17 +306,6 @@ impl Texts {
                 replaces: "Заменяет {symname} {version} оригинального NCALayer",
                 may: "Плагин сможет:",
                 nothing: "Плагин будет только отвечать на запросы сайтов.",
-                keys: "выбирать ваш ключ и подписывать им",
-                dialogs: "показывать окна",
-                files: "открывать и сохранять файлы, которые вы выберете",
-                http: "обращаться к {0}",
-                origins: "обращаться к самим сайтам {0}",
-                http_insecure: "обращаться по незащищённому соединению к {0}",
-                key_files: "открывать файлы ключей, которые назовут сайты, — каждый после вашего разрешения",
-                page_files_read: "читать файлы, которые назовут сайты, — каждый после вашего разрешения",
-                page_files: "читать файлы и записывать файлы {0} в папки, которые назовут сайты, — каждый файл и каждую папку после вашего разрешения",
-                settings: "хранить свои настройки на этом компьютере",
-                shared: "делить данные между сайтами",
                 local: "Этого плагина нет в каталоге OpenNCALayer, его не проверял мейнтейнер. Устанавливайте только плагины из источника, которому доверяете.",
             },
             Locale::En => &Texts {
@@ -382,17 +317,6 @@ impl Texts {
                 replaces: "Replaces {symname} {version} of the original NCALayer",
                 may: "The plugin will be able to:",
                 nothing: "The plugin will only answer the sites' requests.",
-                keys: "choose your key and sign with it",
-                dialogs: "show windows",
-                files: "open and save files you choose",
-                http: "reach {0}",
-                origins: "reach the sites {0} themselves",
-                http_insecure: "reach {0} over an unprotected connection",
-                key_files: "open key files the sites name, each once you allow it",
-                page_files_read: "read files the sites name, each once you allow it",
-                page_files: "read files and write {0} files into folders the sites name, each once you allow it",
-                settings: "keep its settings on this computer",
-                shared: "share data between sites",
                 local: "This plugin is not in the OpenNCALayer catalog; the maintainer has not reviewed it. Install plugins only from a source you trust.",
             },
         }
@@ -592,21 +516,6 @@ mod tests {
             "Заменит установленную версию 0.0.9 (локальную, из файла)"
         );
         assert!(texts(&request, Locale::Kk).replacing.contains("0.0.9"));
-    }
-
-    #[test]
-    fn page_files_say_when_permission_is_asked() {
-        let page_files = CapabilityLine::PageFiles(vec!["xml".to_owned(), "pdf".to_owned()]);
-        assert_eq!(
-            capability_text(&page_files, Locale::Ru),
-            "читать файлы и записывать файлы .xml, .pdf в папки, которые назовут сайты, — \
-             каждый файл и каждую папку после вашего разрешения"
-        );
-        assert_eq!(
-            capability_text(&page_files, Locale::En),
-            "read files and write .xml, .pdf files into folders the sites name, each once you \
-             allow it"
-        );
     }
 
     #[test]

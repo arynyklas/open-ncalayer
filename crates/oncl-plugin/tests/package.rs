@@ -2,9 +2,10 @@
 //! with the `zip` crate, some of them patched afterwards into what no writer would produce.
 
 use oncl_basics::Locale;
+use oncl_basics::capabilities::CapabilityLine;
 use oncl_plugin::{
     Capabilities, HttpPrefix, MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, Manifest, PACKAGE_EXT, Package,
-    PackageError,
+    PackageError, is_symbolic_name,
 };
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
@@ -820,4 +821,52 @@ fn page_files_ext_needs_page_files() {
     assert!(added.shared);
     assert_eq!(added.origins.len(), 1);
     assert!(new.added_over(&new).is_empty());
+}
+
+#[test]
+fn lines_follow_manifest_order() {
+    let caps = caps_of(
+        r#"shared = true
+settings = true
+page_files = true
+page_files_ext = ["xml"]
+key_files = true
+http_insecure = ["http://local.shop.kz:8080/"]
+origins = ["https://*.shop.kz"]
+http = ["https://a.kz/api/"]
+files = true
+dialogs = true
+keys = true"#,
+    )
+    .unwrap();
+    assert_eq!(
+        caps.lines(),
+        [
+            CapabilityLine::Keys,
+            CapabilityLine::Dialogs,
+            CapabilityLine::Files,
+            CapabilityLine::Http(vec!["https://a.kz/api/".to_owned()]),
+            CapabilityLine::Origins(vec!["https://*.shop.kz".to_owned()]),
+            CapabilityLine::HttpInsecure(vec!["http://local.shop.kz:8080/".to_owned()]),
+            CapabilityLine::KeyFiles,
+            CapabilityLine::PageFiles(vec!["xml".to_owned()]),
+            CapabilityLine::Settings,
+            CapabilityLine::Shared,
+        ]
+    );
+}
+
+#[test]
+fn empty_capabilities_have_no_lines() {
+    assert!(Capabilities::default().lines().is_empty());
+    assert!(caps_of("").unwrap().lines().is_empty());
+}
+
+#[test]
+fn symbolic_name_rules() {
+    assert!(is_symbolic_name("kz.a_b-1"));
+    assert!(is_symbolic_name(&"a".repeat(128)));
+    for bad in ["", "a b", "a/b", &"a".repeat(129)] {
+        assert!(!is_symbolic_name(bad), "{bad:?}");
+    }
 }
