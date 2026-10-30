@@ -4,7 +4,7 @@
 
 ## Где лежит
 
-- Индекс: `updates/v1/<channel>.json`, где `<channel>` — `stable` или `beta`. Публикуется на GitHub Pages проекта.
+- Индекс: `updates/v1/<channel>.json`, где `<channel>` — `stable` или `beta`. Публикуется на GitHub Pages проекта байт в байт, рядом со страницами сайта проекта (`site/`): у сайта нет своего пути `updates`, `pages.yml` копирует каталог `updates/` в артефакт после сборки сайта и сверяет копию с репозиторием.
 - Подпись: `updates/v1/<channel>.json.minisig` рядом с индексом.
 - Сами файлы (пакеты Velopack, расширение) лежат в неизменяемых GitHub Releases. Индекс ссылается на них по URL и sha256.
 
