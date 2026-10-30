@@ -15,7 +15,6 @@ use clap::{Parser, Subcommand};
 use oncl_basics::Locale;
 use oncl_desktop::original::EntryState;
 use oncl_ipc::IpcListener;
-use oncl_pki::http::UreqTransport;
 use oncl_pki::pkix::CaSet;
 use oncl_tls::{
     AUTO_RENEW_BEFORE, RENEW_BEFORE, TargetOs, TlsFiles, TlsInfo, TlsSource, TlsWarning,
@@ -97,6 +96,23 @@ pub enum Command {
     Integration {
         #[command(subcommand)]
         command: IntegrationCommand,
+    },
+    // Test builds only (feature `e2e-prompter`), never releases.
+    #[cfg(feature = "e2e-prompter")]
+    #[command(about = "Для тестовых сборок: действия end-to-end тестов")]
+    E2e {
+        #[command(subcommand)]
+        command: E2eCommand,
+    },
+}
+
+#[cfg(feature = "e2e-prompter")]
+#[derive(Debug, Subcommand)]
+pub enum E2eCommand {
+    #[command(about = "Установить пакет плагина (.onclp) как локальный, включённым")]
+    InstallPlugin {
+        #[arg(help = "Файл пакета плагина")]
+        file: PathBuf,
     },
 }
 
@@ -452,6 +468,37 @@ pub fn e2e_prompter() -> Result<Option<oncl_basics::testing::ScriptedPrompter>, 
             ExitCode::FAILURE
         })?;
     Ok(Some(oncl_basics::testing::ScriptedPrompter::new(steps)))
+}
+
+/// `e2e install-plugin <file>`: installs the package as a local plugin, enabled, in the data
+/// directory, and prints `<id> <version>`. Exit code 0, or 1 with the reason on stderr.
+#[cfg(feature = "e2e-prompter")]
+pub fn e2e(command: E2eCommand) -> ExitCode {
+    let E2eCommand::InstallPlugin { file } = command;
+    let run = || -> Result<String, String> {
+        let paths = data_paths().map_err(|_| String::new())?;
+        let package = oncl_plugin::Package::read_file(&file).map_err(|e| e.to_string())?;
+        let bytes = fs::read(&file).map_err(|e| e.to_string())?;
+        let store = oncl_plugin::Store::open(&paths.data).map_err(|e| e.to_string())?;
+        let manifest = &package.manifest;
+        store
+            .install(&package, &bytes, oncl_plugin::Source::Local)
+            .and_then(|()| store.set_enabled(&manifest.id, true))
+            .map_err(|e| e.to_string())?;
+        Ok(format!("{} {}", manifest.id, manifest.version))
+    };
+    match run() {
+        Ok(installed) => {
+            println!("{installed}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            if !e.is_empty() {
+                eprintln!("{}: {e}", file.display());
+            }
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// The steps of an [`E2E_PROMPTER_VAR`] file.
@@ -1138,7 +1185,7 @@ fn integration_ok(record: &io::Result<Option<lifecycle::Record>>, relay: &Report
 /// `cms-verify <file> [--content <file>] [--chain <file>]... [--offline]`: prints
 /// [`cms_verify_report_with`] against the CA certificates of the `chain` files (each PEM,
 /// every `CERTIFICATE` block, or DER) or, without any, the embedded NCA set; unless
-/// `offline`, over the network ([`UreqTransport`] through the proxy of `settings.json`) with
+/// `offline`, over the network ([`crate::daemon_transport`] through the proxy of `settings.json`) with
 /// the CRL cache in `<data_dir>/crl`.
 /// Exit code 0 when the report ends with `OK`, otherwise 1.
 pub fn cms_verify(
@@ -1179,7 +1226,7 @@ pub fn cms_verify(
             Ok(paths) => paths,
             Err(code) => return code,
         };
-        http = UreqTransport::with_proxy(load_settings(&paths.settings()).proxy);
+        http = crate::daemon_transport(load_settings(&paths.settings()).proxy);
         Some(Online {
             http: &http,
             crl_dir: paths.crl(),
@@ -1413,6 +1460,20 @@ mod tests {
                 no_tray: true
             })
         ));
+    }
+
+    #[cfg(feature = "e2e-prompter")]
+    #[test]
+    fn e2e_install_plugin_parses() {
+        let cli =
+            Cli::try_parse_from(["openncalayer", "e2e", "install-plugin", "p.onclp"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::E2e {
+                command: E2eCommand::InstallPlugin { ref file }
+            }) if file == Path::new("p.onclp")
+        ));
+        assert!(Cli::try_parse_from(["openncalayer", "e2e", "install-plugin"]).is_err());
     }
 
     #[test]

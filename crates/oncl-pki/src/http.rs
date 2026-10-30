@@ -4,6 +4,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use std::fmt::{self, Write};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ureq::http::Uri;
 use ureq::{Proxy, ProxyProtocol};
@@ -320,6 +321,8 @@ fn usable(proxy: Proxy) -> Result<Proxy, HttpError> {
 #[derive(Clone, Debug, Default)]
 pub struct UreqTransport {
     proxy: ProxySetting,
+    /// HTTPS roots instead of the webpki roots (`ureq`'s default), if set.
+    roots: Option<Arc<Vec<ureq::tls::Certificate<'static>>>>,
 }
 
 /// The most redirects one request follows, as `ureq` by default.
@@ -340,7 +343,25 @@ impl UreqTransport {
     /// [`ProxySetting::validate`] fails every request with an [`HttpError`] instead of
     /// connecting directly.
     pub fn with_proxy(proxy: ProxySetting) -> Self {
-        UreqTransport { proxy }
+        UreqTransport { proxy, roots: None }
+    }
+
+    /// This transport, trusting the CA certificates `extra` (DER) on HTTPS on top of the
+    /// webpki roots. Conformance builds only: a release trusts the webpki roots alone.
+    #[cfg(feature = "extra-roots")]
+    #[must_use]
+    pub fn with_extra_roots(mut self, extra: &[Vec<u8>]) -> Self {
+        let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .map(|der| ureq::tls::Certificate::from_der(der.as_ref()).to_owned())
+            .chain(
+                extra
+                    .iter()
+                    .map(|der| ureq::tls::Certificate::from_der(der).to_owned()),
+            )
+            .collect();
+        self.roots = Some(Arc::new(roots));
+        self
     }
 
     /// The route of a request to `url`. The system's proxy is looked up for each request,
@@ -369,15 +390,26 @@ impl UreqTransport {
     /// A `ureq` agent connecting directly or through the tunnel of `proxy` within
     /// `connect_timeout`, the whole request ending after `timeout`, following no redirects
     /// (`send` does).
-    fn agent(proxy: Option<Proxy>, timeout: Duration, connect_timeout: Duration) -> ureq::Agent {
-        ureq::Agent::config_builder()
+    fn agent(
+        &self,
+        proxy: Option<Proxy>,
+        timeout: Duration,
+        connect_timeout: Duration,
+    ) -> ureq::Agent {
+        let mut config = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .timeout_connect(Some(connect_timeout))
             .http_status_as_error(false)
             .max_redirects(0)
-            .proxy(proxy)
-            .build()
-            .into()
+            .proxy(proxy);
+        if let Some(roots) = &self.roots {
+            config = config.tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::Specific(Arc::clone(roots)))
+                    .build(),
+            );
+        }
+        config.build().into()
     }
 
     /// `request`, following redirects if its options say so. A redirect is followed with a
@@ -456,7 +488,7 @@ impl UreqTransport {
         if left.is_zero() {
             return Err(HttpError::new(HttpErrorKind::Timeout, "timed out"));
         }
-        let agent = Self::agent(proxy, left, opts.connect_timeout);
+        let agent = self.agent(proxy, left, opts.connect_timeout);
         let response = match request.method {
             HttpMethod::Post => {
                 let mut builder = agent.post(url);
@@ -926,7 +958,7 @@ mod tests {
 
     #[test]
     fn agent_connects_within_the_connect_timeout() {
-        let agent = UreqTransport::agent(None, Duration::from_secs(5), CONNECT_TIMEOUT);
+        let agent = direct().agent(None, Duration::from_secs(5), CONNECT_TIMEOUT);
         let timeouts = agent.config().timeouts();
         assert_eq!(
             (timeouts.global, timeouts.connect),

@@ -4058,6 +4058,7 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "ureq",
+ "webpki-root-certs",
  "x509-cert",
  "zeroize",
 ]
@@ -7065,6 +7066,15 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "url",
  "web-sys",
+]
+
+[[package]]
+name = "webpki-root-certs"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

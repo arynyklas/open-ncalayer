@@ -182,6 +182,8 @@ fn main() -> ExitCode {
         } => cli::cms_verify(&file, content.as_deref(), &chain, offline),
         Command::Nm { command } => cli::nm(command),
         Command::Integration { command } => cli::integration(command),
+        #[cfg(feature = "e2e-prompter")]
+        Command::E2e { command } => cli::e2e(command),
     }
 }
 

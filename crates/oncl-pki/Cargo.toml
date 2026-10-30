@@ -13,6 +13,9 @@ publish.workspace = true
 # `ocsp::MockOcsp` (an in-process OCSP responder), `crl::MockCrl` (an in-process CRL
 # distribution point), `http::RouteTransport` and `testing::issue_cert`.
 testing = []
+# `UreqTransport::with_extra_roots`: an extra CA on top of the webpki roots (conformance
+# builds of the daemon, never releases).
+extra-roots = ["dep:webpki-root-certs"]
 
 [dependencies]
 aes.workspace = true
@@ -39,6 +42,7 @@ thiserror.workspace = true
 time.workspace = true
 x509-cert.workspace = true
 ureq.workspace = true
+webpki-root-certs = { workspace = true, optional = true }
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
