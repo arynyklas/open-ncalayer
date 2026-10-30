@@ -628,6 +628,27 @@ fn fhs_v1_cancel_dialog_and_500() {
 }
 
 #[test]
+fn fhs_english_texts_are_cabinet_en() {
+    let harness = Harness::new(
+        vec![
+            Step::CancelStorage,
+            Step::Choice {
+                button: 0,
+                option: None,
+            },
+        ],
+        vec![],
+    )
+    .with_locale(oncl_basics::Locale::En);
+    let args = serde_json::json!({"base64data": STANDARD.encode(b"hello")});
+    harness.call(FHS, &fhs_request("signText", &args), FHS_ORIGIN);
+    let choices = harness.prompter().choice_prompts();
+    assert_eq!(choices[0].title.as_deref(), Some("Error"));
+    assert_eq!(choices[0].text, "Key entry not selected");
+    assert_eq!(choices[0].buttons, vec!["Close".to_owned()]);
+}
+
+#[test]
 fn fhs_v1_sign_text_and_xml() {
     let mut steps = choose("user-gost2015-sign");
     steps.extend(choose("user-gost2015-sign"));
