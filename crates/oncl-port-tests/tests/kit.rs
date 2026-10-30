@@ -1,9 +1,8 @@
-//! The ports' workspace: it builds, every port packages and loads, every registry entry
-//! matches its manifest.
+//! The ports' workspace: it builds, and every port packages and loads.
 
 use oncl_pdk::abi::Import;
-use oncl_plugin::{Engine, Manifest, Package};
-use oncl_port_tests::{CONFORMANCE, Registry, STATUSES, port_package};
+use oncl_plugin::{Engine, Package};
+use oncl_port_tests::port_package;
 use oncl_testkit::plugin::{port_dirs, ports_built};
 
 /// The short name of a port directory.
@@ -43,54 +42,6 @@ fn every_port_package_is_valid() {
             package.manifest.id
         );
     }
-}
-
-#[test]
-fn registry_files_parse() {
-    for dir in port_dirs() {
-        let short = short(&dir);
-        let manifest = Manifest::from_toml(
-            &String::from_utf8(oncl_testkit::read(dir.join("plugin.toml"))).unwrap(),
-        )
-        .unwrap_or_else(|e| panic!("{short}: {e}"));
-        let text = String::from_utf8(oncl_testkit::read(dir.join("registry.toml"))).unwrap();
-        let registry: Registry = toml::from_str(&text).unwrap_or_else(|e| panic!("{short}: {e}"));
-        assert_eq!(registry.id, manifest.id, "{short}");
-        assert_eq!(registry.modules, manifest.modules, "{short}");
-        let replaces = manifest
-            .replaces
-            .as_ref()
-            .expect("a port replaces a bundle");
-        assert_eq!(registry.original.symname, replaces.symname, "{short}");
-        assert_eq!(registry.original.version, replaces.version, "{short}");
-        assert!(STATUSES.contains(&registry.port.status.as_str()), "{short}");
-        assert!(
-            CONFORMANCE.contains(&registry.port.conformance.as_str()),
-            "{short}"
-        );
-    }
-}
-
-#[test]
-fn registry_schema_reads_the_example_entry() {
-    let registry: Registry = toml::from_str(
-        r#"
-id = "io.github.arynyklas.openncalayer.port.nursign"
-modules = ["NURSign"]
-[original]
-symname = "kz.ecc.NurSignBundle"
-version = "5.1.2"
-vendor = "АО «Центр электронных финансов»"
-[port]
-status = "partial"
-conformance = "computed"
-[[differences]]
-ru = "Окно выбора ключа — общее окно OpenNCALayer."
-"#,
-    )
-    .unwrap();
-    assert_eq!(registry.differences.len(), 1);
-    assert!(toml::from_str::<Registry>("id = 1").is_err());
 }
 
 #[test]

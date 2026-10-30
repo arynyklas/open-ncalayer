@@ -25,7 +25,7 @@ pub fn read_package(path: &Path) -> anyhow::Result<(Vec<u8>, Package)> {
     Ok((bytes, package))
 }
 
-fn read_limited(path: &Path, limit: u64) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn read_limited(path: &Path, limit: u64) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     File::open(path)
         .with_context(|| format!("opening {}", path.display()))?
@@ -230,6 +230,29 @@ pub fn check_min_core(manifest: &Manifest, imports: &[Import]) -> anyhow::Result
 /// output.
 const NOT_PORTS: [&str; 2] = ["common", "target"];
 
+/// The port directories under `plugins`: every directory except [`NOT_PORTS`] and hidden
+/// ones, sorted by name.
+///
+/// # Errors
+///
+/// An unreadable directory or a name that is not UTF-8.
+pub fn port_names(plugins: &Path) -> anyhow::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(plugins).with_context(|| format!("reading {}", plugins.display()))? {
+        let entry = entry.with_context(|| format!("reading {}", plugins.display()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            bail!("{} is not a UTF-8 name", entry.path().display());
+        };
+        if !entry.file_type()?.is_dir() || NOT_PORTS.contains(&name) || name.starts_with('.') {
+            continue;
+        }
+        names.push(name.to_owned());
+    }
+    names.sort();
+    Ok(names)
+}
+
 /// The port directories (names under `plugins`) whose `plugin.toml` names an `(id,
 /// version)` that `channel`'s index in `index_dir` does not list yet, sorted by name;
 /// every port if the channel has no index.
@@ -244,21 +267,8 @@ pub fn pending(plugins: &Path, index_dir: &Path, channel: Channel) -> anyhow::Re
     } else {
         Vec::new()
     };
-    let mut names = Vec::new();
-    for entry in fs::read_dir(plugins).with_context(|| format!("reading {}", plugins.display()))? {
-        let entry = entry.with_context(|| format!("reading {}", plugins.display()))?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            bail!("{} is not a UTF-8 name", entry.path().display());
-        };
-        if !entry.file_type()?.is_dir() || NOT_PORTS.contains(&name) || name.starts_with('.') {
-            continue;
-        }
-        names.push(name.to_owned());
-    }
-    names.sort();
     let mut pending = Vec::new();
-    for name in names {
+    for name in port_names(plugins)? {
         let manifest_path = plugins.join(&name).join("plugin.toml");
         let text = String::from_utf8(read_limited(&manifest_path, MAX_MANIFEST)?)
             .with_context(|| format!("reading {}", manifest_path.display()))?;
@@ -272,4 +282,19 @@ pub fn pending(plugins: &Path, index_dir: &Path, channel: Channel) -> anyhow::Re
         }
     }
     Ok(pending)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn port_names_skip_common_target_and_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["zeta", "common", "target", ".git", "alpha"] {
+            fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        assert_eq!(port_names(dir.path()).unwrap(), ["alpha", "zeta"]);
+    }
 }

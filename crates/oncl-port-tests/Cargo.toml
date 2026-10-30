@@ -21,9 +21,7 @@ oncl-testkit.workspace = true
 # The ports' hardware tokens: off, or the emulator's cards (`Harness::with_tokens`).
 oncl-token = { workspace = true, features = ["emulator"] }
 semver.workspace = true
-serde.workspace = true
 time.workspace = true
-toml.workspace = true
 
 [dev-dependencies]
 # DER of the synthetic certificates and of the CMS (base64) the ports' replies carry; SKF's
