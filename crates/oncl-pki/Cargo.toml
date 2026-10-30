@@ -78,3 +78,11 @@ required-features = ["testing"]
 [[test]]
 name = "keystore"
 required-features = ["testing"]
+
+[[test]]
+name = "cms_report"
+required-features = ["testing"]
+
+[[test]]
+name = "xades"
+required-features = ["testing"]

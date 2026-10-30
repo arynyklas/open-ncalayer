@@ -142,13 +142,13 @@ fn check_pki_url_in(pki_hosts: &[String], url: &str) -> HostResult<()> {
 
 /// The core's transport, for the URLs a certificate names: only to the PKI hosts, and
 /// never to where a redirect points (a 3xx reply is the reply).
-struct PkiOnly {
+pub(super) struct PkiOnly {
     hosts: Arc<[String]>,
     http: Arc<dyn HttpTransport>,
 }
 
 impl PkiOnly {
-    fn of(state: &HostState) -> Self {
+    pub(super) fn of(state: &HostState) -> Self {
         PkiOnly {
             hosts: Arc::clone(&state.services.pki_hosts),
             http: Arc::clone(&state.services.http),
@@ -230,7 +230,12 @@ fn object_id(text: &str) -> HostResult<ObjectIdentifier> {
 }
 
 /// A PKI request that failed, as the plugin sees it.
-fn net_failure(stage: NetStage, url: &str, kind: http::NetKind, detail: String) -> NetFailure {
+pub(super) fn net_failure(
+    stage: NetStage,
+    url: &str,
+    kind: http::NetKind,
+    detail: String,
+) -> NetFailure {
     let address = url::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned))

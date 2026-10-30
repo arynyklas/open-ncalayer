@@ -103,6 +103,8 @@ mod imports {
         pub fn shared_get(ptr: i32, len: i32) -> i64;
         #[link_name = "shared_put"]
         pub fn shared_put(ptr: i32, len: i32) -> i64;
+        #[link_name = "keys_sign_xades"]
+        pub fn keys_sign_xades(ptr: i32, len: i32) -> i64;
     }
 }
 
@@ -156,6 +158,7 @@ fn host_fn(import: Import) -> HostFn {
         Import::SettingsPut => imports::settings_put,
         Import::SharedGet => imports::shared_get,
         Import::SharedPut => imports::shared_put,
+        Import::KeysSignXades => imports::keys_sign_xades,
     }
 }
 
@@ -421,7 +424,7 @@ pub mod keys {
     pub use crate::abi::{
         C14n, CmsCerts, CmsContent, CmsOutcome, CoSign, NsBinding, Placement, RawAttribute,
         SignCmsExArgs, SignXmlExArgs, SignedAttrs, SigningTime, SigningTimeObject, TimeForm,
-        TimeSource, Transform, XmlOutput,
+        TimeSource, Transform, XadesArgs, XadesLevel, XadesOutcome, XmlOutput,
     };
     use crate::abi::{
         Chosen, Handle, OpenedKey, SignCmsArgs, SignRawArgs, SignXmlArgs, TerminalsArgs,
@@ -562,6 +565,15 @@ pub mod keys {
                 ..args
             };
             call::<_, Bytes>(imports::keys_sign_xml_ex, &args).map(Bytes::into_vec)
+        }
+
+        /// A XAdES-BASELINE signature as `args` says (its `handle` is this key's).
+        pub fn sign_xades(&self, args: XadesArgs) -> HostResult<XadesOutcome> {
+            let args = XadesArgs {
+                handle: self.handle,
+                ..args
+            };
+            call(imports::keys_sign_xades, &args)
         }
 
         /// The key's certificate chain, DER, from its certificate up: the key store's

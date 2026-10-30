@@ -1,0 +1,292 @@
+//! XAdES-BASELINE signatures (ETSI EN 319 132-1, XAdES 1.3.2) of a whole XML document, at
+//! the levels plugins ask for:
+//!
+//! - **B**: an enveloped `ds:Signature` (as [`xmldsig::sign_enveloped`] makes it, with an
+//!   `Id`) with `xades:QualifyingProperties` in a `ds:Object`; its `SignedProperties`
+//!   (`SigningTime`, `SigningCertificateV2` with the SHA-256 of the signer's certificate)
+//!   are signed by a second reference of the type `http://uri.etsi.org/01903#SignedProperties`;
+//! - **T**: and an unsigned `SignatureTimeStamp` over the `ds:SignatureValue` element,
+//!   canonicalized with Exclusive XML Canonicalization;
+//! - **LT**: and `CertificateValues` (the chain given) and `RevocationValues` (an OCSP
+//!   response for the signer's certificate and each certificate of the chain other than a
+//!   self-signed root or a CA naming no responder, each from the responder of the
+//!   certificate's AIA through [`ocsp::fetch`]).
+//!
+//! The signature and algorithm URIs follow the signer's certificate as Kalkan's do (GOST
+//! 2015-512, GOST 2004, RSA-SHA256), unless the spec names them. Byte-for-byte equality
+//! with other XAdES signers is not a goal; the structure is B-LT's, and the signature passes
+//! [`xmldsig::verify`].
+
+use crate::cert::{self, Certificate};
+use crate::http::{HttpTransport, NonceSpec, PkiMethod};
+use crate::key::{HashAlg, PrivateKey};
+use crate::ocsp::{self, CertStatus, OcspError};
+use crate::tsp::{self, TsaSpec, TspError};
+use crate::xmldsig::{self, C14n, QualifyingObject, XmlError, XmlSignSpec};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use der::Encode;
+use sha2::{Digest, Sha256};
+use std::time::Duration;
+use time::OffsetDateTime;
+
+/// The `DigestMethod` of `SigningCertificateV2`.
+const SHA256_URI: &str = "http://www.w3.org/2001/04/xmlenc#sha256";
+
+/// Timeout of each OCSP request of [`XadesLevel::Lt`].
+const OCSP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How much a XAdES signature carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XadesLevel {
+    /// The signed properties.
+    B,
+    /// And a signature time-stamp.
+    T,
+    /// And the certificates and OCSP responses to validate it later.
+    Lt,
+}
+
+/// How to make a XAdES signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct XadesSpec<'a> {
+    /// The level.
+    pub level: XadesLevel,
+    /// The TSA of [`XadesLevel::T`] and [`XadesLevel::Lt`]; not used for
+    /// [`XadesLevel::B`].
+    pub tsa: Option<TsaSpec>,
+    /// The signer's issuers, from its issuer up (the root may be among them): the
+    /// `CertificateValues` of [`XadesLevel::Lt`], and the issuers its OCSP requests name.
+    pub chain: Vec<Certificate>,
+    /// The `SignatureMethod` URI; `None`: Kalkan's for the certificate's algorithm.
+    pub signature_method: Option<&'a str>,
+    /// The `DigestMethod` URI; `None`: the one paired with the signature method.
+    pub digest_method: Option<&'a str>,
+}
+
+/// Why a XAdES signature is not made.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum XadesError {
+    /// The document cannot be signed so, or the spec is inconsistent.
+    #[error(transparent)]
+    Xml(#[from] XmlError),
+    /// The time-stamp failed.
+    #[error("time-stamp: {0}")]
+    Tsp(#[from] TspError),
+    /// No OCSP response about a certificate of the chain, from its responder at `url`
+    /// (empty if the certificate names none).
+    #[error("OCSP of {subject}: {error}")]
+    Ocsp {
+        /// The certificate's subject.
+        subject: String,
+        /// The responder's URL.
+        url: String,
+        /// What failed.
+        error: OcspError,
+    },
+    /// A responder answered without a successful response (`OCSPResponseStatus`).
+    #[error("OCSP of {subject}: response status {status}")]
+    OcspRejected {
+        /// The certificate's subject.
+        subject: String,
+        /// The responder's URL.
+        url: String,
+        /// The `OCSPResponseStatus`.
+        status: u8,
+    },
+    /// A certificate of the chain is not good: revoked, or unknown to its responder.
+    #[error("OCSP of {subject}: {status:?}")]
+    NotGood {
+        /// The certificate's subject.
+        subject: String,
+        /// Its status.
+        status: CertStatus,
+    },
+    /// The chain has no issuer of a certificate that is not self-signed.
+    #[error("the chain has no issuer of {0}")]
+    NoIssuer(String),
+}
+
+/// Signs the whole of `xml` with `key` (certificate `cert`) as a XAdES-BASELINE signature
+/// of `spec.level` made at `now`; time-stamps and OCSP requests go through `http`.
+///
+/// # Errors
+///
+/// [`XadesError::Xml`] as [`xmldsig::sign_spec`] fails, and for T or LT without a TSA;
+/// [`XadesError::Tsp`]; for LT, [`XadesError::NoIssuer`], the OCSP failures, and a
+/// certificate that is not good.
+pub fn sign(
+    xml: &[u8],
+    spec: &XadesSpec<'_>,
+    key: &PrivateKey,
+    cert: &Certificate,
+    http: &dyn HttpTransport,
+    now: OffsetDateTime,
+) -> Result<Vec<u8>, XadesError> {
+    let tsa = match (spec.level, &spec.tsa) {
+        (XadesLevel::B, _) => None,
+        (_, Some(tsa)) => Some(tsa),
+        (_, None) => {
+            return Err(
+                XmlError::Constraint("a XAdES-T or -LT signature needs a TSA".to_owned()).into(),
+            );
+        }
+    };
+    let cert_der = cert
+        .to_der()
+        .map_err(|e| XmlError::Parse(format!("certificate: {e}")))?;
+    let id = signature_id(xml, &cert_der, now);
+    let properties_id = format!("{id}-SignedProperties");
+    let utc = now.to_offset(time::UtcOffset::UTC);
+    let signing_time = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        utc.year(),
+        u8::from(utc.month()),
+        utc.day(),
+        utc.hour(),
+        utc.minute(),
+        utc.second()
+    );
+    let signed_properties = format!(
+        "<xades:SignedProperties Id=\"{properties_id}\">\
+         <xades:SignedSignatureProperties>\
+         <xades:SigningTime>{signing_time}</xades:SigningTime>\
+         <xades:SigningCertificateV2><xades:Cert><xades:CertDigest>\
+         <ds:DigestMethod Algorithm=\"{SHA256_URI}\"/>\
+         <ds:DigestValue>{}</ds:DigestValue>\
+         </xades:CertDigest></xades:Cert></xades:SigningCertificateV2>\
+         </xades:SignedSignatureProperties>\
+         </xades:SignedProperties>",
+        STANDARD.encode(Sha256::digest(&cert_der)),
+    );
+    let xml_spec = XmlSignSpec {
+        signature_method: spec.signature_method,
+        digest_method: spec.digest_method,
+        signature_id: Some(&id),
+        ..XmlSignSpec::kalkan(None, None)
+    };
+    let signed = xmldsig::sign_qualified(
+        xml,
+        &xml_spec,
+        key,
+        cert,
+        QualifyingObject {
+            signed_properties: &signed_properties,
+            signed_properties_id: &properties_id,
+        },
+    )?;
+    let Some(tsa) = tsa else {
+        return Ok(signed);
+    };
+
+    let value = xmldsig::signature_value_c14n(&signed, &id)?;
+    let stamp = tsp::request(tsa, &tsa.hash.digest(&value), http)?;
+    let mut unsigned = format!(
+        "<xades:UnsignedProperties><xades:UnsignedSignatureProperties>\
+         <xades:SignatureTimeStamp Id=\"{id}-SignatureTimeStamp\">\
+         <ds:CanonicalizationMethod Algorithm=\"{}\"/>\
+         <xades:EncapsulatedTimeStamp>{}</xades:EncapsulatedTimeStamp>\
+         </xades:SignatureTimeStamp>",
+        C14n::Exclusive.uri(),
+        STANDARD.encode(&stamp.token),
+    );
+    if spec.level == XadesLevel::Lt {
+        let responses = ocsp_responses(cert, &spec.chain, http)?;
+        unsigned.push_str("<xades:CertificateValues>");
+        for issuer in &spec.chain {
+            let der = issuer
+                .to_der()
+                .map_err(|e| XmlError::Parse(format!("certificate: {e}")))?;
+            unsigned.push_str(&format!(
+                "<xades:EncapsulatedX509Certificate>{}</xades:EncapsulatedX509Certificate>",
+                STANDARD.encode(der)
+            ));
+        }
+        unsigned.push_str("</xades:CertificateValues><xades:RevocationValues><xades:OCSPValues>");
+        for response in responses {
+            unsigned.push_str(&format!(
+                "<xades:EncapsulatedOCSPValue>{}</xades:EncapsulatedOCSPValue>",
+                STANDARD.encode(response)
+            ));
+        }
+        unsigned.push_str("</xades:OCSPValues></xades:RevocationValues>");
+    }
+    unsigned.push_str("</xades:UnsignedSignatureProperties></xades:UnsignedProperties>");
+    Ok(xmldsig::append_qualifying(&signed, &id, &unsigned)?)
+}
+
+/// An `Id` for the signature: of the document, the certificate and the time, so two
+/// signatures of a document differ.
+fn signature_id(xml: &[u8], cert_der: &[u8], now: OffsetDateTime) -> String {
+    let mut hash = Sha256::new();
+    hash.update(xml);
+    hash.update(cert_der);
+    hash.update(now.unix_timestamp_nanos().to_be_bytes());
+    let digest = hash.finalize();
+    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("xades-{hex}")
+}
+
+/// Whether `cert` is self-signed: its issuer is its subject, and its own key verifies it.
+fn self_signed(cert: &Certificate) -> bool {
+    cert.tbs_certificate().issuer() == cert.tbs_certificate().subject()
+        && cert::verify_signature(cert, cert).is_ok()
+}
+
+/// The `OCSPResponse` about `signer` and each certificate of `chain` that is neither
+/// self-signed nor without a responder URL, in that order, each good, from the responder
+/// of the certificate's AIA.
+fn ocsp_responses(
+    signer: &Certificate,
+    chain: &[Certificate],
+    http: &dyn HttpTransport,
+) -> Result<Vec<Vec<u8>>, XadesError> {
+    let request = ocsp::RequestSpec {
+        cert_id_hash: HashAlg::Sha1,
+        nonce: NonceSpec::None,
+        method: PkiMethod::Post { content_type: None },
+        url: None,
+        timeout: OCSP_TIMEOUT,
+    };
+    let mut responses = Vec::new();
+    for cert in std::iter::once(signer).chain(chain) {
+        if self_signed(cert) {
+            continue;
+        }
+        let subject = cert.tbs_certificate().subject().to_string();
+        let is_signer = std::ptr::eq(cert, signer);
+        // A CA that names no responder (as the NCA's intermediates) has no OCSP to carry.
+        if !is_signer && ocsp::ocsp_url(cert).is_none() {
+            continue;
+        }
+        let issuer = chain
+            .iter()
+            .find(|candidate| cert::verify_signature(cert, candidate).is_ok())
+            .ok_or_else(|| XadesError::NoIssuer(subject.clone()))?;
+        let url = ocsp::ocsp_url(cert).unwrap_or_default();
+        let fetched =
+            ocsp::fetch(cert, issuer, &request, http, None).map_err(|error| XadesError::Ocsp {
+                subject: subject.clone(),
+                url: url.clone(),
+                error,
+            })?;
+        if fetched.response_status != 0 {
+            return Err(XadesError::OcspRejected {
+                subject,
+                url,
+                status: fetched.response_status,
+            });
+        }
+        match fetched.answer.map(|answer| answer.status) {
+            Some(CertStatus::Good) => {}
+            status => {
+                return Err(XadesError::NotGood {
+                    subject,
+                    status: status.unwrap_or(CertStatus::Unknown),
+                });
+            }
+        }
+        responses.push(fetched.response);
+    }
+    Ok(responses)
+}

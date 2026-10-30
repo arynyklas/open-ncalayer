@@ -28,4 +28,5 @@ pub mod roots;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod tsp;
+pub mod xades;
 pub mod xmldsig;

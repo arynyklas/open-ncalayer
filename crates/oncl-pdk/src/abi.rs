@@ -288,11 +288,13 @@ pub enum Import {
     SharedGet,
     /// `shared_put`: [`SharedPut`] → `()`.
     SharedPut,
+    /// `keys_sign_xades`: [`XadesArgs`] → [`XadesOutcome`].
+    KeysSignXades,
 }
 
 impl Import {
     /// Every host function.
-    pub const ALL: [Import; 44] = [
+    pub const ALL: [Import; 45] = [
         Import::Log,
         Import::Now,
         Import::Random,
@@ -337,6 +339,7 @@ impl Import {
         Import::SettingsPut,
         Import::SharedGet,
         Import::SharedPut,
+        Import::KeysSignXades,
     ];
 
     /// Its import name in [`IMPORT_MODULE`].
@@ -386,6 +389,7 @@ impl Import {
             Import::SettingsPut => "settings_put",
             Import::SharedGet => "shared_get",
             Import::SharedPut => "shared_put",
+            Import::KeysSignXades => "keys_sign_xades",
         }
     }
 
@@ -419,7 +423,8 @@ impl Import {
             | Import::CrlFetch
             | Import::CmsVerify
             | Import::KeysSignXmlEx
-            | Import::XmlVerify => Some(Capability::Keys),
+            | Import::XmlVerify
+            | Import::KeysSignXades => Some(Capability::Keys),
             Import::DialogMessage
             | Import::DialogConfirm
             | Import::DialogPassword
@@ -484,7 +489,8 @@ impl Import {
             | Import::SettingsGet
             | Import::SettingsPut
             | Import::SharedGet
-            | Import::SharedPut => "0.1.0-alpha.3",
+            | Import::SharedPut
+            | Import::KeysSignXades => "0.1.0-alpha.3",
         };
         semver::Version::parse(version).expect("a valid version")
     }
@@ -1789,6 +1795,54 @@ pub struct SignXmlExArgs {
 pub struct XmlVerifyArgs {
     /// The document, UTF-8.
     pub xml: Bytes,
+}
+
+/// How much a XAdES signature of [`XadesArgs`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XadesLevel {
+    /// XAdES-BASELINE-B: the signed properties.
+    B,
+    /// XAdES-BASELINE-T: and a signature time-stamp.
+    T,
+    /// XAdES-BASELINE-LT: and the chain and OCSP responses.
+    Lt,
+}
+
+/// `keys_sign_xades`: a XAdES-BASELINE signature of the whole document by the key
+/// `handle`, enveloped, the last child of the document element.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XadesArgs {
+    /// The key.
+    pub handle: u32,
+    /// The document, UTF-8.
+    pub xml: Bytes,
+    /// The level.
+    pub level: XadesLevel,
+    /// The TSA of T and LT.
+    pub tsa: TsaChoice,
+    /// The signer's issuers, from its issuer up (DER): the certificates of LT and the
+    /// issuers its OCSP requests name.
+    #[serde(default)]
+    pub chain: Vec<Bytes>,
+    /// The `SignatureMethod` URI; `None`: Kalkan's for the key.
+    #[serde(default)]
+    pub signature_method: Option<String>,
+    /// The `DigestMethod` URI; `None`: the one paired with the signature method.
+    #[serde(default)]
+    pub digest_method: Option<String>,
+}
+
+/// The outcome of `keys_sign_xades`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XadesOutcome {
+    /// The signed document.
+    Signed(Bytes),
+    /// The time-stamp or an OCSP request failed.
+    Failed(NetFailure),
+    /// A certificate of the chain is revoked or unknown to its responder.
+    Invalid(Problem),
 }
 
 /// One signature of an [`XmlVerifyArgs`] document, in document order.

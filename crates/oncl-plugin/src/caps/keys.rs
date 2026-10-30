@@ -22,14 +22,17 @@ use oncl_pdk::abi::{
     C14n, CmsCerts, CmsContent, CmsOutcome, Placement, SignCmsExArgs, SignXmlExArgs, TimeSource,
     Transform, XmlOutput,
 };
+use oncl_pdk::abi::{NetStage, Problem, XadesArgs, XadesLevel, XadesOutcome};
 use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{
     self, AttrSpec, CertSpec, CmsError, CoSign, Content, SignOptions, SignSpec, TimeForm,
 };
 use oncl_pki::info::{KeyUsageBits, KncaCertType};
 use oncl_pki::key::{KeyAlg, SigAlg};
+use oncl_pki::ocsp::CertStatus;
 use oncl_pki::pkcs12::{self, KeyEntry};
 use oncl_pki::pkix::CaSet;
+use oncl_pki::xades;
 use oncl_pki::{cert, tsp, xmldsig};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -715,6 +718,67 @@ pub(crate) fn keys_sign_xml_ex(state: &mut HostState, args: SignXmlExArgs) -> Ho
     };
     let signed = xmldsig::sign_spec(&args.xml, &spec, &entry.key, &entry.cert).map_err(failed)?;
     Ok(Bytes::from(signed))
+}
+
+/// `keys_sign_xades`: a XAdES-BASELINE signature of the whole document; time-stamps and
+/// OCSP requests only to the PKI hosts.
+pub(crate) fn keys_sign_xades(state: &mut HostState, args: XadesArgs) -> HostResult<XadesOutcome> {
+    let level = match args.level {
+        XadesLevel::B => xades::XadesLevel::B,
+        XadesLevel::T => xades::XadesLevel::T,
+        XadesLevel::Lt => xades::XadesLevel::Lt,
+    };
+    let tsa = match level {
+        xades::XadesLevel::B => None,
+        _ => match crypto::tsa_spec(state, &args.tsa)? {
+            Ok(spec) => Some(spec),
+            Err(failure) => return Ok(XadesOutcome::Failed(failure)),
+        },
+    };
+    let chain = args
+        .chain
+        .iter()
+        .map(|der| crypto::parse(der))
+        .collect::<HostResult<Vec<_>>>()?;
+    let spec = xades::XadesSpec {
+        level,
+        tsa,
+        chain,
+        signature_method: args.signature_method.as_deref(),
+        digest_method: args.digest_method.as_deref(),
+    };
+    let now = (state.services.clock)();
+    let http = crypto::PkiOnly::of(state);
+    let entry = state.keys.get(args.handle)?;
+    Ok(
+        match xades::sign(&args.xml, &spec, &entry.key, &entry.cert, &http, now) {
+            Ok(signed) => XadesOutcome::Signed(Bytes::from(signed)),
+            Err(xades::XadesError::Tsp(e)) => {
+                let tsa = spec.tsa.as_ref().expect("a TSA stamped");
+                XadesOutcome::Failed(crypto::tsp_failure(tsa, &e))
+            }
+            Err(xades::XadesError::Ocsp { url, error, .. }) => XadesOutcome::Failed(
+                crypto::net_failure(NetStage::Ocsp, &url, error.kind(), error.to_string()),
+            ),
+            Err(xades::XadesError::OcspRejected { url, status, .. }) => {
+                XadesOutcome::Failed(crypto::net_failure(
+                    NetStage::Ocsp,
+                    &url,
+                    oncl_pki::http::NetKind::Rejected(status),
+                    format!("OCSP response status {status}"),
+                ))
+            }
+            Err(xades::XadesError::NotGood { status, .. }) => XadesOutcome::Invalid(match status {
+                CertStatus::Revoked { time, reason } => Problem::Revoked {
+                    at_ms: crate::host::unix_ms(time),
+                    reason,
+                },
+                CertStatus::Good | CertStatus::Unknown => Problem::StatusUnknown,
+            }),
+            Err(e @ xades::XadesError::NoIssuer(_)) => return Err(invalid(e.to_string())),
+            Err(xades::XadesError::Xml(e)) => return Err(failed(e)),
+        },
+    )
 }
 
 /// `keys_release`.

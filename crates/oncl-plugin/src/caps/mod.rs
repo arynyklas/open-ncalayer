@@ -34,7 +34,8 @@ pub(crate) use files::{
 };
 pub(crate) use keys::{
     KeyTable, keys_chain, keys_choose, keys_open, keys_release, keys_select, keys_sign_cms,
-    keys_sign_cms_ex, keys_sign_raw, keys_sign_xml, keys_sign_xml_ex, keys_terminals,
+    keys_sign_cms_ex, keys_sign_raw, keys_sign_xades, keys_sign_xml, keys_sign_xml_ex,
+    keys_terminals,
 };
 pub use net::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS};
 pub(crate) use net::{http_request, http_request_ex};

@@ -1,13 +1,15 @@
 //! CMS verification reports and XML signatures by profile for plugins (`cms_verify`,
-//! `keys_sign_xml_ex`, `xml_verify`): what the core checks, through the ABI.
+//! `keys_sign_xml_ex`, `keys_sign_xades`, `xml_verify`): what the core checks, through the
+//! ABI.
 
 mod common;
 
 use common::*;
 use oncl_pdk::abi::{
     self, Bytes, C14n, Check, ErrorCode, HostResult, Import, KeySource, NetStage, OpenArgs,
-    Password, Placement, Problem, Revocation, SignXmlExArgs, Transform, VerifyArgs, VerifyAt,
-    VerifyReport, XmlOutput, XmlSigReport, XmlVerifyArgs,
+    Password, Placement, Problem, Revocation, SignXmlExArgs, Transform, TsaChoice, VerifyArgs,
+    VerifyAt, VerifyReport, XadesArgs, XadesLevel, XadesOutcome, XmlOutput, XmlSigReport,
+    XmlVerifyArgs,
 };
 use oncl_pki::cert;
 use oncl_pki::cms::{AttrSpec, CertSpec, CoSign, Content, SignSpec, sign_spec};
@@ -288,4 +290,86 @@ fn xml_verify_reports_each_signature() {
     let reports = check(&spoiled);
     assert!(reports[0].valid && !reports[1].valid);
     assert!(check(b"<a/>").is_empty());
+}
+
+fn xades_args(level: XadesLevel) -> XadesArgs {
+    XadesArgs {
+        handle: 1,
+        xml: Bytes::from(b"<doc><a>1</a></doc>".to_vec()),
+        level,
+        tsa: TsaChoice::Basics,
+        chain: ["inter-gost2015", "root-gost2015"]
+            .map(|name| Bytes::from(synthetic_cert(name)))
+            .to_vec(),
+        signature_method: None,
+        digest_method: None,
+    }
+}
+
+/// The synthetic OCSP responder and the mock TSA at the basics module's URL.
+fn responder_and_tsa() -> Arc<dyn HttpTransport> {
+    let tsa = oncl_pki::tsp::MockTsa::new(entry("tsa-gost2015"));
+    Arc::new(RouteTransport::new(vec![
+        (
+            oncl_pki::tsp::TsaProfile::basics_default().url,
+            Arc::new(tsa) as Arc<dyn HttpTransport>,
+        ),
+        ("http://ocsp.synthetic.test".to_owned(), responder()),
+    ]))
+}
+
+fn xades(services: &HostServices, key: &str, level: XadesLevel) -> HostResult<XadesOutcome> {
+    run(
+        services,
+        &[
+            open(key),
+            (Import::KeysSignXades, abi::encode(&xades_args(level))),
+        ],
+    )
+}
+
+#[test]
+fn xades_through_abi() {
+    let services = services(responder_and_tsa(), &["ocsp.synthetic.test"]);
+    let signed = match xades(&services, "inter-user-gost2015-sign", XadesLevel::Lt).unwrap() {
+        XadesOutcome::Signed(signed) => signed,
+        other => panic!("{other:?}"),
+    };
+    let text = std::str::from_utf8(&signed).unwrap();
+    assert!(text.contains("<xades:SignatureTimeStamp"));
+    assert!(text.contains("<xades:EncapsulatedOCSPValue>"));
+    assert_eq!(
+        xmldsig::verify(&signed).unwrap()[0].cert,
+        entry("inter-user-gost2015-sign").cert
+    );
+
+    // A revoked signer: no signature.
+    assert_eq!(
+        xades(&services, "inter-revoked-gost2015-sign", XadesLevel::Lt).unwrap(),
+        XadesOutcome::Invalid(Problem::Revoked {
+            at_ms: REVOKED_AT_MS,
+            reason: Some(1)
+        })
+    );
+
+    // The responder the certificate names is not a PKI host: never asked.
+    let nca_only = self::services(responder_and_tsa(), &[]);
+    match xades(&nca_only, "inter-user-gost2015-sign", XadesLevel::Lt).unwrap() {
+        XadesOutcome::Failed(failure) => {
+            assert_eq!(failure.stage, NetStage::Ocsp);
+            assert_eq!(failure.address, "ocsp.synthetic.test");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // B needs no network; T fails without the TSA.
+    let offline = self::services(Arc::new(Offline), &[]);
+    assert!(matches!(
+        xades(&offline, "user-gost2015-sign", XadesLevel::B).unwrap(),
+        XadesOutcome::Signed(_)
+    ));
+    match xades(&offline, "user-gost2015-sign", XadesLevel::T).unwrap() {
+        XadesOutcome::Failed(failure) => assert_eq!(failure.stage, NetStage::Tsp),
+        other => panic!("{other:?}"),
+    }
 }

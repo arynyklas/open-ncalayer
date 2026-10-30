@@ -290,6 +290,7 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
         Import::SettingsPut => run(args, |a| caps::settings_put(state, a)),
         Import::SharedGet => run(args, |a| caps::shared_get(state, a)),
         Import::SharedPut => run(args, |a| caps::shared_put(state, a)),
+        Import::KeysSignXades => run(args, |a| caps::keys_sign_xades(state, a)),
     }
 }
 

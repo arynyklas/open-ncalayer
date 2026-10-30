@@ -47,6 +47,23 @@ use roxmltree::{Document, Node, NodeId};
 const DSIG_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
 const EXC_C14N_NS: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
 const ENVELOPED_SIGNATURE: &str = "http://www.w3.org/2000/09/xmldsig#enveloped-signature";
+/// The namespace of XAdES 1.3.2 (ETSI EN 319 132-1).
+pub(crate) const XADES_NS: &str = "http://uri.etsi.org/01903/v1.3.2#";
+/// The `Type` of the reference to `xades:SignedProperties`.
+const SIGNED_PROPERTIES_TYPE: &str = "http://uri.etsi.org/01903#SignedProperties";
+
+/// A `ds:Object` with `xades:QualifyingProperties` (`Target` the signature's `Id`) around
+/// the given `xades:SignedProperties`, which a second reference signs (its `Type`
+/// [`SIGNED_PROPERTIES_TYPE`], Exclusive XML Canonicalization alone, the signature's
+/// digest method). The unsigned properties are added to the signed document afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct QualifyingObject<'a> {
+    /// The `xades:SignedProperties` element as written, with the `xades` prefix (bound by
+    /// `QualifyingProperties`) and the `ds` prefix (bound by the signature).
+    pub(crate) signed_properties: &'a str,
+    /// Its `Id`.
+    pub(crate) signed_properties_id: &'a str,
+}
 
 /// Bound on the references of a document times its size, the bytes [`verify`] may
 /// canonicalize: a 64 MiB document may carry 16 references, a 1 MiB one 1024.
@@ -331,6 +348,43 @@ pub fn sign_spec(
     key: &PrivateKey,
     cert: &Certificate,
 ) -> Result<Vec<u8>, XmlError> {
+    sign_with(xml, spec, key, cert, None)
+}
+
+/// [`sign_spec`] with XAdES qualifying properties in a `ds:Object` instead of a
+/// signing-time object (the spec has none, and a signature `Id`); the result is spliced
+/// as [`XmlOutput::AsIs`] whatever the spec says.
+pub(crate) fn sign_qualified(
+    xml: &[u8],
+    spec: &XmlSignSpec<'_>,
+    key: &PrivateKey,
+    cert: &Certificate,
+    qualifying: QualifyingObject<'_>,
+) -> Result<Vec<u8>, XmlError> {
+    if spec.signature_id.is_none() || spec.signing_time_object.is_some() {
+        return Err(XmlError::Constraint(
+            "qualifying properties need a signature Id and no signing-time object".to_owned(),
+        ));
+    }
+    sign_with(
+        xml,
+        &XmlSignSpec {
+            output: XmlOutput::AsIs,
+            ..spec.clone()
+        },
+        key,
+        cert,
+        Some(qualifying),
+    )
+}
+
+fn sign_with(
+    xml: &[u8],
+    spec: &XmlSignSpec<'_>,
+    key: &PrivateKey,
+    cert: &Certificate,
+    qualifying: Option<QualifyingObject<'_>>,
+) -> Result<Vec<u8>, XmlError> {
     let transforms = spec
         .transforms
         .clone()
@@ -460,10 +514,14 @@ pub fn sign_spec(
         digest,
         cert: cert_der(cert)?,
         id: spec.signature_id,
-        object: spec.signing_time_object.map(|object| ObjectTemplate {
-            object,
-            reset_default_namespace: default_namespace,
-        }),
+        object: match (spec.signing_time_object, qualifying) {
+            (Some(object), _) => Some(ObjectTemplate::SigningTime {
+                object,
+                reset_default_namespace: default_namespace,
+            }),
+            (None, Some(qualifying)) => Some(ObjectTemplate::Qualifying(qualifying)),
+            (None, None) => None,
+        },
         reference_c14n,
         separator: if spec.strip_whitespace { "" } else { "\n" },
         line_breaks: spec.base64_line_breaks.unwrap_or(true),
@@ -703,11 +761,42 @@ fn canonicalizer(method: C14n) -> Canonicalizer<'static> {
     }
 }
 
-/// The signing-time object of a signature to write.
-struct ObjectTemplate<'t> {
-    object: SigningTimeObject<'t>,
-    /// The signature's parent has a default namespace: `<timestamp>` resets it.
-    reset_default_namespace: bool,
+/// The `ds:Object` of a signature to write.
+enum ObjectTemplate<'t> {
+    /// A signing-time object.
+    SigningTime {
+        object: SigningTimeObject<'t>,
+        /// The signature's parent has a default namespace: `<timestamp>` resets it.
+        reset_default_namespace: bool,
+    },
+    /// XAdES qualifying properties.
+    Qualifying(QualifyingObject<'t>),
+}
+
+impl ObjectTemplate<'_> {
+    /// The `Id`, `Type`, transforms and canonicalization of the second reference, if the
+    /// object has one.
+    fn reference<'s>(
+        &'s self,
+        template: &'s Template<'_>,
+    ) -> Option<(&'s str, Option<&'static str>, Vec<&'s str>, C14n)> {
+        match self {
+            ObjectTemplate::SigningTime { object, .. } => object.target_ref.then(|| {
+                (
+                    object.property_id,
+                    None,
+                    template.transforms.to_vec(),
+                    template.reference_c14n,
+                )
+            }),
+            ObjectTemplate::Qualifying(q) => Some((
+                q.signed_properties_id,
+                Some(SIGNED_PROPERTIES_TYPE),
+                vec![C14n::Exclusive.uri()],
+                C14n::Exclusive,
+            )),
+        }
+    }
 }
 
 /// The signature to write.
@@ -737,13 +826,23 @@ impl Template<'_> {
         }
     }
 
-    fn reference(&self, s: &mut String, uri: &str, digest: &[u8]) {
+    fn reference(
+        &self,
+        s: &mut String,
+        uri: &str,
+        kind: Option<&str>,
+        transforms: &[&str],
+        digest: &[u8],
+    ) {
         let n = self.separator;
+        let kind = kind
+            .map(|kind| format!(" Type=\"{}\"", escape_attribute(kind)))
+            .unwrap_or_default();
         s.push_str(&format!(
-            "<ds:Reference URI=\"{}\">{n}<ds:Transforms>{n}",
+            "<ds:Reference URI=\"{}\"{kind}>{n}<ds:Transforms>{n}",
             escape_attribute(uri)
         ));
-        for transform in self.transforms {
+        for transform in transforms {
             s.push_str(&format!("<ds:Transform Algorithm=\"{transform}\"/>{n}"));
         }
         s.push_str(&format!(
@@ -769,10 +868,18 @@ impl Template<'_> {
             self.method.uri(),
             escape_attribute(self.algorithms.signature_uri),
         );
-        self.reference(&mut s, self.uri, &self.digest);
-        if let Some(object) = self.object.as_ref().filter(|o| o.object.target_ref) {
-            let uri = format!("#{}", object.object.property_id);
-            self.reference(&mut s, &uri, object_digest.unwrap_or_default());
+        self.reference(&mut s, self.uri, None, self.transforms, &self.digest);
+        if let Some((id, kind, transforms, _)) =
+            self.object.as_ref().and_then(|o| o.reference(self))
+        {
+            let uri = format!("#{id}");
+            self.reference(
+                &mut s,
+                &uri,
+                kind,
+                &transforms,
+                object_digest.unwrap_or_default(),
+            );
         }
         s.push_str(&format!("</ds:SignedInfo>{n}<ds:SignatureValue>"));
         if let Some(value) = value {
@@ -794,21 +901,33 @@ impl Template<'_> {
             "</ds:SignatureValue>{n}<ds:KeyInfo>{n}<ds:X509Data>{n}<ds:X509Certificate>{cert}\
              </ds:X509Certificate>{n}</ds:X509Data>{n}</ds:KeyInfo>{n}"
         ));
-        if let Some(object) = &self.object {
-            let reset = if object.reset_default_namespace {
-                " xmlns=\"\""
-            } else {
-                ""
-            };
-            s.push_str(&format!(
-                "<ds:Object>{n}<ds:SignatureProperties>{n}\
-                 <ds:SignatureProperty Id=\"{}\" Target=\"#{}\">{n}\
-                 <timestamp{reset}>{}</timestamp>{n}</ds:SignatureProperty>{n}\
-                 </ds:SignatureProperties>{n}</ds:Object>{n}",
-                escape_attribute(object.object.property_id),
+        match &self.object {
+            Some(ObjectTemplate::SigningTime {
+                object,
+                reset_default_namespace,
+            }) => {
+                let reset = if *reset_default_namespace {
+                    " xmlns=\"\""
+                } else {
+                    ""
+                };
+                s.push_str(&format!(
+                    "<ds:Object>{n}<ds:SignatureProperties>{n}\
+                     <ds:SignatureProperty Id=\"{}\" Target=\"#{}\">{n}\
+                     <timestamp{reset}>{}</timestamp>{n}</ds:SignatureProperty>{n}\
+                     </ds:SignatureProperties>{n}</ds:Object>{n}",
+                    escape_attribute(object.property_id),
+                    escape_attribute(self.id.unwrap_or_default()),
+                    escape_text(object.text),
+                ));
+            }
+            Some(ObjectTemplate::Qualifying(q)) => s.push_str(&format!(
+                "<ds:Object>{n}<xades:QualifyingProperties xmlns:xades=\"{XADES_NS}\" \
+                 Target=\"#{}\">{n}{}{n}</xades:QualifyingProperties>{n}</ds:Object>{n}",
                 escape_attribute(self.id.unwrap_or_default()),
-                escape_text(object.object.text),
-            ));
+                q.signed_properties,
+            )),
+            None => {}
         }
         s.push_str("</ds:Signature>");
         s
@@ -840,20 +959,18 @@ impl Template<'_> {
         point: &SplicePoint,
         key: &PrivateKey,
     ) -> Result<Vec<u8>, XmlError> {
-        let object_digest = match &self.object {
-            Some(object) if object.object.target_ref => {
-                Some(self.in_place(xml, point, None, |signature| {
-                    let property = signature
-                        .descendants()
-                        .find(|n| is_ds(*n, "SignatureProperty"))
-                        .expect("the signing-time object");
-                    // The enveloped-signature transform does not drop it: a document-order
-                    // filter of a subtree inside the signature never meets the signature.
-                    let canonical = canonicalizer(self.reference_c14n).run(property)?;
-                    Ok(self.algorithms.digest.digest(&canonical))
-                })?)
-            }
-            _ => None,
+        let object_digest = match self.object.as_ref().and_then(|o| o.reference(self)) {
+            Some((id, _, _, c14n)) => Some(self.in_place(xml, point, None, |signature| {
+                let target = signature
+                    .descendants()
+                    .find(|n| n.is_element() && n.attribute("Id") == Some(id))
+                    .expect("the object's signed element");
+                // The enveloped-signature transform does not drop it: a document-order
+                // filter of a subtree inside the signature never meets the signature.
+                let canonical = canonicalizer(c14n).run(target)?;
+                Ok(self.algorithms.digest.digest(&canonical))
+            })?),
+            None => None,
         };
         let tbs = self.in_place(xml, point, object_digest.as_deref(), |signature| {
             let signed_info = signature.first_element_child().expect("SignedInfo");
@@ -919,6 +1036,45 @@ impl SplicePoint {
         }
         out
     }
+}
+
+/// The signature of `doc` whose `Id` is `id`.
+fn signature_by_id<'a, 'i>(doc: &'a Document<'i>, id: &str) -> Result<Node<'a, 'i>, XmlError> {
+    doc.descendants()
+        .find(|n| is_ds(*n, "Signature") && n.attribute("Id") == Some(id))
+        .ok_or_else(|| malformed(&format!("no signature with Id {id:?}")))
+}
+
+/// The `ds:SignatureValue` of the signature `id` in `signed` (a document [`sign_qualified`]
+/// made), canonicalized in place with Exclusive XML Canonicalization: what a XAdES
+/// `SignatureTimeStamp` stamps.
+pub(crate) fn signature_value_c14n(signed: &[u8], id: &str) -> Result<Vec<u8>, XmlError> {
+    let doc = parse::parse_signed(signed)?;
+    let value = ds_child(signature_by_id(&doc, id)?, "SignatureValue")?;
+    canonicalizer(C14n::Exclusive).run(value)
+}
+
+/// `signed` (a document [`sign_qualified`] made) with `properties` spliced in as the last
+/// child of the `xades:QualifyingProperties` of the signature `id`; the other bytes are
+/// kept.
+pub(crate) fn append_qualifying(
+    signed: &[u8],
+    id: &str,
+    properties: &str,
+) -> Result<Vec<u8>, XmlError> {
+    let doc = parse::parse_signed(signed)?;
+    let qualifying = signature_by_id(&doc, id)?
+        .children()
+        .filter(|n| is_ds(*n, "Object"))
+        .flat_map(|object| object.children())
+        .find(|n| {
+            n.is_element()
+                && n.tag_name().namespace() == Some(XADES_NS)
+                && n.tag_name().name() == "QualifyingProperties"
+        })
+        .ok_or_else(|| malformed("the signature has no xades:QualifyingProperties"))?;
+    let point = SplicePoint::of(signed, qualifying)?;
+    Ok(point.splice(signed, properties))
 }
 
 /// The certificate of a signature's `KeyInfo/X509Data/X509Certificate`.
