@@ -5,12 +5,14 @@ use std::path::PathBuf;
 
 use oncl_basics::Locale;
 
+pub mod check;
 pub mod data;
 pub mod generate;
 pub mod inputs;
 pub mod ports;
 pub mod site;
 
+pub use check::check;
 pub use generate::generate;
 
 /// The site's hand-written sources, from the workspace root.
