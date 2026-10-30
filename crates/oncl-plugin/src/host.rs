@@ -43,6 +43,9 @@ pub struct HostServices {
     /// The CAs of `ca_list`, `ca_issuer` and the chains of `keys_chain`: the NCA's
     /// ([`CaSet::nca_production`]).
     pub cas: Arc<CaSet>,
+    /// The hardware tokens of `keys_choose`, `keys_terminals` and `keys_open`, while their
+    /// support is on.
+    pub tokens: Arc<oncl_token::Tokens>,
 }
 
 /// Who runs in an instance now.

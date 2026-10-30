@@ -50,6 +50,7 @@ pub fn services_with(
         clock,
         cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
         locale: Arc::new(|| Locale::Ru),
+        tokens: oncl_token::Tokens::disabled(),
     }
 }
 

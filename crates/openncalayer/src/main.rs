@@ -531,6 +531,7 @@ fn start_plugins(
         // The language the settings window saved last.
         locale: Arc::new(move || load_settings(&settings).ui_locale()),
         cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
+        tokens: oncl_token::Tokens::disabled(),
     };
     let modules = Arc::new(PluginModules::new(
         Arc::new(Engine::new()),

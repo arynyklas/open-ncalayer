@@ -27,6 +27,9 @@ oncl-protocol.workspace = true
 oncl-registry.workspace = true
 oncl-tls.workspace = true
 oncl-ui.workspace = true
+# Hardware tokens and ID cards over the system's smart card service (experimental, off by
+# default).
+oncl-token.workspace = true
 oncl-update.workspace = true
 
 base64.workspace = true

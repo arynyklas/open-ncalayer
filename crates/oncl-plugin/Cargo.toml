@@ -58,6 +58,8 @@ oncl-basics = { path = "../oncl-basics", features = ["testing"] }
 # `testing`: `tsp::MockTsa`, `RouteTransport`.
 oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 oncl-testkit.workspace = true
+# `emulator`: software tokens for the `keys` capability's token tests.
+oncl-token = { path = "../oncl-token", features = ["emulator"] }
 tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 tracing-subscriber.workspace = true

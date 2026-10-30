@@ -176,6 +176,7 @@ impl Harness {
             locale: Arc::new(move || locale),
             // The synthetic PKI's CAs, as the ports' keys are synthetic.
             cas: Arc::new(synthetic_cas()),
+            tokens: oncl_token::Tokens::disabled(),
         }
     }
 
