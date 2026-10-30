@@ -1,0 +1,25 @@
+id = "io.github.arynyklas.openncalayer.port.ezsigner"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.gov.pki.cms.CMSSignUtil"]
+
+[name]
+ru = "ezSigner (порт OpenNCALayer)"
+kk = "ezSigner (OpenNCALayer порты)"
+en = "ezSigner (OpenNCALayer port)"
+
+[description]
+ru = "Подписание локальных файлов в CMS с меткой времени для ezsigner.kz"
+kk = "ezsigner.kz үшін жергілікті файлдарға уақыт белгісі бар CMS қолтаңбасы"
+en = "Time-stamped CMS signatures of local files for ezsigner.kz"
+
+[replaces]
+symname = "kz.gov.pki.cms.NLDocSignerModule"
+version = "1.2.1"
+
+[capabilities]
+keys = true
+dialogs = true
+files = true
+page_files = true
+page_files_ext = ["cms"]

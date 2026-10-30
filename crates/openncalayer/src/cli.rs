@@ -473,6 +473,8 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_basics::testing::Step>, String> {
         CancelFile,
         Password(String),
         CancelPassword,
+        Confirm { yes: bool },
+        CancelConfirm,
     }
 
     let specs: Vec<StepSpec> = serde_json::from_str(text).map_err(|e| e.to_string())?;
@@ -492,6 +494,8 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_basics::testing::Step>, String> {
             StepSpec::CancelFile => Step::CancelFile,
             StepSpec::Password(password) => Step::Password(password),
             StepSpec::CancelPassword => Step::CancelPassword,
+            StepSpec::Confirm { yes } => Step::Confirm { yes },
+            StepSpec::CancelConfirm => Step::CancelConfirm,
         })
         .collect())
 }

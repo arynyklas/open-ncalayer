@@ -54,6 +54,102 @@ pub fn sign_xml(key: &Key, xml: &str, tbs: &str, parent: &str) -> Result<String,
     String::from_utf8(signed).map_err(|e| e.to_string())
 }
 
+/// Why `checkCert` of ezSigner and uchet refuses a signer certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertProblem {
+    /// Not of Kalkan's type SIGNATURE.
+    NotSigning,
+    /// Expired now.
+    Expired,
+    /// Not yet valid now.
+    NotYetValid,
+    /// Issued by none of the core's CAs.
+    UnknownCa,
+    /// It has an extended key usage that is refused (1.2.398.5.19.1.2.2.1, .2.2.1.2).
+    Blocked,
+    /// The OCSP responder says revoked.
+    Revoked,
+    /// The OCSP responder does not know it.
+    OcspUnknown,
+    /// The OCSP response is not of a trusted responder.
+    OcspNotVerified,
+    /// The OCSP response is outside its update window.
+    OcspStale,
+}
+
+/// The refused extended key usages.
+const BLOCKED_EKUS: [&str; 2] = ["1.2.398.5.19.1.2.2.1", "1.2.398.5.19.1.2.2.1.2"];
+
+/// `checkCert` of ezSigner and uchet: the type SIGNATURE, the validity now, an issuer among
+/// the core's CAs (which stand for the original's CA list), no refused extended key usage,
+/// then an OCSP check at the certificate's responder (SHA-1 `CertID`, GET, no nonce),
+/// checked as the core checks its own; a responder that cannot be reached, and a
+/// certificate without one, pass.
+///
+/// # Errors
+///
+/// The host's message.
+pub fn check_cert(der: &[u8]) -> Result<Option<CertProblem>, String> {
+    use oncl_pdk::pki::{
+        CertStatusAbi, IssuerSel, Nonce, OcspArgs, OcspOutcome, PkiMethod, PkiUrl, Problem,
+    };
+    let info = host::cert_info(der).map_err(|e| e.message)?;
+    let details = host::cert_details(der).map_err(|e| e.message)?;
+    if !details.knca_types.iter().any(|t| t == "SIGNATURE") {
+        return Ok(Some(CertProblem::NotSigning));
+    }
+    let now = host::now().map_err(|e| e.message)?;
+    if now > info.not_after {
+        return Ok(Some(CertProblem::Expired));
+    }
+    if now < info.not_before {
+        return Ok(Some(CertProblem::NotYetValid));
+    }
+    if host::ca_issuer(der).map_err(|e| e.message)?.is_none() {
+        return Ok(Some(CertProblem::UnknownCa));
+    }
+    if info
+        .ext_key_usages
+        .iter()
+        .any(|eku| BLOCKED_EKUS.contains(&eku.as_str()))
+    {
+        return Ok(Some(CertProblem::Blocked));
+    }
+    if details.ocsp_urls.is_empty() {
+        return Ok(None);
+    }
+    let outcome = oncl_pdk::pki::ocsp_fetch(&OcspArgs {
+        cert: der.to_vec().into(),
+        issuer: IssuerSel::HostCas,
+        cert_id_hash: oncl_pdk::abi::HashAlg::Sha1,
+        nonce: Nonce::None,
+        url: PkiUrl::FromCert(der.to_vec().into()),
+        method: PkiMethod::GetUrlEncoded,
+        // The original's checker waits 5 seconds.
+        timeout_ms: 5_000,
+        check: true,
+    });
+    // Unverified against the original: a responder that cannot be reached (or a host
+    // refusal) lets the certificate pass, as the original's checker ignores such failures.
+    let Ok(OcspOutcome::Ok {
+        cert_status,
+        problem,
+        ..
+    }) = outcome
+    else {
+        return Ok(None);
+    };
+    Ok(match (cert_status, problem) {
+        (Some(CertStatusAbi::Revoked { .. }), _) => Some(CertProblem::Revoked),
+        (Some(CertStatusAbi::Unknown), _) => Some(CertProblem::OcspUnknown),
+        (_, Some(Problem::OcspStale)) => Some(CertProblem::OcspStale),
+        (_, Some(Problem::ResponderUnverified | Problem::NonceMismatch)) => {
+            Some(CertProblem::OcspNotVerified)
+        }
+        _ => None,
+    })
+}
+
 /// The text of `reply`; a dropped connection asks the host to drop it (the text returned
 /// then is not sent).
 pub fn into_text(reply: Reply) -> String {

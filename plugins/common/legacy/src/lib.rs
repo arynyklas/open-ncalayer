@@ -10,8 +10,8 @@
 
 use der::{Decode, Encode};
 use oncl_pdk::abi::{
-    Bytes, CmsCerts, CmsContent, CoSign, NetFailure, NetKind, SignCmsExArgs, SignedAttrs,
-    SigningTime, TimeForm, TimeSource, TsaChoice,
+    Bytes, CmsCerts, CmsContent, CoSign, FileFilter, NetFailure, NetKind, SignCmsExArgs,
+    SignedAttrs, SigningTime, TimeForm, TimeSource, TsaChoice,
 };
 use oncl_pdk::javaexc::Throwable;
 use oncl_pdk::legacy::Outcome;
@@ -175,6 +175,45 @@ pub fn cades_args(
     }
 }
 
+/// The file name and the folder of `path` as `java.io.File` gives them (`getName`,
+/// `getParent`), either separator counting; no folder for a bare name.
+pub fn split_path(path: &str) -> (&str, Option<&str>) {
+    match path.rfind(['\\', '/']) {
+        Some(i) => (&path[i + 1..], Some(&path[..i])),
+        None => (path, None),
+    }
+}
+
+/// The `FileInfo` bean of ezSigner and uchet: `path`, `filename`, `size`, `filedir`.
+pub fn file_info(path: &str, size: u64) -> JObject {
+    let (name, dir) = split_path(path);
+    let mut bean = JObject::hash_map();
+    bean.put("path", path);
+    bean.put("filename", name);
+    bean.put("size", JValue::Int(size as i64));
+    bean.put_opt("filedir", dir);
+    bean
+}
+
+/// The file types of the clones' `FileExtension.valueOf(name)`: `all` (no filter),
+/// `pkcs12`, `cert`, `cms`; `None` for another name (`IllegalArgumentException`).
+pub fn file_filters(name: &str) -> Option<Vec<FileFilter>> {
+    let filter = |name: &str, extensions: &[&str]| FileFilter {
+        name: name.to_owned(),
+        extensions: extensions.iter().map(|e| (*e).to_owned()).collect(),
+    };
+    Some(match name {
+        "all" => Vec::new(),
+        "pkcs12" => vec![filter(
+            "pkcs12 files (*.p12, *.pfx, *.jks)",
+            &["p12", "pfx", "jks"],
+        )],
+        "cert" => vec![filter("cert files (*.crt, *.cer)", &["crt", "cer"])],
+        "cms" => vec![filter("cms files (*.cms)", &["cms"])],
+        _ => return None,
+    })
+}
+
 /// The ESEDO file names of `text`: split on `<>` as Java's `split` (trailing empty parts
 /// dropped), each trimmed; a blank text is none.
 pub fn split_names(text: &str) -> Vec<String> {
@@ -254,7 +293,9 @@ pub fn common_name(name: &[u8]) -> Option<String> {
 #[cfg(target_arch = "wasm32")]
 mod guest;
 #[cfg(target_arch = "wasm32")]
-pub use guest::{Select, cades, into_text, official_key_info, select, sign_xml};
+pub use guest::{
+    CertProblem, Select, cades, check_cert, into_text, official_key_info, select, sign_xml,
+};
 
 #[cfg(test)]
 mod tests {

@@ -904,3 +904,773 @@ fn eot_bad_base64_java_text() {
         r#"{"code":"500","message":"java.lang.IllegalAccessException: Class kz.gov.pki.eot.signmodule.Activator can not access a member of class kz.gov.pki.eot.signmodule.EotSignerModuleService with modifiers \"private\". Method: getJson"}"#
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// ezSigner (NLDoc 1.2.1)
+
+const EZ: &str = "ezsigner";
+
+fn ez_request(method: &str, args: Value, lang: Option<&str>) -> String {
+    let mut request = json!({"method": method, "args": args});
+    if let Some(lang) = lang {
+        request["lang"] = json!(lang);
+    }
+    request.to_string()
+}
+
+/// A temporary folder holding `doc.pdf`.
+fn folder_with_document() -> (tempfile::TempDir, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("doc.pdf");
+    std::fs::write(&file, b"%PDF-1.4 the document").unwrap();
+    let dir_text = dir.path().to_str().unwrap().to_owned();
+    (dir, file.to_str().unwrap().to_owned(), dir_text)
+}
+
+fn yes() -> Step {
+    Step::Confirm { yes: true }
+}
+
+#[test]
+fn ezsigner_lang_kk_texts() {
+    let h = Harness::new(vec![], vec![]);
+    let mut s = h.session(EZ);
+    let network = ["\\\\server\\share\\a.pdf", "\\\\server\\share", "PKCS12"];
+    assert_eq!(
+        text(s.call(
+            &ez_request("signFilePath", json!(network), Some("kk")),
+            None
+        )),
+        r#"{"code":"500","message":"Күтпеген қате"}"#
+    );
+    assert_eq!(
+        text(s.call(
+            &ez_request("getMessage", json!(["cms.signed"]), Some("kk")),
+            None
+        )),
+        "Файлға сәтті қол қойылды"
+    );
+    // Any other language is Russian.
+    assert_eq!(
+        text(s.call(
+            &ez_request("getMessage", json!(["cms.signed"]), Some("en")),
+            None
+        )),
+        "Файл успешно подписан"
+    );
+    assert_eq!(
+        text(s.call(&ez_request("getMessage", json!(["nope"]), None), None)),
+        r#"{"code":"500","message":"java.lang.reflect.InvocationTargetException. Method: getMessage"}"#
+    );
+}
+
+#[test]
+fn ezsigner_no_such_method_previous_locale() {
+    let h = Harness::new(vec![], vec![]);
+    let mut s = h.session(EZ);
+    // The first call has Russian, whatever it asks for.
+    assert_eq!(
+        text(s.call(&ez_request("nope", json!([]), Some("kk")), None)),
+        r#"{"code":"500","message":"В модуле нет такого метода nope"}"#
+    );
+    // A method found sets the language before it runs.
+    s.call(&ez_request("getMessage", json!(["404"]), Some("kk")), None);
+    assert_eq!(
+        text(s.call(&ez_request("nope", json!([]), Some("ru")), None)),
+        r#"{"code":"500","message":"Модульде мұндай әдіс жоқ nope"}"#
+    );
+    // A private method sets it too.
+    assert_eq!(
+        text(s.call(&ez_request("checkCert", json!(["x"]), Some("ru")), None)),
+        r#"{"code":"500","message":"java.lang.IllegalAccessException: Class kz.gov.pki.cms.NLDocSignerActivator can not access a member of class kz.gov.pki.cms.CMSSignUtil with modifiers \"private\". Method: checkCert"}"#
+    );
+    assert_eq!(
+        text(s.call(&ez_request("nope", json!([]), None), None)),
+        r#"{"code":"500","message":"В модуле нет такого метода nope"}"#
+    );
+}
+
+#[test]
+fn ezsigner_change_lang_without_uuid_drops() {
+    let h = Harness::new(vec![], vec![]);
+    let mut s = h.session(EZ);
+    assert_eq!(
+        s.call(&ez_request("changeLang", json!(["kk"]), None), None),
+        Reply::Drop
+    );
+    assert_eq!(
+        text(s.call(&ez_request("nope", json!([]), None), None)),
+        r#"{"code":"500","message":"Модульде мұндай әдіс жоқ nope"}"#
+    );
+    let with_uuid = json!({"method": "changeLang", "args": ["ru"], "uuid": "1"}).to_string();
+    assert_eq!(text(s.call(&with_uuid, None)), r#"{"code":"500"}"#);
+    assert_eq!(
+        text(s.call(&ez_request("showKeyChooser", json!([[]]), None), None)),
+        r#"{"code":"500","message":"java.lang.IllegalArgumentException: argument type mismatch. Method: showKeyChooser"}"#
+    );
+}
+
+#[test]
+fn ezsigner_get_file_path_cancel_size_zero() {
+    let h = Harness::new(vec![Step::CancelPath], vec![]);
+    assert_eq!(
+        text(h.call(
+            EZ,
+            &ez_request("getFilePath", json!(["pkcs12", ""]), None),
+            None
+        )),
+        r#"{"responseObject":{"size":0},"code":"200"}"#
+    );
+    assert_eq!(h.prompter().path_prompts().len(), 1);
+    assert_eq!(
+        text(h.call(
+            EZ,
+            &ez_request("getFilePath", json!(["p12", ""]), None),
+            None
+        )),
+        r#"{"code":"500","message":"java.lang.reflect.InvocationTargetException. Method: getFilePath"}"#
+    );
+    let (_dir, file, folder) = folder_with_document();
+    let h = Harness::new(vec![Step::Path(file.clone().into())], vec![]);
+    let reply = text(h.call(
+        EZ,
+        &ez_request("getFilePath", json!(["all", ""]), None),
+        None,
+    ));
+    let mut info = JObject::hash_map();
+    info.put("path", file.as_str());
+    info.put("filename", "doc.pdf");
+    info.put("size", JValue::Int(21));
+    info.put("filedir", folder.as_str());
+    let mut expected = JObject::hash_map();
+    expected.put("code", "200");
+    expected.put("responseObject", JValue::Obj(info));
+    assert_eq!(reply, expected.to_json());
+    let h = Harness::new(vec![Step::CancelPath], vec![]);
+    assert_eq!(
+        text(h.call(EZ, &ez_request("getDirectoryPath", json!([""]), None), None)),
+        r#"{"code":"200"}"#
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn ezsigner_sign_file_path_writes_cms() {
+    let (dir, file, folder) = folder_with_document();
+    let mut steps = vec![yes()];
+    steps.extend(key("user-gost2015-sign"));
+    steps.push(yes());
+    let h = Harness::new(steps, vec![]);
+    let reply = text(h.call(
+        EZ,
+        &ez_request("signFilePath", json!([file, folder, "PKCS12"]), Some("kk")),
+        None,
+    ));
+    let written = dir.path().join("doc.pdf.cms");
+    let mut expected = JObject::hash_map();
+    expected.put("code", "200");
+    expected.put("message", "Файлға сәтті қол қойылды");
+    expected.put("responseObject", written.to_str().unwrap());
+    assert_eq!(reply, expected.to_json());
+    let cms = std::fs::read(&written).unwrap();
+    let signers = oncl_pki::cms::verify(&cms, None).unwrap();
+    assert!(signers[0].timestamp_token.is_some());
+    assert_eq!(cms_view(&cms).econtent.unwrap(), b"%PDF-1.4 the document");
+    assert_eq!(h.prompter().confirm_prompts().len(), 2);
+    // A blank storage name, after the paths.
+    let h = Harness::new(vec![yes()], vec![]);
+    assert_eq!(
+        text(h.call(
+            EZ,
+            &ez_request("signFilePath", json!([file, folder, " "]), None),
+            None
+        )),
+        r#"{"code":"500","message":"Не заполнены обязательные входные параметры"}"#
+    );
+    // A certificate the core's CAs do not chain: refused before signing.
+    let mut steps = vec![yes()];
+    steps.extend(key("expired-gost2015-sign"));
+    let h = Harness::new(steps, vec![]);
+    assert_eq!(
+        text(h.call(
+            EZ,
+            &ez_request("signFilePath", json!([file, folder, "PKCS12"]), None),
+            None
+        )),
+        r#"{"code":"500","message":"Срок действия сертфиката истек"}"#
+    );
+}
+
+#[test]
+fn ezsigner_network_path_internal_error() {
+    let h = Harness::new(vec![], vec![]);
+    for path in ["\\\\server\\share\\a.pdf", "/home/user/a.pdf", "a.pdf", ""] {
+        assert_eq!(
+            text(h.call(
+                EZ,
+                &ez_request("signFilePath", json!([path, "C:\\", "PKCS12"]), None),
+                None
+            )),
+            r#"{"code":"500","message":"Непредвиденная ошибка"}"#,
+            "{path}"
+        );
+    }
+    assert!(h.prompter().confirm_prompts().is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn ezsigner_missing_path_text_has_newline() {
+    let (_dir, file, folder) = folder_with_document();
+    let missing = file.replace("doc.pdf", "nope.pdf");
+    let h = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(h.call(
+            EZ,
+            &ez_request("signFilePath", json!([missing, folder, "PKCS12"]), None),
+            None
+        )),
+        r#"{"code":"500","message":"Этот путь к файлу не существует на вашем компьютере.\n"}"#
+    );
+    assert_eq!(
+        text(h.call(
+            EZ,
+            &ez_request(
+                "signFilePath",
+                json!([missing, folder, "PKCS12"]),
+                Some("kk")
+            ),
+            None
+        )),
+        r#"{"code":"500","message":"Бұл файлға жол сіздің компьютеріңіз де жоқ."}"#
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn ezsigner_write_declined() {
+    let (dir, file, folder) = folder_with_document();
+    let mut steps = vec![yes()];
+    steps.extend(key("user-gost2015-sign"));
+    steps.push(Step::Confirm { yes: false });
+    let h = Harness::new(steps, vec![]);
+    assert_eq!(
+        text(h.call(
+            EZ,
+            &ez_request("signFilePath", json!([file, folder, "PKCS12"]), None),
+            None
+        )),
+        r#"{"code":"500","message":"Ошибка при работе с файлом"}"#
+    );
+    assert!(!dir.path().join("doc.pdf.cms").exists());
+    // Reading declined.
+    let h = Harness::new(vec![Step::Confirm { yes: false }], vec![]);
+    assert_eq!(
+        text(h.call(
+            EZ,
+            &ez_request("signFilePath", json!([file, folder, "PKCS12"]), None),
+            None
+        )),
+        r#"{"code":"500","message":"Ошибка при работе с файлом"}"#
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// uchet signUtil
+
+const UCHET: &str = "uchet";
+const LICENSE: &str = "http://ncalayer.uchet.kz:8080";
+
+fn uchet(steps: Vec<Step>, method: &str, args: Value) -> String {
+    text(Harness::new(steps, vec![]).call(UCHET, &call(method, args), None))
+}
+
+#[test]
+fn uchet_test_raw_text() {
+    assert_eq!(uchet(vec![], "test", json!(["abc"])), "trueabc");
+    assert_eq!(
+        uchet(vec![], "signFile", json!(["", "u", "d", "PKCS12"])),
+        "no no no !!!"
+    );
+    assert_eq!(
+        uchet(vec![], "getMessage", json!(["404"])),
+        "Не заполнены обязательные входные параметры"
+    );
+    assert_eq!(
+        uchet(vec![], "getActiveTokens", json!([])),
+        r#"{"code":"500","message":"NoSuchMethodException getActiveTokens"}"#
+    );
+}
+
+#[test]
+fn uchet_raw_text_with_uuid_is_parse_error() {
+    let h = Harness::new(vec![], vec![]);
+    let request = json!({"method": "test", "args": ["x"], "uuid": "u"}).to_string();
+    assert_eq!(
+        text(h.call(UCHET, &request, None)),
+        r#"{"code":"500","message":"A JSONObject text must begin with '{' at 1 [character 2 line 1]"}"#
+    );
+}
+
+#[test]
+fn uchet_get_version() {
+    assert_eq!(
+        uchet(vec![], "getVersion", json!(["x"])),
+        r#"{"code":"200","message":"1.5"}"#
+    );
+    assert_eq!(
+        uchet(vec![], "getJson", json!([["x"]])),
+        r#"{"code":"500","message":"JSONArray[0] is not a int."}"#
+    );
+    assert_eq!(
+        uchet(vec![], "sign", json!(["a", "b"])),
+        r#"{"code":"500","message":"java.lang.IllegalAccessException: Class kz.uchet.signUtil.NCALayerCommonActivator can not access a member of class kz.uchet.signUtil.CommonUtils with modifiers \"private\". Method: sign"}"#
+    );
+}
+
+/// An attached CAdES-T of `data` by the synthetic key `name` (made by the rating1c port).
+fn cades_t(name: &str, data: &[u8]) -> Vec<u8> {
+    let reply = parse(&r1c(
+        key(name),
+        "createCmsFromBase64",
+        json!(["PKCS12", "SIGNATURE", b64(data), true, true, ""]),
+    ));
+    unb64(reply["responseObject"].as_str().unwrap())
+}
+
+/// `checkCMS` of a CMS file by `name`, the responder answering `status` for it.
+fn uchet_check(name: &str, status: oncl_pki::ocsp::CertStatus) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("signed.cms");
+    std::fs::write(&file, cades_t(name, b"data")).unwrap();
+    let serial = cert_info(&entry(name).cert).serial_hex;
+    let responder: Arc<dyn HttpTransport> =
+        Arc::new(MockOcsp::new(entry("ocsp-gost2015")).status(&serial, status));
+    let h = Harness::new(
+        vec![yes()],
+        vec![("http://ocsp.synthetic.test".to_owned(), responder)],
+    )
+    .with_pki_hosts(&["ocsp.synthetic.test"])
+    // The mock responder answers at the real time.
+    .with_clock(time::OffsetDateTime::now_utc);
+    text(h.call(
+        UCHET,
+        &call("checkCMS", json!([file.to_str().unwrap()])),
+        None,
+    ))
+}
+
+#[test]
+fn uchet_check_cms_report_bytes() {
+    let reply = uchet_check("inter-user-gost2015-sign", oncl_pki::ocsp::CertStatus::Good);
+    let parsed = parse(&reply);
+    let signer = &parsed["responseObjects"][0];
+    let period = signer["certificateValidityPeriod"].as_str().unwrap();
+    let tsp_date = signer["tspDate"].as_str().unwrap();
+    let date = |s: &str| {
+        let b = s.as_bytes();
+        s.len() == 19 && b[2] == b'/' && b[5] == b'/' && b[10] == b' ' && b[13] == b':'
+    };
+    assert!(
+        date(&period[..19]) && &period[19..22] == " - " && date(&period[22..]),
+        "{period}"
+    );
+    assert!(date(tsp_date), "{tsp_date}");
+    let e = entry("inter-user-gost2015-sign");
+    let info = cert_info(&e.cert);
+    let verification = |valid: bool| {
+        let mut r = JObject::hash_map();
+        r.put("valid", valid);
+        JValue::Obj(r)
+    };
+    let mut bean = JObject::hash_map();
+    bean.put(
+        "personCertificate",
+        info.ext_key_usages.contains("1.2.398.3.3.4.1.1"),
+    );
+    bean.put("serialNumber", info.serial_hex.trim_start_matches('0'));
+    bean.put("validSignature", true);
+    bean.put("certificateValidityPeriod", period);
+    bean.put("tspDate", tsp_date);
+    bean.put("iin", "123456789011");
+    bean.put("tspVerificationResult", verification(true));
+    bean.put("number", 0);
+    bean.put("certificateVerificationResult", verification(true));
+    bean.put("name", "ТЕСТОВ ТЕСТ ТЕСТОВИЧ");
+    bean.put("signatureVerificationResult", verification(true));
+    let mut expected = JObject::hash_map();
+    expected.put("code", "200");
+    expected.put("responseObjects", JValue::Arr(vec![JValue::Obj(bean)]));
+    assert_eq!(reply, expected.to_json());
+}
+
+#[test]
+fn uchet_check_cms_revoked_text() {
+    let revoked = oncl_pki::ocsp::CertStatus::Revoked {
+        time: time::OffsetDateTime::from_unix_timestamp(1_768_464_000).unwrap(),
+        reason: None,
+    };
+    let reply = parse(&uchet_check("inter-revoked-gost2015-sign", revoked));
+    let signer = &reply["responseObjects"][0];
+    assert_eq!(
+        signer["certificateVerificationResult"],
+        json!({"valid": false, "message": "Сертификат отозван"})
+    );
+    assert_eq!(signer["validSignature"], false);
+    // A file the page names that does not exist; a blank path.
+    assert_eq!(
+        uchet(vec![], "checkCMS", json!(["C:\\no\\such.cms"])),
+        r#"{"code":"500","message":"Ошибка при работе с файлом"}"#
+    );
+    assert_eq!(
+        uchet(vec![], "checkCMS", json!([" "])),
+        r#"{"code":"500","message":"Не заполнены обязательные входные параметры"}"#
+    );
+}
+
+#[test]
+fn uchet_check_cms_from_web_foreign_denied() {
+    let h = Harness::new(vec![], vec![]);
+    for url in ["https://evil.example/a.cms", "file:///C:/a.cms", "/a.cms"] {
+        assert_eq!(
+            text(h.call(
+                UCHET,
+                &call("checkCMSFromWeb", json!([url])),
+                Some("https://uchet.kz")
+            )),
+            r#"{"code":"500","message":"Непредвиденная ошибка"}"#
+        );
+    }
+    assert!(h.http_log().is_empty());
+}
+
+#[test]
+fn uchet_sign_xml_api_consent_and_message() {
+    let (path, password) = p12("user-gost2015-sign");
+    let h = Harness::new(vec![yes()], vec![]);
+    let mut s = h.session(UCHET);
+    let request = call(
+        "signXmlApi",
+        json!([path.to_str().unwrap(), password, "<doc><a>1</a></doc>"]),
+    );
+    for _ in 0..2 {
+        let reply = parse(&text(s.call(&request, None)));
+        assert_eq!(reply["code"], "200");
+        assert!(reply.get("responseObject").is_none());
+        let xml = reply["message"].as_str().unwrap();
+        assert!(
+            xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?><doc>"),
+            "{xml}"
+        );
+        assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+    }
+    // Asked once for the session.
+    assert_eq!(h.prompter().confirm_prompts().len(), 1);
+}
+
+#[test]
+fn uchet_sign_xml_api_wrong_password() {
+    let (path, _) = p12("user-gost2015-sign");
+    let h = Harness::new(vec![yes()], vec![]);
+    let request = call(
+        "signXmlApi",
+        json!([path.to_str().unwrap(), "wrong", "<a/>"]),
+    );
+    assert_eq!(
+        text(h.call(UCHET, &request, None)),
+        r#"{"code":"500","message":"Не удалось открыть хранилище"}"#
+    );
+    // Declined.
+    let h = Harness::new(vec![Step::Confirm { yes: false }], vec![]);
+    let request = call(
+        "signXmlApi",
+        json!([path.to_str().unwrap(), "Qwerty12", "<a/>"]),
+    );
+    assert_eq!(
+        text(h.call(UCHET, &request, None)),
+        r#"{"code":"500","message":"Не удалось открыть хранилище"}"#
+    );
+}
+
+/// A request the license server got: its headers, `Content-Type` and body.
+type Seen = (Vec<(String, String)>, Option<String>, Vec<u8>);
+
+/// The license server answering `body` with `status`, recording what it was sent.
+struct License {
+    status: u16,
+    body: &'static str,
+    seen: Mutex<Vec<Seen>>,
+}
+
+impl HttpTransport for License {
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        self.seen.lock().unwrap().push((
+            request
+                .headers
+                .iter()
+                .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+                .collect(),
+            request.content_type.map(str::to_owned),
+            request.body.to_vec(),
+        ));
+        Ok(HttpReply {
+            status: self.status,
+            content_type: Some("application/json".to_owned()),
+            location: None,
+            body: self.body.as_bytes().to_vec(),
+        })
+    }
+}
+
+fn license(status: u16, body: &'static str) -> Arc<License> {
+    Arc::new(License {
+        status,
+        body,
+        seen: Mutex::new(Vec::new()),
+    })
+}
+
+#[test]
+fn uchet_license_ok_then_sign() {
+    let server = license(200, r#"{"error":"","result":"ok"}"#);
+    let route: Arc<dyn HttpTransport> = server.clone();
+    let (dir, file, folder) = folder_with_document();
+    let (key_path, password) = p12("user-gost2015-sign");
+    // The file, then the key file, then the folder.
+    let h = Harness::new(vec![yes(), yes(), yes()], vec![(LICENSE.to_owned(), route)]);
+    let reply = parse(&text(h.call(
+        UCHET,
+        &call(
+            "signFileFromDiskAndSaveToDiskApi",
+            json!([
+                "tok",
+                file,
+                folder,
+                key_path.to_str().unwrap(),
+                password,
+                "PKCS12"
+            ]),
+        ),
+        None,
+    )));
+    assert_eq!(reply["code"], "200", "{reply}");
+    assert_eq!(reply["message"], "Файл успешно подписан");
+    let written = dir.path().join("doc.pdf.cms");
+    assert_eq!(
+        Some(reply["responseObject"].as_str().unwrap()),
+        written.to_str()
+    );
+    oncl_pki::cms::verify(&std::fs::read(&written).unwrap(), None).unwrap();
+    let seen = server.seen.lock().unwrap().clone();
+    let (headers, content_type, body) = &seen[0];
+    assert_eq!(body, br#"{"sign_token":"tok"}"#);
+    assert_eq!(content_type.as_deref(), Some("application/json"));
+    assert!(headers.contains(&("User-Agent".to_owned(), "Mozilla/5.0".to_owned())));
+    assert!(headers.contains(&("Accept-Language".to_owned(), "en-US,en;q=0.5".to_owned())));
+    assert_eq!(
+        h.http_log()[0],
+        "POST http://ncalayer.uchet.kz:8080/checkSignToken"
+    );
+
+    let server = license(200, r#"{"error":"","result":"ok"}"#);
+    let route: Arc<dyn HttpTransport> = server.clone();
+    let h = Harness::new(vec![yes()], vec![(LICENSE.to_owned(), route)]);
+    let reply = parse(&text(h.call(
+        UCHET,
+        &call(
+            "signFileAndReturnBase64Api",
+            json!([
+                "tok",
+                b64(b"bytes"),
+                key_path.to_str().unwrap(),
+                password,
+                "PKCS12"
+            ]),
+        ),
+        None,
+    )));
+    let cms = unb64(reply["responseObject"].as_str().unwrap());
+    assert_eq!(cms_view(&cms).econtent.unwrap(), b"bytes");
+}
+
+#[test]
+fn uchet_license_rejected_text() {
+    let route: Arc<dyn HttpTransport> =
+        license(200, r#"{"error":"Токен недействителен","result":""}"#);
+    let h = Harness::new(vec![], vec![(LICENSE.to_owned(), route)]);
+    assert_eq!(
+        text(h.call(
+            UCHET,
+            &call(
+                "signFileAndReturnBase64Api",
+                json!(["tok", "", "", "", "PKCS12"])
+            ),
+            None
+        )),
+        r#"{"code":"500","message":"Токен недействителен"}"#
+    );
+    assert!(h.prompter().confirm_prompts().is_empty());
+}
+
+#[test]
+fn uchet_license_down() {
+    let down = r#"{"code":"500","message":"Сервер лицензирования не доступен"}"#;
+    // No server at all.
+    let h = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(h.call(
+            UCHET,
+            &call(
+                "signFileAndReturnBase64Api",
+                json!(["tok", "", "", "", "PKCS12"])
+            ),
+            None
+        )),
+        down
+    );
+    for (status, body) in [
+        (500, r#"{"error":"","result":"ok"}"#),
+        (200, "{}"),
+        (200, "x"),
+    ] {
+        let route: Arc<dyn HttpTransport> = license(status, body);
+        let h = Harness::new(vec![], vec![(LICENSE.to_owned(), route)]);
+        assert_eq!(
+            text(h.call(
+                UCHET,
+                &call(
+                    "signFileAndReturnBase64Api",
+                    json!(["tok", "", "", "", "PKCS12"])
+                ),
+                None
+            )),
+            down,
+            "{status} {body}"
+        );
+    }
+}
+
+#[test]
+fn uchet_license_test_token_not_local() {
+    let h = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(h.call(
+            UCHET,
+            &call(
+                "signFileFromDiskAndSaveToDiskApi",
+                json!(["mytest1", "", "", "", "", "PKCS12"])
+            ),
+            None
+        )),
+        r#"{"code":"500","message":"Сервер лицензирования не доступен"}"#
+    );
+    assert!(h.http_log().is_empty());
+}
+
+/// A key store with two signing keys: the individual's and the legal entity's.
+fn two_signing_keys(dir: &std::path::Path) -> std::path::PathBuf {
+    use oncl_pki::pkcs12::{WriteEntry, WriteOptions, write};
+    let entries: Vec<WriteEntry> = ["user-gost2015-sign", "legal-gost2015-sign"]
+        .iter()
+        .map(|name| {
+            let e = entry(name);
+            WriteEntry {
+                alias: e.alias.clone(),
+                pkcs8_der: e.key.to_pkcs8_der().to_vec(),
+                cert_der: Some(der_of(&e.cert)),
+            }
+        })
+        .collect();
+    let mut counter = 0u8;
+    let pfx = write(
+        &entries,
+        &[],
+        "Qwerty12",
+        &WriteOptions::default(),
+        &mut |buf| {
+            for b in buf {
+                counter = counter.wrapping_add(1);
+                *b = counter;
+            }
+        },
+    )
+    .unwrap();
+    let path = dir.join("two.p12");
+    std::fs::write(&path, pfx).unwrap();
+    path
+}
+
+#[test]
+fn uchet_multi_key_unexpected_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = two_signing_keys(dir.path());
+    let (_docs, file, folder) = folder_with_document();
+    // signFilePath: the module's storage dialog (the file, then its password).
+    let h = Harness::new(
+        vec![
+            yes(),
+            Step::Path(store.clone()),
+            Step::Password("Qwerty12".to_owned()),
+        ],
+        vec![],
+    );
+    assert_eq!(
+        text(h.call(
+            UCHET,
+            &call("signFilePath", json!([file, folder, "PKCS12"])),
+            None
+        )),
+        r#"{"code":"500","message":"Непредвиденная ошибка"}"#
+    );
+    // signXmlApi: the same.
+    let h = Harness::new(vec![yes()], vec![]);
+    assert_eq!(
+        text(h.call(
+            UCHET,
+            &call(
+                "signXmlApi",
+                json!([store.to_str().unwrap(), "Qwerty12", "<a/>"])
+            ),
+            None
+        )),
+        r#"{"code":"500","message":"Непредвиденная ошибка"}"#
+    );
+    // One signing key in the dialog's store signs; a wrong password is asked again.
+    let (key_path, _) = p12("user-gost2015-sign");
+    let h = Harness::new(
+        vec![
+            yes(),
+            Step::Path(key_path),
+            Step::Password("wrong".to_owned()),
+            Step::Message,
+            Step::Password("Qwerty12".to_owned()),
+            yes(),
+        ],
+        vec![],
+    );
+    let reply = parse(&text(h.call(
+        UCHET,
+        &call("signFilePath", json!([file, folder, "PKCS12"])),
+        None,
+    )));
+    assert_eq!(reply["message"], "Файл успешно подписан", "{reply}");
+    // Closing the storage dialog.
+    let h = Harness::new(vec![yes(), Step::CancelPath], vec![]);
+    assert_eq!(
+        text(h.call(
+            UCHET,
+            &call("signFilePath", json!([file, folder, "PKCS12"])),
+            None
+        )),
+        r#"{"code":"500","message":"Не удалось открыть хранилище"}"#
+    );
+    // The file is read first, then the storage is checked.
+    assert_eq!(
+        uchet(
+            vec![yes()],
+            "signFilePath",
+            json!([file, folder, "AKKaztokenStore"])
+        ),
+        r#"{"code":"500","message":"Носитель не обнаружен"}"#
+    );
+}
