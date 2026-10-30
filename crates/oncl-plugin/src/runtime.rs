@@ -151,6 +151,7 @@ impl Engine {
         let module =
             Module::new(&self.engine, wasm).map_err(|e| LoadError::Invalid(e.to_string()))?;
         check_exports(&module)?;
+        let mut imports = Vec::new();
         for import in module.imports() {
             let full_name = format!("{}.{}", import.module(), import.name());
             let host_fn = (import.module() == IMPORT_MODULE)
@@ -163,11 +164,15 @@ impl Engine {
             if !declares(&manifest.capabilities, host_fn) {
                 return Err(LoadError::Undeclared(full_name));
             }
+            if !imports.contains(&host_fn) {
+                imports.push(host_fn);
+            }
         }
         Ok(Compiled {
             engine: self.engine.clone(),
             module,
             capabilities: Arc::new(manifest.capabilities.clone()),
+            imports,
             process_fuel: self.process_fuel,
         })
     }
@@ -222,6 +227,7 @@ pub struct Compiled {
     engine: wasmi::Engine,
     module: Module,
     capabilities: Arc<Capabilities>,
+    imports: Vec<Import>,
     process_fuel: u64,
 }
 
@@ -237,6 +243,11 @@ pub struct SessionContext {
 }
 
 impl Compiled {
+    /// The host functions the module imports, in the order of its import section.
+    pub fn imports(&self) -> &[Import] {
+        &self.imports
+    }
+
     /// A new instance for `ctx`, its host functions served by `services`: the memory and
     /// tables limited, `oncl_abi_version` checked.
     ///

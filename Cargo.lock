@@ -3994,6 +3994,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-tests"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "oncl-basics",
+ "oncl-pdk",
+ "oncl-pki",
+ "oncl-plugin",
+ "oncl-protocol",
+ "oncl-testkit",
+ "semver",
+ "serde",
+ "serde_json",
+ "time",
+ "toml",
+]
+
+[[package]]
 name = "oncl-protocol"
 version = "0.1.0-alpha.3"
 dependencies = [
@@ -7559,6 +7576,7 @@ dependencies = [
  "object",
  "oncl-gost",
  "oncl-ipc",
+ "oncl-pdk",
  "oncl-pki",
  "oncl-plugin",
  "oncl-protocol",

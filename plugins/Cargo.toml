@@ -1,0 +1,41 @@
+# The plugin ports: WebAssembly plugins (`cdylib`, one directory each, with `plugin.toml` and
+# `registry.toml`; a port's directory never starts with `c`) and the guest libraries they share
+# (`common/`). Built on its own for wasm32-unknown-unknown, not part of the core's workspace or
+# releases; `cargo xtask plugin pack plugins/<short>` packages a port.
+[workspace]
+members = ["common/*", "[!c]*"]
+exclude = ["target"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99.1"
+license = "Apache-2.0"
+repository = "https://github.com/arynyklas/open-ncalayer"
+publish = false
+
+[workspace.dependencies]
+oncl-pdk = { path = "../crates/oncl-pdk" }
+oncl-port-kit = { path = "common/kit" }
+oncl-port-pki = { path = "common/pki" }
+
+# DER of signed attributes and names, reading CMS: pure Rust, no randomness (no `getrandom`,
+# which has no wasm32-unknown-unknown backend here). `cms` 0.3 exists only as a release
+# candidate (0.3.0-rc.0); it is the release on `der` 0.8 and `x509-cert` 0.3.
+cms = { version = "=0.3.0-rc.0", default-features = false }
+const-oid = { version = "0.10.2", features = ["db"] }
+der = { version = "0.8.2", features = ["alloc", "derive", "oid"] }
+spki = { version = "0.8.1", features = ["alloc"] }
+x509-cert = { version = "0.3.0", default-features = false }
+# MD5 of files some sites ask for next to SHA-256 (not used for signatures).
+md-5 = "0.11.0"
+# Origins of the page and of URLs the ports fetch.
+url = "2.5.8"
+# Zip archives some ports upload, deflated through pure-Rust zlib-rs, as in the core.
+zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"

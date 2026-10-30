@@ -116,6 +116,34 @@ fn pack_refuses_a_manifest_version_other_than_the_crates() {
 }
 
 #[test]
+fn pack_rejects_min_core_below_imports() {
+    let manifest = |min_core: &str| {
+        oncl_plugin::Manifest::from_toml(&oncl_testkit::plugin::example_manifest().replace(
+            "min_core = \"0.1.0-alpha.3\"",
+            &format!("min_core = \"{min_core}\""),
+        ))
+        .unwrap()
+    };
+    let wasm = fs::read(oncl_testkit::plugin::example_wasm()).unwrap();
+    let compiled = oncl_plugin::Engine::new()
+        .compile(&manifest("0.1.0-alpha.3"), &wasm)
+        .unwrap();
+    assert!(!compiled.imports().is_empty());
+    xtask::plugin::check_min_core(&manifest("0.1.0-alpha.3"), compiled.imports()).unwrap();
+    xtask::plugin::check_min_core(&manifest("1.0.0"), compiled.imports()).unwrap();
+    let error = error_text(xtask::plugin::check_min_core(
+        &manifest("0.1.0-alpha.2"),
+        compiled.imports(),
+    ));
+    assert!(
+        error.contains("min_core 0.1.0-alpha.2 is below 0.1.0-alpha.3"),
+        "{error}"
+    );
+    // A module importing nothing needs no particular core.
+    xtask::plugin::check_min_core(&manifest("0.0.1"), &[]).unwrap();
+}
+
+#[test]
 fn add_plugin_takes_everything_from_the_package() {
     let dir = tempfile::tempdir().unwrap();
     let packages = tempfile::tempdir().unwrap();

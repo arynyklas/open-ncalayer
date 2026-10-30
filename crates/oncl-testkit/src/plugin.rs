@@ -1,4 +1,5 @@
-//! The example plugin of `crates/oncl-pdk/example`, built for the tests.
+//! The example plugin of `crates/oncl-pdk/example` and the plugin ports of `plugins/`, built
+//! for the tests.
 
 use crate::workspace_root;
 use std::io::{Cursor, Write};
@@ -26,8 +27,15 @@ pub fn example_wasm() -> &'static Path {
 
 /// Builds the example: the path of its module.
 fn build_example() -> PathBuf {
+    let target_dir = target_dir("plugin-example");
+    build_wasm(&example_dir().join("Cargo.toml"), &target_dir, &[]);
+    target_dir.join("wasm32-unknown-unknown/release/oncl_plugin_example.wasm")
+}
+
+/// `name` in the target directory (`CARGO_TARGET_DIR`, else `target`).
+fn target_dir(name: &str) -> PathBuf {
     let root = workspace_root();
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+    std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .map(|dir| {
             if dir.is_absolute() {
@@ -37,10 +45,19 @@ fn build_example() -> PathBuf {
             }
         })
         .unwrap_or_else(|| root.join("target"))
-        .join("plugin-example");
+        .join(name)
+}
+
+/// `cargo build --release --locked --target wasm32-unknown-unknown` of `manifest` into
+/// `target_dir`, with `extra` arguments.
+///
+/// # Panics
+///
+/// If the build fails.
+fn build_wasm(manifest: &Path, target_dir: &Path, extra: &[&str]) {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
-        .current_dir(&root)
+        .current_dir(workspace_root())
         .args([
             "build",
             "--release",
@@ -49,16 +66,59 @@ fn build_example() -> PathBuf {
             "wasm32-unknown-unknown",
         ])
         .arg("--manifest-path")
-        .arg(example_dir().join("Cargo.toml"))
+        .arg(manifest)
         .arg("--target-dir")
-        .arg(&target_dir)
-        // The flags of the test build are not the example's.
+        .arg(target_dir)
+        .args(extra)
+        // The flags of the test build are not the plugins'.
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .status()
         .expect("cargo runs");
-    assert!(status.success(), "building the example plugin failed");
-    target_dir.join("wasm32-unknown-unknown/release/oncl_plugin_example.wasm")
+    assert!(status.success(), "building {} failed", manifest.display());
+}
+
+/// The directory of the plugin ports' workspace.
+pub fn ports_dir() -> PathBuf {
+    workspace_root().join("plugins")
+}
+
+/// The directories of the plugin ports (`plugins/<short>`, those with a `plugin.toml`),
+/// sorted by name.
+pub fn port_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(ports_dir())
+        .expect("plugins/ is readable")
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| path.join("plugin.toml").is_file())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// The release directory of the plugin ports' modules
+/// (`<target>/plugin-ports/wasm32-unknown-unknown/release`), the whole `plugins/` workspace
+/// built once per process.
+///
+/// # Panics
+///
+/// If the build fails.
+pub fn ports_built() -> &'static Path {
+    static BUILT: LazyLock<PathBuf> = LazyLock::new(|| {
+        let target_dir = target_dir("plugin-ports");
+        build_wasm(
+            &ports_dir().join("Cargo.toml"),
+            &target_dir,
+            &["--workspace"],
+        );
+        target_dir.join("wasm32-unknown-unknown/release")
+    });
+    &BUILT
+}
+
+/// The module of the port in `plugins/<short>`: `oncl_port_<short>.wasm` (`-` as `_`) of
+/// [`ports_built`].
+pub fn port_wasm(short: &str) -> PathBuf {
+    ports_built().join(format!("oncl_port_{}.wasm", short.replace('-', "_")))
 }
 
 /// The example's `plugin.toml`.

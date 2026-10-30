@@ -1,6 +1,8 @@
 /target/
 # The example plugin's own workspace, when built in place.
 /crates/oncl-pdk/example/target/
+# The plugin ports' workspace, when built in place.
+/plugins/target/
 /.worktrees/
 # Built programs and downloads; nothing like them is committed.
 *.exe
