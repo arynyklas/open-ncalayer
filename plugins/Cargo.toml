@@ -31,7 +31,13 @@ x509-cert = { version = "0.3.0", default-features = false }
 md-5 = "0.11.0"
 # Origins of the page and of URLs the ports fetch.
 url = "2.5.8"
-# Zip archives some ports upload, deflated through pure-Rust zlib-rs, as in the core.
+# Zip archives some ports upload: the container written by `oncl-port-kit`, the entries
+# deflated through pure-Rust zlib-rs, as in the core, and checked with CRC-32. Not the `zip`
+# crate: on wasm32 it pulls `getrandom` with `wasm_js`, whose wasm-bindgen imports no plugin
+# host has.
+crc32fast = { version = "1.5.3", default-features = false }
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+# Reads the archives back in tests (native only).
 zip = { version = "9.1.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [profile.release]
