@@ -125,7 +125,6 @@ jobs:
             echo "::error::pcscd or vsmartcard-vpcd is not installable on this runner image"
             exit 1
           fi
-          sudo systemctl restart pcscd
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -135,9 +134,22 @@ jobs:
           cargo test --no-run -p oncl-token --features emulator --test vpcd
       - name: Test against the emulated Kaztoken
         run: |
-          cargo xtask token-emu --config crates/oncl-token/tests/vpcd-kaztoken.toml &
-          sleep 5
-          ONCL_TOKEN_VPCD=1 cargo test -p oncl-token --features emulator --test vpcd
+          # The packaged pcscd is socket-activated and exits when idle (--auto-exit): stop
+          # it and run one for the whole step (the polkit check is for desktop sessions),
+          # then serve the card to its vpcd reader. The tests wait for the card to appear;
+          # one at a time, as they share the card.
+          sudo systemctl stop pcscd.socket pcscd.service 2>/dev/null || true
+          sudo pcscd --foreground --disable-polkit > pcscd.log 2>&1 &
+          cargo xtask token-emu --config crates/oncl-token/tests/vpcd-kaztoken.toml \
+            > token-emu.log 2>&1 &
+          status=0
+          ONCL_TOKEN_VPCD=1 cargo test -p oncl-token --features emulator --test vpcd \
+            -- --test-threads=1 || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "--- pcscd"; cat pcscd.log
+            echo "--- token-emu"; cat token-emu.log
+          fi
+          exit "$status"
 
   deny:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
