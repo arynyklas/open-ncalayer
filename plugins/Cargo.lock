@@ -415,6 +415,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-k2sign"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-kit",
+]
+
+[[package]]
 name = "oncl-port-kit"
 version = "0.1.0"
 dependencies = [
@@ -432,6 +440,15 @@ version = "1.0.0-beta.1"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
+]
+
+[[package]]
+name = "oncl-port-nursign"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-kit",
+ "url",
 ]
 
 [[package]]

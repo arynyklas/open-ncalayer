@@ -1,0 +1,17 @@
+[package]
+name = "oncl-port-nursign"
+description = "NURSign as an OpenNCALayer plugin: CAdES and XMLDSig signatures, file uploads for the e-finance sites"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oncl-pdk.workspace = true
+oncl-port-kit.workspace = true
+url.workspace = true

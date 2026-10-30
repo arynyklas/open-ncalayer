@@ -1,0 +1,25 @@
+id = "io.github.arynyklas.openncalayer.port.nursign"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["NURSign"]
+
+[name]
+ru = "NURSign (порт OpenNCALayer)"
+kk = "NURSign (OpenNCALayer порты)"
+en = "NURSign (OpenNCALayer port)"
+
+[description]
+ru = "Подпись текста, данных, XML и файлов для сайтов госзакупок и финансов, как модуль NURSign"
+kk = "Мемлекеттік сатып алу және қаржы сайттарына мәтінге, деректерге, XML мен файлдарға қол қою, NURSign модулі сияқты"
+en = "Text, data, XML and file signatures for the procurement and finance sites, as the NURSign module made them"
+
+[replaces]
+symname = "kz.ecc.NurSignBundle"
+version = "5.1.2"
+
+[capabilities]
+keys = true
+dialogs = true
+files = true
+http = ["https://*.gov.kz/", "https://*.ecc.kz/", "https://*.minfin.kz/"]
+origins = ["https://*.gov.kz", "https://*.ecc.kz", "https://*.minfin.kz"]

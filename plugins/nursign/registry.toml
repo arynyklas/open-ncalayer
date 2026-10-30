@@ -1,0 +1,35 @@
+id = "io.github.arynyklas.openncalayer.port.nursign"
+modules = ["NURSign"]
+
+[original]
+symname = "kz.ecc.NurSignBundle"
+version = "5.1.2"
+vendor = "АО «Центр электронных финансов»"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Окно выбора ключа — общее окно OpenNCALayer; кэша недавних ключей плагина нет."
+
+[[differences]]
+ru = "Ключи на токенах станут доступны вместе с поддержкой токенов в ядре; до этого работают файлы PKCS#12."
+
+[[differences]]
+ru = "Пароль проверяет окно OpenNCALayer, поэтому ответа «Неверный пароль» после выбора ключа не бывает."
+
+[[differences]]
+ru = "Файл настроек ~/.NURSign/config/nursign.properties не читается: список хостов — встроенные суффиксы .gov.kz, .ecc.kz, .minfin.kz, предельный размер файла — 20 МиБ; ключ testFileName не поддерживается."
+
+[[differences]]
+ru = "Загрузки и выгрузки — только по HTTPS к хостам под .gov.kz, .ecc.kz и .minfin.kz (оригинал пускал и http://); проверка по хешам идёт на сайт страницы, только если он под этими доменами."
+
+[[differences]]
+ru = "Окна хода загрузки с кнопкой отмены нет: передачи ограничены таймаутом ядра (60 с); перенаправления не выполняются."
+
+[[differences]]
+ru = "Тексты сетевых исключений Java (ошибка метки времени и т. п.) воспроизводятся в форме «java.net.UnknownHostException: tsp.pki.gov.kz»; тексты разбора XML — общим текстом «Ошибка при формировании ЭЦП»."
+
+[[differences]]
+ru = "Окна показываются на языке OpenNCALayer: английский — английскими текстами, остальные — русскими, как у оригинала."
