@@ -1,0 +1,24 @@
+id = "io.github.arynyklas.openncalayer.port.metadoc"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.metadoc.NCAModule"]
+
+[name]
+ru = "Metadoc (порт OpenNCALayer)"
+kk = "Metadoc (OpenNCALayer порты)"
+en = "Metadoc (OpenNCALayer port)"
+
+[description]
+ru = "Подписание документов Metadoc в формате ЕСЭДО ключом из файла, указанного сайтом"
+kk = "Metadoc құжаттарына сайт көрсеткен файлдағы кілтпен ЕСЭДО пішімінде қол қою"
+en = "ESEDO signatures of Metadoc documents with a key file the site names"
+
+[replaces]
+symname = "kz.metadoc.NCAModule"
+version = "1.7"
+
+[capabilities]
+keys = true
+key_files = true
+dialogs = true
+files = true

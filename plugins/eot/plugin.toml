@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.eot"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.gov.pki.eot.SignModule"]
+
+[name]
+ru = "E-Otinish Signer (порт OpenNCALayer)"
+kk = "E-Otinish Signer (OpenNCALayer порты)"
+en = "E-Otinish Signer (OpenNCALayer port)"
+
+[description]
+ru = "Подпись обращений E-Otinish в формате ЕСЭДО"
+kk = "E-Otinish өтініштеріне ЕСЭДО пішімінде қол қою"
+en = "ESEDO signatures of E-Otinish appeals"
+
+[replaces]
+symname = "kz.gov.pki.eot.SignModule"
+version = "1.0"
+
+[capabilities]
+keys = true
+dialogs = true
+files = true

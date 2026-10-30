@@ -184,6 +184,15 @@ fn quote_sun(text: &str) -> String {
 /// `dn` parsed as `javax.naming.ldap.LdapName`, walking `getRdns()`: from the last RDN of
 /// the string to the first. The value without its escapes.
 pub fn ldap_first(dn: &str, kind: &str) -> Option<String> {
+    ldap_avas(dn)
+        .into_iter()
+        .find_map(|(t, v)| (t == kind).then_some(v))
+}
+
+/// The attributes of the DN string `dn` parsed as `javax.naming.ldap.LdapName`, in the
+/// order of `getRdns()` (from the last RDN of the string to the first): each type as
+/// written, each value without its escapes.
+pub fn ldap_avas(dn: &str) -> Vec<(String, String)> {
     let mut parts = Vec::new();
     let (mut part, mut escaped) = (String::new(), false);
     for c in dn.chars() {
@@ -200,12 +209,15 @@ pub fn ldap_first(dn: &str, kind: &str) -> Option<String> {
         }
     }
     parts.push(part);
-    parts.iter().rev().find_map(|rdn| {
-        rdn.split('+').find_map(|ava| {
+    parts
+        .iter()
+        .rev()
+        .flat_map(|rdn| rdn.split('+'))
+        .filter_map(|ava| {
             let (t, v) = ava.split_once('=')?;
-            (t.trim() == kind).then(|| unescape_ldap(v.trim()))
+            Some((t.trim().to_owned(), unescape_ldap(v.trim())))
         })
-    })
+        .collect()
 }
 
 fn unescape_ldap(value: &str) -> String {

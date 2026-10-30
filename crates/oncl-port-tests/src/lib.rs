@@ -177,7 +177,6 @@ impl Harness {
             ..self
         }
     }
-
     /// The prompter: the dialogs shown.
     pub fn prompter(&self) -> &ScriptedPrompter {
         &self.prompter

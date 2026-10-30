@@ -4011,8 +4011,10 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "time",
  "toml",
+ "x509-cert",
  "zip",
 ]
 

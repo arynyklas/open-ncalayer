@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.eot"
+modules = ["kz.gov.pki.eot.SignModule"]
+
+[original]
+symname = "kz.gov.pki.eot.SignModule"
+version = "1.0"
+vendor = "E-Otinish"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Для ключа RSA издатель в запросе OCSP — его настоящий УЦ (из сертификатов УЦ ядра); оригинал всегда указывал ГОСТ-УЦ 2022 года, и ответчик не узнавал сертификат."
+
+[[differences]]
+ru = "Ключи sha1RSA не подписывают (ядро не делает подписей SHA-1): ответ «UNKNOWN_ALGORITHM»."
+
+[[differences]]
+ru = "Токены появятся вместе с поддержкой токенов в ядре; до тех пор ответ «storage.empty»."
+
+[[differences]]
+ru = "Значение атрибута 1.3.6.1.4.1.6801.2.8 (DN подписанта) вычислено по правилам Kalkan и не сверено с оригиналом."

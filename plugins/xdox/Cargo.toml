@@ -1,0 +1,16 @@
+[package]
+name = "oncl-port-xdox"
+description = "The OpenNCALayer port of the xdox.kz signer bundle (kz.xdox.osgi.SignerBundle)"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oncl-pdk.workspace = true
+oncl-port-legacy.workspace = true

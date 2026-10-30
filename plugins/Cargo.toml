@@ -17,6 +17,7 @@ publish = false
 [workspace.dependencies]
 oncl-pdk = { path = "../crates/oncl-pdk" }
 oncl-port-kit = { path = "common/kit" }
+oncl-port-legacy = { path = "common/legacy" }
 oncl-port-pki = { path = "common/pki" }
 
 # DER of signed attributes and names, reading CMS: pure Rust, no randomness (no `getrandom`,

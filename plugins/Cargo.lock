@@ -407,6 +407,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-arta"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-kit",
+ "oncl-port-legacy",
+ "oncl-port-pki",
+]
+
+[[package]]
 name = "oncl-port-bas"
 version = "1.0.0-beta.1"
 dependencies = [
@@ -459,6 +469,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-eot"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-legacy",
+ "oncl-port-pki",
+]
+
+[[package]]
 name = "oncl-port-eproc"
 version = "1.0.0-beta.1"
 dependencies = [
@@ -479,6 +498,14 @@ version = "1.0.0-beta.1"
 dependencies = [
  "oncl-pdk",
  "oncl-port-pki",
+]
+
+[[package]]
+name = "oncl-port-ezsigner"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-legacy",
 ]
 
 [[package]]
@@ -523,11 +550,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-legacy"
+version = "0.1.0"
+dependencies = [
+ "der",
+ "oncl-pdk",
+ "oncl-port-pki",
+ "x509-cert",
+]
+
+[[package]]
 name = "oncl-port-market"
 version = "1.0.0-beta.1"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
+]
+
+[[package]]
+name = "oncl-port-metadoc"
+version = "1.0.0-beta.1"
+dependencies = [
+ "cms",
+ "der",
+ "oncl-pdk",
+ "oncl-port-legacy",
+ "oncl-port-pki",
 ]
 
 [[package]]
@@ -569,6 +617,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-rating1c"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-kit",
+ "oncl-port-legacy",
+ "oncl-port-pki",
+]
+
+[[package]]
 name = "oncl-port-simourg"
 version = "1.0.0-beta.1"
 dependencies = [
@@ -594,6 +652,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-port-uchet"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-kit",
+ "oncl-port-legacy",
+]
+
+[[package]]
 name = "oncl-port-uchet-esf"
 version = "1.0.0-beta.1"
 dependencies = [
@@ -606,6 +673,14 @@ version = "1.0.0-beta.1"
 dependencies = [
  "oncl-pdk",
  "oncl-port-pki",
+]
+
+[[package]]
+name = "oncl-port-xdox"
+version = "1.0.0-beta.1"
+dependencies = [
+ "oncl-pdk",
+ "oncl-port-legacy",
 ]
 
 [[package]]

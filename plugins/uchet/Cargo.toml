@@ -1,0 +1,17 @@
+[package]
+name = "oncl-port-uchet"
+description = "The OpenNCALayer port of uchet.kz's signUtil (kz.uchet.signUtil)"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oncl-pdk.workspace = true
+oncl-port-kit.workspace = true
+oncl-port-legacy.workspace = true

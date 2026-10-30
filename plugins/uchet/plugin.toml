@@ -1,0 +1,27 @@
+id = "io.github.arynyklas.openncalayer.port.uchet"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.uchet.signUtil.commonUtils"]
+
+[name]
+ru = "uchet.kz signUtil (порт OpenNCALayer)"
+kk = "uchet.kz signUtil (OpenNCALayer порты)"
+en = "uchet.kz signUtil (OpenNCALayer port)"
+
+[description]
+ru = "Подписание XML и файлов, проверка CMS для сервисов uchet.kz"
+kk = "uchet.kz қызметтері үшін XML мен файлдарға қол қою, CMS тексеру"
+en = "XML and file signatures, CMS checks for the uchet.kz services"
+
+[replaces]
+symname = "kz.uchet.signUtil"
+version = "1.5"
+
+[capabilities]
+keys = true
+key_files = true
+dialogs = true
+files = true
+page_files = true
+page_files_ext = ["cms"]
+http_insecure = ["http://ncalayer.uchet.kz:8080/"]

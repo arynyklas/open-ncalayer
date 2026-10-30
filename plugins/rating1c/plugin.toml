@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.rating1c"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.rating1c.edo.signUtils"]
+
+[name]
+ru = "1С-Рейтинг ЭДО (порт OpenNCALayer)"
+kk = "1С-Рейтинг ЭДО (OpenNCALayer порты)"
+en = "1C-Rating EDO (OpenNCALayer port)"
+
+[description]
+ru = "Подписание XML, CMS и сырых данных для сервисов 1С-Рейтинг"
+kk = "1С-Рейтинг қызметтері үшін XML, CMS және шикі деректерге қол қою"
+en = "XML, CMS and raw signatures for the 1C-Rating services"
+
+[replaces]
+symname = "kz.rating1c.edo"
+version = "1.9.5"
+
+[capabilities]
+keys = true
+dialogs = true
+files = true

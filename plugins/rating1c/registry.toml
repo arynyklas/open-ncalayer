@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.port.rating1c"
+modules = ["kz.rating1c.edo.signUtils"]
+
+[original]
+symname = "kz.rating1c.edo"
+version = "1.9.5"
+vendor = "1С-Рейтинг"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Окна выбора хранилища и ключа — общие окна OpenNCALayer; список недавних ключей ведёт само ядро, плагин в него не пишет."
+
+[[differences]]
+ru = "Токены (Kaztoken, удостоверение личности и др.) появятся вместе с поддержкой токенов в ядре; до тех пор getActiveTokens отвечает пустым списком."
+
+[[differences]]
+ru = "Метка времени — профиль Kalkan по умолчанию через ядро; при ошибке ответ «Ошибка. Код: TIMESTAMP_CREATION_FAILURE»."
+
+[[differences]]
+ru = "Порядок ключей KeyInfo и текст signerCert вычислены по правилам Java и не сверены с оригиналом."

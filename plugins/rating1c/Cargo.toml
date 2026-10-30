@@ -1,0 +1,18 @@
+[package]
+name = "oncl-port-rating1c"
+description = "The OpenNCALayer port of 1C-Rating's kz.rating1c.edo signing module"
+version = "1.0.0-beta.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oncl-pdk.workspace = true
+oncl-port-kit.workspace = true
+oncl-port-legacy.workspace = true
+oncl-port-pki.workspace = true

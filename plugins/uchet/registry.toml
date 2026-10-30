@@ -1,0 +1,29 @@
+id = "io.github.arynyklas.openncalayer.port.uchet"
+modules = ["kz.uchet.signUtil.commonUtils"]
+
+[original]
+symname = "kz.uchet.signUtil"
+version = "1.5"
+vendor = "THE BOSS MEDIA GROUP"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Ключ по пути и паролю от страницы и чтение/запись файлов, названных страницей, — только после разрешения пользователя (один раз за сессию)."
+
+[[differences]]
+ru = "Проверка CMS и сертификата идёт по сертификатам УЦ ядра, а не по сертификатам, которые оригинал скачивал с pki.gov.kz при каждом вызове."
+
+[[differences]]
+ru = "checkCMSFromWeb читает только адреса, разрешённые манифестом (в том числе не file: и не чужие сайты); иначе «Непредвиденная ошибка»."
+
+[[differences]]
+ru = "Тестовый режим лицензии (токен со словом test и сервер на localhost) не переносится: ответ «Сервер лицензирования не доступен»."
+
+[[differences]]
+ru = "В signXml отмена выбора файла завершает подпись (оригинал всё равно открывал окно ключа)."
+
+[[differences]]
+ru = "Токены появятся вместе с поддержкой токенов в ядре; до тех пор ответ «Носитель не обнаружен»."
