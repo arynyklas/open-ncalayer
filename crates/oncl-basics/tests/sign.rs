@@ -465,6 +465,7 @@ impl Prompter for JksFirst {
             storage: kind,
             path: key.path,
             password: Zeroizing::new(key.password),
+            reader: None,
         })
     }
 
@@ -501,6 +502,10 @@ impl Prompter for JksFirst {
     }
 
     fn save_file(&self, _: &oncl_basics::SavePrompt) -> Prompt<PathBuf> {
+        Prompt::Cancelled
+    }
+
+    fn reader(&self, _: &oncl_basics::ReaderPrompt) -> Prompt<String> {
         Prompt::Cancelled
     }
 }

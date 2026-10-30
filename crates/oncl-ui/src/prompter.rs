@@ -9,7 +9,8 @@ use crate::view::{self, KeyRow};
 use oncl_basics::{
     Action, Busy, BusyPrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FileKind, FilePrompt,
     ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale, MessageKind, MessagePrompt,
-    PasswordPrompt, Prompt, Prompter, SavePrompt, StorageAnswer, StorageKind, StoragePrompt,
+    PasswordPrompt, Prompt, Prompter, ReaderPrompt, SavePrompt, StorageAnswer, StorageKind,
+    StoragePrompt,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
@@ -203,6 +204,11 @@ impl Prompter for SlintPrompter {
     fn save_file(&self, p: &SavePrompt) -> Prompt<PathBuf> {
         ask(p, show_save)
     }
+
+    fn reader(&self, _: &ReaderPrompt) -> Prompt<String> {
+        tracing::warn!("the reader dialog is not available");
+        Prompt::Cancelled
+    }
 }
 
 /// A dialog to open on the event loop: it gets the prompt and where its outcome goes.
@@ -323,6 +329,7 @@ fn show_storage(
                 storage,
                 path: PathBuf::from(ui.get_path().as_str()),
                 password,
+                reader: None,
             }));
         }
     });

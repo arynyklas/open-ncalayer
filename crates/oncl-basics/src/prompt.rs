@@ -2,15 +2,18 @@
 //! `StorageStage` (storage, file, password) and `KeystoreStage` (key choice) of the signing
 //! flow, `CsrStage` (storage, folder, password) of `generateCsr`, `ImportCertStage`
 //! (folder, new password) of `importCertificate`, the file chooser other modules hand
-//! paths to pages with, and the legacy Applet's password dialog; between the storage and
-//! key dialogs, a busy indicator while the key store opens. Plugins add a message, a
-//! yes/no question and the choice of where to save a file.
+//! paths to pages with, and the legacy Applet's password and reader dialogs; between the
+//! storage and key dialogs, a busy indicator while the key store opens. With token support
+//! on, the storage dialog offers the readers holding tokens and asks for the PIN. Plugins
+//! add a message, a yes/no question and the choice of where to save a file.
 
 use crate::filter::Availability;
 use crate::live::LiveAvailability;
+use crate::tokens::{ReaderList, open_error};
 use oncl_pki::info::CertInfo;
 use oncl_pki::jks::{self, JksError};
 use oncl_pki::pkcs12::{self, KeyEntry, Pkcs12Error};
+use oncl_token::{TokenKind, Tokens};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -104,6 +107,15 @@ impl StorageKind {
     pub fn writable(&self) -> bool {
         *self == StorageKind::Pkcs12
     }
+
+    /// The hardware token family of the storage: the six token storages; `None` for files
+    /// and the cloud storage.
+    pub fn token_kind(&self) -> Option<TokenKind> {
+        match self {
+            StorageKind::Token(name) => TokenKind::from_storage_name(name),
+            StorageKind::Pkcs12 | StorageKind::Jks => None,
+        }
+    }
 }
 
 /// Why the previous storage answer could not be opened.
@@ -131,6 +143,21 @@ pub enum OpenError {
     /// The password does not match the policy for keys of internal systems (the legacy
     /// Applet's `signXml` with `INAUTH`/`INSIGN`).
     InnerPasswordPolicy,
+    /// The token is not in the reader, or was removed; another card is there.
+    TokenAbsent,
+    /// The smart card service is not available.
+    TokenService,
+    /// The PIN is wrong; the tries left when the token tells them.
+    WrongPin {
+        /// Tries left before the PIN is blocked.
+        tries_left: Option<u8>,
+    },
+    /// The token's PIN is blocked.
+    PinBlocked,
+    /// The PIN does not fit the token (e.g. an ID card's PIN is 4 characters).
+    InvalidPin,
+    /// The token cannot be read.
+    TokenFailure,
 }
 
 /// The storage dialog.
@@ -150,16 +177,25 @@ pub struct StoragePrompt {
     pub error: Option<OpenError>,
     /// A line the dialog shows besides the request, e.g. the file to be signed.
     pub detail: Option<String>,
+    /// The readers holding tokens, with token support on; `None` with it off, and the
+    /// token storages are then not selectable.
+    pub tokens: Option<ReaderList>,
+    /// The storage to select, on a retry after a token's error.
+    pub chosen: Option<StorageKind>,
+    /// The reader to select, on a retry after a token's error.
+    pub reader: Option<String>,
 }
 
 /// The user's answer to a [`StoragePrompt`].
 pub struct StorageAnswer {
     /// Chosen storage.
     pub storage: StorageKind,
-    /// Key store file.
+    /// Key store file; empty for a token.
     pub path: PathBuf,
-    /// Key store password.
+    /// Key store password, or the token's PIN.
     pub password: Zeroizing<String>,
+    /// The reader of a token; `None` for a file.
+    pub reader: Option<String>,
 }
 
 impl StorageAnswer {
@@ -199,6 +235,38 @@ impl StorageAnswer {
             })?,
             StorageKind::Token(_) => return Err(OpenError::UnsupportedStorage),
         };
+        if entries.is_empty() {
+            return Err(OpenError::NoKeys);
+        }
+        Ok(entries)
+    }
+
+    /// [`StorageAnswer::open`] for files; a token storage opens in its reader with the PIN
+    /// through `tokens`: the token's keys that have a certificate, in the token's order.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`StorageAnswer::open`]; for a token, [`OpenError::UnsupportedStorage`]
+    /// with token support off or a storage not offered, [`OpenError::TokenAbsent`],
+    /// [`OpenError::TokenService`], [`OpenError::WrongPin`], [`OpenError::PinBlocked`],
+    /// [`OpenError::InvalidPin`], [`OpenError::TokenFailure`], or [`OpenError::NoKeys`].
+    pub fn open_with(
+        &self,
+        offered: &[StorageKind],
+        tokens: &Tokens,
+    ) -> Result<Vec<KeyEntry>, OpenError> {
+        let Some(kind) = self.storage.token_kind() else {
+            return self.open(offered);
+        };
+        if !tokens.is_enabled() || !offered.contains(&self.storage) {
+            return Err(OpenError::UnsupportedStorage);
+        }
+        let Some(reader) = self.reader.as_deref() else {
+            return Err(OpenError::TokenAbsent);
+        };
+        let entries = tokens
+            .open(reader, kind, &self.password)
+            .map_err(|e| open_error(&e))?;
         if entries.is_empty() {
             return Err(OpenError::NoKeys);
         }
@@ -523,6 +591,20 @@ pub struct SavePrompt {
     pub directory: Option<PathBuf>,
 }
 
+/// The choice of a reader holding a token of one storage, for the legacy Applet's
+/// `browseKeyStore`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReaderPrompt {
+    /// The requesting page's origin, or `"UNIDENTIFIED"`.
+    pub origin: String,
+    /// Dialog language.
+    pub locale: Locale,
+    /// The token storage.
+    pub storage: StorageKind,
+    /// The readers; the dialog offers those holding a token of `storage`.
+    pub readers: ReaderList,
+}
+
 /// The outcome of a dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prompt<T> {
@@ -559,6 +641,9 @@ pub trait Prompter: Send + Sync {
     fn confirm(&self, p: &ConfirmPrompt) -> Prompt<bool>;
     /// Asks where to save a file: its path. The file is not written here.
     fn save_file(&self, p: &SavePrompt) -> Prompt<PathBuf>;
+    /// Asks for a reader holding a token of `p.storage`: its name. The dialog opens even
+    /// without one, and can scan again.
+    fn reader(&self, p: &ReaderPrompt) -> Prompt<String>;
 }
 
 /// Where the last opened key store path is kept (`recentPath` of settings.json).

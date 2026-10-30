@@ -21,6 +21,8 @@ oncl-pdk.workspace = true
 oncl-pki.workspace = true
 # `AddInfo`, `SessionId`: what a call comes with.
 oncl-protocol.workspace = true
+# `Tokens`: the hardware tokens the `keys` capability's storage dialog offers.
+oncl-token.workspace = true
 # `Store`: the catalog (the signed update index) kept and verified again, the package sums.
 oncl-update.workspace = true
 semver.workspace = true

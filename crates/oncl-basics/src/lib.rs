@@ -24,6 +24,7 @@ mod prompt;
 mod sign;
 #[cfg(feature = "testing")]
 pub mod testing;
+mod tokens;
 
 pub use filter::{
     Availability, ChainPolicy, DisabledReason, KeyFilter, OCSP_DEADLINE, availabilities,
@@ -35,6 +36,7 @@ use oncl_pki::http::HttpTransport;
 use oncl_pki::tsp::TsaProfile;
 use oncl_protocol::invoker::{self, CallResult, Failure, NlClass};
 use oncl_protocol::{AddInfo, Module};
+use oncl_token::Tokens;
 pub use page_file::{
     MAX_CHOSEN_NETWORK_PATHS, MAX_PAGE_FILE, PageFile, PageFileError, is_device_path,
     is_network_path, page_path, remember_chosen_path,
@@ -42,12 +44,13 @@ pub use page_file::{
 pub use prompt::{
     Action, Busy, BusyPrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FileKind, FilePrompt,
     ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale, MessageKind, MessagePrompt,
-    OpenError, PasswordPrompt, Prompt, Prompter, RecentPathStore, SavePrompt, StorageAnswer,
-    StorageKind, StoragePrompt,
+    OpenError, PasswordPrompt, Prompt, Prompter, ReaderPrompt, RecentPathStore, SavePrompt,
+    StorageAnswer, StorageKind, StoragePrompt,
 };
 use serde_json::{Map, Value};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use time::OffsetDateTime;
+pub use tokens::{ReaderEntry, ReaderList, ReaderProblem};
 
 /// Name the module is registered under.
 pub const MODULE_NAME: &str = "kz.gov.pki.knca.basics";
@@ -72,11 +75,12 @@ pub struct Basics {
     ocsp_cache: Arc<OcspCache>,
     tsa: TsaProfile,
     clock: fn() -> OffsetDateTime,
+    tokens: Arc<Tokens>,
 }
 
 impl Basics {
     /// The module with the basics TSA profile ([`TsaProfile::basics_default`]), the system
-    /// clock and an empty OCSP memory.
+    /// clock, an empty OCSP memory and no tokens.
     pub fn new(
         prompter: Arc<dyn Prompter>,
         recent: Arc<dyn RecentPathStore>,
@@ -89,6 +93,7 @@ impl Basics {
             ocsp_cache: Arc::new(OcspCache::new()),
             tsa: TsaProfile::basics_default(),
             clock: OffsetDateTime::now_utc,
+            tokens: Tokens::disabled(),
         }
     }
 
@@ -115,6 +120,13 @@ impl Basics {
         }
     }
 
+    /// The same module offering the hardware tokens of `tokens` in the storage dialog
+    /// while their support is on.
+    #[must_use]
+    pub fn with_tokens(self, tokens: Arc<Tokens>) -> Self {
+        Basics { tokens, ..self }
+    }
+
     /// The key choice of this module's dialogs, checks and clock.
     fn key_chooser(&self) -> KeyChooser {
         KeyChooser {
@@ -123,6 +135,7 @@ impl Basics {
             http: Arc::clone(&self.http),
             ocsp_cache: Arc::clone(&self.ocsp_cache),
             clock: self.clock,
+            tokens: Arc::clone(&self.tokens),
         }
     }
 }

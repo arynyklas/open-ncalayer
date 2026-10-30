@@ -932,6 +932,7 @@ impl Prompter for Hasty {
             storage: StorageKind::Pkcs12,
             path: key.path,
             password: key.password.into(),
+            reader: None,
         })
     }
 
@@ -974,6 +975,10 @@ impl Prompter for Hasty {
     }
 
     fn save_file(&self, _: &oncl_basics::SavePrompt) -> Prompt<std::path::PathBuf> {
+        Prompt::Cancelled
+    }
+
+    fn reader(&self, _: &oncl_basics::ReaderPrompt) -> Prompt<String> {
         Prompt::Cancelled
     }
 }

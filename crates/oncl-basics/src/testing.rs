@@ -3,8 +3,8 @@
 
 use crate::prompt::{
     Busy, BusyPrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FilePrompt, ImportAnswer, ImportPrompt,
-    KeyPrompt, MessagePrompt, PasswordPrompt, Prompt, Prompter, RecentPathStore, SavePrompt,
-    StorageAnswer, StorageKind, StoragePrompt,
+    KeyPrompt, MessagePrompt, PasswordPrompt, Prompt, Prompter, ReaderPrompt, RecentPathStore,
+    SavePrompt, StorageAnswer, StorageKind, StoragePrompt,
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,19 @@ pub enum Step {
         /// Its password.
         password: String,
     },
+    /// Answer a storage prompt with a hardware token.
+    Token {
+        /// The token's storage.
+        storage: StorageKind,
+        /// Its reader.
+        reader: String,
+        /// Its PIN.
+        pin: String,
+    },
+    /// Answer a reader prompt with this reader.
+    Reader(String),
+    /// Cancel a reader prompt.
+    CancelReader,
     /// Pick candidate `n` in a key prompt.
     Key(usize),
     /// Cancel a key prompt.
@@ -90,6 +103,9 @@ impl Step {
             Step::Storage { .. } => "Storage",
             Step::CancelStorage => "CancelStorage",
             Step::Jks { .. } => "Jks",
+            Step::Token { .. } => "Token",
+            Step::Reader(_) => "Reader",
+            Step::CancelReader => "CancelReader",
             Step::Key(_) => "Key",
             Step::CancelKey => "CancelKey",
             Step::Csr { .. } => "Csr",
@@ -132,6 +148,7 @@ struct State {
     message_prompts: Vec<MessagePrompt>,
     confirm_prompts: Vec<ConfirmPrompt>,
     save_prompts: Vec<SavePrompt>,
+    reader_prompts: Vec<ReaderPrompt>,
 }
 
 /// A [`Prompter`] answering from a queue of [`Step`]s and recording every prompt shown. An
@@ -157,7 +174,8 @@ impl ScriptedPrompter {
     }
 
     /// What was shown so far, in order: `"storage"`, `"busy"`, `"busy closed"`, `"key"`,
-    /// `"csr"`, `"import"`, `"file"`, `"password"`, `"message"`, `"confirm"`, `"save"`.
+    /// `"csr"`, `"import"`, `"file"`, `"password"`, `"message"`, `"confirm"`, `"save"`,
+    /// `"reader"`.
     pub fn timeline(&self) -> Vec<&'static str> {
         self.lock().timeline.clone()
     }
@@ -218,6 +236,11 @@ impl ScriptedPrompter {
         self.lock().save_prompts.clone()
     }
 
+    /// Reader prompts shown so far.
+    pub fn reader_prompts(&self) -> Vec<ReaderPrompt> {
+        self.lock().reader_prompts.clone()
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         lock(&self.state)
     }
@@ -252,11 +275,23 @@ impl Prompter for ScriptedPrompter {
                 storage: StorageKind::Pkcs12,
                 path,
                 password: Zeroizing::new(password),
+                reader: None,
             }),
             Some(Step::Jks { path, password }) => Prompt::Answer(StorageAnswer {
                 storage: StorageKind::Jks,
                 path,
                 password: Zeroizing::new(password),
+                reader: None,
+            }),
+            Some(Step::Token {
+                storage,
+                reader,
+                pin,
+            }) => Prompt::Answer(StorageAnswer {
+                storage,
+                path: PathBuf::new(),
+                password: Zeroizing::new(pin),
+                reader: Some(reader),
             }),
             Some(Step::CancelStorage) | None => Prompt::Cancelled,
             Some(step) => panic!(
@@ -360,6 +395,17 @@ impl Prompter for ScriptedPrompter {
             Some(Step::Save { path }) => Prompt::Answer(path),
             Some(Step::CancelSave) | None => Prompt::Cancelled,
             Some(step) => panic!("ScriptedPrompter: save dialog answered by {}", step.kind()),
+        }
+    }
+
+    fn reader(&self, p: &ReaderPrompt) -> Prompt<String> {
+        match self.next("reader", |s| s.reader_prompts.push(p.clone())) {
+            Some(Step::Reader(reader)) => Prompt::Answer(reader),
+            Some(Step::CancelReader) | None => Prompt::Cancelled,
+            Some(step) => panic!(
+                "ScriptedPrompter: reader prompt answered by {}",
+                step.kind()
+            ),
         }
     }
 }

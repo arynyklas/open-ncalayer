@@ -488,6 +488,9 @@ fn open_store(
             .map(Path::to_path_buf),
         error: None,
         detail: None,
+        tokens: None,
+        chosen: None,
+        reader: None,
     };
     loop {
         let Prompt::Answer(answer) = a.prompter.storage(&prompt) else {

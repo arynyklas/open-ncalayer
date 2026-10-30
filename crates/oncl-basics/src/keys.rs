@@ -1,6 +1,7 @@
 //! The key choice every signing flow shares: the storage dialog until a key store opens, then
 //! the key dialog, with the keys checked against the request's conditions and their OCSP
-//! responders. `PKIExtras.sign` uses it, and so do plugins with the `keys` capability.
+//! responders. `PKIExtras.sign` uses it, and so do plugins with the `keys` capability. With
+//! token support on, the storage dialog offers the tokens plugged in too.
 
 use crate::filter::{KeyFilter, availabilities};
 use crate::ocsp_cache::OcspCache;
@@ -8,10 +9,12 @@ use crate::prompt::{
     Action, Busy, BusyPrompt, KeyPrompt, Locale, Prompt, Prompter, RecentPathStore, StorageKind,
     StoragePrompt,
 };
+use crate::tokens::ReaderList;
 use oncl_pki::cert::Certificate;
 use oncl_pki::http::HttpTransport;
 use oncl_pki::info::{CertInfo, cert_info};
 use oncl_pki::pkcs12::KeyEntry;
+use oncl_token::Tokens;
 use std::sync::Arc;
 use time::OffsetDateTime;
 
@@ -28,6 +31,8 @@ pub struct KeyChooser {
     pub ocsp_cache: Arc<OcspCache>,
     /// The time of the checks (certificate validity, path validation, OCSP).
     pub clock: fn() -> OffsetDateTime,
+    /// The hardware tokens the storage dialog offers while their support is on.
+    pub tokens: Arc<Tokens>,
 }
 
 /// What a key is chosen for.
@@ -49,7 +54,7 @@ pub struct KeyRequest {
 
 impl KeyChooser {
     /// Asks for a storage until one opens, then for one of its keys until an enabled one is
-    /// picked: that key; `None` if the user cancels either dialog. The opened path is
+    /// picked: that key; `None` if the user cancels either dialog. The opened file's path is
     /// remembered.
     ///
     /// The caller holds the dialog-flow turn ([`crate::lock_dialog_flow`]) for its whole
@@ -61,8 +66,8 @@ impl KeyChooser {
     }
 
     /// Asks for a storage until one opens; `None` if the user cancels. Saves the opened
-    /// path. The busy indicator shows from each answer on; it is returned with the opened
-    /// store.
+    /// file's path; a token's reader is not remembered. The busy indicator shows from each
+    /// answer on; it is returned with the opened store.
     fn open_storage(&self, request: &KeyRequest) -> Option<(Vec<KeyEntry>, Busy)> {
         let mut prompt = StoragePrompt {
             origin: request.origin.clone(),
@@ -72,6 +77,12 @@ impl KeyChooser {
             recent_path: self.recent.load(),
             error: None,
             detail: request.detail.clone(),
+            tokens: self
+                .tokens
+                .is_enabled()
+                .then(|| ReaderList::new(Arc::clone(&self.tokens))),
+            chosen: None,
+            reader: None,
         };
         loop {
             let answer = match self.prompter.storage(&prompt) {
@@ -82,14 +93,21 @@ impl KeyChooser {
                 origin: request.origin.clone(),
                 locale: request.locale,
             });
-            match answer.open(&prompt.storages) {
+            match answer.open_with(&prompt.storages, &self.tokens) {
                 Ok(entries) => {
-                    self.recent.save(&answer.path);
+                    if answer.storage.token_kind().is_none() {
+                        self.recent.save(&answer.path);
+                    }
                     return Some((entries, busy));
                 }
                 Err(e) => {
                     prompt.error = Some(e);
-                    prompt.recent_path = Some(answer.path);
+                    if answer.storage.token_kind().is_some() && prompt.tokens.is_some() {
+                        prompt.chosen = Some(answer.storage);
+                        prompt.reader = answer.reader;
+                    } else {
+                        prompt.recent_path = Some(answer.path);
+                    }
                 }
             }
         }

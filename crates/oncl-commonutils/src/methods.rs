@@ -359,6 +359,9 @@ fn choose_key(
         recent_path: None,
         error: None,
         detail: detail.clone(),
+        tokens: None,
+        chosen: None,
+        reader: None,
     };
     let mut keys = loop {
         let Prompt::Answer(answer) = cu.prompter.storage(&prompt) else {

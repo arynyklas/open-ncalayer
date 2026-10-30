@@ -216,6 +216,7 @@ pub(crate) fn keys_choose(state: &mut HostState, args: ChooseArgs) -> HostResult
         http: Arc::clone(&services.http),
         ocsp_cache: Arc::clone(&services.ocsp_cache),
         clock: services.clock,
+        tokens: oncl_token::Tokens::disabled(),
     };
     DialogTurn::hold();
     let Some(entry) = chooser.choose(&request) else {

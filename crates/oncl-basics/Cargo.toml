@@ -17,6 +17,7 @@ base64.workspace = true
 der.workspace = true
 oncl-pki.workspace = true
 oncl-protocol.workspace = true
+oncl-token.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tracing.workspace = true
@@ -31,6 +32,8 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage
 # `testing`: `tsp::MockTsa`, `ocsp::MockOcsp`, `testing::issue_cert`.
 oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 oncl-testkit.workspace = true
+# `emulator`: software tokens in the storage dialog's tests.
+oncl-token = { path = "../oncl-token", features = ["emulator"] }
 tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 tracing-subscriber.workspace = true
@@ -58,4 +61,8 @@ required-features = ["testing"]
 
 [[test]]
 name = "validation"
+required-features = ["testing"]
+
+[[test]]
+name = "tokens"
 required-features = ["testing"]

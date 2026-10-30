@@ -140,8 +140,23 @@ pub fn folder_error(path: &str, l: Locale) -> Option<&'static str> {
 /// Why a storage answer could not be opened. The texts for a store without (suitable) keys
 /// (`label.errorMessage.emptyStorage*`) and for the legacy Applet's password checks are the
 /// original's; English for the internal systems' policy is ours (the original's English
-/// dictionary repeats the Kazakh text).
-pub fn error_text(e: OpenError, l: Locale) -> &'static str {
+/// dictionary repeats the Kazakh text), and so are the hardware tokens' texts.
+pub fn error_text(e: OpenError, l: Locale) -> String {
+    if let OpenError::WrongPin {
+        tries_left: Some(n),
+    } = e
+    {
+        return match l {
+            Locale::Kk => format!("PIN-код қате. Қалған әрекет саны: {n}"),
+            Locale::Ru => format!("Неверный PIN-код. Осталось попыток: {n}"),
+            Locale::En => format!("Wrong PIN. Tries left: {n}"),
+        };
+    }
+    fixed_error_text(e, l).to_owned()
+}
+
+/// [`error_text`] of the errors without a number.
+fn fixed_error_text(e: OpenError, l: Locale) -> &'static str {
     match (e, l) {
         (OpenError::WrongPassword, Locale::Kk) => "Құпиясөз қате",
         (OpenError::WrongPassword, Locale::Ru) => "Неверный пароль",
@@ -195,6 +210,30 @@ pub fn error_text(e: OpenError, l: Locale) -> &'static str {
         (OpenError::InnerPasswordPolicy, Locale::En) => {
             "The password needs at least 8 characters with 1 uppercase letter, 1 lowercase letter (Latin letters only), 1 special character and 1 digit."
         }
+        (OpenError::WrongPin { .. }, Locale::Kk) => "PIN-код қате",
+        (OpenError::WrongPin { .. }, Locale::Ru) => "Неверный PIN-код",
+        (OpenError::WrongPin { .. }, Locale::En) => "Wrong PIN",
+        (OpenError::PinBlocked, Locale::Kk) => "PIN-код бұғатталған",
+        (OpenError::PinBlocked, Locale::Ru) => "PIN-код заблокирован",
+        (OpenError::PinBlocked, Locale::En) => "The PIN is blocked",
+        (OpenError::InvalidPin, Locale::Kk) => {
+            "PIN-код бұл тасымалдағышқа сәйкес келмейді (жеке куәлікте — 4 таңба)"
+        }
+        (OpenError::InvalidPin, Locale::Ru) => {
+            "PIN-код не подходит для этого носителя (у удостоверения личности — 4 символа)"
+        }
+        (OpenError::InvalidPin, Locale::En) => {
+            "The PIN does not fit this token (an ID card's PIN is 4 characters)"
+        }
+        (OpenError::TokenAbsent, Locale::Kk) => "Тасымалдағыш табылмады немесе шығарылды",
+        (OpenError::TokenAbsent, Locale::Ru) => "Носитель не найден или извлечён",
+        (OpenError::TokenAbsent, Locale::En) => "The token is not found or was removed",
+        (OpenError::TokenService, Locale::Kk) => "Смарт-карталар қызметі қолжетімсіз",
+        (OpenError::TokenService, Locale::Ru) => "Служба смарт-карт недоступна",
+        (OpenError::TokenService, Locale::En) => "The smart card service is not available",
+        (OpenError::TokenFailure, Locale::Kk) => "Тасымалдағышты оқу мүмкін болмады",
+        (OpenError::TokenFailure, Locale::Ru) => "Не удалось прочитать носитель",
+        (OpenError::TokenFailure, Locale::En) => "Cannot read the token",
     }
 }
 

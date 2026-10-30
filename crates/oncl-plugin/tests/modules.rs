@@ -197,6 +197,9 @@ impl Prompter for GatedConfirm {
     fn save_file(&self, _: &SavePrompt) -> Prompt<PathBuf> {
         Prompt::Cancelled
     }
+    fn reader(&self, _: &oncl_basics::ReaderPrompt) -> Prompt<String> {
+        Prompt::Cancelled
+    }
 }
 
 #[test]
