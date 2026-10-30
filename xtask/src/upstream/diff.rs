@@ -661,9 +661,15 @@ fn dist_change(id: &str, old: &Facts, new: &Facts, notes: &mut Vec<String>) -> D
             _ => false,
         }
     };
+    // A repack only where both sides were inventoried: without files there is nothing to
+    // compare, and any change of installer metadata is a change.
+    let inventoried = |d: &DistFacts| d.unpack == super::facts::UnpackStatus::Ok;
     let repack_only = !added
         && !removed
         && sha256.is_some()
+        && inventoried(b)
+        && inventoried(a)
+        && meta.is_empty()
         && files.is_empty()
         && changed_files.iter().all(repacked_jar)
         && jars.keys().all(repacked_jar)

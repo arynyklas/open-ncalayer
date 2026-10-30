@@ -351,3 +351,66 @@ fn summary_strings_are_plain() {
         assert!(!line.contains(['|', '`', '<', '\n']), "{line}");
     }
 }
+
+fn dist(
+    sha: &str,
+    unpack: xtask::upstream::facts::UnpackStatus,
+) -> xtask::upstream::facts::DistFacts {
+    xtask::upstream::facts::DistFacts {
+        url: "https://example.test/f".to_owned(),
+        page: None,
+        label: None,
+        filename: None,
+        size: Some(1),
+        sha256: Some(sha.repeat(64)),
+        published_sha1: None,
+        format: None,
+        status: FetchStatus::Ok,
+        unpack,
+        files: Default::default(),
+        jre: None,
+        jars: Default::default(),
+        embedded_manifests: Default::default(),
+        meta: Default::default(),
+    }
+}
+
+#[test]
+fn uninventoried_distribution_change_is_not_a_repack() {
+    use xtask::upstream::facts::UnpackStatus;
+    use xtask::upstream::meta::TzdbMeta;
+    let skipped = || UnpackStatus::Skipped {
+        reason: "no innounp".to_owned(),
+    };
+    let mut old = base();
+    let mut tz = dist("a", skipped());
+    tz.meta.tzdb = Some(TzdbMeta {
+        versions: vec!["2026a".to_owned()],
+    });
+    old.distributions
+        .insert("fixed:tzdb.dat".to_owned(), tz.clone());
+    old.distributions
+        .insert("page:windows-64-bit".to_owned(), dist("a", skipped()));
+    // A new tzdb.dat.
+    let mut new = old.clone();
+    let t = new.distributions.get_mut("fixed:tzdb.dat").unwrap();
+    t.sha256 = Some("b".repeat(64));
+    t.meta.tzdb = Some(TzdbMeta {
+        versions: vec!["2026b".to_owned()],
+    });
+    let d = diff(Some(&old), &new);
+    assert_eq!(d.kind(), EntryKind::Change);
+    assert!(d.needs_core_issue());
+    // A new installer innounp could not unpack.
+    let mut new = old.clone();
+    new.distributions
+        .get_mut("page:windows-64-bit")
+        .unwrap()
+        .sha256 = Some("c".repeat(64));
+    let d = diff(Some(&old), &new);
+    assert_eq!(d.kind(), EntryKind::Change);
+    assert_eq!(
+        one(&render(&d, Some(&old), &new, &ctx()), Label::Upstream).label,
+        Label::Upstream
+    );
+}
