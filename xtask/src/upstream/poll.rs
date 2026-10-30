@@ -293,7 +293,8 @@ pub fn poll(
                     }
                     Some(_) => {}
                 }
-                if before.is_none() {
+                // A new JAR starts a new run of download failures.
+                if before.is_none_or(|b| b.manifest_hash != hash || b.url != source.url) {
                     *entry = SourceState::default();
                 }
                 entry.url = source.url.clone();
@@ -353,9 +354,14 @@ pub fn poll(
                 match head_ok(fetcher, &source.url, &RequestCtx::default()) {
                     Err(Refusal::Refused) => refuse(&mut next, source),
                     Err(Refusal::Failed) => {
+                        // A known source keeps what was last seen of it, so that a change
+                        // of the manifest is still reported once HEAD succeeds.
+                        let known = next.sources.contains_key(&source.id);
                         let entry = next.sources.entry(source.id.clone()).or_default();
-                        entry.url = source.url.clone();
-                        entry.manifest_hash = source.expected_sha256.clone();
+                        if !known {
+                            entry.url = source.url.clone();
+                            entry.manifest_hash = source.expected_sha256.clone();
+                        }
                         if let Some(change) = fail(entry, &source.id) {
                             changes.push(change);
                         }

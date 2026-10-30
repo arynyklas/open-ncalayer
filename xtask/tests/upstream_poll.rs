@@ -531,3 +531,59 @@ fn sha1_found_before_multibyte_text() {
         assert_eq!(links[0].published_sha1.as_deref(), Some(sha1), "pad {pad}");
     }
 }
+
+#[test]
+fn new_bundle_hash_resets_its_strikes() {
+    let server = world('a');
+    let mut state = run(&server, &State::default()).next;
+    let entry = state.sources.get_mut("bundle:kz.example.demo").unwrap();
+    entry.failures = 2;
+    entry.status = SourceStatus::Failing;
+    let json = manifest_json(&server, |j| {
+        j.replace("bundle-a.jar\",\"hash\":\"", "bundle-a.jar\",\"hash\":\"ff")
+    });
+    let k = key('a');
+    serve_manifest_and_page(&server, signed(&json), &page_html([&k, &k, &k, &k], SHA1S));
+    let r = run(&server, &state);
+    assert!(r.changes.contains(&Change::Modified {
+        id: "bundle:kz.example.demo".to_owned(),
+        reason: ModReason::ManifestHash
+    }));
+    let e = &r.next.sources["bundle:kz.example.demo"];
+    assert_eq!((e.failures, e.status), (0, SourceStatus::Ok));
+}
+
+#[test]
+fn failed_head_keeps_the_old_hash_so_the_change_is_seen_later() {
+    let server = world('a');
+    let state = run(&server, &State::default()).next;
+    let json = manifest_json(&server, |j| {
+        j.replace("installer.sh\",\"hash\":\"", "installer.sh\",\"hash\":\"ee")
+    });
+    let k = key('a');
+    serve_manifest_and_page(&server, signed(&json), &page_html([&k, &k, &k, &k], SHA1S));
+    server.route("HEAD", "/updates/installer.sh", Response::status(503));
+    let failed = run(&server, &state);
+    assert!(
+        failed.changes.iter().all(|c| c.id() != "dist:setupsh"),
+        "{:?}",
+        failed.changes
+    );
+    assert_eq!(
+        failed.next.sources["dist:setupsh"].manifest_hash,
+        state.sources["dist:setupsh"].manifest_hash
+    );
+    server.route(
+        "HEAD",
+        "/updates/installer.sh",
+        Response::ok(vec![0; 10]).header("ETag", "\"e1\""),
+    );
+    let ok = run(&server, &failed.next);
+    assert_eq!(
+        ok.changes,
+        [Change::Modified {
+            id: "dist:setupsh".to_owned(),
+            reason: ModReason::ManifestHash
+        }]
+    );
+}
