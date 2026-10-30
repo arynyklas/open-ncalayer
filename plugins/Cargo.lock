@@ -410,6 +410,8 @@ dependencies = [
 name = "oncl-port-kit"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "md-5",
  "oncl-pdk",
  "url",
