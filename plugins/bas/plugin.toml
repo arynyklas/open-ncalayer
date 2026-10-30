@@ -4,9 +4,9 @@ min_core = "0.1.0-alpha.3"
 modules = ["kz.bas.nca.multiSignService"]
 
 [name]
-ru = "BAS Signer"
-kk = "BAS Signer"
-en = "BAS Signer"
+ru = "BAS Signer (порт OpenNCALayer)"
+kk = "BAS Signer (OpenNCALayer порты)"
+en = "BAS Signer (OpenNCALayer port)"
 
 [description]
 ru = "Подпись документов ЕСЭДО для esign.bas.kz: ответ OCSP внутри подписи и метка времени"

@@ -23,4 +23,4 @@ ru = "auth: если в первом окне ключ не выбран (в х�
 ru = "Ключи на сертификатах sha1RSA не подписывают (OpenNCALayer не делает подписей RSA-SHA1): ответ 500 «no such algorithm: SHA1WithRSAEncryption for provider KALKAN». Ключи ГОСТ 2015-256 OpenNCALayer не открывает."
 
 [[differences]]
-ru = "Ключи на токенах — после поддержки токенов в OpenNCALayer; до этого токен отвечает storage.empty."
+ru = "Ключи на токенах — только при включённой экспериментальной поддержке токенов; без неё токен отвечает storage.empty."

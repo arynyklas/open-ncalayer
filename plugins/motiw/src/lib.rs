@@ -83,14 +83,20 @@ impl Reply {
 
     /// An error with `responseObject` `""`, as the original's checks and lookups answer.
     fn failed(code: &'static str, message: String) -> Reply {
+        Reply::caught(code, Some(message))
+    }
+
+    /// An exception `getCertificateList` or `sign` catches: `responseObject` `""`, `code`,
+    /// the exception's message (`None`: a null message, left out).
+    fn caught(code: &'static str, message: Option<String>) -> Reply {
         Reply {
             object: Some(JValue::Str(String::new())),
             code,
-            message: Some(message),
+            message,
         }
     }
 
-    /// An error without `responseObject`.
+    /// An error of `verify`: without `responseObject`.
     fn error(message: Option<String>) -> Reply {
         Reply {
             object: None,
@@ -282,7 +288,8 @@ fn containers(storage: &str) -> Option<Reply> {
     )))
 }
 
-/// The keys of the token `storage` in the reader `container`, or the reply why not.
+/// The keys of the token `storage` in the reader `container` (none for an empty token), or
+/// the reply why not.
 fn open(storage: &str, container: &str, password: &str) -> Result<Vec<Key>, Reply> {
     if !is_token(storage) {
         if STORAGES.contains(&storage) {
@@ -292,25 +299,25 @@ fn open(storage: &str, container: &str, password: &str) -> Result<Vec<Key>, Repl
             ));
         }
         // `Storage.get` of an unknown name is null: a NullPointerException, caught.
-        return Err(Reply::error(None));
+        return Err(Reply::caught("500", None));
     }
     let outcome = keys::open(&OpenArgs {
         storage: storage.to_owned(),
         source: KeySource::Terminal(container.to_owned()),
         password: Password::Text(password.to_owned()),
     })
-    .map_err(|e| Reply::error(Some(e.message)))?;
+    .map_err(|e| Reply::caught("500", Some(e.message)))?;
     // Unverified against the original: Kalkan's texts of a token that does not open.
-    outcome.map_err(|why| {
-        Reply::error(Some(match why {
-            OpenOutcome::WrongPassword { .. } => "Wrong password".to_owned(),
-            OpenOutcome::Blocked => "Token is blocked".to_owned(),
-            OpenOutcome::NoDevice | OpenOutcome::NotFound => {
-                return Reply::failed("404", format!("Not found container by serial: {container}"));
-            }
-            other => format!("{other:?}"),
-        }))
-    })
+    let message = match outcome {
+        Ok(keys) => return Ok(keys),
+        Err(OpenOutcome::NoKeys) => return Ok(Vec::new()),
+        Err(OpenOutcome::WrongPassword { .. }) => "Wrong password",
+        Err(OpenOutcome::Blocked) => "Token is blocked",
+        Err(OpenOutcome::NoDevice | OpenOutcome::NotFound) => "Token not found",
+        Err(OpenOutcome::Declined) => "Access denied",
+        Err(OpenOutcome::Corrupt | OpenOutcome::Opened(_)) => "Token is not readable",
+    };
+    Err(Reply::caught("500", Some(message.to_owned())))
 }
 
 /// `getCertificateList(storage, container, password)`.
@@ -343,11 +350,11 @@ fn sign(args: &[Value]) -> Option<Reply> {
         Err(reply) => return Some(reply),
     };
     let Some(key) = keys.iter().find(|key| key.alias() == alias) else {
-        return Some(Reply::error(None));
+        return Some(Reply::caught("500", None));
     };
     let bytes = match javab64::decode_java(data) {
         Ok(bytes) => bytes,
-        Err(e) => return Some(Reply::error(Some(e))),
+        Err(e) => return Some(Reply::caught("500", Some(e))),
     };
     let signed = key.sign_cms_ex(SignCmsExArgs {
         handle: key.handle(),
@@ -371,15 +378,13 @@ fn sign(args: &[Value]) -> Option<Reply> {
     });
     let cms = match signed {
         Ok(CmsOutcome::Signed(cms)) => cms.into_vec(),
-        Ok(CmsOutcome::TspFailed(failure)) => return Some(Reply::error(Some(failure.detail))),
-        Err(e) => return Some(Reply::error(Some(e.message))),
+        Ok(CmsOutcome::TspFailed(failure)) => {
+            return Some(Reply::caught("500", Some(failure.detail)));
+        }
+        Err(e) => return Some(Reply::caught("500", Some(e.message))),
     };
     let signers = cms_read::signers(&cms);
-    // The time-stamp of the last signer that has one, on every certificate.
-    let tst = signers
-        .iter()
-        .rev()
-        .find_map(|signer| signer.unsigned_attrs.as_deref().and_then(time_stamp));
+    let tst = last_time_stamp(&cms);
     let certificates = signers
         .iter()
         .filter_map(|signer| signer.sid_cert.as_deref())
@@ -392,10 +397,20 @@ fn sign(args: &[Value]) -> Option<Reply> {
     Some(Reply::ok(JValue::Obj(object)))
 }
 
+/// The time-stamp of the last signer of `cms` that has one, which the original puts on
+/// every certificate it lists.
+fn last_time_stamp(cms: &[u8]) -> Option<TimeStamp> {
+    cms_read::signers(cms)
+        .iter()
+        .rev()
+        .find_map(|signer| signer.unsigned_attrs.as_deref().and_then(time_stamp))
+}
+
 /// `verify(cms, data)`: base64 errors drop the connection (`None`); provider_util's checks
 /// as its codes.
 fn verify(cms: &str, data: &str) -> Option<Reply> {
     let cms = javab64::decode_java(cms).ok()?;
+    let tst = last_time_stamp(&cms);
     let data = javab64::decode_java(data).ok()?;
     let data = (!data.is_empty()).then(|| Bytes::from(data));
     let detached = data.is_none();
@@ -434,8 +449,7 @@ fn verify(cms: &str, data: &str) -> Option<Reply> {
         if matches!(signer.ess_cert_id, Check::Fail(_)) {
             return code("CMS_ESSCERTIDV2_DIFF_CERTHASH");
         }
-        // Unverified against the original: whether these carry time-stamp details.
-        certificates.extend(certificate_info(cert, None, None).map(JValue::Obj));
+        certificates.extend(certificate_info(cert, None, tst.as_ref()).map(JValue::Obj));
     }
     let mut object = JObject::hash_map();
     object.put("certificates", JValue::Arr(certificates));

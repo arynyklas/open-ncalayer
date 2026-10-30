@@ -2059,13 +2059,50 @@ fn workspace_body_codes_numbers() {
             workspace_sign(r#"["aGVsbG8="]"#),
             r#"{"code":500,"message":"отмена ввода пароля"}"#,
         ),
+        // The password window comes first; closing it cancels.
         (
             workspace("getKaztokenKeys", "{}"),
-            r#"{"code":200,"body":[]}"#,
+            r#"{"code":500,"message":"отмена ввода пароля"}"#,
         ),
     ] {
         assert_eq!(text(session.call(&request, None)), reply, "{request}");
     }
+}
+
+#[test]
+fn workspace_kaztoken_keys() {
+    let name = "user-gost2015-sign";
+    let harness = Harness::new(
+        vec![
+            Step::Password(TOKEN_PIN.to_owned()),
+            Step::Password("000000".to_owned()),
+        ],
+        vec![],
+    )
+    .with_tokens(kaztoken_emulator(name));
+    let mut session = harness.session("workspace");
+    let reply = text(session.call(&workspace("getKaztokenKeys", "{}"), None));
+    assert!(
+        reply.starts_with(r#"{"code":200,"body":[{"notAfter":""#),
+        "{reply}"
+    );
+    assert_key_order(&reply, &["notAfter", "alias", "dn", "alg"]);
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    let keys = value["body"].as_array().unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["dn"], subject_dn(name));
+    assert_eq!(keys[0]["alg"], "ECGOST3410-2015");
+    let date = keys[0]["notAfter"].as_str().unwrap();
+    assert!(
+        date.len() == 10 && date.as_bytes()[2] == b'.' && date.as_bytes()[5] == b'.',
+        "{date}"
+    );
+    assert!(keys[0]["alias"].as_str().is_some_and(|a| !a.is_empty()));
+    assert_eq!(
+        text(session.call(&workspace("getKaztokenKeys", "{}"), None)),
+        r#"{"code":500,"message":"Неверный пароль"}"#
+    );
+    assert_eq!(harness.prompter().password_prompts().len(), 2);
 }
 
 #[test]
@@ -2583,4 +2620,212 @@ fn motiw_show_storage_key() {
         );
         assert_eq!(harness.prompter().storage_prompts().len(), 1);
     }
+}
+
+const TOKEN_READER: &str = "Emulated Reader 0";
+const EMPTY_READER: &str = "Emulated Reader 1";
+const TOKEN_PIN: &str = "123456";
+
+/// A Kaztoken holding the synthetic key `name` in [`TOKEN_READER`] and an empty Kaztoken in
+/// [`EMPTY_READER`].
+fn kaztoken_emulator(name: &str) -> std::sync::Arc<oncl_token::emulator::EmulatorBackend> {
+    use oncl_token::emulator::{CardSpec, EmuKey, EmulatorBackend, card};
+    let key = oncl_testkit::synthetic(name);
+    let key = EmuKey::load(&key.path, &key.password).unwrap();
+    let emu = std::sync::Arc::new(EmulatorBackend::new());
+    for (reader, keys) in [(TOKEN_READER, vec![key]), (EMPTY_READER, vec![])] {
+        emu.add_reader(reader);
+        emu.insert(
+            reader,
+            card(CardSpec::new(
+                oncl_token::TokenKind::Kaztoken,
+                TOKEN_PIN,
+                keys,
+            )),
+        );
+    }
+    emu
+}
+
+#[test]
+fn motiw_token_storages_and_containers() {
+    let harness = Harness::new(vec![], vec![]).with_tokens(kaztoken_emulator("user-gost2015-sign"));
+    let mut session = harness.session("motiw");
+    assert_eq!(
+        text(session.call(&motiw("getStoragesList", "[]"), None)),
+        r#"{"responseObject":["AKKaztokenStore","PKCS12"],"code":"200","message":"","uuid":"7"}"#
+    );
+    assert_eq!(
+        text(session.call(&motiw("getContainerList", r#"["AKKaztokenStore"]"#), None)),
+        format!(
+            r#"{{"responseObject":[{{"path":"{TOKEN_READER}","serial":"AKKaztokenStore"}},{{"path":"{EMPTY_READER}","serial":"AKKaztokenStore"}}],"code":"200","message":"","uuid":"7"}}"#
+        )
+    );
+}
+
+#[test]
+fn motiw_token_certificate_list_and_errors() {
+    let harness = Harness::new(vec![], vec![]).with_tokens(kaztoken_emulator("user-gost2015-sign"));
+    let mut session = harness.session("motiw");
+    let list =
+        |session: &mut oncl_port_tests::SessionHandle, storage: &str, reader: &str, pin: &str| {
+            text(session.call(
+                &motiw(
+                    "getCertificateList",
+                    &format!(r#"["{storage}","{reader}","{pin}"]"#),
+                ),
+                None,
+            ))
+        };
+    let reply = list(&mut session, "AKKaztokenStore", TOKEN_READER, TOKEN_PIN);
+    assert!(reply.starts_with(r#"{"responseObject":[{"#), "{reply}");
+    assert!(
+        reply.ends_with(r#"}],"code":"200","message":"","uuid":"7"}"#),
+        "{reply}"
+    );
+    assert_key_order(
+        &reply,
+        &[
+            "notAfter",
+            "serialNumber",
+            "subject",
+            "alias",
+            "issuer",
+            "notBefore",
+            "algorithm",
+            "sigAlgName",
+        ],
+    );
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(value["responseObject"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["responseObject"][0]["sigAlgName"],
+        "ECGOST3410-2015-512"
+    );
+    // An empty token lists no certificates.
+    assert_eq!(
+        list(&mut session, "AKKaztokenStore", EMPTY_READER, TOKEN_PIN),
+        r#"{"responseObject":[],"code":"200","message":"","uuid":"7"}"#
+    );
+    // Errors keep `"responseObject":""`.
+    assert_eq!(
+        list(&mut session, "AKKaztokenStore", TOKEN_READER, "000000"),
+        r#"{"responseObject":"","code":"500","message":"Wrong password","uuid":"7"}"#
+    );
+    assert_eq!(
+        list(&mut session, "AKKaztokenStore", "No such reader", TOKEN_PIN),
+        r#"{"responseObject":"","code":"500","message":"Token not found","uuid":"7"}"#
+    );
+    assert_eq!(
+        list(&mut session, "BKS", TOKEN_READER, TOKEN_PIN),
+        r#"{"responseObject":"","code":"500","uuid":"7"}"#
+    );
+}
+
+#[test]
+fn motiw_token_sign_and_verify_with_time_stamp() {
+    let harness = Harness::new(vec![], vec![]).with_tokens(kaztoken_emulator("user-gost2015-sign"));
+    let mut session = harness.session("motiw");
+    let listed = text(session.call(
+        &motiw(
+            "getCertificateList",
+            &format!(r#"["AKKaztokenStore","{TOKEN_READER}","{TOKEN_PIN}"]"#),
+        ),
+        None,
+    ));
+    let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let alias = listed["responseObject"][0]["alias"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sign = |session: &mut oncl_port_tests::SessionHandle, alias: &str, format: i32| {
+        text(session.call(
+            &motiw(
+                "sign",
+                &format!(
+                    r#"["AKKaztokenStore","{TOKEN_READER}","{TOKEN_PIN}","{alias}","aGVsbG8=",{format},true]"#
+                ),
+            ),
+            None,
+        ))
+    };
+    // Without a time-stamp.
+    let reply = sign(&mut session, &alias, 1);
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(value["code"], "200", "{reply}");
+    let info = &value["responseObject"]["certificates"][0];
+    assert!(
+        info.get("alias").is_none() && info.get("timeStampDate").is_none(),
+        "{reply}"
+    );
+    let cms = decode_java(value["responseObject"]["signature"].as_str().unwrap()).unwrap();
+    oncl_pki::cms::verify(&cms, None).expect("the CMS verifies");
+
+    // With one: sign and verify both carry it.
+    let reply = sign(&mut session, &alias, 2);
+    let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(value["code"], "200", "{reply}");
+    let signed_info = value["responseObject"]["certificates"][0].clone();
+    assert!(signed_info["timeStampDate"].is_i64(), "{reply}");
+    assert!(signed_info["timeStampSerialNumber"].is_string(), "{reply}");
+    let signature = value["responseObject"]["signature"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let verified = text(session.call(&motiw("verify", &format!(r#"["{signature}",""]"#)), None));
+    let verified: serde_json::Value = serde_json::from_str(&verified).unwrap();
+    assert_eq!(verified["code"], "200");
+    let verified_info = &verified["responseObject"]["certificates"][0];
+    for key in ["timeStampDate", "timeStampSerialNumber", "tsa"] {
+        assert_eq!(verified_info[key], signed_info[key], "{key}");
+    }
+
+    // An alias the token lacks.
+    assert_eq!(
+        sign(&mut session, "nope", 1),
+        r#"{"responseObject":"","code":"500","uuid":"7"}"#
+    );
+}
+
+/// [`with_synthetic_ocsp`] whose responder says the synthetic key `name` is revoked.
+fn with_revoked_ocsp(steps: Vec<Step>, name: &str) -> Harness {
+    let serial: String = entry(name)
+        .cert
+        .tbs_certificate()
+        .serial_number()
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let ocsp = oncl_pki::ocsp::MockOcsp::new(entry("ocsp-gost2015")).status(
+        &serial,
+        oncl_pki::ocsp::CertStatus::Revoked {
+            time: OffsetDateTime::now_utc() - time::Duration::days(1),
+            reason: Some(1),
+        },
+    );
+    let ocsp: std::sync::Arc<dyn oncl_pki::http::HttpTransport> = std::sync::Arc::new(ocsp);
+    Harness::new(steps, vec![("http://ocsp.synthetic.test".to_owned(), ocsp)])
+        .with_pki_hosts(&["ocsp.synthetic.test"])
+        .with_clock(OffsetDateTime::now_utc)
+}
+
+#[test]
+fn revoked_signer_texts_are_fixed() {
+    let name = "inter-user-gost2015-sign";
+    let harness = with_revoked_ocsp(pick(name, 0), name);
+    assert_eq!(
+        text(harness.call("workspace", &workspace_sign(r#"["aGVsbG8="]"#), None)),
+        r#"{"code":500,"message":"Certificate is revoked"}"#
+    );
+    let harness = with_revoked_ocsp(simourg_pick(name), name);
+    let reply = text(harness.call(
+        "simourg",
+        &simourg("createCMSSignatureWithTspFromBase64", SIMOURG_ARGS),
+        None,
+    ));
+    assert!(
+        reply.contains("Ошибка: Certificate is revoked\""),
+        "{reply}"
+    );
 }

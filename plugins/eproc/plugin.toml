@@ -4,9 +4,9 @@ min_core = "0.1.0-alpha.3"
 modules = ["kz.sapa.eproc.osgi.EprocModule"]
 
 [name]
-ru = "Закупки Самрук-Казына"
-kk = "Самұрық-Қазына сатып алулары"
-en = "Samruk-Kazyna e-procurement"
+ru = "Закупки Самрук-Казына (порт OpenNCALayer)"
+kk = "Самұрық-Қазына сатып алулары (OpenNCALayer порты)"
+en = "Samruk-Kazyna e-procurement (OpenNCALayer port)"
 
 [description]
 ru = "Подпись XML для портала закупок Самрук-Казына"

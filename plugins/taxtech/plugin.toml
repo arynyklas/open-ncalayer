@@ -4,9 +4,9 @@ min_core = "0.1.0-alpha.3"
 modules = ["kz.digital.taxtech.documents.multisign.NCAModule"]
 
 [name]
-ru = "ЭДО ЦНТ"
-kk = "ЦСТ ЭҚА"
-en = "Digital TaxTech e-documents"
+ru = "ЭДО ЦНТ (порт OpenNCALayer)"
+kk = "ЦСТ ЭҚА (OpenNCALayer порты)"
+en = "Digital TaxTech e-documents (OpenNCALayer port)"
 
 [description]
 ru = "Подписание документов ЭДО Digital TaxTech: ключ выбирается один раз для сайта"

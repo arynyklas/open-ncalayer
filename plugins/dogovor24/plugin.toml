@@ -4,9 +4,9 @@ min_core = "0.1.0-alpha.3"
 modules = ["kz.dogovor24.module"]
 
 [name]
-ru = "Договор24"
-kk = "Договор24"
-en = "Dogovor24"
+ru = "Договор24 (порт OpenNCALayer)"
+kk = "Договор24 (OpenNCALayer порты)"
+en = "Dogovor24 (OpenNCALayer port)"
 
 [description]
 ru = "Подпись договоров на dogovor24.kz: CMS с меткой времени, пакеты, ЕСЭДО"

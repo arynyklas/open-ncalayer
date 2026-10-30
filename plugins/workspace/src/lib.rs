@@ -8,20 +8,22 @@
 #![cfg(target_arch = "wasm32")]
 
 use oncl_pdk::abi::{
-    Action, CmsCerts, CmsOutcome, CoSign, Filter, HashAlg, KeyOrder, MAX_PKI_TIMEOUT_MS, Nonce,
-    PkiMethod, PkiUrl, SignerSel, StampArgs, StampMode, StampOutcome, TimeForm, TokenForm,
-    TsaChoice, TsaSpec,
+    Action, CmsCerts, CmsOutcome, CoSign, Filter, HashAlg, KeyOrder, KeySource, MAX_PKI_TIMEOUT_MS,
+    Nonce, OpenArgs, OpenOutcome, Password, PasswordArgs, PkiMethod, PkiUrl, SignerSel, StampArgs,
+    StampMode, StampOutcome, TimeForm, TokenForm, TsaChoice, TsaSpec,
 };
 use oncl_pdk::keys::{self, Key, SelectArgs};
 use oncl_pdk::orgjson::{self, JObject, JValue};
 use oncl_pdk::pki::{CertStatusAbi, OcspOutcome};
 use oncl_pdk::serde_json::{Map, Value};
-use oncl_pdk::{Request, host, javab64, pki};
+use oncl_pdk::{Request, dialogs, host, javab64, pki};
+use oncl_port_kit::date::format_java;
 use oncl_port_pki::esedo::{
     self, CertIdHash, ContentMode, Description, Encapsulate, EsedoInput, FileNames, IssuerRule,
     OcspAnswer, OcspForm, OcspRequest, OcspUrl, Profile, SignerDn, SigningTimeRule, StringKind,
     TimeFrom,
 };
+use oncl_port_pki::x509text;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 oncl_pdk::plugin!(handle);
@@ -35,6 +37,13 @@ const WATCHDOG_MS: i64 = 10_000;
 const CANCELLED: &str = "отмена ввода пароля";
 const BUSY: &str = "процесс уже запущен (имеется незавершенный процесс)";
 const TIMED_OUT: &str = "процесс остановлен по таймауту";
+const WRONG_PIN: &str = "Неверный пароль";
+const TOKEN_BLOCKED: &str = "Токен заблокирован";
+const TOKEN_NOT_FOUND: &str = "Токен не найден";
+// Unverified against the original: the texts of Kalkan's OCSP checker.
+const REVOKED: &str = "Certificate is revoked";
+const UNKNOWN_STATUS: &str = "Certificate status is unknown";
+const OCSP_NOT_VALID: &str = "OCSP response is not valid";
 
 /// The SLED card's OCSP request: the page's issuer, a GOST 34.311 `CertID`, no nonce, GET
 /// with the URL-encoded request to the certificate's responder, checked.
@@ -99,8 +108,7 @@ fn handle(request: &Request) -> String {
     let method = orgjson::opt_string(&root, "method").unwrap_or_default();
     let outcome = match method.as_str() {
         "sign" => sign(&root),
-        // The Kaztoken's keys, once the core opens tokens; until then it has none.
-        "getKaztokenKeys" => Ok(Vec::new()),
+        "getKaztokenKeys" => kaztoken_keys(),
         _ => Err(Some("Wrong method. Try 'createCMSSignature'".to_owned())),
     };
     let mut reply = JObject::stringer();
@@ -116,6 +124,59 @@ fn handle(request: &Request) -> String {
         }
     }
     reply.to_json()
+}
+
+/// `getKaztokenKeys`: the original's password window, then `{notAfter, alias, dn, alg}` of
+/// each key of the Kaztoken in the first Kaztoken reader.
+fn kaztoken_keys() -> Result<Vec<JValue>, Option<String>> {
+    let secret = dialogs::password(&PasswordArgs {
+        title: "Ввод пароля".to_owned(),
+        label: "Введите пароль ключа".to_owned(),
+        ok: "OK".to_owned(),
+        cancel: "Отмена".to_owned(),
+        allow_empty: true,
+    })
+    .map_err(|e| Some(e.message))?
+    .ok_or_else(|| Some(CANCELLED.to_owned()))?;
+    // Unverified against the original: Kalkan's texts of a token that does not open.
+    let reader = keys::terminals(KAZTOKEN)
+        .map_err(|e| Some(e.message))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Some(TOKEN_NOT_FOUND.to_owned()))?;
+    let opened = keys::open(&OpenArgs {
+        storage: KAZTOKEN.to_owned(),
+        source: KeySource::Terminal(reader),
+        password: Password::Secret(secret.id),
+    })
+    .map_err(|e| Some(e.message))?;
+    let keys = match opened {
+        Ok(keys) => keys,
+        Err(OpenOutcome::NoKeys) => Vec::new(),
+        Err(OpenOutcome::WrongPassword { .. }) => return Err(Some(WRONG_PIN.to_owned())),
+        Err(OpenOutcome::Blocked) => return Err(Some(TOKEN_BLOCKED.to_owned())),
+        Err(_) => return Err(Some(TOKEN_NOT_FOUND.to_owned())),
+    };
+    keys.iter()
+        .map(|key| {
+            let cert = key.certificate();
+            let info = host::cert_info(cert).map_err(|e| Some(e.message))?;
+            let details = host::cert_details(cert).map_err(|e| Some(e.message))?;
+            let offset = host::local_offset(info.not_after).map_err(|e| Some(e.message))?;
+            let mut bean = JObject::hash_map();
+            bean.put(
+                "notAfter",
+                format_java("dd.MM.yyyy", info.not_after, offset),
+            );
+            bean.put("alias", key.alias());
+            bean.put("dn", details.subject_dn);
+            bean.put(
+                "alg",
+                x509text::kalkan_key_alg_name(&info.spki_alg_oid).unwrap_or(&info.spki_alg_oid),
+            );
+            Ok(JValue::Obj(bean))
+        })
+        .collect()
 }
 
 /// `sign{files, fileNames, isKaztoken, storagePath, alias, issuerCert}`.
@@ -237,12 +298,16 @@ fn sled_ocsp(cert: &[u8], issuer: Option<&str>) -> Result<OcspOutcome, Option<St
             ..
         } => Ok(outcome),
         OcspOutcome::Ok {
-            problem: Some(problem),
+            cert_status: Some(CertStatusAbi::Revoked { .. }),
+            problem: None,
             ..
-        } => Err(Some(format!("OCSP response is not valid: {problem:?}"))),
-        OcspOutcome::Ok { cert_status, .. } => {
-            Err(Some(format!("Certificate status: {cert_status:?}")))
-        }
+        } => Err(Some(REVOKED.to_owned())),
+        OcspOutcome::Ok {
+            cert_status: Some(CertStatusAbi::Unknown),
+            problem: None,
+            ..
+        } => Err(Some(UNKNOWN_STATUS.to_owned())),
+        OcspOutcome::Ok { .. } => Err(Some(OCSP_NOT_VALID.to_owned())),
         OcspOutcome::Failed(failure) => Err(Some(failure.detail.clone())),
     }
 }

@@ -4,9 +4,9 @@ min_core = "0.1.0-alpha.3"
 modules = ["com.osdkz.esf.signer.esfSigner"]
 
 [name]
-ru = "Подпись ЭСФ"
-kk = "ЭШФ қолтаңбасы"
-en = "ESF signer"
+ru = "Подпись ЭСФ (порт OpenNCALayer)"
+kk = "ЭШФ қолтаңбасы (OpenNCALayer порты)"
+en = "ESF signer (OpenNCALayer port)"
 
 [description]
 ru = "Подпись электронных счетов-фактур и вход в ИС ЭСФ"

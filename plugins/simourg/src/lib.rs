@@ -318,11 +318,17 @@ fn sign_cades(storage: &str, key_type: &str, data: &str, attached: bool, names: 
                     return Err(format!("{OCSP_ERROR}{}", failure.detail).into());
                 }
                 Some(OcspOutcome::Ok {
-                    problem: Some(problem),
+                    cert_status: Some(CertStatusAbi::Revoked { .. }),
+                    problem: None,
                     ..
-                }) => return Err(format!("{OCSP_ERROR}{problem:?}").into()),
-                Some(OcspOutcome::Ok { cert_status, .. }) => {
-                    return Err(format!("{OCSP_ERROR}{cert_status:?}").into());
+                }) => return Err(format!("{OCSP_ERROR}Certificate is revoked").into()),
+                Some(OcspOutcome::Ok {
+                    cert_status: Some(CertStatusAbi::Unknown),
+                    problem: None,
+                    ..
+                }) => return Err(format!("{OCSP_ERROR}Certificate status is unknown").into()),
+                Some(OcspOutcome::Ok { .. }) => {
+                    return Err(format!("{OCSP_ERROR}OCSP response is not valid").into());
                 }
                 None => return Err(format!("{OCSP_ERROR}TARGET_CERT_ISSUER_NOT_FOUND").into()),
             },

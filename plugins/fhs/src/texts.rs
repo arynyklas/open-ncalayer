@@ -41,16 +41,16 @@ const KZ: Texts = Texts {
     ..RU
 };
 
-// Unverified against the original: the English texts of `Cabinet_en`.
+/// `Cabinet_en`: some of its texts are Russian.
 const EN: Texts = Texts {
     select_certificate: "Select certificate",
-    key_store: "Key store",
+    key_store: "Хранилище ключей",
     error: "Error",
     close: "Close",
-    key_not_selected: "No signing key selected",
-    download_failed: "Error downloading the file",
-    tsp_failed: "Error creating the time-stamp",
-    sign_failed: "Error creating the signature",
+    key_not_selected: "Key entry not selected",
+    download_failed: "File download error",
+    tsp_failed: "Error on create Timestamp",
+    sign_failed: "Ошибка при формировании ЭЦП",
 };
 
 /// The texts of `locale`.
