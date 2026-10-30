@@ -51,6 +51,11 @@ pub fn pack(root: &Path, directory: &Path, out: &Path) -> anyhow::Result<PathBuf
         .join("Cargo.toml")
         .canonicalize()
         .with_context(|| format!("finding {}/Cargo.toml", directory.display()))?;
+    // What Cargo is given: absolute, but not the verbatim (`\\?\`) form `canonicalize` gives on
+    // Windows, with which Cargo fails to inherit a member's `workspace.dependencies` (as the
+    // ports' shared crates do).
+    let cargo_manifest_arg = std::path::absolute(directory.join("Cargo.toml"))
+        .with_context(|| format!("finding {}/Cargo.toml", directory.display()))?;
     let manifest_path = directory.join("plugin.toml");
     let manifest_bytes = read_limited(&manifest_path, MAX_MANIFEST)?;
     let manifest_text = std::str::from_utf8(&manifest_bytes).context("plugin.toml is not UTF-8")?;
@@ -64,7 +69,7 @@ pub fn pack(root: &Path, directory: &Path, out: &Path) -> anyhow::Result<PathBuf
             "1",
             "--manifest-path",
         ])
-        .arg(&cargo_manifest)
+        .arg(&cargo_manifest_arg)
         .output()
         .context("running cargo metadata")?;
     if !metadata.status.success() {
@@ -122,7 +127,7 @@ pub fn pack(root: &Path, directory: &Path, out: &Path) -> anyhow::Result<PathBuf
             "wasm32-unknown-unknown",
             "--manifest-path",
         ])
-        .arg(&cargo_manifest)
+        .arg(&cargo_manifest_arg)
         .arg("--target-dir")
         .arg(&target_dir)
         // Flags meant for the host build are not the plugin's; the package is published, so
