@@ -333,7 +333,7 @@ pub fn unpack(
             }
         },
         Format::Msi | Format::Dmg => match &tools.sevenzip {
-            None => Ok(skipped("no 7z")),
+            None => Ok(skipped("no 7-Zip 25.01 or newer")),
             Some(tool) => {
                 let out = work.join(if format == Format::Msi { "msi" } else { "dmg" });
                 tool.extract(artifact, &out)?;

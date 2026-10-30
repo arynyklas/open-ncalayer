@@ -359,8 +359,8 @@ fn missing_tool_is_skipped() {
     let work = tempfile::tempdir().unwrap();
     for (name, format, reason) in [
         ("inno-like.exe", Format::InnoExe, "no innounp"),
-        ("msi-like.msi", Format::Msi, "no 7z"),
-        ("fake.dmg", Format::Dmg, "no 7z"),
+        ("msi-like.msi", Format::Msi, "no 7-Zip 25.01 or newer"),
+        ("fake.dmg", Format::Dmg, "no 7-Zip 25.01 or newer"),
     ] {
         assert_eq!(
             unpack(
@@ -532,4 +532,20 @@ fn sevenzip_does_not_follow_a_link_out_of_the_output() {
                 .all(|k| !k.contains("pwned") || k.starts_with("link/"))
         );
     }
+}
+
+#[test]
+fn old_or_missing_7zip_is_a_warning_not_a_failure() {
+    use xtask::upstream::tools::sevenzip_env_line;
+    let new = Some((
+        std::path::PathBuf::from("7z"),
+        Some("7-Zip 25.01 (x64)".to_owned()),
+    ));
+    assert_eq!(sevenzip_env_line(new).as_deref(), Some("ONCL_7Z=7z"));
+    let old = Some((
+        std::path::PathBuf::from("7z"),
+        Some("7-Zip 23.01 (x64)".to_owned()),
+    ));
+    assert_eq!(sevenzip_env_line(old), None);
+    assert_eq!(sevenzip_env_line(None), None);
 }

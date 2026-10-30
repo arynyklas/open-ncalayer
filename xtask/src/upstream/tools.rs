@@ -5,7 +5,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 
 use super::http::{Fetcher, RequestCtx};
 use crate::fetch::verify_sha256;
@@ -100,11 +100,26 @@ pub fn sevenzip_supported(version_line: &str) -> bool {
         .is_some_and(|v| v >= SEVENZIP_MIN)
 }
 
-/// 7-Zip if found and [`sevenzip_supported`]: its path and version line.
-pub fn usable_7z() -> Option<(PathBuf, String)> {
-    let exe = find_7z()?;
-    let version = sevenzip_version(&exe)?;
-    sevenzip_supported(&version).then_some((exe, version))
+/// The `ONCL_7Z=…` line for 7-Zip found at a path with its version line, or `None` with a
+/// warning when it is missing or older than [`SEVENZIP_MIN`]: MSI and DMG distributions are
+/// then recorded as skipped, not a failure.
+pub fn sevenzip_env_line(found: Option<(PathBuf, Option<String>)>) -> Option<String> {
+    match found {
+        Some((exe, Some(version))) if sevenzip_supported(&version) => {
+            Some(format!("ONCL_7Z={}", exe.display()))
+        }
+        Some((_, version)) => {
+            eprintln!(
+                "warning: 7-Zip {} is older than 25.01: MSI and DMG distributions will be skipped",
+                version.as_deref().unwrap_or("of unknown version")
+            );
+            None
+        }
+        None => {
+            eprintln!("warning: 7-Zip not found: MSI and DMG distributions will be skipped");
+            None
+        }
+    }
 }
 
 /// `cargo xtask upstream tools --out <dir>`: prints `ONCL_INNOUNP=…` (Windows) and
@@ -124,14 +139,12 @@ pub fn tools(out: &Path) -> anyhow::Result<()> {
         )?;
         println!("ONCL_INNOUNP={}", exe.display());
     }
-    match usable_7z() {
-        Some((p, _)) => println!("ONCL_7Z={}", p.display()),
-        None => {
-            if cfg!(windows) {
-                bail!("7-Zip 25.01 or newer not found");
-            }
-            eprintln!("7-Zip 25.01 or newer not found: MSI and DMG distributions will be skipped");
-        }
+    let found = find_7z().map(|exe| {
+        let version = sevenzip_version(&exe);
+        (exe, version)
+    });
+    if let Some(line) = sevenzip_env_line(found) {
+        println!("{line}");
     }
     Ok(())
 }
