@@ -453,6 +453,13 @@ pub(crate) fn escape_attribute(value: &str) -> String {
     String::from_utf8(out).expect("escaping keeps UTF-8")
 }
 
+/// Character data as Canonical XML writes it; parsing it back gives `text`.
+pub(crate) fn escape_text(text: &str) -> String {
+    let mut out = Vec::with_capacity(escaped_len(text, text_escape));
+    push_escaped(&mut out, text, text_escape);
+    String::from_utf8(out).expect("escaping keeps UTF-8")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

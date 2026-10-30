@@ -8,19 +8,21 @@ use super::{denied, invalid};
 use crate::host::{HostState, unix_ms};
 use der::asn1::ObjectIdentifier;
 use oncl_pdk::abi::{
-    Bytes, CertArgs, CertDetails, CertStatusAbi, CrlArgs, CrlOutcome, HashAlg, HashArgs,
-    HostResult, IssuerSel, MAX_PKI_TIMEOUT_MS, MAX_TSP_RETRIES, NetFailure, NetKind, NetStage,
-    Nonce, OcspArgs, OcspOutcome, PkiMethod, PkiUrl, Problem, SignerSel, StampArgs, StampMode,
-    StampOutcome, TokenForm, TsaChoice, TspOutcome, TspRequestArgs,
+    Bytes, CertArgs, CertDetails, CertStatusAbi, Check, CrlArgs, CrlOutcome, HashAlg, HashArgs,
+    HostResult, IssuerSel, KeyUsageBit, MAX_PKI_TIMEOUT_MS, MAX_TSP_RETRIES, NetFailure, NetKind,
+    NetStage, Nonce, OcspArgs, OcspOutcome, PkiMethod, PkiUrl, Problem, Revocation, SignerReport,
+    SignerSel, StampArgs, StampMode, StampOutcome, TokenForm, TsaChoice, TspOutcome, TspReport,
+    TspRequestArgs, VerifyArgs, VerifyAt, VerifyReport, XmlSigReport, XmlVerifyArgs,
 };
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::crl::CrlError;
-use oncl_pki::http::{self, NonceSpec};
-use oncl_pki::info::{self, cert_info, kcert_types};
+use oncl_pki::http::{self, HttpError, HttpReply, HttpRequest, HttpTransport, NonceSpec};
+use oncl_pki::info::{self, KeyUsageBits, cert_info, kcert_types};
 use oncl_pki::key::{self, SigAlg};
 use oncl_pki::ocsp::{self, CertStatus, OcspError};
+use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::{self, TsaProfile, TsaSpec};
-use oncl_pki::{cms, crl, oid};
+use oncl_pki::{cms, crl, oid, xmldsig};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -115,12 +117,17 @@ const DEFAULT_OCSP: &str = "http://ocsp.pki.gov.kz";
 /// A URL of a PKI service, if the core may ask it: `http(s)://` to one of the PKI hosts
 /// or a subdomain of one.
 fn check_pki_url(state: &HostState, url: &str) -> HostResult<()> {
+    check_pki_url_in(&state.services.pki_hosts, url)
+}
+
+/// [`check_pki_url`] against `pki_hosts`.
+fn check_pki_url_in(pki_hosts: &[String], url: &str) -> HostResult<()> {
     let parsed = url::Url::parse(url).map_err(|e| invalid(format!("{url}: {e}")))?;
     let host = match (parsed.scheme(), parsed.host_str()) {
         ("http" | "https", Some(host)) => host.to_ascii_lowercase(),
         _ => return Err(denied(format!("{url} is not an http(s) URL of a PKI host"))),
     };
-    let allowed = state.services.pki_hosts.iter().any(|pki| {
+    let allowed = pki_hosts.iter().any(|pki| {
         host == *pki
             || host
                 .strip_suffix(pki.as_str())
@@ -130,6 +137,31 @@ fn check_pki_url(state: &HostState, url: &str) -> HostResult<()> {
         Ok(())
     } else {
         Err(denied(format!("{host} is not a PKI host")))
+    }
+}
+
+/// The core's transport, for the URLs a certificate names: only to the PKI hosts, and
+/// never to where a redirect points (a 3xx reply is the reply).
+struct PkiOnly {
+    hosts: Arc<[String]>,
+    http: Arc<dyn HttpTransport>,
+}
+
+impl PkiOnly {
+    fn of(state: &HostState) -> Self {
+        PkiOnly {
+            hosts: Arc::clone(&state.services.pki_hosts),
+            http: Arc::clone(&state.services.http),
+        }
+    }
+}
+
+impl HttpTransport for PkiOnly {
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        check_pki_url_in(&self.hosts, request.url).map_err(|e| HttpError::other(e.message))?;
+        let mut request = *request;
+        request.opts.redirects = false;
+        self.http.send(&request)
     }
 }
 
@@ -451,4 +483,134 @@ pub(crate) fn crl_fetch(state: &HostState, args: CrlArgs) -> HostResult<CrlOutco
             Err(_) => CrlOutcome::Invalid(Problem::CrlInvalid),
         },
     )
+}
+
+/// The ABI's check of `check`.
+fn check_abi(check: cms::Check) -> Check {
+    match check {
+        cms::Check::Ok => Check::Ok,
+        cms::Check::Skipped => Check::Skipped,
+        cms::Check::Fail(problem) => Check::Fail(problem_abi(problem)),
+    }
+}
+
+fn problem_abi(problem: cms::Problem) -> Problem {
+    match problem {
+        cms::Problem::Malformed => Problem::Malformed,
+        cms::Problem::NoContent => Problem::NoContent,
+        cms::Problem::NoSignerCert => Problem::NoSignerCert,
+        cms::Problem::BadSignature => Problem::BadSignature,
+        cms::Problem::DigestMismatch => Problem::DigestMismatch,
+        cms::Problem::EssCertIdMismatch => Problem::EssCertIdMismatch,
+        cms::Problem::Expired => Problem::Expired,
+        cms::Problem::NotYetValid => Problem::NotYetValid,
+        cms::Problem::UnknownCa => Problem::UnknownCa,
+        cms::Problem::PathInvalid => Problem::PathInvalid,
+        cms::Problem::Revoked { at, reason } => Problem::Revoked {
+            at_ms: unix_ms(at),
+            reason,
+        },
+        cms::Problem::StatusUnknown => Problem::StatusUnknown,
+        cms::Problem::ResponderUnverified => Problem::ResponderUnverified,
+        cms::Problem::OcspStale => Problem::OcspStale,
+        cms::Problem::CrlInvalid => Problem::CrlInvalid,
+        cms::Problem::TspInvalid => Problem::TspInvalid,
+        cms::Problem::TspImprintMismatch => Problem::TspImprintMismatch,
+        cms::Problem::Net(failure) => Problem::Net(net_failure(
+            match failure.stage {
+                cms::NetStage::Ocsp => NetStage::Ocsp,
+                cms::NetStage::Crl => NetStage::Crl,
+            },
+            &failure.url,
+            failure.kind,
+            failure.detail,
+        )),
+    }
+}
+
+/// `cms_verify`: a report on the signers of a CMS; the revocation sources its certificates
+/// name are asked only on the PKI hosts.
+pub(crate) fn cms_verify(state: &HostState, args: VerifyArgs) -> HostResult<VerifyReport> {
+    let custom = match &args.chain {
+        Some(list) if !list.is_empty() => Some(CaSet::new(
+            list.iter()
+                .map(|der| parse(der))
+                .collect::<HostResult<Vec<_>>>()?,
+        )),
+        _ => None,
+    };
+    let trust = custom.as_ref().unwrap_or(&state.services.cas);
+    let chain = match &args.chain {
+        Some(list) if list.is_empty() => cms::ChainPolicy::Skip,
+        _ => cms::ChainPolicy::Through(trust),
+    };
+    let mut require_key_usage = KeyUsageBits::default();
+    for bit in &args.require_key_usage {
+        match bit {
+            KeyUsageBit::DigitalSignature => require_key_usage.digital_signature = true,
+            KeyUsageBit::NonRepudiation => require_key_usage.non_repudiation = true,
+            KeyUsageBit::KeyEncipherment => require_key_usage.key_encipherment = true,
+            KeyUsageBit::KeyAgreement => require_key_usage.key_agreement = true,
+        }
+    }
+    let spec = cms::ReportSpec {
+        at: match args.at {
+            VerifyAt::Now => cms::VerifyAt::Now,
+            VerifyAt::SigningTime => cms::VerifyAt::SigningTime,
+            VerifyAt::TspTime => cms::VerifyAt::TspTime,
+        },
+        chain,
+        trust,
+        revocation: match args.revocation {
+            Revocation::None => cms::Revocation::None,
+            Revocation::EmbeddedOcsp => cms::Revocation::EmbeddedOcsp,
+            Revocation::LiveOcsp => cms::Revocation::LiveOcsp,
+            Revocation::LiveOcspThenCrl => cms::Revocation::LiveOcspThenCrl,
+        },
+        first_signer_only: args.first_signer_only,
+        require_key_usage,
+    };
+    let now = (state.services.clock)();
+    let report = cms::report(
+        &args.cms,
+        args.data.as_deref().map(Vec::as_slice),
+        &spec,
+        &PkiOnly::of(state),
+        now,
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    Ok(VerifyReport {
+        content: report.content.map(Bytes::from),
+        signers: report
+            .signers
+            .into_iter()
+            .map(|signer| SignerReport {
+                certificate: signer.certificate.as_ref().map(der_of),
+                signing_time_ms: signer.signing_time.map(unix_ms),
+                signature: check_abi(signer.signature),
+                ess_cert_id: check_abi(signer.ess_cert_id),
+                validity: check_abi(signer.validity),
+                path: check_abi(signer.path),
+                revocation: check_abi(signer.revocation),
+                tsp: signer.tsp.map(|tsp| TspReport {
+                    gen_time_ms: tsp.gen_time.map(unix_ms),
+                    check: check_abi(tsp.check),
+                    tsa_cert: tsp.tsa_cert.as_ref().map(der_of),
+                }),
+            })
+            .collect(),
+    })
+}
+
+/// `xml_verify`: every signature of the document, in document order, each verified with
+/// the certificate of its own `KeyInfo`.
+pub(crate) fn xml_verify(args: XmlVerifyArgs) -> HostResult<Vec<XmlSigReport>> {
+    let checks = xmldsig::verify_each(&args.xml).map_err(|e| invalid(e.to_string()))?;
+    Ok(checks
+        .into_iter()
+        .map(|check| XmlSigReport {
+            certificate: check.cert.as_ref().map(der_of).unwrap_or_default(),
+            valid: check.result.is_ok(),
+        })
+        .collect())
 }

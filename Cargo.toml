@@ -76,7 +76,8 @@ ring = "0.17.14"
 roxmltree = "0.21.2"
 # Only in xtask (`sign`): passwords read without echo; minisign already depends on it.
 rpassword = "7.5.4"
-# Key generation only: `oncl-pki::keygen` (RSA keys of new key files) and xtask fixtures.
+# `oncl-pki::keygen` (RSA keys of new key files), RSA-SHA1 XML signatures a plugin names by
+# URI (`ring` signs with SHA-2 only), and xtask fixtures.
 rsa = { version = "0.9.10", features = ["sha2"] }
 # oncl-trust on Linux: read-only `cert9.db` (NSS) presence check without `certutil`.
 rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"] }

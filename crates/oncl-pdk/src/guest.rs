@@ -77,6 +77,12 @@ mod imports {
         pub fn ocsp_fetch(ptr: i32, len: i32) -> i64;
         #[link_name = "crl_fetch"]
         pub fn crl_fetch(ptr: i32, len: i32) -> i64;
+        #[link_name = "cms_verify"]
+        pub fn cms_verify(ptr: i32, len: i32) -> i64;
+        #[link_name = "keys_sign_xml_ex"]
+        pub fn keys_sign_xml_ex(ptr: i32, len: i32) -> i64;
+        #[link_name = "xml_verify"]
+        pub fn xml_verify(ptr: i32, len: i32) -> i64;
     }
 }
 
@@ -117,6 +123,9 @@ fn host_fn(import: Import) -> HostFn {
         Import::TspRequest => imports::tsp_request,
         Import::OcspFetch => imports::ocsp_fetch,
         Import::CrlFetch => imports::crl_fetch,
+        Import::CmsVerify => imports::cms_verify,
+        Import::KeysSignXmlEx => imports::keys_sign_xml_ex,
+        Import::XmlVerify => imports::xml_verify,
     }
 }
 
@@ -379,12 +388,13 @@ pub mod keys {
         Action, ChooseArgs, Filter, FilterMore, KeyOrder, KeySource, KeyUsageBit, OpenArgs,
         OpenOutcome, Password, SelectArgs,
     };
+    pub use crate::abi::{
+        C14n, CmsCerts, CmsContent, CmsOutcome, CoSign, NsBinding, Placement, RawAttribute,
+        SignCmsExArgs, SignXmlExArgs, SignedAttrs, SigningTime, SigningTimeObject, TimeForm,
+        TimeSource, Transform, XmlOutput,
+    };
     use crate::abi::{
         Chosen, Handle, OpenedKey, SignCmsArgs, SignRawArgs, SignXmlArgs, TerminalsArgs,
-    };
-    pub use crate::abi::{
-        CmsCerts, CmsContent, CmsOutcome, CoSign, RawAttribute, SignCmsExArgs, SignedAttrs,
-        SigningTime, TimeForm, TimeSource,
     };
 
     /// A key the user chose: it stays usable until dropped.
@@ -515,6 +525,15 @@ pub mod keys {
             call::<_, Bytes>(imports::keys_sign_xml, &args).map(Bytes::into_vec)
         }
 
+        /// An XML signature as `args` says (its `handle` is this key's): the document.
+        pub fn sign_xml_ex(&self, args: SignXmlExArgs) -> HostResult<Vec<u8>> {
+            let args = SignXmlExArgs {
+                handle: self.handle,
+                ..args
+            };
+            call::<_, Bytes>(imports::keys_sign_xml_ex, &args).map(Bytes::into_vec)
+        }
+
         /// The key's certificate chain, DER, from its certificate up: the key store's
         /// certificates, then the CAs the core trusts.
         pub fn chain(&self) -> HostResult<Vec<Vec<u8>>> {
@@ -635,11 +654,29 @@ pub mod http {
 /// Time-stamps, OCSP and CRL, requested by the core from the PKI hosts (`keys`).
 pub mod pki {
     use super::*;
+    use crate::abi::XmlVerifyArgs;
     pub use crate::abi::{
-        CertStatusAbi, CrlArgs, CrlOutcome, IssuerSel, NetFailure, NetKind, NetStage, Nonce,
-        OcspArgs, OcspOutcome, PkiMethod, PkiUrl, Problem, SignerSel, StampArgs, StampMode,
-        StampOutcome, TokenForm, TsaChoice, TsaSpec, TspOutcome, TspRequestArgs,
+        CertStatusAbi, Check, CrlArgs, CrlOutcome, IssuerSel, NetFailure, NetKind, NetStage, Nonce,
+        OcspArgs, OcspOutcome, PkiMethod, PkiUrl, Problem, Revocation, SignerReport, SignerSel,
+        StampArgs, StampMode, StampOutcome, TokenForm, TsaChoice, TsaSpec, TspOutcome, TspReport,
+        TspRequestArgs, VerifyArgs, VerifyAt, VerifyReport, XmlSigReport,
     };
+
+    /// A report on the signers of a CMS.
+    pub fn cms_verify(args: &VerifyArgs) -> HostResult<VerifyReport> {
+        call(imports::cms_verify, args)
+    }
+
+    /// Every XML signature of `xml`, in document order: its certificate, whether it
+    /// verifies.
+    pub fn xml_verify(xml: &[u8]) -> HostResult<Vec<XmlSigReport>> {
+        call(
+            imports::xml_verify,
+            &XmlVerifyArgs {
+                xml: Bytes::from(xml.to_vec()),
+            },
+        )
+    }
 
     /// Time-stamps signers of a CMS.
     pub fn stamp(args: &StampArgs) -> HostResult<StampOutcome> {

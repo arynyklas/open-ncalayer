@@ -65,21 +65,12 @@ pub fn verify(cms: &[u8], detached: Option<&[u8]>) -> Result<Vec<VerifiedSigner>
         (None, Some(detached)) => detached,
         (None, None) => return Err(CmsError::NoEncapsulatedData),
     };
-    let certs = match signed_data.certificates {
-        // Other CertificateChoices (attribute certificates, …) are skipped.
-        Some(set) => set
-            .tlvs()?
-            .into_iter()
-            .filter(|tlv| tlv.first() == Some(&0x30))
-            .map(|tlv| Ok((Certificate::from_der(tlv)?, tlv)))
-            .collect::<Result<Vec<_>, CmsError>>()?,
-        None => Vec::new(),
-    };
+    let certs = certificates(&signed_data)?;
     let signers = signed_data.signer_infos.tlvs()?;
     if signers.is_empty() {
         return Err(CmsError::Malformed("no signers".to_owned()));
     }
-    let digests = ContentDigests::new(content);
+    let digests = ContentDigests::new(Some(content));
     signers
         .into_iter()
         .enumerate()
@@ -95,37 +86,66 @@ pub fn verify(cms: &[u8], detached: Option<&[u8]>) -> Result<Vec<VerifiedSigner>
         .collect()
 }
 
+/// The certificates of a `SignedData` with their DER; other `CertificateChoices`
+/// (attribute certificates, …) are skipped.
+pub(super) fn certificates<'a>(
+    signed_data: &SignedData<'a>,
+) -> Result<Vec<(Certificate, &'a [u8])>, CmsError> {
+    match signed_data.certificates {
+        Some(set) => set
+            .tlvs()?
+            .into_iter()
+            .filter(|tlv| tlv.first() == Some(&0x30))
+            .map(|tlv| Ok((Certificate::from_der(tlv)?, tlv)))
+            .collect(),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Digests of the signed content, each computed at most once per algorithm however many
 /// signers share it, so a document is hashed at most once per [`SigAlg`].
-struct ContentDigests<'a> {
-    content: &'a [u8],
+pub(super) struct ContentDigests<'a> {
+    content: Option<&'a [u8]>,
     by_alg: [OnceCell<Vec<u8>>; 4],
 }
 
 impl<'a> ContentDigests<'a> {
-    fn new(content: &'a [u8]) -> Self {
+    /// Digests of `content`; none without it.
+    pub(super) fn new(content: Option<&'a [u8]>) -> Self {
         ContentDigests {
             content,
             by_alg: Default::default(),
         }
     }
 
-    fn get(&self, alg: SigAlg) -> &[u8] {
+    fn get(&self, alg: SigAlg) -> Option<&[u8]> {
+        let content = self.content?;
         let slot = match alg {
             SigAlg::Gost2004 => 0,
             SigAlg::Gost2015_512 => 1,
             SigAlg::RsaSha256 => 2,
             SigAlg::RsaSha1 => 3,
         };
-        self.by_alg[slot].get_or_init(|| alg.digest(self.content))
+        Some(self.by_alg[slot].get_or_init(|| alg.digest(content)))
     }
 }
 
-struct Signer<'a> {
-    index: usize,
-    info: SignerInfo<'a>,
-    content_type: ObjectIdentifier,
-    digests: &'a ContentDigests<'a>,
+pub(super) struct Signer<'a> {
+    pub(super) index: usize,
+    pub(super) info: SignerInfo<'a>,
+    pub(super) content_type: ObjectIdentifier,
+    pub(super) digests: &'a ContentDigests<'a>,
+}
+
+/// What the signed attributes say, checked against the content and the certificate.
+pub(super) struct SeenAttrs {
+    /// signingTime.
+    pub(super) signing_time: Option<OffsetDateTime>,
+    /// Whether messageDigest is the content's digest; `None` without content.
+    pub(super) digest_matches: Option<bool>,
+    /// Whether signingCertificateV2 names the certificate; `None` without the attribute
+    /// (or without a certificate).
+    pub(super) ess_matches: Option<bool>,
 }
 
 /// `SignerIdentifier`.
@@ -154,19 +174,18 @@ impl Signer<'_> {
     fn verify(&self, certs: &[(Certificate, &[u8])]) -> Result<VerifiedSigner, CmsError> {
         // Without signed attributes the signature covers the whole content, which would be
         // hashed again for every such signer; NCALayer always writes signed attributes.
-        let attrs = self
-            .info
-            .signed_attrs
-            .ok_or_else(|| self.malformed("no signed attributes"))?;
+        let attrs = self.signed_attrs()?;
         let alg = self.algorithm()?;
-        let (cert, cert_der) = self.find_cert(certs)?;
+        let (cert, cert_der) = self
+            .find_cert(certs, |_| true)?
+            .ok_or(CmsError::CertNotFound(self.index))?;
         let key = PublicKey::from_spki(cert.tbs_certificate().subject_public_key_info())
             .map_err(CmsError::Key)?;
 
-        let signing_time = self.check_signed_attrs(attrs, alg, cert_der)?;
-        // Signed over the DER `SET OF`, not the `[0] IMPLICIT` encoding.
-        let message = attrs.to_der()?;
-        key.verify(alg, &message, self.info.signature.as_bytes())
+        let signing_time = self
+            .check_signed_attrs(attrs, alg, Some(cert_der), true)?
+            .signing_time;
+        key.verify(alg, &signed_message(attrs)?, self.info.signature.as_bytes())
             .map_err(|e| match e {
                 KeyError::BadSignature => CmsError::BadSignature(self.index),
                 e => CmsError::Key(e),
@@ -181,10 +200,31 @@ impl Signer<'_> {
         })
     }
 
+    /// Whether the signature verifies with `key` over the signed attributes.
+    pub(super) fn signature_verifies(
+        &self,
+        attrs: RawSet<'_>,
+        alg: SigAlg,
+        key: &PublicKey,
+    ) -> Result<bool, CmsError> {
+        match key.verify(alg, &signed_message(attrs)?, self.info.signature.as_bytes()) {
+            Ok(()) => Ok(true),
+            Err(KeyError::BadSignature) => Ok(false),
+            Err(e) => Err(CmsError::Key(e)),
+        }
+    }
+
+    /// The signed attributes, which NCALayer always writes.
+    pub(super) fn signed_attrs(&self) -> Result<RawSet<'_>, CmsError> {
+        self.info
+            .signed_attrs
+            .ok_or_else(|| self.malformed("no signed attributes"))
+    }
+
     /// Signature algorithm from `signatureAlgorithm`, which must agree with
     /// `digestAlgorithm`. Plain `rsaEncryption` (as OpenSSL writes) takes the digest from
     /// `digestAlgorithm`.
-    fn algorithm(&self) -> Result<SigAlg, CmsError> {
+    pub(super) fn algorithm(&self) -> Result<SigAlg, CmsError> {
         let signature = self.info.signature_algorithm.oid;
         let digest = self.info.digest_algorithm.oid;
         let alg = if signature == oid::RSA_ENCRYPTION {
@@ -197,11 +237,13 @@ impl Signer<'_> {
         alg.ok_or_else(|| CmsError::UnknownAlgorithm(format!("{signature} with digest {digest}")))
     }
 
-    /// Certificate named by `sid`: `IssuerAndSerialNumber` or `[0] SubjectKeyIdentifier`.
-    fn find_cert<'c>(
+    /// The first certificate named by `sid` (`IssuerAndSerialNumber` or `[0]
+    /// SubjectKeyIdentifier`) that `accept` takes, if any.
+    pub(super) fn find_cert<'c>(
         &self,
         certs: &'c [(Certificate, &'c [u8])],
-    ) -> Result<(&'c Certificate, &'c [u8]), CmsError> {
+        accept: impl Fn(&Certificate) -> bool,
+    ) -> Result<Option<(&'c Certificate, &'c [u8])>, CmsError> {
         const SKI: Tag = Tag::ContextSpecific {
             constructed: false,
             number: TagNumber(0),
@@ -212,24 +254,30 @@ impl Signer<'_> {
             SKI => Sid::KeyId(sid.value()),
             tag => return Err(self.malformed(&format!("unknown SignerIdentifier {tag}"))),
         };
-        certs
+        Ok(certs
             .iter()
-            .find(|(cert, _)| sid.matches(cert))
-            .map(|(cert, der)| (cert, *der))
-            .ok_or(CmsError::CertNotFound(self.index))
+            .find(|(cert, _)| sid.matches(cert) && accept(cert))
+            .map(|(cert, der)| (cert, *der)))
     }
 
-    /// Checks contentType, messageDigest and signingCertificateV2; returns signingTime.
-    /// Each of these and signingTime may appear once (RFC 5652 §11, RFC 5035 §5.4).
-    fn check_signed_attrs(
+    /// Checks contentType, messageDigest (against the content, if any) and
+    /// signingCertificateV2 (against `cert_der`, if any); reads signingTime. Each of these
+    /// may appear once (RFC 5652 §11, RFC 5035 §5.4). `strict` fails on the first mismatch,
+    /// in attribute order; otherwise mismatches are only reported.
+    pub(super) fn check_signed_attrs(
         &self,
         attrs: RawSet<'_>,
         alg: SigAlg,
-        cert_der: &[u8],
-    ) -> Result<Option<OffsetDateTime>, CmsError> {
+        cert_der: Option<&[u8]>,
+        strict: bool,
+    ) -> Result<SeenAttrs, CmsError> {
         let (mut content_type_seen, mut digest_seen) = (false, false);
         let (mut time_seen, mut signing_cert_seen) = (false, false);
-        let mut signing_time = None;
+        let mut seen = SeenAttrs {
+            signing_time: None,
+            digest_matches: None,
+            ess_matches: None,
+        };
         for tlv in attrs.tlvs()? {
             let attr = Attribute::from_der(tlv)?;
             let attr_type = attr.attr_type;
@@ -242,12 +290,16 @@ impl Signer<'_> {
             } else if attr_type == oid::MESSAGE_DIGEST {
                 self.first(&mut digest_seen, "messageDigest")?;
                 let digest = value()?.decode_as::<&OctetStringRef>()?;
-                if digest.as_bytes() != self.digests.get(alg) {
+                seen.digest_matches = self
+                    .digests
+                    .get(alg)
+                    .map(|expected| digest.as_bytes() == expected);
+                if strict && seen.digest_matches == Some(false) {
                     return Err(CmsError::DigestMismatch(self.index));
                 }
             } else if attr_type == oid::SIGNING_TIME {
                 self.first(&mut time_seen, "signingTime")?;
-                signing_time = Some(decode_time(value()?)?);
+                seen.signing_time = Some(decode_time(value()?)?);
             } else if attr_type == oid::SIGNING_CERTIFICATE_V2 {
                 self.first(&mut signing_cert_seen, "signingCertificateV2")?;
                 let signing_cert: SigningCertificateV2<'_> = value()?.decode_as()?;
@@ -256,15 +308,37 @@ impl Signer<'_> {
                     .first()
                     .ok_or_else(|| self.malformed("empty signingCertificateV2"))?;
                 let hash_oid = first.hash_algorithm.map_or(oid::SHA256, |a| a.oid);
-                if first.cert_hash.as_bytes() != hash(&hash_oid, cert_der)? {
-                    return Err(CmsError::SigningCertificateMismatch(self.index));
+                if let Some(cert_der) = cert_der {
+                    let matches = first.cert_hash.as_bytes() == hash(&hash_oid, cert_der)?;
+                    if strict && !matches {
+                        return Err(CmsError::SigningCertificateMismatch(self.index));
+                    }
+                    seen.ess_matches = Some(matches);
                 }
             }
         }
         if !digest_seen {
             return Err(self.malformed("no messageDigest attribute"));
         }
-        Ok(signing_time)
+        Ok(seen)
+    }
+
+    /// The value of the single `attr_type` attribute among `attrs`, if there is one.
+    pub(super) fn attribute<'r>(
+        &self,
+        attrs: Option<RawSet<'r>>,
+        attr_type: ObjectIdentifier,
+    ) -> Result<Option<AnyRef<'r>>, CmsError> {
+        let Some(attrs) = attrs else {
+            return Ok(None);
+        };
+        for tlv in attrs.tlvs()? {
+            let attr = Attribute::from_der(tlv)?;
+            if attr.attr_type == attr_type {
+                return Ok(Some(single_value(attr, self.index)?));
+            }
+        }
+        Ok(None)
     }
 
     /// Marks a single-instance attribute as seen; [`CmsError::Malformed`] if it already was.
@@ -275,22 +349,22 @@ impl Signer<'_> {
         Ok(())
     }
 
-    fn timestamp_token(&self) -> Result<Option<Vec<u8>>, CmsError> {
-        let Some(attrs) = self.info.unsigned_attrs else {
-            return Ok(None);
-        };
-        for tlv in attrs.tlvs()? {
-            let attr = Attribute::from_der(tlv)?;
-            if attr.attr_type == oid::TIME_STAMP_TOKEN {
-                return Ok(Some(single_value(attr, self.index)?.to_der()?));
-            }
-        }
-        Ok(None)
+    pub(super) fn timestamp_token(&self) -> Result<Option<Vec<u8>>, CmsError> {
+        self.attribute(self.info.unsigned_attrs, oid::TIME_STAMP_TOKEN)?
+            .map(|token| token.to_der())
+            .transpose()
+            .map_err(CmsError::from)
     }
 
     fn malformed(&self, what: &str) -> CmsError {
         CmsError::Malformed(format!("signer {}: {what}", self.index))
     }
+}
+
+/// What a signature with signed attributes covers: the DER `SET OF`, not the `[0]
+/// IMPLICIT` encoding.
+fn signed_message(attrs: RawSet<'_>) -> Result<Vec<u8>, CmsError> {
+    Ok(attrs.to_der()?)
 }
 
 /// The only value of an attribute.
@@ -499,7 +573,7 @@ mod tests {
 
     #[test]
     fn content_is_hashed_once_per_algorithm() {
-        let digests = ContentDigests::new(b"document");
+        let digests = ContentDigests::new(Some(b"document"));
         let algs = [
             SigAlg::Gost2004,
             SigAlg::Gost2015_512,
@@ -507,10 +581,10 @@ mod tests {
             SigAlg::RsaSha1,
         ];
         for alg in algs {
-            let first = digests.get(alg);
+            let first = digests.get(alg).unwrap();
             assert_eq!(first, alg.digest(b"document"));
             // The same buffer comes back: the digest was not recomputed.
-            assert!(std::ptr::eq(first, digests.get(alg)), "{alg:?}");
+            assert!(std::ptr::eq(first, digests.get(alg).unwrap()), "{alg:?}");
         }
         assert_eq!(
             digests.by_alg.iter().filter(|c| c.get().is_some()).count(),
@@ -528,7 +602,7 @@ mod tests {
         let c = crate::cms::sign(&rsa, &b, &opts()).unwrap();
         let ci = ContentInfo::from_der(&c).unwrap();
         let sd: SignedData<'_> = ci.content.decode_as().unwrap();
-        let digests = ContentDigests::new(b"shared");
+        let digests = ContentDigests::new(Some(b"shared"));
         let certs: Vec<(Certificate, &[u8])> = sd
             .certificates
             .unwrap()
@@ -570,7 +644,7 @@ mod tests {
             signature: OctetStringRef::new(&[]).unwrap(),
             unsigned_attrs: None,
         };
-        let digests = ContentDigests::new(b"");
+        let digests = ContentDigests::new(Some(b""));
         let signer = |info| Signer {
             index: 0,
             info,

@@ -2,12 +2,17 @@
 //! optionally `[n]`, with `/` (child) or `//` (descendant) separators: `/root/body[2]`,
 //! `//data`, `/a//b[1]`; at most [`MAX_STEPS`] steps.
 //!
-//! A name matches the qualified name as written in the document, prefix included. The one
-//! exception follows Kalkan's namespace context (`XMLUtil.PkiNamespaceContext`): the prefix
-//! `SOAP-ENV` stands for the SOAP 1.1 envelope namespace whatever prefix the document binds
-//! to it, so `/SOAP-ENV:Envelope/SOAP-ENV:Body` selects `<soapenv:Body>`. (Kalkan maps every
-//! other prefix to the XMLDSig namespace and an unprefixed name to no namespace; literal
-//! matching selects whatever that would select when the document uses those prefixes.)
+//! Without [`Namespaces`], a name matches the qualified name as written in the document,
+//! prefix included. The one exception follows Kalkan's namespace context
+//! (`XMLUtil.PkiNamespaceContext`): the prefix `SOAP-ENV` stands for the SOAP 1.1 envelope
+//! namespace whatever prefix the document binds to it, so `/SOAP-ENV:Envelope/SOAP-ENV:Body`
+//! selects `<soapenv:Body>`. (Kalkan maps every other prefix to the XMLDSig namespace and an
+//! unprefixed name to no namespace; literal matching selects whatever that would select when
+//! the document uses those prefixes.)
+//!
+//! With [`Namespaces`], names are matched as XPath does: a prefixed name by its namespace
+//! URI and local name, the prefix bound by the caller (an unbound one is an error); an
+//! unprefixed name is in no namespace.
 
 use super::XmlError;
 use super::parse::element_qname;
@@ -31,6 +36,26 @@ struct Step<'e> {
     name: &'e str,
     /// 1-based position among the parent's children of that name.
     position: Option<usize>,
+}
+
+/// The namespaces of an expression's prefixes: each bound one, and the namespace of any
+/// other prefix, if every prefix has one.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Namespaces<'n> {
+    /// Prefix → namespace URI.
+    pub bindings: &'n [(&'n str, &'n str)],
+    /// The namespace of any other prefix.
+    pub other: Option<&'n str>,
+}
+
+impl Namespaces<'_> {
+    fn uri(&self, prefix: &str) -> Option<&str> {
+        self.bindings
+            .iter()
+            .find(|(p, _)| *p == prefix)
+            .map(|(_, uri)| *uri)
+            .or(self.other)
+    }
 }
 
 fn unsupported(expr: &str) -> XmlError {
@@ -100,9 +125,18 @@ fn is_qname(name: &str) -> bool {
     }
 }
 
-fn name_matches(node: Node<'_, '_>, name: &str) -> bool {
+fn name_matches(node: Node<'_, '_>, name: &str, ns: Option<Namespaces<'_>>) -> bool {
     if !node.is_element() {
         return false;
+    }
+    if let Some(ns) = ns {
+        let (uri, local) = match name.split_once(':') {
+            // Prefixes are checked to be bound before any matching.
+            Some((prefix, local)) => (ns.uri(prefix), local),
+            None => (None, name),
+        };
+        return node.tag_name().namespace().filter(|u| !u.is_empty()) == uri
+            && node.tag_name().name() == local;
     }
     match name.strip_prefix(SOAP_ENV_PREFIX) {
         Some(local) => {
@@ -114,11 +148,15 @@ fn name_matches(node: Node<'_, '_>, name: &str) -> bool {
 }
 
 /// Element children of `parent` matching `step`, in document order.
-fn matching_children<'a, 'i>(
+fn matching_children<'a, 'i, 'q>(
     parent: Node<'a, 'i>,
-    step: &Step<'_>,
-) -> impl Iterator<Item = Node<'a, 'i>> {
-    let named = parent.children().filter(|c| name_matches(*c, step.name));
+    step: &Step<'q>,
+    ns: Option<Namespaces<'q>>,
+) -> impl Iterator<Item = Node<'a, 'i>> + use<'a, 'i, 'q> {
+    let name = step.name;
+    let named = parent
+        .children()
+        .filter(move |c| name_matches(*c, name, ns));
     let (skip, take) = match step.position {
         None => (0, usize::MAX),
         Some(n) => (n - 1, 1),
@@ -145,20 +183,25 @@ fn outermost<'a, 'i>(
 }
 
 /// Nodes selected by `step` from `context`, in document order without duplicates.
-fn apply<'i>(doc: &Document<'i>, context: &[NodeId], step: &Step<'_>) -> Vec<NodeId> {
+fn apply<'i, 'q>(
+    doc: &Document<'i>,
+    context: &[NodeId],
+    step: &Step<'q>,
+    ns: Option<Namespaces<'q>>,
+) -> Vec<NodeId> {
     let mut next: Vec<NodeId> = Vec::new();
     match step.axis {
         Axis::Child => {
             for id in context {
                 let node = doc.get_node(*id).expect("node of this document");
-                next.extend(matching_children(node, step).map(|n| n.id()));
+                next.extend(matching_children(node, step, ns).map(|n| n.id()));
             }
         }
         // A context node inside a subtree already searched adds nothing.
         Axis::Descendant => {
             for node in outermost(doc, context) {
                 for d in node.descendants().filter(|d| d.is_element() || d.is_root()) {
-                    next.extend(matching_children(d, step).map(|n| n.id()));
+                    next.extend(matching_children(d, step, ns).map(|n| n.id()));
                 }
             }
         }
@@ -169,10 +212,11 @@ fn apply<'i>(doc: &Document<'i>, context: &[NodeId], step: &Step<'_>) -> Vec<Nod
 }
 
 /// First node selected by the last `step` from `context`, in document order.
-fn first<'a, 'i>(
+fn first<'a, 'i, 'q>(
     doc: &'a Document<'i>,
     context: &[NodeId],
-    step: &Step<'_>,
+    step: &Step<'q>,
+    ns: Option<Namespaces<'q>>,
 ) -> Option<Node<'a, 'i>> {
     match (step.axis, step.position) {
         // The outermost context nodes have disjoint subtrees in document order: the first
@@ -180,30 +224,41 @@ fn first<'a, 'i>(
         (Axis::Descendant, None) => outermost(doc, context).find_map(|node| {
             node.descendants()
                 .skip(1)
-                .find(|d| name_matches(*d, step.name))
+                .find(|d| name_matches(*d, step.name, ns))
         }),
         // Matches of nested context nodes interleave: take the earliest of each.
         (Axis::Child, _) => context
             .iter()
-            .filter_map(|id| matching_children(doc.get_node(*id)?, step).next())
+            .filter_map(|id| matching_children(doc.get_node(*id)?, step, ns).next())
             .min_by_key(|n| n.id().get()),
         (Axis::Descendant, Some(_)) => {
-            let first = apply(doc, context, step).into_iter().next()?;
+            let first = apply(doc, context, step, ns).into_iter().next()?;
             doc.get_node(first)
         }
     }
 }
 
-/// First element selected by `expr`, in document order. Each step costs at most one pass
-/// over the document; intermediate node sets are kept as node ids.
-///
-/// # Errors
-///
-/// [`XmlError::XPath`] if `expr` is outside the supported subset or longer than
-/// [`MAX_STEPS`] steps.
+/// [`select_first_in`] with the names as written.
+#[cfg(test)]
 pub(crate) fn select_first<'a, 'i>(
     doc: &'a Document<'i>,
     expr: &str,
+) -> Result<Option<Node<'a, 'i>>, XmlError> {
+    select_first_in(doc, expr, None)
+}
+
+/// First element selected by `expr`, its names in `ns` if given (as written without), in
+/// document order. Each step costs at most one pass over the document; intermediate node
+/// sets are kept as node ids.
+///
+/// # Errors
+///
+/// [`XmlError::XPath`] if `expr` is outside the supported subset, longer than
+/// [`MAX_STEPS`] steps, or has a prefix `ns` does not bind.
+pub(crate) fn select_first_in<'a, 'i, 'q>(
+    doc: &'a Document<'i>,
+    expr: &'q str,
+    ns: Option<Namespaces<'q>>,
 ) -> Result<Option<Node<'a, 'i>>, XmlError> {
     let steps = parse(expr)?;
     if steps.len() > MAX_STEPS {
@@ -211,15 +266,26 @@ pub(crate) fn select_first<'a, 'i>(
             "XPath expression {expr:?} has more than {MAX_STEPS} steps"
         )));
     }
+    if let Some(ns) = ns {
+        for step in &steps {
+            if let Some((prefix, _)) = step.name.split_once(':')
+                && ns.uri(prefix).is_none()
+            {
+                return Err(XmlError::XPath(format!(
+                    "XPath expression {expr:?}: the prefix {prefix:?} is not bound"
+                )));
+            }
+        }
+    }
     let (last, inner) = steps.split_last().expect("at least one step");
     let mut context = vec![doc.root().id()];
     for step in inner {
-        context = apply(doc, &context, step);
+        context = apply(doc, &context, step, ns);
         if context.is_empty() {
             return Ok(None);
         }
     }
-    Ok(first(doc, &context, last))
+    Ok(first(doc, &context, last, ns))
 }
 
 #[cfg(test)]

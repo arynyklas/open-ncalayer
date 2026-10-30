@@ -18,7 +18,10 @@ use oncl_pdk::abi::{
     HostResult, KeySource, KeyUsageBit, OpenArgs, OpenOutcome, OpenedKey, Password, SelectArgs,
     SignCmsArgs, SignRawArgs, SignXmlArgs, TerminalsArgs,
 };
-use oncl_pdk::abi::{CmsCerts, CmsContent, CmsOutcome, SignCmsExArgs, TimeSource};
+use oncl_pdk::abi::{
+    C14n, CmsCerts, CmsContent, CmsOutcome, Placement, SignCmsExArgs, SignXmlExArgs, TimeSource,
+    Transform, XmlOutput,
+};
 use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{
     self, AttrSpec, CertSpec, CmsError, CoSign, Content, SignOptions, SignSpec, TimeForm,
@@ -645,6 +648,72 @@ pub(crate) fn keys_sign_xml(state: &mut HostState, args: SignXmlArgs) -> HostRes
         ),
     }
     .map_err(failed)?;
+    Ok(Bytes::from(signed))
+}
+
+/// The core's canonicalization of `method`.
+fn c14n(method: C14n) -> xmldsig::C14n {
+    match method {
+        C14n::Inclusive => xmldsig::C14n::Inclusive,
+        C14n::InclusiveWithComments => xmldsig::C14n::InclusiveWithComments,
+        C14n::Exclusive => xmldsig::C14n::Exclusive,
+        C14n::ExclusiveWithComments => xmldsig::C14n::ExclusiveWithComments,
+    }
+}
+
+/// `keys_sign_xml_ex`: an XML signature as the arguments say.
+pub(crate) fn keys_sign_xml_ex(state: &mut HostState, args: SignXmlExArgs) -> HostResult<Bytes> {
+    let entry = state.keys.get(args.handle)?;
+    let spec = xmldsig::XmlSignSpec {
+        element: args.element.as_deref(),
+        parent: args.parent.as_deref(),
+        namespaces: args
+            .namespaces
+            .iter()
+            .map(|b| (b.prefix.as_str(), b.uri.as_str()))
+            .collect(),
+        other_prefix_uri: args.other_prefix_uri.as_deref(),
+        placement: match args.placement {
+            Placement::DocumentElement => xmldsig::Placement::DocumentElement,
+            Placement::FirstChildOfDocument => xmldsig::Placement::FirstChildOfDocument,
+            Placement::Parent => xmldsig::Placement::Parent,
+        },
+        signature_method: args.signature_method.as_deref(),
+        digest_method: args.digest_method.as_deref(),
+        signed_info_c14n: args.signed_info_c14n.map(c14n),
+        transforms: args.transforms.as_ref().map(|transforms| {
+            transforms
+                .iter()
+                .map(|t| match t {
+                    Transform::Enveloped => xmldsig::Transform::Enveloped,
+                    Transform::C14n(method) => xmldsig::Transform::C14n(c14n(*method)),
+                })
+                .collect()
+        }),
+        signature_id: args.signature_id.as_deref(),
+        signing_time_object: args.signing_time_object.as_ref().map(|object| {
+            xmldsig::SigningTimeObject {
+                property_id: &object.property_id,
+                target_ref: object.target_ref,
+                text: &object.text,
+            }
+        }),
+        strip_whitespace: args.strip_whitespace,
+        base64_line_breaks: args.base64_line_breaks,
+        output: match args.output {
+            XmlOutput::AsIs => xmldsig::XmlOutput::AsIs,
+            XmlOutput::Serialize {
+                declaration,
+                standalone_no,
+                trim,
+            } => xmldsig::XmlOutput::Serialize {
+                declaration,
+                standalone_no,
+                trim,
+            },
+        },
+    };
+    let signed = xmldsig::sign_spec(&args.xml, &spec, &entry.key, &entry.cert).map_err(failed)?;
     Ok(Bytes::from(signed))
 }
 

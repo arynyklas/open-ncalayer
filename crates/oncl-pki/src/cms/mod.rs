@@ -15,6 +15,7 @@
 //!   ones unless already there).
 
 pub(crate) mod asn1;
+mod report;
 mod sign;
 mod verify;
 
@@ -25,6 +26,10 @@ use asn1::{ContentInfo, IssuerAndSerialNumber, SignedData, SignerInfo};
 use der::{Decode, Tag, Tagged};
 use x509_cert::Certificate;
 
+pub use report::{
+    ChainPolicy, Check, NetFailure, NetStage, Problem, Report, ReportSpec, Revocation,
+    SignerReport, TspReport, VerifyAt, report,
+};
 #[cfg(feature = "testing")]
 pub(crate) use sign::sign_content;
 pub use sign::{

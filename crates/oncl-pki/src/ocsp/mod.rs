@@ -418,6 +418,7 @@ pub fn check_answer(
 }
 
 /// The `CertID` of a request.
+#[derive(Clone)]
 struct RequestedId<'a> {
     hash: HashAlg,
     name_hash: Vec<u8>,
@@ -528,6 +529,12 @@ fn read_response(
     cas: &CaSet,
     now: OffsetDateTime,
 ) -> Result<OcspAnswer, OcspError> {
+    let basic_der = successful_basic(body)?;
+    read_basic(&basic_der, |_| Ok(requested.clone()), cas, now)
+}
+
+/// The DER `BasicOCSPResponse` of a successful DER or BER `OCSPResponse`.
+fn successful_basic(body: &[u8]) -> Result<Vec<u8>, OcspError> {
     let der = ber::to_der(body)?;
     let response = asn1::OcspResponse::from_der(&der)?;
     if response.response_status.0 != 0 {
@@ -542,8 +549,53 @@ fn read_response(
             bytes.response_type
         )));
     }
-    let basic_der = ber::to_der(bytes.response.as_bytes())?;
-    let basic = asn1::BasicOcspResponse::from_der(&basic_der)?;
+    Ok(ber::to_der(bytes.response.as_bytes())?)
+}
+
+/// Checks an OCSP answer about `cert` (issued by `issuer`) that a signature carries: a DER
+/// or BER `OCSPResponse`, or its `BasicOCSPResponse` alone, as [`check`] checks a fetched
+/// one (the responder, its signature, the first `SingleResponse` about `cert`), current at
+/// `at` — the time the signature is judged at, not the wall clock. The `CertID` may be of
+/// any [`HashAlg`]: the one the response names.
+///
+/// # Errors
+///
+/// The [`OcspError`]s of a response that is not a valid, trusted and current answer about
+/// `cert`.
+pub fn check_embedded(
+    response: &[u8],
+    cert: &Certificate,
+    issuer: &Certificate,
+    cas: &CaSet,
+    at: OffsetDateTime,
+) -> Result<OcspAnswer, OcspError> {
+    let der = ber::to_der(response)?;
+    let basic_der = match asn1::OcspResponse::from_der(&der) {
+        Ok(_) => successful_basic(&der)?,
+        Err(_) => der,
+    };
+    read_basic(
+        &basic_der,
+        |id| {
+            let hash = HashAlg::from_oid(&id.hash_algorithm.oid).ok_or_else(|| {
+                OcspError::Malformed(format!("CertID hash {}", id.hash_algorithm.oid))
+            })?;
+            Ok(RequestedId::with_hash(cert, issuer, hash))
+        },
+        cas,
+        at,
+    )
+}
+
+/// Checks a DER `BasicOCSPResponse`: the responder, its signature, and the first
+/// `SingleResponse`, current at `now` and about the `CertID` `requested` gives for it.
+fn read_basic<'c>(
+    basic_der: &[u8],
+    requested: impl FnOnce(&asn1::CertId<'_>) -> Result<RequestedId<'c>, OcspError>,
+    cas: &CaSet,
+    now: OffsetDateTime,
+) -> Result<OcspAnswer, OcspError> {
+    let basic = asn1::BasicOcspResponse::from_der(basic_der)?;
     let data: asn1::ResponseData<'_> = basic.tbs_response_data.decode_as()?;
     let responder_id = ResponderId::read(data.responder_id)?;
 
@@ -570,6 +622,7 @@ fn read_response(
         .map_err(|e| OcspError::BadSignature(e.to_string()))?;
 
     let single = data.responses.first().ok_or(OcspError::NoSingleResponse)?;
+    let requested = requested(&single.cert_id)?;
     let this_update = generalized_time(single.this_update.0)?;
     if this_update > now + CLOCK_SKEW {
         return Err(OcspError::ThisUpdate);

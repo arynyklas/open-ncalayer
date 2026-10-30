@@ -254,11 +254,17 @@ pub enum Import {
     OcspFetch,
     /// `crl_fetch`: [`CrlArgs`] → [`CrlOutcome`].
     CrlFetch,
+    /// `cms_verify`: [`VerifyArgs`] → [`VerifyReport`].
+    CmsVerify,
+    /// `keys_sign_xml_ex`: [`SignXmlExArgs`] → [`Bytes`], the signed document.
+    KeysSignXmlEx,
+    /// `xml_verify`: [`XmlVerifyArgs`] → `Vec<`[`XmlSigReport`]`>`.
+    XmlVerify,
 }
 
 impl Import {
     /// Every host function.
-    pub const ALL: [Import; 31] = [
+    pub const ALL: [Import; 34] = [
         Import::Log,
         Import::Now,
         Import::Random,
@@ -290,6 +296,9 @@ impl Import {
         Import::TspRequest,
         Import::OcspFetch,
         Import::CrlFetch,
+        Import::CmsVerify,
+        Import::KeysSignXmlEx,
+        Import::XmlVerify,
     ];
 
     /// Its import name in [`IMPORT_MODULE`].
@@ -326,6 +335,9 @@ impl Import {
             Import::TspRequest => "tsp_request",
             Import::OcspFetch => "ocsp_fetch",
             Import::CrlFetch => "crl_fetch",
+            Import::CmsVerify => "cms_verify",
+            Import::KeysSignXmlEx => "keys_sign_xml_ex",
+            Import::XmlVerify => "xml_verify",
         }
     }
 
@@ -356,7 +368,10 @@ impl Import {
             | Import::TspStamp
             | Import::TspRequest
             | Import::OcspFetch
-            | Import::CrlFetch => Some(Capability::Keys),
+            | Import::CrlFetch
+            | Import::CmsVerify
+            | Import::KeysSignXmlEx
+            | Import::XmlVerify => Some(Capability::Keys),
             Import::DialogMessage | Import::DialogConfirm | Import::DialogPassword => {
                 Some(Capability::Dialogs)
             }
@@ -402,7 +417,10 @@ impl Import {
             | Import::TspStamp
             | Import::TspRequest
             | Import::OcspFetch
-            | Import::CrlFetch => "0.1.0-alpha.3",
+            | Import::CrlFetch
+            | Import::CmsVerify
+            | Import::KeysSignXmlEx
+            | Import::XmlVerify => "0.1.0-alpha.3",
         };
         semver::Version::parse(version).expect("a valid version")
     }
@@ -1462,4 +1480,258 @@ pub enum Problem {
     BlockedEku(String),
     /// The network failed.
     Net(NetFailure),
+}
+
+/// The time a signer is judged at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyAt {
+    /// Now.
+    Now,
+    /// Its signingTime attribute (now without one).
+    SigningTime,
+    /// The genTime of its verified time-stamp (now without one).
+    TspTime,
+}
+
+/// Where a signer certificate's revocation status comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Revocation {
+    /// Not checked.
+    None,
+    /// Only the OCSP answer the CMS carries (an id-pkix-ocsp-basic attribute, or an
+    /// id-ri-ocsp-response in `crls`).
+    EmbeddedOcsp,
+    /// The OCSP answer the CMS carries, else the certificate's OCSP responder.
+    LiveOcsp,
+    /// As `live_ocsp`, then the certificate's CRL if the responder fails.
+    LiveOcspThenCrl,
+}
+
+/// `cms_verify`: a report on the signers of a CMS. Responders and distribution points are
+/// asked only on the PKI hosts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyArgs {
+    /// The CMS, DER or BER.
+    pub cms: Bytes,
+    /// The content of a detached CMS.
+    #[serde(default)]
+    pub data: Option<Bytes>,
+    /// The time each signer is judged at.
+    pub at: VerifyAt,
+    /// The CAs of the certification paths: `None`, the ones the core trusts; empty, no
+    /// path is built.
+    #[serde(default)]
+    pub chain: Option<Vec<Bytes>>,
+    /// Where revocation status comes from.
+    pub revocation: Revocation,
+    /// Only the first signer.
+    #[serde(default)]
+    pub first_signer_only: bool,
+    /// Key usage bits the signer certificate must have: among the certificates its signer
+    /// identifier names, the first that has them all is the signer's.
+    #[serde(default)]
+    pub require_key_usage: Vec<KeyUsageBit>,
+}
+
+/// The outcome of one check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Check {
+    /// It holds.
+    Ok,
+    /// Not checked: not asked for, or nothing to check it on.
+    Skipped,
+    /// It fails.
+    Fail(Problem),
+}
+
+/// The time-stamp of a signer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TspReport {
+    /// Its genTime, Unix milliseconds, if it verifies.
+    pub gen_time_ms: Option<i64>,
+    /// Whether it verifies (`tsp_invalid`, `tsp_imprint_mismatch`).
+    pub check: Check,
+    /// The TSA certificate, if it verifies.
+    pub tsa_cert: Option<Bytes>,
+}
+
+/// One signer of a [`VerifyReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignerReport {
+    /// Its certificate, if the CMS has it.
+    pub certificate: Option<Bytes>,
+    /// Its signingTime attribute, Unix milliseconds.
+    pub signing_time_ms: Option<i64>,
+    /// The signature and messageDigest.
+    pub signature: Check,
+    /// signingCertificateV2; skipped without the attribute.
+    pub ess_cert_id: Check,
+    /// The certificate's validity at the time the signer is judged at.
+    pub validity: Check,
+    /// The certification path.
+    pub path: Check,
+    /// The revocation status; a revocation after the time the signer is judged at is good.
+    pub revocation: Check,
+    /// The time-stamp token, if the signer has one.
+    pub tsp: Option<TspReport>,
+}
+
+/// The reply of `cms_verify`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyReport {
+    /// The encapsulated content, if the CMS has it.
+    pub content: Option<Bytes>,
+    /// The signers, in order.
+    pub signers: Vec<SignerReport>,
+}
+
+/// A namespace binding of [`SignXmlExArgs`]'s XPaths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NsBinding {
+    /// The prefix.
+    pub prefix: String,
+    /// The namespace URI.
+    pub uri: String,
+}
+
+/// Where an XML signature goes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Placement {
+    /// Last child of the document element.
+    #[default]
+    DocumentElement,
+    /// Last child of the document's first node, which must be an element.
+    FirstChildOfDocument,
+    /// Last child of the element [`SignXmlExArgs::parent`] selects.
+    Parent,
+}
+
+/// A canonicalization method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum C14n {
+    /// Canonical XML 1.0.
+    Inclusive,
+    /// Canonical XML 1.0 with comments.
+    InclusiveWithComments,
+    /// Exclusive XML Canonicalization 1.0.
+    Exclusive,
+    /// Exclusive XML Canonicalization 1.0 with comments.
+    ExclusiveWithComments,
+}
+
+/// A transform of the signed reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transform {
+    /// enveloped-signature.
+    Enveloped,
+    /// A canonicalization.
+    C14n(C14n),
+}
+
+/// A `ds:Object` with the signing time: `<ds:SignatureProperty Id="<property_id>"
+/// Target="#<signature_id>">` around an unqualified `<timestamp>` holding `text`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SigningTimeObject {
+    /// The `Id` of the `SignatureProperty`.
+    pub property_id: String,
+    /// A second reference (`URI="#<property_id>"`) signs it.
+    pub target_ref: bool,
+    /// The text of `<timestamp>`.
+    pub text: String,
+}
+
+/// The bytes `keys_sign_xml_ex` returns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XmlOutput {
+    /// The input bytes with the signature spliced in.
+    #[default]
+    AsIs,
+    /// As a JDK `Transformer` writes the document: the XML declaration replaced
+    /// (`<?xml version="1.0" encoding="UTF-8"?>`, `standalone="no"` if asked), nothing
+    /// before the first node, and with `trim` no whitespace at either end.
+    Serialize {
+        /// Write the declaration.
+        declaration: bool,
+        /// With `standalone="no"`.
+        standalone_no: bool,
+        /// No whitespace at either end.
+        trim: bool,
+    },
+}
+
+/// `keys_sign_xml_ex`: an XML signature as the plugin's clients expect it. Unset fields
+/// give [`SignXmlArgs`]'s signature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignXmlExArgs {
+    /// The key.
+    pub handle: u32,
+    /// The document, UTF-8.
+    pub xml: Bytes,
+    /// An XPath to the element to sign, which has an `Id`; `None`: the whole document.
+    #[serde(default)]
+    pub element: Option<String>,
+    /// An XPath to the element the signature goes into ([`Placement::Parent`]).
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// Prefix → namespace URI of the XPaths' names; with them (or `other_prefix_uri`)
+    /// names match by namespace, otherwise as written.
+    #[serde(default)]
+    pub namespaces: Vec<NsBinding>,
+    /// The namespace of every prefix `namespaces` does not bind.
+    #[serde(default)]
+    pub other_prefix_uri: Option<String>,
+    /// Where the signature goes.
+    #[serde(default)]
+    pub placement: Placement,
+    /// The `SignatureMethod` URI; `None`: Kalkan's for the certificate. Known URIs only, and
+    /// only one fitting the key.
+    #[serde(default)]
+    pub signature_method: Option<String>,
+    /// The `DigestMethod` URI; `None`: the one paired with the signature method.
+    #[serde(default)]
+    pub digest_method: Option<String>,
+    /// The `CanonicalizationMethod` of `SignedInfo`; `None`: Kalkan's.
+    #[serde(default)]
+    pub signed_info_c14n: Option<C14n>,
+    /// The reference's transforms; `None`: Kalkan's.
+    #[serde(default)]
+    pub transforms: Option<Vec<Transform>>,
+    /// The `Id` of `ds:Signature`.
+    #[serde(default)]
+    pub signature_id: Option<String>,
+    /// A signing-time object (needs `signature_id`).
+    #[serde(default)]
+    pub signing_time_object: Option<SigningTimeObject>,
+    /// No line breaks between the signature's elements.
+    #[serde(default)]
+    pub strip_whitespace: bool,
+    /// Base64 in lines of 76 characters; `None`: as Kalkan (in lines).
+    #[serde(default)]
+    pub base64_line_breaks: Option<bool>,
+    /// The output form.
+    #[serde(default)]
+    pub output: XmlOutput,
+}
+
+/// `xml_verify`: every XML signature of a document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XmlVerifyArgs {
+    /// The document, UTF-8.
+    pub xml: Bytes,
+}
+
+/// One signature of an [`XmlVerifyArgs`] document, in document order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XmlSigReport {
+    /// The certificate of its `KeyInfo`; empty if it does not read.
+    pub certificate: Bytes,
+    /// Whether it verifies with that certificate.
+    pub valid: bool,
 }

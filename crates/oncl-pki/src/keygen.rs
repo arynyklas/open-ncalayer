@@ -154,7 +154,7 @@ pub fn applet_key_id(key: &PublicKey) -> String {
 }
 
 /// The operating system RNG for `rsa` (`rand_core` 0.6).
-struct OsRng;
+pub(crate) struct OsRng;
 
 impl RngCore for OsRng {
     fn next_u32(&mut self) -> u32 {

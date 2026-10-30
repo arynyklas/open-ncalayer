@@ -273,6 +273,9 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
         Import::TspRequest => run(args, |a| caps::tsp_request(state, a)),
         Import::OcspFetch => run(args, |a| caps::ocsp_fetch(state, a)),
         Import::CrlFetch => run(args, |a| caps::crl_fetch(state, a)),
+        Import::CmsVerify => run(args, |a| caps::cms_verify(state, a)),
+        Import::KeysSignXmlEx => run(args, |a| caps::keys_sign_xml_ex(state, a)),
+        Import::XmlVerify => run(args, caps::xml_verify),
     }
 }
 
