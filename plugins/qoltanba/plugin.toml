@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.port.qoltanba"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["kz.btsdigital.qoltanba.CMSSignUtil"]
+
+[name]
+ru = "Qoltanba (порт OpenNCALayer)"
+kk = "Qoltanba (OpenNCALayer порты)"
+en = "Qoltanba (OpenNCALayer port)"
+
+[description]
+ru = "Подпись файлов, проверка подписей CMS и PDF с отчётом о подписантах для qoltanba.kz"
+kk = "qoltanba.kz үшін файлдарға қол қою, CMS қолтаңбаларын тексеру және қол қоюшылар туралы есебі бар PDF"
+en = "Signs files, checks CMS signatures and adds a report of the signers to PDFs for qoltanba.kz"
+
+[replaces]
+symname = "kz.btsdigital.qoltanba"
+version = "1.1"
+
+[capabilities]
+keys = true

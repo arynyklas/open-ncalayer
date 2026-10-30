@@ -29,4 +29,11 @@ toml.workspace = true
 aes.workspace = true
 cbc.workspace = true
 rsa.workspace = true
+# Qoltanba's report: the PDFs of the tests, read back independently of the port.
+lopdf.workspace = true
+# SKF's CA list: a JKS of the tests, its integrity hash.
+sha1.workspace = true
+# SKF's OCSP issuer: an intermediate CA issued again with one of the serials SKF accepts.
+der.workspace = true
+x509-cert.workspace = true
 serde_json.workspace = true

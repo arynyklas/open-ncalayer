@@ -29,6 +29,8 @@ spki = { version = "0.8.1", features = ["alloc"] }
 x509-cert = { version = "0.3.0", default-features = false }
 # MD5 of files some sites ask for next to SHA-256 (not used for signatures).
 md-5 = "0.11.0"
+# The integrity hash of the Java KeyStores some ports download (SKF's CA list).
+sha1 = "0.11.0"
 # Origins of the page and of URLs the ports fetch.
 url = "2.5.8"
 # Zip archives some ports upload: the container written by `oncl-port-kit`, the entries

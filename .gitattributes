@@ -14,3 +14,6 @@ xtask/licenses/*.txt text eol=lf
 # Update indexes are signed byte for byte (`cargo xtask sign`) and published as committed:
 # no end-of-line conversion.
 updates/** -text
+# Qoltanba's report font and its license, as published (sha256 in its README).
+plugins/qoltanba/fonts/*.ttf -text
+plugins/qoltanba/fonts/OFL.txt -text

@@ -1,0 +1,26 @@
+id = "io.github.arynyklas.openncalayer.port.skf"
+version = "1.0.0-beta.1"
+min_core = "0.1.0-alpha.3"
+modules = ["org.skf.osgi.SKFModule"]
+
+[name]
+ru = "СК-Фармация, portal.efis.kz (порт OpenNCALayer)"
+kk = "СК-Фармация, portal.efis.kz (OpenNCALayer порты)"
+en = "SK-Pharmacy, portal.efis.kz (OpenNCALayer port)"
+
+[description]
+ru = "Подпись документов портала СК-Фармация в формате XAdES"
+kk = "СК-Фармация порталының құжаттарына XAdES пішімінде қол қою"
+en = "Signs SK-Pharmacy portal documents as XAdES"
+
+[replaces]
+symname = "org.skf.osgi.SKFModule"
+version = "1.6.2"
+
+[capabilities]
+keys = true
+key_files = true
+dialogs = true
+files = true
+http = ["https://portal.efis.kz/pub/"]
+origins = ["https://*.efis.kz"]

@@ -69,6 +69,26 @@ fn rfc2253_reverses_rdns() {
 }
 
 #[test]
+fn attribute_values_in_der_order() {
+    let name =
+        attr::x509_name_from_kalkan_dn("CN=ИВАНОВ,OU=BIN1,SERIALNUMBER=IIN1,OU=BIN2,C=KZ").unwrap();
+    assert_eq!(
+        x509text::attribute_values(&name, "2.5.4.11").unwrap(),
+        ["BIN1", "BIN2"]
+    );
+    assert_eq!(
+        x509text::attribute_values(&name, "2.5.4.3").unwrap(),
+        ["ИВАНОВ"]
+    );
+    assert!(
+        x509text::attribute_values(&name, "2.5.4.42")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(x509text::attribute_values(b"\x30", "2.5.4.3").is_err());
+}
+
+#[test]
 fn ldap_and_algorithm_names() {
     let dn = "CN=ИВАНОВ ИВАН,SURNAME=ИВАНОВ,SERIALNUMBER=IIN123456789012,C=KZ,OU=BIN1,OU=BIN2";
     assert_eq!(x509text::ldap_first(dn, "OU").as_deref(), Some("BIN2"));

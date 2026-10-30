@@ -1,0 +1,26 @@
+id = "io.github.arynyklas.openncalayer.port.qoltanba"
+modules = ["kz.btsdigital.qoltanba.CMSSignUtil"]
+
+[original]
+symname = "kz.btsdigital.qoltanba"
+version = "1.1"
+vendor = "BTS Digital"
+
+[port]
+status = "partial"
+conformance = "computed"
+
+[[differences]]
+ru = "Хранилище, пароль и ключ выбираются в окнах OpenNCALayer; закрытие окна хранилища и отказ от выбора ключа одинаково дают «Действие отменено»."
+
+[[differences]]
+ru = "Ключи, сертификат которых не типа SIGNATURE или имеет запрещённые назначения ЭП (1.2.398.5.19.1.2.2.1, 1.2.398.5.19.1.2.2.1.2), в окне выбора недоступны (у оригинала — ошибка после выбора)."
+
+[[differences]]
+ru = "Отчёт visualCMS добавляется к PDF инкрементальным обновлением: байты документа не меняются, подписи PDF внутри него сохраняются. Тот же текст и раскладка, байты PDF другие (у оригинала — новый документ iText)."
+
+[[differences]]
+ru = "Язык ответов хранится в сеансе страницы (у оригинала — общий для процесса)."
+
+[[differences]]
+ru = "Токены — после поддержки токенов в OpenNCALayer: до неё токен-хранилища отвечают «Носитель не обнаружен»."

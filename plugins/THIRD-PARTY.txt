@@ -58,6 +58,7 @@ serde 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde | 18, 25
 serde_bytes 0.11.19 | MIT OR Apache-2.0 | https://github.com/serde-rs/bytes | 18, 25
 serde_core 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde | 18, 25
 serde_json 1.0.154 | MIT OR Apache-2.0 | https://github.com/serde-rs/json | 18, 25
+sha1 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes | 1, 26
 smallvec 1.16.4 | MIT OR Apache-2.0 | https://github.com/servo/rust-smallvec | 1, 31
 spki 0.8.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats | 1, 32
 stable_deref_trait 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait | 1, 33

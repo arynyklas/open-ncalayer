@@ -4,11 +4,13 @@
 //! - [`attr`]: values of signed attributes and names made from DN strings;
 //! - [`cms_read`]: content, signers and certificates of a CMS;
 //! - [`esedo`]: the ESEDO signed attributes and OCSP request, by a port's profile;
+//! - [`jks`]: the trusted certificates of a Java KeyStore;
 //! - [`x509text`]: the certificate texts of Java and Kalkan the original's plugins sent.
 
 pub mod attr;
 pub mod cms_read;
 pub mod esedo;
+pub mod jks;
 pub mod x509text;
 
 /// A DER TLV of `tag` around `content`.
