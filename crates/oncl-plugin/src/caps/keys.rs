@@ -3,8 +3,8 @@
 //! signatures made here, the private key never reaching the guest.
 
 use super::{
-    DialogTurn, MAX_KEY_HANDLES, MAX_LINE, check_line, crypto, denied, failed, invalid, origin,
-    source,
+    ConsentKind, DialogTurn, MAX_KEY_HANDLES, MAX_LINE, check_line, crypto, denied, failed,
+    invalid, origin, source,
 };
 use crate::host::HostState;
 use der::asn1::ObjectIdentifier;
@@ -377,11 +377,11 @@ fn page_key_file(state: &mut HostState, path: &str) -> Result<Vec<u8>, OpenOutco
         return Err(OpenOutcome::Corrupt);
     }
     let canonical = std::fs::canonicalize(named).map_err(|_| OpenOutcome::NotFound)?;
-    let key = (origin(state), canonical);
+    let key = (ConsentKind::KeyStore, origin(state), canonical);
     if !state.consents.contains(&key) {
-        let text = consent_text(state.call.locale, &key.0, &source(state), &shown(&key.1));
+        let text = consent_text(state.call.locale, &key.1, &source(state), &shown(&key.2));
         let prompt = ConfirmPrompt {
-            origin: key.0.clone(),
+            origin: key.1.clone(),
             locale: state.call.locale,
             source: source(state),
             text,
@@ -400,7 +400,7 @@ fn page_key_file(state: &mut HostState, path: &str) -> Result<Vec<u8>, OpenOutco
 }
 
 /// `path` as the user reads it: without Windows' `\\?\` prefix.
-fn shown(path: &Path) -> String {
+pub(super) fn shown(path: &Path) -> String {
     let text = path.display().to_string();
     if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{unc}");

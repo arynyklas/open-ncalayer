@@ -4,7 +4,7 @@
 //! runs out of fuel or memory, answers malformed) gets [`PLUGIN_ERROR_REPLY`] sent to the page
 //! and its instance is not used again.
 
-use crate::caps::DialogTurn;
+use crate::caps::{DialogTurn, SharedState};
 use crate::host::{self, HostServices, HostState, Phase};
 use crate::manifest::{Capabilities, Localized, Manifest};
 use oncl_pdk::abi::{self, ABI_VERSION, Capability, IMPORT_MODULE, Import, Input, Output, exports};
@@ -214,7 +214,14 @@ pub(crate) fn declares(capabilities: &Capabilities, import: Import) -> bool {
         Some(Capability::Keys) => capabilities.keys,
         Some(Capability::Dialogs) => capabilities.dialogs,
         Some(Capability::Files) => capabilities.files,
-        Some(Capability::Http) => !capabilities.http.is_empty(),
+        Some(Capability::Http) => {
+            !capabilities.http.is_empty()
+                || !capabilities.origins.is_empty()
+                || !capabilities.http_insecure.is_empty()
+        }
+        Some(Capability::PageFiles) => capabilities.page_files,
+        Some(Capability::Settings) => capabilities.settings,
+        Some(Capability::Shared) => capabilities.shared,
     }
 }
 
@@ -256,14 +263,16 @@ pub struct Compiled {
 }
 
 /// Whose an instance is: its session and its plugin.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SessionContext {
     /// The session the instance serves; `0`: one call without a session.
     pub session: SessionId,
-    /// The plugin's id, in the log.
+    /// The plugin's id, in the log and the name of its settings file.
     pub plugin_id: String,
     /// The plugin's name, in the dialogs.
     pub plugin_name: Localized,
+    /// The values the instances of the plugin's loaded generation share (`shared_*`).
+    pub shared: Arc<SharedState>,
 }
 
 impl Compiled {

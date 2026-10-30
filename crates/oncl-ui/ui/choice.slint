@@ -1,0 +1,79 @@
+// A plugin's question with its own buttons (one to three) and, if it has options, a list to
+// pick from: who asks, how it looks, its heading and text (plain text, not markup).
+
+import { Button, Palette, StandardListView, VerticalBox } from "std-widgets.slint";
+
+export component ChoiceDialog inherits Window {
+    title: "OpenNCALayer";
+    always-on-top: true;
+    min-width: 420px;
+    max-width: 640px;
+
+    // The requesting page's origin.
+    in property <string> origin;
+    // The plugin's name.
+    in property <string> source;
+    // 0: information, 1: warning, 2: error.
+    in property <int> kind;
+    // The plugin's heading; empty: the kind's.
+    in property <string> title-text;
+    // The plugin's text.
+    in property <string> text;
+    // The buttons' texts, left to right.
+    in property <[string]> buttons;
+    // The button Enter presses.
+    in property <int> default-button;
+    // The list to pick from; empty: none.
+    in property <[StandardListViewItem]> options;
+    // The option selected; -1: none.
+    in-out property <int> selected: -1;
+    // The translated header lines.
+    out property <string> requester: @tr("Request from: {}", root.origin);
+    out property <string> heading: root.title-text != "" ? root.title-text : root.kind == 2 ? @tr("Error") : root.kind == 1 ? @tr("Warning") : @tr("Information");
+
+    // A button pressed: its index and the option selected (-1: none).
+    callback pressed(int, int);
+    callback cancel();
+
+    VerticalBox {
+        Text {
+            text: root.requester;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: @tr("Plugin: {}", root.source);
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: root.heading;
+            font-weight: 700;
+            wrap: word-wrap;
+            color: root.kind == 2 ? #c62828 : root.kind == 1 ? #a15c00 : Palette.foreground;
+        }
+
+        Text {
+            text: root.text;
+            wrap: word-wrap;
+        }
+
+        if root.options.length > 0: StandardListView {
+            min-height: 120px;
+            model: root.options;
+            current-item <=> root.selected;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            for label[i] in root.buttons: Button {
+                text: label;
+                primary: i == root.default-button;
+                clicked => {
+                    root.pressed(i, root.selected);
+                }
+            }
+        }
+    }
+}

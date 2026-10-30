@@ -194,6 +194,19 @@ pub enum CapabilityLine {
     Files,
     /// Reach these URL prefixes.
     Http(Vec<String>),
+    /// Reach the sites of these origins themselves (the page's own site).
+    Origins(Vec<String>),
+    /// Reach these plain-HTTP prefixes: an unprotected connection.
+    HttpInsecure(Vec<String>),
+    /// Open key store files the sites name, each once you allow it.
+    KeyFiles,
+    /// Read files and write into folders the sites name, each once you allow it; written
+    /// files of these extensions.
+    PageFiles(Vec<String>),
+    /// Keep its settings on this computer.
+    Settings,
+    /// Share data between sites.
+    Shared,
 }
 
 /// The open window ([`worker::Slot`]).

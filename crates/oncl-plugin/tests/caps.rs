@@ -40,6 +40,7 @@ fn example_on(services: &HostServices, session_id: u64) -> Instance {
         session: session_id,
         plugin_id: manifest.id.clone(),
         plugin_name: manifest.name.clone(),
+        shared: Default::default(),
     };
     Engine::new()
         .compile(&manifest, &read(example_wasm()))

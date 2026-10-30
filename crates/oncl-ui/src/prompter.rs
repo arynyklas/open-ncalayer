@@ -2,20 +2,21 @@
 
 use crate::foreground;
 use crate::ui::{
-    BusyDialog, CertItem, ConfirmDialog, CsrDialog, FileDialog, ImportDialog, KeyDialog, KeyItem,
-    MessageDialog, PasswordDialog, SaveDialog, StorageDialog, StorageRow,
+    BusyDialog, CertItem, ChoiceDialog, ConfirmDialog, CsrDialog, FileDialog, ImportDialog,
+    KeyDialog, KeyItem, MessageDialog, PasswordDialog, SaveDialog, StorageDialog, StorageRow,
 };
 use crate::view::{self, KeyRow};
 use oncl_basics::{
-    Action, Busy, BusyPrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FileKind, FilePrompt,
-    ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale, MessageKind, MessagePrompt,
-    PasswordPrompt, Prompt, Prompter, SavePrompt, StorageAnswer, StorageKind, StoragePrompt,
+    Action, Busy, BusyPrompt, ChoiceAnswer, ChoicePrompt, ConfirmPrompt, CsrAnswer, CsrPrompt,
+    FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale, MessageKind,
+    MessagePrompt, PasswordPrompt, PathMode, PathPrompt, Prompt, Prompter, SavePrompt,
+    StorageAnswer, StorageKind, StoragePrompt,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{
     CloseRequestResponse, ComponentHandle, EventLoopError, Model, ModelRc, PlatformError,
-    SharedString, VecModel,
+    SharedString, StandardListViewItem, VecModel,
 };
 use std::any::Any;
 use std::cell::RefCell;
@@ -202,6 +203,14 @@ impl Prompter for SlintPrompter {
 
     fn save_file(&self, p: &SavePrompt) -> Prompt<PathBuf> {
         ask(p, show_save)
+    }
+
+    fn choice(&self, p: &ChoicePrompt) -> Prompt<ChoiceAnswer> {
+        ask(p, show_choice)
+    }
+
+    fn path(&self, p: &PathPrompt) -> Prompt<PathBuf> {
+        ask(p, show_path)
     }
 }
 
@@ -741,6 +750,79 @@ fn pick(ui: &FileDialog, p: &FilePrompt, pending: Rc<Pending<FileDialog, PathBuf
     }
 }
 
+/// A plugin's file or folder chooser for `p`: the file chooser's window with the plugin's
+/// title, filters and start folder; the outcome goes to `reply`.
+fn show_path(p: PathPrompt, reply: Sender<Prompt<PathBuf>>) -> Result<(), PlatformError> {
+    let ui = FileDialog::new()?;
+    let pending = wire_path(&ui, p, reply);
+    show(&ui, pending)?;
+    ui.invoke_browse();
+    Ok(())
+}
+
+/// The heading of a plugin's chooser: its title, or what to choose.
+fn path_heading(p: &PathPrompt) -> String {
+    let kind = match p.mode {
+        PathMode::File => FileKind::All,
+        PathMode::Directory => FileKind::Directory,
+    };
+    p.title
+        .clone()
+        .unwrap_or_else(|| view::file_dialog_title(kind, p.locale).to_owned())
+}
+
+/// Fills the file chooser with `p` and wires Browse… to the system dialog.
+fn wire_path(
+    ui: &FileDialog,
+    p: PathPrompt,
+    reply: Sender<Prompt<PathBuf>>,
+) -> Rc<Pending<FileDialog, PathBuf>> {
+    select_language(p.locale);
+    ui.set_origin(p.origin.as_str().into());
+    ui.set_source(p.source.as_str().into());
+    ui.set_heading(path_heading(&p).into());
+    let pending = Pending::new(ui.clone_strong(), reply);
+    let weak = ui.as_weak();
+    ui.on_browse({
+        let pending = pending.clone();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                pick_path(&ui, &p, pending.clone());
+            }
+        }
+    });
+    pending
+}
+
+/// Opens the system dialog for `p` over `ui`; a choice answers `pending`, a cancel cancels
+/// it.
+fn pick_path(ui: &FileDialog, p: &PathPrompt, pending: Rc<Pending<FileDialog, PathBuf>>) {
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title(path_heading(p))
+        .set_parent(&ui.window().window_handle());
+    for filter in &p.filters {
+        dialog = dialog.add_filter(filter.name.as_str(), &filter.extensions);
+    }
+    if let Some(dir) = &p.directory {
+        dialog = dialog.set_directory(dir);
+    }
+    let folder = p.mode == PathMode::Directory;
+    let picked = slint::spawn_local(async move {
+        let picked = if folder {
+            dialog.pick_folder().await
+        } else {
+            dialog.pick_file().await
+        };
+        match picked {
+            Some(handle) => pending.finish(Prompt::Answer(handle.path().to_path_buf())),
+            None => pending.cancel(),
+        };
+    });
+    if let Err(e) = picked {
+        tracing::warn!(error = %e, "cannot open the file dialog");
+    }
+}
+
 /// The password dialog for `p`; the outcome goes to `reply`.
 fn show_password(
     p: PasswordPrompt,
@@ -841,6 +923,49 @@ fn wire_confirm(
         let pending = pending.clone();
         move |yes| {
             pending.finish(Prompt::Answer(yes));
+        }
+    });
+    pending
+}
+
+/// A plugin's question with its buttons (and list) for `p`; the outcome goes to `reply`.
+fn show_choice(p: ChoicePrompt, reply: Sender<Prompt<ChoiceAnswer>>) -> Result<(), PlatformError> {
+    let ui = ChoiceDialog::new()?;
+    let pending = wire_choice(&ui, &p, reply);
+    show(&ui, pending)
+}
+
+/// Fills the choice dialog with `p` and wires its buttons to answers: the button and the
+/// option selected, if any.
+fn wire_choice(
+    ui: &ChoiceDialog,
+    p: &ChoicePrompt,
+    reply: Sender<Prompt<ChoiceAnswer>>,
+) -> Rc<Pending<ChoiceDialog, ChoiceAnswer>> {
+    select_language(p.locale);
+    ui.set_origin(p.origin.as_str().into());
+    ui.set_source(p.source.as_str().into());
+    ui.set_kind(match p.kind {
+        MessageKind::Info => 0,
+        MessageKind::Warning => 1,
+        MessageKind::Error => 2,
+    });
+    ui.set_title_text(p.title.as_deref().unwrap_or_default().into());
+    ui.set_text(p.text.as_str().into());
+    let buttons: Vec<SharedString> = p.buttons.iter().map(|b| b.as_str().into()).collect();
+    ui.set_buttons(ModelRc::new(VecModel::from(buttons)));
+    ui.set_default_button(index(Some(p.default)));
+    let options: Vec<StandardListViewItem> = p.options.iter().map(|o| o.as_str().into()).collect();
+    ui.set_options(ModelRc::new(VecModel::from(options)));
+    let pending = Pending::new(ui.clone_strong(), reply);
+    ui.on_pressed({
+        let pending = pending.clone();
+        move |button, selected| {
+            let Ok(button) = usize::try_from(button) else {
+                return;
+            };
+            let option = usize::try_from(selected).ok();
+            pending.finish(Prompt::Answer(ChoiceAnswer { button, option }));
         }
     });
     pending
@@ -954,6 +1079,12 @@ impl Dialog for MessageDialog {
 impl Dialog for ConfirmDialog {
     fn set_cancel(&self, f: impl FnMut() + 'static) {
         ConfirmDialog::on_cancel(self, f);
+    }
+}
+
+impl Dialog for ChoiceDialog {
+    fn set_cancel(&self, f: impl FnMut() + 'static) {
+        ChoiceDialog::on_cancel(self, f);
     }
 }
 
@@ -1675,5 +1806,128 @@ mod plugin_dialogs {
                 other => panic!("{other:?}"),
             }
         }
+    }
+
+    fn choice_prompt(locale: Locale, title: Option<&str>, options: &[&str]) -> ChoicePrompt {
+        ChoicePrompt {
+            origin: ORIGIN.to_owned(),
+            locale,
+            source: "Example".to_owned(),
+            kind: MessageKind::Error,
+            title: title.map(str::to_owned),
+            text: "<b>not markup</b>".to_owned(),
+            buttons: vec!["Да".to_owned(), "Нет".to_owned(), "Отмена".to_owned()],
+            default: 1,
+            options: options.iter().map(|o| (*o).to_owned()).collect(),
+        }
+    }
+
+    /// The plugin's choice: its buttons and list as given, the kind's heading in each
+    /// language without a title of its own, and the button with the option selected.
+    #[test]
+    fn choice_shows_buttons_and_list() {
+        offscreen();
+        for (locale, requester, error) in LANGUAGES {
+            let ui = ChoiceDialog::new().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let pending = wire_choice(&ui, &choice_prompt(locale, None, &[]), tx);
+            wire_dismissal(&ui, &pending);
+            assert_eq!(ui.get_requester(), requester);
+            assert_eq!(ui.get_heading(), error);
+            assert_eq!(ui.get_text(), "<b>not markup</b>");
+            let buttons: Vec<String> = ui.get_buttons().iter().map(String::from).collect();
+            assert_eq!(buttons, ["Да", "Нет", "Отмена"]);
+            assert_eq!(ui.get_default_button(), 1);
+            ui.invoke_pressed(2, -1);
+            assert_eq!(
+                rx.try_recv(),
+                Ok(Prompt::Answer(ChoiceAnswer {
+                    button: 2,
+                    option: None
+                }))
+            );
+        }
+        let ui = ChoiceDialog::new().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let p = choice_prompt(
+            Locale::Kk,
+            Some("Подпись"),
+            &["Считыватель 1", "Считыватель 2"],
+        );
+        let pending = wire_choice(&ui, &p, tx);
+        wire_dismissal(&ui, &pending);
+        assert_eq!(ui.get_heading(), "Подпись");
+        assert_eq!(ui.get_options().row_count(), 2);
+        ui.set_selected(1);
+        ui.invoke_pressed(0, ui.get_selected());
+        assert_eq!(
+            rx.try_recv(),
+            Ok(Prompt::Answer(ChoiceAnswer {
+                button: 0,
+                option: Some(1)
+            }))
+        );
+        // Closing is no button.
+        let ui = ChoiceDialog::new().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let pending = wire_choice(&ui, &choice_prompt(Locale::En, None, &[]), tx);
+        wire_dismissal(&ui, &pending);
+        close(ui.window());
+        assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled));
+    }
+
+    /// The plugin's path chooser: the plugin named, its title or what to choose in each
+    /// language.
+    #[test]
+    fn path_chooser_names_plugin_and_title() {
+        offscreen();
+        let path = |locale, mode, title: Option<&str>| PathPrompt {
+            origin: ORIGIN.to_owned(),
+            locale,
+            source: "Example".to_owned(),
+            title: title.map(str::to_owned),
+            mode,
+            filters: Vec::new(),
+            directory: None,
+        };
+        for (locale, line, file, folder) in [
+            (
+                Locale::Ru,
+                "Плагин: Example",
+                "Выберите файл",
+                "Выберите папку",
+            ),
+            (
+                Locale::Kk,
+                "Плагин: Example",
+                "Файлды таңдаңыз",
+                "Папканы таңдаңыз",
+            ),
+            (
+                Locale::En,
+                "Plugin: Example",
+                "Choose a file",
+                "Choose a folder",
+            ),
+        ] {
+            for (mode, heading) in [(PathMode::File, file), (PathMode::Directory, folder)] {
+                let ui = FileDialog::new().unwrap();
+                let (tx, rx) = mpsc::channel();
+                let pending = wire_path(&ui, path(locale, mode, None), tx);
+                wire_dismissal(&ui, &pending);
+                assert_eq!(ui.get_source_line(), line);
+                assert_eq!(ui.get_heading(), heading);
+                ui.invoke_cancel();
+                assert_eq!(rx.try_recv(), Ok(Prompt::Cancelled));
+            }
+        }
+        let ui = FileDialog::new().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        wire_path(
+            &ui,
+            path(Locale::Ru, PathMode::File, Some("Выберите подпись")),
+            tx,
+        );
+        assert_eq!(ui.get_heading(), "Выберите подпись");
     }
 }

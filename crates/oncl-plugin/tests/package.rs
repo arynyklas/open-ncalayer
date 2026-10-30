@@ -639,6 +639,7 @@ fn capabilities_added_over_older_ones() {
         files: false,
         key_files: false,
         http: vec![prefix("https://a.kz/api/"), prefix("https://b.kz/")],
+        ..Capabilities::default()
     };
     // The same, fewer, or narrower: nothing new.
     assert!(old.added_over(&old).is_empty());
@@ -663,6 +664,7 @@ fn capabilities_added_over_older_ones() {
             prefix("https://b.kz:8443/"),
             prefix("https://c.kz/"),
         ],
+        ..Capabilities::default()
     };
     assert_eq!(
         wider.added_over(&old),
@@ -676,8 +678,146 @@ fn capabilities_added_over_older_ones() {
                 prefix("https://b.kz:8443/"),
                 prefix("https://c.kz/"),
             ],
+            ..Capabilities::default()
         }
     );
     assert!(Capabilities::default().is_empty());
     assert!(!old.is_empty());
+}
+
+/// The capabilities of `MANIFEST` with the `[capabilities]` table `caps`.
+fn caps_of(caps: &str) -> Result<Capabilities, PackageError> {
+    Manifest::from_toml(&format!("{MANIFEST}\n[capabilities]\n{caps}\n")).map(|m| m.capabilities)
+}
+
+#[test]
+fn wildcard_prefix_rules() {
+    let caps = caps_of(r#"http = ["https://*.gov.kz/"]"#).unwrap();
+    let prefix = &caps.http[0];
+    assert_eq!(prefix.host(), "*.gov.kz");
+    assert_eq!(prefix.to_string(), "https://*.gov.kz/");
+    assert!(prefix.allows("https://a.gov.kz/x"));
+    assert!(prefix.allows("https://x.y.gov.kz/"));
+    for url in [
+        "https://gov.kz/",
+        "https://evilgov.kz/",
+        "https://gov.kz.evil/",
+        "https://a.gov.kz@evil/",
+        "http://a.gov.kz/",
+    ] {
+        assert!(!prefix.allows(url), "{url}");
+    }
+    for bad in [
+        "https://*.kz/",
+        "https://*/",
+        "https://a*.kz/",
+        "https://*.*.kz/",
+        "https://*.1.2.3/",
+        "http://*.gov.kz/",
+    ] {
+        let refused = caps_of(&format!("http = [\"{bad}\"]"));
+        assert!(matches!(refused, Err(PackageError::Manifest(_))), "{bad}");
+    }
+    // A wildcard covers the hosts under it, not the domain.
+    let wide = "https://*.gov.kz/".parse::<HttpPrefix>().unwrap();
+    assert!(wide.covers(&"https://a.gov.kz/x/".parse().unwrap()));
+    assert!(wide.covers(&"https://*.pki.gov.kz/".parse().unwrap()));
+    assert!(!wide.covers(&"https://gov.kz/".parse().unwrap()));
+    assert!(
+        !"https://a.gov.kz/"
+            .parse::<HttpPrefix>()
+            .unwrap()
+            .covers(&wide)
+    );
+}
+
+#[test]
+fn origins_rules() {
+    let caps = caps_of(
+        r#"origins = ["https://*.ecc.kz", "http://client2.kazynashylyk.kz", "https://a.kz:8443"]"#,
+    )
+    .unwrap();
+    let shown: Vec<String> = caps.origins.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        shown,
+        [
+            "https://*.ecc.kz",
+            "http://client2.kazynashylyk.kz",
+            "https://a.kz:8443"
+        ]
+    );
+    let url = |text: &str| oncl_plugin::Url::parse(text).unwrap();
+    assert!(caps.origins[0].matches(&url("https://egz.ecc.kz")));
+    assert!(!caps.origins[0].matches(&url("https://ecc.kz")));
+    assert!(!caps.origins[0].matches(&url("http://egz.ecc.kz")));
+    assert!(!caps.origins[0].matches(&url("https://egz.ecc.kz:444")));
+    assert!(caps.origins[1].matches(&url("http://client2.kazynashylyk.kz")));
+    assert!(caps.origins[2].matches(&url("https://a.kz:8443")));
+    assert!(!caps.origins[2].matches(&url("https://a.kz")));
+    for bad in [
+        "https://a.kz/",
+        "https://a.kz/path",
+        "https://a.kz?q",
+        "ftp://a.kz",
+        "https://*.kz",
+        "https://user@a.kz",
+        "a.kz",
+    ] {
+        let refused = caps_of(&format!("origins = [\"{bad}\"]"));
+        assert!(matches!(refused, Err(PackageError::Manifest(_))), "{bad}");
+    }
+    // Origins alone allow the HTTP host functions.
+    assert!(!caps_of(r#"origins = ["https://a.kz"]"#).unwrap().is_empty());
+}
+
+#[test]
+fn http_insecure_rules() {
+    let caps = caps_of(r#"http_insecure = ["http://ncalayer.uchet.kz:8080/api/"]"#).unwrap();
+    let prefix = &caps.http_insecure[0];
+    assert!(!prefix.is_secure());
+    assert_eq!(prefix.to_string(), "http://ncalayer.uchet.kz:8080/api/");
+    assert!(prefix.allows("http://ncalayer.uchet.kz:8080/api/x"));
+    assert!(!prefix.allows("https://ncalayer.uchet.kz:8080/api/x"));
+    assert!(!prefix.allows("http://ncalayer.uchet.kz/api/x"));
+    for bad in [
+        "https://a.kz/",
+        "http://*.uchet.kz/",
+        "http://a.kz",
+        "http://a.kz/api",
+        "http://user@a.kz/",
+        "http://a.kz/?q",
+    ] {
+        let refused = caps_of(&format!("http_insecure = [\"{bad}\"]"));
+        assert!(matches!(refused, Err(PackageError::Manifest(_))), "{bad}");
+    }
+    let nine: Vec<String> = (0..9).map(|i| format!("\"http://h{i}.kz/\"")).collect();
+    let refused = caps_of(&format!("http_insecure = [{}]", nine.join(", ")));
+    assert!(matches!(refused, Err(PackageError::Manifest(_))));
+}
+
+#[test]
+fn page_files_ext_needs_page_files() {
+    let refused = caps_of(r#"page_files_ext = ["cms"]"#);
+    assert!(matches!(refused, Err(PackageError::Manifest(_))));
+    let caps = caps_of("page_files = true\npage_files_ext = [\"CMS\", \"p7s\", \"cms\"]").unwrap();
+    assert!(caps.page_files);
+    assert_eq!(caps.page_files_ext, ["cms", "p7s"]);
+    for bad in ["", ".cms", "c/s", "abcdefghijklmnopq"] {
+        let refused = caps_of(&format!("page_files = true\npage_files_ext = [\"{bad}\"]"));
+        assert!(matches!(refused, Err(PackageError::Manifest(_))), "{bad:?}");
+    }
+    let caps = caps_of("settings = true\nshared = true").unwrap();
+    assert!(caps.settings && caps.shared);
+    // What is new over an older manifest.
+    let old = caps_of("page_files = true\npage_files_ext = [\"cms\"]").unwrap();
+    let new = caps_of(
+        "page_files = true\npage_files_ext = [\"cms\", \"xml\"]\nshared = true\norigins = [\"https://*.a.kz\"]",
+    )
+    .unwrap();
+    let added = new.added_over(&old);
+    assert!(!added.page_files);
+    assert_eq!(added.page_files_ext, ["xml"]);
+    assert!(added.shared);
+    assert_eq!(added.origins.len(), 1);
+    assert!(new.added_over(&new).is_empty());
 }

@@ -61,6 +61,38 @@ fn capability_lines(capabilities: &Capabilities) -> Vec<CapabilityLine> {
             capabilities.http.iter().map(ToString::to_string).collect(),
         ));
     }
+    if !capabilities.origins.is_empty() {
+        lines.push(CapabilityLine::Origins(
+            capabilities
+                .origins
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        ));
+    }
+    if !capabilities.http_insecure.is_empty() {
+        lines.push(CapabilityLine::HttpInsecure(
+            capabilities
+                .http_insecure
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        ));
+    }
+    if capabilities.key_files {
+        lines.push(CapabilityLine::KeyFiles);
+    }
+    if capabilities.page_files || !capabilities.page_files_ext.is_empty() {
+        lines.push(CapabilityLine::PageFiles(
+            capabilities.page_files_ext.clone(),
+        ));
+    }
+    if capabilities.settings {
+        lines.push(CapabilityLine::Settings);
+    }
+    if capabilities.shared {
+        lines.push(CapabilityLine::Shared);
+    }
     lines
 }
 
@@ -222,7 +254,15 @@ mod tests {
                     "https://a.kz/api/".parse::<HttpPrefix>().unwrap(),
                     "https://b.kz:8443/".parse::<HttpPrefix>().unwrap(),
                 ],
-                key_files: false,
+                origins: vec!["https://*.shop.kz".parse().unwrap()],
+                http_insecure: vec![
+                    HttpPrefix::parse_insecure("http://local.shop.kz:8080/").unwrap(),
+                ],
+                key_files: true,
+                page_files: true,
+                page_files_ext: vec!["cms".to_owned()],
+                settings: true,
+                shared: true,
             },
             local: true,
         };
@@ -247,6 +287,12 @@ mod tests {
                     "https://a.kz/api/".to_owned(),
                     "https://b.kz:8443/".to_owned()
                 ]),
+                CapabilityLine::Origins(vec!["https://*.shop.kz".to_owned()]),
+                CapabilityLine::HttpInsecure(vec!["http://local.shop.kz:8080/".to_owned()]),
+                CapabilityLine::KeyFiles,
+                CapabilityLine::PageFiles(vec!["cms".to_owned()]),
+                CapabilityLine::Settings,
+                CapabilityLine::Shared,
             ]
         );
         assert!(shown.local);

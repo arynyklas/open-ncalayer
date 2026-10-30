@@ -52,7 +52,14 @@ version = "1.2.1"
 keys = true
 dialogs = true
 files = true
-http = ["https://tsp.pki.gov.kz/"]
+http = ["https://tsp.pki.gov.kz/", "https://*.gov.kz/"]
+origins = ["https://*.ecc.kz", "http://client2.kazynashylyk.kz"]
+http_insecure = ["http://ncalayer.uchet.kz:8080/"]
+key_files = true
+page_files = true
+page_files_ext = ["cms"]
+settings = true
+shared = true
 ```
 
 | Поле | Обязательно | Правило |
@@ -76,7 +83,15 @@ http = ["https://tsp.pki.gov.kz/"]
 | `dialogs` | `false` | Показ диалогов |
 | `files` | `false` | Чтение и запись файлов, которые пользователь выбрал в диалоге |
 | `http` | `[]` | HTTPS-запросы по адресам с указанными префиксами, не больше 32 префиксов |
+| `origins` | `[]` | `http_request_ex` к origin самой страницы, если он подходит под один из шаблонов (не больше 32); относительные адреса — только от него |
+| `http_insecure` | `[]` | `http_request_ex` по HTTP без TLS под точными префиксами, не больше 8 |
 | `key_files` | `false` | `keys_open` хранилища по пути, который назвала страница (нужен `keys`); каждый файл — только после согласия пользователя |
+| `page_files` | `false` | `page_file_read` и `page_file_write`: файлы и каталоги, которые назвала страница; каждый файл (каталог) — только после согласия пользователя |
+| `page_files_ext` | `[]` | Расширения файлов, которые пишет `page_file_write` (нужен `page_files`): до 16, латинские буквы и цифры, сравниваются без учёта регистра |
+| `settings` | `false` | `settings_get`, `settings_put`: настройки плагина на диске |
+| `shared` | `false` | `shared_get`, `shared_put`: данные, общие для всех экземпляров плагина (а значит, для всех сайтов) в процессе |
+
+Окно установки показывает каждую возможность отдельной строкой: префиксы `http`, сайты `origins`, префиксы `http_insecure` со словами «незащищённое соединение», `key_files`, `page_files` с расширениями записи, `settings` и `shared` («делить данные между сайтами»). Обновление, которое добавляет возможности (новые флаги, префиксы и шаблоны, не покрытые прежними, новые расширения), снова спрашивает пользователя.
 
 Префикс `http`:
 
@@ -85,7 +100,8 @@ http = ["https://tsp.pki.gov.kz/"]
 - без пробелов, управляющих символов и `\`;
 - путь обязателен и заканчивается `/`: `https://a.kz/` и `https://a.kz/api/`, но не `https://a.kz` и не `https://a.kz/api`;
 - порт можно указать; без порта — 443;
-- в пути нет `;`, `%2f` и `%5c` (в любом регистре): с ними префикс не пропустил бы ни одного адреса (см. ниже).
+- в пути нет `;`, `%2f` и `%5c` (в любом регистре): с ними префикс не пропустил бы ни одного адреса (см. ниже);
+- хост может быть `*.` и доменом не меньше чем из двух меток (`https://*.gov.kz/`): тогда подходит любой хост под этим доменом по границе метки (`a.gov.kz`, `x.y.gov.kz`), но не сам `gov.kz`, не `evilgov.kz` и не `gov.kz.evil`; `https://*.kz/`, `https://*/`, `https://a*.kz/` и `*.` перед IP-адресом запрещены.
 
 Адрес запроса разрешён, если он тоже `https://` без имени пользователя и без `\`, пробелов и управляющих символов, а также:
 
@@ -111,6 +127,10 @@ Query и fragment запроса не проверяются. Адреса ра�
 | `https://tsp.pki.gov.kz@evil/` | запрещён: имя пользователя, хост `evil` |
 | `https://tsp.pki.gov.kz:8443/` | запрещён: другой порт |
 | `http://tsp.pki.gov.kz/` | запрещён: не HTTPS |
+
+Шаблон `origins` — `https://` или `http://`, хост (или `*.` и домен не меньше чем из двух меток, как в префиксе) и необязательный порт, без пути, query и fragment: `https://*.ecc.kz`, `https://a.kz:8443`. Порт без указания — 443 или 80 по схеме.
+
+Префикс `http_insecure` — как префикс `http`, но `http://`, только точный хост (без `*.`), порт без указания — 80: `http://ncalayer.uchet.kz:8080/`.
 
 ## ABI
 
@@ -166,7 +186,7 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 
 | Функции | `since` |
 |---|---|
-| `log`, `now`, `random`, `cert_info`, `reply_drop`, `hash`, `cert_details`, `local_time`, `platform`, `ca_list`, `ca_issuer`, функции `keys`, `dialogs`, `files`, `http` из этого раздела | `0.1.0-alpha.3` |
+| `log`, `now`, `random`, `cert_info`, `reply_drop`, `hash`, `cert_details`, `local_time`, `platform`, `ca_list`, `ca_issuer`, функции `keys`, `dialogs`, `files`, `http`, `page_files`, `settings`, `shared` из этого раздела | `0.1.0-alpha.3` |
 
 Функции capabilities — в разделе [Capabilities](#capabilities). Типы аргументов и результатов — модуль `oncl_pdk::abi`.
 
@@ -281,8 +301,11 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 | `dialog_message` | `MessageArgs { kind, text }`, `kind` — `info`, `warning`, `error` | `()` — когда пользователь закрыл окно |
 | `dialog_confirm` | `ConfirmArgs { text }` | `bool`: `true` — «Да»; «Нет» и закрытое окно — `false`. Кнопка по умолчанию — «Нет» |
 | `dialog_password` | `PasswordArgs { title, label, ok, cancel, allow_empty }` | `Option<SecretRef { id }>` — пароль остаётся в ядре, плагин получает его номер для `keys_open`; отмена — `None` |
+| `dialog_choice` | `ChoiceArgs { kind, title, text, buttons, default, options }` | `Option<u8>`: номер нажатой кнопки; со списком `options` — номер выбранного пункта, если нажата первая кнопка; закрытое окно, другая кнопка или ничего не выбрано — `None` |
 
 Окно пароля показывает сайт, название плагина, заголовок, текст и кнопки плагина; без `allow_empty` «ОК» не принимает пустой пароль. Пароль живёт в экземпляре (не больше 8) и годится только для `keys_open` этого экземпляра; неизвестный номер — `invalid`.
+
+Окно выбора показывает сайт, название плагина, заголовок плагина (без него — вид сообщения), текст как обычный текст, от 1 до 3 кнопок слева направо (`default` — кнопка Enter) и список до 32 пунктов. Текст до 16 КиБ, заголовок, кнопки и пункты до 1 КиБ; иначе — `invalid`, окно не показывается.
 
 ### `files`
 
@@ -291,22 +314,63 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 | `file_open` | `()` | `Option<OpenedFile { path, data }>` — файл, который пользователь выбрал в системном окне |
 | `file_save` | `SaveArgs { suggested_name, data }` | `Option<String>` — путь, куда пользователь сохранил |
 
-Плагин не называет пути сам: файл выбирает пользователь. Читается только обычный файл на диске (не канал и не устройство), не больше 64 МиБ. Сохранение предлагает только имя файла из `suggested_name` (без каталогов) и пишет атомарно: через временный файл рядом и переименование.
+| `file_choose` | `ChooseFileArgs { mode, title, filters, initial_dir }`, `mode` — `open` или `directory` | `Option<ChosenPath { path, size }>` — путь, который выбрал пользователь, без чтения; `size` — размер файла, у каталога `None` |
+| `file_open_ex` | `ChooseFileArgs` с `mode = open` | `Option<OpenedFile>` — как `file_open`, с заголовком, типами файлов и начальным каталогом плагина; `directory` — `invalid` |
+
+Плагин не называет пути сам: файл выбирает пользователь. Читается только обычный файл на диске (не канал и не устройство), не больше 64 МиБ. Сохранение предлагает только имя файла из `suggested_name` (без каталогов) и пишет атомарно: через временный файл рядом и переименование. Типы файлов — до 16, у каждого до 16 расширений из латинских букв и цифр (приводятся к строчным); начальный каталог берётся, только если страница могла бы его назвать (как для `page_files`) и это каталог. Выбранный сетевой путь (`file_choose`, `file_open_ex`) становится путём, который страница может назвать дальше.
+
+### `page_files`
+
+| Функция | Аргумент | Результат |
+|---|---|---|
+| `page_file_read` | `PagePathArgs { path }` | `PageRead`: `ok(OpenedFile)`, `not_found`, `too_large`, `declined` |
+| `page_file_write` | `PageWriteArgs { dir, name, data }` | `PageWrite`: `written(path)`, `invalid`, `declined` |
+
+Путь, который назвала страница, проходит те же правила, что у встроенных модулей: устройства (`\\.\`, `\\?\GLOBALROOT`) — никогда, сетевой путь — только выбранный ранее пользователем в окне ядра; читается только обычный файл не больше 64 МиБ (каталог, канал, устройство — `not_found`, больше — `too_large`), до согласия файл не читается. Ядро спрашивает пользователя окном с сайтом, плагином и полным путём; согласие запоминается в экземпляре (сессии) на пару (сайт, канонический путь), отказ — `declined`.
+
+`page_file_write` пишет в существующий каталог, который назвала страница; `name` — имя без разделителей, `..`, управляющих и зарезервированных символов Windows, не начинается с `.` и не заканчивается `.` или пробелом, с расширением из `page_files_ext`; иначе — `invalid` без вопроса. Окно согласия показывает полный путь файла; согласие действует на каталог до конца сессии. Запись атомарная, существующий файл заменяется.
+
+### `settings`
+
+| Функция | Аргумент | Результат |
+|---|---|---|
+| `settings_get` | `()` | `BTreeMap<String, String>` — настройки; без файла или с повреждённым файлом — пустые (повреждение пишется в журнал) |
+| `settings_put` | `BTreeMap<String, String>` | `()` — настройки заменяются целиком |
+
+Настройки лежат в `<data>/plugins/settings/<id>.json`, пишутся атомарно, не больше 256 ключей и 64 КиБ JSON (иначе `limit`). Обновление плагина их сохраняет, удаление — удаляет.
+
+### `shared`
+
+| Функция | Аргумент | Результат |
+|---|---|---|
+| `shared_get` | `SharedKey { key }` | `Option<Bytes>` — значение, если оно есть и не истекло |
+| `shared_put` | `SharedPut { key, value, ttl_ms }` | `()`; `value = None` удаляет ключ |
+
+Значения живут в памяти процесса, общие для всех экземпляров одного загруженного поколения плагина, то есть для всех сессий и сайтов; перезагрузка и обновление плагина начинают с пустого. Не больше 64 ключей и 64 КиБ ключей и значений вместе (иначе `limit`). Handle ключа через `shared` в другую сессию не переносится: таблица ключей — в экземпляре.
 
 ### `http`
 
 | Функция | Аргумент | Результат |
 |---|---|---|
 | `http_request` | `HttpArgs { method, url, content_type, body }`, `method` — `get` или `post` | `HttpResponse { status, content_type, location, body }` |
+| `http_request_ex` | `HttpExArgs { method, url, relative_to_origin, headers, content_type, body, timeout_ms }` | `HttpResponse` |
 
 Адрес проверяется по префиксам манифеста (см. выше) и отправляется в проверенной форме; вне префиксов — `denied`, ничего не отправляется. Запрос идёт через прокси из настроек OpenNCALayer, только по HTTPS, с лимитами 32 МиБ и 60 с и без следования перенаправлениям: 3xx возвращается плагину с `location`. У GET нет тела. За один вызов `oncl_process` плагин отправляет не больше 64 запросов; следующий получает `limit` и не отправляется.
+
+`http_request_ex` отправляет запрос, если выполнено одно из условий:
+
+- адрес под префиксом `http` (HTTPS, хост `*.` — по границе метки);
+- `relative_to_origin` (адрес разрешается от origin текущего вызова) или абсолютный адрес с тем же origin (схема, хост, порт), и этот origin подходит под шаблон `origins`; HTTP — только если сам origin HTTP. Без origin или с origin, который не является адресом (`null`), — `denied`;
+- адрес под префиксом `http_insecure` (HTTP, точный хост и порт).
+
+Остальное, в том числе `file:`, `data:` и другие схемы, — `denied`. Заголовки — только `Cookie`, `User-Agent`, `Accept`, `Accept-Language`, `X-Requested-With` (без учёта регистра; другие — `denied`), не больше 16 и 8 КиБ вместе (иначе `limit`); CR, LF или NUL в заголовке или `content_type` — `invalid`. POST без `content_type` уходит без `Content-Type`. `timeout_ms` — от 1 до 60000. Перенаправлениям хост не следует, как у `http_request`.
 
 ## SDK
 
 Плагин на Rust пишется с крейтом `oncl-pdk`. Под `wasm32` он даёт:
 
 - макрос `oncl_pdk::plugin!(handler)`: `handler: fn(&Request) -> String` получает запрос (`text`, `origin`, `locale`) и возвращает ответ странице; макрос экспортирует `oncl_abi_version`, `oncl_alloc`, `oncl_free`, `oncl_process`, а паника плагина перед trap пишется в журнал через `log`;
-- обёртки host-функций, которые возвращают `HostResult`: `host::{log, now, random, cert_info, reply_drop}`, `keys::{choose, Key}` (`Key::{sign_cms, sign_raw, sign_xml, alias, certificate, handle}`; при удалении `Key` вызывается `keys_release`), `dialogs::{message, confirm}`, `files::{open, save}`, `http::{get, post}`, а также `call_host` — вызов любой host-функции с типами ABI;
+- обёртки host-функций, которые возвращают `HostResult`: `host::{log, now, random, cert_info, reply_drop}`, `keys::{choose, Key}` (`Key::{sign_cms, sign_raw, sign_xml, alias, certificate, handle}`; при удалении `Key` вызывается `keys_release`), `dialogs::{message, confirm, password, choice}`, `files::{open, save, choose, open_ex, page_read, page_write}`, `http::{get, post, request_ex}`, `settings::{get, put}`, `shared::{get, put}`, а также `call_host` — вызов любой host-функции с типами ABI;
 - `Request::add_info()` и реэкспорт `oncl_protocol::{invoker, orgjson}` и `serde_json`: плагин, который отвечает в диалекте CommonInvoker (как `kz.gov.pki.knca.basics`), вызывает тот же `invoker::invoke`, что и встроенные модули;
 - Java-диалекты оригинала для плагинов, которые должны отвечать как оригинал байт в байт (реэкспорт из `oncl-protocol`): `orgjson::{parse, reserialize}` — разбор org.json 20211205 с его текстами ошибок и позицией (`Duplicate key "a" at 11 [character 12 line 1]`), `orgjson::{JObject, JValue, quote}` — запись, как пишет `JSONObject.toString()`: порядок ключей `HashMap` (`JObject::hash_map()` для `new JSONObject()` и бинов, `JObject::from_map(n)` для `new JSONObject(map)`, `JObject::stringer()` для `JSONStringer`), числа без хвостовых нулей, `<\/`, `\u2028`; читатели `orgjson::{opt_boolean, get_boolean, opt_int, get_int, get_object, get_array, array_get_string, …}` с текстами `JSONException`; `javamap` — порядок `HashMap` для любого набора ключей; `javab64::{decode_java, decode_kalkan, encode_mime}`; `javaexc::Throwable` — тексты исключений Java; `legacy::dispatch` — рефлексивный диспетчер `commonUtils` и его клонов (поиск метода по имени и числу аргументов, преобразование массивов, тексты `NoSuchMethodException`/`IllegalAccessException`/`argument type mismatch`, `uuid` через org.json, `null` без `uuid` — обрыв соединения); `invoker::java::invoke_with` — `CommonInvoker` оригинала: `details` с классом исключения (`java.lang.IllegalArgumentException: Supported apiVersion is 2`), порядок `{"body":…,"status":true}` и `{"code":…,"details":…,"message":…,"status":false}`, таблица методов с аннотациями и числом параметров, а для запроса, который не дошёл до `try` оригинала, — выбор `BadRequest::{Reply, Drop, CatchAll}`. Встроенные модули пока отвечают по-прежнему (`invoker::invoke`, свой диспетчер `commonUtils`).
 

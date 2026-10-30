@@ -503,6 +503,14 @@ impl Prompter for JksFirst {
     fn save_file(&self, _: &oncl_basics::SavePrompt) -> Prompt<PathBuf> {
         Prompt::Cancelled
     }
+
+    fn choice(&self, _: &oncl_basics::ChoicePrompt) -> Prompt<oncl_basics::ChoiceAnswer> {
+        Prompt::Cancelled
+    }
+
+    fn path(&self, _: &oncl_basics::PathPrompt) -> Prompt<PathBuf> {
+        Prompt::Cancelled
+    }
 }
 
 #[test]

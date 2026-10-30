@@ -532,6 +532,7 @@ fn start_plugins(
         locale: Arc::new(move || load_settings(&settings).ui_locale()),
         cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
         pki_hosts: oncl_plugin::nca_pki_hosts(),
+        settings_dir: Some(oncl_plugin::Store::settings_dir_in(&paths.data)),
     };
     let modules = Arc::new(PluginModules::new(
         Arc::new(Engine::new()),

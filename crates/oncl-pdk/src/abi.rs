@@ -182,8 +182,14 @@ pub enum Capability {
     Dialogs,
     /// `files = true`.
     Files,
-    /// A non-empty `http`.
+    /// A non-empty `http`, `origins` or `http_insecure`.
     Http,
+    /// `page_files = true`.
+    PageFiles,
+    /// `settings = true`.
+    Settings,
+    /// `shared = true`.
+    Shared,
 }
 
 /// A host function.
@@ -260,11 +266,33 @@ pub enum Import {
     KeysSignXmlEx,
     /// `xml_verify`: [`XmlVerifyArgs`] → `Vec<`[`XmlSigReport`]`>`.
     XmlVerify,
+    /// `http_request_ex`: [`HttpExArgs`] → [`HttpResponse`].
+    HttpRequestEx,
+    /// `file_choose`: [`ChooseFileArgs`] → `Option<`[`ChosenPath`]`>`; `None` if the user
+    /// cancels.
+    FileChoose,
+    /// `file_open_ex`: [`ChooseFileArgs`] → `Option<`[`OpenedFile`]`>`; `None` if the user
+    /// cancels.
+    FileOpenEx,
+    /// `page_file_read`: [`PagePathArgs`] → [`PageRead`].
+    PageFileRead,
+    /// `page_file_write`: [`PageWriteArgs`] → [`PageWrite`].
+    PageFileWrite,
+    /// `dialog_choice`: [`ChoiceArgs`] → `Option<u8>`; `None` if the user closes it.
+    DialogChoice,
+    /// `settings_get`: `()` → `BTreeMap<String, String>`.
+    SettingsGet,
+    /// `settings_put`: `BTreeMap<String, String>` → `()`.
+    SettingsPut,
+    /// `shared_get`: [`SharedKey`] → `Option<`[`Bytes`]`>`.
+    SharedGet,
+    /// `shared_put`: [`SharedPut`] → `()`.
+    SharedPut,
 }
 
 impl Import {
     /// Every host function.
-    pub const ALL: [Import; 34] = [
+    pub const ALL: [Import; 44] = [
         Import::Log,
         Import::Now,
         Import::Random,
@@ -299,6 +327,16 @@ impl Import {
         Import::CmsVerify,
         Import::KeysSignXmlEx,
         Import::XmlVerify,
+        Import::HttpRequestEx,
+        Import::FileChoose,
+        Import::FileOpenEx,
+        Import::PageFileRead,
+        Import::PageFileWrite,
+        Import::DialogChoice,
+        Import::SettingsGet,
+        Import::SettingsPut,
+        Import::SharedGet,
+        Import::SharedPut,
     ];
 
     /// Its import name in [`IMPORT_MODULE`].
@@ -338,6 +376,16 @@ impl Import {
             Import::CmsVerify => "cms_verify",
             Import::KeysSignXmlEx => "keys_sign_xml_ex",
             Import::XmlVerify => "xml_verify",
+            Import::HttpRequestEx => "http_request_ex",
+            Import::FileChoose => "file_choose",
+            Import::FileOpenEx => "file_open_ex",
+            Import::PageFileRead => "page_file_read",
+            Import::PageFileWrite => "page_file_write",
+            Import::DialogChoice => "dialog_choice",
+            Import::SettingsGet => "settings_get",
+            Import::SettingsPut => "settings_put",
+            Import::SharedGet => "shared_get",
+            Import::SharedPut => "shared_put",
         }
     }
 
@@ -372,11 +420,17 @@ impl Import {
             | Import::CmsVerify
             | Import::KeysSignXmlEx
             | Import::XmlVerify => Some(Capability::Keys),
-            Import::DialogMessage | Import::DialogConfirm | Import::DialogPassword => {
-                Some(Capability::Dialogs)
+            Import::DialogMessage
+            | Import::DialogConfirm
+            | Import::DialogPassword
+            | Import::DialogChoice => Some(Capability::Dialogs),
+            Import::FileOpen | Import::FileSave | Import::FileChoose | Import::FileOpenEx => {
+                Some(Capability::Files)
             }
-            Import::FileOpen | Import::FileSave => Some(Capability::Files),
-            Import::HttpRequest => Some(Capability::Http),
+            Import::HttpRequest | Import::HttpRequestEx => Some(Capability::Http),
+            Import::PageFileRead | Import::PageFileWrite => Some(Capability::PageFiles),
+            Import::SettingsGet | Import::SettingsPut => Some(Capability::Settings),
+            Import::SharedGet | Import::SharedPut => Some(Capability::Shared),
         }
     }
 
@@ -420,7 +474,17 @@ impl Import {
             | Import::CrlFetch
             | Import::CmsVerify
             | Import::KeysSignXmlEx
-            | Import::XmlVerify => "0.1.0-alpha.3",
+            | Import::XmlVerify
+            | Import::HttpRequestEx
+            | Import::FileChoose
+            | Import::FileOpenEx
+            | Import::PageFileRead
+            | Import::PageFileWrite
+            | Import::DialogChoice
+            | Import::SettingsGet
+            | Import::SettingsPut
+            | Import::SharedGet
+            | Import::SharedPut => "0.1.0-alpha.3",
         };
         semver::Version::parse(version).expect("a valid version")
     }
@@ -1734,4 +1798,197 @@ pub struct XmlSigReport {
     pub certificate: Bytes,
     /// Whether it verifies with that certificate.
     pub valid: bool,
+}
+
+/// Most headers of an [`HttpExArgs`].
+pub const MAX_HEADERS: usize = 16;
+
+/// Most bytes of the names and values of an [`HttpExArgs`]'s headers together.
+pub const MAX_HEADER_BYTES: usize = 8 << 10;
+
+/// The headers a plugin may send, compared without case.
+pub const ALLOWED_HEADERS: [&str; 5] = [
+    "Cookie",
+    "User-Agent",
+    "Accept",
+    "Accept-Language",
+    "X-Requested-With",
+];
+
+/// An HTTP header of an [`HttpExArgs`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Header {
+    /// One of [`ALLOWED_HEADERS`].
+    pub name: String,
+    /// Without CR, LF or NUL.
+    pub value: String,
+}
+
+/// `http_request_ex`: one request to a URL under the manifest's `http` prefixes, to the
+/// page's own origin when it matches the manifest's `origins`, or under an `http_insecure`
+/// prefix. Redirects are not followed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpExArgs {
+    /// GET or POST.
+    pub method: Method,
+    /// The URL; with `relative_to_origin`, resolved against the page's origin.
+    pub url: String,
+    /// Resolve `url` against the origin of the page that sent the request.
+    #[serde(default)]
+    pub relative_to_origin: bool,
+    /// Headers among [`ALLOWED_HEADERS`].
+    #[serde(default)]
+    pub headers: Vec<Header>,
+    /// The body's `Content-Type` of a POST; `None` sends none.
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// The body of a POST.
+    #[serde(default)]
+    pub body: Bytes,
+    /// The timeout, milliseconds; `None`: the core's.
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+}
+
+/// What a path chooser picks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileMode {
+    /// A file.
+    #[default]
+    Open,
+    /// A folder.
+    Directory,
+}
+
+/// A file type of a path chooser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileFilter {
+    /// What the dialog calls it.
+    pub name: String,
+    /// The extensions, without the dot.
+    pub extensions: Vec<String>,
+}
+
+/// `file_choose`, `file_open_ex`: the system's file or folder dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChooseFileArgs {
+    /// A file or a folder.
+    pub mode: FileMode,
+    /// The dialog's title.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The file types offered.
+    #[serde(default)]
+    pub filters: Vec<FileFilter>,
+    /// The folder it starts in.
+    #[serde(default)]
+    pub initial_dir: Option<String>,
+}
+
+/// A path the user chose, not read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChosenPath {
+    /// The path.
+    pub path: String,
+    /// A file's size in bytes; `None` for a folder.
+    pub size: Option<u64>,
+}
+
+/// `page_file_read`: a file the page names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PagePathArgs {
+    /// The path, as the page sent it.
+    pub path: String,
+}
+
+/// The outcome of `page_file_read`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageRead {
+    /// Read.
+    Ok(OpenedFile),
+    /// No such readable file, or a path pages may not name.
+    NotFound,
+    /// Over the size limit.
+    TooLarge,
+    /// The user said no.
+    Declined,
+}
+
+/// `page_file_write`: a file the page names, in a folder it names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageWriteArgs {
+    /// The folder, as the page sent it.
+    pub dir: String,
+    /// The file name: no separators, an extension of `page_files_ext`.
+    pub name: String,
+    /// The contents.
+    pub data: Bytes,
+}
+
+/// The outcome of `page_file_write`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageWrite {
+    /// Written: the path.
+    Written(String),
+    /// Not a folder pages may name, or a name not allowed.
+    Invalid,
+    /// The user said no.
+    Declined,
+}
+
+/// Most options of a [`ChoiceArgs`].
+pub const MAX_CHOICE_OPTIONS: usize = 32;
+
+/// `dialog_choice`: a message with 1 to 3 buttons, and a list to pick from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChoiceArgs {
+    /// How it looks.
+    pub kind: MessageKind,
+    /// The heading.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The text, plain.
+    pub text: String,
+    /// The buttons' texts, left to right.
+    pub buttons: Vec<String>,
+    /// The button Enter presses.
+    pub default: u8,
+    /// The list, at most [`MAX_CHOICE_OPTIONS`]; with one, the reply is the option picked
+    /// with the first button.
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
+/// Largest serialized size of a plugin's settings, bytes.
+pub const MAX_SETTINGS: usize = 64 << 10;
+
+/// Most keys of a plugin's settings.
+pub const MAX_SETTINGS_KEYS: usize = 256;
+
+/// Most bytes of a plugin's shared values and their keys together.
+pub const MAX_SHARED: usize = 64 << 10;
+
+/// Most keys of a plugin's shared values.
+pub const MAX_SHARED_KEYS: usize = 64;
+
+/// `shared_get`: a value the plugin's instances share.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedKey {
+    /// The key.
+    pub key: String,
+}
+
+/// `shared_put`: a value for every instance of the plugin, until the plugin is reloaded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedPut {
+    /// The key.
+    pub key: String,
+    /// The value; `None` removes it.
+    pub value: Option<Bytes>,
+    /// It goes after this long, milliseconds; `None`: it stays.
+    #[serde(default)]
+    pub ttl_ms: Option<u64>,
 }

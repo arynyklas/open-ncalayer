@@ -25,6 +25,14 @@ const MAX_DESCRIPTION: usize = 2048;
 const MAX_REPLACES_VERSION: usize = 64;
 /// Most URL prefixes of `capabilities.http`.
 const MAX_HTTP_PREFIXES: usize = 32;
+/// Most origin patterns of `capabilities.origins`.
+const MAX_ORIGINS: usize = 32;
+/// Most URL prefixes of `capabilities.http_insecure`.
+const MAX_INSECURE_PREFIXES: usize = 8;
+/// Most extensions of `capabilities.page_files_ext`.
+const MAX_PAGE_FILES_EXT: usize = 16;
+/// Longest extension of `capabilities.page_files_ext`, in bytes.
+const MAX_EXT: usize = 16;
 
 /// A checked `plugin.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,9 +116,24 @@ pub struct Capabilities {
     pub files: bool,
     /// The HTTPS URL prefixes the plugin may send requests to; empty: none.
     pub http: Vec<HttpPrefix>,
+    /// The origins of pages whose own origin the plugin may send requests to
+    /// (`http_request_ex`, relative URLs included); empty: none.
+    pub origins: Vec<OriginPattern>,
+    /// The plain-HTTP URL prefixes the plugin may send requests to: an exact host and port
+    /// each; empty: none.
+    pub http_insecure: Vec<HttpPrefix>,
     /// Open key stores whose path the page names (`keys_open` with a page path), each file
     /// once the user allows it; needs `keys`.
     pub key_files: bool,
+    /// Read files and write into folders the page names, each once the user allows it.
+    pub page_files: bool,
+    /// The extensions, lowercase, of the files `page_file_write` may write; needs
+    /// `page_files`.
+    pub page_files_ext: Vec<String>,
+    /// Keep settings on disk.
+    pub settings: bool,
+    /// Share values between the plugin's instances (and so between sites) in the process.
+    pub shared: bool,
 }
 
 impl Capabilities {
@@ -119,47 +142,121 @@ impl Capabilities {
         *self == Capabilities::default()
     }
 
-    /// What these capabilities allow that `old` does not: the flags `old` lacks, and the
-    /// prefixes no prefix of `old` [covers](HttpPrefix::covers). Empty: nothing new.
+    /// What these capabilities allow that `old` does not: the flags `old` lacks, the
+    /// prefixes no prefix of `old` [covers](HttpPrefix::covers), the origin patterns no
+    /// pattern of `old` [covers](OriginPattern::covers) and the extensions `old` lacks.
+    /// Empty: nothing new.
     pub fn added_over(&self, old: &Capabilities) -> Capabilities {
+        let prefixes = |new: &[HttpPrefix], old: &[HttpPrefix]| -> Vec<HttpPrefix> {
+            new.iter()
+                .filter(|new| !old.iter().any(|o| o.covers(new)))
+                .cloned()
+                .collect()
+        };
         Capabilities {
             keys: self.keys && !old.keys,
             dialogs: self.dialogs && !old.dialogs,
             files: self.files && !old.files,
-            http: self
-                .http
+            http: prefixes(&self.http, &old.http),
+            origins: self
+                .origins
                 .iter()
-                .filter(|new| !old.http.iter().any(|o| o.covers(new)))
+                .filter(|new| !old.origins.iter().any(|o| o.covers(new)))
                 .cloned()
                 .collect(),
+            http_insecure: prefixes(&self.http_insecure, &old.http_insecure),
             key_files: self.key_files && !old.key_files,
+            page_files: self.page_files && !old.page_files,
+            page_files_ext: self
+                .page_files_ext
+                .iter()
+                .filter(|new| !old.page_files_ext.contains(new))
+                .cloned()
+                .collect(),
+            settings: self.settings && !old.settings,
+            shared: self.shared && !old.shared,
         }
     }
 }
 
-/// A URL prefix of `capabilities.http`: `https://`, a host, an optional port and a path
-/// ending with `/`, without user info, query or fragment.
+/// A URL prefix of `capabilities.http` (`https://`) or `capabilities.http_insecure`
+/// (`http://`): the scheme, a host, an optional port and a path ending with `/`, without
+/// user info, query or fragment. An `https` prefix's host may be `*.` and a domain of at
+/// least two labels (`https://*.gov.kz/`): any host under that domain, on a label boundary,
+/// not the domain itself.
 ///
 /// URLs are parsed as browsers parse them ([WHATWG URL], the `url` crate): the host is
-/// compared lowercased (and IDNA-mapped), the port with `443` for none, the path after dot
-/// segments are resolved. Text other parsers could read differently is refused outright:
-/// backslashes, spaces and control characters, and user info (`@` before the path).
+/// compared lowercased (and IDNA-mapped), the port with the scheme's default for none, the
+/// path after dot segments are resolved. Text other parsers could read differently is
+/// refused outright: backslashes, spaces and control characters, and user info (`@` before
+/// the path).
 ///
 /// [WHATWG URL]: https://url.spec.whatwg.org/
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpPrefix {
-    host: String,
+    secure: bool,
+    host: Host,
     port: u16,
     path: String,
 }
 
-impl HttpPrefix {
-    /// The host, lowercased.
-    pub fn host(&self) -> &str {
-        &self.host
+/// The host of a prefix or an origin pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Host {
+    /// This host, lowercased.
+    Exact(String),
+    /// Any host under this domain (`*.` and the domain), not the domain itself.
+    Under(String),
+}
+
+impl Host {
+    /// Whether `host` (of a parsed URL) is this one.
+    fn matches(&self, host: Option<url::Host<&str>>) -> bool {
+        match (self, host) {
+            (Host::Exact(exact), Some(host)) => host.to_string() == *exact,
+            (Host::Under(domain), Some(url::Host::Domain(host))) => host
+                .strip_suffix(domain.as_str())
+                .is_some_and(|label| label.len() > 1 && label.ends_with('.')),
+            _ => false,
+        }
     }
 
-    /// The port, `443` if the prefix names none.
+    /// Whether every host this one matches, `other` matches too.
+    fn covers(&self, other: &Host) -> bool {
+        match (self, other) {
+            (Host::Exact(a), Host::Exact(b)) => a == b,
+            (Host::Under(domain), Host::Exact(host)) => {
+                Host::Under(domain.clone()).matches(Some(url::Host::Domain(host)))
+            }
+            (Host::Under(a), Host::Under(b)) => {
+                a == b || Host::Under(a.clone()).matches(Some(url::Host::Domain(b)))
+            }
+            (Host::Exact(_), Host::Under(_)) => false,
+        }
+    }
+}
+
+impl fmt::Display for Host {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Host::Exact(host) => f.write_str(host),
+            Host::Under(domain) => write!(f, "*.{domain}"),
+        }
+    }
+}
+
+impl HttpPrefix {
+    /// Whether the prefix is `https://`.
+    pub fn is_secure(&self) -> bool {
+        self.secure
+    }
+
+    /// The host, lowercased; `*.` and the domain for any host under it.
+    pub fn host(&self) -> String {
+        self.host.to_string()
+    }
+
+    /// The port, the scheme's default if the prefix names none.
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -169,10 +266,13 @@ impl HttpPrefix {
         &self.path
     }
 
-    /// Whether every URL under `other` is under this prefix too: the same host and port, and
-    /// `other`'s path starts with this one's.
+    /// Whether every URL under `other` is under this prefix too: the same scheme and port, a
+    /// host covering `other`'s, and `other`'s path starts with this one's.
     pub fn covers(&self, other: &HttpPrefix) -> bool {
-        self.host == other.host && self.port == other.port && other.path.starts_with(&self.path)
+        self.secure == other.secure
+            && self.host.covers(&other.host)
+            && self.port == other.port
+            && other.path.starts_with(&self.path)
     }
 
     /// Whether `url` is under this prefix: [`check`](Self::check) accepts it.
@@ -180,9 +280,9 @@ impl HttpPrefix {
         self.check(url).is_some()
     }
 
-    /// `url`, parsed and normalized, if it is under this prefix: `https`, no user info, the
-    /// same host and port, a path starting with the prefix's. The query and fragment of `url`
-    /// do not matter.
+    /// `url`, parsed and normalized, if it is under this prefix: the same scheme, no user
+    /// info, a matching host, the same port, a path starting with the prefix's. The query
+    /// and fragment of `url` do not matter.
     ///
     /// Under a prefix path other than `/`, a path with `;` or an encoded `/` or `\` (`%2f`,
     /// `%5c`, any case) is refused: the parser leaves `..%2f` and `..;` in the path as they
@@ -192,13 +292,54 @@ impl HttpPrefix {
     /// The request must be sent to [`Url::as_str`] of the result, not to `url`: what was
     /// checked is then what is sent. Every redirect is checked again, hop by hop.
     pub fn check(&self, url: &str) -> Option<Url> {
-        let url = parse_https(url).ok()?;
+        let url = parse_url(url, self.scheme()).ok()?;
         let path = url.path();
-        let under = url.host_str() == Some(self.host.as_str())
+        let under = self.host.matches(url.host())
             && url.port_or_known_default() == Some(self.port)
             && path.starts_with(&self.path)
             && (self.path == "/" || !has_hidden_separator(path));
         under.then_some(url)
+    }
+
+    fn scheme(&self) -> &'static str {
+        if self.secure { HTTPS } else { HTTP }
+    }
+
+    /// `text` as a prefix of `scheme`; `*.` hosts only if `wildcard`.
+    fn parse(text: &str, scheme: &'static str, wildcard: bool) -> Result<Self, PackageError> {
+        let bad = |why: &str| PackageError::Manifest(format!("HTTP prefix {text:?}: {why}"));
+        if text.contains(['?', '#']) {
+            return Err(bad("has a query or a fragment"));
+        }
+        let (url, host) = parse_pattern(text, scheme, wildcard).map_err(bad)?;
+        let rest = &text[scheme.len()..];
+        if !rest.contains('/') {
+            return Err(bad("has no path; a prefix ends with `/`"));
+        }
+        if !text.ends_with('/') || !url.path().ends_with('/') {
+            return Err(bad("the path does not end with `/`"));
+        }
+        if has_hidden_separator(url.path()) {
+            return Err(bad("the path has `;`, `%2f` or `%5c`"));
+        }
+        let Some(port) = url.port_or_known_default() else {
+            return Err(bad("has no port"));
+        };
+        Ok(HttpPrefix {
+            secure: scheme == HTTPS,
+            host,
+            port,
+            path: url.path().to_owned(),
+        })
+    }
+
+    /// `text` as a prefix of `capabilities.http_insecure`: `http://`, an exact host.
+    ///
+    /// # Errors
+    ///
+    /// [`PackageError::Manifest`] for anything else.
+    pub fn parse_insecure(text: &str) -> Result<Self, PackageError> {
+        HttpPrefix::parse(text, HTTP, false)
     }
 }
 
@@ -215,52 +356,145 @@ fn has_hidden_separator(path: &str) -> bool {
 impl FromStr for HttpPrefix {
     type Err = PackageError;
 
+    /// An `https://` prefix of `capabilities.http`.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let bad = |why: &str| PackageError::Manifest(format!("HTTP prefix {text:?}: {why}"));
-        if text.contains(['?', '#']) {
-            return Err(bad("has a query or a fragment"));
-        }
-        let url = parse_https(text).map_err(bad)?;
-        let rest = &text[HTTPS.len()..];
-        if !rest.contains('/') {
-            return Err(bad("has no path; a prefix ends with `/`"));
-        }
-        if !text.ends_with('/') || !url.path().ends_with('/') {
-            return Err(bad("the path does not end with `/`"));
-        }
-        if has_hidden_separator(url.path()) {
-            return Err(bad("the path has `;`, `%2f` or `%5c`"));
-        }
-        let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
-            return Err(bad("has no host"));
-        };
-        Ok(HttpPrefix {
-            host: host.to_owned(),
-            port,
-            path: url.path().to_owned(),
-        })
+        HttpPrefix::parse(text, HTTPS, true)
     }
 }
 
 impl fmt::Display for HttpPrefix {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(HTTPS)?;
-        f.write_str(&self.host)?;
-        if self.port != 443 {
+        write!(f, "{}{}", self.scheme(), self.host)?;
+        if self.port != if self.secure { 443 } else { 80 } {
             write!(f, ":{}", self.port)?;
         }
         f.write_str(&self.path)
     }
 }
 
-const HTTPS: &str = "https://";
+/// An origin pattern of `capabilities.origins`: `https://` or `http://`, a host (or `*.`
+/// and a domain of at least two labels) and an optional port, without a path. A page whose
+/// origin matches may have the plugin send requests to that same origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginPattern {
+    secure: bool,
+    host: Host,
+    port: u16,
+}
 
-/// `text` as an `https` URL without user info. Refused before parsing: another scheme
-/// spelling, backslashes (a path separator to browsers, not to every HTTP client), spaces and
-/// control characters (which the WHATWG parser drops), and `@` in the authority.
-fn parse_https(text: &str) -> Result<Url, &'static str> {
-    let Some(rest) = text.strip_prefix(HTTPS) else {
-        return Err("is not an https:// URL");
+impl OriginPattern {
+    /// Whether the pattern is `https://`.
+    pub fn is_secure(&self) -> bool {
+        self.secure
+    }
+
+    /// Whether `origin` (a URL's scheme, host and port) matches.
+    pub fn matches(&self, origin: &Url) -> bool {
+        origin.scheme() == if self.secure { "https" } else { "http" }
+            && self.host.matches(origin.host())
+            && origin.port_or_known_default() == Some(self.port)
+    }
+
+    /// Whether every origin `other` matches, this one matches too.
+    pub fn covers(&self, other: &OriginPattern) -> bool {
+        self.secure == other.secure && self.port == other.port && self.host.covers(&other.host)
+    }
+}
+
+impl FromStr for OriginPattern {
+    type Err = PackageError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let bad = |why: &str| PackageError::Manifest(format!("origin {text:?}: {why}"));
+        let scheme = if text.starts_with(HTTP) { HTTP } else { HTTPS };
+        let rest = text
+            .strip_prefix(scheme)
+            .ok_or_else(|| bad("is not https:// nor http://"))?;
+        if rest.contains(['/', '?', '#']) {
+            return Err(bad("has a path, a query or a fragment"));
+        }
+        let (url, host) = parse_pattern(text, scheme, true).map_err(bad)?;
+        let Some(port) = url.port_or_known_default() else {
+            return Err(bad("has no port"));
+        };
+        Ok(OriginPattern {
+            secure: scheme == HTTPS,
+            host,
+            port,
+        })
+    }
+}
+
+impl fmt::Display for OriginPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (scheme, default) = if self.secure {
+            (HTTPS, 443)
+        } else {
+            (HTTP, 80)
+        };
+        write!(f, "{scheme}{}", self.host)?;
+        if self.port != default {
+            write!(f, ":{}", self.port)?;
+        }
+        Ok(())
+    }
+}
+
+const HTTPS: &str = "https://";
+const HTTP: &str = "http://";
+
+/// `text` as an `https://` or `http://` URL, parsed as [`HttpPrefix::check`] parses: `None`
+/// for another scheme spelling, user info, backslashes, spaces or control characters.
+pub(crate) fn parse_web_url(text: &str) -> Option<Url> {
+    let scheme = if text.starts_with(HTTP) { HTTP } else { HTTPS };
+    parse_url(text, scheme).ok()
+}
+
+/// `text`, of `scheme`, as a URL and its host pattern: with `wildcard`, a host `*.` and a
+/// domain of at least two labels (not an IP address) is any host under that domain.
+fn parse_pattern(
+    text: &str,
+    scheme: &'static str,
+    wildcard: bool,
+) -> Result<(Url, Host), &'static str> {
+    let rest = text.strip_prefix(scheme).ok_or("has another scheme")?;
+    let (text, under) = match rest.strip_prefix("*.") {
+        Some(domain) if wildcard => (format!("{scheme}{domain}"), true),
+        Some(_) => return Err("has a `*` host"),
+        None => (text.to_owned(), false),
+    };
+    let authority_end = text[scheme.len()..]
+        .find(['/', '?', '#'])
+        .map_or(text.len(), |i| i + scheme.len());
+    if text[..authority_end].contains('*') {
+        return Err("has `*` other than a leading `*.`");
+    }
+    let url = parse_url(&text, scheme)?;
+    let host = match url.host() {
+        Some(url::Host::Domain(domain)) if under => {
+            if domain.split('.').filter(|l| !l.is_empty()).count() < 2 {
+                return Err("a `*.` domain needs at least two labels");
+            }
+            Host::Under(domain.to_owned())
+        }
+        Some(_) if under => return Err("a `*.` host is a domain, not an address"),
+        Some(host) => Host::Exact(host.to_string()),
+        None => return Err("has no host"),
+    };
+    Ok((url, host))
+}
+
+/// `text` as a URL of `scheme` (`https://` or `http://`) without user info. Refused before
+/// parsing: another scheme spelling, backslashes (a path separator to browsers, not to
+/// every HTTP client), spaces and control characters (which the WHATWG parser drops), and
+/// `@` in the authority.
+fn parse_url(text: &str, scheme: &'static str) -> Result<Url, &'static str> {
+    let Some(rest) = text.strip_prefix(scheme) else {
+        return Err(if scheme == HTTPS {
+            "is not an https:// URL"
+        } else {
+            "is not an http:// URL"
+        });
     };
     if text
         .bytes()
@@ -276,8 +510,11 @@ fn parse_https(text: &str) -> Result<Url, &'static str> {
         return Err("has no host");
     }
     let url = Url::parse(text).map_err(|_| "is not a valid URL")?;
-    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
-        return Err("is not an https:// URL without user info");
+    if url.scheme() != &scheme[..scheme.len() - 3]
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err("is not a URL of its scheme without user info");
     }
     Ok(url)
 }
@@ -313,7 +550,13 @@ struct RawCapabilities {
     dialogs: bool,
     files: bool,
     http: Vec<String>,
+    origins: Vec<String>,
+    http_insecure: Vec<String>,
     key_files: bool,
+    page_files: bool,
+    page_files_ext: Vec<String>,
+    settings: bool,
+    shared: bool,
 }
 
 impl RawManifest {
@@ -378,6 +621,51 @@ impl RawManifest {
             .iter()
             .map(|p| p.parse())
             .collect::<Result<_, _>>()?;
+        if caps.origins.len() > MAX_ORIGINS {
+            return Err(bad(format!(
+                "capabilities.origins has more than {MAX_ORIGINS} patterns"
+            )));
+        }
+        let origins = caps
+            .origins
+            .iter()
+            .map(|p| p.parse())
+            .collect::<Result<_, _>>()?;
+        if caps.http_insecure.len() > MAX_INSECURE_PREFIXES {
+            return Err(bad(format!(
+                "capabilities.http_insecure has more than {MAX_INSECURE_PREFIXES} prefixes"
+            )));
+        }
+        let http_insecure = caps
+            .http_insecure
+            .iter()
+            .map(|p| HttpPrefix::parse_insecure(p))
+            .collect::<Result<_, _>>()?;
+        if !caps.page_files_ext.is_empty() && !caps.page_files {
+            return Err(bad(
+                "capabilities.page_files_ext needs capabilities.page_files".to_owned(),
+            ));
+        }
+        if caps.page_files_ext.len() > MAX_PAGE_FILES_EXT {
+            return Err(bad(format!(
+                "capabilities.page_files_ext has more than {MAX_PAGE_FILES_EXT} extensions"
+            )));
+        }
+        let mut page_files_ext: Vec<String> = Vec::with_capacity(caps.page_files_ext.len());
+        for ext in &caps.page_files_ext {
+            if ext.is_empty()
+                || ext.len() > MAX_EXT
+                || !ext.bytes().all(|b| b.is_ascii_alphanumeric())
+            {
+                return Err(bad(format!(
+                    "capabilities.page_files_ext: {ext:?} is not 1 to {MAX_EXT} letters and digits"
+                )));
+            }
+            let ext = ext.to_ascii_lowercase();
+            if !page_files_ext.contains(&ext) {
+                page_files_ext.push(ext);
+            }
+        }
         Ok(Manifest {
             id: self.id,
             version: self.version,
@@ -391,7 +679,13 @@ impl RawManifest {
                 dialogs: caps.dialogs,
                 files: caps.files,
                 http,
+                origins,
+                http_insecure,
                 key_files: caps.key_files,
+                page_files: caps.page_files,
+                page_files_ext,
+                settings: caps.settings,
+                shared: caps.shared,
             },
         })
     }

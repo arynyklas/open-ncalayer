@@ -40,10 +40,10 @@ pub use page_file::{
     is_network_path, page_path, remember_chosen_path,
 };
 pub use prompt::{
-    Action, Busy, BusyPrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FileKind, FilePrompt,
-    ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale, MessageKind, MessagePrompt,
-    OpenError, PasswordPrompt, Prompt, Prompter, RecentPathStore, SavePrompt, StorageAnswer,
-    StorageKind, StoragePrompt,
+    Action, Busy, BusyPrompt, ChoiceAnswer, ChoicePrompt, ConfirmPrompt, CsrAnswer, CsrPrompt,
+    FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale, MessageKind,
+    MessagePrompt, OpenError, PasswordPrompt, PathFilter, PathMode, PathPrompt, Prompt, Prompter,
+    RecentPathStore, SavePrompt, StorageAnswer, StorageKind, StoragePrompt,
 };
 use serde_json::{Map, Value};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

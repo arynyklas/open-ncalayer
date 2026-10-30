@@ -5,8 +5,11 @@
 //!   key never reaching the guest;
 //! - [`crypto`]: digests, certificate details and the CAs the core trusts (every plugin);
 //! - [`dialogs`]: a message, a yes/no question and a password that stays in the core;
-//! - [`files`]: a file the user opens or saves in the system dialogs;
-//! - [`net`]: HTTPS requests to URLs under the manifest's prefixes, redirects not followed.
+//! - [`files`]: a file the user opens or saves in the system dialogs, a path the user
+//!   chooses, and files and folders a page names (each once the user allows it);
+//! - [`net`]: requests to URLs under the manifest's prefixes or to the page's own listed
+//!   origin, redirects not followed;
+//! - [`state`]: the plugin's settings on disk and the values its instances share.
 //!
 //! The first host function that shows a window takes the process-wide dialog-flow turn
 //! ([`lock_dialog_flow`]) and holds it until `oncl_process` returns, trap or not
@@ -17,6 +20,7 @@ mod dialogs;
 mod files;
 mod keys;
 mod net;
+mod state;
 
 pub use crypto::{NCA_PKI_HOSTS, nca_pki_hosts};
 pub(crate) use crypto::{
@@ -24,14 +28,18 @@ pub(crate) use crypto::{
     tsp_stamp, xml_verify,
 };
 pub use dialogs::MAX_SECRETS;
-pub(crate) use dialogs::{Secrets, dialog_confirm, dialog_message, dialog_password};
-pub(crate) use files::{file_open, file_save};
+pub(crate) use dialogs::{Secrets, dialog_choice, dialog_confirm, dialog_message, dialog_password};
+pub(crate) use files::{
+    file_choose, file_open, file_open_ex, file_save, page_file_read, page_file_write,
+};
 pub(crate) use keys::{
     KeyTable, keys_chain, keys_choose, keys_open, keys_release, keys_select, keys_sign_cms,
     keys_sign_cms_ex, keys_sign_raw, keys_sign_xml, keys_sign_xml_ex, keys_terminals,
 };
-pub(crate) use net::http_request;
 pub use net::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS};
+pub(crate) use net::{http_request, http_request_ex};
+pub use state::SharedState;
+pub(crate) use state::{settings_get, settings_put, shared_get, shared_put};
 
 use crate::host::HostState;
 use oncl_basics::lock_dialog_flow;
@@ -44,9 +52,20 @@ use std::sync::MutexGuard;
 /// The most keys an instance holds at once.
 pub const MAX_KEY_HANDLES: usize = 16;
 
-/// The page files the user allowed pages to open in an instance's session: (origin,
-/// canonical path).
-pub(crate) type Consents = HashSet<(String, PathBuf)>;
+/// What the user allowed a page to do with a path it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ConsentKind {
+    /// Open the key store file (`keys_open`).
+    KeyStore,
+    /// Read the file (`page_file_read`).
+    Read,
+    /// Write files into the folder (`page_file_write`).
+    WriteDir,
+}
+
+/// What the user allowed pages to do with the paths they name in an instance's session:
+/// (what, origin, canonical path).
+pub(crate) type Consents = HashSet<(ConsentKind, String, PathBuf)>;
 
 /// Longest text of a message or a question, in bytes.
 const MAX_DIALOG_TEXT: usize = 16 << 10;

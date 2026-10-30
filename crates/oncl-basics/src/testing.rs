@@ -2,9 +2,9 @@
 //! [`RecentPathStore`].
 
 use crate::prompt::{
-    Busy, BusyPrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FilePrompt, ImportAnswer, ImportPrompt,
-    KeyPrompt, MessagePrompt, PasswordPrompt, Prompt, Prompter, RecentPathStore, SavePrompt,
-    StorageAnswer, StorageKind, StoragePrompt,
+    Busy, BusyPrompt, ChoiceAnswer, ChoicePrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FilePrompt,
+    ImportAnswer, ImportPrompt, KeyPrompt, MessagePrompt, PasswordPrompt, PathPrompt, Prompt,
+    Prompter, RecentPathStore, SavePrompt, StorageAnswer, StorageKind, StoragePrompt,
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -78,6 +78,19 @@ pub enum Step {
     },
     /// Cancel a save dialog.
     CancelSave,
+    /// Answer a plugin's choice: the button pressed and the option selected.
+    Choice {
+        /// The button.
+        button: usize,
+        /// The option, if any.
+        option: Option<usize>,
+    },
+    /// Close a plugin's choice.
+    CancelChoice,
+    /// Answer a plugin's path chooser with this path.
+    Path(PathBuf),
+    /// Cancel a plugin's path chooser.
+    CancelPath,
     /// Wait on the barrier (without holding the prompter), then take the next step for the
     /// same prompt.
     Wait(Arc<Barrier>),
@@ -107,6 +120,10 @@ impl Step {
             Step::Save { .. } => "Save",
             Step::CancelSave => "CancelSave",
             Step::Wait(_) => "Wait",
+            Step::Choice { .. } => "Choice",
+            Step::CancelChoice => "CancelChoice",
+            Step::Path(_) => "Path",
+            Step::CancelPath => "CancelPath",
         }
     }
 }
@@ -132,6 +149,8 @@ struct State {
     message_prompts: Vec<MessagePrompt>,
     confirm_prompts: Vec<ConfirmPrompt>,
     save_prompts: Vec<SavePrompt>,
+    choice_prompts: Vec<ChoicePrompt>,
+    path_prompts: Vec<PathPrompt>,
 }
 
 /// A [`Prompter`] answering from a queue of [`Step`]s and recording every prompt shown. An
@@ -157,7 +176,8 @@ impl ScriptedPrompter {
     }
 
     /// What was shown so far, in order: `"storage"`, `"busy"`, `"busy closed"`, `"key"`,
-    /// `"csr"`, `"import"`, `"file"`, `"password"`, `"message"`, `"confirm"`, `"save"`.
+    /// `"csr"`, `"import"`, `"file"`, `"password"`, `"message"`, `"confirm"`, `"save"`,
+    /// `"choice"`, `"path"`.
     pub fn timeline(&self) -> Vec<&'static str> {
         self.lock().timeline.clone()
     }
@@ -216,6 +236,16 @@ impl ScriptedPrompter {
     /// Save dialogs shown so far.
     pub fn save_prompts(&self) -> Vec<SavePrompt> {
         self.lock().save_prompts.clone()
+    }
+
+    /// Plugins' choices shown so far.
+    pub fn choice_prompts(&self) -> Vec<ChoicePrompt> {
+        self.lock().choice_prompts.clone()
+    }
+
+    /// Plugins' path choosers shown so far.
+    pub fn path_prompts(&self) -> Vec<PathPrompt> {
+        self.lock().path_prompts.clone()
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -360,6 +390,24 @@ impl Prompter for ScriptedPrompter {
             Some(Step::Save { path }) => Prompt::Answer(path),
             Some(Step::CancelSave) | None => Prompt::Cancelled,
             Some(step) => panic!("ScriptedPrompter: save dialog answered by {}", step.kind()),
+        }
+    }
+
+    fn choice(&self, p: &ChoicePrompt) -> Prompt<ChoiceAnswer> {
+        match self.next("choice", |s| s.choice_prompts.push(p.clone())) {
+            Some(Step::Choice { button, option }) => {
+                Prompt::Answer(ChoiceAnswer { button, option })
+            }
+            Some(Step::CancelChoice) | None => Prompt::Cancelled,
+            Some(step) => panic!("ScriptedPrompter: choice answered by {}", step.kind()),
+        }
+    }
+
+    fn path(&self, p: &PathPrompt) -> Prompt<PathBuf> {
+        match self.next("path", |s| s.path_prompts.push(p.clone())) {
+            Some(Step::Path(path)) => Prompt::Answer(path),
+            Some(Step::CancelPath) | None => Prompt::Cancelled,
+            Some(step) => panic!("ScriptedPrompter: path chooser answered by {}", step.kind()),
         }
     }
 }

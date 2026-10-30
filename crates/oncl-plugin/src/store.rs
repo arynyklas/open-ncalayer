@@ -5,7 +5,9 @@
 //! - `packages/<id>-<version>.onclp`: the package of each installed plugin, as downloaded or
 //!   chosen;
 //! - `catalog/<channel>.json` and `catalog/<channel>.json.minisig`: the last update index of
-//!   the channel accepted, verified again whenever it is read.
+//!   the channel accepted, verified again whenever it is read;
+//! - `settings/<id>.json`: a plugin's settings (`settings_*`), kept across its updates and
+//!   removed with it.
 //!
 //! Every file is replaced atomically ([`write_atomically`]); every change of the state is
 //! made under one lock and saved before it is seen.
@@ -191,7 +193,8 @@ impl Store {
         Ok(())
     }
 
-    /// Uninstalls `id`: the state, then its package file.
+    /// Uninstalls `id`: the state, then its settings file (a failure only logged), then its
+    /// package file.
     ///
     /// # Errors
     ///
@@ -206,6 +209,7 @@ impl Store {
         };
         self.save(&next)?;
         *state = next;
+        remove_file(&self.settings_path(id));
         match std::fs::remove_file(self.package_path(id, &removed.version)) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -324,6 +328,22 @@ impl Store {
         }
     }
 
+    /// `settings/`: the folder of the plugins' settings files
+    /// ([`HostServices::settings_dir`](crate::HostServices::settings_dir)).
+    pub fn settings_dir(&self) -> PathBuf {
+        self.dir.join("settings")
+    }
+
+    /// [`Store::settings_dir`] of the store in `<data_dir>/plugins/`, without opening it.
+    pub fn settings_dir_in(data_dir: &Path) -> PathBuf {
+        data_dir.join("plugins").join("settings")
+    }
+
+    /// `settings/<id>.json`: the settings file of `id`.
+    pub fn settings_path(&self, id: &str) -> PathBuf {
+        self.settings_dir().join(format!("{id}.json"))
+    }
+
     /// `packages/<id>-<version>.onclp`.
     fn package_path(&self, id: &str, version: &Version) -> PathBuf {
         self.dir
@@ -380,12 +400,13 @@ fn not_installed(id: &str) -> io::Error {
     )
 }
 
-/// Removes a package file that is no longer installed; a failure is only logged.
+/// Removes a file of a plugin that is no longer installed (or no longer that version); a
+/// failure is only logged.
 fn remove_file(path: &Path) {
     if let Err(e) = std::fs::remove_file(path)
         && e.kind() != io::ErrorKind::NotFound
     {
-        tracing::warn!(path = %path.display(), error = %e, "cannot remove an old plugin package");
+        tracing::warn!(path = %path.display(), error = %e, "cannot remove an old plugin file");
     }
 }
 

@@ -22,10 +22,10 @@ pub mod store;
 
 pub use caps::{
     HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS, MAX_KEY_HANDLES, MAX_SECRETS, NCA_PKI_HOSTS,
-    nca_pki_hosts,
+    SharedState, nca_pki_hosts,
 };
 pub use host::HostServices;
-pub use manifest::{Capabilities, HttpPrefix, Localized, Manifest, Replaces};
+pub use manifest::{Capabilities, HttpPrefix, Localized, Manifest, OriginPattern, Replaces};
 pub use modules::{BUILT_IN, LoadedInfo, MemoryLimits, OnMissing, PluginModules};
 pub use oncl_pdk::abi::ABI_VERSION;
 pub use package::{MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, PACKAGE_EXT, Package, archive};

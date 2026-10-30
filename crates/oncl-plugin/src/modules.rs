@@ -24,6 +24,7 @@ use semver::Version;
 use crate::{
     Compiled, Engine, HostServices, INSTANCE_HIGH_WATER, Instance, LoadError, Localized,
     MAX_INSTANCES, MEMORY_BUDGET, Manifest, PLUGIN_ERROR_REPLY, Package, Replaces, SessionContext,
+    SharedState,
 };
 
 /// The owner [`LoadError::ModuleTaken`] names for a module built into OpenNCALayer.
@@ -100,6 +101,8 @@ struct Plugin {
     generation: u64,
     compiled: Compiled,
     manifest: Manifest,
+    /// The values the generation's instances share (`shared_*`).
+    shared: Arc<SharedState>,
 }
 
 struct Slot {
@@ -147,7 +150,7 @@ impl PluginModules {
     pub fn check(&self, package: &Package) -> Result<(), LoadError> {
         let manifest = &package.manifest;
         let compiled = self.inner.engine.compile(manifest, &package.wasm)?;
-        drop(compiled.instantiate(&self.inner.services, context(manifest, 0))?);
+        drop(compiled.instantiate(&self.inner.services, context(manifest, 0, Arc::default()))?);
         self.inner.free_modules(&self.inner.lock(), manifest)
     }
 
@@ -162,7 +165,7 @@ impl PluginModules {
     pub fn load(&self, package: Package) -> Result<(), LoadError> {
         let manifest = package.manifest;
         let compiled = self.inner.engine.compile(&manifest, &package.wasm)?;
-        drop(compiled.instantiate(&self.inner.services, context(&manifest, 0))?);
+        drop(compiled.instantiate(&self.inner.services, context(&manifest, 0, Arc::default()))?);
         let mut garbage = Vec::new();
         let mut state = self.inner.lock();
         self.inner.free_modules(&state, &manifest)?;
@@ -180,6 +183,7 @@ impl PluginModules {
                 generation,
                 compiled,
                 manifest,
+                shared: Arc::default(),
             },
         );
         drop_idle(&mut state, &mut garbage, |(_, owner), slot| {
@@ -289,11 +293,12 @@ fn drop_idle(
     state.memory -= freed;
 }
 
-fn context(manifest: &Manifest, session: SessionId) -> SessionContext {
+fn context(manifest: &Manifest, session: SessionId, shared: Arc<SharedState>) -> SessionContext {
     SessionContext {
         session,
         plugin_id: manifest.id.clone(),
         plugin_name: manifest.name.clone(),
+        shared,
     }
 }
 
@@ -417,7 +422,7 @@ impl Inner {
         }
         let plugin = &state.plugins[id];
         let compiled = plugin.compiled.clone();
-        let ctx = context(&plugin.manifest, session);
+        let ctx = context(&plugin.manifest, session, Arc::clone(&plugin.shared));
         state.clock += 1;
         match &key {
             Some(key) => {

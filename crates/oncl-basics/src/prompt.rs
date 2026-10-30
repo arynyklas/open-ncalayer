@@ -535,6 +535,76 @@ pub struct SavePrompt {
     pub directory: Option<PathBuf>,
 }
 
+/// A plugin's message with its own buttons (one to three) and, if it has options, a list to
+/// pick from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoicePrompt {
+    /// The requesting page's origin, or `"UNIDENTIFIED"`.
+    pub origin: String,
+    /// Dialog language.
+    pub locale: Locale,
+    /// Who asks (a plugin's name), shown next to the origin.
+    pub source: String,
+    /// How it looks.
+    pub kind: MessageKind,
+    /// The plugin's heading line, if any.
+    pub title: Option<String>,
+    /// The text, shown as plain text (not markup).
+    pub text: String,
+    /// The buttons' texts, left to right.
+    pub buttons: Vec<String>,
+    /// The button Enter presses: an index of `buttons`.
+    pub default: usize,
+    /// The list to pick from; empty: none.
+    pub options: Vec<String>,
+}
+
+/// The user's answer to a [`ChoicePrompt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChoiceAnswer {
+    /// The button pressed.
+    pub button: usize,
+    /// The option selected, if the prompt has a list and one is selected.
+    pub option: Option<usize>,
+}
+
+/// What a [`PathPrompt`] picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathMode {
+    /// A file.
+    File,
+    /// A folder.
+    Directory,
+}
+
+/// A file type of a [`PathPrompt`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathFilter {
+    /// What the dialog calls it.
+    pub name: String,
+    /// The extensions, lowercase without the dot.
+    pub extensions: Vec<String>,
+}
+
+/// A plugin's file or folder chooser: a path, which the plugin gets without the contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathPrompt {
+    /// The requesting page's origin, or `"UNIDENTIFIED"`.
+    pub origin: String,
+    /// Dialog language.
+    pub locale: Locale,
+    /// Who asks (a plugin's name), shown next to the origin.
+    pub source: String,
+    /// The plugin's title of the dialog; `None`: the default one.
+    pub title: Option<String>,
+    /// A file or a folder.
+    pub mode: PathMode,
+    /// The file types offered; empty: any file.
+    pub filters: Vec<PathFilter>,
+    /// Folder to start in, if any.
+    pub directory: Option<PathBuf>,
+}
+
 /// The outcome of a dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prompt<T> {
@@ -571,6 +641,11 @@ pub trait Prompter: Send + Sync {
     fn confirm(&self, p: &ConfirmPrompt) -> Prompt<bool>;
     /// Asks where to save a file: its path. The file is not written here.
     fn save_file(&self, p: &SavePrompt) -> Prompt<PathBuf>;
+    /// Asks a plugin's question with its buttons (and list): the button pressed (and the
+    /// option selected); closing the dialog cancels.
+    fn choice(&self, p: &ChoicePrompt) -> Prompt<ChoiceAnswer>;
+    /// Asks for a file or folder for a plugin: its path, not read here.
+    fn path(&self, p: &PathPrompt) -> Prompt<PathBuf>;
 }
 
 /// Where the last opened key store path is kept (`recentPath` of settings.json).

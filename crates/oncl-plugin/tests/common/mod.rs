@@ -61,6 +61,7 @@ pub fn services_with(
         cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
         pki_hosts: oncl_plugin::nca_pki_hosts(),
         locale: Arc::new(|| Locale::Ru),
+        settings_dir: None,
     }
 }
 
@@ -84,6 +85,7 @@ pub fn session(session: u64) -> SessionContext {
             kk: "Сынақ плагині".to_owned(),
             en: "Test plugin".to_owned(),
         },
+        shared: Arc::default(),
     }
 }
 
@@ -189,12 +191,13 @@ pub fn probe(calls: &[(Import, Vec<u8>)]) -> String {
         ));
         at += args.len();
     }
-    assert!(at < 32768, "the arguments fit below the output");
+    // The allocator's heap starts past the arguments.
+    let heap = at.div_ceil(65536).max(1) * 65536;
     format!(
         r#"(module
 {imports}{}
 {data}
-  (data (i32.const 32768) "0123456789abcdef")
+  (data (i32.const 512) "0123456789abcdef")
   (func (export "oncl_process") (param i32 i32) (result i64)
     (local $r i64) (local $src i32) (local $len i32) (local $i i32) (local $b i32)
     (local $out i32) (local $hex i32)
@@ -218,10 +221,10 @@ pub fn probe(calls: &[(Import, Vec<u8>)]) -> String {
         (local.set $b (i32.load8_u (i32.add (local.get $src) (local.get $i))))
         (i32.store8 offset=15
           (i32.add (local.get $out) (i32.shl (local.get $i) (i32.const 1)))
-          (i32.load8_u offset=32768 (i32.shr_u (local.get $b) (i32.const 4))))
+          (i32.load8_u offset=512 (i32.shr_u (local.get $b) (i32.const 4))))
         (i32.store8 offset=16
           (i32.add (local.get $out) (i32.shl (local.get $i) (i32.const 1)))
-          (i32.load8_u offset=32768 (i32.and (local.get $b) (i32.const 15))))
+          (i32.load8_u offset=512 (i32.and (local.get $b) (i32.const 15))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $next)))
     (global.set $heap (i32.add (local.get $out) (i32.add (local.get $hex) (i32.const 15))))
@@ -229,7 +232,7 @@ pub fn probe(calls: &[(Import, Vec<u8>)]) -> String {
       (i64.shl (i64.extend_i32_u (local.get $out)) (i64.const 32))
       (i64.extend_i32_u (i32.add (local.get $hex) (i32.const 15)))))
 )"#,
-        standard_exports(64),
+        standard_exports(64).replace("(i32.const 65536)", &format!("(i32.const {heap})")),
     )
 }
 

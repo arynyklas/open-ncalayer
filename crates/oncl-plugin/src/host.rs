@@ -16,6 +16,7 @@ use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::TsaProfile;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::path::PathBuf;
 use std::sync::Arc;
 use time::OffsetDateTime;
 use wasmi::{Caller, Linker, Memory, StoreLimits, TypedFunc};
@@ -46,6 +47,9 @@ pub struct HostServices {
     /// The only hosts (and their subdomains) the core asks for time-stamps, OCSP and CRLs
     /// on a plugin's behalf: the NCA's ([`crate::nca_pki_hosts`]).
     pub pki_hosts: Arc<[String]>,
+    /// The folder of the plugins' settings files (`<data>/plugins/settings`,
+    /// [`crate::Store::settings_dir`]); `None`: `settings_*` fail.
+    pub settings_dir: Option<PathBuf>,
 }
 
 /// Who runs in an instance now.
@@ -276,6 +280,16 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
         Import::CmsVerify => run(args, |a| caps::cms_verify(state, a)),
         Import::KeysSignXmlEx => run(args, |a| caps::keys_sign_xml_ex(state, a)),
         Import::XmlVerify => run(args, caps::xml_verify),
+        Import::HttpRequestEx => run(args, |a| caps::http_request_ex(state, a)),
+        Import::FileChoose => run(args, |a| caps::file_choose(state, a)),
+        Import::FileOpenEx => run(args, |a| caps::file_open_ex(state, a)),
+        Import::PageFileRead => run(args, |a| caps::page_file_read(state, a)),
+        Import::PageFileWrite => run(args, |a| caps::page_file_write(state, a)),
+        Import::DialogChoice => run(args, |a| caps::dialog_choice(state, a)),
+        Import::SettingsGet => run(args, |()| caps::settings_get(state)),
+        Import::SettingsPut => run(args, |a| caps::settings_put(state, a)),
+        Import::SharedGet => run(args, |a| caps::shared_get(state, a)),
+        Import::SharedPut => run(args, |a| caps::shared_put(state, a)),
     }
 }
 

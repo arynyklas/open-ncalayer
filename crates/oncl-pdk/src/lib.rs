@@ -48,7 +48,7 @@ mod guest;
 #[doc(hidden)]
 pub use guest::__rt;
 #[cfg(target_arch = "wasm32")]
-pub use guest::{call_host, dialogs, files, host, http, keys, pki};
+pub use guest::{call_host, dialogs, files, host, http, keys, pki, settings, shared};
 pub use oncl_protocol::{AddInfo, Reply, invoker, javab64, javaexc, javamap, legacy, orgjson};
 pub use serde_json;
 

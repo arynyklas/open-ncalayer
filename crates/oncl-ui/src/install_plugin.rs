@@ -273,6 +273,24 @@ pub(crate) fn capability_text(capability: &CapabilityLine, l: Locale) -> String 
         CapabilityLine::Dialogs => t.dialogs.to_owned(),
         CapabilityLine::Files => t.files.to_owned(),
         CapabilityLine::Http(prefixes) => t.http.replace("{0}", &prefixes.join(", ")),
+        CapabilityLine::Origins(origins) => t.origins.replace("{0}", &origins.join(", ")),
+        CapabilityLine::HttpInsecure(prefixes) => {
+            t.http_insecure.replace("{0}", &prefixes.join(", "))
+        }
+        CapabilityLine::KeyFiles => t.key_files.to_owned(),
+        CapabilityLine::PageFiles(extensions) if extensions.is_empty() => {
+            t.page_files_read.to_owned()
+        }
+        CapabilityLine::PageFiles(extensions) => t.page_files.replace(
+            "{0}",
+            &extensions
+                .iter()
+                .map(|e| format!(".{e}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        CapabilityLine::Settings => t.settings.to_owned(),
+        CapabilityLine::Shared => t.shared.to_owned(),
     }
 }
 
@@ -295,6 +313,16 @@ struct Texts {
     files: &'static str,
     /// `{0}`: the URL prefixes.
     http: &'static str,
+    /// `{0}`: the origin patterns.
+    origins: &'static str,
+    /// `{0}`: the plain-HTTP prefixes.
+    http_insecure: &'static str,
+    key_files: &'static str,
+    page_files_read: &'static str,
+    /// `{0}`: the extensions written.
+    page_files: &'static str,
+    settings: &'static str,
+    shared: &'static str,
     local: &'static str,
 }
 
@@ -314,6 +342,13 @@ impl Texts {
                 dialogs: "терезелерді көрсету",
                 files: "өзіңіз таңдаған файлдарды ашу және сақтау",
                 http: "мына мекенжайларға жүгіну: {0}",
+                origins: "мына сайттардың өздеріне жүгіну: {0}",
+                http_insecure: "қорғалмаған байланыс арқылы жүгіну: {0}",
+                key_files: "сайттар атаған кілт файлдарын ашу, әрқайсысын сіз рұқсат еткеннен кейін",
+                page_files_read: "сайттар атаған файлдарды оқу, әрқайсысын сіз рұқсат еткеннен кейін",
+                page_files: "сайттар атаған файлдарды оқу және папкаларға {0} файлдарын жазу, әрқайсысын сіз рұқсат еткеннен кейін",
+                settings: "баптауларын осы компьютерде сақтау",
+                shared: "деректерді сайттар арасында бөлісу",
                 local: "Бұл плагин OpenNCALayer каталогында жоқ, оны мейнтейнер тексерген жоқ. Плагиндерді тек сенімді көзден орнатыңыз.",
             },
             Locale::Ru => &Texts {
@@ -329,6 +364,13 @@ impl Texts {
                 dialogs: "показывать окна",
                 files: "открывать и сохранять файлы, которые вы выберете",
                 http: "обращаться к {0}",
+                origins: "обращаться к самим сайтам {0}",
+                http_insecure: "обращаться по незащищённому соединению к {0}",
+                key_files: "открывать файлы ключей, которые назовут сайты, — каждый после вашего разрешения",
+                page_files_read: "читать файлы, которые назовут сайты, — каждый после вашего разрешения",
+                page_files: "читать файлы и записывать файлы {0} в папки, которые назовут сайты, — каждый раз после вашего разрешения",
+                settings: "хранить свои настройки на этом компьютере",
+                shared: "делить данные между сайтами",
                 local: "Этого плагина нет в каталоге OpenNCALayer, его не проверял мейнтейнер. Устанавливайте только плагины из источника, которому доверяете.",
             },
             Locale::En => &Texts {
@@ -344,6 +386,13 @@ impl Texts {
                 dialogs: "show windows",
                 files: "open and save files you choose",
                 http: "reach {0}",
+                origins: "reach the sites {0} themselves",
+                http_insecure: "reach {0} over an unprotected connection",
+                key_files: "open key files the sites name, each once you allow it",
+                page_files_read: "read files the sites name, each once you allow it",
+                page_files: "read files and write {0} files into folders the sites name, each once you allow it",
+                settings: "keep its settings on this computer",
+                shared: "share data between sites",
                 local: "This plugin is not in the OpenNCALayer catalog; the maintainer has not reviewed it. Install plugins only from a source you trust.",
             },
         }

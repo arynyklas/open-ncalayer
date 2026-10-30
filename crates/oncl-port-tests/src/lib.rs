@@ -175,6 +175,7 @@ impl Harness {
             // The synthetic PKI's CAs, as the ports' keys are synthetic.
             cas: Arc::new(synthetic_cas()),
             pki_hosts: oncl_plugin::nca_pki_hosts(),
+            settings_dir: None,
         }
     }
 
@@ -219,6 +220,7 @@ fn context(manifest: &Manifest) -> SessionContext {
         session: 1,
         plugin_id: manifest.id.clone(),
         plugin_name: manifest.name.clone(),
+        shared: Arc::default(),
     }
 }
 

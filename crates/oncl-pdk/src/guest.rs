@@ -83,6 +83,26 @@ mod imports {
         pub fn keys_sign_xml_ex(ptr: i32, len: i32) -> i64;
         #[link_name = "xml_verify"]
         pub fn xml_verify(ptr: i32, len: i32) -> i64;
+        #[link_name = "http_request_ex"]
+        pub fn http_request_ex(ptr: i32, len: i32) -> i64;
+        #[link_name = "file_choose"]
+        pub fn file_choose(ptr: i32, len: i32) -> i64;
+        #[link_name = "file_open_ex"]
+        pub fn file_open_ex(ptr: i32, len: i32) -> i64;
+        #[link_name = "page_file_read"]
+        pub fn page_file_read(ptr: i32, len: i32) -> i64;
+        #[link_name = "page_file_write"]
+        pub fn page_file_write(ptr: i32, len: i32) -> i64;
+        #[link_name = "dialog_choice"]
+        pub fn dialog_choice(ptr: i32, len: i32) -> i64;
+        #[link_name = "settings_get"]
+        pub fn settings_get(ptr: i32, len: i32) -> i64;
+        #[link_name = "settings_put"]
+        pub fn settings_put(ptr: i32, len: i32) -> i64;
+        #[link_name = "shared_get"]
+        pub fn shared_get(ptr: i32, len: i32) -> i64;
+        #[link_name = "shared_put"]
+        pub fn shared_put(ptr: i32, len: i32) -> i64;
     }
 }
 
@@ -126,6 +146,16 @@ fn host_fn(import: Import) -> HostFn {
         Import::CmsVerify => imports::cms_verify,
         Import::KeysSignXmlEx => imports::keys_sign_xml_ex,
         Import::XmlVerify => imports::xml_verify,
+        Import::HttpRequestEx => imports::http_request_ex,
+        Import::FileChoose => imports::file_choose,
+        Import::FileOpenEx => imports::file_open_ex,
+        Import::PageFileRead => imports::page_file_read,
+        Import::PageFileWrite => imports::page_file_write,
+        Import::DialogChoice => imports::dialog_choice,
+        Import::SettingsGet => imports::settings_get,
+        Import::SettingsPut => imports::settings_put,
+        Import::SharedGet => imports::shared_get,
+        Import::SharedPut => imports::shared_put,
     }
 }
 
@@ -562,8 +592,8 @@ pub mod keys {
 /// Dialogs (capability `dialogs`).
 pub mod dialogs {
     use super::*;
+    pub use crate::abi::{ChoiceArgs, MessageKind, PasswordArgs, SecretRef};
     use crate::abi::{ConfirmArgs, MessageArgs};
-    pub use crate::abi::{MessageKind, PasswordArgs, SecretRef};
 
     /// Asks for a password the core keeps: its id, for [`crate::keys::Password::Secret`]
     /// of this instance; `None` if the user cancels.
@@ -591,12 +621,22 @@ pub mod dialogs {
             },
         )
     }
+
+    /// Asks with the plugin's buttons (and list): the button pressed, or with a list the
+    /// option selected when the first button is pressed; `None` if closed (or, with a list,
+    /// another button or no option).
+    pub fn choice(args: &ChoiceArgs) -> HostResult<Option<u8>> {
+        call(imports::dialog_choice, args)
+    }
 }
 
 /// Files the user chooses (capability `files`).
 pub mod files {
     use super::*;
-    use crate::abi::{OpenedFile, SaveArgs};
+    pub use crate::abi::{
+        ChooseFileArgs, ChosenPath, FileFilter, FileMode, OpenedFile, PageRead, PageWrite,
+    };
+    use crate::abi::{PagePathArgs, PageWriteArgs, SaveArgs};
 
     /// The path and contents of a file the user chooses; `None` if the user cancels.
     pub fn open() -> HostResult<Option<(String, Vec<u8>)>> {
@@ -615,14 +655,50 @@ pub mod files {
             },
         )
     }
+
+    /// A file or folder the user chooses: its path and a file's size, nothing read; `None`
+    /// if the user cancels.
+    pub fn choose(args: &ChooseFileArgs) -> HostResult<Option<ChosenPath>> {
+        call(imports::file_choose, args)
+    }
+
+    /// The path and contents of a file the user chooses in a chooser with `args`' title,
+    /// file types and start folder; `None` if the user cancels.
+    pub fn open_ex(args: &ChooseFileArgs) -> HostResult<Option<OpenedFile>> {
+        call(imports::file_open_ex, args)
+    }
+
+    /// A file the page names (capability `page_files`), once the user allows it.
+    pub fn page_read(path: &str) -> HostResult<PageRead> {
+        call(
+            imports::page_file_read,
+            &PagePathArgs {
+                path: path.to_owned(),
+            },
+        )
+    }
+
+    /// Writes `data` as `name` into the folder `dir` the page names (capability
+    /// `page_files`), once the user allows it.
+    pub fn page_write(dir: &str, name: &str, data: &[u8]) -> HostResult<PageWrite> {
+        call(
+            imports::page_file_write,
+            &PageWriteArgs {
+                dir: dir.to_owned(),
+                name: name.to_owned(),
+                data: Bytes::from(data.to_vec()),
+            },
+        )
+    }
 }
 
 /// HTTPS requests to the manifest's prefixes (capability `http`). Redirects are not
 /// followed: a 3xx reply comes back with its `location`.
 pub mod http {
     use super::*;
+    use crate::abi::HttpArgs;
     pub use crate::abi::HttpResponse;
-    use crate::abi::{HttpArgs, Method};
+    pub use crate::abi::{Header, HttpExArgs, Method};
 
     /// `GET url`.
     pub fn get(url: &str) -> HostResult<HttpResponse> {
@@ -646,6 +722,60 @@ pub mod http {
                 url: url.to_owned(),
                 content_type: Some(content_type.to_owned()),
                 body: Bytes::from(body.to_vec()),
+            },
+        )
+    }
+
+    /// A request with headers, to the manifest's `http` prefixes, to the page's own origin
+    /// when the manifest's `origins` list it (relative URLs resolved against it), or under
+    /// an `http_insecure` prefix.
+    pub fn request_ex(args: &HttpExArgs) -> HostResult<HttpResponse> {
+        call(imports::http_request_ex, args)
+    }
+}
+
+/// The plugin's settings, kept on disk across sessions and updates (capability
+/// `settings`).
+pub mod settings {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// The settings; empty if none were put.
+    pub fn get() -> HostResult<BTreeMap<String, String>> {
+        call(imports::settings_get, &())
+    }
+
+    /// Replaces the settings.
+    pub fn put(settings: &BTreeMap<String, String>) -> HostResult<()> {
+        call(imports::settings_put, settings)
+    }
+}
+
+/// Values the plugin's instances (every session, every site) share in the process until
+/// the plugin is reloaded (capability `shared`).
+pub mod shared {
+    use super::*;
+    use crate::abi::{SharedKey, SharedPut};
+
+    /// The value of `key`, if set and not expired.
+    pub fn get(key: &str) -> HostResult<Option<Vec<u8>>> {
+        let value: Option<Bytes> = call(
+            imports::shared_get,
+            &SharedKey {
+                key: key.to_owned(),
+            },
+        )?;
+        Ok(value.map(Bytes::into_vec))
+    }
+
+    /// Sets `key` to `value` (for `ttl_ms` milliseconds if given), or removes it.
+    pub fn put(key: &str, value: Option<&[u8]>, ttl_ms: Option<u64>) -> HostResult<()> {
+        call(
+            imports::shared_put,
+            &SharedPut {
+                key: key.to_owned(),
+                value: value.map(|v| Bytes::from(v.to_vec())),
+                ttl_ms,
             },
         )
     }
