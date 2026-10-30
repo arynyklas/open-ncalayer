@@ -4,10 +4,11 @@
 //! report of its signers appended (`visualCMS`) and the signed file itself
 //! (`extractSignedFileBytes`).
 //!
-//! - A request org.json reads and that names a `method` must come from an origin matching
-//!   `.*qoltanba.kz$` (the dot any character, as the original's pattern), else
-//!   `INVALID_ORIGIN`; then the reflective dispatcher of the original's `commonUtils` samples
-//!   ([`legacy`]) finds the method.
+//! - A request org.json reads and that names a `method` must come from
+//!   `https://qoltanba.kz` or one of its subdomains (the original's pattern
+//!   `.*qoltanba.kz$` also let in look-alike sites), else `INVALID_ORIGIN`; then the
+//!   reflective dispatcher of the original's `commonUtils` samples ([`legacy`]) finds the
+//!   method.
 //! - Replies are the `ResponseForJS` bean (`responseObjects`, `responseObject`, `code`,
 //!   `message`) in the texts of the request's `lang` (`kk` Kazakh, anything else Russian);
 //!   a method not found speaks the language of the request before (the original sets it
@@ -192,20 +193,30 @@ fn names_method(text: &str) -> bool {
         if matches!(request.get("method"), Some(JValue::Str(_))))
 }
 
-/// `Pattern.matches(".*qoltanba.kz$", origin)`: `.` is any character but a line terminator.
+/// Whether `origin` is the site's: `https://` and the host `qoltanba.kz` or a subdomain of
+/// it, with an optional port. (The original's `Pattern.matches(".*qoltanba.kz$", origin)`
+/// let in any origin whose text ends that way, `.` any character; this is stricter.)
 fn origin_matches(origin: &str) -> bool {
-    let terminator = |c: char| matches!(c, '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}');
-    let Some(rest) = origin.strip_suffix("kz") else {
+    let Some(authority) = origin.strip_prefix("https://") else {
         return false;
     };
-    let mut chars = rest.chars();
-    match chars.next_back() {
-        Some(dot) if !terminator(dot) => {
-            let head = chars.as_str();
-            head.ends_with("qoltanba") && !head.chars().any(terminator)
-        }
-        _ => false,
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    if port.is_some_and(|port| port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit())) {
+        return false;
     }
+    let label = |label: &str| {
+        !label.is_empty()
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    host == "qoltanba.kz"
+        || host
+            .strip_suffix(".qoltanba.kz")
+            .is_some_and(|sub| sub.split('.').all(label))
 }
 
 fn no_such_method(state: &Qoltanba, name: &str) -> String {
@@ -405,7 +416,7 @@ struct Verified {
     tsp_date: Option<String>,
     bin: Option<String>,
     iin: Option<String>,
-    name: String,
+    name: Option<String>,
     tsp: Judged,
     certificate: Judged,
     signature: Judged,
@@ -429,21 +440,21 @@ impl Verified {
         bean.put("tspVerificationResult", self.tsp.bean(lang));
         bean.put("number", 0);
         bean.put("certificateVerificationResult", self.certificate.bean(lang));
-        bean.put("name", self.name.as_str());
+        bean.put_opt("name", self.name.as_deref());
         bean.put("signatureVerificationResult", self.signature.bean(lang));
         JValue::Obj(bean)
     }
 
-    /// The signer's rows of the report.
-    fn report(self) -> report::Signer {
-        report::Signer {
-            name: self.name,
-            // Unverified against the original: a missing value in the report.
-            iin: self.iin.unwrap_or_default(),
+    /// The signer's rows of the report; `None` if one has no value (the original's iText
+    /// refuses a cell of `null`, and `visualCMS` fails).
+    fn report(self) -> Option<report::Signer> {
+        Some(report::Signer {
+            name: self.name?,
+            iin: self.iin?,
             serial: self.serial,
             period: self.period,
-            signed_at: self.tsp_date.unwrap_or_default(),
-        }
+            signed_at: self.tsp_date?,
+        })
     }
 }
 
@@ -503,14 +514,13 @@ fn signer_info(signer: &SignerReport) -> Result<Verified, &'static str> {
     let not_after = ms(&tbs.validity().not_after);
 
     let person = ekus.iter().any(|eku| eku == EKU_INDIVIDUAL);
-    // Unverified against the original: a subject without CN (here its NullPointerException).
-    let cn = values("2.5.4.3")
-        .into_iter()
-        .next()
-        .ok_or("internalError")?;
-    let name = match values("2.5.4.42").into_iter().next() {
-        Some(given) => format!("{} {given}", cn.trim()),
-        None => cn.trim().to_owned(),
+    // `CN` trimmed, then a space and `G`; `G` alone without a `CN`; neither: no name.
+    let cn = values("2.5.4.3").into_iter().next();
+    let given = values("2.5.4.42").into_iter().next();
+    let name = match (cn, given) {
+        (Some(cn), Some(given)) => Some(format!("{} {given}", cn.trim())),
+        (Some(cn), None) => Some(cn.trim().to_owned()),
+        (None, given) => given,
     };
     let iin = values("2.5.4.5")
         .into_iter()
@@ -519,9 +529,10 @@ fn signer_info(signer: &SignerReport) -> Result<Verified, &'static str> {
     let (bin, organization) = if person {
         (None, None)
     } else {
+        // The last OU that names a BIN.
         let bin = values("2.5.4.11")
             .into_iter()
-            .find(|ou| (ou.contains("BIN") || ou.contains("bin")) && ou.chars().count() == 15)
+            .rfind(|ou| (ou.contains("BIN") || ou.contains("bin")) && ou.chars().count() == 15)
             .map(|ou| ou.chars().skip(3).collect());
         (bin, values("2.5.4.10").into_iter().next())
     };
@@ -601,7 +612,10 @@ fn check_cms_bytes(state: &Qoltanba, args: &Args<'_>, _: &AddInfo) -> Outcome {
 
 fn visual_cms(state: &Qoltanba, args: &Args<'_>, _: &AddInfo) -> Outcome {
     let pdf = verify(args.str(0)).ok().and_then(|(signers, content)| {
-        let signers: Vec<report::Signer> = signers.into_iter().map(Verified::report).collect();
+        let signers: Vec<report::Signer> = signers
+            .into_iter()
+            .map(Verified::report)
+            .collect::<Option<_>>()?;
         report::append(&content?, &signers).ok()
     });
     match pdf {

@@ -7,11 +7,16 @@ use flate2::read::ZlibDecoder;
 use std::collections::BTreeMap;
 use std::io::Read;
 
-/// The largest stream the reader inflates.
-const MAX_INFLATED: u64 = 64 << 20;
+/// The largest stream the reader inflates: well within the plugin's memory, larger than any
+/// cross-reference or object stream of a real document.
+const MAX_INFLATED: u64 = 4 << 20;
 
 /// The most cross-reference sections the reader follows.
 const MAX_SECTIONS: usize = 1024;
+
+/// The most references the reader follows to resolve one value (a stream's `Length`
+/// that is a reference, an object in an object stream, …).
+const MAX_DEPTH: usize = 32;
 
 /// A PDF object.
 #[derive(Debug, Clone, PartialEq)]
@@ -156,8 +161,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A run of regular characters.
+    /// A run of regular characters (none past the end of the data).
     fn word(&mut self) -> &'a [u8] {
+        self.pos = self.pos.min(self.data.len());
         let start = self.pos;
         while let Some(b) = self.peek() {
             if is_white(b) || is_delimiter(b) {
@@ -527,7 +533,10 @@ impl<'a> Document<'a> {
                     };
                     parser.skip_space();
                     let kind = parser.word();
-                    let num = u32::try_from(start + i).map_err(|_| "bad object number")?;
+                    let num = start
+                        .checked_add(i)
+                        .and_then(|num| u32::try_from(num).ok())
+                        .ok_or("bad object number")?;
                     let generation = u16::try_from(generation).map_err(|_| "bad generation")?;
                     let entry = match kind {
                         b"n" => Entry::At(field as usize),
@@ -545,11 +554,11 @@ impl<'a> Document<'a> {
             };
             return Ok((trailer, false));
         }
-        let (dict, data) = match self.indirect_at(offset)? {
+        let (dict, data) = match self.indirect_at(offset, 0)? {
             Obj::Stream(dict, data) => (dict, data),
             _ => return Err("bad cross-reference stream"),
         };
-        let decoded = decode(&dict, &data, |obj| self.resolve_int(obj))?;
+        let decoded = decode(&dict, &data, |obj| self.resolve_int(obj, 1))?;
         let widths: Vec<usize> = match get(&dict, "W") {
             Some(Obj::Array(w)) if w.len() == 3 => w
                 .iter()
@@ -588,7 +597,10 @@ impl<'a> Document<'a> {
                 let (a, rest) = fields.split_at(widths[0]);
                 let (b, c) = rest.split_at(widths[1]);
                 let kind = if widths[0] == 0 { 1 } else { be(a) };
-                let num = u32::try_from(start + i).map_err(|_| "bad object number")?;
+                let num = start
+                    .checked_add(i)
+                    .and_then(|num| u32::try_from(num).ok())
+                    .ok_or("bad object number")?;
                 let entry = match kind {
                     0 => (Entry::Free, 0),
                     1 => (Entry::At(be(b) as usize), be(c) as u16),
@@ -601,8 +613,8 @@ impl<'a> Document<'a> {
         Ok((dict, true))
     }
 
-    /// The indirect object `N G obj … endobj` at `offset`.
-    fn indirect_at(&self, offset: usize) -> Result<Obj, Error> {
+    /// The indirect object `N G obj … endobj` at `offset`, `depth` references deep.
+    fn indirect_at(&self, offset: usize, depth: usize) -> Result<Obj, Error> {
         let mut parser = Parser::new(self.data, offset);
         if parser.uint().is_none() || parser.uint().is_none() || !parser.keyword(b"obj") {
             return Err("bad object header");
@@ -612,7 +624,7 @@ impl<'a> Document<'a> {
         if let Obj::Stream(dict, _) = &obj
             && let Some(Obj::Ref(..)) = get(dict, "Length")
         {
-            let len = self.resolve_int(get(dict, "Length").expect("checked"))?;
+            let len = self.resolve_int(get(dict, "Length").expect("checked"), depth + 1)?;
             let mut dict = dict.clone();
             set(&mut dict, "Length", Obj::Int(len));
             let mut again = Parser::new(self.data, offset);
@@ -629,8 +641,8 @@ impl<'a> Document<'a> {
         Ok(obj)
     }
 
-    fn resolve_int(&self, obj: &Obj) -> Result<i64, Error> {
-        match self.resolve(obj)? {
+    fn resolve_int(&self, obj: &Obj, depth: usize) -> Result<i64, Error> {
+        match self.resolve_at(obj, depth)? {
             Obj::Int(i) => Ok(i),
             _ => Err("not an integer"),
         }
@@ -638,27 +650,40 @@ impl<'a> Document<'a> {
 
     /// `obj`, or the object it refers to.
     pub(crate) fn resolve(&self, obj: &Obj) -> Result<Obj, Error> {
+        self.resolve_at(obj, 0)
+    }
+
+    fn resolve_at(&self, obj: &Obj, depth: usize) -> Result<Obj, Error> {
         match obj {
-            Obj::Ref(num, _) => self.object(*num),
+            Obj::Ref(num, _) => self.object_at(*num, depth),
             other => Ok(other.clone()),
         }
     }
 
     /// The object `num`.
     pub(crate) fn object(&self, num: u32) -> Result<Obj, Error> {
+        self.object_at(num, 0)
+    }
+
+    /// The object `num`, `depth` references deep: past [`MAX_DEPTH`] the references loop.
+    fn object_at(&self, num: u32, depth: usize) -> Result<Obj, Error> {
+        if depth > MAX_DEPTH {
+            return Err("references nested too deep");
+        }
         match self.entries.get(&num) {
             None | Some((Entry::Free, _)) => Ok(Obj::Null),
-            Some((Entry::At(offset), _)) => self.indirect_at(*offset),
+            Some((Entry::At(offset), _)) => self.indirect_at(*offset, depth),
             Some((Entry::InStream(stream), _)) => {
                 let Some((Entry::At(offset), _)) = self.entries.get(stream) else {
                     return Err("bad object stream");
                 };
-                let Obj::Stream(dict, data) = self.indirect_at(*offset)? else {
+                let Obj::Stream(dict, data) = self.indirect_at(*offset, depth + 1)? else {
                     return Err("bad object stream");
                 };
-                let decoded = decode(&dict, &data, |obj| self.resolve_int(obj))?;
-                let n = self.resolve_int(get(&dict, "N").ok_or("bad object stream")?)?;
-                let first = self.resolve_int(get(&dict, "First").ok_or("bad object stream")?)?;
+                let int = |obj: &Obj| self.resolve_int(obj, depth + 1);
+                let decoded = decode(&dict, &data, int)?;
+                let n = int(get(&dict, "N").ok_or("bad object stream")?)?;
+                let first = int(get(&dict, "First").ok_or("bad object stream")?)?;
                 let first = usize::try_from(first).map_err(|_| "bad object stream")?;
                 let mut header = Parser::new(&decoded, 0);
                 for _ in 0..n {
@@ -666,7 +691,11 @@ impl<'a> Document<'a> {
                         return Err("bad object stream");
                     };
                     if obj_num == u64::from(num) {
-                        let mut parser = Parser::new(&decoded, first + at as usize);
+                        let at = usize::try_from(at)
+                            .ok()
+                            .and_then(|at| first.checked_add(at))
+                            .ok_or("bad object stream")?;
+                        let mut parser = Parser::new(&decoded, at);
                         return parser.object(0);
                     }
                 }
@@ -688,7 +717,10 @@ impl<'a> Document<'a> {
             Some(Obj::Int(size)) => u32::try_from(*size).map_err(|_| "bad Size")?,
             _ => return Err("bad Size"),
         };
-        let highest = self.entries.keys().next_back().map_or(0, |n| n + 1);
+        let highest = match self.entries.keys().next_back() {
+            Some(n) => n.checked_add(1).ok_or("bad object number")?,
+            None => 0,
+        };
         Ok(declared.max(highest))
     }
 }
@@ -748,9 +780,9 @@ fn decode(
     Ok(out)
 }
 
-/// Undoes PNG row predictors of rows of `columns` bytes.
+/// Undoes PNG row predictors of rows of `columns` bytes (no more than the data has).
 fn unpredict_png(data: &[u8], columns: usize) -> Result<Vec<u8>, Error> {
-    if columns == 0 {
+    if columns == 0 || columns > data.len() {
         return Err("bad Columns");
     }
     let mut out = Vec::with_capacity(data.len());
@@ -812,11 +844,11 @@ impl<'d, 'a> Update<'d, 'a> {
         })
     }
 
-    /// The number the next new object gets.
-    pub(crate) fn reserve(&mut self) -> u32 {
+    /// The number the next new object gets; none is left past the largest number.
+    pub(crate) fn reserve(&mut self) -> Result<u32, Error> {
         let num = self.next;
-        self.next += 1;
-        num
+        self.next = num.checked_add(1).ok_or("no object number left")?;
+        Ok(num)
     }
 
     /// Writes `obj` as the object `num` (new, or a new version of the document's own).
@@ -831,7 +863,7 @@ impl<'d, 'a> Update<'d, 'a> {
 
     /// The document with the update appended: the objects, a cross-reference section of the
     /// newest section's kind and a trailer pointing back to it.
-    pub(crate) fn finish(mut self) -> Vec<u8> {
+    pub(crate) fn finish(mut self) -> Result<Vec<u8>, Error> {
         let doc = self.doc;
         let mut out = doc.data.to_vec();
         if !out.ends_with(b"\n") {
@@ -853,7 +885,7 @@ impl<'d, 'a> Update<'d, 'a> {
         set(&mut trailer, "Prev", Obj::Int(doc.startxref as i64));
         let xref_at = out.len();
         if doc.xref_stream {
-            let own = self.reserve();
+            let own = self.reserve()?;
             offsets.push((own, 0, xref_at));
             offsets.sort_by_key(|(num, ..)| *num);
             let mut index = Vec::new();
@@ -888,6 +920,6 @@ impl<'d, 'a> Update<'d, 'a> {
             out.push(b'\n');
         }
         out.extend(format!("startxref\n{xref_at}\n%%EOF\n").as_bytes());
-        out
+        Ok(out)
     }
 }

@@ -227,9 +227,10 @@ fn base(origin: &str) -> Result<String, Fail> {
     Ok(format!("https://{host}/"))
 }
 
-/// Calls `call` with the action `action`. A network failure is tried again twice; any
-/// other failure (not 200, not a result, a status other than `SUCCESS` and `ERROR`) is the
-/// general error.
+/// Calls `call` with the action `action`, once: a request the core could not complete is
+/// not sent again (the original's client repeated only requests it had not sent, and the
+/// core does not tell which those are); that and any other failure (not 200, not a
+/// result, a status other than `SUCCESS` and `ERROR`) is the general error.
 pub fn call(origin: &str, call: &str, action: &P) -> Result<Answer, Fail> {
     let args = HttpExArgs {
         method: Method::Post,
@@ -240,15 +241,7 @@ pub fn call(origin: &str, call: &str, action: &P) -> Result<Answer, Fail> {
         body: action.to_json().into_bytes().into(),
         timeout_ms: None,
     };
-    let mut attempts = 0;
-    let response = loop {
-        attempts += 1;
-        match http::request_ex(&args) {
-            Ok(response) => break response,
-            Err(e) if e.code == oncl_pdk::abi::ErrorCode::Failed && attempts < 3 => continue,
-            Err(_) => return Err(Fail::Generic),
-        }
-    };
+    let response = http::request_ex(&args).map_err(|_| Fail::Generic)?;
     if response.status != 200 {
         return Err(Fail::Generic);
     }

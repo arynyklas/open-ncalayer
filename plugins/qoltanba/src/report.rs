@@ -21,10 +21,8 @@ const FONT_NAME: &str = "SourceSansPro-Light";
 const PAGE: (f32, f32) = (595.0, 842.0);
 /// The page margins.
 const MARGIN: f32 = 36.0;
-/// The text size.
+/// The text size (iText's default, the heading's too).
 const SIZE: f32 = 12.0;
-/// The heading's size.
-const HEADING_SIZE: f32 = 14.0;
 /// Lines of a paragraph, as a multiple of its size.
 const LEADING: f32 = 1.35;
 /// The table's column widths, proportions of the text width.
@@ -102,13 +100,15 @@ impl<'f> Writer<'f> {
             self.glyphs.entry(glyph).or_insert(c);
             hex.push_str(&format!("{glyph:04X}"));
         }
-        let mode = if bold {
-            // Fill and stroke, as iText makes a bold of a font without one.
-            format!("2 Tr {:.2} w ", size / 30.0)
+        // Bold: fill and stroke, as iText makes a bold of a font without one; the text
+        // render mode is state that outlives ET, so it is set back to fill after the text.
+        let (bold_on, bold_off) = if bold {
+            (format!("2 Tr {:.2} w ", size / 30.0), " 0 Tr")
         } else {
-            String::new()
+            (String::new(), "")
         };
-        let op = format!("BT /F1 {size} Tf {mode}{x:.2} {baseline:.2} Td <{hex}> Tj ET\n");
+        let op =
+            format!("BT /F1 {size} Tf {bold_on}{x:.2} {baseline:.2} Td <{hex}> Tj{bold_off} ET\n");
         self.content().extend(op.as_bytes());
     }
 
@@ -187,7 +187,7 @@ fn wrap(font: &Font, text: &str, size: f32, width: f32) -> Vec<String> {
 /// The report pages of `signers`: their content streams and the glyphs they use.
 fn lay_out(font: &Font, signers: &[Signer]) -> (Vec<Vec<u8>>, BTreeMap<u16, char>) {
     let mut writer = Writer::new(font);
-    writer.paragraph("Информация об электронном документе", HEADING_SIZE, true);
+    writer.paragraph("Информация об электронном документе", SIZE, true);
     for (i, signer) in signers.iter().enumerate() {
         // The heading stays with the first row of its table.
         writer.ensure(GAP + SIZE * LEADING * 2.0 + 2.0 * PADDING);
@@ -195,7 +195,7 @@ fn lay_out(font: &Font, signers: &[Signer]) -> (Vec<Vec<u8>>, BTreeMap<u16, char
         writer.paragraph(
             &format!("{}) ПОДПИСАНТ - {}", i + 1, signer.name),
             SIZE,
-            false,
+            true,
         );
         for (label, value) in rows(signer) {
             writer.row(label, value);
@@ -252,12 +252,16 @@ fn dict(entries: Vec<(&str, Obj)>) -> Dict {
 }
 
 /// The font's objects in `update`: the Type0 font's number.
-fn put_font(update: &mut Update, font: &Font, glyphs: &BTreeMap<u16, char>) -> u32 {
-    let type0 = update.reserve();
-    let cid = update.reserve();
-    let descriptor = update.reserve();
-    let file = update.reserve();
-    let cmap = update.reserve();
+fn put_font(
+    update: &mut Update,
+    font: &Font,
+    glyphs: &BTreeMap<u16, char>,
+) -> Result<u32, pdf::Error> {
+    let type0 = update.reserve()?;
+    let cid = update.reserve()?;
+    let descriptor = update.reserve()?;
+    let file = update.reserve()?;
+    let cmap = update.reserve()?;
     update.put(
         file,
         Obj::Stream(
@@ -321,7 +325,7 @@ fn put_font(update: &mut Update, font: &Font, glyphs: &BTreeMap<u16, char>) -> u
             ("ToUnicode", Obj::Ref(cmap, 0)),
         ])),
     );
-    type0
+    Ok(type0)
 }
 
 /// `pdf` with the report of `signers` after its pages.
@@ -352,7 +356,7 @@ pub(crate) fn append(pdf: &[u8], signers: &[Signer]) -> Result<Vec<u8>, pdf::Err
 
     let (contents, glyphs) = lay_out(&font, signers);
     let mut update = Update::new(&doc)?;
-    let type0 = put_font(&mut update, &font, &glyphs);
+    let type0 = put_font(&mut update, &font, &glyphs)?;
     let media_box = Obj::Array(vec![
         Obj::Int(0),
         Obj::Int(0),
@@ -360,8 +364,8 @@ pub(crate) fn append(pdf: &[u8], signers: &[Signer]) -> Result<Vec<u8>, pdf::Err
         Obj::Int(PAGE.1 as i64),
     ]);
     for content in &contents {
-        let page = update.reserve();
-        let stream = update.reserve();
+        let page = update.reserve()?;
+        let stream = update.reserve()?;
         update.put(stream, Obj::Stream(Vec::new(), content.clone()));
         update.put(
             page,
@@ -384,8 +388,12 @@ pub(crate) fn append(pdf: &[u8], signers: &[Signer]) -> Result<Vec<u8>, pdf::Err
         );
         kids.push(Obj::Ref(page, 0));
     }
+    let count = i64::try_from(contents.len())
+        .ok()
+        .and_then(|added| count.checked_add(added))
+        .ok_or("bad Count")?;
     set(&mut pages, "Kids", Obj::Array(kids));
-    set(&mut pages, "Count", Obj::Int(count + contents.len() as i64));
+    set(&mut pages, "Count", Obj::Int(count));
     update.put(pages_num, Obj::Dict(pages));
-    Ok(update.finish())
+    update.finish()
 }

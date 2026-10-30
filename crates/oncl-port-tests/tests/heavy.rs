@@ -256,6 +256,49 @@ fn buhta_sign_file_cades_t() {
 }
 
 #[test]
+fn buhta_many_selections_keep_the_newest() {
+    // More selections than the core holds keys for: each one still answers a uuid; the
+    // oldest uuids are forgotten, the newest still sign, and so does a key chosen for one
+    // request.
+    const SELECTIONS: usize = 20;
+    let mut steps: Vec<Step> = (0..SELECTIONS)
+        .flat_map(|_| [storage("user-gost2015-sign"), Step::Key(0)])
+        .collect();
+    steps.extend([storage("user-gost2015-sign"), Step::Key(0)]);
+    let harness = Harness::new(steps, vec![]);
+    let mut session = harness.session("buhta");
+    let uuids: Vec<String> = (0..SELECTIONS)
+        .map(|_| {
+            let body =
+                buhta_body(session.call(&rpc(1, &json!({"tin": "123456789011"})), BUHTA_ORIGIN));
+            let body: Value = serde_json::from_str(&body).unwrap();
+            body["cert"]["cert"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{body}"))
+                .to_owned()
+        })
+        .collect();
+    let sign = |session: &mut oncl_port_tests::SessionHandle, sign: Value| {
+        let mut payload = json!({"document": {"xml": {"data": "<a/>"}}});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(sign.as_object().unwrap().clone());
+        text(session.call(&rpc(2, &payload), BUHTA_ORIGIN))
+    };
+    assert!(sign(&mut session, json!({"signCert": uuids[0]})).contains("INVALID_CERT_SELECTED"));
+    for uuid in &uuids[SELECTIONS - 3..] {
+        let reply = sign(&mut session, json!({"signCert": uuid}));
+        assert!(reply.contains(r#""status":true"#), "{reply}");
+    }
+    let reply = sign(
+        &mut session,
+        json!({"signCertArgs": {"tin": "123456789011"}}),
+    );
+    assert!(reply.contains(r#""status":true"#), "{reply}");
+}
+
+#[test]
 fn buhta_sign_xml_whitespace_and_no_line_breaks() {
     for (store, method) in [
         ("user-gost2015-sign", "gostr34102015-gostr34112015-512"),
@@ -828,6 +871,57 @@ fn acbank_window_closed() {
 }
 
 #[test]
+fn acbank_preview_texts_kk_en() {
+    let view = |option: usize| {
+        [
+            Step::Choice {
+                button: 1,
+                option: None,
+            },
+            Step::Choice {
+                button: 0,
+                option: Some(option),
+            },
+            Step::Message,
+        ]
+    };
+    for (locale, title, valid, invalid) in [
+        (
+            "kk",
+            "Деректерді қарау",
+            "Құжат мазмұны\n\n{}",
+            "Құжат мазмұны (жарамсыз JSON?)\n\nnot json",
+        ),
+        (
+            "en",
+            "Data Preview",
+            "Document Content\n\n{}",
+            "Document Content (invalid JSON?)\n\nnot json",
+        ),
+    ] {
+        let mut steps: Vec<Step> = view(0).into_iter().chain(view(1)).collect();
+        steps.push(Step::CancelChoice);
+        let harness = Harness::new(steps, vec![]);
+        let args = json!({"settings": {"locale": locale},
+            "signableItems": [item("1", "{}"), item("2", "not json")]});
+        // The JSON serialization takes content that is not JSON.
+        assert_eq!(
+            text(harness.call("acbank", &acbank("multiSignJsonWithJws", Some(args)), None)),
+            acbank_error("window.closed")
+        );
+        let messages: Vec<String> = harness
+            .prompter()
+            .message_prompts()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(messages, [valid, invalid], "{locale}");
+        let choices = harness.prompter().choice_prompts();
+        assert_eq!(choices[1].title.as_deref(), Some(title), "{locale}");
+    }
+}
+
+#[test]
 fn acbank_non_gost2015_unexpected_error() {
     for store in ["user-gost2004-sign", "user-rsa-sign"] {
         let harness = Harness::new(sign_steps(store), vec![]);
@@ -925,6 +1019,13 @@ impl HttpTransport for SmartAuth {
             });
         };
         let (_, status, body) = answers.remove(at);
+        // Status 0: the request went out and no answer came in time.
+        if status == 0 {
+            return Err(HttpError::new(
+                oncl_pki::http::HttpErrorKind::Timeout,
+                "read timed out",
+            ));
+        }
         Ok(HttpReply {
             status,
             content_type: Some("application/json".to_owned()),
@@ -1481,6 +1582,78 @@ fn knp_server_error_mapping() {
     );
 }
 
+#[test]
+fn knp_mail_pattern() {
+    let server = SmartAuth::with(&[]);
+    let harness = Harness::new(vec![], kgd(&server));
+    let sign_up = |address: &str| {
+        text(harness.call(
+            "knp",
+            &knp(
+                "signUp",
+                json!({"uin": "1", "type": "IIN_BIN", "signedAuthAgreementXml": "<a/>",
+                    "address": address, "method": "MAIL", "confirmationLanguage": "ru",
+                    "oneTimeHardwareTokenBlock": false}),
+            ),
+            KGD,
+        ))
+    };
+    let illegal = r#"{"requestId":"r1","error":{"sendingConfirmationError":"SENDING_CONFIRMATION_ILLEGAL_MAIL_FORMAT"}}"#;
+    for address in [
+        "a%b@example.kz",
+        ".a@example.kz",
+        "a.@example.kz",
+        "a..b@example.kz",
+        "a@-ab.example.kz",
+        "a@ab-.example.kz",
+        "a@example..kz",
+        "a@example.k",
+        "a@example.kazakhs",
+        "a@example.k2",
+        "a@1.2.3.4:1234",
+        "a@1.2.3",
+        "a@b@example.kz",
+        "a@example.kz\n\n",
+        "",
+    ] {
+        assert_eq!(sign_up(address), illegal, "{address:?}");
+    }
+    assert!(server.requests().is_empty());
+    // Accepted: the request goes out (and the server, answering nothing, fails it).
+    let accepted = [
+        "o'brien+x*y/z^a&b=c?d~e{f}g-h_i@example.kz",
+        "A.B@EXAMPLE.KZ",
+        "a@1.2.3.4",
+        "a@10.0.0.1:25",
+        "a@x.a-b.example.travel",
+        "a@ab.kz",
+        "a@example.kz\n",
+    ];
+    for address in accepted {
+        assert_eq!(sign_up(address), KNP_ERROR, "{address:?}");
+    }
+    assert_eq!(server.requests().len(), accepted.len());
+}
+
+#[test]
+fn knp_sent_request_not_repeated() {
+    // A request that went out without an answer in time is not sent again.
+    let server = SmartAuth::with(&[
+        ("/SmartAuthService/registerUser", 0, json!({})),
+        ("/SmartAuthService/registerUser", 0, json!({})),
+        ("/SmartAuthService/registerUser", 0, json!({})),
+    ]);
+    let harness = Harness::new(vec![], kgd(&server));
+    let request = knp(
+        "signUp",
+        json!({"uin": "1", "type": "IIN_BIN", "signedAuthAgreementXml": "<a/>",
+            "address": "a@example.kz", "method": "MAIL", "confirmationLanguage": "ru",
+            "oneTimeHardwareTokenBlock": false}),
+    );
+    assert_eq!(text(harness.call("knp", &request, KGD)), KNP_ERROR);
+    assert_eq!(server.requests().len(), 1);
+}
+
 // Documentolog.
 
 const SIGN_SERVICE: &str = "kz.documentolog.agent.SignService";
@@ -1819,6 +1992,8 @@ fn documentolog_password_cached_in_session() {
 
 #[test]
 fn documentolog_get_keys_lines() {
+    // The sign key only: the authentication key (clientAuth) is left out; «RSA» for every
+    // certificate not signed with GOST 34.310-2004, GOST 2015 included.
     let (path, steps) = doclog_store("multi-gost2015");
     let harness = Harness::new(steps, vec![]);
     let keys = doclog(
@@ -1829,16 +2004,120 @@ fn documentolog_get_keys_lines() {
     let lines = doclog_ok(harness.call("documentolog", &keys, DOCLOG));
     let aliases = oncl_testkit::synthetic("multi-gost2015").aliases;
     let lines: Vec<&str> = lines.split('\n').collect();
-    assert_eq!(lines.len(), aliases.len(), "{lines:?}");
-    for (line, alias) in lines.iter().zip(&aliases) {
-        let parts: Vec<&str> = line.split('|').collect();
-        assert_eq!(parts.len(), 4, "{line}");
-        assert_eq!(parts[0], "ECGOST3410-2015");
-        assert!(!parts[1].is_empty());
-        assert!(parts[2].chars().all(|c| c.is_ascii_hexdigit()), "{line}");
-        assert!(!parts[2].starts_with('0'), "{line}");
-        assert_eq!(parts[3], alias);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let parts: Vec<&str> = lines[0].split('|').collect();
+    assert_eq!(parts.len(), 4, "{lines:?}");
+    assert_eq!(parts[0], "RSA");
+    assert!(!parts[1].is_empty());
+    assert!(parts[2].chars().all(|c| c.is_ascii_hexdigit()), "{lines:?}");
+    assert!(!parts[2].starts_with('0'), "{lines:?}");
+    assert_eq!(parts[3], aliases[0]);
+
+    let (path, steps) = doclog_store("user-gost2004-sign");
+    let harness = Harness::new(steps, vec![]);
+    let keys = doclog(
+        SIGN_SERVICE,
+        "getKeys",
+        json!({"storage_name": "PKCS12", "storage_path": path}),
+    );
+    let line = doclog_ok(harness.call("documentolog", &keys, DOCLOG));
+    assert!(line.starts_with("ГОСТ|"), "{line}");
+    assert!(
+        line.ends_with(&format!("|{}", alias("user-gost2004-sign"))),
+        "{line}"
+    );
+}
+
+#[test]
+fn documentolog_get_keys_none_left_is_unknown() {
+    // Only an authentication key: nothing to list is an error, and the password is cleared.
+    let (path, mut steps) = doclog_store("user-gost2015-auth");
+    steps.push(Step::Password("Qwerty12".to_owned()));
+    let harness = Harness::new(steps, vec![]);
+    let mut session = harness.session("documentolog");
+    let keys = doclog(
+        SIGN_SERVICE,
+        "getKeys",
+        json!({"storage_name": "PKCS12", "storage_path": path}),
+    );
+    assert_eq!(text(session.call(&keys, DOCLOG)), UNKNOWN);
+    assert_eq!(text(session.call(&keys, DOCLOG)), UNKNOWN);
+    assert_eq!(harness.prompter().password_prompts().len(), 2);
+}
+
+#[test]
+fn documentolog_storages_attached_and_password_first() {
+    // The storage names the original knows: JKS is a file; Kalkan's other token names are
+    // not.
+    let (file, _) = p12("user-rsa-sign");
+    let harness = Harness::new(
+        vec![
+            Step::Password("Qwerty12".to_owned()),
+            Step::Path(file.clone()),
+            Step::Password("Qwerty12".to_owned()),
+        ],
+        vec![],
+    );
+    let mut session = harness.session("documentolog");
+    let browse = |storage: &str| {
+        doclog(
+            KALKAN_SERVICE,
+            "browseKeyStore",
+            json!({"storage_name": storage, "file_extension": "KEYSTORE"}),
+        )
+    };
+    assert_eq!(
+        doclog_ok(session.call(&browse("JKS"), DOCLOG)),
+        file.to_string_lossy()
+    );
+    for storage in ["AKEToken5110Store", "AKAKEYStore"] {
+        assert_eq!(
+            text(session.call(&browse(storage), DOCLOG)),
+            UNKNOWN,
+            "{storage}"
+        );
     }
+    assert_eq!(harness.prompter().path_prompts().len(), 1);
+
+    // `attached` is compared with "true" as written; the password is asked before the
+    // download.
+    let server = doclog_server(
+        vec![],
+        vec![],
+        vec![("https://app.documentolog.kz/data/1", "aGVsbG8=")],
+    );
+    let (path, steps) = doclog_store("user-rsa-sign");
+    let harness = Harness::new(steps, doclog_routes(&server));
+    let mut session = harness.session("documentolog");
+    let request = |url: &str, attached: &str| {
+        doclog(
+            KALKAN_SERVICE,
+            "createCMSSimpleSignature",
+            json!({"storage_alias": "PKCS12", "storage_path": path,
+                "key_index": alias("user-rsa-sign"), "sign_string_url": url,
+                "attached": attached}),
+        )
+    };
+    assert_eq!(
+        doclog_ok(session.call(
+            &request("https://app.documentolog.kz/data/9", "true"),
+            DOCLOG
+        )),
+        ""
+    );
+    assert_eq!(harness.prompter().password_prompts().len(), 1);
+    let cms = decode_java(&doclog_ok(session.call(
+        &request("https://app.documentolog.kz/data/1", "TRUE"),
+        DOCLOG,
+    )))
+    .unwrap();
+    assert_eq!(encapsulated(&cms), None);
+    let cms = decode_java(&doclog_ok(session.call(
+        &request("https://app.documentolog.kz/data/1", "true"),
+        DOCLOG,
+    )))
+    .unwrap();
+    assert_eq!(encapsulated(&cms).as_deref(), Some(&b"aGVsbG8="[..]));
 }
 
 #[test]
@@ -2321,7 +2600,7 @@ fn qoltanba_object(reply: Reply, message: &str) -> Vec<u8> {
 }
 
 #[test]
-fn qoltanba_origin_regex() {
+fn qoltanba_origin_check() {
     let harness = Harness::new(vec![], vec![]);
     let request = qoltanba("getMessage", json!(["cms.signed"]));
     let invalid =
@@ -2330,11 +2609,15 @@ fn qoltanba_origin_regex() {
         None,
         Some(""),
         Some("https://example.kz"),
-        Some("https://qoltanba.kz.evil"),
         Some("https://qoltanba.kz/"),
         Some("https://qoltanbakz"),
         Some("https://qoltanba.kz\n"),
         Some("https://qoltanba\nkz"),
+        Some("http://qoltanba.kz"),
+        Some("https://.qoltanba.kz"),
+        Some("https://qoltanba.kz:"),
+        Some("https://user@qoltanba.kz"),
+        Some("qoltanba.kz"),
     ] {
         assert_eq!(
             text(harness.call("qoltanba", &request, origin)),
@@ -2342,12 +2625,11 @@ fn qoltanba_origin_regex() {
             "{origin:?}"
         );
     }
-    // The whole origin must match `.*qoltanba.kz$`, its dot any character.
+    // The site and its subdomains, over https.
     for origin in [
         "https://qoltanba.kz",
         "https://app.qoltanba.kz",
-        "https://xqoltanbaXkz",
-        "qoltanba-kz",
+        "https://a-b.app.qoltanba.kz:8443",
     ] {
         assert_eq!(
             text(harness.call("qoltanba", &request, Some(origin))),
@@ -2365,6 +2647,30 @@ fn qoltanba_origin_regex() {
         qoltanba_500(r#"JSONObject["method"] not found."#)
     );
     assert!(harness.prompter().timeline().is_empty());
+}
+
+#[test]
+fn qoltanba_lookalike_origin_is_refused() {
+    // The original's pattern `.*qoltanba.kz$` lets any character stand for the dot and any
+    // text before the name; only the site's own host and its subdomains are let in.
+    let harness = Harness::new(vec![], vec![]);
+    let request = qoltanba("getMessage", json!(["cms.signed"]));
+    let invalid =
+        r#"{"success":false,"errorCode":"INVALID_ORIGIN","message":"Origin is invalid!"}"#;
+    for origin in [
+        "https://evilqoltanba.kz",
+        "https://xqoltanbaxkz",
+        "https://qoltanba.kz.evil",
+        "https://xqoltanbaXkz",
+        "qoltanba-kz",
+        "https://evil.kz/qoltanba.kz",
+    ] {
+        assert_eq!(
+            text(harness.call("qoltanba", &request, Some(origin))),
+            invalid,
+            "{origin}"
+        );
+    }
 }
 
 #[test]
@@ -2859,15 +3165,51 @@ fn visual(harness: &Harness, cms: &[u8]) -> Reply {
     )
 }
 
+/// `cms` with a time-stamp of `at` on its signer `index`.
+fn stamped(cms: &[u8], index: usize, at: time::OffsetDateTime) -> Vec<u8> {
+    oncl_pki::tsp::timestamp_signer(
+        cms,
+        index,
+        &oncl_pki::tsp::TsaProfile::basics_default(),
+        &oncl_pki::tsp::MockTsa::new(entry("tsa-gost2015")).with_gen_time(at),
+    )
+    .unwrap()
+}
+
+/// The text render mode and font size of each text shown on `page` of `doc`, in order.
+fn shown_text_styles(doc: &lopdf::Document, page: u32) -> Vec<(i64, f32)> {
+    let id = doc.get_pages()[&page];
+    let content = lopdf::content::Content::decode(&doc.get_page_content(id)).unwrap();
+    let number = |object: &lopdf::Object| match object {
+        lopdf::Object::Integer(i) => *i as f32,
+        lopdf::Object::Real(r) => *r,
+        other => panic!("{other:?}"),
+    };
+    let (mut mode, mut size, mut shown) = (0, 0.0, Vec::new());
+    for operation in content.operations {
+        match operation.operator.as_str() {
+            "Tr" => mode = number(&operation.operands[0]) as i64,
+            "Tf" => size = number(&operation.operands[1]),
+            "Tj" | "TJ" => shown.push((mode, size)),
+            _ => {}
+        }
+    }
+    shown
+}
+
 #[test]
 fn qoltanba_visual_cms_pdf_text_and_page_order() {
     let harness = Harness::new(vec![], vec![]).with_clock(time::OffsetDateTime::now_utc);
     let now = time::OffsetDateTime::now_utc();
     for modern in [false, true] {
         let original = content_pdf(modern);
-        let cms = cosigned(
-            &cms_of("legal-gost2015-sign", &original, now, Some(now)),
-            "inter-user-gost2015-sign",
+        let cms = stamped(
+            &cosigned(
+                &cms_of("legal-gost2015-sign", &original, now, Some(now)),
+                "inter-user-gost2015-sign",
+                now,
+            ),
+            1,
             now,
         );
         let pdf = qoltanba_object(visual(&harness, &cms), "Файл успешно сохранён");
@@ -2895,6 +3237,18 @@ fn qoltanba_visual_cms_pdf_text_and_page_order() {
             assert!(report.contains(line), "{line:?} not in {report:?}");
         }
         assert!(report.find("1) ПОДПИСАНТ").unwrap() < report.find("2) ПОДПИСАНТ").unwrap());
+        // The heading and each signer's line bold, the tables regular, all at 12 pt; the
+        // heading first, a signer's line before its table.
+        let styles = shown_text_styles(&doc, 3);
+        assert!(styles.iter().all(|(_, size)| *size == 12.0), "{styles:?}");
+        let bold: Vec<usize> = (0..styles.len()).filter(|&i| styles[i].0 == 2).collect();
+        assert_eq!(bold.len(), 3, "{styles:?}");
+        assert_eq!(&bold[..2], [0, 1], "{styles:?}");
+        assert!(
+            styles.iter().all(|(mode, _)| *mode == 0 || *mode == 2),
+            "{styles:?}"
+        );
+        assert_eq!(styles.last().unwrap().0, 0, "{styles:?}");
     }
     // Content that is not a PDF.
     let cms = cms_of("legal-gost2015-sign", b"plain text", now, Some(now));
@@ -2905,9 +3259,9 @@ fn qoltanba_visual_cms_pdf_text_and_page_order() {
 fn qoltanba_visual_cms_many_signers_paginate() {
     let harness = Harness::new(vec![], vec![]).with_clock(time::OffsetDateTime::now_utc);
     let now = time::OffsetDateTime::now_utc();
-    let mut cms = cms_of("legal-gost2015-sign", &content_pdf(false), now, None);
-    for _ in 0..7 {
-        cms = cosigned(&cms, "user-gost2015-sign", now);
+    let mut cms = cms_of("legal-gost2015-sign", &content_pdf(false), now, Some(now));
+    for index in 1..8 {
+        cms = stamped(&cosigned(&cms, "user-gost2015-sign", now), index, now);
     }
     let pdf = qoltanba_object(visual(&harness, &cms), "Файл успешно сохранён");
     let doc = lopdf::Document::load_mem(&pdf).unwrap();
@@ -2920,6 +3274,168 @@ fn qoltanba_visual_cms_many_signers_paginate() {
         assert!(
             report.contains(&format!("{n}) ПОДПИСАНТ - ")),
             "{n}: {report}"
+        );
+    }
+    // Later pages are styled as the first: the tables regular.
+    for page in 4..=pages {
+        let styles = shown_text_styles(&doc, page);
+        assert!(
+            styles.iter().any(|(mode, _)| *mode == 0),
+            "{page}: {styles:?}"
+        );
+    }
+}
+
+/// The key of `legal-gost2015-sign` with a certificate of `subject` (RFC 4514, so written
+/// last attribute first), issued by the synthetic root.
+fn legal_with_subject(subject: &str) -> oncl_pki::pkcs12::KeyEntry {
+    use std::str::FromStr;
+    let legal = entry("legal-gost2015-sign");
+    let mut spec = oncl_pki::testing::TestCertSpec::from_cert(&legal.cert);
+    spec.subject = x509_cert::name::Name::from_str(subject).unwrap();
+    let cert = oncl_pki::testing::issue_cert(&entry("root-gost2015.key"), spec);
+    oncl_pki::pkcs12::KeyEntry {
+        alias: "edge".to_owned(),
+        key: legal.key.clone(),
+        cert,
+    }
+}
+
+#[test]
+fn qoltanba_signer_subject_edge_cases() {
+    let harness = Harness::new(vec![], vec![]).with_clock(time::OffsetDateTime::now_utc);
+    let now = time::OffsetDateTime::now_utc();
+    let pdf = content_pdf(false);
+    let options = oncl_pki::cms::SignOptions {
+        encapsulate: true,
+        digested: false,
+        signing_time: now,
+    };
+    let cms_by = |subject: &str| {
+        let signer = legal_with_subject(subject);
+        stamped(
+            &oncl_pki::cms::sign(&signer, &pdf, &options).unwrap(),
+            0,
+            now,
+        )
+    };
+    let info = |cms: &[u8]| signer_infos(&check_cms(&harness, cms))[0].clone();
+
+    // The last OU that names a BIN is the BIN.
+    let cms = cms_by(
+        "OU=BIN123456789021,OU=BIN000000000001,O=ТОО СИНТЕТИКА,\
+         SERIALNUMBER=IIN123456789022,CN=ТЕСТОВА",
+    );
+    assert_eq!(info(&cms)["bin"], "123456789021");
+    qoltanba_object(visual(&harness, &cms), "Файл успешно сохранён");
+
+    // No CN: the given name alone.
+    let cms = cms_by("2.5.4.42=ДАНА,O=ТОО СИНТЕТИКА,SERIALNUMBER=IIN123456789022");
+    assert_eq!(info(&cms)["name"], "ДАНА");
+    qoltanba_object(visual(&harness, &cms), "Файл успешно сохранён");
+
+    // No CN and no given name: no name, and the report has no cell for it.
+    let cms = cms_by("O=ТОО СИНТЕТИКА,SERIALNUMBER=IIN123456789022");
+    assert!(info(&cms).get("name").is_none());
+    assert_eq!(text(visual(&harness, &cms)), qoltanba_500(INTERNAL_ERROR));
+
+    // No SERIALNUMBER: no IIN, and no report.
+    let cms = cms_by("O=ТОО СИНТЕТИКА,CN=ТЕСТОВА");
+    assert!(info(&cms).get("iin").is_none());
+    assert_eq!(text(visual(&harness, &cms)), qoltanba_500(INTERNAL_ERROR));
+
+    // A signer without a time-stamp: no report.
+    let cms = cosigned(
+        &cms_of("legal-gost2015-sign", &pdf, now, Some(now)),
+        "user-gost2015-sign",
+        now,
+    );
+    assert_eq!(text(visual(&harness, &cms)), qoltanba_500(INTERNAL_ERROR));
+}
+
+/// A PDF of `objects` (numbered from 1) with a cross-reference table and the trailer
+/// `trailer` (the dictionary's entries).
+fn classic_pdf(objects: &[&str], trailer: &str) -> Vec<u8> {
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f\r\n", objects.len() + 1).as_bytes());
+    for offset in offsets {
+        out.extend(format!("{offset:010} 00000 n\r\n").as_bytes());
+    }
+    out.extend(format!("trailer\n<< {trailer} >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    out
+}
+
+#[test]
+fn qoltanba_visual_cms_malformed_pdf_internal_error() {
+    let harness = Harness::new(vec![], vec![]).with_clock(time::OffsetDateTime::now_utc);
+    let now = time::OffsetDateTime::now_utc();
+    let pages = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+    ];
+    // The well-formed document the cases spoil.
+    let good = classic_pdf(&pages, "/Size 4 /Root 1 0 R");
+    let cms = cms_of("legal-gost2015-sign", &good, now, Some(now));
+    qoltanba_object(visual(&harness, &cms), "Файл успешно сохранён");
+
+    let xref_stream = |params: &str| {
+        let mut pdf = b"%PDF-1.5\n".to_vec();
+        let at = pdf.len();
+        pdf.extend(
+            format!(
+                "1 0 obj\n<< /Type /XRef /Size 2 /W [1 2 1] /Root 1 0 R \
+                 /DecodeParms << /Predictor 12 {params} >> /Length 4 >>\nstream\nabcd\n\
+                 endstream\nendobj\nstartxref\n{at}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        pdf
+    };
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "startxref past the end",
+            b"%PDF-1.4\nstartxref\n999999\n%%EOF\n".to_vec(),
+        ),
+        (
+            "Prev past the end",
+            classic_pdf(&pages, "/Size 4 /Root 1 0 R /Prev 999999"),
+        ),
+        (
+            "XRefStm past the end",
+            classic_pdf(&pages, "/Size 4 /Root 1 0 R /XRefStm 999999"),
+        ),
+        (
+            "a Length that refers to its own stream",
+            classic_pdf(
+                &[
+                    "<< /Type /Catalog /Pages 2 0 R >>",
+                    "<< /Length 2 0 R >>\nstream\nabc\nendstream",
+                ],
+                "/Size 3 /Root 1 0 R",
+            ),
+        ),
+        ("Columns of 2^32 - 1", xref_stream("/Columns 4294967295")),
+        ("Columns of 2^31", xref_stream("/Columns 2147483648")),
+        (
+            "Size at the last object number",
+            classic_pdf(&pages, "/Size 4294967295 /Root 1 0 R"),
+        ),
+    ];
+    let mut session = harness.session("qoltanba");
+    for (case, pdf) in cases {
+        let cms = cms_of("legal-gost2015-sign", &pdf, now, Some(now));
+        let request = qoltanba("visualCMS", json!([b64(&cms)]));
+        assert_eq!(
+            text(session.call(&request, QOLTANBA_ORIGIN)),
+            qoltanba_500(INTERNAL_ERROR),
+            "{case}"
         );
     }
 }
@@ -3458,6 +3974,49 @@ fn skf_sign_xades_cosign_existing_xml() {
     assert_xades(xml);
     // Signed as it is: no template.
     assert!(!efis.requests().iter().any(|(url, _)| url == TEMPLATE));
+}
+
+#[test]
+fn skf_failed_get_keys_keeps_no_key() {
+    // A key store that opens but whose key fails the checks leaves no key to sign with
+    // (not the one of an earlier `getKeys`).
+    let prepared = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<document \
+                    number=\"DOC-9\"><content>AAAA</content></document>";
+    let doc_url = "https://portal.efis.kz/docs/9";
+    let efis = Efis::new(vec![
+        (CACERTS, skf_cas()),
+        (doc_url, prepared.as_bytes().to_vec()),
+    ]);
+    let harness = skf_harness(&efis);
+    let mut session = harness.session("skf");
+    let sign = skf(
+        "signXades",
+        json!(["1", "DOC-9", doc_url, "text/xml", "SID"]),
+    );
+    let ok = text(session.call(
+        &get_keys("inter-user-gost2015-sign", "Qwerty12", "1"),
+        SKF_ORIGIN,
+    ));
+    assert!(ok.ends_with(r#""errorCode":"NONE"}"#), "{ok}");
+    let failed = text(session.call(
+        &get_keys("inter-user-gost2015-sign", "Qwerty12", "0"),
+        SKF_ORIGIN,
+    ));
+    assert!(!failed.contains("NONE"), "{failed}");
+    let reply: Value = serde_json::from_str(&text(session.call(&sign, SKF_ORIGIN))).unwrap();
+    assert!(reply.get("result").is_none(), "{reply}");
+    assert_ne!(reply["errorCode"], "NONE", "{reply}");
+    // A wrong password does not open the store: the key kept before stays.
+    session.call(
+        &get_keys("inter-user-gost2015-sign", "Qwerty12", "1"),
+        SKF_ORIGIN,
+    );
+    session.call(
+        &get_keys("inter-user-gost2015-sign", "wrong", "1"),
+        SKF_ORIGIN,
+    );
+    let reply: Value = serde_json::from_str(&text(session.call(&sign, SKF_ORIGIN))).unwrap();
+    assert_eq!(reply["errorCode"], "NONE", "{reply}");
 }
 
 #[test]

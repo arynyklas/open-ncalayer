@@ -8,7 +8,7 @@
 //!
 //! - handler 1, SELECT_SIGN_CERT: a key whose BIN (or, without one, IIN) equals `tin`,
 //!   from a PKCS#12 store, with no chain or OCSP check; its uuid stays valid in this
-//!   session.
+//!   session while it is among the 15 latest selected.
 //! - handler 2, SIGN_DOCUMENT, and 3, BULK_SIGN_DOCUMENT: a file as CAdES-T (Kalkan's
 //!   profile and TSA), an XML document with an enveloped signature in the document
 //!   element, whitespace-free, base64 without line breaks.
@@ -31,12 +31,19 @@ use oncl_pdk::serde_json::{Map, Value};
 use oncl_pdk::{AddInfo, Reply, Request, host, javab64};
 use rpc::{Content, FileDocument, Sign, SignedDocument, XmlDocument};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
+/// The most keys SELECT_SIGN_CERT keeps: one fewer than the core holds for an instance, so
+/// a sign request may still choose a key of its own.
+const MAX_SELECTED: usize = 15;
+
 thread_local! {
-    /// The keys SELECT_SIGN_CERT gave out in this session (the plugin instance), by uuid.
-    static SELECTED: RefCell<HashMap<String, Rc<Key>>> = RefCell::new(HashMap::new());
+    /// The keys SELECT_SIGN_CERT gave out in this session (the plugin instance), by uuid,
+    /// oldest first; past [`MAX_SELECTED`] the oldest is dropped (its key released, its
+    /// uuid then unknown).
+    static SELECTED: RefCell<VecDeque<(String, Rc<Key>)>> =
+        const { RefCell::new(VecDeque::new()) };
 }
 
 /// The errors of the RPC: `{"status":false,"code":<name>,"message":<text>}`.
@@ -213,7 +220,12 @@ fn select_cert(args: &rpc::SelectSignCertArgs) -> rpc::SelectSignCertResult {
         return rpc::SelectSignCertResult::default();
     };
     let uuid = uuid();
-    SELECTED.with_borrow_mut(|keys| keys.insert(uuid.clone(), Rc::new(key)));
+    SELECTED.with_borrow_mut(|keys| {
+        keys.push_back((uuid.clone(), Rc::new(key)));
+        while keys.len() > MAX_SELECTED {
+            keys.pop_front();
+        }
+    });
     rpc::SelectSignCertResult {
         cert: Some(rpc::SignCert { cert: uuid }),
     }
@@ -266,7 +278,11 @@ fn uuid() -> String {
 /// The key of a sign request: one selected before (its uuid), or one selected now.
 fn signing_key(sign: Option<&Sign>) -> Result<Rc<Key>, Failure> {
     let key = match sign {
-        Some(Sign::SignCert(uuid)) => SELECTED.with_borrow(|keys| keys.get(uuid).cloned()),
+        Some(Sign::SignCert(uuid)) => SELECTED.with_borrow(|keys| {
+            keys.iter()
+                .find(|(selected, _)| selected == uuid)
+                .map(|(_, key)| Rc::clone(key))
+        }),
         Some(Sign::SignCertArgs(args)) => select(args.tin.as_deref().unwrap_or("")).map(Rc::new),
         None => select("").map(Rc::new),
     };
