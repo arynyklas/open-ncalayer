@@ -373,7 +373,7 @@ mod write {
         assert_eq!(contents.keys.len(), 1);
         assert_eq!(contents.keys[0].alias, "keyless");
         assert!(contents.keys[0].cert.is_none());
-        assert_eq!(*contents.keys[0].key.to_pkcs8_der(), pkcs8);
+        assert_eq!(*contents.keys[0].key.to_pkcs8_der().unwrap(), pkcs8);
         assert!(contents.other_certs.is_empty());
     }
 

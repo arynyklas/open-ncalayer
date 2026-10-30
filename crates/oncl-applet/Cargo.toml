@@ -14,6 +14,7 @@ der.workspace = true
 oncl-basics.workspace = true
 oncl-pki.workspace = true
 oncl-protocol.workspace = true
+oncl-token.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -25,6 +26,8 @@ oncl-basics = { path = "../oncl-basics", features = ["testing"] }
 # `testing`: `issue_cert`.
 oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 oncl-testkit.workspace = true
+# `emulator`: software tokens for the token tests.
+oncl-token = { path = "../oncl-token", features = ["emulator"] }
 # The key identifiers, computed independently in the tests.
 sha1.workspace = true
 tempfile.workspace = true

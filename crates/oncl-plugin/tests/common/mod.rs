@@ -62,6 +62,7 @@ pub fn services_with(
         pki_hosts: oncl_plugin::nca_pki_hosts(),
         locale: Arc::new(|| Locale::Ru),
         settings_dir: None,
+        tokens: oncl_token::Tokens::disabled(),
     }
 }
 

@@ -35,9 +35,11 @@ const DEPENDS: [&str; 5] = [
     "libxkbcommon",
     "libxkbcommon-x11",
 ];
-const OPTDEPENDS: [&str; 2] = [
+const OPTDEPENDS: [&str; 4] = [
     "xdg-desktop-portal: the file dialogs of the windows",
     "zenity: the file dialogs without a desktop portal",
+    "pcsclite: hardware tokens and ID cards (experimental)",
+    "ccid: USB smart card readers",
 ];
 
 /// pacman's `pkgver` of `version`: hyphens are not allowed, and a pre-release must sort
@@ -285,6 +287,17 @@ mod tests {
         }
         assert!(srcinfo.starts_with("pkgbase = openncalayer-bin\n"));
         assert!(srcinfo.ends_with("\npkgname = openncalayer-bin\n"));
+        // Hardware tokens are optional: the daemon opens pcsc-lite at run time.
+        for optdepend in [
+            "pcsclite: hardware tokens and ID cards (experimental)",
+            "ccid: USB smart card readers",
+        ] {
+            assert!(
+                srcinfo.contains(&format!("\toptdepends = {optdepend}\n")),
+                "{optdepend}"
+            );
+            assert!(pkgbuild.contains(&format!("'{optdepend}'")), "{optdepend}");
+        }
 
         let dir = tempfile::tempdir().unwrap();
         let written = p.write(dir.path()).unwrap();

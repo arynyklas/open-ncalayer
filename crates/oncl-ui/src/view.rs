@@ -1,10 +1,11 @@
 //! Dialog texts Rust composes, in the request's [`Locale`]: key and certificate rows,
-//! storage names, open errors, new password and folder checks and the file chooser's title
-//! and filter. Fixed dialog texts live in the `.slint` files and their `.po` catalogs.
+//! storage names, open errors, the readers' notes, new password and folder checks and the
+//! file chooser's title and filter. Fixed dialog texts live in the `.slint` files and their
+//! `.po` catalogs.
 
 use oncl_basics::{
     Availability, DisabledReason, FileKind, ImportPrompt, KeyCandidate, KeyPrompt, Locale,
-    OpenError, StorageKind,
+    OpenError, ReaderProblem, StorageKind,
 };
 use oncl_pki::info::CertInfo;
 use std::path::Path;
@@ -160,8 +161,23 @@ pub fn folder_error(path: &str, l: Locale) -> Option<&'static str> {
 /// Why a storage answer could not be opened. The texts for a store without (suitable) keys
 /// (`label.errorMessage.emptyStorage*`) and for the legacy Applet's password checks are the
 /// original's; English for the internal systems' policy is ours (the original's English
-/// dictionary repeats the Kazakh text).
-pub fn error_text(e: OpenError, l: Locale) -> &'static str {
+/// dictionary repeats the Kazakh text), and so are the hardware tokens' texts.
+pub fn error_text(e: OpenError, l: Locale) -> String {
+    if let OpenError::WrongPin {
+        tries_left: Some(n),
+    } = e
+    {
+        return match l {
+            Locale::Kk => format!("PIN-код қате. Қалған әрекет саны: {n}"),
+            Locale::Ru => format!("Неверный PIN-код. Осталось попыток: {n}"),
+            Locale::En => format!("Wrong PIN. Tries left: {n}"),
+        };
+    }
+    fixed_error_text(e, l).to_owned()
+}
+
+/// [`error_text`] of the errors without a number.
+fn fixed_error_text(e: OpenError, l: Locale) -> &'static str {
     match (e, l) {
         (OpenError::WrongPassword, Locale::Kk) => "Құпиясөз қате",
         (OpenError::WrongPassword, Locale::Ru) => "Неверный пароль",
@@ -215,6 +231,30 @@ pub fn error_text(e: OpenError, l: Locale) -> &'static str {
         (OpenError::InnerPasswordPolicy, Locale::En) => {
             "The password needs at least 8 characters with 1 uppercase letter, 1 lowercase letter (Latin letters only), 1 special character and 1 digit."
         }
+        (OpenError::WrongPin { .. }, Locale::Kk) => "PIN-код қате",
+        (OpenError::WrongPin { .. }, Locale::Ru) => "Неверный PIN-код",
+        (OpenError::WrongPin { .. }, Locale::En) => "Wrong PIN",
+        (OpenError::PinBlocked, Locale::Kk) => "PIN-код бұғатталған",
+        (OpenError::PinBlocked, Locale::Ru) => "PIN-код заблокирован",
+        (OpenError::PinBlocked, Locale::En) => "The PIN is blocked",
+        (OpenError::InvalidPin, Locale::Kk) => {
+            "PIN-код бұл тасымалдағышқа сәйкес келмейді (жеке куәлікте — 4 таңба)"
+        }
+        (OpenError::InvalidPin, Locale::Ru) => {
+            "PIN-код не подходит для этого носителя (у удостоверения личности — 4 символа)"
+        }
+        (OpenError::InvalidPin, Locale::En) => {
+            "The PIN does not fit this token (an ID card's PIN is 4 characters)"
+        }
+        (OpenError::TokenAbsent, Locale::Kk) => "Тасымалдағыш табылмады немесе шығарылды",
+        (OpenError::TokenAbsent, Locale::Ru) => "Носитель не найден или извлечён",
+        (OpenError::TokenAbsent, Locale::En) => "The token is not found or was removed",
+        (OpenError::TokenService, Locale::Kk) => "Смарт-карталар қызметі қолжетімсіз",
+        (OpenError::TokenService, Locale::Ru) => "Служба смарт-карт недоступна",
+        (OpenError::TokenService, Locale::En) => "The smart card service is not available",
+        (OpenError::TokenFailure, Locale::Kk) => "Тасымалдағышты оқу мүмкін болмады",
+        (OpenError::TokenFailure, Locale::Ru) => "Не удалось прочитать носитель",
+        (OpenError::TokenFailure, Locale::En) => "Cannot read the token",
     }
 }
 
@@ -247,6 +287,82 @@ pub fn storage_label(k: StorageKind, l: Locale) -> &'static str {
             Locale::En => "Cloud storage",
         },
         StorageKind::Token(name) => name,
+    }
+}
+
+/// The note under the readers of a token storage: that they are being searched for, why
+/// none is listed (`readers` of them are), or nothing.
+pub fn reader_note(
+    readers: usize,
+    problem: Option<ReaderProblem>,
+    scanning: bool,
+    l: Locale,
+) -> String {
+    if scanning {
+        return match l {
+            Locale::Kk => "Тасымалдағыштарды іздеу…",
+            Locale::Ru => "Поиск носителей…",
+            Locale::En => "Searching for tokens…",
+        }
+        .to_owned();
+    }
+    match problem {
+        Some(ReaderProblem::NoService) => {
+            let (unavailable, hint) = match l {
+                Locale::Kk => ("Смарт-карталар қызметі қолжетімсіз.", service_hint_kk()),
+                Locale::Ru => ("Служба смарт-карт недоступна.", service_hint_ru()),
+                Locale::En => ("The smart card service is not available.", service_hint_en()),
+            };
+            format!("{unavailable} {hint}")
+        }
+        Some(ReaderProblem::Failed) => match l {
+            Locale::Kk => "Смарт-карталар қызметі жауап бермеді. «Жаңарту» батырмасын басыңыз.",
+            Locale::Ru => "Служба смарт-карт не ответила. Нажмите «Обновить».",
+            Locale::En => "The smart card service did not answer. Press «Refresh».",
+        }
+        .to_owned(),
+        None if readers == 0 => match l {
+            Locale::Kk => {
+                "Тасымалдағыш табылмады. Оның қосылғанына көз жеткізіп, «Жаңарту» батырмасын басыңыз."
+            }
+            Locale::Ru => {
+                "Носитель не обнаружен. Убедитесь, что он подключён, и нажмите «Обновить»."
+            }
+            Locale::En => "No token found. Make sure it is plugged in and press «Refresh».",
+        }
+        .to_owned(),
+        None => String::new(),
+    }
+}
+
+/// What to do without the smart card service, on this system.
+fn service_hint_ru() -> &'static str {
+    if cfg!(windows) {
+        "Запустите службу «Смарт-карта» (SCardSvr)."
+    } else if cfg!(target_os = "macos") {
+        "Подключите считыватель."
+    } else {
+        "Установите и запустите pcscd."
+    }
+}
+
+fn service_hint_kk() -> &'static str {
+    if cfg!(windows) {
+        "«Смарт-карта» (SCardSvr) қызметін іске қосыңыз."
+    } else if cfg!(target_os = "macos") {
+        "Оқу құрылғысын қосыңыз."
+    } else {
+        "pcscd орнатып, іске қосыңыз."
+    }
+}
+
+fn service_hint_en() -> &'static str {
+    if cfg!(windows) {
+        "Start the Smart Card service (SCardSvr)."
+    } else if cfg!(target_os = "macos") {
+        "Connect a reader."
+    } else {
+        "Install and start pcscd."
     }
 }
 

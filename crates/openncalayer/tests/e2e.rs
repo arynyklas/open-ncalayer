@@ -133,6 +133,7 @@ async fn start_with(
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         tsa.clone(),
+        oncl_token::Tokens::disabled(),
         Arc::new(|_| {}),
         None,
     );

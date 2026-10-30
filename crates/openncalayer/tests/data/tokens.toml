@@ -1,0 +1,21 @@
+# Emulated readers for a daemon built with feature `token-emulator`
+# (`ONCL_TOKEN_EMULATOR=<this file>`): a Kaztoken and an ID card holding the synthetic test
+# keys. Key paths are relative to this file's directory.
+
+[[reader]]
+name = "OpenNCALayer Emulated Kaztoken 0"
+kind = "AKKaztokenStore"
+pin = "123456"
+keys = [
+    { p12 = "../../../../fixtures/synthetic/user-gost2015-sign.p12", password = "Qwerty12" },
+]
+
+[[reader]]
+name = "OpenNCALayer Emulated ID Card 0"
+kind = "AKKZIDCardStore"
+pin = "1234"
+keys = [
+    { p12 = "../../../../fixtures/synthetic/user-gost2015-auth.p12", password = "Qwerty12" },
+    { p12 = "../../../../fixtures/synthetic/user-gost2015-sign.p12", password = "Qwerty12" },
+]
+id_card = { iin = "123456789012", last_name = "ТЕСТОВ", first_name = "ТЕСТ", middle_name = "ТЕСТОВИЧ" }

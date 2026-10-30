@@ -30,7 +30,9 @@
 //! The container must be an existing local folder given by an absolute path, or a network
 //! folder the user chose in the file chooser (else `COMMON`, as a file the original cannot
 //! write; another network path is refused before it is looked up); `JKS` is not written
-//! (`UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION`). Tokens answer `EMPTY_SLOT`.
+//! (`UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION`). Tokens answer `EMPTY_SLOT`, and
+//! `GENKEY_COMMON` when one of the family is connected: OpenNCALayer does not generate keys
+//! on tokens.
 
 use crate::Applet;
 use crate::dispatch::{Args, NPE, Outcome, Thrown, Wrapper};
@@ -111,6 +113,13 @@ fn generate_all(a: &Applet, args: &Args<'_>) -> Result<Wrapper, Stop> {
         return Err(Stop::Code(UNKNOWN_STORAGE));
     };
     if let StorageKind::Token(_) = storage {
+        if a.token_connected(storage) {
+            tracing::info!(
+                storage = storage.name(),
+                "Applet: generating keys is not supported for tokens"
+            );
+            return Err(Stop::Code(GENKEY_COMMON));
+        }
         return Err(Stop::Code(EMPTY_SLOT));
     }
     let password = Zeroizing::new(args.str(2).unwrap_or_default().to_owned());

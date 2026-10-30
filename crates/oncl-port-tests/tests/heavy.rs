@@ -2459,7 +2459,7 @@ fn store_with_eku(eku: &str) -> std::path::PathBuf {
     let pfx = oncl_pki::pkcs12::write(
         &[oncl_pki::pkcs12::WriteEntry {
             alias: "blocked".to_owned(),
-            pkcs8_der: user.key.to_pkcs8_der().to_vec(),
+            pkcs8_der: user.key.to_pkcs8_der().unwrap().to_vec(),
             cert_der: Some(cert.to_der().unwrap()),
         }],
         &[],

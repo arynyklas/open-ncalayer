@@ -50,6 +50,9 @@ pub struct HostServices {
     /// The folder of the plugins' settings files (`<data>/plugins/settings`,
     /// [`crate::Store::settings_dir`]); `None`: `settings_*` fail.
     pub settings_dir: Option<PathBuf>,
+    /// The hardware tokens of `keys_choose`, `keys_terminals` and `keys_open`, while their
+    /// support is on.
+    pub tokens: Arc<oncl_token::Tokens>,
 }
 
 /// Who runs in an instance now.

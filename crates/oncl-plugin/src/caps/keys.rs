@@ -1,6 +1,8 @@
 //! `keys`: the user's key, chosen in the storage and key dialogs ([`KeyChooser`]) or opened
 //! from a store the plugin names ([`keys_open`]), behind a handle of the instance;
-//! signatures made here, the private key never reaching the guest.
+//! signatures made here, the private key never reaching the guest. With token support on,
+//! the storage dialog offers the tokens plugged in, and `keys_open` opens a token in a
+//! reader with the PIN the plugin passes.
 
 use super::{
     ConsentKind, DialogTurn, MAX_KEY_HANDLES, MAX_LINE, check_line, crypto, denied, failed,
@@ -34,6 +36,7 @@ use oncl_pki::pkcs12::{self, KeyEntry};
 use oncl_pki::pkix::CaSet;
 use oncl_pki::xades;
 use oncl_pki::{cert, tsp, xmldsig};
+use oncl_token::TokenError;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -208,6 +211,7 @@ fn choose(state: &mut HostState, choice: Choice) -> HostResult<Option<Chosen>> {
         http: Arc::clone(&services.http),
         ocsp_cache: Arc::clone(&services.ocsp_cache),
         clock: services.clock,
+        tokens: Arc::clone(&services.tokens),
     };
     DialogTurn::hold();
     let Some(entry) = chooser.choose(&request) else {
@@ -327,6 +331,7 @@ pub(crate) fn keys_open(state: &mut HostState, args: OpenArgs) -> HostResult<Ope
         storage,
         path: PathBuf::new(),
         password,
+        reader: None,
     };
     let entries = match answer.open_data(&data) {
         Ok(entries) => entries,
@@ -339,9 +344,16 @@ pub(crate) fn keys_open(state: &mut HostState, args: OpenArgs) -> HostResult<Ope
                 OpenError::NoKeys | OpenError::NoSigningKeys | OpenError::NoAuthKeys => {
                     OpenOutcome::NoKeys
                 }
-                OpenError::NotPkcs12 | OpenError::NotJks | OpenError::UnsupportedStorage => {
-                    OpenOutcome::Corrupt
-                }
+                // A file's data opens with none of a token's errors.
+                OpenError::NotPkcs12
+                | OpenError::NotJks
+                | OpenError::UnsupportedStorage
+                | OpenError::TokenAbsent
+                | OpenError::TokenService
+                | OpenError::WrongPin { .. }
+                | OpenError::PinBlocked
+                | OpenError::InvalidPin
+                | OpenError::TokenFailure => OpenOutcome::Corrupt,
             });
         }
     };
@@ -352,6 +364,16 @@ pub(crate) fn keys_open(state: &mut HostState, args: OpenArgs) -> HostResult<Ope
             .unwrap_or_else(|_| Arc::from([])),
         StorageKind::Jks | StorageKind::Token(_) => Arc::from([]),
     };
+    keep_opened(state, entries, store_certs)
+}
+
+/// Keeps every key of `entries` under a handle of its own, with the other certificates of
+/// its store; none when they do not all fit.
+fn keep_opened(
+    state: &mut HostState,
+    entries: Vec<KeyEntry>,
+    store_certs: Arc<[Certificate]>,
+) -> HostResult<OpenOutcome> {
     state.keys.has_room_for(entries.len())?;
     let mut opened = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -438,23 +460,55 @@ pub(crate) fn keys_terminals(
     token_readers(state, storage)
 }
 
-/// The readers of the token storage `storage`: none until the core opens tokens.
+/// The readers holding a token of the storage `storage`: none with token support off, and
+/// none for the cloud storage, which no reader holds.
 pub(crate) fn token_readers(
-    _state: &mut HostState,
-    _storage: StorageKind,
+    state: &mut HostState,
+    storage: StorageKind,
 ) -> HostResult<Vec<String>> {
-    Ok(Vec::new())
+    let Some(kind) = storage.token_kind() else {
+        return Ok(Vec::new());
+    };
+    state.services.tokens.readers(kind).map_err(failed)
 }
 
-/// Opens the token of `storage` in `reader` with `pin`: no device until the core opens
-/// tokens.
+/// Opens the token of `storage` in `reader` with `pin`: every key of the token with a
+/// certificate, in the token's order, each behind a handle that keeps the PIN in memory for
+/// its signatures until it is released or the instance ends.
 pub(crate) fn open_token(
-    _state: &mut HostState,
-    _storage: StorageKind,
-    _reader: &str,
-    _pin: &str,
+    state: &mut HostState,
+    storage: StorageKind,
+    reader: &str,
+    pin: &str,
 ) -> HostResult<OpenOutcome> {
-    Ok(OpenOutcome::NoDevice)
+    let Some(kind) = storage.token_kind() else {
+        return Ok(OpenOutcome::NoDevice);
+    };
+    let entries = match state.services.tokens.open(reader, kind, pin) {
+        Ok(entries) => entries,
+        Err(e) => {
+            return match e {
+                TokenError::WrongPin { tries_left } => {
+                    Ok(OpenOutcome::WrongPassword { tries_left })
+                }
+                // Refused before any command: no try spent.
+                TokenError::InvalidPin => Ok(OpenOutcome::WrongPassword { tries_left: None }),
+                TokenError::PinBlocked => Ok(OpenOutcome::Blocked),
+                TokenError::Disabled
+                | TokenError::NoService
+                | TokenError::NoDevice
+                | TokenError::WrongCard
+                | TokenError::CardRemoved => Ok(OpenOutcome::NoDevice),
+                TokenError::Card { .. } | TokenError::Malformed(_) | TokenError::Transport(_) => {
+                    Err(failed(e))
+                }
+            };
+        }
+    };
+    if entries.is_empty() {
+        return Ok(OpenOutcome::NoKeys);
+    }
+    keep_opened(state, entries, Arc::from([]))
 }
 
 /// Longest chain `keys_chain` builds.

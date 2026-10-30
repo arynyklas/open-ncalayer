@@ -46,6 +46,7 @@ fn setup(steps: Vec<Step>) -> (KeyChooser, Arc<ScriptedPrompter>, Arc<MemoryRece
         http: Arc::new(Offline),
         ocsp_cache: Arc::new(OcspCache::new()),
         clock: OffsetDateTime::now_utc,
+        tokens: oncl_token::Tokens::disabled(),
     };
     (chooser, prompter, recent)
 }

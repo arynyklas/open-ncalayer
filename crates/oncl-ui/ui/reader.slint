@@ -1,0 +1,96 @@
+// The reader dialog of the legacy Applet's `browseKeyStore`: a reader holding a token of one
+// storage.
+
+import { Button, StandardListView, VerticalBox } from "std-widgets.slint";
+
+export component ReaderDialog inherits Window {
+    title: "OpenNCALayer";
+    always-on-top: true;
+    min-width: 420px;
+    min-height: 300px;
+
+    // The requesting page's origin.
+    in property <string> origin;
+    // The name of the token storage.
+    in property <string> storage;
+    // The readers holding a token of that storage.
+    in property <[StandardListViewItem]> readers;
+    // Index of the chosen reader, -1 for none.
+    in-out property <int> reader-index: -1;
+    // Why no reader is listed, or that the readers are being searched for; empty otherwise.
+    in property <string> reader-note;
+    // The readers are being searched for: «Refresh» waits.
+    in property <bool> scanning;
+
+    callback choose();
+    callback cancel();
+    callback refresh();
+
+    private property <bool> can-choose: root.reader-index >= 0 && root.reader-index < root.readers.length;
+
+    VerticalBox {
+        Text {
+            text: @tr("Request from: {}", root.origin);
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: @tr("Key storage selection");
+            font-weight: 700;
+        }
+
+        Text {
+            text: @tr("Storage type: {}", root.storage);
+            wrap: word-wrap;
+        }
+
+        StandardListView {
+            vertical-stretch: 1;
+            model: root.readers;
+            current-item <=> root.reader-index;
+        }
+
+        if !root.reader-note.is-empty: Text {
+            text: root.reader-note;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: @tr("Token support is experimental: checked on an emulator only");
+            wrap: word-wrap;
+            font-italic: true;
+            color: #888888;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: @tr("Refresh");
+                enabled: !root.scanning;
+                clicked => {
+                    root.refresh();
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            Button {
+                text: @tr("Choose");
+                primary: true;
+                enabled: root.can-choose;
+                clicked => {
+                    root.choose();
+                }
+            }
+
+            Button {
+                text: @tr("Cancel");
+                clicked => {
+                    root.cancel();
+                }
+            }
+        }
+    }
+}

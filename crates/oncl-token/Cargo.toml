@@ -1,0 +1,83 @@
+[package]
+name = "oncl-token"
+description = "Hardware tokens and ID cards for OpenNCALayer: APDU transport over PC/SC, a driver per token family, keys that sign on the card"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Software cards for tests and the e2e daemon; never in releases.
+emulator = ["dep:rsa", "dep:serde", "dep:toml"]
+
+[dependencies]
+der.workspace = true
+flate2.workspace = true
+# The ATR table and the fixed APDUs of the drivers, as hex.
+hex-literal.workspace = true
+# GOST public keys read from cards.
+oncl-gost.workspace = true
+oncl-pki.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+x509-cert.workspace = true
+zeroize.workspace = true
+
+# The emulator only: the private RSA operation of emulated cards (`ring` signs messages, not
+# padded blocks) and its configuration file.
+rsa = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# winscard.dll: the PC/SC functions of Windows XP and later.
+windows-sys = { workspace = true, features = ["Win32_Security_Credentials"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# libpcsclite.so.1 opened at run time: no link-time dependency on pcsc-lite.
+libloading.workspace = true
+
+[dev-dependencies]
+oncl-pki = { workspace = true, features = ["testing"] }
+oncl-testkit.workspace = true
+time = { workspace = true, features = ["macros"] }
+# Catches the APDU trace of a test.
+tracing-subscriber.workspace = true
+
+[[test]]
+name = "emulator"
+required-features = ["emulator"]
+
+[[test]]
+name = "kaztoken"
+required-features = ["emulator"]
+
+[[test]]
+name = "service"
+required-features = ["emulator"]
+
+[[test]]
+name = "kzid"
+required-features = ["emulator"]
+
+[[test]]
+name = "etoken72k"
+required-features = ["emulator"]
+
+[[test]]
+name = "etoken5110"
+required-features = ["emulator"]
+
+[[test]]
+name = "jacarta"
+required-features = ["emulator"]
+
+[[test]]
+name = "akey"
+required-features = ["emulator"]
+
+[[test]]
+name = "vpcd"
+required-features = ["emulator"]

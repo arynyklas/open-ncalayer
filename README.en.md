@@ -35,6 +35,7 @@ Documentation is written in Russian:
 - [`docs/user/tls.md`](docs/user/tls.md) — the OpenNCALayer certificate: issuing, trusting, removing, re-issuing;
 - [`docs/design/roadmap.md`](docs/design/roadmap.md) — decisions and roadmap;
 - [`docs/design/update-index.md`](docs/design/update-index.md) — the update index: format, signature, choice of a version;
+- [`docs/design/tokens.md`](docs/design/tokens.md) — tokens and ID cards (experimental): families, PIN, emulator;
 - [`docs/dev/release.md`](docs/dev/release.md) — releasing a version and signing the index: the maintainer's instructions;
 - [`docs/original/architecture.md`](docs/original/architecture.md) — architecture of the original NCALayer.
 
@@ -52,7 +53,7 @@ The modules answer as the original's modules of the same names do: reply shapes,
 Storages:
 - `PKCS12` (`.p12`, `.pfx`): read and write;
 - `JKS`: read only, RSA and GOST keys;
-- until P14, tokens (`AK…Store`) answer as if no device were connected: they are unavailable in the `basics` dialogs, commonUtils answers `storage.empty`, the Applet `EMPTY_SLOT`, `getActiveTokens` `[]`.
+- tokens (`AK…Store`) are experimental and off by default (see [Tokens (experimental)](#tokens-experimental)). While their support is off they answer as if no device were connected: they are unavailable in the `basics` dialogs, commonUtils answers `storage.empty`, the Applet `EMPTY_SLOT`, `getActiveTokens` `[]`.
 
 XML signatures (`basics` with `format:"xml"`, commonUtils `signXml` and `signXmls`, the Applet's `signXml`) have the shape Kalkan makes:
 - the whole document: `ds:Signature` is the last child of the root element; one `Reference URI=""` with the enveloped-signature and Canonical XML with comments transforms; SignedInfo is canonicalized with Canonical XML 1.0;
@@ -87,7 +88,7 @@ Key revocation is checked with OCSP when the key has a chain, is not disabled fo
 
 ### Deviations of P1 from the original
 
-- Tokens (`AK…Store`) are unavailable until P14. File storages: `PKCS12` only in P1, `JKS` too (read-only) since P4.
+- Tokens (`AK…Store`) are experimental and off by default, see [Tokens (experimental)](#tokens-experimental). File storages: `PKCS12` only in P1, `JKS` too (read-only) since P4.
 - The original's password strength check for keys with EKU `1.2.398.3.3.4.2*` is not implemented in P1.
 - `NCALAYERPORT` is honoured in any session; the original honours it only in RDP/Citrix/xrdp sessions. The value must be within `13579..=13679`.
 - TLS 1.2 and 1.3; the original speaks only TLS 1.2.
@@ -124,7 +125,7 @@ The `JKS` (Java KeyStore) storage opens for signing in `basics` and `commonUtils
 
 Paths a page names may not point to the network: the files of `createCAdESFromFile` and `createCMSSignatureFromFile`, the Applet module's key folders and files, the start folder of both modules' `showFileChooser`, and the `keystorePath` folder `importCertificate` puts into its dialog. UNC paths (`\\host\…`, `//host/…`, `\\?\UNC\…`; on Linux and macOS, paths starting with `//`) are refused before the file system is touched at all: otherwise the daemon would connect, without a dialog, to a host the page chose (on Windows, with the user's credentials). The exception is a network path the user chose in our file chooser (`showFileChooser` of both modules, the Applet's `browseKeyStore`) while the daemon runs, and the page got in the answer: the page may name that one, for example a `.p12` file or a key folder on a company share. Only that exact path is accepted, after the same lexical normalization (absolute; on Windows `/` read as `\`, `.` and `..` resolved), not its neighbours or the folder above it; the daemon remembers the last 64 such paths. The answer is the original's code for a file not found: `file.not_found` in commonUtils; in the Applet, `KEYSTORE_FILE_NOT_FOUND` (`setX509CertToKeyStore`), `CHANGEPASS_COMMON` (`changePassword`), `COMMON` (`genKeyPairAndGetPKCS10`). The Applet's `signXml` and `importCertificate` do not put such a path into their dialogs, and the folder or file chooser opens in its default folder. The original opens any path.
 
-Tokens are not supported until P14 (see [Modules](#modules)).
+Tokens are experimental and off by default; while their support is off commonUtils answers for them as with no device (see [Modules](#modules) and [Tokens (experimental)](#tokens-experimental)).
 
 #### `PKIEssentials`: `generateCsr` and `importCertificate`
 
@@ -154,8 +155,8 @@ The `kz.gov.pki.knca.commonUtils` module:
 #### Applet
 
 The `kz.gov.pki.knca.applet.Applet` module (legacy; it answers requests without a `module`):
-- A subset is implemented for the file storages `PKCS12` and `JKS` (read-only): `showFileChooser`, `browseKeyStore`, `setPassword`, `getTryCount`, `genKeyPairAndGetPKCS10`, `setX509CertToKeyStore`, `setX509CertToKeyStoreAndChangePassword`, `changePassword`, `signXml`. `loadSlotList`, `getPublicPartInfo`, `deleteEntry` and `resetStorage` answer as the original does with no device. `genExt`, `getProvider`, `setProvider` and `showTokenChooser` answer `java.lang.NoSuchMethodException. Method: <name>`.
-- Until P14 tokens answer `EMPTY_SLOT` (`browseKeyStore`: `TOKEN_CHOOSE_CANCEL`; `deleteEntry` and `resetStorage`: `COMMON`) and open no dialog. For a token, `changePassword` first checks the new PIN by the storage's rule, as the original does with no device: empty, or with characters or a length not allowed, gives `CHANGEPASS_INCORRECT_NEWPASS_PATTERN`; ID cards and the cloud storage give `UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION`; a valid PIN gives `CHANGEPASS_COMMON` (no device). `loadSlotList` always answers `EMPTY_SLOT`, also for `PKCS12` and an unknown name: the original checks the name only when a card is inserted.
+- A subset is implemented for the file storages `PKCS12` and `JKS` (read-only): `showFileChooser`, `browseKeyStore`, `setPassword`, `getTryCount`, `genKeyPairAndGetPKCS10`, `setX509CertToKeyStore`, `setX509CertToKeyStoreAndChangePassword`, `changePassword`, `signXml`. While token support is off, `loadSlotList`, `getPublicPartInfo`, `deleteEntry` and `resetStorage` answer as the original does with no device; with it on, see [Tokens (experimental)](#tokens-experimental). `genExt`, `getProvider`, `setProvider` and `showTokenChooser` answer `java.lang.NoSuchMethodException. Method: <name>`.
+- While token support is off, tokens answer `EMPTY_SLOT` (`browseKeyStore`: `TOKEN_CHOOSE_CANCEL`; `deleteEntry` and `resetStorage`: `COMMON`) and open no dialog; with it on, see [Tokens (experimental)](#tokens-experimental). For a token, `changePassword` first checks the new PIN by the storage's rule, as the original does with no device: empty, or with characters or a length not allowed, gives `CHANGEPASS_INCORRECT_NEWPASS_PATTERN`; ID cards and the cloud storage give `UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION`; a valid PIN gives `CHANGEPASS_COMMON` (no device). With token support off `loadSlotList` always answers `EMPTY_SLOT`, also for `PKCS12` and an unknown name; with it on, the readers holding a token of the storage joined with `<:>`, `EMPTY_SLOT` without one, and for `PKCS12` or an unknown name `UNKNOWN_SMARTCARD` when some card is inserted: the original checks the name only when a card is inserted.
 - `genKeyPairAndGetPKCS10` generates GOST 34.310-2004 and sha256RSA keys of 2048, 3072 or 4096 bits, anything else is `GENKEY_UNKNOWN_ALG`. The original also generates sha1RSA, GammaTech GOST and RSA of any length (it does not generate GOST 2015 either). The key identifier is the original applet's: SHA-1 of the whole `SubjectPublicKeyInfo` (`generateCsr` hashes the public key's BIT STRING). It is the key file's alias, `localKeyId` and name, the request's SubjectKeyIdentifier and `secondResult`. Keys are created only in an existing folder given by an absolute path, local or a network folder the user chose in the file chooser, else `COMMON`; they are not written into `JKS` (`UNKNOWN_STORAGE_FOR_THE_CURRENT_OPERATION`). Values Kalkan writes unchecked give `GENKEY_COMMON`: a dNSName that is not ASCII (e.g. a Cyrillic CN with a non-empty `subjectAlternativeNames`), an `E` or `DC` that is not ASCII, a `SERIALNUMBER` or `C` with characters outside PrintableString. The original writes them mangled or as the wrong string type.
 - One `genKeyPairAndGetPKCS10` request creates at most 16 keys: more `keyLengths` entries give `GENKEY_COMMON` before the first key is generated. The original creates, without a limit and without a dialog, as many key files as the page asks for.
 - One `setX509CertToKeyStore` or `setX509CertToKeyStoreAndChangePassword` request installs at most 16 certificates: more certificates in the `<@>`-separated list give `SETCERT_COMMON` before any file is touched. The original rewrites a key file per certificate, without a limit and without a dialog.
@@ -181,6 +182,19 @@ A plugin is a WebAssembly module serving its own `module` names (a port of a thi
 
 Design: [`docs/design/plugins.md`](docs/design/plugins.md) (Russian).
 
+### Tokens (experimental)
+
+OpenNCALayer reads keys and signs on the tokens of the six families Kalkan knows: Kaztoken, the Kazakhstan ID card, eToken PRO 72K, eToken 5110, JaCarta and AKey. The support is experimental: every driver has been checked only against a software emulator of its token, not on real tokens yet. That is why it is **off by default**.
+
+- **Turning it on:** «Настройки…» (Settings…) → «Токены и удостоверение личности (экспериментально)» (Tokens and ID cards (experimental)). The box applies at once, without a restart: token keys already open (in a plugin, until `keys_release`) stop signing when it is turned off.
+- **What works:** tokens in the storage dialog (the reader, a Refresh button, the PIN and the tries left), CMS, CAdES and XML signatures with a token's key, `getActiveTokens`, `loadSlotList`, `browseKeyStore`, `getPublicPartInfo`, token keys in plugins. A token's signature is checked against its certificate before a site gets it.
+- **What does not:** writing to a token — generating keys, writing a certificate, deleting a key, formatting, changing the PIN. With a token connected these calls answer the original's generic error code and send the token nothing.
+- **What it needs:** Windows — the Smart Card service; macOS — nothing beyond the system; Linux — `pcscd` and the USB reader driver `ccid` (Debian and Ubuntu: `sudo apt install pcscd`; Arch: `sudo pacman -S pcsclite ccid` and `sudo systemctl enable --now pcscd.socket`). Without the service OpenNCALayer works as usual, and the storage dialog says that the smart card service is unavailable.
+
+> **Warning.** Like the original NCALayer, OpenNCALayer answers `getActiveTokens`, `loadSlotList` and `getPublicPartInfo` without asking the user. While token support is on, **any open site can learn which tokens are connected and read the IIN and full name of the holder of an inserted ID card.** On Linux the reader names `loadSlotList` and plugins' `keys_terminals` return can include the token's USB serial number (`pcscd` adds it to the name), which identifies the token. Turn it on only when you actually need a token.
+
+Design, the family table, the PIN, the emulator and the `ONCL_TOKEN_TRACE=1` trace for problem reports: [`docs/design/tokens.md`](docs/design/tokens.md) (Russian).
+
 ## Desktop
 
 ### Tray icon
@@ -204,7 +218,8 @@ The settings window saves into `settings.json` of the data directory (other keys
 - `locale` — the language of the windows and the icon: `ru`, `kk` or `en`; without the key, the system's language if it is one of these three, else Russian;
 - `autostart` — "start at login": our autostart entry `"<exe>" run` — the value `OpenNCALayer` of `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows), `~/.config/autostart/openncalayer.desktop` (Linux), `~/Library/LaunchAgents/io.github.arynyklas.openncalayer.plist` with `RunAtLoad` (macOS). The window shows the entry's real state; an entry disabled in Task Manager → Startup counts as off;
 - `proxy` — the proxy of time-stamping (TSP), OCSP and CRL requests: `{"mode":"none"}` (the default, direct connections as in P4), `{"mode":"system"}` (`ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY` with `NO_PROXY`, and without them on Windows the manual proxy of the Internet Options) or `{"mode":"manual","url":"http://host:port"}`. Plain HTTP goes to the proxy as an absolute-form request (`GET http://…`), HTTPS through a `CONNECT` tunnel. SOCKS and `https://` proxies are not supported. A new proxy applies at once, without a restart. The file may hold a proxy password, so on macOS and Linux only its owner can read it (mode `0600`).
-- `updates` — the self-update: `{"enabled": true, "channel": "stable"}`, the channel `stable` or `beta`; see [Updates](#updates).
+- `updates` — the self-update: `{"enabled": true, "channel": "stable"}`, the channel `stable` or `beta`; see [Updates](#updates);
+- `tokens` — tokens and ID cards: `{"enabled": false}` (the default); the key appears in the file only once the support was turned on. See [Tokens (experimental)](#tokens-experimental).
 
 The same window has:
 - an "Original NCALayer" block: whether it is found, its autostart entries and their state, and the buttons «Отключить автозапуск оригинала» (Disable the original's autostart) and «Вернуть оригинал» (Restore the original);

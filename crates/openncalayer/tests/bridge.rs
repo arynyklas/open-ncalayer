@@ -126,6 +126,7 @@ fn scripted_registry(steps: Vec<Step>) -> (Arc<Registry>, Arc<ScriptedPrompter>)
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(MockTsa::new(entry("tsa-gost2015"))),
+        oncl_token::Tokens::disabled(),
         Arc::new(|_| {}),
         None,
     );

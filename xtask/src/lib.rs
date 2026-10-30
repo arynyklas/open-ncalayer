@@ -13,4 +13,5 @@ pub mod ncanode;
 pub mod package;
 pub mod plugin;
 pub mod sign;
+pub mod token_emu;
 pub mod win7;

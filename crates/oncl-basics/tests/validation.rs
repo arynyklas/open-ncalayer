@@ -944,6 +944,7 @@ impl Prompter for Hasty {
             storage: StorageKind::Pkcs12,
             path: key.path,
             password: key.password.into(),
+            reader: None,
         })
     }
 
@@ -994,6 +995,10 @@ impl Prompter for Hasty {
     }
 
     fn path(&self, _: &oncl_basics::PathPrompt) -> Prompt<std::path::PathBuf> {
+        Prompt::Cancelled
+    }
+
+    fn reader(&self, _: &oncl_basics::ReaderPrompt) -> Prompt<String> {
         Prompt::Cancelled
     }
 }

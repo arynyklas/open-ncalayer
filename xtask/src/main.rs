@@ -96,6 +96,16 @@ enum Command {
         #[command(subcommand)]
         command: PluginCommand,
     },
+    /// Serve the first card of an emulator configuration to vpcd (vsmartcard's virtual
+    /// reader for pcscd) until the process is stopped: the PC/SC test of CI.
+    TokenEmu {
+        /// The emulator configuration (TOML); key paths are relative to the workspace root.
+        #[arg(long)]
+        config: PathBuf,
+        /// vpcd's address [default: 127.0.0.1:35963].
+        #[arg(long)]
+        vpcd: Option<String>,
+    },
     /// Build the Windows 7 programs with their app-local DLLs into `<out>/<arch>/`, run the
     /// import gate on them and, on Windows, start them there.
     Win7 {
@@ -473,6 +483,9 @@ fn main() -> anyhow::Result<()> {
             xtask::e2e::run(&oncl_testkit::workspace_root(), browser, download)
         }
         Command::FetchFixtures => xtask::fetch::fetch_fixtures(),
+        Command::TokenEmu { config, vpcd } => {
+            xtask::token_emu::token_emu(&oncl_testkit::workspace_root(), &config, vpcd.as_deref())
+        }
         Command::InteropOpenssl => xtask::interop::interop_openssl(&oncl_testkit::workspace_root()),
         Command::InteropNcanode => xtask::ncanode::interop_ncanode(),
         Command::GenFixtures { check: false } => {

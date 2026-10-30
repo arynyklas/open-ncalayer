@@ -1,6 +1,7 @@
-// The settings window: language, our autostart, the proxy and the updates (saved together),
-// the original NCALayer's autostart and the browser extension's registration (acted on at
-// once), and «Check now» for updates. The states and messages are composed in Rust.
+// The settings window: language, our autostart, hardware tokens, the proxy and the updates
+// (saved together), the original NCALayer's autostart and the browser extension's
+// registration (acted on at once), and «Check now» for updates. The states and messages are
+// composed in Rust.
 
 import { Button, CheckBox, ComboBox, GroupBox, LineEdit, VerticalBox } from "std-widgets.slint";
 
@@ -17,6 +18,8 @@ export component SettingsWindow inherits Window {
     in-out property <bool> updates-enabled;
     // 0: stable, 1: beta.
     in-out property <int> update-channel;
+    // Hardware tokens and ID cards (experimental).
+    in-out property <bool> tokens-enabled;
     // What the updater can do and found last.
     in property <string> update-state;
     // Whether this installation can update itself («Check now» works).
@@ -66,6 +69,18 @@ export component SettingsWindow inherits Window {
                     text: @tr("Start at login");
                     enabled: !root.busy;
                     checked <=> root.autostart;
+                }
+
+                CheckBox {
+                    text: @tr("Tokens and ID cards (experimental)");
+                    enabled: !root.busy;
+                    checked <=> root.tokens-enabled;
+                }
+
+                Text {
+                    text: @tr("Sites will see the connected tokens and the ID card's details without asking, as with the original NCALayer.");
+                    wrap: word-wrap;
+                    color: #888888;
                 }
             }
         }

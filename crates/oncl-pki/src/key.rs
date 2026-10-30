@@ -188,6 +188,12 @@ pub enum KeyError {
     /// The signature does not verify.
     #[error("signature does not verify")]
     BadSignature,
+    /// The private key cannot be exported (it stays on a hardware token).
+    #[error("the private key stays on the token")]
+    NotExportable,
+    /// A hardware token failed or refused the operation.
+    #[error("token: {0}")]
+    Token(String),
 }
 
 fn malformed(e: impl std::fmt::Display) -> KeyError {
@@ -201,6 +207,70 @@ pub enum PrivateKey {
     Gost(SigningKey),
     /// RSA key.
     Rsa(Arc<RsaKeyPair>),
+    /// A key that signs on a hardware token.
+    Token(TokenKey),
+}
+
+/// A private key held by a hardware token: the token signs digests, the key never leaves it.
+pub trait TokenSigner: Send + Sync {
+    /// Key type.
+    fn alg(&self) -> KeyAlg;
+    /// Public key of the token key.
+    fn public_key(&self) -> &PublicKey;
+    /// Signs `digest` (the output of [`SigAlg::digest`]) with `alg`. The result has the
+    /// format of software keys: GOST `r_LE ‖ s_LE`, RSA a big-endian PKCS#1 v1.5 signature.
+    ///
+    /// # Errors
+    ///
+    /// [`KeyError::Token`] when the token fails or refuses.
+    fn sign_digest(&self, alg: SigAlg, digest: &[u8]) -> Result<Vec<u8>, KeyError>;
+    /// The token family, reader and alias, for `Debug` and the log; never the PIN.
+    fn describe(&self) -> String;
+}
+
+/// A handle of a key on a hardware token.
+#[derive(Clone)]
+pub struct TokenKey(Arc<dyn TokenSigner>);
+
+impl TokenKey {
+    /// Handle of `signer`'s key.
+    pub fn new(signer: Arc<dyn TokenSigner>) -> TokenKey {
+        TokenKey(signer)
+    }
+}
+
+impl std::fmt::Debug for TokenKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.describe())
+    }
+}
+
+/// DER `DigestInfo` of `digest` for an RSA signature algorithm: what PKCS#1 v1.5 pads.
+///
+/// # Errors
+///
+/// [`KeyError::UnsupportedAlgorithm`] for GOST, [`KeyError::Malformed`] if `digest` has not
+/// the hash's length.
+pub fn digest_info(alg: SigAlg, digest: &[u8]) -> Result<Vec<u8>, KeyError> {
+    const SHA256: [u8; 19] = [
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20,
+    ];
+    const SHA1: [u8; 15] = [
+        0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14,
+    ];
+    let (prefix, len): (&[u8], usize) = match alg {
+        SigAlg::RsaSha256 => (&SHA256, 32),
+        SigAlg::RsaSha1 => (&SHA1, 20),
+        SigAlg::Gost2004 | SigAlg::Gost2015_512 => return Err(KeyError::UnsupportedAlgorithm),
+    };
+    if digest.len() != len {
+        return Err(malformed(format!(
+            "a {len}-byte digest expected, got {}",
+            digest.len()
+        )));
+    }
+    Ok([prefix, digest].concat())
 }
 
 /// RSA private key: the `ring` key pair and the PKCS#8 it was read from (zeroized on drop).
@@ -286,6 +356,7 @@ impl PrivateKey {
         match self {
             PrivateKey::Gost(key) => curve_alg(key.curve()),
             PrivateKey::Rsa(_) => KeyAlg::Rsa,
+            PrivateKey::Token(key) => key.0.alg(),
         }
     }
 
@@ -294,6 +365,7 @@ impl PrivateKey {
         match self {
             PrivateKey::Gost(key) => PublicKey::Gost(key.verifying_key().clone()),
             PrivateKey::Rsa(key) => PublicKey::Rsa(key.public_key_der().to_vec()),
+            PrivateKey::Token(key) => key.0.public_key().clone(),
         }
     }
 
@@ -302,10 +374,15 @@ impl PrivateKey {
     /// OID with `SEQUENCE { curve OID, digest parameter OID }`, the `privateKey` octets a DER
     /// INTEGER (`d` big-endian) for GOST 2004 and a DER OCTET STRING (`d` little-endian,
     /// coordinate width) for GOST 2015. An RSA key gives back the PKCS#8 it was read from.
-    pub fn to_pkcs8_der(&self) -> Zeroizing<Vec<u8>> {
+    ///
+    /// # Errors
+    ///
+    /// [`KeyError::NotExportable`] for a key on a hardware token.
+    pub fn to_pkcs8_der(&self) -> Result<Zeroizing<Vec<u8>>, KeyError> {
         let key = match self {
             PrivateKey::Gost(key) => key,
-            PrivateKey::Rsa(key) => return key.pkcs8.clone(),
+            PrivateKey::Rsa(key) => return Ok(key.pkcs8.clone()),
+            PrivateKey::Token(_) => return Err(KeyError::NotExportable),
         };
         let curve = key.curve();
         let d = key.scalar_be();
@@ -329,21 +406,35 @@ impl PrivateKey {
             private_key: OctetStringRef::new(&private_key).expect("privateKey fits DER"),
             public_key: None,
         };
-        Zeroizing::new(info.to_der().expect("PrivateKeyInfo encodes"))
+        Ok(Zeroizing::new(
+            info.to_der().expect("PrivateKeyInfo encodes"),
+        ))
     }
 
     /// Signs `message` (hashed here) with `alg`. GOST signatures use a fresh random nonce and
-    /// the KZ encoding `r_LE ‖ s_LE`; RSA signatures are PKCS#1 v1.5.
+    /// the KZ encoding `r_LE ‖ s_LE`; RSA signatures are PKCS#1 v1.5. A token key's signature
+    /// is verified with its public key before it is returned.
     ///
     /// # Errors
     ///
     /// [`KeyError::UnsupportedAlgorithm`] if `alg` does not fit the key, and for
-    /// [`SigAlg::RsaSha1`].
+    /// [`SigAlg::RsaSha1`]; for a token key [`KeyError::Token`] when the token fails or its
+    /// signature does not verify.
     ///
     /// # Panics
     ///
     /// If the operating system RNG fails.
     pub fn sign(&self, alg: SigAlg, message: &[u8]) -> Result<Vec<u8>, KeyError> {
+        if let PrivateKey::Token(key) = self {
+            if alg.key_alg() != self.alg() || alg == SigAlg::RsaSha1 {
+                return Err(KeyError::UnsupportedAlgorithm);
+            }
+            let sig = key.0.sign_digest(alg, &alg.digest(message))?;
+            key.0.public_key().verify(alg, message, &sig).map_err(|_| {
+                KeyError::Token("the token's signature does not verify with its public key".into())
+            })?;
+            return Ok(sig);
+        }
         match (self, alg) {
             (PrivateKey::Gost(key), SigAlg::Gost2004 | SigAlg::Gost2015_512)
                 if alg.key_alg() == self.alg() =>
@@ -674,7 +765,7 @@ mod tests {
     fn gost(key: PrivateKey) -> SigningKey {
         match key {
             PrivateKey::Gost(k) => k,
-            PrivateKey::Rsa(_) => panic!("expected a GOST key"),
+            PrivateKey::Rsa(_) | PrivateKey::Token(_) => panic!("expected a GOST key"),
         }
     }
 
@@ -802,8 +893,9 @@ mod tests {
                 CurveId::Pkigovkz2004A => pkcs8(curve, &integer(&d)),
                 CurveId::Tc26_512A => pkcs8(curve, &octets(&le(&d))),
             };
-            assert_eq!(*key.to_pkcs8_der(), expected, "{curve:?}");
-            let back = gost(PrivateKey::from_pkcs8_der(&key.to_pkcs8_der(), None).unwrap());
+            assert_eq!(*key.to_pkcs8_der().unwrap(), expected, "{curve:?}");
+            let back =
+                gost(PrivateKey::from_pkcs8_der(&key.to_pkcs8_der().unwrap(), None).unwrap());
             assert_eq!(*back.scalar_be(), d, "{curve:?}");
         }
     }
@@ -831,7 +923,7 @@ mod tests {
         )
         .unwrap();
         let key = PrivateKey::from_pkcs8_der(&rsa, None).unwrap();
-        assert_eq!(*key.to_pkcs8_der(), rsa, "RSA keeps its PKCS#8");
+        assert_eq!(*key.to_pkcs8_der().unwrap(), rsa, "RSA keeps its PKCS#8");
         let spki = key.public_key().to_spki();
         assert_eq!(spki.algorithm.oid, oid::RSA_ENCRYPTION);
         assert_eq!(spki.algorithm.parameters, Some(Any::null()));

@@ -63,10 +63,12 @@ async fn start(steps: Vec<Step>, shorts: &[&str]) -> Srv {
             .unwrap()
             .swap_remove(0),
     ));
+    let tokens = oncl_token::Tokens::disabled();
     let mut registry = build_registry(
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         tsa.clone(),
+        Arc::clone(&tokens),
         Arc::new(|_| {}),
         None,
     );
@@ -81,6 +83,7 @@ async fn start(steps: Vec<Step>, shorts: &[&str]) -> Srv {
         cas: Arc::new(CaSet::nca_production()),
         pki_hosts: oncl_plugin::nca_pki_hosts(),
         settings_dir: None,
+        tokens,
     };
     let plugins = PluginModules::new(Arc::new(Engine::new()), services, registry.names());
     for short in shorts {

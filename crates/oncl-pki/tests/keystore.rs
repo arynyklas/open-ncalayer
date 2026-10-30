@@ -586,7 +586,7 @@ fn change_password_keeps_keyless_keys_and_other_certificates() {
     let p12 = pkcs12::write(
         &[WriteEntry {
             alias: entry.alias.clone(),
-            pkcs8_der: entry.key.to_pkcs8_der().to_vec(),
+            pkcs8_der: entry.key.to_pkcs8_der().unwrap().to_vec(),
             cert_der: Some(entry.cert.to_der().unwrap()),
         }],
         std::slice::from_ref(&ca),

@@ -1576,7 +1576,7 @@ fn two_signing_keys(dir: &std::path::Path) -> std::path::PathBuf {
             let e = entry(name);
             WriteEntry {
                 alias: e.alias.clone(),
-                pkcs8_der: e.key.to_pkcs8_der().to_vec(),
+                pkcs8_der: e.key.to_pkcs8_der().unwrap().to_vec(),
                 cert_der: Some(der_of(&e.cert)),
             }
         })
@@ -2073,7 +2073,7 @@ fn metadoc_file_key_users_private_key_alias() {
         let e = entry(name);
         WriteEntry {
             alias: (*alias).to_owned(),
-            pkcs8_der: e.key.to_pkcs8_der().to_vec(),
+            pkcs8_der: e.key.to_pkcs8_der().unwrap().to_vec(),
             cert_der: Some(der_of(&e.cert)),
         }
     })

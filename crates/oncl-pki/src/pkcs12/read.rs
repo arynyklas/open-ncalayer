@@ -510,7 +510,7 @@ mod tests {
         assert_eq!(contents.keys.len(), 1);
         assert!(contents.keys[0].cert.is_none());
         assert_eq!(
-            *contents.keys[0].key.to_pkcs8_der(),
+            *contents.keys[0].key.to_pkcs8_der().unwrap(),
             read(fixture("openssl/rsa.pk8.der"))
         );
         assert_eq!(contents.other_certs.len(), 1);

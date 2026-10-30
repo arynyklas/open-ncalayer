@@ -16,7 +16,7 @@ pub use autostart::{RegistryAutostart, RegistryBase};
 pub use extension::{BrowserExtension, ExtensionError, ExtensionStatus};
 pub use original::{OriginalControl, OriginalLocations, OriginalNcaLayer, OriginalStatus};
 pub use port_owner::PortOwner;
-pub use settings::{ProxySetting, Settings, UpdateSettings};
+pub use settings::{ProxySetting, Settings, TokenSettings, UpdateSettings};
 
 use std::io;
 use std::path::Path;

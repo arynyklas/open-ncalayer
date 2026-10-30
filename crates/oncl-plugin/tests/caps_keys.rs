@@ -270,7 +270,7 @@ fn store_of(dir: &Path, names: &[&str]) -> PathBuf {
         })
         .map(|entry| WriteEntry {
             alias: entry.alias.clone(),
-            pkcs8_der: entry.key.to_pkcs8_der().to_vec(),
+            pkcs8_der: entry.key.to_pkcs8_der().unwrap().to_vec(),
             cert_der: Some(der(&entry.cert)),
         })
         .collect();
@@ -623,7 +623,7 @@ fn open_over_handle_limit_inserts_nothing() {
 }
 
 #[test]
-fn open_terminal_is_no_device_until_tokens() {
+fn open_terminal_is_no_device_with_tokens_off() {
     let mut plugin = guest(
         &services(),
         "keys = true",
@@ -659,7 +659,7 @@ fn open_terminal_is_no_device_until_tokens() {
 }
 
 #[test]
-fn terminals_are_empty_until_tokens() {
+fn terminals_are_empty_with_tokens_off() {
     let terminals = |storage: &str| {
         let mut plugin = guest(
             &services(),

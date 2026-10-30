@@ -105,7 +105,7 @@ fn build(version: u32, entries: &[(&str, &KeyEntry)], password: &str, salt: u8) 
         out.extend_from_slice(&1u32.to_be_bytes());
         utf(&mut out, alias);
         out.extend_from_slice(&0u64.to_be_bytes());
-        let plain = e.key.to_pkcs8_der();
+        let plain = e.key.to_pkcs8_der().unwrap();
         let salt = [salt; 20];
         let mut protected = salt.to_vec();
         let mut block = salt.to_vec();

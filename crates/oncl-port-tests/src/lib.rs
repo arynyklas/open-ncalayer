@@ -201,6 +201,7 @@ impl Harness {
             cas: Arc::new(synthetic_cas()),
             pki_hosts: Arc::clone(&self.pki_hosts),
             settings_dir: self.settings_dir.clone(),
+            tokens: oncl_token::Tokens::disabled(),
         }
     }
 

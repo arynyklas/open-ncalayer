@@ -5,7 +5,11 @@
 //! The signing methods first ask for the key ([`choose_key`]):
 //!
 //! - an empty (or blank) `storageName` is `storageName.param.empty`, a name Kalkan does not
-//!   know `storage.unknown`, a hardware token `storage.empty` (none is connected);
+//!   know `storage.unknown`, a hardware token `storage.empty` when none of its family is
+//!   connected (always with token support off), as is the cloud storage;
+//! - a token storage with such a token connected opens the storage dialog for that storage
+//!   alone, in the first reader holding one (the original does not ask which), for the PIN;
+//!   the key dialog follows as for the files below;
 //! - `PKCS12` and `JKS` (read-only) open the storage dialog for that storage alone, then the
 //!   key dialog with the keys whose certificate is of the requested `keyType`
 //!   ([`oncl_pki::info::kcert_types`]), any other `keyType` meaning SIGNATURE or
@@ -29,8 +33,8 @@ use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_basics::{
     Action, Availability, BusyPrompt, FileKind, FilePrompt, KeyPrompt, LiveAvailability, Locale,
-    MAX_PAGE_FILE, OpenError, PageFile, PageFileError, Prompt, StorageKind, StoragePrompt,
-    lock_dialog_flow, page_path, remember_chosen_path,
+    MAX_PAGE_FILE, OpenError, PageFile, PageFileError, Prompt, ReaderEntry, ReaderList,
+    StorageKind, StoragePrompt, lock_dialog_flow, page_path, remember_chosen_path,
 };
 use oncl_pki::cms::{self, CmsError, SignOptions};
 use oncl_pki::info::{CertInfo, KncaCertType, cert_info, common_name, kalkan_dn, kcert_types};
@@ -41,6 +45,7 @@ use oncl_pki::xmldsig::{self, XmlError};
 use oncl_pki::{pem, tsp};
 use oncl_protocol::AddInfo;
 use oncl_protocol::javab64::decode_java;
+use oncl_token::TokenKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fmt::Write;
@@ -63,9 +68,16 @@ const ISSUER_CERT_NOT_FOUND: &str = "ISSUER_CERT_NOT_FOUND";
 /// Origin shown when the connection sent none.
 const UNIDENTIFIED: &str = "UNIDENTIFIED";
 
-/// `getActiveTokens()`: the storages with a connected token; none is supported yet.
-pub(crate) fn get_active_tokens(_: &CommonUtils, _: &Args<'_>, _: &AddInfo) -> Outcome {
-    Ok(Some(json!([])))
+/// `getActiveTokens()`: the storages with a connected token, in Kalkan's order; none with
+/// token support off or without the smart card service.
+pub(crate) fn get_active_tokens(cu: &CommonUtils, _: &Args<'_>, _: &AddInfo) -> Outcome {
+    let present = cu.tokens.scan().present;
+    let names: Vec<&str> = TokenKind::ALL
+        .into_iter()
+        .filter(|kind| present.iter().any(|p| p.kind == *kind))
+        .map(TokenKind::storage_name)
+        .collect();
+    Ok(Some(json!(names)))
 }
 
 /// `getKeyInfo(storageName)`: the chosen key's certificate details, nothing signed.
@@ -349,7 +361,7 @@ fn choose_key(
     detail: Option<String>,
     add_info: &AddInfo,
 ) -> Result<KeyEntry, Option<String>> {
-    let storage = file_storage(storage_name)?;
+    let (storage, reader) = storage_of(cu, storage_name)?;
     let origin = origin(add_info);
     let locale = cu.locale();
     let _flow = lock_dialog_flow();
@@ -361,6 +373,9 @@ fn choose_key(
         recent_path: None,
         error: None,
         detail: detail.clone(),
+        tokens: reader.map(|reader| ReaderList::fixed(vec![ReaderEntry { storage, reader }], None)),
+        chosen: None,
+        reader: None,
     };
     let mut keys = loop {
         let Prompt::Answer(answer) = cu.prompter.storage(&prompt) else {
@@ -371,7 +386,7 @@ fn choose_key(
             locale,
         });
         // An empty store gets the text of the requested type too, as in the original.
-        let opened = match answer.open(&prompt.storages) {
+        let opened = match answer.open_with(&prompt.storages, &cu.tokens) {
             Err(OpenError::NoKeys) => Ok(Vec::new()),
             opened => opened,
         };
@@ -379,7 +394,12 @@ fn choose_key(
             Ok(keys) => break keys,
             Err(e) => {
                 prompt.error = Some(e);
-                prompt.recent_path = Some(answer.path);
+                if prompt.tokens.is_some() {
+                    prompt.chosen = Some(answer.storage);
+                    prompt.reader = answer.reader;
+                } else {
+                    prompt.recent_path = Some(answer.path);
+                }
             }
         }
     };
@@ -398,17 +418,26 @@ fn choose_key(
     }
 }
 
-/// The file storage `name` names (`StorageInfo`'s checks).
-fn file_storage(name: &str) -> Result<StorageKind, Option<String>> {
+/// The storage `name` names (`StorageInfo`'s checks), with the reader of a token: the first
+/// one holding a token of its family.
+fn storage_of(
+    cu: &CommonUtils,
+    name: &str,
+) -> Result<(StorageKind, Option<String>), Option<String>> {
     // Java's `trim`: every character up to U+0020.
     if name.trim_matches(|c| c <= ' ').is_empty() {
         return Err(Some(STORAGE_NAME_EMPTY.to_owned()));
     }
-    match StorageKind::from_name(name) {
-        None => Err(Some(STORAGE_UNKNOWN.to_owned())),
-        Some(StorageKind::Token(_)) => Err(Some(STORAGE_EMPTY.to_owned())),
-        Some(kind) => Ok(kind),
-    }
+    let storage = StorageKind::from_name(name).ok_or_else(|| Some(STORAGE_UNKNOWN.to_owned()))?;
+    let StorageKind::Token(_) = storage else {
+        return Ok((storage, None));
+    };
+    let reader = storage
+        .token_kind()
+        .and_then(|kind| cu.tokens.readers(kind).ok())
+        .and_then(|readers| readers.into_iter().next())
+        .ok_or_else(|| Some(STORAGE_EMPTY.to_owned()))?;
+    Ok((storage, Some(reader)))
 }
 
 /// The keys whose certificate is of `key_type` (`None`: SIGNATURE or AUTHENTICATION), with
@@ -713,16 +742,32 @@ mod tests {
         assert!(java_equals_ignore_case("İ", "i"));
     }
 
+    /// No network.
+    struct Offline;
+
+    impl oncl_pki::http::HttpTransport for Offline {
+        fn send(
+            &self,
+            _: &oncl_pki::http::HttpRequest<'_>,
+        ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+            Err(oncl_pki::http::HttpError::other("offline"))
+        }
+    }
+
     #[test]
     fn storage_checks() {
-        let err = |s: &str| file_storage(s).unwrap_err().unwrap();
+        let cu = CommonUtils::new(
+            std::sync::Arc::new(oncl_basics::testing::ScriptedPrompter::new(vec![])),
+            std::sync::Arc::new(Offline),
+        );
+        let err = |s: &str| storage_of(&cu, s).unwrap_err().unwrap();
         assert_eq!(err(""), STORAGE_NAME_EMPTY);
         assert_eq!(err(" \t\n"), STORAGE_NAME_EMPTY);
         assert_eq!(err("pkcs12"), STORAGE_UNKNOWN);
         assert_eq!(err(" PKCS12"), STORAGE_UNKNOWN);
         assert_eq!(err("AKKaztokenStore"), STORAGE_EMPTY);
         assert_eq!(err("ABCloudServiceStore"), STORAGE_EMPTY);
-        assert_eq!(file_storage("PKCS12"), Ok(StorageKind::Pkcs12));
-        assert_eq!(file_storage("JKS"), Ok(StorageKind::Jks));
+        assert_eq!(storage_of(&cu, "PKCS12"), Ok((StorageKind::Pkcs12, None)));
+        assert_eq!(storage_of(&cu, "JKS"), Ok((StorageKind::Jks, None)));
     }
 }

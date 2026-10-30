@@ -111,6 +111,7 @@ impl Sandbox {
             cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
             pki_hosts: oncl_plugin::nca_pki_hosts(),
             settings_dir: None,
+            tokens: oncl_token::Tokens::disabled(),
         };
         let builtin = vec![oncl_basics::MODULE_NAME.to_owned()];
         Sandbox {

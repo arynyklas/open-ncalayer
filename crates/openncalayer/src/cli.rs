@@ -431,7 +431,9 @@ fn configured(files: &TlsFiles) -> Result<TlsInfo, WssFailure> {
 /// (also `{"jks":{"path","password"}}`, `{"cancel_key":null}`,
 /// `{"csr":{"dir","password"}}`, `{"cancel_csr":null}`, `{"import":{"dir","password"}}`,
 /// `{"cancel_import":null}`, `{"file":"…"}`, `{"cancel_file":null}`, `{"password":"…"}`,
-/// `{"cancel_password":null}`).
+/// `{"cancel_password":null}`, `{"confirm":{"yes":true}}`, `{"cancel_confirm":null}`, and for
+/// hardware tokens `{"token":{"storage","reader","pin"}}`, `{"reader":"…"}`,
+/// `{"cancel_reader":null}`).
 #[cfg(feature = "e2e-prompter")]
 pub const E2E_PROMPTER_VAR: &str = "ONCL_E2E_PROMPTER";
 
@@ -460,44 +462,142 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_basics::testing::Step>, String> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
     enum StepSpec {
-        Storage { path: PathBuf, password: String },
-        Jks { path: PathBuf, password: String },
+        Storage {
+            path: PathBuf,
+            password: String,
+        },
+        Jks {
+            path: PathBuf,
+            password: String,
+        },
         CancelStorage,
         Key(usize),
         CancelKey,
-        Csr { dir: PathBuf, password: String },
+        Csr {
+            dir: PathBuf,
+            password: String,
+        },
         CancelCsr,
-        Import { dir: PathBuf, password: String },
+        Import {
+            dir: PathBuf,
+            password: String,
+        },
         CancelImport,
         File(PathBuf),
         CancelFile,
         Password(String),
         CancelPassword,
-        Confirm { yes: bool },
+        Confirm {
+            yes: bool,
+        },
         CancelConfirm,
+        Token {
+            storage: String,
+            reader: String,
+            pin: String,
+        },
+        Reader(String),
+        CancelReader,
     }
 
     let specs: Vec<StepSpec> = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    Ok(specs
+    specs
         .into_iter()
-        .map(|spec| match spec {
-            StepSpec::Storage { path, password } => Step::Storage { path, password },
-            StepSpec::Jks { path, password } => Step::Jks { path, password },
-            StepSpec::CancelStorage => Step::CancelStorage,
-            StepSpec::Key(index) => Step::Key(index),
-            StepSpec::CancelKey => Step::CancelKey,
-            StepSpec::Csr { dir, password } => Step::Csr { dir, password },
-            StepSpec::CancelCsr => Step::CancelCsr,
-            StepSpec::Import { dir, password } => Step::Import { dir, password },
-            StepSpec::CancelImport => Step::CancelImport,
-            StepSpec::File(path) => Step::File(path),
-            StepSpec::CancelFile => Step::CancelFile,
-            StepSpec::Password(password) => Step::Password(password),
-            StepSpec::CancelPassword => Step::CancelPassword,
-            StepSpec::Confirm { yes } => Step::Confirm { yes },
-            StepSpec::CancelConfirm => Step::CancelConfirm,
+        .map(|spec| {
+            Ok(match spec {
+                StepSpec::Storage { path, password } => Step::Storage { path, password },
+                StepSpec::Jks { path, password } => Step::Jks { path, password },
+                StepSpec::CancelStorage => Step::CancelStorage,
+                StepSpec::Key(index) => Step::Key(index),
+                StepSpec::CancelKey => Step::CancelKey,
+                StepSpec::Csr { dir, password } => Step::Csr { dir, password },
+                StepSpec::CancelCsr => Step::CancelCsr,
+                StepSpec::Import { dir, password } => Step::Import { dir, password },
+                StepSpec::CancelImport => Step::CancelImport,
+                StepSpec::File(path) => Step::File(path),
+                StepSpec::CancelFile => Step::CancelFile,
+                StepSpec::Password(password) => Step::Password(password),
+                StepSpec::CancelPassword => Step::CancelPassword,
+                StepSpec::Confirm { yes } => Step::Confirm { yes },
+                StepSpec::CancelConfirm => Step::CancelConfirm,
+                StepSpec::Token {
+                    storage,
+                    reader,
+                    pin,
+                } => Step::Token {
+                    storage: oncl_basics::StorageKind::from_name(&storage)
+                        .ok_or_else(|| format!("no storage {storage:?}"))?,
+                    reader,
+                    pin,
+                },
+                StepSpec::Reader(reader) => Step::Reader(reader),
+                StepSpec::CancelReader => Step::CancelReader,
+            })
         })
-        .collect())
+        .collect()
+}
+
+/// With feature `token-emulator`: a TOML file of emulated readers and cards (the format of
+/// `oncl_token::emulator::read_config`, key paths relative to the file's directory) that
+/// `run` reads hardware tokens from instead of the system's smart card service, with token
+/// support on.
+#[cfg(feature = "token-emulator")]
+pub const TOKEN_EMULATOR_VAR: &str = "ONCL_TOKEN_EMULATOR";
+
+/// The hardware tokens of `run`: the system's smart card service, support on as `enabled`
+/// (the saved setting). With feature `token-emulator` and [`TOKEN_EMULATOR_VAR`] set, the
+/// emulated cards of that file instead, support on; on failure the message is already printed
+/// and exit code 1 returned.
+pub fn token_service(enabled: bool) -> Result<Arc<oncl_token::Tokens>, ExitCode> {
+    token_service_in(enabled, &|name| std::env::var_os(name))
+}
+
+/// [`token_service`] with the environment variables of `env`.
+fn token_service_in(
+    enabled: bool,
+    env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<Arc<oncl_token::Tokens>, ExitCode> {
+    #[cfg(feature = "token-emulator")]
+    if let Some(path) = env(TOKEN_EMULATOR_VAR) {
+        let path = PathBuf::from(path);
+        let base = path.parent().unwrap_or(Path::new(""));
+        let backend = fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| oncl_token::emulator::EmulatorBackend::from_config(&text, base))
+            .map_err(|e| {
+                eprintln!("{TOKEN_EMULATOR_VAR}: {}: {e}", path.display());
+                ExitCode::FAILURE
+            })?;
+        tracing::warn!(config = %path.display(), "hardware tokens are emulated");
+        return Ok(oncl_token::Tokens::new(Arc::new(backend), true));
+    }
+    #[cfg(not(feature = "token-emulator"))]
+    let _ = env;
+    Ok(oncl_token::Tokens::new(
+        Arc::new(oncl_token::PcscBackend::new()),
+        enabled,
+    ))
+}
+
+/// One line on the hardware tokens for the start of the log: support on or off and, with
+/// support on, whether the smart card service answers (with support off it is not asked).
+pub fn token_state(tokens: &oncl_token::Tokens) -> String {
+    if !tokens.is_enabled() {
+        return "hardware token support: off".to_owned();
+    }
+    let scan = tokens.scan();
+    match scan.problem {
+        None => format!(
+            "hardware token support: on; smart card service available, tokens: {}",
+            scan.present.len()
+        ),
+        Some(oncl_token::ScanProblem::NoService) => {
+            "hardware token support: on; smart card service unavailable".to_owned()
+        }
+        Some(oncl_token::ScanProblem::Failed(e)) => {
+            format!("hardware token support: on; smart card service failed: {e}")
+        }
+    }
 }
 
 /// `tls init|import|status`.
@@ -1416,5 +1516,91 @@ mod tests {
         ));
         assert!(parse_steps(r#"[{"wait":null}]"#).is_err());
         assert!(parse_steps("{}").is_err());
+    }
+
+    #[cfg(feature = "e2e-prompter")]
+    #[test]
+    fn e2e_token_steps_parse() {
+        use oncl_basics::StorageKind;
+        use oncl_basics::testing::Step;
+
+        let steps = parse_steps(
+            r#"[{"token":{"storage":"AKKaztokenStore","reader":"R0","pin":"123456"}},
+                {"reader":"R1"},{"cancel_reader":null}]"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            steps.as_slice(),
+            [
+                Step::Token { storage, reader, pin },
+                Step::Reader(chosen),
+                Step::CancelReader,
+            ] if *storage == StorageKind::Token("AKKaztokenStore") && reader == "R0"
+                && pin == "123456" && chosen == "R1"
+        ));
+        assert_eq!(
+            parse_steps(r#"[{"token":{"storage":"NoSuchStore","reader":"R0","pin":"1"}}]"#)
+                .unwrap_err(),
+            r#"no storage "NoSuchStore""#
+        );
+    }
+
+    /// Without the feature the emulator's variable changes nothing: the system's service,
+    /// support as saved.
+    #[cfg(not(feature = "token-emulator"))]
+    #[test]
+    fn release_build_ignores_emulator_var() {
+        let env = |name: &str| {
+            (name == "ONCL_TOKEN_EMULATOR").then(|| std::ffi::OsString::from("missing.toml"))
+        };
+        for enabled in [false, true] {
+            let tokens = token_service_in(enabled, &env).unwrap();
+            assert_eq!(tokens.is_enabled(), enabled);
+        }
+    }
+
+    #[cfg(feature = "token-emulator")]
+    #[test]
+    fn emulator_var_reads_the_emulated_cards() {
+        let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/tokens.toml");
+        let env = |name: &str| (name == TOKEN_EMULATOR_VAR).then(|| config.clone().into());
+        let tokens = token_service_in(false, &env).unwrap();
+        assert!(tokens.is_enabled(), "support on with the emulator");
+        assert_eq!(
+            tokens
+                .readers(oncl_token::TokenKind::Kaztoken)
+                .unwrap()
+                .len(),
+            1
+        );
+        let missing = |name: &str| {
+            (name == TOKEN_EMULATOR_VAR).then(|| std::ffi::OsString::from("missing.toml"))
+        };
+        assert!(token_service_in(true, &missing).is_err());
+        let none = |_: &str| None;
+        assert!(!token_service_in(false, &none).unwrap().is_enabled());
+    }
+
+    /// The start's line on tokens: support off without touching the service, else whether
+    /// the service answers.
+    #[cfg(feature = "token-emulator")]
+    #[test]
+    fn token_state_line() {
+        use oncl_token::emulator::EmulatorBackend;
+
+        let emu = Arc::new(EmulatorBackend::new());
+        emu.add_reader("Reader 0");
+        let tokens = oncl_token::Tokens::new(emu.clone(), false);
+        assert_eq!(token_state(&tokens), "hardware token support: off");
+        tokens.set_enabled(true);
+        assert_eq!(
+            token_state(&tokens),
+            "hardware token support: on; smart card service available, tokens: 0"
+        );
+        emu.set_service(false);
+        assert_eq!(
+            token_state(&tokens),
+            "hardware token support: on; smart card service unavailable"
+        );
     }
 }

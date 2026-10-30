@@ -17,11 +17,11 @@ use url::Url;
 /// The largest body of an HTTP request or reply.
 pub const MAX_HTTP_BODY: u64 = 32 << 20;
 
-/// The timeout of an HTTP request, connecting to reading the reply.
-pub const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// The most HTTP requests of one `oncl_process` call: more are a `limit` error.
 pub const MAX_HTTP_REQUESTS: u32 = 64;
+
+/// The timeout of an HTTP request, connecting to reading the reply.
+pub const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// `http_request`: one HTTPS request to a URL under a prefix of the manifest, sent as
 /// checked, without following redirects; at most [`MAX_HTTP_REQUESTS`] in one call.

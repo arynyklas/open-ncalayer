@@ -207,6 +207,9 @@ impl Prompter for GatedConfirm {
     fn path(&self, _: &oncl_basics::PathPrompt) -> Prompt<PathBuf> {
         Prompt::Cancelled
     }
+    fn reader(&self, _: &oncl_basics::ReaderPrompt) -> Prompt<String> {
+        Prompt::Cancelled
+    }
 }
 
 #[test]
