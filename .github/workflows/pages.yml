@@ -1,13 +1,37 @@
 name: Pages
 
-# GitHub Pages of the project: the update indexes `updates/` under `/updates/`
-# (`/updates/v1/<channel>.json`). Pages is one artifact for the whole site: later pages of
-# the site go into `_site` beside `updates/`. Pages must be enabled with "GitHub Actions"
-# as the source in the repository settings.
+# GitHub Pages of the project, one artifact: the project site (`site/`, built by
+# `cargo xtask registry build` with the pinned Zola) and beside it the update indexes
+# `updates/`, copied byte for byte under `/updates/` (`/updates/v1/<channel>.json`).
+#
+# Runs on a push to main that changes the site's inputs, daily (the releases and the
+# `upstream` branch's facts change without a push), after the upstream watcher publishes
+# facts (`repository_dispatch`), when a release is published, edited or deleted, and by
+# hand. A `release` event runs on the release's tag, which the `github-pages` environment
+# does not deploy: it only starts this workflow again on the default branch.
+#
+# Pages must be enabled with "GitHub Actions" as the source in the repository settings;
+# until then the site is built and checked, and nothing is deployed.
 on:
   push:
     branches: [main]
-    paths: ["updates/**", "crates/oncl-update/keys/**"]
+    paths:
+      - "updates/**"
+      - "crates/oncl-update/keys/**"
+      - "site/**"
+      - "plugins/*/plugin.toml"
+      - "plugins/*/registry.toml"
+      - "xtask/**"
+      - "crates/oncl-basics/src/capabilities.rs"
+      - "crates/oncl-accessory/**"
+      - "fixtures/registry/**"
+      - ".github/workflows/pages.yml"
+  schedule:
+    - cron: "41 4 * * *"
+  repository_dispatch:
+    types: [upstream]
+  release:
+    types: [published, edited, deleted]
   workflow_dispatch:
 
 permissions:
@@ -21,47 +45,140 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  dispatch:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Run Pages on the default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH"
+
   build:
+    if: github.event_name != 'release'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      pages: read
+      deployments: read
     outputs:
-      publish: ${{ steps.site.outputs.publish }}
+      publish: ${{ steps.pages.outputs.publish }}
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
         with:
-          # The push's previous commit (`seq` is compared against it) and the release tags
-          # (every new version's tag must hold a trusted update key).
+          # The base the indexes are compared with and the release tags (every new
+          # version's tag must hold a trusted update key).
           fetch-depth: 0
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Nothing unsigned, expired or pointing elsewhere is published, even if pushed past the
-      # pull request check; on a push, changed content needs a greater `seq` than the
-      # commit before the push. The first push (or a manual run) checks without a base.
+      # pull request check. Changed content needs a greater `seq` than the base: on a push the
+      # commit before it; otherwise the commit Pages serves now (the newest successful
+      # deployment of `github-pages`), so a scheduled or manual run publishes nothing a push
+      # would have refused. Without a deployment yet, the check runs without a base.
       - name: Check the indexes
         env:
+          EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: |
-          if [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
-            git cat-file -e "$BEFORE^{commit}"
-            cargo xtask index check updates/v1 --base "$BEFORE"
+          if [ ! -d updates/v1 ]; then
+            echo "::notice::no updates/v1 yet: no indexes to check"
+            exit 0
+          fi
+          base=""
+          if [ "$EVENT" = push ]; then
+            if [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
+              base="$BEFORE"
+            fi
+          else
+            deployments=$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=github-pages&per_page=30" \
+              --jq '.[] | "\(.id) \(.sha)"')
+            while read -r id sha; do
+              [ -n "$id" ] || continue
+              state=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" --jq '.[0].state')
+              if [ "$state" = success ]; then
+                base="$sha"
+                break
+              fi
+            done <<< "$deployments"
+          fi
+          if [ -n "$base" ]; then
+            git cat-file -e "$base^{commit}"
+            cargo xtask index check updates/v1 --base "$base"
           else
             cargo xtask index check updates/v1 --no-base
           fi
-      # Before the first index (the keys committed alone) there is nothing to publish: the
-      # keys were read above, and the deploy is skipped.
-      - name: Site
-        id: site
+      - name: Is Pages enabled?
+        id: pages
         run: |
-          if [ ! -d updates/v1 ]; then
-            echo "::notice::no updates/v1 yet: nothing to publish"
+          if build_type=$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .build_type 2> pages.err); then
+            if [ "$build_type" != workflow ]; then
+              echo "::error::Pages builds from $build_type, not GitHub Actions"
+              exit 1
+            fi
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif grep -q "HTTP 404" pages.err; then
+            echo "::notice::Pages is not enabled: the site is built and checked, not deployed"
             echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            cat pages.err
+            exit 1
+          fi
+      - name: Releases
+        run: |
+          mkdir -p "$RUNNER_TEMP/site"
+          if ! gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | {tag_name, draft, prerelease, published_at, assets: [.assets[] | {name}]}' \
+            > "$RUNNER_TEMP/site/releases.jsonl"; then
+            echo "::warning::the list of releases could not be read: the site shows none"
+            rm -f "$RUNNER_TEMP/site/releases.jsonl"
+          fi
+      - name: The upstream branch
+        run: |
+          dir="$RUNNER_TEMP/site/upstream"
+          status=0
+          git ls-remote --exit-code --heads origin upstream > /dev/null || status=$?
+          if [ "$status" = 2 ]; then
+            echo "::notice::no upstream branch yet"
+            exit 0
+          elif [ "$status" != 0 ]; then
+            echo "::warning::the upstream branch could not be listed: the site shows no facts"
             exit 0
           fi
-          mkdir _site
-          cp -R updates _site/updates
-          echo "publish=true" >> "$GITHUB_OUTPUT"
+          git fetch --no-tags --depth 1 origin upstream
+          mkdir -p "$dir/latest"
+          git show FETCH_HEAD:index.json > "$dir/index.json" || rm -f "$dir/index.json"
+          git show FETCH_HEAD:latest/facts.json > "$dir/latest/facts.json" || rm -f "$dir/latest/facts.json"
+      - name: Build the site
+        run: |
+          args=(--out target/site)
+          if [ -f "$RUNNER_TEMP/site/releases.jsonl" ]; then
+            args+=(--releases "$RUNNER_TEMP/site/releases.jsonl")
+          fi
+          if [ -d "$RUNNER_TEMP/site/upstream" ]; then
+            args+=(--upstream "$RUNNER_TEMP/site/upstream")
+          fi
+          cargo xtask registry build "${args[@]}"
+      # The site has no `updates/` of its own: the indexes are copied as they are committed.
+      - name: Assemble the artifact
+        run: |
+          mv target/site/public _site
+          test ! -e _site/updates
+          if [ -d updates ]; then
+            cp -R updates _site/updates
+            diff -r updates _site/updates
+          fi
+          cargo xtask registry check _site
       - uses: actions/upload-pages-artifact@v5
-        if: steps.site.outputs.publish == 'true'
+        if: steps.pages.outputs.publish == 'true'
         with:
           path: _site
 
