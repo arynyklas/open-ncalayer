@@ -164,8 +164,14 @@ fn open_ex_filters_and_title_reach_dialog() {
     .unwrap();
     let opened = opened.unwrap();
     assert_eq!(opened.data.as_slice(), b"cms");
-    // The real path of the chosen file (symbolic links and short names resolved).
-    assert_eq!(opened.path, text(&oncl_testkit::real_path(&file)));
+    // A file the user chose is reported as the file system resolves it: on Windows as
+    // given, elsewhere with symbolic links resolved (macOS's /var → /private/var).
+    let expected = if cfg!(windows) {
+        file.clone()
+    } else {
+        oncl_testkit::real_path(&file)
+    };
+    assert_eq!(opened.path, text(&expected));
     let prompt = &prompter.path_prompts()[0];
     assert_eq!(prompt.title.as_deref(), Some("Выберите подпись"));
     assert_eq!(prompt.filters[0].name, "CMS");
