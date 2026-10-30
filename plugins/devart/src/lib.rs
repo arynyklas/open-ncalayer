@@ -81,8 +81,12 @@ struct Signer {
     check_ocsp: bool,
 }
 
-/// The tokens of this instance.
+/// The tokens of this instance, oldest first.
 static SIGNERS: Mutex<Vec<(String, Signer)>> = Mutex::new(Vec::new());
+
+/// Most tokens kept: each holds an open key and the core keeps at most 16 keys an
+/// instance; the oldest goes first (the original keeps every token).
+const MAX_SIGNERS: usize = 12;
 
 fn handle(request: &Request) -> String {
     let options = InvokeOptions {
@@ -336,6 +340,12 @@ fn signer_info(args: &Map<String, Value>) -> Result<String, Exc> {
         initial_path: None,
         order: Default::default(),
     };
+    {
+        // Room for the key the dialog opens.
+        let mut signers = SIGNERS.lock().unwrap_or_else(|e| e.into_inner());
+        let excess = (signers.len() + 1).saturating_sub(MAX_SIGNERS);
+        signers.drain(..excess);
+    }
     let key = keys::select(&request)
         .map_err(|e| Exc::runtime(e.message))?
         .ok_or_else(|| Exc::runtime("action.canceled"))?;

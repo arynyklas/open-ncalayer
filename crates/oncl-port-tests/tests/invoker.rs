@@ -1857,3 +1857,32 @@ fn thundercrypt_lta_upgrade_structure() {
 fn oid_tlv(dotted: &str) -> Vec<u8> {
     der_of(&(0x06, oid(dotted)))
 }
+
+/// A clock one second further on each read, so that Devart tokens differ.
+fn ticking_clock() -> time::OffsetDateTime {
+    static SECONDS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    oncl_port_tests::default_clock()
+        + time::Duration::seconds(SECONDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+}
+
+#[test]
+fn devart_many_tokens_evict_the_oldest() {
+    let steps = (0..20).flat_map(|_| choose("user-gost2015-sign")).collect();
+    let harness = Harness::new(steps, vec![]).with_clock(ticking_clock);
+    let mut session = harness.session(DEVART);
+    let tokens: Vec<String> = (0..20)
+        .map(|_| devart_token(&mut session, serde_json::json!(false)))
+        .collect();
+    let sign = |session: &mut oncl_port_tests::SessionHandle, token: &str| {
+        let args = serde_json::json!({"token": token, "dataList": []});
+        text(session.call(&devart_request("signDevart", &args), None))
+    };
+    let unknown = sign(&mut session, "nope");
+    assert_eq!(
+        sign(&mut session, &tokens[0]),
+        unknown,
+        "the oldest is gone"
+    );
+    let latest = sign(&mut session, &tokens[19]);
+    assert!(latest.contains(r#""status":true"#), "{latest}");
+}
