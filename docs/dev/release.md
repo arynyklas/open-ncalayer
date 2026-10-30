@@ -42,12 +42,15 @@ cp <каталог>/oncl-index.pub crates/oncl-update/keys/current.pub
 ## 3. Выпуск версии
 
 1. Поднять версию в `[workspace.package]` файла `Cargo.toml`, обновить `Cargo.lock` (`cargo check --workspace`), прогнать проверки из раздела «Перед отправкой изменений» README и закоммитить.
-2. Поставить тег и запушить его:
+2. Поставить подписанный тег, проверить подпись и запушить его:
 
    ```sh
-   git tag v<версия>
+   git tag -s v<версия> -m "OpenNCALayer <версия>"
+   git tag -v v<версия>
    git push origin v<версия>
    ```
+
+   Тег аннотированный и подписан ключом мейнтейнера (`user.signingkey`, тем же, что подписывает коммиты). `git tag -v` должен сообщить о верной подписи; если подписи нет или она не сходится, тег удаляется (`git tag -d v<версия>`) и ставится заново, пока он не отправлен.
 
    Первым делом job `version` сверяет тег с версией в `Cargo.toml` и останавливает сборку при расхождении. Версия с суффиксом (`0.1.0-alpha.1`) выходит как pre-release и идёт только в канал `beta`, версия без суффикса — как обычный релиз и в оба канала, `stable` и `beta`.
 3. `release.yml` собирает по флейворам (`win-x64`, `win-x86`, `win7-x64`, `win7-x86`, `linux-x64`, `osx`) архивы, установщики и пакеты Velopack с дельтами (`cargo xtask package windows|macos|linux`, Linux — в контейнере с glibc 2.28 через `cargo xtask package linux-build`), расширение, SBOM и `SHA256SUMS`, выпускает аттестацию происхождения на каждый файл и создаёт релиз. Установщики: `openncalayer-<версия>-<флейвор>-setup.exe` (четыре флейвора Windows), `openncalayer-<версия>-osx.pkg` и `openncalayer-<версия>-osx.zip`, `openncalayer-<версия>-linux-x64.AppImage`. Флейворы `win7-*` собираются `cargo xtask win7`, а содержимое их пакетов, вместе с `Squirrel.exe` и заглушкой Velopack, и их `Setup.exe` проходят гейт импортов Windows 7. После успешного релиза без суффикса `aur.yml` готовит пакет AUR.
