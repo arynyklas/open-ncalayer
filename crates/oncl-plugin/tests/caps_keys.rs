@@ -17,7 +17,7 @@ use oncl_pdk::abi::{
 use oncl_pki::cert;
 use oncl_pki::pkcs12::{WriteEntry, WriteOptions, load, write};
 use oncl_pki::pkix::CaSet;
-use oncl_plugin::{Engine, HostServices, Instance, MAX_KEY_HANDLES, Manifest};
+use oncl_plugin::{Engine, HostServices, Instance, MAX_KEY_HANDLES, MAX_SECRETS, Manifest};
 use oncl_testkit::{read, synthetic, synthetic_cert};
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
@@ -768,6 +768,42 @@ fn unknown_secret_is_invalid() {
         run::<OpenOutcome>(&mut plugin).unwrap_err().code,
         ErrorCode::Invalid
     );
+}
+
+#[test]
+fn password_asks_past_the_limit_evict_the_oldest() {
+    let asks = MAX_SECRETS + 1;
+    let answers = || vec![Step::Password(PASSWORD.to_owned()); asks];
+    // Every ask of one session gets a new id, also past the limit.
+    let (_, services) = scripted(answers());
+    let mut plugin = guest(
+        &services,
+        "dialogs = true",
+        &[(Import::DialogPassword, password_args())],
+    );
+    for id in 1..=asks as u32 {
+        assert_eq!(
+            run::<Option<SecretRef>>(&mut plugin).unwrap(),
+            Some(SecretRef { id })
+        );
+    }
+    // The oldest password is gone, the newer ones are kept.
+    let open_with = |id: u32| {
+        let (_, services) = scripted(answers());
+        let mut calls = vec![(Import::DialogPassword, password_args()); asks];
+        calls.push((
+            Import::KeysOpen,
+            open_args(
+                "PKCS12",
+                bytes_of("user-gost2015-sign"),
+                Password::Secret(id),
+            ),
+        ));
+        let mut plugin = guest(&services, "keys = true\ndialogs = true", &calls);
+        run::<OpenOutcome>(&mut plugin)
+    };
+    assert_eq!(open_with(1).unwrap_err().code, ErrorCode::Invalid);
+    assert_eq!(opened(open_with(2).unwrap()).len(), 1);
 }
 
 // keys_chain, ca_list, ca_issuer

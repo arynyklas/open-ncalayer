@@ -248,7 +248,7 @@ pub enum Import {
     /// `keys_open`: [`OpenArgs`] → [`OpenOutcome`].
     KeysOpen,
     /// `dialog_password`: [`PasswordArgs`] → `Option<`[`SecretRef`]`>`; `None` if the user
-    /// cancels.
+    /// cancels. An instance keeps the 8 newest passwords; an older id is `invalid`.
     DialogPassword,
     /// `keys_sign_cms_ex`: [`SignCmsExArgs`] → [`CmsOutcome`].
     KeysSignCmsEx,

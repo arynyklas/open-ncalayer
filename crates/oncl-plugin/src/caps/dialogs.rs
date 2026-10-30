@@ -13,11 +13,12 @@ use oncl_pdk::abi::{
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
-/// The most passwords of `dialog_password` an instance keeps.
+/// The most passwords of `dialog_password` an instance keeps; a further one replaces the
+/// oldest.
 pub const MAX_SECRETS: usize = 8;
 
 /// The passwords of `dialog_password` an instance keeps, by id. Ids count up and are never
-/// reused.
+/// reused, so the id of a password that was let go stays invalid.
 #[derive(Default)]
 pub(crate) struct Secrets {
     secrets: BTreeMap<u32, Zeroizing<String>>,
@@ -25,19 +26,20 @@ pub(crate) struct Secrets {
 }
 
 impl Secrets {
-    /// Whether another password fits.
+    /// Whether another id is left.
     fn has_room(&self) -> HostResult<()> {
-        if self.secrets.len() >= MAX_SECRETS || self.last == u32::MAX {
-            return Err(limit(format!(
-                "at most {MAX_SECRETS} passwords in an instance"
-            )));
+        if self.last == u32::MAX {
+            return Err(limit("no password ids left in this instance".to_owned()));
         }
         Ok(())
     }
 
-    /// Keeps `secret` under a new id.
+    /// Keeps `secret` under a new id; at [`MAX_SECRETS`] the oldest password is wiped.
     fn insert(&mut self, secret: Zeroizing<String>) -> HostResult<u32> {
         self.has_room()?;
+        while self.secrets.len() >= MAX_SECRETS {
+            self.secrets.pop_first();
+        }
         self.last += 1;
         self.secrets.insert(self.last, secret);
         Ok(self.last)
