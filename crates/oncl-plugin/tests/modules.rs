@@ -411,7 +411,7 @@ fn busy_instances_are_never_evicted() {
     *http.open.lock().unwrap() = true;
     http.opened.notify_all();
     for running in calls {
-        let reply: Value = serde_json::from_str(&running.join().unwrap()).unwrap();
+        let reply: Value = serde_json::from_str(running.join().unwrap().text().unwrap()).unwrap();
         assert_eq!(reply["status"], true, "{reply}");
     }
     // Idle now: the one used longest ago makes room.
