@@ -31,4 +31,4 @@ pub use server::{
     build_registry, builtin_modules, listen_port, listen_port_from, serve,
 };
 pub use session::{hold_requests, release_requests, requests_idle};
-pub use settings::{JsonSettings, LiveProxyTransport, load_settings};
+pub use settings::{JsonSettings, LiveProxyTransport, daemon_transport, load_settings};

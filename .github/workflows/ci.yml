@@ -362,6 +362,13 @@ jobs:
           status=0
           "$BIN/nmhost.exe" < /dev/null || status=$?
           test "$status" -eq 1
+      - name: Daemon without the test features
+        shell: bash
+        run: |
+          # The release build has no `e2e` subcommand: clap refuses it (exit code 2).
+          status=0
+          "$BIN/openncalayer.exe" e2e install-plugin x || status=$?
+          test "$status" -eq 2
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.427

@@ -136,6 +136,9 @@ velopack = { version = "1.3.39-g8d2844f", default-features = false, features = [
 # The About window's repository link in the default browser; Slint's winit backend uses it
 # already.
 webbrowser = "1.2.5"
+# Conformance builds only (`oncl-pki` feature `extra-roots`): the webpki roots as
+# certificates, so that an extra CA can join them.
+webpki-root-certs = "1.0.11"
 windows-sys = "0.61.2"
 # The plugin runtime (`oncl-plugin`): a WebAssembly interpreter, pure Rust, with fuel metering
 # and memory limits, no JIT (no executable memory, so it runs where a JIT may not, Windows 7

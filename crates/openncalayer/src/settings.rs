@@ -62,9 +62,55 @@ pub fn load_settings(path: &Path) -> Settings {
     })
 }
 
-/// The daemon's HTTP transport (time stamps, OCSP, CRL): [`UreqTransport`] through the
-/// proxy of the settings, which [`LiveProxyTransport::set_proxy`] changes for the requests
-/// that start afterwards.
+/// With feature `e2e-prompter` (test builds, never releases): a PEM file of CA certificates
+/// the daemon's and the plugins' HTTPS trusts on top of the webpki roots.
+#[cfg(feature = "e2e-prompter")]
+pub const E2E_EXTRA_CA_VAR: &str = "ONCL_E2E_EXTRA_CA";
+
+/// The CA certificates (DER) of the file in [`E2E_EXTRA_CA_VAR`], read once; none if the
+/// variable is unset, or the file unreadable (logged).
+#[cfg(feature = "e2e-prompter")]
+fn e2e_extra_ca() -> &'static [Vec<u8>] {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+    use std::sync::LazyLock;
+
+    static EXTRA: LazyLock<Vec<Vec<u8>>> = LazyLock::new(|| {
+        let Some(path) = std::env::var_os(E2E_EXTRA_CA_VAR) else {
+            return Vec::new();
+        };
+        let certs = CertificateDer::pem_file_iter(&path)
+            .and_then(|certs| certs.collect::<Result<Vec<_>, _>>());
+        match certs {
+            Ok(certs) if !certs.is_empty() => certs.into_iter().map(|c| c.to_vec()).collect(),
+            Ok(_) => {
+                tracing::error!(path = %Path::new(&path).display(), "{E2E_EXTRA_CA_VAR}: no certificate");
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::error!(path = %Path::new(&path).display(), error = %e, "{E2E_EXTRA_CA_VAR}: unreadable");
+                Vec::new()
+            }
+        }
+    });
+    &EXTRA
+}
+
+/// The daemon's [`UreqTransport`] through `proxy`; with feature `e2e-prompter`, trusting the
+/// CA of [`E2E_EXTRA_CA_VAR`] too.
+pub fn daemon_transport(proxy: ProxySetting) -> UreqTransport {
+    let transport = UreqTransport::with_proxy(proxy);
+    #[cfg(feature = "e2e-prompter")]
+    let transport = match e2e_extra_ca() {
+        [] => transport,
+        extra => transport.with_extra_roots(extra),
+    };
+    transport
+}
+
+/// The daemon's HTTP transport (time stamps, OCSP, CRL, plugins): [`daemon_transport`]
+/// through the proxy of the settings, which [`LiveProxyTransport::set_proxy`] changes for
+/// the requests that start afterwards.
 #[derive(Debug)]
 pub struct LiveProxyTransport {
     current: RwLock<UreqTransport>,
@@ -74,14 +120,13 @@ impl LiveProxyTransport {
     /// A transport through `proxy`.
     pub fn new(proxy: ProxySetting) -> Self {
         LiveProxyTransport {
-            current: RwLock::new(UreqTransport::with_proxy(proxy)),
+            current: RwLock::new(daemon_transport(proxy)),
         }
     }
 
     /// Goes through `proxy` from now on.
     pub fn set_proxy(&self, proxy: ProxySetting) {
-        *self.current.write().unwrap_or_else(PoisonError::into_inner) =
-            UreqTransport::with_proxy(proxy);
+        *self.current.write().unwrap_or_else(PoisonError::into_inner) = daemon_transport(proxy);
     }
 
     /// The transport of a request starting now.
