@@ -99,19 +99,20 @@ pub fn synthetic_issuers() -> Vec<Certificate> {
     vec![cert::parse(&synthetic_cert(ROOT)).expect("synthetic root parses")]
 }
 
-/// Signs `fixtures/upstream/manifest.json` into `fixtures/upstream/manifest.der` under `root`.
+/// Signs `fixtures/upstream/manifest.json` into `fixtures/upstream/manifest.der` under `root`
+/// (or into `out`).
 ///
 /// # Errors
 ///
 /// The JSON cannot be read or the file written.
-pub fn make_fixtures(root: &Path) -> anyhow::Result<()> {
+pub fn make_fixtures(root: &Path, out: Option<&Path>) -> anyhow::Result<()> {
     let dir = root.join("fixtures").join("upstream");
     let json = std::fs::read(dir.join("manifest.json"))
         .with_context(|| format!("read {}", dir.join("manifest.json").display()))?;
     super::manifest::parse_json(&json).map_err(|e| anyhow::anyhow!("manifest.json: {e}"))?;
     let der = sign_manifest(&json, &synthetic_signer("NCALayer"));
-    std::fs::write(dir.join("manifest.der"), der)
-        .with_context(|| format!("write {}", dir.join("manifest.der").display()))?;
-    println!("fixtures/upstream/manifest.der");
+    let out = out.map_or_else(|| dir.join("manifest.der"), Path::to_owned);
+    std::fs::write(&out, der).with_context(|| format!("write {}", out.display()))?;
+    println!("{}", out.display());
     Ok(())
 }

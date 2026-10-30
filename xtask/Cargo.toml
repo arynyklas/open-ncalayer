@@ -30,6 +30,8 @@ anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
 der.workspace = true
+# `upstream`: the gzip stream inside the Windows lite dropper.
+flate2.workspace = true
 # `sign`: the update index key pair and signatures.
 minisign.workspace = true
 object.workspace = true

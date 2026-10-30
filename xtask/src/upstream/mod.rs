@@ -9,11 +9,15 @@ pub mod artifact;
 pub mod branch_layout;
 pub mod cli;
 pub mod http;
+pub mod inventory;
 pub mod manifest;
+pub mod meta;
 pub mod poll;
 pub mod sources;
 pub mod state;
 pub mod testkit;
+pub mod tools;
+pub mod unpack;
 
 /// Largest manifest, in bytes.
 pub const MANIFEST_MAX: u64 = 1 << 20;

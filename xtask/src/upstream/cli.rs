@@ -15,7 +15,11 @@ use super::state::State;
 pub enum UpstreamCommand {
     /// Sign `fixtures/upstream/manifest.json` into `fixtures/upstream/manifest.der` with the
     /// synthetic `CN=NCALayer` signer (run by `fixtures/upstream/make.sh`).
-    MakeFixtures,
+    MakeFixtures {
+        /// Write the signed manifest here instead (the copy inside the launcher JAR).
+        #[arg(long)]
+        embedded: Option<PathBuf>,
+    },
     /// Poll the sources once against `<state>/state.json` and print the changes (source ids
     /// and reasons only).
     Poll {
@@ -25,6 +29,13 @@ pub enum UpstreamCommand {
         /// Also write the changes as JSON here.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Fetch and check the pinned external unpackers into `--out`; prints `ONCL_INNOUNP=…`
+    /// (Windows) and `ONCL_7Z=…` lines for `$GITHUB_ENV`.
+    Tools {
+        /// Where innounp goes.
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -36,7 +47,9 @@ pub enum UpstreamCommand {
 pub fn run(command: UpstreamCommand) -> anyhow::Result<()> {
     let root = oncl_testkit::workspace_root();
     match command {
-        UpstreamCommand::MakeFixtures => super::testkit::make_fixtures(&root),
+        UpstreamCommand::MakeFixtures { embedded } => {
+            super::testkit::make_fixtures(&root, embedded.as_deref())
+        }
         UpstreamCommand::Poll { state, out } => {
             let prev = State::load(&state)?;
             let result = poll(
@@ -58,5 +71,6 @@ pub fn run(command: UpstreamCommand) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        UpstreamCommand::Tools { out } => super::tools::tools(&out),
     }
 }
