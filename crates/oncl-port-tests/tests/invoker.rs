@@ -1797,8 +1797,43 @@ fn thundercrypt_lta_upgrade_structure() {
         .find(|(o, _)| *o == oid("0.4.0.19122.1.5"))
         .expect("an ats-hash-index-v3");
     let index = der_of(&(index[0].0, index[0].1.to_vec()));
-    // hashIndAlgorithm: GOST 34.11-2015 (512).
-    assert_eq!(tlvs(inner(&index))[0].1, &oid_tlv("1.2.398.3.10.1.3.3")[..]);
+    // hashIndAlgorithm: GOST 34.11-2015 (512), with a NULL parameter.
+    let index_parts = tlvs(inner(&index));
+    assert_eq!(
+        index_parts[0].1,
+        &[oid_tlv("1.2.398.3.10.1.3.3"), vec![0x05, 0x00]].concat()[..]
+    );
+    // The index rebuilt by EN 319 122-1 §5.5.2: one hash per certificate, per CRL entry,
+    // and per value of each unsigned attribute (attrType followed by that value), over
+    // the CMS as it was before the archive time-stamp was added.
+    let hash_all = |field: Option<&(u8, &[u8])>| -> Vec<u8> {
+        let mut out = Vec::new();
+        for element in field.map(|f| tlvs(f.1)).unwrap_or_default() {
+            out.extend(der_of(&(
+                0x04,
+                oncl_gost::streebog512(&der_of(&(element.0, element.1.to_vec()))).to_vec(),
+            )));
+        }
+        der_of(&(0x30, out))
+    };
+    let mut values_hashes = Vec::new();
+    for (attr_oid, values) in unsigned.iter().filter(|(o, _)| *o != oid("0.4.0.1733.2.4")) {
+        let attr_type = der_of(&(0x06, attr_oid.clone()));
+        for value in values {
+            let mut input = attr_type.clone();
+            input.extend(der_of(&(value.0, value.1.to_vec())));
+            values_hashes.extend(der_of(&(0x04, oncl_gost::streebog512(&input).to_vec())));
+        }
+    }
+    assert_eq!(
+        index_parts[1].1,
+        inner(&hash_all(parts.iter().find(|(t, _)| *t == 0xa0)))
+    );
+    assert_eq!(
+        index_parts[2].1,
+        inner(&hash_all(parts.iter().find(|(t, _)| *t == 0xa1)))
+    );
+    assert_eq!(index_parts[3].1, &values_hashes[..]);
 
     // The imprint: eContentType, the content's hash, the signer's fields up to its
     // signature, the index.

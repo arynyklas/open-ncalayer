@@ -222,16 +222,24 @@ pub fn hash_index(cms: &[u8], hash: Hasher<'_>) -> Result<Vec<u8>, String> {
         Ok(tlv(0x30, &out.concat()))
     };
     let signer = first_signer(&items)?;
+    // One hash per value of each unsigned attribute: its attrType followed by that value
+    // (EN 319 122-1 §5.5.2).
     let mut unsigned = Vec::new();
     if let Some(attrs) = signer.iter().find(|t| t.tag == 0xa1) {
         for attr in tlvs(attrs.content)? {
-            unsigned.push(tlv(0x04, &hash(attr.content)?));
+            let parts = tlvs(attr.content)?;
+            let attr_type = parts.first().ok_or("malformed attribute")?;
+            let values = parts.get(1).ok_or("malformed attribute")?;
+            for value in tlvs(values.content)? {
+                let input = [attr_type.whole, value.whole].concat();
+                unsigned.push(tlv(0x04, &hash(&input)?));
+            }
         }
     }
     Ok(tlv(
         0x30,
         &[
-            tlv(0x30, &oid(STREEBOG_512)),
+            tlv(0x30, &[oid(STREEBOG_512), vec![0x05, 0x00]].concat()),
             hashes(0xa0)?,
             hashes(0xa1)?,
             tlv(0x30, &unsigned.concat()),
