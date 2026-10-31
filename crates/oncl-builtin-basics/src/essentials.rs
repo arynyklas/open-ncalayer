@@ -24,7 +24,6 @@
 //! - key files are only created in an existing folder given by an absolute path;
 //! - the page's `defaultPassword` and the chosen folder are never logged.
 
-use crate::Core;
 use crate::args::{
     STORAGES, get_array, get_int, get_string, java_string, json_exception, locale, null_pointer,
     pem_or_base64, storage_list,
@@ -33,12 +32,13 @@ use crate::failures::{
     UNKNOWN_ALGORITHM, csr_failure, csr_generating_failure, csr_provider_failure, import_failure,
     import_unsupported_storage, invalid_importing_certificate,
 };
+use crate::{CallResult, Core};
 use der::asn1::ObjectIdentifier;
 use oncl_pdk::abi::{
     Bytes, CertInfo, CsrDialogArgs, Folder, ImportDialogArgs, InstallCertArgs, NewKeyArgs,
     Password, RequestForm,
 };
-use oncl_pdk::invoker::{CallResult, Failure};
+use oncl_pdk::invoker::Failure;
 use oncl_pdk::orgjson::opt_string;
 use oncl_pdk::serde_json::{Map, Value, json};
 use std::collections::HashSet;

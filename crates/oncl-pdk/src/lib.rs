@@ -11,8 +11,9 @@
 //! reflective dispatcher of `commonUtils` clones ([`legacy`]) and the original's
 //! `CommonInvoker` ([`invoker::java`]).
 //!
-//! A plugin answering in the `CommonInvoker` dialect of the basics module uses the same
-//! [`invoker::invoke`] the built-in modules use:
+//! A plugin answering in the `CommonInvoker` dialect of the basics module uses
+//! [`invoker::invoke`] (the request read by `serde_json`), or [`invoker::java`] to answer
+//! to the byte as the basics module does. With the first:
 //!
 //! ```ignore
 //! use oncl_pdk::invoker::{self, CallResult, NlClass};
@@ -109,8 +110,9 @@ impl Request {
         }
     }
 
-    /// The call context the built-in modules get, for [`invoker::invoke`]: the origin. The
-    /// session is not the plugin's to see (`0`).
+    /// The call context the built-in modules get, for [`invoker::invoke`] and
+    /// [`invoker::java::invoke_with`]: the origin. The session is not the plugin's to see
+    /// (`0`).
     pub fn add_info(&self) -> AddInfo {
         AddInfo {
             origin: self.origin.clone(),
