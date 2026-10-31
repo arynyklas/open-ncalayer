@@ -294,11 +294,14 @@ unsafe fn process_with(ptr: i32, len: i32, handler: fn(&Request) -> String) -> i
             let _ = host::log(abi::Level::Error, &format!("panic: {info}"));
         }));
     });
-    // SAFETY: the caller's promise.
-    let input = unsafe { take(ptr as u32, len as u32) };
-    let input: Input = match abi::decode(&input) {
-        Ok(input) => input,
-        Err(e) => panic!("the core sent a malformed input: {e}"),
+    // The CBOR buffer goes before the handler runs: only the decoded request stays.
+    let input: Input = {
+        // SAFETY: the caller's promise.
+        let input = unsafe { take(ptr as u32, len as u32) };
+        match abi::decode(&input) {
+            Ok(input) => input,
+            Err(e) => panic!("the core sent a malformed input: {e}"),
+        }
     };
     let response = handler(&Request::from_input(input));
     let output = abi::encode(&Output { response }).into_boxed_slice();

@@ -761,6 +761,7 @@ fn builtin_tsa_uses_services_http() {
             },
             certificates: abi::CmsCerts::Signer,
             timestamp: Some(TsaChoice::Basics),
+            output: abi::CmsOutput::Der,
         };
         let mut plugin = guest_staged(
             &services,

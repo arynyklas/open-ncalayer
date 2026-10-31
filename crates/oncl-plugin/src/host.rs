@@ -397,8 +397,13 @@ fn platform() -> Platform {
     };
     Platform {
         os,
-        line_separator: if cfg!(windows) { "\r\n" } else { "\n" }.to_owned(),
+        line_separator: line_separator().to_owned(),
     }
+}
+
+/// The system's line separator: `"\r\n"` on Windows, `"\n"` elsewhere.
+pub(crate) fn line_separator() -> &'static str {
+    if cfg!(windows) { "\r\n" } else { "\n" }
 }
 
 /// The offset from UTC of the system's time zone at `unix_ms`, in seconds; `0` if the

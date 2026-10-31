@@ -937,8 +937,11 @@ pub(crate) fn keys_sign_cms_ex(
         CmsError::Key(_) | CmsError::UnknownAlgorithm(_) => cms_failed(e),
         e => invalid(e.to_string()).with_cause(cause::cms(&e)),
     })?;
+    let output = args.output;
+    drop(spec);
+    drop(args);
     let Some(tsa) = tsa else {
-        return Ok(CmsOutcome::Signed(Bytes::from(der)));
+        return Ok(CmsOutcome::Signed(cms_output(der, output)));
     };
     let spec = match tsa {
         Ok(spec) => spec,
@@ -953,10 +956,38 @@ pub(crate) fn keys_sign_cms_ex(
             tsp::TokenForm::Token,
             &crypto::PkiHttp::of(state),
         ) {
-            Ok(stamped) => CmsOutcome::Signed(Bytes::from(stamped)),
+            Ok(stamped) => CmsOutcome::Signed(cms_output(stamped, output)),
             Err(e) => CmsOutcome::TspFailed(crypto::tsp_failure(&spec, &e)),
         },
     )
+}
+
+/// `der` in the form `output` asks for.
+fn cms_output(der: Vec<u8>, output: abi::CmsOutput) -> Bytes {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    match output {
+        abi::CmsOutput::Der => Bytes::from(der),
+        abi::CmsOutput::Base64 => Bytes::from(STANDARD.encode(&der).into_bytes()),
+        abi::CmsOutput::Pem => {
+            const DASHES: &str = "-----";
+            let nl = crate::host::line_separator();
+            let body = STANDARD.encode(&der);
+            drop(der);
+            let mut pem = String::with_capacity(body.len() + body.len() / 64 * nl.len() + 64);
+            for part in [DASHES, "BEGIN CMS", DASHES, nl] {
+                pem.push_str(part);
+            }
+            for line in body.as_bytes().chunks(64) {
+                pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+                pem.push_str(nl);
+            }
+            for part in [DASHES, "END CMS", DASHES, nl] {
+                pem.push_str(part);
+            }
+            Bytes::from(pem.into_bytes())
+        }
+    }
 }
 
 /// `keys_sign_raw`: the key's algorithm, RSA with SHA-256.

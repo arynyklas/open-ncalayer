@@ -1524,6 +1524,25 @@ pub struct SignCmsExArgs {
     /// A time-stamp on the new signer, replacing none.
     #[serde(default)]
     pub timestamp: Option<TsaChoice>,
+    /// The form of [`CmsOutcome::Signed`]: the core encodes it, so the module never holds
+    /// the DER beside its text.
+    #[serde(default)]
+    pub output: CmsOutput,
+}
+
+/// The form of the CMS `keys_sign_cms_ex` returns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CmsOutput {
+    /// DER.
+    #[default]
+    Der,
+    /// Base64 (standard alphabet, padded) of the DER, as ASCII bytes.
+    Base64,
+    /// `-----BEGIN CMS-----`, the base64 in lines of 64 characters, `-----END CMS-----`,
+    /// each line ended by the core's line separator ([`Platform::line_separator`]), as
+    /// ASCII bytes.
+    Pem,
 }
 
 /// What `keys_sign_cms_ex` came to.

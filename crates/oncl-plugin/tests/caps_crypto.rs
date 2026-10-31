@@ -157,6 +157,7 @@ fn sign_args(content: &[u8], attrs: SignedAttrs, timestamp: Option<TsaChoice>) -
         attrs,
         certificates: abi::CmsCerts::Signer,
         timestamp,
+        output: abi::CmsOutput::Der,
     }
 }
 
@@ -245,6 +246,47 @@ fn sign_cms_ex_esedo_like_attrs_verify() {
         .unwrap_err();
         assert_eq!(e.code, ErrorCode::Invalid, "{e}");
     }
+}
+
+#[test]
+fn sign_cms_ex_writes_the_output_form_asked() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    let (_, http) = pki(tsa());
+    let services = services(http, &[]);
+    let mut attrs = cades();
+    attrs.signing_time = Some(SigningTime {
+        at: TimeSource::UnixMs(1_772_359_200_000),
+        form: TimeForm::Auto,
+    });
+    let sign = |output| {
+        let mut args = sign_args(&[7u8; 300], attrs.clone(), None);
+        args.output = output;
+        signed(
+            run(
+                &services,
+                &[
+                    open("user-rsa-sign"),
+                    (Import::KeysSignCmsEx, abi::encode(&args)),
+                ],
+            )
+            .unwrap(),
+        )
+    };
+    let der = sign(abi::CmsOutput::Der);
+    let body = STANDARD.encode(&der);
+    assert_eq!(sign(abi::CmsOutput::Base64), body.as_bytes());
+    let nl = if cfg!(windows) { "\r\n" } else { "\n" };
+    let lines: Vec<&str> = body
+        .as_bytes()
+        .chunks(64)
+        .map(|l| std::str::from_utf8(l).unwrap())
+        .collect();
+    let pem = format!(
+        "-----BEGIN CMS-----{nl}{}{nl}-----END CMS-----{nl}",
+        lines.join(nl)
+    );
+    assert_eq!(String::from_utf8(sign(abi::CmsOutput::Pem)).unwrap(), pem);
 }
 
 #[test]

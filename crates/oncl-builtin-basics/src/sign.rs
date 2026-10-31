@@ -11,9 +11,9 @@ use crate::failures::{
     tsp_failure, xml_failure,
 };
 use oncl_pdk::abi::{
-    Action, Bytes, CmsCerts, CmsContent, CmsOutcome, CoSign, Filter, FlowArgs, FlowChecks,
-    FlowFile, FlowNone, FlowOrder, FlowReaders, FlowStart, SignCmsExArgs, SignedAttrs, SigningTime,
-    TimeForm, TimeSource, TsaChoice,
+    Action, Bytes, CmsCerts, CmsContent, CmsOutcome, CmsOutput, CoSign, Filter, FlowArgs,
+    FlowChecks, FlowFile, FlowNone, FlowOrder, FlowReaders, FlowStart, SignCmsExArgs, SignedAttrs,
+    SigningTime, TimeForm, TimeSource, TsaChoice,
 };
 use oncl_pdk::invoker::{CallResult, Failure};
 use oncl_pdk::orgjson::opt_string;
@@ -61,13 +61,12 @@ pub(crate) fn sign<C: Core>(core: &C, args: &Map<String, Value>) -> CallResult {
         } => {
             // One signingTime for every document, as the original signs them.
             let at = core.now();
-            let nl = core.line_separator();
             let pems = request
                 .data
-                .iter()
+                .into_iter()
                 .map(|data| {
-                    let args = cms_args(data, encapsulate, digested, timestamp, at);
-                    sign_cms(core, &key, args, &nl).map(Value::String)
+                    let args = cms_args(data.into_owned(), encapsulate, digested, timestamp, at);
+                    sign_cms(core, &key, args).map(Value::String)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Value::Array(pems)
@@ -223,15 +222,15 @@ fn parse_chain(
 }
 
 /// The CAdES of `createCAdES` over `data` signed at `at` (Unix ms), time-stamped on its new
-/// signer by the basics TSA if asked.
+/// signer by the basics TSA if asked; the core writes it as PEM.
 fn cms_args(
-    data: &[u8],
+    data: Vec<u8>,
     encapsulate: bool,
     digested: bool,
     timestamp: bool,
     at: i64,
 ) -> SignCmsExArgs {
-    let data = Bytes::from(data.to_vec());
+    let data = Bytes::from(data);
     SignCmsExArgs {
         handle: 0,
         content: if digested {
@@ -259,18 +258,16 @@ fn cms_args(
         },
         certificates: CmsCerts::Signer,
         timestamp: timestamp.then_some(TsaChoice::Basics),
+        output: CmsOutput::Pem,
     }
 }
 
 /// A CAdES PEM.
-fn sign_cms<C: Core>(
-    core: &C,
-    key: &C::Key,
-    args: SignCmsExArgs,
-    nl: &str,
-) -> Result<String, Failure> {
+fn sign_cms<C: Core>(core: &C, key: &C::Key, args: SignCmsExArgs) -> Result<String, Failure> {
     match core.sign_cms(key, args) {
-        Ok(CmsOutcome::Signed(der)) => Ok(pem("CMS", &der, nl)),
+        Ok(CmsOutcome::Signed(pem)) => {
+            Ok(String::from_utf8(pem.into_vec()).expect("the core writes PEM in ASCII"))
+        }
         Ok(CmsOutcome::TspFailed(failure)) => Err(tsp_failure(&failure.detail)),
         Err(e) => Err(cms_failure(&e)),
     }
