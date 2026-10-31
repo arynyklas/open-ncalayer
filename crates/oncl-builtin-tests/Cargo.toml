@@ -9,7 +9,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-oncl-applet.workspace = true
 # `testing`: `ScriptedPrompter` and `MemoryRecentPath`, which the tests answer dialogs with.
 oncl-basics = { workspace = true, features = ["testing"] }
 # The accessory module's names; its guest is embedded by the build script.

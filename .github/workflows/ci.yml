@@ -94,14 +94,6 @@ jobs:
           cargo xtask fetch-fixtures
           # The built-in modules' benchmarks (`bench_*`) are measured in release, by hand.
           cargo test --workspace --all-features -- --include-ignored --skip live_ --skip zola_ --skip bench_ "${skip[@]}"
-      # The built-in modules' tests on their native code too, while a module has any (the
-      # tests of the modules without native code left out).
-      - name: Built-in modules, native backend
-        env:
-          ONCL_BUILTIN_BACKEND: native
-        run: >-
-          cargo test --locked -p oncl-builtin-tests --all-features --lib
-          --test applet --test applet_tokens --test applet_process
       # The daemon as releases build it (no `e2e-prompter`, no `token-emulator`): the token
       # emulator's variable changes nothing.
       - name: Daemon without the test features

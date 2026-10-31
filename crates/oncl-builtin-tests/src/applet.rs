@@ -12,7 +12,7 @@ use std::sync::Arc;
 pub use oncl_builtin_applet::MODULE_NAME;
 
 const AVAILABLE: Available = Available {
-    native: true,
+    native: false,
     wasm: true,
 };
 
@@ -61,13 +61,6 @@ impl HttpTransport for Offline {
 
 fn build(s: Settings) -> Box<dyn Module> {
     match resolve(MODULE_NAME, s.backend, AVAILABLE) {
-        Backend::Native => {
-            let mut m = oncl_applet::Applet::new(s.prompter);
-            if let Some(t) = s.tokens {
-                m = m.with_tokens(t);
-            }
-            Box::new(m)
-        }
         Backend::Wasm => {
             let services = HostServices::new(
                 s.prompter,
@@ -77,6 +70,7 @@ fn build(s: Settings) -> Box<dyn Module> {
             );
             crate::guest(MODULE_NAME, services, None)
         }
+        Backend::Native => unreachable!("resolved to an available backend"),
     }
 }
 
