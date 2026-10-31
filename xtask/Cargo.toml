@@ -41,6 +41,8 @@ minisign.workspace = true
 object.workspace = true
 pkcs8.workspace = true
 rand_chacha.workspace = true
+# `privacy`: the denylist entries and the scans of tracked text.
+regex.workspace = true
 rsa.workspace = true
 # `sign`: passwords without echo.
 rpassword.workspace = true

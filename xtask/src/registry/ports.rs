@@ -90,6 +90,16 @@ pub enum Conformance {
     Confirmed,
 }
 
+impl Conformance {
+    /// The value as `registry.toml` writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Conformance::Computed => "computed",
+            Conformance::Confirmed => "confirmed",
+        }
+    }
+}
+
 /// A port: `plugins/<short>`.
 #[derive(Debug, Clone)]
 pub struct Port {

@@ -126,6 +126,7 @@ fn options<'a>(keys: &'a index::TrustedKeys, base: Option<&'a str>) -> CheckOpti
         keys,
         base,
         vm_smoke: false,
+        conformance: false,
         now: now(),
     }
 }
@@ -453,12 +454,26 @@ fn seq_must_grow_from_the_base() {
     assert!(error_text(result).contains("no-such-branch"));
 }
 
-/// Answers `HEAD` with 200 except for URLs containing `missing`; `vm-smoke` passes for
-/// `smoked` tags. Records the tags asked about.
+/// Answers `HEAD` with 200 except for URLs containing `missing`; a status passes for the
+/// `(tag, context)` pairs of `passed`. Records the pairs asked about.
 struct FakeRemote {
     missing: Option<&'static str>,
-    smoked: &'static [&'static str],
-    asked: RefCell<Vec<String>>,
+    passed: &'static [(&'static str, &'static str)],
+    asked: RefCell<Vec<(String, String)>>,
+}
+
+impl FakeRemote {
+    fn new(missing: Option<&'static str>, passed: &'static [(&'static str, &'static str)]) -> Self {
+        FakeRemote {
+            missing,
+            passed,
+            asked: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn asked(&self) -> Vec<(String, String)> {
+        self.asked.borrow().clone()
+    }
 }
 
 impl Remote for FakeRemote {
@@ -470,10 +485,16 @@ impl Remote for FakeRemote {
         })
     }
 
-    fn vm_smoke_passed(&self, tag: &str) -> anyhow::Result<bool> {
-        self.asked.borrow_mut().push(tag.to_owned());
-        Ok(self.smoked.contains(&tag))
+    fn status_passed(&self, tag: &str, context: &str) -> anyhow::Result<bool> {
+        self.asked
+            .borrow_mut()
+            .push((tag.to_owned(), context.to_owned()));
+        Ok(self.passed.contains(&(tag, context)))
     }
+}
+
+fn pair(tag: &str, context: &str) -> (String, String) {
+    (tag.to_owned(), context.to_owned())
 }
 
 #[test]
@@ -484,17 +505,12 @@ fn network_checks_go_through_the_remote() {
     let path = add(&dir, NEXT_TAG, assets.path()).written.path;
     key.sign(&path);
     let keys = key.trusted();
-    let remote = |missing, smoked| FakeRemote {
-        missing,
-        smoked,
-        asked: RefCell::new(Vec::new()),
-    };
 
-    let ok = remote(None, &[]);
+    let ok = FakeRemote::new(None, &[]);
     index::check(&dir, &options(&keys, Some("HEAD")), Some(&ok)).unwrap();
-    assert!(ok.asked.borrow().is_empty(), "vm-smoke is off by default");
+    assert!(ok.asked().is_empty(), "the status gates are off by default");
 
-    let missing = remote(Some("osx-full"), &[]);
+    let missing = FakeRemote::new(Some("osx-full"), &[]);
     let result = index::check(&dir, &options(&keys, Some("HEAD")), Some(&missing));
     assert!(error_text(result).contains("answered 404"));
 
@@ -502,16 +518,121 @@ fn network_checks_go_through_the_remote() {
         vm_smoke: true,
         ..options(&keys, Some("HEAD"))
     };
-    let unsmoked = remote(None, &[TAG]);
+    let unsmoked = FakeRemote::new(None, &[(TAG, index::VM_SMOKE)]);
     let result = index::check(&dir, &gated, Some(&unsmoked));
     assert!(error_text(result).contains("vm-smoke"));
-    let smoked = remote(None, &[NEXT_TAG]);
+    // Another context's success does not count.
+    let other = FakeRemote::new(None, &[(NEXT_TAG, index::CONFORMANCE)]);
+    let result = index::check(&dir, &gated, Some(&other));
+    assert!(error_text(result).contains("v0.2.0-beta.2 has no successful vm-smoke status"));
+    let smoked = FakeRemote::new(None, &[(NEXT_TAG, index::VM_SMOKE)]);
     index::check(&dir, &gated, Some(&smoked)).unwrap();
     // Only the version new against the base is asked about.
-    assert_eq!(*smoked.asked.borrow(), [NEXT_TAG]);
+    assert_eq!(smoked.asked(), [pair(NEXT_TAG, index::VM_SMOKE)]);
 
     let result = index::check(&dir, &gated, None);
-    assert!(error_text(result).contains("needs the network"));
+    assert!(error_text(result).contains("the vm-smoke gate needs the network"));
+}
+
+const STABLE_TAG: &str = "v0.2.0";
+
+#[test]
+fn check_conformance_required_for_new_stable() {
+    let key = TestKey::new();
+    let repo = keyed_repo(&key.public_text());
+    git(repo.repo.path(), &["tag", STABLE_TAG]);
+    let stable = release_assets(STABLE_TAG, &[Flavor::WinX64], None);
+    let written = index::add(
+        repo.path(),
+        Channel::Stable,
+        STABLE_TAG,
+        stable.path(),
+        100,
+        now(),
+    )
+    .unwrap()
+    .written;
+    key.sign(&written.path);
+    let beta = release_assets(TAG, &[Flavor::WinX64], None);
+    key.sign(&add(repo.path(), TAG, beta.path()).written.path);
+    let keys = key.trusted();
+    let gated = CheckOptions {
+        conformance: true,
+        ..options(&keys, Some("HEAD"))
+    };
+
+    let none = FakeRemote::new(None, &[]);
+    let result = index::check(repo.path(), &gated, Some(&none));
+    assert!(
+        error_text(result).contains("v0.2.0 has no successful conformance status"),
+        "{:?}",
+        none.asked()
+    );
+    // `vm-smoke` is not `conformance`.
+    let smoked = FakeRemote::new(None, &[(STABLE_TAG, index::VM_SMOKE)]);
+    let result = index::check(repo.path(), &gated, Some(&smoked));
+    assert!(error_text(result).contains("no successful conformance status"));
+
+    let conformed = FakeRemote::new(None, &[(STABLE_TAG, index::CONFORMANCE)]);
+    index::check(repo.path(), &gated, Some(&conformed)).unwrap();
+    // Asked about the new stable version only, not the beta one.
+    assert_eq!(conformed.asked(), [pair(STABLE_TAG, index::CONFORMANCE)]);
+
+    // Published (in the base), the version is not new and is not asked about again.
+    git(repo.repo.path(), &["add", "."]);
+    git(repo.repo.path(), &["commit", "--quiet", "-m", "indexes"]);
+    let none = FakeRemote::new(None, &[]);
+    index::check(repo.path(), &gated, Some(&none)).unwrap();
+    assert!(none.asked().is_empty());
+}
+
+#[test]
+fn check_conformance_not_required_for_beta() {
+    let key = TestKey::new();
+    let (_repo, dir) = repository_with_index(&key);
+    let assets = release_assets(NEXT_TAG, &[Flavor::WinX64], None);
+    key.sign(&add(&dir, NEXT_TAG, assets.path()).written.path);
+    let keys = key.trusted();
+
+    let gated = CheckOptions {
+        conformance: true,
+        ..options(&keys, Some("HEAD"))
+    };
+    let none = FakeRemote::new(None, &[]);
+    index::check(&dir, &gated, Some(&none)).unwrap();
+    assert!(none.asked().is_empty());
+
+    // With both gates, the new beta version needs `vm-smoke` only.
+    let both = CheckOptions {
+        vm_smoke: true,
+        ..gated
+    };
+    let smoked = FakeRemote::new(None, &[(NEXT_TAG, index::VM_SMOKE)]);
+    index::check(&dir, &both, Some(&smoked)).unwrap();
+    assert_eq!(smoked.asked(), [pair(NEXT_TAG, index::VM_SMOKE)]);
+}
+
+#[test]
+fn check_conformance_needs_network() {
+    let key = TestKey::new();
+    let (_repo, dir) = repository_with_index(&key);
+    let keys = key.trusted();
+    let gated = CheckOptions {
+        conformance: true,
+        ..options(&keys, Some("HEAD"))
+    };
+    let result = index::check(&dir, &gated, None);
+    assert!(error_text(result).contains("the conformance gate needs the network"));
+    // The command refuses the flag offline.
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["index", "check"])
+        .arg(&dir)
+        .args(["--offline", "--conformance"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--conformance"), "{stderr}");
 }
 
 #[test]

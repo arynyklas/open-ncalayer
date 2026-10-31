@@ -2,11 +2,12 @@ name: Index check
 
 # `cargo xtask index check` (format, signature by the current key, validity, asset URLs on
 # the project's releases answering HEAD with 200, `seq` growth against the base, the update
-# key in the tag of every new version) when a pull request or a push to `main` changes the
-# update indexes or the update keys. It runs on every pull request and push to `main` and
-# decides in the job whether those changed, so the check always reports and can be a
-# required status check: with nothing relevant changed, only the cargo step is skipped and
-# the check passes.
+# key in the tag of every new version, the `vm-smoke` commit status on the tag of every new
+# version and the `conformance` status on the tag of every new stable version) when a pull
+# request or a push to `main` changes the update indexes or the update keys. It runs on
+# every pull request and push to `main` and decides in the job whether those changed, so
+# the check always reports and can be a required status check: with nothing relevant
+# changed, only the cargo step is skipped and the check passes.
 on:
   pull_request:
   push:
@@ -14,6 +15,8 @@ on:
 
 permissions:
   contents: read
+  # The commit statuses of release tags (`vm-smoke`, `conformance`), read through the API.
+  statuses: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -69,9 +72,10 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         env:
           BASE: ${{ steps.changes.outputs.base }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           if [ -n "$BASE" ]; then
-            cargo xtask index check updates/v1 --base "$BASE"
+            cargo xtask index check updates/v1 --base "$BASE" --vm-smoke --conformance
           else
-            cargo xtask index check updates/v1 --no-base
+            cargo xtask index check updates/v1 --no-base --vm-smoke --conformance
           fi

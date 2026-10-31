@@ -96,6 +96,21 @@ enum Command {
         #[command(subcommand)]
         command: PluginCommand,
     },
+    /// Fail on what must never reach the public repository (docs/dev/release.md,
+    /// «Приватность»): transcript files and headers, paths with a drive letter outside the
+    /// listed test literals, certificates issued by an NCA test CA; with `--denylist`, lines
+    /// matching a private list. Findings are printed as `file:line`, never what matched.
+    Privacy {
+        /// `<base>..<head>`: also the file versions these commits add and their messages.
+        /// The empty tree (`4b825dc642cb6eb9a060e54bf8d69288fbee4904`) as base takes the
+        /// whole history.
+        #[arg(long)]
+        range: Option<String>,
+        /// A private list: one entry per line, a case-insensitive substring or
+        /// `re:<regex>`; empty lines and lines starting with `#` are skipped.
+        #[arg(long)]
+        denylist: Option<PathBuf>,
+    },
     /// The project site (`site/`): build it with the pinned Zola, check a built one.
     Registry {
         #[command(subcommand)]
@@ -239,8 +254,9 @@ enum IndexCommand {
         dir: Option<PathBuf>,
     },
     /// Append plugin packages of a `plugins-YYYYMMDD[.N]` release to the channel's index:
-    /// id, version, modules and hashes come from the packages. A prerelease plugin is not
-    /// added to `stable`. The result is unsigned.
+    /// id, version, modules and hashes come from the packages. A prerelease plugin, or one
+    /// whose port's `registry.toml` does not say `conformance = "confirmed"`, is not added
+    /// to `stable`. The result is unsigned.
     AddPlugin {
         /// `stable` or `beta`.
         #[arg(long, value_parser = parse_channel)]
@@ -257,6 +273,10 @@ enum IndexCommand {
         /// The directory of the indexes [default: `updates/v1/` of the workspace].
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// The ports' directory, read for `stable` only [default: `plugins/` of the
+        /// workspace].
+        #[arg(long)]
+        plugins: Option<PathBuf>,
     },
     /// Check the indexes in a directory before publishing: format, signature by
     /// `current.pub` only (a `next.pub` is for clients, not for signing), validity, asset URLs
@@ -265,7 +285,7 @@ enum IndexCommand {
     Check {
         /// The directory of the indexes, e.g. `updates/v1`.
         dir: PathBuf,
-        /// Skip the network checks (`HEAD` of the assets, `vm-smoke`).
+        /// Skip the network checks (`HEAD` of the assets, `vm-smoke`, `conformance`).
         #[arg(long)]
         offline: bool,
         /// The git revision of the base branch.
@@ -279,9 +299,13 @@ enum IndexCommand {
         #[arg(long)]
         keys: Option<PathBuf>,
         /// Require the `vm-smoke` commit status to be `success` on the tag of every new
-        /// version (off until the lab runs it).
+        /// version.
         #[arg(long, conflicts_with = "offline")]
         vm_smoke: bool,
+        /// Require the `conformance` commit status to be `success` on the tag of every new
+        /// `stable` version (`beta` is not gated).
+        #[arg(long, conflicts_with = "offline")]
+        conformance: bool,
     },
 }
 
@@ -589,6 +613,26 @@ fn main() -> anyhow::Result<()> {
             xtask::e2e::run(&oncl_testkit::workspace_root(), browser, download)
         }
         Command::FetchFixtures => xtask::fetch::fetch_fixtures(),
+        Command::Privacy { range, denylist } => {
+            let root = oncl_testkit::workspace_root();
+            let denylist = denylist
+                .map(|path| xtask::privacy::Denylist::read(&path))
+                .transpose()?;
+            let cas = xtask::privacy::TestCas::load(&root.join(xtask::privacy::TEST_CA_DIR))?;
+            let options = xtask::privacy::Options {
+                range: range.as_deref(),
+                denylist: denylist.as_ref(),
+            };
+            let findings = xtask::privacy::check(&root, &cas, &options)?;
+            for finding in &findings {
+                println!("{finding}");
+            }
+            if !findings.is_empty() {
+                bail!("{} privacy findings", findings.len());
+            }
+            println!("privacy: nothing found");
+            Ok(())
+        }
         Command::Registry { command } => registry(command),
         Command::TokenEmu { config, vpcd } => {
             xtask::token_emu::token_emu(&oncl_testkit::workspace_root(), &config, vpcd.as_deref())
@@ -738,10 +782,13 @@ fn main() -> anyhow::Result<()> {
                     packages,
                     rollout,
                     dir,
+                    plugins,
                 },
         } => {
+            let plugins = plugins.unwrap_or_else(|| oncl_testkit::workspace_root().join("plugins"));
             let written = xtask::index::add_plugins(
                 &index_dir(dir),
+                &plugins,
                 channel,
                 &tag,
                 &packages,
@@ -789,6 +836,7 @@ fn main() -> anyhow::Result<()> {
                     no_base,
                     keys,
                     vm_smoke,
+                    conformance,
                 },
         } => {
             let keys = keys.unwrap_or_else(|| {
@@ -802,6 +850,7 @@ fn main() -> anyhow::Result<()> {
                 keys: &keys,
                 base: (!no_base).then_some(base.as_str()),
                 vm_smoke,
+                conformance,
                 now: OffsetDateTime::now_utc(),
             };
             let all = xtask::index::check(&dir, &options, remote)?;
@@ -828,7 +877,7 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             if offline {
-                println!("offline: HEAD of the assets and vm-smoke not checked");
+                println!("offline: HEAD of the assets, vm-smoke and conformance not checked");
             }
             Ok(())
         }
@@ -945,12 +994,31 @@ mod tests {
                 command: IndexCommand::Check {
                     offline: true,
                     vm_smoke: false,
+                    conformance: false,
+                    ..
+                }
+            })
+        ));
+        assert!(matches!(
+            parse(&[
+                "index",
+                "check",
+                "updates/v1",
+                "--vm-smoke",
+                "--conformance"
+            ]),
+            Ok(Command::Index {
+                command: IndexCommand::Check {
+                    offline: false,
+                    vm_smoke: true,
+                    conformance: true,
                     ..
                 }
             })
         ));
         for args in [
             &["index", "check", "updates/v1", "--offline", "--vm-smoke"][..],
+            &["index", "check", "updates/v1", "--offline", "--conformance"],
             &[
                 "index",
                 "add",

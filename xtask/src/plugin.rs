@@ -284,6 +284,21 @@ pub fn pending(plugins: &Path, index_dir: &Path, channel: Channel) -> anyhow::Re
     Ok(pending)
 }
 
+/// The `[port] conformance` of the port with plugin `id` under `plugins_dir`
+/// (`computed` or `confirmed`), from the checked ports ([`crate::registry::ports::load`]).
+///
+/// # Errors
+///
+/// No port has `id`, or a port of `plugins_dir` is invalid.
+pub fn registry_conformance(plugins_dir: &Path, id: &str) -> anyhow::Result<String> {
+    let ports = crate::registry::ports::load(plugins_dir)?;
+    let port = ports
+        .iter()
+        .find(|port| port.registry.id == id)
+        .with_context(|| format!("{id}: no port in {} has this id", plugins_dir.display()))?;
+    Ok(port.registry.port.conformance.as_str().to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
