@@ -997,7 +997,11 @@ fn full_cycle() {
     assert_eq!(code(&reply), "NONE", "{reply}");
     assert_eq!(reply["secondResult"], ids[0]);
     let signed = reply["result"].as_str().unwrap();
-    assert!(signed.starts_with(&xml[..xml.len() - "</doc>".len()]));
+    // Written without the declaration and the whitespace after it.
+    assert!(
+        signed.starts_with("<doc a=\"1\"><x>т</x><ds:Signature"),
+        "{signed}"
+    );
     let signatures = xmldsig::verify(signed.as_bytes()).unwrap();
     assert_eq!(signatures[0].cert, sign_cert);
     let storage_prompt = &prompter2.storage_prompts()[0];

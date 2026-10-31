@@ -245,9 +245,6 @@ pub(crate) fn data_decode(state: &mut HostState, args: DataDecodeArgs) -> HostRe
         .map_err(|_| invalid("the data is not text"))?;
     let decoded = match args.form {
         DataDecoding::JavaBase64 => oncl_protocol::javab64::decode_java(text),
-        DataDecoding::BasicsBase64 => {
-            oncl_protocol::javab64::decode_basics(text).map_err(|e| e.to_string())
-        }
     };
     Ok(match decoded {
         Ok(bytes) => DataDecoded::Data(data.keep(bytes)?),

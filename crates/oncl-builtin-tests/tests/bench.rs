@@ -193,7 +193,7 @@ fn native_choice(
 fn signed(reply: Reply) {
     let text = reply.into_text().expect("a text reply");
     assert!(
-        text.starts_with(r#"{"status":true"#),
+        text.starts_with(r#"{"body":"#) && text.ends_with(r#""status":true}"#),
         "{}",
         &text[..text.len().min(300)]
     );
@@ -513,7 +513,7 @@ fn to_key_dialog(timed: &Timed, module: &dyn Module, request: &str) -> Duration 
     for _ in 0..=RUNS {
         *timed.start.lock().unwrap() = Instant::now();
         let reply = module.process(request, &origin()).into_text().unwrap();
-        assert_eq!(reply, r#"{"status":true,"body":{}}"#);
+        assert_eq!(reply, r#"{"body":{},"status":true}"#);
     }
     let mut shown = std::mem::take(&mut *timed.shown.lock().unwrap());
     assert_eq!(shown.len(), RUNS + 1);
@@ -598,7 +598,7 @@ impl Module for NativeChoice {
             )
             .is_none()
         );
-        Reply::Text(r#"{"status":true,"body":{}}"#.to_owned())
+        Reply::Text(r#"{"body":{},"status":true}"#.to_owned())
     }
 }
 

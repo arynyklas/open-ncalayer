@@ -21,6 +21,7 @@ use oncl_pdk::abi::{
     ImportDialogArgs, InstallCertArgs, InstalledCert, NewKey, NewKeyArgs, SignCmsExArgs,
 };
 use oncl_pdk::invoker::{self, CallResult, Failure, NlClass};
+use oncl_pdk::javaexc::Throwable;
 use oncl_pdk::serde_json::{Map, Value};
 use oncl_pdk::{AddInfo, Locale};
 
@@ -48,9 +49,9 @@ pub trait Core {
     fn choose_key(&self, flow: &FlowArgs) -> Option<Self::Key>;
     /// The certificate of `key`, DER.
     fn certificate<'k>(&self, key: &'k Self::Key) -> &'k [u8];
-    /// `text` (a string of the request, or the marker of one the core keeps) decoded as
-    /// base64 ([`oncl_pdk::javab64::decode_basics`]): the data, or the marker of the data
-    /// the core keeps; else the decoder's message.
+    /// `text` (a string of the request, or the marker of one the core keeps) decoded by
+    /// Java's `Base64.getDecoder()` ([`oncl_pdk::javab64::decode_java`]): the data, or the
+    /// marker of the data the core keeps; else the decoder's message.
     fn decode(&self, text: &str) -> Result<Vec<u8>, String>;
     /// A CMS signature with `key` as `args` say, of data or of the data a marker stands
     /// for: the CMS, or the marker of the CMS the core keeps.
@@ -127,5 +128,7 @@ impl<C: Core + Sync> NlClass for PkiEssentials<'_, C> {
 
 /// `CommonInvoker`'s answer to a defined method called without an `args` object.
 fn demands_arguments(method: &str) -> Failure {
-    Failure::General(Some(format!("{method} demands arguments")))
+    Failure::General(Some(
+        Throwable::iae(format!("{method} demands arguments")).to_string(),
+    ))
 }

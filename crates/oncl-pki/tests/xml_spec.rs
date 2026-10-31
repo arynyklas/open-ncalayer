@@ -2,6 +2,9 @@
 //! canonicalization, namespaces in XPaths, a signature `Id` with a signing-time object,
 //! layout and output form, as the plugins' clients expect them; each one verifying.
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use der::Encode;
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::xmldsig::{
@@ -46,21 +49,35 @@ fn signature(xml: &[u8]) -> &str {
     &text[start..end]
 }
 
+/// `signed` with the base64 of `DigestValue`, `SignatureValue` and `X509Certificate`
+/// replaced by `…`.
+fn skeleton(signed: &[u8]) -> String {
+    let mut out = text(signed).to_owned();
+    for tag in ["ds:DigestValue", "ds:SignatureValue", "ds:X509Certificate"] {
+        let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+        let start = out.find(&open).unwrap() + open.len();
+        let end = out.find(&close).unwrap();
+        out.replace_range(start..end, "…");
+    }
+    out
+}
+
 #[test]
-fn kalkan_spec_bytes_unchanged() {
-    // RSA PKCS#1 v1.5 is deterministic: the bytes taken before XmlSignSpec existed.
+fn kalkan_spec_bytes() {
+    // RSA PKCS#1 v1.5 is deterministic: Kalkan's form of each signature, to the byte.
     let rsa = entry("user-rsa-sign");
     let whole = sign_enveloped(DOC, &rsa.key, &rsa.cert).unwrap();
     let element = sign_element(DOC, "/root/data", Some("/root/p"), &rsa.key, &rsa.cert).unwrap();
     let in_root = sign_element(DOC, "//data", None, &rsa.key, &rsa.cert).unwrap();
     let expected = [
-        "b2fe706c20fb27a9d87c8dde6c8a138fbba6c85f3861253d6e095ef2f5982098",
-        "6259eed25f81eeeb3482c61e81e41e306c14505e8903e84ceeff669e074e149a",
-        "cb9c6ddf94fa04d09854f37d4fc219477b51a666712c23a84487644e940560ab",
+        "c159cb7e7339d6afde23f373c6875f7fa17e858afed443c3c5c521ff9b54da59",
+        "1f2a0b3e480e3d0a42ad139dfb2a3115646302a8925e70f1582385dfa2d1f588",
+        "48b3873c6b40e018b25a598e6dee6ebefbdfa1e438885d2721773d57db269e01",
     ];
-    for (signed, expected) in [&whole, &element, &in_root].into_iter().zip(expected) {
-        assert_eq!(sha256_hex(signed), expected);
-    }
+    assert_eq!(
+        [&whole, &element, &in_root].map(|signed| sha256_hex(signed)),
+        expected
+    );
     assert_eq!(sign(DOC, &XmlSignSpec::kalkan(None, None), &rsa), whole);
     assert_eq!(
         sign(
@@ -74,6 +91,79 @@ fn kalkan_spec_bytes_unchanged() {
         sign(DOC, &XmlSignSpec::kalkan(Some("//data"), None), &rsa),
         in_root
     );
+}
+
+/// Kalkan's signed document as NCALayer's modules return it: no XML declaration (with one
+/// in the input or without), no whitespace around the document, the rest of the input as it
+/// was, and the signature without line breaks.
+#[test]
+fn serialize_output_as_jdk_transformer() {
+    let gost = entry("user-gost2015-sign");
+    let signature = format!(
+        "<ds:Signature xmlns:ds=\"{DSIG}\"><ds:SignedInfo>\
+         <ds:CanonicalizationMethod Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315\"/>\
+         <ds:SignatureMethod Algorithm=\"urn:ietf:params:xml:ns:pkigovkz:xmlsec:algorithms:gostr34102015-gostr34112015-512\"/>\
+         <ds:Reference URI=\"\"><ds:Transforms>\
+         <ds:Transform Algorithm=\"http://www.w3.org/2000/09/xmldsig#enveloped-signature\"/>\
+         <ds:Transform Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments\"/>\
+         </ds:Transforms>\
+         <ds:DigestMethod Algorithm=\"urn:ietf:params:xml:ns:pkigovkz:xmlsec:algorithms:gostr34112015-512\"/>\
+         <ds:DigestValue>…</ds:DigestValue></ds:Reference></ds:SignedInfo>\
+         <ds:SignatureValue>…</ds:SignatureValue>\
+         <ds:KeyInfo><ds:X509Data><ds:X509Certificate>…</ds:X509Certificate></ds:X509Data></ds:KeyInfo>\
+         </ds:Signature>"
+    );
+    for (input, expected) in [
+        (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<form xmlns=\"urn:f\"><v>Тест</v></form>\n",
+            format!("<form xmlns=\"urn:f\"><v>Тест</v>{signature}</form>"),
+        ),
+        ("<r><v>2</v></r>", format!("<r><v>2</v>{signature}</r>")),
+    ] {
+        let signed = sign_enveloped(input.as_bytes(), &gost.key, &gost.cert).unwrap();
+        assert_eq!(skeleton(&signed), expected);
+        verify(&signed).unwrap();
+    }
+}
+
+/// Base64 in Kalkan's signature is one line; Santuario's line breaks, when a spec asks for
+/// them, are lines of 76 characters ended by `&#13;`.
+#[test]
+fn base64_lines_as_observed() {
+    let rsa = entry("user-rsa-sign");
+    let cert = rsa.cert.to_der().unwrap();
+    let value = |signed: &str, tag: &str| {
+        let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+        let start = signed.find(&open).unwrap() + open.len();
+        signed[start..signed.find(&close).unwrap()].to_owned()
+    };
+    let kalkan = sign_enveloped(b"<a>1</a>", &rsa.key, &rsa.cert).unwrap();
+    let kalkan = text(&kalkan);
+    let one_line = value(kalkan, "ds:X509Certificate");
+    assert!(!one_line.contains('\n') && !one_line.contains("&#13;"));
+    assert_eq!(STANDARD.decode(&one_line).unwrap(), cert);
+    let signature = value(kalkan, "ds:SignatureValue");
+    assert_eq!(STANDARD.decode(&signature).unwrap().len(), 256);
+
+    let santuario = sign(
+        b"<a>1</a>",
+        &XmlSignSpec {
+            strip_whitespace: false,
+            output: XmlOutput::AsIs,
+            ..XmlSignSpec::kalkan(None, None)
+        },
+        &rsa,
+    );
+    let santuario = text(&santuario);
+    let lines = value(santuario, "ds:X509Certificate");
+    let lines = lines
+        .strip_prefix('\n')
+        .unwrap()
+        .strip_suffix('\n')
+        .unwrap();
+    assert!(lines.split("&#13;\n").all(|line| line.len() <= 76));
+    assert_eq!(lines.replace("&#13;\n", ""), one_line);
+    assert!(santuario.contains("</ds:SignedInfo>\n<ds:SignatureValue>\n"));
 }
 
 #[test]
@@ -221,9 +311,9 @@ fn signature_id_and_signing_time_object() {
         let sig = signature(&signed);
         assert!(sig.starts_with(&format!("<ds:Signature xmlns:ds=\"{DSIG}\" Id=\"11\">")));
         assert!(sig.contains(
-            "<ds:Object>\n<ds:SignatureProperties>\n<ds:SignatureProperty Id=\"signingTime\" Target=\"#11\">\n\
-             <timestamp xmlns=\"\">30-10-2026 10:00:00 +0500</timestamp>\n</ds:SignatureProperty>\n\
-             </ds:SignatureProperties>\n</ds:Object>\n</ds:Signature>"
+            "<ds:Object><ds:SignatureProperties><ds:SignatureProperty Id=\"signingTime\" Target=\"#11\">\
+             <timestamp xmlns=\"\">30-10-2026 10:00:00 +0500</timestamp></ds:SignatureProperty>\
+             </ds:SignatureProperties></ds:Object></ds:Signature>"
         ));
         assert_eq!(sig.matches("<ds:Reference ").count(), 2);
         assert!(sig.contains("<ds:Reference URI=\"#signingTime\">"));

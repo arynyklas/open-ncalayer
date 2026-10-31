@@ -67,6 +67,14 @@ impl Throwable {
         Throwable::new("java.lang.IllegalArgumentException", Some(message.into()))
     }
 
+    /// Kalkan's `kz.gov.pki.provider.exception.ProviderUtilException` with `message`.
+    pub fn provider_util(message: impl Into<String>) -> Throwable {
+        Throwable::new(
+            "kz.gov.pki.provider.exception.ProviderUtilException",
+            Some(message.into()),
+        )
+    }
+
     /// `java.net.UnknownHostException` of `host`.
     pub fn unknown_host(host: impl Into<String>) -> Throwable {
         Throwable::new("java.net.UnknownHostException", Some(host.into()))
@@ -139,6 +147,10 @@ mod tests {
         assert_eq!(
             Throwable::unknown_host("tsp.pki.gov.kz").to_string(),
             "java.net.UnknownHostException: tsp.pki.gov.kz"
+        );
+        assert_eq!(
+            Throwable::provider_util("org.xml.sax.SAXParseException; lineNumber: 1").to_string(),
+            "kz.gov.pki.provider.exception.ProviderUtilException: org.xml.sax.SAXParseException; lineNumber: 1"
         );
     }
 }

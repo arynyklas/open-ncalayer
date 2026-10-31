@@ -16,6 +16,7 @@ use oncl_pdk::abi::{
     SigningTime, TimeForm, TimeSource, TsaChoice,
 };
 use oncl_pdk::invoker::{CallResult, Failure};
+use oncl_pdk::javaexc::Throwable;
 use oncl_pdk::orgjson::opt_string;
 use oncl_pdk::serde_json::{Map, Value, json};
 use std::borrow::Cow;
@@ -158,7 +159,9 @@ impl<'a> SignRequest<'a> {
             .into_iter()
             .map(|item| {
                 if decode {
-                    core.decode(item).map(Cow::Owned).map_err(signing_failure)
+                    core.decode(item)
+                        .map(Cow::Owned)
+                        .map_err(|message| signing_failure(Throwable::iae(message)))
                 } else {
                     Ok(Cow::Borrowed(item.as_bytes()))
                 }

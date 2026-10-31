@@ -44,7 +44,7 @@ fn echo_roundtrip() {
     let mut instance = example();
     assert_eq!(
         instance.process(&call("echo", json!({"text": "hi"})), &from("https://a.kz")),
-        Ok(r#"{"status":true,"body":"hi"}"#.into())
+        Ok(r#"{"body":"hi","status":true}"#.into())
     );
 }
 

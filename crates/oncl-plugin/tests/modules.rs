@@ -84,7 +84,7 @@ fn module_routes_to_plugin() {
     };
     assert_eq!(
         module.process(&text, &in_session(1)),
-        r#"{"status":true,"body":"hi"}"#
+        r#"{"body":"hi","status":true}"#
     );
     let info = modules.loaded();
     assert_eq!(info.len(), 1);
@@ -235,7 +235,7 @@ fn in_flight_call_finishes_on_old_instance() {
     release.send(()).unwrap();
     assert_eq!(
         running.join().unwrap(),
-        r#"{"status":true,"body":true}"#,
+        r#"{"body":true,"status":true}"#,
         "the running call finishes on its instance"
     );
     assert!(modules.module(MODULE).is_none());
@@ -312,7 +312,7 @@ fn two_plugins_same_module_conflict() {
         &json!({"module": "kz.example.Mine", "class": "Example", "method": "count"}).to_string(),
         &in_session(1),
     );
-    assert_eq!(reply, r#"{"status":true,"body":1}"#);
+    assert_eq!(reply, r#"{"body":1,"status":true}"#);
     // Separate plugins, separate instances in one session.
     assert_eq!(count(&modules, 1), 1);
 }

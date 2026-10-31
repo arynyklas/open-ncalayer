@@ -13,9 +13,11 @@
 //!   layout and output form; [`XmlSignSpec::kalkan`] is the two above.
 //!
 //! The input bytes are kept: the signature is spliced in before the end tag of its parent
-//! (an empty-element tag `<p/>` becomes `<p>…</p>`). The signature layout follows Kalkan's
-//! (Apache Santuario's) serialization: a line break after every element and base64 in lines
-//! of 76 characters ended by `&#13;` (unless a spec says otherwise).
+//! (an empty-element tag `<p/>` becomes `<p>…</p>`). Kalkan's signature, as NCALayer's
+//! modules write it, has no line breaks between its elements and its base64 in one line, and
+//! the document is written without an XML declaration and without whitespace around it; a
+//! spec may ask for Santuario's line breaks instead: one after every element of the
+//! signature and base64 in lines of 76 characters ended by `&#13;`.
 //!
 //! Without a `SignatureMethod` URI of their own, signing algorithms follow the signature
 //! algorithm of the signer's certificate, and sha1RSA certificates are refused; RSA-SHA1
@@ -117,6 +119,12 @@ pub enum XmlError {
     /// with a prefix and the local name `xmlns`), or a signature is malformed.
     #[error("malformed XML: {0}")]
     Parse(String),
+    /// The input is not well-formed XML, in the words of the JDK's parser: the text of its
+    /// `SAXParseException` (`org.xml.sax.SAXParseException; lineNumber: …; columnNumber: …;
+    /// <message>`). Only a document that ends inside its root element is reported so; other
+    /// malformed input is [`XmlError::Parse`].
+    #[error("{0}")]
+    NotWellFormed(String),
     /// The input has a DOCTYPE declaration.
     #[error("DOCTYPE is not allowed in XML")]
     Doctype,
@@ -252,17 +260,21 @@ pub struct XmlSignSpec<'a> {
     pub signature_id: Option<&'a str>,
     /// A signing-time object (needs `signature_id`).
     pub signing_time_object: Option<SigningTimeObject<'a>>,
-    /// No line breaks between the elements of the signature.
+    /// No line breaks between the elements of the signature (`false`: Santuario's line
+    /// breaks).
     pub strip_whitespace: bool,
-    /// Base64 in lines of 76 characters (`None`: as Kalkan, in lines).
+    /// Base64 in lines of 76 characters (`None`: as Santuario does with the same switch, in
+    /// lines unless `strip_whitespace`).
     pub base64_line_breaks: Option<bool>,
     /// The output form.
     pub output: XmlOutput,
 }
 
 impl<'a> XmlSignSpec<'a> {
-    /// The signature Kalkan's `XMLUtil.createXmlSignature` makes: [`sign_enveloped`] without
-    /// `element`, [`sign_element`] with it.
+    /// The signature Kalkan's `XMLUtil.createXmlSignature` makes, written as NCALayer's
+    /// modules return it: [`sign_enveloped`] without `element`, [`sign_element`] with it;
+    /// no line breaks inside the signature, base64 in one line, no XML declaration and no
+    /// whitespace around the document.
     pub fn kalkan(element: Option<&'a str>, parent: Option<&'a str>) -> Self {
         XmlSignSpec {
             element,
@@ -280,14 +292,19 @@ impl<'a> XmlSignSpec<'a> {
             transforms: None,
             signature_id: None,
             signing_time_object: None,
-            strip_whitespace: false,
+            strip_whitespace: true,
             base64_line_breaks: None,
-            output: XmlOutput::AsIs,
+            output: XmlOutput::Serialize {
+                declaration: false,
+                standalone_no: false,
+                trim: true,
+            },
         }
     }
 }
 
-/// Signs the whole document (enveloped signature, appended to the document element).
+/// Signs the whole document (enveloped signature, appended to the document element) as
+/// [`XmlSignSpec::kalkan`] writes it.
 ///
 /// # Errors
 ///
@@ -524,7 +541,7 @@ fn sign_with(
         },
         reference_c14n,
         separator: if spec.strip_whitespace { "" } else { "\n" },
-        line_breaks: spec.base64_line_breaks.unwrap_or(true),
+        line_breaks: spec.base64_line_breaks.unwrap_or(!spec.strip_whitespace),
     };
     let signed = template.insert(xml, &point, key)?;
     Ok(output(signed, spec.output))

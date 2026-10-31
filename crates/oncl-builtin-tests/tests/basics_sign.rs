@@ -267,7 +267,7 @@ fn cancel_returns_empty_body() {
     let (b, p) = basics(script![Step::CancelStorage]);
     assert_eq!(
         b.process(&req(cms_args(json!("x"), json!({}))), &origin("o")),
-        r#"{"status":true,"body":{}}"#
+        r#"{"body":{},"status":true}"#
     );
     assert_eq!(p.storage_prompts().len(), 1);
     assert!(p.key_prompts().is_empty());
@@ -278,7 +278,7 @@ fn cancel_returns_empty_body() {
     ]);
     assert_eq!(
         b.process(&req(cms_args(json!("x"), json!({}))), &origin("o")),
-        r#"{"status":true,"body":{}}"#
+        r#"{"body":{},"status":true}"#
     );
     assert_eq!(p.key_prompts().len(), 1);
 
@@ -286,7 +286,7 @@ fn cancel_returns_empty_body() {
     let (b, _) = basics(script![]);
     assert_eq!(
         b.process(&req(raw_args(json!("x"), json!({}))), &origin("o")),
-        r#"{"status":true,"body":{}}"#
+        r#"{"body":{},"status":true}"#
     );
 }
 
@@ -396,7 +396,7 @@ fn unreadable_storages_reprompt_with_error() {
     let r = s
         .basics
         .process(&req(cms_args(json!("x"), json!({}))), &origin("o"));
-    assert_eq!(r, r#"{"status":true,"body":{}}"#);
+    assert_eq!(r, r#"{"body":{},"status":true}"#);
     let errors: Vec<_> = s
         .prompter
         .storage_prompts()
@@ -888,7 +888,7 @@ fn expired_key_cannot_be_chosen() {
         key(0)
     ]);
     let r = b.process(&req(cms_args(json!("x"), json!({}))), &origin("o"));
-    assert_eq!(r, r#"{"status":true,"body":{}}"#);
+    assert_eq!(r, r#"{"body":{},"status":true}"#);
     let kps = p.key_prompts();
     assert_eq!(kps.len(), 3, "two refused picks, then the exhausted script");
     assert_eq!(kps[0].candidates[0].availability, Availability::Expired);
@@ -1053,6 +1053,34 @@ fn raw_result_shapes() {
     );
 }
 
+/// A raw GOST 2015-512 signature is the 128 bytes the key verifies as they are (the order
+/// and byte order of its halves as Kalkan writes them); the reply is `{"body":…,"status"}`.
+#[test]
+fn raw_gost2015_512_layout() {
+    let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+    let reply = b.process(
+        &req(raw_args(json!("aGVsbG8="), json!({"decode": true}))),
+        &origin("o"),
+    );
+    let text = reply.text().unwrap();
+    let r: Value = serde_json::from_str(text).unwrap();
+    let encoded = r["body"]["result"].as_str().unwrap();
+    assert_eq!(
+        text,
+        format!(r#"{{"body":{{"result":"{encoded}"}},"status":true}}"#)
+    );
+    let sig = STANDARD.decode(encoded).unwrap();
+    assert_eq!(sig.len(), 128);
+    let public = public_key(&entry("user-gost2015-sign"));
+    assert_eq!(public.verify(SigAlg::Gost2015_512, b"hello", &sig), Ok(()));
+    let swapped = [&sig[64..], &sig[..64]].concat();
+    assert!(
+        public
+            .verify(SigAlg::Gost2015_512, b"hello", &swapped)
+            .is_err()
+    );
+}
+
 #[test]
 fn raw_gost2004_verifies() {
     let (b, _) = basics(script![storage("user-gost2004-sign", "Qwerty12"), key(0)]);
@@ -1151,7 +1179,7 @@ fn param_errors() {
             &req(raw_args(json!(ok), json!({"decode": true}))),
             &origin("o"),
         );
-        assert_eq!(r, r#"{"status":true,"body":{}}"#, "{ok}");
+        assert_eq!(r, r#"{"body":{},"status":true}"#, "{ok}");
         assert_eq!(p.storage_prompts().len(), 1);
     }
     for bad in ["YQ=", "YQ==\n", " YQ==", "Y", "YQ===", "YQ-_"] {
@@ -1161,6 +1189,23 @@ fn param_errors() {
             "{bad:?}"
         );
     }
+    // `details`: the `IllegalArgumentException` of Java's decoder.
+    let (b, _) = basics(script![]);
+    assert_eq!(
+        b.process(
+            &req(raw_args(json!("Q"), json!({"decode": true}))),
+            &origin("o")
+        ),
+        r#"{"code":"SIGNING_FAILURE","details":"java.lang.IllegalArgumentException: Input byte[] should at least have 2 bytes for base64 bytes","message":"Signing has failed.","status":false}"#
+    );
+    let (b, _) = basics(script![]);
+    assert_eq!(
+        b.process(
+            &req(raw_args(json!("YQ-_"), json!({"decode": true}))),
+            &origin("o")
+        ),
+        r#"{"code":"SIGNING_FAILURE","details":"java.lang.IllegalArgumentException: Illegal base64 character 2d","message":"Signing has failed.","status":false}"#
+    );
 
     // Other Java exceptions from argument reading: INVOCATION_ERROR with the exception.
     let details = |args: Value| {
@@ -1207,7 +1252,7 @@ fn missing_args_is_a_general_error() {
         let (b, p) = basics(script![]);
         assert_eq!(
             b.process(&request.to_string(), &origin("o")),
-            r#"{"status":false,"code":"GENERAL_ERROR","message":"General error.","details":"sign demands arguments"}"#
+            r#"{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: sign demands arguments","message":"General error.","status":false}"#
         );
         assert!(p.storage_prompts().is_empty());
     }
@@ -1224,12 +1269,18 @@ fn classes() {
         ),
     );
     assert_eq!(r["code"], "GENERAL_ERROR");
-    assert_eq!(r["details"], "sign is not defined in PKIEssentials");
+    assert_eq!(
+        r["details"],
+        "java.lang.IllegalArgumentException: sign is not defined in PKIEssentials"
+    );
     let r = json(b.process(
         &json!({"module": MODULE_NAME, "method": "generateCsr", "args": {}}).to_string(),
         &origin("o"),
     ));
-    assert_eq!(r["details"], "generateCsr is not defined in PKIExtras");
+    assert_eq!(
+        r["details"],
+        "java.lang.IllegalArgumentException: generateCsr is not defined in PKIExtras"
+    );
     let r = json(b.process(
         &json!({"module": MODULE_NAME, "class": "PKIExtras", "method": "importCertificate", "args": {}})
             .to_string(),
@@ -1237,8 +1288,21 @@ fn classes() {
     ));
     assert_eq!(
         r["details"],
-        "importCertificate is not defined in PKIExtras"
+        "java.lang.IllegalArgumentException: importCertificate is not defined in PKIExtras"
     );
+    // An unknown class (`optString`: a number is its text), the names with case.
+    for (class, name) in [(json!("NoClass"), "NoClass"), (json!(7), "7")] {
+        assert_eq!(
+            b.process(
+                &json!({"module": MODULE_NAME, "class": class, "method": "sign", "args": {}})
+                    .to_string(),
+                &origin("o"),
+            ),
+            format!(
+                r#"{{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: {name} is not found","message":"General error.","status":false}}"#
+            )
+        );
+    }
 }
 
 #[test]
@@ -1370,7 +1434,7 @@ fn xml_leading_comment_and_pi_are_kept_and_signed() {
     let r = json(b.process(&req(xml_args(json!(doc), json!({}))), &origin("o")));
     let signed = r["body"]["result"][0].as_str().unwrap();
     assert!(
-        signed.starts_with("<?xml version=\"1.0\"?>\n<!-- c --><?pi x?>\n<a>1<ds:Signature"),
+        signed.starts_with("<!-- c --><?pi x?>\n<a>1<ds:Signature"),
         "{r}"
     );
     oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
@@ -1558,7 +1622,7 @@ fn xml_args(data: Value, signing_params: Value) -> Value {
 fn xml_egov_login_signs_with_the_chosen_key() {
     let (b, p) = basics(script![storage("user-gost2015-auth", "Qwerty12"), key(0)]);
     let r = json(b.process(&req(egov_login_args()), &origin("https://idp.egov.kz")));
-    // `{"status":true,"body":{"result":["<signed xml>"]}}`, nothing more.
+    // `{"body":{"result":["<signed xml>"]},"status":true}`, nothing more.
     assert_eq!(r.as_object().unwrap().len(), 2, "{r}");
     assert_eq!(r["status"], true, "{r}");
     assert_eq!(r["body"].as_object().unwrap().len(), 1, "{r}");
@@ -1566,9 +1630,7 @@ fn xml_egov_login_signs_with_the_chosen_key() {
     assert_eq!(result.len(), 1);
     let signed = result[0].as_str().unwrap();
     assert!(
-        signed.starts_with(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><login><client-type>PORTAL</client-type><ds:Signature"
-        ),
+        signed.starts_with("<login><client-type>PORTAL</client-type><ds:Signature"),
         "{signed}"
     );
     let infos = oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
@@ -1640,7 +1702,7 @@ fn xml_allow_expired_makes_expired_keys_selectable() {
             key(0)
         ]);
         let r = b.process(&req(args), &origin("o"));
-        assert_eq!(r, r#"{"status":true,"body":{}}"#);
+        assert_eq!(r, r#"{"body":{},"status":true}"#);
         assert_eq!(
             p.key_prompts()[0].candidates[0].availability,
             Availability::Expired
@@ -1653,13 +1715,18 @@ fn xml_malformed_is_unable_to_parse_xml_after_the_dialog() {
     for bad in ["<a>", "not xml", "<!DOCTYPE a><a/>", "<a/><b/>"] {
         let (b, p) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
         let r = json(b.process(&req(xml_args(json!(bad), json!({}))), &origin("o")));
-        // `ProviderUtilFailure(UNABLE_TO_PARSE_XML, <parser error>)`, as the original.
+        // `ProviderUtilFailure(UNABLE_TO_PARSE_XML, <parser error>)`, as the original: the
+        // message and the `ProviderUtilException` carrying it.
         assert_eq!(r.as_object().unwrap().len(), 4, "{r}");
         assert_eq!(r["status"], false, "{r}");
         assert_eq!(r["code"], "UNABLE_TO_PARSE_XML", "{r}");
         let message = r["message"].as_str().unwrap();
         assert!(!message.is_empty(), "{r}");
-        assert_eq!(r["details"], message, "{r}");
+        assert_eq!(
+            r["details"],
+            format!("kz.gov.pki.provider.exception.ProviderUtilException: {message}"),
+            "{r}"
+        );
         // Parsed after the key was chosen, as `XMLUtil.createXmlSignature` is.
         assert_eq!(p.storage_prompts().len(), 1, "{bad}");
         assert_eq!(p.key_prompts().len(), 1, "{bad}");
@@ -1671,4 +1738,23 @@ fn xml_malformed_is_unable_to_parse_xml_after_the_dialog() {
         &origin("o"),
     ));
     assert_eq!(r["code"], "UNABLE_TO_PARSE_XML", "{r}");
+}
+
+/// A document that ends inside its root element: the JDK parser's `SAXParseException` as
+/// the message, the `ProviderUtilException` carrying it as `details`.
+#[test]
+fn xml_unclosed_root_has_the_jdk_parsers_text() {
+    let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+    let reply = b.process(
+        &req(xml_args(json!("<doc>\n<open>"), json!({}))),
+        &origin("o"),
+    );
+    let sax = "org.xml.sax.SAXParseException; lineNumber: 2; columnNumber: 7; \
+               XML document structures must start and end within the same entity.";
+    assert_eq!(
+        reply,
+        format!(
+            r#"{{"code":"UNABLE_TO_PARSE_XML","details":"kz.gov.pki.provider.exception.ProviderUtilException: {sax}","message":"{sax}","status":false}}"#
+        )
+    );
 }

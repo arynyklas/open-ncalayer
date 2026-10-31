@@ -186,16 +186,19 @@ fn c14n_method_uris() {
 /// Declaration, BOM, comments, CRLF, a default namespace and attributes out of order.
 const AWKWARD: &str = "\u{FEFF}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!-- head -->\r\n<doc xmlns=\"urn:example:doc\" z=\"1\" a=\"2\" xmlns:p=\"urn:p\" xml:lang=\"ru\">\r\n  <p:item b=\"x\" a=\"y\">Мәтін &amp; text<!-- inner --></p:item>\r\n  <empty/>\r\n</doc>\r\n<!-- tail -->\r\n";
 
+/// What Kalkan's form keeps of [`AWKWARD`]: no BOM, no declaration, no whitespace around.
+const AWKWARD_KEPT: &str = "<!-- head -->\r\n<doc xmlns=\"urn:example:doc\" z=\"1\" a=\"2\" xmlns:p=\"urn:p\" xml:lang=\"ru\">\r\n  <p:item b=\"x\" a=\"y\">Мәтін &amp; text<!-- inner --></p:item>\r\n  <empty/>\r\n</doc>\r\n<!-- tail -->";
+
 #[test]
 fn enveloped_signature_verifies_and_keeps_the_document_bytes() {
     for (signer, alg) in signers() {
         let signed = enveloped(AWKWARD.as_bytes(), &signer);
         let start = find(&signed, "<ds:Signature");
         let end = find(&signed, "</ds:Signature>") + "</ds:Signature>".len();
-        let insert_at = AWKWARD.find("</doc>").unwrap();
+        let insert_at = AWKWARD_KEPT.find("</doc>").unwrap();
         assert_eq!(start, insert_at, "{alg:?}");
-        assert_eq!(&signed[..start], &AWKWARD.as_bytes()[..insert_at]);
-        assert_eq!(&signed[end..], &AWKWARD.as_bytes()[insert_at..]);
+        assert_eq!(&signed[..start], &AWKWARD_KEPT.as_bytes()[..insert_at]);
+        assert_eq!(&signed[end..], &AWKWARD_KEPT.as_bytes()[insert_at..]);
 
         let infos = verify(&signed).unwrap();
         assert_eq!(algs(&infos), [alg]);
@@ -223,30 +226,33 @@ fn enveloped_signature_has_the_kalkan_shape() {
         let signed = enveloped(b"<a><b>test</b></a>", &signer);
         let signed = std::str::from_utf8(&signed).unwrap();
         let expected_head = format!(
-            "<a><b>test</b><ds:Signature xmlns:ds=\"{DSIG}\">\n<ds:SignedInfo>\n\
-             <ds:CanonicalizationMethod Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315\"/>\n\
-             <ds:SignatureMethod Algorithm=\"{signature_method}\"/>\n\
-             <ds:Reference URI=\"\">\n<ds:Transforms>\n\
-             <ds:Transform Algorithm=\"http://www.w3.org/2000/09/xmldsig#enveloped-signature\"/>\n\
-             <ds:Transform Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments\"/>\n\
-             </ds:Transforms>\n<ds:DigestMethod Algorithm=\"{digest_method}\"/>\n<ds:DigestValue>"
+            "<a><b>test</b><ds:Signature xmlns:ds=\"{DSIG}\"><ds:SignedInfo>\
+             <ds:CanonicalizationMethod Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315\"/>\
+             <ds:SignatureMethod Algorithm=\"{signature_method}\"/>\
+             <ds:Reference URI=\"\"><ds:Transforms>\
+             <ds:Transform Algorithm=\"http://www.w3.org/2000/09/xmldsig#enveloped-signature\"/>\
+             <ds:Transform Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments\"/>\
+             </ds:Transforms><ds:DigestMethod Algorithm=\"{digest_method}\"/><ds:DigestValue>"
         );
         assert!(signed.starts_with(&expected_head), "{alg:?}: {signed}");
-        assert!(signed.ends_with(
-            "</ds:X509Certificate>\n</ds:X509Data>\n</ds:KeyInfo>\n</ds:Signature></a>"
-        ));
+        assert!(
+            signed.ends_with("</ds:X509Certificate></ds:X509Data></ds:KeyInfo></ds:Signature></a>")
+        );
         assert!(!signed.contains("Id="), "{alg:?}");
         assert!(!signed.contains("Object"), "{alg:?}");
+        // No line breaks anywhere: base64 in one line.
+        assert!(
+            !signed.contains('\n') && !signed.contains("&#13;"),
+            "{alg:?}"
+        );
 
-        let cert_start = signed.find("<ds:X509Certificate>\n").unwrap() + 21;
-        let cert_end = signed.find("\n</ds:X509Certificate>").unwrap();
-        let cert_b64 = &signed[cert_start..cert_end];
-        assert!(cert_b64.split("&#13;\n").all(|line| line.len() <= 76));
+        let cert_start = signed.find("<ds:X509Certificate>").unwrap() + 20;
+        let cert_end = signed.find("</ds:X509Certificate>").unwrap();
         assert_eq!(
-            STANDARD.decode(cert_b64.replace("&#13;\n", "")).unwrap(),
+            STANDARD.decode(&signed[cert_start..cert_end]).unwrap(),
             signer.cert.to_der().unwrap()
         );
-        assert!(signed.contains("<ds:SignatureValue>\n"));
+        assert!(signed.contains("</ds:SignedInfo><ds:SignatureValue>"));
     }
 }
 
@@ -280,7 +286,7 @@ fn tampering_is_detected() {
     let attribute = replace_once(&signed, "a=\"y\"", "a=\"z\"");
     assert_eq!(verify(&attribute), Err(XmlError::BadDigest));
 
-    let at = find(&signed, "<ds:SignatureValue>\n") + "<ds:SignatureValue>\n".len();
+    let at = find(&signed, "<ds:SignatureValue>") + "<ds:SignatureValue>".len();
     let mut value = signed.clone();
     value[at] = if value[at] == b'A' { b'B' } else { b'A' };
     assert_eq!(verify(&value), Err(XmlError::BadSignature));
@@ -313,11 +319,11 @@ fn sha1_rsa_certificates_are_refused() {
     // Kalkan parses the document first and checks the algorithm before any XPath.
     assert!(matches!(
         sign_enveloped(b"<a>", &signer.key, &sha1_cert),
-        Err(XmlError::Parse(_))
+        Err(XmlError::NotWellFormed(_))
     ));
     assert!(matches!(
         sign_element(b"<a>", "//b", None, &signer.key, &sha1_cert),
-        Err(XmlError::Parse(_))
+        Err(XmlError::NotWellFormed(_))
     ));
     assert!(matches!(
         sign_element(b"<a/>", "//b", None, &signer.key, &sha1_cert),
@@ -341,11 +347,38 @@ fn empty_document_element_is_opened() {
         b"<?xml version=\"1.0\"?>\n<p:doc xmlns:p=\"urn:p\" />",
         &signer,
     );
-    assert!(
-        signed.starts_with(b"<?xml version=\"1.0\"?>\n<p:doc xmlns:p=\"urn:p\" ><ds:Signature")
-    );
+    assert!(signed.starts_with(b"<p:doc xmlns:p=\"urn:p\" ><ds:Signature"));
     assert!(signed.ends_with(b"</ds:Signature></p:doc>"));
     verify(&signed).unwrap();
+}
+
+/// A document that ends inside its root element: the text of the JDK parser's
+/// `SAXParseException`, at the end of the input (lines broken by LF, CR or CRLF, columns in
+/// UTF-16 units, a BOM not counted).
+#[test]
+fn unclosed_root_is_the_jdk_parsers_text() {
+    let [(signer, _), ..] = signers();
+    let message = |line: usize, column: usize| {
+        format!(
+            "org.xml.sax.SAXParseException; lineNumber: {line}; columnNumber: {column}; \
+             XML document structures must start and end within the same entity."
+        )
+    };
+    for (xml, line, column) in [
+        ("<doc><open>", 1, 12),
+        ("<doc>\r\n<a>\n", 3, 1),
+        ("<doc>\r<a>x", 2, 5),
+        ("\u{FEFF}<д>", 1, 4),
+        ("<a>\u{1F600}", 1, 6),
+    ] {
+        let error = sign_enveloped(xml.as_bytes(), &signer.key, &signer.cert).unwrap_err();
+        assert_eq!(
+            error,
+            XmlError::NotWellFormed(message(line, column)),
+            "{xml:?}"
+        );
+        assert_eq!(error.to_string(), message(line, column));
+    }
 }
 
 #[test]
@@ -364,7 +397,7 @@ fn element_signatures_verify() {
             let signed =
                 sign_element(ELEMENTS.as_bytes(), xpath, None, &signer.key, &signer.cert).unwrap();
             let text = std::str::from_utf8(&signed).unwrap();
-            assert!(text.contains(&format!("<ds:Reference URI=\"#{id}\">\n<ds:Transforms>\n<ds:Transform Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments\"/>\n</ds:Transforms>")));
+            assert!(text.contains(&format!("<ds:Reference URI=\"#{id}\"><ds:Transforms><ds:Transform Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments\"/></ds:Transforms>")));
             assert!(text.contains(
                 "<ds:CanonicalizationMethod Algorithm=\"http://www.w3.org/2001/10/xml-exc-c14n#\"/>"
             ));

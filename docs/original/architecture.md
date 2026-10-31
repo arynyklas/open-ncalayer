@@ -264,7 +264,7 @@ sequenceDiagram
 
 | `module` | Запрос | Ответ | Методы |
 |---|---|---|---|
-| `kz.gov.pki.knca.basics` | `{method, class?, apiVersion?:2, args:{…}}` | `{status:true, body}` / `{status:false, code, message, details?}`; отмена — `{status:true, body:{}}` | `PKIExtras.sign` (формат `cms`/`xml`/`raw`; фильтры `extKeyUsageOids`, `iin`, `bin`, `serialNumber`, `chain`; TSP; проверка OCSP), `PKIEssentials.generateCsr`, `PKIEssentials.importCertificate` |
+| `kz.gov.pki.knca.basics` | `{method, class?, apiVersion?:2, args:{…}}` | `{body, status:true}` / `{code, details?, message, status:false}` — ключи в этом порядке (`HashMap` org.json); отмена — `{body:{}, status:true}` | `PKIExtras.sign` (формат `cms`/`xml`/`raw`; фильтры `extKeyUsageOids`, `iin`, `bin`, `serialNumber`, `chain`; TSP; проверка OCSP), `PKIEssentials.generateCsr`, `PKIEssentials.importCertificate` |
 | `kz.gov.pki.knca.commonUtils` | `{method, args:[…позиционные], uuid?}` | `{code:"200"\|"500", message?, responseObject?, uuid?}` | `getActiveTokens`, `getKeyInfo`, `signXml`, `signXmls`, `createCAdESFromBase64`, `createCAdESFromFile`, `createCAdESFromBase64Hash`, `applyCAdEST`, `createCMSSignatureFromBase64/File` (устар.), `showFileChooser`, `changeLocale` |
 | `kz.gov.pki.knca.applet.Applet` | `{method, args:[…], uuid?}` | `{errorCode:"NONE"\|<код>, result?, secondResult?, uuid?}` | `loadSlotList`, `browseKeyStore`, `showFileChooser`, `getPublicPartInfo`, `setPassword`, `getTryCount`, `genExt`, `genKeyPairAndGetPKCS10`, `setX509CertToKeyStore*`, `changePassword`, `signXml`, `deleteEntry`, `resetStorage`, `getProvider` |
 | `kz.gov.pki.ncalayerservices.accessory` | `{method, symname?, uuid?}` | `{errorCode}` / объект | `getBundles`, `getServices`, `installBundle`, `showBundleManager`, `showSettings`, `showKeystoreExplorer`, `showAdesSigning`, `showAdesValidation` |
@@ -319,7 +319,7 @@ sequenceDiagram
 | CMS | Атрибуты contentType, signingTime, messageDigest, signingCertificateV2. В CMS кладётся только сертификат подписанта. Со-подпись — слиянием SignerInfo. Вывод — PEM `BEGIN CMS` (basics) или base64 DER (commonUtils) |
 | TSP | `http://tsp.pki.gov.kz`, нестандартный GET-биндинг `<url>/<urlencoded base64>` с POST как fallback. В basics при наличии `tsaProfile` всегда используются Стрибог‑512 и политика `1.2.398.3.3.2.6.4` |
 | OCSP / CRL | `http://ocsp.pki.gov.kz`, только HTTP. Доверие — встроенный `cacerts.jks` (10 prod-корней и промежуточных; тестовые 6 автоматически не грузятся) |
-| XMLDSig | Inclusive C14N, трансформы enveloped и c14n‑with‑comments, сертификат в KeyInfo, подпись добавляется в корень. URI: `xmldsig-more#gost34310-gost34311`, `urn:ietf:params:xml:ns:pkigovkz:xmlsec:algorithms:gostr34102015-gostr34112015-512` и др. |
+| XMLDSig | Inclusive C14N, трансформы enveloped и c14n‑with‑comments, сертификат в KeyInfo, подпись добавляется в корень. URI: `xmldsig-more#gost34310-gost34311`, `urn:ietf:params:xml:ns:pkigovkz:xmlsec:algorithms:gostr34102015-gostr34112015-512` и др. Модули возвращают документ без объявления XML, подпись — без переводов строк, base64 — одной строкой |
 | Токены | **Только PC/SC APDU, без PKCS#11.** Тип токена определяется по точному ATR. Драйверы: Kaztoken, удостоверение личности РК (ГОСТ‑512 + RSA‑2048), eToken 72K, eToken 5110, JaCarta, AKey |
 | AdES (0.9.x) | CAdES/XAdES/PAdES уровней B/T/LT/LTA, видимый штамп в PDF. Используется в UI-инструментах, **в WebSocket API не входит** |
 

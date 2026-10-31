@@ -180,10 +180,12 @@ pub fn sign(
          </xades:SignedProperties>",
         STANDARD.encode(Sha256::digest(&cert_der)),
     );
+    // Santuario's line breaks: XAdES is not Kalkan's `createXmlSignature`.
     let xml_spec = XmlSignSpec {
         signature_method: spec.signature_method,
         digest_method: spec.digest_method,
         signature_id: Some(&id),
+        strip_whitespace: false,
         ..XmlSignSpec::kalkan(None, None)
     };
     let signed = xmldsig::sign_qualified(

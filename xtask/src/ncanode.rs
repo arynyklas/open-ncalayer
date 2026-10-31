@@ -98,15 +98,15 @@ impl Doc {
         format!("#{}", self.id)
     }
 
-    /// `signed` (this document with signatures, which keeps the prolog bytes) with an
-    /// internal DTD subset declaring the element's `Id` an ID, for NCANode's `/xml/verify`.
+    /// `signed` (this document with signatures, in Kalkan's form: without the BOM and the
+    /// XML declaration) with an internal DTD subset declaring the element's `Id` an ID, for
+    /// NCANode's `/xml/verify`, before the document's first node.
     fn with_id_dtd(&self, signed: &[u8]) -> Vec<u8> {
-        let at = self.prolog.len();
         let dtd = format!(
             "<!DOCTYPE {} [<!ATTLIST {} Id ID #IMPLIED>]>",
             self.root, self.element
         );
-        [&signed[..at], dtd.as_bytes(), &signed[at..]].concat()
+        [dtd.as_bytes(), signed].concat()
     }
 }
 
@@ -794,17 +794,18 @@ mod tests {
     }
 
     #[test]
-    fn id_dtd_goes_after_the_prolog_and_keeps_the_signature() {
+    fn id_dtd_goes_first_and_keeps_the_signature() {
         let doc = AWKWARD.bytes();
         let key = synthetic_rsa();
         let signed =
             oncl_pki::xmldsig::sign_element(&doc, &AWKWARD.xpath(), None, &key.key, &key.cert)
                 .unwrap();
+        // Kalkan's form drops the BOM and the declaration.
+        assert!(signed.starts_with(b"<!-- before the root -->"));
         let with_dtd = AWKWARD.with_id_dtd(&signed);
         let expected = [
-            AWKWARD.prolog,
             "<!DOCTYPE root [<!ATTLIST data Id ID #IMPLIED>]>",
-            std::str::from_utf8(&signed[AWKWARD.prolog.len()..]).unwrap(),
+            std::str::from_utf8(&signed).unwrap(),
         ]
         .concat();
         assert_eq!(std::str::from_utf8(&with_dtd).unwrap(), expected);

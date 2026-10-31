@@ -73,8 +73,9 @@ const SIGNED_BOUNDS: Bounds = Bounds {
 /// # Errors
 ///
 /// [`XmlError::TooLarge`] for input over [`MAX_INPUT`], [`MAX_NODES`], [`MAX_ATTRIBUTES`] or
-/// the parse work bounds, [`XmlError::TooDeep`], [`XmlError::Doctype`], or
-/// [`XmlError::Parse`] for input that is not well-formed namespace-aware UTF-8 XML (an
+/// the parse work bounds, [`XmlError::TooDeep`], [`XmlError::Doctype`],
+/// [`XmlError::NotWellFormed`] for a document that ends inside its root element, or
+/// [`XmlError::Parse`] for other input that is not well-formed namespace-aware UTF-8 XML (an
 /// attribute with a prefix and the local name `xmlns` included).
 pub(crate) fn parse(xml: &[u8]) -> Result<Document<'_>, XmlError> {
     if xml.len() > MAX_INPUT {
@@ -105,8 +106,36 @@ fn parse_with(xml: &[u8], bounds: Bounds) -> Result<Document<'_>, XmlError> {
     Document::parse_with_options(text, options).map_err(|e| match e {
         roxmltree::Error::DtdDetected => XmlError::Doctype,
         roxmltree::Error::NodesLimitReached => XmlError::TooLarge,
+        roxmltree::Error::UnclosedRootNode => sax_at_end(
+            text,
+            "XML document structures must start and end within the same entity.",
+        ),
         e => XmlError::Parse(e.to_string()),
     })
+}
+
+/// [`XmlError::NotWellFormed`] with `message` at the end of `text`, where the JDK's parser
+/// (Xerces) stops: lines broken by LF, CR or CRLF, columns counted in UTF-16 units from 1, a
+/// byte order mark not counted.
+fn sax_at_end(text: &str, message: &str) -> XmlError {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let (mut line, mut column) = (1usize, 1usize);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' | '\n' => {
+                if c == '\r' {
+                    chars.next_if_eq(&'\n');
+                }
+                line += 1;
+                column = 1;
+            }
+            c => column += c.len_utf16(),
+        }
+    }
+    XmlError::NotWellFormed(format!(
+        "org.xml.sax.SAXParseException; lineNumber: {line}; columnNumber: {column}; {message}"
+    ))
 }
 
 /// Rejects a DOCTYPE, nesting deeper than [`MAX_DEPTH`], prefixed `xmlns` attributes and
