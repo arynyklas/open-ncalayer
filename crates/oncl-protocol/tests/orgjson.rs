@@ -2,8 +2,8 @@
 
 use oncl_protocol::orgjson::{
     JObject, JValue, array_get_int, array_get_object, array_get_string, get_array, get_boolean,
-    get_int, get_object, opt_array, opt_boolean, opt_int, opt_object, parse, quoted, reserialize,
-    value_to_string,
+    get_int, get_object, opt_array, opt_boolean, opt_int, opt_object, parse, quoted, quoted_len,
+    reserialize, value_to_string,
 };
 use serde_json::{Value, json};
 
@@ -26,6 +26,97 @@ fn quote_escapes_like_org_json() {
     );
     assert_eq!(quoted("Сәлем"), "\"Сәлем\"");
     assert_eq!(quoted(""), r#""""#);
+}
+
+/// `JSONObject.quote` character by character, as org.json writes it.
+fn quote_by_chars(s: &str) -> String {
+    let mut out = String::from('"');
+    let mut previous = '\0';
+    for c in s.chars() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '/' if previous == '<' => out.push_str("\\/"),
+            '\u{8}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if c < ' '
+                || ('\u{80}'..'\u{a0}').contains(&c)
+                || ('\u{2000}'..'\u{2100}').contains(&c) =>
+            {
+                out.push_str(&format!("\\u{:04x}", u32::from(c)));
+            }
+            c => out.push(c),
+        }
+        previous = c;
+    }
+    out.push('"');
+    out
+}
+
+#[test]
+fn quote_matches_org_json_char_by_char() {
+    // Every character next to an edge of an escaped range, in UTF-8 of each length.
+    const ALPHABET: &[char] = &[
+        '\0',
+        '\u{8}',
+        '\t',
+        '\n',
+        '\u{c}',
+        '\r',
+        '\u{1f}',
+        ' ',
+        '"',
+        '\\',
+        '/',
+        '<',
+        'a',
+        '\u{7f}',
+        '\u{80}',
+        '\u{9f}',
+        '\u{a0}',
+        '\u{bf}',
+        '\u{c0}',
+        'Ә',
+        '\u{7ff}',
+        '\u{800}',
+        '\u{1fff}',
+        '\u{2000}',
+        '\u{2028}',
+        '\u{20ac}',
+        '\u{20ff}',
+        '\u{2100}',
+        '\u{2fff}',
+        '\u{3000}',
+        '\u{ffff}',
+        '\u{10000}',
+        '😀',
+    ];
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for _ in 0..20_000 {
+        let len = usize::try_from(next() % 12).unwrap();
+        let s: String = (0..len)
+            .map(|_| ALPHABET[usize::try_from(next()).unwrap() % ALPHABET.len()])
+            .collect();
+        let expected = quote_by_chars(&s);
+        assert_eq!(quoted(&s), expected, "{s:?}");
+        assert_eq!(quoted_len(&s), expected.len(), "{s:?}");
+    }
+    for c in '\0'..=char::MAX {
+        let s = format!("<{c}/");
+        assert_eq!(quoted(&s), quote_by_chars(&s), "{c:?}");
+        assert_eq!(quoted_len(&s), quoted(&s).len(), "{c:?}");
+    }
 }
 
 #[test]

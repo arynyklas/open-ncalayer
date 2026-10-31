@@ -273,6 +273,52 @@ fn applet_signs_long_documents_as_oncl_pki() {
     assert_eq!(r, json!({"errorCode": "EMPTY_SLOT", "uuid": uuid}));
 }
 
+/// `text` as org.json's `JSONObject.quote` writes it, for text with no character it
+/// escapes beyond `serde_json`'s: `/` escaped after `<`.
+fn org_json_quoted(text: &str) -> String {
+    serde_json::to_string(text).unwrap().replace("</", "<\\/")
+}
+
+#[test]
+fn signed_xml_replies_escape_as_org_json() {
+    let key = entry(KEY);
+    for body in ["x".to_owned(), long_text(12)] {
+        let xml = format!("<a><b>x</b>{body}</a>");
+        let signed =
+            oncl_pki::xmldsig::sign_enveloped(xml.as_bytes(), &key.key, &key.cert).unwrap();
+        let quoted = org_json_quoted(std::str::from_utf8(&signed).unwrap());
+        assert!(quoted.contains(r"<b>x<\/b>") && !quoted.contains("</"));
+
+        let request = sign(json!({
+            "format": "xml",
+            "data": xml,
+            "signingParams": {},
+            "signerParams": {"extKeyUsageOids": [], "chain": []},
+        }));
+        assert_eq!(
+            reply_text(&basics(1), &request.to_string()),
+            format!(r#"{{"body":{{"result":[{quoted}]}},"status":true}}"#)
+        );
+
+        let request = cu("signXml", json!(["PKCS12", "", xml, "", ""]));
+        assert_eq!(
+            reply_text(&common_utils(1), &request.to_string()),
+            format!(r#"{{"responseObject":{quoted},"code":"200"}}"#)
+        );
+
+        let applet = Applet::new(Arc::new(ScriptedPrompter::new(steps(1))));
+        let request =
+            json!({"method": "signXml", "args": ["PKCS12", "", "SIGN", xml], "uuid": "u-1"});
+        assert_eq!(
+            reply_text(&applet, &request.to_string()),
+            format!(
+                r#"{{"result":{quoted},"errorCode":"NONE","secondResult":"{}","uuid":"u-1"}}"#,
+                key.alias
+            )
+        );
+    }
+}
+
 /// The reply's text to the request `text`, sent as is.
 fn reply_text(module: &dyn Module, text: &str) -> String {
     module

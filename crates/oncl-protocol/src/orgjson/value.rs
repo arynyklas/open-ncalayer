@@ -315,45 +315,121 @@ impl JObject {
 /// `JSONObject.quote(s)` appended to `out`: `"` and `\` escaped, `/` only after `<`, the
 /// short escapes of `\b \t \n \f \r`, every other character below U+0020, from U+0080 to
 /// U+009F and from U+2000 to U+20FF as `\u` and four lower-case hex digits; the rest as it
-/// is (Cyrillic is not escaped).
+/// is (Cyrillic is not escaped). The runs between escapes are copied whole.
 pub fn quote(s: &str, out: &mut String) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.reserve(s.len() + 2);
     out.push('"');
-    let mut previous = '\0';
-    for c in s.chars() {
-        match c {
-            '\\' | '"' => {
-                out.push('\\');
-                out.push(c);
-            }
-            '/' => {
-                if previous == '<' {
-                    out.push('\\');
+    let bytes = s.as_bytes();
+    let mut run = 0;
+    while let Some((at, escape, len)) = next_escape(bytes, run) {
+        out.push_str(&s[run..at]);
+        match escape {
+            Escape::Short(text) => out.push_str(text),
+            Escape::Unicode(code) => {
+                out.push_str("\\u");
+                for shift in [12, 8, 4, 0] {
+                    out.push(char::from(HEX[usize::from((code >> shift) & 0xf)]));
                 }
-                out.push(c);
             }
-            '\u{8}' => out.push_str("\\b"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\u{c}' => out.push_str("\\f"),
-            '\r' => out.push_str("\\r"),
-            c if c < ' '
-                || ('\u{80}'..'\u{a0}').contains(&c)
-                || ('\u{2000}'..'\u{2100}').contains(&c) =>
-            {
-                out.push_str(&format!("\\u{:04x}", u32::from(c)));
-            }
-            c => out.push(c),
         }
-        previous = c;
+        run = at + len;
     }
+    out.push_str(&s[run..]);
     out.push('"');
 }
 
 /// `JSONObject.quote(s)` as a new string.
 pub fn quoted(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
+    let mut out = String::new();
     quote(s, &mut out);
     out
+}
+
+/// The length in bytes of `JSONObject.quote(s)`, quotes included.
+pub fn quoted_len(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut len = bytes.len() + 2;
+    let mut from = 0;
+    while let Some((at, escape, n)) = next_escape(bytes, from) {
+        len = len - n + escape.len();
+        from = at + n;
+    }
+    len
+}
+
+/// How `JSONObject.quote` writes a character it escapes.
+#[derive(Clone, Copy)]
+enum Escape {
+    /// A backslash and one character.
+    Short(&'static str),
+    /// `\u` and the code's four hex digits.
+    Unicode(u16),
+}
+
+impl Escape {
+    /// The escape's length in bytes.
+    fn len(self) -> usize {
+        match self {
+            Escape::Short(_) => 2,
+            Escape::Unicode(_) => 6,
+        }
+    }
+}
+
+/// The bytes an escape may start at: below 0x20, `"`, `\`, `<` (of `</`), and the first
+/// bytes of U+0080–U+009F (`C2 80`–`C2 9F`) and U+2000–U+20FF (`E2 80 80`–`E2 83 BF`).
+const MAY_ESCAPE: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut b = 0;
+    while b < 0x20 {
+        table[b] = true;
+        b += 1;
+    }
+    table[b'"' as usize] = true;
+    table[b'\\' as usize] = true;
+    table[b'<' as usize] = true;
+    table[0xc2] = true;
+    table[0xe2] = true;
+    table
+};
+
+/// The first character from `bytes[from]` on (UTF-8, `from` a character's start) that
+/// `JSONObject.quote` escapes: where it starts, its escape and its length.
+fn next_escape(bytes: &[u8], from: usize) -> Option<(usize, Escape, usize)> {
+    let mut i = from;
+    loop {
+        i += bytes[i..]
+            .iter()
+            .position(|b| MAY_ESCAPE[usize::from(*b)])?;
+        let escape = match bytes[i] {
+            b'<' if bytes.get(i + 1) == Some(&b'/') => {
+                return Some((i + 1, Escape::Short("\\/"), 1));
+            }
+            b'<' => None,
+            b'"' => Some(Escape::Short("\\\"")),
+            b'\\' => Some(Escape::Short("\\\\")),
+            0x08 => Some(Escape::Short("\\b")),
+            b'\t' => Some(Escape::Short("\\t")),
+            b'\n' => Some(Escape::Short("\\n")),
+            0x0c => Some(Escape::Short("\\f")),
+            b'\r' => Some(Escape::Short("\\r")),
+            b if b < 0x20 => Some(Escape::Unicode(u16::from(b))),
+            0xc2 if bytes[i + 1] < 0xa0 => {
+                return Some((i, Escape::Unicode(u16::from(bytes[i + 1])), 2));
+            }
+            0xe2 if bytes[i + 1] <= 0x83 => {
+                let code =
+                    0x2000 | (u16::from(bytes[i + 1] & 0x3f) << 6) | u16::from(bytes[i + 2] & 0x3f);
+                return Some((i, Escape::Unicode(code), 3));
+            }
+            _ => None,
+        };
+        if let Some(escape) = escape {
+            return Some((i, escape, 1));
+        }
+        i += 1;
+    }
 }
 
 /// org.json's `numberToString`: a decimal without an exponent loses its trailing zeros and

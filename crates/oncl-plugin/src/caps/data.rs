@@ -12,8 +12,9 @@
 //! - The `data_*` functions take a marker of this call wherever they take data, or the data
 //!   itself; what they make is kept and returned as a marker.
 //! - After the call, every JSON string of the reply that is exactly a marker of this call
-//!   gets the kept data in its place, written as `serde_json` writes a string (the data
-//!   must be UTF-8), into a reply allocated once at its length, at most
+//!   gets the kept data in its place, written as org.json's `JSONObject.quote` writes a
+//!   string, as the modules write their replies (`<\/`; the data must be UTF-8), into a
+//!   reply allocated once at its length, at most
 //!   [`BUILTIN_MAX_REPLY`](crate::BUILTIN_MAX_REPLY) bytes.
 //! - All of it goes when the call returns ([`CallData`] lives in the call's context), and
 //!   at most `max` bytes are kept at once for a call, and
@@ -28,6 +29,7 @@ use oncl_pdk::abi::{
     PageRead, SignCmsExArgs, SignRawArgs, SignXmlArgs, StampArgs, StampOutcome,
 };
 use oncl_pki::cms::Content;
+use oncl_protocol::orgjson::{quote, quoted_len};
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -170,7 +172,7 @@ impl CallData {
     }
 
     /// `reply` with every JSON string that is exactly a marker of this call replaced by
-    /// its data, as `serde_json` writes a string, allocated once at its length.
+    /// its data, as org.json's `JSONObject.quote` writes it, allocated once at its length.
     ///
     /// # Errors
     ///
@@ -213,62 +215,13 @@ impl CallData {
         let mut copied = 0;
         for (start, end, text) in markers {
             out.push_str(&reply[copied..start]);
-            push_quoted(&mut out, text);
+            quote(text, &mut out);
             copied = end;
         }
         out.push_str(&reply[copied..]);
         debug_assert_eq!(out.len(), len);
         Ok(out)
     }
-}
-
-/// Whether `serde_json` escapes the byte `b` in a string.
-fn escapes(b: u8) -> bool {
-    b < 0x20 || b == b'"' || b == b'\\'
-}
-
-/// The length of `text` as `serde_json` writes it as a string, quotes included.
-fn quoted_len(text: &str) -> usize {
-    let extra: usize = text
-        .bytes()
-        .filter(|b| escapes(*b))
-        .map(|b| match b {
-            b'"' | b'\\' | b'\x08' | b'\x0c' | b'\n' | b'\r' | b'\t' => 1,
-            _ => 5,
-        })
-        .sum();
-    text.len() + 2 + extra
-}
-
-/// `text` pushed onto `out` as `serde_json` writes a string: quoted, with `"`, `\` and
-/// the control characters escaped (`\b`, `\f`, `\n`, `\r`, `\t`, else `\u00xx`).
-fn push_quoted(out: &mut String, text: &str) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    out.push('"');
-    let mut run = 0;
-    for (i, b) in text.bytes().enumerate() {
-        if !escapes(b) {
-            continue;
-        }
-        out.push_str(&text[run..i]);
-        match b {
-            b'"' => out.push_str("\\\""),
-            b'\\' => out.push_str("\\\\"),
-            b'\x08' => out.push_str("\\b"),
-            b'\x0c' => out.push_str("\\f"),
-            b'\n' => out.push_str("\\n"),
-            b'\r' => out.push_str("\\r"),
-            b'\t' => out.push_str("\\t"),
-            _ => {
-                out.push_str("\\u00");
-                out.push(char::from(HEX[usize::from(b >> 4)]));
-                out.push(char::from(HEX[usize::from(b & 0xf)]));
-            }
-        }
-        run = i + 1;
-    }
-    out.push_str(&text[run..]);
-    out.push('"');
 }
 
 /// A JSON value checked as `serde_json` reads it into a `Value` (every escape, a lone
@@ -583,30 +536,31 @@ mod tests {
     }
 
     #[test]
-    fn replies_get_the_data_as_serde_json_writes_it() {
+    fn replies_get_the_data_as_org_json_quotes_it() {
         let mut data = CallData::new(usize::MAX);
-        let text = "<a x=\"1\">\r\n</a>\u{1}\u{2028}é\\/\u{8}\u{c}\t\u{1f}\u{7f}\u{0}😀";
+        let text = "<a x=\"1\">\r\n</a>\u{1}\u{2028}é\\/\u{8}\u{c}\t\u{1f}\u{7f}\u{0}😀\u{85}";
+        let quoted = concat!(
+            r#""<a x=\"1\">\r\n<\/a>\u0001\u2028é\\/\b\f\t\u001f"#,
+            "\u{7f}",
+            r#"\u0000😀\u0085""#
+        );
         let marker = data.keep(text.as_bytes().to_vec()).unwrap();
         let other = CallData::new(usize::MAX).keep(b"x".to_vec()).unwrap();
-        let reply = serde_json::json!({
-            "result": [marker, "kept", other, format!("{marker} and more")],
-        })
-        .to_string();
-        let expected = serde_json::json!({
-            "result": [text, "kept", other, format!("{marker} and more")],
-        })
-        .to_string();
+        let reply = format!(r#"{{"result":["{marker}","kept","{other}","{marker} and more"]}}"#);
         let spliced = data.splice(reply, usize::MAX).unwrap();
-        assert_eq!(spliced, expected);
+        assert_eq!(
+            spliced,
+            format!(r#"{{"result":[{quoted},"kept","{other}","{marker} and more"]}}"#)
+        );
         // Allocated once, at its length.
         assert_eq!(spliced.capacity(), spliced.len());
         let gone = format!("\"{}7\"", data.prefix());
         assert!(data.splice(gone, usize::MAX).is_err());
         // A reply over the limit is refused.
         let reply = format!("[\"{marker}\"]");
-        let fits = serde_json::to_string(text).unwrap().len() + 2;
+        let fits = quoted.len() + 2;
         assert!(data.splice(reply.clone(), fits - 1).is_err());
-        assert_eq!(data.splice(reply, fits).unwrap().len(), fits);
+        assert_eq!(data.splice(reply, fits).unwrap(), format!("[{quoted}]"));
     }
 
     #[test]

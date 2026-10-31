@@ -125,8 +125,8 @@ pub struct Input {
     /// For a built-in module: the prefix of this call's data markers, followed by a
     /// number. A marker stands for data the core keeps until the call returns; the `data_*`
     /// functions take a marker wherever they take data, and a reply that holds a marker as
-    /// a JSON string gets the data in its place, as `serde_json` writes a string. `None`
-    /// for plugins.
+    /// a JSON string gets the data in its place, as org.json's `JSONObject.quote` writes a
+    /// string (`<\/`). `None` for plugins.
     #[serde(default)]
     pub data_prefix: Option<String>,
 }
