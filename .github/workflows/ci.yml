@@ -101,7 +101,7 @@ jobs:
           ONCL_BUILTIN_BACKEND: native
         run: >-
           cargo test --locked -p oncl-builtin-tests --all-features --lib
-          --test commonutils --test commonutils_tokens --test commonutils_process --test applet --test applet_tokens
+          --test applet --test applet_tokens
       # The daemon as releases build it (no `e2e-prompter`, no `token-emulator`): the token
       # emulator's variable changes nothing.
       - name: Daemon without the test features

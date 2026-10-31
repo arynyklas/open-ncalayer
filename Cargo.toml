@@ -25,7 +25,6 @@ oncl-builtin-commonutils = { path = "crates/oncl-builtin-commonutils" }
 oncl-builtin-tests = { path = "crates/oncl-builtin-tests" }
 # Builds the built-in modules' WebAssembly (the daemon's build script, xtask).
 oncl-builtins-build = { path = "crates/oncl-builtins-build" }
-oncl-commonutils = { path = "crates/oncl-commonutils" }
 oncl-desktop = { path = "crates/oncl-desktop" }
 oncl-gost = { path = "crates/oncl-gost" }
 oncl-ipc = { path = "crates/oncl-ipc" }

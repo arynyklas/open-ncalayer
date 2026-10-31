@@ -3966,7 +3966,6 @@ dependencies = [
  "oncl-builtin-basics",
  "oncl-builtin-commonutils",
  "oncl-builtins-build",
- "oncl-commonutils",
  "oncl-pki",
  "oncl-plugin",
  "oncl-protocol",
@@ -3992,23 +3991,6 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "toml",
-]
-
-[[package]]
-name = "oncl-commonutils"
-version = "0.1.0-alpha.5"
-dependencies = [
- "base64",
- "der 0.8.2",
- "oncl-basics",
- "oncl-pki",
- "oncl-protocol",
- "oncl-token",
- "serde",
- "serde_json",
- "time",
- "tracing",
- "x509-cert",
 ]
 
 [[package]]
