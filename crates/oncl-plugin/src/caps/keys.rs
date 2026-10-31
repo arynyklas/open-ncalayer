@@ -309,11 +309,15 @@ pub(crate) fn keys_flow_open(state: &mut HostState, args: FlowArgs) -> HostResul
     })
 }
 
-/// The core's flow of `args`, checked: known storages and types, fixed readers that hold a
-/// token of their storage now, a start path a page may name (else none), a detail line
-/// within [`MAX_LINE`] led by a plugin's name.
+/// The core's flow of `args`, checked: known storages (offered as given, none for none) and
+/// types, fixed readers that hold a token of their storage now, a start path a page may
+/// name (else none), a detail line within [`MAX_LINE`] led by a plugin's name.
 fn key_flow(state: &mut HostState, args: FlowArgs) -> HostResult<KeyFlow> {
-    let storages = storage_kinds(&args.storages)?;
+    let storages = args
+        .storages
+        .iter()
+        .map(|name| storage_kind(name))
+        .collect::<HostResult<Vec<_>>>()?;
     let readers = match args.readers {
         FlowReaders::Live => Readers::Live,
         FlowReaders::None => Readers::None,

@@ -6,8 +6,8 @@
 mod common;
 
 use common::*;
-use oncl_basics::PageFileError;
 use oncl_basics::testing::{ScriptedPrompter, Step};
+use oncl_basics::{PageFileError, StorageKind};
 use oncl_pdk::abi::{
     self, Action, Bytes, Chosen, CmsContent, CmsOutcome, ErrorCode, FileKindArgs, Filter,
     FilterMore, FlowArgs, FlowChecks, FlowFile, FlowNone, FlowOrder, FlowOutcome, FlowReader,
@@ -101,7 +101,7 @@ fn der(certificate: &cert::Certificate) -> Vec<u8> {
 fn flow_args() -> FlowArgs {
     FlowArgs {
         action: Action::Sign,
-        storages: Vec::new(),
+        storages: vec!["PKCS12".to_owned(), "JKS".to_owned()],
         readers: FlowReaders::None,
         start: FlowStart::Empty,
         remember: false,
@@ -177,6 +177,38 @@ fn flow_open_then_pick_signs() {
         prompter.timeline(),
         ["storage", "busy", "busy closed", "key"]
     );
+}
+
+#[test]
+fn flow_offers_exactly_the_storages_given() {
+    for (storages, expected) in [
+        (
+            vec!["JKS", "PKCS12", "JKS"],
+            vec![StorageKind::Jks, StorageKind::Pkcs12, StorageKind::Jks],
+        ),
+        // None: the window offers none (only cancel), unlike `keys_choose`.
+        (vec![], vec![]),
+    ] {
+        let (prompter, services) = scripted(vec![Step::CancelStorage]);
+        let args = FlowArgs {
+            storages: storages.iter().map(|s| (*s).to_owned()).collect(),
+            ..flow_args()
+        };
+        let mut plugin = guest(&services, &[open_call(&args)]);
+        assert_eq!(run::<FlowOutcome>(&mut plugin).unwrap().opened, None);
+        assert_eq!(prompter.storage_prompts()[0].storages, expected);
+    }
+    let (prompter, services) = scripted(vec![]);
+    let args = FlowArgs {
+        storages: vec!["PKCS13".to_owned()],
+        ..flow_args()
+    };
+    let mut plugin = guest(&services, &[open_call(&args)]);
+    assert_eq!(
+        run::<FlowOutcome>(&mut plugin).unwrap_err().code,
+        ErrorCode::Invalid
+    );
+    assert!(prompter.storage_prompts().is_empty());
 }
 
 #[test]

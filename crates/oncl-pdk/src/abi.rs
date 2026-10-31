@@ -2571,7 +2571,7 @@ pub enum FlowChecks {
 pub struct FlowArgs {
     /// What the key is for.
     pub action: Action,
-    /// Storage names to offer; empty: PKCS#12 and JKS.
+    /// Storage names to offer, in order, duplicates kept; empty: none (only cancel).
     #[serde(default)]
     pub storages: Vec<String>,
     /// The readers offered for tokens.
