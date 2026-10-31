@@ -262,7 +262,8 @@ async fn unknown_module() {
     );
 }
 
-/// `getServices` over wss lists every built-in module, the embedded ones among them.
+/// `getServices` over wss lists every built-in module, the embedded ones among them, in the
+/// original's order on this system.
 #[tokio::test]
 async fn daemon_serves_every_builtin() {
     let srv = start(vec![]).await;
@@ -280,7 +281,25 @@ async fn daemon_serves_every_builtin() {
         .iter()
         .map(|s| s.as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(listed, openncalayer::builtin_modules());
+    let expected: [&str; 4] = if cfg!(windows) {
+        [
+            "kz.gov.pki.knca.basics",
+            "kz.gov.pki.knca.applet.Applet",
+            "kz.gov.pki.knca.commonUtils",
+            "kz.gov.pki.ncalayerservices.accessory",
+        ]
+    } else {
+        [
+            "kz.gov.pki.knca.applet.Applet",
+            "kz.gov.pki.ncalayerservices.accessory",
+            "kz.gov.pki.knca.basics",
+            "kz.gov.pki.knca.commonUtils",
+        ]
+    };
+    assert_eq!(listed, expected);
+    let mut sorted = listed.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, openncalayer::builtin_modules());
     for name in openncalayer::builtins::SOURCES.iter().flat_map(|s| {
         oncl_plugin::Manifest::from_toml_builtin(s.manifest)
             .unwrap()

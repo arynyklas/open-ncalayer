@@ -1,6 +1,6 @@
 //! The module's exports and the core it asks, on `wasm32`.
 
-use oncl_pdk::abi::{CoreBundles, CoreModules, ErrorCode, Window};
+use oncl_pdk::abi::{CoreBundles, CoreModules, ErrorCode, Os, Window};
 use oncl_pdk::host::{self, Level};
 use oncl_pdk::{Request, core};
 
@@ -27,6 +27,10 @@ impl crate::Core for Host {
 
     fn open_window(&self, window: Window) {
         core::open_window(window).expect("core_open_window");
+    }
+
+    fn os(&self) -> Os {
+        host::platform().expect("platform").os
     }
 }
 

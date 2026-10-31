@@ -384,9 +384,26 @@ const NO_ORIGIN: &str =
 #[tokio::test]
 async fn accessory_lists_the_daemon_modules() {
     let (registry, _) = scripted_registry(Vec::new());
-    // Every module of the registry, the accessory included: none is registered after it.
-    let names = registry.names();
-    assert!(names.contains(&"kz.gov.pki.ncalayerservices.accessory".to_owned()));
+    // Every module of the registry, the accessory included (none is registered after it),
+    // in the original's order on this system.
+    let listed: [&str; 4] = if cfg!(windows) {
+        [
+            "kz.gov.pki.knca.basics",
+            "kz.gov.pki.knca.applet.Applet",
+            "kz.gov.pki.knca.commonUtils",
+            "kz.gov.pki.ncalayerservices.accessory",
+        ]
+    } else {
+        [
+            "kz.gov.pki.knca.applet.Applet",
+            "kz.gov.pki.ncalayerservices.accessory",
+            "kz.gov.pki.knca.basics",
+            "kz.gov.pki.knca.commonUtils",
+        ]
+    };
+    let mut sorted = listed;
+    sorted.sort_unstable();
+    assert_eq!(registry.names(), sorted);
     let (_dir, ep) = start_ipc(registry).await;
     let mut c = Client::connect(&ep).await;
     c.open(1, "https://page.test").await;
@@ -398,7 +415,7 @@ async fn accessory_lists_the_daemon_modules() {
         .await;
     assert_eq!(
         json(&reply),
-        serde_json::json!({"services": names, "uuid": "u"})
+        serde_json::json!({"services": listed, "uuid": "u"})
     );
     assert_eq!(
         json(&c.call(1, INSTALL_BUNDLE).await),
