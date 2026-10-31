@@ -78,56 +78,59 @@ fn parse(reply: &str) -> Value {
     serde_json::from_str(reply).expect("reply is JSON")
 }
 
-fn code(reply: String) -> String {
-    parse(&reply)["code"]
-        .as_str()
-        .expect("reply has a code")
-        .to_owned()
-}
-
 fn assert_json_eq(reply: String, expected: Value) {
     assert_eq!(parse(&reply), expected, "reply: {reply}");
 }
 
-const GENERAL: &str = r#"{"status":false,"code":"GENERAL_ERROR","message":"General error."}"#;
+const GENERAL: &str = r#"{"code":"GENERAL_ERROR","message":"General error.","status":false}"#;
 
+/// `CommonResponse` as org.json writes it: the keys of Java's `HashMap`, which for these
+/// two key sets is the alphabet.
 #[test]
-fn invoke_success_and_cancel_shape() {
+fn reply_key_order_success_and_failure() {
     assert_eq!(
         run(r#"{"method":"ok","args":{}}"#),
-        r#"{"status":true,"body":{"result":1}}"#
+        r#"{"body":{"result":1},"status":true}"#
     );
     assert_eq!(
         run(r#"{"method":"cancel","args":{}}"#),
-        r#"{"status":true,"body":{}}"#
+        r#"{"body":{},"status":true}"#
+    );
+    assert_eq!(
+        run(r#"{"method":"customFull"}"#),
+        r#"{"code":"SIGNING_FAILURE","details":"cause","message":"Signing failure.","status":false}"#
     );
 }
 
+/// `details` of the dispatcher's own failures: `Throwable.toString()` of its
+/// `IllegalArgumentException`.
 #[test]
-fn invoke_errors() {
-    assert_json_eq(
-        run(r#"{"method":"m","apiVersion":3}"#),
-        json!({"status":false,"code":"GENERAL_ERROR","message":"General error.","details":"Supported apiVersion is 2"}),
-    );
-    assert_eq!(code(run(r#"{"method":"nope"}"#)), "GENERAL_ERROR");
+fn dispatcher_details_have_the_exception_class() {
     assert_eq!(
-        code(run(
-            r#"{"class":"PKIEssentials","method":"sign","args":{}}"#
-        )),
-        "GENERAL_ERROR"
+        run(r#"{"method":"m","apiVersion":3}"#),
+        r#"{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: Supported apiVersion is 2","message":"General error.","status":false}"#
+    );
+    assert_eq!(
+        run(r#"{"method":"nope"}"#),
+        r#"{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: nope is not defined in PKIExtras","message":"General error.","status":false}"#
+    );
+    assert_eq!(
+        run(r#"{"class":"PKIUnknown","method":"ok"}"#),
+        r#"{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: PKIUnknown is not found","message":"General error.","status":false}"#
     );
     assert!(!run(r#"{"method":"custom","args":{}}"#).contains("null"));
 }
 
+/// Strings as org.json's `quote` writes them: `/` escaped after `<`, Cyrillic as it is.
 #[test]
-fn error_field_order_is_exact() {
+fn body_strings_escaped_as_org_json() {
+    let add_info = AddInfo {
+        origin: Some("<a></a> тест".into()),
+        ..AddInfo::default()
+    };
     assert_eq!(
-        run(r#"{"method":"m","apiVersion":3}"#),
-        r#"{"status":false,"code":"GENERAL_ERROR","message":"General error.","details":"Supported apiVersion is 2"}"#
-    );
-    assert_eq!(
-        run(r#"{"method":"customFull"}"#),
-        r#"{"status":false,"code":"SIGNING_FAILURE","message":"Signing failure.","details":"cause"}"#
+        run_with(r#"{"method":"echo"}"#, &add_info),
+        r#"{"body":{"args":null,"origin":"<a><\/a> тест"},"status":true}"#
     );
 }
 
@@ -135,14 +138,9 @@ fn error_field_order_is_exact() {
 /// numbers and numeric strings truncate toward zero.
 #[test]
 fn api_version() {
-    assert_eq!(
-        run(r#"{"method":"ok","apiVersion":2}"#),
-        r#"{"status":true,"body":{"result":1}}"#
-    );
-    assert_eq!(
-        run(r#"{"method":"ok"}"#),
-        r#"{"status":true,"body":{"result":1}}"#
-    );
+    let ok = r#"{"body":{"result":1},"status":true}"#;
+    assert_eq!(run(r#"{"method":"ok","apiVersion":2}"#), ok);
+    assert_eq!(run(r#"{"method":"ok"}"#), ok);
     for good in [
         "null",
         r#""2""#,
@@ -160,7 +158,7 @@ fn api_version() {
     ] {
         assert_eq!(
             run(&format!(r#"{{"method":"ok","apiVersion":{good}}}"#)),
-            r#"{"status":true,"body":{"result":1}}"#,
+            ok,
             "apiVersion {good}"
         );
     }
@@ -168,7 +166,7 @@ fn api_version() {
         let reply = run(&format!(r#"{{"method":"ok","apiVersion":{bad}}}"#));
         assert_json_eq(
             reply,
-            json!({"status":false,"code":"GENERAL_ERROR","message":"General error.","details":"Supported apiVersion is 2"}),
+            json!({"status":false,"code":"GENERAL_ERROR","message":"General error.","details":"java.lang.IllegalArgumentException: Supported apiVersion is 2"}),
         );
     }
 }
@@ -193,30 +191,29 @@ fn class_selection() {
     // Empty or absent `class` selects the first class.
     assert_eq!(
         run(r#"{"class":"","method":"ok"}"#),
-        r#"{"status":true,"body":{"result":1}}"#
+        r#"{"body":{"result":1},"status":true}"#
     );
     // A method of the second class is not reachable without naming it.
     assert_json_eq(
         run(r#"{"method":"generateCsr","args":{}}"#),
-        json!({"status":false,"code":"GENERAL_ERROR","message":"General error.","details":"generateCsr is not defined in PKIExtras"}),
+        json!({"status":false,"code":"GENERAL_ERROR","message":"General error.","details":"java.lang.IllegalArgumentException: generateCsr is not defined in PKIExtras"}),
     );
     assert_eq!(
         run(r#"{"class":"PKIEssentials","method":"generateCsr","args":{}}"#),
-        r#"{"status":true,"body":{"result":"csr"}}"#
+        r#"{"body":{"result":"csr"},"status":true}"#
     );
     assert_json_eq(
         run(r#"{"class":"PKIEssentials","method":"sign","args":{}}"#),
-        json!({"status":false,"code":"GENERAL_ERROR","message":"General error.","details":"sign is not defined in PKIEssentials"}),
+        json!({"status":false,"code":"GENERAL_ERROR","message":"General error.","details":"java.lang.IllegalArgumentException: sign is not defined in PKIEssentials"}),
     );
-    assert_eq!(run(r#"{"class":"PKIUnknown","method":"ok"}"#), GENERAL);
-    assert_eq!(run(r#"{"class":7,"method":"ok"}"#), GENERAL);
-}
-
-#[test]
-fn not_defined_details() {
+    // `optString("class")`: a number is its text, the names match with case.
     assert_eq!(
-        run(r#"{"method":"nope"}"#),
-        r#"{"status":false,"code":"GENERAL_ERROR","message":"General error.","details":"nope is not defined in PKIExtras"}"#
+        run(r#"{"class":7,"method":"ok"}"#),
+        r#"{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: 7 is not found","message":"General error.","status":false}"#
+    );
+    assert_eq!(
+        run(r#"{"class":"pkiextras","method":"ok"}"#),
+        r#"{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: pkiextras is not found","message":"General error.","status":false}"#
     );
 }
 
@@ -224,19 +221,19 @@ fn not_defined_details() {
 fn failure_shapes() {
     assert_eq!(
         run(r#"{"method":"custom"}"#),
-        r#"{"status":false,"code":"SIGNING_FAILURE","message":"Signing failure."}"#
+        r#"{"code":"SIGNING_FAILURE","message":"Signing failure.","status":false}"#
     );
     assert_eq!(
         run(r#"{"method":"customBare"}"#),
-        r#"{"status":false,"code":"SIGNING_FAILURE"}"#
+        r#"{"code":"SIGNING_FAILURE","status":false}"#
     );
     assert_eq!(
         run(r#"{"method":"throw"}"#),
-        r#"{"status":false,"code":"INVOCATION_ERROR","message":"An invoked method threw an exception.","details":"org.json.JSONException: JSONObject[\"format\"] not found."}"#
+        r#"{"code":"INVOCATION_ERROR","details":"org.json.JSONException: JSONObject[\"format\"] not found.","message":"An invoked method threw an exception.","status":false}"#
     );
     assert_eq!(
         run(r#"{"method":"throwBare"}"#),
-        r#"{"status":false,"code":"INVOCATION_ERROR","message":"An invoked method threw an exception."}"#
+        r#"{"code":"INVOCATION_ERROR","message":"An invoked method threw an exception.","status":false}"#
     );
     assert_eq!(run(r#"{"method":"general"}"#), GENERAL);
 }
@@ -266,7 +263,7 @@ fn args_and_add_info_reach_the_method() {
 fn uuid_is_not_echoed() {
     assert_eq!(
         run(r#"{"module":"kz.gov.pki.knca.basics","uuid":"abc","method":"ok","args":{}}"#),
-        r#"{"status":true,"body":{"result":1}}"#
+        r#"{"body":{"result":1},"status":true}"#
     );
 }
 

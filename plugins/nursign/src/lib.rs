@@ -483,12 +483,12 @@ fn xmldsig(key: &Key, xml: &str) -> Result<String, Failure> {
         transforms: None,
         signature_id: None,
         signing_time_object: None,
-        strip_whitespace: false,
+        strip_whitespace: true,
         base64_line_breaks: None,
         output: XmlOutput::Serialize {
             declaration: false,
             standalone_no: false,
-            trim: false,
+            trim: true,
         },
     };
     // Unverified against the original: the parser's exception text of a malformed document.

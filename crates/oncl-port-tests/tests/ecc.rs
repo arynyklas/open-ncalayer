@@ -388,7 +388,8 @@ fn efactoring_xml_element_with_parent() {
     assert_eq!(signatures.len(), 1);
 }
 
-/// The original's serializer omits the XML declaration, for the document and an element.
+/// The original's serializer omits the XML declaration, for the document and an element,
+/// and Kalkan's signature has no line breaks and its base64 in one line.
 #[test]
 fn efactoring_xml_drops_the_declaration() {
     for (data, element, parent) in [
@@ -411,6 +412,7 @@ fn efactoring_xml_drops_the_declaration() {
         let reply = harness.call("efactoring", &request.to_string(), None);
         let xml = result(&reply);
         assert!(xml.starts_with(&data[..6]), "{xml}");
+        assert!(!xml.contains('\n') && !xml.contains("&#13;"), "{xml}");
         assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
     }
 }

@@ -8,6 +8,9 @@
 //! exceeds three quarters of it, or when a ninth key lands in one bucket of a table smaller
 //! than 64. A bucket of nine keys or more in a table of 64 or more becomes a tree, whose
 //! order is not emulated (a debug assertion).
+//!
+//! The order a bean's properties go in is the JVM's and differs between the original's
+//! builds for each OS; callers put them in the order NCALayer shows on Windows 11.
 
 /// `String.hashCode()`: `31 * h + c` over the UTF-16 code units, wrapping.
 pub fn string_hash(s: &str) -> i32 {

@@ -359,11 +359,14 @@ fn methods_need_the_class() {
             (
                 "GENERAL_ERROR".to_owned(),
                 "General error.".to_owned(),
-                format!("{method} is not defined in PKIExtras")
+                format!("java.lang.IllegalArgumentException: {method} is not defined in PKIExtras")
             )
         );
         let r = call(&b, Some("PKIEssentials"), method, Value::Null);
-        assert_eq!(failure(&r).2, format!("{method} demands arguments"));
+        assert_eq!(
+            failure(&r).2,
+            format!("java.lang.IllegalArgumentException: {method} demands arguments")
+        );
     }
     assert!(p.csr_prompts().is_empty());
     assert!(p.import_prompts().is_empty());

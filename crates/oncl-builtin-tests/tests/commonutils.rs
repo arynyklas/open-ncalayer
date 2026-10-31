@@ -713,7 +713,12 @@ fn sign_xml_whole_document_and_element() {
         json!(["PKCS12", "SIGNATURE", xml, "", ""]),
     );
     let signed = ok(&reply).as_str().unwrap();
-    assert!(signed.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root><a>текст</a>"));
+    // Without the declaration, the signature without line breaks.
+    assert!(
+        signed.starts_with("<root><a>текст</a><ds:Signature xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:SignedInfo>"),
+        "{signed}"
+    );
+    assert!(!signed.contains('\n'), "{signed}");
     let sigs = xmldsig::verify(signed.as_bytes()).unwrap();
     assert_eq!(sigs.len(), 1);
 
@@ -763,7 +768,10 @@ fn sign_xml_failures_have_the_original_messages() {
         message("<!DOCTYPE r><r/>", "", ""),
         "DOCTYPE is not allowed in XML"
     );
-    assert!(message("<r>", "", "").starts_with("malformed XML"));
+    assert_eq!(
+        message("<r>", "", ""),
+        "org.xml.sax.SAXParseException; lineNumber: 1; columnNumber: 4; XML document structures must start and end within the same entity."
+    );
 }
 
 #[test]

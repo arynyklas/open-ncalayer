@@ -55,11 +55,11 @@ fn harness_runs_a_package() {
     };
     assert_eq!(
         session.call(&call("echo"), Some("https://a.kz")),
-        r#"{"status":true,"body":"hi"}"#
+        r#"{"body":"hi","status":true}"#
     );
     // The instance keeps its state between the calls of a session.
     session.call(&call("count"), None);
     let second = session.call(&call("count"), None);
-    assert_eq!(second, r#"{"status":true,"body":2}"#);
+    assert_eq!(second, r#"{"body":2,"status":true}"#);
     assert!(harness.http_log().is_empty());
 }

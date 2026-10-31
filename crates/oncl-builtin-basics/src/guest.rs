@@ -28,9 +28,9 @@ impl crate::Core for Host {
 
     fn decode(&self, text: &str) -> Result<Vec<u8>, String> {
         if !self.is_marker(text.as_bytes()) {
-            return oncl_pdk::javab64::decode_basics(text).map_err(|e| e.to_string());
+            return oncl_pdk::javab64::decode_java(text);
         }
-        match data::decode(text, DataDecoding::BasicsBase64).expect("data_decode") {
+        match data::decode(text, DataDecoding::JavaBase64).expect("data_decode") {
             DataDecoded::Data(marker) => Ok(marker.into_bytes()),
             DataDecoded::Invalid(message) => Err(message),
         }

@@ -573,7 +573,7 @@ fn abi_types_roundtrip() {
     });
     roundtrip(abi::DataDecodeArgs {
         data: "oncl-data:00:1".to_owned(),
-        form: abi::DataDecoding::BasicsBase64,
+        form: abi::DataDecoding::JavaBase64,
     });
     roundtrip(abi::DataDecoded::Invalid("bad".to_owned()));
     roundtrip(abi::DataEncodeArgs {

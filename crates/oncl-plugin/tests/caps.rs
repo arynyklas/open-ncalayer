@@ -201,7 +201,7 @@ fn cancelled_choice_returns_null_not_error() {
             &from(ORIGIN),
         )
         .unwrap();
-    assert_eq!(cancelled, r#"{"status":true,"body":null}"#);
+    assert_eq!(cancelled, r#"{"body":null,"status":true}"#);
     assert_eq!(prompter.timeline(), ["storage"]);
 
     let mut steps = pick_key();

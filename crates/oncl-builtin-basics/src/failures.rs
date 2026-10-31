@@ -3,6 +3,7 @@
 
 use oncl_pdk::abi::{HostError, cause};
 use oncl_pdk::invoker::Failure;
+use oncl_pdk::javaexc::Throwable;
 use std::fmt::Display;
 
 const SIGNING_FAILURE: &str = "SIGNING_FAILURE";
@@ -98,7 +99,9 @@ pub(crate) fn key_failure(e: &HostError) -> Failure {
 /// certificate is signed with `cert_alg` (an OID):
 ///
 /// - the document does not parse (DOCTYPE and the core's size, depth and work limits
-///   included): the provider's `UNABLE_TO_PARSE_XML`, the parser error as the message;
+///   included): the provider's `UNABLE_TO_PARSE_XML`, the parser error as the message
+///   (the JDK parser's `SAXParseException` where the core words it so) and the
+///   `ProviderUtilException` carrying it as details;
 /// - a certificate signature algorithm other than GOST 2015-512, GOST 2004 or sha256RSA:
 ///   the original's `IllegalArgumentException`, a SIGNING_FAILURE; except sha1RSA, which
 ///   the original signs with rsa-sha1 and the core refuses as for cms (`UNKNOWN_ALGORITHM`);
@@ -107,7 +110,11 @@ pub(crate) fn xml_failure(e: &HostError, cert_alg: &str) -> Failure {
     match e.cause() {
         Some(
             cause::XML_PARSE | cause::XML_DOCTYPE | cause::XML_TOO_LARGE | cause::XML_TOO_DEEP,
-        ) => provider_failure(UNABLE_TO_PARSE_XML, e.message.clone(), &e.message),
+        ) => provider_failure(
+            UNABLE_TO_PARSE_XML,
+            e.message.clone(),
+            &Throwable::provider_util(e.message.clone()),
+        ),
         Some(cause::XML_UNSUPPORTED_ALGORITHM) if cert_alg == SHA1_WITH_RSA => {
             provider_failure(UNKNOWN_ALGORITHM, UNKNOWN_ALGORITHM, &e.message)
         }

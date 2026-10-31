@@ -1725,11 +1725,15 @@ fn arta_get_key_info_sign_info_object() {
     assert_eq!(reply, expected.to_json());
     // The official KeyInfo.
     let h = Harness::new(key("user-gost2015-sign"), vec![]);
-    let reply = parse(&text(h.call(
-        ARTA,
-        &call("getFullKeyInfo", json!(["PKCS12"])),
-        None,
-    )));
+    let raw = text(h.call(ARTA, &call("getFullKeyInfo", json!(["PKCS12"])), None));
+    // Keys sharing a HashMap bucket in commonUtils' order on Windows 11.
+    let at = |key: &str| raw.find(&format!("\"{key}\":")).unwrap();
+    assert!(
+        at("pem") < at("keyId") && at("keyId") < at("alias"),
+        "{raw}"
+    );
+    assert!(at("subjectDn") < at("algorithm"), "{raw}");
+    let reply = parse(&raw);
     let object = &reply["responseObject"];
     assert_eq!(object["alias"], e.alias.as_str());
     assert_eq!(

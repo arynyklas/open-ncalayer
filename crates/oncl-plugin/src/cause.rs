@@ -28,7 +28,7 @@ pub fn cms(e: &CmsError) -> &'static str {
 /// The cause of an XML signature failure; a key's failure inside it is the key's.
 pub fn xml(e: &XmlError) -> &'static str {
     match e {
-        XmlError::Parse(_) => cause::XML_PARSE,
+        XmlError::Parse(_) | XmlError::NotWellFormed(_) => cause::XML_PARSE,
         XmlError::Doctype => cause::XML_DOCTYPE,
         XmlError::TooLarge => cause::XML_TOO_LARGE,
         XmlError::TooDeep => cause::XML_TOO_DEEP,

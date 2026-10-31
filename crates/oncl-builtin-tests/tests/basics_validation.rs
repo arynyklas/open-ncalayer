@@ -32,7 +32,7 @@ use time::macros::datetime;
 const OCSP_URL: &str = "http://ocsp.synthetic.test/";
 /// When `MockOcsp` says `inter-revoked-…` was revoked.
 const REVOKED_AT: OffsetDateTime = datetime!(2026-02-03 04:05:06 UTC);
-const EMPTY: &str = r#"{"status":true,"body":{}}"#;
+const EMPTY: &str = r#"{"body":{},"status":true}"#;
 
 fn entry(name: &str) -> KeyEntry {
     let key = synthetic(name);
@@ -139,7 +139,7 @@ fn refused(args: Value) -> String {
     reply
 }
 
-const CERTIFICATE_PARSING_FAILURE: &str = r#"{"status":false,"code":"CERTIFICATE_PARSING_FAILURE","message":"Certificate parsing failure."}"#;
+const CERTIFICATE_PARSING_FAILURE: &str = r#"{"code":"CERTIFICATE_PARSING_FAILURE","message":"Certificate parsing failure.","status":false}"#;
 
 #[test]
 fn default_chain_disables_synthetic_key() {

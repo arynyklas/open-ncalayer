@@ -1,26 +1,24 @@
 //! `CommonInvoker` semantics: the "apiVersion 2" dispatcher behind `kz.gov.pki.knca.basics`.
 //!
 //! A request is a JSON object `{"apiVersion"?, "class"?, "method", "args"?}`; the reply is the
-//! original's `CommonResponse`: `{"status":true,"body":…}` on success and
-//! `{"status":false,"code",…}` on failure. `uuid` is never echoed.
+//! original's `CommonResponse` as org.json writes it: `{"body":…,"status":true}` on success
+//! and `{"code",…,"status":false}` on failure, the keys in the order of Java's `HashMap`
+//! (`body,status`; `code,details,message,status`), strings escaped as org.json escapes them.
+//! A failure of the dispatcher itself has its `IllegalArgumentException` as `details`
+//! (`Throwable.toString()`). `uuid` is never echoed.
 //!
 //! [`invoke`] is the built-in modules' dialect. [`java`] is the original's dispatcher to the
-//! byte: org.json parsing, `details` with their Java exception class, the key order of
-//! Java's `HashMap`, and what happens to a request that fails before the dispatcher's `try`.
+//! byte: org.json parsing, the key order of Java's `HashMap` inside `body` too, and what
+//! happens to a request that fails before the dispatcher's `try`.
 
 pub mod java;
 
-use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::AddInfo;
-use crate::envelope::to_json;
-use crate::orgjson::opt_int;
+use crate::javaexc::Throwable;
+use crate::orgjson::{JObject, JValue, opt_int};
 
-const GENERAL_ERROR: &str = "GENERAL_ERROR";
-const GENERAL_MESSAGE: &str = "General error.";
-const INVOCATION_ERROR: &str = "INVOCATION_ERROR";
-const INVOCATION_MESSAGE: &str = "An invoked method threw an exception.";
 const API_VERSION: i32 = 2;
 
 /// Why a call failed; becomes the `code`/`message`/`details` of the reply.
@@ -60,41 +58,20 @@ pub trait NlClass: Send + Sync {
 /// Dispatches a request to `classes` and returns the serialized reply. An empty or absent
 /// `class` selects `classes[0]`.
 pub fn invoke(request: &str, add_info: &AddInfo, classes: &[&dyn NlClass]) -> String {
-    let reply = dispatch(request, add_info, classes);
-    let response = match &reply {
-        Ok(body) => CommonResponse {
-            status: true,
-            code: None,
-            message: None,
-            details: None,
-            body: Some(body),
-        },
-        Err(failure) => {
-            let (code, message, details) = match failure {
-                Failure::General(details) => (GENERAL_ERROR, Some(GENERAL_MESSAGE), details),
-                Failure::Invocation(details) => {
-                    (INVOCATION_ERROR, Some(INVOCATION_MESSAGE), details)
-                }
-                Failure::Custom {
-                    code,
-                    message,
-                    details,
-                } => (code.as_str(), message.as_deref(), details),
-            };
-            CommonResponse {
-                status: false,
-                code: Some(code),
-                message,
-                details: details.as_deref(),
-                body: None,
-            }
+    match dispatch(request, add_info, classes) {
+        Ok(body) => {
+            let mut reply = JObject::hash_map();
+            reply.put("status", true);
+            reply.put("body", in_order(body));
+            reply.to_json()
         }
-    };
-    to_json(&response)
+        Err(failure) => java::failure_json(&failure),
+    }
 }
 
 fn dispatch(request: &str, add_info: &AddInfo, classes: &[&dyn NlClass]) -> CallResult {
     let general = || Failure::General(None);
+    let iae = |message: String| Failure::General(Some(Throwable::iae(message).to_string()));
     let request: Value = serde_json::from_str(request).map_err(|_| general())?;
     let request = request.as_object().ok_or_else(general)?;
     let method = request
@@ -103,39 +80,41 @@ fn dispatch(request: &str, add_info: &AddInfo, classes: &[&dyn NlClass]) -> Call
         .ok_or_else(general)?;
 
     if opt_int(request, "apiVersion", API_VERSION) != API_VERSION {
-        return Err(Failure::General(Some(format!(
-            "Supported apiVersion is {API_VERSION}"
-        ))));
+        return Err(iae(format!("Supported apiVersion is {API_VERSION}")));
     }
 
-    let class = match request.get("class") {
-        None | Some(Value::Null) => classes.first(),
-        Some(Value::String(name)) if name.is_empty() => classes.first(),
-        Some(Value::String(name)) => classes.iter().find(|c| c.class_name() == name),
-        Some(_) => None,
+    // `optString("class")`: a value that is not a string is its text.
+    let name = match request.get("class") {
+        None | Some(Value::Null) => String::new(),
+        Some(value) => JValue::from(value.clone()).java_string(),
+    };
+    let class = if name.is_empty() {
+        classes.first()
+    } else {
+        classes.iter().find(|c| c.class_name() == name)
     }
-    .ok_or_else(general)?;
+    .ok_or_else(|| iae(format!("{name} is not found")))?;
 
     let args = request.get("args").and_then(Value::as_object);
     class.call(method, args, add_info).unwrap_or_else(|| {
-        Err(Failure::General(Some(format!(
+        Err(iae(format!(
             "{method} is not defined in {}",
             class.class_name()
-        ))))
+        )))
     })
 }
 
-/// The original's `CommonResponse`; fields serialize in declaration order and `None` fields are
-/// omitted, as org.json does.
-#[derive(Serialize)]
-struct CommonResponse<'a> {
-    status: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    code: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    details: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    body: Option<&'a Value>,
+/// `body` as org.json writes it, the keys of its objects in the order the method put them.
+fn in_order(body: Value) -> JValue {
+    match body {
+        Value::Object(map) => {
+            let mut object = JObject::stringer();
+            for (key, value) in map {
+                object.put(key, in_order(value));
+            }
+            JValue::Obj(object)
+        }
+        Value::Array(items) => JValue::Arr(items.into_iter().map(in_order).collect()),
+        other => JValue::from(other),
+    }
 }

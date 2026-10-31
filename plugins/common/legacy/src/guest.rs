@@ -28,7 +28,8 @@ pub fn cades(key: &Key, args: SignCmsExArgs) -> Result<Vec<u8>, String> {
 /// Kalkan's `XMLUtil.createXmlSignature`: the whole document for an empty `tbs`, else the
 /// element it selects, the signature into the element `parent` selects (the document
 /// element for an empty one); `tbs` and `parent` equal regardless of case are refused with
-/// Kalkan's text. Written without an XML declaration, as its serializer wrote it.
+/// Kalkan's text. Written as NCALayer's modules return it: no line breaks inside the
+/// signature, base64 in one line, no XML declaration, no whitespace around the document.
 ///
 /// # Errors
 ///
@@ -61,12 +62,12 @@ pub fn sign_xml(key: &Key, xml: &str, tbs: &str, parent: &str) -> Result<String,
             transforms: None,
             signature_id: None,
             signing_time_object: None,
-            strip_whitespace: false,
+            strip_whitespace: true,
             base64_line_breaks: None,
             output: XmlOutput::Serialize {
                 declaration: false,
                 standalone_no: false,
-                trim: false,
+                trim: true,
             },
         })
         // Unverified against the original: the messages of failed XML signatures (the host's
@@ -227,12 +228,14 @@ pub fn select(choice: Select<'_>) -> Result<Option<Key>, String> {
     .map_err(|e| e.message)
 }
 
-/// The official `KeyInfo` of `alias` and its certificate `der`, in the field order of the
-/// bean (which decides the order of keys sharing a `HashMap` bucket): `alias`, `keyId`
+/// The official `KeyInfo` of `alias` and its certificate `der`: `alias`, `keyId`
 /// (subjectKeyIdentifier hex), `algorithm` (Kalkan's key algorithm), `subjectCn`,
 /// `subjectDn` and `issuerDn` (Kalkan's DN texts), `issuerCn`, `serialNumber` (hex),
 /// `certNotAfter`/`certNotBefore` (Unix milliseconds as text), `authorityKeyIdentifier`
-/// (only with a `keyId`, both read in one `try`) and `pem`; absent values left out.
+/// (only with a `keyId`, both read in one `try`) and `pem`; absent values left out. The
+/// keys sharing a `HashMap` bucket are put in the order NCALayer's commonUtils writes them
+/// on Windows 11 (`pem`, `keyId`, `alias`; `subjectDn`, `algorithm`): the order the bean's
+/// properties are read in depends on the JVM.
 ///
 /// # Errors
 ///
@@ -243,11 +246,12 @@ pub fn official_key_info(alias: &str, der: &[u8]) -> Result<JObject, String> {
     let (_, issuer) = subject_and_issuer(der)?;
     let key_id = details.ski_hex.clone();
     let mut bean = JObject::hash_map();
-    bean.put("alias", alias);
+    bean.put("pem", info.pem.as_str());
     bean.put_opt("keyId", key_id.clone());
+    bean.put("alias", alias);
+    bean.put("subjectDn", details.subject_dn.as_str());
     bean.put_opt("algorithm", kalkan_key_alg_name(&info.spki_alg_oid));
     bean.put_opt("subjectCn", info.subject_cn.clone());
-    bean.put("subjectDn", details.subject_dn.as_str());
     bean.put_opt("issuerCn", common_name(&issuer));
     bean.put("issuerDn", details.issuer_dn.as_str());
     bean.put("serialNumber", info.serial_hex.as_str());
@@ -257,6 +261,5 @@ pub fn official_key_info(alias: &str, der: &[u8]) -> Result<JObject, String> {
         "authorityKeyIdentifier",
         key_id.and(details.aki_hex.clone()),
     );
-    bean.put("pem", info.pem.as_str());
     Ok(bean)
 }

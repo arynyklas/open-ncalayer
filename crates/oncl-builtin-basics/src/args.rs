@@ -50,9 +50,9 @@ pub(crate) fn storage_list(names: &[Value]) -> Result<Vec<String>, Failure> {
 }
 
 /// Java's `Base64.getDecoder()` as the original's basics module decodes `data` and
-/// certificates.
-pub(crate) fn decode_base64(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    oncl_pdk::javab64::decode_basics(s)
+/// certificates: the message of its `IllegalArgumentException` on failure.
+pub(crate) fn decode_base64(s: &str) -> Result<Vec<u8>, String> {
+    oncl_pdk::javab64::decode_java(s)
 }
 
 /// `der` as base64, for the replies.

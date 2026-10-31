@@ -88,6 +88,96 @@ const KEY_INFO: [&str; 12] = [
     "pem",
 ];
 
+/// Orders NCALayer's modules write, each over the keys in an order they could have been put
+/// in. Within a bucket the order is the order of insertion, and the bean behind getKeyInfo
+/// is read in an order the JVM decides: Windows 11 gives `pem,keyId,alias` and
+/// `subjectDn,algorithm`, Linux `pem,alias,keyId` with either order of the second pair,
+/// Windows 7 `keyId,alias,pem` and `algorithm,subjectDn`. The Windows 11 order is the one
+/// taken.
+#[test]
+fn orders_confirmed_in_the_wild() {
+    let new_map = |keys: &[&'static str]| ordered(keys, DEFAULT_CAPACITY);
+    // CommonInvoker's CommonResponse.
+    assert_eq!(new_map(&["status", "body"]), ["body", "status"]);
+    assert_eq!(
+        new_map(&["status", "code", "message"]),
+        ["code", "message", "status"]
+    );
+    assert_eq!(
+        new_map(&["status", "code", "message", "details"]),
+        ["code", "details", "message", "status"]
+    );
+    // commonUtils' ResponseMessage, with and without the request's uuid.
+    assert_eq!(
+        new_map(&["code", "responseObject"]),
+        ["responseObject", "code"]
+    );
+    assert_eq!(
+        new_map(&["code", "responseObject", "uuid"]),
+        ["responseObject", "code", "uuid"]
+    );
+    assert_eq!(
+        new_map(&["code", "message", "uuid"]),
+        ["code", "message", "uuid"]
+    );
+    // getKeyInfo, Windows 11.
+    assert_eq!(
+        new_map(&[
+            "pem",
+            "keyId",
+            "alias",
+            "subjectDn",
+            "algorithm",
+            "subjectCn",
+            "issuerCn",
+            "issuerDn",
+            "serialNumber",
+            "certNotAfter",
+            "certNotBefore",
+            "authorityKeyIdentifier",
+        ]),
+        [
+            "certNotBefore",
+            "issuerCn",
+            "authorityKeyIdentifier",
+            "serialNumber",
+            "certNotAfter",
+            "issuerDn",
+            "pem",
+            "keyId",
+            "alias",
+            "subjectCn",
+            "subjectDn",
+            "algorithm",
+        ]
+    );
+    // accessory's getBundles: the framework's own bundle first, then as installed.
+    assert_eq!(
+        new_map(&[
+            "org.apache.felix.framework",
+            "kz.gov.pki.osgi.layer.common",
+            "kz.gov.pki.kalkan.knca_provider_jce_kalkan",
+            "kz.gov.pki.kalkan.xmldsig",
+            "kz.gov.pki.provider.knca_provider_util",
+            "kz.gov.pki.api.layer.NCALayerServices",
+            "kz.gov.pki.knca.applet.knca_applet",
+            "kz.gov.pki.osgi.layer.websocket",
+            "uuid",
+        ]),
+        [
+            "kz.gov.pki.osgi.layer.common",
+            "org.apache.felix.framework",
+            "kz.gov.pki.api.layer.NCALayerServices",
+            "kz.gov.pki.knca.applet.knca_applet",
+            "kz.gov.pki.kalkan.xmldsig",
+            "kz.gov.pki.provider.knca_provider_util",
+            "kz.gov.pki.kalkan.knca_provider_jce_kalkan",
+            "kz.gov.pki.osgi.layer.websocket",
+            "uuid",
+        ]
+    );
+}
+
 #[test]
 fn resize_keeps_relative_order() {
     // The thirteenth key doubles the table: keys of one bucket of 16 split between two of

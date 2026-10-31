@@ -115,12 +115,12 @@ fn xmldsig_args(key: &Key, xml: &str) -> SignXmlExArgs {
         transforms: None,
         signature_id: None,
         signing_time_object: None,
-        strip_whitespace: false,
+        strip_whitespace: true,
         base64_line_breaks: None,
         output: XmlOutput::Serialize {
             declaration: false,
             standalone_no: false,
-            trim: false,
+            trim: true,
         },
     }
 }

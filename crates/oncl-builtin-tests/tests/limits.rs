@@ -95,7 +95,7 @@ fn origin() -> AddInfo {
 fn signed(reply: Reply) -> usize {
     let text = reply.into_text().expect("a text reply");
     assert!(
-        text.starts_with(r#"{"status":true"#),
+        text.starts_with(r#"{"body":"#) && text.ends_with(r#""status":true}"#),
         "{}",
         &text[..text.len().min(300)]
     );
@@ -329,6 +329,6 @@ fn calls_without_windows_do_not_wait_for_another_pages_window() {
     release.wait();
     assert_eq!(
         window.join().unwrap().into_text().unwrap(),
-        r#"{"status":true,"body":{}}"#
+        r#"{"body":{},"status":true}"#
     );
 }

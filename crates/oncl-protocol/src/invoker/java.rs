@@ -177,6 +177,11 @@ fn dispatch(parsed: &Parsed, add_info: &AddInfo, classes: &[&dyn NlClass]) -> Ca
 
 /// The failure reply of `failure`.
 fn failure(failure: &Failure) -> Reply {
+    Reply::Text(failure_json(failure))
+}
+
+/// The text of the failure reply of `failure`.
+pub(super) fn failure_json(failure: &Failure) -> String {
     let (code, message, details) = match failure {
         Failure::General(details) => (GENERAL_ERROR, Some(GENERAL_MESSAGE), details),
         Failure::Invocation(details) => (INVOCATION_ERROR, Some(INVOCATION_MESSAGE), details),
@@ -191,5 +196,5 @@ fn failure(failure: &Failure) -> Reply {
     reply.put("code", code);
     reply.put_opt("message", message);
     reply.put_opt("details", details.as_deref());
-    Reply::Text(reply.to_json())
+    reply.to_json()
 }

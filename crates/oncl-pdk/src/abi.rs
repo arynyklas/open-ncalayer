@@ -202,7 +202,10 @@ pub mod cause {
     pub const CMS_SIGNING_CERTIFICATE_MISMATCH: &str = "cms.signing_certificate_mismatch";
     /// A CMS signature that cannot be made as asked.
     pub const CMS_CONSTRAINT: &str = "cms.constraint";
-    /// An XML document that does not parse.
+    /// An XML document that does not parse; a document that ends inside its root element
+    /// has the JDK parser's text as the message (`org.xml.sax.SAXParseException; lineNumber:
+    /// …; columnNumber: …; XML document structures must start and end within the same
+    /// entity.`).
     pub const XML_PARSE: &str = "xml.parse";
     /// An XML document with a DOCTYPE.
     pub const XML_DOCTYPE: &str = "xml.doctype";
@@ -1079,7 +1082,9 @@ pub struct SignRawArgs {
     pub data: Bytes,
 }
 
-/// `keys_sign_xml`: an enveloped XMLDSig.
+/// `keys_sign_xml`: an enveloped XMLDSig, written as Kalkan's `XMLUtil.createXmlSignature`
+/// in NCALayer's modules: no line breaks inside the signature, base64 in one line, no XML
+/// declaration and no whitespace around the document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignXmlArgs {
     /// The key.
@@ -2180,7 +2185,10 @@ pub enum XmlOutput {
 }
 
 /// `keys_sign_xml_ex`: an XML signature as the plugin's clients expect it. Unset fields
-/// give [`SignXmlArgs`]'s signature.
+/// give [`SignXmlArgs`]'s algorithms, canonicalization and placement, laid out with
+/// Santuario's line breaks and returned as is; [`SignXmlArgs`]'s own form is
+/// `strip_whitespace` with `output: Serialize { declaration: false, standalone_no: false,
+/// trim: true }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignXmlExArgs {
     /// The key.
@@ -2222,10 +2230,11 @@ pub struct SignXmlExArgs {
     /// A signing-time object (needs `signature_id`).
     #[serde(default)]
     pub signing_time_object: Option<SigningTimeObject>,
-    /// No line breaks between the signature's elements.
+    /// No line breaks between the signature's elements (`false`: Santuario's line breaks).
     #[serde(default)]
     pub strip_whitespace: bool,
-    /// Base64 in lines of 76 characters; `None`: as Kalkan (in lines).
+    /// Base64 in lines of 76 characters; `None`: as Santuario does with the same switch, in
+    /// lines unless `strip_whitespace`.
     #[serde(default)]
     pub base64_line_breaks: Option<bool>,
     /// The output form.
@@ -2413,12 +2422,9 @@ pub struct DataRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DataDecoding {
-    /// Java's `Base64.getDecoder()` with its messages (`crate::javab64::decode_java`).
+    /// Java's `Base64.getDecoder()` with its messages (`crate::javab64::decode_java`), as
+    /// the basics module and most plugins decode.
     JavaBase64,
-    /// The basics module's base64: the standard alphabet, padded when the text ends with
-    /// `=`, else unpadded, with the `base64` crate's messages
-    /// (`crate::javab64::decode_basics`).
-    BasicsBase64,
 }
 
 /// `data_decode`: kept data (its UTF-8 text) decoded and kept.
