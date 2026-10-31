@@ -17,7 +17,7 @@ use oncl_plugin::{BUILTIN_FUEL, BuiltinLimits, Builtins, Engine as WasmEngine, H
 use oncl_protocol::{AddInfo, Reply};
 use oncl_testkit::{read, synthetic};
 use serde_json::json;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
@@ -92,6 +92,13 @@ fn origin() -> AddInfo {
     }
 }
 
+/// Taken by the tests whose calls keep much data: what the process keeps at once is
+/// bounded (`BUILTIN_KEPT_BUDGET`, 256 MiB on 32-bit targets), so their calls take turns.
+fn one_large_call_at_a_time() -> MutexGuard<'static, ()> {
+    static TURN: Mutex<()> = Mutex::new(());
+    TURN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// The reply's length, the reply a signature.
 fn signed(reply: Reply) -> usize {
     let text = reply.into_text().expect("a text reply");
@@ -134,6 +141,7 @@ fn limits_32_bit_are_the_defaults_here() {
 #[test]
 fn raw_of_a_large_document_fits() {
     // The core signs the document itself: it never comes back into the module.
+    let _turn = one_large_call_at_a_time();
     let data: Vec<u8> = (0..64 * MIB).map(|i| (i % 251) as u8).collect();
     let request = json!({
         "module": MODULE_NAME,
@@ -177,6 +185,7 @@ fn xml_doc(n: usize, len: usize) -> String {
 fn batches_of_short_documents_fit() {
     // Many documents, each shorter than a long string, add up: the core keeps them. The
     // storage window is cancelled, so nothing is signed; the modules answer.
+    let _turn = one_large_call_at_a_time();
     for (doc, total) in [(8 << 10, 16 * MIB), (1 << 10, 4 * MIB)] {
         let docs: Vec<String> = (0..total / doc).map(|n| xml_doc(n, doc)).collect();
         let builtins = Builtins::load(
@@ -222,6 +231,7 @@ fn batches_of_short_documents_fit() {
 #[test]
 fn sign_max_page_file_fits() {
     // The largest file a page may name, signed by commonUtils as an attached CAdES.
+    let _turn = one_large_call_at_a_time();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("doc.bin");
     let data: Vec<u8> = (0..64 * MIB).map(|i| (i % 251) as u8).collect();
@@ -258,6 +268,7 @@ fn sign_max_page_file_fits() {
 #[test]
 fn reply_over_256_mib_on_64_bit() {
     // The largest data a message carries base64-encoded, less room for the request's JSON.
+    let _turn = one_large_call_at_a_time();
     let size = MAX_MESSAGE / 4 * 3 - MIB;
     let request = cms_request(size);
     assert!(request.len() <= MAX_MESSAGE);
@@ -268,6 +279,7 @@ fn reply_over_256_mib_on_64_bit() {
 
 #[test]
 fn fuel_covers_max_message() {
+    let _turn = one_large_call_at_a_time();
     // The fuel grows linearly with the data: measured at two sizes, extrapolated to the
     // largest data a message carries, with a margin of four.
     let fuel = |size: usize| {
@@ -288,6 +300,7 @@ fn fuel_covers_max_message() {
 
 #[test]
 fn memory_limit_is_a_drop_not_a_hang() {
+    let _turn = one_large_call_at_a_time();
     // Over the guest's memory: data in strings short enough to reach the module itself.
     let short: Vec<String> = (0..64 * 1024).map(|_| "A".repeat(128)).collect();
     let in_guest = json!({
@@ -336,6 +349,7 @@ fn memory_limit_is_a_drop_not_a_hang() {
 #[test]
 #[ignore = "a measurement"]
 fn largest_cms_data() {
+    let _turn = one_large_call_at_a_time();
     let fits = |mib: usize| {
         let builtins = basics(BuiltinLimits::default(), 1);
         let module = builtins.module(MODULE_NAME).unwrap();
