@@ -13,7 +13,6 @@ repository = "https://github.com/arynyklas/open-ncalayer"
 publish = false
 
 [workspace.dependencies]
-oncl-accessory = { path = "crates/oncl-accessory" }
 oncl-applet = { path = "crates/oncl-applet" }
 oncl-basics = { path = "crates/oncl-basics" }
 # The accessory module's guest: the core embeds its WebAssembly; xtask reads its bundles.

@@ -3895,15 +3895,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "oncl-accessory"
-version = "0.1.0-alpha.5"
-dependencies = [
- "oncl-protocol",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "oncl-applet"
 version = "0.1.0-alpha.5"
 dependencies = [
@@ -3952,7 +3943,6 @@ version = "0.1.0-alpha.5"
 dependencies = [
  "base64",
  "der 0.8.2",
- "oncl-accessory",
  "oncl-applet",
  "oncl-basics",
  "oncl-builtin-accessory",

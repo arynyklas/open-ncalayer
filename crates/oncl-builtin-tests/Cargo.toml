@@ -9,7 +9,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-oncl-accessory.workspace = true
 oncl-applet.workspace = true
 # `testing`: `ScriptedPrompter` and `MemoryRecentPath`, which the tests answer dialogs with.
 oncl-basics = { workspace = true, features = ["testing"] }
