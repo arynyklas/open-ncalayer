@@ -431,6 +431,7 @@ fn builtin_limits_apply() {
         },
         high_water: 4 << 20,
         idle: 2,
+        max_live: 2,
     };
     for (wat, what) in [
         (answering_after(&spin(1_000_000), "ok"), "fuel"),
@@ -455,32 +456,150 @@ fn builtin_limits_apply() {
     assert!(b.stats(BUILTIN_MODULE).unwrap().max_fuel > 1_000);
 }
 
+/// Plugins whose `request_install` blocks until [`Gate::open`], counting the calls inside.
+#[derive(Default)]
+struct Gate {
+    /// `(inside now, most inside at once, open)`.
+    state: Mutex<(usize, usize, bool)>,
+    changed: std::sync::Condvar,
+}
+
+impl Gate {
+    /// Waits until `n` calls are inside (or 30 s pass); then how many are.
+    fn wait_inside(&self, n: usize) -> usize {
+        let state = self.state.lock().unwrap();
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, std::time::Duration::from_secs(30), |s| s.0 < n)
+            .unwrap();
+        state.0
+    }
+
+    fn open(&self) {
+        self.state.lock().unwrap().2 = true;
+        self.changed.notify_all();
+    }
+
+    /// The most calls inside at once.
+    fn most(&self) -> usize {
+        self.state.lock().unwrap().1
+    }
+}
+
+impl Bundles for Gate {
+    fn services(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn bundles(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    fn request_install(&self, _: &str, _: &str) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.0 += 1;
+        state.1 = state.1.max(state.0);
+        self.changed.notify_all();
+        let mut state = self.changed.wait_while(state, |s| !s.2).unwrap();
+        state.0 -= 1;
+        true
+    }
+}
+
+/// A built-in module whose calls block in `core_install_bundle` until `gate` opens, with
+/// `max_live` live instances.
+fn gated(gate: &Arc<Gate>, max_live: usize) -> Arc<Builtins> {
+    let hooks = CoreHooks {
+        builtin_modules: vec![BUILTIN_MODULE.to_owned()],
+        bundles: Arc::clone(gate) as Arc<dyn Bundles>,
+        ui: Arc::new(|_| {}),
+        core_version: "9.8.7".to_owned(),
+    };
+    Arc::new(builtins_with(
+        "builtin = true",
+        &probe(&[(
+            Import::CoreInstallBundle,
+            cbor(json!({"symname": "kz.example.echo"})),
+        )]),
+        services(),
+        BuiltinLimits {
+            idle: 1,
+            max_live,
+            ..BuiltinLimits::default()
+        },
+        Some(Arc::new(hooks)),
+    ))
+}
+
+/// `n` calls of the module of `b` on their own threads.
+fn calls(b: &Arc<Builtins>, n: usize) -> Vec<thread::JoinHandle<Reply>> {
+    (0..n)
+        .map(|_| {
+            let m = b.module(BUILTIN_MODULE).unwrap();
+            thread::spawn(move || m.process("{}", &from("https://x.kz")))
+        })
+        .collect()
+}
+
 #[test]
 fn busy_pool_waits() {
-    let limits = BuiltinLimits {
-        idle: 1,
-        ..BuiltinLimits::default()
-    };
-    let b = Arc::new(builtins(
-        "",
-        &answering_after(&spin(5_000_000), "ok"),
-        services(),
-        limits,
-    ));
-    let start = Arc::new(Barrier::new(2));
-    let calls: Vec<_> = (0..2)
-        .map(|_| {
-            let (b, start) = (Arc::clone(&b), Arc::clone(&start));
-            thread::spawn(move || {
-                start.wait();
-                text(call(&b, "{}"))
-            })
-        })
-        .collect();
-    for call in calls {
-        assert_eq!(call.join().unwrap(), "ok");
+    let gate = Arc::new(Gate::default());
+    let b = gated(&gate, 1);
+    let first = calls(&b, 1);
+    let first_inside = gate.wait_inside(1);
+    let second = calls(&b, 1);
+    // The second call waits for the one instance instead of making another.
+    thread::sleep(std::time::Duration::from_millis(300));
+    let inside_while_busy = gate.wait_inside(0);
+    let second_done = second[0].is_finished();
+    gate.open();
+    assert_eq!(first_inside, 1);
+    assert_eq!(inside_while_busy, 1, "the second call is not in the module");
+    assert!(!second_done, "the second call waits");
+    for call in first.into_iter().chain(second) {
+        assert!(matches!(call.join().unwrap(), Reply::Text(_)));
     }
+    assert_eq!(gate.most(), 1);
     assert_eq!(b.stats(BUILTIN_MODULE).unwrap().calls, 2);
+    assert_eq!(b.idle(BUILTIN_MODULE), Some(1));
+}
+
+#[test]
+fn busy_pool_is_bounded() {
+    let gate = Arc::new(Gate::default());
+    let b = gated(&gate, 2);
+    let all = calls(&b, 6);
+    let inside = gate.wait_inside(2);
+    thread::sleep(std::time::Duration::from_millis(300));
+    let most = gate.most();
+    gate.open();
+    assert_eq!(inside, 2);
+    assert_eq!(most, 2, "never more instances than `max_live`");
+    for call in all {
+        assert!(matches!(call.join().unwrap(), Reply::Text(_)));
+    }
+    assert_eq!(gate.most(), 2);
+    assert_eq!(b.stats(BUILTIN_MODULE).unwrap().calls, 6);
+    assert_eq!(b.idle(BUILTIN_MODULE), Some(1));
+}
+
+#[test]
+fn load_refuses_too_many_modules() {
+    let manifest = builtin_manifest("");
+    let wasm = wasm(&answering("ok"));
+    let source = BuiltinSource {
+        manifest: &manifest,
+        wasm: &wasm,
+    };
+    let sources = vec![source; oncl_plugin::BUILTIN_MAX_MODULES + 1];
+    let loaded = Builtins::load(
+        &Engine::new(),
+        services(),
+        &sources,
+        BuiltinLimits::default(),
+        None,
+    );
+    assert!(matches!(loaded, Err(LoadError::Invalid(_))));
 }
 
 // --- core_* -------------------------------------------------------------------------------

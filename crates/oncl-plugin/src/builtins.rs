@@ -6,9 +6,11 @@
 //! of the module, or makes one, and after it the instance lets go of every key, password and
 //! consent ([`Instance`]'s `release_all`) before it goes back to the pool, so nothing of one
 //! page's call reaches another's. At most [`BuiltinLimits::idle`] idle instances are kept per
-//! module, each within [`BuiltinLimits::high_water`]; while every instance is busy, a call
-//! makes one more instead of being refused. The pool is apart from the plugins' and their
-//! [`MAX_INSTANCES`](crate::MAX_INSTANCES): plugins cannot crowd the built-in modules out.
+//! module, each within [`BuiltinLimits::high_water`]; at most [`BuiltinLimits::max_live`]
+//! instances of a module live at once, and while all of them are busy a call waits for one,
+//! as a native module's call waited for its turn of the windows. The pool is apart from the
+//! plugins' and their [`MAX_INSTANCES`](crate::MAX_INSTANCES): plugins cannot crowd the
+//! built-in modules out.
 //!
 //! A built-in module that fails (traps, runs out of fuel or memory, answers malformed, or
 //! panics the host) has the connection dropped ([`Reply::Drop`]), as a native module's
@@ -16,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use oncl_protocol::{AddInfo, Module, Reply};
 use semver::Version;
@@ -50,6 +52,28 @@ pub const BUILTIN_HIGH_WATER: usize = 16 << 20;
 /// The idle instances kept per built-in module.
 pub const BUILTIN_IDLE: usize = 2;
 
+/// The instances of a built-in module alive at once, on 64-bit targets.
+#[cfg(target_pointer_width = "64")]
+pub const BUILTIN_MAX_LIVE: usize = 32;
+/// The instances of a built-in module alive at once, on 32-bit targets: one, so the
+/// modules' memory stays within [`BUILTIN_MEMORY_BUDGET`].
+#[cfg(not(target_pointer_width = "64"))]
+pub const BUILTIN_MAX_LIVE: usize = 1;
+
+/// The most built-in modules the core embeds; [`Builtins::load`] refuses more.
+pub const BUILTIN_MAX_MODULES: usize = 4;
+
+/// The address space all built-in modules' instances may take at their largest, on 32-bit
+/// targets: 1.5 GiB of the process's 2 GiB.
+#[cfg(not(target_pointer_width = "64"))]
+pub const BUILTIN_MEMORY_BUDGET: usize = 1536 << 20;
+
+#[cfg(not(target_pointer_width = "64"))]
+const _: () = assert!(
+    BUILTIN_MAX_MODULES * BUILTIN_MAX_LIVE * BUILTIN_MAX_MEMORY <= BUILTIN_MEMORY_BUDGET,
+    "the built-in modules' instances must fit the 32-bit address space"
+);
+
 /// The fuel of one call of a built-in module.
 pub const BUILTIN_FUEL: u64 = 200_000_000_000;
 
@@ -81,11 +105,14 @@ pub struct BuiltinLimits {
     pub high_water: usize,
     /// The idle instances kept per module.
     pub idle: usize,
+    /// The instances of a module alive at once (at least one); a call waits while all
+    /// are busy.
+    pub max_live: usize,
 }
 
 impl Default for BuiltinLimits {
     /// [`BUILTIN_MAX_MEMORY`], [`BUILTIN_FUEL`], [`BUILTIN_MAX_TRANSFER`],
-    /// [`BUILTIN_HIGH_WATER`] and [`BUILTIN_IDLE`].
+    /// [`BUILTIN_HIGH_WATER`], [`BUILTIN_IDLE`] and [`BUILTIN_MAX_LIVE`].
     fn default() -> Self {
         BuiltinLimits {
             instance: InstanceLimits {
@@ -95,6 +122,7 @@ impl Default for BuiltinLimits {
             },
             high_water: BUILTIN_HIGH_WATER,
             idle: BUILTIN_IDLE,
+            max_live: BUILTIN_MAX_LIVE,
         }
     }
 }
@@ -136,8 +164,17 @@ struct Pool {
     /// The values its instances share (`shared_*`), for the life of the process.
     shared: Arc<SharedState>,
     limits: BuiltinLimits,
-    idle: Mutex<Vec<Instance>>,
+    idle: Mutex<Slots>,
+    /// An instance went back idle or was dropped.
+    returned: Condvar,
     stats: Mutex<BuiltinStats>,
+}
+
+/// A pool's instances: those idle, and how many live (idle or in a call).
+#[derive(Default)]
+struct Slots {
+    idle: Vec<Instance>,
+    live: usize,
 }
 
 impl Builtins {
@@ -186,8 +223,9 @@ impl Builtins {
     ///
     /// # Errors
     ///
-    /// The [`LoadError`] of the first module that does not load, or
-    /// [`LoadError::ModuleTaken`] for a module two of them serve.
+    /// The [`LoadError`] of the first module that does not load,
+    /// [`LoadError::ModuleTaken`] for a module two of them serve, or [`LoadError::Invalid`]
+    /// for more than [`BUILTIN_MAX_MODULES`] modules.
     pub fn load(
         engine: &Engine,
         services: HostServices,
@@ -198,6 +236,15 @@ impl Builtins {
         let services = HostServices {
             core: hooks,
             ..services
+        };
+        if sources.len() > BUILTIN_MAX_MODULES {
+            return Err(LoadError::Invalid(format!(
+                "more than {BUILTIN_MAX_MODULES} built-in modules"
+            )));
+        }
+        let limits = BuiltinLimits {
+            max_live: limits.max_live.max(1),
+            ..limits
         };
         let mut owners = HashMap::new();
         let mut modules = HashMap::new();
@@ -215,12 +262,15 @@ impl Builtins {
                 services: services.clone(),
                 shared: Arc::default(),
                 limits,
-                idle: Mutex::new(Vec::new()),
+                idle: Mutex::new(Slots::default()),
+                returned: Condvar::new(),
                 stats: Mutex::new(BuiltinStats::default()),
             });
             let first = pool.instantiate()?;
             if limits.idle > 0 {
-                lock(&pool.idle).push(first);
+                let mut slots = lock(&pool.idle);
+                slots.idle.push(first);
+                slots.live = 1;
             }
             let info = info(manifest, source);
             tracing::info!(
@@ -256,7 +306,9 @@ impl Builtins {
 
     /// The idle instances of the module serving `name` now.
     pub fn idle(&self, name: &str) -> Option<usize> {
-        self.modules.get(name).map(|pool| lock(&pool.idle).len())
+        self.modules
+            .get(name)
+            .map(|pool| lock(&pool.idle).idle.len())
     }
 }
 
@@ -313,12 +365,70 @@ impl Pool {
         };
         self.compiled.instantiate(&self.services, ctx)
     }
+
+    /// An idle instance, else a live slot to make one in: waits while
+    /// [`BuiltinLimits::max_live`] instances are busy.
+    fn take(&self) -> Lease<'_> {
+        let mut slots = lock(&self.idle);
+        loop {
+            if let Some(instance) = slots.idle.pop() {
+                return Lease {
+                    pool: self,
+                    instance: Some(instance),
+                    kept: false,
+                };
+            }
+            if slots.live < self.limits.max_live {
+                slots.live += 1;
+                return Lease {
+                    pool: self,
+                    instance: None,
+                    kept: false,
+                };
+            }
+            slots = self
+                .returned
+                .wait(slots)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// A live slot of a pool taken by a call, with the idle instance it got, if any. Dropped,
+/// the slot is freed unless [`Lease::keep`] put an instance back idle in it, and a waiting
+/// call is woken: on every path, a failure or a panic included.
+struct Lease<'a> {
+    pool: &'a Pool,
+    instance: Option<Instance>,
+    kept: bool,
+}
+
+impl Lease<'_> {
+    /// Puts `instance` back idle in the slot if the pool keeps that many; else it goes.
+    fn keep(mut self, instance: Instance) {
+        let mut slots = lock(&self.pool.idle);
+        if slots.idle.len() < self.pool.limits.idle {
+            slots.idle.push(instance);
+            self.kept = true;
+        }
+        // Before the lease's drop, which takes the lock to free an unkept slot.
+        drop(slots);
+    }
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        if !self.kept {
+            lock(&self.pool.idle).live -= 1;
+        }
+        self.pool.returned.notify_one();
+    }
 }
 
 impl Module for Pool {
     fn process(&self, request: &str, add_info: &AddInfo) -> Reply {
-        let idle = lock(&self.idle).pop();
-        let mut instance = match idle.map_or_else(|| self.instantiate(), Ok) {
+        let mut lease = self.take();
+        let mut instance = match lease.instance.take().map_or_else(|| self.instantiate(), Ok) {
             Ok(instance) => instance,
             Err(e) => {
                 tracing::error!(
@@ -366,10 +476,7 @@ impl Module for Pool {
                 "the built-in module's instance has grown too large; it is dropped"
             );
         } else {
-            let mut idle = lock(&self.idle);
-            if idle.len() < self.limits.idle {
-                idle.push(instance);
-            }
+            lease.keep(instance);
         }
         reply
     }
