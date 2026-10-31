@@ -3,7 +3,7 @@
 //! its CBOR argument from the guest, runs, and writes its CBOR [`HostResult`] into a buffer
 //! of the guest's `oncl_alloc`.
 
-use crate::caps::{self, Consents, Flows, KeyFiles, KeyTable, RequestBudget, Secrets};
+use crate::caps::{self, CallData, Consents, Flows, KeyFiles, KeyTable, RequestBudget, Secrets};
 use crate::core::{self, CoreHooks};
 use crate::manifest::Capabilities;
 use crate::runtime::SessionContext;
@@ -115,6 +115,8 @@ pub(crate) struct CallContext {
     /// The folders the key file windows answered during this request, and the keys and
     /// certificates it asked for.
     pub(crate) key_files: KeyFiles,
+    /// The data kept for a built-in module during this request.
+    pub(crate) data: Option<CallData>,
 }
 
 /// An instance's store data.
@@ -135,6 +137,9 @@ pub(crate) struct HostState {
     guest: Option<(Memory, TypedFunc<i32, i32>)>,
     /// The largest argument or result of a host function.
     max_transfer: usize,
+    /// The most bytes of data kept for a call (`0`: none kept, the call has no
+    /// [`CallData`]).
+    max_kept: usize,
 }
 
 impl HostState {
@@ -144,6 +149,7 @@ impl HostState {
         session: SessionContext,
         capabilities: Arc<Capabilities>,
         max_transfer: usize,
+        max_kept: usize,
     ) -> Self {
         HostState {
             limits,
@@ -158,6 +164,7 @@ impl HostState {
                 http_requests: RequestBudget::default(),
                 flows: Flows::default(),
                 key_files: KeyFiles::default(),
+                data: None,
             },
             keys: KeyTable::default(),
             secrets: Secrets::default(),
@@ -165,6 +172,7 @@ impl HostState {
             page_pins: PagePins::default(),
             guest: None,
             max_transfer,
+            max_kept,
         }
     }
 
@@ -182,6 +190,7 @@ impl HostState {
             http_requests: RequestBudget::default(),
             flows: Flows::default(),
             key_files: KeyFiles::default(),
+            data: (self.max_kept > 0).then(|| CallData::new(self.max_kept)),
         };
     }
 
@@ -191,6 +200,7 @@ impl HostState {
         self.call.origin = None;
         self.call.flows = Flows::default();
         self.call.key_files = KeyFiles::default();
+        self.call.data = None;
     }
 
     /// Lets go of every key, password and consent: the instance is spent, or goes back to
@@ -367,6 +377,13 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
         Import::KeystoreInstallCert => run(args, |a| caps::keystore_install_cert(state, a)),
         Import::KeystoreChangePassword => run(args, |a| caps::keystore_change_password(state, a)),
         Import::TokensIdCard => run(args, |a| caps::tokens_id_card(state, a)),
+        Import::DataRead => run(args, |a| caps::data_read(state, a)),
+        Import::DataDecode => run(args, |a| caps::data_decode(state, a)),
+        Import::DataEncode => run(args, |a| caps::data_encode(state, a)),
+        Import::DataSignCms => run(args, |a| caps::data_sign_cms(state, a)),
+        Import::DataSignXml => run(args, |a| caps::data_sign_xml(state, a)),
+        Import::DataStamp => run(args, |a| caps::data_stamp(state, a)),
+        Import::DataPageRead => run(args, |a| caps::data_page_read(state, a)),
     }
 }
 
@@ -540,5 +557,77 @@ pub(crate) fn abi_cert_info(cert: &oncl_pki::cert::Certificate, der: &[u8]) -> C
         signature_alg_oid: info.signature_alg_oid,
         spki_alg_oid: info.spki_alg_oid,
         pem: oncl_pki::pem::encode("CERTIFICATE", der),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builtins::Inert;
+    use crate::runtime::Trust;
+    use oncl_pdk::abi::DataRef;
+
+    /// The state of an instance with `capabilities`, keeping at most `max_kept` bytes.
+    fn state(capabilities: Capabilities, max_kept: usize) -> HostState {
+        let services = HostServices::new(
+            Arc::new(Inert),
+            Arc::new(Inert),
+            Arc::new(Inert),
+            oncl_token::Tokens::disabled(),
+        );
+        let session = SessionContext {
+            session: 1,
+            plugin_id: "test".to_owned(),
+            plugin_name: crate::Localized {
+                ru: String::new(),
+                kk: String::new(),
+                en: String::new(),
+            },
+            shared: Arc::default(),
+            trust: Trust::Builtin,
+        };
+        HostState::new(
+            wasmi::StoreLimitsBuilder::new().build(),
+            services,
+            session,
+            Arc::new(capabilities),
+            1 << 20,
+            max_kept,
+        )
+    }
+
+    fn read(state: &mut HostState, marker: &str) -> HostResult<abi::Bytes> {
+        caps::data_read(
+            state,
+            DataRef {
+                data: marker.to_owned(),
+            },
+        )
+    }
+
+    #[test]
+    fn kept_data_goes_with_its_call() {
+        let builtin = Capabilities {
+            builtin: true,
+            ..Capabilities::default()
+        };
+        let mut s = state(builtin, 1 << 20);
+        s.begin_call(Some("https://a.kz".to_owned()), Locale::Ru);
+        let first = s.call.data.as_ref().unwrap().prefix().to_owned();
+        let marker = s.call.data.as_mut().unwrap().keep(b"doc".to_vec()).unwrap();
+        assert_eq!(read(&mut s, &marker).unwrap().as_slice(), b"doc");
+        s.end_call();
+        assert!(s.call.data.is_none());
+        assert!(read(&mut s, &marker).is_err());
+        // The instance's next call, for another page: other markers, the old one refused.
+        s.begin_call(Some("https://b.kz".to_owned()), Locale::Ru);
+        assert_ne!(s.call.data.as_ref().unwrap().prefix(), first);
+        assert!(read(&mut s, &marker).is_err());
+        s.end_call();
+        // A plugin's instance keeps nothing.
+        let mut plugin = state(Capabilities::default(), 0);
+        plugin.begin_call(None, Locale::Ru);
+        assert!(plugin.call.data.is_none());
+        assert!(read(&mut plugin, &marker).is_err());
     }
 }

@@ -141,6 +141,20 @@ mod imports {
         pub fn keystore_change_password(ptr: i32, len: i32) -> i64;
         #[link_name = "tokens_id_card"]
         pub fn tokens_id_card(ptr: i32, len: i32) -> i64;
+        #[link_name = "data_read"]
+        pub fn data_read(ptr: i32, len: i32) -> i64;
+        #[link_name = "data_decode"]
+        pub fn data_decode(ptr: i32, len: i32) -> i64;
+        #[link_name = "data_encode"]
+        pub fn data_encode(ptr: i32, len: i32) -> i64;
+        #[link_name = "data_sign_cms"]
+        pub fn data_sign_cms(ptr: i32, len: i32) -> i64;
+        #[link_name = "data_sign_xml"]
+        pub fn data_sign_xml(ptr: i32, len: i32) -> i64;
+        #[link_name = "data_stamp"]
+        pub fn data_stamp(ptr: i32, len: i32) -> i64;
+        #[link_name = "data_page_read"]
+        pub fn data_page_read(ptr: i32, len: i32) -> i64;
     }
 }
 
@@ -213,6 +227,13 @@ fn host_fn(import: Import) -> HostFn {
         Import::KeystoreInstallCert => imports::keystore_install_cert,
         Import::KeystoreChangePassword => imports::keystore_change_password,
         Import::TokensIdCard => imports::tokens_id_card,
+        Import::DataRead => imports::data_read,
+        Import::DataDecode => imports::data_decode,
+        Import::DataEncode => imports::data_encode,
+        Import::DataSignCms => imports::data_sign_cms,
+        Import::DataSignXml => imports::data_sign_xml,
+        Import::DataStamp => imports::data_stamp,
+        Import::DataPageRead => imports::data_page_read,
     }
 }
 
@@ -1093,6 +1114,111 @@ pub mod builtin {
             imports::tokens_id_card,
             &ReaderName {
                 reader: reader.to_owned(),
+            },
+        )
+    }
+}
+
+/// The data the core keeps for a built-in module during a call (capability `builtin`): see
+/// [`crate::Request::data_prefix`]. Each function takes a marker of this call wherever it
+/// takes data, or the data itself, and keeps what it makes: its marker, which the module
+/// writes into its reply as a JSON string.
+pub mod data {
+    use super::{HostResult, call, imports};
+    use crate::abi::{Bytes, DataDecodeArgs, DataEncodeArgs, DataRef, PagePathArgs};
+    pub use crate::abi::{
+        CmsOutcome, DataDecoded, DataDecoding, DataEncoding, PageRead, SignCmsExArgs, SignXmlArgs,
+        StampArgs, StampOutcome,
+    };
+
+    /// `text` (a request) with every marker of `prefix` that `keep` refuses replaced by the
+    /// string it stands for, written as `serde_json` writes a string: what the module
+    /// reads itself, while the data it hands to the core stays there.
+    ///
+    /// # Panics
+    ///
+    /// A marker of the request stands for no text: the core keeps only strings.
+    pub fn restore(text: &str, prefix: &str, keep: impl Fn(&str) -> bool) -> HostResult<String> {
+        let quoted = format!("\"{prefix}");
+        if !text.contains(&quoted) {
+            return Ok(text.to_owned());
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find(&quoted) {
+            let tail = &rest[at + 1..];
+            let Some(end) = tail.find('"') else { break };
+            let marker = &tail[..end];
+            out.push_str(&rest[..at]);
+            if keep(marker) {
+                out.push('"');
+                out.push_str(marker);
+                out.push('"');
+            } else {
+                let data = String::from_utf8(read(marker)?).expect("the core keeps text");
+                out.push_str(&serde_json::to_string(&data).expect("a string serializes"));
+            }
+            rest = &tail[end + 1..];
+        }
+        out.push_str(rest);
+        Ok(out)
+    }
+
+    /// A copy of the data `marker` stands for.
+    pub fn read(marker: &str) -> HostResult<Vec<u8>> {
+        call::<_, Bytes>(
+            imports::data_read,
+            &DataRef {
+                data: marker.to_owned(),
+            },
+        )
+        .map(Bytes::into_vec)
+    }
+
+    /// The text `marker` stands for, decoded as `form` says and kept.
+    pub fn decode(marker: &str, form: DataDecoding) -> HostResult<DataDecoded> {
+        call(
+            imports::data_decode,
+            &DataDecodeArgs {
+                data: marker.to_owned(),
+                form,
+            },
+        )
+    }
+
+    /// The data `marker` stands for, encoded as `form` says and kept: its marker.
+    pub fn encode(marker: &str, form: DataEncoding) -> HostResult<String> {
+        call(
+            imports::data_encode,
+            &DataEncodeArgs {
+                data: marker.to_owned(),
+                form,
+            },
+        )
+    }
+
+    /// `keys_sign_cms_ex` (`args.handle` is the key's): the CMS kept, its marker in
+    /// [`CmsOutcome::Signed`].
+    pub fn sign_cms(args: &SignCmsExArgs) -> HostResult<CmsOutcome> {
+        call(imports::data_sign_cms, args)
+    }
+
+    /// `keys_sign_xml` (`args.handle` is the key's): the marker of the signed document.
+    pub fn sign_xml(args: &SignXmlArgs) -> HostResult<String> {
+        call(imports::data_sign_xml, args)
+    }
+
+    /// `tsp_stamp`: the CMS kept, its marker in [`StampOutcome::Stamped`].
+    pub fn stamp(args: &StampArgs) -> HostResult<StampOutcome> {
+        call(imports::data_stamp, args)
+    }
+
+    /// `page_file_read`: the contents kept, their marker in the file's `data`.
+    pub fn page_read(path: &str) -> HostResult<PageRead> {
+        call(
+            imports::data_page_read,
+            &PagePathArgs {
+                path: path.to_owned(),
             },
         )
     }

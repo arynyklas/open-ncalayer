@@ -1377,3 +1377,80 @@ fn commonutils_locale() {
         });
     }
 }
+
+/// Longer than what a built-in module gets as a data marker (`DATA_KEPT_MIN`).
+fn long_text(seed: u8) -> String {
+    (0..300 * 1024)
+        .map(|i| char::from(b'a' + ((i as u8) ^ seed) % 26))
+        .collect()
+}
+
+#[test]
+fn basics_long_data() {
+    let doc = long_text(1);
+    let b64 = STANDARD.encode(doc.as_bytes());
+    let xml_doc = format!("<a>{doc}</a>");
+    for request in [
+        cms(json!(b64), json!({"decode": true})),
+        cms(
+            json!([b64.clone(), STANDARD.encode(b"x")]),
+            json!({"decode": true}),
+        ),
+        cms(json!(doc), json!({})),
+        cms(json!(format!("{b64}!")), json!({"decode": true})),
+        cms(json!(b64), json!({"decode": true, "tsaProfile": {}})),
+        raw(json!(b64), json!({"decode": true})),
+        xml(json!(xml_doc), json!({})),
+        xml(json!(format!("{xml_doc}<")), json!({})),
+        // Long strings the module reads itself.
+        sign(json!({
+            "format": "cms",
+            "data": "eA==",
+            "allowedStorages": [long_text(2), "PKCS12"],
+            "signingParams": {"decode": true, "x": long_text(3)},
+            "signerParams": {"extKeyUsageOids": [long_text(4)], "chain": []},
+        })),
+        sign(json!({"format": long_text(5), "data": "x", "signingParams": {}, "signerParams": {}})),
+    ] {
+        same(|_| Case::new(rsa(), vec![request.clone()]));
+    }
+}
+
+#[test]
+fn commonutils_long_data() {
+    let doc = long_text(6);
+    let b64 = STANDARD.encode(doc.as_bytes());
+    let attached = STANDARD.encode(STANDARD.decode(rsa_cms(doc.as_bytes(), true)).unwrap());
+    for (method, args) in [
+        ("createCAdESFromBase64", json!(["PKCS12", "", b64, true])),
+        (
+            "createCAdESFromBase64",
+            json!(["PKCS12", "", format!("{b64}!"), true]),
+        ),
+        // A time-stamp is compared by its verified token: attached only.
+        (
+            "createCMSSignatureFromBase64",
+            json!(["PKCS12", "", b64, true]),
+        ),
+        ("createCAdESFromBase64", json!(["PKCS12", "", b64, false])),
+        ("applyCAdEST", json!(["PKCS12", "", attached])),
+        (
+            "signXml",
+            json!(["PKCS12", "", format!("<a>{doc}</a>"), "", ""]),
+        ),
+        (
+            "signXmls",
+            json!(["PKCS12", "", [format!("<b>{doc}</b>"), "<c/>"], "", ""]),
+        ),
+    ] {
+        cu_same(|_| (rsa(), vec![cu(method, args.clone())]));
+    }
+    // Long strings the module reads itself: echoed in its errors.
+    for request in [
+        cu(&long_text(7), json!([])),
+        cu("showFileChooser", json!([long_text(8), ""])),
+        cu("getKeyInfo", json!([long_text(9)])),
+    ] {
+        cu_same(|_| (Vec::new(), vec![request.clone()]));
+    }
+}

@@ -428,6 +428,7 @@ fn builtin_limits_apply() {
             max_memory: 4 << 20,
             fuel: 100_000,
             max_transfer: 1000,
+            max_kept: 0,
         },
         high_water: 4 << 20,
         idle: 2,
@@ -598,7 +599,7 @@ fn check_instantiates_the_modules() {
         ),
         good.replace(
             "(memory (export \"memory\") 2)",
-            "(memory (export \"memory\") 50000)",
+            "(memory (export \"memory\") 40000)",
         ),
     ] {
         assert_ne!(wat, good);

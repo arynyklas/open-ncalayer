@@ -336,12 +336,17 @@ pub(crate) fn tsp_failure(spec: &TsaSpec, e: &tsp::TspError) -> NetFailure {
 /// `tsp_stamp`: time-stamps of signers of a CMS. A signer of a certificate is the first
 /// one Kalkan's way finds; without one nothing is asked.
 pub(crate) fn tsp_stamp(state: &HostState, args: StampArgs) -> HostResult<StampOutcome> {
+    stamp(state, &args, &args.cms)
+}
+
+/// [`tsp_stamp`] of the CMS `cms`.
+pub(crate) fn stamp(state: &HostState, args: &StampArgs, cms: &[u8]) -> HostResult<StampOutcome> {
     let cms_invalid = |e: cms::CmsError| invalid(e.to_string()).with_cause(cause::cms(&e));
-    let count = || cms::signer_count(&args.cms).map_err(cms_invalid);
+    let count = || cms::signer_count(cms).map_err(cms_invalid);
     let signers = match &args.signers {
         SignerSel::OfCert(der) => {
             let cert = parse(der)?;
-            match cms::signer_index_of(&args.cms, &cert).map_err(cms_invalid)? {
+            match cms::signer_index_of(cms, &cert).map_err(cms_invalid)? {
                 Some(index) => tsp::SignerSel::Index(index),
                 None => return Ok(StampOutcome::NoSigner),
             }
@@ -373,7 +378,7 @@ pub(crate) fn tsp_stamp(state: &HostState, args: StampArgs) -> HostResult<StampO
         TokenForm::WholeResponse => tsp::TokenForm::WholeResponse,
     };
     Ok(
-        match tsp::stamp(&args.cms, signers, &spec, mode, form, &PkiHttp::of(state)) {
+        match tsp::stamp(cms, signers, &spec, mode, form, &PkiHttp::of(state)) {
             Ok(cms) => StampOutcome::Stamped(Bytes::from(cms)),
             Err(e) => StampOutcome::Failed(tsp_failure(&spec, &e)),
         },

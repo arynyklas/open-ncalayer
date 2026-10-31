@@ -113,10 +113,6 @@ fn synthetic_cas() -> oncl_pki::pkix::CaSet {
 }
 
 #[test]
-#[cfg_attr(
-    not(target_pointer_width = "64"),
-    ignore = "over the 32-bit memory of an instance: about five times the file at its peak"
-)]
 fn sign_max_page_file_fits() {
     // The largest file a page may name, signed by commonUtils as an attached CAdES.
     let dir = tempfile::tempdir().unwrap();
@@ -185,25 +181,43 @@ fn fuel_covers_max_message() {
 
 #[test]
 fn memory_limit_is_a_drop_not_a_hang() {
-    let mut limits = BuiltinLimits::default();
-    limits.instance.max_memory = 32 * MIB;
-    let builtins = basics(limits, 1);
-    let module = builtins.module(MODULE_NAME).unwrap();
-    let start = Instant::now();
-    assert_eq!(
-        module.process(&cms_request(16 * MIB), &origin()),
-        Reply::Drop
-    );
-    assert!(start.elapsed() < Duration::from_secs(60));
-    // The next call gets a new instance.
-    let reply = module
-        .process(
-            &json!({"module": MODULE_NAME, "method": "sign", "args": {}}).to_string(),
-            &origin(),
-        )
-        .into_text()
-        .unwrap();
-    assert!(reply.contains(r#""status":false"#), "{reply}");
+    // Over the guest's memory: data in strings short enough to reach the module itself.
+    let short: Vec<String> = (0..64 * 1024).map(|_| "A".repeat(128)).collect();
+    let in_guest = json!({
+        "module": MODULE_NAME,
+        "method": "sign",
+        "args": {
+            "format": "raw",
+            "data": short,
+            "signingParams": {"decode": true},
+            "signerParams": {"extKeyUsageOids": [], "chain": []},
+        },
+    })
+    .to_string();
+    let mut small_memory = BuiltinLimits::default();
+    small_memory.instance.max_memory = 4 * MIB;
+    // Over what the core keeps for a call: data the module hands to the core.
+    let mut small_kept = BuiltinLimits::default();
+    small_kept.instance.max_kept = 8 * MIB;
+    for (limits, request) in [
+        (small_memory, in_guest),
+        (small_kept, cms_request(16 * MIB)),
+    ] {
+        let builtins = basics(limits, 2);
+        let module = builtins.module(MODULE_NAME).unwrap();
+        let start = Instant::now();
+        assert_eq!(module.process(&request, &origin()), Reply::Drop);
+        assert!(start.elapsed() < Duration::from_secs(60));
+        // The next call gets a new instance.
+        let reply = module
+            .process(
+                &json!({"module": MODULE_NAME, "method": "sign", "args": {}}).to_string(),
+                &origin(),
+            )
+            .into_text()
+            .unwrap();
+        assert!(reply.contains(r#""status":false"#), "{reply}");
+    }
 }
 
 /// The largest attached CMS data, in whole MiB up to 64, the basics module signs within

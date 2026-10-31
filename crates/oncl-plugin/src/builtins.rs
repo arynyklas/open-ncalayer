@@ -42,11 +42,9 @@ use crate::{
 /// The id prefix of the built-in modules; no plugin package may use it.
 pub const BUILTIN_ID_PREFIX: &str = "io.github.arynyklas.openncalayer.builtin.";
 
-/// The largest linear memory of a built-in module's instance on 64-bit targets: 3 GiB. A
-/// call takes about twelve times the data it signs at its peak, so a reply holding a CMS of
-/// the largest message needs over 2 GiB.
+/// The largest linear memory of a built-in module's instance: 2 GiB on 64-bit targets.
 #[cfg(target_pointer_width = "64")]
-pub const BUILTIN_MAX_MEMORY: usize = 3 << 30;
+pub const BUILTIN_MAX_MEMORY: usize = 2 << 30;
 /// The largest linear memory of a built-in module's instance: 384 MiB on 32-bit targets.
 #[cfg(not(target_pointer_width = "64"))]
 pub const BUILTIN_MAX_MEMORY: usize = 384 << 20;
@@ -84,6 +82,16 @@ const _: () = assert!(
     BUILTIN_MAX_MODULES * BUILTIN_MAX_LIVE * BUILTIN_MAX_MEMORY <= BUILTIN_MEMORY_BUDGET,
     "the built-in modules' instances must fit the 32-bit address space"
 );
+
+/// The most bytes of data the core keeps for one call of a built-in module (the request's
+/// long strings and what the `data_*` functions make of them), on 64-bit targets: the
+/// request of the largest message, its data decoded and the PEM of its CMS fit.
+#[cfg(target_pointer_width = "64")]
+pub const BUILTIN_MAX_KEPT: usize = 2 << 30;
+/// The most bytes of data the core keeps for one call of a built-in module, on 32-bit
+/// targets: a page file of 64 MiB signed, time-stamped and base64-encoded fits.
+#[cfg(not(target_pointer_width = "64"))]
+pub const BUILTIN_MAX_KEPT: usize = 512 << 20;
 
 /// The fuel of one call of a built-in module.
 pub const BUILTIN_FUEL: u64 = 200_000_000_000;
@@ -130,6 +138,7 @@ impl Default for BuiltinLimits {
                 max_memory: BUILTIN_MAX_MEMORY,
                 fuel: BUILTIN_FUEL,
                 max_transfer: BUILTIN_MAX_TRANSFER,
+                max_kept: BUILTIN_MAX_KEPT,
             },
             high_water: BUILTIN_HIGH_WATER,
             idle: BUILTIN_IDLE,
@@ -523,7 +532,7 @@ fn too_many(sources: &[BuiltinSource<'_>]) -> Result<(), LoadError> {
 }
 
 /// The services of [`Builtins::check`]: every window cancelled, no recent path, no network.
-struct Inert;
+pub(crate) struct Inert;
 
 impl Prompter for Inert {
     fn storage(&self, _: &StoragePrompt) -> Prompt<StorageAnswer> {

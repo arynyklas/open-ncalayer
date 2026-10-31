@@ -114,13 +114,25 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, HostError> {
 /// What `oncl_process` gets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Input {
-    /// The request as the page sent it: a JSON text.
+    /// The request as the page sent it: a JSON text. For a built-in module, every string
+    /// value of at least [`DATA_KEPT_MIN`] bytes is replaced by a marker of the data the
+    /// core keeps (see [`Input::data_prefix`]).
     pub request: String,
     /// The page's origin, if the connection sent one.
     pub origin: Option<String>,
     /// The language of OpenNCALayer's windows: `"ru"`, `"kk"` or `"en"`.
     pub locale: String,
+    /// For a built-in module: the prefix of this call's data markers, followed by a
+    /// number. A marker stands for data the core keeps until the call returns; the `data_*`
+    /// functions take a marker wherever they take data, and a reply that holds a marker as
+    /// a JSON string gets the data in its place, as `serde_json` writes a string. `None`
+    /// for plugins.
+    #[serde(default)]
+    pub data_prefix: Option<String>,
 }
+
+/// The shortest string value of a request that a built-in module gets as a data marker.
+pub const DATA_KEPT_MIN: usize = 256 << 10;
 
 /// What `oncl_process` returns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -574,11 +586,29 @@ pub enum Import {
     KeystoreChangePassword,
     /// `tokens_id_card`: [`ReaderName`] → [`IdCardHolder`].
     TokensIdCard,
+    /// `data_read`: [`DataRef`] → [`Bytes`]: the contents of data the core keeps.
+    DataRead,
+    /// `data_decode`: [`DataDecodeArgs`] → [`DataDecoded`].
+    DataDecode,
+    /// `data_encode`: [`DataEncodeArgs`] → `String`, the marker of the encoded data.
+    DataEncode,
+    /// `data_sign_cms`: [`SignCmsExArgs`] → [`CmsOutcome`]: `keys_sign_cms_ex` over data
+    /// the core keeps, the CMS kept (its marker in `signed`).
+    DataSignCms,
+    /// `data_sign_xml`: [`SignXmlArgs`] → `String`: `keys_sign_xml` over data the core
+    /// keeps, the marker of the signed document.
+    DataSignXml,
+    /// `data_stamp`: [`StampArgs`] → [`StampOutcome`]: `tsp_stamp` over data the core
+    /// keeps, the CMS kept (its marker in `stamped`).
+    DataStamp,
+    /// `data_page_read`: [`PagePathArgs`] → [`PageRead`]: `page_file_read`, the contents
+    /// kept (its marker in `data`).
+    DataPageRead,
 }
 
 impl Import {
     /// Every host function.
-    pub const ALL: [Import; 63] = [
+    pub const ALL: [Import; 70] = [
         Import::Log,
         Import::Now,
         Import::Random,
@@ -642,6 +672,13 @@ impl Import {
         Import::KeystoreInstallCert,
         Import::KeystoreChangePassword,
         Import::TokensIdCard,
+        Import::DataRead,
+        Import::DataDecode,
+        Import::DataEncode,
+        Import::DataSignCms,
+        Import::DataSignXml,
+        Import::DataStamp,
+        Import::DataPageRead,
     ];
 
     /// Its import name in [`IMPORT_MODULE`].
@@ -710,6 +747,13 @@ impl Import {
             Import::KeystoreInstallCert => "keystore_install_cert",
             Import::KeystoreChangePassword => "keystore_change_password",
             Import::TokensIdCard => "tokens_id_card",
+            Import::DataRead => "data_read",
+            Import::DataDecode => "data_decode",
+            Import::DataEncode => "data_encode",
+            Import::DataSignCms => "data_sign_cms",
+            Import::DataSignXml => "data_sign_xml",
+            Import::DataStamp => "data_stamp",
+            Import::DataPageRead => "data_page_read",
         }
     }
 
@@ -774,7 +818,14 @@ impl Import {
             | Import::KeystoreNewKey
             | Import::KeystoreInstallCert
             | Import::KeystoreChangePassword
-            | Import::TokensIdCard => Some(Capability::Builtin),
+            | Import::TokensIdCard
+            | Import::DataRead
+            | Import::DataDecode
+            | Import::DataEncode
+            | Import::DataSignCms
+            | Import::DataSignXml
+            | Import::DataStamp
+            | Import::DataPageRead => Some(Capability::Builtin),
         }
     }
 
@@ -848,7 +899,14 @@ impl Import {
             | Import::KeystoreNewKey
             | Import::KeystoreInstallCert
             | Import::KeystoreChangePassword
-            | Import::TokensIdCard => "0.1.0-alpha.5",
+            | Import::TokensIdCard
+            | Import::DataRead
+            | Import::DataDecode
+            | Import::DataEncode
+            | Import::DataSignCms
+            | Import::DataSignXml
+            | Import::DataStamp
+            | Import::DataPageRead => "0.1.0-alpha.5",
         };
         semver::Version::parse(version).expect("a valid version")
     }
@@ -2342,6 +2400,61 @@ pub struct ChosenPath {
 pub struct PagePathArgs {
     /// The path, as the page sent it.
     pub path: String,
+}
+
+/// `data_read`: data the core keeps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataRef {
+    /// Its marker.
+    pub data: String,
+}
+
+/// How `data_decode` decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataDecoding {
+    /// Java's `Base64.getDecoder()` with its messages (`crate::javab64::decode_java`).
+    JavaBase64,
+    /// The basics module's base64: the standard alphabet, padded when the text ends with
+    /// `=`, else unpadded, with the `base64` crate's messages
+    /// (`crate::javab64::decode_basics`).
+    BasicsBase64,
+}
+
+/// `data_decode`: kept data (its UTF-8 text) decoded and kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataDecodeArgs {
+    /// The marker of the text.
+    pub data: String,
+    /// How.
+    pub form: DataDecoding,
+}
+
+/// What `data_decode` came to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataDecoded {
+    /// The marker of the decoded data.
+    Data(String),
+    /// Not of that form: the decoder's message.
+    Invalid(String),
+}
+
+/// How `data_encode` encodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataEncoding {
+    /// Base64, the standard alphabet, padded.
+    Base64,
+}
+
+/// `data_encode`: kept data encoded and kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataEncodeArgs {
+    /// The marker of the data.
+    pub data: String,
+    /// How.
+    pub form: DataEncoding,
 }
 
 /// The outcome of `page_file_read`.

@@ -2,9 +2,7 @@
 //! certificates and data from.
 
 use base64::Engine;
-use base64::alphabet;
 use base64::engine::general_purpose::STANDARD;
-use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use oncl_pdk::Locale;
 use oncl_pdk::invoker::Failure;
 use oncl_pdk::orgjson::{int_value, opt_string};
@@ -22,21 +20,6 @@ pub(crate) const STORAGES: [&str; 9] = [
     "JKS",
     "ABCloudServiceStore",
 ];
-
-/// Java's `Base64.getDecoder()`: the standard alphabet, no whitespace, padding optional but
-/// complete when present, trailing bits ignored. Inputs ending in `=` use [`PADDED`].
-const UNPADDED: GeneralPurpose = GeneralPurpose::new(
-    &alphabet::STANDARD,
-    GeneralPurposeConfig::new()
-        .with_decode_padding_mode(DecodePaddingMode::RequireNone)
-        .with_decode_allow_trailing_bits(true),
-);
-const PADDED: GeneralPurpose = GeneralPurpose::new(
-    &alphabet::STANDARD,
-    GeneralPurposeConfig::new()
-        .with_decode_padding_mode(DecodePaddingMode::RequireCanonical)
-        .with_decode_allow_trailing_bits(true),
-);
 
 /// `optString("locale", "kk")`: Kazakh without one, `kk` and `ru` in any case, anything
 /// else English (Java's `new Locale(…)` lower-cases the language).
@@ -66,12 +49,10 @@ pub(crate) fn storage_list(names: &[Value]) -> Result<Vec<String>, Failure> {
     Ok(storages)
 }
 
+/// Java's `Base64.getDecoder()` as the original's basics module decodes `data` and
+/// certificates.
 pub(crate) fn decode_base64(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    if s.ends_with('=') {
-        PADDED.decode(s)
-    } else {
-        UNPADDED.decode(s)
-    }
+    oncl_pdk::javab64::decode_basics(s)
 }
 
 /// `der` as base64, for the replies.

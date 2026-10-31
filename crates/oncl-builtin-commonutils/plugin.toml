@@ -19,3 +19,5 @@ keys = true
 files = true
 page_files = true
 shared = true
+# The data the core keeps for the module (`data_*`).
+builtin = true

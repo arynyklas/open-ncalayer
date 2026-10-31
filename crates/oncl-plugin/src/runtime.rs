@@ -68,6 +68,9 @@ pub struct InstanceLimits {
     pub fuel: u64,
     /// The largest request, reply, or argument or result of a host function.
     pub max_transfer: usize,
+    /// The most bytes of data the core keeps for one call of a module with the capability
+    /// `builtin` (`data_*`); `0` for a plugin's instance, which keeps none.
+    pub max_kept: usize,
 }
 
 impl Default for InstanceLimits {
@@ -77,6 +80,7 @@ impl Default for InstanceLimits {
             max_memory: MAX_MEMORY,
             fuel: PROCESS_FUEL,
             max_transfer: MAX_TRANSFER,
+            max_kept: 0,
         }
     }
 }
@@ -354,6 +358,11 @@ impl Compiled {
             ctx,
             Arc::clone(&self.capabilities),
             self.limits.max_transfer,
+            if self.capabilities.builtin {
+                self.limits.max_kept
+            } else {
+                0
+            },
         );
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.limits);
@@ -488,10 +497,19 @@ impl Instance {
         add_info: &AddInfo,
         locale: oncl_basics::Locale,
     ) -> Result<String, PluginError> {
+        let (request, data_prefix) = match self.store.data_mut().call.data.as_mut() {
+            Some(data) => (
+                data.keep_request(request)
+                    .map_err(|e| PluginError::Output(e.message))?,
+                Some(data.prefix().to_owned()),
+            ),
+            None => (request.to_owned(), None),
+        };
         let input = abi::encode(&Input {
-            request: request.to_owned(),
+            request,
             origin: add_info.origin.clone(),
             locale: locale_code(locale).to_owned(),
+            data_prefix,
         });
         let len = transfer_len(input.len(), self.limits.max_transfer)?;
         self.store
@@ -522,7 +540,10 @@ impl Instance {
             .map_err(failure)?;
         self.store.data_mut().phase = Phase::Idle;
         let output: Output = abi::decode(&output).map_err(|e| PluginError::Output(e.message))?;
-        Ok(output.response)
+        match &self.store.data().call.data {
+            Some(data) => data.splice(output.response).map_err(PluginError::Output),
+            None => Ok(output.response),
+        }
     }
 }
 

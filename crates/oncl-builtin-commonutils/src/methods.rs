@@ -27,15 +27,12 @@
 
 use crate::Core;
 use crate::dispatch::Args;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use oncl_pdk::abi::{
     Action, Bytes, CmsCerts, CmsContent, CmsOutcome, CmsOutput, CoSign, FlowArgs, FlowChecks,
     FlowFile, FlowNone, FlowOrder, FlowReader, FlowReaders, FlowStart, HostError, PageRead,
     PathOutcome, SignCmsExArgs, SignedAttrs, SignerSel, SigningTime, StampArgs, StampMode,
     StampOutcome, TimeForm, TimeSource, TokenForm, TsaChoice, cause,
 };
-use oncl_pdk::javab64::decode_java;
 use oncl_pdk::{AddInfo, Locale};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -214,9 +211,9 @@ pub(crate) fn create_cades_from_base64_hash<C: Core>(
 pub(crate) fn apply_cades_t<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
     let key = signing_key(cu, args.str(0), args.str(1), add_info)?;
     check_chain(cu, cu.certificate(&key))?;
-    let cms = Data::Base64(args.str(2)).bytes()?;
+    let cms = Data::Base64(args.str(2)).bytes(cu)?;
     let stamped = timestamp(cu, cms, cu.certificate(&key))?;
-    Ok(Some(Value::String(STANDARD.encode(stamped))))
+    Ok(Some(Value::String(cu.encode(&stamped))))
 }
 
 /// `showFileChooser(fileExtension, currentDirectory)`: the path of a chosen file (or folder
@@ -281,9 +278,9 @@ enum Data<'a> {
 }
 
 impl Data<'_> {
-    fn bytes(self) -> Result<Vec<u8>, Option<String>> {
+    fn bytes(self, cu: &impl Core) -> Result<Vec<u8>, Option<String>> {
         match self {
-            Data::Base64(text) => decode_java(text).map_err(Some),
+            Data::Base64(text) => cu.decode(text).map_err(Some),
             Data::Bytes(bytes) => Ok(bytes),
         }
     }
@@ -344,7 +341,7 @@ fn cades<C: Core>(
 ) -> Outcome {
     let key = request.choose(cu, add_info)?;
     check_chain(cu, cu.certificate(&key))?;
-    let data = data.bytes()?;
+    let data = data.bytes(cu)?;
     let (encapsulate, digested) = match content {
         Content::Data { attached } => (attached, false),
         Content::Hash => (false, true),
@@ -364,11 +361,11 @@ fn cms_with_timestamp<C: Core>(
     add_info: &AddInfo,
 ) -> Outcome {
     let key = request.choose(cu, add_info)?;
-    let data = data.bytes()?;
+    let data = data.bytes(cu)?;
     let args = sign_args(data, attached, false, CmsOutput::Der);
     let cms = signed(cu.sign_cms(&key, args))?;
     let stamped = timestamp(cu, cms, cu.certificate(&key))?;
-    Ok(Some(Value::String(STANDARD.encode(stamped))))
+    Ok(Some(Value::String(cu.encode(&stamped))))
 }
 
 /// The CMS with a time-stamp from Kalkan's TSA on the first signer of `cert`.
@@ -743,6 +740,12 @@ mod tests {
             _: Option<&str>,
             _: Option<&str>,
         ) -> Result<Vec<u8>, HostError> {
+            unreachable!()
+        }
+        fn decode(&self, _: &str) -> Result<Vec<u8>, String> {
+            unreachable!()
+        }
+        fn encode(&self, _: &[u8]) -> String {
             unreachable!()
         }
         fn page_read(&self, _: &str) -> PageRead {

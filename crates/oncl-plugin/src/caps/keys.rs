@@ -34,7 +34,7 @@ use oncl_pdk::abi::{
     FlowArgs, FlowChecks, FlowFile, FlowKey, FlowNone, FlowOpened, FlowOrder, FlowOutcome,
     FlowReaders, FlowStart, FlowWrongPin, KeyDescription, MAX_FLOWS, PickArgs, TokenScan,
 };
-use oncl_pdk::abi::{NetStage, Problem, XadesArgs, XadesLevel, XadesOutcome};
+use oncl_pdk::abi::{NetFailure, NetStage, Problem, XadesArgs, XadesLevel, XadesOutcome};
 use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{
     self, AttrSpec, CertSpec, CmsError, CoSign, Content, SignOptions, SignSpec, TimeForm,
@@ -860,6 +860,29 @@ pub(crate) fn keys_sign_cms_ex(
     state: &mut HostState,
     args: SignCmsExArgs,
 ) -> HostResult<CmsOutcome> {
+    let content = match &args.content {
+        CmsContent::Data(data) => Content::Data(data),
+        CmsContent::Digest(digest) => Content::Digest(digest),
+    };
+    let into = match &args.cosign {
+        abi::CoSign::Into(cms) => Some(cms.as_slice()),
+        abi::CoSign::Auto | abi::CoSign::Never => None,
+    };
+    let output = args.output;
+    Ok(match sign_cms_ex(state, &args, content, into)? {
+        Ok(der) => CmsOutcome::Signed(cms_output(der, output)),
+        Err(failure) => CmsOutcome::TspFailed(failure),
+    })
+}
+
+/// [`keys_sign_cms_ex`] of `content`, co-signed into `into` for [`abi::CoSign::Into`]: the
+/// DER CMS, or the failure of its time-stamp.
+pub(crate) fn sign_cms_ex(
+    state: &HostState,
+    args: &SignCmsExArgs,
+    content: Content<'_>,
+    into: Option<&[u8]>,
+) -> HostResult<Result<Vec<u8>, NetFailure>> {
     let tsa = args
         .timestamp
         .as_ref()
@@ -911,15 +934,12 @@ pub(crate) fn keys_sign_cms_ex(
         })
         .collect::<HostResult<_>>()?;
     let spec = SignSpec {
-        content: match &args.content {
-            CmsContent::Data(data) => Content::Data(data),
-            CmsContent::Digest(digest) => Content::Digest(digest),
-        },
+        content,
         encapsulate: args.encapsulate,
         cosign: match &args.cosign {
             abi::CoSign::Auto => CoSign::Auto,
             abi::CoSign::Never => CoSign::Never,
-            abi::CoSign::Into(cms) => CoSign::Into(cms),
+            abi::CoSign::Into(cms) => CoSign::Into(into.unwrap_or(cms)),
         },
         econtent_type: args.econtent_type.as_deref().map(oid).transpose()?,
         digest: args.digest.map(crypto::hash_alg),
@@ -937,15 +957,13 @@ pub(crate) fn keys_sign_cms_ex(
         CmsError::Key(_) | CmsError::UnknownAlgorithm(_) => cms_failed(e),
         e => invalid(e.to_string()).with_cause(cause::cms(&e)),
     })?;
-    let output = args.output;
     drop(spec);
-    drop(args);
     let Some(tsa) = tsa else {
-        return Ok(CmsOutcome::Signed(cms_output(der, output)));
+        return Ok(Ok(der));
     };
     let spec = match tsa {
         Ok(spec) => spec,
-        Err(failure) => return Ok(CmsOutcome::TspFailed(failure)),
+        Err(failure) => return Ok(Err(failure)),
     };
     Ok(
         match tsp::stamp(
@@ -956,14 +974,14 @@ pub(crate) fn keys_sign_cms_ex(
             tsp::TokenForm::Token,
             &crypto::PkiHttp::of(state),
         ) {
-            Ok(stamped) => CmsOutcome::Signed(cms_output(stamped, output)),
-            Err(e) => CmsOutcome::TspFailed(crypto::tsp_failure(&spec, &e)),
+            Ok(stamped) => Ok(stamped),
+            Err(e) => Err(crypto::tsp_failure(&spec, &e)),
         },
     )
 }
 
 /// `der` in the form `output` asks for.
-fn cms_output(der: Vec<u8>, output: abi::CmsOutput) -> Bytes {
+pub(crate) fn cms_output(der: Vec<u8>, output: abi::CmsOutput) -> Bytes {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     match output {
@@ -1007,22 +1025,24 @@ pub(crate) fn keys_sign_raw(state: &mut HostState, args: SignRawArgs) -> HostRes
 
 /// `keys_sign_xml`: the whole document, or an element, with an enveloped signature.
 pub(crate) fn keys_sign_xml(state: &mut HostState, args: SignXmlArgs) -> HostResult<Bytes> {
+    sign_xml(state, &args, &args.xml).map(Bytes::from)
+}
+
+/// [`keys_sign_xml`] of the document `xml`.
+pub(crate) fn sign_xml(state: &HostState, args: &SignXmlArgs, xml: &[u8]) -> HostResult<Vec<u8>> {
     let entry = state.keys.get(args.handle)?;
-    let signed = match &args.element {
-        None if args.parent.is_some() => {
-            return Err(invalid("parent is only for a signed element"));
-        }
-        None => xmldsig::sign_enveloped(&args.xml, &entry.key, &entry.cert),
+    match &args.element {
+        None if args.parent.is_some() => Err(invalid("parent is only for a signed element")),
+        None => xmldsig::sign_enveloped(xml, &entry.key, &entry.cert).map_err(xml_failed),
         Some(element) => xmldsig::sign_element(
-            &args.xml,
+            xml,
             element,
             args.parent.as_deref(),
             &entry.key,
             &entry.cert,
-        ),
+        )
+        .map_err(xml_failed),
     }
-    .map_err(xml_failed)?;
-    Ok(Bytes::from(signed))
 }
 
 /// The core's canonicalization of `method`.

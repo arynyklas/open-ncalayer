@@ -566,6 +566,19 @@ fn abi_types_roundtrip() {
         request: "{}".to_owned(),
         origin: Some("https://a.kz".to_owned()),
         locale: "kk".to_owned(),
+        data_prefix: Some("oncl-data:00:".to_owned()),
+    });
+    roundtrip(abi::DataRef {
+        data: "oncl-data:00:1".to_owned(),
+    });
+    roundtrip(abi::DataDecodeArgs {
+        data: "oncl-data:00:1".to_owned(),
+        form: abi::DataDecoding::BasicsBase64,
+    });
+    roundtrip(abi::DataDecoded::Invalid("bad".to_owned()));
+    roundtrip(abi::DataEncodeArgs {
+        data: "oncl-data:00:1".to_owned(),
+        form: abi::DataEncoding::Base64,
     });
     roundtrip(Output {
         response: "ok".to_owned(),

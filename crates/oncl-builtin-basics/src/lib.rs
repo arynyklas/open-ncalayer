@@ -48,11 +48,17 @@ pub trait Core {
     fn choose_key(&self, flow: &FlowArgs) -> Option<Self::Key>;
     /// The certificate of `key`, DER.
     fn certificate<'k>(&self, key: &'k Self::Key) -> &'k [u8];
-    /// A CMS signature with `key` as `args` say.
+    /// `text` (a string of the request, or the marker of one the core keeps) decoded as
+    /// base64 ([`oncl_pdk::javab64::decode_basics`]): the data, or the marker of the data
+    /// the core keeps; else the decoder's message.
+    fn decode(&self, text: &str) -> Result<Vec<u8>, String>;
+    /// A CMS signature with `key` as `args` say, of data or of the data a marker stands
+    /// for: the CMS, or the marker of the CMS the core keeps.
     fn sign_cms(&self, key: &Self::Key, args: SignCmsExArgs) -> HostResult<CmsOutcome>;
-    /// A signature of `data` with `key`'s algorithm.
+    /// A signature of `data` (or of the data a marker stands for) with `key`'s algorithm.
     fn sign_raw(&self, key: &Self::Key, data: &[u8]) -> HostResult<Vec<u8>>;
-    /// `xml` with an enveloped signature of the whole document.
+    /// `xml` (or the document a marker stands for) with an enveloped signature of the whole
+    /// document: the document, or the marker of the document the core keeps.
     fn sign_xml(&self, key: &Self::Key, xml: &[u8]) -> HostResult<Vec<u8>>;
     /// The `generateCsr` window.
     fn dialog_csr(&self, args: &CsrDialogArgs) -> HostResult<Option<CsrChoice>>;

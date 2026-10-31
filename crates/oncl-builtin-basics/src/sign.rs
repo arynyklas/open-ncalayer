@@ -3,8 +3,8 @@
 
 use crate::Core;
 use crate::args::{
-    STORAGES, class_cast, decode_base64, encode_base64, get_array, get_object, get_string,
-    json_exception, locale, null_pointer, opt_bool, pem, pem_or_base64, storage_list,
+    STORAGES, class_cast, encode_base64, get_array, get_object, get_string, json_exception, locale,
+    null_pointer, opt_bool, pem, pem_or_base64, storage_list,
 };
 use crate::failures::{
     certificate_parsing_failure, cms_failure, invalid_signing_params, key_failure, signing_failure,
@@ -158,7 +158,7 @@ impl<'a> SignRequest<'a> {
             .into_iter()
             .map(|item| {
                 if decode {
-                    decode_base64(item).map(Cow::Owned).map_err(signing_failure)
+                    core.decode(item).map(Cow::Owned).map_err(signing_failure)
                 } else {
                     Ok(Cow::Borrowed(item.as_bytes()))
                 }

@@ -654,11 +654,20 @@ fn id_card_holder_from_emulator() {
 // --- rules ----------------------------------------------------------------------------------------
 
 #[test]
-fn keystore_functions_need_builtin() {
+fn keystore_and_data_functions_need_builtin() {
     let engine = Engine::new();
     let without = Manifest::from_toml_builtin(&builtin_manifest("")).unwrap();
     let plugin = manifest("keys = true\ndialogs = true\nfiles = true\npage_files = true");
-    for import in KEYSTORE_IMPORTS {
+    let data = [
+        Import::DataRead,
+        Import::DataDecode,
+        Import::DataEncode,
+        Import::DataSignCms,
+        Import::DataSignXml,
+        Import::DataStamp,
+        Import::DataPageRead,
+    ];
+    for import in KEYSTORE_IMPORTS.into_iter().chain(data) {
         assert_eq!(import.capability(), Some(abi::Capability::Builtin));
         assert_eq!(import.since().to_string(), "0.1.0-alpha.5");
         let wasm = wasm(&probe(&[(import, Vec::new())]));

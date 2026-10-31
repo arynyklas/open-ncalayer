@@ -1,5 +1,40 @@
 //! The Base64 codecs the original's modules use, with their errors: Java 8's strict
-//! `Base64.getDecoder()`, Kalkan's lenient decoder, and `Base64.getMimeEncoder()`.
+//! `Base64.getDecoder()`, Kalkan's lenient decoder, `Base64.getMimeEncoder()`, and the
+//! basics module's decoder ([`decode_basics`]).
+
+use base64::Engine;
+use base64::alphabet;
+use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+
+/// [`decode_basics`] of a text without padding.
+const BASICS_UNPADDED: GeneralPurpose = GeneralPurpose::new(
+    &alphabet::STANDARD,
+    GeneralPurposeConfig::new()
+        .with_decode_padding_mode(DecodePaddingMode::RequireNone)
+        .with_decode_allow_trailing_bits(true),
+);
+/// [`decode_basics`] of a text ending in `=`.
+const BASICS_PADDED: GeneralPurpose = GeneralPurpose::new(
+    &alphabet::STANDARD,
+    GeneralPurposeConfig::new()
+        .with_decode_padding_mode(DecodePaddingMode::RequireCanonical)
+        .with_decode_allow_trailing_bits(true),
+);
+
+/// The basics module's `Base64.getDecoder()`: the standard alphabet, no whitespace,
+/// padding optional but complete when present, trailing bits ignored.
+///
+/// # Errors
+///
+/// The `base64` crate's [`base64::DecodeError`]: its `Display` is the message the module
+/// reports.
+pub fn decode_basics(text: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    if text.ends_with('=') {
+        BASICS_PADDED.decode(text)
+    } else {
+        BASICS_UNPADDED.decode(text)
+    }
+}
 
 /// The standard alphabet.
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

@@ -49,7 +49,7 @@ mod guest;
 pub use guest::__rt;
 #[cfg(target_arch = "wasm32")]
 pub use guest::{
-    builtin, call_host, core, dialogs, files, host, http, keys, pki, settings, shared, tokens,
+    builtin, call_host, core, data, dialogs, files, host, http, keys, pki, settings, shared, tokens,
 };
 pub use oncl_protocol::{AddInfo, Reply, invoker, javab64, javaexc, javamap, legacy, orgjson};
 pub use serde_json;
@@ -94,6 +94,8 @@ pub struct Request {
     pub origin: Option<String>,
     /// The language of OpenNCALayer's windows.
     pub locale: Locale,
+    /// For a built-in module: the prefix of this call's data markers ([`abi::Input`]).
+    pub data_prefix: Option<String>,
 }
 
 impl Request {
@@ -103,6 +105,7 @@ impl Request {
             locale: Locale::from_code(&input.locale),
             text: input.request,
             origin: input.origin,
+            data_prefix: input.data_prefix,
         }
     }
 

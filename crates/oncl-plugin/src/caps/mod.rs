@@ -10,13 +10,15 @@
 //! - [`net`]: requests to URLs under the manifest's prefixes or to the page's own listed
 //!   origin, redirects not followed;
 //! - [`state`]: the plugin's settings on disk and the values its instances share;
-//! - [`keystore`]: the built-in modules' key files and the windows that ask for them.
+//! - [`keystore`]: the built-in modules' key files and the windows that ask for them;
+//! - [`data`]: the documents the core keeps for a built-in module during a call.
 //!
 //! The first host function that shows a window takes the process-wide dialog-flow turn
 //! ([`lock_dialog_flow`]) and holds it until `oncl_process` returns, trap or not
 //! ([`DialogTurn`]), so a plugin's dialogs and those of other modules do not interleave.
 
 mod crypto;
+mod data;
 mod dialogs;
 mod files;
 mod keys;
@@ -28,6 +30,10 @@ pub use crypto::{NCA_PKI_HOSTS, nca_pki_hosts};
 pub(crate) use crypto::{
     ca_issuer, ca_list, cert_details, cms_verify, crl_fetch, hash, ocsp_fetch, pkix_path,
     tsp_request, tsp_stamp, xml_verify,
+};
+pub(crate) use data::{
+    CallData, data_decode, data_encode, data_page_read, data_read, data_sign_cms, data_sign_xml,
+    data_stamp,
 };
 pub use dialogs::MAX_SECRETS;
 pub(crate) use dialogs::{

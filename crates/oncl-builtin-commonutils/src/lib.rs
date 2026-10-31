@@ -57,11 +57,20 @@ pub trait Core {
     fn cert_details(&self, der: &[u8]) -> CertDetails;
     /// A certification path from `der` through the core's CAs, now or at its notAfter.
     fn path(&self, der: &[u8]) -> PathOutcome;
-    /// A CMS signature.
+    /// `text` (a string of the request, or the marker of one the core keeps) decoded with
+    /// Java's base64 decoder: the data, or the marker of the data the core keeps; else the
+    /// decoder's message.
+    fn decode(&self, text: &str) -> Result<Vec<u8>, String>;
+    /// Base64 of data, or of the data a marker stands for: the text, or the marker of the
+    /// text the core keeps.
+    fn encode(&self, data: &[u8]) -> String;
+    /// A CMS signature of data or of the data a marker stands for: the CMS, or its marker.
     fn sign_cms(&self, key: &Self::Key, args: SignCmsExArgs) -> HostResult<CmsOutcome>;
-    /// A time-stamp on a signer.
+    /// A time-stamp on a signer of a CMS or of the CMS a marker stands for: the CMS, or its
+    /// marker.
     fn stamp(&self, args: &StampArgs) -> HostResult<StampOutcome>;
-    /// An XML signature: the whole document, or the `element` put into `parent`.
+    /// An XML signature (of a document or of the one a marker stands for): the whole
+    /// document, or the `element` put into `parent`; the document, or its marker.
     fn sign_xml(
         &self,
         key: &Self::Key,
@@ -69,7 +78,7 @@ pub trait Core {
         element: Option<&str>,
         parent: Option<&str>,
     ) -> HostResult<Vec<u8>>;
-    /// A file the page names.
+    /// A file the page names; its contents, or their marker.
     fn page_read(&self, path: &str) -> PageRead;
     /// The file chooser of the file type `kind`, starting in `directory`; `invalid` with
     /// the cause `file.unknown_kind` for an unknown type.
