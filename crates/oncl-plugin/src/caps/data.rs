@@ -201,9 +201,7 @@ impl CallData {
                     .ok_or("the reply names data the call let go of")?;
                 let text = std::str::from_utf8(data)
                     .map_err(|_| "the reply names data that is not text")?;
-                let mut written = Counted(0);
-                serde_json::to_writer(&mut written, text).expect("a string serializes");
-                len = len - (end - i) + written.0;
+                len = len - (end - i) + quoted_len(text);
                 markers.push((i, end, text));
             }
             i = end;
@@ -211,31 +209,66 @@ impl CallData {
         if len > max {
             return Err(format!("the reply would be {len} bytes, over {max}"));
         }
-        let mut out = Vec::with_capacity(len);
+        let mut out = String::with_capacity(len);
         let mut copied = 0;
         for (start, end, text) in markers {
-            out.extend_from_slice(&bytes[copied..start]);
-            serde_json::to_writer(&mut out, text).expect("a string serializes");
+            out.push_str(&reply[copied..start]);
+            push_quoted(&mut out, text);
             copied = end;
         }
-        out.extend_from_slice(&bytes[copied..]);
+        out.push_str(&reply[copied..]);
         debug_assert_eq!(out.len(), len);
-        Ok(String::from_utf8(out).expect("text spliced into text"))
+        Ok(out)
     }
 }
 
-/// A writer that only counts the bytes written to it.
-struct Counted(usize);
+/// Whether `serde_json` escapes the byte `b` in a string.
+fn escapes(b: u8) -> bool {
+    b < 0x20 || b == b'"' || b == b'\\'
+}
 
-impl std::io::Write for Counted {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0 += buf.len();
-        Ok(buf.len())
-    }
+/// The length of `text` as `serde_json` writes it as a string, quotes included.
+fn quoted_len(text: &str) -> usize {
+    let extra: usize = text
+        .bytes()
+        .filter(|b| escapes(*b))
+        .map(|b| match b {
+            b'"' | b'\\' | b'\x08' | b'\x0c' | b'\n' | b'\r' | b'\t' => 1,
+            _ => 5,
+        })
+        .sum();
+    text.len() + 2 + extra
+}
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+/// `text` pushed onto `out` as `serde_json` writes a string: quoted, with `"`, `\` and
+/// the control characters escaped (`\b`, `\f`, `\n`, `\r`, `\t`, else `\u00xx`).
+fn push_quoted(out: &mut String, text: &str) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push('"');
+    let mut run = 0;
+    for (i, b) in text.bytes().enumerate() {
+        if !escapes(b) {
+            continue;
+        }
+        out.push_str(&text[run..i]);
+        match b {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\x08' => out.push_str("\\b"),
+            b'\x0c' => out.push_str("\\f"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            _ => {
+                out.push_str("\\u00");
+                out.push(char::from(HEX[usize::from(b >> 4)]));
+                out.push(char::from(HEX[usize::from(b & 0xf)]));
+            }
+        }
+        run = i + 1;
     }
+    out.push_str(&text[run..]);
+    out.push('"');
 }
 
 /// A JSON value checked as `serde_json` reads it into a `Value` (every escape, a lone
@@ -552,7 +585,7 @@ mod tests {
     #[test]
     fn replies_get_the_data_as_serde_json_writes_it() {
         let mut data = CallData::new(usize::MAX);
-        let text = "<a x=\"1\">\r\n</a>\u{1}\u{2028}é\\/";
+        let text = "<a x=\"1\">\r\n</a>\u{1}\u{2028}é\\/\u{8}\u{c}\t\u{1f}\u{7f}\u{0}😀";
         let marker = data.keep(text.as_bytes().to_vec()).unwrap();
         let other = CallData::new(usize::MAX).keep(b"x".to_vec()).unwrap();
         let reply = serde_json::json!({
