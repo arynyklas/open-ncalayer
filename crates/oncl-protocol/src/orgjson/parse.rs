@@ -19,7 +19,7 @@ pub const MAX_DEPTH: usize = 127;
 /// `Duplicate key "a" at 13 [character 14 line 1]`. Keys go in as they come, into a
 /// `new JSONObject()` (a `HashMap` of 16 buckets), nested objects too.
 pub fn parse(text: &str) -> Result<JValue, String> {
-    Tokener::new(text).object(Keep::All).map(JValue::Obj)
+    Tokener::new(text).kept_object(Keep::All).map(JValue::Obj)
 }
 
 /// `new JSONObject(text)` of which only the top-level `keys` are kept: [`parse`]'s errors
@@ -27,7 +27,7 @@ pub fn parse(text: &str) -> Result<JValue, String> {
 /// text has, as `parse` reads them. The other values are read and dropped, so a request of
 /// many keys or large values the reader does not ask for costs no copy of them.
 pub fn parse_only(text: &str, keys: &[&str]) -> Result<JObject, String> {
-    Tokener::new(text).object(Keep::Keys(keys))
+    Tokener::new(text).kept_object(Keep::Keys(keys))
 }
 
 /// `new JSONObject(text).toString()`.
@@ -50,7 +50,7 @@ pub struct Scanned {
 /// read and dropped, so a request carrying a document of megabytes is not copied.
 pub fn scan(text: &str, key: &str) -> Result<Scanned, String> {
     let mut tokener = Tokener::new(text);
-    let mut object = tokener.object(Keep::Keys(&[key]))?;
+    let mut object = tokener.kept_object(Keep::Keys(&[key]))?;
     Ok(Scanned {
         value: object.remove(key),
         len: tokener.pos,
@@ -200,15 +200,21 @@ impl<'t> Tokener<'t> {
         Ok(())
     }
 
+    /// [`object`](Tokener::object) of a `keep` that keeps an object.
+    fn kept_object(&mut self, keep: Keep<'_>) -> Result<JObject, String> {
+        Ok(self.object(keep)?.expect("a kept object"))
+    }
+
     /// `new JSONObject(tokener)`, with the values `keep` asks for: the whole object for
-    /// [`Keep::All`], only the wanted keys for [`Keep::Keys`], no key for [`Keep::Nothing`].
+    /// [`Keep::All`], only the wanted keys for [`Keep::Keys`], and for [`Keep::Nothing`] no
+    /// object at all (`None`: its keys only go into a set, for the duplicate-key check).
     /// A repeated key is found in constant time, whatever is kept.
-    fn object(&mut self, keep: Keep<'_>) -> Result<JObject, String> {
+    fn object(&mut self, keep: Keep<'_>) -> Result<Option<JObject>, String> {
         if self.next_clean() != u16::from(b'{') {
             return Err(self.error("A JSONObject text must begin with '{'"));
         }
         self.enter()?;
-        let mut object = JObject::hash_map();
+        let mut object = (!matches!(keep, Keep::Nothing)).then(JObject::hash_map);
         // The keys read, where the object does not hold them all.
         let mut seen = HashSet::with_hasher(KeyHasher::current());
         loop {
@@ -222,7 +228,7 @@ impl<'t> Tokener<'t> {
                 return Err(self.error("Expected a ':' after a key"));
             }
             let repeated = match keep {
-                Keep::All => object.get(&key).is_some(),
+                Keep::All => object.as_ref().is_some_and(|o| o.get(&key).is_some()),
                 Keep::Keys(_) | Keep::Nothing => !seen.insert(key.clone()),
             };
             if repeated {
@@ -237,7 +243,9 @@ impl<'t> Tokener<'t> {
                 }
                 Keep::All | Keep::Keys(_) => {
                     let value = self.value(Keep::All)?;
-                    object.put(key.into_owned(), value);
+                    if let Some(object) = &mut object {
+                        object.put(key.into_owned(), value);
+                    }
                 }
             }
             match self.next_clean() {
@@ -315,11 +323,7 @@ impl<'t> Tokener<'t> {
         if c == u16::from(b'{') {
             self.back();
             let object = self.object(if keep { Keep::All } else { Keep::Nothing })?;
-            return Ok(if keep {
-                JValue::Obj(object)
-            } else {
-                JValue::Null
-            });
+            return Ok(object.map_or(JValue::Null, JValue::Obj));
         }
         if c == u16::from(b'[') {
             self.back();
