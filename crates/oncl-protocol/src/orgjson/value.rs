@@ -1,12 +1,11 @@
 //! org.json's values as its `toString()` writes them: [`JObject`] in the key order of the
 //! map behind it, numbers as org.json prints them, strings through [`quote`].
 
+use super::keyed::KeyHasher;
 use crate::javamap::{self, Table};
 use hashbrown::HashTable;
 use serde_json::{Map, Number, Value};
 use std::fmt;
-use std::hash::{BuildHasher, RandomState};
-use std::sync::LazyLock;
 
 /// A value of an org.json `JSONObject` or `JSONArray`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,13 +214,9 @@ struct Inner {
     entries: Vec<(String, JValue)>,
     /// The number of each entry in `entries`, hashed by its key.
     index: HashTable<usize>,
-}
-
-/// The hash of a key in [`JObject`]'s index: std's keyed hash, its keys random for each
-/// process, so a page cannot choose keys that collide.
-fn key_hash(key: &str) -> u64 {
-    static KEYS: LazyLock<RandomState> = LazyLock::new(RandomState::new);
-    KEYS.hash_one(key)
+    /// The keys of the index's hash, those of the call that made the object: a secret,
+    /// so a page cannot choose keys that collide (see [`KeyHasher`]).
+    hasher: KeyHasher,
 }
 
 /// Objects are equal by their map and their entries; the index follows from the entries.
@@ -249,6 +244,7 @@ impl JObject {
             kind,
             entries: Vec::new(),
             index: HashTable::new(),
+            hasher: KeyHasher::current(),
         }))
     }
 
@@ -274,7 +270,7 @@ impl JObject {
         let entries = &self.0.entries;
         self.0
             .index
-            .find(key_hash(key), |&i| entries[i].0 == key)
+            .find(self.0.hasher.hash_key(key), |&i| entries[i].0 == key)
             .copied()
     }
 
@@ -289,10 +285,12 @@ impl JObject {
                 if let Kind::Hash(table) = &mut inner.kind {
                     table.push(javamap::string_hash(&key));
                 }
-                let entries = &inner.entries;
+                let (entries, hasher) = (&inner.entries, inner.hasher);
                 inner
                     .index
-                    .insert_unique(key_hash(&key), entries.len(), |&i| key_hash(&entries[i].0));
+                    .insert_unique(hasher.hash_key(&key), entries.len(), |&i| {
+                        hasher.hash_key(&entries[i].0)
+                    });
                 inner.entries.push((key, value));
             }
         }
@@ -323,7 +321,10 @@ impl JObject {
         if let Kind::Hash(table) = &mut inner.kind {
             table.remove(at);
         }
-        if let Ok(entry) = inner.index.find_entry(key_hash(key), |&i| i == at) {
+        if let Ok(entry) = inner
+            .index
+            .find_entry(inner.hasher.hash_key(key), |&i| i == at)
+        {
             entry.remove();
         }
         for i in inner.index.iter_mut() {
@@ -398,6 +399,7 @@ impl JObject {
             kind,
             entries,
             index,
+            hasher: _,
         } = *self.0;
         drop((kind, index));
         entries

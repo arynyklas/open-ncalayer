@@ -39,7 +39,7 @@ use oncl_pdk::abi::{
     Password, RequestForm,
 };
 use oncl_pdk::invoker::Failure;
-use oncl_pdk::orgjson::opt_string;
+use oncl_pdk::orgjson::{KeyHasher, opt_string};
 use oncl_pdk::serde_json::{Map, Value, json};
 use std::collections::HashSet;
 
@@ -230,7 +230,7 @@ impl CsrArgs {
         {
             let names: Vec<String> = names.iter().map(java_string).collect::<Result<_, _>>()?;
             // Each name once, in first-seen order; linear, as a page sends any number.
-            let mut seen = HashSet::with_capacity(names.len());
+            let mut seen = HashSet::with_capacity_and_hasher(names.len(), KeyHasher::current());
             let first: Vec<bool> = names.iter().map(|n| seen.insert(n.as_str())).collect();
             drop(seen);
             alt_names = names

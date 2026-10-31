@@ -2,6 +2,7 @@
 //! quotes, unquoted words, `;` between pairs, text after the object ignored), its number
 //! forms and its error messages with their position.
 
+use super::keyed::KeyHasher;
 use super::value::{JObject, JValue};
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -209,7 +210,7 @@ impl<'t> Tokener<'t> {
         self.enter()?;
         let mut object = JObject::hash_map();
         // The keys read, where the object does not hold them all.
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::with_hasher(KeyHasher::current());
         loop {
             match self.next_clean() {
                 0 => return Err(self.error("A JSONObject text must end with '}'")),

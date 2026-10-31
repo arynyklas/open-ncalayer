@@ -555,6 +555,73 @@ fn many_keys_cost_linear_fuel() {
     }
 }
 
+/// The fuel the four built-in modules spend on a request with `extra` among its top-level
+/// keys, each in a fresh instance of its own.
+fn fuel_with_keys(extra: &str) -> Vec<u64> {
+    let builtins = all_modules();
+    windowless_requests(extra)
+        .iter()
+        .map(|(module, request)| {
+            builtins.module(module).unwrap().process(request, &origin());
+            builtins.stats(module).unwrap().max_fuel
+        })
+        .collect()
+}
+
+#[test]
+fn keys_a_page_chooses_cost_the_fuel_of_other_keys() {
+    // The hash that holds a request's keys is keyed by the host's randomness, so a page
+    // cannot choose keys that collide. Chosen here against fixed keys, 6144 keys have one
+    // home bucket in a table of 8192; they cost what other keys do. (A hash with keys the
+    // page knows is quadratic on them: 3 to 5 times the fuel at this size, growing with
+    // the square.)
+    const CHOSEN: usize = 6144;
+    let known =
+        oncl_protocol::orgjson::KeyHasher::new([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210]);
+    let chosen: Vec<String> =
+        oncl_testkit::collide::colliding_keys(|k| known.hash_key(k), CHOSEN, 13)
+            .iter()
+            .map(|key| format!("\"{key}\":0"))
+            .collect();
+    let random: Vec<String> = (0..CHOSEN).map(|i| format!("\"k{i}\":0")).collect();
+    let start = Instant::now();
+    let chosen = fuel_with_keys(&chosen.join(","));
+    let random = fuel_with_keys(&random.join(","));
+    for ((module, _), (chosen, random)) in windowless_requests("")
+        .iter()
+        .zip(chosen.iter().zip(&random))
+    {
+        assert!(
+            *chosen < 3 * random / 2,
+            "{module}: {chosen} fuel for chosen keys, {random} for other keys"
+        );
+    }
+    assert!(start.elapsed() < Duration::from_secs(60));
+}
+
+#[test]
+fn each_call_has_keys_of_its_own() {
+    // Keys the page can find out are keys it can choose against. Accessory's request has no
+    // random part, so equal fuel for equal requests in fresh instances means equal keys
+    // (the probe sequences of 20 000 keys differ with the keys).
+    let pairs: Vec<String> = (0..20_000).map(|i| format!("\"k{i}\":0")).collect();
+    let pairs = pairs.join(",");
+    let accessory_fuel = || {
+        let builtins = all_modules();
+        let (module, request) = windowless_requests(&pairs).remove(3);
+        builtins
+            .module(&module)
+            .unwrap()
+            .process(&request, &origin());
+        builtins.stats(ACCESSORY).unwrap().max_fuel
+    };
+    let fuels: Vec<u64> = (0..3).map(|_| accessory_fuel()).collect();
+    assert!(
+        fuels.iter().any(|fuel| *fuel != fuels[0]),
+        "the same fuel in fresh instances: {fuels:?}"
+    );
+}
+
 #[test]
 fn nesting_up_to_the_envelope_limit_answers() {
     // The deepest request the envelope routes (`MAX_DEPTH` levels, the outer object

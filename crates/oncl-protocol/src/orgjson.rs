@@ -6,9 +6,11 @@
 //! The messages are `getMessage()`: without the `org.json.JSONException: ` prefix of
 //! `toString()`.
 
+mod keyed;
 mod parse;
 mod value;
 
+pub use keyed::{KeyHasher, seed};
 pub use parse::{MAX_DEPTH, Scanned, parse, parse_only, reserialize, scan};
 pub use value::{JObject, JValue, quote, quoted, quoted_len};
 

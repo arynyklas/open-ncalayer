@@ -327,6 +327,18 @@ unsafe fn process_with(ptr: i32, len: i32, handler: fn(&Request) -> String) -> i
             Err(e) => panic!("the core sent a malformed input: {e}"),
         }
     };
+    // The keys of the hash that holds the page's keys (`oncl_protocol::orgjson`): a
+    // guest has no randomness of its own, and keys the page can know let it choose
+    // colliding ones. Fresh for each call, from the host.
+    let keys = match host::random(16) {
+        Ok(bytes) => <[u8; 16]>::try_from(bytes).expect("the host gave the 16 bytes asked"),
+        Err(e) => panic!("no random bytes to key the hash of the request: {e}"),
+    };
+    let (k0, k1) = keys.split_at(8);
+    oncl_protocol::orgjson::seed([
+        u64::from_le_bytes(k0.try_into().expect("8 bytes")),
+        u64::from_le_bytes(k1.try_into().expect("8 bytes")),
+    ]);
     let response = handler(&Request::from_input(input));
     let output = abi::encode(&Output { response }).into_boxed_slice();
     let len = output.len() as u32;

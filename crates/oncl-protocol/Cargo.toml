@@ -13,3 +13,7 @@ base64.workspace = true
 hashbrown.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+# `collide`: keys that collide under a known hash.
+oncl-testkit.workspace = true

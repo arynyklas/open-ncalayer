@@ -1,10 +1,11 @@
 //! org.json 20211205: its writer, its parser and its readers' messages.
 
 use oncl_protocol::orgjson::{
-    JObject, JValue, MAX_DEPTH, array_get_int, array_get_object, array_get_string, get_array,
-    get_boolean, get_int, get_object, opt_array, opt_boolean, opt_int, opt_object, parse, quoted,
-    quoted_len, reserialize, scan, value_to_string,
+    JObject, JValue, KeyHasher, MAX_DEPTH, array_get_int, array_get_object, array_get_string,
+    get_array, get_boolean, get_int, get_object, opt_array, opt_boolean, opt_int, opt_object,
+    parse, quoted, quoted_len, reserialize, scan, seed, value_to_string,
 };
+use oncl_testkit::collide::colliding_keys;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
@@ -469,4 +470,77 @@ fn put_none_omits_key() {
     let mut o = JObject::hash_map();
     o.put("MD5", 1).put("SHA256", 2).put("MD5", 3);
     assert_eq!(o.to_json(), r#"{"SHA256":2,"MD5":3}"#);
+}
+
+/// Keys a page could choose if it knew the hash of the key index and of the duplicate check:
+/// 6144 keys of which every hash has its low 13 bits zero, so that tables of up to 8192
+/// buckets give them one home bucket.
+const CHOSEN_KEYS: usize = 6144;
+
+fn chosen_text(known: KeyHasher) -> String {
+    let keys = colliding_keys(|key| known.hash_key(key), CHOSEN_KEYS, 13);
+    let pairs: Vec<String> = keys.iter().map(|key| format!("\"{key}\":0")).collect();
+    format!(r#"{{"module":"m",{}}}"#, pairs.join(","))
+}
+
+#[test]
+fn keys_chosen_against_other_keys_read_in_linear_time() {
+    // Chosen for hash keys the reader does not use: they spread as any keys do. (A hash
+    // without a secret lets the page choose, and the index is quadratic; the guests' fuel
+    // is measured with the built-in modules.)
+    let known = KeyHasher::new([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210]);
+    let chosen = chosen_text(known);
+    let random = format!(r#"{{"module":"m",{}}}"#, pairs(CHOSEN_KEYS, 0));
+    let best = |text: &str| {
+        (0..3)
+            .map(|_| {
+                let start = Instant::now();
+                assert_eq!(scan(text, "module").unwrap().len, text.len());
+                assert_eq!(parse(text).unwrap().to_json().len(), text.len());
+                start.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let (chosen, random) = (best(&chosen), best(&random));
+    assert!(
+        chosen < random * 3 + Duration::from_millis(20),
+        "chosen keys {chosen:?}, other keys {random:?}"
+    );
+}
+
+#[test]
+fn seed_sets_the_keys_of_what_is_made_after() {
+    let (a, b) = ([1, 2], [3, 4]);
+    seed(a);
+    assert_eq!(KeyHasher::current(), KeyHasher::new(a));
+    // An object made under `a` keeps finding, putting and removing its keys under `b`.
+    let mut object = JObject::hash_map();
+    for key in ["x", "y", "z"] {
+        object.put(key, 1);
+    }
+    seed(b);
+    assert_eq!(KeyHasher::current(), KeyHasher::new(b));
+    assert_ne!(
+        KeyHasher::new(a).hash_key("x"),
+        KeyHasher::new(b).hash_key("x")
+    );
+    object.put("w", 2).put("x", 3);
+    assert_eq!(object.get("x"), Some(&JValue::from(3)));
+    assert_eq!(object.get("w"), Some(&JValue::from(2)));
+    assert_eq!(object.remove("y"), Some(JValue::from(1)));
+    assert!(object.get("y").is_none());
+    assert_eq!(object.len(), 3);
+    let mut clone = object.clone();
+    assert_eq!(clone.remove("z"), Some(JValue::from(1)));
+    assert_eq!(object.get("z"), Some(&JValue::from(1)));
+}
+
+#[test]
+fn threads_start_with_different_keys() {
+    // From the system's randomness, not a constant (a guest, which has none, is seeded).
+    let keys: Vec<KeyHasher> = (0..2)
+        .map(|_| std::thread::spawn(KeyHasher::current).join().unwrap())
+        .collect();
+    assert_ne!(keys[0], keys[1]);
 }
