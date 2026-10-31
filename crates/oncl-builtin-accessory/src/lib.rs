@@ -8,9 +8,11 @@
 //! - `getBundles`: `{symname: version}` of the original's OSGi framework
 //!   (`org.apache.felix.framework`), of its core bundles whose functions this daemon
 //!   implements ([`CORE_BUNDLES`]), of OpenNCALayer itself ([`SYMNAME`], the core's
-//!   version), and of the original bundles the enabled plugins port;
-//! - `getServices`: `{"services": [module names]}`: the daemon's built-in modules and those
-//!   of its plugins now, sorted;
+//!   version), and of the original bundles the enabled plugins port: a `HashMap` the `uuid`
+//!   goes into too, so the keys are in its order ([`oncl_pdk::javamap`]);
+//! - `getServices`: `{"services": [module names]}`: the daemon's built-in modules, those the
+//!   original has in the order it lists them on the core's system ([`original_services`]),
+//!   then those of its plugins now, sorted;
 //! - `installBundle`: `SYMNAME_PARAMETER_IS_EMPTY` for an empty `symname`; then the
 //!   original reads the page's `origin` with `getString` from the headers its WebSocket
 //!   server always writes as `{"origin": <header or null>}`, so a connection without an
@@ -21,19 +23,20 @@
 //! - `showBundleManager`, `showSettings`, `showKeystoreExplorer`, `showAdesSigning`,
 //!   `showAdesValidation`: `{}`, after asking the daemon to open the window.
 //!
-//! Any failure is `{"errorCode":"<exception.toString()>"}` without `uuid`, as the original's
-//! `JSONStringer` writes it.
+//! The replies but `getBundles` are written in the order of their keys, `uuid` last, as the
+//! original's `JSONStringer` writes them. Any failure is `{"errorCode":"<exception.toString()>"}`
+//! without `uuid`.
 
 pub mod reply;
 
 #[cfg(target_arch = "wasm32")]
 mod guest;
 
-pub use reply::{CORE_BUNDLES, MODULE_NAME, SYMNAME, bundles};
+pub use reply::{CORE_BUNDLES, MODULE_NAME, SYMNAME, bundles, original_services};
 
-use oncl_pdk::abi::{CoreBundles, CoreModules, Window};
-use oncl_pdk::orgjson::{get_string, opt_string};
-use oncl_pdk::serde_json::{Map, Value, json};
+use oncl_pdk::abi::{CoreBundles, CoreModules, Os, Window};
+use oncl_pdk::orgjson::{JObject, JValue, get_string, opt_string};
+use oncl_pdk::serde_json::{Map, Value};
 
 /// What the module asks of the core.
 pub trait Core {
@@ -46,6 +49,8 @@ pub trait Core {
     fn install_bundle(&self, symname: &str) -> Option<bool>;
     /// Opens `window`.
     fn open_window(&self, window: Window);
+    /// The system the core runs on.
+    fn os(&self) -> Os;
 }
 
 /// The reply to `request`: the object, or the exception the original's reply names.
@@ -55,29 +60,15 @@ pub fn handle(core: &impl Core, request: &str) -> Result<String, String> {
     })?;
     let method = get_string(&request, "method").map_err(|e| json_exception(&e))?;
     let uuid = opt_string(&request, "uuid").unwrap_or_default();
-    let mut obj = Map::new();
+    let mut reply = JObject::stringer();
     let window = match method {
         "getBundles" => {
-            let bundles = core.bundles();
-            for (symname, version) in CORE_BUNDLES {
-                obj.insert(symname.to_owned(), json!(version));
-            }
-            obj.insert(SYMNAME.to_owned(), json!(bundles.core_version));
-            for (symname, version) in bundles.plugins {
-                obj.entry(symname).or_insert_with(|| json!(version));
-            }
+            reply = get_bundles(core.bundles());
             None
         }
         "getServices" => {
-            let modules = core.modules();
-            let mut services = modules.builtin;
-            // The built-in ones as given (sorted); with the plugins' added, sorted again.
-            if !modules.plugins.is_empty() {
-                services.extend(modules.plugins);
-                services.sort_unstable();
-                services.dedup();
-            }
-            obj.insert("services".to_owned(), json!(services));
+            let services = get_services(core.modules(), core.os());
+            reply.put("services", services);
             None
         }
         "installBundle" => {
@@ -96,7 +87,7 @@ pub fn handle(core: &impl Core, request: &str) -> Result<String, String> {
                     ),
                 }
             };
-            obj.insert("errorCode".to_owned(), json!(code));
+            reply.put("errorCode", code);
             window
         }
         "showBundleManager" => Some(Window::BundleManager),
@@ -110,17 +101,118 @@ pub fn handle(core: &impl Core, request: &str) -> Result<String, String> {
         core.open_window(window);
     }
     if !uuid.is_empty() {
-        obj.insert("uuid".to_owned(), json!(uuid));
+        reply.put("uuid", uuid);
     }
-    Ok(Value::Object(obj).to_string())
+    Ok(reply.to_json())
+}
+
+/// `getBundles`: a `new HashMap()` of the bundles, in the order they go in; a plugin's
+/// bundle of a name already present does not replace it.
+fn get_bundles(bundles: CoreBundles) -> JObject {
+    let mut reply = JObject::hash_map();
+    for (symname, version) in CORE_BUNDLES {
+        reply.put(symname, version);
+    }
+    reply.put(SYMNAME, bundles.core_version);
+    for (symname, version) in bundles.plugins {
+        if reply.get(&symname).is_none() {
+            reply.put(symname, version);
+        }
+    }
+    reply
+}
+
+/// `getServices`: the built-in modules the original has in its order on `os`, then the other
+/// built-in ones as given (sorted), then the plugins' sorted, each once.
+fn get_services(modules: CoreModules, os: Os) -> Vec<JValue> {
+    let original = original_services(os);
+    let mut services = modules.builtin;
+    // Stable: the names the original lacks keep their order, after its own.
+    services.sort_by_key(|name| {
+        original
+            .iter()
+            .position(|o| o == name)
+            .unwrap_or(original.len())
+    });
+    let mut plugins: Vec<String> = modules
+        .plugins
+        .into_iter()
+        .filter(|name| !services.contains(name))
+        .collect();
+    plugins.sort_unstable();
+    plugins.dedup();
+    services.extend(plugins);
+    services.into_iter().map(JValue::from).collect()
 }
 
 /// The reply to a failure of [`handle`].
 pub fn failure(exception: &str) -> String {
-    json!({ "errorCode": exception }).to_string()
+    JObject::stringer().put("errorCode", exception).to_json()
 }
 
 /// `org.json.JSONException.toString()`.
 fn json_exception(message: &str) -> String {
     format!("org.json.JSONException: {message}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A core on `os` with the four built-in modules (sorted, as the daemon gives them) and
+    /// the plugins' `plugins`.
+    struct OnOs {
+        os: Os,
+        plugins: Vec<String>,
+    }
+
+    impl Core for OnOs {
+        fn modules(&self) -> CoreModules {
+            CoreModules {
+                builtin: vec![
+                    "kz.gov.pki.knca.applet.Applet".to_owned(),
+                    "kz.gov.pki.knca.basics".to_owned(),
+                    "kz.gov.pki.knca.commonUtils".to_owned(),
+                    MODULE_NAME.to_owned(),
+                ],
+                plugins: self.plugins.clone(),
+            }
+        }
+
+        fn bundles(&self) -> CoreBundles {
+            CoreBundles::default()
+        }
+
+        fn install_bundle(&self, _: &str) -> Option<bool> {
+            None
+        }
+
+        fn open_window(&self, _: Window) {}
+
+        fn os(&self) -> Os {
+            self.os
+        }
+    }
+
+    #[test]
+    fn get_services_in_the_original_order_of_each_os() {
+        let windows = r#"{"services":["kz.gov.pki.knca.basics","kz.gov.pki.knca.applet.Applet","kz.gov.pki.knca.commonUtils","kz.gov.pki.ncalayerservices.accessory"],"uuid":"u-1"}"#;
+        let unix = r#"{"services":["kz.gov.pki.knca.applet.Applet","kz.gov.pki.ncalayerservices.accessory","kz.gov.pki.knca.basics","kz.gov.pki.knca.commonUtils"],"uuid":"u-1"}"#;
+        let request = r#"{"method":"getServices","uuid":"u-1"}"#;
+        for (os, reply) in [(Os::Windows, windows), (Os::Linux, unix), (Os::Macos, unix)] {
+            let core = OnOs {
+                os,
+                plugins: Vec::new(),
+            };
+            assert_eq!(handle(&core, request).unwrap(), reply, "{os:?}");
+        }
+        let core = OnOs {
+            os: Os::Linux,
+            plugins: vec!["kz.example.B".to_owned(), "kz.example.A".to_owned()],
+        };
+        assert_eq!(
+            handle(&core, r#"{"method":"getServices"}"#).unwrap(),
+            r#"{"services":["kz.gov.pki.knca.applet.Applet","kz.gov.pki.ncalayerservices.accessory","kz.gov.pki.knca.basics","kz.gov.pki.knca.commonUtils","kz.example.A","kz.example.B"]}"#
+        );
+    }
 }

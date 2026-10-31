@@ -38,11 +38,27 @@ impl Bundles for FakeBundles {
 
 type Seen = Arc<Mutex<Vec<UiRequest>>>;
 
+/// The built-in modules as the daemon gives them: sorted.
+const BUILTINS: [&str; 4] = [
+    "kz.gov.pki.knca.applet.Applet",
+    "kz.gov.pki.knca.basics",
+    "kz.gov.pki.knca.commonUtils",
+    MODULE_NAME,
+];
+
+/// What `getServices` lists of [`BUILTINS`] on the system the tests run on: the original's
+/// order there.
+const SERVICES: &str = if cfg!(windows) {
+    r#""kz.gov.pki.knca.basics","kz.gov.pki.knca.applet.Applet","kz.gov.pki.knca.commonUtils","kz.gov.pki.ncalayerservices.accessory""#
+} else {
+    r#""kz.gov.pki.knca.applet.Applet","kz.gov.pki.ncalayerservices.accessory","kz.gov.pki.knca.basics","kz.gov.pki.knca.commonUtils""#
+};
+
 fn module_with(plugins: Arc<FakeBundles>) -> (Accessory, Seen) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&seen);
     let ui: UiCallback = Arc::new(move |r| log.lock().unwrap().push(r));
-    let services = vec![MODULE_NAME.to_owned(), "kz.gov.pki.knca.basics".to_owned()];
+    let services = BUILTINS.map(str::to_owned).to_vec();
     (Accessory::new(services, plugins, ui), seen)
 }
 
@@ -51,13 +67,17 @@ fn module() -> (Accessory, Seen) {
     module_with(Arc::default())
 }
 
-fn call(m: &Accessory, request: Value, origin: Option<&str>) -> Value {
+/// The reply's text.
+fn call_text(m: &Accessory, request: &str, origin: Option<&str>) -> String {
     let add_info = AddInfo {
         origin: origin.map(str::to_owned),
         ..AddInfo::default()
     };
-    let reply = m.process(&request.to_string(), &add_info);
-    serde_json::from_str(reply.text().unwrap()).unwrap()
+    m.process(request, &add_info).text().unwrap().to_owned()
+}
+
+fn call(m: &Accessory, request: Value, origin: Option<&str>) -> Value {
+    serde_json::from_str(&call_text(m, &request.to_string(), origin)).unwrap()
 }
 
 fn not_found(symname: &str) -> UiRequest {
@@ -84,12 +104,57 @@ fn get_bundles() {
     assert_eq!(obj["uuid"], "u1");
 }
 
+/// The keys of `getBundles` in the order of the original's `HashMap`, which the `uuid` goes
+/// into too; within a bucket, in the order they went in: the original's bundles, OpenNCALayer,
+/// the plugins' bundles, the `uuid`.
 #[test]
-fn get_services() {
-    let (m, _) = module();
+fn get_bundles_in_hashmap_order() {
+    let plugins = Arc::new(FakeBundles::default());
+    *plugins.bundles.lock().unwrap() = vec![
+        ("kz.example.echo".to_owned(), "1.0.0".to_owned()),
+        ("kz.example.alpha".to_owned(), "2.1.0".to_owned()),
+    ];
+    let (m, _) = module_with(plugins);
     assert_eq!(
-        call(&m, json!({"method": "getServices"}), None),
-        json!({"services": [MODULE_NAME, "kz.gov.pki.knca.basics"]})
+        call_text(&m, r#"{"method":"getBundles","uuid":"u-1"}"#, None),
+        concat!(
+            r#"{"kz.gov.pki.osgi.layer.common":"0.3.4","#,
+            r#""org.apache.felix.framework":"7.0.3","#,
+            r#""kz.gov.pki.api.layer.NCALayerServices":"0.8.3","#,
+            r#""kz.example.echo":"1.0.0","#,
+            r#""kz.gov.pki.knca.applet.knca_applet":"0.4.13","#,
+            r#""kz.gov.pki.kalkan.xmldsig":"0.5.2","#,
+            r#""io.github.arynyklas.openncalayer":""#,
+            env!("CARGO_PKG_VERSION"),
+            r#"","kz.gov.pki.provider.knca_provider_util":"0.9.2","#,
+            r#""kz.gov.pki.kalkan.knca_provider_jce_kalkan":"0.7.8","#,
+            r#""kz.gov.pki.osgi.layer.websocket":"0.4.3","#,
+            r#""uuid":"u-1","#,
+            r#""kz.example.alpha":"2.1.0"}"#,
+        )
+    );
+}
+
+/// The built-in modules in the order the original lists them on this system (Windows:
+/// basics, Applet, commonUtils, accessory; Linux and macOS: Applet, accessory, basics,
+/// commonUtils), then the plugins' modules, sorted; `uuid` last.
+#[test]
+fn get_services_bytes() {
+    let plugins = Arc::new(FakeBundles::default());
+    let (m, _) = module_with(Arc::clone(&plugins));
+    assert_eq!(
+        call_text(&m, r#"{"method":"getServices"}"#, None),
+        format!(r#"{{"services":[{SERVICES}]}}"#)
+    );
+    assert_eq!(
+        call_text(&m, r#"{"method":"getServices","uuid":"u-1"}"#, None),
+        format!(r#"{{"services":[{SERVICES}],"uuid":"u-1"}}"#)
+    );
+    *plugins.services.lock().unwrap() =
+        vec!["kz.example.Zeta".to_owned(), "kz.example.Alpha".to_owned()];
+    assert_eq!(
+        call_text(&m, r#"{"method":"getServices","uuid":"u-1"}"#, None),
+        format!(r#"{{"services":[{SERVICES},"kz.example.Alpha","kz.example.Zeta"],"uuid":"u-1"}}"#)
     );
 }
 
@@ -234,14 +299,15 @@ fn get_services_is_live() {
         "io.example.Plugin".to_owned(),
         "kz.gov.pki.knca.basics".to_owned(),
     ];
+    // A plugin's module of a built-in name is listed once, in the built-in place.
     assert_eq!(
-        call(&m, json!({"method": "getServices"}), None),
-        json!({"services": ["io.example.Plugin", "kz.gov.pki.knca.basics", MODULE_NAME]})
+        call_text(&m, r#"{"method":"getServices"}"#, None),
+        format!(r#"{{"services":[{SERVICES},"io.example.Plugin"]}}"#)
     );
     plugins.services.lock().unwrap().clear();
     assert_eq!(
-        call(&m, json!({"method": "getServices"}), None),
-        json!({"services": [MODULE_NAME, "kz.gov.pki.knca.basics"]})
+        call_text(&m, r#"{"method":"getServices"}"#, None),
+        format!(r#"{{"services":[{SERVICES}]}}"#)
     );
 }
 
@@ -267,25 +333,80 @@ fn show_windows() {
     assert_eq!(*seen.lock().unwrap(), expected);
 }
 
+/// `errorCode`, then `uuid` when the request has one.
 #[test]
-fn failures() {
+fn install_bundle_codes_bytes() {
+    let plugins = Arc::new(FakeBundles::default());
+    plugins
+        .offered
+        .lock()
+        .unwrap()
+        .push("kz.example.echo".to_owned());
+    let (m, _) = module_with(plugins);
+    let origin = Some("https://example.kz");
+    for (request, reply) in [
+        (
+            r#"{"method":"installBundle","symname":"","uuid":"u-1"}"#,
+            r#"{"errorCode":"SYMNAME_PARAMETER_IS_EMPTY","uuid":"u-1"}"#,
+        ),
+        (
+            r#"{"method":"installBundle","symname":"   "}"#,
+            r#"{"errorCode":"SYMNAME_PARAMETER_IS_EMPTY"}"#,
+        ),
+        (
+            r#"{"method":"installBundle","symname":"kz.example.echo","uuid":"u-1"}"#,
+            r#"{"errorCode":"NONE","uuid":"u-1"}"#,
+        ),
+        (
+            r#"{"method":"installBundle","symname":"kz.example.echo"}"#,
+            r#"{"errorCode":"NONE"}"#,
+        ),
+        (
+            r#"{"method":"installBundle","symname":"kz.example.other","uuid":"u-1"}"#,
+            r#"{"errorCode":"BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED","uuid":"u-1"}"#,
+        ),
+        (
+            r#"{"method":"installBundle","symname":5}"#,
+            r#"{"errorCode":"BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED"}"#,
+        ),
+        (r#"{"method":"showSettings"}"#, "{}"),
+        (
+            r#"{"method":"showBundleManager","uuid":"u-1"}"#,
+            r#"{"uuid":"u-1"}"#,
+        ),
+    ] {
+        assert_eq!(call_text(&m, request, origin), reply, "{request}");
+    }
+}
+
+/// A failure is `{"errorCode": <exception>}`, without the request's `uuid`.
+#[test]
+fn errors_bytes() {
     let (m, seen) = module();
-    assert_eq!(
-        call(&m, json!({"method": "nope", "uuid": "u"}), None),
-        json!({"errorCode": "java.lang.NoSuchMethodException"})
-    );
-    assert_eq!(
-        call(&m, json!({"uuid": "u"}), None),
-        json!({"errorCode": "org.json.JSONException: JSONObject[\"method\"] not found."})
-    );
-    assert_eq!(
-        call(&m, json!({"method": null}), None),
-        json!({"errorCode": "org.json.JSONException: JSONObject[\"method\"] is not a string."})
-    );
-    assert_eq!(
-        call(&m, json!({"method": 1}), None),
-        json!({"errorCode": "org.json.JSONException: JSONObject[\"method\"] is not a string."})
-    );
+    for (request, reply) in [
+        (
+            r#"{"method":"nope","uuid":"u-1"}"#,
+            r#"{"errorCode":"java.lang.NoSuchMethodException"}"#,
+        ),
+        (
+            r#"{"uuid":"u-1"}"#,
+            r#"{"errorCode":"org.json.JSONException: JSONObject[\"method\"] not found."}"#,
+        ),
+        (
+            r#"{"method":null}"#,
+            r#"{"errorCode":"org.json.JSONException: JSONObject[\"method\"] is not a string."}"#,
+        ),
+        (
+            r#"{"method":42,"uuid":"u-1"}"#,
+            r#"{"errorCode":"org.json.JSONException: JSONObject[\"method\"] is not a string."}"#,
+        ),
+        (
+            r#"{"method":"installBundle","symname":"kz.example.echo","uuid":"u-1"}"#,
+            r#"{"errorCode":"org.json.JSONException: JSONObject[\"origin\"] is not a string."}"#,
+        ),
+    ] {
+        assert_eq!(call_text(&m, request, None), reply, "{request}");
+    }
     assert!(seen.lock().unwrap().is_empty());
 }
 
