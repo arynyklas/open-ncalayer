@@ -334,11 +334,20 @@ pub enum Import {
     /// `call_locale`: [`LocaleArgs`] → `()`: the language of the windows for the rest of
     /// the call.
     CallLocale,
+    /// `core_modules`: `()` → [`CoreModules`].
+    CoreModules,
+    /// `core_bundles`: `()` → [`CoreBundles`].
+    CoreBundles,
+    /// `core_install_bundle`: [`InstallBundleArgs`] → `bool`, whether a plugin porting the
+    /// bundle is offered to the user; the page's origin is the call's.
+    CoreInstallBundle,
+    /// `core_open_window`: [`WindowArgs`] → `()`, the window opened in the background.
+    CoreOpenWindow,
 }
 
 impl Import {
     /// Every host function.
-    pub const ALL: [Import; 46] = [
+    pub const ALL: [Import; 50] = [
         Import::Log,
         Import::Now,
         Import::Random,
@@ -385,6 +394,10 @@ impl Import {
         Import::SharedPut,
         Import::KeysSignXades,
         Import::CallLocale,
+        Import::CoreModules,
+        Import::CoreBundles,
+        Import::CoreInstallBundle,
+        Import::CoreOpenWindow,
     ];
 
     /// Its import name in [`IMPORT_MODULE`].
@@ -436,6 +449,10 @@ impl Import {
             Import::SharedPut => "shared_put",
             Import::KeysSignXades => "keys_sign_xades",
             Import::CallLocale => "call_locale",
+            Import::CoreModules => "core_modules",
+            Import::CoreBundles => "core_bundles",
+            Import::CoreInstallBundle => "core_install_bundle",
+            Import::CoreOpenWindow => "core_open_window",
         }
     }
 
@@ -483,6 +500,10 @@ impl Import {
             Import::PageFileRead | Import::PageFileWrite => Some(Capability::PageFiles),
             Import::SettingsGet | Import::SettingsPut => Some(Capability::Settings),
             Import::SharedGet | Import::SharedPut => Some(Capability::Shared),
+            Import::CoreModules
+            | Import::CoreBundles
+            | Import::CoreInstallBundle
+            | Import::CoreOpenWindow => Some(Capability::Builtin),
         }
     }
 
@@ -539,7 +560,11 @@ impl Import {
             | Import::SharedPut
             | Import::KeysSignXades => "0.1.0-alpha.4",
             // The built-in modules' functions.
-            Import::CallLocale => "0.1.0-alpha.5",
+            Import::CallLocale
+            | Import::CoreModules
+            | Import::CoreBundles
+            | Import::CoreInstallBundle
+            | Import::CoreOpenWindow => "0.1.0-alpha.5",
         };
         semver::Version::parse(version).expect("a valid version")
     }
@@ -2104,4 +2129,58 @@ pub struct SharedPut {
 pub struct LocaleArgs {
     /// `"ru"`, `"kk"` or `"en"`; anything else is `invalid`.
     pub locale: String,
+}
+
+/// `core_modules`: the module names the core serves now.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CoreModules {
+    /// The built-in modules', sorted.
+    pub builtin: Vec<String>,
+    /// The plugins'.
+    pub plugins: Vec<String>,
+}
+
+/// `core_bundles`: the core's version and the original bundles the enabled plugins port.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CoreBundles {
+    /// The core's version.
+    pub core_version: String,
+    /// `(symname, version)` of the bundles the enabled plugins port.
+    pub plugins: Vec<(String, String)>,
+}
+
+/// `core_install_bundle`: the page asks to install the original bundle `symname`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallBundleArgs {
+    /// The bundle's symbolic name.
+    pub symname: String,
+}
+
+/// `core_open_window`: a window of the core a page asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowArgs {
+    /// The window.
+    pub window: Window,
+}
+
+/// A window of the core.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Window {
+    /// The settings.
+    Settings,
+    /// The plugins.
+    BundleManager,
+    /// A key store explorer.
+    KeystoreExplorer,
+    /// AdES signing.
+    AdesSigning,
+    /// AdES validation.
+    AdesValidation,
+    /// Where to find a plugin porting the bundle `symname`, which no plugin of the catalog
+    /// offers; the page's origin is the call's.
+    BundleHint {
+        /// The bundle's symbolic name.
+        symname: String,
+    },
 }

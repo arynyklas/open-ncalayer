@@ -122,14 +122,13 @@ async fn start_ipc(registry: Arc<Registry>) -> (TempDir, Endpoint) {
 /// The daemon's registry answering dialogs with `steps`.
 fn scripted_registry(steps: Vec<Step>) -> (Arc<Registry>, Arc<ScriptedPrompter>) {
     let prompter = Arc::new(ScriptedPrompter::new(steps));
-    let registry = build_registry(
+    let services = oncl_plugin::HostServices::new(
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(MockTsa::new(entry("tsa-gost2015"))),
         oncl_token::Tokens::disabled(),
-        Arc::new(|_| {}),
-        None,
     );
+    let registry = build_registry(services, Arc::new(|_| {}), None).unwrap();
     (Arc::new(registry), prompter)
 }
 

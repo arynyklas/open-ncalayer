@@ -7,6 +7,7 @@
 //! self-update, logging, signature checking (`cms-verify`) and the command line.
 
 mod bridge;
+pub mod builtins;
 pub mod cli;
 pub mod cms_verify;
 pub mod desktop;
@@ -27,8 +28,9 @@ pub mod wss;
 pub use bridge::{NM_FRAME_LIMIT, serve_ipc, split_message};
 pub use paths::{DATA_DIR_VAR, Paths};
 pub use server::{
-    DEFAULT_PORT, IDLE_TIMEOUT, LiveTls, MAX_MESSAGE, MAX_PORT, PORT_VAR, Plugins, ServerConfig,
-    build_registry, builtin_modules, listen_port, listen_port_from, serve,
+    DEFAULT_PORT, IDLE_TIMEOUT, LiveTls, MAX_MESSAGE, MAX_PORT, NoPlugins, PORT_VAR, Plugins,
+    ServerConfig, about_bundles, build_registry, build_registry_from, builtin_modules, listen_port,
+    listen_port_from, serve,
 };
 pub use session::{hold_requests, release_requests, requests_idle};
 pub use settings::{JsonSettings, LiveProxyTransport, daemon_transport, load_settings};

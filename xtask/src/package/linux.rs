@@ -394,9 +394,11 @@ fn set_mode(_: &Path, _: u32) -> anyhow::Result<()> {
 }
 
 /// Builds the programs and the AppDir of `version` in the container ([`IMAGE`]) with the
-/// workspace `root` mounted, into [`OUT_DIR`]: `openncalayer`, `nmhost` and [`APPDIR`]. With
-/// `cache_volume` (a Docker volume) the toolchain and cargo's files persist there between
-/// runs; otherwise under `target/glibc228/` of the workspace. Needs Docker.
+/// workspace `root` mounted, into [`OUT_DIR`]: `openncalayer`, `nmhost` and [`APPDIR`]. The
+/// built-in modules (those of `ONCL_BUILTINS_DIR`, else built first on the host) are
+/// embedded from their mounted folder. With `cache_volume` (a Docker volume) the toolchain
+/// and cargo's files persist there between runs; otherwise under `target/glibc228/` of the
+/// workspace. Needs Docker.
 ///
 /// # Errors
 ///
@@ -406,13 +408,17 @@ pub fn build_in_container(
     version: &Version,
     cache_volume: Option<&str>,
 ) -> anyhow::Result<PathBuf> {
+    let builtins = crate::builtins::prepare(root)?;
     let mut docker = Command::new("docker");
     docker
         .args(["run", "--rm"])
         .arg("-v")
         .arg(mount(root, "/src"))
+        .arg("-v")
+        .arg(mount(&builtins, "/builtins"))
         .args(["-w", "/src", "-e"])
-        .arg(format!("ONCL_VERSION={version}"));
+        .arg(format!("ONCL_VERSION={version}"))
+        .args(["-e", "ONCL_BUILTINS_DIR=/builtins"]);
     if let Some(volume) = cache_volume {
         docker
             .arg("-v")

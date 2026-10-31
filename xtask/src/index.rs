@@ -116,7 +116,9 @@ pub fn plugin_asset_url(tag: &str, id: &str, version: &Version) -> anyhow::Resul
 /// `notes_url` [`release_notes_url`]. So no host, repository, tag, query or fragment other
 /// than the project's releases gets signed or published. Flavors this version does not
 /// know are refused too, and so are plugins sharing a module or a replaced bundle
-/// (`replaces.symname`) with another plugin id.
+/// (`replaces.symname`) with another plugin id, and plugins claiming what is the core's: an
+/// id under the built-in modules' prefix, a built-in module's name ([`builtin_modules`]) or
+/// a bundle of the original the core implements itself.
 ///
 /// # Errors
 ///
@@ -166,9 +168,30 @@ pub fn check_asset_urls(index: &Index) -> anyhow::Result<()> {
         )?;
     }
     let plugin_base = format!("{REPOSITORY}/releases/download/");
+    let builtin = builtin_modules()?;
     let mut owners = BTreeMap::new();
     let mut replacers = BTreeMap::new();
     for plugin in &index.plugins {
+        if plugin.id.starts_with(oncl_plugin::BUILTIN_ID_PREFIX) {
+            bail!(
+                "plugin {}: the id is reserved for the built-in modules",
+                plugin.id
+            );
+        }
+        if let Some(module) = plugin.modules.iter().find(|m| builtin.contains(m)) {
+            bail!("plugin {}: {module} is a built-in module", plugin.id);
+        }
+        if let Some(replaces) = &plugin.replaces
+            && oncl_builtin_accessory::CORE_BUNDLES
+                .iter()
+                .any(|(symname, _)| *symname == replaces.symname)
+        {
+            bail!(
+                "plugin {}: the bundle {} is the core's",
+                plugin.id,
+                replaces.symname
+            );
+        }
         let (tag, _) = plugin
             .package
             .url
@@ -213,6 +236,25 @@ pub fn check_asset_urls(index: &Index) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The module names of the built-in modules (`crates/oncl-builtin-*/plugin.toml`), which no
+/// plugin may serve.
+///
+/// # Errors
+///
+/// A built-in module's manifest cannot be read.
+pub fn builtin_modules() -> anyhow::Result<Vec<String>> {
+    let root = oncl_testkit::workspace_root();
+    let mut modules = Vec::new();
+    for guest in oncl_builtins_build::GUESTS {
+        let path = root.join(guest.dir).join("plugin.toml");
+        let text = fs::read_to_string(&path).with_context(|| format!("{}", path.display()))?;
+        let manifest = oncl_plugin::Manifest::from_toml_builtin(&text)
+            .with_context(|| format!("{}", path.display()))?;
+        modules.extend(manifest.modules);
+    }
+    Ok(modules)
 }
 
 /// An index written by [`add`] or [`refresh`].

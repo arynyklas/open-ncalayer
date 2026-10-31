@@ -4,6 +4,7 @@
 //! of the guest's `oncl_alloc`.
 
 use crate::caps::{self, Consents, KeyTable, RequestBudget, Secrets};
+use crate::core::{self, CoreHooks};
 use crate::manifest::Capabilities;
 use crate::runtime::SessionContext;
 use oncl_basics::{Locale, OcspCache, PagePins, Prompter, RecentPathStore};
@@ -53,6 +54,9 @@ pub struct HostServices {
     /// The hardware tokens of `keys_choose`, `keys_terminals` and `keys_open`, while their
     /// support is on.
     pub tokens: Arc<oncl_token::Tokens>,
+    /// What the `core_*` functions of the built-in modules answer and do; `None`: they
+    /// fail.
+    pub core: Option<Arc<CoreHooks>>,
 }
 
 impl HostServices {
@@ -79,6 +83,7 @@ impl HostServices {
             pki_hosts: crate::nca_pki_hosts(),
             settings_dir: None,
             tokens,
+            core: None,
         }
     }
 }
@@ -334,6 +339,10 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
         Import::SharedPut => run(args, |a| caps::shared_put(state, a)),
         Import::KeysSignXades => run(args, |a| caps::keys_sign_xades(state, a)),
         Import::CallLocale => run(args, |a| call_locale(state, a)),
+        Import::CoreModules => run(args, |()| core::core_modules(state)),
+        Import::CoreBundles => run(args, |()| core::core_bundles(state)),
+        Import::CoreInstallBundle => run(args, |a| core::core_install_bundle(state, a)),
+        Import::CoreOpenWindow => run(args, |a| core::core_open_window(state, a)),
     }
 }
 

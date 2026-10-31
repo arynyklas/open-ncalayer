@@ -30,9 +30,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError, Weak};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use oncl_accessory::Bundles;
 use oncl_desktop::UpdateSettings;
 use oncl_pki::http::HttpTransport;
+use oncl_plugin::core::Bundles;
 use oncl_plugin::{
     BUILT_IN, Capabilities, Installed, LoadError, Localized, MAX_PACKAGE, Package, PluginModules,
     Replaces, Source, Store,

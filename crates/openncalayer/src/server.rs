@@ -10,14 +10,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use oncl_accessory::{Accessory, Bundles, UiCallback};
 use oncl_applet::Applet;
-use oncl_basics::{Basics, OcspCache, Prompter, RecentPathStore};
+use oncl_basics::Basics;
 use oncl_commonutils::CommonUtils;
-use oncl_pki::http::HttpTransport;
-use oncl_protocol::{DynamicModules, HEARTBEAT, Registry, greeting};
+use oncl_plugin::core::{Bundles, CoreHooks, UiCallback};
+use oncl_plugin::{BuiltinLimits, BuiltinSource, Builtins, Engine, HostServices, LoadError};
+use oncl_protocol::{AddInfo, DynamicModules, HEARTBEAT, Registry, Route, greeting};
 use oncl_tls::SelftestReports;
-use oncl_token::Tokens;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -115,13 +114,11 @@ pub struct Plugins {
     pub modules: Arc<dyn DynamicModules>,
     /// What `getServices`, `getBundles` and `installBundle` see of them.
     pub bundles: Arc<dyn Bundles>,
-    /// The OCSP memory the plugins' key choice shares with `kz.gov.pki.knca.basics`.
-    pub ocsp_cache: Arc<OcspCache>,
 }
 
 /// No plugins: `getServices` and `getBundles` list the built-in ones only, and
 /// `installBundle` finds nothing to install.
-struct NoPlugins;
+pub struct NoPlugins;
 
 impl Bundles for NoPlugins {
     fn services(&self) -> Vec<String> {
@@ -137,61 +134,126 @@ impl Bundles for NoPlugins {
     }
 }
 
-/// The names of the built-in modules of [`build_registry`], which no plugin may take.
+/// The names of the built-in modules of [`build_registry`], sorted, which no plugin may
+/// take.
+///
+/// # Panics
+///
+/// When the embedded modules' manifests are wrong, which the build checks.
 pub fn builtin_modules() -> Vec<String> {
-    let mut names = [
-        oncl_basics::MODULE_NAME,
-        oncl_commonutils::MODULE_NAME,
-        oncl_applet::MODULE_NAME,
-        oncl_accessory::MODULE_NAME,
-    ]
-    .map(str::to_owned)
-    .to_vec();
-    names.sort_unstable();
-    names
+    builtin_modules_of(crate::builtins::SOURCES).expect("the embedded modules' manifests")
 }
 
-/// The module registry of the daemon: `kz.gov.pki.knca.basics`,
-/// `kz.gov.pki.knca.commonUtils` and `kz.gov.pki.knca.applet.Applet` (the default module),
-/// which share the dialogs of `prompter`, the hardware tokens of `tokens` (while their
-/// support is on) and reach the NCA time-stamping and OCSP services through `http`, and
-/// `kz.gov.pki.ncalayerservices.accessory`, which asks `ui` to open the daemon's windows;
-/// then the modules of `plugins`, if any.
+/// The names of the modules of `sources` and of the native built-in modules, sorted.
+fn builtin_modules_of(sources: &[BuiltinSource<'_>]) -> Result<Vec<String>, LoadError> {
+    let mut names = Builtins::names(sources)?;
+    names.extend(
+        [
+            oncl_basics::MODULE_NAME,
+            oncl_commonutils::MODULE_NAME,
+            oncl_applet::MODULE_NAME,
+        ]
+        .map(str::to_owned),
+    );
+    names.sort_unstable();
+    Ok(names)
+}
+
+/// The module registry of the daemon: the built-in modules embedded in it
+/// ([`crate::builtins::SOURCES`]) and `kz.gov.pki.knca.basics`, `kz.gov.pki.knca.commonUtils`
+/// and `kz.gov.pki.knca.applet.Applet` (the default module), all served by `services`
+/// (the dialogs, the hardware tokens while their support is on, the NCA time-stamping and
+/// OCSP services, the OCSP memory the plugins share); `ui` opens the windows the pages ask
+/// for; then the modules of `plugins`, if any.
+///
+/// # Errors
+///
+/// A built-in module does not load: the daemon cannot start.
 pub fn build_registry(
-    prompter: Arc<dyn Prompter>,
-    recent: Arc<dyn RecentPathStore>,
-    http: Arc<dyn HttpTransport>,
-    tokens: Arc<Tokens>,
+    services: HostServices,
     ui: UiCallback,
     plugins: Option<Plugins>,
-) -> Registry {
+) -> Result<Registry, LoadError> {
+    build_registry_from(crate::builtins::SOURCES, services, ui, plugins)
+}
+
+/// [`build_registry`] with the built-in modules of `sources`.
+///
+/// # Errors
+///
+/// A module of `sources` does not load.
+pub fn build_registry_from(
+    sources: &[BuiltinSource<'_>],
+    services: HostServices,
+    ui: UiCallback,
+    plugins: Option<Plugins>,
+) -> Result<Registry, LoadError> {
     let mut registry = Registry::default();
-    let common_utils =
-        CommonUtils::new(Arc::clone(&prompter), Arc::clone(&http)).with_tokens(Arc::clone(&tokens));
-    let applet = Applet::new(Arc::clone(&prompter)).with_tokens(Arc::clone(&tokens));
-    let mut basics = Basics::new(prompter, recent, http).with_tokens(tokens);
-    if let Some(plugins) = &plugins {
-        basics = basics.with_ocsp_cache(Arc::clone(&plugins.ocsp_cache));
-    }
+    let common_utils = CommonUtils::new(Arc::clone(&services.prompter), Arc::clone(&services.http))
+        .with_tokens(Arc::clone(&services.tokens));
+    let applet =
+        Applet::new(Arc::clone(&services.prompter)).with_tokens(Arc::clone(&services.tokens));
+    let basics = Basics::new(
+        Arc::clone(&services.prompter),
+        Arc::clone(&services.recent),
+        Arc::clone(&services.http),
+    )
+    .with_tokens(Arc::clone(&services.tokens))
+    .with_ocsp_cache(Arc::clone(&services.ocsp_cache));
     registry.register(oncl_basics::MODULE_NAME, Arc::new(basics));
     registry.register(oncl_commonutils::MODULE_NAME, Arc::new(common_utils));
     registry.register(oncl_applet::MODULE_NAME, Arc::new(applet));
-    // Registered last: its built-in modules are every other one and itself.
-    let mut services = registry.names();
-    services.push(oncl_accessory::MODULE_NAME.to_owned());
-    services.sort_unstable();
     let bundles: Arc<dyn Bundles> = match &plugins {
         Some(plugins) => Arc::clone(&plugins.bundles),
         None => Arc::new(NoPlugins),
     };
-    registry.register(
-        oncl_accessory::MODULE_NAME,
-        Arc::new(Accessory::new(services, bundles, ui)),
-    );
+    let hooks = CoreHooks {
+        builtin_modules: builtin_modules_of(sources)?,
+        bundles,
+        ui,
+        core_version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+    let builtins = Builtins::load(
+        &Engine::new(),
+        services,
+        sources,
+        BuiltinLimits::default(),
+        Some(Arc::new(hooks)),
+    )?;
+    for info in builtins.loaded() {
+        for name in &info.modules {
+            if let Some(module) = builtins.module(name) {
+                registry.register(name, module);
+            }
+        }
+    }
     if let Some(plugins) = plugins {
         registry.set_dynamic(plugins.modules);
     }
-    registry
+    Ok(registry)
+}
+
+/// What the About window lists of the bundles: the reply of the accessory module of
+/// `registry` to `getBundles`, `(symname, version)` in the reply's order, without the
+/// entries the bundles of `plugins` report (the plugins' window lists them).
+pub fn about_bundles(registry: &Registry, plugins: &dyn Bundles) -> Vec<(String, String)> {
+    let request = serde_json::json!({
+        "module": oncl_builtin_accessory::MODULE_NAME,
+        "method": "getBundles",
+    })
+    .to_string();
+    let Route::Module(module) = registry.route(&request) else {
+        return Vec::new();
+    };
+    let reply = module.process(&request, &AddInfo::default());
+    let Some(Ok(serde_json::Value::Object(obj))) = reply.text().map(serde_json::from_str) else {
+        return Vec::new();
+    };
+    let reported = plugins.bundles();
+    obj.into_iter()
+        .filter_map(|(symname, version)| Some((symname, version.as_str()?.to_owned())))
+        .filter(|bundle| !reported.contains(bundle))
+        .collect()
 }
 
 /// Serves connections accepted on `listener`, each in its own task, until the process exits.

@@ -129,14 +129,13 @@ async fn start_with(
     let reports = Arc::new(SelftestReports::new());
     let prompter = Arc::new(ScriptedPrompter::new(steps));
     let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
-    let mut registry = build_registry(
+    let services = oncl_plugin::HostServices::new(
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         tsa.clone(),
         oncl_token::Tokens::disabled(),
-        Arc::new(|_| {}),
-        None,
     );
+    let mut registry = build_registry(services, Arc::new(|_| {}), None).unwrap();
     extra(&mut registry);
     if let Some(dynamic) = dynamic {
         registry.set_dynamic(dynamic);
@@ -261,6 +260,69 @@ async fn unknown_module() {
         next_text(&mut c).await,
         r#"{"success":false,"errorCode":"MODULE_NOT_FOUND"}"#
     );
+}
+
+/// `getServices` over wss lists every built-in module, the embedded ones among them.
+#[tokio::test]
+async fn daemon_serves_every_builtin() {
+    let srv = start(vec![]).await;
+    let mut c = connect(&srv).await;
+    next_text(&mut c).await;
+    send(
+        &mut c,
+        r#"{"module":"kz.gov.pki.ncalayerservices.accessory","method":"getServices"}"#,
+    )
+    .await;
+    let services = json(&next_text(&mut c).await);
+    let listed: Vec<String> = services["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(listed, openncalayer::builtin_modules());
+    for name in openncalayer::builtins::SOURCES.iter().flat_map(|s| {
+        oncl_plugin::Manifest::from_toml_builtin(s.manifest)
+            .unwrap()
+            .modules
+    }) {
+        assert!(listed.contains(&name), "{name}");
+    }
+    send(
+        &mut c,
+        r#"{"module":"kz.gov.pki.ncalayerservices.accessory","method":"getBundles","uuid":"b"}"#,
+    )
+    .await;
+    let bundles = json(&next_text(&mut c).await);
+    assert_eq!(
+        bundles["io.github.arynyklas.openncalayer"],
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(bundles["uuid"], "b");
+}
+
+/// The program lists the modules it embeds: `<id> <version> <sha256>`.
+#[test]
+fn builtins_command_lists_the_embedded_modules() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_openncalayer"))
+        .arg("builtins")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), openncalayer::builtins::SOURCES.len(), "{text}");
+    for (line, source) in lines.iter().zip(openncalayer::builtins::SOURCES) {
+        let manifest = oncl_plugin::Manifest::from_toml_builtin(source.manifest).unwrap();
+        let sha256: String = Sha256::digest(source.wasm)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            *line,
+            format!("{} {} {sha256}", manifest.id, manifest.version)
+        );
+    }
 }
 
 /// Dynamic modules serving nothing that record what they are told.

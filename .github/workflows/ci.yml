@@ -46,6 +46,8 @@ jobs:
         run: cargo clippy --locked --manifest-path crates/oncl-pdk/example/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
       - name: Clippy of the guest SDK (wasm32)
         run: cargo clippy --locked -p oncl-pdk --target wasm32-unknown-unknown -- -D warnings
+      - name: Clippy of the built-in modules (wasm32)
+        run: cargo clippy --locked -p oncl-builtin-accessory --target wasm32-unknown-unknown -- -D warnings
       - name: Clippy of the plugin ports (wasm32)
         run: cargo clippy --locked --manifest-path plugins/Cargo.toml --workspace --target wasm32-unknown-unknown -- -D warnings
       - name: Tests of the ports' shared libraries
@@ -311,6 +313,8 @@ jobs:
             | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
+      - name: Built-in modules embedded
+        run: cargo xtask builtins check --bin "${{ env.BIN }}/openncalayer.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: win7-${{ matrix.arch }}
@@ -374,8 +378,15 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: windows-package-${{ matrix.target }}
+      # Built once and embedded as release.yml does (`ONCL_BUILTINS_DIR`).
+      - name: Built-in modules (as release.yml)
+        run: cargo xtask builtins build
       - name: Build (as release.yml)
+        env:
+          ONCL_BUILTINS_DIR: ${{ github.workspace }}/target/builtins
         run: cargo build --locked --release --target ${{ matrix.target }} -p openncalayer -p oncl-nmhost
+      - name: Built-in modules embedded
+        run: cargo xtask builtins check --bin "${{ env.BIN }}/openncalayer.exe"
       - name: Start
         shell: bash
         run: |
@@ -424,7 +435,11 @@ jobs:
         run: rustup toolchain install && rustup target add x86_64-apple-darwin aarch64-apple-darwin
       - uses: ./.github/actions/pinned-toolchains
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Built-in modules (as release.yml)
+        run: cargo xtask builtins build
       - name: Build both slices and join them
+        env:
+          ONCL_BUILTINS_DIR: ${{ github.workspace }}/target/builtins
         run: |
           for target in x86_64-apple-darwin aarch64-apple-darwin; do
             cargo build --locked --release --target "$target" -p openncalayer -p oncl-nmhost
@@ -434,6 +449,8 @@ jobs:
             lipo -create -output "$BIN/$exe" \
               "target/x86_64-apple-darwin/release/$exe" "target/aarch64-apple-darwin/release/$exe"
           done
+      - name: Built-in modules embedded
+        run: cargo xtask builtins check --bin "$BIN/openncalayer"
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.427
@@ -482,6 +499,7 @@ jobs:
         run: |
           version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
           cargo xtask package linux-build --version "$version"
+          cargo xtask builtins check --bin target/linux-x64/openncalayer
           cargo xtask package linux --version "$version" --packages packages --dist packaged
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

@@ -16,8 +16,12 @@ publish = false
 oncl-accessory = { path = "crates/oncl-accessory" }
 oncl-applet = { path = "crates/oncl-applet" }
 oncl-basics = { path = "crates/oncl-basics" }
+# The accessory module's guest: the core embeds its WebAssembly; xtask reads its bundles.
+oncl-builtin-accessory = { path = "crates/oncl-builtin-accessory" }
 # The built-in modules' tests through the `Module` trait, on either implementation.
 oncl-builtin-tests = { path = "crates/oncl-builtin-tests" }
+# Builds the built-in modules' WebAssembly (the daemon's build script, xtask).
+oncl-builtins-build = { path = "crates/oncl-builtins-build" }
 oncl-commonutils = { path = "crates/oncl-commonutils" }
 oncl-desktop = { path = "crates/oncl-desktop" }
 oncl-gost = { path = "crates/oncl-gost" }
@@ -200,3 +204,13 @@ opt-level = 3
 # CBOR).
 [profile.dev.package.wasmi]
 opt-level = 3
+
+# The built-in modules' WebAssembly (`oncl-builtins-build`): small, one unit, no unwinding.
+[profile.builtin-wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true

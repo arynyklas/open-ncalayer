@@ -97,6 +97,8 @@ pub enum Command {
         #[command(subcommand)]
         command: IntegrationCommand,
     },
+    #[command(about = "Встроенные модули: строки «<id> <версия> <sha256>»")]
+    Builtins,
     // Test builds only (feature `e2e-prompter`), never releases.
     #[cfg(feature = "e2e-prompter")]
     #[command(about = "Для тестовых сборок: действия end-to-end тестов")]
@@ -858,6 +860,23 @@ fn tls_status(files: &TlsFiles) -> Result<ExitCode, ExitCode> {
 fn ru_date(t: OffsetDateTime) -> String {
     let t = t.to_offset(time::UtcOffset::UTC);
     format!("{:02}.{:02}.{:04}", t.day(), u8::from(t.month()), t.year())
+}
+
+/// `builtins`: a line `<id> <version> <sha256>` per built-in module embedded, in the order
+/// the core loads them; exit code 1 if one does not load.
+pub fn builtins() -> ExitCode {
+    match crate::builtins::check(crate::builtins::SOURCES) {
+        Ok(loaded) => {
+            for info in &loaded {
+                println!("{}", crate::builtins::line(info));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Встроенные модули не загружаются: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `nm install|uninstall|status`: exit code 0 on success, otherwise 1 (for `status`: when

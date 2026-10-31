@@ -8,8 +8,38 @@ pub mod applet;
 pub mod basics;
 pub mod commonutils;
 
+use oncl_plugin::core::CoreHooks;
+use oncl_plugin::{BuiltinLimits, Builtins, Engine, HostServices};
 use oncl_protocol::{AddInfo, Module, Reply};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+include!(concat!(env!("OUT_DIR"), "/builtins.rs"));
+
+/// The built-in module `name` of [`SOURCES`], served by `services` with `hooks`.
+///
+/// # Panics
+///
+/// When the modules do not load or none serves `name`.
+fn guest(name: &str, services: HostServices, hooks: Option<Arc<CoreHooks>>) -> Box<dyn Module> {
+    let builtins = Builtins::load(
+        &Engine::new(),
+        services,
+        SOURCES,
+        BuiltinLimits::default(),
+        hooks,
+    )
+    .expect("the built-in modules load");
+    Box::new(Guest(builtins.module(name).expect("a built-in module")))
+}
+
+/// A built-in module's pool.
+struct Guest(Arc<dyn Module>);
+
+impl Module for Guest {
+    fn process(&self, request: &str, add_info: &AddInfo) -> Reply {
+        self.0.process(request, add_info)
+    }
+}
 
 /// The variable choosing the implementation the facades build: `native` or `wasm`.
 pub const BACKEND_VAR: &str = "ONCL_BUILTIN_BACKEND";

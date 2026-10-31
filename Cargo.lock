@@ -3939,6 +3939,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-builtin-accessory"
+version = "0.1.0-alpha.5"
+dependencies = [
+ "oncl-pdk",
+ "serde_json",
+]
+
+[[package]]
 name = "oncl-builtin-tests"
 version = "0.1.0-alpha.5"
 dependencies = [
@@ -3947,8 +3955,11 @@ dependencies = [
  "oncl-accessory",
  "oncl-applet",
  "oncl-basics",
+ "oncl-builtin-accessory",
+ "oncl-builtins-build",
  "oncl-commonutils",
  "oncl-pki",
+ "oncl-plugin",
  "oncl-protocol",
  "oncl-testkit",
  "oncl-token",
@@ -3961,6 +3972,17 @@ dependencies = [
  "windows-sys 0.61.2",
  "x509-cert",
  "zeroize",
+]
+
+[[package]]
+name = "oncl-builtins-build"
+version = "0.1.0-alpha.5"
+dependencies = [
+ "oncl-plugin",
+ "serde",
+ "sha2 0.11.1",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -4300,9 +4322,10 @@ dependencies = [
  "httparse",
  "log",
  "minisign",
- "oncl-accessory",
  "oncl-applet",
  "oncl-basics",
+ "oncl-builtin-accessory",
+ "oncl-builtins-build",
  "oncl-commonutils",
  "oncl-desktop",
  "oncl-ipc",
@@ -7777,8 +7800,9 @@ dependencies = [
  "libc",
  "minisign",
  "object",
- "oncl-accessory",
  "oncl-basics",
+ "oncl-builtin-accessory",
+ "oncl-builtins-build",
  "oncl-gost",
  "oncl-ipc",
  "oncl-pdk",

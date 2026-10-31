@@ -11,13 +11,13 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use clap::Parser;
-use oncl_accessory::UiRequest;
-use oncl_basics::{Locale, OcspCache, Prompter, RecentPathStore};
+use oncl_basics::{Locale, Prompter, RecentPathStore};
 use oncl_desktop::Settings;
 use oncl_desktop::port_owner;
 use oncl_ipc::IpcListener;
 use oncl_pki::http::HttpTransport;
-use oncl_plugin::{Engine, HostServices, PluginModules};
+use oncl_plugin::core::UiRequest;
+use oncl_plugin::{BuiltinSource, Engine, HostServices, PluginModules};
 use oncl_protocol::Registry;
 use oncl_tls::{SelftestReports, TlsFiles};
 use oncl_token::Tokens;
@@ -39,9 +39,9 @@ use openncalayer::update::{
 };
 use openncalayer::wss::{Listening, PortState, WATCH_EVERY, Watcher, Wss};
 use openncalayer::{
-    JsonSettings, LiveProxyTransport, Paths, Plugins, ServerConfig, build_registry,
-    builtin_modules, desktop, hold_requests, listen_port, load_settings, release_requests,
-    requests_idle, serve, serve_ipc,
+    JsonSettings, LiveProxyTransport, NoPlugins, Paths, Plugins, ServerConfig, about_bundles,
+    build_registry_from, builtin_modules, builtins, desktop, hold_requests, listen_port,
+    load_settings, release_requests, requests_idle, serve, serve_ipc,
 };
 use time::OffsetDateTime;
 use tokio::runtime::Runtime;
@@ -171,7 +171,7 @@ fn main() -> ExitCode {
         Command::Run {
             allow_no_wss,
             no_tray,
-        } => run(allow_no_wss, !no_tray),
+        } => run_with_sources(builtins::SOURCES, allow_no_wss, !no_tray),
         Command::Tls { command } => cli::tls(command),
         Command::CmsVerify {
             file,
@@ -180,6 +180,7 @@ fn main() -> ExitCode {
             offline,
         } => cli::cms_verify(&file, content.as_deref(), &chain, offline),
         Command::Nm { command } => cli::nm(command),
+        Command::Builtins => cli::builtins(),
         Command::Integration { command } => cli::integration(command),
         #[cfg(feature = "e2e-prompter")]
         Command::E2e { command } => cli::e2e(command),
@@ -220,7 +221,20 @@ fn velopack_app<'a>() -> velopack::VelopackApp<'a> {
 /// our autostart, not the extension's relay) notifies them at the start, and takes a freed
 /// port by itself; a relay-started one does so only after the user stopped the original or
 /// saved a certificate (D13).
-fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
+///
+/// The built-in modules embedded (`sources`, another set in tests) are checked first: a
+/// module that does not load ends the run at once with code 1, before anything starts (the
+/// updater's health check then rolls a new version back).
+fn run_with_sources(
+    sources: &[BuiltinSource<'_>],
+    allow_no_wss: bool,
+    with_tray: bool,
+) -> ExitCode {
+    if let Err(e) = builtins::check(sources) {
+        tracing::error!(error = %e, "the built-in modules do not load");
+        eprintln!("Не удалось загрузить встроенные модули: {e}");
+        return ExitCode::FAILURE;
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -266,16 +280,26 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
     tracing::info!("{}", cli::token_state(&tokens));
     let prompter: Arc<dyn Prompter> = scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new()));
     let recent: Arc<dyn RecentPathStore> = Arc::new(JsonSettings::new(daemon.paths.settings()));
-    let (plugins, plugin_modules) =
-        start_plugins(&daemon.paths, &prompter, &recent, &http, &tokens);
-    let registry = build_registry(
-        prompter,
-        recent,
-        Arc::clone(&http) as _,
-        Arc::clone(&tokens),
+    let services = host_services(&daemon.paths, prompter, recent, &http, &tokens);
+    let (plugins, plugin_modules) = start_plugins(&daemon.paths, services.clone(), &http);
+    let plugin_bundles = plugin_modules.as_ref().map(|p| Arc::clone(&p.bundles));
+    let registry = match build_registry_from(
+        sources,
+        services,
         Arc::new(open_requested_window),
         plugin_modules,
-    );
+    ) {
+        Ok(registry) => registry,
+        Err(e) => {
+            tracing::error!(error = %e, "the built-in modules do not load");
+            eprintln!("Не удалось загрузить встроенные модули: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let about = match &plugin_bundles {
+        Some(bundles) => about_bundles(&registry, bundles.as_ref()),
+        None => about_bundles(&registry, &NoPlugins),
+    };
     let checks = Checks {
         core: updates.clone(),
         plugins: plugins.as_ref().ok().cloned(),
@@ -347,6 +371,7 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             Arc::clone(&wss),
             checks,
             Box::new(WindowServices(plugins)),
+            about,
         ));
         if wss.off().is_some() {
             let watched = Arc::clone(&wss);
@@ -522,31 +547,33 @@ fn open_requested_window(window: UiRequest) {
     }
 }
 
-/// The plugins: their modules, loaded with the dialogs of `prompter`, the network of `http`,
-/// the hardware tokens of `tokens` and an OCSP memory shared with the basics module; their
-/// service, which installs and updates them from the catalog (or why they are off: logged,
-/// shown in their window). A change is told in the tray and refreshes the plugin window.
-fn start_plugins(
+/// What the built-in modules and the plugins are served by: the dialogs of `prompter`, the
+/// key store path of `recent`, the network of `http`, the hardware tokens of `tokens`, one
+/// OCSP memory, the windows' language the settings window saved last and the plugins'
+/// settings folder.
+fn host_services(
     paths: &Paths,
-    prompter: &Arc<dyn Prompter>,
-    recent: &Arc<dyn RecentPathStore>,
+    prompter: Arc<dyn Prompter>,
+    recent: Arc<dyn RecentPathStore>,
     http: &Arc<LiveProxyTransport>,
     tokens: &Arc<Tokens>,
-) -> (Result<Arc<PluginService>, String>, Option<Plugins>) {
-    let ocsp_cache = Arc::new(OcspCache::new());
+) -> HostServices {
     let settings = paths.settings();
-    let services = HostServices {
-        ocsp_cache: Arc::clone(&ocsp_cache),
-        // The language the settings window saved last.
+    HostServices {
         locale: Arc::new(move || load_settings(&settings).ui_locale()),
         settings_dir: Some(oncl_plugin::Store::settings_dir_in(&paths.data)),
-        ..HostServices::new(
-            Arc::clone(prompter),
-            Arc::clone(recent),
-            Arc::clone(http) as _,
-            Arc::clone(tokens),
-        )
-    };
+        ..HostServices::new(prompter, recent, Arc::clone(http) as _, Arc::clone(tokens))
+    }
+}
+
+/// The plugins: their modules, loaded with `services`; their service, which installs and
+/// updates them from the catalog through `http` (or why they are off: logged, shown in their
+/// window). A change is told in the tray and refreshes the plugin window.
+fn start_plugins(
+    paths: &Paths,
+    services: HostServices,
+    http: &Arc<LiveProxyTransport>,
+) -> (Result<Arc<PluginService>, String>, Option<Plugins>) {
     let modules = Arc::new(PluginModules::new(
         Arc::new(Engine::new()),
         services,
@@ -575,7 +602,6 @@ fn start_plugins(
             let plugins = Plugins {
                 modules,
                 bundles: Arc::clone(&service) as _,
-                ocsp_cache,
             };
             (Ok(service), Some(plugins))
         }
@@ -630,7 +656,8 @@ fn start_renewal(files: TlsFiles, wss: Arc<Wss>) {
 /// `on_saved`. A certificate the wizard saves goes to `wss` at once: served, or wss started
 /// with it, or kept for when the port is free or for the next start ([`Wss::apply_saved`]).
 /// The settings window shows the `updates` and checks for them. About lists the built-in
-/// modules; the plugins' are in the plugin window.
+/// modules and the `bundles` of [`about_bundles`]; the plugins' are in the plugin window.
+#[allow(clippy::too_many_arguments)]
 fn desktop_windows(
     paths: &Paths,
     locale: Locale,
@@ -639,6 +666,7 @@ fn desktop_windows(
     wss: Arc<Wss>,
     updates: Checks,
     plugins: Box<dyn PluginsServices>,
+    bundles: Vec<(String, String)>,
 ) -> DesktopWindows {
     let modules = builtin_modules();
     let executables = lifecycle::executables().unwrap_or_else(|e| {
@@ -648,10 +676,6 @@ fn desktop_windows(
             relay: PathBuf::new(),
         }
     });
-    let bundles = oncl_accessory::bundles()
-        .into_iter()
-        .map(|(symname, version)| (symname.to_owned(), version.to_owned()))
-        .collect();
     let saved_to = Arc::clone(&wss);
     DesktopWindows {
         locale,
@@ -1054,6 +1078,24 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    /// A built-in module that does not load ends the run with code 1 before it starts.
+    #[test]
+    fn builtins_failure_is_fatal() {
+        let manifest = builtins::SOURCES[0].manifest;
+        for source in [
+            BuiltinSource {
+                manifest: "not a manifest",
+                wasm: builtins::SOURCES[0].wasm,
+            },
+            BuiltinSource {
+                manifest,
+                wasm: b"\0asm\x01\0\0\0",
+            },
+        ] {
+            assert_eq!(run_with_sources(&[source], true, false), ExitCode::FAILURE);
+        }
+    }
+
     #[test]
     fn join_gives_up_on_a_running_thread() {
         let done = thread::spawn(|| 7);
@@ -1243,14 +1285,13 @@ mod tests {
         )
         .unwrap();
         let tokens = Tokens::new(Arc::new(emu), true);
-        let registry = build_registry(
+        let services = HostServices::new(
             Arc::new(oncl_basics::testing::ScriptedPrompter::new(Vec::new())),
             Arc::new(oncl_basics::testing::MemoryRecentPath::new(None)),
             Arc::new(LiveProxyTransport::new(oncl_desktop::ProxySetting::None)),
             Arc::clone(&tokens),
-            Arc::new(|_| {}),
-            None,
         );
+        let registry = openncalayer::build_registry(services, Arc::new(|_| {}), None).unwrap();
         let active = || {
             let request =
                 r#"{"module":"kz.gov.pki.knca.commonUtils","method":"getActiveTokens","args":[]}"#;

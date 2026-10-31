@@ -62,20 +62,13 @@ async fn start(steps: Vec<Step>, shorts: &[&str]) -> Srv {
             .swap_remove(0),
     ));
     let tokens = oncl_token::Tokens::disabled();
-    let mut registry = build_registry(
-        prompter.clone(),
-        Arc::new(MemoryRecentPath::new(None)),
-        tsa.clone(),
-        Arc::clone(&tokens),
-        Arc::new(|_| {}),
-        None,
-    );
     let services = HostServices::new(
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         tsa,
         tokens,
     );
+    let mut registry = build_registry(services.clone(), Arc::new(|_| {}), None).unwrap();
     let plugins = PluginModules::new(Arc::new(Engine::new()), services, registry.names());
     for short in shorts {
         plugins

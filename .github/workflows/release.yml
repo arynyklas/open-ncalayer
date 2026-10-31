@@ -59,10 +59,34 @@ jobs:
             *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
           esac
 
+  # The built-in modules' WebAssembly, built once: every flavor embeds these bytes
+  # (`ONCL_BUILTINS_DIR`), and their checksums are the release's `builtins-SHA256SUMS`.
+  builtins:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (rust-toolchain.toml, with wasm32-unknown-unknown)
+        run: rustup toolchain install
+      - run: cargo xtask builtins build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: builtins
+          path: target/builtins/
+          if-no-files-found: error
+      - name: The checksums as a release asset
+        run: mkdir -p sums && cp target/builtins/SHA256SUMS sums/builtins-SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-builtins-sums
+          path: sums/builtins-SHA256SUMS
+          if-no-files-found: error
+
   # One build per Velopack flavor (`oncl_update::Flavor`): the archive, the installer and
   # the update packages (`cargo xtask package`).
   binaries:
-    needs: version
+    needs: [version, builtins]
     strategy:
       fail-fast: false
       matrix:
@@ -116,8 +140,14 @@ jobs:
       SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' && vars.SIGNPATH_ORGANIZATION_ID != '' && vars.SIGNPATH_PROJECT_SLUG != '' && vars.SIGNPATH_SIGNING_POLICY_SLUG != '' }}
       APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGN_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != '' }}
       APPLE_PKG_SIGNING: ${{ secrets.APPLE_INSTALL_IDENTITY != '' }}
+      # The built-in modules of the `builtins` job, embedded as they are.
+      ONCL_BUILTINS_DIR: ${{ github.workspace }}/target/builtins
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: builtins
+          path: target/builtins
       - name: Install toolchain (rust-toolchain.toml)
         shell: bash
         run: |
@@ -154,6 +184,12 @@ jobs:
             lipo -create -output "$BIN/$exe" \
               "target/x86_64-apple-darwin/release/$exe" "target/aarch64-apple-darwin/release/$exe"
           done
+      - name: Built-in modules embedded
+        shell: bash
+        run: |
+          exe="$BIN/openncalayer"
+          if [ "$RUNNER_OS" = Windows ]; then exe+=.exe; fi
+          cargo xtask builtins check --bin "$exe"
 
       # Authenticode before anything is packed: the archive and the package get the signed
       # binaries.

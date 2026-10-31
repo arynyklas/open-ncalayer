@@ -117,7 +117,8 @@ enum Command {
         command: xtask::upstream::cli::UpstreamCommand,
     },
     /// Build the Windows 7 programs with their app-local DLLs into `<out>/<arch>/`, run the
-    /// import gate on them and, on Windows, start them there.
+    /// import gate on them and, on Windows, start them there. The built-in modules are those
+    /// of `ONCL_BUILTINS_DIR`, else built first into `target/builtins` (`builtins build`).
     Win7 {
         /// Architectures to build.
         #[arg(long, value_enum, default_value_t = xtask::win7::Selection::All)]
@@ -130,6 +131,32 @@ enum Command {
         /// library `-Zbuild-std` builds, and every crate then rebuilds.
         #[arg(long)]
         target_dir: Option<PathBuf>,
+    },
+    /// The built-in modules' WebAssembly.
+    Builtins {
+        #[command(subcommand)]
+        command: BuiltinsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum BuiltinsCommand {
+    /// Build the built-in modules into `<out>/<package>/{plugin.toml,plugin.wasm}` with
+    /// `<out>/SHA256SUMS`, as the builds embed them from `ONCL_BUILTINS_DIR`.
+    Build {
+        /// Output directory [default: target/builtins].
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Check that a built program embeds the modules of `<dir>/SHA256SUMS` (its
+    /// `openncalayer builtins`).
+    Check {
+        /// The program.
+        #[arg(long)]
+        bin: PathBuf,
+        /// The modules as built [default: target/builtins].
+        #[arg(long)]
+        dir: Option<PathBuf>,
     },
 }
 
@@ -814,6 +841,21 @@ fn main() -> anyhow::Result<()> {
             let root = oncl_testkit::workspace_root();
             let out = out.unwrap_or_else(|| root.join("target").join("win7"));
             xtask::win7::run(&root, arch, &out, target_dir.as_deref())
+        }
+        Command::Builtins {
+            command: BuiltinsCommand::Build { out },
+        } => {
+            let root = oncl_testkit::workspace_root();
+            let out = out.unwrap_or_else(|| root.join(xtask::builtins::DEFAULT_OUT));
+            xtask::builtins::build(&root, &out)?;
+            Ok(())
+        }
+        Command::Builtins {
+            command: BuiltinsCommand::Check { bin, dir },
+        } => {
+            let root = oncl_testkit::workspace_root();
+            let dir = dir.unwrap_or_else(|| root.join(xtask::builtins::DEFAULT_OUT));
+            xtask::builtins::check(&bin, &dir)
         }
     }
 }

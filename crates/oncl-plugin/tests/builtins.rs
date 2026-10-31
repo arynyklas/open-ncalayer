@@ -6,15 +6,17 @@ mod common;
 use common::*;
 use oncl_basics::Locale;
 use oncl_basics::testing::{ScriptedPrompter, Step};
-use oncl_pdk::abi::{self, ErrorCode, HostError, Import, PageRead};
+use oncl_pdk::abi::{self, CoreBundles, CoreModules, ErrorCode, HostError, Import, PageRead};
+use oncl_plugin::core::{Bundles, CoreHooks, UiRequest};
 use oncl_plugin::{
-    BUILTIN_ID_PREFIX, BuiltinLimits, BuiltinSource, Builtins, Engine, HostServices,
-    InstanceLimits, Manifest, Package, PackageError, SessionContext, Trust, archive,
+    BUILT_IN, BUILTIN_ID_PREFIX, BuiltinLimits, BuiltinSource, Builtins, Engine, HostServices,
+    InstanceLimits, LoadError, Manifest, Package, PackageError, PluginModules, SessionContext,
+    Trust, archive,
 };
 use oncl_protocol::{AddInfo, Reply};
 use oncl_testkit::synthetic;
 use serde_json::{Value, json};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
 /// `value` as CBOR.
@@ -29,13 +31,24 @@ fn builtins(
     services: HostServices,
     limits: BuiltinLimits,
 ) -> Builtins {
+    builtins_with(capabilities, wat, services, limits, None)
+}
+
+/// [`builtins`] with the `core_*` functions of `hooks`.
+fn builtins_with(
+    capabilities: &str,
+    wat: &str,
+    services: HostServices,
+    limits: BuiltinLimits,
+    hooks: Option<Arc<CoreHooks>>,
+) -> Builtins {
     let manifest = builtin_manifest(capabilities);
     let wasm = wasm(wat);
     let source = BuiltinSource {
         manifest: &manifest,
         wasm: &wasm,
     };
-    Builtins::load(&Engine::new(), services, &[source], limits).unwrap()
+    Builtins::load(&Engine::new(), services, &[source], limits, hooks).unwrap()
 }
 
 fn call(b: &Builtins, request: &str) -> Reply {
@@ -468,4 +481,193 @@ fn busy_pool_waits() {
         assert_eq!(call.join().unwrap(), "ok");
     }
     assert_eq!(b.stats(BUILTIN_MODULE).unwrap().calls, 2);
+}
+
+// --- core_* -------------------------------------------------------------------------------
+
+/// Plugins serving `kz.example.Plugin` and porting `kz.example.echo`, offering it; the
+/// installs asked for.
+#[derive(Default)]
+struct FakeBundles {
+    requested: Mutex<Vec<(String, String)>>,
+}
+
+impl Bundles for FakeBundles {
+    fn services(&self) -> Vec<String> {
+        vec!["kz.example.Plugin".to_owned()]
+    }
+
+    fn bundles(&self) -> Vec<(String, String)> {
+        vec![("kz.example.echo".to_owned(), "1.0.0".to_owned())]
+    }
+
+    fn request_install(&self, symname: &str, origin: &str) -> bool {
+        let mut requested = self.requested.lock().unwrap();
+        requested.push((symname.to_owned(), origin.to_owned()));
+        symname == "kz.example.echo"
+    }
+}
+
+/// Hooks over `bundles`, the windows asked for recorded.
+fn hooks(bundles: Arc<FakeBundles>) -> (Arc<CoreHooks>, Arc<Mutex<Vec<UiRequest>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let hooks = CoreHooks {
+        builtin_modules: vec![BUILTIN_MODULE.to_owned()],
+        bundles,
+        ui: Arc::new(move |r| log.lock().unwrap().push(r)),
+        core_version: "9.8.7".to_owned(),
+    };
+    (Arc::new(hooks), seen)
+}
+
+#[test]
+fn core_functions_need_hooks() {
+    let window = cbor(json!({"window": "settings"}));
+    let symname = cbor(json!({"symname": "kz.example.echo"}));
+    for (import, args) in [
+        (Import::CoreModules, cbor(Value::Null)),
+        (Import::CoreBundles, cbor(Value::Null)),
+        (Import::CoreInstallBundle, symname),
+        (Import::CoreOpenWindow, window),
+    ] {
+        let wat = probe(&[(import, args)]);
+        let b = builtins("builtin = true", &wat, services(), BuiltinLimits::default());
+        let err = probe_result::<Value>(&text(call(&b, "{}"))).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Failed, "{import:?}");
+        // A plugin cannot import them at all.
+        let manifest = manifest("");
+        assert!(Engine::new().compile(&manifest, &wasm(&wat)).is_err());
+    }
+    let (hooks, seen) = hooks(Arc::default());
+    let b = builtins_with(
+        "builtin = true",
+        &staged_probe(&[
+            vec![(Import::CoreModules, cbor(Value::Null))],
+            vec![(Import::CoreBundles, cbor(Value::Null))],
+            vec![(
+                Import::CoreOpenWindow,
+                cbor(json!({"window": "bundle_manager"})),
+            )],
+        ]),
+        services(),
+        BuiltinLimits {
+            idle: 1,
+            ..BuiltinLimits::default()
+        },
+        Some(hooks),
+    );
+    assert_eq!(
+        probe_result::<CoreModules>(&text(call(&b, "{}"))).unwrap(),
+        CoreModules {
+            builtin: vec![BUILTIN_MODULE.to_owned()],
+            plugins: vec!["kz.example.Plugin".to_owned()],
+        }
+    );
+    assert_eq!(
+        probe_result::<CoreBundles>(&text(call(&b, "{}"))).unwrap(),
+        CoreBundles {
+            core_version: "9.8.7".to_owned(),
+            plugins: vec![("kz.example.echo".to_owned(), "1.0.0".to_owned())],
+        }
+    );
+    probe_result::<()>(&text(call(&b, "{}"))).unwrap();
+    assert_eq!(*seen.lock().unwrap(), [UiRequest::BundleManager]);
+}
+
+#[test]
+fn install_bundle_origin_comes_from_the_call() {
+    let bundles = Arc::new(FakeBundles::default());
+    let (hooks, seen) = hooks(Arc::clone(&bundles));
+    let b = builtins_with(
+        "builtin = true",
+        &probe(&[
+            (
+                Import::CoreInstallBundle,
+                cbor(json!({"symname": "kz.example.echo"})),
+            ),
+            (
+                Import::CoreOpenWindow,
+                cbor(json!({"window": {"bundle_hint": {"symname": "kz.other"}}})),
+            ),
+        ]),
+        services(),
+        BuiltinLimits::default(),
+        Some(hooks),
+    );
+    let m = b.module(BUILTIN_MODULE).unwrap();
+    probe_result::<()>(m.process("{}", &from("https://a.kz")).text().unwrap()).unwrap();
+    assert_eq!(
+        *bundles.requested.lock().unwrap(),
+        [("kz.example.echo".to_owned(), "https://a.kz".to_owned())]
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [UiRequest::InstallBundle {
+            symname: "kz.other".to_owned(),
+            origin: "https://a.kz".to_owned(),
+        }]
+    );
+    // Without an origin, neither is done.
+    let err = probe_result::<()>(m.process("{}", &AddInfo::default()).text().unwrap()).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Invalid);
+    let install = builtins_with(
+        "builtin = true",
+        &probe(&[(
+            Import::CoreInstallBundle,
+            cbor(json!({"symname": "kz.example.echo"})),
+        )]),
+        services(),
+        BuiltinLimits::default(),
+        hooks_of(&bundles),
+    );
+    let err = probe_result::<bool>(
+        install
+            .module(BUILTIN_MODULE)
+            .unwrap()
+            .process("{}", &AddInfo::default())
+            .text()
+            .unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Invalid);
+    assert_eq!(bundles.requested.lock().unwrap().len(), 1);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+fn hooks_of(bundles: &Arc<FakeBundles>) -> Option<Arc<CoreHooks>> {
+    Some(hooks(Arc::clone(bundles)).0)
+}
+
+#[test]
+fn builtin_module_cannot_be_shadowed() {
+    let manifest = builtin_manifest("");
+    let wasm_bytes = wasm(&answering("{}"));
+    let source = BuiltinSource {
+        manifest: &manifest,
+        wasm: &wasm_bytes,
+    };
+    let names = Builtins::names(&[source]).unwrap();
+    let modules = PluginModules::new(Arc::new(Engine::new()), services(), names);
+    let plugin = format!(
+        r#"
+id = "kz.example.test"
+version = "1.0.0"
+min_core = "0.1.0"
+modules = ["{BUILTIN_MODULE}"]
+
+[name]
+ru = "a"
+kk = "a"
+en = "a"
+"#
+    );
+    let package = Package::read(&archive(plugin.as_bytes(), &wasm_bytes).unwrap()).unwrap();
+    assert_eq!(
+        modules.load(package),
+        Err(LoadError::ModuleTaken {
+            module: BUILTIN_MODULE.to_owned(),
+            owner: BUILT_IN.to_owned(),
+        })
+    );
 }

@@ -360,7 +360,7 @@ fn plugin_data(
 }
 
 fn upstream_data(upstream: &Upstream, ports: &[Port]) -> UpstreamData {
-    let core = oncl_accessory::bundles();
+    let core = oncl_builtin_accessory::bundles();
     let bundles = upstream
         .facts
         .iter()
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn core_bundle_compared_with_get_bundles() {
-        let (symname, version) = oncl_accessory::bundles()[0];
+        let (symname, version) = oncl_builtin_accessory::bundles()[0];
         let upstream = Upstream {
             facts: Some(facts(&[(symname, "999.0", true), ("x y", "1", false)])),
             ..Upstream::default()

@@ -9,8 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-# `registry`: the versions of the core's own bundles, as `getBundles` reports them.
-oncl-accessory.workspace = true
+# `registry`: the versions of the core's own bundles, as `getBundles` reports them; `index`:
+# the bundles no plugin may replace.
+oncl-builtin-accessory.workspace = true
+# `builtins build`, `win7`, `package linux-build`: the built-in modules' WebAssembly;
+# `index`: their module names, which no plugin may serve.
+oncl-builtins-build.workspace = true
 # `registry`: what a plugin's capabilities allow, in the install window's words.
 oncl-basics.workspace = true
 oncl-gost.workspace = true

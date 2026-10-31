@@ -13,11 +13,19 @@ oncl-accessory.workspace = true
 oncl-applet.workspace = true
 # `testing`: `ScriptedPrompter` and `MemoryRecentPath`, which the tests answer dialogs with.
 oncl-basics = { workspace = true, features = ["testing"] }
+# The accessory module's names; its guest is embedded by the build script.
+oncl-builtin-accessory.workspace = true
 oncl-commonutils.workspace = true
 oncl-pki.workspace = true
+# The guests' runtime and the core's hooks.
+oncl-plugin.workspace = true
 oncl-protocol.workspace = true
 oncl-token.workspace = true
 time.workspace = true
+
+[build-dependencies]
+# The guests, built (or taken from `ONCL_BUILTINS_DIR`) and embedded.
+oncl-builtins-build.workspace = true
 
 [dev-dependencies]
 base64.workspace = true

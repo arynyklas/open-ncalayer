@@ -1,11 +1,16 @@
 //! Gives the program the git commit it is built from (`ONCL_GIT_COMMIT`, `unknown` outside
-//! a git checkout), for the About window.
+//! a git checkout), for the About window, and embeds the built-in modules' WebAssembly
+//! (`$OUT_DIR/builtins.rs`): taken from `ONCL_BUILTINS_DIR` if it is set, else built.
 
 use std::path::Path;
 use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if let Err(e) = oncl_builtins_build::embed(&workspace) {
+        panic!("the built-in modules: {e}");
+    }
     let commit = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=ONCL_GIT_COMMIT={commit}");
     // A commit, checkout or reset moves HEAD or the branch it names, and is written to

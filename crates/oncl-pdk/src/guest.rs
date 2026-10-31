@@ -107,6 +107,14 @@ mod imports {
         pub fn keys_sign_xades(ptr: i32, len: i32) -> i64;
         #[link_name = "call_locale"]
         pub fn call_locale(ptr: i32, len: i32) -> i64;
+        #[link_name = "core_modules"]
+        pub fn core_modules(ptr: i32, len: i32) -> i64;
+        #[link_name = "core_bundles"]
+        pub fn core_bundles(ptr: i32, len: i32) -> i64;
+        #[link_name = "core_install_bundle"]
+        pub fn core_install_bundle(ptr: i32, len: i32) -> i64;
+        #[link_name = "core_open_window"]
+        pub fn core_open_window(ptr: i32, len: i32) -> i64;
     }
 }
 
@@ -162,6 +170,10 @@ fn host_fn(import: Import) -> HostFn {
         Import::SharedPut => imports::shared_put,
         Import::KeysSignXades => imports::keys_sign_xades,
         Import::CallLocale => imports::call_locale,
+        Import::CoreModules => imports::core_modules,
+        Import::CoreBundles => imports::core_bundles,
+        Import::CoreInstallBundle => imports::core_install_bundle,
+        Import::CoreOpenWindow => imports::core_open_window,
     }
 }
 
@@ -425,6 +437,39 @@ pub mod host {
                 locale: locale.code().to_owned(),
             },
         )
+    }
+}
+
+/// The core's modules, bundles and windows (capability `builtin`: built-in modules only).
+pub mod core {
+    use super::{HostResult, call, imports};
+    pub use crate::abi::{CoreBundles, CoreModules, Window};
+    use crate::abi::{InstallBundleArgs, WindowArgs};
+
+    /// The module names the core serves now: its built-in modules' and its plugins'.
+    pub fn modules() -> HostResult<CoreModules> {
+        call(imports::core_modules, &())
+    }
+
+    /// The core's version and the bundles its enabled plugins port.
+    pub fn bundles() -> HostResult<CoreBundles> {
+        call(imports::core_bundles, &())
+    }
+
+    /// The page asks to install the original bundle `symname`: whether a plugin porting it
+    /// is offered to the user. `invalid` without the page's origin.
+    pub fn install_bundle(symname: &str) -> HostResult<bool> {
+        call(
+            imports::core_install_bundle,
+            &InstallBundleArgs {
+                symname: symname.to_owned(),
+            },
+        )
+    }
+
+    /// Opens `window` in the background.
+    pub fn open_window(window: Window) -> HostResult<()> {
+        call(imports::core_open_window, &WindowArgs { window })
     }
 }
 

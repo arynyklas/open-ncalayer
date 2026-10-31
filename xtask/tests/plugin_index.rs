@@ -338,6 +338,46 @@ fn a_replaced_bundle_belongs_to_one_plugin() {
     index::check_asset_urls(&index).unwrap();
 }
 
+/// The beta index with the example published, read back.
+fn published_example() -> Index {
+    let dir = index_with_example();
+    read(&index::index_path(dir.path(), Channel::Beta))
+}
+
+#[test]
+fn check_rejects_builtin_id() {
+    let mut index = published_example();
+    let id = format!("{}example", oncl_plugin::BUILTIN_ID_PREFIX);
+    index.plugins[0].package.url = index.plugins[0].package.url.replace(EXAMPLE_ID, &id);
+    index.plugins[0].id = id;
+    let error = error_text(index::check_asset_urls(&index));
+    assert!(
+        error.contains("reserved for the built-in modules"),
+        "{error}"
+    );
+}
+
+#[test]
+fn check_rejects_builtin_module() {
+    let mut index = published_example();
+    let builtin = index::builtin_modules().unwrap();
+    assert!(builtin.contains(&"kz.gov.pki.ncalayerservices.accessory".to_owned()));
+    index.plugins[0].modules.push(builtin[0].clone());
+    let error = error_text(index::check_asset_urls(&index));
+    assert!(error.contains("is a built-in module"), "{error}");
+}
+
+#[test]
+fn check_rejects_core_bundle_symname() {
+    let mut index = published_example();
+    let replaces = index.plugins[0].replaces.as_mut().unwrap();
+    replaces.symname = oncl_builtin_accessory::CORE_BUNDLES[3].0.to_owned();
+    let error = error_text(index::check_asset_urls(&index));
+    assert!(error.contains("is the core's"), "{error}");
+    // The example's own bundle is not the core's.
+    index::check_asset_urls(&published_example()).unwrap();
+}
+
 /// A `plugins/` directory with a port `dir` per entry, whose `plugin.toml` is the
 /// example's with `id` and `version`.
 fn ports(entries: &[(&str, &str, &str)]) -> tempfile::TempDir {

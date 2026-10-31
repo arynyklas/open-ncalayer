@@ -22,6 +22,7 @@ use oncl_protocol::{AddInfo, Module, Reply};
 use semver::Version;
 use sha2::{Digest, Sha256};
 
+use crate::core::CoreHooks;
 use crate::{
     Compiled, Engine, HostServices, Instance, InstanceLimits, LoadError, Localized, Manifest,
     SessionContext, SharedState, Trust,
@@ -157,8 +158,31 @@ impl Builtins {
         Ok(names)
     }
 
-    /// The modules of `sources`, compiled with `engine`, served by `services` and limited by
-    /// `limits`: each instantiated once (its ABI version checked), that instance kept idle.
+    /// The modules of `sources`, checked without running them: their manifests read and
+    /// their code compiled with `engine` against the ABI.
+    ///
+    /// # Errors
+    ///
+    /// The [`LoadError`] of the first module that does not compile, or
+    /// [`LoadError::ModuleTaken`] for a module two of them serve.
+    pub fn check(
+        engine: &Engine,
+        sources: &[BuiltinSource<'_>],
+    ) -> Result<Vec<BuiltinInfo>, LoadError> {
+        let mut owners = HashMap::new();
+        let mut checked = Vec::new();
+        for source in sources {
+            let manifest = manifest(source)?;
+            claim(&mut owners, &manifest)?;
+            engine.compile(&manifest, source.wasm)?;
+            checked.push(info(manifest, source));
+        }
+        Ok(checked)
+    }
+
+    /// The modules of `sources`, compiled with `engine`, served by `services` with the
+    /// `core_*` functions of `hooks`, and limited by `limits`: each instantiated once (its
+    /// ABI version checked), that instance kept idle.
     ///
     /// # Errors
     ///
@@ -169,7 +193,12 @@ impl Builtins {
         services: HostServices,
         sources: &[BuiltinSource<'_>],
         limits: BuiltinLimits,
+        hooks: Option<Arc<CoreHooks>>,
     ) -> Result<Builtins, LoadError> {
+        let services = HostServices {
+            core: hooks,
+            ..services
+        };
         let mut owners = HashMap::new();
         let mut modules = HashMap::new();
         let mut loaded = Vec::new();
@@ -193,20 +222,17 @@ impl Builtins {
             if limits.idle > 0 {
                 lock(&pool.idle).push(first);
             }
+            let info = info(manifest, source);
             tracing::info!(
-                module = %manifest.id,
-                version = %manifest.version,
+                module = %info.id,
+                version = %info.version,
+                sha256 = %hex(&info.sha256),
                 "built-in module loaded"
             );
-            for name in &manifest.modules {
+            for name in &info.modules {
                 modules.insert(name.clone(), Arc::clone(&pool));
             }
-            loaded.push(BuiltinInfo {
-                id: manifest.id,
-                version: manifest.version,
-                modules: manifest.modules,
-                sha256: Sha256::digest(source.wasm).into(),
-            });
+            loaded.push(info);
         }
         Ok(Builtins { modules, loaded })
     }
@@ -232,6 +258,25 @@ impl Builtins {
     pub fn idle(&self, name: &str) -> Option<usize> {
         self.modules.get(name).map(|pool| lock(&pool.idle).len())
     }
+}
+
+/// The info of the loaded `manifest` of `source`.
+fn info(manifest: Manifest, source: &BuiltinSource<'_>) -> BuiltinInfo {
+    BuiltinInfo {
+        id: manifest.id,
+        version: manifest.version,
+        modules: manifest.modules,
+        sha256: Sha256::digest(source.wasm).into(),
+    }
+}
+
+/// `bytes` in lowercase hex.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// The manifest of `source`, which must be a built-in module's.

@@ -1,0 +1,18 @@
+id = "io.github.arynyklas.openncalayer.builtin.accessory"
+version = "0.1.0-alpha.5"
+min_core = "0.1.0-alpha.5"
+modules = ["kz.gov.pki.ncalayerservices.accessory"]
+builtin = true
+
+[name]
+ru = "Сервисы NCALayer"
+kk = "NCALayer қызметтері"
+en = "NCALayer services"
+
+[description]
+ru = "Установленные бандлы, модули и окна OpenNCALayer для страниц"
+kk = "Беттерге арналған OpenNCALayer бандлдары, модульдері мен терезелері"
+en = "OpenNCALayer's bundles, modules and windows for the pages"
+
+[capabilities]
+builtin = true

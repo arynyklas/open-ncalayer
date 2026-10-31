@@ -106,10 +106,11 @@ pub fn run(
     let target_dir = target_dir
         .map(|dir| std::path::absolute(dir).with_context(|| format!("{}", dir.display())))
         .transpose()?;
+    let builtins = crate::builtins::prepare(root)?;
     let mut dirs = Vec::new();
     let mut violations = 0;
     for &arch in selection.arches() {
-        let dir = build(root, arch, &out, target_dir.as_deref())?;
+        let dir = build(root, arch, &out, target_dir.as_deref(), &builtins)?;
         violations += gate(&dir)?;
         dirs.push(dir);
     }
@@ -129,13 +130,14 @@ pub fn run(
 }
 
 /// Builds the packages of a Windows 7 build for `arch`, in cargo's target directory
-/// `target_dir` if given, and copies the files under their shipping names into
-/// `<out>/<arch>/`, which it returns.
+/// `target_dir` if given, embedding the built-in modules laid out in `builtins`, and copies
+/// the files under their shipping names into `<out>/<arch>/`, which it returns.
 pub fn build(
     root: &Path,
     arch: Arch,
     out: &Path,
     target_dir: Option<&Path>,
+    builtins: &Path,
 ) -> anyhow::Result<PathBuf> {
     let mut cargo = Command::new("rustup");
     cargo
@@ -155,6 +157,7 @@ pub fn build(
     // The static CRT: no VC++ redistributable needed. With `--target`, RUSTFLAGS reaches the
     // target's crates only, not build scripts.
     cargo
+        .env(oncl_builtins_build::BUILTINS_DIR_VAR, builtins)
         .env("RUSTFLAGS", "-C target-feature=+crt-static")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         // Set for xtask by the stable toolchain running it.
