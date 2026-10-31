@@ -427,7 +427,7 @@ async fn common_utils_over_wss() {
     .await;
     assert_eq!(
         next_text(&mut c).await,
-        r#"{"code":"200","responseObject":[]}"#
+        r#"{"responseObject":[],"code":"200"}"#
     );
     send(
         &mut c,

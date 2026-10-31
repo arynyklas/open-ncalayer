@@ -258,7 +258,7 @@ fn sign_max_page_file_fits() {
         .into_text()
         .expect("a text reply");
     assert!(
-        reply.starts_with(r#"{"code":"200""#),
+        reply.starts_with(r#"{"responseObject":""#) && reply.ends_with(r#""code":"200"}"#),
         "{}",
         &reply[..reply.len().min(300)]
     );

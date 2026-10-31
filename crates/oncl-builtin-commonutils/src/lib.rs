@@ -2,8 +2,11 @@
 //! into the core as a WebAssembly module.
 //!
 //! A request is `{"method", "args"?: [positional], "uuid"?}`; the original finds the method
-//! by reflection over its `CommonUtils` class, and so does this module's dispatcher. The
-//! reply is `{"code":"200"|"500","message"?,"responseObject"?,"uuid"?}`.
+//! by reflection over its `CommonUtils` class, and so does this module, through the shared
+//! dispatcher of `commonUtils` and its clones ([`oncl_pdk::legacy`]). The reply is the
+//! original's `ResponseMessage` in the key order of Java's `HashMap`:
+//! `{"responseObject"?,"code":"200"|"500","message"?}`, with `"uuid"` last on a method's
+//! own reply when the request has one.
 //!
 //! The module reads the requests and writes the replies, with the original's messages; the
 //! core shows the windows, opens the keys, builds certificate paths, signs, time-stamps and
@@ -11,7 +14,6 @@
 //! dialog language is the process's (the core's shared state), Russian until
 //! `changeLocale`.
 
-mod dispatch;
 mod methods;
 
 #[cfg(target_arch = "wasm32")]
@@ -21,7 +23,7 @@ use oncl_pdk::abi::{
     CertDetails, CertInfo, CmsOutcome, FlowArgs, HostResult, KeyDescription, PageRead, PathOutcome,
     SignCmsExArgs, StampArgs, StampOutcome,
 };
-use oncl_pdk::{AddInfo, Locale};
+use oncl_pdk::{AddInfo, Locale, Reply, legacy};
 
 /// Name the module is registered under.
 pub const MODULE_NAME: &str = "kz.gov.pki.knca.commonUtils";
@@ -99,7 +101,11 @@ pub enum Chosen<K> {
 }
 
 /// The reply to `request` from the page of `add_info`.
-pub fn handle(core: &impl Core, request: &str, add_info: &AddInfo) -> String {
+pub fn handle<C: Core + 'static>(core: &C, request: &str, add_info: &AddInfo) -> String {
     core.call_locale(core.locale());
-    dispatch::process(core, request, add_info)
+    match legacy::dispatch(core, &methods::common_utils::<C>(), request, add_info) {
+        Reply::Text(text) => text,
+        // Every method of `CommonUtils` answers with its `ResponseMessage`.
+        Reply::Drop => unreachable!("a commonUtils method without a reply"),
+    }
 }

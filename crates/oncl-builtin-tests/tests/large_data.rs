@@ -285,7 +285,8 @@ fn reply_text(module: &dyn Module, text: &str) -> String {
 #[test]
 fn lone_surrogates_get_the_same_reply_long_or_short() {
     // `JSON.stringify` writes a lone surrogate as an escape (text cut inside an emoji): the
-    // request is no valid JSON, and the modules answer it as they answer a short one.
+    // modules answer such a request as they answer a short one. basics reads it as org.json
+    // does (a lone surrogate is a Java string), so the method runs.
     let b = basics(0);
     let basics_request = |data: &str| {
         format!(
@@ -294,12 +295,20 @@ fn lone_surrogates_get_the_same_reply_long_or_short() {
         )
     };
     let short = reply_text(&b, &basics_request("x"));
-    assert!(short.contains(r#""code":"GENERAL_ERROR""#), "{short}");
+    assert_eq!(
+        short,
+        r#"{"code":"INVOCATION_ERROR","details":"org.json.JSONException: JSONObject[\"extKeyUsageOids\"] not found.","message":"An invoked method threw an exception.","status":false}"#
+    );
     assert_eq!(reply_text(&b, &basics_request(&long_text(9))), short);
 
+    // commonUtils reads it as org.json does too: the method runs, and its dialog is cancelled.
     let c = common_utils(0);
     for request in [
-        // In the long string, and in a short one after it.
+        // In a short string, in the long string, and in a short one after it.
+        format!(
+            r#"{{"module":"{}","method":"signXml","args":["PKCS12","SIGNATURE","x\ud800","",""]}}"#,
+            commonutils::MODULE_NAME,
+        ),
         format!(
             r#"{{"module":"{}","method":"signXml","args":["PKCS12","SIGNATURE","{}\ud800","",""]}}"#,
             commonutils::MODULE_NAME,
@@ -311,11 +320,9 @@ fn lone_surrogates_get_the_same_reply_long_or_short() {
             long_text(11)
         ),
     ] {
-        // serde_json's message, its column counted in the request as the page sent it.
-        let message = serde_json::from_str::<Value>(&request)
-            .unwrap_err()
-            .to_string();
-        let r: Value = serde_json::from_str(&reply_text(&c, &request)).unwrap();
-        assert_eq!(r, json!({"code": "500", "message": message}));
+        assert_eq!(
+            reply_text(&c, &request),
+            r#"{"code":"500","message":"action.canceled"}"#
+        );
     }
 }
