@@ -47,6 +47,26 @@ pub const MACHINE_PATH_EXCEPTIONS: &[(&str, char, &[&str])] = &[
         &[r"\…", r"\k.p12", r"\x"],
     ),
     ("crates/oncl-basics/tests/sign.rs", 'C', &["/keys/"]),
+    (
+        "crates/oncl-builtin-tests/tests/basics_sign.rs",
+        'C',
+        &["/keys/"],
+    ),
+    (
+        "crates/oncl-builtin-tests/tests/commonutils.rs",
+        'C',
+        &["/x"],
+    ),
+    (
+        "crates/oncl-builtin-tests/tests/differential.rs",
+        'C',
+        &["/keys/"],
+    ),
+    (
+        "crates/oncl-builtins-build/src/lib.rs",
+        'C',
+        &[r"\\Users\\u\\.cargo", "/Users/u/.cargo"],
+    ),
     ("crates/oncl-commonutils/tests/commonutils.rs", 'C', &["/x"]),
     (
         "crates/oncl-desktop/src/autostart.rs",
@@ -80,6 +100,11 @@ pub const MACHINE_PATH_EXCEPTIONS: &[(&str, char, &[&str])] = &[
         &[r"\Program Files\NCALayer\", r"\OpenNCALayer\"],
     ),
     (
+        "crates/oncl-flows/src/page_file.rs",
+        'C',
+        &[r"\…", r"\k.p12", r"\x"],
+    ),
+    (
         "crates/oncl-ipc/src/endpoint.rs",
         'C',
         &[r"\`", r"\Data", r"\\Data", "/Data/"],
@@ -95,6 +120,11 @@ pub const MACHINE_PATH_EXCEPTIONS: &[(&str, char, &[&str])] = &[
         "crates/oncl-plugin/tests/package.rs",
         'C',
         &["/plugin.wasm"],
+    ),
+    (
+        "crates/oncl-plugin/tests/runtime.rs",
+        'C',
+        &[r"\\k.p12", r"\\keys"],
     ),
     (
         "crates/oncl-port-tests/tests/clones.rs",
