@@ -15,7 +15,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Base64 of the signatures in the replies.
 base64.workspace = true
+# The replies as the original's beans serialize (org.json, Java's `HashMap` order) and the
+# shared reflective dispatcher of `commonUtils` (`legacy`).
 oncl-pdk.workspace = true
-# The replies and `KeyInfo`, as the original's beans serialize.
-serde.workspace = true
-serde_json.workspace = true

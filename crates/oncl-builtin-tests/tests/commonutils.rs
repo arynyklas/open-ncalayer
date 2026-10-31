@@ -151,19 +151,19 @@ fn get_active_tokens_lists_no_tokens() {
             .extend(extra.as_object().unwrap().clone());
         raw(&s.cu, r)
     };
-    assert_eq!(req(json!({})), r#"{"code":"200","responseObject":[]}"#);
+    assert_eq!(req(json!({})), r#"{"responseObject":[],"code":"200"}"#);
     assert_eq!(
         req(json!({"args": []})),
-        r#"{"code":"200","responseObject":[]}"#
+        r#"{"responseObject":[],"code":"200"}"#
     );
     // Anything but an array is no arguments (`optJSONArray`).
     assert_eq!(
         req(json!({"args": "x"})),
-        r#"{"code":"200","responseObject":[]}"#
+        r#"{"responseObject":[],"code":"200"}"#
     );
     assert_eq!(
         req(json!({"uuid": "u-1"})),
-        r#"{"code":"200","responseObject":[],"uuid":"u-1"}"#
+        r#"{"responseObject":[],"code":"200","uuid":"u-1"}"#
     );
     assert!(s.prompter.storage_prompts().is_empty());
 }
@@ -184,17 +184,17 @@ fn uuid_is_echoed_on_method_replies_only() {
     );
     assert_eq!(
         req("getActiveTokens", json!([]), json!(42)),
-        r#"{"code":"200","responseObject":[],"uuid":"42"}"#
+        r#"{"responseObject":[],"code":"200","uuid":"42"}"#
     );
     assert_eq!(
         req("getActiveTokens", json!([]), json!(true)),
-        r#"{"code":"200","responseObject":[],"uuid":"true"}"#
+        r#"{"responseObject":[],"code":"200","uuid":"true"}"#
     );
     // Empty and null uuids are not echoed.
     for uuid in [json!(""), Value::Null] {
         assert_eq!(
             req("getActiveTokens", json!([]), uuid),
-            r#"{"code":"200","responseObject":[]}"#
+            r#"{"responseObject":[],"code":"200"}"#
         );
     }
     // Dispatcher errors never carry it.
@@ -208,6 +208,171 @@ fn uuid_is_echoed_on_method_replies_only() {
          kz.gov.pki.knca.NCALayerCommonActivator can not access a member of class \
          kz.gov.pki.knca.CommonUtils with modifiers \\\"private\\\". Method: saveKey\"}"
     );
+}
+
+/// The reply is `ResponseMessage` as org.json writes it, in the key order of Java's
+/// `HashMap`: `responseObject` before `code`, `code` before `message`, the request's `uuid`
+/// last.
+#[test]
+fn reply_keys_in_java_hashmap_order() {
+    let s = setup(script![]);
+    let req = |method: &str, args: Value, uuid: Option<&str>| {
+        let mut request = json!({"module": MODULE_NAME, "method": method, "args": args});
+        if let Some(uuid) = uuid {
+            request["uuid"] = json!(uuid);
+        }
+        raw(&s.cu, request)
+    };
+    assert_eq!(
+        req("getActiveTokens", json!([]), None),
+        r#"{"responseObject":[],"code":"200"}"#
+    );
+    assert_eq!(
+        req("getActiveTokens", json!([]), Some("u-1")),
+        r#"{"responseObject":[],"code":"200","uuid":"u-1"}"#
+    );
+    assert_eq!(
+        req("changeLocale", json!(["ru"]), Some("u-1")),
+        r#"{"code":"200","uuid":"u-1"}"#
+    );
+    assert_eq!(
+        req("getKeyInfo", json!([""]), Some("u-1")),
+        r#"{"code":"500","message":"storageName.param.empty","uuid":"u-1"}"#
+    );
+    assert_eq!(
+        req("showFileChooser", json!(["X", ""]), None),
+        r#"{"code":"500","message":"No enum constant kz.gov.pki.knca.gui.fileChooser.FileChooser.FileType.X"}"#
+    );
+}
+
+/// A method whose dialog is closed answers `500` with `action.canceled`, with the request's
+/// `uuid` or without one: the connection stays.
+#[test]
+fn cancelled_method_answers_500_with_and_without_uuid() {
+    let s = setup(script![Step::CancelFile, Step::CancelFile]);
+    let request = json!({"module": MODULE_NAME, "method": "showFileChooser", "args": ["P12", ""]});
+    assert_eq!(
+        raw(&s.cu, request.clone()),
+        r#"{"code":"500","message":"action.canceled"}"#
+    );
+    let mut with_uuid = request;
+    with_uuid["uuid"] = json!("u-1");
+    assert_eq!(
+        raw(&s.cu, with_uuid),
+        r#"{"code":"500","message":"action.canceled","uuid":"u-1"}"#
+    );
+    assert_eq!(s.prompter.file_prompts().len(), 2);
+}
+
+/// getKeyInfo's object is the `KeyInfo` bean in the key order of Java's `HashMap` of 16
+/// buckets, its properties put in the order NCALayer reads them on Windows 11; with a uuid
+/// the reply is parsed again and keeps it.
+#[test]
+fn key_info_in_java_hashmap_order() {
+    let e = entry("user-gost2015-sign");
+    let tbs = e.cert.tbs_certificate();
+    let ci = cert_info(&e.cert);
+    let (_, ski) = tbs
+        .get_extension::<SubjectKeyIdentifier>()
+        .unwrap()
+        .unwrap();
+    let (_, aki) = tbs
+        .get_extension::<AuthorityKeyIdentifier>()
+        .unwrap()
+        .unwrap();
+    let hex = |b: &[u8]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let millis = |t: OffsetDateTime| (t.unix_timestamp() * 1000).to_string();
+    let text = |s: &str| serde_json::to_string(s).unwrap();
+    let object = format!(
+        "{{\"certNotBefore\":{},\"issuerCn\":{},\"authorityKeyIdentifier\":{},\
+         \"serialNumber\":{},\"certNotAfter\":{},\"issuerDn\":{},\"pem\":{},\"keyId\":{},\
+         \"alias\":{},\"subjectCn\":\"ТЕСТОВ ТЕСТ\",\"subjectDn\":\"CN=ТЕСТОВ ТЕСТ,\
+         SURNAME=ТЕСТОВ,G=ТЕСТОВИЧ,SERIALNUMBER=IIN123456789011,C=KZ\",\
+         \"algorithm\":\"ECGOST3410-2015\"}}",
+        text(&millis(ci.not_before)),
+        text(&common_name(tbs.issuer()).unwrap()),
+        text(&hex(aki.key_identifier.unwrap().as_bytes())),
+        text(&ci.serial_hex),
+        text(&millis(ci.not_after)),
+        text(&kalkan_dn(tbs.issuer())),
+        text(&pem::encode("CERTIFICATE", &e.cert.to_der().unwrap())),
+        text(&hex(ski.0.as_bytes())),
+        text(&synthetic("user-gost2015-sign").aliases[0]),
+    );
+    let s = setup(script![
+        storage("user-gost2015-sign"),
+        key(0),
+        storage("user-gost2015-sign"),
+        key(0)
+    ]);
+    let request = json!({"module": MODULE_NAME, "method": "getKeyInfo", "args": ["PKCS12"]});
+    assert_eq!(
+        raw(&s.cu, request.clone()),
+        format!(r#"{{"responseObject":{object},"code":"200"}}"#)
+    );
+    let mut with_uuid = request;
+    with_uuid["uuid"] = json!("u-1");
+    assert_eq!(
+        raw(&s.cu, with_uuid),
+        format!(r#"{{"responseObject":{object},"code":"200","uuid":"u-1"}}"#)
+    );
+}
+
+/// The dispatcher's own errors, byte for byte, never with the request's `uuid`: a method
+/// not found, a private one, an argument of another type, an `int[]` and a `String[]` that
+/// do not convert, and a `method` that is missing or not a string.
+#[test]
+fn dispatcher_errors_bytes() {
+    let s = setup(script![]);
+    let req = |method: Value, args: Value| {
+        raw(
+            &s.cu,
+            json!({"module": MODULE_NAME, "method": method, "args": args, "uuid": "u-1"}),
+        )
+    };
+    assert_eq!(
+        req(json!("noSuchMethod"), json!([])),
+        r#"{"code":"500","message":"NoSuchMethodException noSuchMethod"}"#
+    );
+    assert_eq!(
+        req(json!("getKeyInfo"), json!([])),
+        r#"{"code":"500","message":"NoSuchMethodException getKeyInfo"}"#
+    );
+    assert_eq!(
+        req(json!("chooseFile"), json!(["a", "b"])),
+        r#"{"code":"500","message":"java.lang.IllegalAccessException: Class kz.gov.pki.knca.NCALayerCommonActivator can not access a member of class kz.gov.pki.knca.CommonUtils with modifiers \"private\". Method: chooseFile"}"#
+    );
+    assert_eq!(
+        req(json!("getKeyInfo"), json!([5])),
+        r#"{"code":"500","message":"java.lang.IllegalArgumentException: argument type mismatch. Method: getKeyInfo"}"#
+    );
+    assert_eq!(
+        req(json!("setKeyInfoServices"), json!(["x"])),
+        r#"{"code":"500","message":"java.lang.IllegalArgumentException: argument type mismatch. Method: setKeyInfoServices"}"#
+    );
+    assert_eq!(
+        req(json!("getJson"), json!([[1, "x"]])),
+        r#"{"code":"500","message":"JSONArray[1] is not a int."}"#
+    );
+    assert_eq!(
+        req(
+            json!("signXmls"),
+            json!(["PKCS12", "", ["<a/>", 1], "", ""])
+        ),
+        r#"{"code":"500","message":"JSONArray[1] is not a String."}"#
+    );
+    assert_eq!(
+        raw(
+            &s.cu,
+            json!({"module": MODULE_NAME, "args": [], "uuid": "u-1"})
+        ),
+        r#"{"code":"500","message":"JSONObject[\"method\"] not found."}"#
+    );
+    assert_eq!(
+        req(json!(5), json!([])),
+        r#"{"code":"500","message":"JSONObject[\"method\"] is not a string."}"#
+    );
+    assert!(s.prompter.storage_prompts().is_empty());
 }
 
 #[test]

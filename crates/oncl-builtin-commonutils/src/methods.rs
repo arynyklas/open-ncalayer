@@ -1,6 +1,7 @@
-//! The public methods of the original's `CommonUtils`. Each answers like its
-//! `ResponseMessage`: `200` with a `responseObject` (none for `changeLocale`), or `500` with
-//! the exception's message (none where the original's exception has none).
+//! The methods of the original's `CommonUtils`, in the table the shared dispatcher walks
+//! ([`common_utils`]). Each public one answers like its `ResponseMessage`: `200` with a
+//! `responseObject` (none for `changeLocale`), or `500` with the exception's message (none
+//! where the original's exception has none).
 //!
 //! The signing methods first ask for the key ([`choose_key`]):
 //!
@@ -26,20 +27,22 @@
 //! paths.
 
 use crate::Core;
-use crate::dispatch::Args;
 use oncl_pdk::abi::{
     Action, Bytes, CmsCerts, CmsContent, CmsOutcome, CmsOutput, CoSign, FlowArgs, FlowChecks,
     FlowFile, FlowNone, FlowOrder, FlowReader, FlowReaders, FlowStart, HostError, PageRead,
     PathOutcome, SignCmsExArgs, SignedAttrs, SignerSel, SigningTime, StampArgs, StampMode,
     StampOutcome, TimeForm, TimeSource, TokenForm, TsaChoice, cause,
 };
+use oncl_pdk::legacy::{
+    self, Args, ErrorBean, LegacyBody, LegacyClass, LegacyMethod, Outcome, Param,
+};
+use oncl_pdk::orgjson::{JObject, JValue};
 use oncl_pdk::{AddInfo, Locale};
-use serde::Serialize;
-use serde_json::{Value, json};
+use std::marker::PhantomData;
 
-/// A method's reply: `Ok` is `200` with the `responseObject` if any, `Err` is `500` with the
-/// `message` if any.
-pub(crate) type Outcome = Result<Option<Value>, Option<String>>;
+/// What a public method answers: `Ok` is `200` with the `responseObject` if any, `Err` is
+/// `500` with the `message` if any.
+pub(crate) type Answer = Result<Option<JValue>, Option<String>>;
 
 const ACTION_CANCELED: &str = "action.canceled";
 const STORAGE_NAME_EMPTY: &str = "storageName.param.empty";
@@ -79,44 +82,170 @@ const KNCA_TYPES: [&str; 5] = [
     "TSP_SIGNING",
 ];
 
+/// `CommonUtils` as the dispatcher, `NCALayerCommonActivator`, reaches it with the core `C`.
+pub(crate) fn common_utils<C: Core + 'static>() -> LegacyClass<C> {
+    LegacyClass {
+        dispatcher: "kz.gov.pki.knca.NCALayerCommonActivator",
+        target: "kz.gov.pki.knca.CommonUtils",
+        methods: Declared::<C>::METHODS,
+        error_bean: ErrorBean::ResponseMessage,
+        no_such_method: legacy::no_such_method_exception,
+        before_invoke: None,
+    }
+}
+
+/// A public method of the table: its parameter types and its body, whose [`Answer`] becomes
+/// the `ResponseMessage` ([`respond`]).
+macro_rules! public {
+    ($name:literal, [$($param:expr),*], $body:ident) => {{
+        const PARAMS: &[Param] = &[$($param),*];
+        LegacyMethod {
+            name: $name,
+            arity: PARAMS.len(),
+            body: LegacyBody::Public(PARAMS, |cu: &C, args: &Args<'_>, add_info: &AddInfo| {
+                respond(cu, $name, $body(cu, args, add_info))
+            }),
+        }
+    }};
+}
+
+/// The declared methods of `CommonUtils` for the core `C`.
+struct Declared<C>(PhantomData<C>);
+
+impl<C: Core + 'static> Declared<C> {
+    /// `CommonUtils.getDeclaredMethods()`, in declaration order.
+    const METHODS: &'static [LegacyMethod<C>] = {
+        use Param::{Bool, Str, Strs};
+        &[
+            // Both setters take a `java.util.function.Function`.
+            LegacyMethod {
+                name: "setKeyInfoServices",
+                arity: 1,
+                body: LegacyBody::Unconvertible,
+            },
+            LegacyMethod {
+                name: "setKeyInfoSetterService",
+                arity: 1,
+                body: LegacyBody::Unconvertible,
+            },
+            public!("getActiveTokens", [], get_active_tokens),
+            public!("getKeyInfo", [Str], get_key_info),
+            public!("signXml", [Str, Str, Str, Str, Str], sign_xml),
+            public!("signXmls", [Str, Str, Strs, Str, Str], sign_xmls),
+            LegacyMethod {
+                name: "saveKey",
+                arity: 2,
+                body: LegacyBody::Private,
+            },
+            public!(
+                "createCMSSignatureFromBase64",
+                [Str, Str, Str, Bool],
+                create_cms_signature_from_base64
+            ),
+            public!(
+                "createCMSSignatureFromFile",
+                [Str, Str, Str, Bool],
+                create_cms_signature_from_file
+            ),
+            public!(
+                "createCAdESFromBase64",
+                [Str, Str, Str, Bool],
+                create_cades_from_base64
+            ),
+            public!(
+                "createCAdESFromFile",
+                [Str, Str, Str, Bool],
+                create_cades_from_file
+            ),
+            public!(
+                "createCAdESFromBase64Hash",
+                [Str, Str, Str],
+                create_cades_from_base64_hash
+            ),
+            public!("applyCAdEST", [Str, Str, Str], apply_cades_t),
+            public!("showFileChooser", [Str, Str], show_file_chooser),
+            public!("changeLocale", [Str], change_locale),
+            LegacyMethod {
+                name: "getBase64FromFile",
+                arity: 1,
+                body: LegacyBody::Private,
+            },
+            LegacyMethod {
+                name: "chooseFile",
+                arity: 2,
+                body: LegacyBody::Private,
+            },
+            // `getJson(Object)`: an array argument is converted to `int[]` first.
+            LegacyMethod {
+                name: "getJson",
+                arity: 1,
+                body: LegacyBody::PrivateTakingObject,
+            },
+        ]
+    };
+}
+
+/// The `ResponseMessage` of a method's answer as org.json writes the bean: `responseObject`,
+/// `code` and `message` in the key order of Java's `HashMap`, the `null` ones left out. A
+/// failure is logged without its arguments.
+fn respond<C: Core>(cu: &C, name: &str, answer: Answer) -> Outcome {
+    let mut bean = JObject::hash_map();
+    match answer {
+        Ok(object) => {
+            bean.put("code", "200");
+            bean.put_opt("responseObject", object);
+        }
+        Err(message) => {
+            cu.debug(&format!(
+                "commonUtils call failed: method={name} message={}",
+                message.as_deref().unwrap_or("")
+            ));
+            bean.put("code", "500");
+            bean.put_opt("message", message);
+        }
+    }
+    Outcome::Json(bean)
+}
+
 /// `getActiveTokens()`: the storages with a connected token, in Kalkan's order; none with
 /// token support off or without the smart card service.
-pub(crate) fn get_active_tokens<C: Core>(cu: &C, _: &Args<'_>, _: &AddInfo) -> Outcome {
-    Ok(Some(json!(cu.active_tokens())))
+fn get_active_tokens<C: Core>(cu: &C, _: &Args<'_>, _: &AddInfo) -> Answer {
+    let tokens = cu.active_tokens().into_iter().map(JValue::Str).collect();
+    Ok(Some(JValue::Arr(tokens)))
 }
 
 /// `getKeyInfo(storageName)`: the chosen key's certificate details, nothing signed.
-pub(crate) fn get_key_info<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
+fn get_key_info<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Answer {
     let key = choose_key(cu, args.str(0), None, Action::KeyInfo, None, add_info)?;
-    Ok(Some(key_info(cu, &key)))
+    Ok(Some(JValue::Obj(key_info(cu, &key))))
 }
 
 /// `signXml(storageName, keyType, xml, tbsElementXPath, signatureParentElementXPath)`.
-pub(crate) fn sign_xml<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
+fn sign_xml<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Answer {
     let key = signing_key(cu, args.str(0), args.str(1), add_info)?;
     let signed = sign_one_xml(cu, &key, args.str(2), args.str(3), args.str(4))?;
-    Ok(Some(Value::String(signed)))
+    Ok(Some(JValue::Str(signed)))
 }
 
 /// `signXmls(storageName, keyType, String[] xmls, tbsElementXPath,
 /// signatureParentElementXPath)`: every document with the key of one dialog.
-pub(crate) fn sign_xmls<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
+fn sign_xmls<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Answer {
     let key = signing_key(cu, args.str(0), args.str(1), add_info)?;
     let signed = args
         .strs(2)
         .iter()
-        .map(|xml| sign_one_xml(cu, &key, xml, args.str(3), args.str(4)).map(Value::String))
+        .map(|xml| sign_one_xml(cu, &key, xml, args.str(3), args.str(4)).map(JValue::Str))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(Value::Array(signed)))
+    Ok(Some(JValue::Arr(signed)))
 }
 
 /// `createCMSSignatureFromBase64(storageName, keyType, base64Data, attached)` (deprecated in
 /// the original): CAdES with a time-stamp from Kalkan's TSA on the chosen key's signer.
-pub(crate) fn create_cms_signature_from_base64<C: Core>(
+fn create_cms_signature_from_base64<C: Core>(
     cu: &C,
     args: &Args<'_>,
     add_info: &AddInfo,
-) -> Outcome {
+) -> Answer {
     let request = Signing {
         storage_name: args.str(0),
         key_type: key_type(args.str(1)),
@@ -133,11 +262,7 @@ pub(crate) fn create_cms_signature_from_base64<C: Core>(
 
 /// `createCMSSignatureFromFile(storageName, keyType, filePath, attached)`:
 /// [`create_cms_signature_from_base64`] of the file's contents.
-pub(crate) fn create_cms_signature_from_file<C: Core>(
-    cu: &C,
-    args: &Args<'_>,
-    add_info: &AddInfo,
-) -> Outcome {
+fn create_cms_signature_from_file<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Answer {
     let (shown, data) = read_page_file(cu, args.str(2))?;
     let request = Signing {
         storage_name: args.str(0),
@@ -149,11 +274,7 @@ pub(crate) fn create_cms_signature_from_file<C: Core>(
 
 /// `createCAdESFromBase64(storageName, keyType, base64Data, attached)`: CAdES without a
 /// time-stamp; a CMS with encapsulated content as the data gets the new signer added.
-pub(crate) fn create_cades_from_base64<C: Core>(
-    cu: &C,
-    args: &Args<'_>,
-    add_info: &AddInfo,
-) -> Outcome {
+fn create_cades_from_base64<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Answer {
     let request = Signing {
         storage_name: args.str(0),
         key_type: key_type(args.str(1)),
@@ -167,11 +288,7 @@ pub(crate) fn create_cades_from_base64<C: Core>(
 
 /// `createCAdESFromFile(storageName, keyType, filePath, attached)`:
 /// [`create_cades_from_base64`] of the file's contents.
-pub(crate) fn create_cades_from_file<C: Core>(
-    cu: &C,
-    args: &Args<'_>,
-    add_info: &AddInfo,
-) -> Outcome {
+fn create_cades_from_file<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Answer {
     let (shown, data) = read_page_file(cu, args.str(2))?;
     let request = Signing {
         storage_name: args.str(0),
@@ -186,11 +303,7 @@ pub(crate) fn create_cades_from_file<C: Core>(
 
 /// `createCAdESFromBase64Hash(storageName, keyType, base64Hash)`: a detached CAdES over a
 /// hash the page computed (`digested`).
-pub(crate) fn create_cades_from_base64_hash<C: Core>(
-    cu: &C,
-    args: &Args<'_>,
-    add_info: &AddInfo,
-) -> Outcome {
+fn create_cades_from_base64_hash<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Answer {
     let request = Signing {
         storage_name: args.str(0),
         key_type: key_type(args.str(1)),
@@ -208,19 +321,19 @@ pub(crate) fn create_cades_from_base64_hash<C: Core>(
 /// `applyCAdEST(storageName, keyType, base64Cms)`: a time-stamp on the signer of the chosen
 /// key's certificate. A CMS without such a signer fails as the original does, on a
 /// `NullPointerException` (no message).
-pub(crate) fn apply_cades_t<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Outcome {
+fn apply_cades_t<C: Core>(cu: &C, args: &Args<'_>, add_info: &AddInfo) -> Answer {
     let key = signing_key(cu, args.str(0), args.str(1), add_info)?;
     check_chain(cu, cu.certificate(&key))?;
     let cms = Data::Base64(args.str(2)).bytes(cu)?;
     let stamped = timestamp(cu, cms, cu.certificate(&key))?;
-    Ok(Some(Value::String(cu.encode(&stamped))))
+    Ok(Some(JValue::Str(cu.encode(&stamped))))
 }
 
 /// `showFileChooser(fileExtension, currentDirectory)`: the path of a chosen file (or folder
 /// for `DIRECTORY` or an empty `fileExtension`), starting in `currentDirectory` if given.
 /// A path that does not exist counts as cancelled, as in the original. The path given to
 /// the page may be named by it later, even on a network share.
-pub(crate) fn show_file_chooser<C: Core>(cu: &C, args: &Args<'_>, _: &AddInfo) -> Outcome {
+fn show_file_chooser<C: Core>(cu: &C, args: &Args<'_>, _: &AddInfo) -> Answer {
     let extension = args.str(0);
     let unknown = || {
         Some(format!(
@@ -231,7 +344,7 @@ pub(crate) fn show_file_chooser<C: Core>(cu: &C, args: &Args<'_>, _: &AddInfo) -
         return Err(unknown());
     }
     match cu.choose_kind(extension, args.str(1)) {
-        Ok(Some(path)) => Ok(Some(Value::String(path))),
+        Ok(Some(path)) => Ok(Some(JValue::Str(path))),
         Ok(None) => Err(canceled()),
         Err(e) if e.cause() == Some(cause::FILE_UNKNOWN_KIND) => Err(unknown()),
         Err(e) => panic!("file_choose_kind: {e}"),
@@ -240,7 +353,7 @@ pub(crate) fn show_file_chooser<C: Core>(cu: &C, args: &Args<'_>, _: &AddInfo) -
 
 /// `changeLocale(language)`: `ru`, `kk` or `en` (exact) switches the dialog language, an
 /// empty one restores Russian, anything else changes nothing.
-pub(crate) fn change_locale<C: Core>(cu: &C, args: &Args<'_>, _: &AddInfo) -> Outcome {
+fn change_locale<C: Core>(cu: &C, args: &Args<'_>, _: &AddInfo) -> Answer {
     let locale = match args.str(0) {
         "" | "ru" => Some(Locale::Ru),
         "kk" => Some(Locale::Kk),
@@ -338,7 +451,7 @@ fn cades<C: Core>(
     data: Data<'_>,
     content: Content,
     add_info: &AddInfo,
-) -> Outcome {
+) -> Answer {
     let key = request.choose(cu, add_info)?;
     check_chain(cu, cu.certificate(&key))?;
     let data = data.bytes(cu)?;
@@ -349,7 +462,7 @@ fn cades<C: Core>(
     let args = sign_args(data, encapsulate, digested, CmsOutput::Base64);
     let base64 = signed(cu.sign_cms(&key, args))?;
     let base64 = String::from_utf8(base64).expect("the core writes base64 in ASCII");
-    Ok(Some(Value::String(base64)))
+    Ok(Some(JValue::Str(base64)))
 }
 
 /// The deprecated `createCAdES` with a time-stamp: no chain check.
@@ -359,13 +472,13 @@ fn cms_with_timestamp<C: Core>(
     data: Data<'_>,
     attached: bool,
     add_info: &AddInfo,
-) -> Outcome {
+) -> Answer {
     let key = request.choose(cu, add_info)?;
     let data = data.bytes(cu)?;
     let args = sign_args(data, attached, false, CmsOutput::Der);
     let cms = signed(cu.sign_cms(&key, args))?;
     let stamped = timestamp(cu, cms, cu.certificate(&key))?;
-    Ok(Some(Value::String(cu.encode(&stamped))))
+    Ok(Some(JValue::Str(cu.encode(&stamped))))
 }
 
 /// The CMS with a time-stamp from Kalkan's TSA on the first signer of `cert`.
@@ -595,31 +708,11 @@ fn cms_message(e: &HostError) -> Option<String> {
     })
 }
 
-/// The original's `KeyInfo` of a key: certificate details, dates as epoch milliseconds,
-/// `null` fields left out.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct KeyInfo {
-    alias: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    key_id: Option<String>,
-    algorithm: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    subject_cn: Option<String>,
-    subject_dn: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    issuer_cn: Option<String>,
-    issuer_dn: String,
-    serial_number: String,
-    cert_not_after: String,
-    cert_not_before: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    authority_key_identifier: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pem: Option<String>,
-}
-
-fn key_info<C: Core>(cu: &C, key: &C::Key) -> Value {
+/// The original's `KeyInfo` of a key as org.json writes the bean: certificate details,
+/// dates as epoch milliseconds, `null` fields left out, in the key order of Java's
+/// `HashMap`. Its properties go in in the order NCALayer reads them on Windows 11, which
+/// decides the order of those sharing a bucket.
+fn key_info<C: Core>(cu: &C, key: &C::Key) -> JObject {
     let description = cu.describe(key);
     let cert = description.certificate.as_slice();
     let info = cu.cert_info(cert);
@@ -628,26 +721,26 @@ fn key_info<C: Core>(cu: &C, key: &C::Key) -> Value {
     // AuthorityKeyIdentifier is left out too.
     let key_id = details.ski_hex;
     let authority_key_identifier = key_id.as_ref().and(details.aki_hex);
-    let key_info = KeyInfo {
-        alias: description.alias,
-        key_id,
-        algorithm: match description.alg.as_str() {
-            "gost2004" => "ECGOST34310",
-            "gost2015_512" => "ECGOST3410-2015",
-            "rsa" => "RSA",
-            other => panic!("a key of the algorithm {other}"),
-        },
-        subject_cn: info.subject_cn,
-        subject_dn: details.subject_dn,
-        issuer_cn: details.issuer_cn,
-        issuer_dn: details.issuer_dn,
-        serial_number: info.serial_hex,
-        cert_not_after: info.not_after.to_string(),
-        cert_not_before: info.not_before.to_string(),
-        authority_key_identifier,
-        pem: Some(info.pem),
+    let algorithm = match description.alg.as_str() {
+        "gost2004" => "ECGOST34310",
+        "gost2015_512" => "ECGOST3410-2015",
+        "rsa" => "RSA",
+        other => panic!("a key of the algorithm {other}"),
     };
-    serde_json::to_value(key_info).expect("KeyInfo serializes")
+    let mut bean = JObject::hash_map();
+    bean.put("pem", info.pem);
+    bean.put_opt("keyId", key_id);
+    bean.put("alias", description.alias);
+    bean.put("subjectDn", details.subject_dn);
+    bean.put("algorithm", algorithm);
+    bean.put_opt("subjectCn", info.subject_cn);
+    bean.put_opt("issuerCn", details.issuer_cn);
+    bean.put("issuerDn", details.issuer_dn);
+    bean.put("serialNumber", info.serial_hex);
+    bean.put("certNotAfter", info.not_after.to_string());
+    bean.put("certNotBefore", info.not_before.to_string());
+    bean.put_opt("authorityKeyIdentifier", authority_key_identifier);
+    bean
 }
 
 /// The file a page names, with the module's messages: `file.not_found`, or

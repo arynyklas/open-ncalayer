@@ -694,7 +694,7 @@ fn bench_page_file_cades() {
     let wasm = median(|| {
         let reply = module.process(&request, &origin()).into_text().unwrap();
         assert!(
-            reply.starts_with(r#"{"code":"200""#),
+            reply.starts_with(r#"{"responseObject":""#) && reply.ends_with(r#""code":"200"}"#),
             "{}",
             &reply[..reply.len().min(300)]
         );
