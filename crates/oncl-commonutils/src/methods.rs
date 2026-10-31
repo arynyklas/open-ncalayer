@@ -32,12 +32,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_basics::{
-    Action, Availability, BusyPrompt, FileKind, FilePrompt, KeyPrompt, LiveAvailability, Locale,
-    MAX_PAGE_FILE, OpenError, PageFile, PageFileError, Prompt, ReaderEntry, ReaderList,
-    StorageKind, StoragePrompt, lock_dialog_flow, page_path, remember_chosen_path,
+    Action, FileKind, FilePrompt, FileRead, KeyChecks, KeyChooser, KeyFlow, KeyOrder, Locale,
+    MAX_PAGE_FILE, OpenError, PageFile, PageFileError, PasswordRules, Prompt, ReaderEntry, Readers,
+    StartPath, StorageKind, lock_dialog_flow, page_path, remember_chosen_path,
 };
 use oncl_pki::cms::{self, CmsError, SignOptions};
-use oncl_pki::info::{CertInfo, KncaCertType, cert_info, common_name, kalkan_dn, kcert_types};
+use oncl_pki::info::{KncaCertType, cert_info, common_name, kalkan_dn};
 use oncl_pki::key::{KeyAlg, KeyError, SigAlg};
 use oncl_pki::pkcs12::KeyEntry;
 use oncl_pki::pkix::{self, PathError};
@@ -50,6 +50,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::fmt::Write;
 use std::path::Path;
+use std::sync::Arc;
 use x509_cert::Certificate;
 use x509_cert::ext::pkix::{AuthorityKeyIdentifier, SubjectKeyIdentifier};
 
@@ -352,7 +353,11 @@ fn timestamp(cu: &CommonUtils, cms: &[u8], cert: &Certificate) -> Result<Vec<u8>
 }
 
 /// The storage dialog then the key dialog, under the process-wide dialog-flow turn; the
-/// busy indicator shows while the key store opens.
+/// busy indicator shows while the key store opens. The keys listed are those of `key_type`
+/// (`None`: SIGNATURE or AUTHENTICATION), newest notBefore first; a store without any is
+/// asked again with the original's message for the type
+/// ([`OpenError::NoSigningKeys`], [`OpenError::NoAuthKeys`], else [`OpenError::NoKeys`]),
+/// an empty store too.
 fn choose_key(
     cu: &CommonUtils,
     storage_name: &str,
@@ -362,60 +367,40 @@ fn choose_key(
     add_info: &AddInfo,
 ) -> Result<KeyEntry, Option<String>> {
     let (storage, reader) = storage_of(cu, storage_name)?;
-    let origin = origin(add_info);
-    let locale = cu.locale();
-    let _flow = lock_dialog_flow();
-    let mut prompt = StoragePrompt {
-        origin: origin.clone(),
-        locale,
+    let flow = KeyFlow {
+        origin: origin(add_info),
+        locale: cu.locale(),
         action,
         storages: vec![storage],
-        recent_path: None,
-        error: None,
-        detail: detail.clone(),
-        tokens: reader.map(|reader| ReaderList::fixed(vec![ReaderEntry { storage, reader }], None)),
-        chosen: None,
-        reader: None,
+        readers: match reader {
+            Some(reader) => Readers::Fixed(vec![ReaderEntry { storage, reader }]),
+            None => Readers::None,
+        },
+        start: StartPath::Empty,
+        remember: false,
+        detail,
+        password: PasswordRules::default(),
+        same_storage: false,
+        file: FileRead::Open,
+        kinds: Some(match key_type {
+            Some(t) => vec![t],
+            None => vec![KncaCertType::Signature, KncaCertType::Authentication],
+        }),
+        none: match key_type {
+            Some(KncaCertType::Signature) => OpenError::NoSigningKeys,
+            Some(KncaCertType::Authentication) => OpenError::NoAuthKeys,
+            _ => OpenError::NoKeys,
+        },
+        empty_is_none: true,
+        order: KeyOrder::NewestFirst,
+        checks: KeyChecks::Settled,
+        skip_blocked_reader: false,
     };
-    let mut keys = loop {
-        let Prompt::Answer(answer) = cu.prompter.storage(&prompt) else {
-            return Err(canceled());
-        };
-        let _busy = cu.prompter.busy(&BusyPrompt {
-            origin: origin.clone(),
-            locale,
-        });
-        // An empty store gets the text of the requested type too, as in the original.
-        let opened = match answer.open_with(&prompt.storages, &cu.tokens) {
-            Err(OpenError::NoKeys) => Ok(Vec::new()),
-            opened => opened,
-        };
-        match opened.and_then(|entries| keys_of_type(entries, key_type)) {
-            Ok(keys) => break keys,
-            Err(e) => {
-                prompt.error = Some(e);
-                if prompt.tokens.is_some() {
-                    prompt.chosen = Some(answer.storage);
-                    prompt.reader = answer.reader;
-                } else {
-                    prompt.recent_path = Some(answer.path);
-                }
-            }
-        }
-    };
-    let mut prompt = KeyPrompt::new(
-        origin,
-        locale,
-        action,
-        keys.iter()
-            .map(|(entry, info)| (entry.alias.clone(), info.clone())),
-        LiveAvailability::settled(vec![Availability::Enabled; keys.len()]),
-    );
-    prompt.detail = detail;
-    match prompt.ask(cu.prompter.as_ref()) {
-        Some(i) => Ok(keys.swap_remove(i).0),
-        None => Err(canceled()),
-    }
+    let chooser = KeyChooser::local(Arc::clone(&cu.prompter), Arc::clone(&cu.tokens));
+    let _flow = lock_dialog_flow();
+    let mut opened = chooser.open(&flow).opened.ok_or_else(canceled)?;
+    let i = opened.pick(&chooser, &flow, None).ok_or_else(canceled)?;
+    Ok(opened.take(i))
 }
 
 /// The storage `name` names (`StorageInfo`'s checks), with the reader of a token: the first
@@ -438,39 +423,6 @@ fn storage_of(
         .and_then(|readers| readers.into_iter().next())
         .ok_or_else(|| Some(STORAGE_EMPTY.to_owned()))?;
     Ok((storage, Some(reader)))
-}
-
-/// The keys whose certificate is of `key_type` (`None`: SIGNATURE or AUTHENTICATION), with
-/// their details, newest notBefore first. Without any, the original's message for the type:
-/// [`OpenError::NoSigningKeys`], [`OpenError::NoAuthKeys`], else [`OpenError::NoKeys`].
-fn keys_of_type(
-    entries: Vec<KeyEntry>,
-    key_type: Option<KncaCertType>,
-) -> Result<Vec<(KeyEntry, CertInfo)>, OpenError> {
-    let mut keys: Vec<(KeyEntry, CertInfo)> = entries
-        .into_iter()
-        .filter_map(|entry| {
-            let info = cert_info(&entry.cert);
-            let types = kcert_types(&info);
-            let wanted = match key_type {
-                Some(t) => types.contains(&t),
-                None => {
-                    types.contains(&KncaCertType::Signature)
-                        || types.contains(&KncaCertType::Authentication)
-                }
-            };
-            wanted.then_some((entry, info))
-        })
-        .collect();
-    if keys.is_empty() {
-        return Err(match key_type {
-            Some(KncaCertType::Signature) => OpenError::NoSigningKeys,
-            Some(KncaCertType::Authentication) => OpenError::NoAuthKeys,
-            _ => OpenError::NoKeys,
-        });
-    }
-    keys.sort_by_key(|(_, info)| std::cmp::Reverse(info.not_before));
-    Ok(keys)
 }
 
 /// The dialogs' action for a signing method's `key_type`.

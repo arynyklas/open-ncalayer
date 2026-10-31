@@ -23,12 +23,13 @@ use crate::dispatch::{Args, NPE, Outcome, Thrown, Wrapper};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_basics::{
-    Action, Availability, BusyPrompt, FileKind, FilePrompt, KeyPrompt, LiveAvailability, Locale,
-    OpenError, PageFile, PasswordPrompt, Prompt, ReaderEntry, ReaderList, ReaderPrompt,
-    StorageAnswer, StorageKind, StoragePrompt, lock_dialog_flow, page_path, remember_chosen_path,
+    Action, FileKind, FilePrompt, FileRead, KeyChecks, KeyChooser, KeyFlow, KeyOrder, Locale,
+    OpenError, PageFile, PasswordPrompt, PasswordRules, Prompt, ReaderEntry, ReaderList,
+    ReaderPrompt, Readers, StartPath, StorageKind, lock_dialog_flow, page_path,
+    remember_chosen_path,
 };
 use oncl_pki::cert::{self, Certificate};
-use oncl_pki::info::{CertInfo, KncaCertType, cert_info, kcert_types};
+use oncl_pki::info::KncaCertType;
 use oncl_pki::keystore::{
     KeystoreError, MAX_CERTIFICATES_PER_REQUEST, certificate_alias, change_password_data,
     check_password_pattern, install_certificate_in_page_folder,
@@ -456,40 +457,70 @@ pub(crate) fn sign_xml(a: &Applet, args: &Args<'_>, add_info: &AddInfo) -> Outco
                 let container = readers.remove(i);
                 readers.insert(0, container);
             }
-            let entries = readers
-                .into_iter()
-                .map(|reader| ReaderEntry { storage, reader })
-                .collect();
-            Some(ReaderList::fixed(entries, None))
+            Readers::Fixed(
+                readers
+                    .into_iter()
+                    .map(|reader| ReaderEntry { storage, reader })
+                    .collect(),
+            )
         }
-        StorageKind::Pkcs12 | StorageKind::Jks => None,
+        StorageKind::Pkcs12 | StorageKind::Jks => Readers::None,
     };
-    let origin = origin(add_info);
+    // A file's dialog starts with the page's `container` unless a page may not name it (a
+    // device path, or a network path the user did not choose in the file chooser).
+    let start = match readers {
+        Readers::None => args
+            .str(1)
+            .and_then(page_path)
+            .filter(|p| !p.as_os_str().is_empty())
+            .map_or(StartPath::Empty, |p| StartPath::Given(p.to_path_buf())),
+        Readers::Live | Readers::Fixed(_) => StartPath::Empty,
+    };
+    let flow = KeyFlow {
+        origin: origin(add_info),
+        locale: LOCALE,
+        action: key_type.action(),
+        storages: vec![storage],
+        readers,
+        start,
+        remember: false,
+        detail: None,
+        password: PasswordRules {
+            non_empty: true,
+            inner_policy: key_type.inner,
+        },
+        same_storage: true,
+        file: FileRead::Chosen,
+        kinds: key_type.wanted.map(|t| vec![t]),
+        none: key_type.empty,
+        empty_is_none: true,
+        order: KeyOrder::OldestFirst,
+        checks: KeyChecks::Settled,
+        skip_blocked_reader: true,
+    };
+    let chooser = KeyChooser::local(Arc::clone(&a.prompter), Arc::clone(&a.tokens));
     let _flow = lock_dialog_flow();
-    let Some(mut keys) = open_store(a, storage, args.str(1), key_type, &origin, readers) else {
+    let open = chooser.open(&flow);
+    if let Some(wrong) = open.wrong_pin {
+        a.set_try_count(token_try_count(wrong.storage, wrong.tries_left));
+    }
+    let Some(mut opened) = open.opened else {
         return Ok(Wrapper::error(SIGN_CANCEL));
     };
-    let mut prompt = KeyPrompt::new(
-        origin,
-        LOCALE,
-        key_type.action(),
-        keys.iter()
-            .map(|(entry, info)| (entry.alias.clone(), info.clone())),
-        LiveAvailability::settled(vec![Availability::Enabled; keys.len()]),
-    );
+    let mut error = None;
     loop {
-        let Some(i) = prompt.ask(a.prompter.as_ref()) else {
+        let Some(i) = opened.pick(&chooser, &flow, error.take()) else {
             return Ok(Wrapper::error(SIGN_CANCEL));
         };
-        match sign_document(&keys[i].0, args.str(3)) {
+        match sign_document(&opened.entries()[i], args.str(3)) {
             Ok(signed) => {
-                let alias = keys.swap_remove(i).0.alias;
+                let alias = opened.take(i).alias;
                 return Ok(Wrapper {
                     second_result: Some(Value::String(alias)),
                     ..Wrapper::ok(signed)
                 });
             }
-            Err(e) => prompt.error = Some(format!("Не удалось подписать документ: {e}")),
+            Err(e) => error = Some(format!("Не удалось подписать документ: {e}")),
         }
     }
 }
@@ -511,7 +542,7 @@ struct KeyType {
     /// The original's text for a store without such keys.
     empty: OpenError,
     /// `INAUTH`/`INSIGN`: keys of internal systems, whose password must match
-    /// [`inner_password_ok`].
+    /// [`oncl_basics::inner_password_ok`].
     inner: bool,
 }
 
@@ -550,86 +581,6 @@ impl KeyType {
     }
 }
 
-/// The original dialog's password policy for `INAUTH`/`INSIGN`:
-/// `^(?=.*?[A-Z])(?=.*?[a-z])(?=.*?[0-9])(?=.*?[#$^+=!*()@%&_-]).{8,32}$` — 8 to 32
-/// characters (code points, as `java.util.regex` `.` takes a supplementary character
-/// whole) without line terminators, with a Latin capital, a Latin small letter, a digit and
-/// one of `#$^+=!*()@%&_-`.
-fn inner_password_ok(password: &str) -> bool {
-    (8..=32).contains(&password.chars().count())
-        && !password.contains(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'])
-        && password.chars().any(|c| c.is_ascii_uppercase())
-        && password.chars().any(|c| c.is_ascii_lowercase())
-        && password.chars().any(|c| c.is_ascii_digit())
-        && password.chars().any(|c| "#$^+=!*()@%&_-".contains(c))
-}
-
-/// The storage dialog until a key store with keys of `key_type` opens; `None` if it is
-/// cancelled. The page's `container` pre-fills it unless a page may not name it (a device
-/// path, or a network path the user did not choose in the file chooser). The busy
-/// indicator shows while the key store opens. A token is opened in one of `readers`.
-fn open_store(
-    a: &Applet,
-    storage: StorageKind,
-    container: Option<&str>,
-    key_type: KeyType,
-    origin: &str,
-    readers: Option<ReaderList>,
-) -> Option<Vec<(KeyEntry, CertInfo)>> {
-    let token = readers.is_some();
-    let mut prompt = StoragePrompt {
-        origin: origin.to_owned(),
-        locale: LOCALE,
-        action: key_type.action(),
-        storages: vec![storage],
-        recent_path: container
-            .filter(|_| !token)
-            .and_then(page_path)
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(Path::to_path_buf),
-        error: None,
-        detail: None,
-        tokens: readers,
-        chosen: None,
-        reader: None,
-    };
-    // The reader whose token refused the PIN as blocked: it is not tried again.
-    let mut blocked: Option<String> = None;
-    loop {
-        let Prompt::Answer(answer) = a.prompter.storage(&prompt) else {
-            return None;
-        };
-        let _busy = a.prompter.busy(&BusyPrompt {
-            origin: origin.to_owned(),
-            locale: LOCALE,
-        });
-        let opened = if token && blocked.is_some() && answer.reader == blocked {
-            Err(OpenError::PinBlocked)
-        } else {
-            open_keys(a, &answer, storage, key_type)
-        };
-        match opened {
-            Ok(keys) => return Some(keys),
-            Err(e) if token => {
-                match e {
-                    OpenError::WrongPin { tries_left } => {
-                        a.set_try_count(token_try_count(storage, tries_left));
-                    }
-                    OpenError::PinBlocked => blocked.clone_from(&answer.reader),
-                    _ => {}
-                }
-                prompt.error = Some(e);
-                prompt.chosen = Some(answer.storage);
-                prompt.reader = answer.reader;
-            }
-            Err(e) => {
-                prompt.error = Some(e);
-                prompt.recent_path = Some(answer.path);
-            }
-        }
-    }
-}
-
 /// `getTryCount` after a wrong PIN: the tries left for Kaztoken and the ID card, else `-1`
 /// (AKey tells its tries too, but the original answers `-1` for it).
 fn token_try_count(storage: StorageKind, tries_left: Option<u8>) -> i32 {
@@ -637,55 +588,6 @@ fn token_try_count(storage: StorageKind, tries_left: Option<u8>) -> i32 {
         (Some(TokenKind::Kaztoken | TokenKind::KzIdCard), Some(n)) => i32::from(n),
         _ => FILE_TRY_COUNT,
     }
-}
-
-/// The keys of `key_type` in the answer's key store, oldest certificate first (the
-/// original dialog's order). The password (or PIN) is checked first, as the original
-/// dialog does. The file is the user's choice (pre-filled with a [`page_path`] at most),
-/// read as [`PageFile::read_chosen`]: a regular disk file of at most 64 MiB, on a network
-/// share too. A token opens in the answer's reader.
-fn open_keys(
-    a: &Applet,
-    answer: &StorageAnswer,
-    storage: StorageKind,
-    key_type: KeyType,
-) -> Result<Vec<(KeyEntry, CertInfo)>, OpenError> {
-    if answer.password.is_empty() {
-        return Err(OpenError::EmptyPassword);
-    }
-    if key_type.inner && !inner_password_ok(&answer.password) {
-        return Err(OpenError::InnerPasswordPolicy);
-    }
-    if answer.storage != storage {
-        return Err(OpenError::UnsupportedStorage);
-    }
-    let opened = if storage.token_kind().is_some() {
-        answer.open_with(&[storage], &a.tokens)
-    } else {
-        let file = PageFile::read_chosen(&answer.path).map_err(|_| OpenError::FileNotFound)?;
-        answer.open_data(&file.data)
-    };
-    let entries = match opened {
-        Err(OpenError::NoKeys) => Vec::new(),
-        opened => opened?,
-    };
-    let mut keys: Vec<(KeyEntry, CertInfo)> = entries
-        .into_iter()
-        .map(|entry| {
-            let info = cert_info(&entry.cert);
-            (entry, info)
-        })
-        .filter(|(_, info)| {
-            key_type
-                .wanted
-                .is_none_or(|t| kcert_types(info).contains(&t))
-        })
-        .collect();
-    if keys.is_empty() {
-        return Err(key_type.empty);
-    }
-    keys.sort_by_key(|(_, info)| info.not_before);
-    Ok(keys)
 }
 
 /// `deleteEntry(storageName, container, alias)`: only token keys are deleted, and
@@ -799,25 +701,6 @@ mod tests {
             (None, OpenError::NoKeys, false)
         );
         assert_eq!(KeyType::of("").action(), Action::Sign);
-    }
-
-    #[test]
-    fn inner_passwords() {
-        assert!(inner_password_ok("Abcdef1#"));
-        assert!(inner_password_ok(&format!("Ab1#{}", "x".repeat(28))));
-        assert!(!inner_password_ok(&format!("Ab1#{}", "x".repeat(29))));
-        assert!(!inner_password_ok("Abcde1#"));
-        assert!(!inner_password_ok("abcdef1#"));
-        assert!(!inner_password_ok("ABCDEF1#"));
-        assert!(!inner_password_ok("Abcdefg#"));
-        assert!(!inner_password_ok("Abcdefg1"));
-        // `.` is not a special character of the policy; other characters are allowed.
-        assert!(!inner_password_ok("Abcdef1."));
-        assert!(inner_password_ok("Абвгд Ab1#"));
-        // Code points, not UTF-16 units.
-        assert!(!inner_password_ok("Ab1#😀😀"));
-        assert!(inner_password_ok(&format!("Ab1#{}", "😀".repeat(28))));
-        assert!(!inner_password_ok("Abcdef1#\n"));
     }
 
     #[test]

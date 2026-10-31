@@ -12,7 +12,7 @@ use super::{
 use crate::host::HostState;
 use der::asn1::ObjectIdentifier;
 use oncl_basics::{
-    ChainPolicy, ConfirmPrompt, FilterMore as BasicsMore, KeyChooser, KeyFilter, KeyOrder,
+    ChainPolicy, ConfirmPrompt, FilterMore as BasicsMore, KeyChooser, KeyFilter, KeyFlow, KeyOrder,
     KeyRequest, Locale, MAX_PAGE_FILE, OpenError, PageFile, PageFileError, Prompt, StorageAnswer,
     StorageKind, page_path,
 };
@@ -185,42 +185,27 @@ fn choose(state: &mut HostState, choice: Choice) -> HostResult<Option<Chosen>> {
             .map(|name| storage_kind(name))
             .collect::<HostResult<_>>()?
     };
-    if let Some(detail) = &choice.detail {
-        check_line("detail", detail, MAX_LINE)?;
-    }
-    // A plugin's name leads the line; a built-in module's line is its own.
-    let detail = match (source_line(state), choice.detail) {
-        (Some(name), Some(detail)) => Some(format!("{name}: {detail}")),
-        (Some(name), None) => Some(name),
-        (None, detail) => detail,
-    };
+    let detail = dialog_detail(state, choice.detail)?;
     let request = KeyRequest {
         origin: origin(state),
         locale: state.call.locale,
-        action: match choice.action {
-            Action::Sign => oncl_basics::Action::Sign,
-            Action::Authenticate => oncl_basics::Action::Authenticate,
-            Action::KeyInfo => oncl_basics::Action::KeyInfo,
-        },
+        action: basics_action(choice.action),
         storages,
         filter: choice.filter,
         detail,
         initial_path: choice.initial_path,
         order: choice.order,
     };
-    let services = &state.services;
-    let chooser = KeyChooser {
-        prompter: Arc::clone(&services.prompter),
-        recent: Arc::clone(&services.recent),
-        http: Arc::clone(&services.http),
-        ocsp_cache: Arc::clone(&services.ocsp_cache),
-        clock: services.clock,
-        tokens: Arc::clone(&services.tokens),
-    };
+    let flow = KeyFlow::from_request(&request);
+    let chooser = key_chooser(state);
     DialogTurn::hold();
-    let Some(entry) = chooser.choose(&request) else {
+    let Some(mut opened) = chooser.open(&flow).opened else {
         return Ok(None);
     };
+    let Some(index) = opened.pick(&chooser, &flow, None) else {
+        return Ok(None);
+    };
+    let entry = opened.take(index);
     let certificate = der_of(&entry.cert)?;
     let alias = entry.alias.clone();
     let handle = state.keys.insert(entry, Arc::from([]))?;
@@ -229,6 +214,41 @@ fn choose(state: &mut HostState, choice: Choice) -> HostResult<Option<Chosen>> {
         alias,
         certificate: Bytes::from(certificate),
     }))
+}
+
+/// The line the key choice's dialogs show: a plugin's name leads it; a built-in module's
+/// line is its own.
+fn dialog_detail(state: &HostState, detail: Option<String>) -> HostResult<Option<String>> {
+    if let Some(detail) = &detail {
+        check_line("detail", detail, MAX_LINE)?;
+    }
+    Ok(match (source_line(state), detail) {
+        (Some(name), Some(detail)) => Some(format!("{name}: {detail}")),
+        (Some(name), None) => Some(name),
+        (None, detail) => detail,
+    })
+}
+
+/// The dialogs' wording of `action`.
+fn basics_action(action: Action) -> oncl_basics::Action {
+    match action {
+        Action::Sign => oncl_basics::Action::Sign,
+        Action::Authenticate => oncl_basics::Action::Authenticate,
+        Action::KeyInfo => oncl_basics::Action::KeyInfo,
+    }
+}
+
+/// The key choice of the instance's services.
+fn key_chooser(state: &HostState) -> KeyChooser {
+    let services = &state.services;
+    KeyChooser {
+        prompter: Arc::clone(&services.prompter),
+        recent: Arc::clone(&services.recent),
+        http: Arc::clone(&services.http),
+        ocsp_cache: Arc::clone(&services.ocsp_cache),
+        clock: services.clock,
+        tokens: Arc::clone(&services.tokens),
+    }
 }
 
 /// The storage named `name`.

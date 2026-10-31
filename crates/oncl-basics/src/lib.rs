@@ -32,7 +32,10 @@ mod tokens;
 pub use filter::{
     Availability, ChainPolicy, DisabledReason, FilterMore, KeyFilter, OCSP_DEADLINE, availabilities,
 };
-pub use keys::{KeyChooser, KeyOrder, KeyRequest};
+pub use keys::{
+    FileRead, FlowOpen, KeyChecks, KeyChooser, KeyFlow, KeyOrder, KeyRequest, OpenedFlow,
+    PasswordRules, Readers, StartPath, WrongPin, inner_password_ok,
+};
 pub use live::LiveAvailability;
 pub use ocsp_cache::{ANSWER_FOR, OcspCache, UNREACHABLE_FOR};
 use oncl_pki::http::HttpTransport;
