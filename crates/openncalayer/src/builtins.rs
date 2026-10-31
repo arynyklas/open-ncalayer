@@ -114,6 +114,7 @@ mod tests {
         for module in [
             "kz.gov.pki.ncalayerservices.accessory",
             "kz.gov.pki.knca.basics",
+            "kz.gov.pki.knca.commonUtils",
         ] {
             assert!(builtins.module(module).is_some(), "{module}");
         }

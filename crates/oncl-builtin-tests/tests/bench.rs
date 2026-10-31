@@ -552,3 +552,66 @@ fn embedded_modules_are_small() {
     let total: usize = SOURCES.iter().map(|s| s.wasm.len()).sum();
     assert!(total <= 4 * MIB, "{total} bytes of built-in modules");
 }
+
+/// The synthetic roots, standing in for the NCA CAs.
+fn synthetic_cas() -> oncl_pki::pkix::CaSet {
+    oncl_pki::pkix::CaSet::new(
+        ["root-gost2015", "root-rsa"]
+            .into_iter()
+            .map(|name| oncl_pki::cert::parse(&synthetic_cert(name)).unwrap())
+            .collect(),
+    )
+}
+
+#[test]
+#[ignore = "a benchmark"]
+fn bench_page_file_cades() {
+    const SIZE: usize = 64 * MIB;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("doc.bin");
+    let doc = data(SIZE);
+    std::fs::write(&path, &doc).unwrap();
+    let request = json!({
+        "module": oncl_builtin_tests::commonutils::MODULE_NAME,
+        "method": "createCAdESFromFile",
+        "args": ["PKCS12", "", path.display().to_string(), false],
+    })
+    .to_string();
+    let prompter = Arc::new(ScriptedPrompter::new(steps("user-rsa-sign", RUNS + 1)));
+    let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
+    let mut services = services(prompter, tsa, rsa_time);
+    services.cas = Arc::new(synthetic_cas());
+    let builtins = load_builtins(services, BuiltinLimits::default());
+    let module = builtins
+        .module(oncl_builtin_tests::commonutils::MODULE_NAME)
+        .unwrap();
+    let wasm = median(|| {
+        let reply = module.process(&request, &origin()).into_text().unwrap();
+        assert!(
+            reply.starts_with(r#"{"code":"200""#),
+            "{}",
+            &reply[..reply.len().min(300)]
+        );
+    });
+    let key = entry("user-rsa-sign");
+    let direct = median(|| {
+        let doc = std::fs::read(&path).unwrap();
+        let _ = pki_cms(&key, &doc, false, rsa_time());
+    });
+    let stats = builtins
+        .stats(oncl_builtin_tests::commonutils::MODULE_NAME)
+        .unwrap();
+    let ratio = wasm.as_secs_f64() / direct.as_secs_f64();
+    record(
+        "bench_page_file_cades/67108864",
+        json!({
+            "wasm_ms": ms(wasm),
+            "pki_direct_ms": ms(direct),
+            "wasm_over_pki_direct": ratio,
+            "peak_memory": stats.peak_memory,
+            "peak_memory_over_size": stats.peak_memory as f64 / SIZE as f64,
+            "fuel": stats.max_fuel,
+        }),
+    );
+    assert!(ratio <= 3.0, "{ratio} times oncl_pki");
+}

@@ -3948,6 +3948,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-builtin-commonutils"
+version = "0.1.0-alpha.5"
+dependencies = [
+ "base64",
+ "oncl-pdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "oncl-builtin-tests"
 version = "0.1.0-alpha.5"
 dependencies = [
@@ -3957,6 +3967,7 @@ dependencies = [
  "oncl-basics",
  "oncl-builtin-accessory",
  "oncl-builtin-basics",
+ "oncl-builtin-commonutils",
  "oncl-builtins-build",
  "oncl-commonutils",
  "oncl-pki",
@@ -4328,7 +4339,6 @@ dependencies = [
  "oncl-basics",
  "oncl-builtin-accessory",
  "oncl-builtins-build",
- "oncl-commonutils",
  "oncl-desktop",
  "oncl-ipc",
  "oncl-pki",

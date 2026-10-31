@@ -9,6 +9,7 @@ use der::{Decode, Encode};
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_builtin_tests::Backend;
 use oncl_builtin_tests::basics::{Basics, MODULE_NAME};
+use oncl_builtin_tests::commonutils::{CommonUtils, MODULE_NAME as CU_MODULE};
 use oncl_pki::cms::{SignOptions, verify};
 use oncl_pki::csr::KeyStoreInfo;
 use oncl_pki::http::{HttpError, HttpReply, HttpRequest, HttpTransport};
@@ -1107,6 +1108,272 @@ fn basics_import_certificate() {
             let mut args = import_args(dir, &[sign_cert]);
             args[key] = value.clone();
             Case::new(vec![], vec![essentials("importCertificate", args)])
+        });
+    }
+}
+
+// kz.gov.pki.knca.commonUtils
+
+/// The synthetic roots and intermediate CA, standing in for the NCA CAs.
+fn synthetic_cas() -> oncl_pki::pkix::CaSet {
+    oncl_pki::pkix::CaSet::new(
+        [
+            "root-gost2015",
+            "root-gost2004",
+            "root-rsa",
+            "inter-gost2015",
+        ]
+        .into_iter()
+        .map(|name| oncl_pki::cert::parse(&oncl_testkit::synthetic_cert(name)).unwrap())
+        .collect(),
+    )
+}
+
+/// A base64 CMS with a time-stamp by its signers and verified tokens; anything else as is.
+fn cu_normalized(reply: Value, dir: &Path) -> Value {
+    match reply {
+        Value::String(s) => match STANDARD.decode(&s) {
+            Ok(der) if verify(&der, None).is_ok() => Value::String(cms_summary(&s)),
+            _ => Value::String(without_dir(&s, dir)),
+        },
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, cu_normalized(v, dir)))
+                .collect(),
+        ),
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(|v| cu_normalized(v, dir)).collect())
+        }
+        other => other,
+    }
+}
+
+/// `requests` (with their sessions) to the commonUtils module of `backend`.
+fn cu_run(backend: Backend, steps: Vec<Step>, requests: &[(Value, AddInfo)], dir: &Path) -> Run {
+    let prompter = Arc::new(ScriptedPrompter::new(steps));
+    let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
+    let cu = CommonUtils::new(prompter.clone(), tsa.clone())
+        .with_cas(synthetic_cas())
+        .with_clock(inside_user_validity)
+        .with_backend(backend);
+    let replies = requests
+        .iter()
+        .map(|(request, add_info)| {
+            let reply = cu.process(&request.to_string(), add_info);
+            cu_normalized(serde_json::from_str(reply.text().unwrap()).unwrap(), dir)
+        })
+        .collect();
+    let p = &prompter;
+    let windows = format!(
+        "{:#?}",
+        (
+            p.timeline(),
+            p.storage_prompts(),
+            p.busy_prompts(),
+            p.opened_key_prompts(),
+            p.key_prompts(),
+            p.file_prompts(),
+            p.reader_prompts(),
+        )
+    );
+    Run {
+        replies,
+        windows: without_dir(&windows, dir),
+        files: Vec::new(),
+        tsa_calls: tsa.calls().len(),
+    }
+}
+
+/// Runs the commonUtils `case(dir)` on both implementations, each in a fresh folder with a
+/// file `doc.txt` and a detached CMS `detached.p7s`.
+fn cu_same(case: impl Fn(&Path) -> (Vec<Step>, Vec<Value>)) {
+    let run = |backend| {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("doc.txt"), b"doc").unwrap();
+        fs::write(
+            dir.path().join("detached.p7s"),
+            STANDARD.decode(rsa_cms(b"doc", false)).unwrap(),
+        )
+        .unwrap();
+        let (steps, requests) = case(dir.path());
+        let requests: Vec<_> = requests.into_iter().map(|r| (r, origin("o"))).collect();
+        cu_run(backend, steps, &requests, dir.path())
+    };
+    assert_eq!(run(Backend::Wasm), run(Backend::Native));
+}
+
+fn cu(method: &str, args: Value) -> Value {
+    json!({"module": CU_MODULE, "method": method, "args": args, "uuid": "u-1"})
+}
+
+#[test]
+fn commonutils_signing() {
+    let doc = STANDARD.encode(b"doc");
+    let hash = STANDARD.encode(SigAlg::RsaSha256.digest(b"doc"));
+    let attached = rsa_cms(b"doc", true);
+    let detached = rsa_cms(b"doc", false);
+    for (method, args) in [
+        ("getKeyInfo", json!(["PKCS12"])),
+        (
+            "signXml",
+            json!(["PKCS12", "SIGNATURE", "<a><b Id=\"x\">1</b></a>", "", ""]),
+        ),
+        (
+            "signXml",
+            json!(["PKCS12", "", "<a><b Id=\"x\">1</b></a>", "//b", ""]),
+        ),
+        (
+            "signXml",
+            json!(["PKCS12", "", "<a><b Id=\"x\">1</b></a>", "/a/b", "/A/B"]),
+        ),
+        ("signXml", json!(["PKCS12", "", "<a>", "", ""])),
+        (
+            "signXmls",
+            json!(["PKCS12", "SIGNATURE", ["<a/>", "<b/>"], "", ""]),
+        ),
+        (
+            "createCAdESFromBase64",
+            json!(["PKCS12", "SIGNATURE", doc, true]),
+        ),
+        (
+            "createCAdESFromBase64",
+            json!(["PKCS12", "SIGNATURE", doc, false]),
+        ),
+        (
+            "createCAdESFromBase64",
+            json!(["PKCS12", "", attached, true]),
+        ),
+        (
+            "createCAdESFromBase64",
+            json!(["PKCS12", "", detached, true]),
+        ),
+        ("createCAdESFromBase64", json!(["PKCS12", "", "!!", true])),
+        (
+            "createCAdESFromBase64Hash",
+            json!(["PKCS12", "SIGNATURE", hash]),
+        ),
+        (
+            "createCMSSignatureFromBase64",
+            json!(["PKCS12", "SIGNATURE", doc, true]),
+        ),
+        ("applyCAdEST", json!(["PKCS12", "SIGNATURE", attached])),
+        (
+            "applyCAdEST",
+            json!(["PKCS12", "SIGNATURE", rsa_cms(b"x", true)]),
+        ),
+        ("applyCAdEST", json!(["PKCS12", "SIGNATURE", "AAAA"])),
+    ] {
+        cu_same(|_| (rsa(), vec![cu(method, args.clone())]));
+    }
+    for method in ["createCAdESFromFile", "createCMSSignatureFromFile"] {
+        for file in ["doc.txt", "detached.p7s", "missing.txt"] {
+            cu_same(|dir| {
+                let path = dir.join(file).display().to_string();
+                (rsa(), vec![cu(method, json!(["PKCS12", "", path, true]))])
+            });
+        }
+    }
+}
+
+#[test]
+fn commonutils_dialogs_and_errors() {
+    let doc = STANDARD.encode(b"doc");
+    let cases: Vec<(Vec<Step>, Value)> = vec![
+        (
+            vec![Step::CancelStorage],
+            cu("getKeyInfo", json!(["PKCS12"])),
+        ),
+        (
+            vec![storage("user-rsa-sign", "Qwerty12"), Step::CancelKey],
+            cu("getKeyInfo", json!(["PKCS12"])),
+        ),
+        (
+            vec![
+                storage("user-rsa-sign", "bad"),
+                storage("user-rsa-sign", "Qwerty12"),
+                Step::Key(0),
+            ],
+            cu("createCAdESFromBase64", json!(["PKCS12", "", doc, true])),
+        ),
+        (
+            vec![
+                Step::Jks {
+                    path: fixture("jks/rsa.jks"),
+                    password: "Qwerty12".to_owned(),
+                },
+                Step::Key(0),
+            ],
+            cu("getKeyInfo", json!(["JKS"])),
+        ),
+        (
+            vec![
+                Step::Jks {
+                    path: fixture("jks/rsa.jks"),
+                    password: "Qwerty12".to_owned(),
+                },
+                Step::Key(0),
+            ],
+            cu("createCAdESFromBase64", json!(["JKS", "", doc, true])),
+        ),
+        (
+            vec![storage("user-rsa-sign", "Qwerty12"), Step::CancelStorage],
+            cu(
+                "signXml",
+                json!(["PKCS12", "AUTHENTICATION", "<a/>", "", ""]),
+            ),
+        ),
+        (Vec::new(), cu("getKeyInfo", json!([" "]))),
+        (Vec::new(), cu("getKeyInfo", json!(["pkcs12"]))),
+        (Vec::new(), cu("getKeyInfo", json!(["AKKaztokenStore"]))),
+        (Vec::new(), cu("getKeyInfo", json!([5]))),
+        (Vec::new(), cu("getKeyInfo", json!([]))),
+        (Vec::new(), cu("saveKey", json!(["a", "b"]))),
+        (Vec::new(), cu("getJson", json!([[1, "x"]]))),
+        (Vec::new(), cu("setKeyInfoServices", json!(["a"]))),
+        (
+            Vec::new(),
+            cu("signXmls", json!(["PKCS12", "", [1], "", ""])),
+        ),
+        (Vec::new(), cu("getActiveTokens", json!([]))),
+        (Vec::new(), json!({"method": 5})),
+        (Vec::new(), json!([1])),
+        (Vec::new(), cu("showFileChooser", json!(["NOPE", ""]))),
+        (
+            vec![Step::CancelFile],
+            cu("showFileChooser", json!(["P12", ""])),
+        ),
+        (
+            vec![Step::CancelFile],
+            cu("showFileChooser", json!(["", "/nowhere"])),
+        ),
+    ];
+    for (steps, request) in cases {
+        cu_same(|_| (steps.clone(), vec![request.clone()]));
+    }
+    cu_same(|dir| {
+        (
+            vec![Step::File(dir.join("doc.txt"))],
+            vec![cu(
+                "showFileChooser",
+                json!(["ALL", dir.display().to_string()]),
+            )],
+        )
+    });
+}
+
+#[test]
+fn commonutils_locale() {
+    for language in ["kk", "en", "ru", "", "de"] {
+        cu_same(|dir| {
+            let path = dir.join("doc.txt").display().to_string();
+            (
+                vec![Step::CancelStorage, Step::CancelFile],
+                vec![
+                    cu("changeLocale", json!([language])),
+                    cu("createCAdESFromFile", json!(["PKCS12", "", path, true])),
+                    cu("showFileChooser", json!(["", ""])),
+                ],
+            )
         });
     }
 }

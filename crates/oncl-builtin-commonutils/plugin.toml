@@ -1,0 +1,21 @@
+id = "io.github.arynyklas.openncalayer.builtin.commonutils"
+version = "0.1.0-alpha.5"
+min_core = "0.1.0-alpha.5"
+modules = ["kz.gov.pki.knca.commonUtils"]
+builtin = true
+
+[name]
+ru = "Общие функции NCALayer"
+kk = "NCALayer жалпы функциялары"
+en = "NCALayer common utilities"
+
+[description]
+ru = "Сведения о ключе, подписи XML и CAdES данных и файлов ключом пользователя, метки времени и выбор файла"
+kk = "Кілт туралы мәліметтер, пайдаланушы кілтімен XML және CAdES қолтаңбалары, уақыт белгілері және файл таңдау"
+en = "Key details, XML and CAdES signatures with the user's key, time-stamps and the file chooser"
+
+[capabilities]
+keys = true
+files = true
+page_files = true
+shared = true

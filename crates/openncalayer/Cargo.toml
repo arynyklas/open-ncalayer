@@ -25,7 +25,6 @@ oncl-applet.workspace = true
 oncl-basics.workspace = true
 # The accessory module's name, which the About window asks for the bundles.
 oncl-builtin-accessory.workspace = true
-oncl-commonutils.workspace = true
 oncl-desktop.workspace = true
 oncl-ipc.workspace = true
 oncl-pki.workspace = true

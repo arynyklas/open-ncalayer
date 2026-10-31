@@ -19,6 +19,8 @@ oncl-basics = { path = "crates/oncl-basics" }
 oncl-builtin-accessory = { path = "crates/oncl-builtin-accessory" }
 # The basics module's guest: the core embeds its WebAssembly; its tests name it.
 oncl-builtin-basics = { path = "crates/oncl-builtin-basics" }
+# The commonUtils module's guest: the core embeds its WebAssembly; its tests name it.
+oncl-builtin-commonutils = { path = "crates/oncl-builtin-commonutils" }
 # The built-in modules' tests through the `Module` trait, on either implementation.
 oncl-builtin-tests = { path = "crates/oncl-builtin-tests" }
 # Builds the built-in modules' WebAssembly (the daemon's build script, xtask).

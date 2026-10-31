@@ -55,6 +55,10 @@ pub const GUESTS: &[Guest] = &[
         package: "oncl-builtin-basics",
         dir: "crates/oncl-builtin-basics",
     },
+    Guest {
+        package: "oncl-builtin-commonutils",
+        dir: "crates/oncl-builtin-commonutils",
+    },
 ];
 
 /// A built-in module laid out for embedding.

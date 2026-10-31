@@ -2,19 +2,21 @@
 
 use crate::{Available, Backend, Lazy, resolve};
 use oncl_basics::Prompter;
+use oncl_basics::testing::MemoryRecentPath;
 use oncl_pki::http::HttpTransport;
 use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::TsaProfile;
+use oncl_plugin::HostServices;
 use oncl_protocol::{AddInfo, Module, Reply};
 use oncl_token::Tokens;
 use std::sync::Arc;
 use time::OffsetDateTime;
 
-pub use oncl_commonutils::MODULE_NAME;
+pub use oncl_builtin_commonutils::MODULE_NAME;
 
 const AVAILABLE: Available = Available {
     native: true,
-    wasm: false,
+    wasm: true,
 };
 
 struct Settings {
@@ -100,7 +102,25 @@ fn build(s: Settings) -> Box<dyn Module> {
             }
             Box::new(m)
         }
-        Backend::Wasm => unreachable!("resolved to an available backend"),
+        Backend::Wasm => {
+            assert!(
+                s.tsa.is_none(),
+                "the built-in commonUtils time-stamps with Kalkan's profile only"
+            );
+            let mut services = HostServices::new(
+                s.prompter,
+                Arc::new(MemoryRecentPath::new(None)),
+                s.http,
+                s.tokens.unwrap_or_else(Tokens::disabled),
+            );
+            if let Some(c) = s.cas {
+                services.cas = Arc::new(c);
+            }
+            if let Some(f) = s.clock {
+                services.clock = f;
+            }
+            crate::guest(MODULE_NAME, services, None)
+        }
     }
 }
 

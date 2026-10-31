@@ -8,6 +8,7 @@ use base64::engine::general_purpose::STANDARD;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_builtin_tests::SOURCES;
 use oncl_builtin_tests::basics::MODULE_NAME;
+use oncl_builtin_tests::commonutils::MODULE_NAME as CU_MODULE;
 use oncl_pki::info::cert_info;
 use oncl_pki::pkcs12::load;
 use oncl_pki::tsp::MockTsa;
@@ -36,6 +37,13 @@ fn rsa_time() -> OffsetDateTime {
 /// The basics module of the built-in modules within `limits`, signing `calls` times with
 /// the synthetic RSA key.
 fn basics(limits: BuiltinLimits, calls: usize) -> Builtins {
+    let services = basics_services(calls);
+    Builtins::load(&WasmEngine::new(), services, SOURCES, limits, None).unwrap()
+}
+
+/// The services of [`basics`]: the prompter answers `calls` key choices with the synthetic
+/// RSA key.
+fn basics_services(calls: usize) -> HostServices {
     let key = synthetic("user-rsa-sign");
     let steps: Vec<Step> = (0..calls)
         .flat_map(|_| {
@@ -57,7 +65,7 @@ fn basics(limits: BuiltinLimits, calls: usize) -> Builtins {
         oncl_token::Tokens::disabled(),
     );
     services.clock = rsa_time;
-    Builtins::load(&WasmEngine::new(), services, SOURCES, limits, None).unwrap()
+    services
 }
 
 /// An attached CMS request of `size` bytes of data, base64-encoded.
@@ -94,15 +102,53 @@ fn signed(reply: Reply) -> usize {
     text.len()
 }
 
+/// The synthetic roots, standing in for the NCA CAs.
+fn synthetic_cas() -> oncl_pki::pkix::CaSet {
+    oncl_pki::pkix::CaSet::new(
+        ["root-gost2015", "root-rsa"]
+            .into_iter()
+            .map(|name| oncl_pki::cert::parse(&oncl_testkit::synthetic_cert(name)).unwrap())
+            .collect(),
+    )
+}
+
 #[test]
 #[cfg_attr(
     not(target_pointer_width = "64"),
-    ignore = "over the 32-bit memory of an instance: 33 MiB of data fit (`largest_cms_data`)"
+    ignore = "over the 32-bit memory of an instance: about five times the file at its peak"
 )]
 fn sign_max_page_file_fits() {
-    let builtins = basics(BuiltinLimits::default(), 1);
-    let module = builtins.module(MODULE_NAME).unwrap();
-    signed(module.process(&cms_request(48 * MIB), &origin()));
+    // The largest file a page may name, signed by commonUtils as an attached CAdES.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("doc.bin");
+    let data: Vec<u8> = (0..64 * MIB).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&path, data).unwrap();
+    let mut builtins = basics_services(1);
+    builtins.cas = Arc::new(synthetic_cas());
+    let builtins = Builtins::load(
+        &WasmEngine::new(),
+        builtins,
+        SOURCES,
+        BuiltinLimits::default(),
+        None,
+    )
+    .unwrap();
+    let module = builtins.module(CU_MODULE).unwrap();
+    let request = json!({
+        "module": CU_MODULE,
+        "method": "createCAdESFromFile",
+        "args": ["PKCS12", "", path.display().to_string(), true],
+    })
+    .to_string();
+    let reply = module
+        .process(&request, &origin())
+        .into_text()
+        .expect("a text reply");
+    assert!(
+        reply.starts_with(r#"{"code":"200""#),
+        "{}",
+        &reply[..reply.len().min(300)]
+    );
 }
 
 #[cfg(target_pointer_width = "64")]
