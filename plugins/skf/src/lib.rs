@@ -207,6 +207,20 @@ fn bc_time(unix_ms: i64) -> String {
     format!("{}GMT+00:00", format_java("yyyyMMddHHmmss", unix_ms, 0))
 }
 
+/// The class of the XML parser's exception.
+const SAX_PARSE: &str = "org.xml.sax.SAXParseException";
+
+/// `SAXParseException.getMessage()` of the core's text of the exception, which is its
+/// `toString()` (`<class>; lineNumber: L; columnNumber: C; <message>`); a text of another
+/// form is the message already.
+fn sax_message(text: &str) -> &str {
+    text.strip_prefix(SAX_PARSE)
+        .and_then(|rest| rest.strip_prefix("; lineNumber: "))
+        .and_then(|rest| rest.split_once("; columnNumber: "))
+        .and_then(|(_, rest)| rest.split_once("; "))
+        .map_or(text, |(_, message)| message)
+}
+
 fn exception(class: &str, message: impl Into<String>) -> Fail {
     Fail::Thrown(Throwable::new(class, Some(message.into())))
 }
@@ -714,8 +728,10 @@ fn sign_xades(
             signature_method,
             digest_method,
         })
-        // A document that is not XML.
-        .map_err(|e| exception("org.xml.sax.SAXParseException", e.message))?;
+        // A document that is not XML. The reply carries `getMessage()` of the parser's
+        // exception: the core words it as `toString()` does, which this strips (the
+        // exception's class is its own).
+        .map_err(|e| exception(SAX_PARSE, sax_message(&e.message)))?;
     let validation = "eu.europa.esig.dss.model.DSSException";
     let signed = match outcome {
         XadesOutcome::Signed(signed) => signed.into_vec(),
