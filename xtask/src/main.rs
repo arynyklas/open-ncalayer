@@ -258,7 +258,7 @@ enum IndexCommand {
     Check {
         /// The directory of the indexes, e.g. `updates/v1`.
         dir: PathBuf,
-        /// Skip the network checks (`HEAD` of the assets, `vm-smoke`).
+        /// Skip the network checks (`HEAD` of the assets, `vm-smoke`, `conformance`).
         #[arg(long)]
         offline: bool,
         /// The git revision of the base branch.
@@ -272,9 +272,13 @@ enum IndexCommand {
         #[arg(long)]
         keys: Option<PathBuf>,
         /// Require the `vm-smoke` commit status to be `success` on the tag of every new
-        /// version (off until the lab runs it).
+        /// version.
         #[arg(long, conflicts_with = "offline")]
         vm_smoke: bool,
+        /// Require the `conformance` commit status to be `success` on the tag of every new
+        /// `stable` version (`beta` is not gated).
+        #[arg(long, conflicts_with = "offline")]
+        conformance: bool,
     },
 }
 
@@ -805,6 +809,7 @@ fn main() -> anyhow::Result<()> {
                     no_base,
                     keys,
                     vm_smoke,
+                    conformance,
                 },
         } => {
             let keys = keys.unwrap_or_else(|| {
@@ -818,6 +823,7 @@ fn main() -> anyhow::Result<()> {
                 keys: &keys,
                 base: (!no_base).then_some(base.as_str()),
                 vm_smoke,
+                conformance,
                 now: OffsetDateTime::now_utc(),
             };
             let all = xtask::index::check(&dir, &options, remote)?;
@@ -844,7 +850,7 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             if offline {
-                println!("offline: HEAD of the assets and vm-smoke not checked");
+                println!("offline: HEAD of the assets, vm-smoke and conformance not checked");
             }
             Ok(())
         }
@@ -946,12 +952,31 @@ mod tests {
                 command: IndexCommand::Check {
                     offline: true,
                     vm_smoke: false,
+                    conformance: false,
+                    ..
+                }
+            })
+        ));
+        assert!(matches!(
+            parse(&[
+                "index",
+                "check",
+                "updates/v1",
+                "--vm-smoke",
+                "--conformance"
+            ]),
+            Ok(Command::Index {
+                command: IndexCommand::Check {
+                    offline: false,
+                    vm_smoke: true,
+                    conformance: true,
                     ..
                 }
             })
         ));
         for args in [
             &["index", "check", "updates/v1", "--offline", "--vm-smoke"][..],
+            &["index", "check", "updates/v1", "--offline", "--conformance"],
             &[
                 "index",
                 "add",

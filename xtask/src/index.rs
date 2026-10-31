@@ -9,7 +9,8 @@
 //! - [`check`] is the gate before publishing: the format, the signature by a trusted key,
 //!   asset URLs on the project's releases ([`check_asset_urls`]), `seq` growth against the
 //!   base branch and, with a [`Remote`], that every asset answers `HEAD` with 200 and,
-//!   behind a flag, that new versions passed `vm-smoke`.
+//!   behind flags, that new versions passed `vm-smoke` and new `stable` versions
+//!   `conformance`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -42,6 +43,10 @@ pub const PACKAGE_ID: &str = "OpenNCALayer";
 
 /// The `vm-smoke` commit status context (set on release tags by the lab agent).
 pub const VM_SMOKE: &str = "vm-smoke";
+
+/// The `conformance` commit status context: the release tag's build compared with the
+/// original in the lab (set by the lab agent after `vm-smoke`).
+pub const CONFORMANCE: &str = "conformance";
 
 /// The index of `channel` in `dir`.
 pub fn index_path(dir: &Path, channel: Channel) -> PathBuf {
@@ -607,12 +612,13 @@ pub trait Remote {
     /// If no response arrives.
     fn head(&self, url: &str) -> anyhow::Result<u16>;
 
-    /// Whether the commit of `tag` has the commit status [`VM_SMOKE`] set to `success`.
+    /// Whether the commit of `tag` has the commit status `context` ([`VM_SMOKE`],
+    /// [`CONFORMANCE`]) set to `success`.
     ///
     /// # Errors
     ///
     /// If the statuses cannot be read.
-    fn vm_smoke_passed(&self, tag: &str) -> anyhow::Result<bool>;
+    fn status_passed(&self, tag: &str, context: &str) -> anyhow::Result<bool>;
 }
 
 /// [`Remote`] over the network: assets as they are, commit statuses through the GitHub API
@@ -656,7 +662,7 @@ impl Remote for GitHub {
         Ok(response.status().as_u16())
     }
 
-    fn vm_smoke_passed(&self, tag: &str) -> anyhow::Result<bool> {
+    fn status_passed(&self, tag: &str, context: &str) -> anyhow::Result<bool> {
         let repo = REPOSITORY
             .strip_prefix("https://github.com/")
             .context("the repository is not on GitHub")?;
@@ -682,7 +688,7 @@ impl Remote for GitHub {
         Ok(status["statuses"].as_array().is_some_and(|statuses| {
             statuses
                 .iter()
-                .any(|s| s["context"] == VM_SMOKE && s["state"] == "success")
+                .any(|s| s["context"] == context && s["state"] == "success")
         }))
     }
 }
@@ -700,6 +706,9 @@ pub struct CheckOptions<'a> {
     /// Require [`VM_SMOKE`] = `success` on the tag of every version new against `base`.
     /// Needs a [`Remote`].
     pub vm_smoke: bool,
+    /// Require [`CONFORMANCE`] = `success` on the tag of every `stable` version new
+    /// against `base`; `beta` versions are not gated. Needs a [`Remote`].
+    pub conformance: bool,
     /// The time the indexes must be valid at.
     pub now: OffsetDateTime,
 }
@@ -725,8 +734,9 @@ pub struct Checked {
 /// [`check_tag_key`] in the repository of `dir` (all versions, if the base has no index of
 /// the channel). Without a base the tag gate is not applied: versions published before a
 /// key rotation keep tags with the old key, and the gate ran when they were added. With
-/// `remote`, every asset URL answers `HEAD` with 200 and, if `options.vm_smoke`, every new
-/// version passed `vm-smoke`.
+/// `remote`, every asset URL answers `HEAD` with 200, if `options.vm_smoke` every new
+/// version passed `vm-smoke`, and if `options.conformance` every new `stable` version
+/// passed `conformance`.
 ///
 /// A `dir` that does not exist (no index published yet) passes with nothing checked,
 /// unless the base has an index there. An existing `dir` needs at least one index.
@@ -739,8 +749,13 @@ pub fn check(
     options: &CheckOptions<'_>,
     remote: Option<&dyn Remote>,
 ) -> anyhow::Result<Vec<Checked>> {
-    if options.vm_smoke && remote.is_none() {
-        bail!("the {VM_SMOKE} gate needs the network");
+    for (gate, context) in [
+        (options.vm_smoke, VM_SMOKE),
+        (options.conformance, CONFORMANCE),
+    ] {
+        if gate && remote.is_none() {
+            bail!("the {context} gate needs the network");
+        }
     }
     let signing = [options.keys.current.clone()];
     let mut checked = Vec::new();
@@ -820,11 +835,18 @@ pub fn check(
                     bail!("{}: HEAD {url} answered {status}", path.display());
                 }
             }
-            if options.vm_smoke {
-                for version in &new_versions {
-                    let tag = format!("v{version}");
-                    if !remote.vm_smoke_passed(&tag)? {
-                        bail!("{tag} has no successful {VM_SMOKE} status");
+            let gates = [
+                (options.vm_smoke, VM_SMOKE),
+                (
+                    options.conformance && channel == Channel::Stable,
+                    CONFORMANCE,
+                ),
+            ];
+            for version in &new_versions {
+                let tag = format!("v{version}");
+                for (gate, context) in gates {
+                    if gate && !remote.status_passed(&tag, context)? {
+                        bail!("{tag} has no successful {context} status");
                     }
                 }
             }
