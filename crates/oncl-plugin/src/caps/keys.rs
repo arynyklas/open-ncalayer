@@ -344,8 +344,7 @@ fn key_flow(state: &mut HostState, args: FlowArgs) -> HostResult<KeyFlow> {
         FlowStart::Recent => StartPath::Recent,
         FlowStart::Empty => StartPath::Empty,
         FlowStart::Page(path) => {
-            check_line("the start path", &path, MAX_LINE)?;
-            // A path a page may not name is not offered.
+            // A path a page may not name is not offered, however long.
             page_path(&path)
                 .filter(|p| !p.as_os_str().is_empty())
                 .map_or(StartPath::Empty, |p| StartPath::Given(p.to_path_buf()))

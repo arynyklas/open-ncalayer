@@ -32,6 +32,23 @@ fn copy_workspace(dir: &Path) {
     }
 }
 
+/// The printable runs of `wasm` ending in `.rs`, from their first `/` or `\\`.
+fn source_paths(wasm: &[u8]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for run in wasm.split(|b| !(0x20..0x7f).contains(b)) {
+        let text = String::from_utf8_lossy(run);
+        let mut rest = text.as_ref();
+        while let Some(end) = rest.find(".rs") {
+            let candidate = &rest[..end + 3];
+            if let Some(start) = candidate.find(['/', '\\']) {
+                paths.push(candidate[start..].to_owned());
+            }
+            rest = &rest[end + 3..];
+        }
+    }
+    paths
+}
+
 /// Whether `haystack` holds `needle`.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
@@ -72,6 +89,16 @@ fn two_builds_are_identical() {
         let wasm = fs::read(&a.wasm).unwrap();
         for path in &machine {
             assert!(!contains(&wasm, path.as_bytes()), "{}: {path}", a.package);
+        }
+        // The only source paths left are those of the prebuilt standard library, the same
+        // on every host: none of the workspace or the registry, no `\` separator.
+        for path in source_paths(&wasm) {
+            assert!(
+                (path.starts_with("/rustc/") || path.starts_with("/rust/deps/"))
+                    && !path.contains('\\'),
+                "{}: {path}",
+                a.package
+            );
         }
     }
     assert_eq!(first.len(), GUESTS.len());

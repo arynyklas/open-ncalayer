@@ -90,9 +90,21 @@ const CLEARED_VARS: &[&str] = &[
 ];
 
 /// Builds the modules of the workspace at `workspace` in `target_dir` and lays them out in
-/// `out`. The modules hold no path of the machine: the Cargo home, the toolchain's sources
-/// and the workspace are remapped (`--remap-path-prefix`), so a build anywhere else gives
-/// the same bytes.
+/// `out`. The modules hold no path of the machine:
+///
+/// - panic locations carry no file names at all (`-Zlocation-detail=none`, through
+///   `RUSTC_BOOTSTRAP=1` for this build only), so neither the folders nor the host's path
+///   separator reach the code;
+/// - every other path the compiler writes starts with a remapped prefix
+///   (`--remap-path-prefix`): the Cargo home, the toolchain's sources and the workspace,
+///   each spelled with `\` and with `/` on Windows.
+///
+/// What is guaranteed: two builds of the same sources with the same toolchain on hosts of
+/// the same system give the same bytes wherever the workspace and the Cargo home are
+/// (`two_builds_are_identical`). A remap swaps a prefix only and never the separators
+/// after it; that Windows and Linux builds give the same bytes rests on no path remaining
+/// in the modules, which `build` does not prove; the published modules are built once, on
+/// Linux.
 /// `out` also gets [`SOURCE`], the [`source_digest`] of what they were built from.
 ///
 /// # Errors
@@ -119,7 +131,11 @@ pub fn build(workspace: &Path, target_dir: &Path, out: &Path) -> io::Result<Vec<
     for var in CLEARED_VARS {
         cargo.env_remove(var);
     }
-    cargo.env("CARGO_ENCODED_RUSTFLAGS", remaps(workspace)?.join("\x1f"));
+    let mut flags = remaps(workspace)?;
+    flags.push("-Zlocation-detail=none".to_owned());
+    cargo
+        .env("CARGO_ENCODED_RUSTFLAGS", flags.join("\x1f"))
+        .env("RUSTC_BOOTSTRAP", "1");
     let output = cargo.output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
@@ -252,15 +268,31 @@ fn remaps(workspace: &Path) -> io::Result<Vec<String>> {
             .ok_or_else(|| io::Error::other("no home folder for the Cargo home"))?
             .join(".cargo"),
     };
-    let remap = |from: &Path, to: &str| format!("--remap-path-prefix={}={to}", from.display());
-    Ok(vec![
-        remap(&real(&cargo_home)?, "/cargo"),
-        remap(
-            &real(&sysroot)?.join("lib/rustlib/src/rust"),
-            &format!("/rustc/{commit}"),
-        ),
-        remap(&real(workspace)?, "."),
-    ])
+    let mut flags = remap(&real(&cargo_home)?, "/cargo");
+    flags.extend(remap(
+        &real(&sysroot)?.join("lib/rustlib/src/rust"),
+        &format!("/rustc/{commit}"),
+    ));
+    flags.extend(remap(&real(workspace)?, "."));
+    Ok(flags)
+}
+
+/// The `--remap-path-prefix` flags mapping `from` to `to`: on Windows `from` spelled both
+/// with `\` and with `/` (a path from the environment may use either), elsewhere as it is.
+fn remap(from: &Path, to: &str) -> Vec<String> {
+    let shown = from.display().to_string();
+    let mut spellings = vec![shown.clone()];
+    if cfg!(windows) {
+        for other in [shown.replace('/', "\\"), shown.replace('\\', "/")] {
+            if !spellings.contains(&other) {
+                spellings.push(other);
+            }
+        }
+    }
+    spellings
+        .into_iter()
+        .map(|from| format!("--remap-path-prefix={from}={to}"))
+        .collect()
 }
 
 /// `path` absolute, as the compiler names the files under it: without `..`, and on Windows
@@ -505,4 +537,28 @@ pub fn hex(bytes: &[u8]) -> String {
 
 fn invalid(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_path_styles_map_to_the_same_prefix() {
+        let flags = |path: &str| remap(Path::new(path), "/cargo");
+        if cfg!(windows) {
+            let back = flags("C:\\Users\\u\\.cargo");
+            let forward = flags("C:/Users/u/.cargo");
+            for f in [&back, &forward] {
+                assert!(f.contains(&"--remap-path-prefix=C:\\Users\\u\\.cargo=/cargo".to_owned()));
+                assert!(f.contains(&"--remap-path-prefix=C:/Users/u/.cargo=/cargo".to_owned()));
+                assert_eq!(f.len(), 2);
+            }
+        } else {
+            assert_eq!(
+                flags("/home/u/.cargo"),
+                ["--remap-path-prefix=/home/u/.cargo=/cargo"]
+            );
+        }
+    }
 }

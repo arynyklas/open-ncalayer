@@ -45,18 +45,20 @@ pub const BUILTIN_ID_PREFIX: &str = "io.github.arynyklas.openncalayer.builtin.";
 /// The largest linear memory of a built-in module's instance: 2 GiB on 64-bit targets.
 #[cfg(target_pointer_width = "64")]
 pub const BUILTIN_MAX_MEMORY: usize = 2 << 30;
-/// The largest linear memory of a built-in module's instance: 384 MiB on 32-bit targets.
+/// The largest linear memory of a built-in module's instance: 16 MiB on 32-bit targets. The
+/// documents stay in the core (`data_*`); a call takes about 1 MiB besides the request's
+/// short strings.
 #[cfg(not(target_pointer_width = "64"))]
-pub const BUILTIN_MAX_MEMORY: usize = 384 << 20;
+pub const BUILTIN_MAX_MEMORY: usize = 16 << 20;
 
 /// An instance of a built-in module whose linear memory is over this after a call is
 /// dropped rather than kept idle: 64 MiB on 64-bit targets.
 #[cfg(target_pointer_width = "64")]
 pub const BUILTIN_HIGH_WATER: usize = 64 << 20;
 /// An instance of a built-in module whose linear memory is over this after a call is
-/// dropped: 16 MiB on 32-bit targets.
+/// dropped: 8 MiB on 32-bit targets.
 #[cfg(not(target_pointer_width = "64"))]
-pub const BUILTIN_HIGH_WATER: usize = 16 << 20;
+pub const BUILTIN_HIGH_WATER: usize = 8 << 20;
 
 /// The idle instances kept per built-in module.
 pub const BUILTIN_IDLE: usize = 2;
@@ -64,24 +66,13 @@ pub const BUILTIN_IDLE: usize = 2;
 /// The instances of a built-in module alive at once, on 64-bit targets.
 #[cfg(target_pointer_width = "64")]
 pub const BUILTIN_MAX_LIVE: usize = 32;
-/// The instances of a built-in module alive at once, on 32-bit targets: one, so the
-/// modules' memory stays within [`BUILTIN_MEMORY_BUDGET`].
+/// The instances of a built-in module alive at once, on 32-bit targets: one call may hold
+/// a window while three others of the module, from any page, answer.
 #[cfg(not(target_pointer_width = "64"))]
-pub const BUILTIN_MAX_LIVE: usize = 1;
+pub const BUILTIN_MAX_LIVE: usize = 4;
 
 /// The most built-in modules the core embeds; [`Builtins::load`] refuses more.
 pub const BUILTIN_MAX_MODULES: usize = 4;
-
-/// The address space all built-in modules' instances may take at their largest, on 32-bit
-/// targets: 1.5 GiB of the process's 2 GiB.
-#[cfg(not(target_pointer_width = "64"))]
-pub const BUILTIN_MEMORY_BUDGET: usize = 1536 << 20;
-
-#[cfg(not(target_pointer_width = "64"))]
-const _: () = assert!(
-    BUILTIN_MAX_MODULES * BUILTIN_MAX_LIVE * BUILTIN_MAX_MEMORY <= BUILTIN_MEMORY_BUDGET,
-    "the built-in modules' instances must fit the 32-bit address space"
-);
 
 /// The most bytes of data the core keeps for one call of a built-in module (the request's
 /// long strings and what the `data_*` functions make of them), on 64-bit targets: the
@@ -91,14 +82,43 @@ pub const BUILTIN_MAX_KEPT: usize = 2 << 30;
 /// The most bytes of data the core keeps for one call of a built-in module, on 32-bit
 /// targets: a page file of 64 MiB signed, time-stamped and base64-encoded fits.
 #[cfg(not(target_pointer_width = "64"))]
-pub const BUILTIN_MAX_KEPT: usize = 512 << 20;
+pub const BUILTIN_MAX_KEPT: usize = 384 << 20;
+
+/// The most bytes of data the core keeps for all calls of the built-in modules at once:
+/// a call that would keep more fails (`limit`, its connection dropped). 8 GiB on 64-bit
+/// targets.
+#[cfg(target_pointer_width = "64")]
+pub const BUILTIN_KEPT_BUDGET: usize = 8 << 30;
+/// The most bytes of data the core keeps for all calls of the built-in modules at once:
+/// 384 MiB on 32-bit targets.
+#[cfg(not(target_pointer_width = "64"))]
+pub const BUILTIN_KEPT_BUDGET: usize = 384 << 20;
+
+/// The address space kept free, on 32-bit targets, for the core's code, heap and the
+/// WebSocket messages, from the process's 2 GiB (Windows 7 x86).
+#[cfg(not(target_pointer_width = "64"))]
+pub const PROCESS_RESERVE: usize = 320 << 20;
+
+// On 32-bit targets everything the modules and plugins may take at once fits the 2 GiB of
+// a process: the built-in modules' instances at their largest, the plugins' instances at
+// their largest, the copies of a host function's argument and result, the data the core
+// keeps, and the reserve.
+#[cfg(not(target_pointer_width = "64"))]
+const _: () = assert!(
+    BUILTIN_MAX_MODULES * BUILTIN_MAX_LIVE * BUILTIN_MAX_MEMORY
+        + crate::MAX_INSTANCES * crate::MAX_MEMORY
+        + 2 * BUILTIN_MAX_TRANSFER
+        + BUILTIN_KEPT_BUDGET
+        + PROCESS_RESERVE
+        <= 2 << 30,
+    "the modules, the plugins and the kept data must fit a 32-bit process"
+);
 
 /// The fuel of one call of a built-in module.
 pub const BUILTIN_FUEL: u64 = 200_000_000_000;
 
 /// The largest buffer passed between the core and a built-in module: 512 MiB on 64-bit
-/// targets (a reply holding a CMS of a [`MAX_TRANSFER`](crate::MAX_TRANSFER) message is
-/// larger than the message).
+/// targets.
 #[cfg(target_pointer_width = "64")]
 pub const BUILTIN_MAX_TRANSFER: usize = 512 << 20;
 /// The largest buffer passed between the core and a built-in module: its memory on 32-bit

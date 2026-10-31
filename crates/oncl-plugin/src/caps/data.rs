@@ -12,7 +12,9 @@
 //!   gets the kept data in its place, written as `serde_json` writes a string (the data
 //!   must be UTF-8).
 //! - All of it goes when the call returns ([`CallData`] lives in the call's context), and
-//!   at most `max` bytes are kept at once: more is `limit`.
+//!   at most `max` bytes are kept at once for a call, and
+//!   [`BUILTIN_KEPT_BUDGET`](crate::BUILTIN_KEPT_BUDGET) for all calls of the process: more
+//!   is `limit`.
 
 use super::{invalid, limit};
 use crate::host::HostState;
@@ -22,6 +24,10 @@ use oncl_pdk::abi::{
     SignXmlArgs, StampArgs, StampOutcome,
 };
 use oncl_pki::cms::Content;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// The bytes all calls keep now.
+static KEPT: AtomicUsize = AtomicUsize::new(0);
 
 /// The data of one call of a built-in module.
 pub(crate) struct CallData {
@@ -71,6 +77,16 @@ impl CallData {
                 self.max
             )));
         }
+        KEPT.try_update(Ordering::AcqRel, Ordering::Acquire, |kept| {
+            kept.checked_add(data.len())
+                .filter(|total| *total <= crate::BUILTIN_KEPT_BUDGET)
+        })
+        .map_err(|_| {
+            limit(format!(
+                "the built-in modules keep at most {} bytes at once",
+                crate::BUILTIN_KEPT_BUDGET
+            ))
+        })?;
         self.bytes = bytes;
         self.kept.push(Some(data));
         Ok(format!("{}{}", self.prefix, self.kept.len() - 1))
@@ -177,6 +193,12 @@ impl CallData {
         }
         out.push_str(&reply[copied..]);
         Ok(out)
+    }
+}
+
+impl Drop for CallData {
+    fn drop(&mut self) {
+        KEPT.fetch_sub(self.bytes, Ordering::AcqRel);
     }
 }
 

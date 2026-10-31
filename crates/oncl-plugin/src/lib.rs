@@ -27,11 +27,11 @@ mod runtime;
 pub mod store;
 
 #[cfg(not(target_pointer_width = "64"))]
-pub use builtins::BUILTIN_MEMORY_BUDGET;
+pub use builtins::PROCESS_RESERVE;
 pub use builtins::{
-    BUILTIN_FUEL, BUILTIN_HIGH_WATER, BUILTIN_ID_PREFIX, BUILTIN_IDLE, BUILTIN_MAX_KEPT,
-    BUILTIN_MAX_LIVE, BUILTIN_MAX_MEMORY, BUILTIN_MAX_MODULES, BUILTIN_MAX_TRANSFER, BuiltinInfo,
-    BuiltinLimits, BuiltinSource, BuiltinStats, Builtins,
+    BUILTIN_FUEL, BUILTIN_HIGH_WATER, BUILTIN_ID_PREFIX, BUILTIN_IDLE, BUILTIN_KEPT_BUDGET,
+    BUILTIN_MAX_KEPT, BUILTIN_MAX_LIVE, BUILTIN_MAX_MEMORY, BUILTIN_MAX_MODULES,
+    BUILTIN_MAX_TRANSFER, BuiltinInfo, BuiltinLimits, BuiltinSource, BuiltinStats, Builtins,
 };
 pub use caps::{
     HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS, MAX_KEY_HANDLES, MAX_SECRETS, NCA_PKI_HOSTS,

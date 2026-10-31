@@ -401,7 +401,7 @@ impl KeyChooser {
                         });
                     }
                     let token_retry = match flow.readers {
-                        Readers::Fixed(_) => true,
+                        Readers::Fixed(_) => answer.storage.token_kind().is_some(),
                         Readers::Live => {
                             answer.storage.token_kind().is_some() && prompt.tokens.is_some()
                         }

@@ -321,6 +321,10 @@ fn flow_page_start_respects_page_path() {
         assert_eq!(start(r"\\.\pipe\k.p12"), None);
     }
     assert_eq!(start(""), None);
+    // However long, a path a page may name is offered as given, as the native modules did:
+    // no `limit`.
+    let long = "x".repeat(10_000);
+    assert_eq!(start(&long), Some(PathBuf::from(&long)));
 }
 
 #[test]
@@ -493,11 +497,27 @@ fn files_guest(services: &HostServices, trust: Trust, call: (Import, Vec<u8>)) -
 #[test]
 fn file_choose_kind_unknown_type_cause() {
     let (prompter, services) = scripted(vec![]);
-    let mut plugin = files_guest(&services, Trust::Installed, kind_call("NOPE", None));
-    let e = run::<Option<String>>(&mut plugin).unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
-    assert_eq!(e.cause(), Some(abi::cause::FILE_UNKNOWN_KIND));
+    for kind in ["NOPE".to_owned(), "P".repeat(10_000)] {
+        let mut plugin = files_guest(&services, Trust::Installed, kind_call(&kind, None));
+        let e = run::<Option<String>>(&mut plugin).unwrap_err();
+        assert_eq!(e.code, ErrorCode::Invalid);
+        assert_eq!(e.cause(), Some(abi::cause::FILE_UNKNOWN_KIND));
+    }
     assert!(prompter.file_prompts().is_empty());
+}
+
+#[test]
+fn file_choose_kind_long_folder_is_passed_on() {
+    // As the native commonUtils: the chooser gets the folder, however long, and starts
+    // elsewhere if it is none; no `limit`.
+    let (prompter, services) = scripted(vec![Step::CancelFile]);
+    let long = "d".repeat(10_000);
+    let mut plugin = files_guest(&services, Trust::Builtin, kind_call("P12", Some(&long)));
+    assert_eq!(run::<Option<String>>(&mut plugin).unwrap(), None);
+    assert_eq!(
+        prompter.file_prompts()[0].directory,
+        Some(PathBuf::from(&long))
+    );
 }
 
 #[test]

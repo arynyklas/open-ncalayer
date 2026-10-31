@@ -177,18 +177,20 @@ pub(crate) fn file_choose_kind(
     state: &mut HostState,
     args: FileKindArgs,
 ) -> HostResult<Option<String>> {
-    check_line("the file type", &args.kind, MAX_LINE)?;
+    // Every name but the known ones is unknown, however long; the folder is a page's path
+    // (one it may not name, however long, is not opened).
     let kind = if args.kind.is_empty() {
         FileKind::Directory
     } else {
         FileKind::from_name(&args.kind).ok_or_else(|| {
-            invalid(format!("no file type {:?}", args.kind))
-                .with_cause(abi::cause::FILE_UNKNOWN_KIND)
+            let shown = if args.kind.len() <= MAX_LINE {
+                format!(" {:?}", args.kind)
+            } else {
+                String::new()
+            };
+            invalid(format!("no such file type{shown}")).with_cause(abi::cause::FILE_UNKNOWN_KIND)
         })?
     };
-    if let Some(directory) = &args.directory {
-        check_line("the folder", directory, MAX_LINE)?;
-    }
     let prompt = FilePrompt {
         origin: origin(state),
         locale: state.call.locale,

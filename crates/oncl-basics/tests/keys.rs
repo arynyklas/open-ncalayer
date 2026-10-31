@@ -355,12 +355,28 @@ fn flow_fixed_readers_first_is_preselected() {
     let prompts = prompter.storage_prompts();
     // The list is the one given, never scanned.
     let readers = prompts[0].tokens.as_ref().expect("readers are offered");
-    assert_eq!(readers.current(), (fixed, None));
+    assert_eq!(readers.current(), (fixed.clone(), None));
     assert_eq!(readers.rescans(), 0);
     // A failed token answer keeps its reader selected.
     assert!(matches!(prompts[1].error, Some(OpenError::WrongPin { .. })));
     assert_eq!(prompts[1].chosen, Some(KAZTOKEN));
     assert_eq!(prompts[1].reader.as_deref(), Some(R1));
+
+    // A failed file answer of the same flow asks again with the file typed.
+    let (_, tokens) = emulator(vec![kaztoken()]);
+    let mixed = KeyFlow {
+        storages: vec![StorageKind::Pkcs12, KAZTOKEN],
+        readers: Readers::Fixed(fixed[..1].to_vec()),
+        ..self::flow()
+    };
+    let (chooser, prompter, _) =
+        setup_with(vec![storage("wrong password"), Step::CancelStorage], tokens);
+    assert!(chooser.open(&mixed).opened.is_none());
+    let prompts = prompter.storage_prompts();
+    assert!(prompts[1].error.is_some());
+    assert_eq!(prompts[1].chosen, None);
+    assert_eq!(prompts[1].reader, None);
+    assert_eq!(prompts[1].recent_path, Some(synthetic(KEY).path));
 }
 
 #[test]

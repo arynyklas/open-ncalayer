@@ -132,7 +132,7 @@ pub struct Input {
 }
 
 /// The shortest string value of a request that a built-in module gets as a data marker.
-pub const DATA_KEPT_MIN: usize = 256 << 10;
+pub const DATA_KEPT_MIN: usize = 16 << 10;
 
 /// What `oncl_process` returns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

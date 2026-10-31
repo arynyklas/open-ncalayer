@@ -171,7 +171,7 @@ fn fuel_covers_max_message() {
     };
     let (small, large) = (4 * MIB, 16 * MIB);
     let (at_small, at_large) = (fuel(small), fuel(large));
-    let per_byte = (at_large - at_small) as f64 / (large - small) as f64;
+    let per_byte = at_large.saturating_sub(at_small) as f64 / (large - small) as f64;
     let at_max = at_large as f64 + per_byte * (MAX_MESSAGE / 4 * 3 - large) as f64;
     assert!(
         4.0 * at_max <= BUILTIN_FUEL as f64,
@@ -240,4 +240,95 @@ fn largest_cms_data() {
         }
     }
     eprintln!("largest attached CMS data: {low} MiB");
+}
+
+#[test]
+fn calls_without_windows_do_not_wait_for_another_pages_window() {
+    // One page's storage window stays open; the calls of other pages that open none
+    // answer meanwhile, three at once (the 32-bit cap less the open window's call).
+    let opened = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let prompter = Arc::new(ScriptedPrompter::new(vec![
+        Step::Wait(Arc::clone(&opened)),
+        Step::Wait(Arc::clone(&release)),
+        Step::CancelStorage,
+    ]));
+    let services = HostServices::new(
+        prompter,
+        Arc::new(MemoryRecentPath::new(None)),
+        Arc::new(oncl_pki::tsp::MockTsa::new(
+            load(
+                &read(synthetic("tsa-gost2015").path),
+                &synthetic("tsa-gost2015").password,
+            )
+            .unwrap()
+            .remove(0),
+        )),
+        oncl_token::Tokens::disabled(),
+    );
+    let builtins = Arc::new(
+        Builtins::load(
+            &WasmEngine::new(),
+            services,
+            SOURCES,
+            BuiltinLimits::default(),
+            None,
+        )
+        .unwrap(),
+    );
+    let page = |n: u32| AddInfo {
+        origin: Some(format!("https://page{n}.kz")),
+        ..AddInfo::default()
+    };
+    let window = {
+        let builtins = Arc::clone(&builtins);
+        std::thread::spawn(move || {
+            builtins
+                .module(MODULE_NAME)
+                .unwrap()
+                .process(&cms_request(16), &page(1))
+        })
+    };
+    opened.wait();
+    let (done, answers) = std::sync::mpsc::channel();
+    let no_window = [
+        (
+            MODULE_NAME,
+            json!({"module": MODULE_NAME, "method": "sign", "args": {}}),
+        ),
+        (
+            MODULE_NAME,
+            json!({"module": MODULE_NAME, "method": "nope"}),
+        ),
+        (
+            MODULE_NAME,
+            json!({"module": MODULE_NAME, "method": "sign", "args": {"format": "x"}}),
+        ),
+        (
+            CU_MODULE,
+            json!({"module": CU_MODULE, "method": "getActiveTokens", "args": []}),
+        ),
+    ];
+    for (n, (module, request)) in no_window.into_iter().enumerate() {
+        let builtins = Arc::clone(&builtins);
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let reply = builtins
+                .module(module)
+                .unwrap()
+                .process(&request.to_string(), &page(2 + n as u32));
+            done.send(reply).unwrap();
+        });
+    }
+    for _ in 0..4 {
+        let reply = answers
+            .recv_timeout(Duration::from_secs(30))
+            .expect("answered while another page's window is open");
+        assert!(reply.text().is_some(), "{reply:?}");
+    }
+    release.wait();
+    assert_eq!(
+        window.join().unwrap().into_text().unwrap(),
+        r#"{"status":true,"body":{}}"#
+    );
 }
