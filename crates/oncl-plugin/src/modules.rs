@@ -299,6 +299,7 @@ fn context(manifest: &Manifest, session: SessionId, shared: Arc<SharedState>) ->
         plugin_id: manifest.id.clone(),
         plugin_name: manifest.name.clone(),
         shared,
+        trust: crate::Trust::Installed,
     }
 }
 

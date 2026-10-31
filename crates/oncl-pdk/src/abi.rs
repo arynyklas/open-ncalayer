@@ -139,6 +139,10 @@ pub struct HostError {
     pub code: ErrorCode,
     /// What happened, in English, for logs.
     pub message: String,
+    /// Which failure of the core's it is, when a guest tells them apart: a stable
+    /// `<area>.<variant>` string of [`mod@cause`]. Absent from older cores' errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
 }
 
 impl HostError {
@@ -147,8 +151,43 @@ impl HostError {
         HostError {
             code,
             message: message.into(),
+            cause: None,
         }
     }
+
+    /// The same error naming its `cause` (one of [`mod@cause`]).
+    #[must_use]
+    pub fn with_cause(self, cause: &str) -> Self {
+        HostError {
+            cause: Some(cause.to_owned()),
+            ..self
+        }
+    }
+
+    /// Which failure of the core's it is, if the core says.
+    pub fn cause(&self) -> Option<&str> {
+        self.cause.as_deref()
+    }
+}
+
+/// The causes a [`HostError`] names: `<area>.<variant>`, stable across cores.
+pub mod cause {
+    /// A CMS signer's algorithm the core does not sign or verify with.
+    pub const CMS_UNKNOWN_ALGORITHM: &str = "cms.unknown_algorithm";
+    /// A CMS without the content to co-sign.
+    pub const CMS_NO_ENCAPSULATED_DATA: &str = "cms.no_encapsulated_data";
+    /// An XML document that does not parse.
+    pub const XML_PARSE: &str = "xml.parse";
+    /// An XML signature algorithm the core does not sign with.
+    pub const XML_UNSUPPORTED_ALGORITHM: &str = "xml.unsupported_algorithm";
+    /// An XPath that names no element, or not one the signature can go into.
+    pub const XML_XPATH: &str = "xml.xpath";
+    /// A key the core cannot sign with.
+    pub const KEY_UNSUPPORTED: &str = "key.unsupported";
+    /// A time-stamp that could not be had.
+    pub const TSP_FAILED: &str = "tsp.failed";
+    /// A file type the chooser does not know.
+    pub const FILE_UNKNOWN_KIND: &str = "file.unknown_kind";
 }
 
 impl fmt::Display for HostError {
@@ -190,6 +229,8 @@ pub enum Capability {
     Settings,
     /// `shared = true`.
     Shared,
+    /// `builtin = true`: reserved for the core's own modules.
+    Builtin,
 }
 
 /// A host function.
@@ -290,11 +331,14 @@ pub enum Import {
     SharedPut,
     /// `keys_sign_xades`: [`XadesArgs`] → [`XadesOutcome`].
     KeysSignXades,
+    /// `call_locale`: [`LocaleArgs`] → `()`: the language of the windows for the rest of
+    /// the call.
+    CallLocale,
 }
 
 impl Import {
     /// Every host function.
-    pub const ALL: [Import; 45] = [
+    pub const ALL: [Import; 46] = [
         Import::Log,
         Import::Now,
         Import::Random,
@@ -340,6 +384,7 @@ impl Import {
         Import::SharedGet,
         Import::SharedPut,
         Import::KeysSignXades,
+        Import::CallLocale,
     ];
 
     /// Its import name in [`IMPORT_MODULE`].
@@ -390,6 +435,7 @@ impl Import {
             Import::SharedGet => "shared_get",
             Import::SharedPut => "shared_put",
             Import::KeysSignXades => "keys_sign_xades",
+            Import::CallLocale => "call_locale",
         }
     }
 
@@ -406,7 +452,8 @@ impl Import {
             | Import::LocalTime
             | Import::Platform
             | Import::CaList
-            | Import::CaIssuer => None,
+            | Import::CaIssuer
+            | Import::CallLocale => None,
             Import::KeysChoose
             | Import::KeysSignCms
             | Import::KeysSignRaw
@@ -491,6 +538,8 @@ impl Import {
             | Import::SharedGet
             | Import::SharedPut
             | Import::KeysSignXades => "0.1.0-alpha.4",
+            // The built-in modules' functions.
+            Import::CallLocale => "0.1.0-alpha.5",
         };
         semver::Version::parse(version).expect("a valid version")
     }
@@ -2048,4 +2097,11 @@ pub struct SharedPut {
     /// It goes after this long, milliseconds; `None`: it stays.
     #[serde(default)]
     pub ttl_ms: Option<u64>,
+}
+
+/// `call_locale`: the language of OpenNCALayer's windows until the call returns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocaleArgs {
+    /// `"ru"`, `"kk"` or `"en"`; anything else is `invalid`.
+    pub locale: String,
 }

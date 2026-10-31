@@ -8,10 +8,12 @@
 //!   [`Compiled`]), instantiated per session ([`Instance`]) with the host functions of its
 //!   capabilities ([`HostServices`]);
 //! - [`store`]: the installed plugins in `<data>/plugins/` ([`Store`]);
-//! - [`modules`]: the loaded plugins as the daemon's dynamic modules ([`PluginModules`]).
+//! - [`modules`]: the loaded plugins as the daemon's dynamic modules ([`PluginModules`]);
+//! - the modules built into the core, run as guests of the same runtime ([`Builtins`]).
 //!
 //! The format, the ABI and the limits are described in `docs/design/plugins.md`.
 
+mod builtins;
 mod caps;
 mod host;
 pub mod manifest;
@@ -20,6 +22,10 @@ pub mod package;
 mod runtime;
 pub mod store;
 
+pub use builtins::{
+    BUILTIN_FUEL, BUILTIN_HIGH_WATER, BUILTIN_ID_PREFIX, BUILTIN_IDLE, BUILTIN_MAX_MEMORY,
+    BUILTIN_MAX_TRANSFER, BuiltinInfo, BuiltinLimits, BuiltinSource, BuiltinStats, Builtins,
+};
 pub use caps::{
     HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS, MAX_KEY_HANDLES, MAX_SECRETS, NCA_PKI_HOSTS,
     SharedState, nca_pki_hosts,
@@ -32,8 +38,9 @@ pub use modules::{BUILT_IN, LoadedInfo, MemoryLimits, OnMissing, PluginModules};
 pub use oncl_pdk::abi::ABI_VERSION;
 pub use package::{MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, PACKAGE_EXT, Package, archive};
 pub use runtime::{
-    Compiled, Engine, INSTANCE_HIGH_WATER, Instance, LoadError, MAX_INSTANCES, MAX_MEMORY,
-    MAX_TRANSFER, MEMORY_BUDGET, PLUGIN_ERROR_REPLY, PROCESS_FUEL, PluginError, SessionContext,
+    Compiled, Engine, INSTANCE_HIGH_WATER, Instance, InstanceLimits, LoadError, MAX_INSTANCES,
+    MAX_MEMORY, MAX_TRANSFER, MEMORY_BUDGET, PLUGIN_ERROR_REPLY, PROCESS_FUEL, PluginError,
+    SessionContext, Trust,
 };
 pub use store::{Installed, Source, Store, StoreError, StoreState};
 pub use url::Url;

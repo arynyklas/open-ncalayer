@@ -17,7 +17,6 @@ use oncl_desktop::Settings;
 use oncl_desktop::port_owner;
 use oncl_ipc::IpcListener;
 use oncl_pki::http::HttpTransport;
-use oncl_pki::tsp::TsaProfile;
 use oncl_plugin::{Engine, HostServices, PluginModules};
 use oncl_protocol::Registry;
 use oncl_tls::{SelftestReports, TlsFiles};
@@ -537,18 +536,16 @@ fn start_plugins(
     let ocsp_cache = Arc::new(OcspCache::new());
     let settings = paths.settings();
     let services = HostServices {
-        prompter: Arc::clone(prompter),
-        recent: Arc::clone(recent),
-        http: Arc::clone(http) as _,
         ocsp_cache: Arc::clone(&ocsp_cache),
-        tsa: TsaProfile::basics_default(),
-        clock: OffsetDateTime::now_utc,
         // The language the settings window saved last.
         locale: Arc::new(move || load_settings(&settings).ui_locale()),
-        cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
-        pki_hosts: oncl_plugin::nca_pki_hosts(),
         settings_dir: Some(oncl_plugin::Store::settings_dir_in(&paths.data)),
-        tokens: Arc::clone(tokens),
+        ..HostServices::new(
+            Arc::clone(prompter),
+            Arc::clone(recent),
+            Arc::clone(http) as _,
+            Arc::clone(tokens),
+        )
     };
     let modules = Arc::new(PluginModules::new(
         Arc::new(Engine::new()),

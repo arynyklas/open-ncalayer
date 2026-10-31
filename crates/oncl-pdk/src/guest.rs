@@ -105,6 +105,8 @@ mod imports {
         pub fn shared_put(ptr: i32, len: i32) -> i64;
         #[link_name = "keys_sign_xades"]
         pub fn keys_sign_xades(ptr: i32, len: i32) -> i64;
+        #[link_name = "call_locale"]
+        pub fn call_locale(ptr: i32, len: i32) -> i64;
     }
 }
 
@@ -159,6 +161,7 @@ fn host_fn(import: Import) -> HostFn {
         Import::SharedGet => imports::shared_get,
         Import::SharedPut => imports::shared_put,
         Import::KeysSignXades => imports::keys_sign_xades,
+        Import::CallLocale => imports::call_locale,
     }
 }
 
@@ -411,6 +414,17 @@ pub mod host {
             },
         )
         .map(|issuer| issuer.map(Bytes::into_vec))
+    }
+
+    /// Shows OpenNCALayer's windows in `locale` until the call returns, instead of the
+    /// language of [`crate::Request::locale`].
+    pub fn call_locale(locale: crate::Locale) -> HostResult<()> {
+        call(
+            imports::call_locale,
+            &crate::abi::LocaleArgs {
+                locale: locale.code().to_owned(),
+            },
+        )
     }
 }
 

@@ -43,6 +43,7 @@ pub use state::SharedState;
 pub(crate) use state::{settings_get, settings_put, shared_get, shared_put};
 
 use crate::host::HostState;
+use crate::runtime::Trust;
 use oncl_basics::lock_dialog_flow;
 use oncl_pdk::abi::{ErrorCode, HostError, HostResult};
 use std::cell::{Cell, RefCell};
@@ -143,6 +144,17 @@ fn origin(state: &HostState) -> String {
 /// The plugin's name in the request's language, as the dialogs show it.
 fn source(state: &HostState) -> String {
     state.session.plugin_name.get(state.call.locale).to_owned()
+}
+
+/// The plugin's name for a window that may go without one: none for a built-in module,
+/// whose windows are the core's own.
+fn source_line(state: &HostState) -> Option<String> {
+    (!is_builtin(state)).then(|| source(state))
+}
+
+/// Whether the instance is a module built into the core.
+fn is_builtin(state: &HostState) -> bool {
+    state.session.trust == Trust::Builtin
 }
 
 fn check_line(what: &str, text: &str, max: usize) -> HostResult<()> {

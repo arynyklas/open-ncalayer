@@ -9,7 +9,12 @@ const FIRST_PLUGIN_CORE: &str = "0.1.0-alpha.3";
 
 /// Every core released so far. A function that is not in a released core must name a newer
 /// one, or that core would be offered plugins it cannot load.
-const RELEASED: [&str; 3] = ["0.1.0-alpha.1", "0.1.0-alpha.2", "0.1.0-alpha.3"];
+const RELEASED: [&str; 4] = [
+    "0.1.0-alpha.1",
+    "0.1.0-alpha.2",
+    "0.1.0-alpha.3",
+    "0.1.0-alpha.4",
+];
 
 /// The functions of the first core with plugins.
 const FIRST: [Import; 14] = [
@@ -29,6 +34,41 @@ const FIRST: [Import; 14] = [
     Import::HttpRequest,
 ];
 
+/// The functions `0.1.0-alpha.4` added: the plugin ports'.
+const ALPHA_4: [Import; 31] = [
+    Import::ReplyDrop,
+    Import::Hash,
+    Import::CertDetails,
+    Import::LocalTime,
+    Import::Platform,
+    Import::CaList,
+    Import::CaIssuer,
+    Import::KeysSelect,
+    Import::KeysChain,
+    Import::KeysTerminals,
+    Import::KeysOpen,
+    Import::DialogPassword,
+    Import::KeysSignCmsEx,
+    Import::TspStamp,
+    Import::TspRequest,
+    Import::OcspFetch,
+    Import::CrlFetch,
+    Import::CmsVerify,
+    Import::KeysSignXmlEx,
+    Import::XmlVerify,
+    Import::HttpRequestEx,
+    Import::FileChoose,
+    Import::FileOpenEx,
+    Import::PageFileRead,
+    Import::PageFileWrite,
+    Import::DialogChoice,
+    Import::SettingsGet,
+    Import::SettingsPut,
+    Import::SharedGet,
+    Import::SharedPut,
+    Import::KeysSignXades,
+];
+
 #[test]
 fn every_import_has_since() {
     let first = Version::parse(FIRST_PLUGIN_CORE).unwrap();
@@ -46,6 +86,10 @@ fn the_first_plugin_core_has_its_functions() {
     for import in FIRST {
         assert_eq!(import.since(), first, "{}", import.name());
     }
+    let alpha_4 = Version::parse("0.1.0-alpha.4").unwrap();
+    for import in ALPHA_4 {
+        assert_eq!(import.since(), alpha_4, "{}", import.name());
+    }
 }
 
 #[test]
@@ -54,7 +98,8 @@ fn later_functions_name_an_unreleased_core() {
         .iter()
         .map(|v| Version::parse(v).unwrap())
         .collect();
-    for import in Import::ALL.into_iter().filter(|i| !FIRST.contains(i)) {
+    let shipped = |i: &Import| FIRST.contains(i) || ALPHA_4.contains(i);
+    for import in Import::ALL.into_iter().filter(|i| !shipped(i)) {
         for version in &released {
             assert!(
                 import.since() > *version,

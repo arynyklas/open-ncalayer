@@ -572,6 +572,12 @@ fn abi_types_roundtrip() {
     });
     roundtrip::<HostResult<i64>>(Ok(-5));
     roundtrip::<HostResult<()>>(Err(HostError::new(ErrorCode::Denied, "no")));
+    roundtrip::<HostResult<()>>(Err(
+        HostError::new(ErrorCode::Failed, "no").with_cause(abi::cause::XML_XPATH)
+    ));
+    roundtrip(abi::LocaleArgs {
+        locale: "kk".to_owned(),
+    });
     roundtrip(LogArgs {
         level: Level::Debug,
         message: "m".to_owned(),

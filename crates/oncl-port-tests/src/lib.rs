@@ -4,8 +4,8 @@
 //! by a [`ScriptedPrompter`] and their PKI requests by the mock TSA, OCSP responder and CRL
 //! server of `oncl_pki` ([`Harness`]).
 
+use oncl_basics::Locale;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
-use oncl_basics::{Locale, OcspCache};
 use oncl_pki::crl::MockCrl;
 use oncl_pki::http::{
     HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport, RouteTransport,
@@ -13,7 +13,7 @@ use oncl_pki::http::{
 use oncl_pki::ocsp::MockOcsp;
 use oncl_pki::pkcs12::{self, KeyEntry};
 use oncl_pki::pkix::CaSet;
-use oncl_pki::tsp::{MockTsa, TsaProfile};
+use oncl_pki::tsp::MockTsa;
 use oncl_plugin::{Engine, HostServices, Instance, Manifest, Package, SessionContext};
 use oncl_protocol::{AddInfo, Reply};
 use std::path::PathBuf;
@@ -203,18 +203,18 @@ impl Harness {
     fn services(&self) -> HostServices {
         let locale = self.locale;
         HostServices {
-            prompter: Arc::clone(&self.prompter) as _,
-            recent: Arc::new(MemoryRecentPath::new(None)),
-            http: Arc::clone(&self.http) as _,
-            ocsp_cache: Arc::new(OcspCache::new()),
-            tsa: TsaProfile::basics_default(),
             clock: self.clock,
             locale: Arc::new(move || locale),
             // The synthetic PKI's CAs, as the ports' keys are synthetic.
             cas: Arc::new(synthetic_cas()),
             pki_hosts: Arc::clone(&self.pki_hosts),
             settings_dir: self.settings_dir.clone(),
-            tokens: Arc::clone(&self.tokens),
+            ..HostServices::new(
+                Arc::clone(&self.prompter) as _,
+                Arc::new(MemoryRecentPath::new(None)),
+                Arc::clone(&self.http) as _,
+                Arc::clone(&self.tokens),
+            )
         }
     }
 
@@ -288,6 +288,7 @@ fn context(manifest: &Manifest) -> SessionContext {
         plugin_id: manifest.id.clone(),
         plugin_name: manifest.name.clone(),
         shared: Arc::default(),
+        trust: oncl_plugin::Trust::Installed,
     }
 }
 

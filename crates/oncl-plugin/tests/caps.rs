@@ -41,6 +41,7 @@ fn example_on(services: &HostServices, session_id: u64) -> Instance {
         plugin_id: manifest.id.clone(),
         plugin_name: manifest.name.clone(),
         shared: Default::default(),
+        trust: oncl_plugin::Trust::Installed,
     };
     Engine::new()
         .compile(&manifest, &read(example_wasm()))

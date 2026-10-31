@@ -56,6 +56,9 @@ pub struct Manifest {
     pub replaces: Option<Replaces>,
     /// What the plugin may do beyond answering requests.
     pub capabilities: Capabilities,
+    /// A module built into the core (`builtin = true`): only a manifest embedded in the
+    /// core is read with it ([`Manifest::from_toml_builtin`]).
+    pub builtin: bool,
 }
 
 /// A text in the three languages of the dialogs.
@@ -135,6 +138,8 @@ pub struct Capabilities {
     pub settings: bool,
     /// Share values between the plugin's instances (and so between sites) in the process.
     pub shared: bool,
+    /// The `builtin` functions: only a module built into the core has them.
+    pub builtin: bool,
 }
 
 impl Capabilities {
@@ -217,6 +222,7 @@ impl Capabilities {
                 .collect(),
             settings: self.settings && !old.settings,
             shared: self.shared && !old.shared,
+            builtin: self.builtin && !old.builtin,
         }
     }
 }
@@ -562,8 +568,32 @@ fn parse_url(text: &str, scheme: &'static str) -> Result<Url, &'static str> {
 }
 
 impl Manifest {
-    /// Parses and checks `plugin.toml`.
+    /// Parses and checks the `plugin.toml` of a plugin package: neither `builtin = true` nor
+    /// an id under [`crate::BUILTIN_ID_PREFIX`], both reserved for the core's own modules.
     pub fn from_toml(text: &str) -> Result<Manifest, PackageError> {
+        let manifest = Self::parse(text)?;
+        if manifest.builtin || manifest.id.starts_with(crate::BUILTIN_ID_PREFIX) {
+            return Err(PackageError::Manifest(
+                "reserved for built-in modules".to_owned(),
+            ));
+        }
+        Ok(manifest)
+    }
+
+    /// Parses and checks the `plugin.toml` of a module built into the core: `builtin = true`
+    /// and an id under [`crate::BUILTIN_ID_PREFIX`].
+    pub fn from_toml_builtin(text: &str) -> Result<Manifest, PackageError> {
+        let manifest = Self::parse(text)?;
+        if !manifest.builtin || !manifest.id.starts_with(crate::BUILTIN_ID_PREFIX) {
+            return Err(PackageError::Manifest(format!(
+                "a built-in module has `builtin = true` and an id under {}",
+                crate::BUILTIN_ID_PREFIX
+            )));
+        }
+        Ok(manifest)
+    }
+
+    fn parse(text: &str) -> Result<Manifest, PackageError> {
         let raw: RawManifest = toml::from_str(text)
             .map_err(|e| PackageError::Manifest(e.to_string().trim_end().to_owned()))?;
         raw.check()
@@ -583,6 +613,8 @@ struct RawManifest {
     replaces: Option<Replaces>,
     #[serde(default)]
     capabilities: RawCapabilities,
+    #[serde(default)]
+    builtin: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -599,6 +631,7 @@ struct RawCapabilities {
     page_files_ext: Vec<String>,
     settings: bool,
     shared: bool,
+    builtin: bool,
 }
 
 impl RawManifest {
@@ -648,6 +681,11 @@ impl RawManifest {
             }
         }
         let caps = self.capabilities;
+        if caps.builtin && !self.builtin {
+            return Err(bad(
+                "capabilities.builtin is reserved for built-in modules".to_owned()
+            ));
+        }
         if caps.key_files && !caps.keys {
             return Err(bad(
                 "capabilities.key_files needs capabilities.keys".to_owned()
@@ -728,7 +766,9 @@ impl RawManifest {
                 page_files_ext,
                 settings: caps.settings,
                 shared: caps.shared,
+                builtin: caps.builtin,
             },
+            builtin: self.builtin,
         })
     }
 }

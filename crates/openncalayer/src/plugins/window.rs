@@ -213,6 +213,7 @@ mod tests {
                 page_files_ext: vec!["cms".to_owned()],
                 settings: true,
                 shared: true,
+                builtin: false,
             },
             local: true,
         };

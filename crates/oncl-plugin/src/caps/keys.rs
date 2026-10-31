@@ -7,7 +7,7 @@
 
 use super::{
     ConsentKind, DialogTurn, MAX_KEY_HANDLES, MAX_LINE, check_line, crypto, denied, failed,
-    invalid, origin, source,
+    invalid, origin, source, source_line,
 };
 use crate::host::HostState;
 use der::asn1::ObjectIdentifier;
@@ -185,13 +185,14 @@ fn choose(state: &mut HostState, choice: Choice) -> HostResult<Option<Chosen>> {
             .map(|name| storage_kind(name))
             .collect::<HostResult<_>>()?
     };
-    let name = source(state);
-    let detail = match &choice.detail {
-        Some(detail) => {
-            check_line("detail", detail, MAX_LINE)?;
-            format!("{name}: {detail}")
-        }
-        None => name,
+    if let Some(detail) = &choice.detail {
+        check_line("detail", detail, MAX_LINE)?;
+    }
+    // A plugin's name leads the line; a built-in module's line is its own.
+    let detail = match (source_line(state), choice.detail) {
+        (Some(name), Some(detail)) => Some(format!("{name}: {detail}")),
+        (Some(name), None) => Some(name),
+        (None, detail) => detail,
     };
     let request = KeyRequest {
         origin: origin(state),
@@ -203,7 +204,7 @@ fn choose(state: &mut HostState, choice: Choice) -> HostResult<Option<Chosen>> {
         },
         storages,
         filter: choice.filter,
-        detail: Some(detail),
+        detail,
         initial_path: choice.initial_path,
         order: choice.order,
     };

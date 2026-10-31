@@ -4,11 +4,9 @@
 #![allow(dead_code)]
 
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
-use oncl_basics::{Locale, OcspCache};
 use oncl_pdk::abi::{self, HostResult, Import};
 use oncl_pki::http::{HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport};
-use oncl_pki::tsp::TsaProfile;
-use oncl_plugin::{HostServices, Localized, Manifest, SessionContext};
+use oncl_plugin::{HostServices, Localized, Manifest, SessionContext, Trust};
 use oncl_protocol::AddInfo;
 use serde::de::DeserializeOwned;
 use std::fmt::Write as _;
@@ -52,17 +50,13 @@ pub fn services_with(
     http: Arc<dyn HttpTransport>,
 ) -> HostServices {
     HostServices {
-        prompter,
-        recent: Arc::new(MemoryRecentPath::new(None)),
-        http,
-        ocsp_cache: Arc::new(OcspCache::new()),
-        tsa: TsaProfile::basics_default(),
         clock,
-        cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
-        pki_hosts: oncl_plugin::nca_pki_hosts(),
-        locale: Arc::new(|| Locale::Ru),
-        settings_dir: None,
-        tokens: oncl_token::Tokens::disabled(),
+        ..HostServices::new(
+            prompter,
+            Arc::new(MemoryRecentPath::new(None)),
+            http,
+            oncl_token::Tokens::disabled(),
+        )
     }
 }
 
@@ -87,7 +81,36 @@ pub fn session(session: u64) -> SessionContext {
             en: "Test plugin".to_owned(),
         },
         shared: Arc::default(),
+        trust: Trust::Installed,
     }
+}
+
+/// The id of the built-in module of [`builtin_manifest`].
+pub const BUILTIN_ID: &str = "io.github.arynyklas.openncalayer.builtin.test";
+
+/// The module name of [`builtin_manifest`].
+pub const BUILTIN_MODULE: &str = "kz.example.Builtin";
+
+/// The `plugin.toml` of a built-in module with `capabilities` (the TOML of the
+/// `[capabilities]` table).
+pub fn builtin_manifest(capabilities: &str) -> String {
+    format!(
+        r#"
+id = "{BUILTIN_ID}"
+version = "0.1.0"
+min_core = "0.1.0"
+modules = ["{BUILTIN_MODULE}"]
+builtin = true
+
+[name]
+ru = "Встроенный"
+kk = "Кіріктірілген"
+en = "Built-in"
+
+[capabilities]
+{capabilities}
+"#
+    )
 }
 
 /// A manifest with `capabilities` (the TOML of the `[capabilities]` table).
@@ -168,30 +191,50 @@ pub fn answering(response: &str) -> String {
 /// CBOR argument, and answers with the hexadecimal of the last one's CBOR result (decode it
 /// with [`probe_result`]).
 pub fn probe(calls: &[(Import, Vec<u8>)]) -> String {
+    staged_probe(&[calls.to_vec()])
+}
+
+/// A [`probe`] whose instance makes the calls of `stages[0]` on its first call, those of
+/// `stages[1]` on its second, and so on; past the last stage it repeats the last.
+pub fn staged_probe(stages: &[Vec<(Import, Vec<u8>)>]) -> String {
     let mut imports = String::new();
-    let mut data = String::new();
-    let mut body = String::new();
+    let mut data = String::from("  (global $stage (mut i32) (i32.const 0))\n");
+    let mut body = String::from("    (block $end\n");
+    for i in (0..stages.len()).rev() {
+        body.push_str(&format!("    (block $s{i}\n"));
+    }
+    let targets: String = (0..stages.len()).map(|i| format!("$s{i} ")).collect();
+    let last = stages.len() - 1;
+    body.push_str(&format!(
+        "    (br_table {targets}$s{last} (global.get $stage))\n"
+    ));
     let mut at = 1024usize;
     let mut imported = Vec::new();
-    for (import, args) in calls {
-        if !imported.contains(import) {
-            imported.push(*import);
-            imports.push_str(&format!(
-                "  (import \"oncl\" \"{0}\" (func ${0} (param i32 i32) (result i64)))\n",
-                import.name()
+    for calls in stages {
+        body.push_str("    )\n");
+        for (import, args) in calls {
+            if !imported.contains(import) {
+                imported.push(*import);
+                imports.push_str(&format!(
+                    "  (import \"oncl\" \"{0}\" (func ${0} (param i32 i32) (result i64)))\n",
+                    import.name()
+                ));
+            }
+            data.push_str(&format!(
+                "  (data (i32.const {at}) \"{}\")\n",
+                wat_bytes(args)
             ));
+            body.push_str(&format!(
+                "    (local.set $r (call ${} (i32.const {at}) (i32.const {})))\n",
+                import.name(),
+                args.len()
+            ));
+            at += args.len();
         }
-        data.push_str(&format!(
-            "  (data (i32.const {at}) \"{}\")\n",
-            wat_bytes(args)
-        ));
-        body.push_str(&format!(
-            "    (local.set $r (call ${} (i32.const {at}) (i32.const {})))\n",
-            import.name(),
-            args.len()
-        ));
-        at += args.len();
+        body.push_str("    (br $end)\n");
     }
+    body.push_str("    )\n");
+    body.push_str("    (global.set $stage (i32.add (global.get $stage) (i32.const 1)))\n");
     // The allocator's heap starts past the arguments.
     let heap = at.div_ceil(65536).max(1) * 65536;
     format!(

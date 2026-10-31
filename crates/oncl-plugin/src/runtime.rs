@@ -58,6 +58,29 @@ const _: () = assert!(MAX_INSTANCES * MAX_MEMORY <= 1 << 30);
 /// arguments or result of a host function), as the daemon's largest WebSocket message.
 pub const MAX_TRANSFER: usize = 256 << 20;
 
+/// The limits of one instance: its linear memory, the fuel of a call and the largest buffer
+/// passed between it and the core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstanceLimits {
+    /// The largest linear memory.
+    pub max_memory: usize,
+    /// The fuel of one `oncl_process` call.
+    pub fuel: u64,
+    /// The largest request, reply, or argument or result of a host function.
+    pub max_transfer: usize,
+}
+
+impl Default for InstanceLimits {
+    /// A plugin's: [`MAX_MEMORY`], [`PROCESS_FUEL`] and [`MAX_TRANSFER`].
+    fn default() -> Self {
+        InstanceLimits {
+            max_memory: MAX_MEMORY,
+            fuel: PROCESS_FUEL,
+            max_transfer: MAX_TRANSFER,
+        }
+    }
+}
+
 /// The fuel of instantiation: the ABI version call.
 const INIT_FUEL: u64 = 1_000_000;
 
@@ -197,7 +220,10 @@ impl Engine {
             module,
             capabilities: Arc::new(manifest.capabilities.clone()),
             imports,
-            process_fuel: self.process_fuel,
+            limits: InstanceLimits {
+                fuel: self.process_fuel,
+                ..InstanceLimits::default()
+            },
         })
     }
 }
@@ -222,6 +248,7 @@ pub(crate) fn declares(capabilities: &Capabilities, import: Import) -> bool {
         Some(Capability::PageFiles) => capabilities.page_files,
         Some(Capability::Settings) => capabilities.settings,
         Some(Capability::Shared) => capabilities.shared,
+        Some(Capability::Builtin) => capabilities.builtin,
     }
 }
 
@@ -259,7 +286,19 @@ pub struct Compiled {
     module: Module,
     capabilities: Arc<Capabilities>,
     imports: Vec<Import>,
-    process_fuel: u64,
+    limits: InstanceLimits,
+}
+
+/// How far the core trusts the code of an instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    /// A plugin the user installed: its windows name it, a page file is read once the user
+    /// allows it.
+    Installed,
+    /// A module built into the core: its windows are the core's own, it reads the page files
+    /// the page names as the core's modules always did, and it may use the `builtin`
+    /// functions.
+    Builtin,
 }
 
 /// Whose an instance is: its session and its plugin.
@@ -273,6 +312,8 @@ pub struct SessionContext {
     pub plugin_name: Localized,
     /// The values the instances of the plugin's loaded generation share (`shared_*`).
     pub shared: Arc<SharedState>,
+    /// How far the core trusts the plugin.
+    pub trust: Trust,
 }
 
 impl Compiled {
@@ -281,12 +322,18 @@ impl Compiled {
         &self.imports
     }
 
+    /// The same module, its instances limited by `limits` instead of a plugin's.
+    #[must_use]
+    pub fn with_limits(self, limits: InstanceLimits) -> Compiled {
+        Compiled { limits, ..self }
+    }
+
     /// A new instance for `ctx`, its host functions served by `services`: the memory and
     /// tables limited, `oncl_abi_version` checked.
     ///
     /// # Errors
     ///
-    /// [`LoadError::Instantiate`] if the module's memory is over [`MAX_MEMORY`] or the version
+    /// [`LoadError::Instantiate`] if the module's memory is over its limit or the version
     /// call fails; [`LoadError::AbiVersion`] for another version.
     pub fn instantiate(
         &self,
@@ -294,7 +341,7 @@ impl Compiled {
         ctx: SessionContext,
     ) -> Result<Instance, LoadError> {
         let limits = StoreLimitsBuilder::new()
-            .memory_size(MAX_MEMORY)
+            .memory_size(self.limits.max_memory)
             .table_elements(MAX_TABLE_ELEMENTS)
             .instances(1)
             .memories(1)
@@ -306,6 +353,7 @@ impl Compiled {
             services.clone(),
             ctx,
             Arc::clone(&self.capabilities),
+            self.limits.max_transfer,
         );
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.limits);
@@ -353,7 +401,7 @@ impl Compiled {
             alloc,
             free,
             process,
-            process_fuel: self.process_fuel,
+            limits: self.limits,
             poisoned: false,
         })
     }
@@ -366,7 +414,7 @@ pub struct Instance {
     alloc: TypedFunc<i32, i32>,
     free: TypedFunc<(i32, i32), ()>,
     process: TypedFunc<(i32, i32), i64>,
-    process_fuel: u64,
+    limits: InstanceLimits,
     poisoned: bool,
 }
 
@@ -421,6 +469,19 @@ impl Instance {
         self.poisoned
     }
 
+    /// Lets go of the keys, passwords and consents of the calls so far: what a pooled
+    /// instance must not carry to its next call.
+    pub(crate) fn release_all(&mut self) {
+        self.store.data_mut().release_all();
+    }
+
+    /// The fuel the last call used.
+    pub(crate) fn fuel_used(&self) -> u64 {
+        self.limits
+            .fuel
+            .saturating_sub(self.store.get_fuel().unwrap_or(0))
+    }
+
     fn run(
         &mut self,
         request: &str,
@@ -432,9 +493,9 @@ impl Instance {
             origin: add_info.origin.clone(),
             locale: locale_code(locale).to_owned(),
         });
-        let len = transfer_len(input.len())?;
+        let len = transfer_len(input.len(), self.limits.max_transfer)?;
         self.store
-            .set_fuel(self.process_fuel)
+            .set_fuel(self.limits.fuel)
             .map_err(|e| PluginError::Trap(e.to_string()))?;
 
         self.store.data_mut().phase = Phase::Host;
@@ -449,13 +510,13 @@ impl Instance {
         self.store.data_mut().phase = Phase::Host;
 
         let (out_ptr, out_len) = abi::unpack(packed);
-        if out_len as usize > MAX_TRANSFER {
+        if out_len as usize > self.limits.max_transfer {
             return Err(PluginError::TooLarge);
         }
         let output = host::read_guest(self.memory.data(&self.store), out_ptr, out_len)
             .map_err(failure)?
             .to_vec();
-        // Lengths up to MAX_TRANSFER fit an i32; the pointer is the guest's own, as given.
+        // Lengths within the limit fit an i32; the pointer is the guest's own, as given.
         self.free
             .call(&mut self.store, (out_ptr as i32, out_len as i32))
             .map_err(failure)?;
@@ -465,9 +526,9 @@ impl Instance {
     }
 }
 
-/// `len` as the `i32` of the ABI, if within [`MAX_TRANSFER`].
-fn transfer_len(len: usize) -> Result<i32, PluginError> {
-    if len > MAX_TRANSFER {
+/// `len` as the `i32` of the ABI, if within `max`.
+fn transfer_len(len: usize, max: usize) -> Result<i32, PluginError> {
+    if len > max {
         return Err(PluginError::TooLarge);
     }
     i32::try_from(len).map_err(|_| PluginError::TooLarge)

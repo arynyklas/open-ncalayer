@@ -5,8 +5,6 @@
 use super::*;
 use crate::update::tests::FakeTransport;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
-use oncl_basics::{Locale, OcspCache};
-use oncl_pki::tsp::TsaProfile;
 use oncl_plugin::{Engine, HostServices};
 use oncl_protocol::DynamicModules;
 use oncl_update::{PluginReplaces, Sha256};
@@ -100,19 +98,12 @@ impl Sandbox {
             format!(r#"{{"updates": {{"enabled": {updates}, "channel": "stable"}}}}"#),
         )
         .unwrap();
-        let services = HostServices {
-            prompter: Arc::new(ScriptedPrompter::new(Vec::<Step>::new())),
-            recent: Arc::new(MemoryRecentPath::new(None)),
-            http: Arc::new(FakeTransport::default()),
-            ocsp_cache: Arc::new(OcspCache::new()),
-            tsa: TsaProfile::basics_default(),
-            clock: OffsetDateTime::now_utc,
-            locale: Arc::new(|| Locale::Ru),
-            cas: Arc::new(oncl_pki::pkix::CaSet::nca_production()),
-            pki_hosts: oncl_plugin::nca_pki_hosts(),
-            settings_dir: None,
-            tokens: oncl_token::Tokens::disabled(),
-        };
+        let services = HostServices::new(
+            Arc::new(ScriptedPrompter::new(Vec::<Step>::new())),
+            Arc::new(MemoryRecentPath::new(None)),
+            Arc::new(FakeTransport::default()),
+            oncl_token::Tokens::disabled(),
+        );
         let builtin = vec![oncl_basics::MODULE_NAME.to_owned()];
         Sandbox {
             dir,

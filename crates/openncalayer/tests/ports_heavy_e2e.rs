@@ -4,9 +4,7 @@
 
 use futures_util::{SinkExt, StreamExt};
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
-use oncl_basics::{Locale, OcspCache};
-use oncl_pki::pkix::CaSet;
-use oncl_pki::tsp::{MockTsa, TsaProfile};
+use oncl_pki::tsp::MockTsa;
 use oncl_plugin::{Engine, HostServices, Package, PluginModules};
 use oncl_testkit::{read, synthetic};
 use openncalayer::{LiveTls, ServerConfig, build_registry, serve};
@@ -72,19 +70,12 @@ async fn start(steps: Vec<Step>, shorts: &[&str]) -> Srv {
         Arc::new(|_| {}),
         None,
     );
-    let services = HostServices {
-        prompter: prompter.clone(),
-        recent: Arc::new(MemoryRecentPath::new(None)),
-        http: tsa,
-        ocsp_cache: Arc::new(OcspCache::new()),
-        tsa: TsaProfile::basics_default(),
-        clock: OffsetDateTime::now_utc,
-        locale: Arc::new(|| Locale::Ru),
-        cas: Arc::new(CaSet::nca_production()),
-        pki_hosts: oncl_plugin::nca_pki_hosts(),
-        settings_dir: None,
+    let services = HostServices::new(
+        prompter.clone(),
+        Arc::new(MemoryRecentPath::new(None)),
+        tsa,
         tokens,
-    };
+    );
     let plugins = PluginModules::new(Arc::new(Engine::new()), services, registry.names());
     for short in shorts {
         plugins

@@ -5,11 +5,11 @@
 
 use crate::caps::{self, Consents, KeyTable, RequestBudget, Secrets};
 use crate::manifest::Capabilities;
-use crate::runtime::{MAX_TRANSFER, SessionContext};
+use crate::runtime::SessionContext;
 use oncl_basics::{Locale, OcspCache, PagePins, Prompter, RecentPathStore};
 use oncl_pdk::abi::{
     self, CertArgs, CertInfo, ErrorCode, HostError, HostResult, IMPORT_MODULE, Import, KeyUsage,
-    Level, LocalTime, LocalTimeArgs, LogArgs, MAX_RANDOM, Os, Platform, RandomArgs,
+    Level, LocalTime, LocalTimeArgs, LocaleArgs, LogArgs, MAX_RANDOM, Os, Platform, RandomArgs,
 };
 use oncl_pki::http::HttpTransport;
 use oncl_pki::pkix::CaSet;
@@ -55,6 +55,34 @@ pub struct HostServices {
     pub tokens: Arc<oncl_token::Tokens>,
 }
 
+impl HostServices {
+    /// Services showing the dialogs with `prompter`, remembering the key store path in
+    /// `recent`, reaching the network through `http` and the hardware tokens of `tokens`;
+    /// the rest as the daemon has it by default: the basics TSA profile, the system clock,
+    /// Russian windows, the NCA's CAs and PKI hosts, no settings folder and an empty OCSP
+    /// memory.
+    pub fn new(
+        prompter: Arc<dyn Prompter>,
+        recent: Arc<dyn RecentPathStore>,
+        http: Arc<dyn HttpTransport>,
+        tokens: Arc<oncl_token::Tokens>,
+    ) -> Self {
+        HostServices {
+            prompter,
+            recent,
+            http,
+            ocsp_cache: Arc::new(OcspCache::new()),
+            tsa: TsaProfile::basics_default(),
+            clock: OffsetDateTime::now_utc,
+            locale: Arc::new(|| Locale::Ru),
+            cas: Arc::new(CaSet::nca_production()),
+            pki_hosts: crate::nca_pki_hosts(),
+            settings_dir: None,
+            tokens,
+        }
+    }
+}
+
 /// Who runs in an instance now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -95,6 +123,8 @@ pub(crate) struct HostState {
     /// The token PINs from the pages the user allowed in this session.
     pub(crate) page_pins: PagePins,
     guest: Option<(Memory, TypedFunc<i32, i32>)>,
+    /// The largest argument or result of a host function.
+    max_transfer: usize,
 }
 
 impl HostState {
@@ -103,6 +133,7 @@ impl HostState {
         services: HostServices,
         session: SessionContext,
         capabilities: Arc<Capabilities>,
+        max_transfer: usize,
     ) -> Self {
         HostState {
             limits,
@@ -121,6 +152,7 @@ impl HostState {
             consents: Consents::default(),
             page_pins: PagePins::default(),
             guest: None,
+            max_transfer,
         }
     }
 
@@ -145,10 +177,13 @@ impl HostState {
         self.call.origin = None;
     }
 
-    /// Lets go of every key and password: the instance is spent.
+    /// Lets go of every key, password and consent: the instance is spent, or goes back to
+    /// a pool for anyone's next call.
     pub(crate) fn release_all(&mut self) {
         self.keys = KeyTable::default();
         self.secrets = Secrets::default();
+        self.consents = Consents::default();
+        self.page_pins = PagePins::default();
     }
 }
 
@@ -220,21 +255,22 @@ fn call(
     };
     caller.data_mut().phase = Phase::Host;
     let (ptr, len) = (ptr as u32, len as u32);
-    if len as usize > MAX_TRANSFER {
+    let max = caller.data().max_transfer;
+    if len as usize > max {
         return Err(trap(format!(
-            "the argument of {} is over {MAX_TRANSFER} bytes",
+            "the argument of {} is over {max} bytes",
             import.name()
         )));
     }
     let args = read_guest(memory.data(&caller), ptr, len)?.to_vec();
     let reply = dispatch(caller.data_mut(), import, &args);
-    if reply.len() > MAX_TRANSFER {
+    if reply.len() > max {
         return Err(trap(format!(
-            "the result of {} is over {MAX_TRANSFER} bytes",
+            "the result of {} is over {max} bytes",
             import.name()
         )));
     }
-    // Within MAX_TRANSFER, which fits an i32.
+    // Within the limit, which fits an i32.
     let reply_len = reply.len() as i32;
     let reply_ptr = alloc.call(&mut caller, reply_len)?;
     write_guest(memory.data_mut(&mut caller), reply_ptr, &reply)?;
@@ -297,7 +333,24 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
         Import::SharedGet => run(args, |a| caps::shared_get(state, a)),
         Import::SharedPut => run(args, |a| caps::shared_put(state, a)),
         Import::KeysSignXades => run(args, |a| caps::keys_sign_xades(state, a)),
+        Import::CallLocale => run(args, |a| call_locale(state, a)),
     }
+}
+
+/// `call_locale`: the windows in `locale` until the call returns.
+fn call_locale(state: &mut HostState, args: LocaleArgs) -> HostResult<()> {
+    state.call.locale = match args.locale.as_str() {
+        "ru" => Locale::Ru,
+        "kk" => Locale::Kk,
+        "en" => Locale::En,
+        _ => {
+            return Err(HostError::new(
+                ErrorCode::Invalid,
+                "the language is not ru, kk or en",
+            ));
+        }
+    };
+    Ok(())
 }
 
 /// `platform`: the operating system and its line separator.

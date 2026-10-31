@@ -1,7 +1,9 @@
 //! `dialogs`: a message, a yes/no question, a choice of the plugin's buttons (and list) and
 //! a password that stays in the core.
 
-use super::{DialogTurn, MAX_DIALOG_TEXT, MAX_LINE, check_line, invalid, limit, origin, source};
+use super::{
+    DialogTurn, MAX_DIALOG_TEXT, MAX_LINE, check_line, invalid, limit, origin, source, source_line,
+};
 use crate::host::HostState;
 use oncl_basics::{
     ChoiceAnswer, ChoicePrompt, ConfirmPrompt, MessagePrompt, PasswordPrompt, Prompt,
@@ -70,7 +72,7 @@ pub(crate) fn dialog_password(
         origin: origin(state),
         locale: state.call.locale,
         message: non_empty(args.label),
-        source: Some(source(state)),
+        source: source_line(state),
         title: non_empty(args.title),
         ok: non_empty(args.ok),
         cancel: non_empty(args.cancel),

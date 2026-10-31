@@ -4,7 +4,8 @@
 
 use super::keys::shown;
 use super::{
-    ConsentKind, DialogTurn, MAX_LINE, check_line, failed, invalid, limit, origin, source,
+    ConsentKind, DialogTurn, MAX_LINE, check_line, failed, invalid, is_builtin, limit, origin,
+    source, source_line,
 };
 use crate::host::HostState;
 use oncl_basics::{
@@ -35,7 +36,7 @@ pub(crate) fn file_open(state: &mut HostState) -> HostResult<Option<OpenedFile>>
         locale: state.call.locale,
         kind: FileKind::All,
         directory: None,
-        source: Some(source(state)),
+        source: source_line(state),
     };
     DialogTurn::hold();
     let path = match state.services.prompter.file(&prompt) {
@@ -232,7 +233,8 @@ fn consent(
 
 /// `page_file_read`: a file the page names, if a page may name it, it is a regular file
 /// within [`MAX_PAGE_FILE`] and the user allows this page to read it (asked once per
-/// session for each file). Nothing is read before the user allows it.
+/// session for each file; a built-in module is not asked for). Nothing is read before the
+/// user allows it.
 pub(crate) fn page_file_read(state: &mut HostState, args: PagePathArgs) -> HostResult<PageRead> {
     let Some(named) = page_path(&args.path) else {
         return Ok(PageRead::NotFound);
@@ -250,7 +252,8 @@ pub(crate) fn page_file_read(state: &mut HostState, args: PagePathArgs) -> HostR
         return Ok(PageRead::NotFound);
     };
     let shown_path = canonical.clone();
-    if !consent(state, ConsentKind::Read, canonical, read_text, &shown_path) {
+    // A built-in module reads what the page names, as the core's modules always did.
+    if !is_builtin(state) && !consent(state, ConsentKind::Read, canonical, read_text, &shown_path) {
         return Ok(PageRead::Declined);
     }
     Ok(match PageFile::read(&args.path) {
