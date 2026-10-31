@@ -3,7 +3,7 @@ name: CI
 on:
   push:
   pull_request:
-  # Only the `live` job (real NCA services) runs on these two triggers.
+  # Only the `live` job (real NCA services) runs on these two triggers, and `bench` by hand.
   schedule:
     - cron: "0 3 * * 1"
   workflow_dispatch:
@@ -92,7 +92,7 @@ jobs:
             skip=(--skip committed_licenses_are_fresh --skip committed_plugin_licenses_are_fresh)
           fi
           cargo xtask fetch-fixtures
-          # The built-in modules' benchmarks (`bench_*`) are measured in release, by hand.
+          # The built-in modules' benchmarks (`bench_*`) run in release, in the `bench` job.
           cargo test --workspace --all-features -- --include-ignored --skip live_ --skip zola_ --skip bench_ "${skip[@]}"
       # The daemon as releases build it (no `e2e-prompter`, no `token-emulator`): the token
       # emulator's variable changes nothing.
@@ -545,6 +545,29 @@ jobs:
       - name: NCANode interop (XMLDSig, CMS)
         if: ${{ !cancelled() }}
         run: cargo xtask interop-ncanode
+
+  # The built-in modules' benchmarks and their thresholds (`bench_*`), in release, on the
+  # runner the thresholds are set for. By hand: they need a quiet machine.
+  bench:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: ./.github/actions/pinned-toolchains
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Fetch fixtures
+        run: cargo xtask fetch-fixtures
+      - name: Benchmarks
+        run: cargo test --locked --release -p oncl-builtin-tests --test bench -- --ignored --test-threads=1
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: builtins-bench
+          path: target/builtins-bench.json
+          if-no-files-found: warn
 
   actionlint:
     if: github.event_name == 'push' || github.event_name == 'pull_request'

@@ -291,7 +291,7 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 
 ### Производительность
 
-Замеры — `crates/oncl-builtin-tests/tests/bench.rs` (тесты `#[ignore]`: `cargo test --release -p oncl-builtin-tests --test bench -- --ignored --test-threads=1`, результаты — в `target/builtins-bench.json`): медиана 7 прогонов после прогрева, окна по сценарию без задержек, фиксированные часы, сравнение с нативным `basics` и с прямыми вызовами `oncl_pki`. Пороги проверяет сам тест. Пределы — `tests/limits.rs` (64 и 32 бит; CI гоняет его и на `i686-pc-windows-msvc`). Машина: Windows x64, сборка release, 2026-10-31.
+Замеры — `crates/oncl-builtin-tests/tests/bench.rs` (тесты `#[ignore]`: `cargo test --release -p oncl-builtin-tests --test bench -- --ignored --test-threads=1`, результаты — в `target/builtins-bench.json`): медиана 7 прогонов после прогрева, окна по сценарию без задержек, фиксированные часы. «Нативный» — работа прежнего нативного `basics`, которую тест повторяет сам (нативного кода больше нет): выбор ключа ядром, `oncl_pki`, разбор и запись JSON; второе сравнение — с прямыми вызовами `oncl_pki`. Пороги проверяет сам тест; в CI его гоняет job `bench` в `ci.yml` (только вручную, `workflow_dispatch`, на `windows-2025`) и сохраняет `builtins-bench.json` артефактом. Пределы — `tests/limits.rs` (64 и 32 бит; CI гоняет его и на `i686-pc-windows-msvc`). Таблица снята не на раннере CI, а на машине разработчика: Intel Core i9-14900KF, Windows 11 x64, сборка release, 2026-10-31. На машине, занятой другими сборками, отношения заметно хуже (у `cms` 64 МиБ — до 1,7 вместо 1,2), поэтому пороги рассчитаны на тихую машину.
 
 | Сценарий (WASM / нативный, мс) | 1 КиБ | 1 МиБ | 16 МиБ | 64 МиБ | Порог |
 |---|---|---|---|---|---|
