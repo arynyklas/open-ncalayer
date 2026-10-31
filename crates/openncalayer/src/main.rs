@@ -1270,7 +1270,7 @@ mod tests {
         let active = || {
             let request =
                 r#"{"module":"kz.gov.pki.knca.commonUtils","method":"getActiveTokens","args":[]}"#;
-            let Route::Module(module) = registry.route(request) else {
+            let Route::Module { module, request } = registry.route(request) else {
                 panic!("commonUtils is registered");
             };
             let reply = module.process(request, &AddInfo::default());
