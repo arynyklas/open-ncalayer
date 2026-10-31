@@ -1,11 +1,12 @@
 //! The [`HostError::cause`](oncl_pdk::abi::HostError::cause) of each failure of the core's
-//! signatures, time-stamps and page files: one of [`oncl_pdk::abi::cause`] per variant of
-//! the core's errors, so a guest tells them apart as the core's modules did.
+//! signatures, time-stamps, page files and key files: one of [`oncl_pdk::abi::cause`] per
+//! variant of the core's errors, so a guest tells them apart as the core's modules did.
 
 use oncl_basics::PageFileError;
 use oncl_pdk::abi::cause;
 use oncl_pki::cms::CmsError;
 use oncl_pki::key::KeyError;
+use oncl_pki::keystore::KeystoreError;
 use oncl_pki::tsp::TspError;
 use oncl_pki::xmldsig::XmlError;
 
@@ -78,4 +79,33 @@ pub fn page_file(e: PageFileError) -> &'static str {
         PageFileError::NotFound => cause::PAGE_FILE_NOT_FOUND,
         PageFileError::TooLarge => cause::PAGE_FILE_TOO_LARGE,
     }
+}
+
+/// The cause of a key file failure, `keystore.<variant>`.
+pub fn keystore(e: &KeystoreError) -> &'static str {
+    match e {
+        KeystoreError::UnknownAlgorithm => cause::KEYSTORE_UNKNOWN_ALGORITHM,
+        KeystoreError::KeystoreFileNotFound(_) => cause::KEYSTORE_KEYSTORE_FILE_NOT_FOUND,
+        KeystoreError::UnsuitedStorage => cause::KEYSTORE_UNSUITED_STORAGE,
+        KeystoreError::InappropriateCert => cause::KEYSTORE_INAPPROPRIATE_CERT,
+        KeystoreError::WrongPassword => cause::KEYSTORE_WRONG_PASSWORD,
+        KeystoreError::WrongPasswordPattern { .. } => cause::KEYSTORE_WRONG_PASSWORD_PATTERN,
+        KeystoreError::ChangePasswordConstraint => cause::KEYSTORE_CHANGE_PASSWORD_CONSTRAINT,
+        KeystoreError::ExtensionNotFound => cause::KEYSTORE_EXTENSION_NOT_FOUND,
+        KeystoreError::UnsupportedStorage => cause::KEYSTORE_UNSUPPORTED_STORAGE,
+        KeystoreError::InvalidRequest(_) => cause::KEYSTORE_INVALID_REQUEST,
+        KeystoreError::Malformed(_) => cause::KEYSTORE_MALFORMED,
+        KeystoreError::Io(_) => cause::KEYSTORE_IO,
+        KeystoreError::Pkcs12(_) => cause::KEYSTORE_PKCS12,
+    }
+}
+
+/// The cause of a failure of `keystore_new_key` at `step` (one of
+/// [`cause::NEW_KEY_STEPS`]): the step, `.` and the variant of [`keystore`], e.g.
+/// `csr.invalid_request`.
+pub fn new_key(step: &str, e: &KeystoreError) -> String {
+    let variant = keystore(e)
+        .strip_prefix("keystore.")
+        .expect("a key file cause starts with keystore.");
+    format!("{step}.{variant}")
 }

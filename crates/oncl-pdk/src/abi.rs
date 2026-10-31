@@ -252,8 +252,68 @@ pub mod cause {
     pub const PAGE_FILE_TOO_LARGE: &str = "page_file.too_large";
     /// A file type the chooser does not know.
     pub const FILE_UNKNOWN_KIND: &str = "file.unknown_kind";
+    /// A key file's signature algorithm (or RSA length) the core does not generate.
+    pub const KEYSTORE_UNKNOWN_ALGORITHM: &str = "keystore.unknown_algorithm";
+    /// No key file of the folder opens with the password and holds the certificate's key.
+    pub const KEYSTORE_KEYSTORE_FILE_NOT_FOUND: &str = "keystore.keystore_file_not_found";
+    /// A certificate whose KeyStoreInfo names another storage.
+    pub const KEYSTORE_UNSUITED_STORAGE: &str = "keystore.unsuited_storage";
+    /// A key under the certificate's alias that is not the certificate's.
+    pub const KEYSTORE_INAPPROPRIATE_CERT: &str = "keystore.inappropriate_cert";
+    /// A key file that does not open with the password.
+    pub const KEYSTORE_WRONG_PASSWORD: &str = "keystore.wrong_password";
+    /// A new password that is empty or does not match the PKCS#12 pattern.
+    pub const KEYSTORE_WRONG_PASSWORD_PATTERN: &str = "keystore.wrong_password_pattern";
+    /// A key file without a key.
+    pub const KEYSTORE_CHANGE_PASSWORD_CONSTRAINT: &str = "keystore.change_password_constraint";
+    /// A certificate without a SubjectKeyIdentifier.
+    pub const KEYSTORE_EXTENSION_NOT_FOUND: &str = "keystore.extension_not_found";
+    /// A storage the core does not write.
+    pub const KEYSTORE_UNSUPPORTED_STORAGE: &str = "keystore.unsupported_storage";
+    /// A subject or alternative name that does not encode.
+    pub const KEYSTORE_INVALID_REQUEST: &str = "keystore.invalid_request";
+    /// A certificate extension that does not parse, or a value that does not encode.
+    pub const KEYSTORE_MALFORMED: &str = "keystore.malformed";
+    /// A file that cannot be read, written or renamed.
+    pub const KEYSTORE_IO: &str = "keystore.io";
+    /// A key file that is not a readable PKCS#12 key store.
+    pub const KEYSTORE_PKCS12: &str = "keystore.pkcs12";
+    /// A folder a page names that a page may not name.
+    pub const KEYSTORE_FOLDER_REFUSED: &str = "keystore.folder.refused";
+    /// A folder that is not an existing folder named by an absolute path.
+    pub const KEYSTORE_FOLDER_MISSING: &str = "keystore.folder.missing";
 
-    /// Every cause.
+    /// The steps of `keystore_new_key`. Its failure's cause is the step, `.` and the
+    /// key file failure's variant: `keystore.generate.unknown_algorithm`,
+    /// `csr.invalid_request`, `keystore.write.io` (the variant of [`KEYSTORE_IO`] after
+    /// `keystore.`). A folder's failure is [`KEYSTORE_FOLDER_REFUSED`] or
+    /// [`KEYSTORE_FOLDER_MISSING`].
+    pub const NEW_KEY_STEPS: [&str; 3] = [KEYSTORE_GENERATE, CSR, KEYSTORE_WRITE];
+    /// The new key.
+    pub const KEYSTORE_GENERATE: &str = "keystore.generate";
+    /// Its request.
+    pub const CSR: &str = "csr";
+    /// Its key file.
+    pub const KEYSTORE_WRITE: &str = "keystore.write";
+
+    /// The key file failures, `keystore.<variant>`.
+    pub const KEYSTORE: [&str; 13] = [
+        KEYSTORE_UNKNOWN_ALGORITHM,
+        KEYSTORE_KEYSTORE_FILE_NOT_FOUND,
+        KEYSTORE_UNSUITED_STORAGE,
+        KEYSTORE_INAPPROPRIATE_CERT,
+        KEYSTORE_WRONG_PASSWORD,
+        KEYSTORE_WRONG_PASSWORD_PATTERN,
+        KEYSTORE_CHANGE_PASSWORD_CONSTRAINT,
+        KEYSTORE_EXTENSION_NOT_FOUND,
+        KEYSTORE_UNSUPPORTED_STORAGE,
+        KEYSTORE_INVALID_REQUEST,
+        KEYSTORE_MALFORMED,
+        KEYSTORE_IO,
+        KEYSTORE_PKCS12,
+    ];
+
+    /// Every cause but the steps of `keystore_new_key` ([`NEW_KEY_STEPS`]).
     pub const ALL: &[&str] = &[
         CMS_NO_ENCAPSULATED_DATA,
         CMS_UNKNOWN_ALGORITHM,
@@ -294,7 +354,38 @@ pub mod cause {
         PAGE_FILE_NOT_FOUND,
         PAGE_FILE_TOO_LARGE,
         FILE_UNKNOWN_KIND,
+        KEYSTORE_UNKNOWN_ALGORITHM,
+        KEYSTORE_KEYSTORE_FILE_NOT_FOUND,
+        KEYSTORE_UNSUITED_STORAGE,
+        KEYSTORE_INAPPROPRIATE_CERT,
+        KEYSTORE_WRONG_PASSWORD,
+        KEYSTORE_WRONG_PASSWORD_PATTERN,
+        KEYSTORE_CHANGE_PASSWORD_CONSTRAINT,
+        KEYSTORE_EXTENSION_NOT_FOUND,
+        KEYSTORE_UNSUPPORTED_STORAGE,
+        KEYSTORE_INVALID_REQUEST,
+        KEYSTORE_MALFORMED,
+        KEYSTORE_IO,
+        KEYSTORE_PKCS12,
+        KEYSTORE_FOLDER_REFUSED,
+        KEYSTORE_FOLDER_MISSING,
     ];
+
+    /// Whether `cause` is one the core names: one of [`ALL`], or a step of
+    /// `keystore_new_key` with a key file failure's variant.
+    pub fn is_known(cause: &str) -> bool {
+        ALL.contains(&cause)
+            || NEW_KEY_STEPS.iter().any(|step| {
+                cause
+                    .strip_prefix(step)
+                    .and_then(|rest| rest.strip_prefix('.'))
+                    .is_some_and(|variant| {
+                        KEYSTORE
+                            .iter()
+                            .any(|k| k.strip_prefix("keystore.") == Some(variant))
+                    })
+            })
+    }
 }
 
 impl fmt::Display for HostError {
@@ -468,11 +559,26 @@ pub enum Import {
     FileChooseKind,
     /// `pkix_path`: [`PathArgs`] → [`PathOutcome`].
     PkixPath,
+    /// `dialog_csr`: [`CsrDialogArgs`] → `Option<`[`CsrChoice`]`>`: the `generateCsr`
+    /// window; `None` if the user cancels.
+    DialogCsr,
+    /// `dialog_import`: [`ImportDialogArgs`] → `Option<`[`ImportChoice`]`>`: the
+    /// `importCertificate` window; `None` if the user cancels.
+    DialogImport,
+    /// `keystore_new_key`: [`NewKeyArgs`] → [`NewKey`]: a key in a new key file and its
+    /// request.
+    KeystoreNewKey,
+    /// `keystore_install_cert`: [`InstallCertArgs`] → [`InstalledCert`].
+    KeystoreInstallCert,
+    /// `keystore_change_password`: [`ChangePasswordArgs`] → `()`.
+    KeystoreChangePassword,
+    /// `tokens_id_card`: [`ReaderName`] → [`IdCardHolder`].
+    TokensIdCard,
 }
 
 impl Import {
     /// Every host function.
-    pub const ALL: [Import; 57] = [
+    pub const ALL: [Import; 63] = [
         Import::Log,
         Import::Now,
         Import::Random,
@@ -530,6 +636,12 @@ impl Import {
         Import::DialogReader,
         Import::FileChooseKind,
         Import::PkixPath,
+        Import::DialogCsr,
+        Import::DialogImport,
+        Import::KeystoreNewKey,
+        Import::KeystoreInstallCert,
+        Import::KeystoreChangePassword,
+        Import::TokensIdCard,
     ];
 
     /// Its import name in [`IMPORT_MODULE`].
@@ -592,6 +704,12 @@ impl Import {
             Import::DialogReader => "dialog_reader",
             Import::FileChooseKind => "file_choose_kind",
             Import::PkixPath => "pkix_path",
+            Import::DialogCsr => "dialog_csr",
+            Import::DialogImport => "dialog_import",
+            Import::KeystoreNewKey => "keystore_new_key",
+            Import::KeystoreInstallCert => "keystore_install_cert",
+            Import::KeystoreChangePassword => "keystore_change_password",
+            Import::TokensIdCard => "tokens_id_card",
         }
     }
 
@@ -650,7 +768,13 @@ impl Import {
             Import::CoreModules
             | Import::CoreBundles
             | Import::CoreInstallBundle
-            | Import::CoreOpenWindow => Some(Capability::Builtin),
+            | Import::CoreOpenWindow
+            | Import::DialogCsr
+            | Import::DialogImport
+            | Import::KeystoreNewKey
+            | Import::KeystoreInstallCert
+            | Import::KeystoreChangePassword
+            | Import::TokensIdCard => Some(Capability::Builtin),
         }
     }
 
@@ -718,7 +842,13 @@ impl Import {
             | Import::TokensScan
             | Import::DialogReader
             | Import::FileChooseKind
-            | Import::PkixPath => "0.1.0-alpha.5",
+            | Import::PkixPath
+            | Import::DialogCsr
+            | Import::DialogImport
+            | Import::KeystoreNewKey
+            | Import::KeystoreInstallCert
+            | Import::KeystoreChangePassword
+            | Import::TokensIdCard => "0.1.0-alpha.5",
         };
         semver::Version::parse(version).expect("a valid version")
     }
@@ -2592,4 +2722,158 @@ pub enum PathOutcome {
     IssuerNotFound,
     /// No valid path: why, in English.
     Invalid(String),
+}
+
+// The built-in modules' key files and certificate windows (capability `builtin`).
+
+/// `dialog_csr`: where the new key files of `generateCsr` go.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CsrDialogArgs {
+    /// Storages to offer, in order.
+    pub storages: Vec<String>,
+    /// Ask for the key file password (the page gave none).
+    pub ask_password: bool,
+}
+
+/// The answer to the `generateCsr` window: a PKCS#12 folder the user chose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CsrChoice {
+    /// The folder, for [`Folder::Chosen`] until the call returns.
+    pub folder: u32,
+    /// The storage chosen.
+    pub storage: String,
+    /// The key file password typed, with `ask_password`.
+    pub password: Option<SecretRef>,
+}
+
+/// `dialog_import`: the `importCertificate` window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportDialogArgs {
+    /// The storage the page names.
+    pub storage: String,
+    /// The folder the window starts with, if a page may name it.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// The certificates to install, DER, in request order.
+    pub certificates: Vec<Bytes>,
+}
+
+/// The answer to the `importCertificate` window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportChoice {
+    /// The folder (or key file) of the keys, for [`Folder::Chosen`] until the call returns.
+    pub folder: u32,
+    /// The password the key files get.
+    pub new_password: SecretRef,
+}
+
+/// Where key files are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Folder {
+    /// A folder the user chose in a window of this call.
+    Chosen(u32),
+    /// A folder the page names: an existing folder by an absolute path a page may name.
+    Page(String),
+}
+
+/// The request a new key comes with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestForm {
+    /// `generateCsr`'s: PEM, SubjectAltName and KeyStoreInfo with the folder.
+    Essentials {
+        /// Subject attributes, `(dotted OID, value)`.
+        dn: Vec<(String, String)>,
+        /// dNSNames.
+        dns_names: Vec<String>,
+        /// rfc822Name; blank or `None` for none.
+        email: Option<String>,
+    },
+    /// The legacy Applet's: DER with its key identifier, its key file named by it.
+    Applet {
+        /// Subject attributes, `(dotted OID, value)`, in this order.
+        dn: Vec<(String, String)>,
+        /// dNSNames; `None` for no SubjectAltName.
+        dns_names: Option<Vec<String>>,
+    },
+}
+
+/// `keystore_new_key`: a new key alone in a PKCS#12 key file of a folder, and its request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewKeyArgs {
+    /// Where the key file goes.
+    pub folder: Folder,
+    /// The key file password.
+    pub password: Password,
+    /// The signature algorithm, a dotted OID.
+    pub alg: String,
+    /// The RSA key length.
+    #[serde(default)]
+    pub bits: Option<u32>,
+    /// The request.
+    pub form: RequestForm,
+}
+
+/// A new key's request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewKey {
+    /// The request, DER.
+    pub der: Bytes,
+    /// The request as PEM (`CERTIFICATE REQUEST`, lines of 64, the platform's line
+    /// separator), for [`RequestForm::Essentials`].
+    pub pem: Option<String>,
+    /// The key identifier: of the BIT STRING (`generateCsr`) or of the whole
+    /// SubjectPublicKeyInfo (the Applet), lowercase hex.
+    pub key_id: String,
+}
+
+/// `keystore_install_cert`: a certificate installed next to its key in a key file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallCertArgs {
+    /// Where the key file is.
+    pub folder: Folder,
+    /// The key file password.
+    pub password: Password,
+    /// The certificate, DER.
+    pub cert: Bytes,
+    /// The storage, a dotted OID (PKCS#12, JKS).
+    pub storage_oid: String,
+    /// The password the key file gets afterwards, checked first.
+    #[serde(default)]
+    pub new_password: Option<Password>,
+}
+
+/// The key file a certificate went into.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstalledCert {
+    /// Its absolute path.
+    pub path: String,
+}
+
+/// `keystore_change_password`: a key file the page names, re-encrypted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangePasswordArgs {
+    /// The key file.
+    pub file: String,
+    /// Its password.
+    pub old: Password,
+    /// Its new password.
+    pub new: Password,
+}
+
+/// `tokens_id_card`: a reader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderName {
+    /// The reader's name.
+    pub reader: String,
+}
+
+/// The holder of the ID card in a reader, read without the PIN.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdCardHolder {
+    /// The IIN.
+    pub iin: String,
+    /// The full name, as the card writes it.
+    pub full_name: String,
 }

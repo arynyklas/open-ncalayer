@@ -9,6 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# `keystore_new_key`: the DER of a new key's PEM request.
+base64.workspace = true
 # The DER of a chosen key's certificate.
 der.workspace = true
 # `random`: the system's generator.
@@ -51,7 +53,6 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_
 libc.workspace = true
 
 [dev-dependencies]
-base64.workspace = true
 # Catalogs signed in the store's tests.
 minisign.workspace = true
 oncl-basics = { path = "../oncl-basics", features = ["testing"] }
@@ -64,3 +65,5 @@ tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 tracing-subscriber.workspace = true
 wat.workspace = true
+# Requests read and certificates issued in the key file tests.
+x509-cert.workspace = true

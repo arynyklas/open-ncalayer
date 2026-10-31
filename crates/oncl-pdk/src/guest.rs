@@ -129,6 +129,18 @@ mod imports {
         pub fn file_choose_kind(ptr: i32, len: i32) -> i64;
         #[link_name = "pkix_path"]
         pub fn pkix_path(ptr: i32, len: i32) -> i64;
+        #[link_name = "dialog_csr"]
+        pub fn dialog_csr(ptr: i32, len: i32) -> i64;
+        #[link_name = "dialog_import"]
+        pub fn dialog_import(ptr: i32, len: i32) -> i64;
+        #[link_name = "keystore_new_key"]
+        pub fn keystore_new_key(ptr: i32, len: i32) -> i64;
+        #[link_name = "keystore_install_cert"]
+        pub fn keystore_install_cert(ptr: i32, len: i32) -> i64;
+        #[link_name = "keystore_change_password"]
+        pub fn keystore_change_password(ptr: i32, len: i32) -> i64;
+        #[link_name = "tokens_id_card"]
+        pub fn tokens_id_card(ptr: i32, len: i32) -> i64;
     }
 }
 
@@ -195,6 +207,12 @@ fn host_fn(import: Import) -> HostFn {
         Import::DialogReader => imports::dialog_reader,
         Import::FileChooseKind => imports::file_choose_kind,
         Import::PkixPath => imports::pkix_path,
+        Import::DialogCsr => imports::dialog_csr,
+        Import::DialogImport => imports::dialog_import,
+        Import::KeystoreNewKey => imports::keystore_new_key,
+        Import::KeystoreInstallCert => imports::keystore_install_cert,
+        Import::KeystoreChangePassword => imports::keystore_change_password,
+        Import::TokensIdCard => imports::tokens_id_card,
     }
 }
 
@@ -1025,5 +1043,54 @@ pub mod tokens {
     /// card is in any reader.
     pub fn scan() -> HostResult<TokenScan> {
         call(imports::tokens_scan, &())
+    }
+}
+
+/// The key files and certificate windows of the built-in modules, and the holder of an ID
+/// card (capability `builtin`: built-in modules only). The private keys stay in the core.
+pub mod builtin {
+    use super::{HostResult, call, imports};
+    use crate::abi::ReaderName;
+    pub use crate::abi::{
+        ChangePasswordArgs, CsrChoice, CsrDialogArgs, Folder, IdCardHolder, ImportChoice,
+        ImportDialogArgs, InstallCertArgs, InstalledCert, NewKey, NewKeyArgs, RequestForm,
+    };
+
+    /// The `generateCsr` window: a PKCS#12 folder for the new key files; `None` if the user
+    /// cancels. A storage other than PKCS#12 and a folder that is none fail with their
+    /// `keystore.*` cause.
+    pub fn dialog_csr(args: &CsrDialogArgs) -> HostResult<Option<CsrChoice>> {
+        call(imports::dialog_csr, args)
+    }
+
+    /// The `importCertificate` window: the folder of the keys and their new password;
+    /// `None` if the user cancels.
+    pub fn dialog_import(args: &ImportDialogArgs) -> HostResult<Option<ImportChoice>> {
+        call(imports::dialog_import, args)
+    }
+
+    /// A new key alone in a key file of the folder, and its request.
+    pub fn new_key(args: &NewKeyArgs) -> HostResult<NewKey> {
+        call(imports::keystore_new_key, args)
+    }
+
+    /// A certificate installed next to its key; the key file's absolute path.
+    pub fn install_cert(args: &InstallCertArgs) -> HostResult<InstalledCert> {
+        call(imports::keystore_install_cert, args)
+    }
+
+    /// A key file the page names, re-encrypted with a new password.
+    pub fn change_password(args: &ChangePasswordArgs) -> HostResult<()> {
+        call(imports::keystore_change_password, args)
+    }
+
+    /// The holder of the ID card in `reader`, read without the PIN.
+    pub fn id_card(reader: &str) -> HostResult<IdCardHolder> {
+        call(
+            imports::tokens_id_card,
+            &ReaderName {
+                reader: reader.to_owned(),
+            },
+        )
     }
 }

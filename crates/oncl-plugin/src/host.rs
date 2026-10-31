@@ -3,7 +3,7 @@
 //! its CBOR argument from the guest, runs, and writes its CBOR [`HostResult`] into a buffer
 //! of the guest's `oncl_alloc`.
 
-use crate::caps::{self, Consents, Flows, KeyTable, RequestBudget, Secrets};
+use crate::caps::{self, Consents, Flows, KeyFiles, KeyTable, RequestBudget, Secrets};
 use crate::core::{self, CoreHooks};
 use crate::manifest::Capabilities;
 use crate::runtime::SessionContext;
@@ -112,6 +112,9 @@ pub(crate) struct CallContext {
     pub(crate) http_requests: RequestBudget,
     /// The key choice flows opened during this request, with their busy indicators.
     pub(crate) flows: Flows,
+    /// The folders the key file windows answered during this request, and the keys and
+    /// certificates it asked for.
+    pub(crate) key_files: KeyFiles,
 }
 
 /// An instance's store data.
@@ -154,6 +157,7 @@ impl HostState {
                 drop: false,
                 http_requests: RequestBudget::default(),
                 flows: Flows::default(),
+                key_files: KeyFiles::default(),
             },
             keys: KeyTable::default(),
             secrets: Secrets::default(),
@@ -177,14 +181,16 @@ impl HostState {
             drop: false,
             http_requests: RequestBudget::default(),
             flows: Flows::default(),
+            key_files: KeyFiles::default(),
         };
     }
 
-    /// The request is answered: its flows end.
+    /// The request is answered: its flows and the folders of its windows end.
     pub(crate) fn end_call(&mut self) {
         self.phase = Phase::Idle;
         self.call.origin = None;
         self.call.flows = Flows::default();
+        self.call.key_files = KeyFiles::default();
     }
 
     /// Lets go of every key, password and consent: the instance is spent, or goes back to
@@ -355,6 +361,12 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
         Import::CoreBundles => run(args, |()| core::core_bundles(state)),
         Import::CoreInstallBundle => run(args, |a| core::core_install_bundle(state, a)),
         Import::CoreOpenWindow => run(args, |a| core::core_open_window(state, a)),
+        Import::DialogCsr => run(args, |a| caps::dialog_csr(state, a)),
+        Import::DialogImport => run(args, |a| caps::dialog_import(state, a)),
+        Import::KeystoreNewKey => run(args, |a| caps::keystore_new_key(state, a)),
+        Import::KeystoreInstallCert => run(args, |a| caps::keystore_install_cert(state, a)),
+        Import::KeystoreChangePassword => run(args, |a| caps::keystore_change_password(state, a)),
+        Import::TokensIdCard => run(args, |a| caps::tokens_id_card(state, a)),
     }
 }
 

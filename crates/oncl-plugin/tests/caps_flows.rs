@@ -830,7 +830,15 @@ fn causes_cover_every_variant() {
     );
     let distinct: BTreeSet<&str> = causes.iter().copied().collect();
     let all: BTreeSet<&str> = abi::cause::ALL.iter().copied().collect();
-    let produced_by_files: BTreeSet<&str> = [abi::cause::FILE_UNKNOWN_KIND].into();
+    // `file_choose_kind`'s, and the key files' (`caps_keystore.rs`).
+    let produced_by_files: BTreeSet<&str> = [abi::cause::FILE_UNKNOWN_KIND]
+        .into_iter()
+        .chain(abi::cause::KEYSTORE)
+        .chain([
+            abi::cause::KEYSTORE_FOLDER_REFUSED,
+            abi::cause::KEYSTORE_FOLDER_MISSING,
+        ])
+        .collect();
     assert_eq!(
         distinct
             .union(&produced_by_files)

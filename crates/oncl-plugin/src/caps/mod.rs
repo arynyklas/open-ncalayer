@@ -9,7 +9,8 @@
 //!   chooses, and files and folders a page names (each once the user allows it);
 //! - [`net`]: requests to URLs under the manifest's prefixes or to the page's own listed
 //!   origin, redirects not followed;
-//! - [`state`]: the plugin's settings on disk and the values its instances share.
+//! - [`state`]: the plugin's settings on disk and the values its instances share;
+//! - [`keystore`]: the built-in modules' key files and the windows that ask for them.
 //!
 //! The first host function that shows a window takes the process-wide dialog-flow turn
 //! ([`lock_dialog_flow`]) and holds it until `oncl_process` returns, trap or not
@@ -19,6 +20,7 @@ mod crypto;
 mod dialogs;
 mod files;
 mod keys;
+mod keystore;
 mod net;
 mod state;
 
@@ -39,6 +41,10 @@ pub(crate) use keys::{
     Flows, KeyTable, keys_chain, keys_choose, keys_describe, keys_flow_open, keys_flow_pick,
     keys_open, keys_release, keys_select, keys_sign_cms, keys_sign_cms_ex, keys_sign_raw,
     keys_sign_xades, keys_sign_xml, keys_sign_xml_ex, keys_terminals, tokens_scan,
+};
+pub(crate) use keystore::{
+    KeyFiles, dialog_csr, dialog_import, keystore_change_password, keystore_install_cert,
+    keystore_new_key, tokens_id_card,
 };
 pub use net::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS};
 pub(crate) use net::{RequestBudget, http_request, http_request_ex};

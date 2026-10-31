@@ -737,6 +737,70 @@ fn abi_types_roundtrip() {
     }
     roundtrip(abi::SignerSel::OfCert(bytes()));
     roundtrip(abi::StampOutcome::NoSigner);
+    roundtrip(abi::CsrDialogArgs {
+        storages: vec!["PKCS12".to_owned()],
+        ask_password: true,
+    });
+    roundtrip::<Option<abi::CsrChoice>>(Some(abi::CsrChoice {
+        folder: 1,
+        storage: "PKCS12".to_owned(),
+        password: Some(abi::SecretRef { id: 2 }),
+    }));
+    roundtrip(abi::ImportDialogArgs {
+        storage: "PKCS12".to_owned(),
+        path: Some("C:\\keys".to_owned()),
+        certificates: vec![bytes()],
+    });
+    roundtrip::<Option<abi::ImportChoice>>(Some(abi::ImportChoice {
+        folder: 0,
+        new_password: abi::SecretRef { id: 3 },
+    }));
+    for form in [
+        abi::RequestForm::Essentials {
+            dn: vec![("2.5.4.3".to_owned(), "cn".to_owned())],
+            dns_names: vec!["a.kz".to_owned()],
+            email: None,
+        },
+        abi::RequestForm::Applet {
+            dn: Vec::new(),
+            dns_names: Some(Vec::new()),
+        },
+    ] {
+        roundtrip(abi::NewKeyArgs {
+            folder: abi::Folder::Page("/keys".to_owned()),
+            password: abi::Password::Secret(1),
+            alg: "1.2.840.113549.1.1.11".to_owned(),
+            bits: Some(2048),
+            form,
+        });
+    }
+    roundtrip(abi::NewKey {
+        der: bytes(),
+        pem: Some("-----".to_owned()),
+        key_id: "ab".to_owned(),
+    });
+    roundtrip(abi::InstallCertArgs {
+        folder: abi::Folder::Chosen(0),
+        password: abi::Password::Text("p".to_owned()),
+        cert: bytes(),
+        storage_oid: "1.2".to_owned(),
+        new_password: None,
+    });
+    roundtrip(abi::InstalledCert {
+        path: "/keys/k.p12".to_owned(),
+    });
+    roundtrip(abi::ChangePasswordArgs {
+        file: "/k.p12".to_owned(),
+        old: abi::Password::Text("a".to_owned()),
+        new: abi::Password::Secret(4),
+    });
+    roundtrip(abi::ReaderName {
+        reader: "R".to_owned(),
+    });
+    roundtrip(abi::IdCardHolder {
+        iin: "1".to_owned(),
+        full_name: "A B".to_owned(),
+    });
 }
 
 #[test]

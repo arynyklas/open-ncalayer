@@ -31,7 +31,7 @@ pub(crate) struct Secrets {
 
 impl Secrets {
     /// Whether another id is left.
-    fn has_room(&self) -> HostResult<()> {
+    pub(super) fn has_room(&self) -> HostResult<()> {
         if self.last == u32::MAX {
             return Err(limit("no password ids left in this instance".to_owned()));
         }
@@ -39,7 +39,7 @@ impl Secrets {
     }
 
     /// Keeps `secret` under a new id; at [`MAX_SECRETS`] the oldest password is wiped.
-    fn insert(&mut self, secret: Zeroizing<String>) -> HostResult<u32> {
+    pub(super) fn insert(&mut self, secret: Zeroizing<String>) -> HostResult<u32> {
         self.has_room()?;
         while self.secrets.len() >= MAX_SECRETS {
             self.secrets.pop_first();
