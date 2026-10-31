@@ -1,8 +1,9 @@
 name: Privacy
 
 # `cargo xtask privacy` (docs/dev/release.md, «Приватность»): no transcripts, paths with a
-# drive letter or certificates of the NCA test CA in the tracked files, in the file versions
-# the pushed commits add or in their messages. With the secret `PRIVACY_DENYLIST` (a base64
+# drive letter or certificates of the NCA test CA in the tracked files, in what the pushed
+# commits add (the lines a text file gains, new or changed binary files) or in their messages.
+# With the secret `PRIVACY_DENYLIST` (a base64
 # private list), also no line that matches it; the list itself never enters the repository,
 # and the check prints only `file:line`. Forks and pull requests from them have no secrets:
 # there the denylist step leaves a notice and passes.

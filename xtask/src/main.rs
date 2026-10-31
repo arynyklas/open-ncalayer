@@ -101,7 +101,8 @@ enum Command {
     /// listed test literals, certificates issued by an NCA test CA; with `--denylist`, lines
     /// matching a private list. Findings are printed as `file:line`, never what matched.
     Privacy {
-        /// `<base>..<head>`: also the file versions these commits add and their messages.
+        /// `<base>..<head>`: also what these commits add (the lines a text file gains, new or
+        /// changed binary files) and their messages.
         /// The empty tree (`4b825dc642cb6eb9a060e54bf8d69288fbee4904`) as base takes the
         /// whole history.
         #[arg(long)]

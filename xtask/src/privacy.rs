@@ -14,12 +14,14 @@
 //! names the place and the line, never the entry or the text that matched.
 //!
 //! What is checked: the tracked files of the work tree (`git ls-files`) and, with a range
-//! `<base>..<head>`, also every file version those commits add and their messages.
+//! `<base>..<head>`, also what each commit of it adds (against its first parent): the lines
+//! a text file gains (line numbers are those of the file version the commit makes), a binary
+//! file when it is new or changed, and the commit's message. A line that was already there,
+//! moved or not, is not checked again.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -430,7 +432,8 @@ fn find_all<'a>(haystack: &'a [u8], needle: &'a [u8]) -> impl Iterator<Item = us
 /// What [`check`] looks at besides the structure.
 #[derive(Default)]
 pub struct Options<'a> {
-    /// `<base>..<head>`: also the file versions these commits add and their messages.
+    /// `<base>..<head>`: also what these commits add (the lines a text file gains, new or
+    /// changed binary files) and their messages.
     pub range: Option<&'a str>,
     /// The private list.
     pub denylist: Option<&'a Denylist>,
@@ -461,16 +464,32 @@ pub fn check(root: &Path, cas: &TestCas, options: &Options) -> anyhow::Result<Ve
             .filter(|(base, head)| !base.is_empty() && !head.is_empty() && !head.starts_with('.'))
             .ok_or_else(|| anyhow!("--range wants <base>..<head>, not {range:?}"))?;
         let range = format!("{base}..{head}");
-        for (id, path, bytes) in range_blobs(root, &range)? {
-            if work_tree_blobs.get(&path) == Some(&id) {
-                continue; // the work tree's version: checked above
+        let empty_tree = empty_tree(root)?;
+        let commits = git(root, &["rev-list", "--parents", &range, "--"])?;
+        for entry in commits.lines() {
+            let mut ids = entry.split_whitespace();
+            let Some(commit) = ids.next() else { continue };
+            // Against the first parent; a root commit adds everything.
+            let parent = ids.next().unwrap_or(&empty_tree);
+            for add in commit_adds(root, parent, commit)? {
+                if work_tree_blobs.get(&add.path) == Some(&add.id) {
+                    continue; // the work tree's version: checked above
+                }
+                let place = Place::Blob {
+                    path: add.path.clone(),
+                    id: add.id.clone(),
+                };
+                if add.new_path {
+                    scanner.check_path(&place, &add.path, &mut findings);
+                }
+                match &add.hunks {
+                    Some(hunks) => scanner.check_added(&place, &add.path, hunks, &mut findings),
+                    None => {
+                        let bytes = git_bytes(root, &["cat-file", "blob", &add.id])?;
+                        scanner.check_content(&place, Some(&add.path), &bytes, &mut findings);
+                    }
+                }
             }
-            let place = Place::Blob {
-                path: path.clone(),
-                id,
-            };
-            scanner.check_path(&place, &path, &mut findings);
-            scanner.check_content(&place, Some(&path), &bytes, &mut findings);
         }
         let log = git(root, &["log", "-z", "--format=%H%n%B", &range, "--"])?;
         for entry in nul_separated(&log) {
@@ -494,6 +513,11 @@ fn blob_id(bytes: &[u8]) -> String {
 }
 
 fn git(root: &Path, args: &[&str]) -> anyhow::Result<String> {
+    String::from_utf8(git_bytes(root, args)?)
+        .map_err(|_| anyhow!("git {}: not UTF-8", args.join(" ")))
+}
+
+fn git_bytes(root: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
     let out = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -506,7 +530,7 @@ fn git(root: &Path, args: &[&str]) -> anyhow::Result<String> {
         args.join(" "),
         String::from_utf8_lossy(&out.stderr).trim()
     );
-    String::from_utf8(out.stdout).map_err(|_| anyhow!("git {}: not UTF-8", args.join(" ")))
+    Ok(out.stdout)
 }
 
 fn nul_separated(text: &str) -> impl Iterator<Item = String> + '_ {
@@ -515,57 +539,196 @@ fn nul_separated(text: &str) -> impl Iterator<Item = String> + '_ {
         .map(|s| s.strip_prefix('\n').unwrap_or(s).to_owned())
 }
 
-/// Every blob that a commit of `range` adds: `(id, path, bytes)`.
-fn range_blobs(root: &Path, range: &str) -> anyhow::Result<Vec<(String, String, Vec<u8>)>> {
-    // `<id> <path>` for trees and blobs; commits and root trees have no path.
-    let objects = git(root, &["rev-list", "--objects", range, "--"])?;
-    let named: Vec<(String, String)> = objects
-        .lines()
-        .filter_map(|line| line.split_once(' '))
-        .filter(|(_, path)| !path.is_empty())
-        .map(|(id, path)| (id.to_owned(), path.to_owned()))
-        .collect();
-
-    let mut child = Command::new("git")
+/// The id of the empty tree in the repository's hash format.
+fn empty_tree(root: &Path) -> anyhow::Result<String> {
+    let out = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["cat-file", "--batch"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .context("running git cat-file --batch")?;
-    let mut stdin = child.stdin.take().expect("piped stdin");
-    let ids: Vec<String> = named.iter().map(|(id, _)| id.clone()).collect();
-    let writer = std::thread::spawn(move || -> std::io::Result<()> {
-        for id in ids {
-            writeln!(stdin, "{id}")?;
-        }
-        Ok(())
-    });
-    let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-    let mut blobs = Vec::new();
-    for (id, path) in named {
-        let mut header = String::new();
-        stdout.read_line(&mut header)?;
-        // `<id> <type> <size>`
-        let mut fields = header.split_whitespace();
-        let (Some(_), Some(kind), Some(size)) = (fields.next(), fields.next(), fields.next())
-        else {
-            bail!("git cat-file: unexpected header {header:?} for {id}");
+        .args(["hash-object", "-t", "tree", "--stdin"])
+        .stdin(Stdio::null())
+        .output()
+        .context("running git hash-object")?;
+    ensure!(out.status.success(), "git hash-object failed");
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Consecutive lines a commit adds to a text file.
+#[derive(Clone)]
+struct Hunk {
+    /// The 1-based number of the first line in the file version the commit makes.
+    first: usize,
+    lines: Vec<Vec<u8>>,
+}
+
+/// What a commit adds to one file: the version it makes and, of a text file, its added
+/// lines.
+struct FileAdd {
+    path: String,
+    /// The blob id of the version.
+    id: String,
+    /// The path did not exist in the parent.
+    new_path: bool,
+    /// The added lines of a text file; `None`: binary, checked whole.
+    hunks: Option<Vec<Hunk>>,
+}
+
+fn is_zero_id(id: &str) -> bool {
+    id.bytes().all(|b| b == b'0')
+}
+
+/// The files that `commit` adds or changes against `parent` (a commit or tree): the new
+/// blobs and, for text, the lines of the `-U0` patch that start with `+`. Deleted files,
+/// mode-only changes and submodules add no content.
+fn commit_adds(root: &Path, parent: &str, commit: &str) -> anyhow::Result<Vec<FileAdd>> {
+    let diff = |extra: &[&str]| {
+        let mut args = vec![
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--full-index",
+            "--no-abbrev",
+        ];
+        args.extend_from_slice(extra);
+        args.extend([parent, commit, "--"]);
+        git_bytes(root, &args)
+    };
+    // `:<mode> <mode> <id> <id> <status>`, then the path.
+    let raw = diff(&["--raw", "-z"])?;
+    let mut tokens = raw.split(|&b| b == 0).filter(|t| !t.is_empty());
+    let mut files: Vec<(String, String, bool)> = Vec::new();
+    while let Some(meta) = tokens.next() {
+        let path = tokens
+            .next()
+            .ok_or_else(|| anyhow!("git diff --raw: a path is missing"))?;
+        let meta = String::from_utf8_lossy(meta);
+        let fields: Vec<&str> = meta.trim_start_matches(':').split_whitespace().collect();
+        let [_, mode, old, new, status] = fields[..] else {
+            bail!("git diff --raw: unexpected entry {meta:?}");
         };
-        let size: usize = size.parse().context("git cat-file: object size")?;
-        let mut body = vec![0; size + 1]; // the content, then a newline
-        stdout.read_exact(&mut body)?;
-        body.pop();
-        if kind == "blob" {
-            blobs.push((id, path, body));
+        if mode == "160000" || status.starts_with('D') || is_zero_id(new) || old == new {
+            continue;
+        }
+        files.push((
+            String::from_utf8_lossy(path).into_owned(),
+            new.to_owned(),
+            status.starts_with('A'),
+        ));
+    }
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sections = patch_sections(&diff(&["-U0"])?);
+    Ok(files
+        .into_iter()
+        .map(|(path, id, new_path)| {
+            let section = sections.get(&id);
+            // A listed exception is matched on the whole content.
+            let whole = TEST_CA_EXCEPTIONS.iter().any(|(file, _)| *file == path);
+            let hunks = match section {
+                Some((true, _)) => None,
+                _ if whole => None,
+                Some((false, hunks)) => Some(hunks.clone()),
+                None => Some(Vec::new()),
+            };
+            FileAdd {
+                path,
+                id,
+                new_path,
+                hunks,
+            }
+        })
+        .collect())
+}
+
+/// One file's part of a patch.
+#[derive(Default)]
+struct Section {
+    binary: bool,
+    /// The added lines with their numbers in the new version.
+    added: Vec<(usize, Vec<u8>)>,
+    /// The removed lines, counted: a line that is only moved is removed and added.
+    removed: HashMap<Vec<u8>, usize>,
+}
+
+impl Section {
+    /// The added lines that are not one of the removed (each removed line cancels one added
+    /// line of the same text), as runs of consecutive lines.
+    fn into_hunks(mut self) -> Vec<Hunk> {
+        let mut hunks: Vec<Hunk> = Vec::new();
+        for (number, line) in self.added {
+            if let Some(count) = self.removed.get_mut(&line)
+                && *count > 0
+            {
+                *count -= 1;
+                continue;
+            }
+            match hunks.last_mut() {
+                Some(hunk) if hunk.first + hunk.lines.len() == number => hunk.lines.push(line),
+                _ => hunks.push(Hunk {
+                    first: number,
+                    lines: vec![line],
+                }),
+            }
+        }
+        hunks
+    }
+}
+
+/// The sections of a `git diff -U0 --full-index` patch, by the blob id they make:
+/// `(binary, added lines)`.
+fn patch_sections(patch: &[u8]) -> HashMap<String, (bool, Vec<Hunk>)> {
+    let mut sections = HashMap::new();
+    let mut current: Option<(String, Section)> = None;
+    let mut in_hunk = false;
+    let mut next = 0usize;
+    let mut flush = |current: &mut Option<(String, Section)>| {
+        if let Some((id, section)) = current.take() {
+            let binary = section.binary;
+            sections
+                .entry(id)
+                .or_insert_with(|| (binary, section.into_hunks()));
+        }
+    };
+    for line in patch.split(|&b| b == b'\n') {
+        // Lines of a hunk start with `+`, `-`, a space or `\`: the others are headers.
+        if line.starts_with(b"diff --git ") {
+            flush(&mut current);
+            in_hunk = false;
+        } else if let Some(rest) = line.strip_prefix(b"index ") {
+            let ids = String::from_utf8_lossy(rest);
+            let new = ids.split(' ').next().and_then(|ids| ids.split_once(".."));
+            if let Some((_, new)) = new {
+                current = Some((new.to_owned(), Section::default()));
+            }
+        } else if line.starts_with(b"Binary files ") || line.starts_with(b"GIT binary patch") {
+            if let Some((_, section)) = current.as_mut() {
+                section.binary = true;
+            }
+        } else if let Some(rest) = line.strip_prefix(b"@@ ") {
+            // `-<start>[,<count>] +<start>[,<count>] @@`
+            let text = String::from_utf8_lossy(rest);
+            next = text
+                .split(' ')
+                .find_map(|part| part.strip_prefix('+'))
+                .and_then(|range| range.split(',').next())
+                .and_then(|start| start.parse().ok())
+                .unwrap_or(0);
+            in_hunk = true;
+        } else if in_hunk && let Some((_, section)) = current.as_mut() {
+            if let Some(added) = line.strip_prefix(b"+") {
+                section.added.push((next, added.to_vec()));
+                next += 1;
+            } else if let Some(removed) = line.strip_prefix(b"-") {
+                *section.removed.entry(removed.to_vec()).or_default() += 1;
+            }
         }
     }
-    writer
-        .join()
-        .map_err(|_| anyhow!("git cat-file: the writer panicked"))??;
-    ensure!(child.wait()?.success(), "git cat-file --batch failed");
-    Ok(blobs)
+    flush(&mut current);
+    sections
 }
 
 /// The compiled rules.
@@ -673,6 +836,41 @@ impl<'a> Scanner<'a> {
                 if denylist.matches(line) {
                     out.push(finding(place, Some(index + 1), Rule::Denylist));
                 }
+            }
+        }
+    }
+
+    /// The lines `hunks` add to the text file `path` (line numbers as in the file version).
+    /// They are read as one text, the hunks apart, so that a rule that spans lines (a base64
+    /// body) sees what the commit wrote and no more.
+    fn check_added(&self, place: &Place, path: &str, hunks: &[Hunk], out: &mut Vec<Finding>) {
+        let mut text = Vec::new();
+        // The line of the file for each line of `text`; none for a separator.
+        let mut numbers: Vec<Option<usize>> = Vec::new();
+        for (index, hunk) in hunks.iter().enumerate() {
+            if index > 0 {
+                text.extend_from_slice(b"-\n");
+                numbers.push(None);
+            }
+            for (offset, line) in hunk.lines.iter().enumerate() {
+                text.extend_from_slice(line);
+                text.push(b'\n');
+                numbers.push(Some(hunk.first + offset));
+            }
+        }
+        let mut found = Vec::new();
+        self.check_content(place, Some(path), &text, &mut found);
+        for f in found {
+            match f.line {
+                Some(line) => {
+                    if let Some(&Some(real)) = numbers.get(line - 1) {
+                        out.push(Finding {
+                            line: Some(real),
+                            ..f
+                        });
+                    }
+                }
+                None => out.push(f),
             }
         }
     }

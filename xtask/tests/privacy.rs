@@ -411,6 +411,123 @@ fn privacy_denylist_hits_files_and_commit_messages() {
     );
 }
 
+/// The findings in file versions of the history: `(path, line, rule)`.
+fn history_findings(findings: &[Finding]) -> Vec<(String, Option<usize>, Rule)> {
+    findings
+        .iter()
+        .filter_map(|f| match &f.place {
+            Place::Blob { path, .. } => Some((path.clone(), f.line, f.rule)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn privacy_range_checks_only_the_lines_a_commit_adds() {
+    let denylist = Denylist::parse("secrethost.example\n").unwrap();
+    let repo = Repo::new();
+    // Public already: the base holds the line.
+    repo.write("docs/lab.md", "one\nsecrethost.example\ntwo\n");
+    repo.write("data/lines.txt", "a\nsecrethost.example\nb\nc\n");
+    let base = repo.commit("init");
+    // Commits that only touch the files around that line, one moves it.
+    repo.write("docs/lab.md", "zero\none\nsecrethost.example\ntwo\nthree\n");
+    repo.write("data/lines.txt", "secrethost.example\na\nb\nc\n");
+    repo.commit("docs: touch the files");
+    // A line that is new, in an old file and in a new one.
+    repo.write(
+        "docs/lab.md",
+        "zero\none\nsecrethost.example\ntwo\nthree\nleak: SecretHost.Example\n",
+    );
+    repo.write("new.txt", "fresh\nsecrethost.example\n");
+    repo.commit("docs: more");
+    // Both go again; the last versions are the work tree's.
+    repo.write(
+        "docs/lab.md",
+        "zero\none\nsecrethost.example\ntwo\nthree\nsix\n",
+    );
+    repo.write("data/lines.txt", "secrethost.example\na\nb\nc\nd\n");
+    repo.remove("new.txt");
+    repo.commit("docs: tidy");
+
+    let range = format!("{base}..HEAD");
+    let findings = repo.check(&Options {
+        range: Some(&range),
+        denylist: Some(&denylist),
+    });
+    assert_eq!(
+        history_findings(&findings),
+        [
+            file("docs/lab.md", Some(6), Rule::Denylist),
+            file("new.txt", Some(2), Rule::Denylist),
+        ]
+    );
+    // The tree check is as before: every line of every file.
+    let tree = repo.check(&Options {
+        range: None,
+        denylist: Some(&denylist),
+    });
+    assert_eq!(
+        summary(&tree),
+        [
+            file("data/lines.txt", Some(1), Rule::Denylist),
+            file("docs/lab.md", Some(3), Rule::Denylist),
+        ]
+    );
+}
+
+#[test]
+fn privacy_range_checks_binary_files_whole_when_new_or_changed() {
+    let der = issued_by_test_ca();
+    let repo = Repo::new();
+    repo.write("keys/leaf.der", &der);
+    repo.write("notes.md", "one\n");
+    let base = repo.commit("init");
+    // Unchanged, so not checked again; only the neighbour changes.
+    repo.write("notes.md", "one\ntwo\n");
+    repo.commit("docs: notes");
+    let range = format!("{base}..HEAD");
+    let findings = repo.check(&Options {
+        range: Some(&range),
+        denylist: None,
+    });
+    assert_eq!(
+        history_findings(&findings),
+        [],
+        "an unchanged binary file is not checked again"
+    );
+    // Changed: checked whole. A PEM body that is new is read across its lines.
+    let mut changed = der.clone();
+    changed.push(0);
+    repo.write("keys/leaf.der", &changed);
+    repo.write("keys/leaf.pem", format!("# a leaf\n{}", pem(&der)));
+    repo.commit("feat: keys");
+    repo.remove("keys/leaf.der");
+    repo.remove("keys/leaf.pem");
+    repo.commit("revert: keys");
+    let findings = repo.check(&Options {
+        range: Some(&range),
+        denylist: None,
+    });
+    let mut found = history_findings(&findings);
+    found.dedup();
+    assert_eq!(
+        found[0],
+        file("keys/leaf.der", None, Rule::TestNcaCertificate)
+    );
+    let pem_lines: Vec<_> = found[1..].iter().map(|f| (&f.0[..], f.2)).collect();
+    assert!(
+        pem_lines
+            .iter()
+            .all(|f| *f == ("keys/leaf.pem", Rule::TestNcaCertificate)),
+        "{found:?}"
+    );
+    assert!(
+        found[1..].iter().all(|f| f.1.is_some_and(|line| line >= 3)),
+        "{found:?}"
+    );
+}
+
 #[test]
 fn privacy_denylist_output_hides_the_pattern() {
     // In the findings: the place and the line only.
