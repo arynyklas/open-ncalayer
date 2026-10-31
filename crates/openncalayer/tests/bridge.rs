@@ -437,19 +437,19 @@ async fn request_without_module_reaches_the_applet() {
     c.open(1, "https://page.test").await;
     assert_eq!(
         c.call(1, r#"{"method":"getTryCount","uuid":"t"}"#).await,
-        r#"{"errorCode":"NONE","result":-1,"uuid":"t"}"#
+        r#"{"result":-1,"errorCode":"NONE","uuid":"t"}"#
     );
     assert_eq!(
         c.call(1, r#"{"method":"setPassword","args":["PIN"]}"#)
             .await,
-        r#"{"errorCode":"NONE","result":false}"#
+        r#"{"result":false,"errorCode":"NONE"}"#
     );
     assert_eq!(prompter.password_prompts()[0].origin, "https://page.test");
     let wss = start_wss(registry).await;
     let mut ws = wss_connect(wss.addr, &wss.ca_der).await;
     assert_eq!(
         wss_call(&mut ws, r#"{"method":"getTryCount"}"#).await,
-        r#"{"errorCode":"NONE","result":-1}"#
+        r#"{"result":-1,"errorCode":"NONE"}"#
     );
 }
 

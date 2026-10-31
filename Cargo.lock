@@ -3908,7 +3908,6 @@ version = "0.1.0-alpha.5"
 dependencies = [
  "base64",
  "oncl-pdk",
- "serde",
  "serde_json",
 ]
 

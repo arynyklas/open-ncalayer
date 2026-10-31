@@ -16,6 +16,4 @@ crate-type = ["cdylib", "rlib"]
 # The certificates of the page's PEM and the key requests' PEM.
 base64.workspace = true
 oncl-pdk.workspace = true
-# The replies, as the original's `ResultWrapper` serializes.
-serde.workspace = true
 serde_json.workspace = true
