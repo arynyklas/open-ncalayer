@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use oncl_protocol::orgjson::MAX_DEPTH;
 use oncl_protocol::{
     AddInfo, COMPAT_VERSION, DEFAULT_MODULE, DynamicModules, HEARTBEAT, Module, Registry, Reply,
     Route, SessionId, greeting, module_not_found,
@@ -198,19 +199,25 @@ fn lenient_org_json_routes() {
     assert_eq!(routed(&r, r#"{"module":"kz.test.m",} x"#), "m");
 }
 
-/// Deep nesting is no crash: within the limit it routes, beyond it the frame is dropped.
+/// Deep nesting is no crash: up to [`MAX_DEPTH`] levels, the outer object included, it
+/// routes, as deep as `serde_json` reads; one level more, and far more, the frame is
+/// dropped.
 #[test]
 fn deep_nesting_is_dropped_not_overflowed() {
     let mut r = Registry::default();
     assert!(r.register("kz.test.m", module("m")));
+    // `depth` levels in all.
     let nested = |depth: usize| {
         format!(
             r#"{{"module":"kz.test.m","args":{}{}}}"#,
-            "[".repeat(depth),
-            "]".repeat(depth)
+            "[".repeat(depth - 1),
+            "]".repeat(depth - 1)
         )
     };
-    assert_eq!(routed(&r, &nested(500)), "m");
+    assert_eq!(routed(&r, &nested(MAX_DEPTH)), "m");
+    assert!(serde_json::from_str::<serde_json::Value>(&nested(MAX_DEPTH)).is_ok());
+    assert_eq!(routed(&r, &nested(MAX_DEPTH + 1)), "invalid-json");
+    assert!(serde_json::from_str::<serde_json::Value>(&nested(MAX_DEPTH + 1)).is_err());
     assert_eq!(routed(&r, &nested(100_000)), "invalid-json");
     assert_eq!(
         routed(

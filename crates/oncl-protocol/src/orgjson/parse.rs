@@ -4,10 +4,12 @@
 
 use super::value::{JObject, JValue};
 
-/// The deepest nesting of objects and arrays read. org.json has no limit of its own (a
-/// deeper text ends its thread in a `StackOverflowError`); this one keeps the reader's
-/// recursion within a thread's stack. A deeper text is an error.
-const MAX_DEPTH: usize = 512;
+/// The deepest nesting of objects and arrays read, the outer object included. org.json has
+/// no limit of its own (a deeper text ends its thread in a `StackOverflowError`); this one
+/// is the depth `serde_json` reads (its recursion limit of 128 leaves 127 levels), so every
+/// reader after the envelope reads what it routes: the built-in modules, the core's data
+/// rewrite and plugins that read the request with `serde_json`. A deeper text is an error.
+pub const MAX_DEPTH: usize = 127;
 
 /// `new JSONObject(text)`: the object, or org.json's `JSONException` message, such as
 /// `A JSONObject text must begin with '{' at 1 [character 2 line 1]` or

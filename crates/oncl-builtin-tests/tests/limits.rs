@@ -6,6 +6,8 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_builtin_tests::SOURCES;
+use oncl_builtin_tests::accessory::MODULE_NAME as ACCESSORY;
+use oncl_builtin_tests::applet::MODULE_NAME as APPLET;
 use oncl_builtin_tests::basics::MODULE_NAME;
 use oncl_builtin_tests::commonutils::MODULE_NAME as CU_MODULE;
 use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
@@ -14,6 +16,7 @@ use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::load;
 use oncl_pki::tsp::MockTsa;
 use oncl_plugin::{BUILTIN_FUEL, BuiltinLimits, Builtins, Engine as WasmEngine, HostServices};
+use oncl_protocol::orgjson::MAX_DEPTH;
 use oncl_protocol::{AddInfo, Reply};
 use oncl_testkit::{read, synthetic};
 use serde_json::json;
@@ -456,4 +459,73 @@ fn calls_without_windows_do_not_wait_for_another_pages_window() {
         window.join().unwrap().into_text().unwrap(),
         r#"{"body":{},"status":true}"#
     );
+}
+
+/// A request of each built-in module that opens no window, with `extra` (a text of
+/// `"key":value` pairs, or nothing) among its top-level keys.
+fn windowless_requests(extra: &str) -> Vec<(&'static str, String)> {
+    let sep = if extra.is_empty() { "" } else { "," };
+    vec![
+        (
+            MODULE_NAME,
+            format!(r#"{{"module":"{MODULE_NAME}","method":"sign","args":{{}}{sep}{extra}}}"#),
+        ),
+        (
+            CU_MODULE,
+            format!(
+                r#"{{"module":"{CU_MODULE}","method":"getActiveTokens","args":[]{sep}{extra}}}"#
+            ),
+        ),
+        (
+            APPLET,
+            format!(r#"{{"module":"{APPLET}","method":"getTryCount","args":[]{sep}{extra}}}"#),
+        ),
+        (
+            ACCESSORY,
+            format!(r#"{{"module":"{ACCESSORY}","method":"getServices"{sep}{extra}}}"#),
+        ),
+    ]
+}
+
+/// The four built-in modules within the 32-bit limits, opening no window.
+fn all_modules() -> Builtins {
+    Builtins::load(
+        &WasmEngine::new(),
+        basics_services(0),
+        SOURCES,
+        limits_32_bit(),
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn nesting_up_to_the_envelope_limit_answers() {
+    // The deepest request the envelope routes (`MAX_DEPTH` levels, the outer object
+    // included) is answered as without its deep value; one level more is no crash either.
+    let builtins = all_modules();
+    // A value of `levels - 1` levels, under the request's object.
+    let deep = |levels: usize| {
+        let (pairs, odd) = ((levels - 1) / 2, (levels - 1) % 2 == 1);
+        format!(
+            r#""deep":{}{}{}"#,
+            "[{\"a\":".repeat(pairs),
+            if odd { "[]" } else { "0" },
+            "}]".repeat(pairs)
+        )
+    };
+    let plain = windowless_requests("");
+    for ((module, request), (_, at_limit)) in
+        plain.iter().zip(windowless_requests(&deep(MAX_DEPTH)))
+    {
+        let module = builtins.module(module).unwrap();
+        assert_eq!(
+            module.process(&at_limit, &origin()),
+            module.process(request, &origin())
+        );
+    }
+    for (module, over) in windowless_requests(&deep(MAX_DEPTH + 1)) {
+        let reply = builtins.module(module).unwrap().process(&over, &origin());
+        assert!(reply.text().is_some(), "{module}: {reply:?}");
+    }
 }
