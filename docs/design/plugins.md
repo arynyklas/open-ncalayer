@@ -474,7 +474,7 @@ cargo build --release --target wasm32-unknown-unknown --manifest-path crates/onc
 | `[original]` `symname`, `version` | те же, что `[replaces]` в `plugin.toml`; `symname` — `^[A-Za-z0-9._-]{1,128}$` и не повторяется у двух портов |
 | `[original]` `vendor` | 1–256 символов без управляющих |
 | `[port]` `status` | `full`, `partial` или `needs-tokens` (всё, но часть проверяется только на токенах) |
-| `[port]` `conformance` | `computed` (по коду оригинала) или `confirmed` (на работающем оригинале, P10) |
+| `[port]` `conformance` | `computed` (по коду оригинала) или `confirmed` (на работающем оригинале, P10); в канал `stable` `cargo xtask index add-plugin` пускает только `confirmed` |
 | `[[differences]]` `ru` | до 64 отличий, каждое — 1–2048 символов без управляющих, кроме перевода строки; показываются как текст, на казахской и английской страницах — с пометкой «на русском» |
 
 Лишние ключи — ошибка. Каждый порт получает на сайте проекта страницу `/plugins/<short>/` (и `/kk/…`, `/en/…`) и строку каталога `/plugins/#<symname>`; новый порт с `registry.toml` попадает на сайт при следующей сборке.

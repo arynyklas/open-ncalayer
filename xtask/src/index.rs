@@ -28,6 +28,7 @@ use sha2::Digest;
 use time::OffsetDateTime;
 use ureq::Agent;
 
+use crate::registry::ports::Conformance;
 use crate::sign::signature_path;
 
 /// Where the indexes live, from the workspace root; published under `/updates/v1/`.
@@ -374,15 +375,18 @@ pub fn refresh(dir: &Path, channel: Channel, now: OffsetDateTime) -> anyhow::Res
 
 /// Appends validated plugin packages to a channel's index, leaving the result unsigned.
 ///
-/// Package hashes and metadata come from their bytes, never from their file names.
+/// Package hashes and metadata come from their bytes, never from their file names. A
+/// package goes to `stable` only if its port in `plugins` has `conformance = "confirmed"`
+/// ([`crate::plugin::registry_conformance`]); `beta` does not read `plugins`.
 ///
 /// # Errors
 ///
-/// An invalid tag or package, an existing version, a prerelease in stable, conflicting
-/// module owners or bundles replaced by two plugins (checked before anything is written),
-/// an invalid existing index, or an I/O failure.
+/// An invalid tag or package, an existing version, a prerelease or a port without confirmed
+/// conformance in stable, conflicting module owners or bundles replaced by two plugins
+/// (checked before anything is written), an invalid existing index, or an I/O failure.
 pub fn add_plugins(
     dir: &Path,
+    plugins: &Path,
     channel: Channel,
     tag: &str,
     packages: &[PathBuf],
@@ -413,12 +417,22 @@ pub fn add_plugins(
     for path in packages {
         let (bytes, package) = crate::plugin::read_package(path)?;
         let manifest = package.manifest;
-        if channel == Channel::Stable && !manifest.version.pre.is_empty() {
-            bail!(
-                "plugin {} {} is a prerelease; add it to beta",
-                manifest.id,
-                manifest.version
-            );
+        if channel == Channel::Stable {
+            if !manifest.version.pre.is_empty() {
+                bail!(
+                    "plugin {} {} is a prerelease; add it to beta",
+                    manifest.id,
+                    manifest.version
+                );
+            }
+            let conformance = crate::plugin::registry_conformance(plugins, &manifest.id)?;
+            if conformance != Conformance::Confirmed.as_str() {
+                bail!(
+                    "{}: conformance with the original is not confirmed (conformance = \
+                     {conformance}); add it to beta",
+                    manifest.id
+                );
+            }
         }
         if index
             .plugins

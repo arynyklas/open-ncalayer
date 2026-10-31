@@ -8,7 +8,8 @@ name: Plugins
 # and a build provenance attestation of every file. Then a pull request adds the
 # packages to the beta index, unsigned: the maintainer signs it locally
 # (`cargo xtask sign`), never CI. Stable gets a plugin version only by hand
-# (`cargo xtask index add-plugin --channel stable`), once it has proved itself in beta.
+# (`cargo xtask index add-plugin --channel stable`), once it has proved itself in beta and
+# its port's registry.toml says `conformance = "confirmed"`.
 #
 # Third-party actions are pinned to a commit, with the release tag in a comment.
 on:
@@ -156,7 +157,7 @@ jobs:
             echo "4. commit the index and its \`.minisig\` file and push: the index check runs on that push;"
             echo "5. merge: GitHub Pages publishes \`updates/\`."
             echo
-            echo "Stable gets a plugin version by hand, once it has proved itself in beta: \`cargo xtask index add-plugin --channel stable\`."
+            echo "Stable gets a plugin version by hand, once it has proved itself in beta and its port's \`registry.toml\` says \`conformance = \"confirmed\"\`: \`cargo xtask index add-plugin --channel stable\`."
           } > "$RUNNER_TEMP/index-pr.md"
       - name: Open the index pull request
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1

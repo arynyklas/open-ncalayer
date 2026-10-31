@@ -12,6 +12,8 @@ const TAG: &str = "plugins-20261029";
 const EXAMPLE_ID: &str = "io.github.arynyklas.openncalayer.example";
 const EXAMPLE_URL: &str = "https://github.com/arynyklas/open-ncalayer/releases/download/\
                            plugins-20261029/io.github.arynyklas.openncalayer.example-0.1.0.onclp";
+/// A ports' directory that does not exist: `beta` never reads it.
+const NO_PORTS: &str = "no-such-plugins-dir";
 
 fn now() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap()
@@ -150,6 +152,7 @@ fn add_plugin_takes_everything_from_the_package() {
     let path = example(packages.path());
     let written = index::add_plugins(
         dir.path(),
+        Path::new(NO_PORTS),
         Channel::Beta,
         TAG,
         std::slice::from_ref(&path),
@@ -185,6 +188,7 @@ fn add_plugin_takes_everything_from_the_package() {
     let before = fs::read(&written.path).unwrap();
     let again = index::add_plugins(
         dir.path(),
+        Path::new(NO_PORTS),
         Channel::Beta,
         "plugins-20261030",
         &[path],
@@ -208,6 +212,7 @@ fn add_plugin_refuses_bad_input() {
     ] {
         let result = index::add_plugins(
             dir.path(),
+            Path::new(NO_PORTS),
             Channel::Beta,
             tag,
             std::slice::from_ref(&path),
@@ -225,6 +230,7 @@ fn add_plugin_refuses_bad_input() {
     );
     let result = index::add_plugins(
         dir.path(),
+        Path::new(NO_PORTS),
         Channel::Stable,
         TAG,
         std::slice::from_ref(&beta),
@@ -232,7 +238,16 @@ fn add_plugin_refuses_bad_input() {
         now(),
     );
     assert!(error_text(result).contains("prerelease"));
-    index::add_plugins(dir.path(), Channel::Beta, TAG, &[beta], 100, now()).unwrap();
+    index::add_plugins(
+        dir.path(),
+        Path::new(NO_PORTS),
+        Channel::Beta,
+        TAG,
+        &[beta],
+        100,
+        now(),
+    )
+    .unwrap();
 
     // Another plugin serving the same module.
     let other = package(
@@ -240,12 +255,28 @@ fn add_plugin_refuses_bad_input() {
         "other.onclp",
         &manifest.replace(EXAMPLE_ID, "kz.example.other"),
     );
-    let result = index::add_plugins(dir.path(), Channel::Beta, TAG, &[other], 100, now());
+    let result = index::add_plugins(
+        dir.path(),
+        Path::new(NO_PORTS),
+        Channel::Beta,
+        TAG,
+        &[other],
+        100,
+        now(),
+    );
     assert!(error_text(result).contains("owned by both"));
 
     let broken = packages.path().join("broken.onclp");
     fs::write(&broken, b"not a zip").unwrap();
-    let result = index::add_plugins(dir.path(), Channel::Beta, TAG, &[broken], 100, now());
+    let result = index::add_plugins(
+        dir.path(),
+        Path::new(NO_PORTS),
+        Channel::Beta,
+        TAG,
+        &[broken],
+        100,
+        now(),
+    );
     assert!(result.is_err());
 }
 
@@ -255,6 +286,7 @@ fn plugin_urls_off_the_project_releases_are_refused() {
     let packages = tempfile::tempdir().unwrap();
     let written = index::add_plugins(
         dir.path(),
+        Path::new(NO_PORTS),
         Channel::Beta,
         TAG,
         &[example(packages.path())],
@@ -284,6 +316,7 @@ fn a_replaced_bundle_belongs_to_one_plugin() {
     let packages = tempfile::tempdir().unwrap();
     let written = index::add_plugins(
         dir.path(),
+        Path::new(NO_PORTS),
         Channel::Beta,
         TAG,
         &[example(packages.path())],
@@ -302,6 +335,7 @@ fn a_replaced_bundle_belongs_to_one_plugin() {
     let other = package(packages.path(), "other.onclp", &other);
     let result = index::add_plugins(
         dir.path(),
+        Path::new(NO_PORTS),
         Channel::Beta,
         TAG,
         std::slice::from_ref(&other),
@@ -359,6 +393,7 @@ fn index_with_example() -> tempfile::TempDir {
     let packages = tempfile::tempdir().unwrap();
     index::add_plugins(
         dir.path(),
+        Path::new(NO_PORTS),
         Channel::Beta,
         TAG,
         &[example(packages.path())],
@@ -443,4 +478,134 @@ fn pending_empty_when_all_published() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "plugins/b\n");
+}
+
+const PORT_ID: &str = "io.github.arynyklas.openncalayer.port.echo";
+
+/// A `plugins/` directory with the port `echo` (the example under [`PORT_ID`]) whose
+/// `registry.toml` says `conformance`, and that port's package in `packages`.
+fn port_with_package(conformance: &str, packages: &Path) -> (tempfile::TempDir, PathBuf) {
+    let plugins = tempfile::tempdir().unwrap();
+    let port = plugins.path().join("echo");
+    fs::create_dir(&port).unwrap();
+    let manifest = oncl_testkit::plugin::example_manifest().replace(EXAMPLE_ID, PORT_ID);
+    fs::write(port.join("plugin.toml"), &manifest).unwrap();
+    fs::write(
+        port.join("registry.toml"),
+        format!(
+            "id = \"{PORT_ID}\"\n\
+             modules = [\"io.github.arynyklas.openncalayer.Example\"]\n\
+             \n\
+             [original]\n\
+             symname = \"kz.example.echo\"\n\
+             version = \"1.0.0\"\n\
+             vendor = \"Example\"\n\
+             \n\
+             [port]\n\
+             status = \"full\"\n\
+             conformance = \"{conformance}\"\n"
+        ),
+    )
+    .unwrap();
+    let package = package(packages, "echo.onclp", &manifest);
+    (plugins, package)
+}
+
+#[test]
+fn add_plugin_stable_refuses_computed() {
+    let dir = tempfile::tempdir().unwrap();
+    let packages = tempfile::tempdir().unwrap();
+    let (plugins, package) = port_with_package("computed", packages.path());
+    let result = index::add_plugins(
+        dir.path(),
+        plugins.path(),
+        Channel::Stable,
+        TAG,
+        std::slice::from_ref(&package),
+        100,
+        now(),
+    );
+    let error = error_text(result);
+    assert!(
+        error.contains(&format!(
+            "{PORT_ID}: conformance with the original is not confirmed (conformance = computed)"
+        )),
+        "{error}"
+    );
+    assert!(!index::index_path(dir.path(), Channel::Stable).exists());
+
+    // The command reads the ports from `--plugins`.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["index", "add-plugin", "--channel", "stable", "--tag", TAG])
+        .arg("--package")
+        .arg(&package)
+        .arg("--dir")
+        .arg(dir.path())
+        .arg("--plugins")
+        .arg(plugins.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("(conformance = computed)"), "{stderr}");
+    assert!(!index::index_path(dir.path(), Channel::Stable).exists());
+}
+
+#[test]
+fn add_plugin_stable_accepts_confirmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let packages = tempfile::tempdir().unwrap();
+    let (plugins, package) = port_with_package("confirmed", packages.path());
+    let written = index::add_plugins(
+        dir.path(),
+        plugins.path(),
+        Channel::Stable,
+        TAG,
+        &[package],
+        100,
+        now(),
+    )
+    .unwrap();
+    let index = read(&written.path);
+    let [release] = index.plugins.as_slice() else {
+        panic!("{:?}", index.plugins);
+    };
+    assert_eq!(release.id, PORT_ID);
+    assert_eq!(release.version.to_string(), "0.1.0");
+}
+
+#[test]
+fn add_plugin_beta_ignores_conformance() {
+    let packages = tempfile::tempdir().unwrap();
+    let (plugins, package) = port_with_package("computed", packages.path());
+    for ports in [plugins.path(), Path::new(NO_PORTS)] {
+        let dir = tempfile::tempdir().unwrap();
+        let written = index::add_plugins(
+            dir.path(),
+            ports,
+            Channel::Beta,
+            TAG,
+            std::slice::from_ref(&package),
+            100,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(read(&written.path).plugins[0].id, PORT_ID);
+    }
+}
+
+#[test]
+fn registry_conformance_unknown_id_is_error() {
+    let packages = tempfile::tempdir().unwrap();
+    let (plugins, _) = port_with_package("computed", packages.path());
+    assert_eq!(
+        xtask::plugin::registry_conformance(plugins.path(), PORT_ID).unwrap(),
+        "computed"
+    );
+    let error = error_text(xtask::plugin::registry_conformance(
+        plugins.path(),
+        EXAMPLE_ID,
+    ));
+    assert!(error.contains(EXAMPLE_ID), "{error}");
+    assert!(error.contains("no port"), "{error}");
 }

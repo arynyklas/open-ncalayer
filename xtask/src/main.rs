@@ -227,8 +227,9 @@ enum IndexCommand {
         dir: Option<PathBuf>,
     },
     /// Append plugin packages of a `plugins-YYYYMMDD[.N]` release to the channel's index:
-    /// id, version, modules and hashes come from the packages. A prerelease plugin is not
-    /// added to `stable`. The result is unsigned.
+    /// id, version, modules and hashes come from the packages. A prerelease plugin, or one
+    /// whose port's `registry.toml` does not say `conformance = "confirmed"`, is not added
+    /// to `stable`. The result is unsigned.
     AddPlugin {
         /// `stable` or `beta`.
         #[arg(long, value_parser = parse_channel)]
@@ -245,6 +246,10 @@ enum IndexCommand {
         /// The directory of the indexes [default: `updates/v1/` of the workspace].
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// The ports' directory, read for `stable` only [default: `plugins/` of the
+        /// workspace].
+        #[arg(long)]
+        plugins: Option<PathBuf>,
     },
     /// Check the indexes in a directory before publishing: format, signature by
     /// `current.pub` only (a `next.pub` is for clients, not for signing), validity, asset URLs
@@ -746,10 +751,13 @@ fn main() -> anyhow::Result<()> {
                     packages,
                     rollout,
                     dir,
+                    plugins,
                 },
         } => {
+            let plugins = plugins.unwrap_or_else(|| oncl_testkit::workspace_root().join("plugins"));
             let written = xtask::index::add_plugins(
                 &index_dir(dir),
+                &plugins,
                 channel,
                 &tag,
                 &packages,
