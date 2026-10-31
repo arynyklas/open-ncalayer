@@ -31,7 +31,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "d617ab3cd0317c493bba15211d5e144b61d1a35bdda7a39ed5c1ac1075cb30d9",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:digital.taxtech.documents.multisign": {
@@ -53,7 +53,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "d109e40aad22fdbddbcfc54c5af41ee4afed36258ef3dee96994115c02146c54",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:kz.Simourg.SimBASE": {
@@ -86,7 +86,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "cdbf736f1806811dd6f28d634cda127b9a0b016d86911d492346d79ada5d8744",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:kz.arta.synergy.signmodule": {
@@ -141,7 +141,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "0f6ae676d8f5776b3cfe642edd4a059d33f2f1ebb81901a91a47ac607ef26329",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:kz.dogovor24.module": {
@@ -174,7 +174,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "209375db9debe49586a56da4920305f9ab25b63e0d9a7c518661e158b2bf191d",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:kz.ecc.MarketSignBundle": {
@@ -185,7 +185,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "384e482b39150e3bd8e14d8007bd8bc0b0e535a7f7cc5def5a8aace46fde33dc",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:kz.ecc.NurSignBundle": {
@@ -193,11 +193,11 @@
       "size": null,
       "etag": null,
       "last_modified": null,
-      "sha256": null,
+      "sha256": "dd6fcc0345281ad239f561c9fe25e3d0ee7cf8e05b1a8ad0f4a3933c02d69b51",
       "published_sha1": null,
       "manifest_hash": "dd6fcc0345281ad239f561c9fe25e3d0ee7cf8e05b1a8ad0f4a3933c02d69b51",
-      "failures": 1,
-      "status": "failing"
+      "failures": 0,
+      "status": "ok"
     },
     "bundle:kz.efactoring.EfactoringSignBundle": {
       "url": "https://efactoring.kz:90/api/v1/public/download/",
@@ -207,7 +207,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "5709ba475fbdfb75b1e03b2e4a264fad7a56c6a66ae9eeb1203c50f5b88f5665",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:kz.energy.sign": {
@@ -350,7 +350,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "d84377410d113f714694b4cc5a53929a0681deb374040fa817e5c13be0a575dd",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:kz.metadoc.NCAModule": {
@@ -372,7 +372,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "c7f1af62640528431e7074196ef8b37543bf2d48fa7b9888348712290555142e",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:kz.qiwi.osgi.SecurityUtils": {
@@ -416,7 +416,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "2acdb99335f574806c5839fea7b18bf34e2015cc4f972a3b677c8b3451969cfd",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:kz.smartdoc.osgi.CmsSigner": {
@@ -427,7 +427,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "410fed71f50bd0951b3fe7d170a550a9984323e396def75db6afe11d3ce19c01",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:kz.uchet.esfSignUtil": {
@@ -460,7 +460,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "f575913a30c4c363ba9941e95c15b84a1ec5cdb44f573541cb159428391ef5c9",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:kz.workspace.Signer": {
@@ -482,7 +482,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "61c3fc183c5146366e51866f8d9de05b9db3a5dbd70bb1c0305e45bd774944c0",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "bundle:org.skf.osgi.SKFModule": {
@@ -526,7 +526,7 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "b84e093fa5ab601ec684ecb1a15875063891ef9edfb822912162584f62635d01",
-      "failures": 1,
+      "failures": 2,
       "status": "failing"
     },
     "dist:setupexe": {
@@ -586,58 +586,58 @@
     },
     "page:korporativnoy-seti": {
       "url": "https://ncl.pki.gov.kz/download.php",
-      "size": null,
+      "size": 113741824,
       "etag": null,
       "last_modified": null,
-      "sha256": null,
-      "published_sha1": null,
+      "sha256": "693a0059fe6c396adb9ffacacbde0c9c495f1b81cf8722fe4724bbcf5de0a947",
+      "published_sha1": "93d31ea5c4a751e1edbeb75109b8268a177111c7",
       "manifest_hash": null,
-      "failures": 1,
-      "status": "failing"
+      "failures": 0,
+      "status": "ok"
     },
     "page:linux": {
       "url": "https://ncl.pki.gov.kz/download.php",
-      "size": null,
+      "size": 125574095,
       "etag": null,
       "last_modified": null,
-      "sha256": null,
-      "published_sha1": null,
+      "sha256": "31f47c126fe56107d76f11c446110dfa09fc397f032a54ef8ee4d7bcaf6461cb",
+      "published_sha1": "ee0219f72b26b23e25d9f26afc246ca14e16c394",
       "manifest_hash": null,
-      "failures": 1,
-      "status": "failing"
+      "failures": 0,
+      "status": "ok"
     },
     "page:macosx": {
       "url": "https://ncl.pki.gov.kz/download.php",
-      "size": null,
+      "size": 96098391,
       "etag": null,
       "last_modified": null,
-      "sha256": null,
-      "published_sha1": null,
+      "sha256": "5479f2fd91561f0d2be6c205dcd4b4c5f9cd51884f740b7f7bc05e9da49787cc",
+      "published_sha1": "c95f3b7efef12129d9c658103b0530f809f72d91",
       "manifest_hash": null,
-      "failures": 1,
-      "status": "failing"
+      "failures": 0,
+      "status": "ok"
     },
     "page:windows-32-bit": {
       "url": "https://ncl.pki.gov.kz/download.php",
-      "size": null,
+      "size": 68956816,
       "etag": null,
       "last_modified": null,
-      "sha256": null,
-      "published_sha1": null,
+      "sha256": "39856f111507b048a9d10e917dea8249392a21f477ac8a811871f94e58f5bba6",
+      "published_sha1": "1c881619e9fb5621188d110808d27d9fe45e6655",
       "manifest_hash": null,
-      "failures": 1,
-      "status": "failing"
+      "failures": 0,
+      "status": "ok"
     },
     "page:windows-64-bit": {
       "url": "https://ncl.pki.gov.kz/download.php",
-      "size": null,
+      "size": 71549648,
       "etag": null,
       "last_modified": null,
-      "sha256": null,
-      "published_sha1": null,
+      "sha256": "b83b624c20c3e473d8412ca233ae8444fd2d48bfc0bdc3ada94eb3f706aabac9",
+      "published_sha1": "fdd90db42251c35f321aef62061085ca55419634",
       "manifest_hash": null,
-      "failures": 1,
-      "status": "failing"
+      "failures": 0,
+      "status": "ok"
     }
   }
 }

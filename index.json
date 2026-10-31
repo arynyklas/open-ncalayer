@@ -18,6 +18,36 @@
         "notes": []
       },
       "issues": []
+    },
+    {
+      "id": "2026-10-31-1.4-987c7dee",
+      "date": "2026-10-31",
+      "observed": "2026-10-31T12:43:44.7293889Z",
+      "version": "1.4",
+      "key8": "987c7dee",
+      "path": "history/2026-10-31-1.4-987c7dee/",
+      "kind": "change",
+      "summary": {
+        "core": [],
+        "plugins": [],
+        "distributions": [
+          "page:korporativnoy-seti: sha256 — → 693a0059fe6c396a",
+          "page:linux: sha256 — → 31f47c126fe56107",
+          "page:macosx: sha256 — → 5479f2fd91561f0d",
+          "page:windows-32-bit: sha256 — → 39856f111507b048",
+          "page:windows-64-bit: sha256 — → b83b624c20c3e473"
+        ],
+        "notes": [
+          "kz.ecc.NurSignBundle: загрузка pending → ok"
+        ]
+      },
+      "issues": [
+        {
+          "key": "core:1.4:987c7dee",
+          "number": 2,
+          "label": "upstream"
+        }
+      ]
     }
   ]
 }

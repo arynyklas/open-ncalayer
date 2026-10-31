@@ -1,0 +1,27 @@
+[
+  {
+    "change": "modified",
+    "id": "page:korporativnoy-seti",
+    "reason": "published_sha1"
+  },
+  {
+    "change": "modified",
+    "id": "page:linux",
+    "reason": "published_sha1"
+  },
+  {
+    "change": "modified",
+    "id": "page:macosx",
+    "reason": "published_sha1"
+  },
+  {
+    "change": "modified",
+    "id": "page:windows-32-bit",
+    "reason": "published_sha1"
+  },
+  {
+    "change": "modified",
+    "id": "page:windows-64-bit",
+    "reason": "published_sha1"
+  }
+]
