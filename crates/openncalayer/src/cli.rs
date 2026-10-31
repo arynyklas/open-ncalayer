@@ -16,13 +16,14 @@ use oncl_basics::Locale;
 use oncl_desktop::original::EntryState;
 use oncl_ipc::IpcListener;
 use oncl_pki::pkix::CaSet;
+use oncl_plugin::BuiltinSource;
 use oncl_tls::{
     AUTO_RENEW_BEFORE, RENEW_BEFORE, TargetOs, TlsFiles, TlsInfo, TlsSource, TlsWarning,
     instructions, load_info, server_config, sha1_grouped,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use zeroize::Zeroizing;
 
 use crate::cms_verify::{Online, Options, cms_verify_report_with, parse_certificates};
@@ -254,8 +255,11 @@ pub trait AtStart {
 }
 
 /// Prepares `run`: data paths and logging, the panic hook, the IPC endpoint, `at_start`,
-/// then TLS and the port. On failure the message is already printed and the exit code
-/// returned: [`EXIT_ALREADY_RUNNING`], [`EXIT_TLS_NOT_CONFIGURED`], [`EXIT_PORT_BUSY`] or 1.
+/// the check of the built-in modules `sources`, then TLS and the port. On failure the
+/// message is already printed and the exit code returned: [`EXIT_ALREADY_RUNNING`],
+/// [`EXIT_TLS_NOT_CONFIGURED`], [`EXIT_PORT_BUSY`] or 1. A built-in module that does not
+/// load ends the start with 1 after `at_start`, so the updater has counted the run and
+/// rolls a version with broken modules back, and the failure is in the log.
 /// With `allow_no_wss` any failure to start the wss server (TLS not set up or unusable, the
 /// port busy or not bindable) only turns it off, with a warning in the log. With
 /// `tray_session` (a tray is to show the problem) so do TLS not set up and a busy port: the
@@ -264,6 +268,7 @@ pub trait AtStart {
 pub async fn prepare_run(
     allow_no_wss: bool,
     tray_session: bool,
+    sources: &[BuiltinSource<'_>],
     at_start: &mut dyn AtStart,
 ) -> Result<Daemon, ExitCode> {
     let paths = data_paths()?;
@@ -273,7 +278,15 @@ pub async fn prepare_run(
     // As early as the log takes entries: panics of the start (the updater's hook included)
     // and of the windowing libraries go to the log, not as raw text to stderr only.
     std::panic::set_hook(Box::new(|info| tracing::error!(%info, "panic")));
-    prepare_in(paths, listen_port(), allow_no_wss, tray_session, at_start).await
+    prepare_in(
+        paths,
+        listen_port(),
+        allow_no_wss,
+        tray_session,
+        sources,
+        at_start,
+    )
+    .await
 }
 
 /// [`prepare_run`] in `paths`, wss on `port`.
@@ -282,10 +295,16 @@ async fn prepare_in(
     port: u16,
     allow_no_wss: bool,
     tray_session: bool,
+    sources: &[BuiltinSource<'_>],
     at_start: &mut dyn AtStart,
 ) -> Result<Daemon, ExitCode> {
     let ipc = bind_ipc(&paths.data).await?;
     at_start.started(&paths)?;
+    if let Err(e) = crate::builtins::check(sources) {
+        error!(error = %e, "the built-in modules do not load");
+        eprintln!("Не удалось загрузить встроенные модули: {e}");
+        return Err(ExitCode::FAILURE);
+    }
     let wss = match open_wss(&paths.tls(), port) {
         Ok(wss) => Ok(wss),
         Err(failure) if allow_no_wss => {
@@ -1374,8 +1393,14 @@ mod tests {
         }
     }
 
-    /// `prepare_in` on a free port in `dir`: its exit code, if it fails.
-    fn prepare(dir: &Path, tray_session: bool, hooks: &mut Hooks) -> Option<u8> {
+    /// `prepare_in` with the built-in modules `sources` on a free port in `dir`: its exit
+    /// code, if it fails.
+    fn prepare_with(
+        dir: &Path,
+        tray_session: bool,
+        sources: &[BuiltinSource<'_>],
+        hooks: &mut Hooks,
+    ) -> Option<u8> {
         let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .unwrap()
             .local_addr()
@@ -1388,10 +1413,16 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        match runtime.block_on(prepare_in(paths, port, false, tray_session, hooks)) {
+        let prepared = prepare_in(paths, port, false, tray_session, sources, hooks);
+        match runtime.block_on(prepared) {
             Ok(_) => None,
             Err(code) => Some((1..=4u8).find(|c| ExitCode::from(*c) == code).unwrap_or(0)),
         }
+    }
+
+    /// `prepare_in` with the embedded built-in modules on a free port in `dir`.
+    fn prepare(dir: &Path, tray_session: bool, hooks: &mut Hooks) -> Option<u8> {
+        prepare_with(dir, tray_session, crate::builtins::SOURCES, hooks)
     }
 
     #[test]
@@ -1423,6 +1454,64 @@ mod tests {
         };
         assert_eq!(prepare(dir.path(), true, &mut hooks), Some(4));
         assert_eq!((hooks.started, hooks.clean), (1, 0));
+    }
+
+    /// A thread's log lines, for the test that reads its own.
+    #[derive(Clone, Default)]
+    struct LogLines(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl io::Write for LogLines {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Built-in modules that do not load end the start with code 1 after the start hooks
+    /// (the updater counted the run: it is not a clean end) and leave an error in the log.
+    #[test]
+    fn builtins_failure_is_fatal() {
+        let manifest = crate::builtins::SOURCES[0].manifest;
+        for source in [
+            BuiltinSource {
+                manifest: "not a manifest",
+                wasm: crate::builtins::SOURCES[0].wasm,
+            },
+            BuiltinSource {
+                manifest,
+                wasm: b"\0asm\x01\0\0\0",
+            },
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let log = LogLines::default();
+            let writer = log.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .finish();
+            let mut hooks = Hooks::default();
+            let code = tracing::subscriber::with_default(subscriber, || {
+                prepare_with(dir.path(), true, &[source], &mut hooks)
+            });
+            assert_eq!(code, Some(1));
+            assert_eq!((hooks.started, hooks.clean), (1, 0));
+            let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+            assert!(
+                log.contains("ERROR") && log.contains("the built-in modules do not load"),
+                "{log}"
+            );
+        }
+        // The embedded modules load: the start goes on (to TLS, not set up here).
+        let dir = tempfile::tempdir().unwrap();
+        let mut hooks = Hooks::default();
+        assert_eq!(
+            prepare(dir.path(), false, &mut hooks),
+            Some(EXIT_TLS_NOT_CONFIGURED)
+        );
     }
 
     #[test]

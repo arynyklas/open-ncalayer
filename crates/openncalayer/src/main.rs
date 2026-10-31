@@ -17,7 +17,7 @@ use oncl_desktop::port_owner;
 use oncl_ipc::IpcListener;
 use oncl_pki::http::HttpTransport;
 use oncl_plugin::core::UiRequest;
-use oncl_plugin::{BuiltinSource, Engine, HostServices, PluginModules};
+use oncl_plugin::{Engine, HostServices, PluginModules};
 use oncl_protocol::Registry;
 use oncl_tls::{SelftestReports, TlsFiles};
 use oncl_token::Tokens;
@@ -171,7 +171,7 @@ fn main() -> ExitCode {
         Command::Run {
             allow_no_wss,
             no_tray,
-        } => run_with_sources(builtins::SOURCES, allow_no_wss, !no_tray),
+        } => run(allow_no_wss, !no_tray),
         Command::Tls { command } => cli::tls(command),
         Command::CmsVerify {
             file,
@@ -222,19 +222,11 @@ fn velopack_app<'a>() -> velopack::VelopackApp<'a> {
 /// port by itself; a relay-started one does so only after the user stopped the original or
 /// saved a certificate (D13).
 ///
-/// The built-in modules embedded (`sources`, another set in tests) are checked first: a
-/// module that does not load ends the run at once with code 1, before anything starts (the
-/// updater's health check then rolls a new version back).
-fn run_with_sources(
-    sources: &[BuiltinSource<'_>],
-    allow_no_wss: bool,
-    with_tray: bool,
-) -> ExitCode {
-    if let Err(e) = builtins::check(sources) {
-        tracing::error!(error = %e, "the built-in modules do not load");
-        eprintln!("Не удалось загрузить встроенные модули: {e}");
-        return ExitCode::FAILURE;
-    }
+/// The built-in modules embedded are checked once the updater has looked at the start
+/// ([`cli::prepare_run`]): a module that does not load ends the run with code 1, logged,
+/// and the updater's health check rolls a new version back.
+fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
+    let sources = builtins::SOURCES;
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -253,7 +245,8 @@ fn run_with_sources(
         loop_runs: Arc::clone(&loop_runs),
         started: None,
     };
-    let daemon = match runtime.block_on(cli::prepare_run(allow_no_wss, with_tray, &mut start)) {
+    let prepared = cli::prepare_run(allow_no_wss, with_tray, sources, &mut start);
+    let daemon = match runtime.block_on(prepared) {
         Ok(daemon) => daemon,
         Err(code) => return code,
     };
@@ -1077,24 +1070,6 @@ fn join_within<T>(thread: JoinHandle<T>, timeout: Duration) -> Option<thread::Re
 mod tests {
     use super::*;
     use std::sync::mpsc;
-
-    /// A built-in module that does not load ends the run with code 1 before it starts.
-    #[test]
-    fn builtins_failure_is_fatal() {
-        let manifest = builtins::SOURCES[0].manifest;
-        for source in [
-            BuiltinSource {
-                manifest: "not a manifest",
-                wasm: builtins::SOURCES[0].wasm,
-            },
-            BuiltinSource {
-                manifest,
-                wasm: b"\0asm\x01\0\0\0",
-            },
-        ] {
-            assert_eq!(run_with_sources(&[source], true, false), ExitCode::FAILURE);
-        }
-    }
 
     #[test]
     fn join_gives_up_on_a_running_thread() {
