@@ -451,7 +451,7 @@ jobs:
   # for conformance checks against the original. A workflow artifact only: `publish` takes
   # the `release-*` artifacts, never this one.
   conformance:
-    needs: version
+    needs: [version, builtins]
     strategy:
       fail-fast: false
       matrix:
@@ -464,8 +464,15 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+    env:
+      # The built-in modules of the `builtins` job, embedded as they ship.
+      ONCL_BUILTINS_DIR: ${{ github.workspace }}/target/builtins
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: builtins
+          path: target/builtins
       - name: Install system libraries
         if: runner.os == 'Linux'
         run: |
@@ -476,6 +483,12 @@ jobs:
       - uses: ./.github/actions/pinned-toolchains
       - name: Build the daemon with the test features
         run: cargo build --release --locked -p openncalayer --features e2e-prompter
+      - name: Built-in modules embedded
+        shell: bash
+        run: |
+          exe=target/release/openncalayer
+          if [ "$RUNNER_OS" = Windows ]; then exe+=.exe; fi
+          cargo xtask builtins check --bin "$exe"
       # Every port: none is in an empty index.
       - name: Pack every plugin port
         shell: bash
