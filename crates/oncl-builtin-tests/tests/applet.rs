@@ -230,6 +230,31 @@ fn uuid_is_echoed_on_method_replies_only() {
     );
 }
 
+/// A `uuid` that is not a string is `optString`'s `toString()` of the value org.json holds
+/// (a number as the `BigDecimal` or `BigInteger` it reads, an object or an array as
+/// org.json writes it), then written as a string.
+#[test]
+fn non_string_uuid_is_its_org_json_text() {
+    let (a, _) = setup(vec![]);
+    for (uuid, echoed) in [
+        ("42", r#""42""#),
+        ("1.50", r#""1.50""#),
+        ("1e3", r#""1E+3""#),
+        ("12345678901234567890", r#""12345678901234567890""#),
+        ("true", r#""true""#),
+        ("[1.0]", r#""[1]""#),
+        ("{}", r#""{}""#),
+        (r#"{"b":"</","a":1}"#, r#""{\"a\":1,\"b\":\"<\\/\"}""#),
+    ] {
+        let request = format!(r#"{{"method":"getTryCount","args":[],"uuid":{uuid}}}"#);
+        assert_eq!(
+            a.process(&request, &origin()).into_text().unwrap(),
+            format!(r#"{{"result":-1,"errorCode":"NONE","uuid":{echoed}}}"#),
+            "{uuid}"
+        );
+    }
+}
+
 /// The reply is org.json's `JSONObject` of the `ResultWrapper` bean, a `HashMap` of 16
 /// buckets: `result` (bucket 0), `errorCode` (9), `secondResult` (12), `uuid` (13). Fields
 /// that are `null` are left out.

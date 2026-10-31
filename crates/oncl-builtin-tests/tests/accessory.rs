@@ -440,6 +440,9 @@ fn errors_bytes() {
     assert!(seen.lock().unwrap().is_empty());
 }
 
+/// A `uuid` that is not a string is `optString`'s `toString()` of the value org.json holds
+/// (a number as the `BigDecimal` or `BigInteger` it reads, an object or an array as
+/// org.json writes it), then written as a string.
 #[test]
 fn non_string_uuid_is_its_text() {
     let (m, _) = module();
@@ -447,6 +450,26 @@ fn non_string_uuid_is_its_text() {
         call(&m, json!({"method": "getServices", "uuid": 7}), None)["uuid"],
         "7"
     );
+    for (uuid, echoed) in [
+        ("42", r#""42""#),
+        ("1.50", r#""1.50""#),
+        ("1e3", r#""1E+3""#),
+        ("12345678901234567890", r#""12345678901234567890""#),
+        ("true", r#""true""#),
+        ("[1.0]", r#""[1]""#),
+        ("{}", r#""{}""#),
+        (r#"{"b":"</","a":1}"#, r#""{\"a\":1,\"b\":\"<\\/\"}""#),
+    ] {
+        assert_eq!(
+            call_text(
+                &m,
+                &format!(r#"{{"method":"showSettings","uuid":{uuid}}}"#),
+                None
+            ),
+            format!(r#"{{"uuid":{echoed}}}"#),
+            "{uuid}"
+        );
+    }
 }
 
 /// A request is read as `new JSONObject(request)` reads it: org.json's lenient forms,
