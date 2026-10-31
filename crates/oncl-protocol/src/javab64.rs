@@ -22,12 +22,24 @@ fn value(b: u8) -> Option<u8> {
 /// complete when present, trailing bits ignored. Characters beyond Latin-1 are one `?` each,
 /// a supplementary character included (`getBytes(ISO_8859_1)`).
 ///
+/// Canonical text (padded, no trailing bits: what `btoa` writes), which Java decodes to the
+/// same bytes, is decoded by the `base64` crate's strict engine; any other text as Java does.
+///
 /// # Errors
 ///
 /// `Illegal base64 character <hex>`, `Input byte[] should at least have 2 bytes for base64
 /// bytes`, `Last unit does not have enough valid bits`, `Input byte array has wrong 4-byte
 /// ending unit`, `Input byte array has incorrect ending byte at <n>`.
 pub fn decode_java(text: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    match base64::engine::general_purpose::STANDARD.decode(text) {
+        Ok(bytes) => Ok(bytes),
+        Err(_) => decode_java_units(text),
+    }
+}
+
+/// [`decode_java`] as Java's decoder walks the text.
+fn decode_java_units(text: &str) -> Result<Vec<u8>, String> {
     let src: Vec<u8> = text
         .chars()
         .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
@@ -191,4 +203,84 @@ pub fn encode_mime(bytes: &[u8]) -> String {
         out.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    /// Characters at every kind of edge: values with and without the low bits a last unit
+    /// drops, both non-letters of the alphabet, padding, whitespace, an illegal ASCII
+    /// character, Latin-1 and beyond.
+    const EDGES: &[char] = &['A', 'Q', 'g', 'w', '+', '/', '=', ' ', '\n', '!', 'é', '€'];
+
+    fn xorshift(mut state: u64) -> impl FnMut() -> usize {
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            usize::try_from(state >> 32).unwrap()
+        }
+    }
+
+    fn same(text: &str) {
+        assert_eq!(decode_java(text), decode_java_units(text), "{text:?}");
+    }
+
+    #[test]
+    fn every_short_text_decodes_as_java_does() {
+        let mut texts = vec![String::new()];
+        for _ in 0..5 {
+            texts = texts
+                .iter()
+                .flat_map(|t| EDGES.iter().map(move |c| format!("{t}{c}")))
+                .collect();
+            texts.iter().for_each(|t| same(t));
+        }
+    }
+
+    #[test]
+    fn random_texts_decode_as_java_does() {
+        let alphabet: Vec<char> = ALPHABET
+            .iter()
+            .map(|b| char::from(*b))
+            .chain(EDGES.iter().copied())
+            .collect();
+        let mut next = xorshift(0x2545_f491_4f6c_dd1d);
+        for _ in 0..200_000 {
+            let len = 6 + next() % 4;
+            let text: String = (0..len)
+                .map(|_| alphabet[next() % alphabet.len()])
+                .collect();
+            same(&text);
+        }
+    }
+
+    #[test]
+    fn encodings_and_their_variants_decode_as_java_does() {
+        let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..20_000 {
+            let bytes: Vec<u8> = (0..next() % 64).map(|_| next() as u8).collect();
+            let canonical = STANDARD.encode(&bytes);
+            assert_eq!(decode_java(&canonical).unwrap(), bytes);
+            same(&canonical);
+            // Without padding.
+            same(canonical.trim_end_matches('='));
+            if canonical.is_empty() {
+                continue;
+            }
+            let mut chars: Vec<char> = canonical.chars().collect();
+            // Another character anywhere: of the alphabet (trailing bits), padding,
+            // whitespace, illegal, beyond ASCII.
+            let at = next() % chars.len();
+            chars[at] = EDGES[next() % EDGES.len()];
+            same(&chars.iter().collect::<String>());
+            // One more anywhere.
+            let at = next() % (chars.len() + 1);
+            chars.insert(at, EDGES[next() % EDGES.len()]);
+            same(&chars.iter().collect::<String>());
+        }
+    }
 }
