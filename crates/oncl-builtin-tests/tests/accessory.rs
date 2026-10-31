@@ -448,3 +448,31 @@ fn non_string_uuid_is_its_text() {
         "7"
     );
 }
+
+/// A request is read as `new JSONObject(request)` reads it: org.json's lenient forms,
+/// which the envelope routes, answer as strict JSON does; a text that is no object gets
+/// org.json's own message.
+#[test]
+fn lenient_requests_answer_as_strict_ones() {
+    let (m, _) = module();
+    for (lenient, strict) in [
+        (
+            "{module:'kz.gov.pki.ncalayerservices.accessory',method:'nope'}",
+            r#"{"errorCode":"java.lang.NoSuchMethodException"}"#,
+        ),
+        (
+            r#"{"method":"nope",}"#,
+            r#"{"errorCode":"java.lang.NoSuchMethodException"}"#,
+        ),
+        (
+            "{'method':'showSettings';'uuid':'u-1'}",
+            r#"{"uuid":"u-1"}"#,
+        ),
+        (
+            "[1]",
+            r#"{"errorCode":"org.json.JSONException: A JSONObject text must begin with '{' at 1 [character 2 line 1]"}"#,
+        ),
+    ] {
+        assert_eq!(call_text(&m, lenient, None), strict, "{lenient}");
+    }
+}

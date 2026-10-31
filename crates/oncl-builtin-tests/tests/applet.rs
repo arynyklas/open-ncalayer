@@ -333,6 +333,33 @@ fn dispatcher_error_bytes() {
     }
 }
 
+/// A request is read as `new JSONObject(request)` reads it: org.json's lenient forms,
+/// which the envelope routes, answer as strict JSON does; a text that is no object (which
+/// the envelope never routes) gets org.json's own message.
+#[test]
+fn lenient_requests_answer_as_strict_ones() {
+    let (a, _) = setup(vec![]);
+    let text = |request: &str| a.process(request, &origin()).into_text().unwrap();
+    let strict = text(r#"{"method":"getTryCount","args":[],"uuid":"u-1"}"#);
+    assert_eq!(strict, r#"{"result":-1,"errorCode":"NONE","uuid":"u-1"}"#);
+    for lenient in [
+        "{'method':'getTryCount','args':[],'uuid':'u-1'}",
+        "{method:getTryCount,args:[],uuid:u-1}",
+        r#"{"method":"getTryCount";"args":[];"uuid":"u-1",}"#,
+        r#"{"method":"getTryCount","args":[],"uuid":"u-1"} trailing"#,
+    ] {
+        assert_eq!(text(lenient), strict, "{lenient}");
+    }
+    assert_eq!(
+        text("[1]"),
+        r#"{"errorCode":"org.json.JSONException: A JSONObject text must begin with '{' at 1 [character 2 line 1]. Method: "}"#
+    );
+    assert_eq!(
+        text(r#"{"method":"getTryCount","method":"x"}"#),
+        r#"{"errorCode":"org.json.JSONException: Duplicate key \"method\" at 33 [character 34 line 1]. Method: "}"#
+    );
+}
+
 /// `getProvider` returns the original's internal property table of a proprietary JCE
 /// provider: it is not offered.
 #[test]

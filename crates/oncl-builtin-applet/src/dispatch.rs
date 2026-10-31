@@ -23,7 +23,7 @@
 //! `NoSuchMethodException` here.
 
 use crate::{Core, keygen, methods};
-use oncl_pdk::orgjson::{JObject, get_string, int_value, opt_string};
+use oncl_pdk::orgjson::{self, JObject, JValue, get_string, int_value};
 use serde_json::Value;
 
 /// The class the dispatcher's instance is of, the only `class` besides an empty one.
@@ -288,20 +288,18 @@ pub(crate) fn process<C: Core>(core: &C, request: &str) -> String {
 fn dispatch<C: Core>(core: &C, request: &str) -> Result<(Wrapper, String), String> {
     // The method's name as far as it was read, for the failure text.
     let failure = |exception: &str, name: &str| format!("{exception}. Method: {name}");
-    let request = match serde_json::from_str::<Value>(request) {
-        Ok(Value::Object(request)) => request,
-        // The server routes JSON objects only.
-        _ => {
-            return Err(failure(
-                "org.json.JSONException: A JSONObject text must begin with '{' at 1 [character 2 line 1]",
-                "",
-            ));
-        }
+    let json_exception = |e: &str| failure(&format!("org.json.JSONException: {e}"), "");
+    // Read as `new JSONObject(request)`; only the keys the dispatcher reads are kept.
+    let request = orgjson::parse_only(request, &["class", "uuid", "method", "args"])
+        .map_err(|e| json_exception(&e))?;
+    let opt_string = |key: &str| match request.get(key) {
+        None | Some(JValue::Null) => String::new(),
+        Some(value) => value.java_string(),
     };
-    let class = opt_string(&request, "class").unwrap_or_default();
-    let uuid = opt_string(&request, "uuid").unwrap_or_default();
-    let name = get_string(&request, "method")
-        .map_err(|e| failure(&format!("org.json.JSONException: {e}"), ""))?;
+    let class = opt_string("class");
+    let uuid = opt_string("uuid");
+    let request = request.into_map();
+    let name = get_string(&request, "method").map_err(|e| json_exception(&e))?;
     let args: &[Value] = match request.get("args") {
         Some(Value::Array(args)) => args,
         _ => &[],

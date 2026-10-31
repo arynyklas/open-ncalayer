@@ -35,8 +35,7 @@ mod guest;
 pub use reply::{CORE_BUNDLES, MODULE_NAME, SYMNAME, bundles, original_services};
 
 use oncl_pdk::abi::{CoreBundles, CoreModules, Os, Window};
-use oncl_pdk::orgjson::{JObject, JValue, get_string, opt_string};
-use oncl_pdk::serde_json::{Map, Value};
+use oncl_pdk::orgjson::{self, JObject, JValue};
 
 /// What the module asks of the core.
 pub trait Core {
@@ -53,13 +52,23 @@ pub trait Core {
     fn os(&self) -> Os;
 }
 
-/// The reply to `request`: the object, or the exception the original's reply names.
+/// The reply to `request`: the object, or the exception the original's reply names. The
+/// request is read as `new JSONObject(request)` reads it; only the keys the module reads
+/// are kept.
 pub fn handle(core: &impl Core, request: &str) -> Result<String, String> {
-    let request: Map<String, Value> = oncl_pdk::serde_json::from_str(request).map_err(|_| {
-        json_exception("A JSONObject text must begin with '{' at 1 [character 2 line 1]")
-    })?;
-    let method = get_string(&request, "method").map_err(|e| json_exception(&e))?;
-    let uuid = opt_string(&request, "uuid").unwrap_or_default();
+    let request = orgjson::parse_only(request, &["method", "uuid", "symname"])
+        .map_err(|e| json_exception(&e))?;
+    // org.json `optString`: absent and `null` are empty, any other value its `toString()`.
+    let opt_string = |key: &str| match request.get(key) {
+        None | Some(JValue::Null) => String::new(),
+        Some(value) => value.java_string(),
+    };
+    let method = match request.get("method") {
+        Some(JValue::Str(method)) => method.as_str(),
+        None => return Err(json_exception("JSONObject[\"method\"] not found.")),
+        Some(_) => return Err(json_exception("JSONObject[\"method\"] is not a string.")),
+    };
+    let uuid = opt_string("uuid");
     let mut reply = JObject::stringer();
     let window = match method {
         "getBundles" => {
@@ -72,7 +81,7 @@ pub fn handle(core: &impl Core, request: &str) -> Result<String, String> {
             None
         }
         "installBundle" => {
-            let symname = opt_string(&request, "symname").unwrap_or_default();
+            let symname = opt_string("symname");
             // `String.trim()`: every char up to U+0020.
             let (code, window) = if symname.trim_matches(|c| c <= ' ').is_empty() {
                 ("SYMNAME_PARAMETER_IS_EMPTY", None)
