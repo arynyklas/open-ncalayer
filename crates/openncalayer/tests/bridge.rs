@@ -597,6 +597,47 @@ async fn invalid_json_closes_only_that_sid() {
     assert_eq!(c.call(2, HEARTBEAT).await, HEARTBEAT);
 }
 
+/// What the original drops without a close frame closes the virtual socket with a bare
+/// `close` (the extension closes the page's socket with 1006, as a dropped connection), and
+/// no reply before it; text after the request is ignored, as on wss.
+#[tokio::test]
+async fn bridge_drop_closes_with_the_observed_code() {
+    let (registry, _) = scripted_registry(vec![]);
+    let (_dir, ep) = start_ipc(registry).await;
+    let mut c = Client::connect(&ep).await;
+    let dropped = [
+        r#"{"module":"#,
+        "",
+        "[]",
+        r#""s""#,
+        "1",
+        "null",
+        "true",
+        "\u{feff}{\"module\":\"kz.gov.pki.ncalayerservices.accessory\",\"method\":\"getServices\"}",
+        r#"{"module":"kz.test.absent","module":"kz.gov.pki.ncalayerservices.accessory","method":"getServices"}"#,
+        r#"{"module":"kz.gov.pki.ncalayerservices.accessory","module":"kz.test.absent","method":"getServices"}"#,
+        " --heartbeat--",
+        "--HEARTBEAT--",
+    ];
+    for (sid, text) in (1..).zip(dropped) {
+        c.open(sid, "https://a.test").await;
+        c.send_text(sid, text).await;
+        assert_eq!(
+            c.next_raw().await,
+            format!(r#"{{"t":"close","sid":{sid}}}"#),
+            "{text:?}"
+        );
+    }
+    c.open(100, "https://a.test").await;
+    for trailing in [" x", "{}"] {
+        assert_eq!(
+            c.call(100, &format!(r#"{{"module":"kz.test.absent"}}{trailing}"#))
+                .await,
+            r#"{"success":false,"errorCode":"MODULE_NOT_FOUND"}"#
+        );
+    }
+}
+
 /// A module that panics.
 struct Panics;
 

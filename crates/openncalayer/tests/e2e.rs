@@ -604,19 +604,302 @@ async fn e2e_second_connection_not_blocked_by_open_dialog() {
     assert_eq!(key_origins, ["https://first.test", "https://second.test"]);
 }
 
+const GREETING: &str = r#"{"result":{"version":"1.4"}}"#;
+const MODULE_NOT_FOUND: &str = r#"{"success":false,"errorCode":"MODULE_NOT_FOUND"}"#;
+
+/// A WebSocket client written by hand over TLS: it sends frames `tokio-tungstenite` would
+/// not (unmasked, malformed) and sees every byte the server sends, a close frame among them.
+struct RawWs {
+    stream: TlsStream<TcpStream>,
+    /// Bytes read and not yet taken.
+    read: Vec<u8>,
+}
+
+/// The mask of the frames [`RawWs`] masks.
+const MASK: [u8; 4] = [0x37, 0xfa, 0x21, 0x3d];
+
+impl RawWs {
+    /// The WebSocket handshake from [`ORIGIN`], then the greeting, which must come first.
+    async fn connect(srv: &Srv) -> RawWs {
+        let mut ws = RawWs {
+            stream: tls_connect(srv).await,
+            read: Vec::new(),
+        };
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\nOrigin: {ORIGIN}\r\n\r\n",
+            srv.addr.port()
+        );
+        ws.stream.write_all(request.as_bytes()).await.unwrap();
+        let head = loop {
+            if let Some(end) = ws.read.windows(4).position(|w| w == b"\r\n\r\n") {
+                break ws.read.drain(..end + 4).collect::<Vec<u8>>();
+            }
+            assert!(ws.fill().await, "no handshake reply");
+        };
+        let head = String::from_utf8(head).unwrap();
+        assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
+        assert_eq!(ws.frame().await, Some((0x81, GREETING.as_bytes().to_vec())));
+        ws
+    }
+
+    /// Reads more bytes; `false` at the end of the connection (also one without TLS
+    /// `close_notify`).
+    async fn fill(&mut self) -> bool {
+        let mut buf = [0; 16 << 10];
+        let n = timeout(PATIENCE, self.stream.read(&mut buf))
+            .await
+            .expect("nothing in time")
+            .unwrap_or(0);
+        self.read.extend_from_slice(&buf[..n]);
+        n > 0
+    }
+
+    /// Takes `n` bytes; `None` if the connection ends first.
+    async fn take(&mut self, n: usize) -> Option<Vec<u8>> {
+        while self.read.len() < n {
+            if !self.fill().await {
+                return None;
+            }
+        }
+        Some(self.read.drain(..n).collect())
+    }
+
+    /// The next frame of the server, unmasked: its first byte (FIN, RSV, opcode) and its
+    /// payload; `None` if the connection ends first.
+    async fn frame(&mut self) -> Option<(u8, Vec<u8>)> {
+        let head = self.take(2).await?;
+        assert_eq!(head[1] & 0x80, 0, "a masked server frame");
+        let len = match head[1] & 0x7f {
+            126 => u16::from_be_bytes(self.take(2).await?.try_into().unwrap()).into(),
+            127 => u64::from_be_bytes(self.take(8).await?.try_into().unwrap()),
+            len => u64::from(len),
+        };
+        let payload = self.take(usize::try_from(len).unwrap()).await?;
+        Some((head[0], payload))
+    }
+
+    /// The next frame, which must be text.
+    async fn text(&mut self) -> String {
+        let (first, payload) = self.frame().await.expect("connection ended");
+        assert_eq!(first, 0x81, "not a text frame");
+        String::from_utf8(payload).unwrap()
+    }
+
+    /// Everything the server sends until the connection ends.
+    async fn rest(&mut self) -> Vec<u8> {
+        while self.fill().await {}
+        std::mem::take(&mut self.read)
+    }
+
+    /// Sends a frame of `first` (FIN, RSV, opcode) and `payload`, masked with `mask` if
+    /// any.
+    async fn send(&mut self, first: u8, payload: &[u8], mask: Option<[u8; 4]>) {
+        let mut frame = vec![first];
+        let masked = if mask.is_some() { 0x80 } else { 0 };
+        match payload.len() {
+            len @ 0..=125 => frame.push(masked | len as u8),
+            len @ 126..=0xffff => {
+                frame.push(masked | 126);
+                frame.extend_from_slice(&(len as u16).to_be_bytes());
+            }
+            len => {
+                frame.push(masked | 127);
+                frame.extend_from_slice(&(len as u64).to_be_bytes());
+            }
+        }
+        match mask {
+            Some(mask) => {
+                frame.extend_from_slice(&mask);
+                frame.extend(payload.iter().zip(mask.iter().cycle()).map(|(b, m)| b ^ m));
+            }
+            None => frame.extend_from_slice(payload),
+        }
+        self.stream.write_all(&frame).await.unwrap();
+    }
+
+    /// Sends a masked text frame.
+    async fn send_text(&mut self, text: &str) {
+        self.send(0x81, text.as_bytes(), Some(MASK)).await;
+    }
+}
+
+/// The original drops the TCP connection without a close frame, and without a reply, on a
+/// frame that is not a JSON object org.json reads: not JSON, empty, JSON of another type, a
+/// byte order mark before the object, a repeated key, a variant of the heartbeat.
 #[tokio::test]
-async fn invalid_json_drops_connection_without_close_frame() {
+async fn invalid_json_closes_as_observed() {
+    let srv = start(vec![]).await;
+    for text in [
+        r#"{"module":"#,
+        "",
+        "[]",
+        r#""s""#,
+        "1",
+        "null",
+        "true",
+        "\u{feff}{\"module\":\"kz.gov.pki.ncalayerservices.accessory\",\"method\":\"getServices\"}",
+        r#"{"module":"kz.test.absent","module":"kz.gov.pki.ncalayerservices.accessory","method":"getServices"}"#,
+        r#"{"module":"kz.gov.pki.ncalayerservices.accessory","module":"kz.test.absent","method":"getServices"}"#,
+        " --heartbeat--",
+        "--HEARTBEAT--",
+    ] {
+        let mut ws = RawWs::connect(&srv).await;
+        ws.send_text(text).await;
+        assert_eq!(ws.rest().await, b"", "{text:?}");
+    }
+}
+
+/// Only `--heartbeat--` itself is echoed; a request naming it as a module is a request.
+#[tokio::test]
+async fn heartbeat_variants_are_ordinary_text() {
+    let srv = start(vec![]).await;
+    let mut ws = RawWs::connect(&srv).await;
+    for (text, reply) in [
+        ("--heartbeat--", "--heartbeat--"),
+        (r#"{"module":"--heartbeat--"}"#, MODULE_NOT_FOUND),
+        ("--heartbeat--", "--heartbeat--"),
+    ] {
+        ws.send_text(text).await;
+        assert_eq!(ws.text().await, reply, "{text}");
+    }
+}
+
+/// A client frame without a mask is taken as any other.
+#[tokio::test]
+async fn unmasked_client_frame_is_accepted() {
+    let srv = start(vec![]).await;
+    let mut ws = RawWs::connect(&srv).await;
+    ws.send(0x81, b"--heartbeat--", None).await;
+    assert_eq!(ws.text().await, "--heartbeat--");
+    ws.send(0x81, br#"{"module":"kz.test.absent"}"#, None).await;
+    assert_eq!(ws.text().await, MODULE_NOT_FOUND);
+    ws.send_text("--heartbeat--").await;
+    assert_eq!(ws.text().await, "--heartbeat--");
+}
+
+/// Frames that break RFC 6455 drop the connection without a close frame; fragments, a ping
+/// and a close are answered as the RFC has it.
+#[tokio::test]
+async fn malformed_frames_handled_as_observed() {
+    let srv = start(vec![]).await;
+    let big_ping = [b'p'; 130];
+    let dropped: [(u8, &[u8]); 5] = [
+        // RSV1 without an extension.
+        (0xc1, b"--heartbeat--"),
+        // A reserved opcode.
+        (0x83, b"x"),
+        // A continuation without a first fragment.
+        (0x80, b"--heartbeat--"),
+        // Text that is not UTF-8.
+        (0x81, &[0xf4, 0xd2]),
+        // A control frame over 125 bytes.
+        (0x89, &big_ping),
+    ];
+    for (first, payload) in dropped {
+        let mut ws = RawWs::connect(&srv).await;
+        ws.send(first, payload, Some(MASK)).await;
+        assert_eq!(ws.rest().await, b"", "{first:#04x}");
+    }
+
+    let mut ws = RawWs::connect(&srv).await;
+    ws.send(0x01, b"--heart", Some(MASK)).await;
+    ws.send(0x80, b"beat--", Some(MASK)).await;
+    assert_eq!(ws.text().await, "--heartbeat--");
+    ws.send(0x89, b"ping", Some(MASK)).await;
+    assert_eq!(ws.frame().await, Some((0x8a, b"ping".to_vec())));
+    ws.send(0x88, &1000u16.to_be_bytes(), Some(MASK)).await;
+    assert_eq!(
+        ws.frame().await,
+        Some((0x88, 1000u16.to_be_bytes().to_vec()))
+    );
+    assert_eq!(ws.rest().await, b"");
+}
+
+/// Frames of 1 and 16 MiB are requests like any other.
+#[tokio::test]
+async fn oversized_frame_handled_as_observed() {
     let srv = start(vec![]).await;
     let mut c = connect(&srv).await;
     next_text(&mut c).await;
-    send(&mut c, "nope").await;
-    match timeout(PATIENCE, c.next())
-        .await
-        .expect("no reaction in time")
-    {
-        None | Some(Err(_)) => {}
-        Some(Ok(message)) => panic!("expected a dropped connection, got {message:?}"),
+    for size in [1usize << 20, 16 << 20] {
+        let request = format!(
+            r#"{{"module":"kz.test.absent","method":"x","pad":"{}"}}"#,
+            "a".repeat(size)
+        );
+        send(&mut c, &request).await;
+        assert_eq!(next_text(&mut c).await, MODULE_NOT_FOUND, "{size}");
     }
+}
+
+/// Answers with the request it gets.
+struct Echo;
+
+impl Module for Echo {
+    fn process(&self, request: &str, _add_info: &AddInfo) -> Reply {
+        request.into()
+    }
+}
+
+/// org.json reads one object: text after it, a second object among others, is ignored, and
+/// the module gets the first object alone.
+#[tokio::test]
+async fn trailing_text_after_the_request_is_ignored() {
+    let srv = start_with(vec![], None, |registry| {
+        registry.register("test.Echo", Arc::new(Echo));
+    })
+    .await;
+    let mut c = connect(&srv).await;
+    next_text(&mut c).await;
+    let request = r#"{"module":"test.Echo","method":"x","args":[]}"#;
+    for trailing in [" x", "{}", r#"{"module":"kz.test.absent"}"#] {
+        send(&mut c, &format!("{request}{trailing}")).await;
+        assert_eq!(next_text(&mut c).await, request, "{trailing}");
+        send(
+            &mut c,
+            &format!(r#"{{"module":"kz.test.absent"}}{trailing}"#),
+        )
+        .await;
+        assert_eq!(next_text(&mut c).await, MODULE_NOT_FOUND, "{trailing}");
+    }
+}
+
+/// Two requests in a row on one connection: the second is answered after the first, which
+/// waits for its dialog, and right after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn second_request_waits_for_the_first() {
+    let signal = Arc::new(Barrier::new(2));
+    let srv = start(vec![
+        Step::Wait(signal.clone()),
+        storage("user-gost2015-sign"),
+        Step::Key(0),
+    ])
+    .await;
+    let mut c = connect(&srv).await;
+    next_text(&mut c).await;
+    let release = Release(signal.clone());
+    send(
+        &mut c,
+        &basics_sign_cms(&STANDARD.encode(b"u-1"), cms_params_detached()),
+    )
+    .await;
+    send(&mut c, r#"{"module":"kz.test.absent","uuid":"u-2"}"#).await;
+    let deadline = Instant::now() + PATIENCE;
+    while srv.prompter.storage_prompts().is_empty() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let early = timeout(Duration::from_millis(300), next_text(&mut c)).await;
+    drop(release);
+    assert!(
+        early.is_err(),
+        "a reply while the dialog is open: {early:?}"
+    );
+    assert_eq!(json(&next_text(&mut c).await)["status"], true);
+    assert_eq!(
+        next_text_within(&mut c, Duration::from_secs(5)).await,
+        MODULE_NOT_FOUND
+    );
 }
 
 /// Asks for the connection to be dropped.
@@ -634,16 +917,9 @@ async fn dropped_reply_closes_without_frame() {
         registry.register("test.Drop", Arc::new(Dropping));
     })
     .await;
-    let mut c = connect(&srv).await;
-    next_text(&mut c).await;
-    send(&mut c, r#"{"module":"test.Drop","method":"x"}"#).await;
-    match timeout(PATIENCE, c.next())
-        .await
-        .expect("no reaction in time")
-    {
-        None | Some(Err(_)) => {}
-        Some(Ok(message)) => panic!("expected a dropped connection, got {message:?}"),
-    }
+    let mut ws = RawWs::connect(&srv).await;
+    ws.send_text(r#"{"module":"test.Drop","method":"x"}"#).await;
+    assert_eq!(ws.rest().await, b"");
 }
 
 /// Sends a raw HTTP request over TLS and returns the status code, the response head and

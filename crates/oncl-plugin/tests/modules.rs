@@ -79,11 +79,11 @@ fn module_routes_to_plugin() {
     let text =
         json!({"module": MODULE, "class": "Example", "method": "echo", "args": {"text": "hi"}})
             .to_string();
-    let Route::Module(module) = registry.route(&text) else {
+    let Route::Module { module, request } = registry.route(&text) else {
         panic!("not routed to the plugin");
     };
     assert_eq!(
-        module.process(&text, &in_session(1)),
+        module.process(request, &in_session(1)),
         r#"{"status":true,"body":"hi"}"#
     );
     let info = modules.loaded();

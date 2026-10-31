@@ -109,11 +109,12 @@ fn is_the_default_module() {
     let (a, _) = setup(vec![]);
     let mut registry = Registry::default();
     registry.register(MODULE_NAME, Arc::new(a));
-    let Route::Module(m) = registry.route(r#"{"method":"getTryCount","uuid":"u1"}"#) else {
+    let request = r#"{"method":"getTryCount","uuid":"u1"}"#;
+    let Route::Module { module, .. } = registry.route(request) else {
         panic!("a request without module goes to the Applet");
     };
     assert_eq!(
-        m.process(r#"{"method":"getTryCount","uuid":"u1"}"#, &origin()),
+        module.process(request, &origin()),
         r#"{"errorCode":"NONE","result":-1,"uuid":"u1"}"#
     );
 }

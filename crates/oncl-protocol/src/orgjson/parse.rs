@@ -4,13 +4,17 @@
 
 use super::value::{JObject, JValue};
 
+/// The deepest nesting of objects and arrays read. org.json has no limit of its own (a
+/// deeper text ends its thread in a `StackOverflowError`); this one keeps the reader's
+/// recursion within a thread's stack. A deeper text is an error.
+const MAX_DEPTH: usize = 512;
+
 /// `new JSONObject(text)`: the object, or org.json's `JSONException` message, such as
 /// `A JSONObject text must begin with '{' at 1 [character 2 line 1]` or
 /// `Duplicate key "a" at 13 [character 14 line 1]`. Keys go in as they come, into a
 /// `new JSONObject()` (a `HashMap` of 16 buckets), nested objects too.
 pub fn parse(text: &str) -> Result<JValue, String> {
-    let mut tokener = Tokener::new(text);
-    tokener.object().map(JValue::Obj)
+    Tokener::new(text).object(Keep::All).map(JValue::Obj)
 }
 
 /// `new JSONObject(text).toString()`.
@@ -18,10 +22,52 @@ pub fn reserialize(text: &str) -> Result<String, String> {
     parse(text).map(|value| value.to_json())
 }
 
-/// org.json's `JSONTokener` over the UTF-16 code units of a text.
-struct Tokener {
-    units: Vec<u16>,
+/// What [`scan`] reads of an object's text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scanned {
+    /// The value of the key asked for, if the object has it.
+    pub value: Option<JValue>,
+    /// The length in bytes of the object's text, through its closing `}`. org.json does
+    /// not read what follows.
+    pub len: usize,
+}
+
+/// `new JSONObject(text)` as a check: [`parse`]'s errors (a key repeated in any object
+/// among them), but only the value of the top-level `key` is kept. The other values are
+/// read and dropped, so a request carrying a document of megabytes is not copied.
+pub fn scan(text: &str, key: &str) -> Result<Scanned, String> {
+    let mut tokener = Tokener::new(text);
+    let mut object = tokener.object(Keep::Key(key))?;
+    Ok(Scanned {
+        value: object.remove(key),
+        len: tokener.pos,
+    })
+}
+
+/// Which values the reader keeps; the others are read, checked and dropped (their keys are
+/// kept, with `null` in place of the value, for the duplicate-key check).
+#[derive(Clone, Copy)]
+enum Keep<'k> {
+    All,
+    Nothing,
+    /// The value of this key of the object; nothing below the other keys.
+    Key(&'k str),
+}
+
+impl Keep<'_> {
+    /// Whether values are kept inside a value this one keeps.
+    fn all(self) -> bool {
+        matches!(self, Keep::All)
+    }
+}
+
+/// org.json's `JSONTokener` over the UTF-16 code units of a text, decoded as it reads.
+struct Tokener<'t> {
+    text: &'t str,
+    /// The byte offset of the next character in `text`.
     pos: usize,
+    /// The low surrogate of the last character read, still to be returned.
+    low: Option<u16>,
     eof: bool,
     use_previous: bool,
     previous: u16,
@@ -30,13 +76,16 @@ struct Tokener {
     character: usize,
     line: usize,
     character_previous_line: usize,
+    /// Objects and arrays open.
+    depth: usize,
 }
 
-impl Tokener {
-    fn new(text: &str) -> Tokener {
+impl<'t> Tokener<'t> {
+    fn new(text: &'t str) -> Tokener<'t> {
         Tokener {
-            units: text.encode_utf16().collect(),
+            text,
             pos: 0,
+            low: None,
             eof: false,
             use_previous: false,
             previous: 0,
@@ -44,7 +93,25 @@ impl Tokener {
             character: 1,
             line: 1,
             character_previous_line: 0,
+            depth: 0,
         }
+    }
+
+    /// The next UTF-16 unit of `text`, `0` at its end.
+    fn unit(&mut self) -> u16 {
+        if let Some(low) = self.low.take() {
+            return low;
+        }
+        let Some(c) = self.text[self.pos..].chars().next() else {
+            return 0;
+        };
+        self.pos += c.len_utf8();
+        let mut units = [0; 2];
+        let units = c.encode_utf16(&mut units);
+        if let [_, low] = units {
+            self.low = Some(*low);
+        }
+        units[0]
     }
 
     /// `next()`: the next unit, `0` at the end.
@@ -53,13 +120,7 @@ impl Tokener {
             self.use_previous = false;
             self.previous
         } else {
-            match self.units.get(self.pos) {
-                Some(&c) => {
-                    self.pos += 1;
-                    c
-                }
-                None => 0,
-            }
+            self.unit()
         };
         if c == 0 {
             self.eof = true;
@@ -117,115 +178,160 @@ impl Tokener {
         )
     }
 
-    /// `new JSONObject(tokener)`.
-    fn object(&mut self) -> Result<JObject, String> {
+    /// Enters an object or an array: an error beyond [`MAX_DEPTH`].
+    fn enter(&mut self) -> Result<(), String> {
+        if self.depth == MAX_DEPTH {
+            return Err(self.error("Nesting too deep"));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    /// `new JSONObject(tokener)`, with the values `keep` asks for.
+    fn object(&mut self, keep: Keep<'_>) -> Result<JObject, String> {
         if self.next_clean() != u16::from(b'{') {
             return Err(self.error("A JSONObject text must begin with '{'"));
         }
+        self.enter()?;
         let mut object = JObject::hash_map();
         loop {
             match self.next_clean() {
                 0 => return Err(self.error("A JSONObject text must end with '}'")),
-                c if c == u16::from(b'}') => return Ok(object),
+                c if c == u16::from(b'}') => break,
                 _ => self.back(),
             }
-            let key = self.value()?.java_string();
+            let key = self.value(Keep::All)?.java_string();
             if self.next_clean() != u16::from(b':') {
                 return Err(self.error("Expected a ':' after a key"));
             }
             if object.get(&key).is_some() {
                 return Err(self.error(&format!("Duplicate key \"{key}\"")));
             }
-            let value = self.value()?;
+            let value = match keep {
+                Keep::Key(wanted) if wanted == key => self.value(Keep::All)?,
+                Keep::All => self.value(Keep::All)?,
+                Keep::Key(_) | Keep::Nothing => self.value(Keep::Nothing)?,
+            };
             object.put(key, value);
             match self.next_clean() {
                 c if c == u16::from(b';') || c == u16::from(b',') => {
                     if self.next_clean() == u16::from(b'}') {
-                        return Ok(object);
+                        break;
                     }
                     self.back();
                 }
-                c if c == u16::from(b'}') => return Ok(object),
+                c if c == u16::from(b'}') => break,
                 _ => return Err(self.error("Expected a ',' or '}'")),
             }
         }
+        self.depth -= 1;
+        Ok(object)
     }
 
-    /// `new JSONArray(tokener)`.
-    fn array(&mut self) -> Result<Vec<JValue>, String> {
+    /// `new JSONArray(tokener)`; its elements only if `keep`.
+    fn array(&mut self, keep: bool) -> Result<Vec<JValue>, String> {
         if self.next_clean() != u16::from(b'[') {
             return Err(self.error("A JSONArray text must start with '['"));
         }
+        self.enter()?;
         let mut items = Vec::new();
         let c = self.next_clean();
         if c == 0 {
             return Err(self.error("Expected a ',' or ']'"));
         }
-        if c == u16::from(b']') {
-            return Ok(items);
-        }
-        self.back();
-        loop {
-            if self.next_clean() == u16::from(b',') {
-                self.back();
-                items.push(JValue::Null);
-            } else {
-                self.back();
-                items.push(self.value()?);
-            }
-            match self.next_clean() {
-                0 => return Err(self.error("Expected a ',' or ']'")),
-                c if c == u16::from(b',') => {
-                    let c = self.next_clean();
-                    if c == 0 {
-                        return Err(self.error("Expected a ',' or ']'"));
-                    }
-                    if c == u16::from(b']') {
-                        return Ok(items);
-                    }
+        if c != u16::from(b']') {
+            self.back();
+            loop {
+                let item = if self.next_clean() == u16::from(b',') {
                     self.back();
+                    JValue::Null
+                } else {
+                    self.back();
+                    self.value(if keep { Keep::All } else { Keep::Nothing })?
+                };
+                if keep {
+                    items.push(item);
                 }
-                c if c == u16::from(b']') => return Ok(items),
-                _ => return Err(self.error("Expected a ',' or ']'")),
+                match self.next_clean() {
+                    0 => return Err(self.error("Expected a ',' or ']'")),
+                    c if c == u16::from(b',') => {
+                        let c = self.next_clean();
+                        if c == 0 {
+                            return Err(self.error("Expected a ',' or ']'"));
+                        }
+                        if c == u16::from(b']') {
+                            break;
+                        }
+                        self.back();
+                    }
+                    c if c == u16::from(b']') => break,
+                    _ => return Err(self.error("Expected a ',' or ']'")),
+                }
             }
         }
+        self.depth -= 1;
+        Ok(items)
     }
 
-    /// `nextValue()`.
-    fn value(&mut self) -> Result<JValue, String> {
+    /// `nextValue()`; a value not kept is `null`.
+    fn value(&mut self, keep: Keep<'_>) -> Result<JValue, String> {
+        let keep = keep.all();
         let c = self.next_clean();
         if c == u16::from(b'"') || c == u16::from(b'\'') {
-            return self.string(c).map(JValue::Str);
+            let s = self.string(c, keep)?;
+            return Ok(if keep { JValue::Str(s) } else { JValue::Null });
         }
         if c == u16::from(b'{') {
             self.back();
-            return self.object().map(JValue::Obj);
+            let object = self.object(if keep { Keep::All } else { Keep::Nothing })?;
+            return Ok(if keep {
+                JValue::Obj(object)
+            } else {
+                JValue::Null
+            });
         }
         if c == u16::from(b'[') {
             self.back();
-            return self.array().map(JValue::Arr);
+            let items = self.array(keep)?;
+            return Ok(if keep {
+                JValue::Arr(items)
+            } else {
+                JValue::Null
+            });
         }
         let mut word = Vec::new();
+        // Whether a unit above U+0020 came: the word is not blank after `trim()`.
+        let mut filled = false;
         let mut c = c;
         while c >= u16::from(b' ') && !",:]}/\\\"[{;=#".encode_utf16().any(|stop| stop == c) {
-            word.push(c);
+            filled |= c > u16::from(b' ');
+            if keep {
+                word.push(c);
+            }
             c = self.next();
         }
         if !self.eof {
             self.back();
         }
-        let word = String::from_utf16_lossy(&word);
-        // `String.trim()`: units up to U+0020 at both ends.
-        let word = word.trim_matches(|c: char| c <= ' ');
-        if word.is_empty() {
+        if !filled {
             return Err(self.error("Missing value"));
         }
-        Ok(string_to_value(word))
+        if !keep {
+            return Ok(JValue::Null);
+        }
+        let word = String::from_utf16_lossy(&word);
+        // `String.trim()`: units up to U+0020 at both ends.
+        Ok(string_to_value(word.trim_matches(|c: char| c <= ' ')))
     }
 
-    /// `nextString(quote)`.
-    fn string(&mut self, quote: u16) -> Result<String, String> {
+    /// `nextString(quote)`; the string only if `keep` (else it is checked and dropped).
+    fn string(&mut self, quote: u16, keep: bool) -> Result<String, String> {
         let mut out = Vec::new();
+        let mut push = |unit: u16| {
+            if keep {
+                out.push(unit);
+            }
+        };
         loop {
             let c = self.next();
             match c {
@@ -233,19 +339,18 @@ impl Tokener {
                 0x5c => {
                     let escaped = self.next();
                     match escaped {
-                        0x62 => out.push(0x08),
-                        0x74 => out.push(0x09),
-                        0x6e => out.push(0x0a),
-                        0x66 => out.push(0x0c),
-                        0x72 => out.push(0x0d),
+                        0x62 => push(0x08),
+                        0x74 => push(0x09),
+                        0x6e => push(0x0a),
+                        0x66 => push(0x0c),
+                        0x72 => push(0x0d),
                         0x75 => {
-                            let mut hex = Vec::with_capacity(4);
-                            for _ in 0..4 {
-                                let c = self.next();
+                            let mut hex = [0; 4];
+                            for unit in &mut hex {
+                                *unit = self.next();
                                 if self.eof {
                                     return Err(self.error("Substring bounds error"));
                                 }
-                                hex.push(c);
                             }
                             let hex = String::from_utf16_lossy(&hex);
                             // `(char) Integer.parseInt(hex, 16)`: a sign is allowed, the
@@ -253,14 +358,14 @@ impl Tokener {
                             let unit = i32::from_str_radix(&hex, 16)
                                 .map_err(|_| self.error("Illegal escape."))?
                                 as u16;
-                            out.push(unit);
+                            push(unit);
                         }
-                        0x22 | 0x27 | 0x5c | 0x2f => out.push(escaped),
+                        0x22 | 0x27 | 0x5c | 0x2f => push(escaped),
                         _ => return Err(self.error("Illegal escape.")),
                     }
                 }
                 c if c == quote => return Ok(String::from_utf16_lossy(&out)),
-                c => out.push(c),
+                c => push(c),
             }
         }
     }

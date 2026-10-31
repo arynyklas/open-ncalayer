@@ -2,12 +2,11 @@
 //! to a module.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
 
-use serde::de::{IgnoredAny, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde::Serialize;
+
+use crate::orgjson::{self, JValue};
 
 /// Version announced in the greeting. Clients may key behaviour on it, so it stays the
 /// original's value.
@@ -89,7 +88,8 @@ impl PartialEq<String> for Reply {
 }
 
 /// A module reachable through the `module` field of a request. It receives the raw request text
-/// and parses it with its own grammar; its reply is sent back as is.
+/// (through the end of its JSON object, see [`Route::Module`]) and parses it with its own
+/// grammar; its reply is sent back as is.
 pub trait Module: Send + Sync {
     fn process(&self, request: &str, add_info: &AddInfo) -> Reply;
 }
@@ -116,15 +116,19 @@ pub struct Registry {
 }
 
 /// What the server should do with an incoming text frame.
-pub enum Route {
+pub enum Route<'a> {
     /// Echo the frame back verbatim.
     Heartbeat,
-    /// Pass the frame to this module and send back its reply.
-    Module(Arc<dyn Module>),
+    /// Pass `request` to `module` and send back its reply. `request` is the frame through
+    /// the end of its JSON object: what follows it the original does not read.
+    Module {
+        module: Arc<dyn Module>,
+        request: &'a str,
+    },
     /// Reply with [`module_not_found`]. `module` is the requested name if it is a string.
     NotFound { module: Option<String> },
-    /// The frame is not a JSON object: drop the TCP connection without a close frame, as the
-    /// original does.
+    /// The frame is not a JSON object org.json reads (a key repeated in an object is an
+    /// error there): drop the TCP connection without a close frame, as the original does.
     InvalidJson,
 }
 
@@ -169,30 +173,36 @@ impl Registry {
         }
     }
 
-    /// Routes a text frame. The `module` field is read from the top-level JSON object; an absent
-    /// or `null` field selects [`DEFAULT_MODULE`], and any other non-string value matches no
-    /// module. Built-in modules go before dynamic ones.
-    pub fn route(&self, text: &str) -> Route {
+    /// Routes a text frame. The frame is read as org.json's `new JSONObject(text)` reads it
+    /// ([`orgjson::scan`]): its leniency, a key repeated in any object is an error, and the
+    /// text after the object is not read. The `module` field is read from that object; an
+    /// absent or `null` field selects [`DEFAULT_MODULE`], and any other non-string value
+    /// matches no module. Built-in modules go before dynamic ones.
+    pub fn route<'a>(&self, text: &'a str) -> Route<'a> {
         if text == HEARTBEAT {
             return Route::Heartbeat;
         }
-        let Ok(ModuleField(module)) = serde_json::from_str::<ModuleField>(text) else {
+        let Ok(scanned) = orgjson::scan(text, "module") else {
             return Route::InvalidJson;
         };
-        let (name, named) = match &module {
-            None | Some(Value::Null) => (DEFAULT_MODULE, false),
-            Some(Value::String(name)) => (name.as_str(), true),
+        let request = &text[..scanned.len];
+        let (name, named) = match &scanned.value {
+            None | Some(JValue::Null) => (DEFAULT_MODULE, false),
+            Some(JValue::Str(name)) => (name.as_str(), true),
             Some(_) => return Route::NotFound { module: None },
         };
-        if let Some(m) = self.modules.get(name) {
-            return Route::Module(Arc::clone(m));
-        }
-        match self.dynamic.as_ref().and_then(|d| d.module(name)) {
-            Some(m) => Route::Module(m),
-            None => Route::NotFound {
-                module: named.then(|| name.to_owned()),
+        let module = match self.modules.get(name) {
+            Some(m) => Arc::clone(m),
+            None => match self.dynamic.as_ref().and_then(|d| d.module(name)) {
+                Some(m) => m,
+                None => {
+                    return Route::NotFound {
+                        module: named.then(|| name.to_owned()),
+                    };
+                }
             },
-        }
+        };
+        Route::Module { module, request }
     }
 }
 
@@ -231,46 +241,4 @@ pub fn module_not_found() -> String {
 /// serialization cannot fail.
 pub(crate) fn to_json<T: Serialize>(reply: &T) -> String {
     serde_json::to_string(reply).expect("protocol replies always serialize")
-}
-
-/// The `module` field of a request. Deserializes only from a JSON object (any other JSON value is
-/// rejected) and skips every other field without building it, since requests can carry documents
-/// of tens of megabytes.
-struct ModuleField(Option<Value>);
-
-#[derive(Deserialize)]
-#[serde(field_identifier, rename_all = "lowercase")]
-enum Key {
-    Module,
-    #[serde(other)]
-    Other,
-}
-
-impl<'de> Deserialize<'de> for ModuleField {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(ModuleFieldVisitor)
-    }
-}
-
-struct ModuleFieldVisitor;
-
-impl<'de> Visitor<'de> for ModuleFieldVisitor {
-    type Value = ModuleField;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a JSON object")
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ModuleField, A::Error> {
-        let mut module = None;
-        while let Some(key) = map.next_key::<Key>()? {
-            match key {
-                Key::Module => module = Some(map.next_value::<Value>()?),
-                Key::Other => {
-                    map.next_value::<IgnoredAny>()?;
-                }
-            }
-        }
-        Ok(ModuleField(module))
-    }
 }

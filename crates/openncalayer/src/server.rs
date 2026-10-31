@@ -217,10 +217,10 @@ pub fn about_bundles(registry: &Registry, plugins: &dyn Bundles) -> Vec<(String,
         "method": "getBundles",
     })
     .to_string();
-    let Route::Module(module) = registry.route(&request) else {
+    let Route::Module { module, request } = registry.route(&request) else {
         return Vec::new();
     };
-    let reply = module.process(&request, &AddInfo::default());
+    let reply = module.process(request, &AddInfo::default());
     let Some(Ok(serde_json::Value::Object(obj))) = reply.text().map(serde_json::from_str) else {
         return Vec::new();
     };
@@ -324,9 +324,12 @@ async fn connection(
         return reply(&mut tls, &response).await;
     }
 
+    // The original takes a client frame without a mask too (RFC 6455 has the server close
+    // the connection).
     let config = WebSocketConfig::default()
         .max_message_size(Some(cfg.max_message))
-        .max_frame_size(Some(cfg.max_message));
+        .max_frame_size(Some(cfg.max_message))
+        .accept_unmasked_frames(true);
     // tungstenite reads the handshake itself: give it back the bytes already read.
     let stream = Replay::new(head, tls);
     let accepted = timeout(
