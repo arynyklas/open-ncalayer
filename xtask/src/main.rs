@@ -111,6 +111,11 @@ enum Command {
         #[arg(long)]
         vpcd: Option<String>,
     },
+    /// The watcher of the original NCALayer (`docs/dev/upstream-watch.md`).
+    Upstream {
+        #[command(subcommand)]
+        command: xtask::upstream::cli::UpstreamCommand,
+    },
     /// Build the Windows 7 programs with their app-local DLLs into `<out>/<arch>/`, run the
     /// import gate on them and, on Windows, start them there.
     Win7 {
@@ -800,6 +805,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::Upstream { command } => xtask::upstream::cli::run(command),
         Command::Win7 {
             arch,
             out,

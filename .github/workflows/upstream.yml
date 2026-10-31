@@ -1,0 +1,122 @@
+# The watcher of the original NCALayer (docs/dev/upstream-watch.md): every 6 hours the
+# `collect` job (read-only) polls the original's sites, unpacks what changed without running
+# it and emits the facts as JSON; the `publish` job (the only one that may write) commits them
+# to the `upstream` branch, opens or updates the issues and notifies the registry site.
+name: Upstream watch
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "run: collect and publish; issues-only: issues of the last entry of the upstream branch"
+        type: choice
+        options: [run, issues-only]
+        default: run
+
+permissions: {}
+
+concurrency:
+  group: upstream
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  collect:
+    if: (github.event_name == 'workflow_dispatch' && inputs.mode == 'run') || (github.event_name == 'schedule' && vars.UPSTREAM_SOURCE != 'lab')
+    runs-on: windows-2025
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.run.outputs.changed }}
+      alert: ${{ steps.run.outputs.alert }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      # A public repository: the branch is read without credentials.
+      - name: Previous state
+        run: |
+          if git ls-remote --exit-code --heads origin upstream; then
+            git fetch --depth=1 origin upstream
+            git worktree add "$RUNNER_TEMP/state" FETCH_HEAD
+          else
+            mkdir -p "$RUNNER_TEMP/state"
+          fi
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: ./.github/actions/pinned-toolchains
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: upstream-collect
+      - name: Tools
+        run: cargo xtask upstream tools --out "$RUNNER_TEMP/tools" >> "$GITHUB_ENV"
+      # The originals stay in $RUNNER_TEMP/w; only JSON goes to $RUNNER_TEMP/out.
+      - name: Collect
+        id: run
+        run: cargo xtask upstream run --dry-run --state "$RUNNER_TEMP/state" --work "$RUNNER_TEMP/w" --emit "$RUNNER_TEMP/out" --github-output "$GITHUB_OUTPUT"
+      - name: Only JSON
+        run: |
+          if find "$RUNNER_TEMP/out" -type f ! -name '*.json' | grep -q .; then
+            echo "::error::non-JSON file in the emit directory"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: steps.run.outputs.changed == 'true' || steps.run.outputs.alert == 'true'
+        with:
+          name: upstream-facts
+          path: ${{ runner.temp }}/out
+          retention-days: 3
+          if-no-files-found: error
+      - name: Cleanup
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/w"
+
+  publish:
+    needs: collect
+    if: always() && !cancelled() && (needs.collect.result == 'failure' || needs.collect.outputs.changed == 'true' || needs.collect.outputs.alert == 'true' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'issues-only'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      # The default credentials: the branch is pushed with them.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: ./.github/actions/pinned-toolchains
+      # No cache here: this job can write, and the artifact is checked, not trusted.
+      # Facts only from a collect job that finished, its JSON-only check included.
+      - uses: actions/download-artifact@v5
+        if: needs.collect.result == 'success' && (needs.collect.outputs.changed == 'true' || needs.collect.outputs.alert == 'true')
+        with:
+          name: upstream-facts
+          path: out
+      - name: Publish
+        if: needs.collect.result == 'success' && (needs.collect.outputs.changed == 'true' || needs.collect.outputs.alert == 'true')
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: cargo xtask upstream publish --from out --branch-dir "$RUNNER_TEMP/upstream"
+      - name: Issues only
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'issues-only'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cargo xtask upstream issues --branch-dir "$RUNNER_TEMP/upstream"
+      # Raised even if a step above failed.
+      - name: Alert
+        if: ${{ !cancelled() && needs.collect.result == 'failure' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: cargo xtask upstream alert --kind collect-failed --run-url "$RUN_URL"

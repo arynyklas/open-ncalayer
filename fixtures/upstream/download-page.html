@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Synthetic download page</title>
+</head>
+<body>
+<h1>Synthetic downloads</h1>
+<p>A page of our own making with the markup of a download table: links with one-time keys, each followed by its published hashes.</p>
+<table class="downloads">
+  <tr class="row">
+    <td><a href='download.php?key={{key_win}}'id='btnWin'    onclick='start();' >NCALayer для Windows 64-bit</a><br></td>
+    <td><strong>SHA1: </strong>{{sha1_win}}<br><strong>MD5: </strong>00000000000000000000000000000000<br></td>
+  </tr>
+  <tr class="row">
+    <td><a href='download.php?key={{key_mac}}'id='btnMac' class='button'>NCALayer для MacOSX</a><br></td>
+    <td><strong>SHA1: </strong>{{sha1_mac}}<br><strong>MD5: </strong>00000000000000000000000000000000<br></td>
+  </tr>
+  <tr class="row">
+    <td><a href='download.php?key={{key_lin}}'id='btnLin' class='button'>NCALayer для Linux</a><br></td>
+    <td><strong>SHA1: </strong>{{sha1_lin}}<br><strong>MD5: </strong>00000000000000000000000000000000<br></td>
+  </tr>
+  <tr class="row">
+    <td><a href='download.php?key={{key_msi}}' id='btnMsi' class='button'>NCALayer для корпоративной сети</a><br></td>
+    <td><strong>SHA1: </strong>{{sha1_msi}}<br><strong>MD5: </strong>00000000000000000000000000000000<br></td>
+  </tr>
+</table>
+<p>A document: <a href='download.php?key=1111111111111111111111111111111111111111' class='doc'>by this link</a></p>
+</body>
+</html>

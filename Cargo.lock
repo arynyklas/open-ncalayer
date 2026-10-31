@@ -7757,6 +7757,7 @@ dependencies = [
  "base64",
  "clap",
  "der 0.8.2",
+ "flate2",
  "libc",
  "minisign",
  "object",

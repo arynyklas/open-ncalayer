@@ -37,6 +37,7 @@ Documentation is written in Russian:
 - [`docs/design/update-index.md`](docs/design/update-index.md) — the update index: format, signature, choice of a version;
 - [`docs/design/tokens.md`](docs/design/tokens.md) — tokens and ID cards (experimental): families, PIN, emulator;
 - [`docs/dev/release.md`](docs/dev/release.md) — releasing a version and signing the index: the maintainer's instructions;
+- [`docs/dev/upstream-watch.md`](docs/dev/upstream-watch.md) — the watcher of the original: the `upstream` branch, issues, the fallback;
 - [`docs/original/architecture.md`](docs/original/architecture.md) — architecture of the original NCALayer.
 
 ### Modules

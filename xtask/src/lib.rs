@@ -15,4 +15,5 @@ pub mod plugin;
 pub mod registry;
 pub mod sign;
 pub mod token_emu;
+pub mod upstream;
 pub mod win7;

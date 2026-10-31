@@ -139,6 +139,8 @@ jobs:
           # then serve the card to its vpcd reader. The tests wait for the card to appear;
           # one at a time, as they share the card.
           sudo systemctl stop pcscd.socket pcscd.service 2>/dev/null || true
+          # The log belongs to the runner user, not root: the redirect is meant.
+          # shellcheck disable=SC2024
           sudo pcscd --foreground --disable-polkit > pcscd.log 2>&1 &
           cargo xtask token-emu --config crates/oncl-token/tests/vpcd-kaztoken.toml \
             > token-emu.log 2>&1 &
@@ -506,3 +508,17 @@ jobs:
       - name: NCANode interop (XMLDSig, CMS)
         if: ${{ !cancelled() }}
         run: cargo xtask interop-ncanode
+
+  actionlint:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      # shellcheck comes with the runner image; actionlint runs it over the `run:` scripts.
+      - name: actionlint
+        run: |
+          curl -sSfLo actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color .github/workflows/*.yml

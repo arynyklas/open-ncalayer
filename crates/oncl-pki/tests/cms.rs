@@ -3,7 +3,10 @@
 
 use der::asn1::{AnyRef, ObjectIdentifier};
 use der::{Decode, Encode, Reader, SliceReader, Tagged};
-use oncl_pki::cms::{CmsError, SignOptions, sign, signer_count, signer_index_of, to_pem, verify};
+use oncl_pki::cms::{
+    CmsError, SignOptions, certificates, content, sign, signer_count, signer_index_of, to_pem,
+    verify,
+};
 use oncl_pki::info::cert_info;
 use oncl_pki::key::{KeyError, SigAlg};
 use oncl_pki::pkcs12::{KeyEntry, load};
@@ -529,4 +532,33 @@ fn signers_are_found_by_certificate() {
         signer_index_of(b"d", &gost.cert),
         Err(CmsError::Malformed(_))
     ));
+}
+
+#[test]
+fn certificates_lists_signer_cert() {
+    let gost = entry("user-gost2015-sign");
+    let one = sign(&gost, b"d", &opts(true)).unwrap();
+    assert_eq!(certificates(&one), Ok(vec![gost.cert.clone()]));
+    let two = sign(&entry("user-rsa-sign"), &one, &opts(true)).unwrap();
+    assert_eq!(certificates(&two).unwrap().len(), 2);
+    // BER with indefinite lengths is read too.
+    assert_eq!(
+        certificates(&to_ber_indefinite(&one)),
+        Ok(vec![gost.cert.clone()])
+    );
+    assert!(matches!(certificates(b"d"), Err(CmsError::Malformed(_))));
+}
+
+#[test]
+fn content_is_the_encapsulated_bytes() {
+    let gost = entry("user-gost2015-sign");
+    let attached = sign(&gost, b"payload", &opts(true)).unwrap();
+    assert_eq!(content(&attached), Ok(Some(b"payload".to_vec())));
+    assert_eq!(
+        content(&to_ber_indefinite(&attached)),
+        Ok(Some(b"payload".to_vec()))
+    );
+    let detached = sign(&gost, b"payload", &opts(false)).unwrap();
+    assert_eq!(content(&detached), Ok(None));
+    assert!(matches!(content(b"d"), Err(CmsError::Malformed(_))));
 }
