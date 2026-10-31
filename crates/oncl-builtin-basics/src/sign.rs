@@ -1,7 +1,6 @@
 //! `PKIExtras.sign`: the arguments as the original reads them with org.json, then the
 //! storage → key → sign flow of the core's windows.
 
-use crate::Core;
 use crate::args::{
     STORAGES, class_cast, encode_base64, get_array, get_object, get_string, json_exception, locale,
     null_pointer, opt_bool, pem, pem_or_base64, storage_list,
@@ -10,12 +9,13 @@ use crate::failures::{
     certificate_parsing_failure, cms_failure, invalid_signing_params, key_failure, signing_failure,
     tsp_failure, xml_failure,
 };
+use crate::{CallResult, Core};
 use oncl_pdk::abi::{
     Action, Bytes, CmsCerts, CmsContent, CmsOutcome, CmsOutput, CoSign, Filter, FlowArgs,
     FlowChecks, FlowFile, FlowNone, FlowOrder, FlowReaders, FlowStart, SignCmsExArgs, SignedAttrs,
     SigningTime, TimeForm, TimeSource, TsaChoice,
 };
-use oncl_pdk::invoker::{CallResult, Failure};
+use oncl_pdk::invoker::Failure;
 use oncl_pdk::javaexc::Throwable;
 use oncl_pdk::orgjson::opt_string;
 use oncl_pdk::serde_json::{Map, Value, json};

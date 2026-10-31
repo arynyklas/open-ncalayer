@@ -61,7 +61,7 @@ pub trait NlClass: Send + Sync {
 /// parse, or whose `method` is missing or not a string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BadRequest {
-    /// `GENERAL_ERROR` without `details`, as the built-in modules answer.
+    /// `GENERAL_ERROR` without `details`, as [`super::invoke`] answers.
     Reply,
     /// No reply: the exception left the module, the connection is dropped.
     Drop,

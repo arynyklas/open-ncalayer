@@ -1338,17 +1338,113 @@ fn param_errors() {
     );
 }
 
+/// `CommonResponse` as org.json writes it: `body,status` and `code,details,message,status`.
 #[test]
-fn missing_args_is_a_general_error() {
+fn invoker_reply_key_order_success_and_failure() {
+    let (b, _) = basics(script![Step::CancelStorage]);
+    assert_eq!(
+        b.process(&req(raw_args(json!("u-1"), json!({}))), &origin("o")),
+        r#"{"body":{},"status":true}"#
+    );
+    let (b, _) = basics(script![]);
+    assert_eq!(
+        b.process(
+            &req(raw_args(json!("Q"), json!({"decode": true}))),
+            &origin("o")
+        ),
+        r#"{"code":"SIGNING_FAILURE","details":"java.lang.IllegalArgumentException: Input byte[] should at least have 2 bytes for base64 bytes","message":"Signing has failed.","status":false}"#
+    );
+}
+
+/// `details` is `Throwable.toString()`: the exception's class, then its message.
+#[test]
+fn failure_details_have_exception_class() {
+    let (b, p) = basics(script![]);
+    for api_version in [json!(1), json!(3), json!("3")] {
+        assert_eq!(
+            b.process(
+                &json!({"module": MODULE_NAME, "apiVersion": api_version, "method": "sign", "args": {}})
+                    .to_string(),
+                &origin("o"),
+            ),
+            r#"{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: Supported apiVersion is 2","message":"General error.","status":false}"#
+        );
+    }
+    assert!(p.storage_prompts().is_empty());
+}
+
+/// An unknown class (`optString`: a number is its text; names match with case) is a
+/// `GENERAL_ERROR` with its `IllegalArgumentException`.
+#[test]
+fn unknown_class_details() {
+    let (b, p) = basics(script![]);
+    for (class, name) in [
+        (json!("NoClass"), "NoClass"),
+        (json!("pkiextras"), "pkiextras"),
+        (json!(7), "7"),
+    ] {
+        assert_eq!(
+            b.process(
+                &json!({"module": MODULE_NAME, "class": class, "method": "sign", "args": {}})
+                    .to_string(),
+                &origin("o"),
+            ),
+            format!(
+                r#"{{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: {name} is not found","message":"General error.","status":false}}"#
+            )
+        );
+    }
+    assert!(p.storage_prompts().is_empty());
+}
+
+#[test]
+fn method_without_args_demands_arguments() {
     for request in [
         json!({"module": MODULE_NAME, "method": "sign"}),
         json!({"module": MODULE_NAME, "method": "sign", "args": ["x"]}),
         json!({"module": MODULE_NAME, "class": "PKIExtras", "method": "sign", "args": null}),
+        json!({"module": MODULE_NAME, "class": "", "method": "sign", "args": "{}"}),
     ] {
         let (b, p) = basics(script![]);
         assert_eq!(
             b.process(&request.to_string(), &origin("o")),
             r#"{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: sign demands arguments","message":"General error.","status":false}"#
+        );
+        assert!(p.storage_prompts().is_empty());
+    }
+}
+
+/// A request without a string `method` fails before the dispatcher: a `GENERAL_ERROR` whose
+/// `details` is org.json's `JSONException`, not a dropped connection.
+#[test]
+fn missing_method_is_a_general_error_with_the_json_exception() {
+    let not_found = r#"{"code":"GENERAL_ERROR","details":"org.json.JSONException: JSONObject[\"method\"] not found.","message":"General error.","status":false}"#;
+    let not_a_string = r#"{"code":"GENERAL_ERROR","details":"org.json.JSONException: JSONObject[\"method\"] is not a string.","message":"General error.","status":false}"#;
+    for (request, reply) in [
+        (json!({"module": MODULE_NAME}), not_found),
+        (json!({"module": MODULE_NAME, "args": {}}), not_found),
+        (
+            json!({"module": MODULE_NAME, "apiVersion": 3, "class": "NoClass"}),
+            not_found,
+        ),
+        (
+            json!({"module": MODULE_NAME, "method": null, "args": {}}),
+            not_a_string,
+        ),
+        (
+            json!({"module": MODULE_NAME, "method": 7, "args": {}}),
+            not_a_string,
+        ),
+        (
+            json!({"module": MODULE_NAME, "method": ["sign"], "args": {}}),
+            not_a_string,
+        ),
+    ] {
+        let (b, p) = basics(script![]);
+        assert_eq!(
+            b.process(&request.to_string(), &origin("o")),
+            reply,
+            "{request}"
         );
         assert!(p.storage_prompts().is_empty());
     }
@@ -1386,16 +1482,15 @@ fn classes() {
         r["details"],
         "java.lang.IllegalArgumentException: importCertificate is not defined in PKIExtras"
     );
-    // An unknown class (`optString`: a number is its text), the names with case.
-    for (class, name) in [(json!("NoClass"), "NoClass"), (json!(7), "7")] {
+    // The method name matches with case; an empty one matches nothing.
+    for method in ["Sign", ""] {
         assert_eq!(
             b.process(
-                &json!({"module": MODULE_NAME, "class": class, "method": "sign", "args": {}})
-                    .to_string(),
+                &json!({"module": MODULE_NAME, "method": method, "args": {}}).to_string(),
                 &origin("o"),
             ),
             format!(
-                r#"{{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: {name} is not found","message":"General error.","status":false}}"#
+                r#"{{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: {method} is not defined in PKIExtras","message":"General error.","status":false}}"#
             )
         );
     }

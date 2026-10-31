@@ -833,6 +833,32 @@ async fn oversized_frame_handled_as_observed() {
     }
 }
 
+/// A basics request without a string `method` is answered with org.json's exception, and the
+/// connection stays open.
+#[tokio::test]
+async fn basics_bad_request_as_observed() {
+    let srv = start(vec![]).await;
+    let mut ws = RawWs::connect(&srv).await;
+    for (text, reply) in [
+        (
+            r#"{"module":"kz.gov.pki.knca.basics"}"#,
+            r#"{"code":"GENERAL_ERROR","details":"org.json.JSONException: JSONObject[\"method\"] not found.","message":"General error.","status":false}"#,
+        ),
+        (
+            r#"{"args":{},"module":"kz.gov.pki.knca.basics","uuid":"u-1"}"#,
+            r#"{"code":"GENERAL_ERROR","details":"org.json.JSONException: JSONObject[\"method\"] not found.","message":"General error.","status":false}"#,
+        ),
+        (
+            r#"{"args":{},"method":null,"module":"kz.gov.pki.knca.basics"}"#,
+            r#"{"code":"GENERAL_ERROR","details":"org.json.JSONException: JSONObject[\"method\"] is not a string.","message":"General error.","status":false}"#,
+        ),
+        ("--heartbeat--", "--heartbeat--"),
+    ] {
+        ws.send_text(text).await;
+        assert_eq!(ws.text().await, reply, "{text}");
+    }
+}
+
 /// Answers with the request it gets.
 struct Echo;
 

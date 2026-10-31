@@ -20,8 +20,9 @@ use oncl_pdk::abi::{
     CertInfo, CmsOutcome, CsrChoice, CsrDialogArgs, FlowArgs, HostResult, ImportChoice,
     ImportDialogArgs, InstallCertArgs, InstalledCert, NewKey, NewKeyArgs, SignCmsExArgs,
 };
-use oncl_pdk::invoker::{self, CallResult, Failure, NlClass};
-use oncl_pdk::javaexc::Throwable;
+use oncl_pdk::invoker::Failure;
+use oncl_pdk::invoker::java::{self, BadRequest, InvokeOptions, NlClass, NlMethod};
+use oncl_pdk::orgjson::{JObject, JValue};
 use oncl_pdk::serde_json::{Map, Value};
 use oncl_pdk::{AddInfo, Locale};
 
@@ -71,64 +72,106 @@ pub trait Core {
     fn install_cert(&self, args: &InstallCertArgs) -> HostResult<InstalledCert>;
 }
 
-/// The reply to `request` from the page of `add_info`.
+/// The reply to `request` from the page of `add_info`. A request without a string `method`
+/// is a `GENERAL_ERROR` whose `details` is org.json's exception, as the original answers it.
 pub fn handle(core: &(impl Core + Sync), request: &str, add_info: &AddInfo) -> String {
-    invoker::invoke(request, add_info, &[&PkiExtras(core), &PkiEssentials(core)])
+    java::invoke_with(
+        request,
+        add_info,
+        &[&PkiExtras(core), &PkiEssentials(core)],
+        &InvokeOptions {
+            bad_request: BadRequest::CatchAll,
+        },
+    )
+    .into_text()
+    .expect("the dispatcher answers every request")
+}
+
+/// What a method of the module returns: the reply's `body`, or a failure.
+type CallResult = Result<Value, Failure>;
+
+/// `body` as the module writes it: the keys of its objects in the order the method put them.
+fn body(value: Value) -> JValue {
+    match value {
+        Value::Object(map) => {
+            let mut object = JObject::stringer();
+            for (key, value) in map {
+                object.put(key, body(value));
+            }
+            JValue::Obj(object)
+        }
+        Value::Array(items) => JValue::Arr(items.into_iter().map(body).collect()),
+        other => JValue::from(other),
+    }
 }
 
 /// `PKIExtras`, the default class.
 struct PkiExtras<'a, C>(&'a C);
+
+/// `PKIExtras.sign(args, addInfo)`.
+const EXTRAS_METHODS: &[NlMethod] = &[NlMethod {
+    name: "sign",
+    annotation: None,
+    params: 2,
+}];
 
 impl<C: Core + Sync> NlClass for PkiExtras<'_, C> {
     fn class_name(&self) -> &'static str {
         "PKIExtras"
     }
 
+    fn methods(&self) -> &'static [NlMethod] {
+        EXTRAS_METHODS
+    }
+
     fn call(
         &self,
-        method: &str,
+        _: &NlMethod,
         args: Option<&Map<String, Value>>,
         _: &AddInfo,
-    ) -> Option<CallResult> {
-        match method {
-            "sign" => Some(match args {
-                Some(args) => sign::sign(self.0, args),
-                None => Err(demands_arguments(method)),
-            }),
-            _ => None,
-        }
+    ) -> java::CallResult {
+        let args = args.expect("sign has parameters");
+        sign::sign(self.0, args).map(body)
     }
 }
 
 /// `PKIEssentials`, reachable only by name.
 struct PkiEssentials<'a, C>(&'a C);
 
+/// `PKIEssentials.generateCsr(args)` and `importCertificate(args)`.
+const ESSENTIALS_METHODS: &[NlMethod] = &[
+    NlMethod {
+        name: "generateCsr",
+        annotation: None,
+        params: 1,
+    },
+    NlMethod {
+        name: "importCertificate",
+        annotation: None,
+        params: 1,
+    },
+];
+
 impl<C: Core + Sync> NlClass for PkiEssentials<'_, C> {
     fn class_name(&self) -> &'static str {
         "PKIEssentials"
     }
 
+    fn methods(&self) -> &'static [NlMethod] {
+        ESSENTIALS_METHODS
+    }
+
     fn call(
         &self,
-        method: &str,
+        method: &NlMethod,
         args: Option<&Map<String, Value>>,
         _: &AddInfo,
-    ) -> Option<CallResult> {
-        let call = match method {
-            "generateCsr" => essentials::generate_csr::<C>,
-            "importCertificate" => essentials::import_certificate::<C>,
-            _ => return None,
-        };
-        Some(match args {
-            Some(args) => call(self.0, args),
-            None => Err(demands_arguments(method)),
-        })
+    ) -> java::CallResult {
+        let args = args.expect("the methods have parameters");
+        match method.name {
+            "generateCsr" => essentials::generate_csr(self.0, args),
+            _ => essentials::import_certificate(self.0, args),
+        }
+        .map(body)
     }
-}
-
-/// `CommonInvoker`'s answer to a defined method called without an `args` object.
-fn demands_arguments(method: &str) -> Failure {
-    Failure::General(Some(
-        Throwable::iae(format!("{method} demands arguments")).to_string(),
-    ))
 }

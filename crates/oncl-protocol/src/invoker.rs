@@ -7,9 +7,10 @@
 //! A failure of the dispatcher itself has its `IllegalArgumentException` as `details`
 //! (`Throwable.toString()`). `uuid` is never echoed.
 //!
-//! [`invoke`] is the built-in modules' dialect. [`java`] is the original's dispatcher to the
-//! byte: org.json parsing, the key order of Java's `HashMap` inside `body` too, and what
-//! happens to a request that fails before the dispatcher's `try`.
+//! [`invoke`] reads the request with `serde_json` and writes the objects of `body` in the
+//! order the method put their keys. [`java`] is the original's dispatcher to the byte, which
+//! the basics module answers with: org.json parsing, the key order of Java's `HashMap` inside
+//! `body` too, and what happens to a request that fails before the dispatcher's `try`.
 
 pub mod java;
 
