@@ -53,16 +53,6 @@ pub enum Backend {
     Wasm,
 }
 
-/// The implementation [`BACKEND_VAR`] names, [`Backend::Wasm`] when it is not set. A
-/// module without a guest yet is native unless the variable names one.
-///
-/// # Panics
-///
-/// When the variable holds anything but `native` or `wasm`.
-pub fn backend() -> Backend {
-    from_env().unwrap_or(Backend::Wasm)
-}
-
 fn from_env() -> Option<Backend> {
     match std::env::var(BACKEND_VAR) {
         Ok(v) if v == "native" => Some(Backend::Native),
