@@ -583,6 +583,44 @@ fn busy_pool_is_bounded() {
     assert_eq!(b.idle(BUILTIN_MODULE), Some(1));
 }
 
+/// `check` instantiates: a module that compiles but does not instantiate fails it, as it
+/// would fail the daemon's load.
+#[test]
+fn check_instantiates_the_modules() {
+    let manifest = builtin_manifest("");
+    let good = answering("ok");
+    let abi = "(func (export \"oncl_abi_version\") (result i32) (i32.const 1))";
+    assert!(good.contains(abi));
+    for wat in [
+        good.replace(
+            abi,
+            "(func (export \"oncl_abi_version\") (result i32) (i32.const 99))",
+        ),
+        good.replace(
+            "(memory (export \"memory\") 2)",
+            "(memory (export \"memory\") 40000)",
+        ),
+    ] {
+        assert_ne!(wat, good);
+        let wasm = wasm(&wat);
+        let source = BuiltinSource {
+            manifest: &manifest,
+            wasm: &wasm,
+        };
+        let engine = Engine::new();
+        engine
+            .compile(&Manifest::from_toml_builtin(&manifest).unwrap(), &wasm)
+            .unwrap();
+        assert!(Builtins::check(&engine, &[source]).is_err(), "{wat}");
+    }
+    let wasm = wasm(&good);
+    let source = BuiltinSource {
+        manifest: &manifest,
+        wasm: &wasm,
+    };
+    assert_eq!(Builtins::check(&Engine::new(), &[source]).unwrap().len(), 1);
+}
+
 #[test]
 fn load_refuses_too_many_modules() {
     let manifest = builtin_manifest("");

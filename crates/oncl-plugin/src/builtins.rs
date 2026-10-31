@@ -18,7 +18,16 @@
 
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+
+use oncl_basics::{
+    Busy, BusyPrompt, ChoiceAnswer, ChoicePrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FilePrompt,
+    ImportAnswer, ImportPrompt, KeyPrompt, MessagePrompt, PasswordPrompt, PathPrompt, Prompt,
+    Prompter, ReaderPrompt, RecentPathStore, SavePrompt, StorageAnswer, StoragePrompt,
+};
+use oncl_pki::http::{HttpError, HttpReply, HttpRequest, HttpTransport};
+use zeroize::Zeroizing;
 
 use oncl_protocol::{AddInfo, Module, Reply};
 use semver::Version;
@@ -195,23 +204,43 @@ impl Builtins {
         Ok(names)
     }
 
-    /// The modules of `sources`, checked without running them: their manifests read and
-    /// their code compiled with `engine` against the ABI.
+    /// The modules of `sources`, checked without serving anything: their manifests read,
+    /// their code compiled with `engine` against the ABI, and each instantiated once within
+    /// the default [`BuiltinLimits`] (its ABI version and initialisation checked) with
+    /// services that show no window and reach no network, then dropped.
     ///
     /// # Errors
     ///
-    /// The [`LoadError`] of the first module that does not compile, or
-    /// [`LoadError::ModuleTaken`] for a module two of them serve.
+    /// The [`LoadError`] of the first module that does not load,
+    /// [`LoadError::ModuleTaken`] for a module two of them serve, or [`LoadError::Invalid`]
+    /// for more than [`BUILTIN_MAX_MODULES`] modules.
     pub fn check(
         engine: &Engine,
         sources: &[BuiltinSource<'_>],
     ) -> Result<Vec<BuiltinInfo>, LoadError> {
+        too_many(sources)?;
+        let services = HostServices::new(
+            Arc::new(Inert),
+            Arc::new(Inert),
+            Arc::new(Inert),
+            oncl_token::Tokens::disabled(),
+        );
         let mut owners = HashMap::new();
         let mut checked = Vec::new();
         for source in sources {
             let manifest = manifest(source)?;
             claim(&mut owners, &manifest)?;
-            engine.compile(&manifest, source.wasm)?;
+            let compiled = engine
+                .compile(&manifest, source.wasm)?
+                .with_limits(BuiltinLimits::default().instance);
+            let ctx = SessionContext {
+                session: 0,
+                plugin_id: manifest.id.clone(),
+                plugin_name: manifest.name.clone(),
+                shared: Arc::default(),
+                trust: Trust::Builtin,
+            };
+            drop(compiled.instantiate(&services, ctx)?);
             checked.push(info(manifest, source));
         }
         Ok(checked)
@@ -237,11 +266,7 @@ impl Builtins {
             core: hooks,
             ..services
         };
-        if sources.len() > BUILTIN_MAX_MODULES {
-            return Err(LoadError::Invalid(format!(
-                "more than {BUILTIN_MAX_MODULES} built-in modules"
-            )));
-        }
+        too_many(sources)?;
         let limits = BuiltinLimits {
             max_live: limits.max_live.max(1),
             ..limits
@@ -479,5 +504,88 @@ impl Module for Pool {
             lease.keep(instance);
         }
         reply
+    }
+}
+
+/// [`LoadError::Invalid`] for more than [`BUILTIN_MAX_MODULES`] `sources`.
+fn too_many(sources: &[BuiltinSource<'_>]) -> Result<(), LoadError> {
+    if sources.len() > BUILTIN_MAX_MODULES {
+        return Err(LoadError::Invalid(format!(
+            "more than {BUILTIN_MAX_MODULES} built-in modules"
+        )));
+    }
+    Ok(())
+}
+
+/// The services of [`Builtins::check`]: every window cancelled, no recent path, no network.
+struct Inert;
+
+impl Prompter for Inert {
+    fn storage(&self, _: &StoragePrompt) -> Prompt<StorageAnswer> {
+        Prompt::Cancelled
+    }
+
+    fn busy(&self, _: &BusyPrompt) -> Busy {
+        Busy::none()
+    }
+
+    fn key(&self, _: &KeyPrompt) -> Prompt<usize> {
+        Prompt::Cancelled
+    }
+
+    fn csr(&self, _: &CsrPrompt) -> Prompt<CsrAnswer> {
+        Prompt::Cancelled
+    }
+
+    fn import_cert(&self, _: &ImportPrompt) -> Prompt<ImportAnswer> {
+        Prompt::Cancelled
+    }
+
+    fn file(&self, _: &FilePrompt) -> Prompt<PathBuf> {
+        Prompt::Cancelled
+    }
+
+    fn password(&self, _: &PasswordPrompt) -> Prompt<Zeroizing<String>> {
+        Prompt::Cancelled
+    }
+
+    fn message(&self, _: &MessagePrompt) -> Prompt<()> {
+        Prompt::Cancelled
+    }
+
+    fn confirm(&self, _: &ConfirmPrompt) -> Prompt<bool> {
+        Prompt::Cancelled
+    }
+
+    fn save_file(&self, _: &SavePrompt) -> Prompt<PathBuf> {
+        Prompt::Cancelled
+    }
+
+    fn choice(&self, _: &ChoicePrompt) -> Prompt<ChoiceAnswer> {
+        Prompt::Cancelled
+    }
+
+    fn path(&self, _: &PathPrompt) -> Prompt<PathBuf> {
+        Prompt::Cancelled
+    }
+
+    fn reader(&self, _: &ReaderPrompt) -> Prompt<String> {
+        Prompt::Cancelled
+    }
+}
+
+impl RecentPathStore for Inert {
+    fn load(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn save(&self, _: &Path) {}
+}
+
+impl HttpTransport for Inert {
+    fn send(&self, _: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        Err(HttpError::other(
+            "a built-in module's check reaches no network",
+        ))
     }
 }
