@@ -7,8 +7,10 @@
 use crate::caps::{DialogTurn, SharedState};
 use crate::host::{self, HostServices, HostState, Phase};
 use crate::manifest::{Capabilities, Localized, Manifest};
-use oncl_pdk::abi::{self, ABI_VERSION, Capability, IMPORT_MODULE, Import, Input, Output, exports};
+use oncl_pdk::abi::{self, ABI_VERSION, Capability, IMPORT_MODULE, Import, Output, exports};
 use oncl_protocol::{AddInfo, Reply, SessionId};
+use serde::Serialize;
+use std::borrow::Cow;
 use std::sync::Arc;
 use wasmi::{
     CompilationMode, Config, EnforcedLimits, ExternType, FuncType, Linker, Memory, Module, Store,
@@ -514,21 +516,28 @@ impl Instance {
         add_info: &AddInfo,
         locale: oncl_flows::Locale,
     ) -> Result<String, PluginError> {
+        let max = self.limits.max_transfer;
         let (request, data_prefix) = match self.store.data_mut().call.data.as_mut() {
             Some(data) => (
-                data.keep_request(request)
+                data.keep_request(request, max)
                     .map_err(|e| PluginError::Output(e.message))?,
                 Some(data.prefix().to_owned()),
             ),
-            None => (request.to_owned(), None),
+            None => (Cow::Borrowed(request), None),
         };
-        let input = abi::encode(&Input {
-            request,
-            origin: add_info.origin.clone(),
-            locale: locale_code(locale).to_owned(),
-            data_prefix,
+        // The input is longer than its request: one that is over the limit is refused
+        // before it is encoded.
+        if request.len() > max {
+            return Err(PluginError::TooLarge);
+        }
+        let input = abi::encode(&InputRef {
+            request: &request,
+            origin: add_info.origin.as_deref(),
+            locale: locale_code(locale),
+            data_prefix: data_prefix.as_deref(),
         });
-        let len = transfer_len(input.len(), self.limits.max_transfer)?;
+        drop(request);
+        let len = transfer_len(input.len(), max)?;
         self.store
             .set_fuel(self.limits.fuel)
             .map_err(|e| PluginError::Trap(e.to_string()))?;
@@ -589,5 +598,39 @@ fn locale_code(locale: oncl_flows::Locale) -> &'static str {
         oncl_flows::Locale::Ru => "ru",
         oncl_flows::Locale::Kk => "kk",
         oncl_flows::Locale::En => "en",
+    }
+}
+
+/// [`abi::Input`] by reference, encoded to the same bytes: the request is not copied to be
+/// encoded.
+#[derive(Serialize)]
+struct InputRef<'a> {
+    request: &'a str,
+    origin: Option<&'a str>,
+    locale: &'a str,
+    data_prefix: Option<&'a str>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_by_reference_encodes_as_input() {
+        for (origin, data_prefix) in [(None, None), (Some("https://x.kz"), Some("oncl-data:ab:"))] {
+            let by_reference = abi::encode(&InputRef {
+                request: r#"{"a":"б"}"#,
+                origin,
+                locale: "kk",
+                data_prefix,
+            });
+            let owned = abi::encode(&abi::Input {
+                request: r#"{"a":"б"}"#.to_owned(),
+                origin: origin.map(str::to_owned),
+                locale: "kk".to_owned(),
+                data_prefix: data_prefix.map(str::to_owned),
+            });
+            assert_eq!(by_reference, owned);
+        }
     }
 }

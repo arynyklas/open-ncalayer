@@ -33,6 +33,7 @@ use oncl_pdk::abi::{
 };
 use oncl_pki::cms::Content;
 use oncl_protocol::orgjson::{quote, quoted_len};
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -129,11 +130,22 @@ impl CallData {
     }
 
     /// `request` with its long string values kept and replaced by their markers (see the
-    /// module's documentation); as it is if it is not valid JSON or they add up to less
-    /// than [`DATA_KEPT_MIN`].
-    pub(crate) fn keep_request(&mut self, request: &str) -> HostResult<String> {
+    /// module's documentation); as it is, not copied, if it is not valid JSON or they add
+    /// up to less than [`DATA_KEPT_MIN`].
+    ///
+    /// # Errors
+    ///
+    /// `limit`, before anything is kept or copied, if the request with its markers would be
+    /// over `max` bytes (what may be passed to the module), or the data and what each kept
+    /// string takes besides its bytes ([`KEPT_ENTRY_COST`]) would be over what this call
+    /// or all calls may keep.
+    pub(crate) fn keep_request<'a>(
+        &mut self,
+        request: &'a str,
+        max: usize,
+    ) -> HostResult<Cow<'a, str>> {
         if request.len() < DATA_KEPT_MIN || serde_json::from_str::<Strict>(request).is_err() {
-            return Ok(request.to_owned());
+            return Ok(Cow::Borrowed(request));
         }
         let bytes = request.as_bytes();
         // A large request may be a batch of many short documents: they are kept too.
@@ -142,29 +154,29 @@ impl CallData {
         } else {
             DATA_KEPT_STRING_MIN
         };
-        // The long string values: where they start and end, quotes included.
-        let mut long = Vec::new();
-        let mut total = 0usize;
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] != b'"' {
-                i += 1;
-                continue;
-            }
-            let end = string_end(bytes, i);
-            if end - i - 2 >= shortest && !is_key(bytes, end) {
-                long.push((i, end));
-                total += end - i - 2;
-            }
-            i = end;
-        }
+        // The long string values: how many, and how long together with their quotes.
+        let (count, total, replaced) = long_strings(bytes, shortest, |_, _| {});
         if total < DATA_KEPT_MIN {
-            return Ok(request.to_owned());
+            return Ok(Cow::Borrowed(request));
         }
         // Each marker is the prefix, at most 10 digits and its quotes.
-        let replaced: usize = long.iter().map(|(start, end)| end - start).sum();
-        let mut out =
-            String::with_capacity(request.len() - replaced + long.len() * (self.prefix.len() + 12));
+        let out_len = request.len() - replaced + count * (self.prefix.len() + 12);
+        if out_len > max {
+            return Err(limit(format!(
+                "the request would be {out_len} bytes with its data kept, over {max}"
+            )));
+        }
+        let room = crate::BUILTIN_KEPT_BUDGET
+            .saturating_sub(KEPT.load(Ordering::Acquire))
+            .min(self.max.saturating_sub(self.bytes));
+        if total.saturating_add(count.saturating_mul(KEPT_ENTRY_COST)) > room {
+            return Err(limit(format!(
+                "{count} strings of {total} bytes are more than a call may keep"
+            )));
+        }
+        let mut long = Vec::with_capacity(count);
+        long_strings(bytes, shortest, |start, end| long.push((start, end)));
+        let mut out = String::with_capacity(out_len);
         let mut copied = 0;
         for (start, end) in long {
             let text: String = serde_json::from_str(&request[start..end])
@@ -177,7 +189,7 @@ impl CallData {
             copied = end;
         }
         out.push_str(&request[copied..]);
-        Ok(out)
+        Ok(Cow::Owned(out))
     }
 
     /// `reply` with every JSON string that is exactly a marker of this call replaced by
@@ -231,6 +243,39 @@ impl CallData {
         debug_assert_eq!(out.len(), len);
         Ok(out)
     }
+}
+
+/// What a kept string takes in the core besides its bytes: its entry in the list, the
+/// allocation's header, its place in the list of where the strings are, its marker.
+/// Counted against what a call may keep, so that a request of millions of short strings is
+/// refused before they are copied.
+const KEPT_ENTRY_COST: usize = 128;
+
+/// The string values of `bytes` (a valid JSON text) of at least `shortest` bytes between
+/// their quotes, that are not object keys: how many, their bytes together without quotes,
+/// and with quotes. `found` gets where each starts and ends, quotes included.
+fn long_strings(
+    bytes: &[u8],
+    shortest: usize,
+    mut found: impl FnMut(usize, usize),
+) -> (usize, usize, usize) {
+    let (mut count, mut total, mut replaced) = (0, 0, 0);
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        let end = string_end(bytes, i);
+        if end - i - 2 >= shortest && !is_key(bytes, end) {
+            found(i, end);
+            count += 1;
+            total += end - i - 2;
+            replaced += end - i;
+        }
+        i = end;
+    }
+    (count, total, replaced)
 }
 
 /// A JSON value checked as `serde_json` reads it into a `Value` (every escape, a lone
@@ -489,7 +534,7 @@ mod tests {
         let request = format!(
             r#"{{"short":"x","data":"{value}","list":["{value}",1],"{key}":true, "esc":"\u0041{value}"}}"#
         );
-        let kept = data.keep_request(&request).unwrap();
+        let kept = data.keep_request(&request, usize::MAX).unwrap();
         let p = data.prefix().to_owned();
         assert_eq!(
             kept,
@@ -508,8 +553,11 @@ mod tests {
         // Invalid JSON and short requests stay as they are.
         let mut data = CallData::new(usize::MAX);
         let broken = format!(r#"{{"data":"{value}""#);
-        assert_eq!(data.keep_request(&broken).unwrap(), broken);
-        assert_eq!(data.keep_request(r#"{"a":"b"}"#).unwrap(), r#"{"a":"b"}"#);
+        assert_eq!(data.keep_request(&broken, usize::MAX).unwrap(), broken);
+        assert_eq!(
+            data.keep_request(r#"{"a":"b"}"#, usize::MAX).unwrap(),
+            r#"{"a":"b"}"#
+        );
         assert!(data.kept.is_empty());
     }
 
@@ -584,7 +632,7 @@ mod tests {
             "short": shorter,
         })
         .to_string();
-        let kept = data.keep_request(&request).unwrap();
+        let kept = data.keep_request(&request, usize::MAX).unwrap();
         let p = data.prefix().to_owned();
         let markers: Vec<String> = (0..count).map(|n| format!("{p}{n}")).collect();
         assert_eq!(
@@ -599,7 +647,7 @@ mod tests {
             "short": vec![shorter.clone(); count],
         })
         .to_string();
-        assert_eq!(data.keep_request(&request).unwrap(), request);
+        assert_eq!(data.keep_request(&request, usize::MAX).unwrap(), request);
         assert!(data.kept.is_empty());
     }
 
@@ -613,7 +661,7 @@ mod tests {
             "c".repeat(DATA_KEPT_MIN),
         );
         let mut data = CallData::new(usize::MAX);
-        let kept = data.keep_request(&request).unwrap();
+        let kept = data.keep_request(&request, usize::MAX).unwrap();
         let p = data.prefix().to_owned();
         assert_eq!(
             kept,
@@ -644,7 +692,7 @@ mod tests {
         .to_string();
         assert!(request.len() > DATA_KEPT_LARGE);
         let mut data = CallData::new(usize::MAX);
-        let kept = data.keep_request(&request).unwrap();
+        let kept = data.keep_request(&request, usize::MAX).unwrap();
         let p = data.prefix().to_owned();
         let markers: Vec<String> = (0..count).map(|n| format!("{p}{n}")).collect();
         assert_eq!(
@@ -659,7 +707,7 @@ mod tests {
         let request = serde_json::json!({"data": vec![short; count / 2]}).to_string();
         assert!(request.len() <= DATA_KEPT_LARGE);
         let mut data = CallData::new(usize::MAX);
-        assert_eq!(data.keep_request(&request).unwrap(), request);
+        assert_eq!(data.keep_request(&request, usize::MAX).unwrap(), request);
     }
 
     #[test]
@@ -668,16 +716,44 @@ mod tests {
         for escape in [r"\ud800", r"\udc00", r"\ud800\u0041"] {
             let mut data = CallData::new(usize::MAX);
             let request = format!(r#"{{"data":"{value}{escape}","more":"{value}"}}"#);
-            assert_eq!(data.keep_request(&request).unwrap(), request);
+            assert_eq!(data.keep_request(&request, usize::MAX).unwrap(), request);
             assert!(data.kept.is_empty());
             // In a key too.
             let request = format!(r#"{{"k{escape}":"{value}"}}"#);
-            assert_eq!(data.keep_request(&request).unwrap(), request);
+            assert_eq!(data.keep_request(&request, usize::MAX).unwrap(), request);
         }
         // A pair is text.
         let mut data = CallData::new(usize::MAX);
         let request = format!(r#"{{"data":"{value}\ud83d\ude00"}}"#);
-        assert_ne!(data.keep_request(&request).unwrap(), request);
+        assert_ne!(data.keep_request(&request, usize::MAX).unwrap(), request);
         assert_eq!(data.kept.len(), 1);
+    }
+
+    #[test]
+    fn a_request_the_module_cannot_take_is_refused_before_anything_is_kept() {
+        // 20 000 strings of 64 bytes in a request over 1 MiB: kept, each with a marker.
+        let docs: Vec<String> = (0..20_000).map(|n| format!("{n:064}")).collect();
+        let request = serde_json::json!({ "data": docs }).to_string();
+        assert!(request.len() > DATA_KEPT_LARGE);
+        let mut data = CallData::new(usize::MAX);
+        let kept = data.keep_request(&request, usize::MAX).unwrap();
+        assert_eq!(data.kept.len(), 20_000);
+        // Refused when the request with markers may be longer than `max`: each marker is
+        // counted at its longest.
+        let mut data = CallData::new(usize::MAX);
+        let bound = request.len() - 20_000 * 66 + 20_000 * (data.prefix().len() + 12);
+        assert!(bound >= kept.len());
+        assert!(data.keep_request(&request, bound).is_ok());
+        let mut data = CallData::new(usize::MAX);
+        let e = data.keep_request(&request, bound - 1).unwrap_err();
+        assert!(e.message.contains("over"), "{}", e.message);
+        assert!(data.kept.is_empty());
+        // The strings and what each takes besides its bytes are counted against `max`.
+        let room = 20_000 * (64 + KEPT_ENTRY_COST);
+        let mut data = CallData::new(room - 1);
+        assert!(data.keep_request(&request, usize::MAX).is_err());
+        assert!(data.kept.is_empty());
+        let mut data = CallData::new(room);
+        assert!(data.keep_request(&request, usize::MAX).is_ok());
     }
 }

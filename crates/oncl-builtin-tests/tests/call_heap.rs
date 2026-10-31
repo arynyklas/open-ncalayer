@@ -134,7 +134,8 @@ fn a_request_over_the_transfer_limit_costs_no_copy() {
         ("63-byte documents", 1 << 20, 63),
         // Kept in the core, each with its entry.
         ("64-byte documents", 1 << 20, 64),
-        ("1000-byte documents", 64 << 10, 1000),
+        // More than a call may keep (256 MiB with each string's entry).
+        ("1000-byte documents", 300_000, 1000),
     ] {
         let request = batch(count, len);
         assert!(request.len() > 16 * MIB);
