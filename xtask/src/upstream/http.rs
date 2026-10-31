@@ -4,10 +4,11 @@
 //!
 //! A host is resolved once per request and every address is checked; the connection goes to
 //! exactly those addresses (no second lookup, no proxy), so a DNS answer that changes in
-//! between (DNS rebinding) cannot lead it elsewhere. A request without a [`Session`] may use
-//! any of them (the next one when one does not answer). Requests of a session go to the
-//! address the session first reached for the host: the download page keeps its PHP session
-//! on one backend of several behind the same name.
+//! between (DNS rebinding) cannot lead it elsewhere. Proxy variables are ignored for that
+//! reason ([`proxy_ignored`]). A request without a [`Session`] may use any of them (the next
+//! one when one cannot be connected to). Requests of a session go to the address the session
+//! first reached for the host: the download page keeps its PHP session on one backend of
+//! several behind the same name.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -422,8 +423,8 @@ impl Fetcher {
 
     /// One request of `url` (no redirect followed). Without a session it may go to any
     /// checked address of the host. In a session it goes to the pinned address; before one
-    /// is pinned, the checked addresses are tried in turn and the first that answers is
-    /// pinned.
+    /// is pinned, the checked addresses are tried in turn (the next one only when one cannot
+    /// be connected to) and the first that answers is pinned.
     fn call(
         &self,
         method: &str,
@@ -472,7 +473,8 @@ impl Fetcher {
                     }
                     return Ok(response);
                 }
-                Err(e) => last = ureq_error(e),
+                Err(e) if is_connect_error(&e) => last = ureq_error(e),
+                Err(e) => return Err(ureq_error(e)),
             }
         }
         Err(last)
@@ -563,6 +565,32 @@ fn read_limited(
         }
         sink(&buf[..n])?;
     }
+}
+
+/// Whether `e` is of connecting to the address (refused, unreachable, connect timeout), so
+/// that another address may still answer.
+fn is_connect_error(e: &ureq::Error) -> bool {
+    use std::io::ErrorKind;
+    match e {
+        ureq::Error::Timeout(ureq::Timeout::Connect) | ureq::Error::ConnectionFailed => true,
+        ureq::Error::Io(e) => matches!(
+            e.kind(),
+            ErrorKind::ConnectionRefused
+                | ErrorKind::HostUnreachable
+                | ErrorKind::NetworkUnreachable
+                | ErrorKind::AddrNotAvailable
+                | ErrorKind::TimedOut
+        ),
+        _ => false,
+    }
+}
+
+/// A note when a proxy variable (`HTTPS_PROXY`, `ALL_PROXY`, …) is set: the watcher
+/// connects directly, as only a direct connection goes to the addresses it checked.
+pub fn proxy_ignored() -> Option<&'static str> {
+    ureq::Proxy::try_from_env().map(|_| {
+        "note: proxy variables are ignored: the watcher connects directly to the addresses it checked"
+    })
 }
 
 fn io_error(e: std::io::Error) -> FetchError {

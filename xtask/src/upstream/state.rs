@@ -47,7 +47,8 @@ pub struct SourceState {
     pub published_sha1: Option<String>,
     /// The `hash` the manifest gives.
     pub manifest_hash: Option<String>,
-    /// Failed polls in a row.
+    /// Failures in a row: of polls; for a page link, of its downloads and of finding it on
+    /// the page.
     pub failures: u32,
     /// The outcome.
     pub status: SourceStatus,

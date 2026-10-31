@@ -3,11 +3,14 @@
 
 mod upstream_common;
 
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+
 use oncl_testkit::{fixture, read};
 use upstream_common::{
     MockServer, Response, endpoints, key, manifest_json, page_html, serve_manifest_and_page, signed,
 };
-use xtask::upstream::http::{FetchError, Fetcher, RequestCtx};
+use xtask::upstream::http::{FetchError, Fetcher, RequestCtx, Session};
 use xtask::upstream::poll::{AlertKind, Change, ModReason, PollResult, poll};
 use xtask::upstream::sources::parse_download_page;
 use xtask::upstream::state::{SourceState, SourceStatus, State};
@@ -230,14 +233,6 @@ fn page_links_are_not_requested_and_keep_their_download_status() {
         "{:?}",
         server.requests()
     );
-    // The page's session, for the run's downloads.
-    let host = xtask::upstream::http::UrlParts::parse(&server.base)
-        .unwrap()
-        .host;
-    assert_eq!(
-        r.session.lock().unwrap().cookie_header(&host).as_deref(),
-        Some("sid=synthetic")
-    );
 }
 
 #[test]
@@ -422,6 +417,37 @@ fn oversized_body_is_error_not_truncation() {
             .len(),
         2000
     );
+}
+
+#[test]
+fn session_falls_back_to_the_next_address_and_sticks_to_it() {
+    let server = MockServer::start();
+    server.route("GET", "/", Response::ok(b"page".to_vec()));
+    // Nothing listens on port 1 (and no test can bind it): connecting is refused.
+    let dead = SocketAddr::from(([127, 0, 0, 1], 1));
+    let live = SocketAddr::from(([127, 0, 0, 1], server.port));
+    let fetcher = Fetcher::for_tests().resolving_with(move |_, _| vec![dead, live]);
+    let url = format!("http://upstream.test:{}/", server.port);
+    let session = Arc::new(Mutex::new(Session::default()));
+    let ctx = RequestCtx {
+        referer: None,
+        session: Some(Arc::clone(&session)),
+    };
+    assert_eq!(fetcher.get(&url, 1024, &ctx).unwrap().body, b"page");
+    assert_eq!(
+        session.lock().unwrap().pinned("upstream.test", server.port),
+        Some(live)
+    );
+    assert_eq!(fetcher.get(&url, 1024, &ctx).unwrap().body, b"page");
+    // Without a session the connection itself moves on to the next address.
+    assert_eq!(
+        fetcher
+            .get(&url, 1024, &RequestCtx::default())
+            .unwrap()
+            .body,
+        b"page"
+    );
+    assert_eq!(server.requests().len(), 3);
 }
 
 #[test]

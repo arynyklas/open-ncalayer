@@ -6,16 +6,16 @@
 //! No request is made for the links of the page either: a `download.php?key=` key serves
 //! one request only (HEAD included), so the run downloads each with a fresh key. A link is
 //! judged by the SHA-1 published beside it; the page missing or the link absent from it
-//! counts as a failure, otherwise only the run's downloads change its status and failures.
+//! counts as a failure (and only that removes a link), otherwise only the run's downloads
+//! change its status and failures.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
 
 use oncl_pki::cert::Certificate;
 use serde::{Deserialize, Serialize};
 
 use super::artifact::{Format, TAIL_BYTES, detect_format};
-use super::http::{FetchError, Fetcher, RequestCtx, Session};
+use super::http::{FetchError, Fetcher, RequestCtx};
 use super::manifest::{Verified, verify_and_parse};
 use super::sources::{PageLink, Source, SourceKind, discover, parse_download_page, without_query};
 use super::state::{SourceState, SourceStatus, State};
@@ -125,8 +125,6 @@ pub struct PollResult {
     pub changes: Vec<Change>,
     /// Alerts.
     pub alerts: Vec<Alert>,
-    /// The session of the page, for downloads of its links.
-    pub session: Arc<Mutex<Session>>,
 }
 
 /// Polls every source; see the module documentation.
@@ -140,7 +138,6 @@ pub fn poll(
     let mut next = prev.clone();
     let mut changes = Vec::new();
     let mut alerts = Vec::new();
-    let session = Arc::new(Mutex::new(Session::default()));
     let had_baseline = prev
         .sources
         .get("manifest")
@@ -199,7 +196,6 @@ pub fn poll(
             sources: Vec::new(),
             changes,
             alerts,
-            session,
         };
     };
 
@@ -240,12 +236,10 @@ pub fn poll(
         );
     }
 
-    let page_ctx = RequestCtx {
-        referer: None,
-        session: Some(Arc::clone(&session)),
-    };
+    // Only the links and their SHA-1 are read here: the run reads the page again (in a
+    // session of its own) for the key of each download.
     let page: Option<Vec<PageLink>> = fetcher
-        .get(&endpoints.page, PAGE_MAX, &page_ctx)
+        .get(&endpoints.page, PAGE_MAX, &RequestCtx::default())
         .ok()
         .map(|p| parse_download_page(&String::from_utf8_lossy(&p.body), &endpoints.page));
     let sources = discover(&verified, page.as_deref().unwrap_or_default(), endpoints);
@@ -394,7 +388,6 @@ pub fn poll(
         sources,
         changes,
         alerts,
-        session,
     }
 }
 

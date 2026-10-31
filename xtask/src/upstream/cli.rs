@@ -178,6 +178,9 @@ pub fn run(command: UpstreamCommand) -> anyhow::Result<()> {
             super::testkit::make_fixtures(&root, embedded.as_deref())
         }
         UpstreamCommand::Poll { state, out } => {
+            if let Some(note) = super::http::proxy_ignored() {
+                eprintln!("{note}");
+            }
             let prev = State::load(&state)?;
             let result = poll(
                 &prev,
@@ -198,7 +201,12 @@ pub fn run(command: UpstreamCommand) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        UpstreamCommand::Tools { out } => super::tools::tools(&out),
+        UpstreamCommand::Tools { out } => {
+            if let Some(note) = super::http::proxy_ignored() {
+                eprintln!("{note}");
+            }
+            super::tools::tools(&out)
+        }
         UpstreamCommand::Publish { from, args } => publish_cli(&root, &from, &args),
         UpstreamCommand::Issues { entry, args } => {
             let report = issues_for_entry(entry.as_deref(), &publish_options(&root, &args)?)?;

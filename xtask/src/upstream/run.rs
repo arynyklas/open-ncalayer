@@ -5,9 +5,11 @@
 //! bodies or tool output.
 //!
 //! A key of the download page serves one request, so each page link is downloaded with a
-//! fresh one: the page is read again in the poll's session right before, and the link with
-//! the same identity is taken. Only these downloads change a page source's status and
-//! failures; a failing or refused one is tried again on every run.
+//! fresh one: right before, the page is read again in a new session (pinned to the address
+//! that answered it) and the link with the same identity is taken. Only these downloads
+//! change a page source's status and failures; a failing or refused one is tried again on
+//! every run. Failed downloads of a link still on the page stop at
+//! `FAILURES_TO_REMOVE - 1`: only its absence from the page removes it (see the poll).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,7 +29,7 @@ use super::diff::diff;
 use super::facts::{
     BundleUpdate, DistInput, Facts, FetchStatus, Updates, dist_facts, key8, merge, to_json,
 };
-use super::http::{FetchError, Fetcher, RequestCtx, Session};
+use super::http::{FetchError, Fetcher, RequestCtx, Session, proxy_ignored};
 use super::inventory::inventory;
 use super::jar::{jar_entries, jar_facts};
 use super::poll::{Alert, AlertKind, Change, ModReason, poll};
@@ -139,6 +141,9 @@ impl Logger {
 /// emit directory.
 pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
     let mut log = Logger(Vec::new());
+    if let Some(note) = proxy_ignored() {
+        log.line(note.to_owned());
+    }
     let prev_state = State::load(&opts.state_dir)?;
     let prev_facts: Option<Facts> = read_json(&opts.state_dir.join(LATEST))?;
     let prev_latest = std::fs::read(opts.state_dir.join(LATEST)).ok();
@@ -189,10 +194,6 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
     if let Ok(verified) = &polled.manifest {
         let changed: BTreeMap<&str, &Change> = polled.changes.iter().map(|c| (c.id(), c)).collect();
         let mut updates = Updates::default();
-        let page_ctx = RequestCtx {
-            referer: Some(opts.endpoints.page.clone()),
-            session: Some(Arc::clone(&polled.session)),
-        };
         let mut n = 0usize;
         for source in &polled.sources {
             let change = changed.get(source.id.as_str()).copied();
@@ -251,8 +252,8 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
                             })
                         );
                     let (url, ctx) = if page {
-                        match fresh_link(opts, source, &polled.session) {
-                            Ok(url) => (url, page_ctx.clone()),
+                        match fresh_link(opts, source) {
+                            Ok(link) => link,
                             Err(e) => {
                                 log.line(format!("fetch: {} failed: {e}", source.id));
                                 forget_and_fail(&prev_state, &mut next_state, &source.id);
@@ -444,30 +445,34 @@ fn fetch_bundle(
     )
 }
 
-/// The link of the page source `source` with a fresh key: the page read again in `session`.
-fn fresh_link(
-    opts: &RunOptions,
-    source: &Source,
-    session: &Arc<Mutex<Session>>,
-) -> Result<String, String> {
+/// The link of the page source `source` with a fresh key, and what its download goes with:
+/// the page read again in a new session, so that one backend gone quiet fails one link only.
+fn fresh_link(opts: &RunOptions, source: &Source) -> Result<(String, RequestCtx), String> {
     let ctx = RequestCtx {
         referer: None,
-        session: Some(Arc::clone(session)),
+        session: Some(Arc::new(Mutex::new(Session::default()))),
     };
     let page = opts
         .fetcher
         .get(&opts.endpoints.page, PAGE_MAX, &ctx)
         .map_err(|e| format!("download page: {e}"))?;
-    parse_download_page(&String::from_utf8_lossy(&page.body), &opts.endpoints.page)
+    let url = parse_download_page(&String::from_utf8_lossy(&page.body), &opts.endpoints.page)
         .into_iter()
         .find(|link| source.id.strip_prefix("page:") == Some(link.slug.as_str()))
         .map(|link| link.url)
-        .ok_or_else(|| "the link is gone from the download page".to_owned())
+        .ok_or_else(|| "the link is gone from the download page".to_owned())?;
+    Ok((
+        url,
+        RequestCtx {
+            referer: Some(opts.endpoints.page.clone()),
+            ..ctx
+        },
+    ))
 }
 
-/// A download of a distribution failed: what this poll saw of the source is forgotten (so
-/// the next poll reports the change again) and the failure is counted.
-fn forget_and_fail(prev: &State, state: &mut State, id: &str) {
+/// What this poll saw of a source whose download did not succeed is forgotten, so that the
+/// next poll reports the change again.
+fn forget(prev: &State, state: &mut State, id: &str) {
     if let Some(entry) = state.sources.get_mut(id) {
         let seen = prev.sources.get(id).cloned().unwrap_or_default();
         entry.size = seen.size;
@@ -476,7 +481,21 @@ fn forget_and_fail(prev: &State, state: &mut State, id: &str) {
         entry.published_sha1 = seen.published_sha1;
         entry.manifest_hash = seen.manifest_hash;
         entry.sha256 = seen.sha256;
-        super::poll::fail(entry, id);
+    }
+}
+
+/// A download of a distribution failed: [`forget`], and the failure is counted. A page link
+/// still on the page stops one short of removal (only its absence removes it), so that the
+/// state stops changing while its downloads keep failing.
+fn forget_and_fail(prev: &State, state: &mut State, id: &str) {
+    forget(prev, state, id);
+    if let Some(entry) = state.sources.get_mut(id) {
+        if id.starts_with("page:") {
+            entry.failures = (entry.failures + 1).min(FAILURES_TO_REMOVE - 1);
+            entry.status = SourceStatus::Failing;
+        } else {
+            super::poll::fail(entry, id);
+        }
     }
 }
 
@@ -496,8 +515,10 @@ fn fetch_dist(
     let page = matches!(source.kind, SourceKind::Page { .. });
     let d = match opts.fetcher.download(url, DIST_MAX, ctx, dest) {
         Ok(d) => d,
-        Err(FetchError::RefusedAddress(_)) => {
+        // A page link is not requested by the poll: its download is what finds it refused.
+        Err(FetchError::RefusedAddress(_)) if page => {
             log.line(format!("fetch: {} refused", source.id));
+            forget(prev, state, &source.id);
             if let Some(entry) = state.sources.get_mut(&source.id) {
                 entry.status = SourceStatus::Refused;
                 entry.failures = 0;
@@ -530,11 +551,7 @@ fn fetch_dist(
             entry.status = SourceStatus::Ok;
         }
     };
-    if headers_only && before.as_deref() == Some(d.sha256.as_str()) {
-        log.line(format!("fetch: {} content unchanged", source.id));
-        page_ok(state);
-        return None;
-    }
+    // Checked first: content kept as unchanged still matches the manifest and the page.
     let format = match check_artifact(&d, source) {
         Ok(f) => f,
         Err(e) => {
@@ -545,6 +562,10 @@ fn fetch_dist(
         }
     };
     page_ok(state);
+    if headers_only && before.as_deref() == Some(d.sha256.as_str()) {
+        log.line(format!("fetch: {} content unchanged", source.id));
+        return None;
+    }
     let work = dest.with_extension("d");
     let unpacked = unpack(&d.path, format, &work, &opts.tools, &opts.limits);
     let inv = match &unpacked {

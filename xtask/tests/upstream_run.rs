@@ -528,15 +528,7 @@ fn one_shot_keys_download_every_page_link() {
     assert_eq!((downloads.len(), keys.len()), (4, 4));
 
     // The state of a run whose page downloads failed (failing, 1 failure) recovers.
-    let state_path = dirs.state().join("state.json");
-    let mut state = State::load(&dirs.state()).unwrap();
-    for (id, entry) in &mut state.sources {
-        if id.starts_with("page:") {
-            entry.failures = 1;
-            entry.status = SourceStatus::Failing;
-        }
-    }
-    std::fs::write(&state_path, state.to_json()).unwrap();
+    set_pages(&dirs, 1, SourceStatus::Failing);
     server.clear_requests();
     let out = cycle(&server, &dirs, 2);
     assert!(out.entry.is_none(), "{:?}", out.log);
@@ -601,14 +593,255 @@ fn page_session_sticks_to_the_backend_of_the_page() {
     for (id, failures, status, _) in page_states(&dirs.state()) {
         assert_eq!((failures, status), (0, SourceStatus::Ok), "{id}");
     }
-    // Every page load and link of the session went to one backend.
-    let session = |s: &MockServer| {
+    // A key answers only on the backend that issued it (else `404.php`, not ok above). The
+    // rotating names sent the links' sessions to both backends.
+    let links = |s: &MockServer| {
         s.requests()
             .iter()
-            .filter(|r| r.path() == "/" || r.path() == "/download.php")
+            .filter(|r| r.path() == "/download.php")
             .count()
     };
-    let (on_a, on_b) = (session(&a), session(&b));
-    assert!(on_a == 0 || on_b == 0, "{on_a} and {on_b}");
-    assert_eq!(on_a + on_b, 1 + 4 + 4);
+    assert!(
+        links(&a) > 0 && links(&b) > 0,
+        "{} and {}",
+        links(&a),
+        links(&b)
+    );
+    assert_eq!(links(&a) + links(&b), 4);
+}
+
+/// Sets every page source of the state directory to `failures` and `status`.
+fn set_pages(dirs: &Dirs, failures: u32, status: SourceStatus) {
+    let mut state = State::load(&dirs.state()).unwrap();
+    for (id, entry) in &mut state.sources {
+        if id.starts_with("page:") {
+            entry.failures = failures;
+            entry.status = status;
+        }
+    }
+    std::fs::write(dirs.state().join("state.json"), state.to_json()).unwrap();
+}
+
+fn key_target(c: char) -> String {
+    format!("/download.php?key={}", upstream_common::key(c))
+}
+
+#[test]
+fn failing_downloads_never_remove_a_listed_link() {
+    let server = MockServer::start();
+    serve_world(&server, |j| j);
+    let dirs = Dirs::new();
+    cycle(&server, &dirs, 1);
+    let baseline = std::fs::read(dirs.state().join("latest/facts.json")).unwrap();
+    // As after a page outage: every link is downloaded again, and every key now fails.
+    set_pages(&dirs, 1, SourceStatus::Failing);
+    for (c, _) in upstream_common::PAGE_FILES {
+        server.route("GET", &key_target(c), Response::status(503));
+    }
+    for n in 2..=5 {
+        let out = cycle(&server, &dirs, n);
+        assert!(out.entry.is_none(), "{:?}", out.log);
+        assert!(
+            out.log.iter().all(|l| !l.starts_with("poll: page:")),
+            "{:?}",
+            out.log
+        );
+        let pages = page_states(&dirs.state());
+        assert_eq!(pages.len(), 4);
+        for (id, failures, status, _) in pages {
+            assert_eq!(
+                (failures, status),
+                (2, SourceStatus::Failing),
+                "{id}, run {n}"
+            );
+        }
+        if n > 2 {
+            // Capped: the state no longer changes.
+            assert_eq!(files_under(&dirs.emit(n)).unwrap(), ["run.json"], "run {n}");
+        }
+    }
+    assert_eq!(
+        std::fs::read(dirs.state().join("latest/facts.json")).unwrap(),
+        baseline
+    );
+    // Gone from the page: removed at once, with the change reported.
+    server.route("GET", "/", Response::status(503));
+    let out = cycle(&server, &dirs, 6);
+    assert!(out.entry.is_some(), "{:?}", out.log);
+    assert!(
+        out.log.contains(&"poll: page:linux removed".to_owned()),
+        "{:?}",
+        out.log
+    );
+    assert!(page_ids(&facts(&dirs.state())).is_empty());
+    for (id, _, status, _) in page_states(&dirs.state()) {
+        assert_eq!(status, SourceStatus::Gone, "{id}");
+    }
+}
+
+#[test]
+fn refused_download_of_a_changed_dist_is_reported_again() {
+    let server = MockServer::start();
+    serve_world(&server, |j| j);
+    let dirs = Dirs::new();
+    cycle(&server, &dirs, 1);
+    let old = read(fixture("upstream/installer.sh"));
+    let mut new = old.clone();
+    new.extend_from_slice(b"\n# new build\n");
+    let (old_sha, new_sha) = (sha256_hex(&old), sha256_hex(&new));
+    serve_world(&server, |j| j.replace(&old_sha, &new_sha));
+    let path = "/updates/installer.sh";
+    let modified = "poll: dist:setupsh modified:manifest_hash".to_owned();
+    // HEAD passes, the GET is sent to a private address.
+    server.route("HEAD", path, Response::ok(new.clone()));
+    server.route(
+        "GET",
+        path,
+        Response::redirect("http://10.0.0.1/installer.sh"),
+    );
+    let out = cycle(&server, &dirs, 2);
+    assert!(out.log.contains(&modified), "{:?}", out.log);
+    // The new manifest makes an entry; the distribution is still the old one.
+    assert_eq!(
+        facts(&dirs.state()).distributions["dist:setupsh"]
+            .sha256
+            .as_deref(),
+        Some(old_sha.as_str())
+    );
+    // One failed HEAD, then a good one: the change is seen again and downloaded.
+    server.route("HEAD", path, Response::status(503));
+    let out = cycle(&server, &dirs, 3);
+    assert!(
+        out.log.iter().all(|l| !l.contains("dist:setupsh")),
+        "{:?}",
+        out.log
+    );
+    server.route("HEAD", path, Response::ok(new.clone()));
+    server.route("GET", path, Response::ok(new.clone()));
+    let out = cycle(&server, &dirs, 4);
+    assert!(out.log.contains(&modified), "{:?}", out.log);
+    assert!(out.entry.is_some(), "{:?}", out.log);
+    assert_eq!(
+        facts(&dirs.state()).distributions["dist:setupsh"]
+            .sha256
+            .as_deref(),
+        Some(new_sha.as_str())
+    );
+    // Once.
+    let out = cycle(&server, &dirs, 5);
+    assert!(
+        out.log.iter().all(|l| !l.contains("dist:setupsh")),
+        "{:?}",
+        out.log
+    );
+}
+
+/// The page of the world with the SHA-1 of the Windows link set to that of `win`.
+fn page_with_win(win: &[u8]) -> String {
+    let keys: Vec<String> = upstream_common::PAGE_FILES
+        .iter()
+        .map(|(c, _)| upstream_common::key(*c))
+        .collect();
+    let mut sha1s: Vec<String> = upstream_common::PAGE_FILES
+        .iter()
+        .map(|(_, f)| upstream_common::sha1_hex(&read(fixture(&format!("upstream/{f}")))))
+        .collect();
+    sha1s[0] = upstream_common::sha1_hex(win);
+    upstream_common::page_html(
+        [&keys[0], &keys[1], &keys[2], &keys[3]],
+        [&sha1s[0], &sha1s[1], &sha1s[2], &sha1s[3]],
+    )
+}
+
+#[test]
+fn refused_page_link_then_old_file_stays_pending() {
+    let server = MockServer::start();
+    serve_world(&server, |j| j);
+    let dirs = Dirs::new();
+    cycle(&server, &dirs, 1);
+    let old = read(fixture("upstream/inno-like.exe"));
+    let mut new = old.clone();
+    new.extend_from_slice(b"new build");
+    server.route("GET", "/", Response::html(page_with_win(&new).into_bytes()));
+    let target = key_target('1');
+    server.route("GET", &target, Response::redirect("http://10.0.0.1/x.exe"));
+    let out = cycle(&server, &dirs, 2);
+    assert!(
+        out.log
+            .contains(&"poll: page:windows-64-bit modified:published_sha1".to_owned()),
+        "{:?}",
+        out.log
+    );
+    assert!(
+        out.log
+            .contains(&"fetch: page:windows-64-bit refused".to_owned())
+    );
+    let win = |dirs: &Dirs| {
+        page_states(&dirs.state())
+            .into_iter()
+            .find(|p| p.0 == "page:windows-64-bit")
+            .map(|p| (p.1, p.2))
+            .unwrap()
+    };
+    assert_eq!(win(&dirs), (0, SourceStatus::Refused));
+    // The key now serves the old file: it does not match the page, so not ok.
+    server.route("GET", &target, Response::ok(old));
+    let out = cycle(&server, &dirs, 3);
+    assert!(out.entry.is_none(), "{:?}", out.log);
+    assert_eq!(win(&dirs), (1, SourceStatus::Failing));
+    // The new file: downloaded, one entry.
+    server.route("GET", &target, Response::ok(new.clone()));
+    let out = cycle(&server, &dirs, 4);
+    assert!(out.entry.is_some(), "{:?}", out.log);
+    assert_eq!(win(&dirs), (0, SourceStatus::Ok));
+    assert_eq!(
+        facts(&dirs.state()).distributions["page:windows-64-bit"]
+            .sha256
+            .as_deref(),
+        Some(sha256_hex(&new).as_str())
+    );
+}
+
+#[test]
+fn page_reread_failure_and_missing_link_fail_that_link_only() {
+    let server = MockServer::start();
+    serve_world(&server, |j| j);
+    let page = upstream_common::world_page();
+    let without_linux = page.replace("NCALayer для Linux</a>", "</a>");
+    assert_ne!(page, without_linux);
+    // The poll's page; then, for each link in id order, the page read again.
+    server.route_seq(
+        "GET",
+        "/",
+        vec![
+            Response::html(page.into_bytes()),
+            Response::status(503),
+            Response::html(without_linux.into_bytes()),
+        ],
+    );
+    let dirs = Dirs::new();
+    let out = cycle(&server, &dirs, 1);
+    for line in [
+        "fetch: page:korporativnoy-seti failed: download page: HTTP status 503",
+        "fetch: page:linux failed: the link is gone from the download page",
+    ] {
+        assert!(out.log.contains(&line.to_owned()), "{line}: {:?}", out.log);
+    }
+    let states: Vec<_> = page_states(&dirs.state())
+        .into_iter()
+        .map(|(id, failures, status, _)| (id, failures, status))
+        .collect();
+    assert_eq!(
+        states,
+        [
+            (
+                "page:korporativnoy-seti".to_owned(),
+                1,
+                SourceStatus::Failing
+            ),
+            ("page:linux".to_owned(), 1, SourceStatus::Failing),
+            ("page:macosx".to_owned(), 0, SourceStatus::Ok),
+            ("page:windows-64-bit".to_owned(), 0, SourceStatus::Ok),
+        ]
+    );
 }
