@@ -3,12 +3,14 @@
 //! module's code never copies documents through its interpreter.
 //!
 //! - Before the call, the request's string values of at least [`DATA_KEPT_STRING_MIN`]
-//!   bytes (object keys never) are kept, once they add up to at least [`DATA_KEPT_MIN`]
-//!   bytes, and replaced by markers: the call's prefix, random and unknown to the page,
-//!   followed by a number. A string's length is that of its JSON text between the quotes,
-//!   escapes as written. Only a request that is valid JSON is rewritten (every escape is
-//!   checked, a lone surrogate is not valid); anything else reaches the module as the page
-//!   sent it. Only a module that imports a `data_*` function has its requests rewritten.
+//!   bytes, or of at least [`DATA_KEPT_SHORT_MIN`] bytes in a request longer than
+//!   [`DATA_KEPT_LARGE`] (object keys never), are kept, once they add up to at least
+//!   [`DATA_KEPT_MIN`] bytes, and replaced by markers: the call's prefix, random and
+//!   unknown to the page, followed by a number. A string's length is that of its JSON text
+//!   between the quotes, escapes as written. Only a request that is valid JSON is rewritten
+//!   (every escape is checked, a lone surrogate is not valid); anything else reaches the
+//!   module as the page sent it. Only a module that imports a `data_*` function has its
+//!   requests rewritten.
 //! - The `data_*` functions take a marker of this call wherever they take data, or the data
 //!   itself; what they make is kept and returned as a marker.
 //! - After the call, every JSON string of the reply that is exactly a marker of this call
@@ -24,9 +26,10 @@
 use super::{invalid, limit};
 use crate::host::HostState;
 use oncl_pdk::abi::{
-    Bytes, CmsContent, CmsOutcome, DATA_KEPT_MIN, DATA_KEPT_STRING_MIN, DataDecodeArgs,
-    DataDecoded, DataDecoding, DataEncodeArgs, DataEncoding, DataRef, HostResult, PagePathArgs,
-    PageRead, SignCmsExArgs, SignRawArgs, SignXmlArgs, StampArgs, StampOutcome,
+    Bytes, CmsContent, CmsOutcome, DATA_KEPT_LARGE, DATA_KEPT_MIN, DATA_KEPT_SHORT_MIN,
+    DATA_KEPT_STRING_MIN, DataDecodeArgs, DataDecoded, DataDecoding, DataEncodeArgs, DataEncoding,
+    DataRef, HostResult, PagePathArgs, PageRead, SignCmsExArgs, SignRawArgs, SignXmlArgs,
+    StampArgs, StampOutcome,
 };
 use oncl_pki::cms::Content;
 use oncl_protocol::orgjson::{quote, quoted_len};
@@ -133,6 +136,12 @@ impl CallData {
             return Ok(request.to_owned());
         }
         let bytes = request.as_bytes();
+        // A large request may be a batch of many short documents: they are kept too.
+        let shortest = if request.len() > DATA_KEPT_LARGE {
+            DATA_KEPT_SHORT_MIN
+        } else {
+            DATA_KEPT_STRING_MIN
+        };
         // The long string values: where they start and end, quotes included.
         let mut long = Vec::new();
         let mut total = 0usize;
@@ -143,7 +152,7 @@ impl CallData {
                 continue;
             }
             let end = string_end(bytes, i);
-            if end - i - 2 >= DATA_KEPT_STRING_MIN && !is_key(bytes, end) {
+            if end - i - 2 >= shortest && !is_key(bytes, end) {
                 long.push((i, end));
                 total += end - i - 2;
             }
@@ -617,6 +626,40 @@ mod tests {
             data.get(format!("{p}0").as_bytes()).unwrap(),
             format!("A{}", "a".repeat(DATA_KEPT_STRING_MIN - 6)).as_bytes()
         );
+    }
+
+    #[test]
+    fn a_large_request_keeps_its_short_values_too() {
+        // Over `DATA_KEPT_LARGE` bytes, values from `DATA_KEPT_SHORT_MIN` bytes are kept;
+        // shorter ones and keys stay.
+        let short = "s".repeat(DATA_KEPT_SHORT_MIN);
+        let shorter = "t".repeat(DATA_KEPT_SHORT_MIN - 1);
+        let key = "k".repeat(DATA_KEPT_SHORT_MIN);
+        let count = DATA_KEPT_LARGE / DATA_KEPT_SHORT_MIN;
+        let request = serde_json::json!({
+            "data": vec![short.clone(); count],
+            "shorter": shorter,
+            key.clone(): 1,
+        })
+        .to_string();
+        assert!(request.len() > DATA_KEPT_LARGE);
+        let mut data = CallData::new(usize::MAX);
+        let kept = data.keep_request(&request).unwrap();
+        let p = data.prefix().to_owned();
+        let markers: Vec<String> = (0..count).map(|n| format!("{p}{n}")).collect();
+        assert_eq!(
+            kept,
+            serde_json::json!({"data": markers, "shorter": shorter, key: 1}).to_string()
+        );
+        assert_eq!(
+            data.get(format!("{p}0").as_bytes()).unwrap(),
+            short.as_bytes()
+        );
+        // Within `DATA_KEPT_LARGE` bytes, the same values stay.
+        let request = serde_json::json!({"data": vec![short; count / 2]}).to_string();
+        assert!(request.len() <= DATA_KEPT_LARGE);
+        let mut data = CallData::new(usize::MAX);
+        assert_eq!(data.keep_request(&request).unwrap(), request);
     }
 
     #[test]

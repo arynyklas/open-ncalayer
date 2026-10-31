@@ -131,7 +131,8 @@ pub struct Input {
     pub data_prefix: Option<String>,
 }
 
-/// A request's string values of at least [`DATA_KEPT_STRING_MIN`] bytes are kept by the
+/// A request's string values of at least [`DATA_KEPT_STRING_MIN`] bytes (of
+/// [`DATA_KEPT_SHORT_MIN`] in a request longer than [`DATA_KEPT_LARGE`]) are kept by the
 /// core, and reach a built-in module as data markers, once they add up to at least this
 /// many bytes. Object keys are never kept. A request that is not valid JSON (a lone
 /// surrogate escape included) is not rewritten.
@@ -140,6 +141,15 @@ pub const DATA_KEPT_MIN: usize = 16 << 10;
 /// The shortest string value of a request that the core keeps (see [`DATA_KEPT_MIN`]): the
 /// length of its JSON text between the quotes, escapes as written.
 pub const DATA_KEPT_STRING_MIN: usize = 1 << 10;
+
+/// A request longer than this has its shorter strings kept too, from
+/// [`DATA_KEPT_SHORT_MIN`] bytes: a batch of many short documents stays in the core, not in
+/// the module's memory.
+pub const DATA_KEPT_LARGE: usize = 1 << 20;
+
+/// The shortest string value the core keeps of a request longer than [`DATA_KEPT_LARGE`]:
+/// a little longer than a marker.
+pub const DATA_KEPT_SHORT_MIN: usize = 64;
 
 /// What `oncl_process` returns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

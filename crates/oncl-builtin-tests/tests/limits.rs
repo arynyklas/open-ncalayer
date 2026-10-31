@@ -184,13 +184,25 @@ fn xml_doc(n: usize, len: usize) -> String {
     )
 }
 
+/// The documents a batch (`data` of basics, `signXmls` of commonUtils) holds within the
+/// 32-bit limits, whatever their length: what the README promises.
+const BATCH_32_BIT: usize = 50_000;
+
 #[test]
 fn batches_of_short_documents_fit() {
-    // Many documents, each shorter than a long string, add up: the core keeps them. The
-    // storage window is cancelled, so nothing is signed; the modules answer.
+    // Many documents, each shorter than a long string, add up: the core keeps them, from
+    // 64 bytes once the request is over 1 MiB; shorter ones reach the module. The storage
+    // window is cancelled, so nothing is signed; the modules answer.
     let _turn = one_large_call_at_a_time();
-    for (doc, total) in [(8 << 10, 16 * MIB), (1 << 10, 4 * MIB)] {
-        let docs: Vec<String> = (0..total / doc).map(|n| xml_doc(n, doc)).collect();
+    for (doc, count) in [
+        (8 << 10, 16 * MIB / (8 << 10)),
+        (1 << 10, 4 * MIB / (1 << 10)),
+        (1000, 8 * MIB / 1000),
+        (1000, BATCH_32_BIT),
+        (63, BATCH_32_BIT),
+    ] {
+        let total = doc * count;
+        let docs: Vec<String> = (0..count).map(|n| xml_doc(n, doc)).collect();
         let builtins = Builtins::load(
             &WasmEngine::new(),
             basics_services(0),
@@ -304,8 +316,9 @@ fn fuel_covers_max_message() {
 #[test]
 fn memory_limit_is_a_drop_not_a_hang() {
     let _turn = one_large_call_at_a_time();
-    // Over the guest's memory: data in strings short enough to reach the module itself.
-    let short: Vec<String> = (0..64 * 1024).map(|_| "A".repeat(128)).collect();
+    // Over the guest's memory: data in strings short enough to reach the module itself
+    // (under 64 bytes, which the core keeps of a large request).
+    let short: Vec<String> = (0..128 * 1024).map(|_| "A".repeat(48)).collect();
     let in_guest = json!({
         "module": MODULE_NAME,
         "method": "sign",

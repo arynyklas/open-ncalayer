@@ -46,8 +46,9 @@ pub const BUILTIN_ID_PREFIX: &str = "io.github.arynyklas.openncalayer.builtin.";
 #[cfg(target_pointer_width = "64")]
 pub const BUILTIN_MAX_MEMORY: usize = 2 << 30;
 /// The largest linear memory of a built-in module's instance: 16 MiB on 32-bit targets. The
-/// documents stay in the core (`data_*`); a call takes about 1 MiB besides the request's
-/// short strings.
+/// documents stay in the core (`data_*`), short ones too in a large request; a call takes
+/// about 1 MiB besides a few hundred bytes for each document of a batch, so a batch of
+/// 50 000 documents fits.
 #[cfg(not(target_pointer_width = "64"))]
 pub const BUILTIN_MAX_MEMORY: usize = 16 << 20;
 
