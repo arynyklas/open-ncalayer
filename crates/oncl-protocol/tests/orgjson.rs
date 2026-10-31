@@ -108,7 +108,7 @@ fn quote_matches_org_json_char_by_char() {
     for _ in 0..20_000 {
         let len = usize::try_from(next() % 12).unwrap();
         let s: String = (0..len)
-            .map(|_| ALPHABET[usize::try_from(next()).unwrap() % ALPHABET.len()])
+            .map(|_| ALPHABET[usize::try_from(next() % ALPHABET.len() as u64).unwrap()])
             .collect();
         let expected = quote_by_chars(&s);
         assert_eq!(quoted(&s), expected, "{s:?}");
