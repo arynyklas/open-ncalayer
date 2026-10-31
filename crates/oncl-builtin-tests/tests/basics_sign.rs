@@ -5,6 +5,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_builtin_tests::basics::{Basics, MODULE_NAME};
+use oncl_builtin_tests::panicking::PanicOnKey;
 use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_flows::{
     Action, Availability, Busy, BusyPrompt, ChainPolicy, CsrAnswer, CsrPrompt, DisabledReason,
@@ -896,10 +897,11 @@ fn expired_key_cannot_be_chosen() {
 }
 
 #[test]
-fn a_prompter_panic_drops_only_the_connection() {
+fn a_script_that_does_not_fit_the_window_cancels_it() {
     // The refused expired key is prompted for again, and the script answers that prompt
-    // with a storage: the scripted prompter panics. The call's connection is dropped; the
-    // module, and the process, carry on with the next call.
+    // with a storage: the window is cancelled as if the user closed it, and logged. The
+    // call gets its ordinary reply of a cancelled key dialog, not a panic; the module
+    // carries on with the next call.
     let (b, p) = basics(script![
         storage("expired-gost2015-sign", "Qwerty12"),
         key(0),
@@ -908,10 +910,50 @@ fn a_prompter_panic_drops_only_the_connection() {
         key(0)
     ]);
     let args = cms_args(json!("x"), json!({}));
-    assert_eq!(b.process(&req(args.clone()), &origin("o")), Reply::Drop);
+    let reply = b.process(&req(args.clone()), &origin("o"));
+    assert_eq!(reply, Reply::Text(r#"{"body":{},"status":true}"#.into()));
+    let mismatches = p.mismatches();
+    assert_eq!(mismatches.len(), 1, "{mismatches:?}");
+    assert!(
+        mismatches[0].contains("key prompt") && mismatches[0].contains("Storage"),
+        "{}",
+        mismatches[0]
+    );
     let r = json(b.process(&req(args), &origin("o")));
     assert_eq!(r["status"], true, "{r}");
+    assert_eq!(p.mismatches().len(), 1, "the next call fits its script");
     assert_eq!(p.key_prompts().len(), 3);
+}
+
+#[test]
+fn a_prompter_panic_drops_only_the_connection() {
+    // A window panics (a prompter's bug): that call's connection is dropped, as a native
+    // module's was. Another connection calls the same module and gets a normal answer, and
+    // so does the first one's next call: no lock the panic held, no instance it spoiled.
+    let scripted = Arc::new(ScriptedPrompter::new(script![
+        storage("user-gost2015-sign", "Qwerty12"),
+        storage("user-gost2015-sign", "Qwerty12"),
+        key(0),
+        storage("user-gost2015-sign", "Qwerty12"),
+        key(0)
+    ]));
+    let b = Basics::new(
+        Arc::new(PanicOnKey::new(scripted.clone(), 1)),
+        Arc::new(MemoryRecentPath::new(None)),
+        Arc::new(MockTsa::new(entry("tsa-gost2015"))),
+    );
+    let args = cms_args(json!("x"), json!({}));
+    assert_eq!(b.process(&req(args.clone()), &origin("o")), Reply::Drop);
+    let other = thread::scope(|s| {
+        s.spawn(|| json(b.process(&req(args.clone()), &origin("p"))))
+            .join()
+            .unwrap()
+    });
+    assert_eq!(other["status"], true, "{other}");
+    let again = json(b.process(&req(args), &origin("o")));
+    assert_eq!(again["status"], true, "{again}");
+    assert_eq!(scripted.key_prompts().len(), 2);
+    assert!(scripted.mismatches().is_empty());
 }
 
 #[test]

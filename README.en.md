@@ -479,7 +479,9 @@ cargo xtask ext build
 cargo xtask ext-e2e --download
 ```
 
-Without `--download` the paths come from `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`, `ONCL_FIREFOX_ESR` and `ONCL_GECKODRIVER`; one browser only: `--browser chromium|firefox|firefox-esr`. Firefox ESR 115 needs the system library `libdbus-glib-1-2`. The browsers run with throwaway profiles in `target/ext-e2e/`, and the host is registered there too (`nm install --sandbox`). The `e2e-prompter` feature replaces the signing dialogs with a script from the `ONCL_E2E_PROMPTER` file; regular builds do not have it. Scenario 8 removes the extension under an open page (Firefox only; in ESR 115 it checks the limitation described above).
+Without `--download` the paths come from `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`, `ONCL_FIREFOX_ESR` and `ONCL_GECKODRIVER`; one browser only: `--browser chromium|firefox|firefox-esr`. Firefox ESR 115 needs the system library `libdbus-glib-1-2`. The browsers run with throwaway profiles in `target/ext-e2e/`, and the host is registered there too (`nm install --sandbox`). The `e2e-prompter` feature replaces the signing dialogs with a script from the `ONCL_E2E_PROMPTER` file; regular builds do not have it. A script step of another kind than the window that opened (a key answer for a storage window) does not fail the call: the window is cancelled and the log gets a `… the window is cancelled` line; the page gets the ordinary reply of a cancelled dialog and the connection stays open. Scenario 8 removes the extension under an open page (Firefox only; in ESR 115 it checks the limitation described above).
+
+The built-in modules' tests (`cargo test -p oncl-builtin-tests`) also run without markers: with `ONCL_TEST_NO_MARKERS=1` the core does not replace the long strings of a request with markers, the module reads them as they are, and every test passes the same. The `markers` test compares the replies with and without markers for every string of the covered methods' requests made 20 000 bytes long (and for a batch of documents over 1 MiB).
 
 Windows 7 SP1 builds (on Windows only, with the pinned nightly):
 

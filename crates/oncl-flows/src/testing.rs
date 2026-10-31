@@ -168,15 +168,15 @@ struct State {
     choice_prompts: Vec<ChoicePrompt>,
     path_prompts: Vec<PathPrompt>,
     reader_prompts: Vec<ReaderPrompt>,
+    mismatches: Vec<String>,
 }
 
 /// A [`Prompter`] answering from a queue of [`Step`]s and recording every prompt shown. An
 /// empty queue cancels. A key prompt is answered once its OCSP checks have settled, as a
 /// user would pick from what the dialog ends up showing. Safe to share between threads.
 ///
-/// # Panics
-///
-/// A prompt panics if the next step answers another kind of prompt.
+/// A window whose next scripted step answers another kind of window is cancelled and logged
+/// (see [`ScriptedPrompter::mismatches`]), never a panic: the step is dropped.
 pub struct ScriptedPrompter {
     state: Arc<Mutex<State>>,
 }
@@ -270,8 +270,28 @@ impl ScriptedPrompter {
         self.lock().reader_prompts.clone()
     }
 
+    /// One line per window cancelled because the next scripted step answered another kind
+    /// of window; empty while the script and the flow agree.
+    pub fn mismatches(&self) -> Vec<String> {
+        self.lock().mismatches.clone()
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         lock(&self.state)
+    }
+
+    /// A window met a scripted answer of another kind: the script and the flow disagree.
+    /// Logs it, remembers it for [`ScriptedPrompter::mismatches`], and cancels the window,
+    /// so the call ends with its ordinary cancel reply instead of a panic taking the
+    /// connection down.
+    fn mismatch<T>(&self, window: &str, step: &Step) -> Prompt<T> {
+        let line = format!(
+            "ScriptedPrompter: {window} met the scripted step {}; the window is cancelled",
+            step.kind()
+        );
+        tracing::error!("{line}");
+        self.lock().mismatches.push(line);
+        Prompt::Cancelled
     }
 
     /// Records a prompt of `kind`, then takes the next answering step, waiting out `Wait`
@@ -323,10 +343,7 @@ impl Prompter for ScriptedPrompter {
                 reader: Some(reader),
             }),
             Some(Step::CancelStorage) | None => Prompt::Cancelled,
-            Some(step) => panic!(
-                "ScriptedPrompter: storage prompt answered by {}",
-                step.kind()
-            ),
+            Some(step) => self.mismatch("storage prompt", &step),
         }
     }
 
@@ -349,7 +366,7 @@ impl Prompter for ScriptedPrompter {
         match step {
             Some(Step::Key(index)) => Prompt::Answer(index),
             Some(Step::CancelKey) | None => Prompt::Cancelled,
-            Some(step) => panic!("ScriptedPrompter: key prompt answered by {}", step.kind()),
+            Some(step) => self.mismatch("key prompt", &step),
         }
     }
 
@@ -361,10 +378,7 @@ impl Prompter for ScriptedPrompter {
                 password: Zeroizing::new(password),
             }),
             Some(Step::CancelCsr) | None => Prompt::Cancelled,
-            Some(step) => panic!(
-                "ScriptedPrompter: generateCsr prompt answered by {}",
-                step.kind()
-            ),
+            Some(step) => self.mismatch("generateCsr prompt", &step),
         }
     }
 
@@ -375,12 +389,7 @@ impl Prompter for ScriptedPrompter {
                 new_password: Zeroizing::new(password),
             }),
             Some(Step::CancelImport) | None => Prompt::Cancelled,
-            Some(step) => {
-                panic!(
-                    "ScriptedPrompter: importCertificate prompt answered by {}",
-                    step.kind()
-                )
-            }
+            Some(step) => self.mismatch("importCertificate prompt", &step),
         }
     }
 
@@ -388,7 +397,7 @@ impl Prompter for ScriptedPrompter {
         match self.next("file", |s| s.file_prompts.push(p.clone())) {
             Some(Step::File(path)) => Prompt::Answer(path),
             Some(Step::CancelFile) | None => Prompt::Cancelled,
-            Some(step) => panic!("ScriptedPrompter: file chooser answered by {}", step.kind()),
+            Some(step) => self.mismatch("file chooser", &step),
         }
     }
 
@@ -396,10 +405,7 @@ impl Prompter for ScriptedPrompter {
         match self.next("password", |s| s.password_prompts.push(p.clone())) {
             Some(Step::Password(password)) => Prompt::Answer(Zeroizing::new(password)),
             Some(Step::CancelPassword) | None => Prompt::Cancelled,
-            Some(step) => panic!(
-                "ScriptedPrompter: password dialog answered by {}",
-                step.kind()
-            ),
+            Some(step) => self.mismatch("password dialog", &step),
         }
     }
 
@@ -407,7 +413,7 @@ impl Prompter for ScriptedPrompter {
         match self.next("message", |s| s.message_prompts.push(p.clone())) {
             Some(Step::Message) => Prompt::Answer(()),
             Some(Step::CancelMessage) | None => Prompt::Cancelled,
-            Some(step) => panic!("ScriptedPrompter: message answered by {}", step.kind()),
+            Some(step) => self.mismatch("message", &step),
         }
     }
 
@@ -415,7 +421,7 @@ impl Prompter for ScriptedPrompter {
         match self.next("confirm", |s| s.confirm_prompts.push(p.clone())) {
             Some(Step::Confirm { yes }) => Prompt::Answer(yes),
             Some(Step::CancelConfirm) | None => Prompt::Cancelled,
-            Some(step) => panic!("ScriptedPrompter: question answered by {}", step.kind()),
+            Some(step) => self.mismatch("question", &step),
         }
     }
 
@@ -423,7 +429,7 @@ impl Prompter for ScriptedPrompter {
         match self.next("save", |s| s.save_prompts.push(p.clone())) {
             Some(Step::Save { path }) => Prompt::Answer(path),
             Some(Step::CancelSave) | None => Prompt::Cancelled,
-            Some(step) => panic!("ScriptedPrompter: save dialog answered by {}", step.kind()),
+            Some(step) => self.mismatch("save dialog", &step),
         }
     }
 
@@ -433,7 +439,7 @@ impl Prompter for ScriptedPrompter {
                 Prompt::Answer(ChoiceAnswer { button, option })
             }
             Some(Step::CancelChoice) | None => Prompt::Cancelled,
-            Some(step) => panic!("ScriptedPrompter: choice answered by {}", step.kind()),
+            Some(step) => self.mismatch("choice", &step),
         }
     }
 
@@ -441,7 +447,7 @@ impl Prompter for ScriptedPrompter {
         match self.next("path", |s| s.path_prompts.push(p.clone())) {
             Some(Step::Path(path)) => Prompt::Answer(path),
             Some(Step::CancelPath) | None => Prompt::Cancelled,
-            Some(step) => panic!("ScriptedPrompter: path chooser answered by {}", step.kind()),
+            Some(step) => self.mismatch("path chooser", &step),
         }
     }
 
@@ -449,10 +455,7 @@ impl Prompter for ScriptedPrompter {
         match self.next("reader", |s| s.reader_prompts.push(p.clone())) {
             Some(Step::Reader(reader)) => Prompt::Answer(reader),
             Some(Step::CancelReader) | None => Prompt::Cancelled,
-            Some(step) => panic!(
-                "ScriptedPrompter: reader prompt answered by {}",
-                step.kind()
-            ),
+            Some(step) => self.mismatch("reader prompt", &step),
         }
     }
 }

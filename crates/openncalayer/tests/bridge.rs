@@ -1018,6 +1018,46 @@ mod binary {
         assert!(!log.contains("system tray"), "{log}");
     }
 
+    /// A script step of another kind than the window that opens (a key answer for a storage
+    /// window): the window is cancelled, with a line in the log saying so, and the page gets
+    /// the reply of a cancelled dialog. The connection stays open; the next call is
+    /// answered by what is left of the script.
+    #[test]
+    fn a_script_step_of_the_wrong_kind_cancels_its_window() {
+        let dir = daemon_dir();
+        let port = free_port();
+        let key = synthetic("user-gost2015-sign");
+        write_steps(
+            dir.path(),
+            &json!([
+                {"key": 0},
+                {"storage": {"path": key.path, "password": key.password}},
+                {"key": 0},
+            ]),
+        );
+        runtime().block_on(async {
+            let (_daemon, mut c) = start(
+                daemon(dir.path(), port, &["run", "--allow-no-wss", "--no-tray"]),
+                dir.path(),
+            )
+            .await;
+            c.open(1, "https://binary.test").await;
+            let params = json!({"decode": true, "encapsulate": false, "digested": false});
+            let request = basics_sign_cms(&STANDARD.encode(b"binary"), params);
+            let reply = c.call(1, &request).await;
+            assert_eq!(json(&reply), json!({"body": {}, "status": true}), "{reply}");
+            // The connection is open and the next call gets its dialogs.
+            let reply = json(&c.call(1, &request).await);
+            assert_eq!(reply["status"], true, "{reply}");
+            assert!(reply["body"]["result"][0].is_string(), "{reply}");
+        });
+        let log = logs(dir.path());
+        assert!(
+            log.contains("storage prompt met the scripted step Key; the window is cancelled"),
+            "{log}"
+        );
+    }
+
     /// A login without a session bus: the tray cannot start, the daemon signs regardless.
     #[cfg(target_os = "linux")]
     #[test]

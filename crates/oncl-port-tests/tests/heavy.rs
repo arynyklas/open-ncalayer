@@ -3980,6 +3980,35 @@ fn skf_sign_xades_cosign_existing_xml() {
 }
 
 #[test]
+fn skf_sign_xades_of_a_document_that_ends_inside_its_root() {
+    let prepared =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<document number=\"DOC-10\"><content>AAAA";
+    let doc_url = "https://portal.efis.kz/docs/10";
+    let efis = Efis::new(vec![
+        (CACERTS, skf_cas()),
+        (doc_url, prepared.as_bytes().to_vec()),
+    ]);
+    let harness = skf_harness(&efis);
+    let mut session = harness.session("skf");
+    session.call(
+        &get_keys("inter-user-gost2015-sign", "Qwerty12", "1"),
+        SKF_ORIGIN,
+    );
+    let reply = text(session.call(
+        &skf(
+            "signXades",
+            json!(["1", "DOC-10", doc_url, "text/xml", "SID"]),
+        ),
+        SKF_ORIGIN,
+    ));
+    // `getMessage()` of the parser's exception: neither its class nor its position.
+    assert_eq!(
+        reply,
+        skf_error("XML document structures must start and end within the same entity.")
+    );
+}
+
+#[test]
 fn skf_failed_get_keys_keeps_no_key() {
     // A key store that opens but whose key fails the checks leaves no key to sign with
     // (not the one of an earlier `getKeys`).
