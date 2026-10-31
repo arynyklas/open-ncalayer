@@ -135,7 +135,9 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 tray-icon = { version = "=0.26.1", default-features = false }
 # Only in xtask (`ext-e2e`): the stand-in original NCALayer, a blocking WebSocket server.
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
-ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
+# `~`: `xtask/src/upstream/http.rs` uses `ureq::unversioned` (its resolver and connector),
+# which may break in a minor release.
+ureq = { version = "~3.5.0", default-features = false, features = ["rustls"] }
 # `oncl-plugin`: the URL prefixes a plugin may reach, parsed as browsers parse URLs; Velopack
 # depends on it already.
 url = "2.5.8"

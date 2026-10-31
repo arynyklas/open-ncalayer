@@ -3,11 +3,14 @@
 
 mod upstream_common;
 
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+
 use oncl_testkit::{fixture, read};
 use upstream_common::{
     MockServer, Response, endpoints, key, manifest_json, page_html, serve_manifest_and_page, signed,
 };
-use xtask::upstream::http::{FetchError, Fetcher, RequestCtx};
+use xtask::upstream::http::{FetchError, Fetcher, RequestCtx, Session};
 use xtask::upstream::poll::{AlertKind, Change, ModReason, PollResult, poll};
 use xtask::upstream::sources::parse_download_page;
 use xtask::upstream::state::{SourceState, SourceStatus, State};
@@ -38,7 +41,6 @@ fn world(k: char) -> MockServer {
             Response::ok(vec![0; 10]).header("ETag", "\"e1\""),
         );
     }
-    server.route("HEAD", "/download.php", Response::ok(vec![0; 10]));
     server
 }
 
@@ -94,12 +96,12 @@ fn first_poll_adds_all_sources() {
         .into_iter()
         .collect::<Vec<_>>()
     );
-    // Bundles are not requested while polling.
+    // Bundles and page links are not requested while polling.
     assert!(
         server
             .requests()
             .iter()
-            .all(|r| !r.target.contains("bundles/"))
+            .all(|r| !r.target.contains("bundles/") && r.path() != "/download.php")
     );
 }
 
@@ -197,17 +199,41 @@ fn failure_then_success_resets_count() {
 }
 
 #[test]
-fn page_html_instead_of_file_is_failure_not_change() {
+fn page_links_are_not_requested_and_keep_their_download_status() {
     let server = world('a');
-    let state = run(&server, &State::default()).next;
-    server.route(
-        "HEAD",
-        "/download.php",
-        Response::html(read(fixture("upstream/error.html"))),
-    );
+    let mut state = run(&server, &State::default()).next;
+    // As left by a run whose downloads failed after one absence, and a link removed long ago.
+    for id in ["page:windows-64-bit", "page:macosx"] {
+        let e = state.sources.get_mut(id).unwrap();
+        e.failures = 1;
+        e.status = SourceStatus::Failing;
+    }
+    let gone = state.sources.get_mut("page:linux").unwrap();
+    gone.failures = 3;
+    gone.status = SourceStatus::Gone;
+    server.clear_requests();
     let r = run(&server, &state);
-    assert!(r.changes.is_empty(), "{:?}", r.changes);
-    assert_eq!(r.next.sources["page:windows-64-bit"].failures, 1);
+    assert_eq!(
+        r.changes,
+        [Change::Added {
+            id: "page:linux".to_owned()
+        }]
+    );
+    // Found: the absences end, the download status stays.
+    for id in ["page:windows-64-bit", "page:macosx"] {
+        let e = &r.next.sources[id];
+        assert_eq!((e.failures, e.status), (0, SourceStatus::Failing), "{id}");
+    }
+    let e = &r.next.sources["page:linux"];
+    assert_eq!((e.failures, e.status), (0, SourceStatus::Ok));
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|r| r.path() != "/download.php"),
+        "{:?}",
+        server.requests()
+    );
 }
 
 #[test]
@@ -395,35 +421,34 @@ fn oversized_body_is_error_not_truncation() {
 }
 
 #[test]
-fn cookies_and_referer_sent_for_page_downloads() {
-    let server = world('a');
-    let page = server.url("/");
-    server.handler(move |r| {
-        (r.path() == "/download.php").then(|| {
-            let cookie_ok = r
-                .headers
-                .get("cookie")
-                .is_some_and(|c| c.contains("sid=synthetic"));
-            let referer_ok = r.headers.get("referer") == Some(&page);
-            if cookie_ok && referer_ok {
-                Response::ok(vec![0; 10])
-            } else {
-                Response::status(403)
-            }
-        })
-    });
-    let r = run(&server, &State::default());
-    assert!(
-        r.next.sources["page:windows-64-bit"].status == SourceStatus::Ok,
-        "{:?}",
-        r.next.sources["page:windows-64-bit"]
+fn session_falls_back_to_the_next_address_and_sticks_to_it() {
+    let server = MockServer::start();
+    server.route("GET", "/", Response::ok(b"page".to_vec()));
+    // Nothing listens on port 1 (and no test can bind it): connecting is refused.
+    let dead = SocketAddr::from(([127, 0, 0, 1], 1));
+    let live = SocketAddr::from(([127, 0, 0, 1], server.port));
+    let fetcher = Fetcher::for_tests().resolving_with(move |_, _| vec![dead, live]);
+    let url = format!("http://upstream.test:{}/", server.port);
+    let session = Arc::new(Mutex::new(Session::default()));
+    let ctx = RequestCtx {
+        referer: None,
+        session: Some(Arc::clone(&session)),
+    };
+    assert_eq!(fetcher.get(&url, 1024, &ctx).unwrap().body, b"page");
+    assert_eq!(
+        session.lock().unwrap().pinned("upstream.test", server.port),
+        Some(live)
     );
-    let downloads: Vec<_> = server
-        .requests()
-        .into_iter()
-        .filter(|r| r.path() == "/download.php")
-        .collect();
-    assert_eq!(downloads.len(), 4);
+    assert_eq!(fetcher.get(&url, 1024, &ctx).unwrap().body, b"page");
+    // Without a session the connection itself moves on to the next address.
+    assert_eq!(
+        fetcher
+            .get(&url, 1024, &RequestCtx::default())
+            .unwrap()
+            .body,
+        b"page"
+    );
+    assert_eq!(server.requests().len(), 3);
 }
 
 #[test]

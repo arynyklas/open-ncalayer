@@ -2,6 +2,12 @@
 //! and HEAD of the distributions and fixed files. A failure counts; a source is removed only
 //! after [`FAILURES_TO_REMOVE`] failures in a row, and a success resets the count. Bundles
 //! follow the manifest, which is the authority on them: no request is made for them here.
+//!
+//! No request is made for the links of the page either: a `download.php?key=` key serves
+//! one request only (HEAD included), so the run downloads each with a fresh key. A link is
+//! judged by the SHA-1 published beside it. Its `failures` count the polls in a row that
+//! did not find it (the page missing, or the link absent from it), and only they remove it;
+//! a poll that finds it ends the count. Its status is left to the run's downloads.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -10,7 +16,7 @@ use oncl_pki::cert::Certificate;
 use serde::{Deserialize, Serialize};
 
 use super::artifact::{Format, TAIL_BYTES, detect_format};
-use super::http::{CookieJar, FetchError, Fetcher, RequestCtx};
+use super::http::{FetchError, Fetcher, RequestCtx, Session};
 use super::manifest::{Verified, verify_and_parse};
 use super::sources::{PageLink, Source, SourceKind, discover, parse_download_page, without_query};
 use super::state::{SourceState, SourceStatus, State};
@@ -120,8 +126,6 @@ pub struct PollResult {
     pub changes: Vec<Change>,
     /// Alerts.
     pub alerts: Vec<Alert>,
-    /// The cookies of the page, for downloads of its links.
-    pub cookies: Arc<Mutex<CookieJar>>,
 }
 
 /// Polls every source; see the module documentation.
@@ -135,7 +139,6 @@ pub fn poll(
     let mut next = prev.clone();
     let mut changes = Vec::new();
     let mut alerts = Vec::new();
-    let cookies = Arc::new(Mutex::new(CookieJar::default()));
     let had_baseline = prev
         .sources
         .get("manifest")
@@ -194,7 +197,6 @@ pub fn poll(
             sources: Vec::new(),
             changes,
             alerts,
-            cookies,
         };
     };
 
@@ -235,9 +237,13 @@ pub fn poll(
         );
     }
 
+    // Only the links and their SHA-1 are read here, and no later request of the poll needs
+    // the page's cookies: the run reads the page again, in a session of its own, for the key
+    // of each download. The session here only carries a cookie set on a redirect hop of the
+    // page to the next hop.
     let page_ctx = RequestCtx {
         referer: None,
-        cookies: Some(Arc::clone(&cookies)),
+        session: Some(Arc::new(Mutex::new(Session::default()))),
     };
     let page: Option<Vec<PageLink>> = fetcher
         .get(&endpoints.page, PAGE_MAX, &page_ctx)
@@ -252,7 +258,8 @@ pub fn poll(
             continue;
         }
         if id.starts_with("page:") {
-            // The page is not the authority: its absence counts as a failure.
+            // The page is not the authority: its absence counts as a failure; only such
+            // failures remove a link.
             if let Some(change) = fail(next.sources.get_mut(id).expect("copied from prev"), id) {
                 changes.push(change);
             }
@@ -264,10 +271,6 @@ pub fn poll(
         }
     }
 
-    let link_ctx = RequestCtx {
-        referer: Some(endpoints.page.clone()),
-        cookies: Some(Arc::clone(&cookies)),
-    };
     for source in &sources {
         let before = prev
             .sources
@@ -301,54 +304,38 @@ pub fn poll(
                 entry.manifest_hash = hash;
             }
             SourceKind::Page { published_sha1, .. } => {
-                if page.is_none() {
-                    if let Some(entry) = next.sources.get_mut(&source.id)
-                        && let Some(change) = fail(entry, &source.id)
-                    {
-                        changes.push(change);
+                match before {
+                    // New or back after removal: starts afresh.
+                    None => {
+                        changes.push(Change::Added {
+                            id: source.id.clone(),
+                        });
+                        next.sources
+                            .insert(source.id.clone(), SourceState::default());
                     }
-                    continue;
-                }
-                match head_ok(fetcher, &source.url, &link_ctx) {
-                    Err(Refusal::Refused) => refuse(&mut next, source),
-                    Err(Refusal::Failed) => {
-                        let entry = next.sources.entry(source.id.clone()).or_default();
-                        entry.url = without_query(&source.url);
-                        if let Some(change) = fail(entry, &source.id) {
-                            changes.push(change);
-                        }
-                    }
-                    Ok(head) => {
-                        match before {
-                            Some(b) if b.status != SourceStatus::Refused => {
-                                if published_sha1.is_some() {
-                                    if b.published_sha1 != *published_sha1 {
-                                        changes.push(Change::Modified {
-                                            id: source.id.clone(),
-                                            reason: ModReason::PublishedSha1,
-                                        });
-                                    }
-                                } else {
-                                    changes.push(Change::Modified {
-                                        id: source.id.clone(),
-                                        reason: ModReason::Content,
-                                    });
-                                }
-                            }
-                            _ => changes.push(Change::Added {
+                    // Whether its address is public now, only the run's download can tell.
+                    Some(b) if b.status == SourceStatus::Refused => {}
+                    Some(b) => {
+                        if published_sha1.is_none() {
+                            changes.push(Change::Modified {
                                 id: source.id.clone(),
-                            }),
+                                reason: ModReason::Content,
+                            });
+                        } else if b.published_sha1 != *published_sha1 {
+                            changes.push(Change::Modified {
+                                id: source.id.clone(),
+                                reason: ModReason::PublishedSha1,
+                            });
                         }
-                        let entry = next.sources.entry(source.id.clone()).or_default();
-                        entry.url = without_query(&source.url);
-                        entry.size = head.content_length;
-                        entry.etag = head.etag;
-                        entry.last_modified = head.last_modified;
-                        entry.published_sha1 = published_sha1.clone();
-                        entry.failures = 0;
-                        entry.status = SourceStatus::Ok;
                     }
                 }
+                // Found: the run of absences ends. The status is left to the run's download.
+                let entry = next.sources.entry(source.id.clone()).or_default();
+                entry.failures = 0;
+                entry.url = without_query(&source.url);
+                entry.etag = None;
+                entry.last_modified = None;
+                entry.published_sha1 = published_sha1.clone();
             }
             SourceKind::Dist { .. } | SourceKind::Fixed => {
                 match head_ok(fetcher, &source.url, &RequestCtx::default()) {
@@ -410,7 +397,6 @@ pub fn poll(
         sources,
         changes,
         alerts,
-        cookies,
     }
 }
 
