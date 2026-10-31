@@ -470,9 +470,11 @@ fn configured(files: &TlsFiles) -> Result<TlsInfo, WssFailure> {
 /// (also `{"jks":{"path","password"}}`, `{"cancel_key":null}`,
 /// `{"csr":{"dir","password"}}`, `{"cancel_csr":null}`, `{"import":{"dir","password"}}`,
 /// `{"cancel_import":null}`, `{"file":"…"}`, `{"cancel_file":null}`, `{"password":"…"}`,
-/// `{"cancel_password":null}`, `{"confirm":{"yes":true}}`, `{"cancel_confirm":null}`, and for
-/// hardware tokens `{"token":{"storage","reader","pin"}}`, `{"reader":"…"}`,
-/// `{"cancel_reader":null}`).
+/// `{"cancel_password":null}`, `{"confirm":{"yes":true}}`, `{"cancel_confirm":null}`,
+/// `{"message":null}`, `{"cancel_message":null}`, `{"choice":{"button":0,"option":1}}`
+/// (`option` may be left out), `{"cancel_choice":null}`, `{"save":{"path":"…"}}`,
+/// `{"cancel_save":null}`, `{"path":"…"}`, `{"cancel_path":null}`, and for hardware tokens
+/// `{"token":{"storage","reader","pin"}}`, `{"reader":"…"}`, `{"cancel_reader":null}`).
 #[cfg(feature = "e2e-prompter")]
 pub const E2E_PROMPTER_VAR: &str = "ONCL_E2E_PROMPTER";
 
@@ -561,6 +563,20 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_flows::testing::Step>, String> {
             yes: bool,
         },
         CancelConfirm,
+        Message,
+        CancelMessage,
+        Choice {
+            button: usize,
+            #[serde(default)]
+            option: Option<usize>,
+        },
+        CancelChoice,
+        Save {
+            path: PathBuf,
+        },
+        CancelSave,
+        Path(PathBuf),
+        CancelPath,
         Token {
             storage: String,
             reader: String,
@@ -590,6 +606,14 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_flows::testing::Step>, String> {
                 StepSpec::CancelPassword => Step::CancelPassword,
                 StepSpec::Confirm { yes } => Step::Confirm { yes },
                 StepSpec::CancelConfirm => Step::CancelConfirm,
+                StepSpec::Message => Step::Message,
+                StepSpec::CancelMessage => Step::CancelMessage,
+                StepSpec::Choice { button, option } => Step::Choice { button, option },
+                StepSpec::CancelChoice => Step::CancelChoice,
+                StepSpec::Save { path } => Step::Save { path },
+                StepSpec::CancelSave => Step::CancelSave,
+                StepSpec::Path(path) => Step::Path(path),
+                StepSpec::CancelPath => Step::CancelPath,
                 StepSpec::Token {
                     storage,
                     reader,
@@ -1715,6 +1739,35 @@ mod tests {
                 .unwrap_err(),
             r#"no storage "NoSuchStore""#
         );
+    }
+
+    #[cfg(feature = "e2e-prompter")]
+    #[test]
+    fn e2e_window_steps_parse() {
+        use oncl_flows::testing::Step;
+
+        let steps = parse_steps(
+            r#"[{"message":null},{"cancel_message":null},
+                {"choice":{"button":1,"option":2}},{"choice":{"button":0}},
+                {"cancel_choice":null},{"save":{"path":"out.cms"}},{"cancel_save":null},
+                {"path":"dir"},{"cancel_path":null}]"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            steps.as_slice(),
+            [
+                Step::Message,
+                Step::CancelMessage,
+                Step::Choice { button: 1, option: Some(2) },
+                Step::Choice { button: 0, option: None },
+                Step::CancelChoice,
+                Step::Save { path: saved },
+                Step::CancelSave,
+                Step::Path(chosen),
+                Step::CancelPath,
+            ] if saved == Path::new("out.cms") && chosen == Path::new("dir")
+        ));
+        assert!(parse_steps(r#"[{"choice":{"option":1}}]"#).is_err());
     }
 
     /// Without the feature the emulator's variable changes nothing: the system's service,
