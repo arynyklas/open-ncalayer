@@ -16,6 +16,8 @@ publish = false
 oncl-accessory = { path = "crates/oncl-accessory" }
 oncl-applet = { path = "crates/oncl-applet" }
 oncl-basics = { path = "crates/oncl-basics" }
+# The built-in modules' tests through the `Module` trait, on either implementation.
+oncl-builtin-tests = { path = "crates/oncl-builtin-tests" }
 oncl-commonutils = { path = "crates/oncl-commonutils" }
 oncl-desktop = { path = "crates/oncl-desktop" }
 oncl-gost = { path = "crates/oncl-gost" }

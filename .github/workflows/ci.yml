@@ -91,6 +91,11 @@ jobs:
           fi
           cargo xtask fetch-fixtures
           cargo test --workspace --all-features -- --include-ignored --skip live_ --skip zola_ "${skip[@]}"
+      # The built-in modules' tests on their native code too, while a module has any.
+      - name: Built-in modules, native backend
+        env:
+          ONCL_BUILTIN_BACKEND: native
+        run: cargo test --locked -p oncl-builtin-tests --all-features
       # The daemon as releases build it (no `e2e-prompter`, no `token-emulator`): the token
       # emulator's variable changes nothing.
       - name: Daemon without the test features

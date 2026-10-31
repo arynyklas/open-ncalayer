@@ -8,11 +8,11 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{
-    Availability, Basics, Busy, BusyPrompt, ChainPolicy, CsrAnswer, CsrPrompt, DisabledReason,
-    FilePrompt, ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt, MODULE_NAME, OCSP_DEADLINE,
-    OcspCache, PasswordPrompt, Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt,
-    availabilities,
+    Availability, Busy, BusyPrompt, ChainPolicy, CsrAnswer, CsrPrompt, DisabledReason, FilePrompt,
+    ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt, OCSP_DEADLINE, OcspCache, PasswordPrompt,
+    Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt, availabilities,
 };
+use oncl_builtin_tests::basics::{Basics, MODULE_NAME};
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::http::{HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport};
 use oncl_pki::info::{CertInfo, cert_info};

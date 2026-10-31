@@ -36,7 +36,6 @@ oncl-testkit.workspace = true
 oncl-token = { path = "../oncl-token", features = ["emulator"] }
 tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
-tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 # A named pipe server for the test that a chosen network pipe is refused by `GetFileType`.
@@ -48,21 +47,5 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [[test]]
-name = "essentials"
-required-features = ["testing"]
-
-[[test]]
 name = "keys"
-required-features = ["testing"]
-
-[[test]]
-name = "sign"
-required-features = ["testing"]
-
-[[test]]
-name = "validation"
-required-features = ["testing"]
-
-[[test]]
-name = "tokens"
 required-features = ["testing"]

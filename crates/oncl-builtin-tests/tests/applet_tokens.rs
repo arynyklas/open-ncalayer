@@ -2,9 +2,9 @@
 //! the reader dialog, ID card details, XML signing with the PIN and its try count, and the
 //! writes it refuses without a command to the card.
 
-use oncl_applet::Applet;
 use oncl_basics::testing::{ScriptedPrompter, Step};
 use oncl_basics::{OpenError, ReaderEntry, StorageKind};
+use oncl_builtin_tests::applet::Applet;
 use oncl_pki::xmldsig;
 use oncl_protocol::{AddInfo, Module};
 use oncl_testkit::synthetic;

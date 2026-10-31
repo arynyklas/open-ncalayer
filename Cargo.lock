@@ -3912,14 +3912,10 @@ dependencies = [
  "oncl-basics",
  "oncl-pki",
  "oncl-protocol",
- "oncl-testkit",
  "oncl-token",
  "serde",
  "serde_json",
- "sha1",
- "tempfile",
  "tracing",
- "x509-cert",
  "zeroize",
 ]
 
@@ -3934,6 +3930,30 @@ dependencies = [
  "oncl-testkit",
  "oncl-token",
  "serde_json",
+ "tempfile",
+ "time",
+ "tracing",
+ "windows-sys 0.61.2",
+ "x509-cert",
+ "zeroize",
+]
+
+[[package]]
+name = "oncl-builtin-tests"
+version = "0.1.0-alpha.4"
+dependencies = [
+ "base64",
+ "der 0.8.2",
+ "oncl-accessory",
+ "oncl-applet",
+ "oncl-basics",
+ "oncl-commonutils",
+ "oncl-pki",
+ "oncl-protocol",
+ "oncl-testkit",
+ "oncl-token",
+ "serde_json",
+ "sha1",
  "tempfile",
  "time",
  "tracing",
@@ -3952,15 +3972,11 @@ dependencies = [
  "oncl-basics",
  "oncl-pki",
  "oncl-protocol",
- "oncl-testkit",
  "oncl-token",
  "serde",
  "serde_json",
- "tempfile",
  "time",
  "tracing",
- "tracing-subscriber",
- "windows-sys 0.61.2",
  "x509-cert",
 ]
 

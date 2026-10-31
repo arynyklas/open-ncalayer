@@ -6,7 +6,7 @@ use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_basics::testing::{ScriptedPrompter, Step};
 use oncl_basics::{Action, FileKind, Locale, OpenError, StorageKind};
-use oncl_commonutils::{CommonUtils, MODULE_NAME};
+use oncl_builtin_tests::commonutils::{CommonUtils, MODULE_NAME};
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::cms::{self, SignOptions, verify};
 use oncl_pki::info::{cert_info, common_name, kalkan_dn};

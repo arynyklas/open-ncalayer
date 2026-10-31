@@ -1,0 +1,47 @@
+[package]
+name = "oncl-builtin-tests"
+description = "Tests of OpenNCALayer's built-in modules (basics, commonUtils, Applet, accessory) through the Module trait, on their native code or their WebAssembly guests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+oncl-accessory.workspace = true
+oncl-applet.workspace = true
+# `testing`: `ScriptedPrompter` and `MemoryRecentPath`, which the tests answer dialogs with.
+oncl-basics = { workspace = true, features = ["testing"] }
+oncl-commonutils.workspace = true
+oncl-pki.workspace = true
+oncl-protocol.workspace = true
+oncl-token.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+der.workspace = true
+# `testing`: `tsp::MockTsa`, `ocsp::MockOcsp`, `testing::issue_cert`.
+oncl-pki = { workspace = true, features = ["testing"] }
+oncl-testkit.workspace = true
+# `emulator`: software tokens.
+oncl-token = { workspace = true, features = ["emulator"] }
+serde_json.workspace = true
+# The key identifiers, computed independently in the tests.
+sha1.workspace = true
+tempfile.workspace = true
+time = { workspace = true, features = ["macros"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+x509-cert.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+# A named pipe server for the tests that page-named pipes are refused.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+] }
