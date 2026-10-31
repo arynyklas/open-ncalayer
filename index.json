@@ -48,6 +48,36 @@
           "label": "upstream"
         }
       ]
+    },
+    {
+      "id": "2026-10-31-1.4-521e11da",
+      "date": "2026-10-31",
+      "observed": "2026-10-31T12:53:16.1681866Z",
+      "version": "1.4",
+      "key8": "521e11da",
+      "path": "history/2026-10-31-1.4-521e11da/",
+      "kind": "change",
+      "summary": {
+        "core": [],
+        "plugins": [],
+        "distributions": [],
+        "notes": [
+          "com.osdkz.esf.signer: загрузка pending → unreachable",
+          "ku.amaryllis.amart: загрузка pending → unreachable",
+          "kz.akkamal.tinysigner: загрузка pending → unreachable",
+          "kz.documentolog.Agent: загрузка pending → unreachable",
+          "kz.ecc.K2SignBundle: загрузка pending → unreachable",
+          "kz.ecc.MarketSignBundle: загрузка pending → unreachable",
+          "kz.efactoring.EfactoringSignBundle: загрузка pending → unreachable",
+          "kz.inessoft.kgd.knp.sono_knp_ncalayer_module: загрузка pending → unreachable",
+          "kz.nitec.eup.eupsigner: загрузка pending → unreachable",
+          "kz.sapa.ztender.osgi.ZTenderModule: загрузка pending → unreachable",
+          "kz.smartdoc.osgi.CmsSigner: загрузка pending → unreachable",
+          "kz.webkassa.osgi.SignerBundle: загрузка pending → unreachable",
+          "kz.xdox.osgi.SignerBundle: загрузка pending → unreachable"
+        ]
+      },
+      "issues": []
     }
   ]
 }

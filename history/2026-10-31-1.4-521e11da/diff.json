@@ -1,0 +1,34 @@
+{
+  "baseline": false,
+  "manifest": {
+    "version": null,
+    "info": null,
+    "updurl": null,
+    "syspkgs": {
+      "added": [],
+      "removed": []
+    },
+    "disturls": [],
+    "signer": null,
+    "extra": {},
+    "resigned_only": false
+  },
+  "core": {},
+  "plugins": {},
+  "distributions": {},
+  "notes": [
+    "com.osdkz.esf.signer: загрузка pending → unreachable",
+    "ku.amaryllis.amart: загрузка pending → unreachable",
+    "kz.akkamal.tinysigner: загрузка pending → unreachable",
+    "kz.documentolog.Agent: загрузка pending → unreachable",
+    "kz.ecc.K2SignBundle: загрузка pending → unreachable",
+    "kz.ecc.MarketSignBundle: загрузка pending → unreachable",
+    "kz.efactoring.EfactoringSignBundle: загрузка pending → unreachable",
+    "kz.inessoft.kgd.knp.sono_knp_ncalayer_module: загрузка pending → unreachable",
+    "kz.nitec.eup.eupsigner: загрузка pending → unreachable",
+    "kz.sapa.ztender.osgi.ZTenderModule: загрузка pending → unreachable",
+    "kz.smartdoc.osgi.CmsSigner: загрузка pending → unreachable",
+    "kz.webkassa.osgi.SignerBundle: загрузка pending → unreachable",
+    "kz.xdox.osgi.SignerBundle: загрузка pending → unreachable"
+  ]
+}

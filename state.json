@@ -31,8 +31,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "d617ab3cd0317c493bba15211d5e144b61d1a35bdda7a39ed5c1ac1075cb30d9",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:digital.taxtech.documents.multisign": {
       "url": "https://edo-app.digitaltaxtech.kz/edo/ncalayer/nca_module-1.0.jar",
@@ -53,8 +53,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "d109e40aad22fdbddbcfc54c5af41ee4afed36258ef3dee96994115c02146c54",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:kz.Simourg.SimBASE": {
       "url": "https://simourg.com/sim/kz/ncalayer/SimbaseNcaLayerBundle-2.2.jar",
@@ -86,8 +86,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "cdbf736f1806811dd6f28d634cda127b9a0b016d86911d492346d79ada5d8744",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:kz.arta.synergy.signmodule": {
       "url": "http://tdd.lan.arta.kz/docs/synergy/tags/minsky/user-manual/html/resources/modules/kz.arta.synergy.signmodule-6.0.jar",
@@ -141,8 +141,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "0f6ae676d8f5776b3cfe642edd4a059d33f2f1ebb81901a91a47ac607ef26329",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:kz.dogovor24.module": {
       "url": "https://dogovor24.kz/kz.dogovor24.module_1.0.5.jar",
@@ -174,8 +174,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "209375db9debe49586a56da4920305f9ab25b63e0d9a7c518661e158b2bf191d",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:kz.ecc.MarketSignBundle": {
       "url": "https://omarket.kz/upload/market-signer-1.0.7.jar",
@@ -185,8 +185,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "384e482b39150e3bd8e14d8007bd8bc0b0e535a7f7cc5def5a8aace46fde33dc",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:kz.ecc.NurSignBundle": {
       "url": "https://v3bl.goszakup.gov.kz/uploads/crypto/NURSignBundle-5.1.2.jar",
@@ -207,8 +207,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "5709ba475fbdfb75b1e03b2e4a264fad7a56c6a66ae9eeb1203c50f5b88f5665",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:kz.energy.sign": {
       "url": "https://tezis.energy.kz/ncalayer/module/SignEnergy-2.0.0.jar",
@@ -350,8 +350,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "d84377410d113f714694b4cc5a53929a0681deb374040fa817e5c13be0a575dd",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:kz.metadoc.NCAModule": {
       "url": "https://ncalayer.metadoc.kz/ncalayer/metadoc-1.7.jar",
@@ -372,8 +372,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "c7f1af62640528431e7074196ef8b37543bf2d48fa7b9888348712290555142e",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:kz.qiwi.osgi.SecurityUtils": {
       "url": "https://arm.osfd.kz/misc/SecurityUtils-1.3.jar",
@@ -416,8 +416,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "2acdb99335f574806c5839fea7b18bf34e2015cc4f972a3b677c8b3451969cfd",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:kz.smartdoc.osgi.CmsSigner": {
       "url": "http://91.201.215.24/NCALayerModules/cmssigner-1.4.1.jar",
@@ -427,8 +427,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "410fed71f50bd0951b3fe7d170a550a9984323e396def75db6afe11d3ce19c01",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:kz.uchet.esfSignUtil": {
       "url": "https://uchet-esf.object.pscloud.io/UchetEsfSignBundle-1.0.jar",
@@ -460,8 +460,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "f575913a30c4c363ba9941e95c15b84a1ec5cdb44f573541cb159428391ef5c9",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:kz.workspace.Signer": {
       "url": "https://qt.workspace.kz/storage/WorkspaceSigner-1.3.jar",
@@ -482,8 +482,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "61c3fc183c5146366e51866f8d9de05b9db3a5dbd70bb1c0305e45bd774944c0",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "bundle:org.skf.osgi.SKFModule": {
       "url": "https://portal.efis.kz/static/?fileName=SkfLayerBundle-1.6.2.jar",
@@ -526,8 +526,8 @@
       "sha256": null,
       "published_sha1": null,
       "manifest_hash": "b84e093fa5ab601ec684ecb1a15875063891ef9edfb822912162584f62635d01",
-      "failures": 2,
-      "status": "failing"
+      "failures": 3,
+      "status": "gone"
     },
     "dist:setupexe": {
       "url": "http://crl.pki.gov.kz/updates/ncalayerlite.exe",

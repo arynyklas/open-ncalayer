@@ -138,7 +138,7 @@
       "csernum": "00adbf834e8fe1d0f0195acf8938c882bb",
       "chash": "53afabee6970b109ac2416b1a5125125d9c2d5b314a7eb84b0ac43f85d8e9691",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -170,7 +170,7 @@
       "csernum": "44a4d7e8b367e68f01853f9c",
       "chash": "880dc4c9803391401f6314601c9b41853ccdcaeaa882fc53df04f05d90f1d9d4",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -218,7 +218,7 @@
       "csernum": "10a624e0527821724b85beaae307a7b4",
       "chash": "6e6885d6c6c64f80c328e080b262c30e7a7b6ba60f8eb2ce57b2c5ccea6c20d2",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -298,7 +298,7 @@
       "csernum": "04ac057635fa11c1e10f5c3c40020653",
       "chash": "a6c5f34046aeb58ae6467bb4852640bcbfb3edd6a24667c5958215cf283b1b52",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -346,7 +346,7 @@
       "csernum": "00ec848c97796f6ebda829a2d2a4db465d",
       "chash": "70574a18ae596bf88415f35b4558b7c3caf28496e093765990ddd5cdbe44dfd6",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -362,7 +362,7 @@
       "csernum": "4e40d0f4d454f0f2027dfb37ef4b9ee7",
       "chash": "757bf5308332da7bc1fe19c958f13026452497aa94f7d801ad0312ef5949d92e",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -394,7 +394,7 @@
       "csernum": "4e40d0f4d454f0f2027dfb37ef4b9ee7",
       "chash": "757bf5308332da7bc1fe19c958f13026452497aa94f7d801ad0312ef5949d92e",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -602,7 +602,7 @@
       "csernum": "15f9faeacd6d8bae9bee9b2f",
       "chash": "8cce76fcd7f1cfd53a6fe274c372e458b11c33cb520e3b73d095ffabc67753f8",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -634,7 +634,7 @@
       "csernum": "00f020e53fa43b0380c5babda153f46eba",
       "chash": "620242d3288b3f82ec02b69c4edbcde35623fbf7d6316d4e0d76b9204f7b429e",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -698,7 +698,7 @@
       "csernum": "00f461d2e86dbf71036af2dcce32668e0f",
       "chash": "6c5eba8f0d6e4c0075b724f9a3a6b4112f3bb81087e390703455c9e6099ae3d1",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -714,7 +714,7 @@
       "csernum": "00de6a14a9c686a9b1394b14acd97f61af",
       "chash": "4c00d69802ceaa16b93d293cb2c9eb2c65319c4f4d7d565b7516cf79bc326188",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -762,7 +762,7 @@
       "csernum": "00b5ad21e6828e22fd17563797aec17596",
       "chash": "f45033c2ad6563c6ea6d23deba9af0224703a3d6372a3996462fd916d147c7ff",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
@@ -794,7 +794,7 @@
       "csernum": "2522975a1f7494130d0fab081602f73e",
       "chash": "c8320f71e3af67eae5bb54662fb990abaf02ab81d19d965c6051fbe1589a2a39",
       "extra": {},
-      "fetch": "pending",
+      "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
     },
