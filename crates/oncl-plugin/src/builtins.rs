@@ -42,9 +42,11 @@ use crate::{
 /// The id prefix of the built-in modules; no plugin package may use it.
 pub const BUILTIN_ID_PREFIX: &str = "io.github.arynyklas.openncalayer.builtin.";
 
-/// The largest linear memory of a built-in module's instance: 2 GiB on 64-bit targets.
+/// The largest linear memory of a built-in module's instance on 64-bit targets: 3 GiB. A
+/// call takes about twelve times the data it signs at its peak, so a reply holding a CMS of
+/// the largest message needs over 2 GiB.
 #[cfg(target_pointer_width = "64")]
-pub const BUILTIN_MAX_MEMORY: usize = 2 << 30;
+pub const BUILTIN_MAX_MEMORY: usize = 3 << 30;
 /// The largest linear memory of a built-in module's instance: 384 MiB on 32-bit targets.
 #[cfg(not(target_pointer_width = "64"))]
 pub const BUILTIN_MAX_MEMORY: usize = 384 << 20;

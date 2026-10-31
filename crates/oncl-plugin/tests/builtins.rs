@@ -598,7 +598,7 @@ fn check_instantiates_the_modules() {
         ),
         good.replace(
             "(memory (export \"memory\") 2)",
-            "(memory (export \"memory\") 40000)",
+            "(memory (export \"memory\") 50000)",
         ),
     ] {
         assert_ne!(wat, good);
