@@ -107,15 +107,16 @@ pub const BUILTIN_MAX_REPLY: usize = 128 << 20;
 /// The address space kept free, on 32-bit targets, for the core's code and heap, from the
 /// process's 2 GiB (Windows 7 x86).
 #[cfg(not(target_pointer_width = "64"))]
-pub const PROCESS_RESERVE: usize = 96 << 20;
+pub const PROCESS_RESERVE: usize = 80 << 20;
 
 // On 32-bit targets, what the modules and plugins may take at once fits the 2 GiB of a
 // process: the built-in modules' instances and the plugins' instances at their largest,
 // the copies of a built-in module's host function argument and result, the data the core
 // keeps, one reply being spliced, one incoming message at its largest (a plugin's
-// `MAX_TRANSFER` is the daemon's largest message) and the reserve. Not counted: the
-// copies of a plugin's host function buffers, a message on another connection, and the
-// frame a reply is copied into after its call (when that call's data is gone).
+// `MAX_TRANSFER` is the daemon's largest message), the heap the envelope's reader takes
+// to read it (`SCAN_BUDGET`) and the reserve. Not counted: the copies of a plugin's host
+// function buffers, a message on another connection, and the frame a reply is copied into
+// after its call (when that call's data is gone).
 #[cfg(not(target_pointer_width = "64"))]
 const _: () = assert!(
     BUILTIN_MAX_MODULES * BUILTIN_MAX_LIVE * BUILTIN_MAX_MEMORY
@@ -124,6 +125,7 @@ const _: () = assert!(
         + BUILTIN_KEPT_BUDGET
         + BUILTIN_MAX_REPLY
         + crate::MAX_TRANSFER
+        + oncl_protocol::orgjson::SCAN_BUDGET
         + PROCESS_RESERVE
         <= 2 << 30,
     "the modules, the plugins, the kept data and a message must fit a 32-bit process"

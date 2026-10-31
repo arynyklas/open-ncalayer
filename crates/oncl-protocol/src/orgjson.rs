@@ -11,7 +11,10 @@ mod parse;
 mod value;
 
 pub use keyed::{KeyHasher, seed};
-pub use parse::{MAX_DEPTH, Scanned, parse, parse_only, reserialize, scan};
+pub use parse::{
+    MAX_DEPTH, SCAN_BUDGET, SCAN_BUDGET_32_BIT, Scanned, parse, parse_only, reserialize, scan,
+    scan_within,
+};
 pub use value::{JObject, JValue, quote, quoted, quoted_len};
 
 use serde_json::{Map, Value};
