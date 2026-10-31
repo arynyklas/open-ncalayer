@@ -272,3 +272,50 @@ fn applet_signs_long_documents_as_oncl_pki() {
     );
     assert_eq!(r, json!({"errorCode": "EMPTY_SLOT", "uuid": uuid}));
 }
+
+/// The reply's text to the request `text`, sent as is.
+fn reply_text(module: &dyn Module, text: &str) -> String {
+    module
+        .process(text, &origin())
+        .text()
+        .expect("a text reply")
+        .to_owned()
+}
+
+#[test]
+fn lone_surrogates_get_the_same_reply_long_or_short() {
+    // `JSON.stringify` writes a lone surrogate as an escape (text cut inside an emoji): the
+    // request is no valid JSON, and the modules answer it as they answer a short one.
+    let b = basics(0);
+    let basics_request = |data: &str| {
+        format!(
+            r#"{{"module":"{}","method":"sign","args":{{"format":"xml","data":"{data}\ud800","signingParams":{{}},"signerParams":{{}}}}}}"#,
+            basics::MODULE_NAME
+        )
+    };
+    let short = reply_text(&b, &basics_request("x"));
+    assert!(short.contains(r#""code":"GENERAL_ERROR""#), "{short}");
+    assert_eq!(reply_text(&b, &basics_request(&long_text(9))), short);
+
+    let c = common_utils(0);
+    for request in [
+        // In the long string, and in a short one after it.
+        format!(
+            r#"{{"module":"{}","method":"signXml","args":["PKCS12","SIGNATURE","{}\ud800","",""]}}"#,
+            commonutils::MODULE_NAME,
+            long_text(10)
+        ),
+        format!(
+            r#"{{"module":"{}","method":"signXml","args":["PKCS12","SIGNATURE","{}","\ud800",""]}}"#,
+            commonutils::MODULE_NAME,
+            long_text(11)
+        ),
+    ] {
+        // serde_json's message, its column counted in the request as the page sent it.
+        let message = serde_json::from_str::<Value>(&request)
+            .unwrap_err()
+            .to_string();
+        let r: Value = serde_json::from_str(&reply_text(&c, &request)).unwrap();
+        assert_eq!(r, json!({"code": "500", "message": message}));
+    }
+}

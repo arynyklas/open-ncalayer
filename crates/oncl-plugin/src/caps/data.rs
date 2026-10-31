@@ -2,28 +2,33 @@
 //! long string values of the request, and what the `data_*` functions make of them, so the
 //! module's code never copies documents through its interpreter.
 //!
-//! - Before the call, every string value of the request of at least [`DATA_KEPT_MIN`]
-//!   bytes (object keys never) is kept and replaced by a marker: the call's prefix, random
-//!   and unknown to the page, followed by a number. Only a request that is valid JSON is
-//!   rewritten; anything else reaches the module as the page sent it.
+//! - Before the call, the request's string values of at least [`DATA_KEPT_STRING_MIN`]
+//!   bytes (object keys never) are kept, once they add up to at least [`DATA_KEPT_MIN`]
+//!   bytes, and replaced by markers: the call's prefix, random and unknown to the page,
+//!   followed by a number. A string's length is that of its JSON text between the quotes,
+//!   escapes as written. Only a request that is valid JSON is rewritten (every escape is
+//!   checked, a lone surrogate is not valid); anything else reaches the module as the page
+//!   sent it. Only a module that imports a `data_*` function has its requests rewritten.
 //! - The `data_*` functions take a marker of this call wherever they take data, or the data
 //!   itself; what they make is kept and returned as a marker.
 //! - After the call, every JSON string of the reply that is exactly a marker of this call
 //!   gets the kept data in its place, written as `serde_json` writes a string (the data
-//!   must be UTF-8).
+//!   must be UTF-8), into a reply allocated once at its length, at most
+//!   [`BUILTIN_MAX_REPLY`](crate::BUILTIN_MAX_REPLY) bytes.
 //! - All of it goes when the call returns ([`CallData`] lives in the call's context), and
 //!   at most `max` bytes are kept at once for a call, and
 //!   [`BUILTIN_KEPT_BUDGET`](crate::BUILTIN_KEPT_BUDGET) for all calls of the process: more
-//!   is `limit`.
+//!   is `limit`, and the call's connection is dropped whatever the module answers.
 
 use super::{invalid, limit};
 use crate::host::HostState;
 use oncl_pdk::abi::{
-    Bytes, CmsContent, CmsOutcome, DATA_KEPT_MIN, DataDecodeArgs, DataDecoded, DataDecoding,
-    DataEncodeArgs, DataEncoding, DataRef, HostResult, PagePathArgs, PageRead, SignCmsExArgs,
-    SignXmlArgs, StampArgs, StampOutcome,
+    Bytes, CmsContent, CmsOutcome, DATA_KEPT_MIN, DATA_KEPT_STRING_MIN, DataDecodeArgs,
+    DataDecoded, DataDecoding, DataEncodeArgs, DataEncoding, DataRef, HostResult, PagePathArgs,
+    PageRead, SignCmsExArgs, SignRawArgs, SignXmlArgs, StampArgs, StampOutcome,
 };
 use oncl_pki::cms::Content;
+use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The bytes all calls keep now.
@@ -118,17 +123,17 @@ impl CallData {
         }
     }
 
-    /// `request` with its string values of at least [`DATA_KEPT_MIN`] bytes kept and
-    /// replaced by their markers; as it is if it is not valid JSON or has none.
+    /// `request` with its long string values kept and replaced by their markers (see the
+    /// module's documentation); as it is if it is not valid JSON or they add up to less
+    /// than [`DATA_KEPT_MIN`].
     pub(crate) fn keep_request(&mut self, request: &str) -> HostResult<String> {
-        if request.len() < DATA_KEPT_MIN
-            || serde_json::from_str::<serde::de::IgnoredAny>(request).is_err()
-        {
+        if request.len() < DATA_KEPT_MIN || serde_json::from_str::<Strict>(request).is_err() {
             return Ok(request.to_owned());
         }
         let bytes = request.as_bytes();
-        let mut out = String::with_capacity(request.len().min(1 << 20));
-        let mut copied = 0;
+        // The long string values: where they start and end, quotes included.
+        let mut long = Vec::new();
+        let mut total = 0usize;
         let mut i = 0;
         while i < bytes.len() {
             if bytes[i] != b'"' {
@@ -136,39 +141,50 @@ impl CallData {
                 continue;
             }
             let end = string_end(bytes, i);
-            if end - i >= DATA_KEPT_MIN && !is_key(bytes, end) {
-                let text: String = serde_json::from_str(&request[i..end])
-                    .map_err(|e| invalid(format!("a request string: {e}")))?;
-                let marker = self.keep(text.into_bytes())?;
-                out.push_str(&request[copied..i]);
-                out.push('"');
-                out.push_str(&marker);
-                out.push('"');
-                copied = end;
+            if end - i - 2 >= DATA_KEPT_STRING_MIN && !is_key(bytes, end) {
+                long.push((i, end));
+                total += end - i - 2;
             }
             i = end;
         }
-        if copied == 0 {
+        if total < DATA_KEPT_MIN {
             return Ok(request.to_owned());
+        }
+        // Each marker is the prefix, at most 10 digits and its quotes.
+        let replaced: usize = long.iter().map(|(start, end)| end - start).sum();
+        let mut out =
+            String::with_capacity(request.len() - replaced + long.len() * (self.prefix.len() + 12));
+        let mut copied = 0;
+        for (start, end) in long {
+            let text: String = serde_json::from_str(&request[start..end])
+                .map_err(|e| invalid(format!("a request string: {e}")))?;
+            let marker = self.keep(text.into_bytes())?;
+            out.push_str(&request[copied..start]);
+            out.push('"');
+            out.push_str(&marker);
+            out.push('"');
+            copied = end;
         }
         out.push_str(&request[copied..]);
         Ok(out)
     }
 
     /// `reply` with every JSON string that is exactly a marker of this call replaced by
-    /// its data, as `serde_json` writes a string.
+    /// its data, as `serde_json` writes a string, allocated once at its length.
     ///
     /// # Errors
     ///
-    /// Data a marker of the reply stands for is gone or not UTF-8.
-    pub(crate) fn splice(&self, reply: String) -> Result<String, String> {
+    /// Data a marker of the reply stands for is gone or not UTF-8, or the reply would be
+    /// over `max` bytes.
+    pub(crate) fn splice(&self, reply: String, max: usize) -> Result<String, String> {
         let quoted = format!("\"{}", self.prefix);
         if !reply.contains(&quoted) {
             return Ok(reply);
         }
         let bytes = reply.as_bytes();
-        let mut out = String::with_capacity(reply.len());
-        let mut copied = 0;
+        // The markers: where they start and end, quotes included, and their data.
+        let mut markers = Vec::new();
+        let mut len = reply.len();
         let mut i = 0;
         while i < bytes.len() {
             if bytes[i] != b'"' {
@@ -185,14 +201,92 @@ impl CallData {
                     .ok_or("the reply names data the call let go of")?;
                 let text = std::str::from_utf8(data)
                     .map_err(|_| "the reply names data that is not text")?;
-                out.push_str(&reply[copied..i]);
-                out.push_str(&serde_json::to_string(text).expect("a string serializes"));
-                copied = end;
+                let mut written = Counted(0);
+                serde_json::to_writer(&mut written, text).expect("a string serializes");
+                len = len - (end - i) + written.0;
+                markers.push((i, end, text));
             }
             i = end;
         }
-        out.push_str(&reply[copied..]);
-        Ok(out)
+        if len > max {
+            return Err(format!("the reply would be {len} bytes, over {max}"));
+        }
+        let mut out = Vec::with_capacity(len);
+        let mut copied = 0;
+        for (start, end, text) in markers {
+            out.extend_from_slice(&bytes[copied..start]);
+            serde_json::to_writer(&mut out, text).expect("a string serializes");
+            copied = end;
+        }
+        out.extend_from_slice(&bytes[copied..]);
+        debug_assert_eq!(out.len(), len);
+        Ok(String::from_utf8(out).expect("text spliced into text"))
+    }
+}
+
+/// A writer that only counts the bytes written to it.
+struct Counted(usize);
+
+impl std::io::Write for Counted {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A JSON value checked as `serde_json` reads it into a `Value` (every escape, a lone
+/// surrogate refused) without keeping it: unescaped strings are not even copied.
+struct Strict;
+
+impl<'de> serde::Deserialize<'de> for Strict {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(Strict)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for Strict {
+    type Value = Strict;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Strict, E> {
+        Ok(Strict)
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<Strict, E> {
+        Ok(Strict)
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<Strict, E> {
+        Ok(Strict)
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<Strict, E> {
+        Ok(Strict)
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<Strict, E> {
+        Ok(Strict)
+    }
+
+    fn visit_unit<E>(self) -> Result<Strict, E> {
+        Ok(Strict)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Strict, A::Error> {
+        while seq.next_element::<Strict>()?.is_some() {}
+        Ok(Strict)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Strict, A::Error> {
+        while map.next_entry::<Strict, Strict>()?.is_some() {}
+        Ok(Strict)
     }
 }
 
@@ -232,6 +326,25 @@ fn call_data(state: &mut HostState) -> HostResult<&mut CallData> {
         .ok_or_else(|| invalid("the call keeps no data"))
 }
 
+/// `kept`, the result of keeping data during a call: over a limit, the call's connection is
+/// dropped whatever the module answers, as for the request's own data.
+fn over_limit_drops<T>(state: &mut HostState, kept: HostResult<T>) -> HostResult<T> {
+    if let Err(e) = &kept {
+        tracing::error!(
+            error = %e,
+            "a built-in module's call keeps more data than it may; its connection is dropped"
+        );
+        state.call.drop = true;
+    }
+    kept
+}
+
+/// [`CallData::keep`] for the call of `state`, through [`over_limit_drops`].
+fn keep(state: &mut HostState, bytes: Vec<u8>) -> HostResult<String> {
+    let kept = call_data(state)?.keep(bytes);
+    over_limit_drops(state, kept)
+}
+
 /// `data_read`: a copy of the data.
 pub(crate) fn data_read(state: &mut HostState, args: DataRef) -> HostResult<Bytes> {
     let data = call_data(state)?;
@@ -246,10 +359,10 @@ pub(crate) fn data_decode(state: &mut HostState, args: DataDecodeArgs) -> HostRe
     let decoded = match args.form {
         DataDecoding::JavaBase64 => oncl_protocol::javab64::decode_java(text),
     };
-    Ok(match decoded {
-        Ok(bytes) => DataDecoded::Data(data.keep(bytes)?),
-        Err(message) => DataDecoded::Invalid(message),
-    })
+    match decoded {
+        Ok(bytes) => keep(state, bytes).map(DataDecoded::Data),
+        Err(message) => Ok(DataDecoded::Invalid(message)),
+    }
 }
 
 /// `data_encode`: kept data encoded as `args.form` says, and kept.
@@ -261,7 +374,7 @@ pub(crate) fn data_encode(state: &mut HostState, args: DataEncodeArgs) -> HostRe
             .encode(data.get(args.data.as_bytes())?)
             .into_bytes(),
     };
-    data.keep(encoded)
+    keep(state, encoded)
 }
 
 /// `data_sign_cms`: `keys_sign_cms_ex` of the content (and the CMS co-signed into) a
@@ -284,9 +397,11 @@ pub(crate) fn data_sign_cms(state: &mut HostState, args: SignCmsExArgs) -> HostR
         super::keys::sign_cms_ex(state, &args, content, into)
     })();
     let outcome = match signed {
-        Ok(Ok(der)) => data
-            .keep(super::keys::cms_output(der, args.output).into_vec())
-            .map(|marker| CmsOutcome::Signed(Bytes::from(marker.into_bytes()))),
+        Ok(Ok(der)) => {
+            let kept = data.keep(super::keys::cms_output(der, args.output).into_vec());
+            over_limit_drops(state, kept)
+                .map(|marker| CmsOutcome::Signed(Bytes::from(marker.into_bytes())))
+        }
         Ok(Err(failure)) => Ok(CmsOutcome::TspFailed(failure)),
         Err(e) => Err(e),
     };
@@ -305,9 +420,27 @@ pub(crate) fn data_sign_xml(state: &mut HostState, args: SignXmlArgs) -> HostRes
     let signed = data
         .resolve(&args.xml)
         .and_then(|xml| super::keys::sign_xml(state, &args, xml));
-    let outcome = signed.and_then(|signed| data.keep(signed));
+    let outcome = match signed {
+        Ok(signed) => {
+            let kept = data.keep(signed);
+            over_limit_drops(state, kept)
+        }
+        Err(e) => Err(e),
+    };
     state.call.data = Some(data);
     outcome
+}
+
+/// `data_sign_raw`: `keys_sign_raw` of the data a marker names (or of `args.data` itself):
+/// the signature.
+pub(crate) fn data_sign_raw(state: &mut HostState, args: SignRawArgs) -> HostResult<Bytes> {
+    let data = state
+        .call
+        .data
+        .as_ref()
+        .ok_or_else(|| invalid("the call keeps no data"))?;
+    let bytes = data.resolve(&args.data)?;
+    super::keys::sign_raw(state, args.handle, bytes).map(Bytes::from)
 }
 
 /// `data_stamp`: `tsp_stamp` of the CMS a marker names, the stamped CMS kept.
@@ -321,9 +454,11 @@ pub(crate) fn data_stamp(state: &mut HostState, args: StampArgs) -> HostResult<S
         .resolve(&args.cms)
         .and_then(|cms| super::crypto::stamp(state, &args, cms));
     let outcome = match stamped {
-        Ok(StampOutcome::Stamped(cms)) => data
-            .keep(cms.into_vec())
-            .map(|marker| StampOutcome::Stamped(Bytes::from(marker.into_bytes()))),
+        Ok(StampOutcome::Stamped(cms)) => {
+            let kept = data.keep(cms.into_vec());
+            over_limit_drops(state, kept)
+                .map(|marker| StampOutcome::Stamped(Bytes::from(marker.into_bytes())))
+        }
         other => other,
     };
     state.call.data = Some(data);
@@ -336,8 +471,7 @@ pub(crate) fn data_page_read(state: &mut HostState, args: PagePathArgs) -> HostR
     match super::files::page_file_read(state, args)? {
         PageRead::Ok(mut file) => {
             let contents = std::mem::take(&mut file.data).into_vec();
-            let marker = call_data(state)?.keep(contents)?;
-            file.data = Bytes::from(marker.into_bytes());
+            file.data = Bytes::from(keep(state, contents)?.into_bytes());
             Ok(PageRead::Ok(file))
         }
         other => Ok(other),
@@ -429,8 +563,91 @@ mod tests {
             "result": [text, "kept", other, format!("{marker} and more")],
         })
         .to_string();
-        assert_eq!(data.splice(reply).unwrap(), expected);
+        let spliced = data.splice(reply, usize::MAX).unwrap();
+        assert_eq!(spliced, expected);
+        // Allocated once, at its length.
+        assert_eq!(spliced.capacity(), spliced.len());
         let gone = format!("\"{}7\"", data.prefix());
-        assert!(data.splice(gone).is_err());
+        assert!(data.splice(gone, usize::MAX).is_err());
+        // A reply over the limit is refused.
+        let reply = format!("[\"{marker}\"]");
+        let fits = serde_json::to_string(text).unwrap().len() + 2;
+        assert!(data.splice(reply.clone(), fits - 1).is_err());
+        assert_eq!(data.splice(reply, fits).unwrap().len(), fits);
+    }
+
+    #[test]
+    fn many_shorter_values_are_kept_once_they_add_up() {
+        let value = "a".repeat(DATA_KEPT_STRING_MIN);
+        let shorter = "b".repeat(DATA_KEPT_STRING_MIN - 1);
+        let count = DATA_KEPT_MIN / DATA_KEPT_STRING_MIN;
+        // `count` values of the shortest kept length add up to the threshold.
+        let mut data = CallData::new(usize::MAX);
+        let request = serde_json::json!({
+            "data": vec![value.clone(); count],
+            "short": shorter,
+        })
+        .to_string();
+        let kept = data.keep_request(&request).unwrap();
+        let p = data.prefix().to_owned();
+        let markers: Vec<String> = (0..count).map(|n| format!("{p}{n}")).collect();
+        assert_eq!(
+            kept,
+            serde_json::json!({"data": markers, "short": shorter}).to_string()
+        );
+        assert_eq!(data.kept.len(), count);
+        // One fewer does not add up: nothing is kept.
+        let mut data = CallData::new(usize::MAX);
+        let request = serde_json::json!({
+            "data": vec![value.clone(); count - 1],
+            "short": vec![shorter.clone(); count],
+        })
+        .to_string();
+        assert_eq!(data.keep_request(&request).unwrap(), request);
+        assert!(data.kept.is_empty());
+    }
+
+    #[test]
+    fn the_length_is_the_json_text_between_the_quotes() {
+        // Exactly the shortest length, escapes counted as written: kept; a byte less: not.
+        let escaped = format!("\\u0041{}", "a".repeat(DATA_KEPT_STRING_MIN - 6));
+        let request = format!(
+            r#"{{"a":"{escaped}","b":"{}","c":"{}"}}"#,
+            "b".repeat(DATA_KEPT_STRING_MIN - 1),
+            "c".repeat(DATA_KEPT_MIN),
+        );
+        let mut data = CallData::new(usize::MAX);
+        let kept = data.keep_request(&request).unwrap();
+        let p = data.prefix().to_owned();
+        assert_eq!(
+            kept,
+            format!(
+                r#"{{"a":"{p}0","b":"{}","c":"{p}1"}}"#,
+                "b".repeat(DATA_KEPT_STRING_MIN - 1)
+            )
+        );
+        assert_eq!(
+            data.get(format!("{p}0").as_bytes()).unwrap(),
+            format!("A{}", "a".repeat(DATA_KEPT_STRING_MIN - 6)).as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_lone_surrogate_leaves_the_request_as_it_is() {
+        let value = long('a');
+        for escape in [r"\ud800", r"\udc00", r"\ud800\u0041"] {
+            let mut data = CallData::new(usize::MAX);
+            let request = format!(r#"{{"data":"{value}{escape}","more":"{value}"}}"#);
+            assert_eq!(data.keep_request(&request).unwrap(), request);
+            assert!(data.kept.is_empty());
+            // In a key too.
+            let request = format!(r#"{{"k{escape}":"{value}"}}"#);
+            assert_eq!(data.keep_request(&request).unwrap(), request);
+        }
+        // A pair is text.
+        let mut data = CallData::new(usize::MAX);
+        let request = format!(r#"{{"data":"{value}\ud83d\ude00"}}"#);
+        assert_ne!(data.keep_request(&request).unwrap(), request);
+        assert_eq!(data.kept.len(), 1);
     }
 }

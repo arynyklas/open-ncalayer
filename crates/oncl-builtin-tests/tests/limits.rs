@@ -10,6 +10,7 @@ use oncl_builtin_tests::basics::MODULE_NAME;
 use oncl_builtin_tests::commonutils::MODULE_NAME as CU_MODULE;
 use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_pki::info::cert_info;
+use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::load;
 use oncl_pki::tsp::MockTsa;
 use oncl_plugin::{BUILTIN_FUEL, BuiltinLimits, Builtins, Engine as WasmEngine, HostServices};
@@ -112,6 +113,112 @@ fn synthetic_cas() -> oncl_pki::pkix::CaSet {
     )
 }
 
+/// The default limits of a 32-bit target, on any target (the guest is the same wasm32
+/// module on both; the process-wide budgets stay this target's).
+fn limits_32_bit() -> BuiltinLimits {
+    let mut limits = BuiltinLimits::default();
+    limits.instance.max_memory = 16 * MIB;
+    limits.instance.max_transfer = 16 * MIB;
+    limits.instance.max_kept = 256 * MIB;
+    limits.high_water = 8 * MIB;
+    limits.max_live = 4;
+    limits
+}
+
+#[cfg(not(target_pointer_width = "64"))]
+#[test]
+fn limits_32_bit_are_the_defaults_here() {
+    assert_eq!(limits_32_bit(), BuiltinLimits::default());
+}
+
+#[test]
+fn raw_of_a_large_document_fits() {
+    // The core signs the document itself: it never comes back into the module.
+    let data: Vec<u8> = (0..64 * MIB).map(|i| (i % 251) as u8).collect();
+    let request = json!({
+        "module": MODULE_NAME,
+        "method": "sign",
+        "args": {
+            "format": "raw",
+            "data": STANDARD.encode(&data),
+            "signingParams": {"decode": true},
+            "signerParams": {"extKeyUsageOids": [], "chain": []},
+        },
+    })
+    .to_string();
+    let builtins = basics(limits_32_bit(), 1);
+    let module = builtins.module(MODULE_NAME).unwrap();
+    let reply: serde_json::Value = serde_json::from_str(
+        module
+            .process(&request, &origin())
+            .text()
+            .expect("a text reply"),
+    )
+    .unwrap();
+    let key = synthetic("user-rsa-sign");
+    let entry = load(&read(&key.path), &key.password).unwrap().remove(0);
+    let signature = entry.key.sign(SigAlg::RsaSha256, &data).unwrap();
+    assert_eq!(
+        reply,
+        json!({"body": {"result": STANDARD.encode(signature)}, "status": true})
+    );
+}
+
+/// An XML document of exactly `len` bytes.
+fn xml_doc(n: usize, len: usize) -> String {
+    let head = format!("<doc n=\"{n}\">");
+    format!(
+        "{head}{}</doc>",
+        "x".repeat(len - head.len() - "</doc>".len())
+    )
+}
+
+#[test]
+fn batches_of_short_documents_fit() {
+    // Many documents, each shorter than a long string, add up: the core keeps them. The
+    // storage window is cancelled, so nothing is signed; the modules answer.
+    for (doc, total) in [(8 << 10, 16 * MIB), (1 << 10, 4 * MIB)] {
+        let docs: Vec<String> = (0..total / doc).map(|n| xml_doc(n, doc)).collect();
+        let builtins = Builtins::load(
+            &WasmEngine::new(),
+            basics_services(0),
+            SOURCES,
+            limits_32_bit(),
+            None,
+        )
+        .unwrap();
+        let request = json!({
+            "module": MODULE_NAME,
+            "method": "sign",
+            "args": {
+                "format": "xml",
+                "data": docs,
+                "signingParams": {},
+                "signerParams": {"extKeyUsageOids": [], "chain": []},
+            },
+        })
+        .to_string();
+        let module = builtins.module(MODULE_NAME).unwrap();
+        assert_eq!(
+            module.process(&request, &origin()),
+            r#"{"body":{},"status":true}"#,
+            "basics, {total} bytes of {doc}"
+        );
+        let request = json!({
+            "module": CU_MODULE,
+            "method": "signXmls",
+            "args": ["PKCS12", "", docs, "", ""],
+        })
+        .to_string();
+        let module = builtins.module(CU_MODULE).unwrap();
+        assert_eq!(
+            module.process(&request, &origin()),
+            r#"{"code":"500","message":"action.canceled"}"#,
+            "commonUtils, {total} bytes of {doc}"
+        );
+    }
+}
+
 #[test]
 fn sign_max_page_file_fits() {
     // The largest file a page may name, signed by commonUtils as an attached CAdES.
@@ -196,12 +303,16 @@ fn memory_limit_is_a_drop_not_a_hang() {
     .to_string();
     let mut small_memory = BuiltinLimits::default();
     small_memory.instance.max_memory = 4 * MIB;
-    // Over what the core keeps for a call: data the module hands to the core.
+    // Over what the core keeps for a call: data the module hands to the core, with the
+    // request, and while signing (the request and its data decoded fit, the CMS not).
     let mut small_kept = BuiltinLimits::default();
     small_kept.instance.max_kept = 8 * MIB;
+    let mut kept_mid_call = BuiltinLimits::default();
+    kept_mid_call.instance.max_kept = 20 * MIB;
     for (limits, request) in [
         (small_memory, in_guest),
         (small_kept, cms_request(16 * MIB)),
+        (kept_mid_call, cms_request(8 * MIB)),
     ] {
         let builtins = basics(limits, 2);
         let module = builtins.module(MODULE_NAME).unwrap();

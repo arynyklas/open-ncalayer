@@ -208,6 +208,36 @@ fn install_bundle_not_found_keeps_code_and_hint() {
 }
 
 #[test]
+fn long_strings_reach_the_module_as_sent() {
+    // The core keeps no data for accessory: its replies and windows show the page's text.
+    let (m, seen) = module();
+    let blank = " ".repeat(64 << 10);
+    assert_eq!(
+        call(
+            &m,
+            json!({"method": "installBundle", "symname": blank}),
+            Some("https://example.kz")
+        ),
+        json!({"errorCode": "SYMNAME_PARAMETER_IS_EMPTY"})
+    );
+    assert!(seen.lock().unwrap().is_empty());
+    let plugins = Arc::new(FakeBundles::default());
+    let (m, seen) = module_with(Arc::clone(&plugins));
+    let long = "kz.".to_owned() + &"x".repeat(64 << 10);
+    let uuid = "u".repeat(32 << 10);
+    assert_eq!(
+        call(
+            &m,
+            json!({"method": "installBundle", "symname": long, "uuid": uuid}),
+            Some("https://example.kz")
+        ),
+        json!({"errorCode": "BUNDLE_NOT_FOUND_OR_ALREADY_INSTALLED", "uuid": uuid})
+    );
+    assert_eq!(*seen.lock().unwrap(), [not_found(&long)]);
+    assert_eq!(plugins.requested.lock().unwrap()[0].0, long);
+}
+
+#[test]
 fn get_bundles_includes_plugin_replaces() {
     let plugins = Arc::new(FakeBundles::default());
     let (m, _) = module_with(Arc::clone(&plugins));

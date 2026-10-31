@@ -689,6 +689,7 @@ fn keystore_and_data_functions_need_builtin() {
         Import::DataEncode,
         Import::DataSignCms,
         Import::DataSignXml,
+        Import::DataSignRaw,
         Import::DataStamp,
         Import::DataPageRead,
     ];

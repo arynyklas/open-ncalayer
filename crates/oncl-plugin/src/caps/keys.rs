@@ -1007,17 +1007,21 @@ pub(crate) fn cms_output(der: Vec<u8>, output: abi::CmsOutput) -> Bytes {
 
 /// `keys_sign_raw`: the key's algorithm, RSA with SHA-256.
 pub(crate) fn keys_sign_raw(state: &mut HostState, args: SignRawArgs) -> HostResult<Bytes> {
-    let entry = state.keys.get(args.handle)?;
+    sign_raw(state, args.handle, &args.data).map(Bytes::from)
+}
+
+/// [`keys_sign_raw`] of `data` with the key `handle`.
+pub(crate) fn sign_raw(state: &HostState, handle: u32, data: &[u8]) -> HostResult<Vec<u8>> {
+    let entry = state.keys.get(handle)?;
     let alg = match entry.key.alg() {
         KeyAlg::Gost2004 => SigAlg::Gost2004,
         KeyAlg::Gost2015_512 => SigAlg::Gost2015_512,
         KeyAlg::Rsa => SigAlg::RsaSha256,
     };
-    let signature = entry
+    entry
         .key
-        .sign(alg, &args.data)
-        .map_err(|e: KeyError| failed(&e).with_cause(cause::key(&e)))?;
-    Ok(Bytes::from(signature))
+        .sign(alg, data)
+        .map_err(|e: KeyError| failed(&e).with_cause(cause::key(&e)))
 }
 
 /// `keys_sign_xml`: the whole document, or an element, with an enveloped signature.

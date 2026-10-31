@@ -7,6 +7,7 @@ use oncl_pdk::abi::{
 use oncl_pdk::keys::{self, Flow, Key};
 use oncl_pdk::serde_json::{self, Value};
 use oncl_pdk::{Locale, Request, builtin, data, dialogs, files, host, shared, tokens};
+use std::borrow::Cow;
 
 /// The process's PIN try count in the core's shared state.
 const TRY_COUNT_KEY: &str = "try_count";
@@ -132,17 +133,23 @@ fn handle(request: &Request) -> String {
     };
     // The core keeps the long strings of the request; the module reads all but the
     // document `signXml` signs.
-    let text = match serde_json::from_str::<Value>(&request.text) {
-        Ok(parsed) => {
-            let document = match (&parsed["method"], &parsed["args"]) {
-                (Value::String(m), Value::Array(args)) if m == DATA_METHOD && args.len() == 4 => {
-                    args[3].as_str()
-                }
-                _ => None,
-            };
-            data::restore(&request.text, prefix, |m| document == Some(m)).expect("data_read")
+    let text = if data::holds_markers(&request.text, prefix) {
+        match serde_json::from_str::<Value>(&request.text) {
+            Ok(parsed) => {
+                let document = match (&parsed["method"], &parsed["args"]) {
+                    (Value::String(m), Value::Array(args))
+                        if m == DATA_METHOD && args.len() == 4 =>
+                    {
+                        args[3].as_str()
+                    }
+                    _ => None,
+                };
+                data::restore(&request.text, prefix, |m| document == Some(m)).expect("data_read")
+            }
+            Err(_) => Cow::Borrowed(request.text.as_str()),
         }
-        Err(_) => request.text.clone(),
+    } else {
+        Cow::Borrowed(request.text.as_str())
     };
     crate::handle(&Host, &text)
 }

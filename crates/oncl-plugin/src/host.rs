@@ -399,6 +399,7 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
         Import::DataEncode => run(args, |a| caps::data_encode(state, a)),
         Import::DataSignCms => run(args, |a| caps::data_sign_cms(state, a)),
         Import::DataSignXml => run(args, |a| caps::data_sign_xml(state, a)),
+        Import::DataSignRaw => run(args, |a| caps::data_sign_raw(state, a)),
         Import::DataStamp => run(args, |a| caps::data_stamp(state, a)),
         Import::DataPageRead => run(args, |a| caps::data_page_read(state, a)),
     }

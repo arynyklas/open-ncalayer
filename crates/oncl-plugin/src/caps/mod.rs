@@ -32,8 +32,8 @@ pub(crate) use crypto::{
     tsp_request, tsp_stamp, xml_verify,
 };
 pub(crate) use data::{
-    CallData, data_decode, data_encode, data_page_read, data_read, data_sign_cms, data_sign_xml,
-    data_stamp,
+    CallData, data_decode, data_encode, data_page_read, data_read, data_sign_cms, data_sign_raw,
+    data_sign_xml, data_stamp,
 };
 pub use dialogs::MAX_SECRETS;
 pub(crate) use dialogs::{

@@ -151,6 +151,8 @@ mod imports {
         pub fn data_sign_cms(ptr: i32, len: i32) -> i64;
         #[link_name = "data_sign_xml"]
         pub fn data_sign_xml(ptr: i32, len: i32) -> i64;
+        #[link_name = "data_sign_raw"]
+        pub fn data_sign_raw(ptr: i32, len: i32) -> i64;
         #[link_name = "data_stamp"]
         pub fn data_stamp(ptr: i32, len: i32) -> i64;
         #[link_name = "data_page_read"]
@@ -232,6 +234,7 @@ fn host_fn(import: Import) -> HostFn {
         Import::DataEncode => imports::data_encode,
         Import::DataSignCms => imports::data_sign_cms,
         Import::DataSignXml => imports::data_sign_xml,
+        Import::DataSignRaw => imports::data_sign_raw,
         Import::DataStamp => imports::data_stamp,
         Import::DataPageRead => imports::data_page_read,
     }
@@ -1127,41 +1130,65 @@ pub mod data {
     use super::{HostResult, call, imports};
     use crate::abi::{Bytes, DataDecodeArgs, DataEncodeArgs, DataRef, PagePathArgs};
     pub use crate::abi::{
-        CmsOutcome, DataDecoded, DataDecoding, DataEncoding, PageRead, SignCmsExArgs, SignXmlArgs,
-        StampArgs, StampOutcome,
+        CmsOutcome, DataDecoded, DataDecoding, DataEncoding, PageRead, SignCmsExArgs, SignRawArgs,
+        SignXmlArgs, StampArgs, StampOutcome,
     };
+    use std::borrow::Cow;
 
     /// `text` (a request) with every marker of `prefix` that `keep` refuses replaced by the
     /// string it stands for, written as `serde_json` writes a string: what the module
-    /// reads itself, while the data it hands to the core stays there.
+    /// reads itself, while the data it hands to the core stays there. `text` itself if it
+    /// holds no marker to replace; the restored text is allocated once, at its length.
     ///
     /// # Panics
     ///
     /// A marker of the request stands for no text: the core keeps only strings.
-    pub fn restore(text: &str, prefix: &str, keep: impl Fn(&str) -> bool) -> HostResult<String> {
+    pub fn restore<'a>(
+        text: &'a str,
+        prefix: &str,
+        keep: impl Fn(&str) -> bool,
+    ) -> HostResult<Cow<'a, str>> {
+        if !holds_markers(text, prefix) {
+            return Ok(Cow::Borrowed(text));
+        }
         let quoted = format!("\"{prefix}");
-        if !text.contains(&quoted) {
-            return Ok(text.to_owned());
-        }
-        let mut out = String::with_capacity(text.len());
-        let mut rest = text;
-        while let Some(at) = rest.find(&quoted) {
-            let tail = &rest[at + 1..];
-            let Some(end) = tail.find('"') else { break };
-            let marker = &tail[..end];
-            out.push_str(&rest[..at]);
-            if keep(marker) {
-                out.push('"');
-                out.push_str(marker);
-                out.push('"');
-            } else {
+        // The strings read back: where their markers start and end (quotes included).
+        let mut restored: Vec<(usize, usize, String)> = Vec::new();
+        let mut from = 0;
+        while let Some(at) = text[from..].find(&quoted) {
+            let start = from + at;
+            let Some(len) = text[start + 1..].find('"') else {
+                break;
+            };
+            let end = start + len + 2;
+            let marker = &text[start + 1..end - 1];
+            if !keep(marker) {
                 let data = String::from_utf8(read(marker)?).expect("the core keeps text");
-                out.push_str(&serde_json::to_string(&data).expect("a string serializes"));
+                let json = serde_json::to_string(&data).expect("a string serializes");
+                restored.push((start, end, json));
             }
-            rest = &tail[end + 1..];
+            from = end;
         }
-        out.push_str(rest);
-        Ok(out)
+        if restored.is_empty() {
+            return Ok(Cow::Borrowed(text));
+        }
+        let replaced: usize = restored.iter().map(|(start, end, _)| end - start).sum();
+        let added: usize = restored.iter().map(|(_, _, json)| json.len()).sum();
+        let mut out = String::with_capacity(text.len() - replaced + added);
+        let mut copied = 0;
+        for (start, end, json) in restored {
+            out.push_str(&text[copied..start]);
+            out.push_str(&json);
+            copied = end;
+        }
+        out.push_str(&text[copied..]);
+        Ok(Cow::Owned(out))
+    }
+
+    /// Whether `text` holds a JSON string that starts with a marker of `prefix`.
+    pub fn holds_markers(text: &str, prefix: &str) -> bool {
+        let quoted = format!("\"{prefix}");
+        text.contains(&quoted)
     }
 
     /// A copy of the data `marker` stands for.
@@ -1206,6 +1233,12 @@ pub mod data {
     /// `keys_sign_xml` (`args.handle` is the key's): the marker of the signed document.
     pub fn sign_xml(args: &SignXmlArgs) -> HostResult<String> {
         call(imports::data_sign_xml, args)
+    }
+
+    /// `keys_sign_raw` (`args.handle` is the key's) of `args.data` or the data it names if
+    /// it is a marker: the signature.
+    pub fn sign_raw(args: &SignRawArgs) -> HostResult<Vec<u8>> {
+        call::<_, Bytes>(imports::data_sign_raw, args).map(Bytes::into_vec)
     }
 
     /// `tsp_stamp`: the CMS kept, its marker in [`StampOutcome::Stamped`].

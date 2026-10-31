@@ -3,12 +3,14 @@
 use oncl_pdk::abi::{
     CertInfo, CmsOutcome, CsrChoice, CsrDialogArgs, ErrorCode, FlowArgs, HostResult, ImportChoice,
     ImportDialogArgs, InstallCertArgs, InstalledCert, NewKey, NewKeyArgs, SignCmsExArgs,
-    SignXmlArgs,
+    SignRawArgs, SignXmlArgs,
 };
 use oncl_pdk::data::{self, DataDecoded, DataDecoding};
 use oncl_pdk::keys::{self, Key};
 use oncl_pdk::serde_json::{self, Value};
 use oncl_pdk::{Locale, Request, builtin, host};
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 
 /// The core, through the host functions, with the prefix of the call's data markers. A
 /// failure the module has no answer for is the module's failure: the connection is
@@ -78,12 +80,11 @@ impl crate::Core for Host {
     }
 
     fn sign_raw(&self, key: &Key, bytes: &[u8]) -> HostResult<Vec<u8>> {
-        if self.is_marker(bytes) {
-            let marker = std::str::from_utf8(bytes).expect("a marker is text");
-            key.sign_raw(&data::read(marker).expect("data_read"))
-        } else {
-            key.sign_raw(bytes)
-        }
+        // The core signs the data a marker names itself: the document never comes back.
+        data::sign_raw(&SignRawArgs {
+            handle: key.handle(),
+            data: bytes.to_vec().into(),
+        })
     }
 
     fn sign_xml(&self, key: &Key, xml: &[u8]) -> HostResult<Vec<u8>> {
@@ -118,16 +119,20 @@ fn handle(request: &Request) -> String {
         panic!("a built-in module's call keeps data");
     };
     // The core keeps the long strings of the request; the module reads all but `data`.
-    let text = match serde_json::from_str::<Value>(&request.text) {
-        Ok(parsed) => {
-            let kept: Vec<&str> = match &parsed["args"]["data"] {
-                Value::String(s) => vec![s.as_str()],
-                Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
-                _ => Vec::new(),
-            };
-            data::restore(&request.text, &prefix, |m| kept.contains(&m)).expect("data_read")
+    let text = if data::holds_markers(&request.text, &prefix) {
+        match serde_json::from_str::<Value>(&request.text) {
+            Ok(parsed) => {
+                let kept: BTreeSet<&str> = match &parsed["args"]["data"] {
+                    Value::String(s) => BTreeSet::from([s.as_str()]),
+                    Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+                    _ => BTreeSet::new(),
+                };
+                data::restore(&request.text, &prefix, |m| kept.contains(m)).expect("data_read")
+            }
+            Err(_) => Cow::Borrowed(request.text.as_str()),
         }
-        Err(_) => request.text.clone(),
+    } else {
+        Cow::Borrowed(request.text.as_str())
     };
     crate::handle(&Host { prefix }, &text, &request.add_info())
 }

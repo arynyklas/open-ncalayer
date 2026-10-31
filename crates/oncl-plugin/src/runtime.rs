@@ -256,6 +256,23 @@ pub(crate) fn declares(capabilities: &Capabilities, import: Import) -> bool {
     }
 }
 
+/// Whether `import` is one of the `data_*` functions (capability `builtin`). Only a module
+/// importing one has the core keep its request's long strings: any other gets its requests
+/// as the page sent them.
+fn keeps_data(import: &Import) -> bool {
+    matches!(
+        import,
+        Import::DataRead
+            | Import::DataDecode
+            | Import::DataEncode
+            | Import::DataSignCms
+            | Import::DataSignXml
+            | Import::DataSignRaw
+            | Import::DataStamp
+            | Import::DataPageRead
+    )
+}
+
 /// The ABI's exports, with their types.
 fn check_exports(module: &Module) -> Result<(), LoadError> {
     let func = |params: &[ValType], results: &[ValType]| {
@@ -358,7 +375,7 @@ impl Compiled {
             ctx,
             Arc::clone(&self.capabilities),
             self.limits.max_transfer,
-            if self.capabilities.builtin {
+            if self.imports.iter().any(keeps_data) {
                 self.limits.max_kept
             } else {
                 0
@@ -541,7 +558,9 @@ impl Instance {
         self.store.data_mut().phase = Phase::Idle;
         let output: Output = abi::decode(&output).map_err(|e| PluginError::Output(e.message))?;
         match &self.store.data().call.data {
-            Some(data) => data.splice(output.response).map_err(PluginError::Output),
+            Some(data) => data
+                .splice(output.response, crate::BUILTIN_MAX_REPLY)
+                .map_err(PluginError::Output),
             None => Ok(output.response),
         }
     }

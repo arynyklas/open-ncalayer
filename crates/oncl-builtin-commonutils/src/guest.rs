@@ -8,6 +8,8 @@ use oncl_pdk::data::{self, DataDecoded, DataDecoding, DataEncoding};
 use oncl_pdk::keys::{self, Key};
 use oncl_pdk::serde_json::{self, Value};
 use oncl_pdk::{Locale, Request, files, host, pki, shared, tokens};
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 
 /// The process's dialog language in the core's shared state.
 const LOCALE_KEY: &str = "locale";
@@ -159,19 +161,23 @@ fn handle(request: &Request) -> String {
     };
     // The core keeps the long strings of the request; the module reads all but the data
     // of the signing methods.
-    let text = match serde_json::from_str::<Value>(&request.text) {
-        Ok(parsed) => {
-            let data_method = parsed["method"]
-                .as_str()
-                .is_some_and(|m| DATA_METHODS.contains(&m));
-            let kept: Vec<&str> = match (&parsed["args"][2], data_method) {
-                (Value::String(s), true) => vec![s.as_str()],
-                (Value::Array(items), true) => items.iter().filter_map(Value::as_str).collect(),
-                _ => Vec::new(),
-            };
-            data::restore(&request.text, &prefix, |m| kept.contains(&m)).expect("data_read")
+    let text = if data::holds_markers(&request.text, &prefix) {
+        match serde_json::from_str::<Value>(&request.text) {
+            Ok(parsed) => {
+                let data_method = parsed["method"]
+                    .as_str()
+                    .is_some_and(|m| DATA_METHODS.contains(&m));
+                let kept: BTreeSet<&str> = match (&parsed["args"][2], data_method) {
+                    (Value::String(s), true) => BTreeSet::from([s.as_str()]),
+                    (Value::Array(items), true) => items.iter().filter_map(Value::as_str).collect(),
+                    _ => BTreeSet::new(),
+                };
+                data::restore(&request.text, &prefix, |m| kept.contains(m)).expect("data_read")
+            }
+            Err(_) => Cow::Borrowed(request.text.as_str()),
         }
-        Err(_) => request.text.clone(),
+    } else {
+        Cow::Borrowed(request.text.as_str())
     };
     crate::handle(&Host { prefix }, &text, &request.add_info())
 }

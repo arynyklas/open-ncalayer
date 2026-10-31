@@ -82,7 +82,7 @@ pub const BUILTIN_MAX_KEPT: usize = 2 << 30;
 /// The most bytes of data the core keeps for one call of a built-in module, on 32-bit
 /// targets: a page file of 64 MiB signed, time-stamped and base64-encoded fits.
 #[cfg(not(target_pointer_width = "64"))]
-pub const BUILTIN_MAX_KEPT: usize = 384 << 20;
+pub const BUILTIN_MAX_KEPT: usize = 256 << 20;
 
 /// The most bytes of data the core keeps for all calls of the built-in modules at once:
 /// a call that would keep more fails (`limit`, its connection dropped). 8 GiB on 64-bit
@@ -90,28 +90,42 @@ pub const BUILTIN_MAX_KEPT: usize = 384 << 20;
 #[cfg(target_pointer_width = "64")]
 pub const BUILTIN_KEPT_BUDGET: usize = 8 << 30;
 /// The most bytes of data the core keeps for all calls of the built-in modules at once:
-/// 384 MiB on 32-bit targets.
+/// 256 MiB on 32-bit targets.
 #[cfg(not(target_pointer_width = "64"))]
-pub const BUILTIN_KEPT_BUDGET: usize = 384 << 20;
+pub const BUILTIN_KEPT_BUDGET: usize = 256 << 20;
 
-/// The address space kept free, on 32-bit targets, for the core's code, heap and the
-/// WebSocket messages, from the process's 2 GiB (Windows 7 x86).
+/// The longest reply of a built-in module once the kept data is spliced in: a longer one
+/// drops the connection. As much as a call keeps on 64-bit targets.
+#[cfg(target_pointer_width = "64")]
+pub const BUILTIN_MAX_REPLY: usize = BUILTIN_MAX_KEPT;
+/// The longest reply of a built-in module once the kept data is spliced in, on 32-bit
+/// targets: 128 MiB, the CAdES of a page file of 64 MiB in base64 fits.
 #[cfg(not(target_pointer_width = "64"))]
-pub const PROCESS_RESERVE: usize = 320 << 20;
+pub const BUILTIN_MAX_REPLY: usize = 128 << 20;
 
-// On 32-bit targets everything the modules and plugins may take at once fits the 2 GiB of
-// a process: the built-in modules' instances at their largest, the plugins' instances at
-// their largest, the copies of a host function's argument and result, the data the core
-// keeps, and the reserve.
+/// The address space kept free, on 32-bit targets, for the core's code and heap, from the
+/// process's 2 GiB (Windows 7 x86).
+#[cfg(not(target_pointer_width = "64"))]
+pub const PROCESS_RESERVE: usize = 96 << 20;
+
+// On 32-bit targets, what the modules and plugins may take at once fits the 2 GiB of a
+// process: the built-in modules' instances and the plugins' instances at their largest,
+// the copies of a built-in module's host function argument and result, the data the core
+// keeps, one reply being spliced, one incoming message at its largest (a plugin's
+// `MAX_TRANSFER` is the daemon's largest message) and the reserve. Not counted: the
+// copies of a plugin's host function buffers, a message on another connection, and the
+// frame a reply is copied into after its call (when that call's data is gone).
 #[cfg(not(target_pointer_width = "64"))]
 const _: () = assert!(
     BUILTIN_MAX_MODULES * BUILTIN_MAX_LIVE * BUILTIN_MAX_MEMORY
         + crate::MAX_INSTANCES * crate::MAX_MEMORY
         + 2 * BUILTIN_MAX_TRANSFER
         + BUILTIN_KEPT_BUDGET
+        + BUILTIN_MAX_REPLY
+        + crate::MAX_TRANSFER
         + PROCESS_RESERVE
         <= 2 << 30,
-    "the modules, the plugins and the kept data must fit a 32-bit process"
+    "the modules, the plugins, the kept data and a message must fit a 32-bit process"
 );
 
 /// The fuel of one call of a built-in module.

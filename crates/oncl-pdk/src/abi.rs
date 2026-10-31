@@ -114,9 +114,9 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, HostError> {
 /// What `oncl_process` gets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Input {
-    /// The request as the page sent it: a JSON text. For a built-in module, every string
-    /// value of at least [`DATA_KEPT_MIN`] bytes is replaced by a marker of the data the
-    /// core keeps (see [`Input::data_prefix`]).
+    /// The request as the page sent it: a JSON text. For a built-in module, its long string
+    /// values are replaced by markers of the data the core keeps (see [`DATA_KEPT_MIN`] and
+    /// [`Input::data_prefix`]).
     pub request: String,
     /// The page's origin, if the connection sent one.
     pub origin: Option<String>,
@@ -131,8 +131,15 @@ pub struct Input {
     pub data_prefix: Option<String>,
 }
 
-/// The shortest string value of a request that a built-in module gets as a data marker.
+/// A request's string values of at least [`DATA_KEPT_STRING_MIN`] bytes are kept by the
+/// core, and reach a built-in module as data markers, once they add up to at least this
+/// many bytes. Object keys are never kept. A request that is not valid JSON (a lone
+/// surrogate escape included) is not rewritten.
 pub const DATA_KEPT_MIN: usize = 16 << 10;
+
+/// The shortest string value of a request that the core keeps (see [`DATA_KEPT_MIN`]): the
+/// length of its JSON text between the quotes, escapes as written.
+pub const DATA_KEPT_STRING_MIN: usize = 1 << 10;
 
 /// What `oncl_process` returns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -601,6 +608,9 @@ pub enum Import {
     /// `data_sign_xml`: [`SignXmlArgs`] → `String`: `keys_sign_xml` over data the core
     /// keeps, the marker of the signed document.
     DataSignXml,
+    /// `data_sign_raw`: [`SignRawArgs`] → [`Bytes`]: `keys_sign_raw` over data the core
+    /// keeps (`data` may be a marker), the signature itself.
+    DataSignRaw,
     /// `data_stamp`: [`StampArgs`] → [`StampOutcome`]: `tsp_stamp` over data the core
     /// keeps, the CMS kept (its marker in `stamped`).
     DataStamp,
@@ -611,7 +621,7 @@ pub enum Import {
 
 impl Import {
     /// Every host function.
-    pub const ALL: [Import; 70] = [
+    pub const ALL: [Import; 71] = [
         Import::Log,
         Import::Now,
         Import::Random,
@@ -680,6 +690,7 @@ impl Import {
         Import::DataEncode,
         Import::DataSignCms,
         Import::DataSignXml,
+        Import::DataSignRaw,
         Import::DataStamp,
         Import::DataPageRead,
     ];
@@ -755,6 +766,7 @@ impl Import {
             Import::DataEncode => "data_encode",
             Import::DataSignCms => "data_sign_cms",
             Import::DataSignXml => "data_sign_xml",
+            Import::DataSignRaw => "data_sign_raw",
             Import::DataStamp => "data_stamp",
             Import::DataPageRead => "data_page_read",
         }
@@ -827,6 +839,7 @@ impl Import {
             | Import::DataEncode
             | Import::DataSignCms
             | Import::DataSignXml
+            | Import::DataSignRaw
             | Import::DataStamp
             | Import::DataPageRead => Some(Capability::Builtin),
         }
@@ -908,6 +921,7 @@ impl Import {
             | Import::DataEncode
             | Import::DataSignCms
             | Import::DataSignXml
+            | Import::DataSignRaw
             | Import::DataStamp
             | Import::DataPageRead => "0.1.0-alpha.5",
         };
