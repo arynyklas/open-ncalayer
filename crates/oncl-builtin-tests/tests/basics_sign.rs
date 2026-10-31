@@ -896,6 +896,25 @@ fn expired_key_cannot_be_chosen() {
 }
 
 #[test]
+fn a_prompter_panic_drops_only_the_connection() {
+    // The refused expired key is prompted for again, and the script answers that prompt
+    // with a storage: the scripted prompter panics. The call's connection is dropped; the
+    // module, and the process, carry on with the next call.
+    let (b, p) = basics(script![
+        storage("expired-gost2015-sign", "Qwerty12"),
+        key(0),
+        storage("user-gost2015-sign", "Qwerty12"),
+        storage("user-gost2015-sign", "Qwerty12"),
+        key(0)
+    ]);
+    let args = cms_args(json!("x"), json!({}));
+    assert_eq!(b.process(&req(args.clone()), &origin("o")), Reply::Drop);
+    let r = json(b.process(&req(args), &origin("o")));
+    assert_eq!(r["status"], true, "{r}");
+    assert_eq!(p.key_prompts().len(), 3);
+}
+
+#[test]
 fn out_of_range_key_index_reprompts() {
     let (b, p) = basics(script![
         storage("user-gost2015-sign", "Qwerty12"),

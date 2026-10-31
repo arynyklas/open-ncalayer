@@ -17,6 +17,7 @@ use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::TsaProfile;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;
 use time::OffsetDateTime;
@@ -251,12 +252,28 @@ pub(crate) fn write_guest(data: &mut [u8], ptr: i32, bytes: &[u8]) -> Result<(),
     Ok(())
 }
 
-/// Defines the host function `import` in `linker`.
+/// Defines the host function `import` in `linker`. A panic of the host function (a
+/// prompter's, a capability's) traps: it cannot unwind through the interpreter, which
+/// would abort the process, so the call fails as on any other trap.
 pub(crate) fn define(linker: &mut Linker<HostState>, import: Import) -> Result<(), wasmi::Error> {
     linker.func_wrap(
         IMPORT_MODULE,
         import.name(),
-        move |caller: Caller<'_, HostState>, ptr: i32, len: i32| call(caller, import, ptr, len),
+        move |caller: Caller<'_, HostState>, ptr: i32, len: i32| {
+            panic::catch_unwind(AssertUnwindSafe(|| call(caller, import, ptr, len))).unwrap_or_else(
+                |payload| {
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("a non-string payload");
+                    Err(trap(format!(
+                        "the host function {} panicked: {message}",
+                        import.name()
+                    )))
+                },
+            )
+        },
     )?;
     Ok(())
 }
