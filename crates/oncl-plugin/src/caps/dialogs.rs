@@ -5,7 +5,7 @@ use super::{
     DialogTurn, MAX_DIALOG_TEXT, MAX_LINE, check_line, invalid, limit, origin, source, source_line,
 };
 use crate::host::HostState;
-use oncl_basics::{
+use oncl_flows::{
     ChoiceAnswer, ChoicePrompt, ConfirmPrompt, MessagePrompt, PasswordPrompt, Prompt, ReaderList,
     ReaderPrompt, StorageKind,
 };
@@ -138,11 +138,11 @@ pub(crate) fn dialog_confirm(state: &mut HostState, args: ConfirmArgs) -> HostRe
     Ok(state.services.prompter.confirm(&prompt) == Prompt::Answer(true))
 }
 
-fn message_kind(kind: MessageKind) -> oncl_basics::MessageKind {
+fn message_kind(kind: MessageKind) -> oncl_flows::MessageKind {
     match kind {
-        MessageKind::Info => oncl_basics::MessageKind::Info,
-        MessageKind::Warning => oncl_basics::MessageKind::Warning,
-        MessageKind::Error => oncl_basics::MessageKind::Error,
+        MessageKind::Info => oncl_flows::MessageKind::Info,
+        MessageKind::Warning => oncl_flows::MessageKind::Warning,
+        MessageKind::Error => oncl_flows::MessageKind::Error,
     }
 }
 

@@ -14,14 +14,14 @@ publish.workspace = true
 # `ONCL_UPDATE_INDEX_BASE` set, the updater reads its index there; with
 # `ONCL_E2E_EXTRA_CA=<pem>` set, outbound HTTPS trusts that CA too; `e2e install-plugin`
 # installs a plugin package. Never in releases.
-e2e-prompter = ["oncl-basics/testing", "oncl-pki/extra-roots"]
+e2e-prompter = ["oncl-flows/testing", "oncl-pki/extra-roots"]
 # `token-emulator`: with `ONCL_TOKEN_EMULATOR=<config.toml>` set, `run` reads hardware tokens
 # from the emulated readers and cards of that file, with token support on (end-to-end tests).
 # Never in releases.
 token-emulator = ["oncl-token/emulator"]
 
 [dependencies]
-oncl-basics.workspace = true
+oncl-flows.workspace = true
 # The accessory module's name, which the About window asks for the bundles.
 oncl-builtin-accessory.workspace = true
 oncl-desktop.workspace = true
@@ -60,7 +60,7 @@ zeroize.workspace = true
 [dev-dependencies]
 # `testing`: `ScriptedPrompter`, `MemoryRecentPath`, `tsp::MockTsa`, `ocsp::MockOcsp`,
 # `crl::MockCrl` and `http::RouteTransport`.
-oncl-basics = { path = "../oncl-basics", features = ["testing"] }
+oncl-flows = { path = "../oncl-flows", features = ["testing"] }
 oncl-pki = { path = "../oncl-pki", features = ["testing"] }
 # A `log` record must reach the log file through the `tracing-log` bridge.
 log.workspace = true

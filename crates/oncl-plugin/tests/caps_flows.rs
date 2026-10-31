@@ -6,8 +6,8 @@
 mod common;
 
 use common::*;
-use oncl_basics::testing::{ScriptedPrompter, Step};
-use oncl_basics::{PageFileError, StorageKind};
+use oncl_flows::testing::{ScriptedPrompter, Step};
+use oncl_flows::{PageFileError, StorageKind};
 use oncl_pdk::abi::{
     self, Action, Bytes, Chosen, CmsContent, CmsOutcome, ErrorCode, FileKindArgs, Filter,
     FilterMore, FlowArgs, FlowChecks, FlowFile, FlowNone, FlowOrder, FlowOutcome, FlowReader,
@@ -362,7 +362,7 @@ fn fifth_flow_is_limit() {
 #[test]
 fn flow_wrong_pin_reported() {
     let token = |pin: &str| Step::Token {
-        storage: oncl_basics::StorageKind::Token(KAZTOKEN),
+        storage: oncl_flows::StorageKind::Token(KAZTOKEN),
         reader: R0.to_owned(),
         pin: pin.to_owned(),
     };
@@ -376,7 +376,7 @@ fn flow_wrong_pin_reported() {
     let mut plugin = guest(&services, &[open_call(&args)]);
     let outcome: FlowOutcome = run(&mut plugin).unwrap();
     assert_eq!(outcome.opened, None);
-    let Some(oncl_basics::OpenError::WrongPin { tries_left }) = prompter.storage_prompts()[1].error
+    let Some(oncl_flows::OpenError::WrongPin { tries_left }) = prompter.storage_prompts()[1].error
     else {
         panic!("the wrong PIN is shown");
     };
@@ -552,10 +552,10 @@ fn file_choose_kind_missing_path_is_none() {
             Some(dir.path().to_path_buf())
         );
         let prompts = prompter.file_prompts();
-        assert_eq!(prompts[0].kind, oncl_basics::FileKind::P12);
+        assert_eq!(prompts[0].kind, oncl_flows::FileKind::P12);
         assert_eq!(prompts[0].directory.as_deref(), Some(dir.path()));
         assert_eq!(prompts[0].source, source, "{trust:?}");
-        assert_eq!(prompts[2].kind, oncl_basics::FileKind::Directory);
+        assert_eq!(prompts[2].kind, oncl_flows::FileKind::Directory);
         assert_eq!(prompts[2].directory, None);
     }
 }
@@ -943,7 +943,7 @@ fn flow_live_checks_follow_the_filter() {
     assert_eq!(run::<Option<Chosen>>(&mut plugin).unwrap(), None);
     assert_ne!(
         prompter.key_prompts()[0].candidates[0].availability,
-        oncl_basics::Availability::Enabled
+        oncl_flows::Availability::Enabled
     );
 }
 

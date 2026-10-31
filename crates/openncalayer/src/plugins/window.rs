@@ -172,7 +172,7 @@ fn bundle(replaces: &Replaces) -> ReplacedBundle {
 mod tests {
     use super::*;
     use crate::plugins::{AvailableView, InstalledView, PendingView};
-    use oncl_basics::capabilities::CapabilityLine;
+    use oncl_flows::capabilities::CapabilityLine;
     use oncl_plugin::{Capabilities, HttpPrefix};
     use oncl_update::{Channel, Version};
     use time::macros::datetime;

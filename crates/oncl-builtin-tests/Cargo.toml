@@ -1,6 +1,6 @@
 [package]
 name = "oncl-builtin-tests"
-description = "Tests of OpenNCALayer's built-in modules (basics, commonUtils, Applet, accessory) through the Module trait, on their native code or their WebAssembly guests"
+description = "Tests of OpenNCALayer's built-in modules (basics, commonUtils, Applet, accessory) through the Module trait, on their embedded WebAssembly guests"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 # `testing`: `ScriptedPrompter` and `MemoryRecentPath`, which the tests answer dialogs with.
-oncl-basics = { workspace = true, features = ["testing"] }
+oncl-flows = { workspace = true, features = ["testing"] }
 # The accessory module's names; its guest is embedded by the build script.
 oncl-builtin-accessory.workspace = true
 # The Applet module's name; its guest is embedded by the build script.

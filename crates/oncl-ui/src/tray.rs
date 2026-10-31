@@ -7,7 +7,7 @@
 //! [`TrayHandle::notify`] shows a [`Notification`]: a balloon of the icon on Windows, a
 //! desktop notification over D-Bus on Linux, `osascript` on macOS.
 
-use oncl_basics::Locale;
+use oncl_flows::Locale;
 use std::cell::RefCell;
 use std::io::Cursor;
 use std::rc::Rc;

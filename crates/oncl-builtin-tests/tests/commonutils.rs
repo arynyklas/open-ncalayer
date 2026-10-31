@@ -4,9 +4,9 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::Encode;
-use oncl_basics::testing::{ScriptedPrompter, Step};
-use oncl_basics::{Action, FileKind, Locale, OpenError, StorageKind};
 use oncl_builtin_tests::commonutils::{CommonUtils, MODULE_NAME};
+use oncl_flows::testing::{ScriptedPrompter, Step};
+use oncl_flows::{Action, FileKind, Locale, OpenError, StorageKind};
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::cms::{self, SignOptions, verify};
 use oncl_pki::info::{cert_info, common_name, kalkan_dn};
@@ -1110,7 +1110,7 @@ fn pipes_and_devices_are_refused_without_blocking() {
     }
     // The same pipe through the network redirector: a page may not name a network path,
     // so it is refused before anything is opened. (A user-chosen network path is opened;
-    // the `GetFileType` guard that refuses such a pipe is tested in `oncl-basics`.)
+    // the `GetFileType` guard that refuses such a pipe is tested in `oncl-flows`.)
     check(&format!(r"\\localhost\pipe\{name}"), Duration::from_secs(2));
     assert!(s.prompter.storage_prompts().is_empty());
 

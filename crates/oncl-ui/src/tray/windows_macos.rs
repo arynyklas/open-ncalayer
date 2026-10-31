@@ -7,7 +7,7 @@ use super::balloon::Balloons;
 use super::{
     IconKind, MenuRow, Notification, PRODUCT, TrayCommand, TrayError, TrayModel, TrayState, deliver,
 };
-use oncl_basics::Locale;
+use oncl_flows::Locale;
 use std::cell::RefCell;
 use std::rc::Rc;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};

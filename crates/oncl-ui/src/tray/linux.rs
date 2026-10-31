@@ -17,7 +17,7 @@ use super::{
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem, OfflineReason, ToolTip};
-use oncl_basics::Locale;
+use oncl_flows::Locale;
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::Value;
 

@@ -1,8 +1,8 @@
 //! The shared key choice ([`KeyChooser`], [`KeyFlow`]) and the plugin dialogs of the scripted
 //! prompter.
 
-use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
-use oncl_basics::{
+use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+use oncl_flows::{
     Action, Availability, ChainPolicy, ConfirmPrompt, FileRead, KeyChecks, KeyChooser, KeyFilter,
     KeyFlow, KeyOrder, KeyRequest, Locale, MessageKind, MessagePrompt, OcspCache, OpenError,
     PasswordRules, Prompt, Prompter, ReaderEntry, Readers, SavePrompt, StartPath, StorageKind,

@@ -5,8 +5,8 @@
 
 use std::time::{Duration, Instant};
 
-use oncl_basics::Locale;
 use oncl_desktop::PortOwner;
+use oncl_flows::Locale;
 use oncl_ui::settings_view::{UpdateStatus, update_view};
 use oncl_ui::view::page_text;
 use oncl_ui::{ActionTarget, Notification, NotificationAction, TrayCommand, TrayState};

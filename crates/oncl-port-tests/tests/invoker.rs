@@ -4,7 +4,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use oncl_basics::testing::Step;
+use oncl_flows::testing::Step;
 use oncl_pki::http::{HttpError, HttpErrorKind, HttpReply, HttpRequest, HttpTransport};
 use oncl_port_tests::{Harness, P12_PASSWORD, p12};
 use oncl_protocol::Reply;
@@ -639,7 +639,7 @@ fn fhs_english_texts_are_cabinet_en() {
         ],
         vec![],
     )
-    .with_locale(oncl_basics::Locale::En);
+    .with_locale(oncl_flows::Locale::En);
     let args = serde_json::json!({"base64data": STANDARD.encode(b"hello")});
     harness.call(FHS, &fhs_request("signText", &args), FHS_ORIGIN);
     let choices = harness.prompter().choice_prompts();

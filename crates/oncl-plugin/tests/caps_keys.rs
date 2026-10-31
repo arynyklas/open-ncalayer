@@ -6,8 +6,8 @@
 mod common;
 
 use common::*;
-use oncl_basics::testing::{ScriptedPrompter, Step};
-use oncl_basics::{Availability, DisabledReason};
+use oncl_flows::testing::{ScriptedPrompter, Step};
+use oncl_flows::{Availability, DisabledReason};
 use oncl_pdk::abi::{
     self, Action, Bytes, CertArgs, CertDetails, Chosen, ErrorCode, Filter, FilterMore, Handle,
     HashAlg, HashArgs, HostResult, Import, KeyOrder, KeySource, KeyUsageBit, LocalTime,

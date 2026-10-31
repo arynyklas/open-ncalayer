@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use oncl_basics::Locale;
+use oncl_flows::Locale;
 
 pub mod check;
 pub mod data;

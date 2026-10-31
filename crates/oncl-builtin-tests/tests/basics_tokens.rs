@@ -3,12 +3,12 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
-use oncl_basics::{
+use oncl_builtin_tests::basics::{Basics, MODULE_NAME};
+use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+use oncl_flows::{
     Locale, OpenError, Prompt, Prompter, ReaderEntry, ReaderList, ReaderProblem, ReaderPrompt,
     StorageKind,
 };
-use oncl_builtin_tests::basics::{Basics, MODULE_NAME};
 use oncl_pki::cms::verify;
 use oncl_pki::pkcs12::load;
 use oncl_pki::tsp::MockTsa;

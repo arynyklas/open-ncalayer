@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::update::tests::FakeTransport;
-use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_plugin::{Engine, HostServices};
 use oncl_protocol::DynamicModules;
 use oncl_update::{PluginReplaces, Sha256};

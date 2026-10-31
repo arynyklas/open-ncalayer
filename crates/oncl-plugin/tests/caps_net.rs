@@ -76,7 +76,7 @@ impl HttpTransport for Recording {
 
 fn services(http: Arc<Recording>) -> HostServices {
     services_with(
-        Arc::new(oncl_basics::testing::ScriptedPrompter::new(Vec::new())),
+        Arc::new(oncl_flows::testing::ScriptedPrompter::new(Vec::new())),
         http,
     )
 }

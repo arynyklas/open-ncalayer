@@ -1,7 +1,7 @@
 //! The texts Rust composes for the TLS wizard. `{0}`, `{1}`, `{2}` stand for the arguments of
 //! [`fill`].
 
-use oncl_basics::Locale;
+use oncl_flows::Locale;
 
 /// The texts Rust composes for the TLS wizard, in one language.
 pub(super) struct Texts {

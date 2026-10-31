@@ -4,7 +4,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
-use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_ipc::{Endpoint, IpcStream, connect, endpoint, read_frame, write_frame};
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::MockTsa;

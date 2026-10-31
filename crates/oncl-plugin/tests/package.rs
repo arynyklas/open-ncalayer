@@ -1,8 +1,8 @@
 //! The plugin package (`.onclp`) and its manifest (`plugin.toml`): packages are built here
 //! with the `zip` crate, some of them patched afterwards into what no writer would produce.
 
-use oncl_basics::Locale;
-use oncl_basics::capabilities::CapabilityLine;
+use oncl_flows::Locale;
+use oncl_flows::capabilities::CapabilityLine;
 use oncl_plugin::{
     Capabilities, HttpPrefix, MAX_MANIFEST, MAX_PACKAGE, MAX_WASM, Manifest, PACKAGE_EXT, Package,
     PackageError, is_symbolic_name,

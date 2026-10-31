@@ -7,7 +7,7 @@ use crate::ui::{
     StorageRow,
 };
 use crate::view::{self, KeyRow};
-use oncl_basics::{
+use oncl_flows::{
     Action, Busy, BusyPrompt, ChoiceAnswer, ChoicePrompt, ConfirmPrompt, CsrAnswer, CsrPrompt,
     FileKind, FilePrompt, ImportAnswer, ImportPrompt, KeyCandidate, KeyPrompt, Locale, MessageKind,
     MessagePrompt, PasswordPrompt, PathMode, PathPrompt, Prompt, Prompter, ReaderList,
@@ -1681,7 +1681,7 @@ mod tests {
 #[cfg(test)]
 mod key_selection {
     use super::*;
-    use oncl_basics::{Availability, LiveAvailability};
+    use oncl_flows::{Availability, LiveAvailability};
     use oncl_pki::info::{CertInfo, KeyUsageBits};
     use std::collections::BTreeSet;
     use time::macros::datetime;
@@ -2177,7 +2177,7 @@ mod plugin_dialogs {
 #[cfg(test)]
 mod token_dialogs {
     use super::*;
-    use oncl_basics::{OpenError, ReaderEntry};
+    use oncl_flows::{OpenError, ReaderEntry};
     use slint::platform::WindowEvent as SlintWindowEvent;
     use std::time::Instant;
 

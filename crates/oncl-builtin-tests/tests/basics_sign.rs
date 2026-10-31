@@ -4,14 +4,14 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::Encode;
-use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
-use oncl_basics::{
+use oncl_builtin_tests::basics::{Basics, MODULE_NAME};
+use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+use oncl_flows::{
     Action, Availability, Busy, BusyPrompt, ChainPolicy, CsrAnswer, CsrPrompt, DisabledReason,
     FilePrompt, FilterMore, ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt, Locale, OcspCache,
     OpenError, PasswordPrompt, Prompt, Prompter, RecentPathStore, StorageAnswer, StorageKind,
     StoragePrompt, availabilities,
 };
-use oncl_builtin_tests::basics::{Basics, MODULE_NAME};
 use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{SignOptions, verify};
 use oncl_pki::http::HttpTransport;
@@ -425,7 +425,7 @@ fn keyless_store_reprompts_with_no_keys() {
         &mut |buf: &mut [u8]| buf.fill(3),
     )
     .unwrap();
-    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("oncl-basics-keyless.p12");
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("oncl-flows-keyless.p12");
     std::fs::write(&path, p12).unwrap();
     let s = setup(
         script![
@@ -494,27 +494,27 @@ impl Prompter for JksFirst {
         Prompt::Cancelled
     }
 
-    fn message(&self, _: &oncl_basics::MessagePrompt) -> Prompt<()> {
+    fn message(&self, _: &oncl_flows::MessagePrompt) -> Prompt<()> {
         Prompt::Cancelled
     }
 
-    fn confirm(&self, _: &oncl_basics::ConfirmPrompt) -> Prompt<bool> {
+    fn confirm(&self, _: &oncl_flows::ConfirmPrompt) -> Prompt<bool> {
         Prompt::Cancelled
     }
 
-    fn save_file(&self, _: &oncl_basics::SavePrompt) -> Prompt<PathBuf> {
+    fn save_file(&self, _: &oncl_flows::SavePrompt) -> Prompt<PathBuf> {
         Prompt::Cancelled
     }
 
-    fn choice(&self, _: &oncl_basics::ChoicePrompt) -> Prompt<oncl_basics::ChoiceAnswer> {
+    fn choice(&self, _: &oncl_flows::ChoicePrompt) -> Prompt<oncl_flows::ChoiceAnswer> {
         Prompt::Cancelled
     }
 
-    fn path(&self, _: &oncl_basics::PathPrompt) -> Prompt<PathBuf> {
+    fn path(&self, _: &oncl_flows::PathPrompt) -> Prompt<PathBuf> {
         Prompt::Cancelled
     }
 
-    fn reader(&self, _: &oncl_basics::ReaderPrompt) -> Prompt<String> {
+    fn reader(&self, _: &oncl_flows::ReaderPrompt) -> Prompt<String> {
         Prompt::Cancelled
     }
 }
@@ -1398,7 +1398,7 @@ fn rsa_store_with_signature_oid(last: u8) -> PathBuf {
     )
     .unwrap();
     let path =
-        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("oncl-basics-rsa-oid-{last}.p12"));
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("oncl-flows-rsa-oid-{last}.p12"));
     std::fs::write(&path, p12).unwrap();
     path
 }

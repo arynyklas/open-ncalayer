@@ -1,7 +1,7 @@
 //! `kz.gov.pki.knca.basics`.
 
-use crate::{Available, Backend, Lazy, resolve};
-use oncl_basics::{OcspCache, Prompter, RecentPathStore};
+use crate::Lazy;
+use oncl_flows::{OcspCache, Prompter, RecentPathStore};
 use oncl_pki::http::HttpTransport;
 use oncl_pki::tsp::TsaProfile;
 use oncl_plugin::HostServices;
@@ -12,11 +12,6 @@ use time::OffsetDateTime;
 
 pub use oncl_builtin_basics::MODULE_NAME;
 
-const AVAILABLE: Available = Available {
-    native: false,
-    wasm: true,
-};
-
 struct Settings {
     prompter: Arc<dyn Prompter>,
     recent: Arc<dyn RecentPathStore>,
@@ -25,7 +20,6 @@ struct Settings {
     clock: Option<fn() -> OffsetDateTime>,
     ocsp_cache: Option<Arc<OcspCache>>,
     tokens: Option<Arc<Tokens>>,
-    backend: Option<Backend>,
 }
 
 /// The `kz.gov.pki.knca.basics` module, configured as the daemon configures it.
@@ -47,7 +41,6 @@ impl Basics {
             clock: None,
             ocsp_cache: None,
             tokens: None,
-            backend: None,
         }))
     }
 
@@ -78,37 +71,25 @@ impl Basics {
         self.0.settings().tokens = Some(tokens);
         self
     }
-
-    /// The same module built as `backend`.
-    #[must_use]
-    pub fn with_backend(mut self, backend: Backend) -> Self {
-        self.0.settings().backend = Some(backend);
-        self
-    }
 }
 
 fn build(s: Settings) -> Box<dyn Module> {
-    match resolve(MODULE_NAME, s.backend, AVAILABLE) {
-        Backend::Wasm => {
-            let mut services = HostServices::new(
-                s.prompter,
-                s.recent,
-                s.http,
-                s.tokens.unwrap_or_else(Tokens::disabled),
-            );
-            if let Some(p) = s.tsa {
-                services.tsa = p;
-            }
-            if let Some(f) = s.clock {
-                services.clock = f;
-            }
-            if let Some(c) = s.ocsp_cache {
-                services.ocsp_cache = c;
-            }
-            crate::guest(MODULE_NAME, services, None)
-        }
-        Backend::Native => unreachable!("resolved to an available backend"),
+    let mut services = HostServices::new(
+        s.prompter,
+        s.recent,
+        s.http,
+        s.tokens.unwrap_or_else(Tokens::disabled),
+    );
+    if let Some(p) = s.tsa {
+        services.tsa = p;
     }
+    if let Some(f) = s.clock {
+        services.clock = f;
+    }
+    if let Some(c) = s.ocsp_cache {
+        services.ocsp_cache = c;
+    }
+    crate::guest(MODULE_NAME, services, None)
 }
 
 impl Module for Basics {

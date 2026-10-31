@@ -2,7 +2,7 @@
 //! signatures, time-stamps, page files and key files: one of [`oncl_pdk::abi::cause`] per
 //! variant of the core's errors, so a guest tells them apart as the core's modules did.
 
-use oncl_basics::PageFileError;
+use oncl_flows::PageFileError;
 use oncl_pdk::abi::cause;
 use oncl_pki::cms::CmsError;
 use oncl_pki::key::KeyError;

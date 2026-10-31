@@ -16,7 +16,7 @@ oncl-builtin-accessory.workspace = true
 # `index`: their module names, which no plugin may serve.
 oncl-builtins-build.workspace = true
 # `registry`: what a plugin's capabilities allow, in the install window's words.
-oncl-basics.workspace = true
+oncl-flows.workspace = true
 oncl-gost.workspace = true
 oncl-ipc.workspace = true
 # `plugin pack`: the core version each host function a plugin imports appeared in.

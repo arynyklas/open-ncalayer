@@ -1,6 +1,6 @@
 //! The texts Rust composes for the settings window.
 
-use oncl_basics::Locale;
+use oncl_flows::Locale;
 
 /// The texts Rust composes for the settings window, in one language.
 pub(super) struct Texts {

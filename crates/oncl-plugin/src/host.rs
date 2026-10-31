@@ -7,7 +7,7 @@ use crate::caps::{self, CallData, Consents, Flows, KeyFiles, KeyTable, RequestBu
 use crate::core::{self, CoreHooks};
 use crate::manifest::Capabilities;
 use crate::runtime::SessionContext;
-use oncl_basics::{Locale, OcspCache, PagePins, Prompter, RecentPathStore};
+use oncl_flows::{Locale, OcspCache, PagePins, Prompter, RecentPathStore};
 use oncl_pdk::abi::{
     self, CertArgs, CertInfo, ErrorCode, HostError, HostResult, IMPORT_MODULE, Import, KeyUsage,
     Level, LocalTime, LocalTimeArgs, LocaleArgs, LogArgs, MAX_RANDOM, Os, Platform, RandomArgs,

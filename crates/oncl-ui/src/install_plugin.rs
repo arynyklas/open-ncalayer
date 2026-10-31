@@ -12,8 +12,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use oncl_basics::Locale;
-use oncl_basics::capabilities::{CapabilityLine, capability_text};
+use oncl_flows::Locale;
+use oncl_flows::capabilities::{CapabilityLine, capability_text};
 use slint::{
     CloseRequestResponse, ComponentHandle, ModelRc, PlatformError, SharedString, VecModel,
 };

@@ -3,8 +3,8 @@
 //! written for a later format is not read as a weaker one.
 
 use crate::PackageError;
-use oncl_basics::Locale;
-use oncl_basics::capabilities::CapabilityLine;
+use oncl_flows::Locale;
+use oncl_flows::capabilities::CapabilityLine;
 use semver::Version;
 use serde::Deserialize;
 use std::collections::HashSet;

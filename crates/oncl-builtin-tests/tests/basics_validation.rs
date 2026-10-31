@@ -6,13 +6,13 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
-use oncl_basics::{
+use oncl_builtin_tests::basics::{Basics, MODULE_NAME};
+use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+use oncl_flows::{
     Availability, Busy, BusyPrompt, ChainPolicy, CsrAnswer, CsrPrompt, DisabledReason, FilePrompt,
     ImportAnswer, ImportPrompt, KeyFilter, KeyPrompt, OCSP_DEADLINE, OcspCache, PasswordPrompt,
     Prompt, Prompter, StorageAnswer, StorageKind, StoragePrompt, availabilities,
 };
-use oncl_builtin_tests::basics::{Basics, MODULE_NAME};
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::http::{HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport};
 use oncl_pki::info::{CertInfo, cert_info};
@@ -978,27 +978,27 @@ impl Prompter for Hasty {
         Prompt::Cancelled
     }
 
-    fn message(&self, _: &oncl_basics::MessagePrompt) -> Prompt<()> {
+    fn message(&self, _: &oncl_flows::MessagePrompt) -> Prompt<()> {
         Prompt::Cancelled
     }
 
-    fn confirm(&self, _: &oncl_basics::ConfirmPrompt) -> Prompt<bool> {
+    fn confirm(&self, _: &oncl_flows::ConfirmPrompt) -> Prompt<bool> {
         Prompt::Cancelled
     }
 
-    fn save_file(&self, _: &oncl_basics::SavePrompt) -> Prompt<std::path::PathBuf> {
+    fn save_file(&self, _: &oncl_flows::SavePrompt) -> Prompt<std::path::PathBuf> {
         Prompt::Cancelled
     }
 
-    fn choice(&self, _: &oncl_basics::ChoicePrompt) -> Prompt<oncl_basics::ChoiceAnswer> {
+    fn choice(&self, _: &oncl_flows::ChoicePrompt) -> Prompt<oncl_flows::ChoiceAnswer> {
         Prompt::Cancelled
     }
 
-    fn path(&self, _: &oncl_basics::PathPrompt) -> Prompt<std::path::PathBuf> {
+    fn path(&self, _: &oncl_flows::PathPrompt) -> Prompt<std::path::PathBuf> {
         Prompt::Cancelled
     }
 
-    fn reader(&self, _: &oncl_basics::ReaderPrompt) -> Prompt<String> {
+    fn reader(&self, _: &oncl_flows::ReaderPrompt) -> Prompt<String> {
         Prompt::Cancelled
     }
 }

@@ -7,9 +7,9 @@ use base64::engine::general_purpose::STANDARD;
 use der::asn1::OctetString;
 use der::oid::AssociatedOid;
 use der::{Decode, Encode};
-use oncl_basics::testing::{ScriptedPrompter, Step};
-use oncl_basics::{Action, FileKind, Locale, OpenError, StorageKind};
 use oncl_builtin_tests::applet::{Applet, MODULE_NAME};
+use oncl_flows::testing::{ScriptedPrompter, Step};
+use oncl_flows::{Action, FileKind, Locale, OpenError, StorageKind};
 use oncl_pki::cert::Certificate;
 use oncl_pki::csr::KeyStoreInfo;
 use oncl_pki::key::{PublicKey, SigAlg};
@@ -1684,7 +1684,7 @@ fn signxml_reads_a_user_picked_network_file() {
     let Some(network) = network_form(&local) else {
         return;
     };
-    assert!(oncl_basics::is_network_path(&network), "{network}");
+    assert!(oncl_flows::is_network_path(&network), "{network}");
     let (a, prompter) = setup(vec![
         Step::Storage {
             path: PathBuf::from(&network),

@@ -59,7 +59,7 @@ pub(crate) use state::{settings_get, settings_put, shared_get, shared_put};
 
 use crate::host::HostState;
 use crate::runtime::Trust;
-use oncl_basics::lock_dialog_flow;
+use oncl_flows::lock_dialog_flow;
 use oncl_pdk::abi::{ErrorCode, HostError, HostResult};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;

@@ -1,8 +1,8 @@
 //! `kz.gov.pki.knca.commonUtils`.
 
-use crate::{Available, Backend, Lazy, resolve};
-use oncl_basics::Prompter;
-use oncl_basics::testing::MemoryRecentPath;
+use crate::Lazy;
+use oncl_flows::Prompter;
+use oncl_flows::testing::MemoryRecentPath;
 use oncl_pki::http::HttpTransport;
 use oncl_pki::pkix::CaSet;
 use oncl_plugin::HostServices;
@@ -13,18 +13,12 @@ use time::OffsetDateTime;
 
 pub use oncl_builtin_commonutils::MODULE_NAME;
 
-const AVAILABLE: Available = Available {
-    native: false,
-    wasm: true,
-};
-
 struct Settings {
     prompter: Arc<dyn Prompter>,
     http: Arc<dyn HttpTransport>,
     cas: Option<CaSet>,
     clock: Option<fn() -> OffsetDateTime>,
     tokens: Option<Arc<Tokens>>,
-    backend: Option<Backend>,
 }
 
 /// The `kz.gov.pki.knca.commonUtils` module, configured as the daemon configures it.
@@ -40,7 +34,6 @@ impl CommonUtils {
             cas: None,
             clock: None,
             tokens: None,
-            backend: None,
         }))
     }
 
@@ -64,34 +57,22 @@ impl CommonUtils {
         self.0.settings().tokens = Some(tokens);
         self
     }
-
-    /// The same module built as `backend`.
-    #[must_use]
-    pub fn with_backend(mut self, backend: Backend) -> Self {
-        self.0.settings().backend = Some(backend);
-        self
-    }
 }
 
 fn build(s: Settings) -> Box<dyn Module> {
-    match resolve(MODULE_NAME, s.backend, AVAILABLE) {
-        Backend::Wasm => {
-            let mut services = HostServices::new(
-                s.prompter,
-                Arc::new(MemoryRecentPath::new(None)),
-                s.http,
-                s.tokens.unwrap_or_else(Tokens::disabled),
-            );
-            if let Some(c) = s.cas {
-                services.cas = Arc::new(c);
-            }
-            if let Some(f) = s.clock {
-                services.clock = f;
-            }
-            crate::guest(MODULE_NAME, services, None)
-        }
-        Backend::Native => unreachable!("resolved to an available backend"),
+    let mut services = HostServices::new(
+        s.prompter,
+        Arc::new(MemoryRecentPath::new(None)),
+        s.http,
+        s.tokens.unwrap_or_else(Tokens::disabled),
+    );
+    if let Some(c) = s.cas {
+        services.cas = Arc::new(c);
     }
+    if let Some(f) = s.clock {
+        services.clock = f;
+    }
+    crate::guest(MODULE_NAME, services, None)
 }
 
 impl Module for CommonUtils {

@@ -19,13 +19,13 @@ pub(crate) use window::{is_open, open};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use oncl_basics::Locale;
 use oncl_desktop::original::{EntryKind, EntryState};
 use oncl_desktop::settings::Channel;
 use oncl_desktop::{
     Autostart, BrowserExtension, ExtensionError, ExtensionStatus, OriginalControl, OriginalStatus,
     ProxySetting, Settings, TokenSettings, UpdateSettings,
 };
+use oncl_flows::Locale;
 
 use texts::Texts;
 

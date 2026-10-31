@@ -5,10 +5,10 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_builtin_tests::applet::Applet;
 use oncl_builtin_tests::basics::{self, Basics};
 use oncl_builtin_tests::commonutils::{self, CommonUtils};
+use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_pki::cms::SignOptions;
 use oncl_pki::info::cert_info;
 use oncl_pki::pkcs12::{KeyEntry, load};

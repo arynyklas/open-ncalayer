@@ -31,7 +31,7 @@ pub fn line(info: &BuiltinInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+    use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
     use oncl_plugin::{BuiltinLimits, HostServices};
     use std::sync::Arc;
 

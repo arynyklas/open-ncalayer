@@ -8,7 +8,7 @@ use super::{DialogTurn, failed, invalid, limit, origin};
 use crate::cause;
 use crate::host::HostState;
 use der::asn1::ObjectIdentifier;
-use oncl_basics::{CsrPrompt, ImportPrompt, PageFile, Prompt, StorageKind, page_path};
+use oncl_flows::{CsrPrompt, ImportPrompt, PageFile, Prompt, StorageKind, page_path};
 use oncl_pdk::abi::cause as causes;
 use oncl_pdk::abi::{
     ChangePasswordArgs, CsrChoice, CsrDialogArgs, Folder, HostError, HostResult, IdCardHolder,

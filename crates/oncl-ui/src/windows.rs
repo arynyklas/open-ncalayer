@@ -8,8 +8,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use oncl_basics::Locale;
 use oncl_desktop::Settings;
+use oncl_flows::Locale;
 
 use crate::about_view::{self, AboutInfo, AboutTab};
 use crate::plugins_view::{self, PluginsServices};

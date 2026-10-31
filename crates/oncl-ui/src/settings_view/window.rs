@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::thread::LocalKey;
 
-use oncl_basics::Locale;
 use oncl_desktop::{Settings, UpdateSettings};
+use oncl_flows::Locale;
 use slint::{CloseRequestResponse, ComponentHandle, PlatformError, SharedString};
 
 use super::texts::Texts;

@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use oncl_basics::capabilities::capability_text;
+use oncl_flows::capabilities::capability_text;
 use oncl_plugin::is_symbolic_name;
 use oncl_update::Channel;
 use serde::Serialize;
@@ -557,7 +557,7 @@ mod tests {
             assert_eq!(lines.len(), 2, "{lang}");
             assert_eq!(
                 lines[0],
-                capability_text(&oncl_basics::capabilities::CapabilityLine::Keys, l)
+                capability_text(&oncl_flows::capabilities::CapabilityLine::Keys, l)
             );
             assert!(lines[1].contains("https://*.example.kz/"), "{}", lines[1]);
         }

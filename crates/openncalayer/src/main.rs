@@ -11,9 +11,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use clap::Parser;
-use oncl_basics::{Locale, Prompter, RecentPathStore};
 use oncl_desktop::Settings;
 use oncl_desktop::port_owner;
+use oncl_flows::{Locale, Prompter, RecentPathStore};
 use oncl_ipc::IpcListener;
 use oncl_pki::http::HttpTransport;
 use oncl_plugin::core::UiRequest;
@@ -1261,8 +1261,8 @@ mod tests {
         .unwrap();
         let tokens = Tokens::new(Arc::new(emu), true);
         let services = HostServices::new(
-            Arc::new(oncl_basics::testing::ScriptedPrompter::new(Vec::new())),
-            Arc::new(oncl_basics::testing::MemoryRecentPath::new(None)),
+            Arc::new(oncl_flows::testing::ScriptedPrompter::new(Vec::new())),
+            Arc::new(oncl_flows::testing::MemoryRecentPath::new(None)),
             Arc::new(LiveProxyTransport::new(oncl_desktop::ProxySetting::None)),
             Arc::clone(&tokens),
         );

@@ -3,7 +3,7 @@
 //! file chooser's title and filter. Fixed dialog texts live in the `.slint` files and their
 //! `.po` catalogs.
 
-use oncl_basics::{
+use oncl_flows::{
     Availability, DisabledReason, FileKind, ImportPrompt, KeyCandidate, KeyPrompt, Locale,
     OpenError, ReaderProblem, StorageKind,
 };

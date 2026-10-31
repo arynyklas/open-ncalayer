@@ -1,7 +1,7 @@
 //! The built-in modules behind the [`Module`](oncl_protocol::Module) trait, for their tests:
-//! each facade takes the settings of the module's native type (the same constructors and
-//! builder methods) and builds the module the first time it is called, natively or as its
-//! WebAssembly guest ([`Backend`]).
+//! each facade takes the settings the modules' former native types took (the same
+//! constructors and builder methods) and builds the module's embedded WebAssembly guest the
+//! first time it is called.
 
 pub mod accessory;
 pub mod applet;
@@ -38,53 +38,6 @@ struct Guest(Arc<dyn Module>);
 impl Module for Guest {
     fn process(&self, request: &str, add_info: &AddInfo) -> Reply {
         self.0.process(request, add_info)
-    }
-}
-
-/// The variable choosing the implementation the facades build: `native` or `wasm`.
-pub const BACKEND_VAR: &str = "ONCL_BUILTIN_BACKEND";
-
-/// An implementation of a built-in module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
-    /// The module's Rust code, linked into the test.
-    Native,
-    /// The module's WebAssembly guest, run by the plugin runtime.
-    Wasm,
-}
-
-fn from_env() -> Option<Backend> {
-    match std::env::var(BACKEND_VAR) {
-        Ok(v) if v == "native" => Some(Backend::Native),
-        Ok(v) if v == "wasm" => Some(Backend::Wasm),
-        Ok(v) => panic!("{BACKEND_VAR} must be `native` or `wasm`, not `{v}`"),
-        Err(_) => None,
-    }
-}
-
-/// What a module has: native code, a guest, or both.
-#[derive(Clone, Copy)]
-struct Available {
-    native: bool,
-    wasm: bool,
-}
-
-/// The implementation of the module `name` to build: `explicit` (from `with_backend`), else
-/// the variable's, else its guest if it has one.
-fn resolve(name: &str, explicit: Option<Backend>, available: Available) -> Backend {
-    let chosen = explicit.or_else(from_env).unwrap_or(if available.wasm {
-        Backend::Wasm
-    } else {
-        Backend::Native
-    });
-    match chosen {
-        Backend::Native if !available.native => {
-            panic!("{name} has no native implementation any more; use {BACKEND_VAR}=wasm")
-        }
-        Backend::Wasm if !available.wasm => {
-            panic!("{name} has no WebAssembly guest yet; use {BACKEND_VAR}=native")
-        }
-        b => b,
     }
 }
 

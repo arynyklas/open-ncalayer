@@ -1,4 +1,4 @@
-use oncl_basics::{
+use oncl_flows::{
     Action, Availability, DisabledReason, FileKind, ImportPrompt, KeyCandidate, KeyPrompt,
     LiveAvailability, Locale, OpenError, StorageKind,
 };

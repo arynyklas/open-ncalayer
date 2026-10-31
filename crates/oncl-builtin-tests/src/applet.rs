@@ -1,8 +1,8 @@
 //! `kz.gov.pki.knca.applet.Applet`.
 
-use crate::{Available, Backend, Lazy, resolve};
-use oncl_basics::Prompter;
-use oncl_basics::testing::MemoryRecentPath;
+use crate::Lazy;
+use oncl_flows::Prompter;
+use oncl_flows::testing::MemoryRecentPath;
 use oncl_pki::http::{HttpError, HttpReply, HttpRequest, HttpTransport};
 use oncl_plugin::HostServices;
 use oncl_protocol::{AddInfo, Module, Reply};
@@ -11,15 +11,9 @@ use std::sync::Arc;
 
 pub use oncl_builtin_applet::MODULE_NAME;
 
-const AVAILABLE: Available = Available {
-    native: false,
-    wasm: true,
-};
-
 struct Settings {
     prompter: Arc<dyn Prompter>,
     tokens: Option<Arc<Tokens>>,
-    backend: Option<Backend>,
 }
 
 /// The `kz.gov.pki.knca.applet.Applet` module, configured as the daemon configures it.
@@ -31,7 +25,6 @@ impl Applet {
         Applet(Lazy::new(Settings {
             prompter,
             tokens: None,
-            backend: None,
         }))
     }
 
@@ -39,13 +32,6 @@ impl Applet {
     #[must_use]
     pub fn with_tokens(mut self, tokens: Arc<Tokens>) -> Self {
         self.0.settings().tokens = Some(tokens);
-        self
-    }
-
-    /// The same module built as `backend`.
-    #[must_use]
-    pub fn with_backend(mut self, backend: Backend) -> Self {
-        self.0.settings().backend = Some(backend);
         self
     }
 }
@@ -60,18 +46,13 @@ impl HttpTransport for Offline {
 }
 
 fn build(s: Settings) -> Box<dyn Module> {
-    match resolve(MODULE_NAME, s.backend, AVAILABLE) {
-        Backend::Wasm => {
-            let services = HostServices::new(
-                s.prompter,
-                Arc::new(MemoryRecentPath::new(None)),
-                Arc::new(Offline),
-                s.tokens.unwrap_or_else(Tokens::disabled),
-            );
-            crate::guest(MODULE_NAME, services, None)
-        }
-        Backend::Native => unreachable!("resolved to an available backend"),
-    }
+    let services = HostServices::new(
+        s.prompter,
+        Arc::new(MemoryRecentPath::new(None)),
+        Arc::new(Offline),
+        s.tokens.unwrap_or_else(Tokens::disabled),
+    );
+    crate::guest(MODULE_NAME, services, None)
 }
 
 impl Module for Applet {

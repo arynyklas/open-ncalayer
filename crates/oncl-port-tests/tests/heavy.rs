@@ -1,8 +1,8 @@
 //! The ports of the heavy plugins: Buhta NcaModule, Alatau City Bank, KNP (ИС СОНО),
 //! Documentolog, Qoltanba, SKF.
 
-use oncl_basics::testing::Step;
-use oncl_basics::{Availability, DisabledReason};
+use oncl_flows::testing::Step;
+use oncl_flows::{Availability, DisabledReason};
 use oncl_pki::http::{HttpError, HttpMethod, HttpReply, HttpRequest, HttpTransport};
 use oncl_pki::key::SigAlg;
 use oncl_port_tests::{Harness, entry, p12};
@@ -174,7 +174,7 @@ fn buhta_select_tin_filter() {
     );
     assert_eq!(
         harness.prompter().storage_prompts()[0].storages,
-        vec![oncl_basics::StorageKind::Pkcs12]
+        vec![oncl_flows::StorageKind::Pkcs12]
     );
 }
 
@@ -1938,8 +1938,8 @@ fn documentolog_browse_directory_mode() {
         file.to_string_lossy()
     );
     let paths = harness.prompter().path_prompts();
-    assert_eq!(paths[0].mode, oncl_basics::PathMode::Directory);
-    assert_eq!(paths[1].mode, oncl_basics::PathMode::File);
+    assert_eq!(paths[0].mode, oncl_flows::PathMode::Directory);
+    assert_eq!(paths[1].mode, oncl_flows::PathMode::File);
     assert_eq!(paths[1].filters[0].extensions, ["p12"]);
     // The password dialog once: it is kept.
     let passwords = harness.prompter().password_prompts();

@@ -3,7 +3,7 @@
 //! socket without a frame.
 
 use futures_util::{SinkExt, StreamExt};
-use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_pki::tsp::MockTsa;
 use oncl_plugin::{Engine, HostServices, Package, PluginModules};
 use oncl_testkit::{read, synthetic};

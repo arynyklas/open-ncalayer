@@ -25,7 +25,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use oncl_basics::Locale;
+use oncl_flows::Locale;
 use oncl_tls::{
     AUTO_RENEW_BEFORE, RENEW_BEFORE, SelftestReport, SelftestReports, TlsError, TlsFiles, TlsInfo,
     TlsMaterial, TlsSource, TlsWarning, sha1_grouped,

@@ -385,7 +385,7 @@ mod tests {
         };
 
         // Listening instances that never answer: reading from one blocks forever.
-        let name = format!("oncl-basics-test-{}", std::process::id());
+        let name = format!("oncl-flows-test-{}", std::process::id());
         let wide: Vec<u16> = format!(r"\\.\pipe\{name}")
             .encode_utf16()
             .chain([0])

@@ -1,6 +1,6 @@
 [package]
-name = "oncl-basics"
-description = "The dialogs, key choice, page path rules and page PINs OpenNCALayer shows its built-in modules and plugins"
+name = "oncl-flows"
+description = "The windows, key choice, page paths and page PINs the OpenNCALayer core shows for its modules and plugins"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use oncl_basics::Locale;
 use oncl_desktop::PortOwner;
+use oncl_flows::Locale;
 use oncl_tls::TlsFiles;
 use oncl_ui::Stopped;
 use oncl_ui::tls_wizard::Applied;

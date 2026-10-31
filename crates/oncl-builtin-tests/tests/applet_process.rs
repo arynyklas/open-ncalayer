@@ -1,9 +1,9 @@
 //! `kz.gov.pki.knca.applet.Applet` across sessions: its PIN try count belongs to the
 //! process.
 
-use oncl_basics::StorageKind;
-use oncl_basics::testing::{ScriptedPrompter, Step};
 use oncl_builtin_tests::applet::Applet;
+use oncl_flows::StorageKind;
+use oncl_flows::testing::{ScriptedPrompter, Step};
 use oncl_protocol::{AddInfo, Module};
 use oncl_testkit::synthetic;
 use oncl_token::emulator::{CardSpec, EmuKey, EmulatorBackend, card};

@@ -3,7 +3,7 @@
 //! signatures made here, the private key never reaching the guest. With token support on,
 //! the storage dialog offers the tokens plugged in, and `keys_open` opens a token in a
 //! reader with the PIN the plugin passes, once the user allows it
-//! ([`PagePins`](oncl_basics::PagePins)).
+//! ([`PagePins`](oncl_flows::PagePins)).
 
 use super::{
     ConsentKind, DialogTurn, MAX_DIALOG_TEXT, MAX_KEY_HANDLES, MAX_LINE, check_line, crypto,
@@ -12,15 +12,13 @@ use super::{
 use crate::cause;
 use crate::host::HostState;
 use der::asn1::ObjectIdentifier;
-use oncl_basics::{
+use oncl_flows::{
     ChainPolicy, ConfirmPrompt, FilterMore as BasicsMore, KeyChooser, KeyFilter, KeyFlow, KeyOrder,
     KeyRequest, Locale, MAX_PAGE_FILE, OpenError, PageFile, PageFileError, Prompt, StorageAnswer,
     StorageKind, page_path,
 };
-use oncl_basics::{
-    FileRead, KeyChecks, OpenedFlow, PasswordRules, ReaderEntry, Readers, StartPath,
-};
-use oncl_basics::{PinFrom, PinRefusal, PinUse, page_pin_text};
+use oncl_flows::{FileRead, KeyChecks, OpenedFlow, PasswordRules, ReaderEntry, Readers, StartPath};
+use oncl_flows::{PinFrom, PinRefusal, PinUse, page_pin_text};
 use oncl_pdk::abi::{
     self, Action, Bytes, ChooseArgs, Chosen, ErrorCode, Filter, FilterMore, Handle, HostError,
     HostResult, KeySource, KeyUsageBit, OpenArgs, OpenOutcome, OpenedKey, Password, SelectArgs,
@@ -230,11 +228,11 @@ fn dialog_detail(state: &HostState, detail: Option<String>) -> HostResult<Option
 }
 
 /// The dialogs' wording of `action`.
-fn basics_action(action: Action) -> oncl_basics::Action {
+fn basics_action(action: Action) -> oncl_flows::Action {
     match action {
-        Action::Sign => oncl_basics::Action::Sign,
-        Action::Authenticate => oncl_basics::Action::Authenticate,
-        Action::KeyInfo => oncl_basics::Action::KeyInfo,
+        Action::Sign => oncl_flows::Action::Sign,
+        Action::Authenticate => oncl_flows::Action::Authenticate,
+        Action::KeyInfo => oncl_flows::Action::KeyInfo,
     }
 }
 

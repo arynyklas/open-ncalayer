@@ -265,7 +265,7 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 
 ## Встроенные модули
 
-Модули `kz.gov.pki.knca.basics`, `kz.gov.pki.knca.commonUtils`, `kz.gov.pki.knca.applet.Applet` и `kz.gov.pki.ncalayerservices.accessory` переходят в гостей WebAssembly того же ABI, вшитых в ядро (`oncl_plugin::Builtins`). Встроенный модуль:
+Модули `kz.gov.pki.knca.basics`, `kz.gov.pki.knca.commonUtils`, `kz.gov.pki.knca.applet.Applet` и `kz.gov.pki.ncalayerservices.accessory` — гости WebAssembly того же ABI, вшитые в ядро (`oncl_plugin::Builtins`). Для них ABI 1 расширен аддитивно (`since` 0.1.0-alpha.5): `call_locale` и `HostError.cause`; потоки выбора ключа `keys_flow_open`/`keys_flow_pick`, `keys_describe`, `tokens_scan`, `dialog_reader`, `file_choose_kind`, `pkix_path`, `SignerSel::OfCert` и `SignCmsExArgs.output` — их могут звать и плагины с нужной capability; функции capability `builtin` (раздел [`builtin`](#builtin)) — ядро (`core_*`), окна и файлы ключей (`dialog_csr`, `dialog_import`, `keystore_*`), держатель удостоверения (`tokens_id_card`) и данные, которые ядро держит за модуль (`data_*`). Встроенный модуль:
 
 - читается из `plugin.toml` с `builtin = true` и `id` под префиксом `io.github.arynyklas.openncalayer.builtin.` — только из бинаря ядра, не из пакета;
 - не устанавливается и не удаляется, его нет в окне «Плагины»; плагин не может занять имя его модуля (`ModuleTaken`, владелец `OpenNCALayer`);

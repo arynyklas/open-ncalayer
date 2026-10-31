@@ -13,7 +13,6 @@ repository = "https://github.com/arynyklas/open-ncalayer"
 publish = false
 
 [workspace.dependencies]
-oncl-basics = { path = "crates/oncl-basics" }
 # The accessory module's guest: the core embeds its WebAssembly; xtask reads its bundles.
 oncl-builtin-accessory = { path = "crates/oncl-builtin-accessory" }
 # The Applet module's guest: the core embeds its WebAssembly; its tests name it.
@@ -22,11 +21,13 @@ oncl-builtin-applet = { path = "crates/oncl-builtin-applet" }
 oncl-builtin-basics = { path = "crates/oncl-builtin-basics" }
 # The commonUtils module's guest: the core embeds its WebAssembly; its tests name it.
 oncl-builtin-commonutils = { path = "crates/oncl-builtin-commonutils" }
-# The built-in modules' tests through the `Module` trait, on either implementation.
+# The built-in modules' tests through the `Module` trait.
 oncl-builtin-tests = { path = "crates/oncl-builtin-tests" }
 # Builds the built-in modules' WebAssembly (the daemon's build script, xtask).
 oncl-builtins-build = { path = "crates/oncl-builtins-build" }
 oncl-desktop = { path = "crates/oncl-desktop" }
+# The windows, key choice, page paths and page PINs the core gives modules and plugins.
+oncl-flows = { path = "crates/oncl-flows" }
 oncl-gost = { path = "crates/oncl-gost" }
 oncl-ipc = { path = "crates/oncl-ipc" }
 oncl-pki = { path = "crates/oncl-pki" }

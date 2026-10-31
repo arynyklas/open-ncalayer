@@ -1,7 +1,7 @@
 //! A token PIN from a page reaches the card only with the user's consent, on emulated
 //! cards: the APDU log shows what was sent.
 
-use oncl_basics::{PagePins, PinFrom, PinRefusal, PinUse};
+use oncl_flows::{PagePins, PinFrom, PinRefusal, PinUse};
 use oncl_testkit::synthetic;
 use oncl_token::emulator::{CardSpec, EmuKey, EmulatorBackend, card};
 use oncl_token::{TokenError, TokenKind, Tokens};

@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use oncl_basics::{Action, Availability, KeyCandidate, KeyPrompt, LiveAvailability, Locale};
 use oncl_desktop::original::Unavailable;
 use oncl_desktop::{BrowserExtension, ExtensionError, ExtensionStatus};
+use oncl_flows::{Action, Availability, KeyCandidate, KeyPrompt, LiveAvailability, Locale};
 use oncl_pki::info::{CertInfo, KeyUsageBits};
 use slint::{ComponentHandle, PhysicalSize, Rgb8Pixel};
 use time::macros::datetime;

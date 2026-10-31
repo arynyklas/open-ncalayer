@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::thread::LocalKey;
 
-use oncl_basics::Locale;
-use oncl_basics::capabilities::{CapabilityLine, capability_text};
+use oncl_flows::Locale;
+use oncl_flows::capabilities::{CapabilityLine, capability_text};
 use slint::{ComponentHandle, ModelRc, PlatformError, SharedString, VecModel};
 use time::OffsetDateTime;
 

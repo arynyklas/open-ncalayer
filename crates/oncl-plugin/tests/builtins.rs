@@ -4,8 +4,8 @@
 mod common;
 
 use common::*;
-use oncl_basics::Locale;
-use oncl_basics::testing::{ScriptedPrompter, Step};
+use oncl_flows::Locale;
+use oncl_flows::testing::{ScriptedPrompter, Step};
 use oncl_pdk::abi::{self, CoreBundles, CoreModules, ErrorCode, HostError, Import, PageRead};
 use oncl_plugin::core::{Bundles, CoreHooks, UiRequest};
 use oncl_plugin::{

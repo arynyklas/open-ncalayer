@@ -5,9 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
 
-use oncl_basics::RecentPathStore;
 use oncl_desktop::ProxySetting;
 use oncl_desktop::settings::{self, Settings};
+use oncl_flows::RecentPathStore;
 use oncl_pki::http::{HttpError, HttpReply, HttpRequest, HttpTransport, UreqTransport};
 use serde_json::Value;
 

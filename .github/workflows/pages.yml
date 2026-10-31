@@ -25,7 +25,7 @@ on:
       - "plugins/*/plugin.toml"
       - "plugins/*/registry.toml"
       - "xtask/**"
-      - "crates/oncl-basics/src/capabilities.rs"
+      - "crates/oncl-flows/src/capabilities.rs"
       - "crates/oncl-builtin-accessory/**"
       - "fixtures/registry/**"
       - ".github/workflows/pages.yml"

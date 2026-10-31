@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::thread::LocalKey;
 use std::time::Duration;
 
-use oncl_basics::Locale;
+use oncl_flows::Locale;
 use oncl_trust::Certificate;
 use slint::{
     CloseRequestResponse, ComponentHandle, Model, ModelRc, PlatformError, SharedString, VecModel,

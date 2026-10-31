@@ -5,8 +5,8 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
-use oncl_basics::RecentPathStore;
-use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+use oncl_flows::RecentPathStore;
+use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_pki::cert;
 use oncl_pki::cms::{SignOptions, sign, verify};
 use oncl_pki::key::SigAlg;

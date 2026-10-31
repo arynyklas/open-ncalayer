@@ -9,7 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-oncl-basics.workspace = true
+oncl-flows.workspace = true
 oncl-pki.workspace = true
 # The update channel of the settings.
 oncl-update.workspace = true

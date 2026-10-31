@@ -10,7 +10,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
-use oncl_basics::Locale;
+use oncl_flows::Locale;
 use oncl_pki::fsutil::Access;
 pub use oncl_pki::http::ProxySetting;
 pub use oncl_update::Channel;

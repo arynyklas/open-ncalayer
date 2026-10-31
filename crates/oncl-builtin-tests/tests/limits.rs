@@ -5,10 +5,10 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_builtin_tests::SOURCES;
 use oncl_builtin_tests::basics::MODULE_NAME;
 use oncl_builtin_tests::commonutils::MODULE_NAME as CU_MODULE;
+use oncl_flows::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_pki::info::cert_info;
 use oncl_pki::pkcs12::load;
 use oncl_pki::tsp::MockTsa;

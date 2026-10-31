@@ -1,9 +1,9 @@
 //! `kz.gov.pki.knca.commonUtils` across sessions: its dialog language belongs to the
 //! process, and the windows of two calls never interleave.
 
-use oncl_basics::testing::{ScriptedPrompter, Step};
-use oncl_basics::{Locale, StoragePrompt};
 use oncl_builtin_tests::commonutils::{CommonUtils, MODULE_NAME};
+use oncl_flows::testing::{ScriptedPrompter, Step};
+use oncl_flows::{Locale, StoragePrompt};
 use oncl_pki::http::{HttpError, HttpReply, HttpRequest, HttpTransport};
 use oncl_protocol::{AddInfo, Module};
 use serde_json::{Value, json};

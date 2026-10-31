@@ -3895,22 +3895,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "oncl-basics"
-version = "0.1.0-alpha.5"
-dependencies = [
- "der 0.8.2",
- "oncl-pki",
- "oncl-testkit",
- "oncl-token",
- "tempfile",
- "time",
- "tracing",
- "windows-sys 0.61.2",
- "x509-cert",
- "zeroize",
-]
-
-[[package]]
 name = "oncl-builtin-accessory"
 version = "0.1.0-alpha.5"
 dependencies = [
@@ -3954,12 +3938,12 @@ version = "0.1.0-alpha.5"
 dependencies = [
  "base64",
  "der 0.8.2",
- "oncl-basics",
  "oncl-builtin-accessory",
  "oncl-builtin-applet",
  "oncl-builtin-basics",
  "oncl-builtin-commonutils",
  "oncl-builtins-build",
+ "oncl-flows",
  "oncl-pki",
  "oncl-plugin",
  "oncl-protocol",
@@ -3992,7 +3976,7 @@ name = "oncl-desktop"
 version = "0.1.0-alpha.5"
 dependencies = [
  "libc",
- "oncl-basics",
+ "oncl-flows",
  "oncl-pki",
  "oncl-registry",
  "oncl-update",
@@ -4000,6 +3984,22 @@ dependencies = [
  "tempfile",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "oncl-flows"
+version = "0.1.0-alpha.5"
+dependencies = [
+ "der 0.8.2",
+ "oncl-pki",
+ "oncl-testkit",
+ "oncl-token",
+ "tempfile",
+ "time",
+ "tracing",
+ "windows-sys 0.61.2",
+ "x509-cert",
+ "zeroize",
 ]
 
 [[package]]
@@ -4095,7 +4095,7 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
  "minisign",
- "oncl-basics",
+ "oncl-flows",
  "oncl-pdk",
  "oncl-pki",
  "oncl-protocol",
@@ -4130,7 +4130,7 @@ dependencies = [
  "cbc",
  "der 0.8.2",
  "lopdf",
- "oncl-basics",
+ "oncl-flows",
  "oncl-gost",
  "oncl-pdk",
  "oncl-pki",
@@ -4241,8 +4241,8 @@ name = "oncl-ui"
 version = "0.1.0-alpha.5"
 dependencies = [
  "ksni",
- "oncl-basics",
  "oncl-desktop",
+ "oncl-flows",
  "oncl-pki",
  "oncl-tls",
  "oncl-trust",
@@ -4309,10 +4309,10 @@ dependencies = [
  "httparse",
  "log",
  "minisign",
- "oncl-basics",
  "oncl-builtin-accessory",
  "oncl-builtins-build",
  "oncl-desktop",
+ "oncl-flows",
  "oncl-ipc",
  "oncl-pki",
  "oncl-plugin",
@@ -7785,9 +7785,9 @@ dependencies = [
  "libc",
  "minisign",
  "object",
- "oncl-basics",
  "oncl-builtin-accessory",
  "oncl-builtins-build",
+ "oncl-flows",
  "oncl-gost",
  "oncl-ipc",
  "oncl-pdk",

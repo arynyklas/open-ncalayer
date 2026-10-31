@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use oncl_basics::{
+use oncl_flows::{
     Busy, BusyPrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FilePrompt, ImportAnswer, ImportPrompt,
     KeyPrompt, MessagePrompt, PasswordPrompt, Prompt, Prompter, SavePrompt, StorageAnswer,
     StoragePrompt,
@@ -201,13 +201,13 @@ impl Prompter for GatedConfirm {
     fn save_file(&self, _: &SavePrompt) -> Prompt<PathBuf> {
         Prompt::Cancelled
     }
-    fn choice(&self, _: &oncl_basics::ChoicePrompt) -> Prompt<oncl_basics::ChoiceAnswer> {
+    fn choice(&self, _: &oncl_flows::ChoicePrompt) -> Prompt<oncl_flows::ChoiceAnswer> {
         Prompt::Cancelled
     }
-    fn path(&self, _: &oncl_basics::PathPrompt) -> Prompt<PathBuf> {
+    fn path(&self, _: &oncl_flows::PathPrompt) -> Prompt<PathBuf> {
         Prompt::Cancelled
     }
-    fn reader(&self, _: &oncl_basics::ReaderPrompt) -> Prompt<String> {
+    fn reader(&self, _: &oncl_flows::ReaderPrompt) -> Prompt<String> {
         Prompt::Cancelled
     }
 }

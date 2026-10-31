@@ -12,8 +12,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use oncl_basics::Locale;
 use oncl_desktop::original::EntryState;
+use oncl_flows::Locale;
 use oncl_ipc::IpcListener;
 use oncl_pki::pkix::CaSet;
 use oncl_plugin::BuiltinSource;
@@ -479,7 +479,7 @@ pub const E2E_PROMPTER_VAR: &str = "ONCL_E2E_PROMPTER";
 /// The scripted prompter of the file in [`E2E_PROMPTER_VAR`], if the variable is set. On
 /// failure the message is already printed and exit code 1 returned.
 #[cfg(feature = "e2e-prompter")]
-pub fn e2e_prompter() -> Result<Option<oncl_basics::testing::ScriptedPrompter>, ExitCode> {
+pub fn e2e_prompter() -> Result<Option<oncl_flows::testing::ScriptedPrompter>, ExitCode> {
     let Some(path) = std::env::var_os(E2E_PROMPTER_VAR) else {
         return Ok(None);
     };
@@ -490,7 +490,7 @@ pub fn e2e_prompter() -> Result<Option<oncl_basics::testing::ScriptedPrompter>, 
             eprintln!("{E2E_PROMPTER_VAR}: {}: {e}", Path::new(&path).display());
             ExitCode::FAILURE
         })?;
-    Ok(Some(oncl_basics::testing::ScriptedPrompter::new(steps)))
+    Ok(Some(oncl_flows::testing::ScriptedPrompter::new(steps)))
 }
 
 /// `e2e install-plugin <file>`: installs the package as a local plugin, enabled, in the data
@@ -526,8 +526,8 @@ pub fn e2e(command: E2eCommand) -> ExitCode {
 
 /// The steps of an [`E2E_PROMPTER_VAR`] file.
 #[cfg(feature = "e2e-prompter")]
-fn parse_steps(text: &str) -> Result<Vec<oncl_basics::testing::Step>, String> {
-    use oncl_basics::testing::Step;
+fn parse_steps(text: &str) -> Result<Vec<oncl_flows::testing::Step>, String> {
+    use oncl_flows::testing::Step;
 
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "snake_case")]
@@ -595,7 +595,7 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_basics::testing::Step>, String> {
                     reader,
                     pin,
                 } => Step::Token {
-                    storage: oncl_basics::StorageKind::from_name(&storage)
+                    storage: oncl_flows::StorageKind::from_name(&storage)
                         .ok_or_else(|| format!("no storage {storage:?}"))?,
                     reader,
                     pin,
@@ -1655,7 +1655,7 @@ mod tests {
     #[cfg(feature = "e2e-prompter")]
     #[test]
     fn e2e_steps_parse() {
-        use oncl_basics::testing::Step;
+        use oncl_flows::testing::Step;
 
         let steps = parse_steps(
             r#"[{"storage":{"path":"k.p12","password":"pw"}},{"key":1},
@@ -1693,8 +1693,8 @@ mod tests {
     #[cfg(feature = "e2e-prompter")]
     #[test]
     fn e2e_token_steps_parse() {
-        use oncl_basics::StorageKind;
-        use oncl_basics::testing::Step;
+        use oncl_flows::StorageKind;
+        use oncl_flows::testing::Step;
 
         let steps = parse_steps(
             r#"[{"token":{"storage":"AKKaztokenStore","reader":"R0","pin":"123456"}},

@@ -9,7 +9,7 @@ use super::{
 };
 use crate::cause;
 use crate::host::HostState;
-use oncl_basics::{
+use oncl_flows::{
     ConfirmPrompt, FileKind, FilePrompt, Locale, MAX_PAGE_FILE, PageFile, PageFileError,
     PathFilter, PathMode, PathPrompt, Prompt, SavePrompt, is_device_path, page_path,
     remember_chosen_path,

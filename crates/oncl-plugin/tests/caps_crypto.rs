@@ -44,10 +44,9 @@ fn cert_der(name: &str) -> Vec<u8> {
 /// plus `extra_hosts`.
 fn services(http: Arc<dyn HttpTransport>, extra_hosts: &[&str]) -> HostServices {
     let mut services = services_with(
-        Arc::new(oncl_basics::testing::ScriptedPrompter::new(Vec::<
-            oncl_basics::testing::Step,
-        >::new(
-        ))),
+        Arc::new(oncl_flows::testing::ScriptedPrompter::new(Vec::<
+            oncl_flows::testing::Step,
+        >::new())),
         http,
     );
     services.cas = Arc::new(CaSet::new(

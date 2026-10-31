@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use oncl_basics::testing::{ScriptedPrompter, Step};
+use oncl_flows::testing::{ScriptedPrompter, Step};
 use oncl_pdk::abi::{
     self, Bytes, ChoiceArgs, ErrorCode, HostResult, Import, MAX_SETTINGS_KEYS, MAX_SHARED,
     MAX_SHARED_KEYS, MessageKind, SharedKey, SharedPut,
@@ -82,7 +82,7 @@ fn choice_returns_button_index() {
     assert_eq!(prompt.default, 1);
     assert_eq!(prompt.title.as_deref(), Some("Подпись"));
     assert_eq!(prompt.text, "Продолжить?");
-    assert_eq!(prompt.kind, oncl_basics::MessageKind::Warning);
+    assert_eq!(prompt.kind, oncl_flows::MessageKind::Warning);
     assert_eq!(prompt.origin, ORIGIN);
     assert_eq!(prompt.source, "Тестовый плагин");
 }

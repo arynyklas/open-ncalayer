@@ -5,8 +5,8 @@
 mod common;
 
 use common::*;
-use oncl_basics::testing::{ScriptedPrompter, Step};
-use oncl_basics::{PathMode, page_path};
+use oncl_flows::testing::{ScriptedPrompter, Step};
+use oncl_flows::{PathMode, page_path};
 use oncl_pdk::abi::{
     self, Bytes, ChooseFileArgs, ChosenPath, ErrorCode, FileFilter, FileMode, HostResult, Import,
     OpenedFile, PagePathArgs, PageRead, PageWrite, PageWriteArgs,

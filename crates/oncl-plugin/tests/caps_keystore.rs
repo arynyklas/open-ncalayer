@@ -10,8 +10,8 @@ use base64::engine::general_purpose::STANDARD;
 use common::*;
 use der::asn1::{ObjectIdentifier, OctetString};
 use der::{Decode, Encode};
-use oncl_basics::StorageKind;
-use oncl_basics::testing::{ScriptedPrompter, Step};
+use oncl_flows::StorageKind;
+use oncl_flows::testing::{ScriptedPrompter, Step};
 use oncl_pdk::abi::{
     self, ChangePasswordArgs, CsrChoice, CsrDialogArgs, ErrorCode, Folder, HostResult,
     IdCardHolder, Import, ImportChoice, ImportDialogArgs, InstallCertArgs, InstalledCert, NewKey,

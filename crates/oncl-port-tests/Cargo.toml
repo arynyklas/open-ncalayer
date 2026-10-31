@@ -10,7 +10,7 @@ publish.workspace = true
 
 [dependencies]
 # `ScriptedPrompter`, `MemoryRecentPath`: the dialogs of a port, answered by a script.
-oncl-basics = { workspace = true, features = ["testing"] }
+oncl-flows = { workspace = true, features = ["testing"] }
 oncl-pdk.workspace = true
 # `MockTsa`, `MockOcsp`, `MockCrl`, `RouteTransport`: the PKI services ports reach.
 oncl-pki = { workspace = true, features = ["testing"] }

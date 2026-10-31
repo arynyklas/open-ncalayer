@@ -495,7 +495,7 @@ impl Instance {
         &mut self,
         request: &str,
         add_info: &AddInfo,
-        locale: oncl_basics::Locale,
+        locale: oncl_flows::Locale,
     ) -> Result<String, PluginError> {
         let (request, data_prefix) = match self.store.data_mut().call.data.as_mut() {
             Some(data) => (
@@ -565,10 +565,10 @@ fn failure(e: wasmi::Error) -> PluginError {
 }
 
 /// The ABI's code of `locale`.
-fn locale_code(locale: oncl_basics::Locale) -> &'static str {
+fn locale_code(locale: oncl_flows::Locale) -> &'static str {
     match locale {
-        oncl_basics::Locale::Ru => "ru",
-        oncl_basics::Locale::Kk => "kk",
-        oncl_basics::Locale::En => "en",
+        oncl_flows::Locale::Ru => "ru",
+        oncl_flows::Locale::Kk => "kk",
+        oncl_flows::Locale::En => "en",
     }
 }
