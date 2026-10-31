@@ -303,7 +303,7 @@ async fn daemon_serves_every_builtin() {
     send(&mut c, r#"{"method":"getTryCount","uuid":"t"}"#).await;
     assert_eq!(
         next_text(&mut c).await,
-        r#"{"errorCode":"NONE","result":-1,"uuid":"t"}"#
+        r#"{"result":-1,"errorCode":"NONE","uuid":"t"}"#
     );
 }
 

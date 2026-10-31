@@ -15,14 +15,15 @@
 //!   takes only a JSON string or `null`, an array parameter only an array or `null`;
 //! - an exception the method throws is `java.lang.reflect.InvocationTargetException`;
 //! - every failure is `{"errorCode":"<exception>. Method: <name>"}` without `uuid`; a
-//!   method's `ResultWrapper` gets the request's `uuid` when it is not empty.
+//!   method's `ResultWrapper` gets the request's `uuid` when it is not empty;
+//! - the reply is a `JSONObject` (a `HashMap`): `result`, `errorCode`, `secondResult`,
+//!   `uuid`, in this order of its buckets.
 //!
 //! `genExt`, `getProvider`, `setProvider` and `showTokenChooser` are left out: they are
 //! `NoSuchMethodException` here.
 
 use crate::{Core, keygen, methods};
-use oncl_pdk::orgjson::{get_string, int_value, opt_string};
-use serde::Serialize;
+use oncl_pdk::orgjson::{JObject, get_string, int_value, opt_string};
 use serde_json::Value;
 
 /// The class the dispatcher's instance is of, the only `class` besides an empty one.
@@ -260,43 +261,26 @@ impl<'a> Args<'a> {
     }
 }
 
-/// The reply as org.json writes it, with the request's `uuid` added to a method's own
-/// reply.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Reply<'a> {
-    error_code: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<&'a Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    second_result: Option<&'a Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    uuid: Option<&'a str>,
-}
-
-/// Dispatches `request` and serializes the reply.
+/// Dispatches `request` and writes the reply as org.json does: the `ResultWrapper` bean
+/// (its `null` fields left out) with the request's `uuid` put in, or the dispatcher's
+/// `errorCode` alone.
 pub(crate) fn process<C: Core>(core: &C, request: &str) -> String {
+    let mut reply = JObject::hash_map();
     match dispatch(core, request) {
         Ok((wrapper, uuid)) => {
-            let uuid = (!uuid.is_empty()).then_some(uuid.as_str());
-            serialize(&Reply {
-                error_code: wrapper.error_code,
-                result: wrapper.result.as_ref(),
-                second_result: wrapper.second_result.as_ref(),
-                uuid,
-            })
+            reply
+                .put("errorCode", wrapper.error_code)
+                .put_opt("result", wrapper.result)
+                .put_opt("secondResult", wrapper.second_result);
+            if !uuid.is_empty() {
+                reply.put("uuid", uuid);
+            }
         }
-        Err(message) => serialize(&Reply {
-            error_code: &message,
-            result: None,
-            second_result: None,
-            uuid: None,
-        }),
+        Err(message) => {
+            reply.put("errorCode", message);
+        }
     }
-}
-
-fn serialize(reply: &Reply<'_>) -> String {
-    serde_json::to_string(reply).expect("replies serialize")
+    reply.to_json()
 }
 
 /// The method's `ResultWrapper` with the request's `uuid` (`optString`), or the

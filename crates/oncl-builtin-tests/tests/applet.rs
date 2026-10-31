@@ -115,7 +115,7 @@ fn is_the_default_module() {
     };
     assert_eq!(
         module.process(request, &origin()),
-        r#"{"errorCode":"NONE","result":-1,"uuid":"u1"}"#
+        r#"{"result":-1,"errorCode":"NONE","uuid":"u1"}"#
     );
 }
 
@@ -129,7 +129,7 @@ fn class_must_be_empty_or_the_applet() {
     ] {
         assert_eq!(
             raw(&a, json!({"class": class, "method": "getTryCount"})),
-            r#"{"errorCode":"NONE","result":-1}"#
+            r#"{"result":-1,"errorCode":"NONE"}"#
         );
     }
     for class in [json!("kz.gov.pki.knca.applet.MainApplet"), json!(1)] {
@@ -165,10 +165,9 @@ fn dispatcher_failures() {
         reply(json!({"method": 5})),
         json!({"errorCode": "org.json.JSONException: JSONObject[\"method\"] is not a string.. Method: "})
     );
-    // Not offered: the original's extension dialogs, its JCE provider and its token chooser.
+    // Not offered: the original's extension dialogs and token chooser.
     for (method, args) in [
         ("genExt", json!(["2.5.29.15"])),
-        ("getProvider", json!([])),
         ("setProvider", json!(["x"])),
         ("showTokenChooser", json!(["AKKaztokenStore"])),
     ] {
@@ -201,7 +200,7 @@ fn dispatcher_failures() {
     // Anything but an array is no arguments.
     assert_eq!(
         raw(&a, json!({"method": "getTryCount", "args": "x"})),
-        r#"{"errorCode":"NONE","result":-1}"#
+        r#"{"result":-1,"errorCode":"NONE"}"#
     );
 }
 
@@ -229,6 +228,125 @@ fn uuid_is_echoed_on_method_replies_only() {
         req("nope", json!("abc")),
         r#"{"errorCode":"java.lang.NoSuchMethodException. Method: nope"}"#
     );
+}
+
+/// The reply is org.json's `JSONObject` of the `ResultWrapper` bean, a `HashMap` of 16
+/// buckets: `result` (bucket 0), `errorCode` (9), `secondResult` (12), `uuid` (13). Fields
+/// that are `null` are left out.
+#[test]
+fn result_wrapper_key_order() {
+    let (a, _) = setup(vec![Step::Password("p".to_owned())]);
+    assert_eq!(
+        raw(&a, json!({"method": "getTryCount", "args": []})),
+        r#"{"result":-1,"errorCode":"NONE"}"#
+    );
+    assert_eq!(
+        raw(&a, json!({"method": "setPassword", "args": []})),
+        r#"{"result":true,"errorCode":"NONE"}"#
+    );
+    assert_eq!(
+        raw(&a, json!({"method": "loadSlotList", "args": ["PKCS12"]})),
+        r#"{"errorCode":"EMPTY_SLOT"}"#
+    );
+    // `result` and `secondResult` together.
+    let dir = tempfile::tempdir().unwrap();
+    let reply = raw(
+        &a,
+        json!({
+            "method": "genKeyPairAndGetPKCS10",
+            "args": gen_args(&dir_arg(&dir), "2.5.4.3<:>2.5.4.6", "X<:>KZ", ""),
+        }),
+    );
+    let parsed: Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(code(&parsed), "NONE", "{reply}");
+    let quoted = |key: &str| serde_json::to_string(parsed[key].as_str().unwrap()).unwrap();
+    assert_eq!(
+        reply,
+        format!(
+            r#"{{"result":{},"errorCode":"NONE","secondResult":{}}}"#,
+            quoted("result"),
+            quoted("secondResult")
+        )
+    );
+}
+
+/// The request's `uuid` is put into a method's reply after the bean's fields, in its
+/// `HashMap` bucket: last.
+#[test]
+fn uuid_placement() {
+    let (a, _) = setup(vec![]);
+    let req =
+        |method: &str, args: Value| raw(&a, json!({"method": method, "args": args, "uuid": "u-1"}));
+    assert_eq!(
+        req("getTryCount", json!([])),
+        r#"{"result":-1,"errorCode":"NONE","uuid":"u-1"}"#
+    );
+    assert_eq!(
+        req("loadSlotList", json!(["PKCS12"])),
+        r#"{"errorCode":"EMPTY_SLOT","uuid":"u-1"}"#
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let reply = req(
+        "genKeyPairAndGetPKCS10",
+        gen_args(&dir_arg(&dir), "2.5.4.3<:>2.5.4.6", "X<:>KZ", ""),
+    );
+    let parsed: Value = serde_json::from_str(&reply).unwrap();
+    let quoted = |key: &str| serde_json::to_string(parsed[key].as_str().unwrap()).unwrap();
+    assert_eq!(
+        reply,
+        format!(
+            r#"{{"result":{},"errorCode":"NONE","secondResult":{},"uuid":"u-1"}}"#,
+            quoted("result"),
+            quoted("secondResult")
+        )
+    );
+}
+
+/// The dispatcher's failures, byte for byte: `errorCode` alone, never the request's
+/// `uuid`.
+#[test]
+fn dispatcher_error_bytes() {
+    let (a, _) = setup(vec![]);
+    for (request, expected) in [
+        (
+            json!({"method": "noSuchMethod", "args": [], "uuid": "u-1"}),
+            r#"{"errorCode":"java.lang.NoSuchMethodException. Method: noSuchMethod"}"#,
+        ),
+        (
+            json!({"method": "loadSlotList", "args": [], "uuid": "u-1"}),
+            r#"{"errorCode":"java.lang.NoSuchMethodException. Method: loadSlotList"}"#,
+        ),
+        (
+            json!({"method": "loadSlotList", "args": [5], "uuid": "u-1"}),
+            r#"{"errorCode":"java.lang.IllegalArgumentException: argument type mismatch. Method: loadSlotList"}"#,
+        ),
+        (
+            json!({"method": "setTryCount", "args": [1], "uuid": "u-1"}),
+            r#"{"errorCode":"java.lang.IllegalAccessException: Class kz.gov.pki.knca.applet.osgi.KNCAAppletActivator can not access a member of class kz.gov.pki.knca.applet.Applet with modifiers \"private\". Method: setTryCount"}"#,
+        ),
+        (
+            json!({"args": [], "uuid": "u-1"}),
+            r#"{"errorCode":"org.json.JSONException: JSONObject[\"method\"] not found.. Method: "}"#,
+        ),
+    ] {
+        assert_eq!(raw(&a, request), expected);
+    }
+}
+
+/// `getProvider` returns the original's internal property table of a proprietary JCE
+/// provider: it is not offered.
+#[test]
+fn get_provider_is_not_offered() {
+    let (a, _) = setup(vec![]);
+    for uuid in [Value::Null, json!("u-1")] {
+        assert_eq!(
+            raw(
+                &a,
+                json!({"method": "getProvider", "args": [], "uuid": uuid})
+            ),
+            r#"{"errorCode":"java.lang.NoSuchMethodException. Method: getProvider"}"#
+        );
+    }
 }
 
 // --- showFileChooser, browseKeyStore ------------------------------------------------------
@@ -513,7 +631,7 @@ fn try_count_is_the_modules() {
     };
     assert_eq!(
         a.process(r#"{"method":"getTryCount"}"#, &other),
-        r#"{"errorCode":"NONE","result":-1}"#
+        r#"{"result":-1,"errorCode":"NONE"}"#
     );
 }
 
