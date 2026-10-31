@@ -3,9 +3,15 @@
 //! of the `upstream` branch, plus `run.json`. The emit directory holds JSON only; the
 //! originals stay in the work directory. The log names sources, sizes and hashes, never
 //! bodies or tool output.
+//!
+//! A key of the download page serves one request, so each page link is downloaded with a
+//! fresh one: the page is read again in the poll's session right before, and the link with
+//! the same identity is taken. Only these downloads change a page source's status and
+//! failures; a failing or refused one is tried again on every run.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
 use oncl_pki::cert::Certificate;
@@ -21,14 +27,14 @@ use super::diff::diff;
 use super::facts::{
     BundleUpdate, DistInput, Facts, FetchStatus, Updates, dist_facts, key8, merge, to_json,
 };
-use super::http::{FetchError, Fetcher, RequestCtx};
+use super::http::{FetchError, Fetcher, RequestCtx, Session};
 use super::inventory::inventory;
 use super::jar::{jar_entries, jar_facts};
 use super::poll::{Alert, AlertKind, Change, ModReason, poll};
-use super::sources::{Source, SourceKind};
+use super::sources::{Source, SourceKind, parse_download_page};
 use super::state::{SourceStatus, State};
 use super::unpack::{Limits, Tools, Unpacked, unpack};
-use super::{BUNDLE_MAX, DIST_MAX, Endpoints, FAILURES_TO_REMOVE, pretty_json};
+use super::{BUNDLE_MAX, DIST_MAX, Endpoints, FAILURES_TO_REMOVE, PAGE_MAX, pretty_json};
 
 /// What a run needs.
 pub struct RunOptions {
@@ -185,7 +191,7 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
         let mut updates = Updates::default();
         let page_ctx = RequestCtx {
             referer: Some(opts.endpoints.page.clone()),
-            cookies: Some(polled.cookies.clone()),
+            session: Some(Arc::clone(&polled.session)),
         };
         let mut n = 0usize;
         for source in &polled.sources {
@@ -222,30 +228,44 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
                         .as_ref()
                         .and_then(|f| f.distributions.get(&source.id))
                         .is_some_and(|d| d.status == FetchStatus::Ok);
-                    let state = next_state.sources.get(&source.id);
-                    if state.is_some_and(|s| s.status != SourceStatus::Ok) {
+                    let page = matches!(source.kind, SourceKind::Page { .. });
+                    let not_ok = next_state
+                        .sources
+                        .get(&source.id)
+                        .is_some_and(|s| s.status != SourceStatus::Ok);
+                    // A page link has no poll of its own: a failing or refused one is retried.
+                    if not_ok && !page {
                         continue;
                     }
-                    if change.is_none() && known {
+                    if change.is_none() && known && !not_ok {
                         continue;
                     }
                     n += 1;
                     let dest = dl.join(n.to_string());
-                    let ctx = if matches!(source.kind, SourceKind::Page { .. }) {
-                        page_ctx.clone()
+                    let headers_only = known
+                        && matches!(
+                            change,
+                            None | Some(Change::Modified {
+                                reason: ModReason::Headers | ModReason::Content,
+                                ..
+                            })
+                        );
+                    let (url, ctx) = if page {
+                        match fresh_link(opts, source, &polled.session) {
+                            Ok(url) => (url, page_ctx.clone()),
+                            Err(e) => {
+                                log.line(format!("fetch: {} failed: {e}", source.id));
+                                forget_and_fail(&prev_state, &mut next_state, &source.id);
+                                continue;
+                            }
+                        }
                     } else {
-                        RequestCtx::default()
+                        (source.url.clone(), RequestCtx::default())
                     };
-                    let headers_only = matches!(
-                        change,
-                        Some(Change::Modified {
-                            reason: ModReason::Headers | ModReason::Content,
-                            ..
-                        })
-                    ) && known;
                     if let Some(facts) = fetch_dist(
                         opts,
                         source,
+                        &url,
                         &ctx,
                         &dest,
                         headers_only,
@@ -424,6 +444,27 @@ fn fetch_bundle(
     )
 }
 
+/// The link of the page source `source` with a fresh key: the page read again in `session`.
+fn fresh_link(
+    opts: &RunOptions,
+    source: &Source,
+    session: &Arc<Mutex<Session>>,
+) -> Result<String, String> {
+    let ctx = RequestCtx {
+        referer: None,
+        session: Some(Arc::clone(session)),
+    };
+    let page = opts
+        .fetcher
+        .get(&opts.endpoints.page, PAGE_MAX, &ctx)
+        .map_err(|e| format!("download page: {e}"))?;
+    parse_download_page(&String::from_utf8_lossy(&page.body), &opts.endpoints.page)
+        .into_iter()
+        .find(|link| source.id.strip_prefix("page:") == Some(link.slug.as_str()))
+        .map(|link| link.url)
+        .ok_or_else(|| "the link is gone from the download page".to_owned())
+}
+
 /// A download of a distribution failed: what this poll saw of the source is forgotten (so
 /// the next poll reports the change again) and the failure is counted.
 fn forget_and_fail(prev: &State, state: &mut State, id: &str) {
@@ -443,6 +484,7 @@ fn forget_and_fail(prev: &State, state: &mut State, id: &str) {
 fn fetch_dist(
     opts: &RunOptions,
     source: &Source,
+    url: &str,
     ctx: &RequestCtx,
     dest: &Path,
     headers_only: bool,
@@ -451,8 +493,17 @@ fn fetch_dist(
     updates: &mut Updates,
     log: &mut Logger,
 ) -> Option<super::facts::DistFacts> {
-    let d = match opts.fetcher.download(&source.url, DIST_MAX, ctx, dest) {
+    let page = matches!(source.kind, SourceKind::Page { .. });
+    let d = match opts.fetcher.download(url, DIST_MAX, ctx, dest) {
         Ok(d) => d,
+        Err(FetchError::RefusedAddress(_)) => {
+            log.line(format!("fetch: {} refused", source.id));
+            if let Some(entry) = state.sources.get_mut(&source.id) {
+                entry.status = SourceStatus::Refused;
+                entry.failures = 0;
+            }
+            return None;
+        }
         Err(e) => {
             log.line(format!("fetch: {} failed: {e}", source.id));
             forget_and_fail(prev, state, &source.id);
@@ -468,9 +519,20 @@ fn fetch_dist(
     let before = prev.sources.get(&source.id).and_then(|s| s.sha256.clone());
     if let Some(entry) = state.sources.get_mut(&source.id) {
         entry.sha256 = Some(d.sha256.clone());
+        if page {
+            entry.size = Some(d.size);
+        }
     }
+    // A page source's status follows its downloads only.
+    let page_ok = |state: &mut State| {
+        if page && let Some(entry) = state.sources.get_mut(&source.id) {
+            entry.failures = 0;
+            entry.status = SourceStatus::Ok;
+        }
+    };
     if headers_only && before.as_deref() == Some(d.sha256.as_str()) {
         log.line(format!("fetch: {} content unchanged", source.id));
+        page_ok(state);
         return None;
     }
     let format = match check_artifact(&d, source) {
@@ -482,6 +544,7 @@ fn fetch_dist(
             return None;
         }
     };
+    page_ok(state);
     let work = dest.with_extension("d");
     let unpacked = unpack(&d.path, format, &work, &opts.tools, &opts.limits);
     let inv = match &unpacked {
@@ -503,12 +566,10 @@ fn fetch_dist(
         }
         Err(e) => log.line(format!("unpack: {} failed:{e}", source.id)),
     }
-    let page =
-        matches!(source.kind, SourceKind::Page { .. }).then_some(opts.endpoints.page.as_str());
     let (facts, jars) = dist_facts(
         &DistInput {
             source,
-            page,
+            page: page.then_some(opts.endpoints.page.as_str()),
             downloaded: Some(&d),
             format: Some(format),
             status: FetchStatus::Ok,

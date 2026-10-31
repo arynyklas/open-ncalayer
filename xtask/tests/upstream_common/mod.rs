@@ -366,3 +366,68 @@ pub fn serve_world(server: &MockServer, edit: impl FnOnce(String) -> String) {
         );
     }
 }
+
+static NEXT_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Serves the download page of [`PAGE_FILES`] as the original does: every load gives fresh
+/// keys and the session cookie `sid=<sid>`; a key answers exactly one request of any method
+/// (HEAD included) with that cookie and `referer`, after that (and for a key of another
+/// server) 302 to `/404.php`, an HTML page. Tried before the routes of `server`.
+pub fn serve_one_shot_page(server: &MockServer, sid: &str, referer: &str) {
+    let keys: Arc<Mutex<BTreeMap<String, &'static str>>> = Arc::default();
+    let cookie = format!("sid={sid}");
+    let sha1s: Vec<String> = PAGE_FILES
+        .iter()
+        .map(|(_, f)| sha1_hex(&read(fixture(&format!("upstream/{f}")))))
+        .collect();
+    let page_keys = Arc::clone(&keys);
+    let set_cookie = format!("{cookie}; Path=/");
+    server.handler(move |r| {
+        (r.method == "GET" && r.path() == "/").then(|| {
+            let mut issued = page_keys.lock().unwrap();
+            let fresh: Vec<String> = PAGE_FILES
+                .iter()
+                .map(|(_, file)| {
+                    let k = format!(
+                        "{:032x}",
+                        NEXT_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    );
+                    issued.insert(k.clone(), *file);
+                    k
+                })
+                .collect();
+            let html = page_html(
+                [&fresh[0], &fresh[1], &fresh[2], &fresh[3]],
+                [&sha1s[0], &sha1s[1], &sha1s[2], &sha1s[3]],
+            );
+            Response::html(html.into_bytes()).header("Set-Cookie", &set_cookie)
+        })
+    });
+    let referer = referer.to_owned();
+    server.handler(move |r| {
+        (r.path() == "/download.php").then(|| {
+            let file = r
+                .target
+                .split_once("key=")
+                .and_then(|(_, k)| keys.lock().unwrap().remove(k));
+            let session = r
+                .headers
+                .get("cookie")
+                .is_some_and(|c| c.split(';').any(|p| p.trim() == cookie))
+                && r.headers.get("referer") == Some(&referer);
+            match file {
+                Some(file) if session => Response::ok(read(fixture(&format!("upstream/{file}"))))
+                    .header(
+                        "Content-Disposition",
+                        &format!("attachment; filename={file}"),
+                    ),
+                _ => Response::redirect("/404.php"),
+            }
+        })
+    });
+    server.route(
+        "GET",
+        "/404.php",
+        Response::html(read(fixture("upstream/error.html"))),
+    );
+}

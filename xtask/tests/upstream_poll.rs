@@ -38,7 +38,6 @@ fn world(k: char) -> MockServer {
             Response::ok(vec![0; 10]).header("ETag", "\"e1\""),
         );
     }
-    server.route("HEAD", "/download.php", Response::ok(vec![0; 10]));
     server
 }
 
@@ -94,12 +93,12 @@ fn first_poll_adds_all_sources() {
         .into_iter()
         .collect::<Vec<_>>()
     );
-    // Bundles are not requested while polling.
+    // Bundles and page links are not requested while polling.
     assert!(
         server
             .requests()
             .iter()
-            .all(|r| !r.target.contains("bundles/"))
+            .all(|r| !r.target.contains("bundles/") && r.path() != "/download.php")
     );
 }
 
@@ -197,17 +196,48 @@ fn failure_then_success_resets_count() {
 }
 
 #[test]
-fn page_html_instead_of_file_is_failure_not_change() {
+fn page_links_are_not_requested_and_keep_their_download_status() {
     let server = world('a');
-    let state = run(&server, &State::default()).next;
-    server.route(
-        "HEAD",
-        "/download.php",
-        Response::html(read(fixture("upstream/error.html"))),
-    );
+    let mut state = run(&server, &State::default()).next;
+    // As left by a run whose downloads failed, and a link removed long ago.
+    for id in ["page:windows-64-bit", "page:macosx"] {
+        let e = state.sources.get_mut(id).unwrap();
+        e.failures = 1;
+        e.status = SourceStatus::Failing;
+    }
+    let gone = state.sources.get_mut("page:linux").unwrap();
+    gone.failures = 3;
+    gone.status = SourceStatus::Gone;
+    server.clear_requests();
     let r = run(&server, &state);
-    assert!(r.changes.is_empty(), "{:?}", r.changes);
-    assert_eq!(r.next.sources["page:windows-64-bit"].failures, 1);
+    assert_eq!(
+        r.changes,
+        [Change::Added {
+            id: "page:linux".to_owned()
+        }]
+    );
+    for id in ["page:windows-64-bit", "page:macosx"] {
+        let e = &r.next.sources[id];
+        assert_eq!((e.failures, e.status), (1, SourceStatus::Failing), "{id}");
+    }
+    let e = &r.next.sources["page:linux"];
+    assert_eq!((e.failures, e.status), (0, SourceStatus::Ok));
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|r| r.path() != "/download.php"),
+        "{:?}",
+        server.requests()
+    );
+    // The page's session, for the run's downloads.
+    let host = xtask::upstream::http::UrlParts::parse(&server.base)
+        .unwrap()
+        .host;
+    assert_eq!(
+        r.session.lock().unwrap().cookie_header(&host).as_deref(),
+        Some("sid=synthetic")
+    );
 }
 
 #[test]
@@ -392,38 +422,6 @@ fn oversized_body_is_error_not_truncation() {
             .len(),
         2000
     );
-}
-
-#[test]
-fn cookies_and_referer_sent_for_page_downloads() {
-    let server = world('a');
-    let page = server.url("/");
-    server.handler(move |r| {
-        (r.path() == "/download.php").then(|| {
-            let cookie_ok = r
-                .headers
-                .get("cookie")
-                .is_some_and(|c| c.contains("sid=synthetic"));
-            let referer_ok = r.headers.get("referer") == Some(&page);
-            if cookie_ok && referer_ok {
-                Response::ok(vec![0; 10])
-            } else {
-                Response::status(403)
-            }
-        })
-    });
-    let r = run(&server, &State::default());
-    assert!(
-        r.next.sources["page:windows-64-bit"].status == SourceStatus::Ok,
-        "{:?}",
-        r.next.sources["page:windows-64-bit"]
-    );
-    let downloads: Vec<_> = server
-        .requests()
-        .into_iter()
-        .filter(|r| r.path() == "/download.php")
-        .collect();
-    assert_eq!(downloads.len(), 4);
 }
 
 #[test]

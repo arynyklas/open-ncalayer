@@ -1,6 +1,8 @@
 //! The sources the watcher polls and their identities. The one-time `download.php?key=`
 //! keys of the download page are not part of an identity: a page source is named after the
-//! label of its link.
+//! label of its link. A key serves one request (HEAD included) and only in the session of
+//! the page that gave it, so a link is never requested by the poll; the run reads the page
+//! again for a fresh key right before each download.
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +18,7 @@ pub struct Source {
     pub id: String,
     /// What it is.
     pub kind: SourceKind,
-    /// Where it is now (for a page source, with the current key).
+    /// Where it is now (for a page source, with the key of the poll's page, never requested).
     pub url: String,
     /// The SHA-256 the manifest gives.
     pub expected_sha256: Option<String>,

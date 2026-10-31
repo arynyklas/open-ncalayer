@@ -2,15 +2,18 @@
 //! truncation), redirects followed by hand with every hop checked, and public destination
 //! addresses only. Error messages never carry bytes of a response body.
 //!
-//! The addresses are checked when resolved here; the connection resolves the host again, so
-//! a DNS answer that changes in between (DNS rebinding) is not caught. That residual risk
-//! is accepted: the runner holds no credentials the original's sites could reach for.
+//! A host is resolved once per request and every address is checked; the connection goes to
+//! exactly those addresses (no second lookup, no proxy), so a DNS answer that changes in
+//! between (DNS rebinding) cannot lead it elsewhere. A request without a [`Session`] may use
+//! any of them (the next one when one does not answer). Requests of a session go to the
+//! address the session first reached for the host: the download page keeps its PHP session
+//! on one backend of several behind the same name.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,7 +21,11 @@ use std::time::Duration;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use ureq::Agent;
+use ureq::config::Config;
+use ureq::http::Uri;
 use ureq::tls::{Certificate as TlsCertificate, RootCerts, TlsConfig};
+use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
 use super::{REDIRECTS_MAX, hex};
 
@@ -79,15 +86,17 @@ impl fmt::Display for FetchError {
 
 impl std::error::Error for FetchError {}
 
-/// Cookies set by responses: `name=value` by host, no attributes but the host.
+/// A browsing session: the cookies set by responses (`name=value` by host, no attributes but
+/// the host) and, by host and port, the address the session first reached.
 #[derive(Debug, Default)]
-pub struct CookieJar {
+pub struct Session {
     by_host: BTreeMap<String, BTreeMap<String, String>>,
+    pinned: BTreeMap<(String, u16), SocketAddr>,
 }
 
-impl CookieJar {
+impl Session {
     /// Stores the cookie of a `Set-Cookie` value for `host`.
-    pub fn set(&mut self, host: &str, set_cookie: &str) {
+    pub fn set_cookie(&mut self, host: &str, set_cookie: &str) {
         let pair = set_cookie.split(';').next().unwrap_or_default();
         if let Some((name, value)) = pair.split_once('=') {
             let name = name.trim();
@@ -101,7 +110,7 @@ impl CookieJar {
     }
 
     /// The `Cookie` header for `host`, if any.
-    pub fn header(&self, host: &str) -> Option<String> {
+    pub fn cookie_header(&self, host: &str) -> Option<String> {
         let cookies = self.by_host.get(&host.to_ascii_lowercase())?;
         (!cookies.is_empty()).then(|| {
             cookies
@@ -111,15 +120,27 @@ impl CookieJar {
                 .join("; ")
         })
     }
+
+    /// The address of `host`:`port` the session is pinned to, if any.
+    pub fn pinned(&self, host: &str, port: u16) -> Option<SocketAddr> {
+        self.pinned.get(&(host.to_ascii_lowercase(), port)).copied()
+    }
+
+    /// Pins `host`:`port` to `addr` unless it is pinned already.
+    pub fn pin(&mut self, host: &str, port: u16, addr: SocketAddr) {
+        self.pinned
+            .entry((host.to_ascii_lowercase(), port))
+            .or_insert(addr);
+    }
 }
 
-/// What goes with a request: `Referer` and the cookie jar.
+/// What goes with a request: `Referer` and the session.
 #[derive(Clone, Debug, Default)]
 pub struct RequestCtx {
     /// The `Referer` header.
     pub referer: Option<String>,
-    /// Cookies to send and to store.
-    pub cookies: Option<Arc<Mutex<CookieJar>>>,
+    /// Cookies to send and to store, and the addresses to stick to.
+    pub session: Option<Arc<Mutex<Session>>>,
 }
 
 /// A HEAD response.
@@ -171,12 +192,52 @@ pub struct Downloaded {
     pub filename: Option<String>,
 }
 
+/// Name resolution in place of DNS: the addresses of a host and port.
+type Lookup = Arc<dyn Fn(&str, u16) -> Vec<SocketAddr> + Send + Sync>;
+
 /// The HTTP client of the watcher.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Fetcher {
     allow_loopback: bool,
     timeout: Duration,
     connect_timeout: Duration,
+    lookup: Option<Lookup>,
+}
+
+impl fmt::Debug for Fetcher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Fetcher")
+            .field("allow_loopback", &self.allow_loopback)
+            .field("timeout", &self.timeout)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("lookup", &self.lookup.as_ref().map(|_| "custom"))
+            .finish()
+    }
+}
+
+/// The connection's resolver: the addresses already checked, nothing else.
+#[derive(Debug)]
+struct Checked(Vec<SocketAddr>);
+
+impl Resolver for Checked {
+    fn resolve(
+        &self,
+        _: &Uri,
+        _: &Config,
+        _: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let mut addrs = self.empty();
+        for addr in &self.0 {
+            if addrs.try_push(*addr).is_err() {
+                break;
+            }
+        }
+        if addrs.is_empty() {
+            Err(ureq::Error::HostNotFound)
+        } else {
+            Ok(addrs)
+        }
+    }
 }
 
 impl Default for Fetcher {
@@ -199,6 +260,7 @@ impl Fetcher {
             allow_loopback: false,
             timeout: Duration::from_secs(30 * 60),
             connect_timeout: Duration::from_secs(30),
+            lookup: None,
         }
     }
 
@@ -209,7 +271,19 @@ impl Fetcher {
             allow_loopback: true,
             timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(5),
+            lookup: None,
         }
+    }
+
+    /// For tests: host names resolve through `lookup` instead of DNS (no address is an
+    /// unknown name). The answers are checked like those of DNS; IP literals bypass it.
+    #[must_use]
+    pub fn resolving_with(
+        mut self,
+        lookup: impl Fn(&str, u16) -> Vec<SocketAddr> + Send + Sync + 'static,
+    ) -> Fetcher {
+        self.lookup = Some(Arc::new(lookup));
+        self
     }
 
     /// HEAD of `url`, redirects followed.
@@ -298,8 +372,8 @@ impl Fetcher {
         result
     }
 
-    /// `method` of `url`, redirects followed by hand (each hop's address checked): the final
-    /// URL and the 2xx answer.
+    /// `method` of `url`, redirects followed by hand (each hop's addresses checked): the
+    /// final URL and the 2xx answer.
     fn send(
         &self,
         method: &str,
@@ -309,28 +383,17 @@ impl Fetcher {
         let mut url = url.to_owned();
         for _ in 0..=REDIRECTS_MAX {
             let parts = UrlParts::parse(&url)?;
-            check_public(&parts.host, parts.port, self.allow_loopback)?;
-            let agent = self.agent(&parts.host);
-            let mut request = match method {
-                "HEAD" => agent.head(&url),
-                _ => agent.get(&url),
-            };
-            if let Some(referer) = &ctx.referer {
-                request = request.header("Referer", referer);
-            }
-            if let Some(jar) = &ctx.cookies
-                && let Some(cookie) = jar.lock().expect("cookie jar").header(&parts.host)
-            {
-                request = request.header("Cookie", cookie);
-            }
-            let response = request.call().map_err(ureq_error)?;
+            let response = self.call(method, &url, &parts, ctx)?;
             let status = response.status().as_u16();
             let mut headers = BTreeMap::new();
             for (name, value) in response.headers() {
                 let Ok(value) = value.to_str() else { continue };
                 if name.as_str() == "set-cookie" {
-                    if let Some(jar) = &ctx.cookies {
-                        jar.lock().expect("cookie jar").set(&parts.host, value);
+                    if let Some(session) = &ctx.session {
+                        session
+                            .lock()
+                            .expect("session")
+                            .set_cookie(&parts.host, value);
                     }
                     continue;
                 }
@@ -357,13 +420,101 @@ impl Fetcher {
         Err(FetchError::TooManyRedirects)
     }
 
-    fn agent(&self, host: &str) -> Agent {
+    /// One request of `url` (no redirect followed). Without a session it may go to any
+    /// checked address of the host. In a session it goes to the pinned address; before one
+    /// is pinned, the checked addresses are tried in turn and the first that answers is
+    /// pinned.
+    fn call(
+        &self,
+        method: &str,
+        url: &str,
+        parts: &UrlParts,
+        ctx: &RequestCtx,
+    ) -> Result<ureq::http::Response<ureq::Body>, FetchError> {
+        let session = ctx.session.as_ref();
+        let pinned =
+            session.and_then(|s| s.lock().expect("session").pinned(&parts.host, parts.port));
+        let tries: Vec<Vec<SocketAddr>> = match pinned {
+            Some(addr) => vec![vec![addr]],
+            None => {
+                let addrs = self.public_addrs(&parts.host, parts.port)?;
+                if session.is_some() {
+                    addrs.into_iter().map(|a| vec![a]).collect()
+                } else {
+                    vec![addrs]
+                }
+            }
+        };
+        let mut last = FetchError::Network(format!("{} has no address", parts.host));
+        for addrs in tries {
+            let agent = self.agent(&parts.host, addrs.clone());
+            let mut request = match method {
+                "HEAD" => agent.head(url),
+                _ => agent.get(url),
+            };
+            if let Some(referer) = &ctx.referer {
+                request = request.header("Referer", referer);
+            }
+            if let Some(session) = session
+                && let Some(cookie) = session.lock().expect("session").cookie_header(&parts.host)
+            {
+                request = request.header("Cookie", cookie);
+            }
+            match request.call() {
+                Ok(response) => {
+                    if let Some(session) = session
+                        && let [addr] = addrs[..]
+                    {
+                        session
+                            .lock()
+                            .expect("session")
+                            .pin(&parts.host, parts.port, addr);
+                    }
+                    return Ok(response);
+                }
+                Err(e) => last = ureq_error(e),
+            }
+        }
+        Err(last)
+    }
+
+    /// The addresses of `host`:`port`, every one public (loopback allowed with
+    /// `allow_loopback`).
+    ///
+    /// # Errors
+    ///
+    /// [`FetchError::RefusedAddress`] if any is not, [`FetchError::Network`] if it does not
+    /// resolve.
+    fn public_addrs(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, FetchError> {
+        let addrs: Vec<SocketAddr> = match (host.parse::<IpAddr>(), &self.lookup) {
+            (Ok(ip), _) => vec![SocketAddr::new(ip, port)],
+            (Err(_), Some(lookup)) => lookup(host, port),
+            (Err(_), None) => (host, port)
+                .to_socket_addrs()
+                .map_err(|e| FetchError::Network(format!("resolve {host}: {}", e.kind())))?
+                .collect(),
+        };
+        if addrs.is_empty() {
+            return Err(FetchError::Network(format!("{host} has no address")));
+        }
+        if addrs
+            .iter()
+            .any(|a| !(is_public(a.ip()) || self.allow_loopback && a.ip().is_loopback()))
+        {
+            return Err(FetchError::RefusedAddress(host.to_owned()));
+        }
+        Ok(addrs)
+    }
+
+    /// An agent for `host` that connects to `addrs` only.
+    fn agent(&self, host: &str, addrs: Vec<SocketAddr>) -> Agent {
         let mut config = Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .max_redirects_will_error(false)
             .timeout_global(Some(self.timeout))
             .timeout_connect(Some(self.connect_timeout))
+            .proxy(None)
             .user_agent("OpenNCALayer-upstream-watch");
         if roots_for(host) == RootsChoice::NcaTls {
             let roots = oncl_pki::roots::nca_tls_roots()
@@ -377,7 +528,7 @@ impl Fetcher {
                     .build(),
             );
         }
-        config.build().into()
+        Agent::with_parts(config.build(), DefaultConnector::new(), Checked(addrs))
     }
 }
 
@@ -541,32 +692,6 @@ impl UrlParts {
             format!("{}{dir}{reference}", self.origin())
         }
     }
-}
-
-/// Refuses `host` unless every address it resolves to is public (loopback allowed with
-/// `allow_loopback`).
-///
-/// # Errors
-///
-/// [`FetchError::RefusedAddress`], or [`FetchError::Network`] if it does not resolve.
-pub fn check_public(host: &str, port: u16, allow_loopback: bool) -> Result<(), FetchError> {
-    let addrs: Vec<IpAddr> = match host.parse::<IpAddr>() {
-        Ok(ip) => vec![ip],
-        Err(_) => (host, port)
-            .to_socket_addrs()
-            .map_err(|e| FetchError::Network(format!("resolve {host}: {}", e.kind())))?
-            .map(|a| a.ip())
-            .collect(),
-    };
-    if addrs.is_empty() {
-        return Err(FetchError::Network(format!("{host} has no address")));
-    }
-    for ip in addrs {
-        if !(is_public(ip) || allow_loopback && ip.is_loopback()) {
-            return Err(FetchError::RefusedAddress(host.to_owned()));
-        }
-    }
-    Ok(())
 }
 
 /// Whether `ip` is a public unicast address.
