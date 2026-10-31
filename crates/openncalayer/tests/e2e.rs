@@ -314,13 +314,21 @@ fn builtins_command_lists_the_embedded_modules() {
     assert_eq!(lines.len(), openncalayer::builtins::SOURCES.len(), "{text}");
     for (line, source) in lines.iter().zip(openncalayer::builtins::SOURCES) {
         let manifest = oncl_plugin::Manifest::from_toml_builtin(source.manifest).unwrap();
-        let sha256: String = Sha256::digest(source.wasm)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let hex = |bytes: &[u8]| -> String {
+            Sha256::digest(bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
         assert_eq!(
             *line,
-            format!("{} {} {sha256}", manifest.id, manifest.version)
+            format!(
+                "{} {} {} {}",
+                manifest.id,
+                manifest.version,
+                hex(source.wasm),
+                hex(source.manifest.as_bytes())
+            )
         );
     }
 }

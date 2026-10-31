@@ -144,6 +144,8 @@ pub struct BuiltinInfo {
     pub modules: Vec<String>,
     /// The SHA-256 of its `plugin.wasm`.
     pub sha256: [u8; 32],
+    /// The SHA-256 of its `plugin.toml`.
+    pub manifest_sha256: [u8; 32],
 }
 
 /// What the calls of a built-in module took so far.
@@ -344,6 +346,7 @@ fn info(manifest: Manifest, source: &BuiltinSource<'_>) -> BuiltinInfo {
         version: manifest.version,
         modules: manifest.modules,
         sha256: Sha256::digest(source.wasm).into(),
+        manifest_sha256: Sha256::digest(source.manifest.as_bytes()).into(),
     }
 }
 

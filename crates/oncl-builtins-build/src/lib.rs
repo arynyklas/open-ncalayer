@@ -33,6 +33,9 @@ pub const TARGET: &str = "wasm32-unknown-unknown";
 /// The checksums file of a folder of modules.
 pub const SUMS: &str = "SHA256SUMS";
 
+/// The file of a folder of modules naming what they were built from ([`source_digest`]).
+pub const SOURCE: &str = "SOURCE-SHA256";
+
 /// A built-in module's crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Guest {
@@ -83,12 +86,16 @@ const CLEARED_VARS: &[&str] = &[
 ];
 
 /// Builds the modules of the workspace at `workspace` in `target_dir` and lays them out in
-/// `out`.
+/// `out`. The modules hold no path of the machine: the Cargo home, the toolchain's sources
+/// and the workspace are remapped (`--remap-path-prefix`), so a build anywhere else gives
+/// the same bytes.
+/// `out` also gets [`SOURCE`], the [`source_digest`] of what they were built from.
 ///
 /// # Errors
 ///
 /// The build fails, or a manifest is not a built-in module's of this version.
 pub fn build(workspace: &Path, target_dir: &Path, out: &Path) -> io::Result<Vec<Built>> {
+    let digest = source_digest(workspace)?;
     let mut cargo = Command::new("cargo");
     cargo
         .current_dir(workspace)
@@ -108,6 +115,7 @@ pub fn build(workspace: &Path, target_dir: &Path, out: &Path) -> io::Result<Vec<
     for var in CLEARED_VARS {
         cargo.env_remove(var);
     }
+    cargo.env("CARGO_ENCODED_RUSTFLAGS", remaps(workspace)?.join("\x1f"));
     let output = cargo.output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
@@ -124,17 +132,162 @@ pub fn build(workspace: &Path, target_dir: &Path, out: &Path) -> io::Result<Vec<
         built.push(lay_out(guest, &manifest, &wasm, out)?);
     }
     write_sums(out, &built)?;
+    write_if_changed(&out.join(SOURCE), format!("{digest}\n").as_bytes())?;
     Ok(built)
 }
 
-/// Takes the modules laid out in `dir` (by [`build`]) and lays them out in `out`, checking
-/// them against `dir`'s `SHA256SUMS`.
+/// The output of `rustc args` in `workspace`, with its toolchain, trimmed.
+fn rustc(workspace: &Path, args: &[&str]) -> io::Result<String> {
+    let mut rustc = Command::new("rustc");
+    rustc.current_dir(workspace).args(args);
+    for var in CLEARED_VARS {
+        rustc.env_remove(var);
+    }
+    let output = rustc.output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "rustc {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    String::from_utf8(output.stdout)
+        .map(|s| s.trim().to_owned())
+        .map_err(|_| invalid("rustc's output is not UTF-8".to_owned()))
+}
+
+/// The `release` and `commit-hash` lines of the toolchain of `workspace`: what of the
+/// compiler shapes the modules, the same on every host.
+fn toolchain(workspace: &Path) -> io::Result<String> {
+    let version = rustc(workspace, &["-vV"])?;
+    let lines: Vec<&str> = version
+        .lines()
+        .filter(|line| line.starts_with("release: ") || line.starts_with("commit-hash: "))
+        .collect();
+    if lines.len() != 2 {
+        return Err(invalid(format!(
+            "rustc -vV has no release or commit hash:\n{version}"
+        )));
+    }
+    Ok(lines.join("\n"))
+}
+
+/// The SHA-256 (hex) of what the modules of `workspace` are built from: every file of
+/// [`inputs`] by its path from the workspace root (`/`-separated), its text with CRLF read
+/// as LF, and the toolchain's release and commit. The same sources give the same digest on
+/// every host, whatever their line endings.
 ///
 /// # Errors
 ///
-/// A module or its checksum is missing, a checksum does not match, or a manifest is not a
-/// built-in module's of this version.
-pub fn take(dir: &Path, out: &Path) -> io::Result<Vec<Built>> {
+/// An input cannot be read, or `rustc` does not run.
+pub fn source_digest(workspace: &Path) -> io::Result<String> {
+    let mut files = Vec::new();
+    for input in inputs(workspace)? {
+        walk(&input, &mut files)?;
+    }
+    let mut named: Vec<(String, PathBuf)> = files
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .strip_prefix(workspace)
+                .unwrap_or(&path)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            (name, path)
+        })
+        .collect();
+    named.sort();
+    let mut digest = Sha256::new();
+    digest.update(toolchain(workspace)?.as_bytes());
+    for (name, path) in named {
+        let bytes = fs::read(&path)?;
+        let mut text = Vec::with_capacity(bytes.len());
+        let mut rest = &bytes[..];
+        while let Some(at) = rest.windows(2).position(|w| w == b"\r\n") {
+            text.extend_from_slice(&rest[..at]);
+            text.push(b'\n');
+            rest = &rest[at + 2..];
+        }
+        text.extend_from_slice(rest);
+        digest.update(b"\0");
+        digest.update(name.as_bytes());
+        digest.update(b"\0");
+        digest.update((text.len() as u64).to_le_bytes());
+        digest.update(&text);
+    }
+    Ok(hex(&digest.finalize()))
+}
+
+/// Every file at or under `path`, into `files`.
+fn walk(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    if path.is_dir() {
+        for entry in fs::read_dir(path)? {
+            walk(&entry?.path(), files)?;
+        }
+    } else {
+        files.push(path.to_owned());
+    }
+    Ok(())
+}
+
+/// The `--remap-path-prefix` flags of a build of `workspace`: the Cargo home to `/cargo`,
+/// the toolchain's library sources to `/rustc/<commit>` (where they are when the rust-src
+/// component is not installed), the workspace to `.`.
+fn remaps(workspace: &Path) -> io::Result<Vec<String>> {
+    let version = rustc(workspace, &["-vV"])?;
+    let commit = version
+        .lines()
+        .find_map(|line| line.strip_prefix("commit-hash: "))
+        .ok_or_else(|| invalid(format!("rustc -vV has no commit hash:\n{version}")))?;
+    let sysroot = PathBuf::from(rustc(workspace, &["--print", "sysroot"])?);
+    let cargo_home = match std::env::var_os("CARGO_HOME") {
+        Some(home) => PathBuf::from(home),
+        None => std::env::home_dir()
+            .ok_or_else(|| io::Error::other("no home folder for the Cargo home"))?
+            .join(".cargo"),
+    };
+    let remap = |from: &Path, to: &str| format!("--remap-path-prefix={}={to}", from.display());
+    Ok(vec![
+        remap(&real(&cargo_home)?, "/cargo"),
+        remap(
+            &real(&sysroot)?.join("lib/rustlib/src/rust"),
+            &format!("/rustc/{commit}"),
+        ),
+        remap(&real(workspace)?, "."),
+    ])
+}
+
+/// `path` absolute, as the compiler names the files under it: without `..`, and on Windows
+/// without the `\\?\` prefix canonical paths get there.
+fn real(path: &Path) -> io::Result<PathBuf> {
+    if cfg!(windows) {
+        std::path::absolute(path)
+    } else {
+        fs::canonicalize(path)
+    }
+}
+
+/// Takes the modules laid out in `dir` (by [`build`]) and lays them out in `out`, checking
+/// them against `dir`'s `SHA256SUMS` and against the workspace at `workspace`: built from
+/// its sources ([`source_digest`]), with its manifests.
+///
+/// # Errors
+///
+/// A module or its checksum is missing, a checksum does not match, the modules were built
+/// from other sources, or a manifest is not the workspace's or not a built-in module's of
+/// this version.
+pub fn take(workspace: &Path, dir: &Path, out: &Path) -> io::Result<Vec<Built>> {
+    let built_from = fs::read_to_string(dir.join(SOURCE))
+        .map_err(|e| invalid(format!("{SOURCE} of {}: {e}", dir.display())))?;
+    if built_from.trim() != source_digest(workspace)? {
+        return Err(invalid(format!(
+            "the modules of {} were built from other sources than {}",
+            dir.display(),
+            workspace.display()
+        )));
+    }
     let sums = fs::read_to_string(dir.join(SUMS))?;
     let mut built = Vec::new();
     for guest in GUESTS {
@@ -153,13 +306,29 @@ pub fn take(dir: &Path, out: &Path) -> io::Result<Vec<Built>> {
                 return Err(invalid(format!("{file} does not match its checksum")));
             }
         }
+        let own = fs::read_to_string(workspace.join(guest.dir).join("plugin.toml"))?;
+        if parse_manifest(&manifest)? != parse_manifest(own.as_bytes())? {
+            return Err(invalid(format!(
+                "{}/plugin.toml is not the workspace's {}/plugin.toml",
+                guest.package, guest.dir
+            )));
+        }
         built.push(lay_out(guest, &manifest, &wasm, out)?);
     }
     write_sums(out, &built)?;
+    write_if_changed(&out.join(SOURCE), built_from.as_bytes())?;
     Ok(built)
 }
 
-/// Checks the `plugin.toml` text `manifest`: a built-in module's id, this version.
+/// The `plugin.toml` bytes `manifest`, parsed.
+fn parse_manifest(manifest: &[u8]) -> io::Result<toml::Table> {
+    let text =
+        std::str::from_utf8(manifest).map_err(|_| invalid("a manifest is not UTF-8".to_owned()))?;
+    toml::from_str(text).map_err(|e| invalid(format!("a malformed manifest: {e}")))
+}
+
+/// Checks the `plugin.toml` text `manifest`: a built-in module's id, this version, and
+/// `min_core` the same.
 ///
 /// # Errors
 ///
@@ -169,6 +338,7 @@ pub fn check_manifest(manifest: &str) -> io::Result<()> {
     struct Head {
         id: String,
         version: String,
+        min_core: Option<String>,
     }
     let head: Head =
         toml::from_str(manifest).map_err(|e| invalid(format!("a malformed manifest: {e}")))?;
@@ -184,14 +354,20 @@ pub fn check_manifest(manifest: &str) -> io::Result<()> {
             head.id, head.version
         )));
     }
+    if head.min_core.as_deref() != Some(WORKSPACE_VERSION) {
+        return Err(invalid(format!(
+            "{} needs min_core = {WORKSPACE_VERSION:?}, its version",
+            head.id
+        )));
+    }
     Ok(())
 }
 
 /// What a build script embedding the modules does: takes them from
-/// [`BUILTINS_DIR_VAR`] if it is set, else builds them from the workspace at `workspace`
-/// in `$OUT_DIR/builtins-target`; lays them out in `$OUT_DIR/builtins` and writes
-/// `$OUT_DIR/builtins.rs` ([`sources_rs`]), to be `include!`d. Tells Cargo what to rerun
-/// on.
+/// [`BUILTINS_DIR_VAR`] if it is set (checked against the sources of `workspace`), else
+/// builds them from the workspace at `workspace` in `$OUT_DIR/builtins-target`; lays them
+/// out in `$OUT_DIR/builtins` and writes `$OUT_DIR/builtins.rs` ([`sources_rs`]), to be
+/// `include!`d. Tells Cargo what to rerun on: the sources either way.
 ///
 /// # Errors
 ///
@@ -201,19 +377,17 @@ pub fn embed(workspace: &Path) -> io::Result<()> {
         std::env::var_os("OUT_DIR").ok_or_else(|| io::Error::other("OUT_DIR is not set"))?,
     );
     println!("cargo:rerun-if-env-changed={BUILTINS_DIR_VAR}");
+    for input in inputs(workspace)? {
+        println!("cargo:rerun-if-changed={}", input.display());
+    }
     let out = out_dir.join("builtins");
     let built = match std::env::var_os(BUILTINS_DIR_VAR) {
         Some(dir) => {
             let dir = PathBuf::from(dir);
             println!("cargo:rerun-if-changed={}", dir.display());
-            take(&dir, &out)?
+            take(workspace, &dir, &out)?
         }
-        None => {
-            for input in inputs(workspace)? {
-                println!("cargo:rerun-if-changed={}", input.display());
-            }
-            build(workspace, &out_dir.join("builtins-target"), &out)?
-        }
+        None => build(workspace, &out_dir.join("builtins-target"), &out)?,
     };
     write_if_changed(&out_dir.join("builtins.rs"), sources_rs(&built).as_bytes())
 }
@@ -255,7 +429,11 @@ pub fn inputs(workspace: &Path) -> io::Result<Vec<PathBuf>> {
             dirs.push(path);
         }
     }
-    let mut inputs = vec![workspace.join("Cargo.toml"), workspace.join("Cargo.lock")];
+    let mut inputs = vec![
+        workspace.join("Cargo.toml"),
+        workspace.join("Cargo.lock"),
+        workspace.join("rust-toolchain.toml"),
+    ];
     for dir in dirs {
         for name in ["src", "Cargo.toml", "plugin.toml"] {
             let path = dir.join(name);

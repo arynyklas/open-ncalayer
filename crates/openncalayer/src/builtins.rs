@@ -5,8 +5,8 @@ use oncl_plugin::{BuiltinInfo, BuiltinSource, Builtins, Engine, LoadError};
 
 include!(concat!(env!("OUT_DIR"), "/builtins.rs"));
 
-/// The modules of `sources`, checked without running them (manifests, ABI): what
-/// `openncalayer builtins` prints and the start checks first.
+/// The modules of `sources`, checked without serving anything (manifests, ABI, one
+/// instance each): what `openncalayer builtins` prints and the start checks.
 ///
 /// # Errors
 ///
@@ -15,10 +15,17 @@ pub fn check(sources: &[BuiltinSource<'_>]) -> Result<Vec<BuiltinInfo>, LoadErro
     Builtins::check(&Engine::new(), sources)
 }
 
-/// The line `openncalayer builtins` prints for `info`: `<id> <version> <sha256>`.
+/// The line `openncalayer builtins` prints for `info`: `<id> <version> <sha256 of
+/// plugin.wasm> <sha256 of plugin.toml>`.
 pub fn line(info: &BuiltinInfo) -> String {
-    let sha256: String = info.sha256.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{} {} {sha256}", info.id, info.version)
+    let hex = |bytes: &[u8; 32]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+    format!(
+        "{} {} {} {}",
+        info.id,
+        info.version,
+        hex(&info.sha256),
+        hex(&info.manifest_sha256)
+    )
 }
 
 #[cfg(test)]
@@ -112,10 +119,12 @@ mod tests {
         }
         assert_eq!(check(SOURCES).unwrap(), loaded);
         let line = line(&loaded[0]);
-        assert!(
-            line.starts_with(&format!("{} {} ", loaded[0].id, loaded[0].version)),
-            "{line}"
-        );
-        assert_eq!(line.rsplit(' ').next().unwrap().len(), 64);
+        let fields: Vec<&str> = line.split(' ').collect();
+        assert_eq!(fields.len(), 4, "{line}");
+        assert_eq!(fields[0], loaded[0].id);
+        assert_eq!(fields[1], loaded[0].version.to_string());
+        assert_eq!(fields[2].len(), 64);
+        assert_eq!(fields[3].len(), 64);
+        assert_ne!(fields[2], fields[3], "the code's and the manifest's");
     }
 }

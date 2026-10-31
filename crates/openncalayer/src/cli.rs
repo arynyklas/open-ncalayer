@@ -98,7 +98,9 @@ pub enum Command {
         #[command(subcommand)]
         command: IntegrationCommand,
     },
-    #[command(about = "Встроенные модули: строки «<id> <версия> <sha256>»")]
+    #[command(
+        about = "Встроенные модули: строки «<id> <версия> <sha256 plugin.wasm> <sha256 plugin.toml>»"
+    )]
     Builtins,
     // Test builds only (feature `e2e-prompter`), never releases.
     #[cfg(feature = "e2e-prompter")]
@@ -881,8 +883,9 @@ fn ru_date(t: OffsetDateTime) -> String {
     format!("{:02}.{:02}.{:04}", t.day(), u8::from(t.month()), t.year())
 }
 
-/// `builtins`: a line `<id> <version> <sha256>` per built-in module embedded, in the order
-/// the core loads them; exit code 1 if one does not load.
+/// `builtins`: a line `<id> <version> <sha256 of plugin.wasm> <sha256 of plugin.toml>` per
+/// built-in module embedded, in the order the core loads them; exit code 1 if one does not
+/// load.
 pub fn builtins() -> ExitCode {
     match crate::builtins::check(crate::builtins::SOURCES) {
         Ok(loaded) => {

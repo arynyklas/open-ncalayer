@@ -47,12 +47,13 @@ pub fn prepare(root: &Path) -> anyhow::Result<PathBuf> {
     Ok(build(root, &root.join(DEFAULT_OUT))?.0)
 }
 
-/// Checks that the program `exe` embeds the modules laid out in `dir`: the SHA-256 of each
-/// module `exe builtins` lists is that of a `plugin.wasm` of `dir`'s `SHA256SUMS`, one each.
+/// Checks that the program `exe` embeds the modules laid out in `dir`: each line
+/// `exe builtins` prints has the SHA-256 of a `plugin.wasm` of `dir`'s `SHA256SUMS` and of
+/// the `plugin.toml` of the same module, one line per module.
 ///
 /// # Errors
 ///
-/// The program does not run, or embeds other modules.
+/// The program does not run, or embeds other modules or manifests.
 pub fn check(exe: &Path, dir: &Path) -> anyhow::Result<()> {
     let output = std::process::Command::new(exe)
         .arg("builtins")
@@ -68,18 +69,34 @@ pub fn check(exe: &Path, dir: &Path) -> anyhow::Result<()> {
     let sums_path = dir.join(oncl_builtins_build::SUMS);
     let sums =
         std::fs::read_to_string(&sums_path).with_context(|| format!("{}", sums_path.display()))?;
-    let built: Vec<&str> = sums
-        .lines()
-        .filter_map(|line| line.split_once("  "))
-        .filter(|(_, path)| path.ends_with("/plugin.wasm"))
-        .map(|(sum, _)| sum)
+    let sum_of = |file: &str| {
+        sums.lines()
+            .filter_map(|line| line.split_once("  "))
+            .find(|(_, path)| *path == file)
+            .map(|(sum, _)| sum)
+    };
+    // `(plugin.wasm, plugin.toml)` of each module built.
+    let built: Vec<(&str, &str)> = oncl_builtins_build::GUESTS
+        .iter()
+        .filter_map(|guest| {
+            let wasm = sum_of(&format!("{}/plugin.wasm", guest.package))?;
+            let manifest = sum_of(&format!("{}/plugin.toml", guest.package))?;
+            Some((wasm, manifest))
+        })
         .collect();
-    let embedded: Vec<&str> = listed
+    let embedded: Vec<(&str, &str)> = listed
         .lines()
-        .map(|line| line.rsplit(' ').next().unwrap_or_default())
+        .filter_map(|line| {
+            let mut fields = line.rsplit(' ');
+            let manifest = fields.next()?;
+            let wasm = fields.next()?;
+            Some((wasm, manifest))
+        })
         .collect();
     anyhow::ensure!(
-        embedded.len() == built.len() && embedded.iter().all(|sum| built.contains(sum)),
+        built.len() == oncl_builtins_build::GUESTS.len()
+            && embedded.len() == built.len()
+            && embedded.iter().all(|pair| built.contains(pair)),
         "{} embeds other built-in modules than {}:\n{listed}",
         exe.display(),
         sums_path.display()
