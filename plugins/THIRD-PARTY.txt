@@ -32,50 +32,51 @@ flagset 0.4.7 | Apache-2.0 | https://github.com/enarx/flagset | 1
 flate2 1.1.10 | MIT OR Apache-2.0 | https://github.com/rust-lang/flate2-rs | 1, 16
 form_urlencoded 1.2.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url | 1, 17
 half 2.7.1 | MIT OR Apache-2.0 | https://github.com/VoidStarKat/half-rs | 18, 19
-hybrid-array 0.4.15 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hybrid-array | 1, 20
-icu_collections 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-icu_locale_core 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-icu_normalizer 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-icu_normalizer_data 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-icu_properties 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-icu_properties_data 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-icu_provider 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-idna 1.1.0 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ | 1, 22
-idna_adapter 1.2.2 | Apache-2.0 OR MIT | https://github.com/hsivonen/idna_adapter | 1, 23
-inout 0.2.5 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils | 1, 24
-itoa 1.0.18 | MIT OR Apache-2.0 | https://github.com/dtolnay/itoa | 18, 25
-litemap 0.8.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-md-5 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes | 1, 26
-memchr 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr | 27, 28, 29
-num-bigint 0.4.8 | MIT OR Apache-2.0 | https://github.com/rust-num/num-bigint | 1, 30
-num-integer 0.1.47 | MIT OR Apache-2.0 | https://github.com/rust-num/num-integer | 1, 30
-num-traits 0.2.19 | MIT OR Apache-2.0 | https://github.com/rust-num/num-traits | 1, 30
-percent-encoding 2.3.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ | 1, 22
-potential_utf 0.1.6 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
+hashbrown 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown | 1, 20
+hybrid-array 0.4.15 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hybrid-array | 1, 21
+icu_collections 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+icu_locale_core 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+icu_normalizer 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+icu_normalizer_data 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+icu_properties 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+icu_properties_data 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+icu_provider 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+idna 1.1.0 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ | 1, 23
+idna_adapter 1.2.2 | Apache-2.0 OR MIT | https://github.com/hsivonen/idna_adapter | 1, 24
+inout 0.2.5 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils | 1, 25
+itoa 1.0.18 | MIT OR Apache-2.0 | https://github.com/dtolnay/itoa | 18, 26
+litemap 0.8.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+md-5 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes | 1, 27
+memchr 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr | 28, 29, 30
+num-bigint 0.4.8 | MIT OR Apache-2.0 | https://github.com/rust-num/num-bigint | 1, 31
+num-integer 0.1.47 | MIT OR Apache-2.0 | https://github.com/rust-num/num-integer | 1, 31
+num-traits 0.2.19 | MIT OR Apache-2.0 | https://github.com/rust-num/num-traits | 1, 31
+percent-encoding 2.3.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ | 1, 23
+potential_utf 0.1.6 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
 prost 0.14.4 | Apache-2.0 | https://github.com/tokio-rs/prost | 1
-semver 1.0.28 | MIT OR Apache-2.0 | https://github.com/dtolnay/semver | 18, 25
-serde 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde | 18, 25
-serde_bytes 0.11.19 | MIT OR Apache-2.0 | https://github.com/serde-rs/bytes | 18, 25
-serde_core 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde | 18, 25
-serde_json 1.0.154 | MIT OR Apache-2.0 | https://github.com/serde-rs/json | 18, 25
-sha1 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes | 1, 26
-smallvec 1.16.4 | MIT OR Apache-2.0 | https://github.com/servo/rust-smallvec | 1, 31
-spki 0.8.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats | 1, 32
-stable_deref_trait 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait | 1, 33
-tinystr 0.8.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-typenum 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum | 34, 35, 36
-url 2.5.8 | MIT OR Apache-2.0 | https://github.com/servo/rust-url | 1, 22
-utf8_iter 1.1.0 | Apache-2.0 OR MIT | https://github.com/hsivonen/utf8_iter | 1, 37, 38
-utf_types 1.0.0 | Apache-2.0 OR MIT | https://github.com/hsivonen/utf_types | 1, 38, 39
-writeable 0.6.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-x509-cert 0.3.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats | 1, 40
-yoke 0.8.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-zerocopy 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy | 41, 42, 43
-zerofrom 0.1.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-zerotrie 0.2.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-zerovec 0.11.9 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 21
-zlib-rs 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs | 44
-zmij 1.0.23 | MIT | https://github.com/dtolnay/zmij | 25
+semver 1.0.28 | MIT OR Apache-2.0 | https://github.com/dtolnay/semver | 18, 26
+serde 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde | 18, 26
+serde_bytes 0.11.19 | MIT OR Apache-2.0 | https://github.com/serde-rs/bytes | 18, 26
+serde_core 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde | 18, 26
+serde_json 1.0.154 | MIT OR Apache-2.0 | https://github.com/serde-rs/json | 18, 26
+sha1 0.11.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes | 1, 27
+smallvec 1.16.4 | MIT OR Apache-2.0 | https://github.com/servo/rust-smallvec | 1, 32
+spki 0.8.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats | 1, 33
+stable_deref_trait 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait | 1, 34
+tinystr 0.8.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+typenum 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum | 35, 36, 37
+url 2.5.8 | MIT OR Apache-2.0 | https://github.com/servo/rust-url | 1, 23
+utf8_iter 1.1.0 | Apache-2.0 OR MIT | https://github.com/hsivonen/utf8_iter | 1, 38, 39
+utf_types 1.0.0 | Apache-2.0 OR MIT | https://github.com/hsivonen/utf_types | 1, 39, 40
+writeable 0.6.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+x509-cert 0.3.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats | 1, 41
+yoke 0.8.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+zerocopy 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy | 42, 43, 44
+zerofrom 0.1.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+zerotrie 0.2.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+zerovec 0.11.9 | Unicode-3.0 | https://github.com/unicode-org/icu4x | 22
+zlib-rs 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs | 45
+zmij 1.0.23 | MIT | https://github.com/dtolnay/zmij | 26
 
 [text 1] LICENSE-APACHE of aes 0.9.3
 
@@ -1101,7 +1102,35 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-[text 20] LICENSE-MIT of hybrid-array 0.4.15
+[text 20] LICENSE-MIT of hashbrown 0.17.1
+
+Copyright (c) 2016 Amanieu d'Antras
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+[text 21] LICENSE-MIT of hybrid-array 0.4.15
 
 Copyright (c) 2022-2026 The RustCrypto Project Developers
 
@@ -1129,7 +1158,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 21] LICENSE of icu_collections 2.4.0
+[text 22] LICENSE of icu_collections 2.4.0
 
 UNICODE LICENSE V3
 
@@ -1178,7 +1207,7 @@ SPDX-License-Identifier: Unicode-3.0
 Portions of ICU4X may have been adapted from ICU4C and/or ICU4J.
 ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation and others.
 
-[text 22] LICENSE-MIT of idna 1.1.0
+[text 23] LICENSE-MIT of idna 1.1.0
 
 Copyright (c) 2013-2025 The rust-url developers
 
@@ -1206,7 +1235,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 23] LICENSE-MIT of idna_adapter 1.2.2
+[text 24] LICENSE-MIT of idna_adapter 1.2.2
 
 Copyright (c) The rust-url developers
 
@@ -1234,7 +1263,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 24] LICENSE-MIT of inout 0.2.5
+[text 25] LICENSE-MIT of inout 0.2.5
 
 Copyright (c) 2022-2025 The RustCrypto Project Developers
 Copyright (c) 2022 Artyom Pavlov
@@ -1263,7 +1292,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 25] LICENSE-MIT of itoa 1.0.18
+[text 26] LICENSE-MIT of itoa 1.0.18
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -1289,7 +1318,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 26] LICENSE-MIT of md-5 0.11.0
+[text 27] LICENSE-MIT of md-5 0.11.0
 
 Copyright (c) 2016-2026 The RustCrypto Project Developers
 Copyright (c) 2016 Artyom Pavlov
@@ -1320,13 +1349,13 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 27] COPYING of memchr 2.8.3
+[text 28] COPYING of memchr 2.8.3
 
 This project is dual-licensed under the Unlicense and MIT licenses.
 
 You may use this code under the terms of either license.
 
-[text 28] LICENSE-MIT of memchr 2.8.3
+[text 29] LICENSE-MIT of memchr 2.8.3
 
 The MIT License (MIT)
 
@@ -1350,7 +1379,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
-[text 29] UNLICENSE of memchr 2.8.3
+[text 30] UNLICENSE of memchr 2.8.3
 
 This is free and unencumbered software released into the public domain.
 
@@ -1377,7 +1406,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 For more information, please refer to <http://unlicense.org/>
 
-[text 30] LICENSE-MIT of num-bigint 0.4.8
+[text 31] LICENSE-MIT of num-bigint 0.4.8
 
 Copyright (c) 2014 The Rust Project Developers
 
@@ -1405,7 +1434,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 31] LICENSE-MIT of smallvec 1.16.4
+[text 32] LICENSE-MIT of smallvec 1.16.4
 
 Copyright (c) 2018 The Servo Project Developers
 
@@ -1433,7 +1462,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 32] LICENSE-MIT of spki 0.8.1
+[text 33] LICENSE-MIT of spki 0.8.1
 
 Copyright (c) 2021-2026 The RustCrypto Project Developers
 
@@ -1461,7 +1490,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 33] LICENSE-MIT of stable_deref_trait 1.2.1
+[text 34] LICENSE-MIT of stable_deref_trait 1.2.1
 
 Copyright (c) 2017 Robert Grosse
 
@@ -1489,11 +1518,11 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 34] LICENSE of typenum 1.20.1
+[text 35] LICENSE of typenum 1.20.1
 
 MIT OR Apache-2.0
 
-[text 35] LICENSE-APACHE of typenum 1.20.1
+[text 36] LICENSE-APACHE of typenum 1.20.1
 
                               Apache License
                         Version 2.0, January 2004
@@ -1697,7 +1726,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-[text 36] LICENSE-MIT of typenum 1.20.1
+[text 37] LICENSE-MIT of typenum 1.20.1
 
 The MIT License (MIT)
 
@@ -1721,7 +1750,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-[text 37] COPYRIGHT of utf8_iter 1.1.0
+[text 38] COPYRIGHT of utf8_iter 1.1.0
 
 Copyright Mozilla Foundation
 
@@ -1766,7 +1795,7 @@ licensed under the Apache License, Version 2.0 <LICENSE-APACHE> or
 <http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
 <LICENSE-MIT> or <http://opensource.org/licenses/MIT>, at your option.
 
-[text 38] LICENSE-MIT of utf8_iter 1.1.0
+[text 39] LICENSE-MIT of utf8_iter 1.1.0
 
 Copyright Mozilla Foundation
 
@@ -1794,7 +1823,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 39] COPYRIGHT of utf_types 1.0.0
+[text 40] COPYRIGHT of utf_types 1.0.0
 
 Copyright Mozilla Foundation
 
@@ -1817,7 +1846,7 @@ limitations under the Licenses.
 Test code is dedicated to the Public Domain when so designated (see
 the individual files for PD/CC0-dedicated sections).
 
-[text 40] LICENSE-MIT of x509-cert 0.3.0
+[text 41] LICENSE-MIT of x509-cert 0.3.0
 
 Copyright (c) 2021-2025 The RustCrypto Project Developers
 
@@ -1845,7 +1874,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 41] LICENSE-APACHE of zerocopy 0.8.63
+[text 42] LICENSE-APACHE of zerocopy 0.8.63
 
                                  Apache License
                            Version 2.0, January 2004
@@ -2049,7 +2078,7 @@ DEALINGS IN THE SOFTWARE.
    See the License for the specific language governing permissions and
    limitations under the License.
 
-[text 42] LICENSE-BSD of zerocopy 0.8.63
+[text 43] LICENSE-BSD of zerocopy 0.8.63
 
 Copyright 2019 The Fuchsia Authors.
 
@@ -2076,7 +2105,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-[text 43] LICENSE-MIT of zerocopy 0.8.63
+[text 44] LICENSE-MIT of zerocopy 0.8.63
 
 Copyright 2023 The Fuchsia Authors
 
@@ -2104,7 +2133,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-[text 44] LICENSE of zlib-rs 0.6.8
+[text 45] LICENSE of zlib-rs 0.6.8
 
 (C) 2024 Trifecta Tech Foundation
 
@@ -2128,9 +2157,9 @@ freely, subject to the following restrictions:
 
 [assets]
 Fonts embedded in the plugin ports' modules. Each line names the font file, its licence, its source and the number of its licence text, which follows the list.
-qoltanba/fonts/SourceSansPro-Light.ttf | OFL-1.1 | https://github.com/adobe-fonts/source-sans | 45
+qoltanba/fonts/SourceSansPro-Light.ttf | OFL-1.1 | https://github.com/adobe-fonts/source-sans | 46
 
-[text 45] OFL.txt of qoltanba/fonts
+[text 46] OFL.txt of qoltanba/fonts
 
 Copyright 2010, 2012, 2014 Adobe Systems Incorporated (http://www.adobe.com/), with Reserved Font Name 'Source'. All Rights Reserved. Source is a trademark of Adobe Systems Incorporated in the United States and/or other countries.
 
