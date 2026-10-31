@@ -10,5 +10,6 @@ publish.workspace = true
 
 [dependencies]
 base64.workspace = true
+hashbrown.workspace = true
 serde.workspace = true
 serde_json.workspace = true

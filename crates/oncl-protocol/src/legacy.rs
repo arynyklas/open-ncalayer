@@ -196,9 +196,16 @@ pub fn dispatch<C: ?Sized>(
     add_info: &AddInfo,
 ) -> Reply {
     let error = |message: Option<&str>| Reply::Text(error_reply(class.error_bean, message));
-    let parsed = match orgjson::parse(request) {
-        Ok(JValue::Obj(parsed)) => parsed,
-        Ok(_) => unreachable!("parse gives an object"),
+    // Only the keys the dispatcher reads are kept, unless the hook reads the request.
+    let parsed = match class.before_invoke {
+        Some(_) => orgjson::parse(request).map(|parsed| match parsed {
+            JValue::Obj(parsed) => parsed,
+            _ => unreachable!("parse gives an object"),
+        }),
+        None => orgjson::parse_only(request, &["uuid", "method", "args"]),
+    };
+    let parsed = match parsed {
+        Ok(parsed) => parsed,
         Err(message) => return error(Some(&message)),
     };
     let uuid = match parsed.get("uuid") {
@@ -210,7 +217,7 @@ pub fn dispatch<C: ?Sized>(
         None => return error(Some("JSONObject[\"method\"] not found.")),
         Some(_) => return error(Some("JSONObject[\"method\"] is not a string.")),
     };
-    let request = parsed.to_map();
+    let request = parsed.into_map();
     let args: &[Value] = match request.get("args") {
         Some(Value::Array(args)) => args,
         _ => &[],

@@ -40,12 +40,24 @@ fn bucket(hash: i32, capacity: usize) -> usize {
 }
 
 /// The keys of a `HashMap` as they go in and out, and the table size they lead to.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct Table {
     capacity: usize,
     /// The hashes of the keys present, in the order they went in.
     hashes: Vec<i32>,
+    /// The keys in each of the `capacity` buckets (empty before the first key), counted
+    /// again when the table grows.
+    counts: Vec<u32>,
 }
+
+/// Tables are equal by their size and keys; the counts follow from them.
+impl PartialEq for Table {
+    fn eq(&self, other: &Table) -> bool {
+        self.capacity == other.capacity && self.hashes == other.hashes
+    }
+}
+
+impl Eq for Table {}
 
 impl Table {
     /// An empty table of `capacity` (a power of two) buckets.
@@ -54,19 +66,20 @@ impl Table {
         Table {
             capacity,
             hashes: Vec::new(),
+            counts: Vec::new(),
         }
     }
 
     /// A new key of `hash` goes in last.
     pub(crate) fn push(&mut self, hash: i32) {
+        if self.counts.is_empty() {
+            self.counts = vec![0; self.capacity];
+        }
         self.hashes.push(hash);
         let at = bucket(hash, self.capacity);
-        let crowded = self
-            .hashes
-            .iter()
-            .filter(|h| bucket(**h, self.capacity) == at)
-            .count();
-        if crowded > TREEIFY_THRESHOLD {
+        self.counts[at] += 1;
+        let capacity = self.capacity;
+        if self.counts[at] as usize > TREEIFY_THRESHOLD {
             if self.capacity < MIN_TREEIFY_CAPACITY {
                 self.capacity *= 2;
             } else {
@@ -76,17 +89,39 @@ impl Table {
         if self.hashes.len() > self.capacity / 4 * 3 {
             self.capacity *= 2;
         }
+        if self.capacity != capacity {
+            self.counts = vec![0; self.capacity];
+            for &h in &self.hashes {
+                self.counts[bucket(h, self.capacity)] += 1;
+            }
+        }
     }
 
     /// The key at `index` (in the order of going in) goes out. Tables never shrink.
     pub(crate) fn remove(&mut self, index: usize) {
-        self.hashes.remove(index);
+        let hash = self.hashes.remove(index);
+        self.counts[bucket(hash, self.capacity)] -= 1;
     }
 
-    /// The indices of the keys present in iteration order.
+    /// The indices of the keys present in iteration order: bucket by bucket, in the order
+    /// they went in within each.
     pub(crate) fn order(&self) -> Vec<usize> {
-        let mut order: Vec<usize> = (0..self.hashes.len()).collect();
-        order.sort_by_key(|&i| bucket(self.hashes[i], self.capacity));
+        if self.hashes.is_empty() {
+            return Vec::new();
+        }
+        // Where each bucket starts in the order.
+        let mut next: Vec<usize> = Vec::with_capacity(self.capacity);
+        let mut start = 0;
+        for &count in &self.counts {
+            next.push(start);
+            start += count as usize;
+        }
+        let mut order = vec![0; self.hashes.len()];
+        for (i, &h) in self.hashes.iter().enumerate() {
+            let at = &mut next[bucket(h, self.capacity)];
+            order[*at] = i;
+            *at += 1;
+        }
         order
     }
 }

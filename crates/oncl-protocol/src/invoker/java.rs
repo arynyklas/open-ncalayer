@@ -120,12 +120,9 @@ struct Parsed {
 }
 
 /// Reads the request as the dispatcher does before its `try`; an error is the
-/// `JSONException` message.
+/// `JSONException` message. Only the keys the dispatcher reads are kept.
 fn read(request: &str) -> Result<Parsed, String> {
-    let JValue::Obj(object) = orgjson::parse(request)? else {
-        unreachable!("parse gives an object");
-    };
-    let map = object.to_map();
+    let object = orgjson::parse_only(request, &["apiVersion", "class", "method", "args"])?;
     let class = match object.get("class") {
         None | Some(JValue::Null) => String::new(),
         Some(value) => value.java_string(),
@@ -135,11 +132,15 @@ fn read(request: &str) -> Result<Parsed, String> {
         None => return Err("JSONObject[\"method\"] not found.".to_owned()),
         Some(_) => return Err("JSONObject[\"method\"] is not a string.".to_owned()),
     };
+    let mut map = object.into_map();
     Ok(Parsed {
         api_version: orgjson::opt_int(&map, "apiVersion", API_VERSION),
         class,
         method,
-        args: orgjson::opt_object(&map, "args").cloned(),
+        args: match map.remove("args") {
+            Some(Value::Object(args)) => Some(args),
+            _ => None,
+        },
     })
 }
 

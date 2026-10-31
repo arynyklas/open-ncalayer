@@ -3,6 +3,8 @@
 //! forms and its error messages with their position.
 
 use super::value::{JObject, JValue};
+use std::borrow::Cow;
+use std::collections::HashSet;
 
 /// The deepest nesting of objects and arrays read, the outer object included. org.json has
 /// no limit of its own (a deeper text ends its thread in a `StackOverflowError`); this one
@@ -17,6 +19,14 @@ pub const MAX_DEPTH: usize = 127;
 /// `new JSONObject()` (a `HashMap` of 16 buckets), nested objects too.
 pub fn parse(text: &str) -> Result<JValue, String> {
     Tokener::new(text).object(Keep::All).map(JValue::Obj)
+}
+
+/// `new JSONObject(text)` of which only the top-level `keys` are kept: [`parse`]'s errors
+/// (a key repeated in any object among them), and the object holding those of `keys` the
+/// text has, as `parse` reads them. The other values are read and dropped, so a request of
+/// many keys or large values the reader does not ask for costs no copy of them.
+pub fn parse_only(text: &str, keys: &[&str]) -> Result<JObject, String> {
+    Tokener::new(text).object(Keep::Keys(keys))
 }
 
 /// `new JSONObject(text).toString()`.
@@ -39,21 +49,21 @@ pub struct Scanned {
 /// read and dropped, so a request carrying a document of megabytes is not copied.
 pub fn scan(text: &str, key: &str) -> Result<Scanned, String> {
     let mut tokener = Tokener::new(text);
-    let mut object = tokener.object(Keep::Key(key))?;
+    let mut object = tokener.object(Keep::Keys(&[key]))?;
     Ok(Scanned {
         value: object.remove(key),
         len: tokener.pos,
     })
 }
 
-/// Which values the reader keeps; the others are read, checked and dropped (their keys are
-/// kept, with `null` in place of the value, for the duplicate-key check).
+/// Which values the reader keeps; the others are read, checked and dropped (only their
+/// keys are kept, in a set, for the duplicate-key check).
 #[derive(Clone, Copy)]
 enum Keep<'k> {
     All,
     Nothing,
-    /// The value of this key of the object; nothing below the other keys.
-    Key(&'k str),
+    /// The values of these keys of the object; nothing below the other keys.
+    Keys(&'k [&'k str]),
 }
 
 impl Keep<'_> {
@@ -189,32 +199,46 @@ impl<'t> Tokener<'t> {
         Ok(())
     }
 
-    /// `new JSONObject(tokener)`, with the values `keep` asks for.
+    /// `new JSONObject(tokener)`, with the values `keep` asks for: the whole object for
+    /// [`Keep::All`], only the wanted keys for [`Keep::Keys`], no key for [`Keep::Nothing`].
+    /// A repeated key is found in constant time, whatever is kept.
     fn object(&mut self, keep: Keep<'_>) -> Result<JObject, String> {
         if self.next_clean() != u16::from(b'{') {
             return Err(self.error("A JSONObject text must begin with '{'"));
         }
         self.enter()?;
         let mut object = JObject::hash_map();
+        // The keys read, where the object does not hold them all.
+        let mut seen = HashSet::new();
         loop {
             match self.next_clean() {
                 0 => return Err(self.error("A JSONObject text must end with '}'")),
                 c if c == u16::from(b'}') => break,
                 _ => self.back(),
             }
-            let key = self.value(Keep::All)?.java_string();
+            let key = self.key()?;
             if self.next_clean() != u16::from(b':') {
                 return Err(self.error("Expected a ':' after a key"));
             }
-            if object.get(&key).is_some() {
+            let repeated = match keep {
+                Keep::All => object.get(&key).is_some(),
+                Keep::Keys(_) | Keep::Nothing => !seen.insert(key.clone()),
+            };
+            if repeated {
                 return Err(self.error(&format!("Duplicate key \"{key}\"")));
             }
-            let value = match keep {
-                Keep::Key(wanted) if wanted == key => self.value(Keep::All)?,
-                Keep::All => self.value(Keep::All)?,
-                Keep::Key(_) | Keep::Nothing => self.value(Keep::Nothing)?,
-            };
-            object.put(key, value);
+            match keep {
+                Keep::Keys(wanted) if !wanted.contains(&key.as_ref()) => {
+                    self.value(Keep::Nothing)?;
+                }
+                Keep::Nothing => {
+                    self.value(Keep::Nothing)?;
+                }
+                Keep::All | Keep::Keys(_) => {
+                    let value = self.value(Keep::All)?;
+                    object.put(key.into_owned(), value);
+                }
+            }
             match self.next_clean() {
                 c if c == u16::from(b';') || c == u16::from(b',') => {
                     if self.next_clean() == u16::from(b'}') {
@@ -281,7 +305,11 @@ impl<'t> Tokener<'t> {
         let c = self.next_clean();
         if c == u16::from(b'"') || c == u16::from(b'\'') {
             let s = self.string(c, keep)?;
-            return Ok(if keep { JValue::Str(s) } else { JValue::Null });
+            return Ok(if keep {
+                JValue::Str(s.into_owned())
+            } else {
+                JValue::Null
+            });
         }
         if c == u16::from(b'{') {
             self.back();
@@ -305,10 +333,15 @@ impl<'t> Tokener<'t> {
         // Whether a unit above U+0020 came: the word is not blank after `trim()`.
         let mut filled = false;
         let mut c = c;
-        while c >= u16::from(b' ') && !",:]}/\\\"[{;=#".encode_utf16().any(|stop| stop == c) {
+        while c >= u16::from(b' ') && !is_word_stop(c) {
             filled |= c > u16::from(b' ');
             if keep {
                 word.push(c);
+            }
+            let run = self.run(|b| b < b' ' || is_word_stop(u16::from(b)));
+            filled |= run.bytes().any(|b| b > b' ');
+            if keep {
+                word.extend(run.encode_utf16());
             }
             c = self.next();
         }
@@ -326,9 +359,33 @@ impl<'t> Tokener<'t> {
         Ok(string_to_value(word.trim_matches(|c: char| c <= ' ')))
     }
 
-    /// `nextString(quote)`; the string only if `keep` (else it is checked and dropped).
-    fn string(&mut self, quote: u16, keep: bool) -> Result<String, String> {
+    /// An object's key: `nextValue().toString()`, borrowed from the text when it is a quoted
+    /// string without escapes.
+    fn key(&mut self) -> Result<Cow<'t, str>, String> {
+        let c = self.next_clean();
+        if c == u16::from(b'"') || c == u16::from(b'\'') {
+            return self.string(c, true);
+        }
+        self.back();
+        Ok(Cow::Owned(match self.value(Keep::All)? {
+            JValue::Str(s) => s,
+            value => value.java_string(),
+        }))
+    }
+
+    /// `nextString(quote)`; the string only if `keep` (else it is checked and dropped),
+    /// borrowed from the text when it has no escapes.
+    fn string(&mut self, quote: u16, keep: bool) -> Result<Cow<'t, str>, String> {
+        let stop = |b: u8| matches!(b, 0 | b'\n' | b'\r' | b'\\') || u16::from(b) == quote;
+        let plain = self.run(stop);
+        if self.peek_byte() == Some(quote as u8) {
+            self.next();
+            return Ok(Cow::Borrowed(plain));
+        }
         let mut out = Vec::new();
+        if keep {
+            out.extend(plain.encode_utf16());
+        }
         let mut push = |unit: u16| {
             if keep {
                 out.push(unit);
@@ -366,11 +423,54 @@ impl<'t> Tokener<'t> {
                         _ => return Err(self.error("Illegal escape.")),
                     }
                 }
-                c if c == quote => return Ok(String::from_utf16_lossy(&out)),
+                c if c == quote => return Ok(Cow::Owned(String::from_utf16_lossy(&out))),
                 c => push(c),
             }
         }
     }
+
+    /// The next byte of `text` if the next unit comes from it unread.
+    fn peek_byte(&self) -> Option<u8> {
+        if self.use_previous || self.low.is_some() {
+            return None;
+        }
+        self.text.as_bytes().get(self.pos).copied()
+    }
+
+    /// Reads at once, as `next()` reads them one by one, the characters from the position up
+    /// to the first byte `stop` takes, or the end. `stop` must take NUL, CR and LF (which
+    /// `next()` reads otherwise); it is asked of ASCII bytes only, so a run never ends inside
+    /// a character. Nothing is read while a unit is still to be returned.
+    fn run(&mut self, stop: impl Fn(u8) -> bool) -> &'t str {
+        if self.use_previous || self.low.is_some() {
+            return "";
+        }
+        let text: &'t str = self.text;
+        let rest = &text[self.pos..];
+        let len = rest
+            .bytes()
+            .position(|b| b.is_ascii() && stop(b))
+            .unwrap_or(rest.len());
+        let run = &rest[..len];
+        let Some(last) = run.chars().next_back() else {
+            return run;
+        };
+        let units: usize = run.chars().map(char::len_utf16).sum();
+        self.pos += len;
+        self.index += units;
+        self.character += units;
+        let mut buf = [0; 2];
+        self.previous = *last.encode_utf16(&mut buf).last().expect("a unit");
+        run
+    }
+}
+
+/// The units that end an unquoted word besides those below U+0020.
+fn is_word_stop(c: u16) -> bool {
+    matches!(
+        u8::try_from(c),
+        Ok(b',' | b':' | b']' | b'}' | b'/' | b'\\' | b'"' | b'[' | b'{' | b';' | b'=' | b'#')
+    )
 }
 
 /// `JSONObject.stringToValue(word)` of an unquoted word.

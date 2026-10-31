@@ -500,6 +500,49 @@ fn all_modules() -> Builtins {
 }
 
 #[test]
+fn many_keys_cost_linear_fuel() {
+    // Each module reads a request of `keys` extra keys as without them, its fuel growing
+    // with the keys' number, not with its square.
+    let pairs = |keys: usize| {
+        (0..keys)
+            .map(|i| format!("\"k{i}\":{i}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let plain = windowless_requests("");
+    let replies: Vec<Reply> = {
+        let builtins = all_modules();
+        plain
+            .iter()
+            .map(|(module, request)| builtins.module(module).unwrap().process(request, &origin()))
+            .collect()
+    };
+    let fuel = |keys: usize| -> Vec<u64> {
+        let builtins = all_modules();
+        let start = Instant::now();
+        let fuel = windowless_requests(&pairs(keys))
+            .iter()
+            .zip(&replies)
+            .map(|((module, request), reply)| {
+                assert_eq!(
+                    &builtins.module(module).unwrap().process(request, &origin()),
+                    reply,
+                    "{module}, {keys} keys"
+                );
+                builtins.stats(module).unwrap().max_fuel
+            })
+            .collect();
+        assert!(start.elapsed() < Duration::from_secs(60), "{keys} keys");
+        fuel
+    };
+    let (small, large) = (fuel(10_000), fuel(80_000));
+    for (((module, _), small), large) in plain.iter().zip(small).zip(large) {
+        // Eight times the keys: linear is about eight times the fuel, quadratic 64.
+        assert!(large <= 12 * small, "{module}: {small} then {large}");
+    }
+}
+
+#[test]
 fn nesting_up_to_the_envelope_limit_answers() {
     // The deepest request the envelope routes (`MAX_DEPTH` levels, the outer object
     // included) is answered as without its deep value; one level more is no crash either.

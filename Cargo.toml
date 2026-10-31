@@ -59,6 +59,9 @@ flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] 
 futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"] }
 getrandom = "0.4.3"
 gost94 = { version = "0.11.0", default-features = false }
+# The key index of org.json objects (`oncl-protocol`): entry numbers hashed by the keys they
+# point to, so no key is stored twice; already in the lock file, no features (std's hasher).
+hashbrown = { version = "0.17.1", default-features = false }
 hex-literal = "1.1.0"
 hmac = "0.13.0"
 httparse = "1.10.1"

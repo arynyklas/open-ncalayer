@@ -2,7 +2,11 @@
 //! map behind it, numbers as org.json prints them, strings through [`quote`].
 
 use crate::javamap::{self, Table};
+use hashbrown::HashTable;
 use serde_json::{Map, Number, Value};
+use std::fmt;
+use std::hash::{BuildHasher, RandomState};
+use std::sync::LazyLock;
 
 /// A value of an org.json `JSONObject` or `JSONArray`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,17 +92,35 @@ impl JValue {
             JValue::Null => Value::Null,
             JValue::Bool(b) => Value::Bool(*b),
             JValue::Int(i) => Value::from(*i),
-            JValue::Dec(d) => d
-                .parse::<f64>()
-                .ok()
-                .and_then(Number::from_f64)
-                .map_or_else(|| Value::String(d.clone()), Value::Number),
+            JValue::Dec(d) => dec_value(d).unwrap_or_else(|| Value::String(d.clone())),
             JValue::Str(s) => Value::String(s.clone()),
             JValue::Obj(o) => Value::Object(o.to_map()),
             JValue::Arr(items) => Value::Array(items.iter().map(JValue::to_value).collect()),
             JValue::Raw(s) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone())),
         }
     }
+
+    /// [`to_value`](JValue::to_value), the strings moved rather than copied.
+    pub fn into_value(self) -> Value {
+        match self {
+            JValue::Null => Value::Null,
+            JValue::Bool(b) => Value::Bool(b),
+            JValue::Int(i) => Value::from(i),
+            JValue::Dec(d) => dec_value(&d).unwrap_or(Value::String(d)),
+            JValue::Str(s) => Value::String(s),
+            JValue::Obj(o) => Value::Object(o.into_map()),
+            JValue::Arr(items) => Value::Array(items.into_iter().map(JValue::into_value).collect()),
+            JValue::Raw(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
+        }
+    }
+}
+
+/// The nearest `f64` of a number's text, if there is one.
+fn dec_value(d: &str) -> Option<Value> {
+    d.parse::<f64>()
+        .ok()
+        .and_then(Number::from_f64)
+        .map(Value::Number)
 }
 
 impl From<&str> for JValue {
@@ -179,52 +201,99 @@ enum Kind {
     Written,
 }
 
-/// An org.json `JSONObject`, its keys in the order its `toString()` writes them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JObject {
+/// An org.json `JSONObject`, its keys in the order its `toString()` writes them. A key is
+/// found, put and removed in constant time, as in Java's `HashMap`, whatever the number of
+/// keys. One pointer wide, so a [`JValue`] is as small as a string.
+#[derive(Clone)]
+pub struct JObject(Box<Inner>);
+
+/// What a [`JObject`] holds.
+#[derive(Clone)]
+struct Inner {
     kind: Kind,
     /// The entries in the order they went in.
     entries: Vec<(String, JValue)>,
+    /// The number of each entry in `entries`, hashed by its key.
+    index: HashTable<usize>,
+}
+
+/// The hash of a key in [`JObject`]'s index: std's keyed hash, its keys random for each
+/// process, so a page cannot choose keys that collide.
+fn key_hash(key: &str) -> u64 {
+    static KEYS: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+    KEYS.hash_one(key)
+}
+
+/// Objects are equal by their map and their entries; the index follows from the entries.
+impl PartialEq for JObject {
+    fn eq(&self, other: &JObject) -> bool {
+        self.0.kind == other.0.kind && self.0.entries == other.0.entries
+    }
+}
+
+impl Eq for JObject {}
+
+impl fmt::Debug for JObject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JObject")
+            .field("kind", &self.0.kind)
+            .field("entries", &self.0.entries)
+            .finish()
+    }
 }
 
 impl JObject {
+    /// An empty object over `kind`.
+    fn with(kind: Kind) -> JObject {
+        JObject(Box::new(Inner {
+            kind,
+            entries: Vec::new(),
+            index: HashTable::new(),
+        }))
+    }
+
     /// `new JSONObject()`, or a bean wrapped by org.json: a `HashMap` of 16 buckets.
     pub fn hash_map() -> JObject {
-        JObject {
-            kind: Kind::Hash(Table::new(javamap::DEFAULT_CAPACITY)),
-            entries: Vec::new(),
-        }
+        JObject::with(Kind::Hash(Table::new(javamap::DEFAULT_CAPACITY)))
     }
 
     /// `new JSONObject(map)` of a map of `len` entries: a `HashMap` of
     /// [`table_size_for`](javamap::table_size_for)`(len)` buckets, filled in the map's order.
     pub fn from_map(len: usize) -> JObject {
-        JObject {
-            kind: Kind::Hash(Table::new(javamap::table_size_for(len))),
-            entries: Vec::new(),
-        }
+        JObject::with(Kind::Hash(Table::new(javamap::table_size_for(len))))
     }
 
     /// An object written by `JSONStringer` (or held in a `LinkedHashMap`): keys in the order
     /// they were put.
     pub fn stringer() -> JObject {
-        JObject {
-            kind: Kind::Written,
-            entries: Vec::new(),
-        }
+        JObject::with(Kind::Written)
+    }
+
+    /// The number of the entry of `key`.
+    fn find(&self, key: &str) -> Option<usize> {
+        let entries = &self.0.entries;
+        self.0
+            .index
+            .find(key_hash(key), |&i| entries[i].0 == key)
+            .copied()
     }
 
     /// `put(key, value)`: a key already present keeps its place and takes the new value.
     pub fn put(&mut self, key: impl Into<String>, value: impl Into<JValue>) -> &mut Self {
         let key = key.into();
         let value = value.into();
-        match self.entries.iter_mut().find(|(k, _)| *k == key) {
-            Some(entry) => entry.1 = value,
+        match self.find(&key) {
+            Some(at) => self.0.entries[at].1 = value,
             None => {
-                if let Kind::Hash(table) = &mut self.kind {
+                let inner = &mut *self.0;
+                if let Kind::Hash(table) = &mut inner.kind {
                     table.push(javamap::string_hash(&key));
                 }
-                self.entries.push((key, value));
+                let entries = &inner.entries;
+                inner
+                    .index
+                    .insert_unique(key_hash(&key), entries.len(), |&i| key_hash(&entries[i].0));
+                inner.entries.push((key, value));
             }
         }
         self
@@ -246,38 +315,48 @@ impl JObject {
         }
     }
 
-    /// Removes `key`, if present.
+    /// Removes `key`, if present. The entries after it move up, so this takes time in
+    /// their number.
     pub fn remove(&mut self, key: &str) -> Option<JValue> {
-        let at = self.entries.iter().position(|(k, _)| k == key)?;
-        if let Kind::Hash(table) = &mut self.kind {
+        let at = self.find(key)?;
+        let inner = &mut *self.0;
+        if let Kind::Hash(table) = &mut inner.kind {
             table.remove(at);
         }
-        Some(self.entries.remove(at).1)
+        if let Ok(entry) = inner.index.find_entry(key_hash(key), |&i| i == at) {
+            entry.remove();
+        }
+        for i in inner.index.iter_mut() {
+            if *i > at {
+                *i -= 1;
+            }
+        }
+        Some(inner.entries.remove(at).1)
     }
 
     /// The value of `key`.
     pub fn get(&self, key: &str) -> Option<&JValue> {
-        self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.find(key).map(|at| &self.0.entries[at].1)
     }
 
     /// The number of keys.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.0.entries.len()
     }
 
     /// Whether there are no keys.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.0.entries.is_empty()
     }
 
     /// The entries in the order `toString()` writes them.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &JValue)> {
-        let order = match &self.kind {
+        let order = match &self.0.kind {
             Kind::Hash(table) => table.order(),
-            Kind::Written => (0..self.entries.len()).collect(),
+            Kind::Written => (0..self.0.entries.len()).collect(),
         };
         order.into_iter().map(|i| {
-            let (k, v) = &self.entries[i];
+            let (k, v) = &self.0.entries[i];
             (k.as_str(), v)
         })
     }
@@ -305,9 +384,25 @@ impl JObject {
 
     /// The object as a `serde_json` map (see [`JValue::to_value`]).
     pub fn to_map(&self) -> Map<String, Value> {
-        self.entries
+        self.0
+            .entries
             .iter()
             .map(|(k, v)| (k.clone(), v.to_value()))
+            .collect()
+    }
+
+    /// [`to_map`](JObject::to_map), the keys and strings moved rather than copied; the
+    /// object's index goes first.
+    pub fn into_map(self) -> Map<String, Value> {
+        let Inner {
+            kind,
+            entries,
+            index,
+        } = *self.0;
+        drop((kind, index));
+        entries
+            .into_iter()
+            .map(|(k, v)| (k, v.into_value()))
             .collect()
     }
 }

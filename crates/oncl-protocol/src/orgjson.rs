@@ -9,7 +9,7 @@
 mod parse;
 mod value;
 
-pub use parse::{MAX_DEPTH, Scanned, parse, reserialize, scan};
+pub use parse::{MAX_DEPTH, Scanned, parse, parse_only, reserialize, scan};
 pub use value::{JObject, JValue, quote, quoted, quoted_len};
 
 use serde_json::{Map, Value};

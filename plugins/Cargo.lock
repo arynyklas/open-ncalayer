@@ -888,6 +888,7 @@ name = "oncl-protocol"
 version = "0.1.0-alpha.5"
 dependencies = [
  "base64",
+ "hashbrown",
  "serde",
  "serde_json",
 ]

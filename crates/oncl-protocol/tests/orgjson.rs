@@ -1,11 +1,12 @@
 //! org.json 20211205: its writer, its parser and its readers' messages.
 
 use oncl_protocol::orgjson::{
-    JObject, JValue, array_get_int, array_get_object, array_get_string, get_array, get_boolean,
-    get_int, get_object, opt_array, opt_boolean, opt_int, opt_object, parse, quoted, quoted_len,
-    reserialize, value_to_string,
+    JObject, JValue, MAX_DEPTH, array_get_int, array_get_object, array_get_string, get_array,
+    get_boolean, get_int, get_object, opt_array, opt_boolean, opt_int, opt_object, parse, quoted,
+    quoted_len, reserialize, scan, value_to_string,
 };
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 
 #[test]
 fn quote_escapes_like_org_json() {
@@ -176,6 +177,132 @@ fn parse_rejects_duplicate_key() {
         parse(r#"{"a":null,"a":2}"#),
         Err(r#"Duplicate key "a" at 14 [character 15 line 1]"#.to_owned())
     );
+}
+
+#[test]
+fn scan_rejects_duplicate_key_wherever_it_is() {
+    let repeated = |text: &str| scan(text, "module").unwrap_err();
+    assert!(repeated(r#"{"module":"m","module":"n"}"#).starts_with(r#"Duplicate key "module""#));
+    assert!(repeated(r#"{"module":"m","a":1,"a":2}"#).starts_with(r#"Duplicate key "a""#));
+    assert!(
+        repeated(r#"{"module":"m","args":[{"x":1,"x":{}}]}"#).starts_with(r#"Duplicate key "x""#)
+    );
+    let scanned = scan(r#"{"a":{"a":1},"module":"m","b":[{"a":2}]} x"#, "module").unwrap();
+    assert_eq!(scanned.value, Some(JValue::from("m")));
+    assert_eq!(scanned.len, 40);
+}
+
+/// The longest the reading of a text of 80 000 keys may take, in any build: in linear time
+/// it takes well under a second even unoptimized; in quadratic time it took 17 s optimized.
+const MANY_KEYS_BOUND: Duration = Duration::from_secs(10);
+
+/// `n` pairs `"k<i>":<i>` joined by commas.
+fn pairs(n: usize, from: usize) -> String {
+    (from..from + n)
+        .map(|i| format!("\"k{i}\":{i}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[test]
+fn many_keys_read_in_linear_time() {
+    const KEYS: usize = 80_000;
+    let top = format!(r#"{{{},"module":"m"}}"#, pairs(KEYS, 0));
+    let nested = format!(r#"{{"module":"m","args":{{{}}}}}"#, pairs(KEYS, 0));
+    assert!(top.len() > 1_000_000);
+    for text in [&top, &nested] {
+        let start = Instant::now();
+        let scanned = scan(text, "module").unwrap();
+        assert_eq!(scanned.value, Some(JValue::from("m")));
+        assert_eq!(scanned.len, text.len());
+        let JValue::Obj(object) = parse(text).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(object.to_json().len(), text.len());
+        assert!(object.into_map().len() <= KEYS + 1);
+        assert!(start.elapsed() < MANY_KEYS_BOUND, "{:?}", start.elapsed());
+    }
+    // The last key repeats the first: found without comparing it with every other.
+    let start = Instant::now();
+    let repeated = format!(r#"{{"module":"m",{},"k0":0}}"#, pairs(KEYS, 0));
+    assert!(
+        scan(&repeated, "module")
+            .unwrap_err()
+            .starts_with(r#"Duplicate key "k0""#)
+    );
+    assert!(
+        parse(&repeated)
+            .unwrap_err()
+            .starts_with(r#"Duplicate key "k0""#)
+    );
+    assert!(start.elapsed() < MANY_KEYS_BOUND, "{:?}", start.elapsed());
+}
+
+#[test]
+fn deep_text_of_many_keys_reads_in_linear_time() {
+    // `MAX_DEPTH` levels, each an object of 630 keys and the next level: 80 000 keys.
+    const PER_LEVEL: usize = 630;
+    let mut text = String::new();
+    for level in 0..MAX_DEPTH {
+        text.push('{');
+        if level == 0 {
+            text.push_str(r#""module":"m","#);
+        }
+        text.push_str(&pairs(PER_LEVEL, level * PER_LEVEL));
+        if level + 1 < MAX_DEPTH {
+            text.push_str(",\"next\":");
+        }
+    }
+    text.push_str(&"}".repeat(MAX_DEPTH));
+    let start = Instant::now();
+    assert_eq!(scan(&text, "module").unwrap().len, text.len());
+    assert!(parse(&text).is_ok());
+    assert!(start.elapsed() < MANY_KEYS_BOUND, "{:?}", start.elapsed());
+    // One level more is refused.
+    let deeper = format!(r#"{{"a":{text}}}"#);
+    assert!(
+        scan(&deeper, "module")
+            .unwrap_err()
+            .starts_with("Nesting too deep")
+    );
+}
+
+/// `scan` and `parse` against `serde_json` on texts of many keys, optimized:
+/// `cargo test --release -p oncl-protocol --test orgjson -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement"]
+fn many_keys_against_serde_json() {
+    let median = |f: &dyn Fn()| {
+        let mut runs: Vec<Duration> = (0..7)
+            .map(|_| {
+                let start = Instant::now();
+                f();
+                start.elapsed()
+            })
+            .collect();
+        runs.sort();
+        runs[3]
+    };
+    for keys in [10_000, 80_000, 200_000] {
+        let text = format!(r#"{{{},"module":"m"}}"#, pairs(keys, 0));
+        let serde = median(&|| {
+            serde_json::from_str::<serde::de::IgnoredAny>(&text).unwrap();
+        });
+        let serde_value = median(&|| {
+            serde_json::from_str::<Value>(&text).unwrap();
+        });
+        let scanned = median(&|| {
+            scan(&text, "module").unwrap();
+        });
+        let parsed = median(&|| {
+            parse(&text).unwrap();
+        });
+        eprintln!(
+            "{keys} keys, {} bytes: serde_json IgnoredAny {serde:?}, Value {serde_value:?}; \
+             scan {scanned:?}, parse {parsed:?}",
+            text.len()
+        );
+    }
 }
 
 #[test]
