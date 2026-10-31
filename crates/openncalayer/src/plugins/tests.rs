@@ -104,7 +104,7 @@ impl Sandbox {
             Arc::new(FakeTransport::default()),
             oncl_token::Tokens::disabled(),
         );
-        let builtin = vec![oncl_basics::MODULE_NAME.to_owned()];
+        let builtin = vec!["kz.gov.pki.knca.basics".to_owned()];
         Sandbox {
             dir,
             transport: Arc::new(FakeTransport::default()),

@@ -3914,13 +3914,10 @@ dependencies = [
 name = "oncl-basics"
 version = "0.1.0-alpha.5"
 dependencies = [
- "base64",
  "der 0.8.2",
  "oncl-pki",
- "oncl-protocol",
  "oncl-testkit",
  "oncl-token",
- "serde_json",
  "tempfile",
  "time",
  "tracing",

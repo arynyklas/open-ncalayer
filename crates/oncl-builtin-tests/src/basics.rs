@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 pub use oncl_builtin_basics::MODULE_NAME;
 
 const AVAILABLE: Available = Available {
-    native: true,
+    native: false,
     wasm: true,
 };
 
@@ -28,7 +28,7 @@ struct Settings {
     backend: Option<Backend>,
 }
 
-/// The `kz.gov.pki.knca.basics` module, as `oncl_basics::Basics` is configured.
+/// The `kz.gov.pki.knca.basics` module, configured as the daemon configures it.
 pub struct Basics(Lazy<Settings>);
 
 impl Basics {
@@ -89,22 +89,6 @@ impl Basics {
 
 fn build(s: Settings) -> Box<dyn Module> {
     match resolve(MODULE_NAME, s.backend, AVAILABLE) {
-        Backend::Native => {
-            let mut m = oncl_basics::Basics::new(s.prompter, s.recent, s.http);
-            if let Some(p) = s.tsa {
-                m = m.with_tsa(p);
-            }
-            if let Some(f) = s.clock {
-                m = m.with_clock(f);
-            }
-            if let Some(c) = s.ocsp_cache {
-                m = m.with_ocsp_cache(c);
-            }
-            if let Some(t) = s.tokens {
-                m = m.with_tokens(t);
-            }
-            Box::new(m)
-        }
         Backend::Wasm => {
             let mut services = HostServices::new(
                 s.prompter,
@@ -123,6 +107,7 @@ fn build(s: Settings) -> Box<dyn Module> {
             }
             crate::guest(MODULE_NAME, services, None)
         }
+        Backend::Native => unreachable!("resolved to an available backend"),
     }
 }
 

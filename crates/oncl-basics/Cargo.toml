@@ -1,6 +1,6 @@
 [package]
 name = "oncl-basics"
-description = "The kz.gov.pki.knca.basics module of OpenNCALayer: PKIExtras.sign (cms, raw, xml) and PKIEssentials (generateCsr, importCertificate) behind a Prompter UI abstraction, and the page-path rules every module shares"
+description = "The dialogs, key choice, page path rules and page PINs OpenNCALayer shows its built-in modules and plugins"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,12 +13,9 @@ publish.workspace = true
 testing = []
 
 [dependencies]
-base64.workspace = true
 der.workspace = true
 oncl-pki.workspace = true
-oncl-protocol.workspace = true
 oncl-token.workspace = true
-serde_json.workspace = true
 time.workspace = true
 tracing.workspace = true
 x509-cert.workspace = true

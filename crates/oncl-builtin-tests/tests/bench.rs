@@ -1,5 +1,6 @@
 //! Timings of the built-in modules against the same work done by `oncl_pki` directly
-//! (`pki_direct_*`) and by the native basics module, with their limits: the median of 7 runs
+//! (`pki_direct_*`) and as the native basics module did it (the core's key choice, then
+//! `oncl_pki`, the request and reply read and written natively), with their limits: the median of 7 runs
 //! after a warm-up, a scripted prompter without delays, mock TSA and OCSP responders and a
 //! fixed clock. Every measurement goes to `target/builtins-bench.json`.
 //!
@@ -10,9 +11,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
 use oncl_basics::{
-    Busy, BusyPrompt, ChoiceAnswer, ChoicePrompt, ConfirmPrompt, CsrAnswer, CsrPrompt, FilePrompt,
-    ImportAnswer, ImportPrompt, KeyPrompt, MessagePrompt, PasswordPrompt, PathPrompt, Prompt,
-    Prompter, ReaderPrompt, SavePrompt, StorageAnswer, StorageKind, StoragePrompt,
+    Action, Busy, BusyPrompt, ChainPolicy, ChoiceAnswer, ChoicePrompt, ConfirmPrompt, CsrAnswer,
+    CsrPrompt, FilePrompt, ImportAnswer, ImportPrompt, KeyChooser, KeyFilter, KeyOrder, KeyPrompt,
+    KeyRequest, Locale, MessagePrompt, OcspCache, PasswordPrompt, PathPrompt, Prompt, Prompter,
+    ReaderPrompt, SavePrompt, StorageAnswer, StorageKind, StoragePrompt,
 };
 use oncl_builtin_tests::SOURCES;
 use oncl_builtin_tests::basics::MODULE_NAME;
@@ -145,14 +147,47 @@ fn load_builtins(services: HostServices, limits: BuiltinLimits) -> Builtins {
     Builtins::load(&WasmEngine::new(), services, SOURCES, limits, None).unwrap()
 }
 
-/// A native basics module answering `prompter`.
-fn native(
+/// The core's key choice of `prompter`'s answers, as a native module asked for it: the
+/// storage dialog, the key file read, the keys checked live against `chain` (the
+/// request's `signerParams.chain`), the key dialog.
+fn native_choice(
     prompter: Arc<dyn Prompter>,
     http: Arc<dyn HttpTransport>,
     clock: fn() -> OffsetDateTime,
-) -> oncl_basics::Basics {
-    oncl_basics::Basics::new(prompter, Arc::new(MemoryRecentPath::new(None)), http)
-        .with_clock(clock)
+    chain: Vec<oncl_pki::cert::Certificate>,
+) -> Option<KeyEntry> {
+    let chooser = KeyChooser {
+        prompter,
+        recent: Arc::new(MemoryRecentPath::new(None)),
+        http,
+        ocsp_cache: Arc::new(OcspCache::new()),
+        clock,
+        tokens: oncl_token::Tokens::disabled(),
+    };
+    let filter = KeyFilter {
+        ext_key_usages: Default::default(),
+        iin: String::new(),
+        bin: String::new(),
+        serial_number: String::new(),
+        allow_expired: false,
+        chain: if chain.is_empty() {
+            ChainPolicy::Empty
+        } else {
+            ChainPolicy::Custom(Arc::new(oncl_pki::pkix::CaSet::new(chain)))
+        },
+        allow_revoked: false,
+        more: Default::default(),
+    };
+    chooser.choose(&KeyRequest {
+        origin: "https://x.kz".to_owned(),
+        locale: Locale::Kk,
+        action: Action::Sign,
+        storages: StorageKind::all(),
+        filter,
+        detail: None,
+        initial_path: None,
+        order: KeyOrder::Store,
+    })
 }
 
 fn signed(reply: Reply) {
@@ -202,12 +237,50 @@ fn wasm_sign(key: &str, request: &str, clock: fn() -> OffsetDateTime) -> Measure
     }
 }
 
-/// `request` signed by `key` `RUNS + 1` times by the native basics module.
+/// What the native basics module did for `request` (format `cms` or `xml`), `RUNS + 1`
+/// times: the request read, the key chosen in the core's dialogs, the data decoded, signed
+/// with `oncl_pki`, written as PEM, the reply written. The base of the thresholds since
+/// the native module is gone.
 fn native_sign(key: &str, request: &str, clock: fn() -> OffsetDateTime) -> Duration {
-    let prompter = Arc::new(ScriptedPrompter::new(steps(key, RUNS + 1)));
-    let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
-    let module = native(prompter, tsa, clock);
-    median(|| signed(module.process(request, &origin())))
+    let prompter: Arc<dyn Prompter> = Arc::new(ScriptedPrompter::new(steps(key, RUNS + 1)));
+    let tsa: Arc<dyn HttpTransport> = Arc::new(MockTsa::new(entry("tsa-gost2015")));
+    median(|| {
+        let request: Value = serde_json::from_str(request).unwrap();
+        let args = &request["args"];
+        let entry = native_choice(Arc::clone(&prompter), Arc::clone(&tsa), clock, Vec::new())
+            .expect("a key");
+        let params = &args["signingParams"];
+        let text = args["data"].as_str().unwrap();
+        let result = match args["format"].as_str().unwrap() {
+            "cms" => {
+                let data = if params["decode"] == true {
+                    STANDARD.decode(text).unwrap()
+                } else {
+                    text.as_bytes().to_vec()
+                };
+                let der = oncl_pki::cms::sign(
+                    &entry,
+                    &data,
+                    &SignOptions {
+                        encapsulate: params["encapsulate"] != false,
+                        digested: false,
+                        signing_time: clock(),
+                    },
+                )
+                .unwrap();
+                json!([oncl_pki::pem::encode("CMS", &der)])
+            }
+            "xml" => {
+                let signed =
+                    oncl_pki::xmldsig::sign_enveloped(text.as_bytes(), &entry.key, &entry.cert)
+                        .unwrap();
+                json!([String::from_utf8(signed).unwrap()])
+            }
+            other => panic!("format {other}"),
+        };
+        let reply = json!({"status": true, "body": {"result": result}}).to_string();
+        assert!(reply.len() > 100);
+    })
 }
 
 /// One size of a signing scenario: its times, ratios and the guest's memory and fuel.
@@ -487,13 +560,46 @@ fn bench_many_keys_live() {
         let builtins = load_builtins(services(p, http, inter_time), BuiltinLimits::default());
         Box::new(Pooled(builtins))
     });
-    let native = timed(&|p, http| Box::new(native(p, http, inter_time)));
+    let chain = vec![
+        oncl_pki::cert::parse(&synthetic_cert("inter-gost2015")).unwrap(),
+        oncl_pki::cert::parse(&synthetic_cert("root-gost2015")).unwrap(),
+    ];
+    let native = timed(&|p, http| {
+        Box::new(NativeChoice {
+            prompter: p,
+            http,
+            chain: chain.clone(),
+        })
+    });
     let diff = ms(wasm) - ms(native);
     record(
         "bench_many_keys_live",
         json!({"wasm_ms": ms(wasm), "native_ms": ms(native), "wasm_minus_native_ms": diff}),
     );
     assert!(diff <= 30.0, "{diff} ms more than native to the key dialog");
+}
+
+/// The core's key choice as a native module asked for it, answering what the module
+/// answered when the key dialog is cancelled.
+struct NativeChoice {
+    prompter: Arc<Timed>,
+    http: Arc<dyn HttpTransport>,
+    chain: Vec<oncl_pki::cert::Certificate>,
+}
+
+impl Module for NativeChoice {
+    fn process(&self, _: &str, _: &AddInfo) -> Reply {
+        assert!(
+            native_choice(
+                self.prompter.clone(),
+                Arc::clone(&self.http),
+                inter_time,
+                self.chain.clone(),
+            )
+            .is_none()
+        );
+        Reply::Text(r#"{"status":true,"body":{}}"#.to_owned())
+    }
 }
 
 /// The basics module of loaded built-in modules.

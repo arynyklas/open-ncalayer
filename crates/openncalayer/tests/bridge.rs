@@ -5,7 +5,6 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
-use oncl_basics::{Basics, MODULE_NAME};
 use oncl_ipc::{Endpoint, IpcStream, connect, endpoint, read_frame, write_frame};
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::MockTsa;
@@ -443,19 +442,14 @@ async fn large_reply_is_chunked_and_reassembles() {
         storage("user-rsa-sign"),
         Step::Key(0),
     ]));
-    let mut registry = Registry::default();
-    registry.register(
-        MODULE_NAME,
-        Arc::new(
-            Basics::new(
-                prompter,
-                Arc::new(MemoryRecentPath::new(None)),
-                Arc::new(MockTsa::new(entry("tsa-gost2015"))),
-            )
-            .with_clock(fixed_clock),
-        ),
+    let mut services = oncl_plugin::HostServices::new(
+        prompter,
+        Arc::new(MemoryRecentPath::new(None)),
+        Arc::new(MockTsa::new(entry("tsa-gost2015"))),
+        oncl_token::Tokens::disabled(),
     );
-    let registry = Arc::new(registry);
+    services.clock = fixed_clock;
+    let registry = Arc::new(build_registry(services, Arc::new(|_| {}), None).unwrap());
     let wss = start_wss(registry.clone()).await;
     let (_dir, ep) = start_ipc(registry).await;
 
