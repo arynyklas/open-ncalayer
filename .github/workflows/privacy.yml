@@ -1,0 +1,85 @@
+name: Privacy
+
+# `cargo xtask privacy` (docs/dev/release.md, «Приватность»): no transcripts, paths with a
+# drive letter or certificates of the NCA test CA in the tracked files, in the file versions
+# the pushed commits add or in their messages. With the secret `PRIVACY_DENYLIST` (a base64
+# private list), also no line that matches it; the list itself never enters the repository,
+# and the check prints only `file:line`. Forks and pull requests from them have no secrets:
+# there the denylist step leaves a notice and passes.
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  privacy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The commits of the range and their messages.
+          fetch-depth: 0
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: ./.github/actions/pinned-toolchains
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: The range
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          zero=0000000000000000000000000000000000000000
+          if [ "$EVENT" = pull_request ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "$zero" ] \
+            && git cat-file -e "$BEFORE^{commit}" 2> /dev/null; then
+            range="$BEFORE..$GITHUB_SHA"
+          elif base="$(git merge-base "origin/$DEFAULT_BRANCH" "$GITHUB_SHA" 2> /dev/null)" \
+            && [ "$base" != "$GITHUB_SHA" ]; then
+            # A new branch: its commits that the default branch does not have.
+            range="$base..$GITHUB_SHA"
+          else
+            # Nothing to compare with: the tracked files only.
+            range=""
+          fi
+          echo "range=$range" >> "$GITHUB_OUTPUT"
+          echo "range: ${range:-none}"
+      - name: Structure
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+        run: |
+          cargo build -p xtask
+          if [ -n "$RANGE" ]; then
+            target/debug/xtask privacy --range "$RANGE"
+          else
+            target/debug/xtask privacy
+          fi
+      # The built xtask: nothing compiles while the list is on disk.
+      - name: Denylist
+        env:
+          PRIVACY_DENYLIST: ${{ secrets.PRIVACY_DENYLIST }}
+          RANGE: ${{ steps.range.outputs.range }}
+        run: |
+          if [ -z "$PRIVACY_DENYLIST" ]; then
+            echo "::notice::denylist not checked: no PRIVACY_DENYLIST secret here (a fork or a pull request from one)"
+            exit 0
+          fi
+          list="$(mktemp)"
+          trap 'rm -f "$list"' EXIT
+          if ! printf '%s' "$PRIVACY_DENYLIST" | base64 -d > "$list" 2> /dev/null; then
+            echo "::error::PRIVACY_DENYLIST is not base64"
+            exit 1
+          fi
+          args=(--denylist "$list")
+          if [ -n "$RANGE" ]; then
+            args+=(--range "$RANGE")
+          fi
+          target/debug/xtask privacy "${args[@]}"

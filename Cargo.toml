@@ -80,6 +80,9 @@ rand_chacha = "0.3.1"
 rc2 = "0.9.0"
 raw-window-handle = "0.6.2"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto", "zeroize"] }
+# Only in xtask (`privacy`): the denylist entries and the scans of tracked text; already in the
+# lock file through other crates.
+regex = "1.13.1"
 rfd = "0.17.2"
 ring = "0.17.14"
 # XMLDSig: the XML tree with byte positions (the signature is spliced into the input bytes).

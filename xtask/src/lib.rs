@@ -12,6 +12,7 @@ pub mod licenses;
 pub mod ncanode;
 pub mod package;
 pub mod plugin;
+pub mod privacy;
 pub mod registry;
 pub mod sign;
 pub mod token_emu;

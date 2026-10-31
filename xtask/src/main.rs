@@ -96,6 +96,21 @@ enum Command {
         #[command(subcommand)]
         command: PluginCommand,
     },
+    /// Fail on what must never reach the public repository (docs/dev/release.md,
+    /// «Приватность»): transcript files and headers, paths with a drive letter outside the
+    /// listed test literals, certificates issued by an NCA test CA; with `--denylist`, lines
+    /// matching a private list. Findings are printed as `file:line`, never what matched.
+    Privacy {
+        /// `<base>..<head>`: also the file versions these commits add and their messages.
+        /// The empty tree (`4b825dc642cb6eb9a060e54bf8d69288fbee4904`) as base takes the
+        /// whole history.
+        #[arg(long)]
+        range: Option<String>,
+        /// A private list: one entry per line, a case-insensitive substring or
+        /// `re:<regex>`; empty lines and lines starting with `#` are skipped.
+        #[arg(long)]
+        denylist: Option<PathBuf>,
+    },
     /// The project site (`site/`): build it with the pinned Zola, check a built one.
     Registry {
         #[command(subcommand)]
@@ -562,6 +577,26 @@ fn main() -> anyhow::Result<()> {
             xtask::e2e::run(&oncl_testkit::workspace_root(), browser, download)
         }
         Command::FetchFixtures => xtask::fetch::fetch_fixtures(),
+        Command::Privacy { range, denylist } => {
+            let root = oncl_testkit::workspace_root();
+            let denylist = denylist
+                .map(|path| xtask::privacy::Denylist::read(&path))
+                .transpose()?;
+            let cas = xtask::privacy::TestCas::load(&root.join(xtask::privacy::TEST_CA_DIR))?;
+            let options = xtask::privacy::Options {
+                range: range.as_deref(),
+                denylist: denylist.as_ref(),
+            };
+            let findings = xtask::privacy::check(&root, &cas, &options)?;
+            for finding in &findings {
+                println!("{finding}");
+            }
+            if !findings.is_empty() {
+                bail!("{} privacy findings", findings.len());
+            }
+            println!("privacy: nothing found");
+            Ok(())
+        }
         Command::Registry { command } => registry(command),
         Command::TokenEmu { config, vpcd } => {
             xtask::token_emu::token_emu(&oncl_testkit::workspace_root(), &config, vpcd.as_deref())
