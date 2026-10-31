@@ -48,7 +48,8 @@ pub const BUILTIN_MAX_MEMORY: usize = 2 << 30;
 /// The largest linear memory of a built-in module's instance: 16 MiB on 32-bit targets. The
 /// documents stay in the core (`data_*`), short ones too in a large request; a call takes
 /// about 1 MiB besides a few hundred bytes for each document of a batch, so a batch of
-/// 50 000 documents fits.
+/// 35 000 documents of up to 1 KiB signs (`limits.rs`); more fill the memory (39 000 of 40
+/// bytes) or the reply (38 000 of 1000 bytes).
 #[cfg(not(target_pointer_width = "64"))]
 pub const BUILTIN_MAX_MEMORY: usize = 16 << 20;
 

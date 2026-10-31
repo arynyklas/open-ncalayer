@@ -184,22 +184,147 @@ fn xml_doc(n: usize, len: usize) -> String {
     )
 }
 
-/// The documents a batch (`data` of basics, `signXmls` of commonUtils) holds within the
-/// 32-bit limits, whatever their length: what the README promises.
-const BATCH_32_BIT: usize = 50_000;
+/// An XML document of `len` bytes (at least 20) that is short as JSON text: no quotes.
+fn plain_doc(n: usize, len: usize) -> String {
+    let head = format!("<d>{n:08}");
+    format!("{head}{}</d>", "x".repeat(len - head.len() - "</d>".len()))
+}
+
+/// The modules that sign a batch of documents.
+#[derive(Clone, Copy, Debug)]
+enum Batch {
+    /// basics `sign`, format `xml`: the `data` array.
+    Basics,
+    /// commonUtils `signXmls`.
+    CommonUtils,
+}
+
+/// `docs` signed by `which` within the 32-bit limits, the synthetic RSA key signing them:
+/// the reply's length, or `None` if the connection is dropped. Any other reply is a
+/// failure of the test.
+fn sign_batch(which: Batch, docs: &[String]) -> Option<usize> {
+    let builtins = basics(limits_32_bit(), 1);
+    let (module, request, prefix) = match which {
+        Batch::Basics => (
+            MODULE_NAME,
+            json!({
+                "module": MODULE_NAME,
+                "method": "sign",
+                "args": {
+                    "format": "xml",
+                    "data": docs,
+                    "signingParams": {},
+                    "signerParams": {"extKeyUsageOids": [], "chain": []},
+                },
+            }),
+            r#"{"body":{"result":["#,
+        ),
+        Batch::CommonUtils => (
+            CU_MODULE,
+            json!({
+                "module": CU_MODULE,
+                "method": "signXmls",
+                "args": ["PKCS12", "", docs, "", ""],
+            }),
+            r#"{"responseObject":["#,
+        ),
+    };
+    let reply = builtins
+        .module(module)
+        .unwrap()
+        .process(&request.to_string(), &origin());
+    let text = match reply {
+        Reply::Drop => return None,
+        reply => reply.into_text().expect("a text reply"),
+    };
+    assert!(
+        text.starts_with(prefix)
+            && (text.ends_with(r#""status":true}"#) || text.ends_with(r#""code":"200"}"#)),
+        "{which:?}: {} ... {}",
+        &text[..text.len().min(100)],
+        &text[text.len().saturating_sub(100)..]
+    );
+    Some(text.len())
+}
+
+/// A kind of document: its name and how a document is made.
+type BatchKind = (&'static str, fn(usize) -> String);
+
+/// The documents of each kind a batch is tried with: below the length from which the core
+/// keeps a document in a large request (so the module holds them), at it (65 bytes as
+/// JSON text, as the quotes of the attribute are escaped), and 1000 bytes.
+fn batch_kinds() -> [BatchKind; 3] {
+    [
+        ("40 bytes", |n| plain_doc(n, 40)),
+        ("63 bytes", |n| xml_doc(n, 63)),
+        ("1000 bytes", |n| xml_doc(n, 1000)),
+    ]
+}
+
+/// The documents a batch (`data` of basics, `signXmls` of commonUtils) holds, signed,
+/// within the 32-bit limits, the documents up to 1 KiB: what the README promises. Measured
+/// with [`largest_signed_batch`]: 38 000 documents of 1000 bytes (their reply is 99% of
+/// `BUILTIN_MAX_REPLY`), 39 000 of 40 bytes; the module's 16 MiB of memory is the limit
+/// for shorter documents, the reply's length for longer ones.
+const BATCH_32_BIT: usize = 35_000;
+
+#[test]
+fn batches_of_documents_are_signed_at_the_documented_size() {
+    // The documents are signed, not only read: the reply is the signed batch, and its
+    // memory and length are what the limits allow.
+    let _turn = one_large_call_at_a_time();
+    for (which, kinds) in [
+        (Batch::Basics, batch_kinds().to_vec()),
+        (Batch::CommonUtils, vec![batch_kinds()[0], batch_kinds()[2]]),
+    ] {
+        for (what, make) in kinds {
+            let docs: Vec<String> = (0..BATCH_32_BIT).map(make).collect();
+            let reply = sign_batch(which, &docs).unwrap_or_else(|| {
+                panic!("{which:?}: {BATCH_32_BIT} documents of {what}: dropped")
+            });
+            assert!(reply > BATCH_32_BIT * 2000, "{which:?}, {what}: {reply}");
+        }
+    }
+}
+
+/// How many signed documents of each kind go through, for the README's number:
+/// `BATCH_COUNTS=35000,38000,39000 cargo test --release -p oncl-builtin-tests --test limits
+/// largest_signed_batch -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement"]
+fn largest_signed_batch() {
+    let _turn = one_large_call_at_a_time();
+    let counts: Vec<usize> = std::env::var("BATCH_COUNTS")
+        .unwrap_or_else(|_| "1000".to_owned())
+        .split(',')
+        .map(|n| n.parse().unwrap())
+        .collect();
+    for count in counts {
+        for which in [Batch::Basics, Batch::CommonUtils] {
+            for (what, make) in batch_kinds() {
+                let docs: Vec<String> = (0..count).map(make).collect();
+                let start = Instant::now();
+                let reply = sign_batch(which, &docs);
+                eprintln!(
+                    "{which:?}, {count} documents of {what}: {reply:?} in {:?}",
+                    start.elapsed()
+                );
+            }
+        }
+    }
+}
 
 #[test]
 fn batches_of_short_documents_fit() {
     // Many documents, each shorter than a long string, add up: the core keeps them, from
     // 64 bytes once the request is over 1 MiB; shorter ones reach the module. The storage
-    // window is cancelled, so nothing is signed; the modules answer.
+    // window is cancelled, so nothing is signed; the modules answer (signing a batch:
+    // `batches_of_documents_are_signed_at_the_documented_size`).
     let _turn = one_large_call_at_a_time();
     for (doc, count) in [
         (8 << 10, 16 * MIB / (8 << 10)),
         (1 << 10, 4 * MIB / (1 << 10)),
         (1000, 8 * MIB / 1000),
-        (1000, BATCH_32_BIT),
-        (63, BATCH_32_BIT),
     ] {
         let total = doc * count;
         let docs: Vec<String> = (0..count).map(|n| xml_doc(n, doc)).collect();
@@ -610,7 +735,7 @@ fn each_call_has_keys_of_its_own() {
         let builtins = all_modules();
         let (module, request) = windowless_requests(&pairs).remove(3);
         builtins
-            .module(&module)
+            .module(module)
             .unwrap()
             .process(&request, &origin());
         builtins.stats(ACCESSORY).unwrap().max_fuel
