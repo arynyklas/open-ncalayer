@@ -117,29 +117,35 @@ struct SyntheticEntry {
     aliases: Vec<String>,
 }
 
-/// All synthetic containers, in `fixtures.toml` order.
+/// All synthetic containers, in `fixtures.toml` order. The manifest is read once per process:
+/// a suite asks for its containers hundreds of times, and each file read is one more chance
+/// to meet a scanner or an indexer that holds the file for a moment (Windows answers «Access
+/// is denied» then).
 ///
 /// # Panics
 ///
 /// If `fixtures/synthetic/fixtures.toml` is missing or malformed.
 pub fn synthetic_all() -> Vec<SyntheticKey> {
-    let path = fixture("synthetic/fixtures.toml");
-    let text = String::from_utf8(read(&path))
-        .unwrap_or_else(|e| panic!("{} is not UTF-8: {e}", path.display()));
-    let manifest: SyntheticManifest =
-        toml::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    manifest
-        .p12
-        .into_iter()
-        .map(|e| SyntheticKey {
-            path: fixture(&format!("synthetic/{}.p12", e.name)),
-            root: fixture(&format!("synthetic/{}", e.root)),
-            issuer: fixture(&format!("synthetic/{}", e.issuer)),
-            name: e.name,
-            password: e.password,
-            aliases: e.aliases,
-        })
-        .collect()
+    static ALL: std::sync::LazyLock<Vec<SyntheticKey>> = std::sync::LazyLock::new(|| {
+        let path = fixture("synthetic/fixtures.toml");
+        let text = String::from_utf8(read(&path))
+            .unwrap_or_else(|e| panic!("{} is not UTF-8: {e}", path.display()));
+        let manifest: SyntheticManifest =
+            toml::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        manifest
+            .p12
+            .into_iter()
+            .map(|e| SyntheticKey {
+                path: fixture(&format!("synthetic/{}.p12", e.name)),
+                root: fixture(&format!("synthetic/{}", e.root)),
+                issuer: fixture(&format!("synthetic/{}", e.issuer)),
+                name: e.name,
+                password: e.password,
+                aliases: e.aliases,
+            })
+            .collect()
+    });
+    ALL.clone()
 }
 
 /// The synthetic container `fixtures/synthetic/<name>.p12`.

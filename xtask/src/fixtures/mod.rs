@@ -680,11 +680,26 @@ pub fn gen_fixtures(root: &Path) -> anyhow::Result<()> {
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
     for (name, contents) in &files {
-        let path = dir.join(name);
-        fs::write(&path, contents).with_context(|| format!("writing {}", path.display()))?;
+        write_if_changed(&dir.join(name), contents)?;
     }
     println!("wrote {} files to {}", files.len(), dir.display());
     Ok(())
+}
+
+/// Writes `contents` to `path` unless the file holds them already, through a temporary file
+/// renamed over it: a test run reading the fixtures meanwhile sees the old file or the new
+/// one, never a half-written file, and files that did not change are not touched at all.
+fn write_if_changed(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    if fs::read(path).is_ok_and(|old| old == contents) {
+        return Ok(());
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let temporary = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    fs::write(&temporary, contents).with_context(|| format!("writing {}", temporary.display()))?;
+    fs::rename(&temporary, path).map_err(|e| {
+        let _ = fs::remove_file(&temporary);
+        anyhow::Error::new(e).context(format!("replacing {}", path.display()))
+    })
 }
 
 /// Whether `fixtures/synthetic/` under the workspace `root` holds exactly the files
