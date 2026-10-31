@@ -2,15 +2,18 @@
 
 use crate::{Available, Backend, Lazy, resolve};
 use oncl_basics::Prompter;
+use oncl_basics::testing::MemoryRecentPath;
+use oncl_pki::http::{HttpError, HttpReply, HttpRequest, HttpTransport};
+use oncl_plugin::HostServices;
 use oncl_protocol::{AddInfo, Module, Reply};
 use oncl_token::Tokens;
 use std::sync::Arc;
 
-pub use oncl_applet::MODULE_NAME;
+pub use oncl_builtin_applet::MODULE_NAME;
 
 const AVAILABLE: Available = Available {
     native: true,
-    wasm: false,
+    wasm: true,
 };
 
 struct Settings {
@@ -19,7 +22,7 @@ struct Settings {
     backend: Option<Backend>,
 }
 
-/// The `kz.gov.pki.knca.applet.Applet` module, as `oncl_applet::Applet` is configured.
+/// The `kz.gov.pki.knca.applet.Applet` module, configured as the daemon configures it.
 pub struct Applet(Lazy<Settings>);
 
 impl Applet {
@@ -47,6 +50,15 @@ impl Applet {
     }
 }
 
+/// No network: the module needs none.
+struct Offline;
+
+impl HttpTransport for Offline {
+    fn send(&self, _: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        Err(HttpError::other("offline"))
+    }
+}
+
 fn build(s: Settings) -> Box<dyn Module> {
     match resolve(MODULE_NAME, s.backend, AVAILABLE) {
         Backend::Native => {
@@ -56,7 +68,15 @@ fn build(s: Settings) -> Box<dyn Module> {
             }
             Box::new(m)
         }
-        Backend::Wasm => unreachable!("resolved to an available backend"),
+        Backend::Wasm => {
+            let services = HostServices::new(
+                s.prompter,
+                Arc::new(MemoryRecentPath::new(None)),
+                Arc::new(Offline),
+                s.tokens.unwrap_or_else(Tokens::disabled),
+            );
+            crate::guest(MODULE_NAME, services, None)
+        }
     }
 }
 

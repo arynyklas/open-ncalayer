@@ -17,6 +17,8 @@ oncl-applet = { path = "crates/oncl-applet" }
 oncl-basics = { path = "crates/oncl-basics" }
 # The accessory module's guest: the core embeds its WebAssembly; xtask reads its bundles.
 oncl-builtin-accessory = { path = "crates/oncl-builtin-accessory" }
+# The Applet module's guest: the core embeds its WebAssembly; its tests name it.
+oncl-builtin-applet = { path = "crates/oncl-builtin-applet" }
 # The basics module's guest: the core embeds its WebAssembly; its tests name it.
 oncl-builtin-basics = { path = "crates/oncl-builtin-basics" }
 # The commonUtils module's guest: the core embeds its WebAssembly; its tests name it.

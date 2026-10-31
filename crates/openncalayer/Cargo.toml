@@ -21,7 +21,6 @@ e2e-prompter = ["oncl-basics/testing", "oncl-pki/extra-roots"]
 token-emulator = ["oncl-token/emulator"]
 
 [dependencies]
-oncl-applet.workspace = true
 oncl-basics.workspace = true
 # The accessory module's name, which the About window asks for the bundles.
 oncl-builtin-accessory.workspace = true

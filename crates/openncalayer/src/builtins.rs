@@ -115,6 +115,7 @@ mod tests {
             "kz.gov.pki.ncalayerservices.accessory",
             "kz.gov.pki.knca.basics",
             "kz.gov.pki.knca.commonUtils",
+            "kz.gov.pki.knca.applet.Applet",
         ] {
             assert!(builtins.module(module).is_some(), "{module}");
         }

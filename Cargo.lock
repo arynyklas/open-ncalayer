@@ -3935,6 +3935,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-builtin-applet"
+version = "0.1.0-alpha.5"
+dependencies = [
+ "base64",
+ "oncl-pdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "oncl-builtin-basics"
 version = "0.1.0-alpha.5"
 dependencies = [
@@ -3963,6 +3973,7 @@ dependencies = [
  "oncl-applet",
  "oncl-basics",
  "oncl-builtin-accessory",
+ "oncl-builtin-applet",
  "oncl-builtin-basics",
  "oncl-builtin-commonutils",
  "oncl-builtins-build",
@@ -4315,7 +4326,6 @@ dependencies = [
  "httparse",
  "log",
  "minisign",
- "oncl-applet",
  "oncl-basics",
  "oncl-builtin-accessory",
  "oncl-builtins-build",

@@ -1,0 +1,23 @@
+id = "io.github.arynyklas.openncalayer.builtin.applet"
+version = "0.1.0-alpha.5"
+min_core = "0.1.0-alpha.5"
+modules = ["kz.gov.pki.knca.applet.Applet"]
+builtin = true
+
+[name]
+ru = "Апплет NCALayer"
+kk = "NCALayer апплеті"
+en = "NCALayer applet"
+
+[description]
+ru = "Выбор файла, окно пароля, файлы ключей и их запросы, установка сертификатов, смена пароля и подпись XML"
+kk = "Файл таңдау, құпиясөз терезесі, кілт файлдары мен олардың сұраулары, сертификаттарды орнату, құпиясөзді ауыстыру және XML-ге қол қою"
+en = "File choice, the password dialog, key files and their requests, certificate installation, password change and XML signing"
+
+[capabilities]
+keys = true
+dialogs = true
+files = true
+shared = true
+# Key files, the ID card holder and the data the core keeps for the module.
+builtin = true

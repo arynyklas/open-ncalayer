@@ -6,6 +6,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_basics::testing::{MemoryRecentPath, ScriptedPrompter, Step};
+use oncl_builtin_tests::applet::Applet;
 use oncl_builtin_tests::basics::{self, Basics};
 use oncl_builtin_tests::commonutils::{self, CommonUtils};
 use oncl_pki::cms::SignOptions;
@@ -237,4 +238,37 @@ fn common_utils_signs_long_documents_as_oncl_pki() {
         r,
         json!({"code": "500", "message": format!("NoSuchMethodException {name}")})
     );
+}
+
+#[test]
+fn applet_signs_long_documents_as_oncl_pki() {
+    let a = Applet::new(Arc::new(ScriptedPrompter::new(steps(1))));
+    let xml = format!("<a>{}</a>", long_text(6));
+    let key = entry(KEY);
+    let request = json!({"method": "signXml", "args": ["PKCS12", "", "SIGN", xml], "uuid": "u"});
+    let signed = oncl_pki::xmldsig::sign_enveloped(xml.as_bytes(), &key.key, &key.cert).unwrap();
+    assert_eq!(
+        reply(&a, request),
+        json!({
+            "errorCode": "NONE",
+            "result": String::from_utf8(signed).unwrap(),
+            "secondResult": key.alias,
+            "uuid": "u",
+        })
+    );
+    // Long strings it reads itself: the document of another method, a long uuid.
+    let uuid = long_text(7);
+    let r = reply(
+        &a,
+        json!({"method": "setPassword", "args": [long_text(8), "x"], "uuid": uuid}),
+    );
+    assert_eq!(
+        r,
+        json!({"errorCode": "java.lang.NoSuchMethodException. Method: setPassword"})
+    );
+    let r = reply(
+        &a,
+        json!({"method": "loadSlotList", "args": [xml], "uuid": uuid}),
+    );
+    assert_eq!(r, json!({"errorCode": "EMPTY_SLOT", "uuid": uuid}));
 }

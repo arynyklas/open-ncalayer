@@ -299,6 +299,12 @@ async fn daemon_serves_every_builtin() {
         env!("CARGO_PKG_VERSION")
     );
     assert_eq!(bundles["uuid"], "b");
+    // A request without `module` goes to the Applet, the default module.
+    send(&mut c, r#"{"method":"getTryCount","uuid":"t"}"#).await;
+    assert_eq!(
+        next_text(&mut c).await,
+        r#"{"errorCode":"NONE","result":-1,"uuid":"t"}"#
+    );
 }
 
 /// The program lists the modules it embeds: `<id> <version> <sha256>`.

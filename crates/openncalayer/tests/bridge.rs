@@ -427,6 +427,32 @@ async fn accessory_without_origin_over_wss() {
     assert_eq!(wss_call(&mut ws, INSTALL_BUNDLE).await, NO_ORIGIN);
 }
 
+/// A request without `module` reaches the built-in Applet, the default module, over the
+/// bridge and over wss; its password dialog shows the page's origin.
+#[tokio::test]
+async fn request_without_module_reaches_the_applet() {
+    let (registry, prompter) = scripted_registry(vec![Step::CancelPassword]);
+    let (_dir, ep) = start_ipc(Arc::clone(&registry)).await;
+    let mut c = Client::connect(&ep).await;
+    c.open(1, "https://page.test").await;
+    assert_eq!(
+        c.call(1, r#"{"method":"getTryCount","uuid":"t"}"#).await,
+        r#"{"errorCode":"NONE","result":-1,"uuid":"t"}"#
+    );
+    assert_eq!(
+        c.call(1, r#"{"method":"setPassword","args":["PIN"]}"#)
+            .await,
+        r#"{"errorCode":"NONE","result":false}"#
+    );
+    assert_eq!(prompter.password_prompts()[0].origin, "https://page.test");
+    let wss = start_wss(registry).await;
+    let mut ws = wss_connect(wss.addr, &wss.ca_der).await;
+    assert_eq!(
+        wss_call(&mut ws, r#"{"method":"getTryCount"}"#).await,
+        r#"{"errorCode":"NONE","result":-1}"#
+    );
+}
+
 /// The time of the first call, ever after: CMS replies of two calls are byte-equal.
 fn fixed_clock() -> OffsetDateTime {
     static AT: LazyLock<OffsetDateTime> = LazyLock::new(OffsetDateTime::now_utc);

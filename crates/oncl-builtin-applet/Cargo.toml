@@ -1,0 +1,21 @@
+[package]
+name = "oncl-builtin-applet"
+description = "The legacy kz.gov.pki.knca.applet.Applet module of OpenNCALayer (the default module) as a built-in WebAssembly module: the original's reflective dispatcher over file choice, the password dialog, key files and their requests, certificate installation, password change and XML signing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+# `cdylib`: the module the core embeds (wasm32); `rlib`: its name and unit tests on the host.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The certificates of the page's PEM and the key requests' PEM.
+base64.workspace = true
+oncl-pdk.workspace = true
+# The replies, as the original's `ResultWrapper` serializes.
+serde.workspace = true
+serde_json.workspace = true
