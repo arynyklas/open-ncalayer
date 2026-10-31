@@ -20,7 +20,7 @@ use oncl_pki::key::{PublicKey, SigAlg};
 use oncl_pki::pkcs12::{KeyEntry, WriteEntry, WriteOptions, load, write};
 use oncl_pki::tsp::{MockTsa, verify_token};
 use oncl_protocol::{AddInfo, Module, Reply};
-use oncl_testkit::{fixture, read, synthetic};
+use oncl_testkit::{fixture, ncanode, read, synthetic};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -896,6 +896,25 @@ fn expired_key_cannot_be_chosen() {
 }
 
 #[test]
+fn a_prompter_panic_drops_only_the_connection() {
+    // The refused expired key is prompted for again, and the script answers that prompt
+    // with a storage: the scripted prompter panics. The call's connection is dropped; the
+    // module, and the process, carry on with the next call.
+    let (b, p) = basics(script![
+        storage("expired-gost2015-sign", "Qwerty12"),
+        key(0),
+        storage("user-gost2015-sign", "Qwerty12"),
+        storage("user-gost2015-sign", "Qwerty12"),
+        key(0)
+    ]);
+    let args = cms_args(json!("x"), json!({}));
+    assert_eq!(b.process(&req(args.clone()), &origin("o")), Reply::Drop);
+    let r = json(b.process(&req(args), &origin("o")));
+    assert_eq!(r["status"], true, "{r}");
+    assert_eq!(p.key_prompts().len(), 3);
+}
+
+#[test]
 fn out_of_range_key_index_reprompts() {
     let (b, p) = basics(script![
         storage("user-gost2015-sign", "Qwerty12"),
@@ -1076,6 +1095,83 @@ fn raw_rsa_is_sha256() {
         .unwrap();
     let public = public_key(&entry("user-rsa-sign"));
     assert_eq!(public.verify(SigAlg::RsaSha256, b"hello", &sig), Ok(()));
+}
+
+#[test]
+fn ncanode_test_keys_sign_within_their_validity() {
+    fn gost2015_clock() -> OffsetDateTime {
+        datetime!(2023-01-01 00:00 UTC)
+    }
+    fn rsa_clock() -> OffsetDateTime {
+        datetime!(2021-06-01 00:00 UTC)
+    }
+    // A clock within each certificate's validity.
+    type Clock = fn() -> OffsetDateTime;
+    let keys: [(&str, &str, SigAlg, Clock); 2] = [
+        (
+            "individual_valid_2015.p12",
+            "Aa123456",
+            SigAlg::Gost2015_512,
+            gost2015_clock,
+        ),
+        (
+            "individual_valid_sign_2004.p12",
+            "Qwerty12",
+            SigAlg::RsaSha256,
+            rsa_clock,
+        ),
+    ];
+    for (file, password, alg, clock) in keys {
+        let path = ncanode(file);
+        let signer = || script![storage_at(&path, password), key(0)];
+        let public = public_key(&load(&read(&path), password).unwrap()[0]);
+
+        // Both certificates have expired: today the key is offered but cannot be chosen.
+        let (b, p) = basics(signer());
+        let r = b.process(&req(cms_args(json!("x"), json!({}))), &origin("o"));
+        assert_eq!(r, r#"{"status":true,"body":{}}"#, "{file}");
+        assert_eq!(
+            p.key_prompts()[0].candidates[0].availability,
+            Availability::Expired
+        );
+
+        let (b, _) = basics(signer());
+        let r = json(b.with_clock(clock).process(
+            &req(cms_args(json!("aGVsbG8="), json!({"decode": true}))),
+            &origin("o"),
+        ));
+        let der = pem_to_der(r["body"]["result"][0].as_str().unwrap());
+        assert_eq!(verify(&der, None).unwrap()[0].sig_alg, alg, "{file}");
+
+        let (b, _) = basics(signer());
+        let r = json(b.with_clock(clock).process(
+            &req(raw_args(json!("aGVsbG8="), json!({"decode": true}))),
+            &origin("o"),
+        ));
+        let sig = STANDARD
+            .decode(r["body"]["result"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(public.verify(alg, b"hello", &sig), Ok(()), "{file}");
+
+        let (b, _) = basics(signer());
+        let r = json(b.with_clock(clock).process(
+            &req(json!({
+                "format": "xml",
+                "data": "<a>x</a>",
+                "signingParams": {},
+                "signerParams": {"extKeyUsageOids": [], "chain": []},
+            })),
+            &origin("o"),
+        ));
+        assert_eq!(r["status"], true, "{file}: {r}");
+        assert!(
+            r["body"]["result"][0]
+                .as_str()
+                .unwrap()
+                .contains("<ds:SignatureValue>"),
+            "{file}: {r}"
+        );
+    }
 }
 
 #[test]
