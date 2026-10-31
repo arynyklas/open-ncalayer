@@ -170,24 +170,131 @@ impl HostError {
     }
 }
 
-/// The causes a [`HostError`] names: `<area>.<variant>`, stable across cores.
+/// The causes a [`HostError`] names: `<area>.<variant>`, stable across cores. A failure of
+/// a key inside a CMS or XML signature names the key's cause; one of a CMS inside a
+/// time-stamp, the CMS's.
 pub mod cause {
+    /// A CMS without the content to verify or co-sign.
+    pub const CMS_NO_ENCAPSULATED_DATA: &str = "cms.no_encapsulated_data";
     /// A CMS signer's algorithm the core does not sign or verify with.
     pub const CMS_UNKNOWN_ALGORITHM: &str = "cms.unknown_algorithm";
-    /// A CMS without the content to co-sign.
-    pub const CMS_NO_ENCAPSULATED_DATA: &str = "cms.no_encapsulated_data";
+    /// A CMS that is not valid, or a value that cannot go into one.
+    pub const CMS_MALFORMED: &str = "cms.malformed";
+    /// A CMS signer without its certificate.
+    pub const CMS_CERT_NOT_FOUND: &str = "cms.cert_not_found";
+    /// A CMS signer whose messageDigest does not match the content.
+    pub const CMS_DIGEST_MISMATCH: &str = "cms.digest_mismatch";
+    /// A CMS signature that does not verify.
+    pub const CMS_BAD_SIGNATURE: &str = "cms.bad_signature";
+    /// A CMS signer whose signingCertificateV2 does not match its certificate.
+    pub const CMS_SIGNING_CERTIFICATE_MISMATCH: &str = "cms.signing_certificate_mismatch";
+    /// A CMS signature that cannot be made as asked.
+    pub const CMS_CONSTRAINT: &str = "cms.constraint";
     /// An XML document that does not parse.
     pub const XML_PARSE: &str = "xml.parse";
-    /// An XML signature algorithm the core does not sign with.
-    pub const XML_UNSUPPORTED_ALGORITHM: &str = "xml.unsupported_algorithm";
-    /// An XPath that names no element, or not one the signature can go into.
+    /// An XML document with a DOCTYPE.
+    pub const XML_DOCTYPE: &str = "xml.doctype";
+    /// An XML document over the processing limits.
+    pub const XML_TOO_LARGE: &str = "xml.too_large";
+    /// An XML document nested too deep.
+    pub const XML_TOO_DEEP: &str = "xml.too_deep";
+    /// An XPath outside the subset the core reads.
     pub const XML_XPATH: &str = "xml.xpath";
-    /// A key the core cannot sign with.
+    /// An element to sign or a signature parent that breaks a signing rule.
+    pub const XML_CONSTRAINT: &str = "xml.constraint";
+    /// An XML signature algorithm the core does not sign or verify with.
+    pub const XML_UNSUPPORTED_ALGORITHM: &str = "xml.unsupported_algorithm";
+    /// An XML document without a signature.
+    pub const XML_NO_SIGNATURE: &str = "xml.no_signature";
+    /// An XML signature reference whose digest does not match.
+    pub const XML_BAD_DIGEST: &str = "xml.bad_digest";
+    /// An XML signature value that does not verify.
+    pub const XML_BAD_SIGNATURE: &str = "xml.bad_signature";
+    /// A key that does not decode.
+    pub const KEY_MALFORMED: &str = "key.malformed";
+    /// A key of an algorithm the core does not know.
+    pub const KEY_UNKNOWN_KEY_ALGORITHM: &str = "key.unknown_key_algorithm";
+    /// A signature algorithm the key cannot sign with.
     pub const KEY_UNSUPPORTED: &str = "key.unsupported";
-    /// A time-stamp that could not be had.
-    pub const TSP_FAILED: &str = "tsp.failed";
+    /// A private key that does not belong to its certificate.
+    pub const KEY_MISMATCH: &str = "key.mismatch";
+    /// A signature of the key that does not verify.
+    pub const KEY_BAD_SIGNATURE: &str = "key.bad_signature";
+    /// A private key that stays on its token.
+    pub const KEY_NOT_EXPORTABLE: &str = "key.not_exportable";
+    /// A token that failed or refused the operation.
+    pub const KEY_TOKEN: &str = "key.token";
+    /// No HTTP reply from the TSA.
+    pub const TSP_HTTP: &str = "tsp.http";
+    /// An HTTP status other than 200 from the TSA.
+    pub const TSP_STATUS: &str = "tsp.status";
+    /// A reply of another content type from the TSA.
+    pub const TSP_CONTENT_TYPE: &str = "tsp.content_type";
+    /// A request the TSA refused.
+    pub const TSP_REJECTED: &str = "tsp.rejected";
+    /// A time-stamp whose nonce is not the request's.
+    pub const TSP_NONCE_MISMATCH: &str = "tsp.nonce_mismatch";
+    /// A time-stamp whose message imprint is not the request's.
+    pub const TSP_IMPRINT_MISMATCH: &str = "tsp.imprint_mismatch";
+    /// A time-stamp of an imprint algorithm the core does not compute.
+    pub const TSP_UNSUPPORTED_IMPRINT_ALGORITHM: &str = "tsp.unsupported_imprint_algorithm";
+    /// A time-stamp of another policy.
+    pub const TSP_POLICY_MISMATCH: &str = "tsp.policy_mismatch";
+    /// A time-stamp without a TSA certificate with the timeStamping key usage.
+    pub const TSP_NO_TSA_CERTIFICATE: &str = "tsp.no_tsa_certificate";
+    /// A time-stamp whose genTime is too far from the core's clock.
+    pub const TSP_CLOCK_SKEW: &str = "tsp.clock_skew";
+    /// A TSA reply that is not a `TimeStampResp`.
+    pub const TSP_MALFORMED: &str = "tsp.malformed";
+    /// A file that is not a regular disk file a page may name, or cannot be read.
+    pub const PAGE_FILE_NOT_FOUND: &str = "page_file.not_found";
+    /// A file over the size the core reads.
+    pub const PAGE_FILE_TOO_LARGE: &str = "page_file.too_large";
     /// A file type the chooser does not know.
     pub const FILE_UNKNOWN_KIND: &str = "file.unknown_kind";
+
+    /// Every cause.
+    pub const ALL: &[&str] = &[
+        CMS_NO_ENCAPSULATED_DATA,
+        CMS_UNKNOWN_ALGORITHM,
+        CMS_MALFORMED,
+        CMS_CERT_NOT_FOUND,
+        CMS_DIGEST_MISMATCH,
+        CMS_BAD_SIGNATURE,
+        CMS_SIGNING_CERTIFICATE_MISMATCH,
+        CMS_CONSTRAINT,
+        XML_PARSE,
+        XML_DOCTYPE,
+        XML_TOO_LARGE,
+        XML_TOO_DEEP,
+        XML_XPATH,
+        XML_CONSTRAINT,
+        XML_UNSUPPORTED_ALGORITHM,
+        XML_NO_SIGNATURE,
+        XML_BAD_DIGEST,
+        XML_BAD_SIGNATURE,
+        KEY_MALFORMED,
+        KEY_UNKNOWN_KEY_ALGORITHM,
+        KEY_UNSUPPORTED,
+        KEY_MISMATCH,
+        KEY_BAD_SIGNATURE,
+        KEY_NOT_EXPORTABLE,
+        KEY_TOKEN,
+        TSP_HTTP,
+        TSP_STATUS,
+        TSP_CONTENT_TYPE,
+        TSP_REJECTED,
+        TSP_NONCE_MISMATCH,
+        TSP_IMPRINT_MISMATCH,
+        TSP_UNSUPPORTED_IMPRINT_ALGORITHM,
+        TSP_POLICY_MISMATCH,
+        TSP_NO_TSA_CERTIFICATE,
+        TSP_CLOCK_SKEW,
+        TSP_MALFORMED,
+        PAGE_FILE_NOT_FOUND,
+        PAGE_FILE_TOO_LARGE,
+        FILE_UNKNOWN_KIND,
+    ];
 }
 
 impl fmt::Display for HostError {
@@ -343,11 +450,29 @@ pub enum Import {
     CoreInstallBundle,
     /// `core_open_window`: [`WindowArgs`] → `()`, the window opened in the background.
     CoreOpenWindow,
+    /// `keys_flow_open`: [`FlowArgs`] → [`FlowOutcome`]: the storage dialog of a key choice
+    /// with the flow's rules; the opened flow lasts until the call returns.
+    KeysFlowOpen,
+    /// `keys_flow_pick`: [`PickArgs`] → `Option<`[`Chosen`]`>`: the key dialog of an opened
+    /// flow; `None` if the user cancels.
+    KeysFlowPick,
+    /// `keys_describe`: [`Handle`] → [`KeyDescription`].
+    KeysDescribe,
+    /// `tokens_scan`: `()` → [`TokenScan`].
+    TokensScan,
+    /// `dialog_reader`: [`ReaderArgs`] → `Option<String>`, the reader chosen; `None` if the
+    /// user cancels.
+    DialogReader,
+    /// `file_choose_kind`: [`FileKindArgs`] → `Option<String>`, the path of an existing file
+    /// or folder the user chose; `None` if the user cancels.
+    FileChooseKind,
+    /// `pkix_path`: [`PathArgs`] → [`PathOutcome`].
+    PkixPath,
 }
 
 impl Import {
     /// Every host function.
-    pub const ALL: [Import; 50] = [
+    pub const ALL: [Import; 57] = [
         Import::Log,
         Import::Now,
         Import::Random,
@@ -398,6 +523,13 @@ impl Import {
         Import::CoreBundles,
         Import::CoreInstallBundle,
         Import::CoreOpenWindow,
+        Import::KeysFlowOpen,
+        Import::KeysFlowPick,
+        Import::KeysDescribe,
+        Import::TokensScan,
+        Import::DialogReader,
+        Import::FileChooseKind,
+        Import::PkixPath,
     ];
 
     /// Its import name in [`IMPORT_MODULE`].
@@ -453,6 +585,13 @@ impl Import {
             Import::CoreBundles => "core_bundles",
             Import::CoreInstallBundle => "core_install_bundle",
             Import::CoreOpenWindow => "core_open_window",
+            Import::KeysFlowOpen => "keys_flow_open",
+            Import::KeysFlowPick => "keys_flow_pick",
+            Import::KeysDescribe => "keys_describe",
+            Import::TokensScan => "tokens_scan",
+            Import::DialogReader => "dialog_reader",
+            Import::FileChooseKind => "file_choose_kind",
+            Import::PkixPath => "pkix_path",
         }
     }
 
@@ -470,7 +609,8 @@ impl Import {
             | Import::Platform
             | Import::CaList
             | Import::CaIssuer
-            | Import::CallLocale => None,
+            | Import::CallLocale
+            | Import::PkixPath => None,
             Import::KeysChoose
             | Import::KeysSignCms
             | Import::KeysSignRaw
@@ -488,14 +628,21 @@ impl Import {
             | Import::CmsVerify
             | Import::KeysSignXmlEx
             | Import::XmlVerify
-            | Import::KeysSignXades => Some(Capability::Keys),
+            | Import::KeysSignXades
+            | Import::KeysFlowOpen
+            | Import::KeysFlowPick
+            | Import::KeysDescribe
+            | Import::TokensScan
+            | Import::DialogReader => Some(Capability::Keys),
             Import::DialogMessage
             | Import::DialogConfirm
             | Import::DialogPassword
             | Import::DialogChoice => Some(Capability::Dialogs),
-            Import::FileOpen | Import::FileSave | Import::FileChoose | Import::FileOpenEx => {
-                Some(Capability::Files)
-            }
+            Import::FileOpen
+            | Import::FileSave
+            | Import::FileChoose
+            | Import::FileOpenEx
+            | Import::FileChooseKind => Some(Capability::Files),
             Import::HttpRequest | Import::HttpRequestEx => Some(Capability::Http),
             Import::PageFileRead | Import::PageFileWrite => Some(Capability::PageFiles),
             Import::SettingsGet | Import::SettingsPut => Some(Capability::Settings),
@@ -564,7 +711,14 @@ impl Import {
             | Import::CoreModules
             | Import::CoreBundles
             | Import::CoreInstallBundle
-            | Import::CoreOpenWindow => "0.1.0-alpha.5",
+            | Import::CoreOpenWindow
+            | Import::KeysFlowOpen
+            | Import::KeysFlowPick
+            | Import::KeysDescribe
+            | Import::TokensScan
+            | Import::DialogReader
+            | Import::FileChooseKind
+            | Import::PkixPath => "0.1.0-alpha.5",
         };
         semver::Version::parse(version).expect("a valid version")
     }
@@ -900,6 +1054,9 @@ pub struct CertDetails {
     /// The algorithm the key signs with: `gost2004`, `gost2015_512`, `rsa_sha256` or
     /// `rsa_sha1`; `None` for another.
     pub signing_alg: Option<String>,
+    /// The common name of the issuer. Absent from older cores' details.
+    #[serde(default)]
+    pub issuer_cn: Option<String>,
 }
 
 /// `local_time`: the offset of the system's time zone at an instant.
@@ -1250,7 +1407,7 @@ pub enum CmsOutcome {
 }
 
 /// The signers [`StampArgs`] time-stamps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignerSel {
     /// The last one.
@@ -1259,6 +1416,9 @@ pub enum SignerSel {
     Index(u32),
     /// Every one without a time-stamp yet.
     AllUnstamped,
+    /// The first one of this certificate (DER), as Kalkan finds a signer;
+    /// [`StampOutcome::NoSigner`] without one.
+    OfCert(Bytes),
 }
 
 /// What [`StampArgs`] does with an earlier time-stamp.
@@ -1304,6 +1464,8 @@ pub enum StampOutcome {
     Stamped(Bytes),
     /// The time-stamp failed.
     Failed(NetFailure),
+    /// No signer of the certificate of [`SignerSel::OfCert`]; nothing was requested.
+    NoSigner,
 }
 
 /// `tsp_request`: a time-stamp of a hash.
@@ -2183,4 +2345,251 @@ pub enum Window {
         /// The bundle's symbolic name.
         symname: String,
     },
+}
+
+// Key choice flows, tokens, the typed file chooser and certificate paths.
+
+/// Most flows a call opens with `keys_flow_open`.
+pub const MAX_FLOWS: usize = 4;
+
+/// The readers a flow's storage dialog offers for tokens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowReaders {
+    /// Those holding a token, scanned when the dialog opens, while token support is on.
+    Live,
+    /// These, the first one first; each must hold a token of its storage's family now.
+    Fixed(Vec<FlowReader>),
+    /// None: the token storages are not selectable.
+    None,
+}
+
+/// A reader of [`FlowReaders::Fixed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowReader {
+    /// The token's storage (`AKKaztokenStore`, …).
+    pub storage: String,
+    /// The reader's name ([`Import::KeysTerminals`]).
+    pub reader: String,
+}
+
+/// The key store file a flow's storage dialog starts with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowStart {
+    /// The last one opened.
+    Recent,
+    /// This path from the page, if a page may name it; otherwise none.
+    Page(String),
+    /// None.
+    Empty,
+}
+
+/// How a flow reads the key store file the user chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowFile {
+    /// Any file the system opens.
+    Open,
+    /// A regular disk file of at most the size of a page's file, on a network share too,
+    /// never a device.
+    Chosen,
+}
+
+/// The storage dialog's error when a flow has no key to list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowNone {
+    /// No keys.
+    NoKeys,
+    /// No signing keys.
+    NoSigningKeys,
+    /// No authentication keys.
+    NoAuthKeys,
+}
+
+/// The order of a flow's keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowOrder {
+    /// As stored.
+    Store,
+    /// The latest notBefore first.
+    NewestFirst,
+    /// The earliest notBefore first.
+    OldestFirst,
+}
+
+/// How a flow checks the keys it lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowChecks {
+    /// Not at all: every key may be picked.
+    Settled,
+    /// Against these conditions and the keys' OCSP responders, the key dialog following
+    /// the checks.
+    Live {
+        /// The conditions of `keys_choose`.
+        filter: Box<Filter>,
+        /// More conditions.
+        more: Box<FilterMore>,
+    },
+}
+
+/// `keys_flow_open`: a key choice's storage dialog and the rules of its key dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowArgs {
+    /// What the key is for.
+    pub action: Action,
+    /// Storage names to offer; empty: PKCS#12 and JKS.
+    #[serde(default)]
+    pub storages: Vec<String>,
+    /// The readers offered for tokens.
+    pub readers: FlowReaders,
+    /// The key store file the dialog starts with.
+    pub start: FlowStart,
+    /// The path of an opened file becomes the last one opened.
+    pub remember: bool,
+    /// A line both dialogs show (after a plugin's name).
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// An empty password is refused before the store is opened.
+    pub non_empty_password: bool,
+    /// The password must match the policy for keys of internal systems.
+    pub inner_password_policy: bool,
+    /// An answer of a storage not offered is refused before the store is read.
+    pub same_storage: bool,
+    /// How the file is read.
+    pub file: FlowFile,
+    /// The keys listed: those of one of these Kalkan types (`SIGNATURE`, …); `None`: all.
+    #[serde(default)]
+    pub knca_types: Option<Vec<String>>,
+    /// The dialog's error when no key is left to list.
+    pub none: FlowNone,
+    /// An empty store is a store without keys to list.
+    pub empty_is_none: bool,
+    /// The order of the keys.
+    pub order: FlowOrder,
+    /// How the keys are checked.
+    pub checks: FlowChecks,
+    /// A reader whose token refused the PIN as blocked is not tried again.
+    pub skip_blocked_reader: bool,
+}
+
+/// A key of an opened flow, in the key dialog's order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowKey {
+    /// Its alias in the key store.
+    pub alias: String,
+    /// Its certificate, DER.
+    pub certificate: Bytes,
+}
+
+/// A flow whose store opened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowOpened {
+    /// The flow, for [`PickArgs`], until the call returns.
+    pub flow: u32,
+    /// Its keys.
+    pub keys: Vec<FlowKey>,
+}
+
+/// The last wrong PIN of a flow's storage dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowWrongPin {
+    /// The token's storage.
+    pub storage: String,
+    /// Tries left before the PIN is blocked, if the token tells.
+    pub tries_left: Option<u8>,
+}
+
+/// What `keys_flow_open` came to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowOutcome {
+    /// The opened flow; `None` if the user cancelled.
+    pub opened: Option<FlowOpened>,
+    /// The last wrong PIN typed, whether the store opened or not.
+    pub wrong_pin: Option<FlowWrongPin>,
+}
+
+/// `keys_flow_pick`: the key dialog of an opened flow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickArgs {
+    /// The flow.
+    pub flow: u32,
+    /// The dialog's error line: why the previous key did not do.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// `keys_describe`: a key the instance holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyDescription {
+    /// Its alias in the key store.
+    pub alias: String,
+    /// Its algorithm: `gost2004`, `gost2015_512` or `rsa`.
+    pub alg: String,
+    /// Its certificate, DER.
+    pub certificate: Bytes,
+}
+
+/// What `tokens_scan` saw.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenScan {
+    /// Token support is on.
+    pub enabled: bool,
+    /// The storages of the tokens connected, in Kalkan's order.
+    pub present: Vec<String>,
+    /// A card of any kind is in a reader.
+    pub any_card: bool,
+}
+
+/// `dialog_reader`: the choice of a reader holding a token of a storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderArgs {
+    /// The token's storage (`AKKaztokenStore`, …).
+    pub storage: String,
+}
+
+/// `file_choose_kind`: the original's file chooser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileKindArgs {
+    /// The original's `FileChooser.FileType` name (`P12`, `XML`, `ALL`, …); empty: a folder.
+    pub kind: String,
+    /// The folder it starts in, if a page may name it.
+    #[serde(default)]
+    pub directory: Option<String>,
+}
+
+/// The time a certification path is valid at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathTime {
+    /// The core's clock.
+    Now,
+    /// The core's clock, or for an expired certificate its notAfter.
+    NotAfterIfExpired,
+    /// This instant, Unix milliseconds.
+    UnixMs(i64),
+}
+
+/// `pkix_path`: a certification path through the CAs the core trusts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathArgs {
+    /// The certificate, DER.
+    pub cert: Bytes,
+    /// When.
+    pub at: PathTime,
+}
+
+/// What `pkix_path` came to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathOutcome {
+    /// A valid path.
+    Valid,
+    /// No CA the core trusts has the certificate's issuer name.
+    IssuerNotFound,
+    /// No valid path: why, in English.
+    Invalid(String),
 }

@@ -3,7 +3,7 @@
 //! its CBOR argument from the guest, runs, and writes its CBOR [`HostResult`] into a buffer
 //! of the guest's `oncl_alloc`.
 
-use crate::caps::{self, Consents, KeyTable, RequestBudget, Secrets};
+use crate::caps::{self, Consents, Flows, KeyTable, RequestBudget, Secrets};
 use crate::core::{self, CoreHooks};
 use crate::manifest::Capabilities;
 use crate::runtime::SessionContext;
@@ -110,6 +110,8 @@ pub(crate) struct CallContext {
     pub(crate) drop: bool,
     /// The HTTP requests sent during this request, the core's PKI requests included.
     pub(crate) http_requests: RequestBudget,
+    /// The key choice flows opened during this request, with their busy indicators.
+    pub(crate) flows: Flows,
 }
 
 /// An instance's store data.
@@ -151,6 +153,7 @@ impl HostState {
                 locale: Locale::Ru,
                 drop: false,
                 http_requests: RequestBudget::default(),
+                flows: Flows::default(),
             },
             keys: KeyTable::default(),
             secrets: Secrets::default(),
@@ -173,13 +176,15 @@ impl HostState {
             locale,
             drop: false,
             http_requests: RequestBudget::default(),
+            flows: Flows::default(),
         };
     }
 
-    /// The request is answered.
+    /// The request is answered: its flows end.
     pub(crate) fn end_call(&mut self) {
         self.phase = Phase::Idle;
         self.call.origin = None;
+        self.call.flows = Flows::default();
     }
 
     /// Lets go of every key, password and consent: the instance is spent, or goes back to
@@ -339,6 +344,13 @@ fn dispatch(state: &mut HostState, import: Import, args: &[u8]) -> Vec<u8> {
         Import::SharedPut => run(args, |a| caps::shared_put(state, a)),
         Import::KeysSignXades => run(args, |a| caps::keys_sign_xades(state, a)),
         Import::CallLocale => run(args, |a| call_locale(state, a)),
+        Import::KeysFlowOpen => run(args, |a| caps::keys_flow_open(state, a)),
+        Import::KeysFlowPick => run(args, |a| caps::keys_flow_pick(state, a)),
+        Import::KeysDescribe => run(args, |a| caps::keys_describe(state, a)),
+        Import::TokensScan => run(args, |()| Ok(caps::tokens_scan(state))),
+        Import::DialogReader => run(args, |a| caps::dialog_reader(state, a)),
+        Import::FileChooseKind => run(args, |a| caps::file_choose_kind(state, a)),
+        Import::PkixPath => run(args, |a| caps::pkix_path(state, a)),
         Import::CoreModules => run(args, |()| core::core_modules(state)),
         Import::CoreBundles => run(args, |()| core::core_bundles(state)),
         Import::CoreInstallBundle => run(args, |a| core::core_install_bundle(state, a)),

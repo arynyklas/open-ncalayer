@@ -115,6 +115,20 @@ mod imports {
         pub fn core_install_bundle(ptr: i32, len: i32) -> i64;
         #[link_name = "core_open_window"]
         pub fn core_open_window(ptr: i32, len: i32) -> i64;
+        #[link_name = "keys_flow_open"]
+        pub fn keys_flow_open(ptr: i32, len: i32) -> i64;
+        #[link_name = "keys_flow_pick"]
+        pub fn keys_flow_pick(ptr: i32, len: i32) -> i64;
+        #[link_name = "keys_describe"]
+        pub fn keys_describe(ptr: i32, len: i32) -> i64;
+        #[link_name = "tokens_scan"]
+        pub fn tokens_scan(ptr: i32, len: i32) -> i64;
+        #[link_name = "dialog_reader"]
+        pub fn dialog_reader(ptr: i32, len: i32) -> i64;
+        #[link_name = "file_choose_kind"]
+        pub fn file_choose_kind(ptr: i32, len: i32) -> i64;
+        #[link_name = "pkix_path"]
+        pub fn pkix_path(ptr: i32, len: i32) -> i64;
     }
 }
 
@@ -174,6 +188,13 @@ fn host_fn(import: Import) -> HostFn {
         Import::CoreBundles => imports::core_bundles,
         Import::CoreInstallBundle => imports::core_install_bundle,
         Import::CoreOpenWindow => imports::core_open_window,
+        Import::KeysFlowOpen => imports::keys_flow_open,
+        Import::KeysFlowPick => imports::keys_flow_pick,
+        Import::KeysDescribe => imports::keys_describe,
+        Import::TokensScan => imports::tokens_scan,
+        Import::DialogReader => imports::dialog_reader,
+        Import::FileChooseKind => imports::file_choose_kind,
+        Import::PkixPath => imports::pkix_path,
     }
 }
 
@@ -486,7 +507,12 @@ pub mod keys {
         TimeSource, Transform, XadesArgs, XadesLevel, XadesOutcome, XmlOutput,
     };
     use crate::abi::{
-        Chosen, Handle, OpenedKey, SignCmsArgs, SignRawArgs, SignXmlArgs, TerminalsArgs,
+        Chosen, FlowOutcome, Handle, OpenedKey, PickArgs, SignCmsArgs, SignRawArgs, SignXmlArgs,
+        TerminalsArgs,
+    };
+    pub use crate::abi::{
+        FlowArgs, FlowChecks, FlowFile, FlowKey, FlowNone, FlowOrder, FlowReader, FlowReaders,
+        FlowStart, FlowWrongPin, KeyDescription,
     };
 
     /// A key the user chose: it stays usable until dropped.
@@ -546,6 +572,45 @@ pub mod keys {
                 storage: storage.to_owned(),
             },
         )
+    }
+
+    /// A key choice by `args`' rules, opened: its storage dialog until a store opens. The
+    /// flow, `None` if the user cancelled; and the last wrong PIN typed either way. The
+    /// flow lasts until the call returns.
+    pub fn flow_open(args: &FlowArgs) -> HostResult<(Option<Flow>, Option<FlowWrongPin>)> {
+        let outcome: FlowOutcome = call(imports::keys_flow_open, args)?;
+        let flow = outcome.opened.map(|opened| Flow {
+            id: opened.flow,
+            keys: opened.keys,
+        });
+        Ok((flow, outcome.wrong_pin))
+    }
+
+    /// A key choice whose store opened ([`flow_open`]).
+    #[derive(Debug)]
+    pub struct Flow {
+        id: u32,
+        keys: Vec<FlowKey>,
+    }
+
+    impl Flow {
+        /// Its keys, in the key dialog's order.
+        pub fn keys(&self) -> &[FlowKey] {
+            &self.keys
+        }
+
+        /// The key dialog, with `error` as its error line: the key picked, `None` if the
+        /// user cancels. Every pick is a key of its own; the dialog lists the same keys.
+        pub fn pick(&self, error: Option<&str>) -> HostResult<Option<Key>> {
+            let chosen: Option<Chosen> = call(
+                imports::keys_flow_pick,
+                &PickArgs {
+                    flow: self.id,
+                    error: error.map(str::to_owned),
+                },
+            )?;
+            Ok(chosen.map(Key::from))
+        }
     }
 
     impl Key {
@@ -635,6 +700,16 @@ pub mod keys {
             call(imports::keys_sign_xades, &args)
         }
 
+        /// Its alias, algorithm and certificate.
+        pub fn describe(&self) -> HostResult<KeyDescription> {
+            call(
+                imports::keys_describe,
+                &Handle {
+                    handle: self.handle,
+                },
+            )
+        }
+
         /// The key's certificate chain, DER, from its certificate up: the key store's
         /// certificates, then the CAs the core trusts.
         pub fn chain(&self) -> HostResult<Vec<Vec<u8>>> {
@@ -699,6 +774,17 @@ pub mod dialogs {
     pub fn choice(args: &ChoiceArgs) -> HostResult<Option<u8>> {
         call(imports::dialog_choice, args)
     }
+
+    /// The choice of a reader holding a token of `storage` (capability `keys`): the
+    /// reader, `None` if the user cancels.
+    pub fn reader(storage: &str) -> HostResult<Option<String>> {
+        call(
+            imports::dialog_reader,
+            &crate::abi::ReaderArgs {
+                storage: storage.to_owned(),
+            },
+        )
+    }
 }
 
 /// Files the user chooses (capability `files`).
@@ -731,6 +817,20 @@ pub mod files {
     /// if the user cancels.
     pub fn choose(args: &ChooseFileArgs) -> HostResult<Option<ChosenPath>> {
         call(imports::file_choose, args)
+    }
+
+    /// The original's file chooser for the `FileChooser.FileType` `kind` (empty: a folder),
+    /// starting in `directory` if a page may name it: the path of an existing file or
+    /// folder the user chose; `None` if the user cancels. The path is one pages may name
+    /// later. An unknown `kind` is `invalid` with the cause `file.unknown_kind`.
+    pub fn choose_kind(kind: &str, directory: Option<&str>) -> HostResult<Option<String>> {
+        call(
+            imports::file_choose_kind,
+            &crate::abi::FileKindArgs {
+                kind: kind.to_owned(),
+                directory: directory.map(str::to_owned),
+            },
+        )
     }
 
     /// The path and contents of a file the user chooses in a chooser with `args`' title,
@@ -858,9 +958,9 @@ pub mod pki {
     use crate::abi::XmlVerifyArgs;
     pub use crate::abi::{
         CertStatusAbi, Check, CrlArgs, CrlOutcome, IssuerSel, NetFailure, NetKind, NetStage, Nonce,
-        OcspArgs, OcspOutcome, PkiMethod, PkiUrl, Problem, Revocation, SignerReport, SignerSel,
-        StampArgs, StampMode, StampOutcome, TokenForm, TsaChoice, TsaSpec, TspOutcome, TspReport,
-        TspRequestArgs, VerifyArgs, VerifyAt, VerifyReport, XmlSigReport,
+        OcspArgs, OcspOutcome, PathOutcome, PathTime, PkiMethod, PkiUrl, Problem, Revocation,
+        SignerReport, SignerSel, StampArgs, StampMode, StampOutcome, TokenForm, TsaChoice, TsaSpec,
+        TspOutcome, TspReport, TspRequestArgs, VerifyArgs, VerifyAt, VerifyReport, XmlSigReport,
     };
 
     /// A report on the signers of a CMS.
@@ -901,5 +1001,29 @@ pub mod pki {
     /// The CRLs of a certificate and its status in them.
     pub fn crl_fetch(args: &CrlArgs) -> HostResult<CrlOutcome> {
         call(imports::crl_fetch, args)
+    }
+
+    /// Whether a certification path from the certificate `der` through the CAs the core
+    /// trusts is valid `at`.
+    pub fn path(der: &[u8], at: PathTime) -> HostResult<PathOutcome> {
+        call(
+            imports::pkix_path,
+            &crate::abi::PathArgs {
+                cert: Bytes::from(der.to_vec()),
+                at,
+            },
+        )
+    }
+}
+
+/// The hardware tokens (capability `keys`).
+pub mod tokens {
+    use super::*;
+    pub use crate::abi::TokenScan;
+
+    /// Whether token support is on, the storages of the tokens connected and whether a
+    /// card is in any reader.
+    pub fn scan() -> HostResult<TokenScan> {
+        call(imports::tokens_scan, &())
     }
 }

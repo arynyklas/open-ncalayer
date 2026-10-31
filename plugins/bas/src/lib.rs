@@ -192,7 +192,10 @@ fn sign(root: &oncl_pdk::serde_json::Map<String, oncl_pdk::serde_json::Value>) -
             NetKind::Http(status) => format!("Invalid TSP response status: {status}"),
             _ => "TSP creation failure".to_owned(),
         }),
-        Err(_) => Outcome::CmsFailed("TSP creation failure".to_owned()),
+        // `no_signer` answers only `of_cert`, which is not asked here.
+        Ok(StampOutcome::NoSigner) | Err(_) => {
+            Outcome::CmsFailed("TSP creation failure".to_owned())
+        }
     }
 }
 

@@ -24,18 +24,21 @@ mod state;
 
 pub use crypto::{NCA_PKI_HOSTS, nca_pki_hosts};
 pub(crate) use crypto::{
-    ca_issuer, ca_list, cert_details, cms_verify, crl_fetch, hash, ocsp_fetch, tsp_request,
-    tsp_stamp, xml_verify,
+    ca_issuer, ca_list, cert_details, cms_verify, crl_fetch, hash, ocsp_fetch, pkix_path,
+    tsp_request, tsp_stamp, xml_verify,
 };
 pub use dialogs::MAX_SECRETS;
-pub(crate) use dialogs::{Secrets, dialog_choice, dialog_confirm, dialog_message, dialog_password};
+pub(crate) use dialogs::{
+    Secrets, dialog_choice, dialog_confirm, dialog_message, dialog_password, dialog_reader,
+};
 pub(crate) use files::{
-    file_choose, file_open, file_open_ex, file_save, page_file_read, page_file_write,
+    file_choose, file_choose_kind, file_open, file_open_ex, file_save, page_file_read,
+    page_file_write,
 };
 pub(crate) use keys::{
-    KeyTable, keys_chain, keys_choose, keys_open, keys_release, keys_select, keys_sign_cms,
-    keys_sign_cms_ex, keys_sign_raw, keys_sign_xades, keys_sign_xml, keys_sign_xml_ex,
-    keys_terminals,
+    Flows, KeyTable, keys_chain, keys_choose, keys_describe, keys_flow_open, keys_flow_pick,
+    keys_open, keys_release, keys_select, keys_sign_cms, keys_sign_cms_ex, keys_sign_raw,
+    keys_sign_xades, keys_sign_xml, keys_sign_xml_ex, keys_terminals, tokens_scan,
 };
 pub use net::{HTTP_TIMEOUT, MAX_HTTP_BODY, MAX_HTTP_REQUESTS};
 pub(crate) use net::{RequestBudget, http_request, http_request_ex};

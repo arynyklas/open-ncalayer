@@ -409,6 +409,8 @@ fn stamp(cms: Vec<u8>, tsa: TsaChoice) -> Result<Vec<u8>, String> {
     match pki::stamp(&args).map_err(|e| e.message)? {
         StampOutcome::Stamped(cms) => Ok(cms.into_vec()),
         StampOutcome::Failed(failure) => Err(failure.detail),
+        // Answers only `of_cert`, which is not asked here.
+        StampOutcome::NoSigner => Err("the CMS has no signer to time-stamp".to_owned()),
     }
 }
 

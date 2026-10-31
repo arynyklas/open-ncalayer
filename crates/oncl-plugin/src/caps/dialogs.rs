@@ -1,18 +1,20 @@
 //! `dialogs`: a message, a yes/no question, a choice of the plugin's buttons (and list) and
-//! a password that stays in the core.
+//! a password that stays in the core; with `keys`, the choice of a token's reader.
 
 use super::{
     DialogTurn, MAX_DIALOG_TEXT, MAX_LINE, check_line, invalid, limit, origin, source, source_line,
 };
 use crate::host::HostState;
 use oncl_basics::{
-    ChoiceAnswer, ChoicePrompt, ConfirmPrompt, MessagePrompt, PasswordPrompt, Prompt,
+    ChoiceAnswer, ChoicePrompt, ConfirmPrompt, MessagePrompt, PasswordPrompt, Prompt, ReaderList,
+    ReaderPrompt, StorageKind,
 };
 use oncl_pdk::abi::{
     ChoiceArgs, ConfirmArgs, HostResult, MAX_CHOICE_OPTIONS, MessageArgs, MessageKind,
-    PasswordArgs, SecretRef,
+    PasswordArgs, ReaderArgs, SecretRef,
 };
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// The most passwords of `dialog_password` an instance keeps; a further one replaces the
@@ -86,6 +88,25 @@ pub(crate) fn dialog_password(
         })),
         Prompt::Cancelled => Ok(None),
     }
+}
+
+/// `dialog_reader`: the choice of a reader holding a token of a storage, the readers
+/// scanned when it opens and on request: the reader's name.
+pub(crate) fn dialog_reader(state: &mut HostState, args: ReaderArgs) -> HostResult<Option<String>> {
+    let storage = StorageKind::from_name(&args.storage)
+        .filter(|s| s.token_kind().is_some())
+        .ok_or_else(|| invalid(format!("{:?} is not a token storage", args.storage)))?;
+    let prompt = ReaderPrompt {
+        origin: origin(state),
+        locale: state.call.locale,
+        storage,
+        readers: ReaderList::new(Arc::clone(&state.services.tokens)),
+    };
+    DialogTurn::hold();
+    Ok(match state.services.prompter.reader(&prompt) {
+        Prompt::Answer(reader) => Some(reader),
+        Prompt::Cancelled => None,
+    })
 }
 
 /// `dialog_message`.

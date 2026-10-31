@@ -574,6 +574,8 @@ fn sign_cms(key: &Key, files_names: &str, data: &[u8]) -> Result<Signed, Error> 
     let cms = match stamped {
         StampOutcome::Stamped(cms) => cms.into_vec(),
         StampOutcome::Failed(failure) => return Err(remote(&failure, &url, None)),
+        // Answers only `of_cert`, which is not asked here.
+        StampOutcome::NoSigner => return Err(Error::code("TSP_NOT_VALID")),
     };
     Ok(Signed {
         cms,

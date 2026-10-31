@@ -7,6 +7,7 @@ use super::{
     ConsentKind, DialogTurn, MAX_LINE, check_line, failed, invalid, is_builtin, limit, origin,
     source, source_line,
 };
+use crate::cause;
 use crate::host::HostState;
 use oncl_basics::{
     ConfirmPrompt, FileKind, FilePrompt, Locale, MAX_PAGE_FILE, PageFile, PageFileError,
@@ -14,8 +15,8 @@ use oncl_basics::{
     remember_chosen_path,
 };
 use oncl_pdk::abi::{
-    Bytes, ChooseFileArgs, ChosenPath, FileMode, HostResult, OpenedFile, PagePathArgs, PageRead,
-    PageWrite, PageWriteArgs, SaveArgs,
+    self, Bytes, ChooseFileArgs, ChosenPath, FileKindArgs, FileMode, HostError, HostResult,
+    OpenedFile, PagePathArgs, PageRead, PageWrite, PageWriteArgs, SaveArgs,
 };
 use oncl_pki::fsutil::{Access, write_atomically};
 use std::path::{Path, PathBuf};
@@ -43,10 +44,7 @@ pub(crate) fn file_open(state: &mut HostState) -> HostResult<Option<OpenedFile>>
         Prompt::Answer(path) => path,
         Prompt::Cancelled => return Ok(None),
     };
-    let file = PageFile::read_chosen(&path).map_err(|e| match e {
-        PageFileError::TooLarge => limit(format!("the file is over {MAX_PAGE_FILE} bytes")),
-        PageFileError::NotFound => failed(format!("{} cannot be read", path.display())),
-    })?;
+    let file = PageFile::read_chosen(&path).map_err(|e| unread(e, &path))?;
     remember_chosen_path(&path);
     Ok(Some(OpenedFile {
         path: file.shown,
@@ -172,6 +170,49 @@ pub(crate) fn file_choose(
     }))
 }
 
+/// `file_choose_kind`: the original's file chooser for a `FileChooser.FileType` (empty: a
+/// folder), starting in a folder the page names if a page may name it: the path of an
+/// existing file or folder the user chose, which pages may name later. Nothing is read.
+pub(crate) fn file_choose_kind(
+    state: &mut HostState,
+    args: FileKindArgs,
+) -> HostResult<Option<String>> {
+    check_line("the file type", &args.kind, MAX_LINE)?;
+    let kind = if args.kind.is_empty() {
+        FileKind::Directory
+    } else {
+        FileKind::from_name(&args.kind).ok_or_else(|| {
+            invalid(format!("no file type {:?}", args.kind))
+                .with_cause(abi::cause::FILE_UNKNOWN_KIND)
+        })?
+    };
+    if let Some(directory) = &args.directory {
+        check_line("the folder", directory, MAX_LINE)?;
+    }
+    let prompt = FilePrompt {
+        origin: origin(state),
+        locale: state.call.locale,
+        kind,
+        // A network folder the user did not choose is not opened: the system dialog would
+        // connect to its host.
+        directory: args
+            .directory
+            .as_deref()
+            .and_then(page_path)
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(Path::to_path_buf),
+        source: source_line(state),
+    };
+    DialogTurn::hold();
+    Ok(match state.services.prompter.file(&prompt) {
+        Prompt::Answer(path) if path.exists() => {
+            remember_chosen_path(&path);
+            Some(path.to_string_lossy().into_owned())
+        }
+        Prompt::Answer(_) | Prompt::Cancelled => None,
+    })
+}
+
 /// `file_open_ex`: a file the user chooses in the plugin's chooser, at most
 /// [`MAX_PAGE_FILE`] bytes.
 pub(crate) fn file_open_ex(
@@ -187,15 +228,21 @@ pub(crate) fn file_open_ex(
         Prompt::Answer(path) => path,
         Prompt::Cancelled => return Ok(None),
     };
-    let file = PageFile::read_chosen(&path).map_err(|e| match e {
-        PageFileError::TooLarge => limit(format!("the file is over {MAX_PAGE_FILE} bytes")),
-        PageFileError::NotFound => failed(format!("{} cannot be read", path.display())),
-    })?;
+    let file = PageFile::read_chosen(&path).map_err(|e| unread(e, &path))?;
     remember_chosen_path(&path);
     Ok(Some(OpenedFile {
         path: file.shown,
         data: Bytes::from(file.data),
     }))
+}
+
+/// A file the user chose that is not read: over the limit, or not a readable file.
+fn unread(e: PageFileError, path: &Path) -> HostError {
+    match e {
+        PageFileError::TooLarge => limit(format!("the file is over {MAX_PAGE_FILE} bytes")),
+        PageFileError::NotFound => failed(format!("{} cannot be read", path.display())),
+    }
+    .with_cause(cause::page_file(e))
 }
 
 /// Asks once per session whether the page may do `kind` with `path` (canonical), with

@@ -6,15 +6,19 @@
 //! ([`PagePins`](oncl_basics::PagePins)).
 
 use super::{
-    ConsentKind, DialogTurn, MAX_KEY_HANDLES, MAX_LINE, check_line, crypto, denied, failed,
-    invalid, origin, source, source_line,
+    ConsentKind, DialogTurn, MAX_DIALOG_TEXT, MAX_KEY_HANDLES, MAX_LINE, check_line, crypto,
+    denied, failed, invalid, limit, origin, source, source_line,
 };
+use crate::cause;
 use crate::host::HostState;
 use der::asn1::ObjectIdentifier;
 use oncl_basics::{
     ChainPolicy, ConfirmPrompt, FilterMore as BasicsMore, KeyChooser, KeyFilter, KeyFlow, KeyOrder,
     KeyRequest, Locale, MAX_PAGE_FILE, OpenError, PageFile, PageFileError, Prompt, StorageAnswer,
     StorageKind, page_path,
+};
+use oncl_basics::{
+    FileRead, KeyChecks, OpenedFlow, PasswordRules, ReaderEntry, Readers, StartPath,
 };
 use oncl_basics::{PinFrom, PinRefusal, PinUse, page_pin_text};
 use oncl_pdk::abi::{
@@ -26,6 +30,10 @@ use oncl_pdk::abi::{
     C14n, CmsCerts, CmsContent, CmsOutcome, Placement, SignCmsExArgs, SignXmlExArgs, TimeSource,
     Transform, XmlOutput,
 };
+use oncl_pdk::abi::{
+    FlowArgs, FlowChecks, FlowFile, FlowKey, FlowNone, FlowOpened, FlowOrder, FlowOutcome,
+    FlowReaders, FlowStart, FlowWrongPin, KeyDescription, MAX_FLOWS, PickArgs, TokenScan,
+};
 use oncl_pdk::abi::{NetStage, Problem, XadesArgs, XadesLevel, XadesOutcome};
 use oncl_pki::cert::Certificate;
 use oncl_pki::cms::{
@@ -33,13 +41,13 @@ use oncl_pki::cms::{
 };
 use oncl_pki::crl::CrlError;
 use oncl_pki::info::{KeyUsageBits, KncaCertType};
-use oncl_pki::key::{KeyAlg, SigAlg};
+use oncl_pki::key::{KeyAlg, KeyError, SigAlg};
 use oncl_pki::ocsp::CertStatus;
 use oncl_pki::pkcs12::{self, KeyEntry, Pkcs12Error};
 use oncl_pki::pkix::CaSet;
 use oncl_pki::xades;
 use oncl_pki::{cert, tsp, xmldsig};
-use oncl_token::TokenError;
+use oncl_token::{TokenError, TokenKind};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -176,15 +184,7 @@ pub(crate) fn keys_select(state: &mut HostState, args: SelectArgs) -> HostResult
 
 /// The storage and key dialogs of `choice`; the key stays in the instance.
 fn choose(state: &mut HostState, choice: Choice) -> HostResult<Option<Chosen>> {
-    let storages = if choice.storages.is_empty() {
-        vec![StorageKind::Pkcs12, StorageKind::Jks]
-    } else {
-        choice
-            .storages
-            .iter()
-            .map(|name| storage_kind(name))
-            .collect::<HostResult<_>>()?
-    };
+    let storages = storage_kinds(&choice.storages)?;
     let detail = dialog_detail(state, choice.detail)?;
     let request = KeyRequest {
         origin: origin(state),
@@ -251,9 +251,210 @@ fn key_chooser(state: &HostState) -> KeyChooser {
     }
 }
 
+/// The storages named `names`; none: PKCS#12 and JKS.
+fn storage_kinds(names: &[String]) -> HostResult<Vec<StorageKind>> {
+    if names.is_empty() {
+        return Ok(vec![StorageKind::Pkcs12, StorageKind::Jks]);
+    }
+    names.iter().map(|name| storage_kind(name)).collect()
+}
+
 /// The storage named `name`.
 fn storage_kind(name: &str) -> HostResult<StorageKind> {
     StorageKind::from_name(name).ok_or_else(|| invalid(format!("no storage {name:?}")))
+}
+
+/// The key choice flows of a call, by id; `None` for one whose storage dialog was
+/// cancelled. An opened flow keeps its busy indicator up to its first key dialog.
+#[derive(Default)]
+pub(crate) struct Flows(Vec<Option<(KeyFlow, OpenedFlow)>>);
+
+/// `keys_flow_open`: a key choice's storage dialog by the flow's rules; the opened flow
+/// stays until the call returns, at most [`MAX_FLOWS`] in a call.
+pub(crate) fn keys_flow_open(state: &mut HostState, args: FlowArgs) -> HostResult<FlowOutcome> {
+    if state.call.flows.0.len() >= MAX_FLOWS {
+        return Err(limit(format!("at most {MAX_FLOWS} key choices in a call")));
+    }
+    let flow = key_flow(state, args)?;
+    let chooser = key_chooser(state);
+    DialogTurn::hold();
+    let open = chooser.open(&flow);
+    let wrong_pin = open.wrong_pin.map(|wrong| FlowWrongPin {
+        storage: wrong.storage.name().to_owned(),
+        tries_left: wrong.tries_left,
+    });
+    let Some(opened) = open.opened else {
+        state.call.flows.0.push(None);
+        return Ok(FlowOutcome {
+            opened: None,
+            wrong_pin,
+        });
+    };
+    let keys = opened
+        .entries()
+        .iter()
+        .map(|entry| {
+            Ok(FlowKey {
+                alias: entry.alias.clone(),
+                certificate: Bytes::from(der_of(&entry.cert)?),
+            })
+        })
+        .collect::<HostResult<_>>()?;
+    // At most MAX_FLOWS, which fits a u32.
+    let id = state.call.flows.0.len() as u32;
+    state.call.flows.0.push(Some((flow, opened)));
+    Ok(FlowOutcome {
+        opened: Some(FlowOpened { flow: id, keys }),
+        wrong_pin,
+    })
+}
+
+/// The core's flow of `args`, checked: known storages and types, fixed readers that hold a
+/// token of their storage now, a start path a page may name (else none), a detail line
+/// within [`MAX_LINE`] led by a plugin's name.
+fn key_flow(state: &mut HostState, args: FlowArgs) -> HostResult<KeyFlow> {
+    let storages = storage_kinds(&args.storages)?;
+    let readers = match args.readers {
+        FlowReaders::Live => Readers::Live,
+        FlowReaders::None => Readers::None,
+        FlowReaders::Fixed(list) => {
+            let mut entries = Vec::with_capacity(list.len());
+            for fixed in list {
+                check_line("the reader", &fixed.reader, MAX_LINE)?;
+                let storage = storage_kind(&fixed.storage)?;
+                if !token_readers(state, storage)?.contains(&fixed.reader) {
+                    return Err(invalid(format!(
+                        "no token of {} is in the reader",
+                        storage.name()
+                    )));
+                }
+                entries.push(ReaderEntry {
+                    storage,
+                    reader: fixed.reader,
+                });
+            }
+            Readers::Fixed(entries)
+        }
+    };
+    let start = match args.start {
+        FlowStart::Recent => StartPath::Recent,
+        FlowStart::Empty => StartPath::Empty,
+        FlowStart::Page(path) => {
+            check_line("the start path", &path, MAX_LINE)?;
+            // A path a page may not name is not offered.
+            page_path(&path)
+                .filter(|p| !p.as_os_str().is_empty())
+                .map_or(StartPath::Empty, |p| StartPath::Given(p.to_path_buf()))
+        }
+    };
+    let kinds = args
+        .knca_types
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| {
+                    KncaCertType::from_name(name)
+                        .ok_or_else(|| invalid(format!("no Kalkan type {name:?}")))
+                })
+                .collect::<HostResult<Vec<_>>>()
+        })
+        .transpose()?;
+    let checks = match args.checks {
+        FlowChecks::Settled => KeyChecks::Settled,
+        FlowChecks::Live { filter, more } => {
+            KeyChecks::Live(Box::new(key_filter(*filter, filter_more(*more)?)?))
+        }
+    };
+    Ok(KeyFlow {
+        origin: origin(state),
+        locale: state.call.locale,
+        action: basics_action(args.action),
+        storages,
+        readers,
+        start,
+        remember: args.remember,
+        detail: dialog_detail(state, args.detail)?,
+        password: PasswordRules {
+            non_empty: args.non_empty_password,
+            inner_policy: args.inner_password_policy,
+        },
+        same_storage: args.same_storage,
+        file: match args.file {
+            FlowFile::Open => FileRead::Open,
+            FlowFile::Chosen => FileRead::Chosen,
+        },
+        kinds,
+        none: match args.none {
+            FlowNone::NoKeys => OpenError::NoKeys,
+            FlowNone::NoSigningKeys => OpenError::NoSigningKeys,
+            FlowNone::NoAuthKeys => OpenError::NoAuthKeys,
+        },
+        empty_is_none: args.empty_is_none,
+        order: match args.order {
+            FlowOrder::Store => KeyOrder::Store,
+            FlowOrder::NewestFirst => KeyOrder::NewestFirst,
+            FlowOrder::OldestFirst => KeyOrder::OldestFirst,
+        },
+        checks,
+        skip_blocked_reader: args.skip_blocked_reader,
+    })
+}
+
+/// `keys_flow_pick`: the key dialog of an opened flow, with the error line given; each key
+/// picked is kept under a new handle.
+pub(crate) fn keys_flow_pick(state: &mut HostState, args: PickArgs) -> HostResult<Option<Chosen>> {
+    if let Some(error) = &args.error {
+        check_line("the error", error, MAX_DIALOG_TEXT)?;
+    }
+    state.keys.has_room()?;
+    let chooser = key_chooser(state);
+    let Some(Some((flow, opened))) = state.call.flows.0.get_mut(args.flow as usize) else {
+        return Err(invalid(format!("no key choice {} in this call", args.flow)));
+    };
+    DialogTurn::hold();
+    let Some(index) = opened.pick(&chooser, flow, args.error) else {
+        return Ok(None);
+    };
+    let entry = opened.entries()[index].clone();
+    let certificate = der_of(&entry.cert)?;
+    let alias = entry.alias.clone();
+    let handle = state.keys.insert(entry, Arc::from([]))?;
+    Ok(Some(Chosen {
+        handle,
+        alias,
+        certificate: Bytes::from(certificate),
+    }))
+}
+
+/// `keys_describe`: the alias, algorithm and certificate of a key the instance holds.
+pub(crate) fn keys_describe(state: &mut HostState, args: Handle) -> HostResult<KeyDescription> {
+    let entry = state.keys.get(args.handle)?;
+    Ok(KeyDescription {
+        alias: entry.alias.clone(),
+        alg: match entry.key.alg() {
+            KeyAlg::Gost2004 => "gost2004",
+            KeyAlg::Gost2015_512 => "gost2015_512",
+            KeyAlg::Rsa => "rsa",
+        }
+        .to_owned(),
+        certificate: Bytes::from(der_of(&entry.cert)?),
+    })
+}
+
+/// `tokens_scan`: whether token support is on, the storages of the tokens connected in
+/// Kalkan's order, and whether a card of any kind is in a reader.
+pub(crate) fn tokens_scan(state: &HostState) -> TokenScan {
+    let tokens = &state.services.tokens;
+    let present = tokens.scan().present;
+    TokenScan {
+        enabled: tokens.is_enabled(),
+        present: TokenKind::ALL
+            .into_iter()
+            .filter(|kind| present.iter().any(|p| p.kind == *kind))
+            .map(|kind| kind.storage_name().to_owned())
+            .collect(),
+        any_card: tokens.any_card(),
+    }
 }
 
 /// The basics module's conditions of `filter` and `more`.
@@ -632,10 +833,10 @@ pub(crate) fn keys_sign_cms(state: &mut HostState, args: SignCmsArgs) -> HostRes
         digested: false,
         signing_time: (state.services.clock)(),
     };
-    let mut der = cms::sign(entry, &args.data, &opts).map_err(failed)?;
+    let mut der = cms::sign(entry, &args.data, &opts).map_err(cms_failed)?;
     if args.timestamp {
         let last = cms::signer_count(&der)
-            .map_err(failed)?
+            .map_err(cms_failed)?
             .checked_sub(1)
             .ok_or_else(|| failed("the signed CMS has no signers"))?;
         der = tsp::timestamp_signer(
@@ -644,7 +845,7 @@ pub(crate) fn keys_sign_cms(state: &mut HostState, args: SignCmsArgs) -> HostRes
             &state.services.tsa,
             state.services.http.as_ref(),
         )
-        .map_err(failed)?;
+        .map_err(|e| failed(&e).with_cause(cause::tsp(&e)))?;
     }
     Ok(Bytes::from(der))
 }
@@ -729,8 +930,8 @@ pub(crate) fn keys_sign_cms_ex(
     };
     let entry = state.keys.get(args.handle)?;
     let der = cms::sign_spec(entry, &chain, &spec).map_err(|e| match e {
-        CmsError::Key(_) | CmsError::UnknownAlgorithm(_) => failed(e),
-        e => invalid(e.to_string()),
+        CmsError::Key(_) | CmsError::UnknownAlgorithm(_) => cms_failed(e),
+        e => invalid(e.to_string()).with_cause(cause::cms(&e)),
     })?;
     let Some(tsa) = tsa else {
         return Ok(CmsOutcome::Signed(Bytes::from(der)));
@@ -746,7 +947,7 @@ pub(crate) fn keys_sign_cms_ex(
             &spec,
             tsp::StampMode::Replace,
             tsp::TokenForm::Token,
-            &crypto::PkiOnly::of(state),
+            &crypto::PkiHttp::of(state),
         ) {
             Ok(stamped) => CmsOutcome::Signed(Bytes::from(stamped)),
             Err(e) => CmsOutcome::TspFailed(crypto::tsp_failure(&spec, &e)),
@@ -762,7 +963,10 @@ pub(crate) fn keys_sign_raw(state: &mut HostState, args: SignRawArgs) -> HostRes
         KeyAlg::Gost2015_512 => SigAlg::Gost2015_512,
         KeyAlg::Rsa => SigAlg::RsaSha256,
     };
-    let signature = entry.key.sign(alg, &args.data).map_err(failed)?;
+    let signature = entry
+        .key
+        .sign(alg, &args.data)
+        .map_err(|e: KeyError| failed(&e).with_cause(cause::key(&e)))?;
     Ok(Bytes::from(signature))
 }
 
@@ -782,7 +986,7 @@ pub(crate) fn keys_sign_xml(state: &mut HostState, args: SignXmlArgs) -> HostRes
             &entry.cert,
         ),
     }
-    .map_err(failed)?;
+    .map_err(xml_failed)?;
     Ok(Bytes::from(signed))
 }
 
@@ -848,7 +1052,8 @@ pub(crate) fn keys_sign_xml_ex(state: &mut HostState, args: SignXmlExArgs) -> Ho
             },
         },
     };
-    let signed = xmldsig::sign_spec(&args.xml, &spec, &entry.key, &entry.cert).map_err(failed)?;
+    let signed =
+        xmldsig::sign_spec(&args.xml, &spec, &entry.key, &entry.cert).map_err(xml_failed)?;
     Ok(Bytes::from(signed))
 }
 
@@ -880,7 +1085,7 @@ pub(crate) fn keys_sign_xades(state: &mut HostState, args: XadesArgs) -> HostRes
         digest_method: args.digest_method.as_deref(),
     };
     let now = (state.services.clock)();
-    let http = crypto::PkiOnly::of(state);
+    let http = crypto::PkiHttp::of(state);
     let entry = state.keys.get(args.handle)?;
     Ok(
         match xades::sign(&args.xml, &spec, &entry.key, &entry.cert, &http, now) {
@@ -919,9 +1124,19 @@ pub(crate) fn keys_sign_xades(state: &mut HostState, args: XadesArgs) -> HostRes
             )),
             Err(xades::XadesError::Crl { .. }) => XadesOutcome::Invalid(Problem::CrlInvalid),
             Err(e @ xades::XadesError::NoIssuer(_)) => return Err(invalid(e.to_string())),
-            Err(xades::XadesError::Xml(e)) => return Err(failed(e)),
+            Err(xades::XadesError::Xml(e)) => return Err(xml_failed(e)),
         },
     )
+}
+
+/// A CMS that did not sign: `failed` with its cause.
+fn cms_failed(e: CmsError) -> HostError {
+    failed(&e).with_cause(cause::cms(&e))
+}
+
+/// An XML document that did not sign: `failed` with its cause.
+fn xml_failed(e: xmldsig::XmlError) -> HostError {
+    failed(&e).with_cause(cause::xml(&e))
 }
 
 /// `keys_release`.

@@ -10,12 +10,14 @@
 //! - [`store`]: the installed plugins in `<data>/plugins/` ([`Store`]);
 //! - [`modules`]: the loaded plugins as the daemon's dynamic modules ([`PluginModules`]);
 //! - the modules built into the core, run as guests of the same runtime ([`Builtins`]),
-//!   and what the core tells them about itself ([`core`]).
+//!   and what the core tells them about itself ([`core`]);
+//! - the [`cause`] of the core's failures a guest tells apart.
 //!
 //! The format, the ABI and the limits are described in `docs/design/plugins.md`.
 
 mod builtins;
 mod caps;
+pub mod cause;
 pub mod core;
 mod host;
 pub mod manifest;

@@ -660,6 +660,83 @@ fn abi_types_roundtrip() {
         location: Some("/x".to_owned()),
         body: bytes(),
     });
+    roundtrip(abi::FlowArgs {
+        action: Action::Authenticate,
+        storages: vec!["PKCS12".to_owned()],
+        readers: abi::FlowReaders::Fixed(vec![abi::FlowReader {
+            storage: "AKKaztokenStore".to_owned(),
+            reader: "R".to_owned(),
+        }]),
+        start: abi::FlowStart::Page("C:\\k.p12".to_owned()),
+        remember: true,
+        detail: Some("d".to_owned()),
+        non_empty_password: true,
+        inner_password_policy: false,
+        same_storage: true,
+        file: abi::FlowFile::Chosen,
+        knca_types: Some(vec!["SIGNATURE".to_owned()]),
+        none: abi::FlowNone::NoAuthKeys,
+        empty_is_none: true,
+        order: abi::FlowOrder::OldestFirst,
+        checks: abi::FlowChecks::Live {
+            filter: Box::new(Filter {
+                iin: "1".to_owned(),
+                ..Filter::default()
+            }),
+            more: Box::default(),
+        },
+        skip_blocked_reader: true,
+    });
+    roundtrip(abi::FlowOutcome {
+        opened: Some(abi::FlowOpened {
+            flow: 2,
+            keys: vec![abi::FlowKey {
+                alias: "a".to_owned(),
+                certificate: bytes(),
+            }],
+        }),
+        wrong_pin: Some(abi::FlowWrongPin {
+            storage: "AKKaztokenStore".to_owned(),
+            tries_left: Some(3),
+        }),
+    });
+    roundtrip(abi::PickArgs {
+        flow: 1,
+        error: Some("e".to_owned()),
+    });
+    roundtrip(abi::KeyDescription {
+        alias: "a".to_owned(),
+        alg: "rsa".to_owned(),
+        certificate: bytes(),
+    });
+    roundtrip(abi::TokenScan {
+        enabled: true,
+        present: vec!["AKKZIDCardStore".to_owned()],
+        any_card: true,
+    });
+    roundtrip(abi::ReaderArgs {
+        storage: "AKKaztokenStore".to_owned(),
+    });
+    roundtrip(abi::FileKindArgs {
+        kind: "P12".to_owned(),
+        directory: None,
+    });
+    for at in [
+        abi::PathTime::Now,
+        abi::PathTime::NotAfterIfExpired,
+        abi::PathTime::UnixMs(-1),
+    ] {
+        roundtrip(abi::PathArgs { cert: bytes(), at });
+    }
+    for outcome in [
+        abi::PathOutcome::Valid,
+        abi::PathOutcome::IssuerNotFound,
+        abi::PathOutcome::Invalid("why".to_owned()),
+    ] {
+        roundtrip(outcome);
+    }
+    roundtrip(abi::SignerSel::OfCert(bytes()));
+    roundtrip(abi::StampOutcome::NoSigner);
 }
 
 #[test]

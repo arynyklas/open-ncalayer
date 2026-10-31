@@ -348,6 +348,8 @@ fn stamp(cms: Vec<u8>) -> Result<String, Option<String>> {
     match pki::stamp(&args).map_err(|e| Some(e.message))? {
         StampOutcome::Stamped(cms) => Ok(base64(&cms)),
         StampOutcome::Failed(failure) => Err(Some(failure.detail)),
+        // Answers only `of_cert`, which is not asked here.
+        StampOutcome::NoSigner => Err(None),
     }
 }
 
