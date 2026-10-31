@@ -408,6 +408,31 @@ fn page_folder_must_be_absolute_and_existing() {
     );
 }
 
+/// A page that names no folder: the certificate's own checks first, then refused like a
+/// folder a page may not name; a new key is refused before any key is made.
+#[test]
+fn unnamed_folder_is_refused() {
+    let (_, services) = scripted(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let args = essentials(Folder::Unnamed, Password::Text(PASSWORD.to_owned()));
+    assert_cause(
+        once::<NewKey>(&services, vec![new_key(&args)]),
+        abi::cause::KEYSTORE_FOLDER_REFUSED,
+    );
+    let (_, key) = key_file(dir.path());
+    let cert = certificate(&key, &[0x41, 0x03], true);
+    let no_ski = certificate(&key, &[0x41, 0x04], false);
+    assert_cause(
+        once::<InstalledCert>(&services, vec![install(Folder::Unnamed, &no_ski, None)]),
+        abi::cause::KEYSTORE_EXTENSION_NOT_FOUND,
+    );
+    assert_cause(
+        once::<InstalledCert>(&services, vec![install(Folder::Unnamed, &cert, None)]),
+        abi::cause::KEYSTORE_FOLDER_REFUSED,
+    );
+    assert_eq!(files(dir.path()).len(), 1);
+}
+
 #[test]
 fn chosen_folder_handle_is_per_call() {
     let dir = tempfile::tempdir().unwrap();

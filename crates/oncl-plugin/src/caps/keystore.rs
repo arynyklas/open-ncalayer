@@ -76,7 +76,8 @@ enum PageFolder {
     Existing,
 }
 
-/// The folder of `folder`: a window's answer of this call, or a folder the page may name.
+/// The folder of `folder`: a window's answer of this call, or a folder the page may name
+/// (none named is refused as one it may not).
 fn folder(state: &HostState, folder: &Folder, page: PageFolder) -> HostResult<PathBuf> {
     match folder {
         Folder::Chosen(id) => state
@@ -97,6 +98,9 @@ fn folder(state: &HostState, folder: &Folder, page: PageFolder) -> HostResult<Pa
                 );
             }
             Ok(dir.to_path_buf())
+        }
+        Folder::Unnamed => {
+            Err(failed("the page named no folder").with_cause(causes::KEYSTORE_FOLDER_REFUSED))
         }
     }
 }
@@ -317,7 +321,7 @@ pub(crate) fn keystore_install_cert(
             check_new()?;
             install_certificate(&dir, &old, &certificate, &storage_oid).map_err(|e| failure(&e))?
         }
-        Folder::Page(_) => {
+        Folder::Page(_) | Folder::Unnamed => {
             certificate_alias(&certificate, &storage_oid).map_err(|e| failure(&e))?;
             let dir = folder(state, &args.folder, PageFolder::Existing)?;
             check_new()?;

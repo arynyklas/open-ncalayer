@@ -2907,6 +2907,9 @@ pub enum Folder {
     Chosen(u32),
     /// A folder the page names: an existing folder by an absolute path a page may name.
     Page(String),
+    /// No folder: the page named none. Refused as a folder a page may not name, after a
+    /// certificate's own checks.
+    Unnamed,
 }
 
 /// The request a new key comes with.
