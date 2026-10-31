@@ -5,17 +5,18 @@
 //!
 //! No request is made for the links of the page either: a `download.php?key=` key serves
 //! one request only (HEAD included), so the run downloads each with a fresh key. A link is
-//! judged by the SHA-1 published beside it; the page missing or the link absent from it
-//! counts as a failure (and only that removes a link), otherwise only the run's downloads
-//! change its status and failures.
+//! judged by the SHA-1 published beside it. Its `failures` count the polls in a row that
+//! did not find it (the page missing, or the link absent from it), and only they remove it;
+//! a poll that finds it ends the count. Its status is left to the run's downloads.
 
 use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 use oncl_pki::cert::Certificate;
 use serde::{Deserialize, Serialize};
 
 use super::artifact::{Format, TAIL_BYTES, detect_format};
-use super::http::{FetchError, Fetcher, RequestCtx};
+use super::http::{FetchError, Fetcher, RequestCtx, Session};
 use super::manifest::{Verified, verify_and_parse};
 use super::sources::{PageLink, Source, SourceKind, discover, parse_download_page, without_query};
 use super::state::{SourceState, SourceStatus, State};
@@ -236,10 +237,16 @@ pub fn poll(
         );
     }
 
-    // Only the links and their SHA-1 are read here: the run reads the page again (in a
-    // session of its own) for the key of each download.
+    // Only the links and their SHA-1 are read here, and no later request of the poll needs
+    // the page's cookies: the run reads the page again, in a session of its own, for the key
+    // of each download. The session here only carries a cookie set on a redirect hop of the
+    // page to the next hop.
+    let page_ctx = RequestCtx {
+        referer: None,
+        session: Some(Arc::new(Mutex::new(Session::default()))),
+    };
     let page: Option<Vec<PageLink>> = fetcher
-        .get(&endpoints.page, PAGE_MAX, &RequestCtx::default())
+        .get(&endpoints.page, PAGE_MAX, &page_ctx)
         .ok()
         .map(|p| parse_download_page(&String::from_utf8_lossy(&p.body), &endpoints.page));
     let sources = discover(&verified, page.as_deref().unwrap_or_default(), endpoints);
@@ -251,7 +258,8 @@ pub fn poll(
             continue;
         }
         if id.starts_with("page:") {
-            // The page is not the authority: its absence counts as a failure.
+            // The page is not the authority: its absence counts as a failure; only such
+            // failures remove a link.
             if let Some(change) = fail(next.sources.get_mut(id).expect("copied from prev"), id) {
                 changes.push(change);
             }
@@ -321,8 +329,9 @@ pub fn poll(
                         }
                     }
                 }
-                // Status and failures are left to the run's download.
+                // Found: the run of absences ends. The status is left to the run's download.
                 let entry = next.sources.entry(source.id.clone()).or_default();
+                entry.failures = 0;
                 entry.url = without_query(&source.url);
                 entry.etag = None;
                 entry.last_modified = None;

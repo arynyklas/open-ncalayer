@@ -568,21 +568,35 @@ fn read_limited(
 }
 
 /// Whether `e` is of connecting to the address (refused, unreachable, connect timeout), so
-/// that another address may still answer.
+/// that another address may still answer. Nothing of the request has been sent then.
 fn is_connect_error(e: &ureq::Error) -> bool {
-    use std::io::ErrorKind;
     match e {
         ureq::Error::Timeout(ureq::Timeout::Connect) | ureq::Error::ConnectionFailed => true,
-        ureq::Error::Io(e) => matches!(
-            e.kind(),
-            ErrorKind::ConnectionRefused
-                | ErrorKind::HostUnreachable
-                | ErrorKind::NetworkUnreachable
-                | ErrorKind::AddrNotAvailable
-                | ErrorKind::TimedOut
-        ),
+        ureq::Error::Io(e) => is_connect_io_error(e),
         _ => false,
     }
+}
+
+/// The I/O side of [`is_connect_error`].
+fn is_connect_io_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    // Windows: WSAEACCES (a VPN or firewall blocking the address or its family, which ureq
+    // also fails over on), WSAENETDOWN and WSAEHOSTDOWN, by code: the first maps to the
+    // broader `PermissionDenied`, the last to no specific kind. Refused, unreachable,
+    // address not available and timed out map to the kinds below.
+    #[cfg(windows)]
+    if matches!(e.raw_os_error(), Some(10013 | 10050 | 10064)) {
+        return true;
+    }
+    matches!(
+        e.kind(),
+        ErrorKind::ConnectionRefused
+            | ErrorKind::HostUnreachable
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::NetworkDown
+            | ErrorKind::AddrNotAvailable
+            | ErrorKind::TimedOut
+    )
 }
 
 /// A note when a proxy variable (`HTTPS_PROXY`, `ALL_PROXY`, …) is set: the watcher
@@ -764,4 +778,72 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || (s[0] & 0xffc0) == 0xfe80
         || (s[0] == 0x2001 && s[1] == 0x0db8)
         || s[..6] == [0, 0, 0, 0, 0, 0])
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Error, ErrorKind};
+
+    use super::{is_connect_error, is_connect_io_error};
+
+    #[test]
+    fn connect_errors_fail_over() {
+        for kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::HostUnreachable,
+            ErrorKind::NetworkUnreachable,
+            ErrorKind::NetworkDown,
+            ErrorKind::AddrNotAvailable,
+            ErrorKind::TimedOut,
+        ] {
+            assert!(is_connect_io_error(&Error::from(kind)), "{kind:?}");
+        }
+        assert!(is_connect_error(&ureq::Error::Timeout(
+            ureq::Timeout::Connect
+        )));
+        assert!(is_connect_error(&ureq::Error::ConnectionFailed));
+        assert!(is_connect_error(&ureq::Error::Io(Error::from(
+            ErrorKind::ConnectionRefused
+        ))));
+    }
+
+    #[test]
+    fn errors_after_the_request_may_have_been_sent_do_not() {
+        for kind in [
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::BrokenPipe,
+            ErrorKind::UnexpectedEof,
+            ErrorKind::PermissionDenied,
+        ] {
+            assert!(!is_connect_io_error(&Error::from(kind)), "{kind:?}");
+        }
+        assert!(!is_connect_error(&ureq::Error::Timeout(
+            ureq::Timeout::RecvResponse
+        )));
+        assert!(!is_connect_error(&ureq::Error::Timeout(
+            ureq::Timeout::Global
+        )));
+        assert!(!is_connect_error(&ureq::Error::StatusCode(503)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_connect_errors_fail_over() {
+        // WSAEACCES, WSAEADDRNOTAVAIL, WSAENETDOWN, WSAENETUNREACH, WSAETIMEDOUT,
+        // WSAECONNREFUSED, WSAEHOSTDOWN, WSAEHOSTUNREACH.
+        for code in [10013, 10049, 10050, 10051, 10060, 10061, 10064, 10065] {
+            assert!(
+                is_connect_io_error(&Error::from_raw_os_error(code)),
+                "{code}"
+            );
+        }
+        // WSAECONNRESET, WSAECONNABORTED: the request may have been sent.
+        for code in [10054, 10053] {
+            assert!(
+                !is_connect_io_error(&Error::from_raw_os_error(code)),
+                "{code}"
+            );
+        }
+    }
 }

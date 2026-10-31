@@ -638,35 +638,66 @@ fn failing_downloads_never_remove_a_listed_link() {
     for (c, _) in upstream_common::PAGE_FILES {
         server.route("GET", &key_target(c), Response::status(503));
     }
-    for n in 2..=5 {
-        let out = cycle(&server, &dirs, n);
+    let no_page_change = |out: &RunOutcome| {
         assert!(out.entry.is_none(), "{:?}", out.log);
         assert!(
             out.log.iter().all(|l| !l.starts_with("poll: page:")),
             "{:?}",
             out.log
         );
+    };
+    for n in 2..=5 {
+        let out = cycle(&server, &dirs, n);
+        no_page_change(&out);
         let pages = page_states(&dirs.state());
         assert_eq!(pages.len(), 4);
         for (id, failures, status, _) in pages {
+            // Found on the page every time: no absence counted.
             assert_eq!(
                 (failures, status),
-                (2, SourceStatus::Failing),
+                (0, SourceStatus::Failing),
                 "{id}, run {n}"
             );
         }
         if n > 2 {
-            // Capped: the state no longer changes.
             assert_eq!(files_under(&dirs.emit(n)).unwrap(), ["run.json"], "run {n}");
         }
+    }
+    // A page blip after the failed downloads: one absence, nothing removed.
+    server.route("GET", "/", Response::status(503));
+    let out = cycle(&server, &dirs, 6);
+    no_page_change(&out);
+    for (id, failures, status, _) in page_states(&dirs.state()) {
+        assert_eq!((failures, status), (1, SourceStatus::Failing), "{id}");
+    }
+    // The page and the files are back: no change, no entry, the links are ok again.
+    server.route(
+        "GET",
+        "/",
+        Response::html(upstream_common::world_page().into_bytes()),
+    );
+    for (c, file) in upstream_common::PAGE_FILES {
+        server.route(
+            "GET",
+            &key_target(c),
+            Response::ok(read(fixture(&format!("upstream/{file}")))),
+        );
+    }
+    let out = cycle(&server, &dirs, 7);
+    no_page_change(&out);
+    for (id, failures, status, _) in page_states(&dirs.state()) {
+        assert_eq!((failures, status), (0, SourceStatus::Ok), "{id}");
     }
     assert_eq!(
         std::fs::read(dirs.state().join("latest/facts.json")).unwrap(),
         baseline
     );
-    // Gone from the page: removed at once, with the change reported.
+    // Absent from the page 3 polls in a row: removed, with the change reported.
     server.route("GET", "/", Response::status(503));
-    let out = cycle(&server, &dirs, 6);
+    for n in 8..=9 {
+        no_page_change(&cycle(&server, &dirs, n));
+    }
+    let out = cycle(&server, &dirs, 10);
     assert!(out.entry.is_some(), "{:?}", out.log);
     assert!(
         out.log.contains(&"poll: page:linux removed".to_owned()),
@@ -788,7 +819,7 @@ fn refused_page_link_then_old_file_stays_pending() {
     server.route("GET", &target, Response::ok(old));
     let out = cycle(&server, &dirs, 3);
     assert!(out.entry.is_none(), "{:?}", out.log);
-    assert_eq!(win(&dirs), (1, SourceStatus::Failing));
+    assert_eq!(win(&dirs), (0, SourceStatus::Failing));
     // The new file: downloaded, one entry.
     server.route("GET", &target, Response::ok(new.clone()));
     let out = cycle(&server, &dirs, 4);
@@ -836,10 +867,10 @@ fn page_reread_failure_and_missing_link_fail_that_link_only() {
         [
             (
                 "page:korporativnoy-seti".to_owned(),
-                1,
+                0,
                 SourceStatus::Failing
             ),
-            ("page:linux".to_owned(), 1, SourceStatus::Failing),
+            ("page:linux".to_owned(), 0, SourceStatus::Failing),
             ("page:macosx".to_owned(), 0, SourceStatus::Ok),
             ("page:windows-64-bit".to_owned(), 0, SourceStatus::Ok),
         ]

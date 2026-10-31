@@ -7,9 +7,9 @@
 //! A key of the download page serves one request, so each page link is downloaded with a
 //! fresh one: right before, the page is read again in a new session (pinned to the address
 //! that answered it) and the link with the same identity is taken. Only these downloads
-//! change a page source's status and failures; a failing or refused one is tried again on
-//! every run. Failed downloads of a link still on the page stop at
-//! `FAILURES_TO_REMOVE - 1`: only its absence from the page removes it (see the poll).
+//! change a page source's status; a failing or refused one is tried again on every run. A
+//! failed download does not count towards its removal: only polls that do not find it on
+//! the page do (see the poll).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -484,14 +484,13 @@ fn forget(prev: &State, state: &mut State, id: &str) {
     }
 }
 
-/// A download of a distribution failed: [`forget`], and the failure is counted. A page link
-/// still on the page stops one short of removal (only its absence removes it), so that the
-/// state stops changing while its downloads keep failing.
+/// A download of a distribution failed: [`forget`], and the failure is counted. For a page
+/// link it is only marked failing: its `failures` count the polls that did not find it on
+/// the page, and only they remove it.
 fn forget_and_fail(prev: &State, state: &mut State, id: &str) {
     forget(prev, state, id);
     if let Some(entry) = state.sources.get_mut(id) {
         if id.starts_with("page:") {
-            entry.failures = (entry.failures + 1).min(FAILURES_TO_REMOVE - 1);
             entry.status = SourceStatus::Failing;
         } else {
             super::poll::fail(entry, id);

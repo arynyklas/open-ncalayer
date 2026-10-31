@@ -202,7 +202,7 @@ fn failure_then_success_resets_count() {
 fn page_links_are_not_requested_and_keep_their_download_status() {
     let server = world('a');
     let mut state = run(&server, &State::default()).next;
-    // As left by a run whose downloads failed, and a link removed long ago.
+    // As left by a run whose downloads failed after one absence, and a link removed long ago.
     for id in ["page:windows-64-bit", "page:macosx"] {
         let e = state.sources.get_mut(id).unwrap();
         e.failures = 1;
@@ -219,9 +219,10 @@ fn page_links_are_not_requested_and_keep_their_download_status() {
             id: "page:linux".to_owned()
         }]
     );
+    // Found: the absences end, the download status stays.
     for id in ["page:windows-64-bit", "page:macosx"] {
         let e = &r.next.sources[id];
-        assert_eq!((e.failures, e.status), (1, SourceStatus::Failing), "{id}");
+        assert_eq!((e.failures, e.status), (0, SourceStatus::Failing), "{id}");
     }
     let e = &r.next.sources["page:linux"];
     assert_eq!((e.failures, e.status), (0, SourceStatus::Ok));
