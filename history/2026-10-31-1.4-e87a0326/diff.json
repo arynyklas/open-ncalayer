@@ -1,0 +1,20 @@
+{
+  "baseline": true,
+  "manifest": {
+    "version": null,
+    "info": null,
+    "updurl": null,
+    "syspkgs": {
+      "added": [],
+      "removed": []
+    },
+    "disturls": [],
+    "signer": null,
+    "extra": {},
+    "resigned_only": false
+  },
+  "core": {},
+  "plugins": {},
+  "distributions": {},
+  "notes": []
+}

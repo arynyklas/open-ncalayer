@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "id": "2026-10-31-1.4-e87a0326",
+      "date": "2026-10-31",
+      "observed": "2026-10-31T03:52:43.6726069Z",
+      "version": "1.4",
+      "key8": "e87a0326",
+      "path": "history/2026-10-31-1.4-e87a0326/",
+      "kind": "baseline",
+      "summary": {
+        "core": [
+          "NCALayer 1.4: первые факты"
+        ],
+        "plugins": [],
+        "distributions": [],
+        "notes": []
+      },
+      "issues": []
+    }
+  ]
+}

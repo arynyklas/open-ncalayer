@@ -1,0 +1,222 @@
+[
+  {
+    "change": "added",
+    "id": "bundle:asia.dbt.thundercrypt.osgi.ThunderCryptModule"
+  },
+  {
+    "change": "added",
+    "id": "bundle:com.buhta.cert.ncamodule"
+  },
+  {
+    "change": "added",
+    "id": "bundle:com.osdkz.esf.signer"
+  },
+  {
+    "change": "added",
+    "id": "bundle:digital.taxtech.documents.multisign"
+  },
+  {
+    "change": "added",
+    "id": "bundle:ku.amaryllis.amart"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.Simourg.SimBASE"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.acbank.business.api.ncalayer.module"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.akkamal.tinysigner"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.arta.synergy.signmodule"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.bas.nca.signer"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.btsdigital.qoltanba"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.devart.bundle.Devart"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.documentolog.Agent"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.dogovor24.module"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.doodocs.moduleservice"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.ecc.K2SignBundle"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.ecc.MarketSignBundle"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.ecc.NurSignBundle"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.efactoring.EfactoringSignBundle"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.energy.sign"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.fhs.cabinet.FHSCabinet"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.gov.pki.api.layer.NCALayerServices"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.gov.pki.cms.NLDocSignerModule"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.gov.pki.eot.SignModule"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.gov.pki.kalkan.knca_provider_jce_kalkan"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.gov.pki.kalkan.xmldsig"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.gov.pki.knca.applet.knca_applet"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.gov.pki.osgi.layer.common"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.gov.pki.osgi.layer.websocket"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.gov.pki.provider.knca_provider_util"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.idocs"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.inessoft.kgd.knp.sono_knp_ncalayer_module"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.metadoc.NCAModule"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.nitec.eup.eupsigner"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.qiwi.osgi.SecurityUtils"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.rating1c.edo"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.sapa.eproc.osgi.EprocModule"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.sapa.ztender.osgi.ZTenderModule"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.smartdoc.osgi.CmsSigner"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.uchet.esfSignUtil"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.uchet.signUtil"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.webkassa.osgi.SignerBundle"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.workspace.Signer"
+  },
+  {
+    "change": "added",
+    "id": "bundle:kz.xdox.osgi.SignerBundle"
+  },
+  {
+    "change": "added",
+    "id": "bundle:org.skf.osgi.SKFModule"
+  },
+  {
+    "change": "added",
+    "id": "bundle:ru.letograf.crypto.KadagalauBundle"
+  },
+  {
+    "change": "added",
+    "id": "bundle:ru.motiw.ModuleService"
+  },
+  {
+    "change": "added",
+    "id": "dist:setupexe"
+  },
+  {
+    "change": "added",
+    "id": "dist:setupsh"
+  },
+  {
+    "change": "added",
+    "id": "fixed:ncalayer.zip"
+  },
+  {
+    "change": "added",
+    "id": "fixed:tzdb.dat"
+  },
+  {
+    "change": "added",
+    "id": "manifest"
+  },
+  {
+    "change": "added",
+    "id": "page:korporativnoy-seti"
+  },
+  {
+    "change": "added",
+    "id": "page:macosx"
+  },
+  {
+    "change": "added",
+    "id": "page:windows-32-bit"
+  }
+]
