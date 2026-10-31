@@ -19,3 +19,6 @@ updates/** -text
 # Qoltanba's report font and its license, as published (sha256 in its README).
 plugins/qoltanba/fonts/*.ttf -text
 plugins/qoltanba/fonts/OFL.txt -text
+# Issue templates embedded with include_str!: the rendered issue body (and its golden
+# fixtures) must not depend on the checkout's line endings.
+xtask/src/upstream/templates/*.md text eol=lf
