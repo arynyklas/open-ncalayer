@@ -375,6 +375,7 @@ pub fn sign_args(
         attrs: signed_attrs(profile, input)?,
         certificates: profile.certificates.clone(),
         timestamp: None,
+        output: oncl_pdk::abi::CmsOutput::Der,
     })
 }
 

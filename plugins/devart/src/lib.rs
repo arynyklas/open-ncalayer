@@ -685,6 +685,7 @@ fn cms_group(key: &Key, items: &[&Item], check: bool) -> Result<Vec<JValue>, Str
             },
             certificates: CmsCerts::Signer,
             timestamp: None,
+            output: oncl_pdk::abi::CmsOutput::Der,
         };
         let cms = match key.sign_cms_ex(args).map_err(|e| e.message)? {
             CmsOutcome::Signed(cms) => cms.into_vec(),

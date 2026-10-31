@@ -490,6 +490,7 @@ fn simple_cms(key: &Key, content: CmsContent, attached: bool) -> Option<String> 
             },
             certificates: CmsCerts::Chain,
             timestamp: None,
+            output: oncl_pdk::abi::CmsOutput::Der,
         })
         .ok(),
     )
@@ -656,6 +657,7 @@ fn cades(key: &Key, data: &[u8]) -> Option<String> {
             },
             certificates: CmsCerts::Signer,
             timestamp: None,
+            output: oncl_pdk::abi::CmsOutput::Der,
         })
         .ok(),
     )

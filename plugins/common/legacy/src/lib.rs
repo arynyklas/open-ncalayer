@@ -172,6 +172,7 @@ pub fn cades_args(
         },
         certificates: CmsCerts::Signer,
         timestamp: timestamp.then_some(TsaChoice::Kalkan),
+        output: oncl_pdk::abi::CmsOutput::Der,
     }
 }
 

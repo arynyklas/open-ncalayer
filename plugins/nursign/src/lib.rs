@@ -436,6 +436,7 @@ fn cades(key: &Key, data: &[u8], timestamp: bool) -> Result<Vec<u8>, Failure> {
         },
         certificates: CmsCerts::Signer,
         timestamp: timestamp.then_some(TsaChoice::Kalkan),
+        output: oncl_pdk::abi::CmsOutput::Der,
     };
     match key.sign_cms_ex(args) {
         Ok(CmsOutcome::Signed(cms)) => Ok(cms.into_vec()),

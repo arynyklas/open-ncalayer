@@ -231,6 +231,7 @@ fn cades(key: &Key, data: &[u8], attach: bool, timestamp: bool) -> Option<Vec<u8
         },
         certificates: CmsCerts::Signer,
         timestamp: timestamp.then_some(TsaChoice::Kalkan),
+        output: oncl_pdk::abi::CmsOutput::Der,
     };
     match key.sign_cms_ex(args) {
         Ok(CmsOutcome::Signed(cms)) => Some(cms.into_vec()),

@@ -353,6 +353,7 @@ fn cades_t(key: &Key, data: &[u8], attached: bool) -> Option<Vec<u8>> {
             },
             certificates: CmsCerts::Signer,
             timestamp: Some(TsaChoice::Kalkan),
+            output: oncl_pdk::abi::CmsOutput::Der,
         })
         .ok()?;
     match outcome {

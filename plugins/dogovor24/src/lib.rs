@@ -189,6 +189,7 @@ fn cades(data: &str, key: Option<&Key>) -> Result<String, Option<String>> {
         },
         certificates: CmsCerts::Signer,
         timestamp: Some(TsaChoice::Kalkan),
+        output: oncl_pdk::abi::CmsOutput::Der,
     };
     // Unverified against the original: the message of a failed time-stamp (here the
     // core's description of the failure).

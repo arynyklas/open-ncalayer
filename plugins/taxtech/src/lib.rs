@@ -396,6 +396,7 @@ fn sign_cms(key: &Key, bytes: Vec<u8>, params: &Map<String, Value>) -> Result<St
         },
         certificates: Default::default(),
         timestamp: with_tsp.then_some(TsaChoice::Kalkan),
+        output: oncl_pdk::abi::CmsOutput::Der,
     };
     // Unverified against the original: provider_util codes of signing failures (here all
     // SIGNING_FAILURE).

@@ -264,6 +264,7 @@ fn cades(key: &Key, data: Vec<u8>, attached: bool) -> CallResult {
         },
         certificates: CmsCerts::Signer,
         timestamp: Some(TsaChoice::Kalkan),
+        output: oncl_pdk::abi::CmsOutput::Der,
     };
     match key.sign_cms_ex(args) {
         Ok(CmsOutcome::Signed(cms)) => Ok(javab64::encode_mime(&cms).replace("\r\n", "").into()),

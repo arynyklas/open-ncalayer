@@ -273,6 +273,7 @@ fn sign_all(
                 },
                 certificates: Default::default(),
                 timestamp: timestamp.then_some(TsaChoice::Kalkan),
+                output: oncl_pdk::abi::CmsOutput::Der,
             };
             let Ok(CmsOutcome::Signed(cms)) = key.sign_cms_ex(args) else {
                 return None;

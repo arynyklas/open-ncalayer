@@ -375,6 +375,7 @@ fn sign(args: &[Value]) -> Option<Reply> {
         },
         certificates: CmsCerts::Signer,
         timestamp: (format > 1).then_some(TsaChoice::Kalkan),
+        output: oncl_pdk::abi::CmsOutput::Der,
     });
     let cms = match signed {
         Ok(CmsOutcome::Signed(cms)) => cms.into_vec(),

@@ -339,6 +339,7 @@ fn sign(data: &str, storage: &str) -> Result<Vec<u8>, Failure> {
             },
             certificates: CmsCerts::Signer,
             timestamp: Some(TsaChoice::Kalkan),
+            output: oncl_pdk::abi::CmsOutput::Der,
         })
         .map_err(internal)?;
     match outcome {
