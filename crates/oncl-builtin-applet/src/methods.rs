@@ -419,7 +419,8 @@ fn pin_pattern_ok(password: &str, max: usize) -> bool {
 /// A token (with token support on) is asked for in the readers holding one, `container`
 /// first if it names one of them, with its PIN typed in the core's dialog; a wrong PIN sets
 /// the try count and asks again; a blocked PIN is not tried again. Without such a reader it
-/// is `EMPTY_SLOT`, without a dialog.
+/// is `EMPTY_SLOT`, without a dialog; so is a token that goes, or a smart card service that
+/// fails, between listing the readers and opening the dialog.
 pub(crate) fn sign_xml<C: Core>(core: &C, args: &Args<'_>) -> Outcome {
     let Some(storage) = storage(args.str(0)) else {
         return Ok(Wrapper::error(UNKNOWN_STORAGE));
@@ -472,7 +473,9 @@ pub(crate) fn sign_xml<C: Core>(core: &C, args: &Args<'_>) -> Outcome {
         checks: FlowChecks::Settled,
         skip_blocked_reader: true,
     };
-    let (opened, wrong_pin) = core.flow_open(&flow);
+    let Some((opened, wrong_pin)) = core.flow_open(&flow) else {
+        return Ok(Wrapper::error(EMPTY_SLOT));
+    };
     if let Some(wrong) = wrong_pin {
         core.set_try_count(token_try_count(&wrong.storage, wrong.tries_left));
     }
@@ -674,7 +677,7 @@ pub(crate) mod tests {
         fn change_password(&self, _: ChangePasswordArgs) -> HostResult<()> {
             unreachable!()
         }
-        fn flow_open(&self, _: &FlowArgs) -> (Option<()>, Option<FlowWrongPin>) {
+        fn flow_open(&self, _: &FlowArgs) -> Option<(Option<()>, Option<FlowWrongPin>)> {
             unreachable!()
         }
         fn pick(&self, _: &(), _: Option<&str>) -> Option<()> {

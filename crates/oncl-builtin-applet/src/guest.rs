@@ -1,8 +1,8 @@
 //! The module's exports and the core it asks, on `wasm32`.
 
 use oncl_pdk::abi::{
-    ChangePasswordArgs, FlowArgs, FlowWrongPin, HostResult, IdCardHolder, InstallCertArgs,
-    InstalledCert, NewKey, NewKeyArgs, PasswordArgs, SignXmlArgs, TokenScan,
+    ChangePasswordArgs, ErrorCode, FlowArgs, FlowReaders, FlowWrongPin, HostResult, IdCardHolder,
+    InstallCertArgs, InstalledCert, NewKey, NewKeyArgs, PasswordArgs, SignXmlArgs, TokenScan,
 };
 use oncl_pdk::keys::{self, Flow, Key};
 use oncl_pdk::serde_json::{self, Value};
@@ -105,8 +105,20 @@ impl crate::Core for Host {
         builtin::change_password(&args)
     }
 
-    fn flow_open(&self, flow: &FlowArgs) -> (Option<Flow>, Option<FlowWrongPin>) {
-        keys::flow_open(flow).expect("keys_flow_open")
+    fn flow_open(&self, flow: &FlowArgs) -> Option<(Option<Flow>, Option<FlowWrongPin>)> {
+        match keys::flow_open(flow) {
+            Ok(opened) => Some(opened),
+            // A fixed reader is checked before any window: its token went since
+            // `token_readers`, or the smart card service failed.
+            Err(e)
+                if matches!(flow.readers, FlowReaders::Fixed(_))
+                    && matches!(e.code, ErrorCode::Invalid | ErrorCode::Failed) =>
+            {
+                crate::Core::debug(self, &format!("the key choice's reader: {e}"));
+                None
+            }
+            Err(e) => panic!("keys_flow_open: {e}"),
+        }
     }
 
     fn pick(&self, flow: &Flow, error: Option<&str>) -> Option<Key> {

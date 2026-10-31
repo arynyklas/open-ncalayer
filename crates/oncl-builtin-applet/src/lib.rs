@@ -87,8 +87,9 @@ pub trait Core {
     /// A key file the page names, re-encrypted.
     fn change_password(&self, args: ChangePasswordArgs) -> HostResult<()>;
     /// The storage dialog of `flow` until a store opens: the flow, `None` if cancelled; and
-    /// the last wrong PIN typed.
-    fn flow_open(&self, flow: &FlowArgs) -> (Option<Self::Flow>, Option<FlowWrongPin>);
+    /// the last wrong PIN typed. `None` before any window when a fixed reader of `flow` no
+    /// longer holds its token, or the smart card service failed on reading it again.
+    fn flow_open(&self, flow: &FlowArgs) -> Option<(Option<Self::Flow>, Option<FlowWrongPin>)>;
     /// The key dialog of `flow` with `error` as its error line: the key picked, `None` if
     /// cancelled.
     fn pick(&self, flow: &Self::Flow, error: Option<&str>) -> Option<Self::Key>;

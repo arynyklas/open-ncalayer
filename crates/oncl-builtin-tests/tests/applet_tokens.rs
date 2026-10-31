@@ -8,11 +8,12 @@ use oncl_flows::{OpenError, ReaderEntry, StorageKind};
 use oncl_pki::xmldsig;
 use oncl_protocol::{AddInfo, Module};
 use oncl_testkit::synthetic;
-use oncl_token::backend::Backend;
+use oncl_token::backend::{Backend, BackendError, Connection, ReaderState};
 use oncl_token::emulator::{CardSpec, EmuKey, EmulatorBackend, card};
 use oncl_token::{IdCardInfo, TokenKind, Tokens};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const R0: &str = "OpenNCALayer Emulated Reader 0";
 const R1: &str = "OpenNCALayer Emulated Reader 1";
@@ -377,6 +378,62 @@ fn sign_xml_without_reader_is_empty_slot() {
         "EMPTY_SLOT",
     );
     assert!(prompter.storage_prompts().is_empty());
+}
+
+/// The emulator, whose `readers` answers as it does for the first `good` calls, then
+/// fails (`fail`) or no longer sees the card in R0.
+struct Flaky {
+    emu: Arc<EmulatorBackend>,
+    good: usize,
+    fail: bool,
+    calls: AtomicUsize,
+}
+
+impl Backend for Flaky {
+    fn readers(&self) -> Result<Vec<ReaderState>, BackendError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) >= self.good {
+            if self.fail {
+                return Err(BackendError::Failed(
+                    "SCardGetStatusChange 0x80100009".into(),
+                ));
+            }
+            self.emu.remove(R0);
+        }
+        self.emu.readers()
+    }
+
+    fn connect(&self, reader: &str) -> Result<Box<dyn Connection>, BackendError> {
+        self.emu.connect(reader)
+    }
+}
+
+#[test]
+fn sign_xml_reader_gone_before_the_dialog_is_empty_slot() {
+    // The readers are listed, then the token goes or the smart card service fails before
+    // the dialog opens: `EMPTY_SLOT`, without a window, as when no reader holds a token.
+    for fail in [true, false] {
+        let flaky = Arc::new(Flaky {
+            emu: emulator(vec![kaztoken()]),
+            good: 1,
+            fail,
+            calls: AtomicUsize::new(0),
+        });
+        let prompter = Arc::new(ScriptedPrompter::new(vec![token(R0, PIN), Step::Key(0)]));
+        let a = Applet::new(prompter.clone()).with_tokens(Tokens::new(flaky.clone(), true));
+        assert_code(
+            &call(
+                &a,
+                "signXml",
+                json!(["AKKaztokenStore", R0, "SIGN", "<a/>"]),
+            ),
+            "EMPTY_SLOT",
+        );
+        assert!(prompter.storage_prompts().is_empty(), "{fail}");
+        assert!(
+            flaky.calls.load(Ordering::SeqCst) > 1,
+            "the readers were read again"
+        );
+    }
 }
 
 /// The methods that take a password or PIN from the page answer without a command to a
