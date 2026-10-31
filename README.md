@@ -486,7 +486,9 @@ cargo xtask ext build
 cargo xtask ext-e2e --download
 ```
 
-Без `--download` пути берутся из `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`, `ONCL_FIREFOX_ESR` и `ONCL_GECKODRIVER`; один браузер — `--browser chromium|firefox|firefox-esr`. Firefox ESR 115 нужна системная библиотека `libdbus-glib-1-2`. Браузеры запускаются с одноразовыми профилями в `target/ext-e2e/`, хост регистрируется там же (`nm install --sandbox`). Фича `e2e-prompter` заменяет окна подписи сценарием из файла `ONCL_E2E_PROMPTER`; в обычных сборках её нет. Сценарий 8 удаляет расширение из открытой страницы (только Firefox; в ESR 115 он проверяет описанное выше ограничение).
+Без `--download` пути берутся из `ONCL_CHROME`, `ONCL_CHROMEDRIVER`, `ONCL_FIREFOX`, `ONCL_FIREFOX_ESR` и `ONCL_GECKODRIVER`; один браузер — `--browser chromium|firefox|firefox-esr`. Firefox ESR 115 нужна системная библиотека `libdbus-glib-1-2`. Браузеры запускаются с одноразовыми профилями в `target/ext-e2e/`, хост регистрируется там же (`nm install --sandbox`). Фича `e2e-prompter` заменяет окна подписи сценарием из файла `ONCL_E2E_PROMPTER`; в обычных сборках её нет. Шаг сценария не того вида, что открывшееся окно (ответ окна ключа на окно хранилища), не роняет вызов: окно отменяется, а в журнал пишется строка `… the window is cancelled`; страница получает обычный ответ на отмену, соединение остаётся открытым. Сценарий 8 удаляет расширение из открытой страницы (только Firefox; в ESR 115 он проверяет описанное выше ограничение).
+
+Тесты встроенных модулей (`cargo test -p oncl-builtin-tests`) идут и без маркеров: при `ONCL_TEST_NO_MARKERS=1` ядро не заменяет длинные строки запроса маркерами, модуль читает их как есть, и все тесты проходят так же. Тест `markers` сверяет ответы с маркерами и без них для каждой строки запросов покрытых методов, увеличенной до 20 000 байт (и для пачки документов длиннее 1 МиБ).
 
 Проверка наших подписей XMLDSig и CMS в NCANode (Kalkan), только Linux, нужен Docker: `cargo xtask fetch-fixtures && cargo xtask interop-ncanode`. Образ, порядок запуска и последний результат описаны в [`docs/dev/interop-ncanode.md`](docs/dev/interop-ncanode.md).
 

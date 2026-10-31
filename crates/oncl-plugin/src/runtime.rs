@@ -71,6 +71,11 @@ pub struct InstanceLimits {
     /// The most bytes of data the core keeps for one call of a module with the capability
     /// `builtin` (`data_*`); `0` for a plugin's instance, which keeps none.
     pub max_kept: usize,
+    /// Whether a module with the capability `builtin` gets the long strings of a request as
+    /// markers of data the core keeps (see `DATA_KEPT_MIN`), as it does in the daemon. Off,
+    /// only the tests that compare the replies without markers set it: the request reaches
+    /// the module as the page sent it, and the `data_*` functions still keep what they make.
+    pub keep_request: bool,
 }
 
 impl Default for InstanceLimits {
@@ -81,6 +86,7 @@ impl Default for InstanceLimits {
             fuel: PROCESS_FUEL,
             max_transfer: MAX_TRANSFER,
             max_kept: 0,
+            keep_request: true,
         }
     }
 }
@@ -514,10 +520,15 @@ impl Instance {
         add_info: &AddInfo,
         locale: oncl_flows::Locale,
     ) -> Result<String, PluginError> {
+        let keep = self.limits.keep_request;
         let (request, data_prefix) = match self.store.data_mut().call.data.as_mut() {
             Some(data) => (
-                data.keep_request(request)
-                    .map_err(|e| PluginError::Output(e.message))?,
+                if keep {
+                    data.keep_request(request)
+                        .map_err(|e| PluginError::Output(e.message))?
+                } else {
+                    request.to_owned()
+                },
                 Some(data.prefix().to_owned()),
             ),
             None => (request.to_owned(), None),

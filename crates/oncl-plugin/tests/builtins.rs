@@ -429,6 +429,7 @@ fn builtin_limits_apply() {
             fuel: 100_000,
             max_transfer: 1000,
             max_kept: 0,
+            keep_request: true,
         },
         high_water: 4 << 20,
         idle: 2,

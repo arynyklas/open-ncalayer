@@ -7,6 +7,7 @@ pub mod accessory;
 pub mod applet;
 pub mod basics;
 pub mod commonutils;
+pub mod panicking;
 
 use oncl_plugin::core::CoreHooks;
 use oncl_plugin::{BuiltinLimits, Builtins, Engine, HostServices};
@@ -15,20 +16,28 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 include!(concat!(env!("OUT_DIR"), "/builtins.rs"));
 
+/// With this variable set to `1`, the modules of these tests get no markers for the long
+/// strings of a request: the request reaches them as the test sent it. The tests of
+/// `oncl-builtin-tests` run both ways and must pass the same (`ONCL_TEST_NO_MARKERS=1
+/// cargo test -p oncl-builtin-tests`).
+pub const NO_MARKERS_VAR: &str = "ONCL_TEST_NO_MARKERS";
+
+/// The limits the modules of these tests run within: the daemon's, without the markers of a
+/// request's long strings if [`NO_MARKERS_VAR`] is `1`.
+pub fn limits() -> BuiltinLimits {
+    let mut limits = BuiltinLimits::default();
+    limits.instance.keep_request = std::env::var_os(NO_MARKERS_VAR).is_none_or(|v| v != "1");
+    limits
+}
+
 /// The built-in module `name` of [`SOURCES`], served by `services` with `hooks`.
 ///
 /// # Panics
 ///
 /// When the modules do not load or none serves `name`.
 fn guest(name: &str, services: HostServices, hooks: Option<Arc<CoreHooks>>) -> Box<dyn Module> {
-    let builtins = Builtins::load(
-        &Engine::new(),
-        services,
-        SOURCES,
-        BuiltinLimits::default(),
-        hooks,
-    )
-    .expect("the built-in modules load");
+    let builtins = Builtins::load(&Engine::new(), services, SOURCES, limits(), hooks)
+        .expect("the built-in modules load");
     Box::new(Guest(builtins.module(name).expect("a built-in module")))
 }
 

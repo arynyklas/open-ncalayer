@@ -25,6 +25,8 @@ oncl-plugin.workspace = true
 oncl-protocol.workspace = true
 oncl-token.workspace = true
 time.workspace = true
+# The prompter that panics in a window, for the tests of a host function's panic.
+zeroize.workspace = true
 
 [build-dependencies]
 # The guests, built (or taken from `ONCL_BUILTINS_DIR`) and embedded.
@@ -46,7 +48,6 @@ time = { workspace = true, features = ["macros"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 x509-cert.workspace = true
-zeroize.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 # A named pipe server for the tests that page-named pipes are refused.

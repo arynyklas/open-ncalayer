@@ -174,6 +174,7 @@ impl Default for BuiltinLimits {
                 fuel: BUILTIN_FUEL,
                 max_transfer: BUILTIN_MAX_TRANSFER,
                 max_kept: BUILTIN_MAX_KEPT,
+                keep_request: true,
             },
             high_water: BUILTIN_HIGH_WATER,
             idle: BUILTIN_IDLE,
