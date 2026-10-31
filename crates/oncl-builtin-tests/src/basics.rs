@@ -4,16 +4,17 @@ use crate::{Available, Backend, Lazy, resolve};
 use oncl_basics::{OcspCache, Prompter, RecentPathStore};
 use oncl_pki::http::HttpTransport;
 use oncl_pki::tsp::TsaProfile;
+use oncl_plugin::HostServices;
 use oncl_protocol::{AddInfo, Module, Reply};
 use oncl_token::Tokens;
 use std::sync::Arc;
 use time::OffsetDateTime;
 
-pub use oncl_basics::MODULE_NAME;
+pub use oncl_builtin_basics::MODULE_NAME;
 
 const AVAILABLE: Available = Available {
     native: true,
-    wasm: false,
+    wasm: true,
 };
 
 struct Settings {
@@ -104,7 +105,24 @@ fn build(s: Settings) -> Box<dyn Module> {
             }
             Box::new(m)
         }
-        Backend::Wasm => unreachable!("resolved to an available backend"),
+        Backend::Wasm => {
+            let mut services = HostServices::new(
+                s.prompter,
+                s.recent,
+                s.http,
+                s.tokens.unwrap_or_else(Tokens::disabled),
+            );
+            if let Some(p) = s.tsa {
+                services.tsa = p;
+            }
+            if let Some(f) = s.clock {
+                services.clock = f;
+            }
+            if let Some(c) = s.ocsp_cache {
+                services.ocsp_cache = c;
+            }
+            crate::guest(MODULE_NAME, services, None)
+        }
     }
 }
 

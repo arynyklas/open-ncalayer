@@ -1,0 +1,21 @@
+[package]
+name = "oncl-builtin-basics"
+description = "The kz.gov.pki.knca.basics module of OpenNCALayer as a built-in WebAssembly module: CMS, raw and XML signatures with the user's key, new keys in key files with their requests, and certificates installed next to their keys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+# `cdylib`: the module the core embeds (wasm32); `rlib`: its name and unit tests on the host.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Java's `Base64.getDecoder()` of `data` and certificates, with the original's error texts.
+base64.workspace = true
+# OIDs read as the core reads them: algorithms and subject attributes of `generateCsr`.
+der.workspace = true
+oncl-pdk.workspace = true
+serde_json.workspace = true

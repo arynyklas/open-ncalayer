@@ -1,0 +1,19 @@
+id = "io.github.arynyklas.openncalayer.builtin.basics"
+version = "0.1.0-alpha.5"
+min_core = "0.1.0-alpha.5"
+modules = ["kz.gov.pki.knca.basics"]
+builtin = true
+
+[name]
+ru = "Подписание NCALayer"
+kk = "NCALayer қолтаңбасы"
+en = "NCALayer signing"
+
+[description]
+ru = "Подпись CMS, XML и сырых данных ключом пользователя, новые ключи и установка сертификатов"
+kk = "Пайдаланушы кілтімен CMS, XML және шикі деректерге қол қою, жаңа кілттер мен сертификаттарды орнату"
+en = "CMS, XML and raw signatures with the user's key, new keys and certificate installation"
+
+[capabilities]
+keys = true
+builtin = true

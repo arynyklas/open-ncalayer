@@ -14,6 +14,8 @@ oncl-applet.workspace = true
 oncl-basics = { workspace = true, features = ["testing"] }
 # The accessory module's names; its guest is embedded by the build script.
 oncl-builtin-accessory.workspace = true
+# The basics module's name; its guest is embedded by the build script.
+oncl-builtin-basics.workspace = true
 oncl-commonutils.workspace = true
 oncl-pki.workspace = true
 # The guests' runtime and the core's hooks.

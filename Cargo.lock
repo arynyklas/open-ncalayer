@@ -3938,6 +3938,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-builtin-basics"
+version = "0.1.0-alpha.5"
+dependencies = [
+ "base64",
+ "der 0.8.2",
+ "oncl-pdk",
+ "serde_json",
+]
+
+[[package]]
 name = "oncl-builtin-tests"
 version = "0.1.0-alpha.5"
 dependencies = [
@@ -3946,6 +3956,7 @@ dependencies = [
  "oncl-applet",
  "oncl-basics",
  "oncl-builtin-accessory",
+ "oncl-builtin-basics",
  "oncl-builtins-build",
  "oncl-commonutils",
  "oncl-pki",

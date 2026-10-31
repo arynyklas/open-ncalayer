@@ -47,7 +47,7 @@ jobs:
       - name: Clippy of the guest SDK (wasm32)
         run: cargo clippy --locked -p oncl-pdk --target wasm32-unknown-unknown -- -D warnings
       - name: Clippy of the built-in modules (wasm32)
-        run: cargo clippy --locked -p oncl-builtin-accessory --target wasm32-unknown-unknown -- -D warnings
+        run: cargo clippy --locked -p oncl-builtin-accessory -p oncl-builtin-basics --target wasm32-unknown-unknown -- -D warnings
       - name: Clippy of the plugin ports (wasm32)
         run: cargo clippy --locked --manifest-path plugins/Cargo.toml --workspace --target wasm32-unknown-unknown -- -D warnings
       - name: Tests of the ports' shared libraries

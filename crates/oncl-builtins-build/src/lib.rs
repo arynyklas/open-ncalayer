@@ -43,10 +43,16 @@ pub struct Guest {
 }
 
 /// The built-in modules, in the order the core loads them.
-pub const GUESTS: &[Guest] = &[Guest {
-    package: "oncl-builtin-accessory",
-    dir: "crates/oncl-builtin-accessory",
-}];
+pub const GUESTS: &[Guest] = &[
+    Guest {
+        package: "oncl-builtin-accessory",
+        dir: "crates/oncl-builtin-accessory",
+    },
+    Guest {
+        package: "oncl-builtin-basics",
+        dir: "crates/oncl-builtin-basics",
+    },
+];
 
 /// A built-in module laid out for embedding.
 #[derive(Debug, Clone, PartialEq, Eq)]

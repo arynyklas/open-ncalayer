@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use oncl_applet::Applet;
-use oncl_basics::Basics;
 use oncl_commonutils::CommonUtils;
 use oncl_plugin::core::{Bundles, CoreHooks, UiCallback};
 use oncl_plugin::{BuiltinLimits, BuiltinSource, Builtins, Engine, HostServices, LoadError};
@@ -147,24 +146,17 @@ pub fn builtin_modules() -> Vec<String> {
 /// The names of the modules of `sources` and of the native built-in modules, sorted.
 fn builtin_modules_of(sources: &[BuiltinSource<'_>]) -> Result<Vec<String>, LoadError> {
     let mut names = Builtins::names(sources)?;
-    names.extend(
-        [
-            oncl_basics::MODULE_NAME,
-            oncl_commonutils::MODULE_NAME,
-            oncl_applet::MODULE_NAME,
-        ]
-        .map(str::to_owned),
-    );
+    names.extend([oncl_commonutils::MODULE_NAME, oncl_applet::MODULE_NAME].map(str::to_owned));
     names.sort_unstable();
     Ok(names)
 }
 
 /// The module registry of the daemon: the built-in modules embedded in it
-/// ([`crate::builtins::SOURCES`]) and `kz.gov.pki.knca.basics`, `kz.gov.pki.knca.commonUtils`
-/// and `kz.gov.pki.knca.applet.Applet` (the default module), all served by `services`
-/// (the dialogs, the hardware tokens while their support is on, the NCA time-stamping and
-/// OCSP services, the OCSP memory the plugins share); `ui` opens the windows the pages ask
-/// for; then the modules of `plugins`, if any.
+/// ([`crate::builtins::SOURCES`]: `kz.gov.pki.knca.basics` among them),
+/// `kz.gov.pki.knca.commonUtils` and `kz.gov.pki.knca.applet.Applet` (the default module), all
+/// served by `services` (the dialogs, the hardware tokens while their support is on, the NCA
+/// time-stamping and OCSP services, the OCSP memory the plugins share); `ui` opens the
+/// windows the pages ask for; then the modules of `plugins`, if any.
 ///
 /// # Errors
 ///
@@ -193,14 +185,6 @@ pub fn build_registry_from(
         .with_tokens(Arc::clone(&services.tokens));
     let applet =
         Applet::new(Arc::clone(&services.prompter)).with_tokens(Arc::clone(&services.tokens));
-    let basics = Basics::new(
-        Arc::clone(&services.prompter),
-        Arc::clone(&services.recent),
-        Arc::clone(&services.http),
-    )
-    .with_tokens(Arc::clone(&services.tokens))
-    .with_ocsp_cache(Arc::clone(&services.ocsp_cache));
-    registry.register(oncl_basics::MODULE_NAME, Arc::new(basics));
     registry.register(oncl_commonutils::MODULE_NAME, Arc::new(common_utils));
     registry.register(oncl_applet::MODULE_NAME, Arc::new(applet));
     let bundles: Arc<dyn Bundles> = match &plugins {

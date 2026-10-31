@@ -104,11 +104,12 @@ mod tests {
                 assert!(builtins.module(module).is_some(), "{module}");
             }
         }
-        assert!(
-            builtins
-                .module("kz.gov.pki.ncalayerservices.accessory")
-                .is_some()
-        );
+        for module in [
+            "kz.gov.pki.ncalayerservices.accessory",
+            "kz.gov.pki.knca.basics",
+        ] {
+            assert!(builtins.module(module).is_some(), "{module}");
+        }
         assert_eq!(check(SOURCES).unwrap(), loaded);
         let line = line(&loaded[0]);
         assert!(
