@@ -280,6 +280,8 @@ impl Setup {
             fetcher: Fetcher::for_tests(),
             now: time::OffsetDateTime::from_unix_timestamp(1_793_448_000).unwrap(),
             github_output: None,
+            deadline: Some(xtask::upstream::RUN_DEADLINE),
+            page_timeout: xtask::upstream::PAGE_DOWNLOAD_TIMEOUT,
         }
     }
 

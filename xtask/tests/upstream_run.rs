@@ -10,7 +10,7 @@ use upstream_common::{
     MockServer, Response, TEST_HOST, endpoints, serve_one_shot_page, serve_world,
 };
 use xtask::upstream::branch_layout::{Index, RunJson, is_entry_id};
-use xtask::upstream::diff::{EntryKind, PluginLine};
+use xtask::upstream::diff::{EntryKind, FactsDiff, PluginLine};
 use xtask::upstream::facts::{Facts, FetchStatus};
 use xtask::upstream::http::Fetcher;
 use xtask::upstream::run::{RunOptions, RunOutcome, files_under, run};
@@ -57,6 +57,8 @@ fn opts(server: &MockServer, state: &Path, work: &Path, emit: &Path) -> RunOptio
         fetcher: Fetcher::for_tests(),
         now: time::OffsetDateTime::from_unix_timestamp(NOW).unwrap(),
         github_output: None,
+        deadline: Some(xtask::upstream::RUN_DEADLINE),
+        page_timeout: xtask::upstream::PAGE_DOWNLOAD_TIMEOUT,
     }
 }
 
@@ -875,4 +877,182 @@ fn page_reread_failure_and_missing_link_fail_that_link_only() {
             ("page:windows-64-bit".to_owned(), 0, SourceStatus::Ok),
         ]
     );
+}
+
+#[test]
+fn first_download_of_a_known_page_link_makes_no_core_issue() {
+    let server = MockServer::start();
+    serve_world(&server, |j| j);
+    // One link fails in the first run: its source is known afterwards, its facts are not.
+    server.route("GET", &key_target('2'), Response::status(503));
+    let dirs = Dirs::new();
+    let out = cycle(&server, &dirs, 1);
+    assert_eq!(page_ids(&facts(&dirs.state())).len(), 3, "{:?}", out.log);
+    serve_world(&server, |j| j);
+    let out = cycle(&server, &dirs, 2);
+    let id = out
+        .entry
+        .clone()
+        .expect("the new distribution makes an entry");
+    assert_eq!(page_ids(&facts(&dirs.state())).len(), 4);
+    let d: FactsDiff = serde_json::from_slice(
+        &std::fs::read(dirs.emit(2).join(format!("history/{id}/diff.json"))).unwrap(),
+    )
+    .unwrap();
+    let first: Vec<_> = d
+        .distributions
+        .iter()
+        .filter(|(_, dd)| dd.first_fetch)
+        .collect();
+    assert_eq!(first.len(), 1, "{d:?}");
+    assert!(!first[0].1.added);
+    assert!(!d.needs_core_issue(), "{d:?}");
+    let e = index(&dirs.emit(2)).entries.pop().unwrap();
+    assert!(e.summary.distributions.is_empty(), "{:?}", e.summary);
+    assert!(
+        e.summary
+            .notes
+            .iter()
+            .any(|n| n.ends_with("первая загрузка известного источника")),
+        "{:?}",
+        e.summary
+    );
+}
+
+#[test]
+fn hanging_downloads_stop_at_the_run_deadline_and_wait_for_the_next_run() {
+    let server = MockServer::start();
+    serve_world(&server, |j| j);
+    let dirs = Dirs::new();
+    cycle(&server, &dirs, 1);
+    let state_before = std::fs::read(dirs.state().join("state.json")).unwrap();
+    // Both installers are announced as changed (another ETag), then their servers go quiet.
+    for (path, file) in [
+        ("/updates/installer.sh", "installer.sh"),
+        ("/updates/lite.exe", "lite.exe"),
+    ] {
+        server.route(
+            "GET",
+            path,
+            Response::ok(read(fixture(&format!("upstream/{file}")))).header("ETag", "\"new\""),
+        );
+    }
+    let ids = ["dist:setupsh", "dist:setupexe"];
+    server.clear_requests();
+    server.hang("GET", "/updates/installer.sh");
+    server.hang("GET", "/updates/lite.exe");
+    let started = std::time::Instant::now();
+    let out = cycle_with(&server, &dirs, 2, |o| {
+        o.deadline = Some(std::time::Duration::from_secs(2));
+    });
+    // The client's timeout is 30 s: the deadline cut the one request, and the other never began.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    let gets = server
+        .requests()
+        .iter()
+        .filter(|r| {
+            r.method == "GET" && ["/updates/installer.sh", "/updates/lite.exe"].contains(&r.path())
+        })
+        .count();
+    assert_eq!(gets, 1, "{:?}", out.log);
+    for id in ids {
+        let line = format!("fetch: {id} skipped: run deadline passed, left for the next run");
+        assert!(out.log.contains(&line), "{id}: {:?}", out.log);
+    }
+    assert!(
+        out.log.iter().all(|l| !l.contains("failed")),
+        "{:?}",
+        out.log
+    );
+    // Nothing is counted, nothing recorded: the state is the one before the run.
+    assert!(!out.changed && out.entry.is_none(), "{:?}", out.log);
+    assert_eq!(
+        std::fs::read(dirs.state().join("state.json")).unwrap(),
+        state_before
+    );
+    // The next run, with the servers back, does what was left.
+    server.release_hangs();
+    let out = cycle(&server, &dirs, 3);
+    for id in ids {
+        assert!(
+            out.log
+                .iter()
+                .any(|l| l.starts_with(&format!("fetch: {id} ")) && !l.contains("skipped")),
+            "{id}: {:?}",
+            out.log
+        );
+    }
+}
+
+#[test]
+fn a_new_source_skipped_by_the_deadline_is_new_again_next_run() {
+    let server = MockServer::start();
+    serve_world(&server, |j| j);
+    let dirs = Dirs::new();
+    // The deadline has passed before the first download.
+    let out = cycle_with(&server, &dirs, 1, |o| {
+        o.deadline = Some(std::time::Duration::ZERO);
+    });
+    assert!(
+        out.log
+            .iter()
+            .any(|l| l.contains("skipped: run deadline passed")),
+        "{:?}",
+        out.log
+    );
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|r| r.method != "GET" || !r.target.contains("download.php")),
+        "no page link is requested"
+    );
+    let st = State::load(&dirs.state()).unwrap();
+    assert!(
+        !st.sources.contains_key("dist:setupsh"),
+        "{:?}",
+        st.sources.keys()
+    );
+    // Later: the sources are reported as added again and downloaded.
+    let out = cycle(&server, &dirs, 2);
+    assert!(
+        out.log.contains(&"poll: dist:setupsh added".to_owned()),
+        "{:?}",
+        out.log
+    );
+    assert_eq!(
+        facts(&dirs.state()).distributions["dist:setupsh"].status,
+        FetchStatus::Ok
+    );
+}
+
+#[test]
+fn a_hanging_page_download_is_cut_by_the_page_timeout() {
+    let server = MockServer::start();
+    serve_world(&server, |j| j);
+    let dirs = Dirs::new();
+    cycle(&server, &dirs, 1);
+    // Every link is retried; the backend takes the requests and says nothing.
+    set_pages(&dirs, 0, SourceStatus::Failing);
+    server.clear_requests();
+    server.hang("GET", "/download.php");
+    let started = std::time::Instant::now();
+    let out = cycle_with(&server, &dirs, 2, |o| {
+        o.page_timeout = std::time::Duration::from_secs(1);
+    });
+    // Four links at the client's 30 s would be two minutes.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(25),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(page_downloads(&server).len(), 4, "{:?}", out.log);
+    for (id, failures, status, _) in page_states(&dirs.state()) {
+        assert_eq!((failures, status), (0, SourceStatus::Failing), "{id}");
+    }
+    assert!(out.entry.is_none(), "{:?}", out.log);
 }

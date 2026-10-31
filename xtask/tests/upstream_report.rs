@@ -124,7 +124,7 @@ fn one(issues: &[Issue], label: Label) -> &Issue {
 #[test]
 fn first_run_baseline_has_no_issue() {
     let f = base();
-    let d = diff(None, &f);
+    let d = diff(None, &f, &Default::default());
     assert!(d.baseline);
     assert_eq!(d.kind(), EntryKind::Baseline);
     assert!(render(&d, None, &f, &ctx()).is_empty());
@@ -139,7 +139,7 @@ fn version_bump_core_issue() {
     let core = new.bundles.get_mut("kz.example.core").unwrap();
     core.version = "0.9.2".to_owned();
     core.hash = "cd".repeat(32);
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     assert_eq!(d.kind(), EntryKind::Change);
     let issues = render(&d, Some(&old), &new, &ctx());
     let issue = one(&issues, Label::Upstream);
@@ -158,7 +158,7 @@ fn version_bump_core_issue() {
 fn plugin_only_change_makes_plugin_issue_only() {
     let old = base();
     let new = with_demo_jar(old.clone(), "bundle-a-v2.jar", "1.1.0");
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     let issues = render(&d, Some(&old), &new, &ctx());
     let issue = one(&issues, Label::UpstreamPlugin);
     assert_eq!(issue.key, "plugin:kz.example.demo:1.1.0");
@@ -194,7 +194,7 @@ fn plugin_added_issue() {
     extra.version = "2.0".to_owned();
     extra.info = "a new synthetic plugin".to_owned();
     new.bundles.insert("kz.example.extra".to_owned(), extra);
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     let issues = render(&d, Some(&old), &new, &ctx());
     let issue = one(&issues, Label::UpstreamPlugin);
     assert_eq!(issue.key, "plugin:kz.example.extra:2.0");
@@ -206,7 +206,7 @@ fn plugin_added_issue() {
 fn repack_only_makes_no_issue() {
     let old = base();
     let new = with_demo_jar(old.clone(), "bundle-a-repack.jar", "1.0.0");
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     assert!(render(&d, Some(&old), &new, &ctx()).is_empty());
     assert_eq!(d.kind(), EntryKind::Repack);
     let s = d.summary(Some(&old), &new);
@@ -219,7 +219,7 @@ fn manifest_resigned_only_makes_no_issue() {
     let old = base();
     let mut new = old.clone();
     new.manifest.sha256 = "ef".repeat(32);
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     assert!(d.manifest.resigned_only);
     assert!(render(&d, Some(&old), &new, &ctx()).is_empty());
     assert_eq!(d.kind(), EntryKind::Repack);
@@ -230,7 +230,7 @@ fn reachability_change_is_note_only() {
     let old = base();
     let mut new = old.clone();
     new.bundles.get_mut(DEMO).unwrap().fetch = FetchStatus::Unreachable;
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     assert!(render(&d, Some(&old), &new, &ctx()).is_empty());
     assert!(
         d.notes.iter().any(|n| n.contains("unreachable")),
@@ -246,7 +246,7 @@ fn signer_change_warns() {
     let mut new = old.clone();
     new.manifest.signer.serial = "0abc".to_owned();
     new.manifest.signer.sha256 = "12".repeat(32);
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     let issues = render(&d, Some(&old), &new, &ctx());
     let issue = one(&issues, Label::Upstream);
     assert!(issue.body.contains("Сменился сертификат подписи манифеста"));
@@ -276,7 +276,7 @@ fn alert_bodies() {
 fn key_marker_is_last_line() {
     let old = base();
     let new = with_demo_jar(old.clone(), "bundle-a-v2.jar", "1.1.0");
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     for issue in render(&d, Some(&old), &new, &ctx()) {
         assert_eq!(key_of(&issue.body).as_deref(), Some(issue.key.as_str()));
         assert!(
@@ -296,7 +296,7 @@ fn markdown_in_facts_is_escaped() {
     let demo = new.bundles.get_mut(DEMO).unwrap();
     demo.info = "a | b <script>alert(1)</script>\nsecond `line`".to_owned();
     demo.version = "1.0.1|x".to_owned();
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     let issues = render(&d, Some(&old), &new, &ctx());
     let body = &one(&issues, Label::UpstreamPlugin).body;
     assert!(!body.contains("<script>"), "{body}");
@@ -321,7 +321,7 @@ fn long_diff_is_truncated_with_note() {
             Default::default(),
         );
     }
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     let issues = render(&d, Some(&old), &new, &ctx());
     let body = &one(&issues, Label::UpstreamPlugin).body;
     assert!(body.chars().count() <= BODY_MAX);
@@ -336,7 +336,7 @@ fn summary_strings_are_plain() {
     let mut new = with_demo_jar(old.clone(), "bundle-a-v2.jar", "1.1.0|`<b>`");
     new.manifest.version = "1.5 <i>".to_owned();
     new.bundles.get_mut("kz.example.core").unwrap().fetch = FetchStatus::Unreachable;
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     let s = d.summary(Some(&old), &new);
     let mut all: Vec<String> = s.core.clone();
     all.extend(s.distributions.clone());
@@ -398,7 +398,7 @@ fn uninventoried_distribution_change_is_not_a_repack() {
     t.meta.tzdb = Some(TzdbMeta {
         versions: vec!["2026b".to_owned()],
     });
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     assert_eq!(d.kind(), EntryKind::Change);
     assert!(d.needs_core_issue());
     // A new installer innounp could not unpack.
@@ -407,12 +407,114 @@ fn uninventoried_distribution_change_is_not_a_repack() {
         .get_mut("page:windows-64-bit")
         .unwrap()
         .sha256 = Some("c".repeat(64));
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     assert_eq!(d.kind(), EntryKind::Change);
     assert_eq!(
         one(&render(&d, Some(&old), &new, &ctx()), Label::Upstream).label,
         Label::Upstream
     );
+}
+
+const FIRST_FETCH: &str = "первая загрузка известного источника";
+
+fn skipped() -> xtask::upstream::facts::UnpackStatus {
+    xtask::upstream::facts::UnpackStatus::Skipped {
+        reason: "no innounp".to_owned(),
+    }
+}
+
+#[test]
+fn first_fetch_of_a_known_source_is_a_note() {
+    // The source was in the previous state, the previous facts hold nothing of it.
+    let old = base();
+    let mut new = old.clone();
+    for id in ["page:linux", "page:windows-64-bit"] {
+        new.distributions
+            .insert(id.to_owned(), dist("a", skipped()));
+    }
+    let d = diff(Some(&old), &new, &Default::default());
+    assert!(!d.needs_core_issue());
+    assert!(render(&d, Some(&old), &new, &ctx()).is_empty());
+    for id in ["page:linux", "page:windows-64-bit"] {
+        let dd = &d.distributions[id];
+        assert!(
+            dd.first_fetch && !dd.added && !dd.content_changed(),
+            "{dd:?}"
+        );
+    }
+    let s = d.summary(Some(&old), &new);
+    assert!(s.core.is_empty() && s.distributions.is_empty(), "{s:?}");
+    for id in ["page:linux", "page:windows-64-bit"] {
+        assert!(
+            s.notes.contains(&format!("{id}: {FIRST_FETCH}")),
+            "{:?}",
+            s.notes
+        );
+    }
+}
+
+#[test]
+fn new_source_still_makes_a_core_issue() {
+    let old = base();
+    let mut new = old.clone();
+    new.distributions
+        .insert("page:linux".to_owned(), dist("a", skipped()));
+    let added: std::collections::BTreeSet<String> = ["page:linux".to_owned()].into();
+    let d = diff(Some(&old), &new, &added);
+    assert!(d.distributions["page:linux"].added);
+    assert!(d.distributions["page:linux"].content_changed());
+    assert!(d.needs_core_issue());
+    let issues = render(&d, Some(&old), &new, &ctx());
+    assert!(one(&issues, Label::Upstream).body.contains("page:linux"));
+    let s = d.summary(Some(&old), &new);
+    assert!(s.notes.iter().all(|n| !n.contains(FIRST_FETCH)), "{s:?}");
+}
+
+#[test]
+fn changed_sha_still_makes_an_issue_beside_a_first_fetch() {
+    let mut old = base();
+    old.distributions
+        .insert("page:windows-64-bit".to_owned(), dist("a", skipped()));
+    let mut new = old.clone();
+    new.distributions
+        .get_mut("page:windows-64-bit")
+        .unwrap()
+        .sha256 = Some("c".repeat(64));
+    new.distributions
+        .insert("page:linux".to_owned(), dist("a", skipped()));
+    let d = diff(Some(&old), &new, &Default::default());
+    assert!(d.needs_core_issue());
+    let issues = render(&d, Some(&old), &new, &ctx());
+    let body = &one(&issues, Label::Upstream).body;
+    assert!(body.contains("page:windows-64-bit"), "{body}");
+    // The first fetch is not a row of the issue, only a note of the entry.
+    assert!(!body.contains("page:linux"), "{body}");
+    assert!(
+        d.summary(Some(&old), &new)
+            .notes
+            .contains(&format!("page:linux: {FIRST_FETCH}"))
+    );
+}
+
+#[test]
+fn first_download_of_a_pending_bundle_is_a_note() {
+    // Known to the manifest, its download had not succeeded yet (pending).
+    let mut old = base();
+    let demo = old.bundles.get_mut(DEMO).unwrap();
+    demo.fetch = FetchStatus::Pending;
+    demo.jar = None;
+    let new = base();
+    let d = diff(Some(&old), &new, &Default::default());
+    assert!(d.core.is_empty() && d.plugins.is_empty(), "{d:?}");
+    assert!(!d.needs_core_issue());
+    assert_eq!(d.plugin_issues().count(), 0);
+    assert!(render(&d, Some(&old), &new, &ctx()).is_empty());
+    assert_eq!(d.notes, [format!("{DEMO}: {FIRST_FETCH}")]);
+    // A bundle whose hash changed with it is still a change.
+    let mut changed = new.clone();
+    changed.bundles.get_mut(DEMO).unwrap().hash = "ab".repeat(32);
+    let d = diff(Some(&old), &changed, &Default::default());
+    assert_eq!(d.plugin_issues().count(), 1, "{d:?}");
 }
 
 #[test]
@@ -423,7 +525,7 @@ fn mentions_references_and_links_are_neutralised() {
     demo.name = "@octocat [x](https://example.com)".to_owned();
     demo.info = "Ask @octocat, see #1 and o/r#2, [x](https://example.com) ![i](https://example.com/i.png) *b* _c_ ~d~ \\[e]".to_owned();
     demo.csernum = "#3 @team".to_owned();
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     let issues = render(&d, Some(&old), &new, &ctx());
     let body = &one(&issues, Label::UpstreamPlugin).body;
     for live in [
@@ -466,7 +568,7 @@ fn code_spans_keep_angle_brackets() {
     let j = new.jars[&sha].clone();
     new.jars.insert("ff".repeat(32), j);
     new.bundles.get_mut(DEMO).unwrap().jar = Some("ff".repeat(32));
-    let d = diff(Some(&old), &new);
+    let d = diff(Some(&old), &new, &Default::default());
     let issues = render(&d, Some(&old), &new, &ctx());
     let body = &one(&issues, Label::UpstreamPlugin).body;
     assert!(body.contains("`<init>(Ljava/lang/String;)V`"), "{body}");

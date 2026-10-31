@@ -10,10 +10,19 @@
 //! change a page source's status; a failing or refused one is tried again on every run. A
 //! failed download does not count towards its removal: only polls that do not find it on
 //! the page do (see the poll).
+//!
+//! The run has a deadline of its own ([`RunOptions::deadline`], measured from its start):
+//! once it has passed, the downloads not yet started are skipped and so is the one in flight
+//! (a request is never given more than the time left). A skipped source is left for the
+//! next run: its state goes back to what the previous state had (a source the previous state
+//! lacked is reported as new again), nothing is counted as a failure, and the log says so.
+//! A page download has a shorter request timeout ([`RunOptions::page_timeout`]) than the
+//! others, since a backend that accepts and goes quiet costs it in full, once per link.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use oncl_pki::cert::Certificate;
@@ -62,6 +71,11 @@ pub struct RunOptions {
     pub now: OffsetDateTime,
     /// `$GITHUB_OUTPUT`: `changed=` and `alert=` lines are appended.
     pub github_output: Option<PathBuf>,
+    /// How long the run may go on downloading; none: without a deadline.
+    pub deadline: Option<Duration>,
+    /// The longest a single page download or re-read of the page may take (never more than
+    /// the client's own timeout).
+    pub page_timeout: Duration,
 }
 
 /// What a run did.
@@ -133,6 +147,50 @@ impl Logger {
     }
 }
 
+/// The deadline of the run's downloads, on the run's own clock.
+struct Clock {
+    end: Option<Instant>,
+}
+
+impl Clock {
+    fn start(deadline: Option<Duration>) -> Clock {
+        Clock {
+            end: deadline.and_then(|d| Instant::now().checked_add(d)),
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.end.is_some_and(|end| Instant::now() >= end)
+    }
+
+    /// `fetcher`, its request timeout cut to `limit` and to the time the run has left.
+    fn cap(&self, fetcher: &Fetcher, limit: Option<Duration>) -> Fetcher {
+        let left = self
+            .end
+            .map(|end| end.saturating_duration_since(Instant::now()));
+        match limit.into_iter().chain(left).min() {
+            Some(cap) => fetcher.capped(cap),
+            None => fetcher.clone(),
+        }
+    }
+}
+
+/// A download that the run's deadline stopped or kept from starting: the source goes back to
+/// what the previous state had, so that the next poll sees it as the next run would have.
+fn leave(prev: &State, state: &mut State, id: &str, log: &mut Logger) {
+    log.line(format!(
+        "fetch: {id} skipped: run deadline passed, left for the next run"
+    ));
+    match prev.sources.get(id) {
+        Some(seen) => {
+            state.sources.insert(id.to_owned(), seen.clone());
+        }
+        None => {
+            state.sources.remove(id);
+        }
+    }
+}
+
 /// Runs the cycle; see the module documentation.
 ///
 /// # Errors
@@ -140,6 +198,7 @@ impl Logger {
 /// Unreadable branch files, I/O of the work and emit directories, or a non-JSON file in the
 /// emit directory.
 pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
+    let clock = Clock::start(opts.deadline);
     let mut log = Logger(Vec::new());
     if let Some(note) = proxy_ignored() {
         log.line(note.to_owned());
@@ -193,6 +252,12 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
 
     if let Ok(verified) = &polled.manifest {
         let changed: BTreeMap<&str, &Change> = polled.changes.iter().map(|c| (c.id(), c)).collect();
+        let added_sources: BTreeSet<String> = polled
+            .changes
+            .iter()
+            .filter(|c| matches!(c, Change::Added { .. }))
+            .map(|c| c.id().to_owned())
+            .collect();
         let mut updates = Updates::default();
         let mut n = 0usize;
         for source in &polled.sources {
@@ -211,10 +276,25 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
                     if change.is_none() && !retry {
                         continue;
                     }
+                    if clock.expired() {
+                        leave(&prev_state, &mut next_state, &source.id, &mut log);
+                        continue;
+                    }
                     n += 1;
                     let dest = dl.join(format!("{n}.jar"));
-                    let (update, jar) =
-                        fetch_bundle(opts, source, &dest, &mut next_state, &mut log);
+                    let fetcher = clock.cap(&opts.fetcher, None);
+                    let Some((update, jar)) = fetch_bundle(
+                        opts,
+                        &fetcher,
+                        &clock,
+                        source,
+                        &dest,
+                        &prev_state,
+                        &mut next_state,
+                        &mut log,
+                    ) else {
+                        continue;
+                    };
                     if let Some((sha, facts)) = jar {
                         updates.jars.insert(sha, facts);
                     }
@@ -241,6 +321,10 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
                     if change.is_none() && known && !not_ok {
                         continue;
                     }
+                    if clock.expired() {
+                        leave(&prev_state, &mut next_state, &source.id, &mut log);
+                        continue;
+                    }
                     n += 1;
                     let dest = dl.join(n.to_string());
                     let headers_only = known
@@ -251,12 +335,17 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
                                 ..
                             })
                         );
+                    let fetcher = clock.cap(&opts.fetcher, page.then_some(opts.page_timeout));
                     let (url, ctx) = if page {
-                        match fresh_link(opts, source) {
+                        match fresh_link(opts, &fetcher, source) {
                             Ok(link) => link,
                             Err(e) => {
-                                log.line(format!("fetch: {} failed: {e}", source.id));
-                                forget_and_fail(&prev_state, &mut next_state, &source.id);
+                                if clock.expired() {
+                                    leave(&prev_state, &mut next_state, &source.id, &mut log);
+                                } else {
+                                    log.line(format!("fetch: {} failed: {e}", source.id));
+                                    forget_and_fail(&prev_state, &mut next_state, &source.id);
+                                }
                                 continue;
                             }
                         }
@@ -265,6 +354,8 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
                     };
                     if let Some(facts) = fetch_dist(
                         opts,
+                        &fetcher,
+                        &clock,
                         source,
                         &url,
                         &ctx,
@@ -297,7 +388,7 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
         if prev_latest.as_deref() != Some(json.as_slice()) {
             let k8 = key8(&json);
             log.line(format!("facts: {k8}"));
-            let d = diff(prev_facts.as_ref(), &facts);
+            let d = diff(prev_facts.as_ref(), &facts, &added_sources);
             let date = opts.now.date().to_string();
             let id = entry_id(&date, &facts.manifest.version, &k8);
             let dir = history_dir(&id);
@@ -380,18 +471,20 @@ fn bundle_failure(state: &mut State, id: &str) -> FetchStatus {
     }
 }
 
+/// The download of a bundle; none when the run's deadline stopped it (see [`leave`]).
+#[allow(clippy::too_many_arguments)]
 fn fetch_bundle(
     opts: &RunOptions,
+    fetcher: &Fetcher,
+    clock: &Clock,
     source: &Source,
     dest: &Path,
+    prev: &State,
     state: &mut State,
     log: &mut Logger,
-) -> (BundleUpdate, Option<(String, super::facts::JarFacts)>) {
-    let fail = |fetch| (BundleUpdate { fetch, jar: None }, None);
-    let d = match opts
-        .fetcher
-        .download(&source.url, BUNDLE_MAX, &RequestCtx::default(), dest)
-    {
+) -> Option<(BundleUpdate, Option<(String, super::facts::JarFacts)>)> {
+    let fail = |fetch| Some((BundleUpdate { fetch, jar: None }, None));
+    let d = match fetcher.download(&source.url, BUNDLE_MAX, &RequestCtx::default(), dest) {
         Ok(d) => d,
         Err(FetchError::RefusedAddress(_)) => {
             log.line(format!("fetch: {} refused", source.id));
@@ -399,6 +492,10 @@ fn fetch_bundle(
             entry.status = SourceStatus::Refused;
             entry.failures = 0;
             return fail(FetchStatus::Refused);
+        }
+        Err(_) if clock.expired() => {
+            leave(prev, state, &source.id, log);
+            return None;
         }
         Err(e) => {
             log.line(format!("fetch: {} failed: {e}", source.id));
@@ -436,24 +533,27 @@ fn fetch_bundle(
     entry.sha256 = Some(d.sha256.clone());
     entry.failures = 0;
     entry.status = SourceStatus::Ok;
-    (
+    Some((
         BundleUpdate {
             fetch: FetchStatus::Ok,
             jar: Some(d.sha256.clone()),
         },
         facts.map(|f| (d.sha256, f)),
-    )
+    ))
 }
 
 /// The link of the page source `source` with a fresh key, and what its download goes with:
 /// the page read again in a new session, so that one backend gone quiet fails one link only.
-fn fresh_link(opts: &RunOptions, source: &Source) -> Result<(String, RequestCtx), String> {
+fn fresh_link(
+    opts: &RunOptions,
+    fetcher: &Fetcher,
+    source: &Source,
+) -> Result<(String, RequestCtx), String> {
     let ctx = RequestCtx {
         referer: None,
         session: Some(Arc::new(Mutex::new(Session::default()))),
     };
-    let page = opts
-        .fetcher
+    let page = fetcher
         .get(&opts.endpoints.page, PAGE_MAX, &ctx)
         .map_err(|e| format!("download page: {e}"))?;
     let url = parse_download_page(&String::from_utf8_lossy(&page.body), &opts.endpoints.page)
@@ -501,6 +601,8 @@ fn forget_and_fail(prev: &State, state: &mut State, id: &str) {
 #[allow(clippy::too_many_arguments)]
 fn fetch_dist(
     opts: &RunOptions,
+    fetcher: &Fetcher,
+    clock: &Clock,
     source: &Source,
     url: &str,
     ctx: &RequestCtx,
@@ -512,7 +614,7 @@ fn fetch_dist(
     log: &mut Logger,
 ) -> Option<super::facts::DistFacts> {
     let page = matches!(source.kind, SourceKind::Page { .. });
-    let d = match opts.fetcher.download(url, DIST_MAX, ctx, dest) {
+    let d = match fetcher.download(url, DIST_MAX, ctx, dest) {
         Ok(d) => d,
         // A page link is not requested by the poll: its download is what finds it refused.
         Err(FetchError::RefusedAddress(_)) if page => {
@@ -522,6 +624,10 @@ fn fetch_dist(
                 entry.status = SourceStatus::Refused;
                 entry.failures = 0;
             }
+            return None;
+        }
+        Err(_) if clock.expired() => {
+            leave(prev, state, &source.id, log);
             return None;
         }
         Err(e) => {

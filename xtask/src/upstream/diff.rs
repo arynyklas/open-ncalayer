@@ -299,8 +299,12 @@ impl JarDiff {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DistDiff {
-    /// New source.
+    /// New source: not in the previous state of the run either.
     pub added: bool,
+    /// A source the previous state already knew, fetched successfully for the first time
+    /// (the previous facts had no entry for it): a note, not a change.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub first_fetch: bool,
     /// Gone source.
     pub removed: bool,
     /// Fetch status.
@@ -376,8 +380,10 @@ pub struct Summary {
     pub notes: Vec<String>,
 }
 
-/// The difference of `new` from `old` (none: the baseline).
-pub fn diff(old: Option<&Facts>, new: &Facts) -> FactsDiff {
+/// The difference of `new` from `old` (none: the baseline). `added_sources` are the sources
+/// the run saw for the first time: a distribution absent from `old` that is not among them
+/// was known before and is only fetched for the first time.
+pub fn diff(old: Option<&Facts>, new: &Facts, added_sources: &BTreeSet<String>) -> FactsDiff {
     let Some(old) = old else {
         return FactsDiff {
             baseline: true,
@@ -432,7 +438,9 @@ pub fn diff(old: Option<&Facts>, new: &Facts) -> FactsDiff {
             (None, Some(a)) => (BundleDiff::Added(Box::new(a.clone())), a.required),
             (Some(b), None) => (BundleDiff::Removed(Box::new(b.clone())), b.required),
             (Some(b), Some(a)) => {
-                if b.fetch != a.fetch {
+                if b.jar.is_none() && a.jar.is_some() {
+                    notes.push(format!("{name}: первая загрузка известного источника"));
+                } else if b.fetch != a.fetch {
                     notes.push(format!(
                         "{name}: загрузка {} → {}",
                         fetch_name(b.fetch),
@@ -461,7 +469,7 @@ pub fn diff(old: Option<&Facts>, new: &Facts) -> FactsDiff {
         .chain(new.distributions.keys())
         .collect();
     for id in ids {
-        let d = dist_change(id, old, new, &mut notes);
+        let d = dist_change(id, old, new, added_sources, &mut notes);
         if d != DistDiff::default() {
             distributions.insert(id.clone(), d);
         }
@@ -550,7 +558,13 @@ fn bundle_change(b: &BundleFacts, a: &BundleFacts, old: &Facts, new: &Facts) -> 
     })
 }
 
-fn dist_change(id: &str, old: &Facts, new: &Facts, notes: &mut Vec<String>) -> DistDiff {
+fn dist_change(
+    id: &str,
+    old: &Facts,
+    new: &Facts,
+    added_sources: &BTreeSet<String>,
+    notes: &mut Vec<String>,
+) -> DistDiff {
     let (b, a) = (old.distributions.get(id), new.distributions.get(id));
     let empty = |url: &str| DistFacts {
         url: url.to_owned(),
@@ -571,7 +585,8 @@ fn dist_change(id: &str, old: &Facts, new: &Facts, notes: &mut Vec<String>) -> D
         embedded_manifests: BTreeMap::new(),
         meta: Default::default(),
     };
-    let (added, removed) = (b.is_none(), a.is_none());
+    let first_fetch = b.is_none() && a.is_some() && !added_sources.contains(id);
+    let (added, removed) = (b.is_none() && !first_fetch, a.is_none());
     let b_owned;
     let a_owned;
     let b = match b {
@@ -591,7 +606,10 @@ fn dist_change(id: &str, old: &Facts, new: &Facts, notes: &mut Vec<String>) -> D
     if removed {
         notes.push(format!("{id}: источник исчез"));
     }
-    let status = change(&b.status, &a.status).filter(|_| !added && !removed);
+    if first_fetch {
+        notes.push(format!("{id}: первая загрузка известного источника"));
+    }
+    let status = change(&b.status, &a.status).filter(|_| !added && !removed && !first_fetch);
     if let Some(c) = &status {
         notes.push(format!(
             "{id}: загрузка {} → {}",
@@ -603,6 +621,7 @@ fn dist_change(id: &str, old: &Facts, new: &Facts, notes: &mut Vec<String>) -> D
     if a.sha256.is_none() && !removed {
         return DistDiff {
             added,
+            first_fetch,
             removed,
             status,
             ..DistDiff::default()
@@ -665,6 +684,7 @@ fn dist_change(id: &str, old: &Facts, new: &Facts, notes: &mut Vec<String>) -> D
     // compare, and any change of installer metadata is a change.
     let inventoried = |d: &DistFacts| d.unpack == super::facts::UnpackStatus::Ok;
     let repack_only = !added
+        && !first_fetch
         && !removed
         && sha256.is_some()
         && inventoried(b)
@@ -679,6 +699,7 @@ fn dist_change(id: &str, old: &Facts, new: &Facts, notes: &mut Vec<String>) -> D
             .all(|c| c.before.as_ref().map(|m| &m.version) == c.after.as_ref().map(|m| &m.version));
     DistDiff {
         added,
+        first_fetch,
         removed,
         status,
         sha256,

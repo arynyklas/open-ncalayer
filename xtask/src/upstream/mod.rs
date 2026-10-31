@@ -40,6 +40,11 @@ pub const DIST_MAX: u64 = 1 << 30;
 pub const REDIRECTS_MAX: u32 = 5;
 /// Failed polls in a row after which a source counts as gone.
 pub const FAILURES_TO_REMOVE: u32 = 3;
+/// How long a run goes on downloading by default (the `collect` job stops at 120 minutes).
+pub const RUN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90 * 60);
+/// The longest a page download may take: a backend that accepts the request and then says
+/// nothing costs it in full, and each of the page's links is requested in a session of its own.
+pub const PAGE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// The signed manifest of the original NCALayer.
 pub const MANIFEST_URL: &str = "https://crl.pki.gov.kz/updates/ncalayer.der";
 /// The official download page.

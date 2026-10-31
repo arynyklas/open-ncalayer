@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Subcommand;
 
-use super::Endpoints;
 use super::branch_layout::ToolVersions;
 use super::github::Client;
 use super::http::Fetcher;
@@ -16,6 +15,7 @@ use super::report::PortRef;
 use super::run::{self as cycle, RunOptions};
 use super::state::State;
 use super::unpack::{Limits, Tools};
+use super::{Endpoints, PAGE_DOWNLOAD_TIMEOUT, RUN_DEADLINE};
 
 /// `cargo xtask upstream …`.
 #[derive(Debug, Subcommand)]
@@ -57,6 +57,10 @@ pub enum UpstreamCommand {
         /// Append `changed=` and `alert=` lines here (`$GITHUB_OUTPUT`).
         #[arg(long)]
         github_output: Option<PathBuf>,
+        /// Minutes after which the downloads not yet started are skipped and left for the
+        /// next run (0: no deadline).
+        #[arg(long, default_value_t = RUN_DEADLINE.as_secs() / 60)]
+        deadline_minutes: u64,
     },
     /// Publish an emit directory: checked strictly, copied into the `upstream` branch with the
     /// issue numbers, committed, pushed; issues created or updated by key; alerts of its
@@ -238,6 +242,7 @@ pub fn run(command: UpstreamCommand) -> anyhow::Result<()> {
             emit,
             dry_run,
             github_output,
+            deadline_minutes,
         } => {
             let mut tools = Tools::from_env();
             // 7-Zip older than 25.01 would write through links out of its output directory.
@@ -276,6 +281,9 @@ pub fn run(command: UpstreamCommand) -> anyhow::Result<()> {
                 fetcher: Fetcher::new(),
                 now: time::OffsetDateTime::now_utc(),
                 github_output,
+                deadline: (deadline_minutes > 0)
+                    .then(|| std::time::Duration::from_secs(deadline_minutes.saturating_mul(60))),
+                page_timeout: PAGE_DOWNLOAD_TIMEOUT,
             };
             let print = |outcome: &super::run::RunOutcome| {
                 println!(

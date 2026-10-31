@@ -287,6 +287,14 @@ impl Fetcher {
         self
     }
 
+    /// This client with a request timeout of at most `limit`.
+    #[must_use]
+    pub fn capped(&self, limit: Duration) -> Fetcher {
+        let mut capped = self.clone();
+        capped.timeout = capped.timeout.min(limit);
+        capped
+    }
+
     /// HEAD of `url`, redirects followed.
     ///
     /// # Errors

@@ -96,6 +96,7 @@ struct Shared {
     routes: BTreeMap<(String, String), Vec<Response>>,
     handlers: Vec<Handler>,
     requests: Vec<Recorded>,
+    hangs: Vec<(String, String)>,
 }
 
 /// The mock; it serves until dropped with the test process.
@@ -149,6 +150,21 @@ impl MockServer {
         self.shared.lock().unwrap().handlers.push(Box::new(f));
     }
 
+    /// Requests of `method path` are accepted and read, then never answered (the connection
+    /// stays open until the client closes it). Tried before the handlers and the routes.
+    pub fn hang(&self, method: &str, path: &str) {
+        self.shared
+            .lock()
+            .unwrap()
+            .hangs
+            .push((method.to_owned(), path.to_owned()));
+    }
+
+    /// Answers the requests that [`MockServer::hang`] held back from now on.
+    pub fn release_hangs(&self) {
+        self.shared.lock().unwrap().hangs.clear();
+    }
+
     pub fn requests(&self) -> Vec<Recorded> {
         self.shared.lock().unwrap().requests.clone()
     }
@@ -189,6 +205,22 @@ fn serve(stream: TcpStream, shared: &Arc<Mutex<Shared>>) {
         headers,
         body,
     };
+    let hung = {
+        let mut s = shared.lock().unwrap();
+        let hung = s
+            .hangs
+            .iter()
+            .any(|(m, p)| *m == method && p == recorded.path());
+        if hung {
+            s.requests.push(recorded.clone());
+        }
+        hung
+    };
+    if hung {
+        let mut sink = [0u8; 64];
+        while matches!(reader.read(&mut sink), Ok(n) if n > 0) {}
+        return;
+    }
     let response = {
         let mut s = shared.lock().unwrap();
         s.requests.push(recorded.clone());
