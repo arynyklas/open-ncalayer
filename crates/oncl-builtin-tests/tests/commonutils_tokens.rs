@@ -14,9 +14,11 @@ use oncl_pki::tsp::{MockTsa, verify_token};
 use oncl_pki::xmldsig;
 use oncl_protocol::{AddInfo, Module};
 use oncl_testkit::{read, synthetic, synthetic_cert};
+use oncl_token::backend::{Backend, BackendError, Connection, ReaderState};
 use oncl_token::emulator::{CardSpec, EmuKey, EmulatorBackend, card};
 use oncl_token::{TokenKind, Tokens};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use time::OffsetDateTime;
 
@@ -153,6 +155,69 @@ fn token_storage_without_reader_is_storage_empty() {
     let s = setup(&emu, false, vec![]);
     let reply = call(&s.cu, "getKeyInfo", json!(["AKKaztokenStore"]));
     assert_eq!(failed(&reply), "storage.empty");
+}
+
+/// The emulator, whose `readers` answers as it does for the first `good` calls, then
+/// fails (`fail`) or no longer sees the card in R0.
+struct Flaky {
+    emu: Arc<EmulatorBackend>,
+    good: usize,
+    fail: bool,
+    calls: AtomicUsize,
+}
+
+impl Backend for Flaky {
+    fn readers(&self) -> Result<Vec<ReaderState>, BackendError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) >= self.good {
+            if self.fail {
+                return Err(BackendError::Failed(
+                    "SCardGetStatusChange 0x80100009".into(),
+                ));
+            }
+            self.emu.remove(R0);
+        }
+        self.emu.readers()
+    }
+
+    fn connect(&self, reader: &str) -> Result<Box<dyn Connection>, BackendError> {
+        self.emu.connect(reader)
+    }
+}
+
+#[test]
+fn failing_smart_card_service_is_storage_empty() {
+    // Failing at once, failing after the readers were read, the token gone after that:
+    // `storage.empty`, without a window, as the original answered.
+    for (good, fail) in [(0, true), (1, true), (1, false)] {
+        let emu = emulator(vec![spec(TokenKind::Kaztoken)]);
+        let flaky = Arc::new(Flaky {
+            emu,
+            good,
+            fail,
+            calls: AtomicUsize::new(0),
+        });
+        let prompter = Arc::new(ScriptedPrompter::new(vec![token(R0, PIN), Step::Key(0)]));
+        let tsa_key = synthetic("tsa-gost2015");
+        let tsa = Arc::new(MockTsa::new(
+            load(&read(&tsa_key.path), &tsa_key.password)
+                .unwrap()
+                .swap_remove(0),
+        ));
+        let cu = CommonUtils::new(prompter.clone(), tsa)
+            .with_cas(synthetic_cas())
+            .with_tokens(Tokens::new(flaky, true));
+        for (method, args) in [
+            ("getKeyInfo", json!(["AKKaztokenStore"])),
+            (
+                "signXml",
+                json!(["AKKaztokenStore", "SIGNATURE", "<a/>", "", ""]),
+            ),
+        ] {
+            let reply = call(&cu, method, args);
+            assert_eq!(failed(&reply), "storage.empty", "{good} {fail} {method}");
+        }
+        assert!(prompter.storage_prompts().is_empty());
+    }
 }
 
 #[test]

@@ -1,8 +1,10 @@
 //! The module's exports and the core it asks, on `wasm32`.
 
+use crate::Chosen;
 use oncl_pdk::abi::{
-    CertDetails, CertInfo, CmsOutcome, FlowArgs, HostResult, KeyDescription, PageRead, PathOutcome,
-    PathTime, SignCmsExArgs, SignXmlArgs, StampArgs, StampOutcome,
+    CertDetails, CertInfo, CmsOutcome, ErrorCode, FlowArgs, FlowReaders, HostResult,
+    KeyDescription, PageRead, PathOutcome, PathTime, SignCmsExArgs, SignXmlArgs, StampArgs,
+    StampOutcome,
 };
 use oncl_pdk::data::{self, DataDecoded, DataDecoding, DataEncoding};
 use oncl_pdk::keys::{self, Key};
@@ -91,12 +93,31 @@ impl crate::Core for Host {
     }
 
     fn readers(&self, storage: &str) -> Vec<String> {
-        keys::terminals(storage).expect("keys_terminals")
+        // As the original read them: a failing smart card service has no readers.
+        keys::terminals(storage).unwrap_or_else(|e| {
+            self.debug(&format!("the readers of {storage}: {e}"));
+            Vec::new()
+        })
     }
 
-    fn choose_key(&self, flow: &FlowArgs) -> Option<Key> {
-        let (flow, _) = keys::flow_open(flow).expect("keys_flow_open");
-        flow?.pick(None).expect("keys_flow_pick")
+    fn choose_key(&self, flow: &FlowArgs) -> Chosen<Key> {
+        let (flow, _) = match keys::flow_open(flow) {
+            Ok(opened) => opened,
+            // A fixed reader is checked before any window: its token went since
+            // `readers`, or the smart card service failed.
+            Err(e)
+                if matches!(flow.readers, FlowReaders::Fixed(_))
+                    && matches!(e.code, ErrorCode::Invalid | ErrorCode::Failed) =>
+            {
+                self.debug(&format!("the key choice's reader: {e}"));
+                return Chosen::ReaderGone;
+            }
+            Err(e) => panic!("keys_flow_open: {e}"),
+        };
+        match flow.map(|flow| flow.pick(None).expect("keys_flow_pick")) {
+            Some(Some(key)) => Chosen::Key(key),
+            _ => Chosen::Canceled,
+        }
     }
 
     fn certificate<'k>(&self, key: &'k Key) -> &'k [u8] {

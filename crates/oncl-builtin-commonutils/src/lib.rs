@@ -43,10 +43,11 @@ pub trait Core {
     fn call_locale(&self, locale: Locale);
     /// The storages of the tokens connected, in Kalkan's order.
     fn active_tokens(&self) -> Vec<String>;
-    /// The readers holding a token of the storage `storage`.
+    /// The readers holding a token of the storage `storage`; none if the smart card
+    /// service fails.
     fn readers(&self, storage: &str) -> Vec<String>;
-    /// The storage and key dialogs of `flow`: the key picked, `None` if cancelled.
-    fn choose_key(&self, flow: &FlowArgs) -> Option<Self::Key>;
+    /// The storage and key dialogs of `flow`.
+    fn choose_key(&self, flow: &FlowArgs) -> Chosen<Self::Key>;
     /// The key's certificate, DER.
     fn certificate<'k>(&self, key: &'k Self::Key) -> &'k [u8];
     /// The key's alias, algorithm and certificate.
@@ -83,6 +84,18 @@ pub trait Core {
     /// The file chooser of the file type `kind`, starting in `directory`; `invalid` with
     /// the cause `file.unknown_kind` for an unknown type.
     fn choose_kind(&self, kind: &str, directory: &str) -> HostResult<Option<String>>;
+}
+
+/// What the key dialogs of a flow gave.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Chosen<K> {
+    /// The key the user picked.
+    Key(K),
+    /// The user cancelled.
+    Canceled,
+    /// The flow's reader holds no token of its storage any more (or the smart card
+    /// service failed): no window opened.
+    ReaderGone,
 }
 
 /// The reply to `request` from the page of `add_info`.

@@ -25,8 +25,8 @@
 //! network path the user chose in the file chooser) and shown in both dialogs as absolute
 //! paths.
 
-use crate::Core;
 use crate::dispatch::Args;
+use crate::{Chosen, Core};
 use oncl_pdk::abi::{
     Action, Bytes, CmsCerts, CmsContent, CmsOutcome, CmsOutput, CoSign, FlowArgs, FlowChecks,
     FlowFile, FlowNone, FlowOrder, FlowReader, FlowReaders, FlowStart, HostError, PageRead,
@@ -429,7 +429,12 @@ fn choose_key<C: Core>(
         checks: FlowChecks::Settled,
         skip_blocked_reader: false,
     };
-    cu.choose_key(&flow).ok_or_else(canceled)
+    match cu.choose_key(&flow) {
+        Chosen::Key(key) => Ok(key),
+        Chosen::Canceled => Err(canceled()),
+        // The token went between the readers and the window.
+        Chosen::ReaderGone => Err(Some(STORAGE_EMPTY.to_owned())),
+    }
 }
 
 /// The storage `name` names (`StorageInfo`'s checks), with the reader of a token: the first
@@ -709,7 +714,7 @@ mod tests {
         fn readers(&self, _: &str) -> Vec<String> {
             Vec::new()
         }
-        fn choose_key(&self, _: &FlowArgs) -> Option<()> {
+        fn choose_key(&self, _: &FlowArgs) -> Chosen<()> {
             unreachable!()
         }
         fn certificate<'k>(&self, _: &'k ()) -> &'k [u8] {
