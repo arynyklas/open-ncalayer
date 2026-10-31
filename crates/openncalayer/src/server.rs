@@ -209,8 +209,9 @@ pub fn build_registry_from(
 }
 
 /// What the About window lists of the bundles: the reply of the accessory module of
-/// `registry` to `getBundles`, `(symname, version)` in the reply's order, without the
-/// entries the bundles of `plugins` report (the plugins' window lists them).
+/// `registry` to `getBundles`, `(symname, version)` sorted by symname (the reply's object is
+/// read into a sorted map), without the entries the bundles of `plugins` report (the
+/// plugins' window lists them).
 pub fn about_bundles(registry: &Registry, plugins: &dyn Bundles) -> Vec<(String, String)> {
     let request = serde_json::json!({
         "module": oncl_builtin_accessory::MODULE_NAME,
