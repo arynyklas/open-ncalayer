@@ -190,8 +190,9 @@ fn legacy(text: &str) -> String {
 
 /// `params` as org.json wraps the original's `HashMap`: a map of its size filled in the
 /// order of the first one.
-// Unverified against the original: the order of three params (`failure` before `address`
-// by this rule), and the order the original put the keys into its map.
+// Not observable: the order of three params (`failure` before `address` by this rule) and
+// of the keys the original put into its map: the branches that give them need a key of the
+// national CA's chain, which the checks cannot use.
 fn params(entries: &[(&'static str, String)]) -> JObject {
     let mut source = JObject::hash_map();
     for (key, value) in entries {
@@ -281,8 +282,9 @@ fn remote(failure: &NetFailure, address: &str, attempted: Option<String>) -> Err
 
 /// `<SimpleName>: <message>` of the deepest cause, white space collapsed, at most 512
 /// characters.
-// Unverified against the original: the JDK's exception texts, built here from the core's
-// failure.
+// Not observable: the JDK's exception texts of a failed network request are built here from
+// the core's failure; the branches need a key of the national CA's chain and a network that
+// fails on demand.
 fn detail(failure: &NetFailure, service: &str, address: &str) -> String {
     let text = match failure.kind {
         NetKind::UnknownHost => format!("UnknownHostException: {}", failure.address),
@@ -482,7 +484,8 @@ fn sign_cms(key: &Key, files_names: &str, data: &[u8]) -> Result<Signed, Error> 
         host::ca_issuer(cert).map_err(|e| Error::code(e.message))?
     };
     let issuer = issuer.ok_or_else(|| Error::code("UNKNOWN_CA"))?;
-    // Unverified against the original: the code of a certificate without an OCSP URL.
+    // Not observable: the code of a certificate without an OCSP URL; the branch follows the
+    // chain check, which only a key of the national CA's chain passes.
     let ocsp_url = details
         .ocsp_urls
         .first()

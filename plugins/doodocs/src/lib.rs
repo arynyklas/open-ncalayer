@@ -269,14 +269,15 @@ fn cades(key: &Key, data: Vec<u8>, attached: bool) -> CallResult {
     match key.sign_cms_ex(args) {
         Ok(CmsOutcome::Signed(cms)) => Ok(javab64::encode_mime(&cms).replace("\r\n", "").into()),
         Ok(CmsOutcome::TspFailed(failure)) => Err(provider_failure(&tsp_cause(&failure))),
-        // Unverified against the original: the provider's message (the core's here).
+        // Not observable: a signature refused for a reason other than the time-stamp cannot be
+        // provoked with a usable key; the core's message stands for the provider's.
         Err(e) => Err(provider_failure(&e.message)),
     }
 }
 
 /// The `toString()` of the cause of a failed time-stamp.
-// Unverified against the original: the exception texts (JDK and Kalkan), built here from
-// the core's failure.
+// Not observable: the texts of a failed time-stamp depend on how the TSA fails, which cannot
+// be provoked repeatably; they are built here from the core's failure (JDK and Kalkan texts).
 fn tsp_cause(failure: &NetFailure) -> String {
     match failure.kind {
         NetKind::Http(status) => {

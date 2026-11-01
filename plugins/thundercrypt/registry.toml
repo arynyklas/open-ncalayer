@@ -8,7 +8,7 @@ vendor = "Dynamics Business Technologies"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Файл ключа по пути от страницы открывается после согласия пользователя в окне OpenNCALayer (один раз за сессию); пароль вводится в окне ядра и плагину не передаётся."

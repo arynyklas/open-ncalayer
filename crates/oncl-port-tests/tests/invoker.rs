@@ -344,12 +344,15 @@ fn idocs_cancel_cancelled() {
 }
 
 #[test]
-fn idocs_non_gost2015_key_fails() {
+fn idocs_non_gost2015_key_names_its_algorithm() {
     let harness = Harness::new(choose("user-rsa-sign"), vec![]);
-    let reply = idocs_sign(&harness, "a.pdf", b"hello");
-    let inner: Value = serde_json::from_str(body(&reply).as_str().unwrap()).unwrap();
-    assert_eq!(inner["status"], "failure", "{reply}");
-    assert!(inner["message"].is_string(), "{reply}");
+    assert_eq!(
+        idocs_sign(&harness, "a.pdf", b"hello"),
+        concat!(
+            r#"{"body":"{\"message\":\"no such algorithm: GOST3411-2015-512withRSA "#,
+            r#"for provider KALKAN\",\"status\":\"failure\"}","status":true}"#
+        )
+    );
 }
 
 // FHS Cabinet
@@ -455,20 +458,22 @@ fn fhs_certificate_path_cancel_keeps_code_200() {
     assert_eq!(prompts[0].filters[0].extensions, vec!["p12".to_owned()]);
 }
 
-#[test]
-fn fhs_certificate_info_fields() {
+/// The reply of `getCertificateInfo` for the synthetic store `name`.
+fn fhs_certificate_info(name: &str, request_id: &str) -> String {
     let harness = Harness::new(vec![Step::Confirm { yes: true }], vec![]);
     let request = fhs_request(
         "getCertificateInfo",
-        &merged(
-            fhs_key("user-gost2015-sign"),
-            serde_json::json!({"requestId": "7"}),
-        ),
+        &merged(fhs_key(name), serde_json::json!({"requestId": request_id})),
     );
-    let reply = text(harness.call(FHS, &request, FHS_ORIGIN));
+    text(harness.call(FHS, &request, FHS_ORIGIN))
+}
+
+#[test]
+fn fhs_certificate_info_fields() {
+    let reply = fhs_certificate_info("user-gost2015-sign", "7");
     let entry = oncl_port_tests::entry("user-gost2015-sign");
     let serial = oncl_pki::info::serial_dec(&entry.cert);
-    let prefix = r#"{"body":{"code":"200","method":"getCertificateInfo","requestId":"7","message":"OK","certificateInfo":{"expiryDate":""#;
+    let prefix = r#"{"body":{"code":"200","method":"getCertificateInfo","requestId":"7","certificateInfo":{"expiryDate":""#;
     assert!(reply.starts_with(prefix), "{reply}");
     let info = &body(&reply)["certificateInfo"];
     let keys: Vec<&str> = info
@@ -481,7 +486,7 @@ fn fhs_certificate_info_fields() {
     assert_eq!(keys.len(), 9, "{reply}");
     assert!(
         reply.contains(&format!(
-            r#""serialNumber":"{serial}","surname":"ТЕСТОВ","fullName":"ТЕСТОВ ТЕСТ","middleName":"ТЕСТОВИЧ","algorithm":"ECGOST3410-2015","certificateType":["SIGNATURE","AUTHENTICATION"],"iin":"IIN123456789011"}}"#
+            r#""serialNumber":"{serial}","surname":"ТЕСТОВ","fullName":"ТЕСТОВ ТЕСТ","middleName":"ТЕСТОВИЧ","algorithm":"ECGOST3410-2015","certificateType":["AUTHENTICATION","SIGNATURE"],"iin":"IIN123456789011"}},"message":"OK"}},"status":true}}"#
         )),
         "{reply}"
     );
@@ -491,16 +496,35 @@ fn fhs_certificate_info_fields() {
     assert_eq!(&date[19..20], ".");
     assert!(matches!(&date[23..24], "+" | "-"), "{date}");
 
-    let legal = Harness::new(vec![Step::Confirm { yes: true }], vec![]);
-    let reply = text(legal.call(
-        FHS,
-        &fhs_request("getCertificateInfo", &fhs_key("legal-gost2015-sign")),
-        FHS_ORIGIN,
-    ));
+    let reply = fhs_certificate_info("legal-gost2015-sign", "");
     let info = &body(&reply)["certificateInfo"];
     assert_eq!(info["orgName"], "ТОО СИНТЕТИКА");
     assert_eq!(info["bin"], "BIN123456789021");
     assert!(info.get("email").is_none());
+}
+
+#[test]
+fn fhs_certificate_info_message_after_info() {
+    for name in ["user-gost2015-sign", "legal-gost2015-sign"] {
+        let reply = fhs_certificate_info(name, "r");
+        let head = reply.find(r#""certificateInfo":"#).expect("the info");
+        let message = reply.find(r#""message":"OK""#).expect("the message");
+        assert!(head < message, "{reply}");
+        assert!(
+            reply.ends_with(r#""message":"OK"},"status":true}"#),
+            "{reply}"
+        );
+    }
+}
+
+#[test]
+fn fhs_certificate_type_follows_a_hash_set() {
+    // Both KNCA types: the order of a Java `HashSet` of the names, not Kalkan's.
+    let reply = fhs_certificate_info("user-gost2015-sign", "");
+    assert!(
+        reply.contains(r#""certificateType":["AUTHENTICATION","SIGNATURE"]"#),
+        "{reply}"
+    );
 }
 
 #[test]
@@ -704,6 +728,27 @@ fn fhs_sign_file_foreign_url_denied() {
         )),
         r#"{"code":"INVOCATION_ERROR","details":"org.json.JSONException: JSONObject[\"url\"] not found.","message":"An invoked method threw an exception.","status":false}"#
     );
+}
+
+#[test]
+fn fhs_sign_file_bare_host() {
+    // A page on the bare host of the company's site signs a file of its own, as its
+    // sub-domains' pages do.
+    let harness = Harness::new(
+        choose("user-gost2015-sign"),
+        vec![(
+            "https://fhs.kz/".to_owned(),
+            Arc::new(Fixed(b"file".to_vec())) as Arc<dyn HttpTransport>,
+        )],
+    );
+    let args = serde_json::json!({"url": "https://fhs.kz/files/1.pdf"});
+    let request = fhs_request("signFile", &args);
+    let reply = text(harness.call(FHS, &request, Some("https://fhs.kz")));
+    let cms = STANDARD
+        .decode(body(&reply)["message"].as_str().expect("signed"))
+        .unwrap();
+    oncl_pki::cms::verify(&cms, Some(b"file")).expect("the CMS verifies");
+    assert_eq!(harness.http_log()[0], "GET https://fhs.kz/files/1.pdf");
 }
 
 #[test]

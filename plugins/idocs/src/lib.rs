@@ -21,6 +21,7 @@ use oncl_port_pki::esedo::{
     self, CertIdHash, ContentMode, Description, Encapsulate, EsedoInput, FileNames, IssuerRule,
     OcspAnswer, OcspForm, OcspRequest, OcspUrl, Profile, SigningTimeRule, StringKind, TimeFrom,
 };
+use oncl_port_pki::x509text::kalkan_key_alg_name;
 use x509_cert::Certificate;
 
 /// The idocs ESEDO CMS.
@@ -178,8 +179,6 @@ fn sign(args: &Map<String, Value>) -> CallResult {
 }
 
 /// The CMS of `content` named `name`, signed with `key`; an error is the reply's message.
-// Unverified against the original: the message of a failed signature (Kalkan's text there,
-// the core's here), e.g. for a key that is not GOST 2015-512.
 fn signed(key: &keys::Key, name: &str, content: &[u8]) -> Result<Vec<u8>, String> {
     let cert = key.certificate();
     let outcome = nca_gost_2022().and_then(|issuer| {
@@ -194,9 +193,26 @@ fn signed(key: &keys::Key, name: &str, content: &[u8]) -> Result<Vec<u8>, String
         ..EsedoInput::default()
     };
     let args = esedo::sign_args(&IDOCS, &input, key.handle())?;
-    match key.sign_cms_ex(args).map_err(|e| e.message)? {
-        CmsOutcome::Signed(cms) => Ok(cms.into_vec()),
-        CmsOutcome::TspFailed(failure) => Err(failure.detail),
+    match key.sign_cms_ex(args) {
+        Ok(CmsOutcome::Signed(cms)) => Ok(cms.into_vec()),
+        Ok(CmsOutcome::TspFailed(failure)) => Err(failure.detail),
+        Err(e) => Err(refusal(cert, e.message)),
+    }
+}
+
+/// The message of a refused signature: Kalkan's `no such algorithm` for the profile's
+/// GOST 2015-512 digest with a key of another algorithm (the digest is the profile's
+/// whatever the key), else the core's `message`.
+fn refusal(cert: &[u8], message: String) -> String {
+    const GOST_2015: &str = "ECGOST3410-2015";
+    let Ok(info) = host::cert_info(cert) else {
+        return message;
+    };
+    match kalkan_key_alg_name(&info.spki_alg_oid) {
+        Some(GOST_2015) | None => message,
+        Some(algorithm) => {
+            format!("no such algorithm: GOST3411-2015-512with{algorithm} for provider KALKAN")
+        }
     }
 }
 

@@ -197,10 +197,11 @@ fn certificate_info(args: &Map<String, Value>) -> JValue {
         return bean.into();
     };
     bean.put("code", "200");
-    bean.put("message", "OK");
     match certificate(key.certificate()) {
+        // `certificateInfo` goes in before `message` (a bucket of the original's `HashMap`).
         Ok(info) => {
             bean.put("certificateInfo", info);
+            bean.put("message", "OK");
         }
         Err(message) => {
             bean.put("message", message);
@@ -229,17 +230,13 @@ fn certificate(der: &[u8]) -> Result<JObject, String> {
         "algorithm",
         kalkan_key_alg_name(&info.spki_alg_oid).unwrap_or(&info.spki_alg_oid),
     );
-    // Kalkan's order; the original's set had none.
-    bean.put(
-        "certificateType",
-        JValue::from(
-            details
-                .knca_types
-                .into_iter()
-                .map(JValue::from)
-                .collect::<Vec<_>>(),
-        ),
-    );
+    // The names of a Java `HashSet<String>`, in its iteration order.
+    let names: Vec<&str> = details.knca_types.iter().map(String::as_str).collect();
+    let ordered = javamap::iteration_order(&names, javamap::DEFAULT_CAPACITY)
+        .into_iter()
+        .map(|i| JValue::from(names[i]))
+        .collect::<Vec<_>>();
+    bean.put("certificateType", JValue::from(ordered));
     let subject = subject(der);
     let first = |oid: &str| {
         subject
@@ -322,8 +319,9 @@ fn cades(key: &Key, data: &[u8]) -> Result<Vec<u8>, SignError> {
 }
 
 /// The `toString()` of the exception a failed time-stamp of Kalkan's has as its cause.
-// Unverified against the original: the exception texts (JDK and Kalkan), built here from
-// the core's failure.
+// Not observable: the texts of a failed time-stamp depend on how the TSA fails (no answer in
+// time, no connection made, an HTTP error), which cannot be provoked repeatably; they are
+// built here from the core's failure.
 fn tsp_cause(failure: &NetFailure) -> String {
     match failure.kind {
         NetKind::Http(status) => {
@@ -366,7 +364,8 @@ fn sign_text_v2(args: &Map<String, Value>) -> JValue {
                 format!("error code:{code}, error message{cause}"),
             );
         }
-        // Unverified against the original: the provider's message (the core's here).
+        // Not observable: a signature failing for a reason other than the time-stamp cannot be
+        // provoked with a usable key; the core's message stands for the provider's.
         Err(SignError::Host(message)) => {
             bean.put("message", message);
         }
@@ -447,7 +446,8 @@ fn sign_xml(args: &Map<String, Value>, t: &Texts) -> CallResult {
     };
     Ok(match key.sign_xml(xml.as_bytes(), None, None) {
         Ok(signed) => v1_ok(String::from_utf8_lossy(&signed).into_owned()),
-        // Unverified against the original: the provider's message (the core's here).
+        // Not observable: the key and main windows of V1 are not reachable, so the text of
+        // the error window for a failed signature was never seen; the core's message here.
         Err(e) => v1_failed(Some(&e.message), t),
     })
 }
@@ -473,7 +473,8 @@ fn sign_file(args: &Map<String, Value>, t: &Texts) -> CallResult {
     };
     Ok(match cades(&key, &data) {
         Ok(cms) => v1_ok(base64(&cms)),
-        // Unverified against the original: the provider's message (built here).
+        // Not observable: the key and main windows of V1 are not reachable, so the text of
+        // the error window for a failed time-stamp was never seen; the cause here.
         Err(SignError::Tsp(cause)) => v1_failed(Some(&cause), t),
         Err(SignError::Host(message)) => v1_failed(Some(&message), t),
     })

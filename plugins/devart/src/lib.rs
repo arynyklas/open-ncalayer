@@ -426,7 +426,8 @@ fn check_validity(der: &[u8]) -> Result<(), Exc> {
 }
 
 /// The exception of a request to the OCSP responder that failed.
-// Unverified against the original: the JDK's texts of network exceptions.
+// Not observable: a failing OCSP responder or network cannot be provoked repeatably, so the
+// JDK's texts of the network exceptions are built here from the core's failure.
 fn network_exception(failure: &NetFailure) -> Exc {
     match failure.kind {
         NetKind::UnknownHost => {
@@ -459,7 +460,8 @@ fn check_ocsp(der: &[u8]) -> Result<(), Exc> {
         pki::ocsp_fetch(&args).map_err(|e| Exc::checked("java.io.IOException", e.message))?;
     match outcome {
         OcspOutcome::Failed(failure) => Err(network_exception(&failure)),
-        // Unverified against the original: the class of the responder-status exception.
+        // Not observable: a responder answering with a status other than successful cannot be
+        // provoked; the class of the exception is the core's reading of the status.
         OcspOutcome::Ok {
             response_status, ..
         } if response_status != 0 => Err(Exc::checked(
@@ -581,8 +583,8 @@ fn signed_item(item: &Item, signature: String, data: String, certificate: String
 
 /// The ESF group: a raw signature of each text, with the chosen key.
 fn esf(key: &Key, items: &[&Item]) -> Result<Vec<JValue>, String> {
-    // Unverified against the original: the text for a sha1RSA certificate, which the
-    // core does not sign with.
+    // Not observable: a sha1RSA certificate, which the core does not sign with, is not among
+    // the keys the checks can use; the text is built here.
     if host::cert_details(key.certificate())
         .is_ok_and(|d| d.signing_alg.as_deref() == Some("rsa_sha1"))
     {

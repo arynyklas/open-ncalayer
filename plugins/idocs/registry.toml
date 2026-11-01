@@ -8,10 +8,10 @@ vendor = "idocs.kz"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
-ru = "Ключ выбирается в общем окне OpenNCALayer (хранилище PKCS#12), а не в окне idocs; закрытие окна выбора ключа отвечает «cancelled»."
+ru = "Ключ выбирается в общем окне OpenNCALayer (хранилище PKCS#12), а не в окне idocs; закрытие окна выбора ключа, как и «Отмена», отвечает «cancelled» (оригинал при закрытии окна отвечает {\"status\":\"failure\"} без message, а «Отмена» у него даёт «cancelled»)."
 
 [[differences]]
 ru = "Имя файла в атрибуте 1.2.840.113549.1.9.77 записывается в UTF-8 на любой системе (оригинал портил не-ASCII имена кодировкой платформы)."
