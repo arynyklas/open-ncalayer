@@ -11,7 +11,7 @@ resolver = "3"
 edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
-repository = "https://github.com/arynyklas/open-ncalayer"
+repository = "https://github.com/arynyklas/OpenNCALayer"
 publish = false
 
 [workspace.dependencies]

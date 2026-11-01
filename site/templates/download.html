@@ -27,12 +27,12 @@
 {%- endif %}
 <h2>{{ trans(key="download_other", lang=lang) }}</h2>
 <ul>
-<li><a href="https://github.com/arynyklas/open-ncalayer/releases/latest">{{ trans(key="download_latest", lang=lang) }}</a></li>
-<li><a href="https://github.com/arynyklas/open-ncalayer/releases">{{ trans(key="download_all_releases", lang=lang) }}</a></li>
+<li><a href="https://github.com/arynyklas/OpenNCALayer/releases/latest">{{ trans(key="download_latest", lang=lang) }}</a></li>
+<li><a href="https://github.com/arynyklas/OpenNCALayer/releases">{{ trans(key="download_all_releases", lang=lang) }}</a></li>
 <li><a href="https://aur.archlinux.org/packages/openncalayer-bin">{{ trans(key="download_aur", lang=lang) }}</a> <code>openncalayer-bin</code></li>
 </ul>
 <h2>{{ trans(key="download_verify", lang=lang) }}</h2>
 <p>{{ trans(key="download_verify_sums", lang=lang) }}</p>
-<pre><code>gh attestation verify &lt;file&gt; --repo arynyklas/open-ncalayer</code></pre>
+<pre><code>gh attestation verify &lt;file&gt; --repo arynyklas/OpenNCALayer</code></pre>
 {% include "parts/channels.html" %}
 {% endblock main %}

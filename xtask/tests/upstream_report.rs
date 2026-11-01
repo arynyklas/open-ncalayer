@@ -82,7 +82,7 @@ fn with_demo_jar(mut facts: Facts, name: &str, version: &str) -> Facts {
 
 fn ctx() -> RenderCtx {
     RenderCtx {
-        repo: "example/open-ncalayer".to_owned(),
+        repo: "example/OpenNCALayer".to_owned(),
         entry_id: "2026-10-31-1.5-0123abcd".to_owned(),
         date: "2026-10-31".to_owned(),
         ports: vec![PortRef {
@@ -258,7 +258,7 @@ fn alert_bodies() {
         AlertKind::BadSignature,
         "manifest CMS: signature of signer 0 does not verify",
         "2026-10-31",
-        Some("https://github.com/example/open-ncalayer/actions/runs/1"),
+        Some("https://github.com/example/OpenNCALayer/actions/runs/1"),
     );
     assert_eq!(bad.key, "alert:bad_signature:2026-10-31");
     assert_eq!(bad.label, Label::UpstreamAlert);

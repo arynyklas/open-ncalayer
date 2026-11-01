@@ -1,6 +1,6 @@
 # The project site: Zola 0.23.6 (`cargo xtask registry build`). Only hand-written sources
 # live here; the port pages and `data/site.json` are generated into `target/site/src`.
-base_url = "https://arynyklas.github.io/open-ncalayer"
+base_url = "https://arynyklas.github.io/OpenNCALayer"
 title = "OpenNCALayer"
 description = "Открытая замена NCALayer: плагины, загрузка и история оригинала"
 default_language = "ru"

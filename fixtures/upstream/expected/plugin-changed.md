@@ -23,7 +23,7 @@
 | NCALayerMethod | добавлено | `kz.example.demo.DemoModule.verify(Ljava/lang/String;)Ljava/lang/String;` |
 | код ошибки | добавлено | `VERIFY_FAILED` |
 
-Факты записи: https://github.com/example/open-ncalayer/tree/upstream/history/2026-10-31-1.5-0123abcd/
+Факты записи: https://github.com/example/OpenNCALayer/tree/upstream/history/2026-10-31-1.5-0123abcd/
 
 - [ ] Проверить API-diff
 - [ ] Обновить порт или реестр

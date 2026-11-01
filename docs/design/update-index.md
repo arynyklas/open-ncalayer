@@ -24,7 +24,7 @@
       "version": "0.1.0-alpha.2",
       "flavors": {
         "win-x64": {
-          "url": "https://github.com/arynyklas/open-ncalayer/releases/download/v0.1.0-alpha.2/OpenNCALayer-0.1.0-alpha.2-win-x64-full.nupkg",
+          "url": "https://github.com/arynyklas/OpenNCALayer/releases/download/v0.1.0-alpha.2/OpenNCALayer-0.1.0-alpha.2-win-x64-full.nupkg",
           "sha256": "<64 hex>",
           "size": 123,
           "contents_sha256": "<64 hex>",
@@ -35,7 +35,7 @@
       },
       "rollout": 100,
       "revoked": false,
-      "notes_url": "https://github.com/arynyklas/open-ncalayer/releases/tag/v0.1.0-alpha.2"
+      "notes_url": "https://github.com/arynyklas/OpenNCALayer/releases/tag/v0.1.0-alpha.2"
     }
   ],
   "extension": {
@@ -47,7 +47,7 @@
     {
       "id": "kz.example.echo",
       "version": "1.0.0",
-      "url": "https://github.com/arynyklas/open-ncalayer/releases/download/plugins-20261029/kz.example.echo-1.0.0.onclp",
+      "url": "https://github.com/arynyklas/OpenNCALayer/releases/download/plugins-20261029/kz.example.echo-1.0.0.onclp",
       "sha256": "<64 hex>",
       "size": 12345,
       "min_core": "0.2.0",
@@ -102,14 +102,14 @@
 
 Индексы лежат в репозитории в `updates/v1/` и публикуются байт в байт: `.gitattributes` запрещает git менять в них концы строк, иначе подпись не сойдётся. Здесь описаны правила и команды; порядок действий мейнтейнера от первого ключа до выпуска — в [`../dev/release.md`](../dev/release.md).
 
-Все файлы индекса лежат в релизах проекта. URL каждой записи должен быть ровно `https://github.com/arynyklas/open-ncalayer/releases/download/v<версия>/<файл>`, где `<версия>` — версия самой записи, а `<файл>` — имя файла этого вида:
+Все файлы индекса лежат в релизах проекта. URL каждой записи должен быть ровно `https://github.com/arynyklas/OpenNCALayer/releases/download/v<версия>/<файл>`, где `<версия>` — версия самой записи, а `<файл>` — имя файла этого вида:
 
 - полный пакет — `OpenNCALayer-<версия>-<флейвор>-full.nupkg`;
 - дельта — `OpenNCALayer-<версия>-<флейвор>-delta.nupkg`;
 - расширение — `openncalayer-chromium-<версия>.zip` и `openncalayer-firefox-<версия>.xpi`.
-- плагин — `<id>-<версия>.onclp` в релизе с тегом `plugins-ГГГГММДД[.N]` (а не `v<версия>`): `https://github.com/arynyklas/open-ncalayer/releases/download/plugins-ГГГГММДД[.N]/<id>-<версия>.onclp`. Предварительная версия плагина в `stable` не допускается.
+- плагин — `<id>-<версия>.onclp` в релизе с тегом `plugins-ГГГГММДД[.N]` (а не `v<версия>`): `https://github.com/arynyklas/OpenNCALayer/releases/download/plugins-ГГГГММДД[.N]/<id>-<версия>.onclp`. Предварительная версия плагина в `stable` не допускается.
 
-`notes_url` — `https://github.com/arynyklas/open-ncalayer/releases/tag/v<версия>`. Запросы (`?…`), фрагменты (`#…`) и незнакомые флейворы не допускаются. Это правило проверяют `index add` и `index refresh` (и для индекса, который они читают, и для того, который записывают), `sign` и `index check`. Клиент его не проверяет: подписывается только индекс, который прошёл эту проверку.
+`notes_url` — `https://github.com/arynyklas/OpenNCALayer/releases/tag/v<версия>`. Запросы (`?…`), фрагменты (`#…`) и незнакомые флейворы не допускаются. Это правило проверяют `index add` и `index refresh` (и для индекса, который они читают, и для того, который записывают), `sign` и `index check`. Клиент его не проверяет: подписывается только индекс, который прошёл эту проверку.
 
 - `cargo xtask sign keygen --out <каталог>` создаёт пару ключей мейнтейнера: `oncl-index.key` (зашифрован паролем, пароль вводится без эха) и `oncl-index.pub`.
   - Команда отвергает каталог внутри рабочего дерева git, если он не указан в `.gitignore`. Отвергается и файл, который уже отслеживается git.
@@ -141,7 +141,7 @@
 Тег `v<версия>` запускает `.github/workflows/release.yml`:
 
 1. Для каждого флейвора собираются архив, установщик и пакеты Velopack (`cargo xtask package windows|macos|linux`, внутри `vpk pack --packId OpenNCALayer --channel <флейвор>`). Дельта строится от полного пакета флейвора из релиза с наибольшей версией ниже текущей: для релиза — среди релизов, для пререлиза — среди версий любого вида. Этот пакет скачивается прямо из того релиза (`gh release download`; `vpk download github` видит только 10 последних релизов) и сверяется с его `SHA256SUMS`. Если такого релиза нет, дельты нет; любая другая ошибка останавливает сборку. В релиз попадают `OpenNCALayer-<версия>-<флейвор>-full.nupkg`, `-delta.nupkg` (если есть предыдущий пакет), `releases.<флейвор>.json` (фид Velopack: эта версия и полный пакет, от которого построена дельта) и на Windows `RELEASES-<флейвор>`, а также установщики: `openncalayer-<версия>-<флейвор>-setup.exe` для четырёх флейворов Windows, `openncalayer-<версия>-osx.pkg` и `openncalayer-<версия>-osx.zip`, `openncalayer-<версия>-linux-x64.AppImage`. Собираются `win-x64`, `win-x86`, `win7-x64`, `win7-x86`, `linux-x64` и `osx`. Флейворы `win7-*` собирает `cargo xtask win7` (с app-local DLL рядом с exe); исполняемые файлы их пакета, `Squirrel.exe` и заглушка Velopack, а также `Setup.exe` проходят гейт импортов Windows 7. Linux собирается в контейнере с glibc 2.28 (`cargo xtask package linux-build`).
-2. Рядом ложатся расширение, SBOM `openncalayer-<версия>.cdx.json` (CycloneDX, `cargo cyclonedx`) и `SHA256SUMS`. На каждый файл релиза выпускается аттестация происхождения сборки (`actions/attest-build-provenance`), её проверяет `gh attestation verify <файл> --repo arynyklas/open-ncalayer`.
+2. Рядом ложатся расширение, SBOM `openncalayer-<версия>.cdx.json` (CycloneDX, `cargo cyclonedx`) и `SHA256SUMS`. На каждый файл релиза выпускается аттестация происхождения сборки (`actions/attest-build-provenance`), её проверяет `gh attestation verify <файл> --repo arynyklas/OpenNCALayer`.
 3. Подпись кода идёт, только если заданы её секреты, иначе шаг пропускается с уведомлением в журнале. Authenticode через SignPath: секрет `SIGNPATH_API_TOKEN`, переменные `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_SIGNING_POLICY_SLUG`; подписываются `openncalayer.exe` и `nmhost.exe` до упаковки и каждый `Setup.exe` после неё (app-local DLL сборок Windows 7 не подписываются). Подпись и нотаризация Apple: секреты `APPLE_CERTIFICATE_P12` (base64), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`; `.app` (пакет обновления, `.zip` и содержимое `.pkg`) подписывает и нотаризует `vpk pack`; сам `.pkg` подписывается и нотаризуется, только если задан ещё секрет `APPLE_INSTALL_IDENTITY` («Developer ID Installer»). Архив macOS остаётся неподписанным.
 4. После публикации релиза job `index` скачивает его ассеты, выполняет `cargo xtask index add` для каждого канала версии и открывает PR в `main` с неподписанными индексами: пререлиз идёт только в `beta`, релиз без суффикса — в `stable` и в `beta`. У каждого индекса свой следующий `seq`, прежние записи сохраняются, индекс другого канала пререлиз не трогает. Флейвор `osx` в индексы пока не добавляется: универсальная сборка ещё не запускалась на Mac с Intel (лаборатория, P9); его пакеты и установщики в релизе есть.
 
@@ -219,7 +219,7 @@ JSON разбирается только после проверки подпи�
 Порядок работы:
 
 1. Первая проверка идёт через 2–10 минут после запуска, следующие — раз в 6–24 часа. Время каждый раз выбирается случайно.
-2. Индекс канала скачивается с `https://arynyklas.github.io/open-ncalayer/updates/v1/` через прокси из настроек и проверяется, как описано выше. Затем `choose` выбирает версию.
+2. Индекс канала скачивается с `https://arynyklas.github.io/OpenNCALayer/updates/v1/` через прокси из настроек и проверяется, как описано выше. Затем `choose` выбирает версию.
 3. Если индекс не скачался, следующая попытка — через 30–120 минут. Если индекс отвергнут, следующая попытка — в обычный срок. Уведомлений в обоих случаях нет. Ошибку видно в журнале и в окне настроек. Если индекса канала ещё нет (ответ 404: в канал ничего не выпускали), в окне настроек пишется «В канале пока нет выпусков», уведомления нет, а следующая проверка — в обычный срок.
 4. О новой версии демон сообщает уведомлением «Доступна версия X», один раз на версию.
 5. Velopack получает фид из одной выбранной версии: полный пакет и дельту от текущей версии, если она есть в индексе. Файлы скачиваются только по HTTPS и перед передачей Velopack сверяются с `size` и `sha256` из индекса. Полный пакет, который Velopack собрал из дельты или нашёл на диске, принимается, только если он совпадает с полным пакетом индекса по `sha256` и размеру или содержит те же файлы (`contents_sha256`); проверка идёт до того, как пакет встаёт на место и из него извлекается `Update.exe`. Пакет на диске, не прошедший проверку, удаляется и скачивается заново; собранный из дельты заменяется скачиванием полного пакета. Для этого Velopack собирается из изменённой копии в `vendor/velopack` (см. README).

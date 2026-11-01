@@ -535,7 +535,7 @@ mod tests {
         );
         assert_eq!(
             assets[0].url,
-            "https://github.com/arynyklas/open-ncalayer/releases/download/v0.3.0-beta.1/\
+            "https://github.com/arynyklas/OpenNCALayer/releases/download/v0.3.0-beta.1/\
              openncalayer-0.3.0-beta.1-win-x64-setup.exe"
         );
         let full = release_assets(&releases[1]);
@@ -590,13 +590,13 @@ mod tests {
         assert_eq!(
             data.history[1].url.as_deref(),
             Some(
-                "https://github.com/arynyklas/open-ncalayer/tree/upstream/\
+                "https://github.com/arynyklas/OpenNCALayer/tree/upstream/\
                  history/2026-10-01-1.3-0a1b2c3d/"
             )
         );
         assert_eq!(
             data.history[0].issues[0].url,
-            "https://github.com/arynyklas/open-ncalayer/issues/17"
+            "https://github.com/arynyklas/OpenNCALayer/issues/17"
         );
     }
 }

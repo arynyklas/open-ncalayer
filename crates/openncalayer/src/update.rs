@@ -46,7 +46,7 @@ use crate::load_settings;
 
 /// Where the update indexes are published: the `updates/v1` directory of the project's
 /// GitHub Pages.
-pub const INDEX_BASE: &str = "https://arynyklas.github.io/open-ncalayer/updates/v1";
+pub const INDEX_BASE: &str = "https://arynyklas.github.io/OpenNCALayer/updates/v1";
 
 /// With feature `e2e-prompter` (test builds, never releases): another `https://` base of the
 /// update indexes.

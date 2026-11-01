@@ -10,7 +10,7 @@ use xtask::index;
 
 const TAG: &str = "plugins-20261029";
 const EXAMPLE_ID: &str = "io.github.arynyklas.openncalayer.example";
-const EXAMPLE_URL: &str = "https://github.com/arynyklas/open-ncalayer/releases/download/\
+const EXAMPLE_URL: &str = "https://github.com/arynyklas/OpenNCALayer/releases/download/\
                            plugins-20261029/io.github.arynyklas.openncalayer.example-0.1.0.onclp";
 /// A ports' directory that does not exist: `beta` never reads it.
 const NO_PORTS: &str = "no-such-plugins-dir";

@@ -227,7 +227,7 @@ fn add_takes_sums_and_sizes_from_the_assets() {
     assert_eq!(linux.full.size, content.len() as u64);
     assert_eq!(
         linux.full.url,
-        "https://github.com/arynyklas/open-ncalayer/releases/download/v0.2.0-beta.1/\
+        "https://github.com/arynyklas/OpenNCALayer/releases/download/v0.2.0-beta.1/\
          OpenNCALayer-0.2.0-beta.1-linux-x64-full.nupkg"
     );
     assert!(linux.delta_from.is_empty());
@@ -478,7 +478,7 @@ impl FakeRemote {
 
 impl Remote for FakeRemote {
     fn head(&self, url: &str) -> anyhow::Result<u16> {
-        assert!(url.starts_with("https://github.com/arynyklas/open-ncalayer/releases/"));
+        assert!(url.starts_with("https://github.com/arynyklas/OpenNCALayer/releases/"));
         Ok(match self.missing {
             Some(m) if url.contains(m) => 404,
             _ => 200,
@@ -707,11 +707,11 @@ fn sign_raw(key: &TestKey, path: &Path) {
 
 #[test]
 fn urls_off_the_project_releases_are_neither_signed_nor_published() {
-    const FULL: &str = "https://github.com/arynyklas/open-ncalayer/releases/download/\
+    const FULL: &str = "https://github.com/arynyklas/OpenNCALayer/releases/download/\
                         v0.2.0-beta.1/OpenNCALayer-0.2.0-beta.1-win-x64-full.nupkg";
-    const CHROMIUM: &str = "https://github.com/arynyklas/open-ncalayer/releases/download/\
+    const CHROMIUM: &str = "https://github.com/arynyklas/OpenNCALayer/releases/download/\
                             v0.2.0-beta.1/openncalayer-chromium-0.2.0-beta.1.zip";
-    const NOTES: &str = "https://github.com/arynyklas/open-ncalayer/releases/tag/v0.2.0-beta.1";
+    const NOTES: &str = "https://github.com/arynyklas/OpenNCALayer/releases/tag/v0.2.0-beta.1";
     let swaps = [
         (
             FULL,
@@ -719,7 +719,7 @@ fn urls_off_the_project_releases_are_neither_signed_nor_published() {
         ),
         (
             FULL,
-            FULL.replace("arynyklas/open-ncalayer", "someone/open-ncalayer"),
+            FULL.replace("arynyklas/OpenNCALayer", "someone/OpenNCALayer"),
         ),
         (FULL, FULL.replace("/v0.2.0-beta.1/", "/v0.1.0/")),
         (FULL, FULL.replace("https://", "http://")),

@@ -17,7 +17,7 @@ use crate::renewal::{RenewFailure, RenewalCheck};
 use crate::update::Notice;
 
 /// The project site (`site/config.toml`'s `base_url`).
-pub const SITE: &str = "https://arynyklas.github.io/open-ncalayer";
+pub const SITE: &str = "https://arynyklas.github.io/OpenNCALayer";
 
 /// The plugin catalog of the site in `l`, at the row of the bundle `symname` when it is a
 /// symbolic name (otherwise at the top).
@@ -960,15 +960,15 @@ mod tests {
     fn registry_link_per_locale_with_anchor() {
         assert_eq!(
             plugin_registry(Locale::Ru, "kz.x"),
-            "https://arynyklas.github.io/open-ncalayer/plugins/#kz.x"
+            "https://arynyklas.github.io/OpenNCALayer/plugins/#kz.x"
         );
         assert_eq!(
             plugin_registry(Locale::Kk, "kz.x"),
-            "https://arynyklas.github.io/open-ncalayer/kk/plugins/#kz.x"
+            "https://arynyklas.github.io/OpenNCALayer/kk/plugins/#kz.x"
         );
         assert_eq!(
             plugin_registry(Locale::En, "kz.x"),
-            "https://arynyklas.github.io/open-ncalayer/en/plugins/#kz.x"
+            "https://arynyklas.github.io/OpenNCALayer/en/plugins/#kz.x"
         );
     }
 
@@ -977,7 +977,7 @@ mod tests {
         for symname in ["a b", "x#y", "<s>", ""] {
             assert_eq!(
                 plugin_registry(Locale::En, symname),
-                "https://arynyklas.github.io/open-ncalayer/en/plugins/",
+                "https://arynyklas.github.io/OpenNCALayer/en/plugins/",
                 "{symname}"
             );
         }

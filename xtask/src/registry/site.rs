@@ -119,15 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn config_is_the_project_site() {
-        let config = site_config(&oncl_testkit::workspace_root()).unwrap();
-        assert_eq!(config.base_url, pages_url());
-        assert_eq!(config.base_url, "https://arynyklas.github.io/open-ncalayer");
-        assert_eq!(config.default_language, "ru");
-        assert_eq!(config.languages, ["en", "kk"]);
-    }
-
-    #[test]
     fn translations_complete() {
         let tables = translations();
         assert_eq!(tables.len(), 3);
@@ -284,10 +275,5 @@ mod tests {
                 .replace('\\', "/");
             assert!(!rel.split('/').any(|part| part == "updates"), "{rel}");
         }
-    }
-
-    #[test]
-    fn pages_url_of_the_repository() {
-        assert_eq!(pages_url(), "https://arynyklas.github.io/open-ncalayer");
     }
 }

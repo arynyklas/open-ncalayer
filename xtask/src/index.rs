@@ -698,7 +698,7 @@ impl Remote for GitHub {
         let response = self
             .agent
             .head(url)
-            .header("User-Agent", "open-ncalayer-xtask")
+            .header("User-Agent", "OpenNCALayer-xtask")
             .call()
             .with_context(|| format!("HEAD {url}"))?;
         Ok(response.status().as_u16())
@@ -712,7 +712,7 @@ impl Remote for GitHub {
         let mut request = self
             .agent
             .get(&url)
-            .header("User-Agent", "open-ncalayer-xtask")
+            .header("User-Agent", "OpenNCALayer-xtask")
             .header("Accept", "application/vnd.github+json");
         if let Some(token) = &self.token {
             request = request.header("Authorization", &format!("Bearer {token}"));

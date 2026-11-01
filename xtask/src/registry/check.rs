@@ -34,7 +34,7 @@ pub const REQUIRED: [&str; 13] = [
 /// repository (releases, the `upstream` branch, issues, the README) and its AUR package.
 /// Another one needs a reason here.
 pub const EXTERNAL_ALLOWED: [&str; 2] = [
-    "https://github.com/arynyklas/open-ncalayer/",
+    "https://github.com/arynyklas/OpenNCALayer/",
     "https://aur.archlinux.org/packages/openncalayer-bin",
 ];
 
@@ -495,7 +495,7 @@ fn fragment_in(
 mod tests {
     use super::*;
 
-    const BASE: &str = "https://arynyklas.github.io/open-ncalayer";
+    const BASE: &str = "https://arynyklas.github.io/OpenNCALayer";
 
     fn page(lang: &str, body: &str) -> String {
         format!(
@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn relative_and_absolute_links_resolve() {
         let body = format!(
-            "<a href=\"{BASE}/plugins/\">a</a><a href=\"/open-ncalayer/plugins/#kz.a\">b</a>\
+            "<a href=\"{BASE}/plugins/\">a</a><a href=\"/OpenNCALayer/plugins/#kz.a\">b</a>\
              <a href=\"plugins/\">c</a><a href=\"../index.html\">d</a><a href=\"kk/plugins\">e</a>\
              <a href=\"{BASE}\">f</a><a href=\"{BASE}/plugins/#kz.a\">g</a><a href=\"#content\">h</a>"
         );
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn entities_in_href_are_decoded() {
-        let body = "<a href=\"https:&#x2F;&#x2F;arynyklas.github.io&#x2F;open-ncalayer&#x2F;plugins&#x2F;\">x</a>";
+        let body = "<a href=\"https:&#x2F;&#x2F;arynyklas.github.io&#x2F;OpenNCALayer&#x2F;plugins&#x2F;\">x</a>";
         let dir = site(&[("index.html", page("ru", body))]);
         check(dir.path(), BASE).unwrap();
         assert_eq!(
@@ -611,7 +611,7 @@ mod tests {
     fn third_party_stylesheet_is_rejected() {
         let html = page("ru", "").replace(
             "</head>",
-            "<link rel=\"stylesheet\" href=\"https://github.com/arynyklas/open-ncalayer/x.css\"></head>",
+            "<link rel=\"stylesheet\" href=\"https://github.com/arynyklas/OpenNCALayer/x.css\"></head>",
         );
         let dir = site(&[("index.html", html)]);
         assert!(problems(&dir).contains("external resources are not allowed"));
@@ -627,9 +627,9 @@ mod tests {
 
     #[test]
     fn external_link_outside_allowlist_is_rejected() {
-        let body = "<a href=\"https://github.com/arynyklas/open-ncalayer/releases\">ok</a>\
+        let body = "<a href=\"https://github.com/arynyklas/OpenNCALayer/releases\">ok</a>\
                     <a href=\"https://aur.archlinux.org/packages/openncalayer-bin\">ok</a>\
-                    <a href=\"https://github.com/arynyklas/open-ncalayer-other/\">no</a>\
+                    <a href=\"https://github.com/arynyklas/OpenNCALayer-other/\">no</a>\
                     <a href=\"https://example.com/\">no</a>";
         let dir = site(&[("index.html", page("ru", body))]);
         let errors = problems(&dir);
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn insecure_and_javascript_urls_are_rejected() {
-        let body = "<a href=\"http://github.com/arynyklas/open-ncalayer/\">a</a>\
+        let body = "<a href=\"http://github.com/arynyklas/OpenNCALayer/\">a</a>\
                     <a href=\"javascript:alert(1)\">b</a><a href=\"data:text/html,x\">c</a>\
                     <a href=\"//example.com/\">d</a><a href=\"mailto:x@example.com\">e</a>\
                     <a href=\"JavaScript:x\">f</a>";

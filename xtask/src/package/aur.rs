@@ -24,7 +24,7 @@ pub const PKGNAME: &str = "openncalayer-bin";
 pub const INSTALL: &str = "openncalayer-bin.install";
 const PKGDESC: &str =
     "Open replacement for NCALayer: signing with NCA RK (Kazakhstan) keys for websites";
-const URL: &str = "https://github.com/arynyklas/open-ncalayer";
+const URL: &str = "https://github.com/arynyklas/OpenNCALayer";
 /// What the programs need from the system (their `DT_NEEDED` in the glibc 2.28 build:
 /// glibc, libgcc, fontconfig) and what the windows load at run time (libxkbcommon and its
 /// X11 part).
@@ -253,7 +253,7 @@ mod tests {
     fn the_pkgbuild_downloads_the_immutable_release_archive() {
         let p = package("0.2.0-beta.1");
         let pkgbuild = p.pkgbuild();
-        let url = "https://github.com/arynyklas/open-ncalayer/releases/download/v0.2.0-beta.1/\
+        let url = "https://github.com/arynyklas/OpenNCALayer/releases/download/v0.2.0-beta.1/\
                    openncalayer-0.2.0-beta.1-x86_64-unknown-linux-gnu.tar.gz";
         assert!(pkgbuild.contains(&format!(
             "source=('openncalayer-0.2.0-beta.1-x86_64-unknown-linux-gnu.tar.gz::{url}')"

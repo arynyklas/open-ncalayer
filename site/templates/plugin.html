@@ -79,6 +79,6 @@
 <p>{{ trans(key="plugin_not_published", lang=lang) }}</p>
 {%- endif %}
 <h2>{{ trans(key="plugin_install", lang=lang) }}</h2>
-<p>{{ trans(key="plugin_install_text", lang=lang) }} <a href="https://github.com/arynyklas/open-ncalayer/{{ 'blob/main/README.md' if lang == 'ru' else 'blob/main/README.en.md' }}">{{ trans(key="plugin_install_link", lang=lang) }}</a></p>
+<p>{{ trans(key="plugin_install_text", lang=lang) }} <a href="https://github.com/arynyklas/OpenNCALayer/{{ 'blob/main/README.md' if lang == 'ru' else 'blob/main/README.en.md' }}">{{ trans(key="plugin_install_link", lang=lang) }}</a></p>
 <p><a href="{{ get_url(path='@/plugins/_index.md', lang=lang) }}#{{ plugin.symname }}">{{ trans(key="plugin_back", lang=lang) }}</a></p>
 {% endblock main %}
