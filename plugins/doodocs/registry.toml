@@ -8,7 +8,7 @@ vendor = "Doodocs.kz"
 
 [port]
 status = "full"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Вход (auth) живёт в соединении страницы, а не во всём процессе NCALayer: другая вкладка или новое соединение входят заново."

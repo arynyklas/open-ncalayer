@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-idocs"
 description = "The kz.idocs module of idocs.kz as an OpenNCALayer plugin: ESEDO CMS with an OCSP answer"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

@@ -1,5 +1,5 @@
 id = "io.github.arynyklas.openncalayer.port.fhs"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 min_core = "0.1.0-alpha.4"
 modules = ["kz.fhs.cabinet.FHSCabinetSigner"]
 
@@ -22,4 +22,4 @@ keys = true
 key_files = true
 dialogs = true
 files = true
-origins = ["https://*.fhs.kz"]
+origins = ["https://fhs.kz", "https://*.fhs.kz"]
