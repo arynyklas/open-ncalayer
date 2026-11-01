@@ -2671,30 +2671,31 @@ fn metadoc_key_info_order_on_collision() {
     assert_eq!(reply["code"], "200", "{reply}");
     assert_eq!(names(&raw, &reply["responseObject"]), observed);
     assert_eq!(reply["responseObject"]["path"], path.to_str().unwrap());
-    // Through the window: the same order and the path of the file the user chose.
-    let (path, _) = p12("user-gost2015-sign");
+    // Through the window: the same order without the `path` the core does not tell a plugin
+    // (an accepted difference, registry.toml).
     let h = Harness::new(key("user-gost2015-sign"), vec![]);
     let request = json!({"method": "getKeyInfo", "args": ["PKCS12"]}).to_string();
     let raw = text(h.call(METADOC, &request, None));
     let reply = parse(&raw);
-    assert_eq!(names(&raw, &reply["responseObject"]), observed);
-    assert_eq!(reply["responseObject"]["path"], path.to_str().unwrap());
+    let without_path: Vec<&str> = observed.into_iter().filter(|n| *n != "path").collect();
+    assert_eq!(names(&raw, &reply["responseObject"]), without_path);
 }
 
 #[test]
-fn metadoc_key_info_path_is_the_chosen_file_of_each_key() {
-    for name in ["user-gost2015-sign", "user-rsa-sign"] {
+fn metadoc_key_info_through_the_window_never_names_the_key_file() {
+    for (name, usage, algorithm) in [
+        ("user-gost2015-sign", "auth", "ECGOST3410-2015"),
+        ("user-rsa-sign", "sign", "RSA"),
+    ] {
         let (path, _) = p12(name);
         let h = Harness::new(key(name), vec![]);
         let request = json!({"method": "getKeyInfo", "args": ["PKCS12"]}).to_string();
-        let reply = parse(&text(h.call(METADOC, &request, None)));
+        let raw = text(h.call(METADOC, &request, None));
+        let reply = parse(&raw);
         assert_eq!(reply["code"], "200", "{reply}");
-        assert_eq!(reply["responseObject"]["path"], path.to_str().unwrap());
+        assert!(reply["responseObject"].get("path").is_none(), "{reply}");
+        assert!(!raw.contains(path.to_str().unwrap()), "{raw}");
+        assert_eq!(reply["responseObject"]["usage"], usage, "{name}");
+        assert_eq!(reply["responseObject"]["algorithm"], algorithm, "{name}");
     }
-    // The usage and the algorithm of the RSA key.
-    let h = Harness::new(key("user-rsa-sign"), vec![]);
-    let request = json!({"method": "getKeyInfo", "args": ["PKCS12"]}).to_string();
-    let reply = parse(&text(h.call(METADOC, &request, None)));
-    assert_eq!(reply["responseObject"]["usage"], "sign");
-    assert_eq!(reply["responseObject"]["algorithm"], "RSA");
 }

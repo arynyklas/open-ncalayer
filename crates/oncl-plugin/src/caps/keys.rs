@@ -203,7 +203,6 @@ fn choose(state: &mut HostState, choice: Choice) -> HostResult<Option<Chosen>> {
     let Some(index) = opened.pick(&chooser, &flow, None) else {
         return Ok(None);
     };
-    let path = chosen_path(state.capabilities.key_files, opened.path());
     let entry = opened.take(index);
     let certificate = der_of(&entry.cert)?;
     let alias = entry.alias.clone();
@@ -212,13 +211,7 @@ fn choose(state: &mut HostState, choice: Choice) -> HostResult<Option<Chosen>> {
         handle,
         alias,
         certificate: Bytes::from(certificate),
-        path,
     }))
-}
-
-/// The path of the key store file the user chose, for a plugin with `key_files` only.
-fn chosen_path(key_files: bool, path: Option<&Path>) -> Option<String> {
-    path.filter(|_| key_files).map(shown)
 }
 
 /// The line the key choice's dialogs show: a plugin's name leads it; a built-in module's
@@ -411,7 +404,6 @@ fn key_flow(state: &mut HostState, args: FlowArgs) -> HostResult<KeyFlow> {
 /// `keys_flow_pick`: the key dialog of an opened flow, with the error line given; each key
 /// picked is kept under a new handle.
 pub(crate) fn keys_flow_pick(state: &mut HostState, args: PickArgs) -> HostResult<Option<Chosen>> {
-    let key_files = state.capabilities.key_files;
     if let Some(error) = &args.error {
         check_line("the error", error, MAX_DIALOG_TEXT)?;
     }
@@ -427,13 +419,11 @@ pub(crate) fn keys_flow_pick(state: &mut HostState, args: PickArgs) -> HostResul
     let entry = opened.entries()[index].clone();
     let certificate = der_of(&entry.cert)?;
     let alias = entry.alias.clone();
-    let path = chosen_path(key_files, opened.path());
     let handle = state.keys.insert(entry, Arc::from([]))?;
     Ok(Some(Chosen {
         handle,
         alias,
         certificate: Bytes::from(certificate),
-        path,
     }))
 }
 

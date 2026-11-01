@@ -578,7 +578,6 @@ pub mod keys {
         handle: u32,
         alias: String,
         certificate: Vec<u8>,
-        path: Option<String>,
     }
 
     impl From<Chosen> for Key {
@@ -587,7 +586,6 @@ pub mod keys {
                 handle: c.handle,
                 alias: c.alias,
                 certificate: c.certificate.into_vec(),
-                path: c.path,
             }
         }
     }
@@ -598,7 +596,6 @@ pub mod keys {
                 handle: k.handle,
                 alias: k.alias,
                 certificate: k.certificate.into_vec(),
-                path: None,
             }
         }
     }
@@ -674,12 +671,6 @@ pub mod keys {
     }
 
     impl Key {
-        /// The key store file the user chose, for a key from the key dialogs of a plugin
-        /// with `key_files`; `None` for any other key.
-        pub fn path(&self) -> Option<&str> {
-            self.path.as_deref()
-        }
-
         /// Its handle: the key in this instance only, until dropped; for [`call_host`].
         pub fn handle(&self) -> u32 {
             self.handle

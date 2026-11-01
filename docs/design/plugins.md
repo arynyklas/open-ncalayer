@@ -343,7 +343,7 @@ Host-функция получает свой аргумент `(ptr, len)` в �
 
 | Функция | Аргумент | Результат |
 |---|---|---|
-| `keys_choose` | `ChooseArgs { action, storages, filter, detail }` | `Option<Chosen { handle, alias, certificate, path }>`; `path` — файл хранилища ключей, который выбрал пользователь, как он его видит; только плагину с `key_files` в манифесте (иначе и для токена — `None`); дополнение `since` 0.1.0-alpha.5, старое ядро его не заполняет |
+| `keys_choose` | `ChooseArgs { action, storages, filter, detail }` | `Option<Chosen { handle, alias, certificate }>`; путь файла хранилища, который выбрал пользователь в окне, плагину не сообщается |
 | `keys_sign_cms` | `SignCmsArgs { handle, data, attached, timestamp }` | CMS (DER); с `timestamp` — с меткой времени TSA basics на подписи |
 | `keys_sign_raw` | `SignRawArgs { handle, data }` | подпись алгоритмом ключа (ГОСТ 34.10-2004, ГОСТ 34.10-2015 512; RSA — SHA-256) |
 | `keys_sign_xml` | `SignXmlArgs { handle, xml, element, parent }` | документ с enveloped XMLDSig: всего документа или элемента по XPath `element` (с `Id`), подпись — в элемент `parent`. Записан, как его возвращают модули NCALayer (Kalkan `XMLUtil.createXmlSignature`): без переводов строк внутри подписи, base64 одной строкой, без объявления XML и без пробелов по краям документа |
