@@ -318,6 +318,79 @@ impl Setup {
     }
 }
 
+#[test]
+fn published_json_normalization_does_not_create_history_on_the_next_day() {
+    let s = Setup::new();
+    let options = s.opts("published");
+    let first = s.emit(1);
+    assert!(publish(&first, &options).unwrap().committed);
+    let baseline = s.branch_index().entries[0].clone();
+
+    // Model a JSON-aware publication/transport and a Windows checkout: object keys
+    // are reordered by Value, whitespace changes, and LF becomes CRLF. Publish
+    // itself copies bytes; none of these representation changes are new facts.
+    for rel in [
+        "latest/facts.json".to_owned(),
+        format!("{}facts.json", baseline.path),
+    ] {
+        let path = options.branch_dir.join(rel);
+        let original = std::fs::read(&path).unwrap();
+        let value: Value = serde_json::from_slice(&original).unwrap();
+        let normalized = serde_json::to_string_pretty(&value)
+            .unwrap()
+            .replace('\n', "\r\n");
+        assert_ne!(original, normalized.as_bytes());
+        std::fs::write(path, normalized).unwrap();
+    }
+    s.git(&options.branch_dir, &["add", "-A"]);
+    s.git(
+        &options.branch_dir,
+        &["commit", "-q", "-m", "normalize JSON"],
+    );
+    s.git(&options.branch_dir, &["push", "-q", "origin", "upstream"]);
+    let before = s.git(&s.origin(), &["rev-parse", "upstream"]);
+
+    let repeat_emit = s.root.join("repeat");
+    let mut repeat = s.run_opts(s.root.join("unused"), &repeat_emit);
+    repeat.now += time::Duration::days(1);
+    let (out, report) = run_and_publish(repeat, &options).unwrap();
+    assert!(!out.changed, "{:?}", out.log);
+    assert!(out.entry.is_none());
+    assert!(!report.committed);
+    assert_eq!(files_under(&repeat_emit).unwrap(), ["run.json"]);
+    assert_eq!(s.branch_index().entries.len(), 1);
+    assert_eq!(s.git(&s.origin(), &["rev-parse", "upstream"]), before);
+
+    // Exercise the real command on the unchanged collector output, not a mock CLI.
+    let smoke = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["upstream", "publish", "--from"])
+        .arg(&repeat_emit)
+        .args(["--dry-run", "--no-push", "--no-issues"])
+        .output()
+        .unwrap();
+    assert!(smoke.status.success(), "{:?}", smoke);
+    assert!(
+        String::from_utf8_lossy(&smoke.stdout)
+            .contains("publish: committed=false pushed=false dispatched=false issues=0"),
+        "{:?}",
+        smoke
+    );
+
+    s.bump_demo();
+    let changed_emit = s.root.join("real-change");
+    let mut changed = s.run_opts(s.root.join("unused"), &changed_emit);
+    changed.now += time::Duration::days(2);
+    let (out, report) = run_and_publish(changed, &options).unwrap();
+    assert!(out.changed);
+    assert!(out.entry.unwrap().starts_with("2026-11-02-"));
+    assert!(report.committed);
+    let entries = s.branch_index().entries;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].id, baseline.id);
+    assert_eq!(entries[1].kind, xtask::upstream::diff::EntryKind::Change);
+    assert!(!entries[1].summary.plugins.is_empty());
+}
+
 /// A baseline published, then the demo plugin bumped: the second emit has one plugin issue.
 fn second_emit(s: &Setup) -> PathBuf {
     let first = s.emit(1);

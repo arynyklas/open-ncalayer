@@ -205,7 +205,6 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
     }
     let prev_state = State::load(&opts.state_dir)?;
     let prev_facts: Option<Facts> = read_json(&opts.state_dir.join(LATEST))?;
-    let prev_latest = std::fs::read(opts.state_dir.join(LATEST)).ok();
     let mut index: Index = read_json(&opts.state_dir.join(INDEX))?.unwrap_or_default();
     let prev_state_bytes = std::fs::read(opts.state_dir.join(STATE)).ok();
 
@@ -384,8 +383,10 @@ pub fn run(opts: &RunOptions) -> anyhow::Result<RunOutcome> {
         }
 
         let facts = merge(prev_facts.as_ref(), verified, updates);
-        let json = to_json(&facts);
-        if prev_latest.as_deref() != Some(json.as_slice()) {
+        // Publication or checkout may change JSON whitespace and object order.
+        // Compare all parsed facts, including hashes/signatures, not their encoding.
+        if prev_facts.as_ref() != Some(&facts) {
+            let json = to_json(&facts);
             let k8 = key8(&json);
             log.line(format!("facts: {k8}"));
             let d = diff(prev_facts.as_ref(), &facts, &added_sources);
