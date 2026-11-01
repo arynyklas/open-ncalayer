@@ -543,6 +543,8 @@ cargo build --release --target wasm32-unknown-unknown --manifest-path crates/onc
 
 `uuid` запроса возвращается, как раньше. `getBundles` добавляет к бандлам оригинала `replaces.symname → replaces.version` включённых загруженных плагинов, `getServices` — модули плагинов: оба списка живые и видят плагин сразу после установки. `showBundleManager` открывает окно «Плагины».
 
+Порядок записей — намеренное отличие от оригинала: при установленных плагинах `getBundles` и `getServices` ставят модули плагинов после встроенных, по алфавиту. Порядок оригинала с плагинами зависит от его реестра OSGi и не воспроизводится.
+
 ## Порты
 
 Порты сторонних плагинов оригинала лежат в `plugins/`: 34 каталога `plugins/<short>`, по одному на плагин оригинала, и общие библиотеки в `plugins/common/`. Это отдельный workspace для `wasm32-unknown-unknown`: в workspace ядра и в его релизы он не входит. Один порт собирается в пакет командой `cargo xtask plugin pack plugins/<short>`; job `conformance` в `release.yml` собирает пакеты всех портов, но не публикует их (`docs/dev/release.md`).
