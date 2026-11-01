@@ -1363,42 +1363,51 @@ fn uchet_get_message_texts() {
     );
 }
 
-/// `signXml` signs with the key chosen in the core's key window.
+/// A `PKCS12` storage ends `signXml` at once with the thrown reply, and no window is shown.
 #[test]
-fn uchet_sign_xml_signs_with_the_key_of_the_window() {
+fn uchet_sign_xml_pkcs12_is_thrown_without_a_window() {
     let h = Harness::new(key("user-rsa-sign"), vec![]);
-    let reply = parse(&text(h.call(
-        UCHET,
-        &call(
-            "signXml",
-            json!(["PKCS12", "SIGNATURE", "<doc><a>1</a></doc>", "", ""]),
-        ),
-        None,
-    )));
-    assert_eq!(reply["code"], "200", "{reply}");
-    let signed = reply["responseObject"].as_str().unwrap();
-    assert!(signed.starts_with("<doc><a>1</a><ds:Signature"), "{signed}");
-    oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
-    assert_eq!(h.prompter().key_prompts().len(), 1);
+    for key_type in ["SIGNATURE", "AUTHENTICATION"] {
+        assert_eq!(
+            text(h.call(
+                UCHET,
+                &call(
+                    "signXml",
+                    json!(["PKCS12", key_type, "<doc><a>1</a></doc>", "", ""])
+                ),
+                None
+            )),
+            r#"{"code":"500","message":"java.lang.reflect.InvocationTargetException. Method: signXml"}"#,
+            "{key_type}"
+        );
+    }
+    assert!(h.prompter().key_prompts().is_empty());
+    assert!(h.prompter().password_prompts().is_empty());
 }
 
-/// Closing the key window ends `signXml` with `action.canceled`, and no window of the
-/// plugin's own is shown (the plugin never learns the key store's path).
+/// A token storage and an unknown name get the core's answers, still without a window.
 #[test]
-fn uchet_sign_xml_closed_window_is_canceled() {
-    let h = Harness::new(vec![Step::CancelStorage], vec![]);
-    assert_eq!(
-        text(h.call(
-            UCHET,
-            &call(
-                "signXml",
-                json!(["PKCS12", "SIGNATURE", "<doc><a>1</a></doc>", "", ""])
-            ),
-            None
-        )),
-        r#"{"code":"500","message":"action.canceled"}"#
-    );
-    assert!(h.prompter().password_prompts().is_empty());
+fn uchet_sign_xml_token_and_unknown_storage() {
+    let h = Harness::new(vec![], vec![]);
+    for (storage, message) in [
+        ("AKKaztokenStore", "storage.empty"),
+        ("pkcs12", "storage.unknown"),
+        ("nope", "storage.unknown"),
+    ] {
+        assert_eq!(
+            text(h.call(
+                UCHET,
+                &call(
+                    "signXml",
+                    json!([storage, "SIGNATURE", "<doc><a>1</a></doc>", "", ""])
+                ),
+                None
+            )),
+            format!(r#"{{"code":"500","message":"{message}"}}"#),
+            "{storage}"
+        );
+    }
+    assert!(h.prompter().key_prompts().is_empty());
 }
 
 #[test]
@@ -2262,6 +2271,8 @@ fn arta_sign_reply(name: &str, digest: &str, data: &[u8]) -> Value {
     reply["responseObject"].clone()
 }
 
+/// The raw signature of an RSA key is RSA-SHA256, not the original's SHA1withRSA: no RSA-SHA1
+/// signature is offered (the rule is in `plugins/arta/registry.toml`).
 #[test]
 fn arta_sign_document_raw_signature_of_an_rsa_key() {
     let e = entry("user-rsa-sign");

@@ -8,7 +8,7 @@ vendor = "THE BOSS MEDIA GROUP"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Ключ по пути и паролю от страницы и чтение/запись файлов, названных страницей, — только после разрешения пользователя (один раз за сессию)."
@@ -23,7 +23,7 @@ ru = "checkCMSFromWeb читает только адреса, разрешённ
 ru = "Тестовый режим лицензии (токен со словом test и сервер на localhost) не переносится: ответ «Сервер лицензирования не доступен»."
 
 [[differences]]
-ru = "signXml подписывает ключом, выбранным в окне OpenNCALayer, а закрытие окна даёт «action.canceled». Оригинал NCALayer 1.4 на signXml отвечал «java.lang.reflect.InvocationTargetException. Method: signXml» сразу, без окон; что вызывает исключение, неизвестно."
+ru = "signXml с токеном при включённой поддержке токенов подписывает ключом, выбранным в окне OpenNCALayer, а закрытие окна даёт «action.canceled»; с носителем PKCS12 ответ, как у оригинала, — «java.lang.reflect.InvocationTargetException. Method: signXml» без окон."
 
 [[differences]]
 ru = "Токены — только при включённой экспериментальной поддержке токенов; без неё ответ «Носитель не обнаружен»."

@@ -141,12 +141,15 @@ fn get_message(_: &CommonUtils, args: &Args<'_>, _: &AddInfo) -> Outcome {
     }
 }
 
-/// `signXml(storageName, keyType, xml, tbsXPath, parentXPath)`: the official method; its
-/// storage and key windows are the core's one key window (closing it is `action.canceled`).
-// Unverified against the original: a call of NCALayer 1.4 ended at once with
-// `java.lang.reflect.InvocationTargetException. Method: signXml` and no window; what makes it
-// throw is not known, so the call goes the way of the official method.
+/// `signXml(storageName, keyType, xml, tbsXPath, parentXPath)`: the official method. The
+/// original answers a `PKCS12` storage at once with the thrown reply, without any window; a
+/// token storage and an unknown name get the core's own answers (`storage.empty`,
+/// `storage.unknown`), and a key chosen in the core's key window signs (closing it is
+/// `action.canceled`).
 fn sign_xml_method(_: &CommonUtils, args: &Args<'_>, _: &AddInfo) -> Outcome {
+    if args.str(0) == "PKCS12" {
+        return Outcome::Thrown;
+    }
     let key_type = args.str(1);
     let key = select(Select {
         storage: args.str(0),
