@@ -42,8 +42,8 @@ const KZ: Texts = Texts {
 };
 
 /// `Cabinet_en`: some of its texts are Russian.
-// Not observable: the windows of V1 never reach the reply, and the checks cannot drive them,
-// so these texts rest on the original's resource bundle alone.
+// Not observable: the windows of V1 never reach the reply, and nothing available drives
+// them, so these texts rest on the original's resource bundle alone.
 const EN: Texts = Texts {
     select_certificate: "Select certificate",
     key_store: "Хранилище ключей",

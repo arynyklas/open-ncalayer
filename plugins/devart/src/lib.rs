@@ -584,8 +584,8 @@ fn signed_item(item: &Item, signature: String, data: String, certificate: String
 
 /// The ESF group: a raw signature of each text, with the chosen key.
 fn esf(key: &Key, items: &[&Item]) -> Result<Vec<JValue>, String> {
-    // Not observable: a sha1RSA certificate, which the core does not sign with, is not among
-    // the keys the checks can use; the text is built here.
+    // Not observable: a sha1RSA certificate, which the core does not sign with, is no
+    // available key; the text is built here.
     if host::cert_details(key.certificate())
         .is_ok_and(|d| d.signing_alg.as_deref() == Some("rsa_sha1"))
     {

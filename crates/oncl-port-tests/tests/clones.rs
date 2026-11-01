@@ -4,6 +4,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::Encode;
+use oncl_flows::Availability;
 use oncl_flows::testing::Step;
 use oncl_pki::http::{HttpError, HttpReply, HttpRequest, HttpTransport};
 use oncl_pki::info::{cert_info, common_name, kalkan_dn};
@@ -767,12 +768,12 @@ fn xdox_unknown_method() {
     assert!(h.prompter().storage_prompts().is_empty());
 }
 
-/// A key store of one key whose certificate is issued by a key that is none of the
-/// synthetic PKI's CAs: no certification path builds for it.
-fn unchained_key(dir: &std::path::Path) -> Vec<Step> {
+/// A key store of one key (fixture `name`) whose certificate is issued by a key that is none
+/// of the synthetic PKI's CAs: no certification path builds for it.
+fn unchained_key(dir: &std::path::Path, name: &str) -> Vec<Step> {
     use oncl_pki::pkcs12::{WriteEntry, WriteOptions, write};
     use oncl_pki::testing::{TestCertSpec, issue_cert};
-    let user = entry("user-gost2015-sign");
+    let user = entry(name);
     let cert = issue_cert(
         &entry("legal-gost2015-sign"),
         TestCertSpec::from_cert(&user.cert),
@@ -796,7 +797,7 @@ fn unchained_key(dir: &std::path::Path) -> Vec<Step> {
         },
     )
     .unwrap();
-    let path = dir.join("unchained.p12");
+    let path = dir.join(format!("unchained-{name}.p12"));
     std::fs::write(&path, pfx).unwrap();
     vec![
         Step::Storage {
@@ -812,18 +813,27 @@ fn xdox_chain_failure_after_choice() {
     let dir = tempfile::tempdir().unwrap();
     let failure =
         r#"{"success":false,"errorCode":"unknown_exception","message":"ISSUER_CERT_NOT_FOUND"}"#;
-    for method in ["createCms", "CreateCMS", "addSignerToCms", "ADDSIGNERTOCMS"] {
-        let h = Harness::new(unchained_key(dir.path()), vec![]);
-        // The key is offered and chosen; the failure comes before the manifest and the CMS
-        // are read, whatever the storage name is.
-        let request = xdox_request(method, json!({"storageName": "whatever"}));
-        assert_eq!(
-            text(h.call(XDOX, &request, XDOX_ORIGIN)),
-            failure,
-            "{method}"
-        );
-        assert_eq!(h.prompter().key_prompts().len(), 1, "{method}");
-        assert!(h.http_log().is_empty(), "{method}");
+    // The key is offered whether it has expired or not.
+    for name in ["user-gost2015-sign", "expired-gost2015-sign"] {
+        for method in ["createCms", "CreateCMS", "addSignerToCms", "ADDSIGNERTOCMS"] {
+            let h = Harness::new(unchained_key(dir.path(), name), vec![]);
+            // The key is offered and chosen; the failure comes before the manifest and the
+            // CMS are read, whatever the storage name is.
+            let request = xdox_request(method, json!({"storageName": "whatever"}));
+            assert_eq!(
+                text(h.call(XDOX, &request, XDOX_ORIGIN)),
+                failure,
+                "{name} {method}"
+            );
+            let prompts = h.prompter().key_prompts();
+            assert_eq!(prompts.len(), 1, "{name} {method}");
+            assert_eq!(
+                prompts[0].candidates[0].availability,
+                Availability::Enabled,
+                "{name} {method}"
+            );
+            assert!(h.http_log().is_empty(), "{name} {method}");
+        }
     }
 }
 
@@ -1353,43 +1363,10 @@ fn uchet_get_message_texts() {
     );
 }
 
-const SIGN_XML_THROWN: &str =
-    r#"{"code":"500","message":"java.lang.reflect.InvocationTargetException. Method: signXml"}"#;
-
-/// `signXml` with the key store file the module's dialog is given: a file that is not a key
-/// store ends the call with an exception (not `action.canceled`, not `Не удалось открыть
-/// хранилище`).
+/// `signXml` signs with the key chosen in the core's key window.
 #[test]
-fn uchet_sign_xml_file_that_is_not_a_key_store_throws() {
-    let dir = tempfile::tempdir().unwrap();
-    let document = dir.path().join("doc.pdf");
-    std::fs::write(&document, b"%PDF-1.4 not a key store").unwrap();
-    let h = Harness::new(
-        vec![Step::Path(document), Step::Password("x".to_owned())],
-        vec![],
-    );
-    assert_eq!(
-        text(h.call(
-            UCHET,
-            &call(
-                "signXml",
-                json!(["PKCS12", "SIGNATURE", "<doc><a>1</a></doc>", "", ""])
-            ),
-            None
-        )),
-        SIGN_XML_THROWN
-    );
-    // One file dialog and one password window, nothing asked again.
-    assert_eq!(h.prompter().password_prompts().len(), 1);
-}
-
-#[test]
-fn uchet_sign_xml_signs_with_the_key_of_the_file() {
-    let (path, password) = p12("user-rsa-sign");
-    let h = Harness::new(
-        vec![Step::Path(path), Step::Password(password.to_owned())],
-        vec![],
-    );
+fn uchet_sign_xml_signs_with_the_key_of_the_window() {
+    let h = Harness::new(key("user-rsa-sign"), vec![]);
     let reply = parse(&text(h.call(
         UCHET,
         &call(
@@ -1402,23 +1379,26 @@ fn uchet_sign_xml_signs_with_the_key_of_the_file() {
     let signed = reply["responseObject"].as_str().unwrap();
     assert!(signed.starts_with("<doc><a>1</a><ds:Signature"), "{signed}");
     oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
-    // The store has no key of the other type.
-    let (path, password) = p12("user-rsa-sign");
-    let h = Harness::new(
-        vec![Step::Path(path), Step::Password(password.to_owned())],
-        vec![],
-    );
+    assert_eq!(h.prompter().key_prompts().len(), 1);
+}
+
+/// Closing the key window ends `signXml` with `action.canceled`, and no window of the
+/// plugin's own is shown (the plugin never learns the key store's path).
+#[test]
+fn uchet_sign_xml_closed_window_is_canceled() {
+    let h = Harness::new(vec![Step::CancelStorage], vec![]);
     assert_eq!(
         text(h.call(
             UCHET,
             &call(
                 "signXml",
-                json!(["PKCS12", "AUTHENTICATION", "<a/>", "", ""])
+                json!(["PKCS12", "SIGNATURE", "<doc><a>1</a></doc>", "", ""])
             ),
             None
         )),
-        r#"{"code":"500","message":"Сертификат указанного ключа не предназначен для подписания электронных документов"}"#
+        r#"{"code":"500","message":"action.canceled"}"#
     );
+    assert!(h.prompter().password_prompts().is_empty());
 }
 
 #[test]

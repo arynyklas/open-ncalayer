@@ -177,7 +177,8 @@ fn json(key: &Key, x5c: &[String], item: &Item, operation: Operation) -> Result<
     let mut signatures = match jws.get("signatures") {
         Some(JValue::Arr(signatures)) => signatures.clone(),
         // Not observable: a JWS JSON without a `signatures` array. The original opens its
-        // signing window before it reads the JWS, and that window cannot be driven from outside.
+        // signing window before it reads the JWS, and no available key, device or network can
+        // answer that window.
         _ => return Err(Code::Unexpected),
     };
     signatures.push(JValue::Obj(entry));

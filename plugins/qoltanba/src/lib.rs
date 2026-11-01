@@ -293,14 +293,17 @@ fn sign(data: &str, storage: &str) -> Result<Vec<u8>, Failure> {
     if token && keys::terminals(storage).unwrap_or_default().is_empty() {
         return Err(Failure::Text(NO_TOKEN));
     }
-    // The key list offers every key of the storage that is of the type SIGNATURE, valid and
-    // without a blocked usage; the chain is judged after the choice. Not observable:
-    // closing the storage dialog («Не удалось открыть хранилище») and the key list
-    // (`action.canceled`) are one cancel here.
+    // The key list offers every key of the storage that is of the type SIGNATURE and without a
+    // blocked usage, expired ones too; the chain is judged after the choice (an expired key
+    // of an unknown CA gets its unknown-CA text). Not observable: an expired key whose
+    // issuer the original knows — no such key can be produced; it goes the way of a valid
+    // one. Not observable: closing the storage dialog («Не удалось открыть хранилище») and
+    // the key list (`action.canceled`) are one cancel here.
     let key = keys::select(&SelectArgs {
         action: Action::Sign,
         storages: vec![storage.to_owned()],
         filter: Filter {
+            allow_expired: true,
             // The path to the CAs and the status are asked below, after the choice.
             chain: Some(Vec::new()),
             // The status is asked below, where a responder that cannot be asked passes.

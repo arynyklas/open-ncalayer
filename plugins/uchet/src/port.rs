@@ -7,7 +7,7 @@ use oncl_pdk::abi::{
 };
 use oncl_pdk::dialogs::{self, MessageKind, PasswordArgs};
 use oncl_pdk::files::{self, ChooseFileArgs, FileFilter};
-use oncl_pdk::keys::{self, CoSign, Key, KeySource, OpenArgs, Password};
+use oncl_pdk::keys::{self, Action, CoSign, Filter, Key, KeyOrder, KeySource, OpenArgs, Password};
 use oncl_pdk::legacy::{
     self, Args, ErrorBean, LegacyBody, LegacyClass, LegacyMethod, Outcome, Param,
 };
@@ -16,9 +16,9 @@ use oncl_pdk::pki::{self, Revocation};
 use oncl_pdk::{AddInfo, Request, host, http, javab64};
 use oncl_port_kit::date::format_java;
 use oncl_port_legacy::{
-    CertProblem, Storage, base64, cades, cades_args, check_cert, fail, file_filters, file_info,
-    into_text, knca_types, name_values, ok, response, sign_xml, split_path, storage,
-    subject_and_issuer,
+    ACTION_CANCELED, CertProblem, Select, Storage, base64, cades, cades_args, check_cert, fail,
+    file_filters, file_info, into_text, knca_types, name_values, ok, response, select, sign_xml,
+    split_path, storage, subject_and_issuer,
 };
 
 /// The module's state: none.
@@ -141,20 +141,32 @@ fn get_message(_: &CommonUtils, args: &Args<'_>, _: &AddInfo) -> Outcome {
     }
 }
 
-/// `signXml(storageName, keyType, xml, tbsXPath, parentXPath)`: the official method. Its
-/// storage dialog is the module's own (the key store file, then its password), and its key
-/// chooser a stub: the one key of the store of the type asked for. A file that is not a key
-/// store ends the call with an exception, where `signFilePath` answers `Не удалось открыть
-/// хранилище`.
+/// `signXml(storageName, keyType, xml, tbsXPath, parentXPath)`: the official method; its
+/// storage and key windows are the core's one key window (closing it is `action.canceled`).
+// Unverified against the original: a call of NCALayer 1.4 ended at once with
+// `java.lang.reflect.InvocationTargetException. Method: signXml` and no window; what makes it
+// throw is not known, so the call goes the way of the official method.
 fn sign_xml_method(_: &CommonUtils, args: &Args<'_>, _: &AddInfo) -> Outcome {
     let key_type = args.str(1);
-    let keys = match open_store(args.str(0), true) {
-        Ok(keys) => keys,
-        Err(Opening::Thrown) => return Outcome::Thrown,
-        Err(Opening::Message(message)) => return failed(&message),
-    };
-    let key = match only_key(keys, &knca_types(key_type)) {
-        Ok(key) => key,
+    let key = select(Select {
+        storage: args.str(0),
+        action: if key_type == "AUTHENTICATION" {
+            Action::Authenticate
+        } else {
+            Action::Sign
+        },
+        knca_types: knca_types(key_type),
+        order: KeyOrder::NewestFirst,
+        filter: Filter {
+            allow_expired: true,
+            chain: Some(Vec::new()),
+            allow_revoked: true,
+            ..Filter::default()
+        },
+    });
+    let key = match key {
+        Ok(Some(key)) => key,
+        Ok(None) => return failed(ACTION_CANCELED),
         Err(message) => return failed(&message),
     };
     match sign_xml(&key, args.str(2), args.str(3), args.str(4)) {
@@ -427,21 +439,16 @@ fn page_key(path: &str, password: &str) -> Result<Vec<Key>, String> {
 /// The one signing key of `keys`: none is `keyNotFound`; several fail, as the original's
 /// key chooser is a stub.
 fn only_signing_key(keys: Vec<Key>) -> Result<Key, String> {
-    only_key(keys, &["SIGNATURE".to_owned()])
-}
-
-/// The one key of `keys` of one of the Kalkan `types`: none is `keyNotFound`; several fail.
-fn only_key(keys: Vec<Key>, types: &[String]) -> Result<Key, String> {
-    let mut found = Vec::new();
+    let mut signing = Vec::new();
     for key in keys {
         let details = host::cert_details(key.certificate()).map_err(|e| e.message)?;
-        if details.knca_types.iter().any(|t| types.contains(t)) {
-            found.push(key);
+        if details.knca_types.iter().any(|t| t == "SIGNATURE") {
+            signing.push(key);
         }
     }
-    match found.len() {
+    match signing.len() {
         0 => Err(texts::KEY_NOT_FOUND.to_owned()),
-        1 => Ok(found.remove(0)),
+        1 => Ok(signing.remove(0)),
         _ => Err(texts::INTERNAL_ERROR.to_owned()),
     }
 }
@@ -520,29 +527,6 @@ fn checked_storage(storage_name: &str) -> Result<Storage, String> {
 /// again while it is wrong); every key of the store. Closing it is
 /// `Не удалось открыть хранилище`.
 fn storage_dialog(storage_name: &str) -> Result<Vec<Key>, String> {
-    open_store(storage_name, false).map_err(|failure| match failure {
-        Opening::Message(message) => message,
-        Opening::Thrown => texts::STORE_NOT_OPENED.to_owned(),
-    })
-}
-
-/// Why [`open_store`] did not give the keys.
-enum Opening {
-    /// The reply's message.
-    Message(String),
-    /// The method threw (`InvocationTargetException`).
-    Thrown,
-}
-
-impl From<String> for Opening {
-    fn from(message: String) -> Opening {
-        Opening::Message(message)
-    }
-}
-
-/// [`storage_dialog`]; with `thrown_on_corrupt` a file that is not a key store ends the
-/// method with an exception, as `signXml` does, instead of `Не удалось открыть хранилище`.
-fn open_store(storage_name: &str, thrown_on_corrupt: bool) -> Result<Vec<Key>, Opening> {
     let storage = checked_storage(storage_name)?;
     let not_opened = || texts::STORE_NOT_OPENED.to_owned();
     let source = match storage {
@@ -596,10 +580,9 @@ fn open_store(storage_name: &str, thrown_on_corrupt: bool) -> Result<Vec<Key>, O
             }
             Err(keys::OpenOutcome::Blocked) => {
                 let _ = dialogs::message(MessageKind::Error, "Пароль заблокирован");
-                return Err(not_opened().into());
+                return Err(not_opened());
             }
-            Err(keys::OpenOutcome::Corrupt) if thrown_on_corrupt => return Err(Opening::Thrown),
-            Err(_) => return Err(not_opened().into()),
+            Err(_) => return Err(not_opened()),
         }
     }
 }

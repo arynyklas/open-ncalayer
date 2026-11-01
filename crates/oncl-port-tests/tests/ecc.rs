@@ -936,8 +936,8 @@ fn nursign_xml_local_without_declaration() {
 
 #[test]
 fn nursign_xml_malformed_parser_text() {
-    // A document that ends inside its root: the JDK parser's text, in the window and in the
-    // reply, after the key dialog.
+    // A document that ends inside its root, or that starts with text before the markup: the
+    // JDK parser's text, in the window and in the reply, after the key dialog.
     let sax = "org.xml.sax.SAXParseException; lineNumber: 1; columnNumber: 9; \
                XML document structures must start and end within the same entity.";
     for (request, sax) in [
@@ -947,6 +947,11 @@ fn nursign_xml_malformed_parser_text() {
             r#"{"type":"xml","data":"<doc>\n  <a>x</a>"}"#,
             "org.xml.sax.SAXParseException; lineNumber: 2; columnNumber: 11; \
              XML document structures must start and end within the same entity.",
+        ),
+        (
+            r#"{"type":"xml","data":"not xml"}"#,
+            "org.xml.sax.SAXParseException; lineNumber: 1; columnNumber: 1; \
+             Content is not allowed in prolog.",
         ),
     ] {
         let harness = Harness::new(steps(vec![pick(), vec![Step::Message]]), vec![]);

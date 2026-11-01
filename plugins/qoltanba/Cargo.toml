@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-qoltanba"
 description = "OpenNCALayer port of Qoltanba's module: CAdES-T signatures of files, the check of a CMS's signers and a PDF report of them"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

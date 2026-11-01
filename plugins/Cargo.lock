@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-arta"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-efactoring"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-market"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-metadoc"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "cms",
  "der",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-nursign"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-qoltanba"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "base64",
  "der",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-rating1c"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-uchet"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-xdox"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "oncl-pdk",
  "oncl-port-legacy",

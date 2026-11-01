@@ -159,7 +159,7 @@ fn xmldsig(key: &Key, xml: &str, element: &str, parent: &str) -> Option<String> 
         signature_id: None,
         signing_time_object: None,
         strip_whitespace: true,
-        base64_line_breaks: None,
+        base64_line_breaks: Some(false),
         output: XmlOutput::Serialize {
             declaration: false,
             standalone_no: false,

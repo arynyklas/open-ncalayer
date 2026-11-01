@@ -265,7 +265,7 @@ pub fn uin_info(kind: i64, uin: &str) -> P {
 /// `HardwareTokenBlock` with the stub values the original sends.
 pub fn stub_token() -> P {
     // Not observable: the stub values of the token block it sends with `authInfo`, taken
-    // as those of `hardwarePair` (which are as recorded).
+    // as those of `hardwarePair` (which match the original's replies).
     P::Msg(vec![
         ("id", P::str("hwtoken.id")),
         ("hash", P::str("hwtoken.hash")),

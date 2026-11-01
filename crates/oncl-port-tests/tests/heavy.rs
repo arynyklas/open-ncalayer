@@ -2961,11 +2961,11 @@ fn qoltanba_sign_file_bytes_excludes_blocked_eku() {
     );
 }
 
-/// A key store of the key of `user-gost2015-sign` whose certificate its own key issued: none
-/// of the core's CAs is its issuer. Its path.
-fn store_self_issued() -> std::path::PathBuf {
+/// A key store of the key of fixture `name` whose certificate its own key issued: none of the
+/// core's CAs is its issuer. Its path.
+fn store_self_issued(name: &str) -> std::path::PathBuf {
     use der::Encode;
-    let user = entry("user-gost2015-sign");
+    let user = entry(name);
     let spec = oncl_pki::testing::TestCertSpec::from_cert(&user.cert);
     let cert = oncl_pki::testing::issue_cert(&user, spec);
     let pfx = oncl_pki::pkcs12::write(
@@ -2981,49 +2981,57 @@ fn store_self_issued() -> std::path::PathBuf {
     )
     .unwrap();
     let path = std::env::temp_dir().join(format!(
-        "oncl-qoltanba-{}-self-issued.p12",
+        "oncl-qoltanba-{}-{name}-self-issued.p12",
         std::process::id()
     ));
     std::fs::write(&path, pfx).unwrap();
     path
 }
 
+/// The key list offers every signing key, the NCA test key (expired) included; the chain is
+/// judged after the choice, so the unknown CA's text answers, not «Действие отменено».
 #[test]
 fn qoltanba_sign_file_bytes_unknown_ca_after_key_chosen() {
-    let path = store_self_issued();
     let request = |lang: &str| {
         json!({"module": "kz.btsdigital.qoltanba.CMSSignUtil", "method": "signFileBytes",
             "args": [b64(b"qoltanba document"), "PKCS12"], "lang": lang})
         .to_string()
     };
-    for (lang, message) in [
-        (
-            "ru",
-            "Неизвестный удостоверяющий центр. Проверка цепочки сертификатов прошла неуспешно",
-        ),
-        (
-            "kk",
-            "Белгісіз куәландырушы орталық. Сертификаттардың тізбегін тексеру сәтсіз өтті.",
-        ),
-    ] {
-        let steps = vec![
-            Step::Storage {
-                path: path.clone(),
-                password: "Qwerty12".to_owned(),
-            },
-            Step::Key(0),
-        ];
-        let harness = Harness::new(steps, vec![]);
-        assert_eq!(
-            text(harness.call("qoltanba", &request(lang), QOLTANBA_ORIGIN)),
-            qoltanba_500(message),
-            "{lang}"
-        );
-        // The key list offers the key: the chain is judged after the choice.
-        let prompts = harness.prompter().key_prompts();
-        assert_eq!(prompts[0].candidates[0].availability, Availability::Enabled);
+    for fixture in ["user-gost2015-sign", "expired-gost2015-sign"] {
+        let path = store_self_issued(fixture);
+        for (lang, message) in [
+            (
+                "ru",
+                "Неизвестный удостоверяющий центр. Проверка цепочки сертификатов прошла неуспешно",
+            ),
+            (
+                "kk",
+                "Белгісіз куәландырушы орталық. Сертификаттардың тізбегін тексеру сәтсіз өтті.",
+            ),
+        ] {
+            let steps = vec![
+                Step::Storage {
+                    path: path.clone(),
+                    password: "Qwerty12".to_owned(),
+                },
+                Step::Key(0),
+            ];
+            let harness = Harness::new(steps, vec![]);
+            assert_eq!(
+                text(harness.call("qoltanba", &request(lang), QOLTANBA_ORIGIN)),
+                qoltanba_500(message),
+                "{fixture} {lang}"
+            );
+            // The key list offers the key: the chain is judged after the choice.
+            let prompts = harness.prompter().key_prompts();
+            assert_eq!(
+                prompts[0].candidates[0].availability,
+                Availability::Enabled,
+                "{fixture} {lang}"
+            );
+        }
+        std::fs::remove_file(path).unwrap();
     }
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -4164,6 +4172,31 @@ fn skf_sign_xades_of_a_document_that_ends_inside_its_root() {
         reply,
         skf_error("XML document structures must start and end within the same entity.")
     );
+}
+
+#[test]
+fn skf_sign_xades_of_a_document_with_text_before_the_markup() {
+    let prepared = "x<?xml version=\"1.0\" encoding=\"UTF-8\"?><document/>";
+    let doc_url = "https://portal.efis.kz/docs/11";
+    let efis = Efis::new(vec![
+        (CACERTS, skf_cas()),
+        (doc_url, prepared.as_bytes().to_vec()),
+    ]);
+    let harness = skf_harness(&efis);
+    let mut session = harness.session("skf");
+    session.call(
+        &get_keys("inter-user-gost2015-sign", "Qwerty12", "1"),
+        SKF_ORIGIN,
+    );
+    let reply = text(session.call(
+        &skf(
+            "signXades",
+            json!(["1", "DOC-11", doc_url, "text/xml", "SID"]),
+        ),
+        SKF_ORIGIN,
+    ));
+    // `getMessage()` of the parser's exception: neither its class nor its position.
+    assert_eq!(reply, skf_error("Content is not allowed in prolog."));
 }
 
 #[test]

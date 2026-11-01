@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-uchet"
 description = "The OpenNCALayer port of uchet.kz's signUtil (kz.uchet.signUtil)"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

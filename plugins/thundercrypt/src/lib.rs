@@ -192,7 +192,7 @@ fn legacy(text: &str) -> String {
 /// order of the first one.
 // Not observable: the order of three params (`failure` before `address` by this rule) and
 // of the keys the original put into its map: the branches that give them need a key of the
-// national CA's chain, which the checks cannot use.
+// national CA's chain, which no available key, device or network can produce.
 fn params(entries: &[(&'static str, String)]) -> JObject {
     let mut source = JObject::hash_map();
     for (key, value) in entries {

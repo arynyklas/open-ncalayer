@@ -595,7 +595,7 @@ fn xml_signature(key: &Key, xml: &str) -> Result<String, String> {
             signature_id: None,
             signing_time_object: None,
             strip_whitespace: true,
-            base64_line_breaks: None,
+            base64_line_breaks: Some(false),
             output: XmlOutput::Serialize {
                 declaration: true,
                 standalone_no: true,

@@ -78,9 +78,9 @@ mod port {
         reply.to_json()
     }
 
-    /// The storage and key dialogs: signing keys only, oldest first, every key available
-    /// (the original's default-chained signing entity checks its certification path through
-    /// the core's CAs only after the choice, and no revocation).
+    /// The storage and key dialogs: signing keys only, oldest first, every key available,
+    /// expired ones too (the original's default-chained signing entity checks its
+    /// certification path through the core's CAs only after the choice, and no revocation).
     fn choose(storage: &str) -> Result<Key, String> {
         let key = select(Select {
             storage,
@@ -88,6 +88,7 @@ mod port {
             knca_types: vec!["SIGNATURE".to_owned()],
             order: KeyOrder::OldestFirst,
             filter: Filter {
+                allow_expired: true,
                 chain: Some(Vec::new()),
                 allow_revoked: true,
                 ..Filter::default()

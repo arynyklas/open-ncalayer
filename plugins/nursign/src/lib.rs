@@ -398,7 +398,7 @@ fn post_failure(error: &oncl_pdk::abi::HostError) -> Failure {
 }
 
 /// The failure of an XML signature: the parser's `SAXParseException` text where the host has
-/// it, otherwise the general text.
+/// it (a document that ends inside its root or starts with text), otherwise the general text.
 fn xml_failure(error: &oncl_pdk::abi::HostError) -> Failure {
     if error.cause() == Some(cause::XML_PARSE) && error.message.starts_with(SAX_PARSE) {
         Failure::Message(error.message.clone())
@@ -472,7 +472,7 @@ fn tsp_failure(failure: &NetFailure) -> Failure {
         NetKind::Connect => Throwable::connect_refused(),
         NetKind::Timeout => Throwable::socket_timeout(false),
         // Not observable: a TSA's HTTP error and an invalid or refused time-stamp cannot be
-        // produced, as the time-stamp authority is not emulated.
+        // produced, as no TSA can be made to fail on demand.
         NetKind::Http(status) => Throwable::new(
             "java.io.IOException",
             Some(format!(
@@ -502,16 +502,16 @@ fn xmldsig(key: &Key, xml: &str) -> Result<String, Failure> {
         signature_id: None,
         signing_time_object: None,
         strip_whitespace: true,
-        base64_line_breaks: None,
+        base64_line_breaks: Some(false),
         output: XmlOutput::Serialize {
             declaration: false,
             standalone_no: false,
             trim: true,
         },
     };
-    // The JDK parser's text of a document that ends inside its root (the host words it as the
-    // exception's `toString()`) is the window's and the reply's; a parse error of another
-    // kind has the general text.
+    // The JDK parser's text of a document that ends inside its root or starts with text before
+    // the markup (the host words it as the exception's `toString()`) is the window's and the
+    // reply's; a parse error of another kind has the general text.
     let signed = key.sign_xml_ex(args).map_err(|e| xml_failure(&e))?;
     Ok(String::from_utf8_lossy(&signed).into_owned())
 }
