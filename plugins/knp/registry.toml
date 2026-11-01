@@ -8,7 +8,7 @@ vendor = "ТОО «ISERV»"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "SmartAuth вызывается только у сайта https://*.kgd.gov.kz, с которого пришёл запрос, и только по HTTPS с проверкой сертификата (оригинал доверял любому сертификату). Страница с портом или по http получает общую ошибку."
@@ -27,3 +27,6 @@ ru = "Подписи RSA-SHA1 не создаются: сертификат sha1
 
 [[differences]]
 ru = "Файл knpterminal оригинала не читается: режим терминала выключен."
+
+[[differences]]
+ru = "Порядок свойств в ответах следует Windows. На Linux у оригинала порядок свойств, которые попадают в одну корзину HashMap (права ключа, список сертификатов, hardwarePair, accountStatus), иной и нестабилен между JVM; порт его не воспроизводит."

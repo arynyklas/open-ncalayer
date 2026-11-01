@@ -121,11 +121,6 @@ fn buhta_unknown_format_quirk() {
         call(json!({"handler": 0, "payload": "{}"})),
         r#"{"code":"UNKNOWN_COMMAND","message":"Unknown `handler`","status":false}"#
     );
-    // No payload: the method's NullPointerException (EMPTY_PAYLOAD is never used).
-    assert_eq!(
-        call(json!({"handler": 1})),
-        r#"{"code":"INVOCATION_ERROR","details":"java.lang.NullPointerException","message":"An invoked method threw an exception.","status":false}"#
-    );
     assert_eq!(
         call(json!({"handler": 1, "payload": "{\"tin\": {}}"})),
         r#"{"code":"INVALID_PAYLOAD","message":"Invalid payload","status":false}"#
@@ -143,6 +138,18 @@ fn buhta_unknown_format_quirk() {
         )),
         r#"{"code":"GENERAL_ERROR","details":"java.lang.IllegalArgumentException: call demands arguments","message":"General error.","status":false}"#
     );
+}
+
+#[test]
+fn buhta_missing_payload_is_invalid_payload() {
+    let harness = Harness::new(vec![], vec![]);
+    let call = |args: Value| text(harness.call("buhta", &buhta(args), BUHTA_ORIGIN));
+    let invalid = r#"{"code":"INVALID_PAYLOAD","message":"Invalid payload","status":false}"#;
+    // No payload at all is answered as a payload that does not read; no dialog opens.
+    assert_eq!(call(json!({"handler": 1})), invalid);
+    assert_eq!(call(json!({"handler": 2})), invalid);
+    assert_eq!(call(json!({"format": 1, "handler": 3})), invalid);
+    assert!(harness.prompter().timeline().is_empty());
 }
 
 #[test]
@@ -508,6 +515,10 @@ fn acbank_validation_codes_order() {
         (None, "unexpected-error"),
         (
             Some(json!({"settings": {"locale": "de"}})),
+            "settings.locale.incorrect",
+        ),
+        (
+            Some(json!({"settings": {"locale": ""}})),
             "settings.locale.incorrect",
         ),
         // The locale is checked before the items.
@@ -949,6 +960,8 @@ fn acbank_non_gost2015_unexpected_error() {
 
 const KNP: &str = "kz.inessoft.kgd.knp.ncalayer.KNPModuleService";
 const KGD: Option<&str> = Some("https://cabinet.kgd.gov.kz");
+/// An agreement that carries a signature element (its signature is not checked).
+const KNP_SIGNED: &str = r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"/>"#;
 const KNP_ERROR: &str = r#"{"resultStatus":{"resultCode":"ERROR"},"requestId":"r1"}"#;
 
 fn knp(command: &str, fields: Value) -> String {
@@ -1074,19 +1087,22 @@ fn knp_info_and_storage_types() {
     );
     assert_eq!(
         call("getStorageType", json!({})),
-        r#"{"resultStatus":{"resultCode":"OK"},"storages":[{"name":"PKCS12","token":false},{"name":"KAZTOKEN","token":true},{"name":"KZIDCARD","token":true},{"name":"ETOKEN_72K","token":true},{"name":"JACARTA","token":true}],"requestId":"r1"}"#
+        r#"{"storages":[{"name":"PKCS12","token":false},{"name":"KAZTOKEN","token":true},{"name":"KZIDCARD","token":true},{"name":"ETOKEN_72K","token":true},{"name":"JACARTA","token":true}],"resultStatus":{"resultCode":"OK"},"requestId":"r1"}"#
     );
     // No token readers before tokens are supported.
     assert_eq!(
         call("getStorageDevicesByType", json!({"storage": "KAZTOKEN"})),
         r#"{"resultStatus":{"resultCode":"OK"},"requestId":"r1","tokenTerminals":[]}"#
     );
-    for storage in ["PKCS12", "OTHER"] {
-        assert_eq!(
-            call("getStorageDevicesByType", json!({"storage": storage})),
-            KNP_ERROR
-        );
-    }
+    // The file store has no readers: an empty list.
+    assert_eq!(
+        call("getStorageDevicesByType", json!({"storage": "PKCS12"})),
+        r#"{"resultStatus":{"resultCode":"OK"},"requestId":"r1","tokenTerminals":[]}"#
+    );
+    assert_eq!(
+        call("getStorageDevicesByType", json!({"storage": "OTHER"})),
+        KNP_ERROR
+    );
     assert_eq!(
         call("hardwarePair", json!({})),
         r#"{"resultStatus":{"resultCode":"OK"},"requestId":"r1","hardwareKey":"hardwareKey","token":{"hardwareId":"hwtoken.hardwareId","id":"hwtoken.id","parentHash":"hwtoken.parentHash","hash":"hwtoken.hash","parentId":"hwtoken.parentId"}}"#
@@ -1137,8 +1153,8 @@ fn knp_certificates_from_data_url() {
             "keyCertSign",
             "issuerDN",
             "alias",
-            "subjectDN",
             "algorithm",
+            "subjectDN",
             "validTo",
             "requestId",
         ],
@@ -1174,6 +1190,12 @@ fn knp_certificates_from_data_url() {
     let request = knp(
         "getCertificates",
         json!({"type": "JKS", "storagePath": "x"}),
+    );
+    assert_eq!(text(harness.call("knp", &request, KGD)), KNP_ERROR);
+    // A path that is not base64 is the general error, as the strict decoder fails it.
+    let request = knp(
+        "getCertificates",
+        json!({"type": "PKCS12", "storagePath": "data:;base64,%%%", "password": "Qwerty12"}),
     );
     assert_eq!(text(harness.call("knp", &request, KGD)), KNP_ERROR);
 }
@@ -1262,6 +1284,11 @@ fn knp_sign_document_layout() {
     let stamp = &xml[xml[at..].find('>').unwrap() + at + 1..xml.find("</timestamp>").unwrap()];
     assert_eq!(stamp.len(), "29-10-2026 17:00:00 +0500".len(), "{stamp}");
     assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+    // The signature is written as Kalkan does: no line breaks between its elements, its
+    // base64 on one line.
+    assert!(!xml.contains('\n') && !xml.contains("&#13;"), "{xml}");
+    assert!(xml.contains("</ds:SignedInfo><ds:SignatureValue"), "{xml}");
+    assert!(xml.contains("</ds:SignatureValue><ds:KeyInfo>"), "{xml}");
     // The next signature's Id counts the signatures already there.
     let again = text(harness.call(
         "knp",
@@ -1274,6 +1301,7 @@ fn knp_sign_document_layout() {
     assert!(twice.contains("Id=\"2\""), "{twice}");
     assert!(twice.contains("Target=\"#2\""), "{twice}");
     assert!(twice.contains("xmldsig-more#rsa-sha256"), "{twice}");
+    assert!(!twice.contains('\n') && !twice.contains("&#13;"), "{twice}");
     // Both signatures carry `Id="signingTime"`, as the original's do: the document does not
     // verify as XMLDSig requires unique Ids.
     assert_eq!(twice.matches("<ds:Signature ").count(), 2);
@@ -1549,7 +1577,7 @@ fn knp_server_error_mapping() {
     );
     let signed_up: Value = serde_json::from_str(&call(
         "signUp",
-        json!({"uin": "1", "type": "IIN_BIN", "signedAuthAgreementXml": "<a/>",
+        json!({"uin": "1", "type": "IIN_BIN", "signedAuthAgreementXml": KNP_SIGNED,
             "address": "+7 (701) 123-45-67", "method": "SMS", "confirmationLanguage": "ru",
             "oneTimeHardwareTokenBlock": true}),
     ))
@@ -1573,7 +1601,7 @@ fn knp_server_error_mapping() {
         .unwrap();
     assert_eq!(
         register.2,
-        r#"{"uinInfo":{"type":0,"uin":"1"},"confirmationsSetting":{"method":1,"address":"77011234567"},"confirmationLanguage":"ru","hardwareKey":"HWKEY","isOneTimeHardwareTokenBlock":true,"signedAuthAgreementXml":"\u003ca/\u003e"}"#
+        r#"{"uinInfo":{"type":0,"uin":"1"},"confirmationsSetting":{"method":1,"address":"77011234567"},"confirmationLanguage":"ru","hardwareKey":"HWKEY","isOneTimeHardwareTokenBlock":true,"signedAuthAgreementXml":"\u003cds:Signature xmlns:ds\u003d\"http://www.w3.org/2000/09/xmldsig#\"/\u003e"}"#
     );
     assert!(
         requests
@@ -1591,7 +1619,7 @@ fn knp_mail_pattern() {
             "knp",
             &knp(
                 "signUp",
-                json!({"uin": "1", "type": "IIN_BIN", "signedAuthAgreementXml": "<a/>",
+                json!({"uin": "1", "type": "IIN_BIN", "signedAuthAgreementXml": KNP_SIGNED,
                     "address": address, "method": "MAIL", "confirmationLanguage": "ru",
                     "oneTimeHardwareTokenBlock": false}),
             ),
@@ -1646,11 +1674,48 @@ fn knp_sent_request_not_repeated() {
     let harness = Harness::new(vec![], kgd(&server));
     let request = knp(
         "signUp",
-        json!({"uin": "1", "type": "IIN_BIN", "signedAuthAgreementXml": "<a/>",
+        json!({"uin": "1", "type": "IIN_BIN", "signedAuthAgreementXml": KNP_SIGNED,
             "address": "a@example.kz", "method": "MAIL", "confirmationLanguage": "ru",
             "oneTimeHardwareTokenBlock": false}),
     );
     assert_eq!(text(harness.call("knp", &request, KGD)), KNP_ERROR);
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn knp_sign_up_unsigned_agreement_is_general_error() {
+    let server = SmartAuth::with(&[(
+        "/SmartAuthService/registerUser",
+        200,
+        json!({"status": 0, "sentConfirmationData": {"operationId": "op", "usedMethod": 0}}),
+    )]);
+    let harness = Harness::new(vec![], kgd(&server));
+    let sign_up = |agreement: &str, address: &str| {
+        text(harness.call(
+            "knp",
+            &knp(
+                "signUp",
+                json!({"uin": "1", "type": "IIN_BIN", "signedAuthAgreementXml": agreement,
+                    "address": address, "method": "MAIL", "confirmationLanguage": "ru",
+                    "oneTimeHardwareTokenBlock": false}),
+            ),
+            KGD,
+        ))
+    };
+    // A correct address and an agreement without a signature: the general error, and the
+    // service is not called.
+    assert_eq!(sign_up("<a/>", "a@example.kz"), KNP_ERROR);
+    assert!(server.requests().is_empty());
+    // The address is checked before the agreement.
+    assert_eq!(
+        sign_up("<a/>", "not-an-address"),
+        r#"{"requestId":"r1","error":{"sendingConfirmationError":"SENDING_CONFIRMATION_ILLEGAL_MAIL_FORMAT"}}"#
+    );
+    // With a signature the request goes out.
+    assert_eq!(
+        sign_up(KNP_SIGNED, "a@example.kz"),
+        r#"{"resultStatus":{"resultCode":"OK"},"requestId":"r1","sentConfirmationData":{"usedMethod":"MAIL","operationId":"op"}}"#
+    );
     assert_eq!(server.requests().len(), 1);
 }
 
@@ -2048,13 +2113,12 @@ fn documentolog_get_keys_none_left_is_unknown() {
 #[test]
 fn documentolog_storages_attached_and_password_first() {
     // The storage names the original knows: JKS is a file; Kalkan's other token names are
-    // not.
+    // not. An unknown name leaves the browse guard up, so the second one is answered at once.
     let (file, _) = p12("user-rsa-sign");
     let harness = Harness::new(
         vec![
             Step::Password("Qwerty12".to_owned()),
             Step::Path(file.clone()),
-            Step::Password("Qwerty12".to_owned()),
         ],
         vec![],
     );
@@ -2118,6 +2182,35 @@ fn documentolog_storages_attached_and_password_first() {
     )))
     .unwrap();
     assert_eq!(encapsulated(&cms).as_deref(), Some(&b"aGVsbG8="[..]));
+}
+
+#[test]
+fn documentolog_browse_guard_stays_up_after_unknown_storage() {
+    let harness = Harness::new(vec![Step::Password("Qwerty12".to_owned())], vec![]);
+    let mut session = harness.session("documentolog");
+    let browse = |service: &str, storage: &str| {
+        doclog(
+            service,
+            "browseKeyStore",
+            json!({"storage_name": storage, "file_extension": "P12"}),
+        )
+    };
+    // The password window opens first; then the name is found unknown.
+    assert_eq!(
+        text(session.call(&browse(SIGN_SERVICE, "NOPE"), DOCLOG)),
+        UNKNOWN
+    );
+    assert_eq!(harness.prompter().password_prompts().len(), 1);
+    // The guard stays up: either service answers `unknown` at once, with no window.
+    for service in [KALKAN_SERVICE, SIGN_SERVICE] {
+        assert_eq!(
+            text(session.call(&browse(service, "PKCS12"), DOCLOG)),
+            UNKNOWN,
+            "{service}"
+        );
+    }
+    assert_eq!(harness.prompter().password_prompts().len(), 1);
+    assert!(harness.prompter().path_prompts().is_empty());
 }
 
 #[test]
@@ -2868,6 +2961,71 @@ fn qoltanba_sign_file_bytes_excludes_blocked_eku() {
     );
 }
 
+/// A key store of the key of `user-gost2015-sign` whose certificate its own key issued: none
+/// of the core's CAs is its issuer. Its path.
+fn store_self_issued() -> std::path::PathBuf {
+    use der::Encode;
+    let user = entry("user-gost2015-sign");
+    let spec = oncl_pki::testing::TestCertSpec::from_cert(&user.cert);
+    let cert = oncl_pki::testing::issue_cert(&user, spec);
+    let pfx = oncl_pki::pkcs12::write(
+        &[oncl_pki::pkcs12::WriteEntry {
+            alias: "self-issued".to_owned(),
+            pkcs8_der: user.key.to_pkcs8_der().unwrap().to_vec(),
+            cert_der: Some(cert.to_der().unwrap()),
+        }],
+        &[],
+        "Qwerty12",
+        &oncl_pki::pkcs12::WriteOptions::default(),
+        &mut |bytes| bytes.fill(7),
+    )
+    .unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "oncl-qoltanba-{}-self-issued.p12",
+        std::process::id()
+    ));
+    std::fs::write(&path, pfx).unwrap();
+    path
+}
+
+#[test]
+fn qoltanba_sign_file_bytes_unknown_ca_after_key_chosen() {
+    let path = store_self_issued();
+    let request = |lang: &str| {
+        json!({"module": "kz.btsdigital.qoltanba.CMSSignUtil", "method": "signFileBytes",
+            "args": [b64(b"qoltanba document"), "PKCS12"], "lang": lang})
+        .to_string()
+    };
+    for (lang, message) in [
+        (
+            "ru",
+            "Неизвестный удостоверяющий центр. Проверка цепочки сертификатов прошла неуспешно",
+        ),
+        (
+            "kk",
+            "Белгісіз куәландырушы орталық. Сертификаттардың тізбегін тексеру сәтсіз өтті.",
+        ),
+    ] {
+        let steps = vec![
+            Step::Storage {
+                path: path.clone(),
+                password: "Qwerty12".to_owned(),
+            },
+            Step::Key(0),
+        ];
+        let harness = Harness::new(steps, vec![]);
+        assert_eq!(
+            text(harness.call("qoltanba", &request(lang), QOLTANBA_ORIGIN)),
+            qoltanba_500(message),
+            "{lang}"
+        );
+        // The key list offers the key: the chain is judged after the choice.
+        let prompts = harness.prompter().key_prompts();
+        assert_eq!(prompts[0].candidates[0].availability, Availability::Enabled);
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
 #[test]
 fn qoltanba_sign_file_bytes_ocsp() {
     let data = b"qoltanba document";
@@ -2965,8 +3123,8 @@ fn qoltanba_check_cms_signer_info() {
         &text,
         &[
             "personCertificate",
-            "serialNumber",
             "validSignature",
+            "serialNumber",
             "organizationName",
             "certificateValidityPeriod",
             "tspDate",
@@ -3021,11 +3179,11 @@ fn qoltanba_check_cms_signer_info() {
     assert_key_order(
         &text,
         &[
-            "personCertificate",
             "tspVerificationResult",
+            "personCertificate",
             "number",
-            "serialNumber",
             "validSignature",
+            "serialNumber",
             "certificateVerificationResult",
             "certificateValidityPeriod",
             "name",
@@ -3807,7 +3965,7 @@ fn skf_get_keys_line() {
             &get_keys("inter-user-gost2015-sign", "wrong", "1"),
             SKF_ORIGIN
         )),
-        skf_error("Неверный пароль.")
+        skf_error("PKCS12 key store mac invalid - wrong password or corrupted file.")
     );
     assert_eq!(
         text(session.call(
@@ -3941,7 +4099,7 @@ fn skf_sign_xades_template_and_cookie() {
             ),
             SKF_ORIGIN,
         )),
-        skf_error("Server returned HTTP response code: 404 for URL: https://portal.efis.kz/docs/8")
+        skf_error("https://portal.efis.kz/docs/8")
     );
 }
 
@@ -4009,9 +4167,9 @@ fn skf_sign_xades_of_a_document_that_ends_inside_its_root() {
 }
 
 #[test]
-fn skf_failed_get_keys_keeps_no_key() {
-    // A key store that opens but whose key fails the checks leaves no key to sign with
-    // (not the one of an earlier `getKeys`).
+fn skf_failed_get_keys_keeps_the_key() {
+    // A key store that opens but whose key fails the checks still gives the key to sign
+    // with; a store that does not open leaves the key kept before.
     let prepared = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<document \
                     number=\"DOC-9\"><content>AAAA</content></document>";
     let doc_url = "https://portal.efis.kz/docs/9";
@@ -4036,8 +4194,7 @@ fn skf_failed_get_keys_keeps_no_key() {
     ));
     assert!(!failed.contains("NONE"), "{failed}");
     let reply: Value = serde_json::from_str(&text(session.call(&sign, SKF_ORIGIN))).unwrap();
-    assert!(reply.get("result").is_none(), "{reply}");
-    assert_ne!(reply["errorCode"], "NONE", "{reply}");
+    assert_eq!(reply["errorCode"], "NONE", "{reply}");
     // A wrong password does not open the store: the key kept before stays.
     session.call(
         &get_keys("inter-user-gost2015-sign", "Qwerty12", "1"),
@@ -4049,6 +4206,133 @@ fn skf_failed_get_keys_keeps_no_key() {
     );
     let reply: Value = serde_json::from_str(&text(session.call(&sign, SKF_ORIGIN))).unwrap();
     assert_eq!(reply["errorCode"], "NONE", "{reply}");
+}
+
+/// A file with `content` in the temp directory: its path.
+fn skf_temp_file(name: &str, content: &[u8]) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("oncl-skf-{}-{name}", std::process::id()));
+    std::fs::write(&path, content).unwrap();
+    path
+}
+
+#[test]
+fn skf_open_failure_texts_as_java() {
+    let efis = Efis::new(vec![(CACERTS, skf_cas())]);
+    let harness = skf_harness(&efis);
+    let call = |path: &str, password: &str| {
+        text(harness.call(
+            "skf",
+            &skf("getKeys", json!(["PKCS12", path, password, "1"])),
+            SKF_ORIGIN,
+        ))
+    };
+    // A wrong password.
+    let store = p12("inter-user-gost2015-sign")
+        .0
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        call(&store, "wrong"),
+        skf_error("PKCS12 key store mac invalid - wrong password or corrupted file.")
+    );
+    // A file that is not a PKCS12 store.
+    let junk = skf_temp_file("junk.p12", b"not a key store");
+    assert_eq!(
+        call(&junk.to_string_lossy(), "Qwerty12"),
+        skf_error("stream does not represent a PKCS12 key store")
+    );
+    std::fs::remove_file(junk).unwrap();
+    // A file that is not there: the path as Java's `File` writes it, and the system's text.
+    let missing = std::env::temp_dir()
+        .join("oncl-skf-missing")
+        .join("none.p12");
+    let given = missing.to_string_lossy().replace('\\', "/");
+    let expected = if cfg!(windows) {
+        format!(
+            "{} (The system cannot find the file specified)",
+            given.replace('/', "\\")
+        )
+    } else {
+        format!("{given} (No such file or directory)")
+    };
+    assert_eq!(call(&given, "Qwerty12"), skf_error(&expected));
+}
+
+#[test]
+fn skf_sign_xades_expired_key_text() {
+    let prepared = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<document \
+                    number=\"DOC-11\"><content>AAAA</content></document>";
+    let doc_url = "https://portal.efis.kz/docs/11";
+    let efis = Efis::new(vec![
+        (CACERTS, skf_cas()),
+        (doc_url, prepared.as_bytes().to_vec()),
+    ]);
+    let harness = skf_harness(&efis);
+    let mut session = harness.session("skf");
+    // The key of a store whose checks fail is kept, and signing meets its validity.
+    session.call(
+        &get_keys("expired-gost2015-sign", "Qwerty12", "1"),
+        SKF_ORIGIN,
+    );
+    let reply = text(session.call(
+        &skf(
+            "signXades",
+            json!(["1", "DOC-11", doc_url, "text/xml", "SID"]),
+        ),
+        SKF_ORIGIN,
+    ));
+    let reply: Value = serde_json::from_str(&reply).unwrap();
+    let message = reply["errorCode"].as_str().unwrap();
+    let rest = message
+        .strip_prefix("Дата подписания (")
+        .and_then(|rest| rest.strip_suffix(")."))
+        .unwrap_or_else(|| panic!("{message}"));
+    let (signing, period) = rest
+        .split_once(") не входит в период валидности сертификата (")
+        .unwrap_or_else(|| panic!("{message}"));
+    let (from, to) = period.split_once(", ").unwrap();
+    let validity = entry("expired-gost2015-sign")
+        .cert
+        .tbs_certificate()
+        .validity()
+        .clone();
+    let date = |t: time::OffsetDateTime| {
+        format!("{:02}.{:02}.{:04}", t.day(), u8::from(t.month()), t.year())
+    };
+    assert!(
+        in_some_zone(signing, time::OffsetDateTime::now_utc(), date),
+        "{message}"
+    );
+    assert!(
+        in_some_zone(from, instant(&validity.not_before), date),
+        "{message}"
+    );
+    assert!(
+        in_some_zone(to, instant(&validity.not_after), date),
+        "{message}"
+    );
+    // The document was loaded first; no template.
+    assert!(efis.requests().iter().any(|(url, _)| url == doc_url));
+}
+
+#[test]
+fn skf_sign_xades_download_not_found_text() {
+    let efis = Efis::new(vec![(CACERTS, skf_cas())]);
+    let harness = skf_harness(&efis);
+    let mut session = harness.session("skf");
+    session.call(
+        &get_keys("inter-user-gost2015-sign", "Qwerty12", "1"),
+        SKF_ORIGIN,
+    );
+    // A document the portal does not have: `FileNotFoundException`, the URL its message.
+    let url = "https://portal.efis.kz/docs/12";
+    assert_eq!(
+        text(session.call(
+            &skf("signXades", json!(["1", "DOC-12", url, "text/xml", "SID"])),
+            SKF_ORIGIN,
+        )),
+        skf_error(url)
+    );
 }
 
 #[test]

@@ -10,7 +10,8 @@
 //!   `errorCode`, with its four translations (an expired certificate, a revoked one, a
 //!   clock in the future); an exception without a message (`NullPointerException`) is `{}`.
 //! - The key of `getKeys` stays in the session for `signXades` (the original's, in the
-//!   process for every page); the portal's CA list is downloaded once per session.
+//!   process for every page) from the moment its store opens, whether or not the checks
+//!   after pass; the portal's CA list is downloaded once per session.
 //! - Not ported: the original's trust-all TLS for the whole JVM, its OCSP allowed-period
 //!   system property, temporary files.
 
@@ -19,7 +20,7 @@ use base64::engine::general_purpose::STANDARD;
 use der::Decode;
 use oncl_pdk::abi::{
     ChooseFileArgs, FileFilter, FileMode, Header, HostError, HttpExArgs, MAX_PKI_TIMEOUT_MS,
-    MessageKind, Method,
+    MessageKind, Method, Os,
 };
 use oncl_pdk::dialogs::{self, ChoiceArgs};
 use oncl_pdk::host::HashAlg;
@@ -366,23 +367,41 @@ fn host_failure(error: &HostError) -> Fail {
 }
 
 /// The original's exception of a key store that does not open.
-// Unverified against the original: the texts of a missing or unreadable file (Kalkan's
-// exception chain); a file the user does not let the page open, and a token missing, have
-// no original.
-fn open_failure(outcome: OpenOutcome, path: &str) -> Fail {
+// Not observable: the texts of a JKS store that does not open, of a file the user does not
+// let the page open and of a token that is missing; only PKCS12 failures were seen.
+fn open_failure(outcome: OpenOutcome, storage: &str, path: &str) -> Fail {
     let provider = "kz.gov.pki.provider.exception.ProviderUtilException";
+    let pkcs12 = storage == "PKCS12";
     match outcome {
+        OpenOutcome::WrongPassword { .. } if pkcs12 => exception(
+            "java.io.IOException",
+            "PKCS12 key store mac invalid - wrong password or corrupted file.",
+        ),
         OpenOutcome::WrongPassword { .. } => exception(provider, "Неверный пароль."),
         OpenOutcome::Blocked => exception(provider, "Пароль заблокирован."),
-        OpenOutcome::NotFound => exception(
-            "java.io.FileNotFoundException",
-            format!("{path} (No such file or directory)"),
+        OpenOutcome::NotFound => exception("java.io.FileNotFoundException", not_found(path)),
+        OpenOutcome::Corrupt if pkcs12 => exception(
+            "java.io.IOException",
+            "stream does not represent a PKCS12 key store",
         ),
         OpenOutcome::Corrupt => exception(provider, "Не удалось открыть хранилище ключей."),
         OpenOutcome::NoDevice => exception(provider, "Защищенный носитель не обнаружен."),
         OpenOutcome::Declined => exception(provider, "Открытие файла ключа не разрешено."),
         // No key with a certificate: the original's NullPointerException.
         OpenOutcome::NoKeys | OpenOutcome::Opened(_) => npe(),
+    }
+}
+
+/// The message of Java's `FileNotFoundException` for `path`: the path as `File` writes it and
+/// the system's text. Not observable: the text of other systems than Windows.
+fn not_found(path: &str) -> String {
+    if host::platform().is_ok_and(|platform| platform.os == Os::Windows) {
+        format!(
+            "{} (The system cannot find the file specified)",
+            path.replace('/', "\\")
+        )
+    } else {
+        format!("{path} (No such file or directory)")
     }
 }
 
@@ -433,6 +452,10 @@ fn net_exception(failure: &NetFailure) -> Fail {
         NetKind::UnknownHost => Throwable::unknown_host(failure.address.clone()),
         NetKind::Connect => Throwable::connect_refused(),
         NetKind::Timeout => Throwable::socket_timeout(true),
+        NetKind::Http(404 | 410) => Throwable::new(
+            "java.io.FileNotFoundException",
+            Some(failure.address.clone()),
+        ),
         NetKind::Http(status) => Throwable::new(
             "java.io.IOException",
             Some(format!(
@@ -473,7 +496,8 @@ fn ocsp(cert: &[u8], issuer: &[u8]) -> Result<(), Fail> {
             Some(CertStatusAbi::Revoked {
                 reason: Some(_), ..
             }) => Err(Fail::Revoked),
-            // Unverified against the original: the text of a revocation without a reason.
+            // Not observable: the text of a revocation without a reason; `getKeys` never got
+            // as far as the status.
             Some(CertStatusAbi::Revoked { reason: None, .. }) => Err(exception(
                 verify,
                 "Ошибка валидации OCSP. Сертификат отозван.",
@@ -515,13 +539,14 @@ fn get_keys(
     })
     .map_err(|e| host_failure(&e))?;
     let key = opened
-        .map_err(|outcome| open_failure(outcome, path))?
+        .map_err(|outcome| open_failure(outcome, storage, path))?
         .into_iter()
         .next();
-    // The store opened: the original replaces its key here, before the checks. A key that
-    // then fails them is not kept either, so nothing signs until a `getKeys` passes.
-    *state.key.borrow_mut() = None;
-    let key = key.ok_or_else(npe)?;
+    // The store opened: the original keeps its key from here, before the checks, so a key
+    // that then fails them still signs. A store that does not open leaves the earlier key.
+    *state.key.borrow_mut() = key;
+    let kept = state.key.borrow();
+    let key = kept.as_ref().ok_or_else(npe)?;
     let cas = cas(state)?;
     let der = key.certificate();
     let cert = Certificate::from_der(der).map_err(|_| npe())?;
@@ -530,9 +555,9 @@ fn get_keys(
     // (1) OCSP, then the path to the CA list.
     let issuer = ocsp_issuer(&cert, &cas).ok_or_else(npe)?;
     ocsp(der, issuer)?;
-    // Unverified against the original: its PKIX check of the path to the CA list. The
-    // OCSP issuer is one of the list's CAs and its responder knows the certificate; what
-    // the path check adds is the validity, below.
+    // Not observable: its PKIX check of the path to the CA list. The OCSP issuer is one of
+    // the list's CAs and its responder knows the certificate; what the path check adds is
+    // the validity, below.
     // (2) The validity now, in BouncyCastle's words.
     let now = host::now().map_err(|e| host_failure(&e))?;
     let ms = |t: &x509_cert::time::Time| t.to_unix_duration().as_millis() as i64;
@@ -598,7 +623,6 @@ fn get_keys(
         property("C"),
     ]
     .join("|");
-    *state.key.borrow_mut() = Some(key);
     Ok(line)
 }
 
@@ -631,15 +655,37 @@ fn download(url: &str, session: Option<&str>) -> Result<Vec<u8>, Fail> {
         )
     })?;
     if response.status >= 400 {
-        return Err(exception(
-            "java.io.IOException",
-            format!(
-                "Server returned HTTP response code: {} for URL: {url}",
-                response.status
+        return Err(match response.status {
+            404 | 410 => exception("java.io.FileNotFoundException", url.clone()),
+            status => exception(
+                "java.io.IOException",
+                format!("Server returned HTTP response code: {status} for URL: {url}"),
             ),
-        ));
+        });
     }
     Ok(response.body.into_vec())
+}
+
+/// `signXades` signs only inside the certificate's validity: the date of signing against its
+/// period, `dd.MM.yyyy`.
+fn check_validity(cert: &Certificate) -> Result<(), Fail> {
+    let now = host::now().map_err(|e| host_failure(&e))?;
+    let ms = |t: &x509_cert::time::Time| t.to_unix_duration().as_millis() as i64;
+    let validity = cert.tbs_certificate().validity();
+    let (not_before, not_after) = (ms(&validity.not_before), ms(&validity.not_after));
+    if (not_before..=not_after).contains(&now) {
+        return Ok(());
+    }
+    let date = |ms: i64| format_java("dd.MM.yyyy", ms, host::local_offset(ms).unwrap_or(0));
+    Err(exception(
+        "org.skf.osgi.utils.SkfCertificateException",
+        format!(
+            "Дата подписания ({}) не входит в период валидности сертификата ({}, {}).",
+            date(now),
+            date(not_before),
+            date(not_after)
+        ),
+    ))
 }
 
 /// Santuario's `Base64.encode`: lines of 76 characters joined by `\n`.
@@ -685,6 +731,8 @@ fn sign_xades(
     let key = key.as_ref().ok_or_else(npe)?;
     let cas = cas(state)?;
     let document = download(url, Some(session))?;
+    let cert = Certificate::from_der(key.certificate()).map_err(|_| npe())?;
+    check_validity(&cert)?;
     let first_line = document
         .split(|b| *b == b'\n' || *b == b'\r')
         .next()
@@ -697,12 +745,12 @@ fn sign_xades(
         String::from_utf8_lossy(&template)
             .replace("[BUNDLE_VERSION]", VERSION)
             .replace("[DOC_NUMBER]", doc_number)
-            // [P10] Santuario's line breaks in the content.
+            // Not observable: Santuario's line breaks in the content (the original's signed
+            // XML never came back: its signing stopped at the validity check).
             .replace("[BASE64_CONTENT]", &base64_lines(&document))
             .replace("[MIMETYPE]", mime)
             .into_bytes()
     };
-    let cert = Certificate::from_der(key.certificate()).map_err(|_| npe())?;
     let (signature_method, digest_method) =
         xades_methods(&cert.signature_algorithm().oid.to_string());
     let outcome = key
@@ -742,7 +790,7 @@ fn sign_xades(
                 "Ошибка валидации. Сертификат отозван. REVOKED",
             ));
         }
-        // Unverified against the original: DSS's sub-indication of a status unknown.
+        // Not observable: DSS's sub-indication of a status unknown.
         XadesOutcome::Invalid(_) => {
             return Err(exception(validation, "Ошибка валидации. TRY_LATER"));
         }

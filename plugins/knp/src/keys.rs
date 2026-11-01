@@ -39,8 +39,7 @@ pub fn open(kind: &str, path: &str, password: &str) -> Result<Vec<Key>, Fail> {
     let source = if storage == "PKCS12" {
         // Everything after the first `base64,`, or the whole path, is the store's base64.
         let data = path.split_once("base64,").map_or(path, |(_, data)| data);
-        // Unverified against the original: which Base64 decoder reads it (taken as Java's
-        // strict one; a failure is the general error).
+        // Java's strict decoder; a failure is the general error.
         KeySource::Bytes(
             javab64::decode_java(data)
                 .map_err(|_| Fail::Generic)?
@@ -106,11 +105,11 @@ pub fn certificate(key: &Key) -> Result<JObject, Fail> {
     cert.put("keyUsage", usage);
     cert.put("issuerDN", details.issuer_dn);
     cert.put("alias", key.alias());
-    cert.put("subjectDN", details.subject_dn);
     cert.put_opt(
         "algorithm",
         x509text::kalkan_key_alg_name(&info.spki_alg_oid),
     );
+    cert.put("subjectDN", details.subject_dn);
     cert.put(
         "validTo",
         oncl_port_kit::date::format_java(DATE, info.not_after, offset),
@@ -161,7 +160,7 @@ fn uris(der: &[u8]) -> Result<(&'static str, &'static str), Fail> {
 /// The `ds:Signature` elements already in `xml` (`//ds:Signature`), approximated by the
 /// start tags whose local name is `Signature` when the document uses the XMLDSig
 /// namespace.
-fn signatures(xml: &str) -> usize {
+pub(crate) fn signatures(xml: &str) -> usize {
     if !xml.contains("http://www.w3.org/2000/09/xmldsig#") {
         return 0;
     }
@@ -207,8 +206,8 @@ pub fn sign_xml(key: &Key, xml: &str) -> Result<String, Fail> {
                 target_ref: true,
                 text: oncl_port_kit::date::format_java(DATE, now, offset),
             }),
-            strip_whitespace: false,
-            base64_line_breaks: None,
+            strip_whitespace: true,
+            base64_line_breaks: Some(false),
             output: XmlOutput::Serialize {
                 declaration: true,
                 standalone_no: true,

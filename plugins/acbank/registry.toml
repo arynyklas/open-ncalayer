@@ -8,7 +8,7 @@ vendor = "АО «First Heartland Jusan Bank»"
 
 [port]
 status = "full"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Окно подписи — окна OpenNCALayer: список документов с кнопками «Подписать», «Посмотреть», «Отмена», затем общее окно выбора ключа PKCS#12 (тип SIGNATURE). Меню масштаба, файл settings.json и блокировка окна через 15 минут без ввода не переносятся."

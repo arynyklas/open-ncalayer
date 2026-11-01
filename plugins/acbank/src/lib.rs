@@ -166,7 +166,7 @@ fn locale(args: &Map<String, Value>) -> Result<Texts, Code> {
     else {
         return Ok(Texts::RU);
     };
-    // Unverified against the original: an empty locale string is taken as an incorrect one.
+    // An empty locale string is an incorrect one, as `de` is.
     match locale.to_lowercase().as_str() {
         "ru" => Ok(Texts::RU),
         "kk" => Ok(Texts::KK),

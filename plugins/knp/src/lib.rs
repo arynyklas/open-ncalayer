@@ -120,6 +120,18 @@ fn ok(ctx: &Ctx) -> JObject {
     reply(Some("OK"), Some(ctx.request_id))
 }
 
+/// An `OK` reply whose field `key` was put first: it shares a bucket of the original's map
+/// with `resultStatus`, and the earlier put comes first.
+fn ok_first(ctx: &Ctx, key: &str, value: impl Into<JValue>) -> JObject {
+    let mut reply = JObject::hash_map();
+    reply.put(key, value);
+    let mut status = JObject::hash_map();
+    status.put("resultCode", "OK");
+    reply.put("resultStatus", status);
+    reply.put("requestId", ctx.request_id);
+    reply
+}
+
 fn error_of(key: &str, value: &str) -> JObject {
     let mut error = JObject::hash_map();
     error.put(key, value);
@@ -187,16 +199,20 @@ fn storage_types(ctx: &Ctx) -> Result<String, Fail> {
         JValue::Obj(storage)
     })
     .collect();
-    let mut reply = ok(ctx);
-    reply.put("storages", JValue::Arr(storages));
+    let reply = ok_first(ctx, "storages", JValue::Arr(storages));
     Ok(reply.to_json())
 }
 
 /// The readers of a token type: every one for KAZTOKEN, the others without KAZTOKEN's.
 fn storage_devices(ctx: &Ctx) -> Result<String, Fail> {
     let kind = string(ctx.args, "storage")?;
-    let storage = keys::token_storage(&kind).ok_or(Fail::Generic)?;
-    let terminals = oncl_pdk::keys::terminals(storage).map_err(|_| Fail::Generic)?;
+    // The file store has no readers: an empty list, not an error.
+    let terminals = if kind == "PKCS12" {
+        Vec::new()
+    } else {
+        let storage = keys::token_storage(&kind).ok_or(Fail::Generic)?;
+        oncl_pdk::keys::terminals(storage).map_err(|_| Fail::Generic)?
+    };
     let terminals = terminals
         .into_iter()
         .filter(|name| kind == "KAZTOKEN" || !name.starts_with("DigiFlow LLP. KAZTOKEN"))
@@ -651,6 +667,11 @@ fn sign_up(ctx: &Ctx) -> Result<String, Fail> {
     let one_time =
         orgjson::get_boolean(ctx.args, "oneTimeHardwareTokenBlock").map_err(|_| Fail::Generic)?;
     let confirmations = confirmations(ctx, false)?;
+    // An agreement without a signature fails before the service is called, the address
+    // check first. Not observable: whether the original also verifies the signature.
+    if keys::signatures(&auth) == 0 {
+        return Err(Fail::Generic);
+    }
     let mut fields = vec![
         ("uinInfo", uin),
         ("confirmationsSetting", confirmations),

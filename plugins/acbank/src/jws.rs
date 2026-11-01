@@ -176,15 +176,16 @@ fn json(key: &Key, x5c: &[String], item: &Item, operation: Operation) -> Result<
     entry.put("signature", signature);
     let mut signatures = match jws.get("signatures") {
         Some(JValue::Arr(signatures)) => signatures.clone(),
-        // Unverified against the original: a JWS JSON without a `signatures` array.
+        // Not observable: a JWS JSON without a `signatures` array. The original opens its
+        // signing window before it reads the JWS, and that window cannot be driven from outside.
         _ => return Err(Code::Unexpected),
     };
     signatures.push(JValue::Obj(entry));
     jws.put("signatures", JValue::Arr(signatures));
     let mut signed = JObject::hash_map();
     signed.put("spanId", item.span_id.as_str());
-    // Unverified against the original: the base64url around the JWS JSON without padding
-    // (nimbus's `Base64URL`).
+    // Not observable: the base64url around the JWS JSON without padding (nimbus's
+    // `Base64URL`); the original's signed JWS is out of reach (see above).
     signed.put("jws", b64url(jws.to_json().as_bytes()));
     signed.put("id", item.id.as_str());
     Ok(signed)

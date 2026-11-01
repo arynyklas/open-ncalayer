@@ -154,12 +154,9 @@ fn call(args: &Map<String, Value>) -> Result<String, Failure> {
     if !(1..=3).contains(&handler) {
         return Err(RpcFailure::UnknownCommand.failure());
     }
-    // A missing payload is a NullPointerException of the method (`EMPTY_PAYLOAD` is never
-    // used by the original).
+    // A missing payload is an invalid one (`EMPTY_PAYLOAD` is never used by the original).
     let Some(payload) = orgjson::opt_string(args, "payload") else {
-        return Err(Failure::Invocation(Some(
-            "java.lang.NullPointerException".to_owned(),
-        )));
+        return Err(RpcFailure::InvalidPayload.failure());
     };
     let payload = Payload::read(format, &payload)?;
     match handler {
@@ -187,8 +184,7 @@ impl Payload {
     fn read(format: Format, text: &str) -> Result<Payload, Failure> {
         match format {
             Format::Json => Ok(Payload::Json(text.to_owned())),
-            // Unverified against the original: which Base64 decoder reads a binary payload
-            // (taken as Java's strict one; its exception is the method's).
+            // Java's strict decoder; its exception is the method's.
             Format::Binary => javab64::decode_java(text)
                 .map(Payload::Binary)
                 .map_err(|e| {

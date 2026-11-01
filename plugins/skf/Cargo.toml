@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-skf"
 description = "OpenNCALayer port of SK-Pharmacy's module for portal.efis.kz: key files and tokens chosen, the key checked against the portal's CA list and OCSP, XAdES-BASELINE-LT signatures of the portal's documents"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
