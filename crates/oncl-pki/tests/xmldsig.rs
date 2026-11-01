@@ -763,13 +763,14 @@ fn malformed_and_non_utf8_input_is_refused() {
     for xml in [
         &b"<a><b></a>"[..],
         b"",
-        b"text",
         b"<a/><b/>",
         b"<a>\xFF</a>",
         b"<p:a/>",
     ] {
         assert!(matches!(verify(xml), Err(XmlError::Parse(_))), "{xml:?}");
     }
+    // Text before the first markup has the JDK parser's text.
+    assert!(matches!(verify(b"text"), Err(XmlError::NotWellFormed(_))));
 }
 
 #[test]
