@@ -410,9 +410,10 @@ fn sign(key: &Key, digest: &str, data_for_sign: &str) -> Result<JObject, String>
         false => esedo(key, digest)?,
     };
     let data = javab64::decode_kalkan(data_for_sign)?;
-    // Kalkan signs with the key's algorithm name (`RSA` for an RSA key); the core's raw
-    // signature of the key's algorithm is the same: RSA bytes are equal (PKCS#1 v1.5 is
-    // deterministic), a GOST signature matches in form.
+    // Kalkan signs with the key's algorithm name; the port returns the core's raw signature
+    // of the key's algorithm: a GOST signature matches in form, an RSA one is PKCS#1 v1.5
+    // over SHA-256 where the original uses SHA1withRSA (an accepted difference of
+    // `registry.toml`), so its bytes differ.
     let signed = key.sign_raw(&data).map_err(|e| e.message)?;
     let details = host::cert_details(key.certificate()).map_err(|e| e.message)?;
     let mut object = JObject::hash_map();
