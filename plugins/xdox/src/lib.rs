@@ -6,11 +6,11 @@
 
 #[cfg(target_arch = "wasm32")]
 mod port {
-    use oncl_pdk::abi::ErrorCode;
+    use oncl_pdk::abi::{ErrorCode, PathOutcome, PathTime};
     use oncl_pdk::keys::{Action, CmsOutcome, CoSign, Filter, Key, KeyOrder};
     use oncl_pdk::orgjson::{self, JObject, JValue};
     use oncl_pdk::serde_json::{Map, Value};
-    use oncl_pdk::{Request, host, javab64};
+    use oncl_pdk::{Request, host, javab64, pki};
     use oncl_port_legacy::{
         Select, TSA_FAILED, UNKNOWN_ALGORITHM, base64, cades, cades_args, select,
     };
@@ -78,25 +78,34 @@ mod port {
         reply.to_json()
     }
 
-    /// The storage and key dialogs: signing keys only, oldest first, with a certification
-    /// path through the core's CAs (the original's default-chained signing entity, which
-    /// checks no revocation).
+    /// The storage and key dialogs: signing keys only, oldest first, every key available
+    /// (the original's default-chained signing entity checks its certification path through
+    /// the core's CAs only after the choice, and no revocation).
     fn choose(storage: &str) -> Result<Key, String> {
-        let chain = host::ca_list().map_err(|e| e.message)?;
         let key = select(Select {
             storage,
             action: Action::Sign,
             knca_types: vec!["SIGNATURE".to_owned()],
             order: KeyOrder::OldestFirst,
             filter: Filter {
-                chain: Some(chain.into_iter().map(Into::into).collect()),
+                chain: Some(Vec::new()),
                 allow_revoked: true,
                 ..Filter::default()
             },
         })?;
         // The original's cancelled dialog writes a key after the end of its reply object:
         // org.json's `Misplaced key.`.
-        key.ok_or_else(|| "Misplaced key.".to_owned())
+        let key = key.ok_or_else(|| "Misplaced key.".to_owned())?;
+        // The path comes before the page's `cms` and `ncaManifest` are read.
+        match pki::path(key.certificate(), PathTime::NotAfterIfExpired).map_err(|e| e.message)? {
+            PathOutcome::Valid => Ok(key),
+            PathOutcome::IssuerNotFound => Err("ISSUER_CERT_NOT_FOUND".to_owned()),
+            // Not observable: a path that fails for another reason than a missing issuer
+            // has the text of the shared signing entity's exception.
+            PathOutcome::Invalid(why) => Err(format!(
+                "java.security.cert.CertPathBuilderException: {why}"
+            )),
+        }
     }
 
     /// `CREATECMS`: `ncaManifest` signed as UTF-8, attached (a manifest that is itself a CMS
@@ -157,8 +166,8 @@ mod port {
             Ok(CmsOutcome::Signed(cms)) => Ok(cms.into_vec()),
             Ok(CmsOutcome::TspFailed(_)) => Err(TSA_FAILED.to_owned()),
             // A CMS the core cannot read: Kalkan's CMS_PROCESSING_FAILURE.
-            // Unverified against the original: the reply's text for it (the code here, the
-            // cause's `toString()` there).
+            // Not observable: the reply's text for it (the code here, the cause's
+            // `toString()` there); no key available to compare passes the path check.
             Err(e) if e.code == ErrorCode::Invalid => Err("CMS_PROCESSING_FAILURE".to_owned()),
             Err(e) => Err(e.message),
         }

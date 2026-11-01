@@ -49,6 +49,19 @@ fn parse(reply: &str) -> Value {
     serde_json::from_str(reply).unwrap_or_else(|e| panic!("{e}: {reply}"))
 }
 
+/// The member names of the JSON object `value` found in `raw`, in the order they stand
+/// there (the parsed value does not keep it).
+fn names<'a>(raw: &str, value: &'a Value) -> Vec<&'a str> {
+    let mut names: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    names.sort_by_key(|name| raw.find(&format!("\"{name}\":")).unwrap());
+    names
+}
+
 fn b64(data: &[u8]) -> String {
     STANDARD.encode(data)
 }
@@ -252,6 +265,10 @@ fn rating1c_key_info(name: &str) -> JObject {
     let tbs = e.cert.tbs_certificate();
     let ms = |t: time::OffsetDateTime| (t.unix_timestamp_nanos() / 1_000_000) as i64;
     let mut bean = JObject::hash_map();
+    bean.put(
+        "pem",
+        oncl_pki::pem::encode("CERTIFICATE", &der_of(&e.cert)),
+    );
     bean.put("alias", e.alias.as_str());
     bean.put_opt("keyId", oncl_pki::info::ski_hex(&e.cert));
     bean.put("algorithm", "ECGOST3410-2015");
@@ -269,10 +286,6 @@ fn rating1c_key_info(name: &str) -> JObject {
     bean.put("datefrom", ms(info.not_before).to_string());
     bean.put("dateto", ms(info.not_after).to_string());
     bean.put_opt("authorityKeyIdentifier", oncl_pki::info::aki_hex(&e.cert));
-    bean.put(
-        "pem",
-        oncl_pki::pem::encode("CERTIFICATE", &der_of(&e.cert)),
-    );
     bean
 }
 
@@ -310,6 +323,33 @@ fn rating1c_get_key_info_bytes() {
             format!(r#"{{"code":"500","message":"{message}"}}"#)
         );
     }
+}
+
+#[test]
+fn rating1c_key_info_order_on_collision() {
+    let h = Harness::new(key("user-gost2015-sign"), vec![]);
+    let raw = text(h.call(R1C, &call("getKeyInfo", json!(["PKCS12"])), None));
+    let reply = parse(&raw);
+    assert_eq!(
+        names(&raw, &reply["responseObject"]),
+        [
+            "certNotBefore",
+            "issuerCn",
+            "authorityKeyIdentifier",
+            "serialNumber",
+            "certNotAfter",
+            "issuerdn",
+            "keyId",
+            "serial",
+            "dateto",
+            "pem",
+            "alias",
+            "datefrom",
+            "subjectCn",
+            "algorithm",
+            "subjectDn",
+        ]
+    );
 }
 
 #[test]
@@ -727,6 +767,66 @@ fn xdox_unknown_method() {
     assert!(h.prompter().storage_prompts().is_empty());
 }
 
+/// A key store of one key whose certificate is issued by a key that is none of the
+/// synthetic PKI's CAs: no certification path builds for it.
+fn unchained_key(dir: &std::path::Path) -> Vec<Step> {
+    use oncl_pki::pkcs12::{WriteEntry, WriteOptions, write};
+    use oncl_pki::testing::{TestCertSpec, issue_cert};
+    let user = entry("user-gost2015-sign");
+    let cert = issue_cert(
+        &entry("legal-gost2015-sign"),
+        TestCertSpec::from_cert(&user.cert),
+    );
+    let entries = [WriteEntry {
+        alias: user.alias.clone(),
+        pkcs8_der: user.key.to_pkcs8_der().unwrap().to_vec(),
+        cert_der: Some(der_of(&cert)),
+    }];
+    let mut n = 0u8;
+    let pfx = write(
+        &entries,
+        &[],
+        "Qwerty12",
+        &WriteOptions::default(),
+        &mut |buf| {
+            for b in buf {
+                n = n.wrapping_add(7);
+                *b = n;
+            }
+        },
+    )
+    .unwrap();
+    let path = dir.join("unchained.p12");
+    std::fs::write(&path, pfx).unwrap();
+    vec![
+        Step::Storage {
+            path,
+            password: "Qwerty12".to_owned(),
+        },
+        Step::Key(0),
+    ]
+}
+
+#[test]
+fn xdox_chain_failure_after_choice() {
+    let dir = tempfile::tempdir().unwrap();
+    let failure =
+        r#"{"success":false,"errorCode":"unknown_exception","message":"ISSUER_CERT_NOT_FOUND"}"#;
+    for method in ["createCms", "CreateCMS", "addSignerToCms", "ADDSIGNERTOCMS"] {
+        let h = Harness::new(unchained_key(dir.path()), vec![]);
+        // The key is offered and chosen; the failure comes before the manifest and the CMS
+        // are read, whatever the storage name is.
+        let request = xdox_request(method, json!({"storageName": "whatever"}));
+        assert_eq!(
+            text(h.call(XDOX, &request, XDOX_ORIGIN)),
+            failure,
+            "{method}"
+        );
+        assert_eq!(h.prompter().key_prompts().len(), 1, "{method}");
+        assert!(h.http_log().is_empty(), "{method}");
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // eot
 
@@ -975,6 +1075,29 @@ fn ezsigner_lang_kk_texts() {
         text(s.call(&ez_request("getMessage", json!(["nope"]), None), None)),
         r#"{"code":"500","message":"java.lang.reflect.InvocationTargetException. Method: getMessage"}"#
     );
+}
+
+#[test]
+fn ezsigner_kk_texts_of_the_three() {
+    let h = Harness::new(vec![], vec![]);
+    let mut s = h.session(EZ);
+    for (key, expected) in [
+        ("ocsp.revoked", "Сертификат кері қайтарылды"),
+        (
+            "cert.verification.error",
+            "Сертификат валидациядан өткен жоқ",
+        ),
+        (
+            "error.certificate.type",
+            "Кілттің сертификаты электронды құжаттарға қол қоюға арналмаған",
+        ),
+    ] {
+        assert_eq!(
+            text(s.call(&ez_request("getMessage", json!([key]), Some("kk")), None)),
+            expected,
+            "{key}"
+        );
+    }
 }
 
 #[test]
@@ -1303,19 +1426,56 @@ fn uchet_check_cms_report_bytes() {
         info.ext_key_usages.contains("1.2.398.3.3.4.1.1"),
     );
     bean.put("serialNumber", info.serial_hex.trim_start_matches('0'));
+    bean.put("certificateVerificationResult", verification(true));
     bean.put("validSignature", true);
     bean.put("certificateValidityPeriod", period);
     bean.put("tspDate", tsp_date);
     bean.put("iin", "123456789011");
     bean.put("tspVerificationResult", verification(true));
     bean.put("number", 0);
-    bean.put("certificateVerificationResult", verification(true));
     bean.put("name", "ТЕСТОВ ТЕСТ ТЕСТОВИЧ");
     bean.put("signatureVerificationResult", verification(true));
     let mut expected = JObject::hash_map();
     expected.put("code", "200");
     expected.put("responseObjects", JValue::Arr(vec![JValue::Obj(bean)]));
     assert_eq!(reply, expected.to_json());
+}
+
+#[test]
+fn uchet_check_cms_signer_info_order() {
+    let raw = uchet_check("inter-user-gost2015-sign", oncl_pki::ocsp::CertStatus::Good);
+    let reply = parse(&raw);
+    // `certificateVerificationResult` before `validSignature` in their shared bucket.
+    let observed: Vec<&str> = names(&raw, &reply["responseObjects"][0])
+        .into_iter()
+        .filter(|n| *n != "tspDate")
+        .collect();
+    assert_eq!(
+        observed,
+        [
+            "personCertificate",
+            "tspVerificationResult",
+            "number",
+            "serialNumber",
+            "certificateVerificationResult",
+            "validSignature",
+            "certificateValidityPeriod",
+            "name",
+            "signatureVerificationResult",
+            "iin",
+        ]
+    );
+}
+
+#[test]
+fn uchet_check_cms_not_a_cms_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("plain.cms");
+    std::fs::write(&file, b"not a CMS").unwrap();
+    assert_eq!(
+        uchet(vec![yes()], "checkCMS", json!([file.to_str().unwrap()])),
+        r#"{"code":"500","message":"Некорректный cms файл"}"#
+    );
 }
 
 #[test]
@@ -1390,7 +1550,7 @@ fn uchet_sign_xml_api_wrong_password() {
     );
     assert_eq!(
         text(h.call(UCHET, &request, None)),
-        r#"{"code":"500","message":"Не удалось открыть хранилище"}"#
+        r#"{"code":"500","message":"PKCS12 key store mac invalid - wrong password or corrupted file."}"#
     );
     // Declined.
     let h = Harness::new(vec![Step::Confirm { yes: false }], vec![]);
@@ -1726,13 +1886,13 @@ fn arta_get_key_info_sign_info_object() {
     // The official KeyInfo.
     let h = Harness::new(key("user-gost2015-sign"), vec![]);
     let raw = text(h.call(ARTA, &call("getFullKeyInfo", json!(["PKCS12"])), None));
-    // Keys sharing a HashMap bucket in commonUtils' order on Windows 11.
+    // The keys sharing a HashMap bucket in this module's order.
     let at = |key: &str| raw.find(&format!("\"{key}\":")).unwrap();
     assert!(
-        at("pem") < at("keyId") && at("keyId") < at("alias"),
+        at("keyId") < at("alias") && at("alias") < at("pem"),
         "{raw}"
     );
-    assert!(at("subjectDn") < at("algorithm"), "{raw}");
+    assert!(at("algorithm") < at("subjectDn"), "{raw}");
     let reply = parse(&raw);
     let object = &reply["responseObject"];
     assert_eq!(object["alias"], e.alias.as_str());
@@ -1829,7 +1989,7 @@ fn arta_sign_base64_file_swallows_errors() {
 }
 
 #[test]
-fn arta_sign_document_info_json_string() {
+fn arta_sign_document_info_is_empty_bean() {
     let h = Harness::new(key("user-gost2015-sign"), vec![]);
     let mut s = h.session(ARTA);
     let no_key = text(s.call(&call("signDocument", json!(["", "INFO", ""])), None));
@@ -1838,17 +1998,14 @@ fn arta_sign_document_info_json_string() {
         r#"{"code":"500","message":"java.lang.reflect.InvocationTargetException. Method: signDocument"}"#
     );
     s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
-    let reply = parse(&text(
-        s.call(&call("signDocument", json!(["", "info", ""])), None),
-    ));
-    let info = parse(reply["responseObject"].as_str().unwrap());
-    let e = entry("user-gost2015-sign");
-    assert_eq!(info["ALGORITHM"], "ECGOST3410-2015");
-    assert_eq!(info["FORMAT"], "X.509");
-    assert_eq!(info["KEY_CN"], "ТЕСТОВ ТЕСТ");
-    assert_eq!(info["KEY_SERIALNUMBER"], "IIN123456789011");
-    assert_eq!(info["SERIAL_NUMBER"], oncl_pki::info::serial_dec(&e.cert));
-    assert_eq!(info["CERT"], b64(&der_of(&e.cert)));
+    // Whatever the case of the type, the key's fields are not given out.
+    for kind in ["info", "INFO", "Info"] {
+        assert_eq!(
+            text(s.call(&call("signDocument", json!(["", kind, ""])), None)),
+            r#"{"responseObject":"{\"empty\":false}","code":"200"}"#,
+            "{kind}"
+        );
+    }
     assert_eq!(
         text(s.call(&call("signDocument", json!(["", "x", ""])), None)),
         r#"{"code":"500","message":"TYPE NOT RECOGNIZED"}"#
@@ -1958,6 +2115,50 @@ fn arta_sign_xml_first_child_xmldsig_more() {
         xml.trim_end().ends_with("</ds:Signature></a>") || xml.contains("Signature></a>"),
         "{xml}"
     );
+    assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+}
+
+#[test]
+fn arta_key_info_order_on_collision() {
+    let h = Harness::new(key("user-gost2015-sign"), vec![]);
+    let raw = text(h.call(ARTA, &call("getFullKeyInfo", json!(["PKCS12"])), None));
+    let reply = parse(&raw);
+    assert_eq!(
+        names(&raw, &reply["responseObject"]),
+        [
+            "certNotBefore",
+            "issuerCn",
+            "authorityKeyIdentifier",
+            "serialNumber",
+            "certNotAfter",
+            "issuerDn",
+            "keyId",
+            "alias",
+            "pem",
+            "subjectCn",
+            "algorithm",
+            "subjectDn",
+        ]
+    );
+}
+
+#[test]
+fn arta_show_file_chooser_unknown_type_package() {
+    let h = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(h.call(ARTA, &call("showFileChooser", json!(["XYZ", ""])), None)),
+        r#"{"code":"500","message":"No enum constant kz.arta.synergy.gui.fileChooser.FileChooser.FileType.XYZ"}"#
+    );
+}
+
+/// The accepted difference of registry.toml: a GOST 2015 key signs the XML with its own
+/// algorithm, where the original answered `null`.
+#[test]
+fn arta_sign_xml_gost2015_signs_by_the_keys_algorithm() {
+    let h = Harness::new(key("user-gost2015-sign"), vec![]);
+    let mut s = h.session(ARTA);
+    s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
+    let xml = text(s.call(&call("signXML", json!(["<a><b>1</b></a>"])), None));
     assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
 }
 
@@ -2245,4 +2446,46 @@ fn metadoc_cancel_cancelled() {
         text(h.call(METADOC, &request, None)),
         r#"{"code":"500","message":"action.canceled"}"#
     );
+}
+
+#[test]
+fn metadoc_key_info_order_on_collision() {
+    let observed = [
+        "certNotBefore",
+        "issuerCn",
+        "authorityKeyIdentifier",
+        "serialNumber",
+        "certNotAfter",
+        "issuerDn",
+        "usage",
+        "keyId",
+        "path",
+        "pem",
+        "alias",
+        "subjectCn",
+        "algorithm",
+        "subjectDn",
+    ];
+    // By the key file's path: `pem` before `alias`, `algorithm` before `subjectDn`.
+    let (path, password) = p12("user-gost2015-sign");
+    let h = Harness::new(vec![yes()], vec![]);
+    let request = json!({
+        "method": "getKeyInfoByFilePathAndPassword",
+        "filePath": path.to_str().unwrap(),
+        "password": password,
+    })
+    .to_string();
+    let raw = text(h.call(METADOC, &request, None));
+    let reply = parse(&raw);
+    assert_eq!(reply["code"], "200", "{reply}");
+    assert_eq!(names(&raw, &reply["responseObject"]), observed);
+    assert_eq!(reply["responseObject"]["path"], path.to_str().unwrap());
+    // Through the window: the same order without the `path` the core does not tell
+    // (registry.toml).
+    let h = Harness::new(key("user-gost2015-sign"), vec![]);
+    let request = json!({"method": "getKeyInfo", "args": ["PKCS12"]}).to_string();
+    let raw = text(h.call(METADOC, &request, None));
+    let reply = parse(&raw);
+    let without_path: Vec<&str> = observed.into_iter().filter(|n| *n != "path").collect();
+    assert_eq!(names(&raw, &reply["responseObject"]), without_path);
 }

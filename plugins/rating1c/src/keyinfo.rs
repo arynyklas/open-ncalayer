@@ -53,7 +53,8 @@ impl KeyInfo {
     /// Java's `StringIndexOutOfBoundsException` message for a SERIALNUMBER shorter than 12
     /// characters (none at all is the empty text).
     pub fn new(facts: Facts) -> Result<KeyInfo, String> {
-        // Unverified against the original: "last" RDN taken in DER order.
+        // Not observable: no available key carries several SERIALNUMBER or OU values, so
+        // which of them counts ("last", in DER order) cannot be compared.
         let serial_number = facts.serial_numbers.last().cloned().unwrap_or_default();
         let units: Vec<u16> = serial_number.encode_utf16().collect();
         let from = units.len() as i64 - 12;
@@ -81,13 +82,15 @@ impl KeyInfo {
         }
     }
 
-    /// The bean as org.json writes it: its properties in the bean's field order (which
-    /// decides the order of keys sharing a `HashMap` bucket); `datefrom` and `dateto` hold
-    /// notBefore and notAfter in epoch milliseconds, as `certNotBefore` and `certNotAfter`;
-    /// `usage` and `path` are never set for a key from the dialog.
+    /// The bean as org.json writes it: its properties in the order the original's bean
+    /// yields them (`pem` before `alias`, which decides the order of keys sharing a
+    /// `HashMap` bucket); `datefrom` and `dateto` hold notBefore and notAfter in epoch
+    /// milliseconds, as `certNotBefore` and `certNotAfter`; `usage` and `path` are never set
+    /// for a key from the dialog.
     pub fn bean(&self) -> JObject {
         let f = &self.facts;
         let mut bean = JObject::hash_map();
+        bean.put("pem", f.pem.as_str());
         bean.put("alias", f.alias.as_str());
         bean.put_opt("keyId", f.key_id.clone());
         bean.put_opt("algorithm", f.algorithm.clone());
@@ -102,7 +105,6 @@ impl KeyInfo {
         bean.put("datefrom", f.not_before_ms.to_string());
         bean.put("dateto", f.not_after_ms.to_string());
         bean.put_opt("authorityKeyIdentifier", f.aki.clone());
-        bean.put("pem", f.pem.as_str());
         bean
     }
 

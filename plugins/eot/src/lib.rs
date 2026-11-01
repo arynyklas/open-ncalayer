@@ -163,8 +163,9 @@ mod port {
         let outcome = pki::ocsp_fetch(&request).map_err(|e| e.message)?;
         match &outcome {
             OcspOutcome::Failed(failure) => return Err(net_message(failure)),
-            // Unverified against the original: the text of the response object, which an
-            // unsuccessful OCSPResponse does not have (`null`).
+            // Not observable: the text of the response object, which an unsuccessful
+            // OCSPResponse does not have (`null`); no responder within reach answers with a
+            // status other than 0.
             OcspOutcome::Ok {
                 response_status, ..
             } if *response_status != 0 => {
@@ -188,7 +189,8 @@ mod port {
         match key.sign_cms_ex(args) {
             Ok(CmsOutcome::Signed(cms)) => Ok(cms.into_vec()),
             // Kalkan's ProviderUtilException carries the cause's `toString()`.
-            // Unverified against the original: the message of a failed time-stamp.
+            // Not observable: the message of a failed time-stamp; a time-stamp failure
+            // cannot be provoked.
             Ok(CmsOutcome::TspFailed(failure)) => Err(net_exception(&failure)),
             Err(e) => Err(e.message),
         }

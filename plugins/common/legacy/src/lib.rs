@@ -295,7 +295,8 @@ pub fn common_name(name: &[u8]) -> Option<String> {
 mod guest;
 #[cfg(target_arch = "wasm32")]
 pub use guest::{
-    CertProblem, Select, cades, check_cert, into_text, official_key_info, select, sign_xml,
+    CertProblem, KeyInfoProp, Select, cades, check_cert, into_text, official_key_info, select,
+    sign_xml,
 };
 
 #[cfg(test)]

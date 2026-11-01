@@ -19,8 +19,8 @@ pub fn cades(key: &Key, args: SignCmsExArgs) -> Result<Vec<u8>, String> {
     match key.sign_cms_ex(args) {
         Ok(CmsOutcome::Signed(cms)) => Ok(cms.into_vec()),
         Ok(CmsOutcome::TspFailed(_)) => Err(TSA_FAILED.to_owned()),
-        // Unverified against the original: the message of a CMS failure other than the
-        // time-stamp (the host's text stands for Kalkan's).
+        // Not observable: the message of a CMS failure other than the time-stamp (the host's
+        // text stands for Kalkan's); no signature reached one.
         Err(e) => Err(e.message),
     }
 }
@@ -70,8 +70,8 @@ pub fn sign_xml(key: &Key, xml: &str, tbs: &str, parent: &str) -> Result<String,
                 trim: true,
             },
         })
-        // Unverified against the original: the messages of failed XML signatures (the host's
-        // text stands for Kalkan's).
+        // Not observable: the messages of failed XML signatures (the host's text stands for
+        // Kalkan's); no signature reached one.
         .map_err(|e| e.message)?;
     String::from_utf8(signed).map_err(|e| e.to_string())
 }
@@ -151,8 +151,8 @@ pub fn check_cert(der: &[u8]) -> Result<Option<CertProblem>, String> {
         timeout_ms: 5_000,
         check: true,
     });
-    // Unverified against the original: a responder that cannot be reached (or a host
-    // refusal) lets the certificate pass, as the original's checker ignores such failures.
+    // Not observable: a responder that cannot be reached (or a host refusal) lets the
+    // certificate pass, as the original's checker ignores such failures.
     let Ok(OcspOutcome::Ok {
         cert_status,
         problem,
@@ -228,29 +228,64 @@ pub fn select(choice: Select<'_>) -> Result<Option<Key>, String> {
     .map_err(|e| e.message)
 }
 
+/// A property of the official `KeyInfo` whose place among the others of its `HashMap`
+/// bucket depends on the module: the order the bean's getters are read in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyInfoProp {
+    /// `pem`.
+    Pem,
+    /// `keyId`.
+    KeyId,
+    /// `alias`.
+    Alias,
+    /// `subjectDn`.
+    SubjectDn,
+    /// `algorithm`.
+    Algorithm,
+}
+
 /// The official `KeyInfo` of `alias` and its certificate `der`: `alias`, `keyId`
 /// (subjectKeyIdentifier hex), `algorithm` (Kalkan's key algorithm), `subjectCn`,
 /// `subjectDn` and `issuerDn` (Kalkan's DN texts), `issuerCn`, `serialNumber` (hex),
 /// `certNotAfter`/`certNotBefore` (Unix milliseconds as text), `authorityKeyIdentifier`
 /// (only with a `keyId`, both read in one `try`) and `pem`; absent values left out. The
-/// keys sharing a `HashMap` bucket are put in the order NCALayer's commonUtils writes them
-/// on Windows 11 (`pem`, `keyId`, `alias`; `subjectDn`, `algorithm`): the order the bean's
-/// properties are read in depends on the JVM.
+/// keys sharing a `HashMap` bucket are put in the order each module has them: `puts` is
+/// the order of the five that differ (`pem`, `keyId` and `alias` share a bucket in a
+/// 16-bucket map, `pem` and `alias` in a 32-bucket one, `subjectDn` and `algorithm` in
+/// both).
 ///
 /// # Errors
 ///
 /// `der` is not a certificate.
-pub fn official_key_info(alias: &str, der: &[u8]) -> Result<JObject, String> {
+pub fn official_key_info(
+    alias: &str,
+    der: &[u8],
+    puts: [KeyInfoProp; 5],
+) -> Result<JObject, String> {
     let info = host::cert_info(der).map_err(|e| e.message)?;
     let details = host::cert_details(der).map_err(|e| e.message)?;
     let (_, issuer) = subject_and_issuer(der)?;
     let key_id = details.ski_hex.clone();
     let mut bean = JObject::hash_map();
-    bean.put("pem", info.pem.as_str());
-    bean.put_opt("keyId", key_id.clone());
-    bean.put("alias", alias);
-    bean.put("subjectDn", details.subject_dn.as_str());
-    bean.put_opt("algorithm", kalkan_key_alg_name(&info.spki_alg_oid));
+    for prop in puts {
+        match prop {
+            KeyInfoProp::Pem => {
+                bean.put("pem", info.pem.as_str());
+            }
+            KeyInfoProp::KeyId => {
+                bean.put_opt("keyId", key_id.clone());
+            }
+            KeyInfoProp::Alias => {
+                bean.put("alias", alias);
+            }
+            KeyInfoProp::SubjectDn => {
+                bean.put("subjectDn", details.subject_dn.as_str());
+            }
+            KeyInfoProp::Algorithm => {
+                bean.put_opt("algorithm", kalkan_key_alg_name(&info.spki_alg_oid));
+            }
+        }
+    }
     bean.put_opt("subjectCn", info.subject_cn.clone());
     bean.put_opt("issuerCn", common_name(&issuer));
     bean.put("issuerDn", details.issuer_dn.as_str());

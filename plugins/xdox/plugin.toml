@@ -1,6 +1,6 @@
 id = "io.github.arynyklas.openncalayer.port.xdox"
-version = "1.0.0-beta.1"
-min_core = "0.1.0-alpha.4"
+version = "1.0.0-beta.2"
+min_core = "0.1.0-alpha.5"
 modules = ["kz.xdox.signerbundle"]
 
 [name]

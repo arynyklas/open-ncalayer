@@ -265,7 +265,6 @@ fn create_cmses(_: &SignUtils, args: &Args<'_>, _: &AddInfo) -> Outcome {
 /// for GOST.
 fn one_raw(key: &Key, data: &str) -> Result<String, Failed> {
     let data = javab64::decode_java(data).map_err(failed)?;
-    // Unverified against the original: Kalkan's encoding of GOST raw signatures.
     let signature = key.sign_raw(&data).map_err(|e| failed(e.message))?;
     Ok(base64(&signature))
 }

@@ -8,7 +8,7 @@ vendor = "ezsigner.kz"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Переносится только версия 1.2.1; методы версии 1.1 (подписание по ссылке, текста, просмотр CMS, HTML-редактор, открытие файла в ОС) отвечают «нет такого метода»."
