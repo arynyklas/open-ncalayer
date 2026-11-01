@@ -527,6 +527,26 @@ fn fhs_certificate_type_follows_a_hash_set() {
     );
 }
 
+/// The order of `certificateType` depends on the certificate: a person's key lists
+/// AUTHENTICATION first, a key whose subject has an organization SIGNATURE first (both
+/// observed; the rule behind it is not known).
+#[test]
+fn fhs_certificate_type_order_for_a_person_and_a_legal_entity() {
+    for (name, order) in [
+        (
+            "user-gost2015-sign",
+            r#""certificateType":["AUTHENTICATION","SIGNATURE"]"#,
+        ),
+        (
+            "legal-gost2015-sign",
+            r#""certificateType":["SIGNATURE","AUTHENTICATION"]"#,
+        ),
+    ] {
+        let reply = fhs_certificate_info(name, "");
+        assert!(reply.contains(order), "{name}: {reply}");
+    }
+}
+
 /// A legal entity's certificate: SIGNATURE before AUTHENTICATION, and `orgName`, `surname`,
 /// `bin` and the types come before the properties they share a bucket with.
 #[test]

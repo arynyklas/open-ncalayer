@@ -8,7 +8,7 @@ vendor = "АО «Центр электронных финансов»"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Окно выбора ключа — общее окно OpenNCALayer; кэша недавних ключей плагина нет."

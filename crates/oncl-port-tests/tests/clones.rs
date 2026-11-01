@@ -1353,6 +1353,74 @@ fn uchet_get_message_texts() {
     );
 }
 
+const SIGN_XML_THROWN: &str =
+    r#"{"code":"500","message":"java.lang.reflect.InvocationTargetException. Method: signXml"}"#;
+
+/// `signXml` with the key store file the module's dialog is given: a file that is not a key
+/// store ends the call with an exception (not `action.canceled`, not `Не удалось открыть
+/// хранилище`).
+#[test]
+fn uchet_sign_xml_file_that_is_not_a_key_store_throws() {
+    let dir = tempfile::tempdir().unwrap();
+    let document = dir.path().join("doc.pdf");
+    std::fs::write(&document, b"%PDF-1.4 not a key store").unwrap();
+    let h = Harness::new(
+        vec![Step::Path(document), Step::Password("x".to_owned())],
+        vec![],
+    );
+    assert_eq!(
+        text(h.call(
+            UCHET,
+            &call(
+                "signXml",
+                json!(["PKCS12", "SIGNATURE", "<doc><a>1</a></doc>", "", ""])
+            ),
+            None
+        )),
+        SIGN_XML_THROWN
+    );
+    // One file dialog and one password window, nothing asked again.
+    assert_eq!(h.prompter().password_prompts().len(), 1);
+}
+
+#[test]
+fn uchet_sign_xml_signs_with_the_key_of_the_file() {
+    let (path, password) = p12("user-rsa-sign");
+    let h = Harness::new(
+        vec![Step::Path(path), Step::Password(password.to_owned())],
+        vec![],
+    );
+    let reply = parse(&text(h.call(
+        UCHET,
+        &call(
+            "signXml",
+            json!(["PKCS12", "SIGNATURE", "<doc><a>1</a></doc>", "", ""]),
+        ),
+        None,
+    )));
+    assert_eq!(reply["code"], "200", "{reply}");
+    let signed = reply["responseObject"].as_str().unwrap();
+    assert!(signed.starts_with("<doc><a>1</a><ds:Signature"), "{signed}");
+    oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+    // The store has no key of the other type.
+    let (path, password) = p12("user-rsa-sign");
+    let h = Harness::new(
+        vec![Step::Path(path), Step::Password(password.to_owned())],
+        vec![],
+    );
+    assert_eq!(
+        text(h.call(
+            UCHET,
+            &call(
+                "signXml",
+                json!(["PKCS12", "AUTHENTICATION", "<a/>", "", ""])
+            ),
+            None
+        )),
+        r#"{"code":"500","message":"Сертификат указанного ключа не предназначен для подписания электронных документов"}"#
+    );
+}
+
 #[test]
 fn uchet_test_raw_text() {
     assert_eq!(uchet(vec![], "test", json!(["abc"])), "trueabc");
