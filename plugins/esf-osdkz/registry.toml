@@ -8,7 +8,7 @@ vendor = "ТОО «Open Systems Development»"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Файл esf_settings.json (последний каталог ключей) не ведётся: окно выбора хранилища OpenNCALayer помнит последний путь само."
@@ -24,3 +24,6 @@ ru = "Ключи на сертификатах sha1RSA не подписываю
 
 [[differences]]
 ru = "Ключи на токенах — только при включённой экспериментальной поддержке токенов; без неё токен отвечает storage.empty."
+
+[[differences]]
+ru = "Порядок ключей keyInfo внутри общих бакетов HashMap (pem/alias, algorithm/subjectDn) — как у оригинала на Windows 11; JVM оригинала на другой ОС может расположить их иначе."

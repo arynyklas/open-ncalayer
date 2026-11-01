@@ -161,9 +161,8 @@ fn java_class(value: &JValue) -> &'static str {
 
 /// `auth`: an authentication key (or, without one, a GOST 2015 signing key) signs `data`.
 fn auth(storage: &str, data: &str) -> Outcome {
-    // Unverified against the original: it offers GOST 2015 signing keys only when the store
-    // has no authentication key; here a second dialog follows whenever the first one ends
-    // without a key.
+    // Not observable: whether the second dialog is offered only when the store has no
+    // authentication key (here it follows whenever the first dialog ends without a key).
     let key = match choose(storage, "AUTHENTICATION", Action::Authenticate) {
         Err(Some(message)) if message == CANCELED => {
             let key = choose(storage, "SIGNATURE", Action::Authenticate)?;
@@ -253,8 +252,10 @@ fn key_info(key: &Key) -> Result<(JObject, String), Option<String>> {
     // Without a subjectKeyIdentifier both identifiers are left out.
     let authority = details.ski_hex.as_ref().and(details.aki_hex.clone());
     let mut object = JObject::hash_map();
-    // Keys sharing a bucket go in the getter order the specs give (alias before pem,
-    // algorithm before subjectDn).
+    // Keys sharing a bucket go in the order the original's bean put them in: `pem` before
+    // `alias`, `algorithm` before `subjectDn`. Not observable: where `keyId`, in the same
+    // bucket of a 16-bucket map, goes among them.
+    object.put("pem", info.pem.as_str());
     object.put("alias", key.alias());
     object.put_opt("keyId", details.ski_hex.clone());
     object.put_opt(
@@ -269,7 +270,6 @@ fn key_info(key: &Key) -> Result<(JObject, String), Option<String>> {
     object.put("certNotAfter", info.not_after.to_string());
     object.put("certNotBefore", info.not_before.to_string());
     object.put_opt("authorityKeyIdentifier", authority);
-    object.put("pem", info.pem.as_str());
     object.put("base64Pem", base64(cert));
     Ok((object, info.pem))
 }

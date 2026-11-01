@@ -8,7 +8,7 @@ vendor = "ТОО «Digital TaxTech»"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Выбранный ключ живёт только в текущем соединении (у оригинала — на весь процесс для всех вкладок того же сайта, вместе с паролем); после переподключения страница снова вызывает selectKey."
@@ -23,7 +23,7 @@ ru = "Правило сложности пароля для ключей с EKU 
 ru = "Ключи на токенах — только при включённой экспериментальной поддержке токенов; без неё хранилища токенов пусты."
 
 [[differences]]
-ru = "Порядок ключей ответа в общих бакетах HashMap (success/bin, subjectDN/iin) вычислен, не сверен с оригиналом."
+ru = "Порядок ключей ответов внутри общих бакетов HashMap (bin/success, subjectDN/iin) — как у оригинала на Windows 11; JVM оригинала на другой ОС может расположить их иначе."
 
 [[differences]]
 ru = "signCms с digested=true и encapsulate=true (encapsulate по умолчанию — true) отвечает SIGNING_FAILURE: OpenNCALayer не вкладывает переданный хеш в подпись; оригинал (Kalkan, DIGEST_NULL) создавал такую подпись. С encapsulate=false хеш подписывается."

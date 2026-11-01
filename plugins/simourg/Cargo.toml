@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-simourg"
 description = "OpenNCALayer port of Simourg SimBASE: CAdES with an OCSP answer inside and ESEDO CMS, time-stamped"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

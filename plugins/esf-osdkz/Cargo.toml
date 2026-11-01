@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-esf-osdkz"
 description = "OpenNCALayer port of the ESF signer (com.osdkz.esf.signer): raw signatures of e-invoice texts and authentication"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

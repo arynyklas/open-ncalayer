@@ -9,8 +9,8 @@
 
 use oncl_pdk::abi::{
     Action, CmsCerts, CmsOutcome, CoSign, Filter, HashAlg, KeyOrder, KeySource, MAX_PKI_TIMEOUT_MS,
-    Nonce, OpenArgs, OpenOutcome, Password, PasswordArgs, PkiMethod, PkiUrl, SignerSel, StampArgs,
-    StampMode, StampOutcome, TimeForm, TokenForm, TsaChoice, TsaSpec,
+    NetKind, Nonce, OpenArgs, OpenOutcome, Password, PasswordArgs, PkiMethod, PkiUrl, SecretRef,
+    SignerSel, StampArgs, StampMode, StampOutcome, TimeForm, TokenForm, TsaChoice, TsaSpec,
 };
 use oncl_pdk::keys::{self, Key, SelectArgs};
 use oncl_pdk::orgjson::{self, JObject, JValue};
@@ -39,8 +39,10 @@ const BUSY: &str = "процесс уже запущен (имеется нез�
 const TIMED_OUT: &str = "процесс остановлен по таймауту";
 const WRONG_PIN: &str = "Неверный пароль";
 const TOKEN_BLOCKED: &str = "Токен заблокирован";
-const TOKEN_NOT_FOUND: &str = "Токен не найден";
-// Unverified against the original: the texts of Kalkan's OCSP checker.
+/// `toString()` of what Kalkan throws for a Kaztoken that no reader holds.
+const TOKEN_NOT_FOUND: &str = "kz.gov.pki.kalkan.exception.KalkanException: \
+    javax.smartcardio.CardException: DigiFlow LLP. KAZTOKEN 0 not found! [CARD_EXCEPTION]";
+// Not observable: Kalkan's texts of an OCSP answer that is revoked, unknown or not valid.
 const REVOKED: &str = "Certificate is revoked";
 const UNKNOWN_STATUS: &str = "Certificate status is unknown";
 const OCSP_NOT_VALID: &str = "OCSP response is not valid";
@@ -126,10 +128,9 @@ fn handle(request: &Request) -> String {
     reply.to_json()
 }
 
-/// `getKaztokenKeys`: the original's password window, then `{notAfter, alias, dn, alg}` of
-/// each key of the Kaztoken in the first Kaztoken reader.
-fn kaztoken_keys() -> Result<Vec<JValue>, Option<String>> {
-    let secret = dialogs::password(&PasswordArgs {
+/// The original's password window; closing it cancels.
+fn token_password() -> Result<SecretRef, Option<String>> {
+    dialogs::password(&PasswordArgs {
         title: "Ввод пароля".to_owned(),
         label: "Введите пароль ключа".to_owned(),
         ok: "OK".to_owned(),
@@ -137,13 +138,20 @@ fn kaztoken_keys() -> Result<Vec<JValue>, Option<String>> {
         allow_empty: true,
     })
     .map_err(|e| Some(e.message))?
-    .ok_or_else(|| Some(CANCELLED.to_owned()))?;
-    // Unverified against the original: Kalkan's texts of a token that does not open.
+    .ok_or_else(|| Some(CANCELLED.to_owned()))
+}
+
+/// `getKaztokenKeys`: the original's password window, then `{notAfter, alias, dn, alg}` of
+/// each key of the Kaztoken in the first Kaztoken reader.
+fn kaztoken_keys() -> Result<Vec<JValue>, Option<String>> {
+    let secret = token_password()?;
     let reader = keys::terminals(KAZTOKEN)
         .map_err(|e| Some(e.message))?
         .into_iter()
         .next()
         .ok_or_else(|| Some(TOKEN_NOT_FOUND.to_owned()))?;
+    // Not observable: Kalkan's texts of a token that is found and does not open (a wrong PIN,
+    // a blocked token); no device.
     let opened = keys::open(&OpenArgs {
         storage: KAZTOKEN.to_owned(),
         source: KeySource::Terminal(reader),
@@ -183,6 +191,15 @@ fn kaztoken_keys() -> Result<Vec<JValue>, Option<String>> {
 fn sign(root: &Map<String, Value>) -> Result<Vec<JValue>, Option<String>> {
     let args = orgjson::get_object(root, "args")?;
     let kaztoken = orgjson::opt_boolean(args, "isKaztoken", false);
+    // The original asks for the password, then fails to find the token.
+    if kaztoken
+        && keys::terminals(KAZTOKEN)
+            .map_err(|e| Some(e.message))?
+            .is_empty()
+    {
+        token_password()?;
+        return Err(Some(TOKEN_NOT_FOUND.to_owned()));
+    }
     // The core's dialogs replace the original's password dialog and the key file the page
     // names (`storagePath`, a token's `alias`): those are not read.
     let key = keys::select(&SelectArgs {
@@ -267,7 +284,7 @@ fn job(
     watchdog.check()?;
     for _ in 1..files.len() {
         // As the original: every attachment entry is `files[1]`.
-        // Unverified against the original: whether pages send more than one attachment.
+        // Not observable: whether pages send more than one attachment.
         let attachment = decode(&files[1])?;
         let input = EsedoInput {
             cert,
@@ -285,7 +302,7 @@ fn job(
 /// The OCSP answer about `cert` from its responder, issued by the page's `issuer` and
 /// checked: good, or the job fails.
 fn sled_ocsp(cert: &[u8], issuer: Option<&str>) -> Result<OcspOutcome, Option<String>> {
-    // Unverified against the original: the texts of Kalkan's OCSP checker.
+    // Not observable: Kalkan's texts of an OCSP checker beyond a failed connection.
     let issuer = issuer.ok_or_else(|| Some("TARGET_CERT_ISSUER_NOT_FOUND".to_owned()))?;
     let issuer = decode(issuer)?;
     let args = esedo::ocsp_args(&SLED_OCSP, cert, &[&issuer]).map_err(Some)?;
@@ -308,7 +325,15 @@ fn sled_ocsp(cert: &[u8], issuer: Option<&str>) -> Result<OcspOutcome, Option<St
             ..
         } => Err(Some(UNKNOWN_STATUS.to_owned())),
         OcspOutcome::Ok { .. } => Err(Some(OCSP_NOT_VALID.to_owned())),
-        OcspOutcome::Failed(failure) => Err(Some(failure.detail.clone())),
+        OcspOutcome::Failed(failure) => Err(Some(match failure.kind {
+            // Kalkan sets no timeout: a connection that is not made times out in the system.
+            NetKind::Timeout => {
+                "java.net.ConnectException: Connection timed out: connect".to_owned()
+            }
+            NetKind::Connect => "java.net.ConnectException: Connection refused: connect".to_owned(),
+            NetKind::UnknownHost => format!("java.net.UnknownHostException: {}", failure.address),
+            _ => failure.detail.clone(),
+        })),
     }
 }
 
@@ -344,7 +369,7 @@ fn stamp(cms: Vec<u8>) -> Result<String, Option<String>> {
         mode: StampMode::Replace,
         token: TokenForm::Token,
     };
-    // Unverified against the original: the message of a failed time-stamp.
+    // Not observable: the message of a failed time-stamp.
     match pki::stamp(&args).map_err(|e| Some(e.message))? {
         StampOutcome::Stamped(cms) => Ok(base64(&cms)),
         StampOutcome::Failed(failure) => Err(Some(failure.detail)),

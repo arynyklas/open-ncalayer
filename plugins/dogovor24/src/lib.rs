@@ -191,8 +191,8 @@ fn cades(data: &str, key: Option<&Key>) -> Result<String, Option<String>> {
         timestamp: Some(TsaChoice::Kalkan),
         output: oncl_pdk::abi::CmsOutput::Der,
     };
-    // Unverified against the original: the message of a failed time-stamp (here the
-    // core's description of the failure).
+    // Not observable: the message of a failed time-stamp (here the core's description of the
+    // failure): the original's time-stamp never failed.
     match key.sign_cms_ex(args) {
         Ok(CmsOutcome::Signed(cms)) => Ok(base64(&cms)),
         Ok(CmsOutcome::TspFailed(failure)) => Err(Some(failure.detail)),

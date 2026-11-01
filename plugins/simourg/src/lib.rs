@@ -5,7 +5,8 @@
 //! by Kalkan's default, which replaces the first).
 //!
 //! The CMS replies are the original's `Response` bean (`responseObject`, `code`, `message`);
-//! errors answer `Error: <message>`, a cancelled dialog `Cancel`.
+//! errors answer `Error: <message>` (a closed key window `Error: Отмена операции`), a
+//! cancelled confirmation `Cancel`.
 #![cfg(target_arch = "wasm32")]
 
 use oncl_pdk::abi::{
@@ -257,7 +258,8 @@ fn choose(storage: &str, key_type: &str, cas: &[Vec<u8>]) -> Result<Key, Outcome
             order: KeyOrder::OldestFirst,
         })
         .map_err(|e| Outcome::Error(e.message))?
-        .ok_or(Outcome::Cancel)?;
+        // The window of the key file (and the key window) closed.
+        .ok_or_else(|| Outcome::Error("Отмена операции".to_owned()))?;
         let owner = host::cert_info(key.certificate())
             .ok()
             .and_then(|info| info.subject_cn)
@@ -309,7 +311,8 @@ fn sign_cades(storage: &str, key_type: &str, data: &str, attached: bool, names: 
         let bytes = javab64::decode_java(data)?;
         let cert = key.certificate();
         // Two attempts, as the original; the answer must pass the core's check.
-        // Unverified against the original: the text after «Ошибка: » (Kalkan's checker).
+        // Not observable: the text after «Ошибка: » (Kalkan's checker): no other answer of
+        // the responder could be had.
         let answer = match ocsp(&CADES_OCSP, cert, &cas).filter(good) {
             Some(answer) => answer,
             None => match ocsp(&CADES_OCSP, cert, &cas) {
@@ -343,7 +346,7 @@ fn sign_cades(storage: &str, key_type: &str, data: &str, attached: bool, names: 
         };
         let mut args = esedo::sign_args(&SIMOURG_CADES, &input, key.handle())?;
         args.timestamp = Some(TsaChoice::Kalkan);
-        // Unverified against the original: the texts of signing and time-stamp failures.
+        // Not observable: the texts of signing and time-stamp failures.
         match key.sign_cms_ex(args).map_err(|e| e.message)? {
             CmsOutcome::Signed(cms) => Ok(base64(&cms)),
             CmsOutcome::TspFailed(failure) => Err(failure.detail.into()),
@@ -390,7 +393,7 @@ fn sign_esedo(storage: &str, key_type: &str, data: &str, names: &str) -> Outcome
         let cms = stamp(cms.into_vec(), gost).map_err(|_| {
             "kz.gov.pki.kalkan.tsp.TSPException: Ошибка при получении TSP".to_owned()
         })?;
-        // Unverified against the original: the text of the second time-stamp's failure.
+        // Not observable: the text of the second time-stamp's failure.
         let cms = stamp(cms, TsaChoice::Kalkan)?;
         Ok(base64(&cms))
     };

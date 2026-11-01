@@ -1,5 +1,5 @@
 //! Uchet.kz esfSignUtil (`kz.uchet.esfSignUtil`): without dialogs of its own, the key store
-//! the page names (`pkcsPath`, `pkcsPassword`; its last key) signs an XML document
+//! the page names (`pkcsPath`, `pkcsPassword`; the key of its last alias) signs an XML document
 //! (`signXml`) or e-invoice texts (`signEsfList`, raw signatures). The core asks the user
 //! once per connection before it opens a file the page names.
 //!
@@ -12,6 +12,7 @@ use oncl_pdk::keys::{self, Key};
 use oncl_pdk::orgjson::{self, JObject, JValue};
 use oncl_pdk::serde_json::{Map, Value};
 use oncl_pdk::{Request, host, javab64};
+use oncl_port_kit::props::hashtable_order;
 
 oncl_pdk::plugin!(handle);
 
@@ -40,7 +41,9 @@ fn dropped() -> String {
     String::new()
 }
 
-/// The page's key store and password: its last key.
+/// The page's key store and password: the key of the last alias of `KeyStore.aliases()`.
+/// That is the order of a `Hashtable` the aliases were copied into (as `engineAliases` does)
+/// from the store's own: not the order of the file.
 fn open(args: &Map<String, Value>) -> Option<Key> {
     let path = orgjson::get_string(args, "pkcsPath").ok()?;
     let password = orgjson::get_string(args, "pkcsPassword").ok()?;
@@ -51,7 +54,15 @@ fn open(args: &Map<String, Value>) -> Option<Key> {
     })
     .ok()?
     .ok()?;
-    keys.into_iter().last()
+    let last = {
+        let aliases: Vec<&str> = keys.iter().map(Key::alias).collect();
+        let own: Vec<&str> = hashtable_order(&aliases)
+            .into_iter()
+            .map(|i| aliases[i])
+            .collect();
+        own[*hashtable_order(&own).last()?].to_owned()
+    };
+    keys.into_iter().find(|key| key.alias() == last)
 }
 
 /// `signXml{pkcsPath, pkcsPassword, data}`: `{"signedXml":…,"status":200}`, the whole

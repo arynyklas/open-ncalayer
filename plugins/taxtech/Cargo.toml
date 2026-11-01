@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-taxtech"
 description = "OpenNCALayer port of the Digital TaxTech multisign module: a key chosen once per site, then CMS, XML and raw signatures"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

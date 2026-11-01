@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-uchet-esf"
 description = "OpenNCALayer port of Uchet.kz esfSignUtil: XML and raw e-invoice signatures with a key file the page names"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,3 +13,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 oncl-pdk.workspace = true
+oncl-port-kit.workspace = true
