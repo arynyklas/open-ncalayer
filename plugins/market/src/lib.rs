@@ -52,17 +52,19 @@ fn handle(request: &Request) -> String {
 
 oncl_pdk::plugin!(handle);
 
-/// `text`: the key first, then `data`, which the original read only after its dialog; a
-/// missing `data` ended the connection without a reply.
+/// `text`: `data` first, before any window: a `null` one (the case seen; any other value that
+/// is not a string is treated alike) got no window and no reply from the original, whose
+/// connection then stayed silent; this port closes the connection instead (registry.toml).
+/// Then the key, and the signature.
 fn sign_text(req: &Map<String, Value>, texts: &Texts) -> String {
+    let Ok(data) = orgjson::get_string(req, "data") else {
+        return drop_connection();
+    };
+    let attach = orgjson::opt_boolean(req, "attach", false);
+    let has_timestamp = orgjson::opt_boolean(req, "has_timestamp", true);
     loop {
         let Some(key) = choose() else {
             return cancel();
-        };
-        let attach = orgjson::opt_boolean(req, "attach", false);
-        let has_timestamp = orgjson::opt_boolean(req, "has_timestamp", true);
-        let Ok(data) = orgjson::get_string(req, "data") else {
-            return drop_connection();
         };
         let signed = cades(&key, data.as_bytes(), attach, has_timestamp);
         drop(key);

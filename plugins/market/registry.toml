@@ -8,7 +8,7 @@ vendor = "ТОО «E-Commerce Center»"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Окно выбора ключа — общее окно OpenNCALayer; дерева хранилищ с запомненными контейнерами и последним ключом нет."
@@ -24,3 +24,6 @@ ru = "Окна показываются на языке OpenNCALayer: казах
 
 [[differences]]
 ru = "Окно ошибки — окно OpenNCALayer с теми же кнопками «Закрыть» (повтор) и «Отменить»."
+
+[[differences]]
+ru = "Запрос text, у которого data не строка (null или поля нет): оригинал не показывал окон и не отвечал, соединение молчало дальше; порт закрывает соединение, ничего не показав."

@@ -13,7 +13,7 @@ use oncl_pdk::abi::{
     Action, Bytes, ChooseArgs, ChooseFileArgs, CmsCerts, CmsContent, CmsOutcome, CoSign, ErrorCode,
     FileMode, Filter, HashAlg, HttpExArgs, HttpResponse, MessageKind, Method, NetFailure, NetKind,
     SignCmsExArgs, SignXmlExArgs, SignedAttrs, SigningTime, TimeForm, TimeSource, TsaChoice,
-    XmlOutput,
+    XmlOutput, cause,
 };
 use oncl_pdk::javaexc::Throwable;
 use oncl_pdk::keys::{self, Key};
@@ -37,6 +37,9 @@ const STORAGES: [&str; 7] = [
 
 /// The hosts (and their subdomains) the plugin downloads from and uploads to.
 const HOST_SUFFIXES: [&str; 3] = [".gov.kz", ".ecc.kz", ".minfin.kz"];
+
+/// The class of the XML parser's exception.
+const SAX_PARSE: &str = "org.xml.sax.SAXParseException";
 
 /// The largest file signed or downloaded: the original's default, 20 MiB.
 const MAX_FILE_SIZE: usize = 20 * 1024 * 1024;
@@ -104,10 +107,14 @@ fn error(text: &str) -> String {
     error_text(text, "500")
 }
 
-/// `text`: `data` (empty if absent) signed and time-stamped.
+/// `text`: `data` signed and time-stamped; without it (or empty) the key dialog is shown, then
+/// the error window of a failure to sign.
 fn sign_text(req: &Map<String, Value>) -> Outcome {
     let data = orgjson::opt_string(req, "data").unwrap_or_default();
     let key = choose()?;
+    if data.is_empty() {
+        return Err(Code::SignPlainDataFailed.into());
+    }
     let cms = cades(&key, data.as_bytes(), true)?;
     Ok(ecc(Some(base64(&cms).into()), Some("NONE")))
 }
@@ -384,7 +391,18 @@ fn post_failure(error: &oncl_pdk::abi::HostError) -> Failure {
     if error.code == ErrorCode::Denied {
         Code::NotValidUrl.into()
     } else {
-        // Unverified against the original: the text of a network failure of these requests.
+        // Not observable: a failure of these requests cannot be produced, as the site always
+        // answers.
+        Code::SignPlainDataFailed.into()
+    }
+}
+
+/// The failure of an XML signature: the parser's `SAXParseException` text where the host has
+/// it, otherwise the general text.
+fn xml_failure(error: &oncl_pdk::abi::HostError) -> Failure {
+    if error.cause() == Some(cause::XML_PARSE) && error.message.starts_with(SAX_PARSE) {
+        Failure::Message(error.message.clone())
+    } else {
         Code::SignPlainDataFailed.into()
     }
 }
@@ -441,8 +459,8 @@ fn cades(key: &Key, data: &[u8], timestamp: bool) -> Result<Vec<u8>, Failure> {
     match key.sign_cms_ex(args) {
         Ok(CmsOutcome::Signed(cms)) => Ok(cms.into_vec()),
         Ok(CmsOutcome::TspFailed(failure)) => Err(tsp_failure(&failure)),
-        // Unverified against the original: the text of a failure to sign (a key the host
-        // cannot use).
+        // Not observable: no key that the host cannot use is at hand, so what a failure to
+        // sign says is not seen.
         Err(_) => Err(Code::SignPlainDataFailed.into()),
     }
 }
@@ -453,8 +471,8 @@ fn tsp_failure(failure: &NetFailure) -> Failure {
         NetKind::UnknownHost => Throwable::unknown_host(failure.address.as_str()),
         NetKind::Connect => Throwable::connect_refused(),
         NetKind::Timeout => Throwable::socket_timeout(false),
-        // Unverified against the original: the texts of a TSA's HTTP error and of an invalid
-        // or refused time-stamp.
+        // Not observable: a TSA's HTTP error and an invalid or refused time-stamp cannot be
+        // produced, as the time-stamp authority is not emulated.
         NetKind::Http(status) => Throwable::new(
             "java.io.IOException",
             Some(format!(
@@ -491,10 +509,10 @@ fn xmldsig(key: &Key, xml: &str) -> Result<String, Failure> {
             trim: true,
         },
     };
-    // Unverified against the original: the parser's exception text of a malformed document.
-    let signed = key
-        .sign_xml_ex(args)
-        .map_err(|_| Code::SignPlainDataFailed)?;
+    // The JDK parser's text of a document that ends inside its root (the host words it as the
+    // exception's `toString()`) is the window's and the reply's; a parse error of another
+    // kind has the general text.
+    let signed = key.sign_xml_ex(args).map_err(|e| xml_failure(&e))?;
     Ok(String::from_utf8_lossy(&signed).into_owned())
 }
 

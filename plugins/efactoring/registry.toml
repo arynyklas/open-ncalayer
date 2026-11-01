@@ -8,7 +8,7 @@ vendor = "ТОО «E-Commerce Center»"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Окно выбора ключа — общее окно OpenNCALayer; дерева хранилищ с запомненными контейнерами и последним ключом нет."
@@ -27,3 +27,6 @@ ru = "Загрузка документа по upload_url (binary, xml с source
 
 [[differences]]
 ru = "Подпись элемента (sign_element) содержит в Transforms преобразование enveloped-signature перед C14N с комментариями; оригинал указывал только C14N. Это намеренное исправление: подпись проверяется и тогда, когда элемент для подписи лежит внутри подписываемого."
+
+[[differences]]
+ru = "Запрос binary без upload_url и запрос text, у которого data не строка: оригинал не показывал окон и не отвечал, соединение молчало дальше; порт закрывает соединение, ничего не показав."

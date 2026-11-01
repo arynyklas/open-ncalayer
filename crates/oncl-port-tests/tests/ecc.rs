@@ -187,12 +187,19 @@ fn market_text_signs_a_cms_text_as_text() {
 }
 
 #[test]
-fn market_text_missing_data_drops_after_key() {
-    let harness = Harness::new(pick(), vec![]);
-    let reply = harness.call("market", r#"{"type":"text","data":null}"#, None);
-    assert!(matches!(reply, Reply::Drop), "{reply:?}");
-    // The key was picked first, as the original read `data` after its dialog.
-    assert_eq!(timeline(&harness), ["storage", "key"]);
+fn market_text_without_string_data_drops_before_key() {
+    // `data` is read before any window: one that is `null` (or absent, or not a string) gets
+    // no window and no reply.
+    for request in [
+        r#"{"type":"text","data":null}"#,
+        r#"{"type":"text"}"#,
+        r#"{"type":"text","data":5}"#,
+    ] {
+        let harness = Harness::new(pick(), vec![]);
+        let reply = harness.call("market", request, None);
+        assert!(matches!(reply, Reply::Drop), "{request}: {reply:?}");
+        assert!(timeline(&harness).is_empty(), "{request}");
+    }
 }
 
 #[test]
@@ -494,9 +501,38 @@ fn efactoring_remote_xml_is_dead_path_no_http() {
 }
 
 #[test]
+fn efactoring_binary_without_url_drops_before_key() {
+    // No `upload_url` (or one that is not a string): no window, no reply.
+    for request in [
+        r#"{"type":"binary","data":"aGk="}"#,
+        r#"{"type":"binary","data":"aGk=","upload_url":null}"#,
+        r#"{"type":"binary"}"#,
+    ] {
+        let harness = Harness::new(pick(), vec![]);
+        let reply = harness.call("efactoring", request, None);
+        assert!(matches!(reply, Reply::Drop), "{request}: {reply:?}");
+        assert!(timeline(&harness).is_empty(), "{request}");
+    }
+}
+
+#[test]
+fn efactoring_text_without_string_data_drops_before_key() {
+    for request in [
+        r#"{"type":"text"}"#,
+        r#"{"type":"text","data":null}"#,
+        r#"{"type":"text","data":5}"#,
+    ] {
+        let harness = Harness::new(pick(), vec![]);
+        let reply = harness.call("efactoring", request, None);
+        assert!(matches!(reply, Reply::Drop), "{request}: {reply:?}");
+        assert!(timeline(&harness).is_empty(), "{request}");
+    }
+}
+
+#[test]
 fn efactoring_binary_empty_url_cancel() {
     let harness = Harness::new(pick(), vec![]);
-    let reply = harness.call("efactoring", r#"{"type":"binary","data":"aGk="}"#, None);
+    let reply = harness.call("efactoring", r#"{"type":"binary","upload_url":""}"#, None);
     assert_eq!(text(&reply), CANCEL);
     // After the key, and without a dialog.
     assert_eq!(timeline(&harness), ["storage", "key"]);
@@ -650,11 +686,22 @@ fn nursign_text_cades_t_kalkan() {
 }
 
 #[test]
-fn nursign_text_missing_data_signs_empty() {
-    let harness = Harness::new(pick(), vec![]);
-    let reply = harness.call("nursign", r#"{"type":"text"}"#, Some(NUR_ORIGIN));
-    let cms = result_cms(&reply);
-    oncl_pki::cms::verify(&cms, Some(b"")).unwrap();
+fn nursign_text_missing_data_fails_to_sign() {
+    // No `data`, or an empty one: the key dialog, then the error window; nothing is signed.
+    for request in [r#"{"type":"text"}"#, r#"{"type":"text","data":""}"#] {
+        let harness = Harness::new(steps(vec![pick(), vec![Step::Message]]), vec![]);
+        let reply = harness.call("nursign", request, Some(NUR_ORIGIN));
+        assert_eq!(
+            text(&reply),
+            r#"{"errorMessage":"Ошибка при формировании ЭЦП","errorCode":"500"}"#,
+            "{request}"
+        );
+        assert_eq!(timeline(&harness), ["storage", "key", "message"]);
+        assert_eq!(
+            harness.prompter().message_prompts()[0].text,
+            "Ошибка при формировании ЭЦП"
+        );
+    }
     // A number is signed as its JSON text.
     let harness = Harness::new(pick(), vec![]);
     let reply = harness.call(
@@ -885,6 +932,33 @@ fn nursign_xml_local_without_declaration() {
         r#"{"errorMessage":"Ошибка при формировании ЭЦП","errorCode":"500"}"#
     );
     assert_eq!(timeline(&harness), ["message"]);
+}
+
+#[test]
+fn nursign_xml_malformed_parser_text() {
+    // A document that ends inside its root: the JDK parser's text, in the window and in the
+    // reply, after the key dialog.
+    let sax = "org.xml.sax.SAXParseException; lineNumber: 1; columnNumber: 9; \
+               XML document structures must start and end within the same entity.";
+    for (request, sax) in [
+        (r#"{"type":"xml","data":"<doc><a>"}"#, sax),
+        (r#"{"type":"multixml","data":["<doc><a>"]}"#, sax),
+        (
+            r#"{"type":"xml","data":"<doc>\n  <a>x</a>"}"#,
+            "org.xml.sax.SAXParseException; lineNumber: 2; columnNumber: 11; \
+             XML document structures must start and end within the same entity.",
+        ),
+    ] {
+        let harness = Harness::new(steps(vec![pick(), vec![Step::Message]]), vec![]);
+        let reply = harness.call("nursign", request, Some(NUR_ORIGIN));
+        assert_eq!(
+            text(&reply),
+            format!(r#"{{"errorMessage":"{sax}","errorCode":"500"}}"#),
+            "{request}"
+        );
+        assert_eq!(timeline(&harness), ["storage", "key", "message"]);
+        assert_eq!(harness.prompter().message_prompts()[0].text, sax);
+    }
 }
 
 #[test]

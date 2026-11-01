@@ -7,7 +7,8 @@ use oncl_pdk::Locale;
 /// it as `errorCode`. Each with its texts in Russian, Kazakh and English; `None`: the
 /// resource files lack the key and the window shows a single space.
 // The original's error enum has these names; the resource keys that are not in it are in
-// `OTHER_KEYS`.
+// `OTHER_KEYS`. Not observable: that these are exactly the keys of the resource files shows
+// only in the files; the types that reach a reply are in this table.
 pub const ERROR_TYPES: &[(&str, Option<[&str; 3]>)] = &[
     (
         "CANCEL",

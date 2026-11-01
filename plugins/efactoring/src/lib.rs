@@ -59,16 +59,17 @@ fn handle(request: &Request) -> String {
 
 oncl_pdk::plugin!(handle);
 
-/// `text`, as MarketSign's: the key first, then `data`, whose absence ended the connection.
+/// `text`, as MarketSign's: `data` first, before any window; one that is not a string ends the
+/// connection.
 fn sign_text(req: &Map<String, Value>, texts: &Texts) -> String {
+    let Ok(data) = orgjson::get_string(req, "data") else {
+        return drop_connection();
+    };
+    let attach = orgjson::opt_boolean(req, "attach", false);
+    let has_timestamp = orgjson::opt_boolean(req, "has_timestamp", true);
     loop {
         let Some(key) = choose() else {
             return cancel();
-        };
-        let attach = orgjson::opt_boolean(req, "attach", false);
-        let has_timestamp = orgjson::opt_boolean(req, "has_timestamp", true);
-        let Ok(data) = orgjson::get_string(req, "data") else {
-            return drop_connection();
         };
         let signed = cades(&key, data.as_bytes(), attach, has_timestamp);
         drop(key);
@@ -89,8 +90,8 @@ fn sign_xml(req: &Map<String, Value>, texts: &Texts) -> String {
         };
         let source = orgjson::opt_string(req, "source").unwrap_or_else(|| "local".to_owned());
         let error = if source != "local" {
-            // Unverified against the original: what the live portal sends as `source`; version
-            // 1.2 failed every remote download before any request.
+            // Not observable: what the live portal sends as `source` is the portal's own;
+            // version 1.2 failed every remote download before any request.
             texts.bad_request
         } else {
             match orgjson::get_string(req, "data") {
@@ -113,19 +114,25 @@ fn sign_xml(req: &Map<String, Value>, texts: &Texts) -> String {
     }
 }
 
-/// `binary`: without `upload_url`, `CANCEL` once the key is picked; with one, the failed
-/// download window.
+/// `binary`: `upload_url` first, before any window: absent (the case seen; `null` or another
+/// value that is not a string is treated alike), the original showed no window and sent no
+/// reply, and its connection stayed silent; this port closes the connection instead
+/// (registry.toml). Empty: `CANCEL` once the key is picked; otherwise the failed download
+/// window.
 fn sign_binary(req: &Map<String, Value>, texts: &Texts) -> String {
+    let Ok(url) = orgjson::get_string(req, "upload_url") else {
+        return drop_connection();
+    };
     loop {
         let Some(key) = choose() else {
             return cancel();
         };
         drop(key);
-        if orgjson::opt_string(req, "upload_url").is_none_or(|url| url.is_empty()) {
+        if url.is_empty() {
             return cancel();
         }
-        // Unverified against the original: whether the live portal still sends `binary`; in
-        // version 1.2 its download window failed before any request.
+        // Not observable: whether the live portal still sends `binary` is the portal's own;
+        // in version 1.2 the download window failed before any request.
         if !retry(texts, texts.bad_request) {
             return cancel();
         }

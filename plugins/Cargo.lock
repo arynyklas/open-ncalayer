@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-efactoring"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-market"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-nursign"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",

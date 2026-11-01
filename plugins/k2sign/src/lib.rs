@@ -311,8 +311,8 @@ fn send_results(
     };
     let text = match http::request_ex(&args) {
         Ok(reply) if reply.status == 200 => return,
-        // Unverified against the original: the reason phrase is the server's; the standard
-        // one stands in for it.
+        // Not observable: the reason phrase is the server's and shows only in the error
+        // window, not in any reply; the standard one stands in for it.
         Ok(reply) => reason_phrase(reply.status).to_owned(),
         Err(_) => texts::text("UPLOAD_SIGN_VERIFY_RESULT_ERROR", locale).to_owned(),
     };
