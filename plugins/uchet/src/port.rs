@@ -2,8 +2,8 @@
 
 use crate::texts::{self, message};
 use oncl_pdk::abi::{
-    Check, FileMode, Header, HttpExArgs, Method, PageRead, PageWrite, Problem, SignerReport,
-    VerifyArgs, VerifyAt,
+    Check, ErrorCode, FileMode, Header, HttpExArgs, Method, PageRead, PageWrite, Problem,
+    SignerReport, VerifyArgs, VerifyAt,
 };
 use oncl_pdk::dialogs::{self, MessageKind, PasswordArgs};
 use oncl_pdk::files::{self, ChooseFileArgs, FileFilter};
@@ -230,7 +230,6 @@ fn check_cms_from_web(_: &CommonUtils, args: &Args<'_>, _: &AddInfo) -> Outcome 
         body: Vec::new().into(),
         timeout_ms: None,
     });
-    // Unverified against the original: its text for a URL it cannot read.
     let cms = match fetched {
         Ok(reply) if reply.status == 200 => reply.body.into_vec(),
         _ => return failed(texts::INTERNAL_ERROR),
@@ -260,8 +259,10 @@ fn report(cms: &[u8]) -> Result<Vec<JValue>, String> {
         first_signer_only: false,
         require_key_usage: Vec::new(),
     })
-    // Unverified against the original: the text of a CMS that does not read.
-    .map_err(|_| texts::INTERNAL_ERROR.to_owned())?;
+    .map_err(|e| match e.code {
+        ErrorCode::Invalid => texts::CMS_INVALID.to_owned(),
+        _ => texts::INTERNAL_ERROR.to_owned(),
+    })?;
     report
         .signers
         .iter()
@@ -337,10 +338,12 @@ fn signer_info(signer: &SignerReport) -> Result<JObject, String> {
         Some(ms) => Some(local_date(ms)?),
         None => None,
     };
-    // The bean's properties in the order its fields share HashMap buckets.
+    // The bean's properties in the order its fields share HashMap buckets; the certificate's
+    // result comes before `validSignature`.
     let mut bean = JObject::hash_map();
     bean.put("personCertificate", person);
     bean.put("serialNumber", serial);
+    bean.put("certificateVerificationResult", JValue::Obj(certificate));
     bean.put("validSignature", valid);
     bean.put_opt("organizationName", first("2.5.4.10")?);
     bean.put("certificateValidityPeriod", period);
@@ -349,7 +352,6 @@ fn signer_info(signer: &SignerReport) -> Result<JObject, String> {
     bean.put_opt("iin", iin);
     bean.put("tspVerificationResult", JValue::Obj(tsp));
     bean.put("number", 0);
-    bean.put("certificateVerificationResult", JValue::Obj(certificate));
     bean.put_opt("name", name);
     bean.put("signatureVerificationResult", JValue::Obj(signature));
     Ok(bean)
@@ -380,7 +382,8 @@ fn certificate_result(signer: &SignerReport, types: &[String], ekus: &[String]) 
             }
             // The original's checker has no update-window texts here: such answers pass.
             Check::Fail(Problem::OcspStale) => None,
-            // Unverified against the original: a responder that cannot be reached.
+            // Not observable: a responder that cannot be reached; the path check ends every
+            // report before the OCSP request.
             Check::Fail(_) => Some(texts::OCSP_EXCEPTION),
             Check::Ok | Check::Skipped => None,
         }
@@ -404,7 +407,9 @@ fn sign_xml_api(_: &CommonUtils, args: &Args<'_>, _: &AddInfo) -> Outcome {
     }
 }
 
-/// The keys of the PKCS#12 file the page names, opened with the page's password.
+/// The keys of the PKCS#12 file the page names, opened with the page's password. A wrong
+/// password is the text of Kalkan's exception; any other failure to open, as the closed
+/// window of `signFilePath`, is `Не удалось открыть хранилище`.
 fn page_key(path: &str, password: &str) -> Result<Vec<Key>, String> {
     keys::open(&OpenArgs {
         storage: "PKCS12".to_owned(),
@@ -412,8 +417,10 @@ fn page_key(path: &str, password: &str) -> Result<Vec<Key>, String> {
         password: Password::Text(password.to_owned()),
     })
     .map_err(|e| e.message)?
-    // A wrong password too: the original printed the error and had no key store.
-    .map_err(|_| texts::STORE_NOT_OPENED.to_owned())
+    .map_err(|outcome| match outcome {
+        keys::OpenOutcome::WrongPassword { .. } => texts::WRONG_PASSWORD.to_owned(),
+        _ => texts::STORE_NOT_OPENED.to_owned(),
+    })
 }
 
 /// The one signing key of `keys`: none is `keyNotFound`; several fail, as the original's
@@ -524,7 +531,8 @@ fn storage_dialog(storage_name: &str) -> Result<Vec<Key>, String> {
             .ok_or_else(not_opened)?;
             KeySource::Bytes(file.data)
         }
-        // Unverified against the original: the first reader stands for its container list.
+        // Not observable: the first reader stands for its container list; no device is at
+        // hand.
         Storage::Token(name) => KeySource::Terminal(
             keys::terminals(name)
                 .ok()
@@ -646,7 +654,8 @@ fn license(token: &str) -> String {
     ) else {
         return texts::LICENSE_DOWN.to_owned();
     };
-    // Unverified against the original: both texts present (none is taken here).
+    // Not observable: both texts present (none is taken here); the vendor's license server
+    // is out of reach.
     let mut text = "";
     if error.is_empty() {
         text = result;
@@ -687,7 +696,8 @@ fn sign_base64_api(_: &CommonUtils, args: &Args<'_>, _: &AddInfo) -> Outcome {
         sign_cms(keys, &data)
     })();
     match cms {
-        // Unverified against the original: no `message` in this reply.
+        // Not observable: no `message` in this reply; it stands behind the vendor's license
+        // server.
         Ok(cms) => signed(base64(&cms), None),
         Err(message) => failed(&message),
     }

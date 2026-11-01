@@ -51,3 +51,6 @@ pub const SIGNER_VALIDITY: &str = "Срок действия сертфикат�
 pub const NO_MEDIUM: &str = "Носитель не обнаружен";
 pub const STORE_NOT_OPENED: &str = "Не удалось открыть хранилище";
 pub const LICENSE_DOWN: &str = "Сервер лицензирования не доступен";
+pub const CMS_INVALID: &str = "Некорректный cms файл";
+/// The text of Kalkan's exception for a key store opened with a wrong password.
+pub const WRONG_PASSWORD: &str = "PKCS12 key store mac invalid - wrong password or corrupted file.";

@@ -13,10 +13,9 @@ use oncl_pdk::legacy::{
 };
 use oncl_pdk::orgjson::{self, JObject, JValue};
 use oncl_pdk::{AddInfo, Request, host, javab64, pki};
-use oncl_port_kit::date::format_java;
 use oncl_port_legacy::{
-    ACTION_CANCELED, Select, TOKEN_STORAGES, base64, cades, cades_args, fail, into_text,
-    knca_types, official_key_info, ok, response, select, split_path,
+    ACTION_CANCELED, KeyInfoProp, Select, TOKEN_STORAGES, base64, cades, cades_args, fail,
+    into_text, knca_types, official_key_info, ok, response, select, split_path,
 };
 use oncl_port_pki::esedo::{
     CertIdHash, ContentMode, Description, Encapsulate, EsedoInput, FileNames, IssuerRule,
@@ -78,11 +77,15 @@ pub const ARTA_OCSP: OcspRequest = OcspRequest {
 /// The time-stamp policy of an ESEDO signature: the TSA's GOST 2015 one.
 const TSA_GOST2015_POLICY: &str = "1.2.398.3.3.2.6.4";
 
-/// The key the page chose, with what the module read of it.
+/// The key the page chose, with what `getKeyInfo` reads of it.
 struct Selected {
     key: Key,
-    /// The key-info map, in the order of its puts.
-    info: Vec<(&'static str, String)>,
+    /// Kalkan's name of the key's algorithm.
+    algorithm: String,
+    /// The subject's CN.
+    cn: Option<String>,
+    /// The subject's O.
+    o: Option<String>,
 }
 
 /// The module's state, for the session (the original kept it, password and all, for the
@@ -187,75 +190,45 @@ fn check_module_availability(_: &SignService, _: &Args<'_>, _: &AddInfo) -> Outc
     Outcome::Text("OK".to_owned())
 }
 
-/// The subject attribute types the module puts into its key-info map as `KEY_<type>`.
-const SUBJECT_TYPES: [(&str, &str); 11] = [
-    ("CN", "KEY_CN"),
-    ("O", "KEY_O"),
-    ("STREET", "KEY_STREET"),
-    ("L", "KEY_L"),
-    ("ST", "KEY_ST"),
-    ("C", "KEY_C"),
-    ("EMAILADDRESS", "KEY_EMAILADDRESS"),
-    ("GIVENNAME", "KEY_GIVENNAME"),
-    ("SURNAME", "KEY_SURNAME"),
-    ("OU", "KEY_OU"),
-    ("SERIALNUMBER", "KEY_SERIALNUMBER"),
+/// The order the module's `KeyInfo` bean puts the properties that share a `HashMap`
+/// bucket in.
+const KEY_INFO_PUTS: [KeyInfoProp; 5] = [
+    KeyInfoProp::KeyId,
+    KeyInfoProp::Alias,
+    KeyInfoProp::Pem,
+    KeyInfoProp::Algorithm,
+    KeyInfoProp::SubjectDn,
 ];
 
-/// `put(name, value)`: a name already present keeps its place and takes the new value.
-fn put(map: &mut Vec<(&'static str, String)>, name: &'static str, value: String) {
-    match map.iter_mut().find(|(n, _)| *n == name) {
-        Some(entry) => entry.1 = value,
-        None => map.push((name, value)),
-    }
-}
-
-/// The module's key-info map of `cert`: `ALGORITHM` (Kalkan's key algorithm), `CERT`,
-/// `FORMAT`, `SERIAL_NUMBER` (decimal), `KEY_EXPIRY`/`KEY_RELEASE` (`dd.MM.yyyy` in the
-/// system's time zone), then the subject attributes of Kalkan's DN text read as an
-/// `LdapName`.
-fn key_info_map(cert: &[u8]) -> Result<Vec<(&'static str, String)>, String> {
-    let info = host::cert_info(cert).map_err(|e| e.message)?;
-    let details = host::cert_details(cert).map_err(|e| e.message)?;
-    let date = |ms: i64| -> Result<String, String> {
-        let offset = host::local_offset(ms).map_err(|e| e.message)?;
-        Ok(format_java("dd.MM.yyyy", ms, offset))
-    };
-    // Unverified against the original: the order of the map's puts, which decides the
-    // order of names sharing a bucket in the `INFO` text.
-    let mut map = Vec::new();
-    put(
-        &mut map,
-        "ALGORITHM",
-        kalkan_key_alg_name(&info.spki_alg_oid)
-            .unwrap_or(&info.spki_alg_oid)
-            .to_owned(),
-    );
-    // The original put the DER read as text in the system's charset, which no page can
-    // read back; the certificate in Base64 stands for it.
-    put(&mut map, "CERT", base64(cert));
-    put(&mut map, "FORMAT", "X.509".to_owned());
-    put(&mut map, "SERIAL_NUMBER", details.serial_dec.clone());
-    put(&mut map, "KEY_EXPIRY", date(info.not_after)?);
-    put(&mut map, "KEY_RELEASE", date(info.not_before)?);
+/// The chosen `key` with the algorithm and the subject's CN and O of its certificate, the
+/// subject read from Kalkan's DN text as an `LdapName`.
+fn selected(key: Key) -> Result<Selected, String> {
+    let info = host::cert_info(key.certificate()).map_err(|e| e.message)?;
+    let details = host::cert_details(key.certificate()).map_err(|e| e.message)?;
+    let algorithm = kalkan_key_alg_name(&info.spki_alg_oid)
+        .unwrap_or(&info.spki_alg_oid)
+        .to_owned();
+    let (mut cn, mut o) = (None, None);
     // `getRdns()` runs from the last RDN of the text to the first, so of repeated types the
-    // first in the text stays. Unverified against the original: the walk over `getRdns()`.
+    // first in the text stays. Not observable: the walk over `getRdns()`; no key to compare
+    // with repeats a type.
     for (kind, value) in ldap_avas(&details.subject_dn) {
-        if let Some((_, name)) = SUBJECT_TYPES.iter().find(|(t, _)| *t == kind) {
-            put(&mut map, name, value);
+        match kind.as_str() {
+            "CN" => cn = Some(value),
+            "O" => o = Some(value),
+            _ => {}
         }
     }
-    Ok(map)
+    Ok(Selected {
+        key,
+        algorithm,
+        cn,
+        o,
+    })
 }
 
-fn map_value<'a>(map: &'a [(&'static str, String)], name: &str) -> Option<&'a str> {
-    map.iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, v)| v.as_str())
-}
-
-/// The storage and key dialogs (no key type filter, the newest first): the key, kept with
-/// its key-info map for the session. `storageName` is kept even when this fails.
+/// The storage and key dialogs (no key type filter, the newest first): the key, kept for
+/// the session. `storageName` is kept even when this fails.
 fn choose_key(storage: &str) -> Result<(), Outcome> {
     STATE.with(|s| s.borrow_mut().storage_name = storage.to_owned());
     let key = select(Select {
@@ -273,12 +246,12 @@ fn choose_key(storage: &str) -> Result<(), Outcome> {
     })
     .map_err(|message| failed(&message))?
     .ok_or_else(|| failed(ACTION_CANCELED))?;
-    let info = key_info_map(key.certificate()).map_err(|message| failed(&message))?;
-    STATE.with(|s| s.borrow_mut().selected = Some(Selected { key, info }));
+    let selected = selected(key).map_err(|message| failed(&message))?;
+    STATE.with(|s| s.borrow_mut().selected = Some(selected));
     Ok(())
 }
 
-/// The kept key and its map, if the page chose one.
+/// The kept key, if the page chose one.
 fn with_selected<T>(f: impl FnOnce(&Selected) -> T) -> Option<T> {
     STATE.with(|s| s.borrow().selected.as_ref().map(f))
 }
@@ -291,9 +264,9 @@ fn get_key_info(_: &SignService, args: &Args<'_>, _: &AddInfo) -> Outcome {
     let object = with_selected(|selected| {
         let mut object = JObject::hash_map();
         object.put("pem", base64(selected.key.certificate()));
-        object.put_opt("cn", map_value(&selected.info, "KEY_CN"));
-        object.put_opt("algorithm", map_value(&selected.info, "ALGORITHM"));
-        object.put_opt("o", map_value(&selected.info, "KEY_O"));
+        object.put_opt("cn", selected.cn.as_deref());
+        object.put("algorithm", selected.algorithm.as_str());
+        object.put_opt("o", selected.o.as_deref());
         object
     });
     let mut bean = response(None, "200", None);
@@ -307,7 +280,11 @@ fn get_full_key_info(_: &SignService, args: &Args<'_>, _: &AddInfo) -> Outcome {
         return outcome;
     }
     let info = with_selected(|selected| {
-        official_key_info(selected.key.alias(), selected.key.certificate())
+        official_key_info(
+            selected.key.alias(),
+            selected.key.certificate(),
+            KEY_INFO_PUTS,
+        )
     });
     match info {
         Some(Ok(info)) => ok(info),
@@ -388,18 +365,16 @@ fn sign_base64_file(_: &SignService, args: &Args<'_>, _: &AddInfo) -> Outcome {
     Outcome::Json(response(Some(cms.into()), "200", Some("cms.signed")))
 }
 
-/// `signDocument(digest, type, dataForSign)`: `INFO` (any case) is the key-info map as a
-/// JSON text, `SIGN` a raw signature of `dataForSign` and, for a `digest` object with file
-/// names, an ESEDO CMS of its digest. Without a key, and on any failure of `SIGN`, the
-/// original threw.
+/// `signDocument(digest, type, dataForSign)`: `INFO` (any case) is the text `{"empty":false}`
+/// once a key is chosen (the module's key-info map is not given out), `SIGN` a raw
+/// signature of `dataForSign` and, for a `digest` object with file names, an ESEDO CMS of
+/// its digest. Without a key, and on any failure of `SIGN`, the original threw.
 fn sign_document(_: &SignService, args: &Args<'_>, _: &AddInfo) -> Outcome {
     let kind = args.str(1);
     if kind.eq_ignore_ascii_case("INFO") {
-        let info = with_selected(|selected| {
-            let mut object = JObject::from_map(selected.info.len());
-            for (name, value) in &selected.info {
-                object.put(*name, value.as_str());
-            }
+        let info = with_selected(|_| {
+            let mut object = JObject::hash_map();
+            object.put("empty", false);
             object.to_json()
         });
         return match info {
@@ -532,11 +507,9 @@ fn show_file_chooser(_: &SignService, args: &Args<'_>, _: &AddInfo) -> Outcome {
         "KEYSTORE" => (FileMode::Open, &["pfx", "p12", "bin", "jks"]),
         "JKS" => (FileMode::Open, &["jks"]),
         "ALL" => (FileMode::Open, &[]),
-        // Unverified against the original: the package of its file chooser's enum, taken
-        // as the official module's.
         other => {
             return failed(&format!(
-                "No enum constant kz.gov.pki.knca.gui.fileChooser.FileChooser.FileType.{other}"
+                "No enum constant kz.arta.synergy.gui.fileChooser.FileChooser.FileType.{other}"
             ));
         }
     };
@@ -576,8 +549,9 @@ fn sign_xml(_: &SignService, args: &Args<'_>, _: &AddInfo) -> Outcome {
 fn xml_signature(key: &Key, xml: &str) -> Result<String, String> {
     let details = host::cert_details(key.certificate()).map_err(|e| e.message)?;
     // The module's URIs: RSA SHA-256 and GOST 34.310-2004 as Kalkan's; it named the GOST
-    // 2004 ones for every other key too, with which a GOST 2015 key signs nothing, so such a
-    // key gets Kalkan's for its algorithm. SHA-1 RSA keys are refused by the core.
+    // 2004 ones for every other key too, so a GOST 2015 key got no signature from it (`null`).
+    // Such a key gets Kalkan's URIs for its algorithm here (registry.toml). SHA-1 RSA keys
+    // are refused by the core.
     let (signature_method, digest_method) = match details.signing_alg.as_deref() {
         Some("rsa_sha256") => (
             Some("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"),

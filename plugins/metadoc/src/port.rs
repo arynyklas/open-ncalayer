@@ -21,7 +21,8 @@ use oncl_pdk::pki::{
 use oncl_pdk::serde_json::{Map, Value};
 use oncl_pdk::{Reply, Request, host, javab64};
 use oncl_port_legacy::{
-    ACTION_CANCELED, Select, base64, into_text, knca_types, official_key_info, select, sign_xml,
+    ACTION_CANCELED, KeyInfoProp, Select, base64, into_text, knca_types, official_key_info, select,
+    sign_xml,
 };
 use oncl_port_pki::esedo::{
     CertIdHash, ContentMode, Description, Encapsulate, EsedoInput, FileNames, IssuerRule,
@@ -99,8 +100,9 @@ fn response(
     let mut bean = JObject::hash_map();
     bean.put_opt("responseObject", object);
     bean.put("code", code);
-    // Unverified against the original: `message` and `params` share a bucket, and their
-    // order is the bean's.
+    // Not observable: `message` and `params` share a bucket, and their order is the bean's;
+    // `params` comes only with an unknown OCSP or time-stamp address, which no available
+    // key reaches.
     bean.put_opt("message", message);
     if let Some(address) = address {
         let mut params = JObject::hash_map();
@@ -191,10 +193,20 @@ fn process(text: &str) -> Reply {
     Reply::Text(reply)
 }
 
+/// The order the module's `KeyInfo` bean puts the properties that share a `HashMap`
+/// bucket in.
+const KEY_INFO_PUTS: [KeyInfoProp; 5] = [
+    KeyInfoProp::KeyId,
+    KeyInfoProp::Pem,
+    KeyInfoProp::Alias,
+    KeyInfoProp::Algorithm,
+    KeyInfoProp::SubjectDn,
+];
+
 /// The module's `KeyInfo`: the official one, and `usage` — `auth` for a key of Kalkan's
 /// type AUTHENTICATION, else `sign` — and the key store's `path` if the page named it.
 fn key_info(key: &Key, path: Option<&str>) -> Result<JObject, String> {
-    let mut info = official_key_info(key.alias(), key.certificate())?;
+    let mut info = official_key_info(key.alias(), key.certificate(), KEY_INFO_PUTS)?;
     let details = host::cert_details(key.certificate()).map_err(|e| e.message)?;
     info.put_opt("path", path);
     let usage = match details.knca_types.iter().any(|t| t == "AUTHENTICATION") {
@@ -331,8 +343,8 @@ fn open_key(storage: &str, source: KeySource, password: Password) -> Result<Key,
         Err(OpenOutcome::NotFound) => return Err(FILE_NOT_FOUND.into()),
         // The user did not let the page open the file.
         Err(OpenOutcome::Declined) => return Err(CANCELLED.into()),
-        // Unverified against the original: the text of a token that is blocked or not
-        // there (tokens open only with the core's experimental token support).
+        // Not observable: the text of a token that is blocked or not there (tokens open only
+        // with the core's experimental token support, and no device is at hand).
         Err(_) => return Err(COULD_NOT_LOAD_KEY.into()),
     };
     if token {
@@ -353,7 +365,6 @@ fn sign_xml_method(request: &Map<String, Value>) -> String {
         let key = load_key(request)?;
         let xml = orgjson::get_string(request, "xml")?;
         if xml.is_empty() {
-            // Unverified against the original: the text, by its other required fields.
             return Err("\"xml\" argument could not be empty or NULL!".into());
         }
         sign_xml(&key, xml, "", "").map_err(Failure::from)
@@ -399,7 +410,6 @@ fn sign_checked(request: &Map<String, Value>) -> Result<Vec<u8>, Failure> {
     if data.is_empty() {
         return Err("\"dataForSign\" argument could not be empty or NULL!".into());
     }
-    // Unverified against the original: its Base64 decoder, taken as Java's.
     let data = javab64::decode_java(data)
         .map_err(|_| "\"dataForSign\" argument should use BASE64 format!")?;
     let skip_check_permissions = flag(request, "skipCheckPermissions")?;
@@ -437,8 +447,8 @@ fn make_signature(key: &Key, order: &Order<'_>) -> Result<(Vec<u8>, Option<i64>)
     // A `CertID` the core cannot build (GOST 34.311 GT for an issuer under an RSA root, the
     // module's own GOST one otherwise) fails as a request that fails.
     let request = ocsp_args(&METADOC_OCSP, cert, &[&issuer]).map_err(|_| UNKNOWN_CAUSE)?;
-    // Unverified against the original: a certificate without an OCSP responder, whose
-    // exception carries its cause's text.
+    // Not observable: a certificate without an OCSP responder, whose exception carries
+    // its cause's text; no available key reaches the request.
     let outcome = pki::ocsp_fetch(&request).map_err(|_| UNKNOWN_CAUSE)?;
     let produced_at_ms = match &outcome {
         OcspOutcome::Failed(failure) if failure.kind == NetKind::UnknownHost => {
@@ -501,8 +511,8 @@ fn tsa(cert: &[u8]) -> Result<TsaSpec, Failure> {
     let serial = from_hex(&info.serial_hex).ok_or(COULD_NOT_CREATE_SIGN)?;
     Ok(TsaSpec {
         url: PkiUrl::Default,
-        // Unverified against the original: the base64 of a GET in the path as is, here
-        // percent-encoded.
+        // Not observable: the base64 of a GET in the path as is, here percent-encoded; no
+        // request reaches the TSA.
         method: PkiMethod::GetUnder(255),
         hash: if gost {
             HashAlg::Gost34311
@@ -595,8 +605,8 @@ fn self_check(
         Check::Fail(Problem::NoContent) if order.hashed => {}
         _ => return Err("java.lang.Exception: Message digest verification fail!".into()),
     }
-    // Unverified against the original: an exception without a message for a CMS without a
-    // (valid) time-stamp, which the module never makes.
+    // Not observable: an exception without a message for a CMS without a (valid)
+    // time-stamp, which the module never makes; no signature reaches the check.
     let Some(gen_time_ms) = signer
         .tsp
         .as_ref()
@@ -668,8 +678,9 @@ fn permissions(cert: &[u8], order: &Order<'_>) -> Result<(), Failure> {
         return Ok(());
     }
     let details = host::cert_details(cert).map_err(|e| e.message)?;
-    // Unverified against the original: the DN text it compares with. The certificates of
-    // the state CA (УЦГО), which it also let pass, are not supported by the core.
+    // Not observable: the DN text it compares with, since no available key reaches the
+    // check. The certificates of the state CA (УЦГО), which it also let pass, are not
+    // supported by the core.
     if details.issuer_dn == "C=KZ,O=TTC,CN=PKI" {
         return Ok(());
     }

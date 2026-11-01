@@ -188,8 +188,8 @@ fn sign_file_path(_: &CmsSignUtil, args: &Args<'_>, _: &AddInfo) -> Outcome {
 
 fn sign(file_path: &str, file_dir: &str, storage_name: &str) -> Result<String, String> {
     let internal = || text(Text::InternalError).to_owned();
-    // Unverified against the original: the drive checks are the core's page-path rules
-    // (local or chosen network paths), and a missing folder shows when writing.
+    // Not observable: the drive checks (the core's page-path rules for local or chosen
+    // network paths) and a missing folder, which shows when writing.
     let windows = host::platform().map_err(|_| internal())?.os == Os::Windows;
     if !windows || !local(file_path) || !local(file_dir) {
         return Err(internal());
@@ -228,7 +228,7 @@ fn sign(file_path: &str, file_dir: &str, storage_name: &str) -> Result<String, S
 
 /// The storage dialog of the module (the core's) and the key: signing keys only.
 fn choose(storage_name: &str) -> Result<Key, String> {
-    // Unverified against the original: storage names Kalkan does not know (an NPE there).
+    // Not observable: storage names Kalkan does not know (an NPE there).
     let storage = storage(storage_name).map_err(|_| text(Text::InternalError).to_owned())?;
     if let Storage::Token(name) = storage
         && keys::terminals(name).map_or(true, |readers| readers.is_empty())

@@ -8,7 +8,7 @@ vendor = "1С-Рейтинг"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Окна выбора хранилища и ключа — общие окна OpenNCALayer; список недавних ключей ведёт само ядро, плагин в него не пишет."
@@ -18,9 +18,6 @@ ru = "Токены (Kaztoken, удостоверение личности и д�
 
 [[differences]]
 ru = "Метка времени — профиль Kalkan по умолчанию через ядро; при ошибке ответ «Ошибка. Код: TIMESTAMP_CREATION_FAILURE»."
-
-[[differences]]
-ru = "Порядок ключей KeyInfo и текст signerCert вычислены по правилам Java и не сверены с оригиналом."
 
 [[differences]]
 ru = "TestKeyOwner при отмене отвечает {\"code\":\"500\"} и на шаге хранилища, и на шаге ключа: в OpenNCALayer это одно окно, и отмены не различаются. Оригинал при закрытии окна хранилища отвечал {\"code\":\"500\",\"message\":\"action.canceled\"}."
