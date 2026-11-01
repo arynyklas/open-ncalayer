@@ -1755,6 +1755,27 @@ fn k2_verify_all_posts_results_in_hashmap_order() {
 }
 
 #[test]
+fn k2_verify_all_hashmap_order_of_four_ids() {
+    let server = k2_verify_all_server(vec![
+        (40, detached(KEY, b"doc")),
+        (21, detached(KEY, b"doc")),
+        (5, detached(KEY, b"doc")),
+        (3, detached(KEY, b"doc")),
+    ]);
+    let harness = Harness::new(vec![Step::Message], vec![route(K2_ORIGIN, &server)]);
+    let request = K2_VERIFY_ALL.replace("[17,2,33]", "[40,21,5,3]");
+    let reply = harness.call("k2sign", &request, Some(K2_ORIGIN));
+    assert_eq!(text(&reply), r#"{"result":"OK","errorCode":"NONE"}"#);
+    let seen = server.seen();
+    // The ids as strings are not in numeric order ("3" in bucket 3, "5" in 5, "40" in 12,
+    // "21" in 15): an `Integer` key would give 3, 21, 5, 40.
+    assert_eq!(
+        String::from_utf8(seen.last().unwrap().body.clone()).unwrap(),
+        "userName=%D0%98%D0%B2%D0%B0%D0%BD+%D0%98%D0%B2%D0%B0%D0%BD%D0%BE%D0%B2&verifyRes=3-Y;5-Y;40-Y;21-Y;"
+    );
+}
+
+#[test]
 fn k2_verify_all_invalid_no_post() {
     let server = k2_verify_all_server(vec![
         (17, detached(KEY, b"doc")),

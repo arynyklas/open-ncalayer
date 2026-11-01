@@ -527,6 +527,39 @@ fn fhs_certificate_type_follows_a_hash_set() {
     );
 }
 
+/// A legal entity's certificate: SIGNATURE before AUTHENTICATION, and `orgName`, `surname`,
+/// `bin` and the types come before the properties they share a bucket with.
+#[test]
+fn fhs_certificate_info_of_a_legal_entity_follows_the_observed_order() {
+    let reply = fhs_certificate_info("legal-gost2015-sign", "");
+    assert!(
+        reply.contains(r#""certificateType":["SIGNATURE","AUTHENTICATION"]"#),
+        "{reply}"
+    );
+    let order = [
+        "expiryDate",
+        "issuedDate",
+        "orgName",
+        "serialNumber",
+        "surname",
+        "bin",
+        "fullName",
+        "middleName",
+        "certificateType",
+        "algorithm",
+        "iin",
+    ];
+    let at: Vec<usize> = order
+        .iter()
+        .map(|key| {
+            reply
+                .find(&format!("\"{key}\":"))
+                .unwrap_or_else(|| panic!("{key}: {reply}"))
+        })
+        .collect();
+    assert!(at.windows(2).all(|pair| pair[0] < pair[1]), "{reply}");
+}
+
 #[test]
 fn fhs_certificate_info_wrong_password_is_500() {
     let harness = Harness::new(vec![Step::Confirm { yes: true }], vec![]);
@@ -625,6 +658,33 @@ fn fhs_sign_xml_v2_signs_document() {
     let signed = body(&reply)["message"].as_str().unwrap().to_owned();
     assert!(signed.contains("<ds:Signature"), "{reply}");
     assert!(reply.contains(r#"<\/doc>"#), "org.json escapes </");
+}
+
+#[test]
+fn fhs_sign_xml_v2_malformed_document_has_the_parsers_text() {
+    for (xml, text_of_parser) in [
+        (
+            "<doc><a>1</a>",
+            "org.xml.sax.SAXParseException; lineNumber: 1; columnNumber: 14; XML document structures must start and end within the same entity.",
+        ),
+        (
+            "not xml",
+            "org.xml.sax.SAXParseException; lineNumber: 1; columnNumber: 1; Content is not allowed in prolog.",
+        ),
+    ] {
+        let harness = Harness::new(vec![Step::Confirm { yes: true }], vec![]);
+        let args = merged(
+            fhs_key("user-gost2015-sign"),
+            serde_json::json!({"xml": xml}),
+        );
+        assert_eq!(
+            text(harness.call(FHS, &fhs_request("signXmlV2", &args), FHS_ORIGIN)),
+            format!(
+                r#"{{"body":{{"code":"500","method":"signXmlV2","requestId":"","message":"{text_of_parser}"}},"status":true}}"#
+            ),
+            "{xml}"
+        );
+    }
 }
 
 #[test]

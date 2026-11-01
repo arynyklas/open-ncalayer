@@ -218,8 +218,7 @@ fn key_info(key: &Key, path: Option<&str>) -> Result<JObject, String> {
 }
 
 /// `getKeyInfo` with `args[0]` the storage: the official storage and key dialogs, its
-/// `ResponseMessage` reply. The key store's path is not given: the core does not tell a
-/// plugin where the key the user chose lies.
+/// `ResponseMessage` reply; the key's `path` is the key store file the user chose.
 fn get_key_info(storage: &str) -> String {
     let message = |m: &str| oncl_port_legacy::response(None, "500", Some(m)).to_json();
     let key = select(Select {
@@ -239,7 +238,7 @@ fn get_key_info(storage: &str) -> String {
         Ok(None) => return message(ACTION_CANCELED),
         Err(m) => return message(&m),
     };
-    match key_info(&key, None) {
+    match key_info(&key, key.path()) {
         Ok(info) => oncl_port_legacy::response(Some(info.into()), "200", None).to_json(),
         Err(m) => message(&m),
     }

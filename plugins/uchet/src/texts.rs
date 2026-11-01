@@ -33,7 +33,7 @@ pub const FILE_IO: &str = "Ошибка при работе с файлом";
 pub const KEY_NOT_FOUND: &str =
     "Сертификат указанного ключа не предназначен для подписания электронных документов";
 pub const KEY_CHOOSE: &str = "Выберите ключ для подписи";
-pub const CERT_EXPIRED: &str = "Срок действия сертфиката истек";
+pub const CERT_EXPIRED: &str = "Срок действия сертфиката истек ";
 pub const CERT_NOT_YET_VALID: &str = "Срок действия сертфикатa ещё не натупил";
 pub const UNKNOWN_CA: &str =
     "Неизвестный удостоверяющий центр. Проверка цепочки сертификатов прошла неуспешно";

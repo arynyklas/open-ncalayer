@@ -314,7 +314,7 @@ fn signer_info(signer: &SignerReport) -> Result<JObject, String> {
         .iter()
         .any(|eku| eku == "1.2.398.3.3.4.1.1");
     let iin = first("2.5.4.5")?.map(|s| s.chars().skip(3).collect::<String>());
-    // Unverified against the original: a missing GIVENNAME (left out here).
+    // A signer without GIVENNAME is named by its CN alone (observed with a time-stamp key).
     let name = first("2.5.4.3")?.map(|cn| match first("2.5.4.42") {
         Ok(Some(given)) => format!("{cn} {given}"),
         _ => cn,
@@ -338,20 +338,31 @@ fn signer_info(signer: &SignerReport) -> Result<JObject, String> {
         Some(ms) => Some(local_date(ms)?),
         None => None,
     };
-    // The bean's properties in the order its fields share HashMap buckets; the certificate's
-    // result comes before `validSignature`.
+    // The bean's properties in the order its fields share HashMap buckets: for the certificate
+    // of a person, `personCertificate` before `tspVerificationResult` and the certificate's
+    // result before `validSignature`; for any other, the reverse of both (observed on a legal
+    // entity's key and on a time-stamp authority's).
     let mut bean = JObject::hash_map();
-    bean.put("personCertificate", person);
-    bean.put("serialNumber", serial);
-    bean.put("certificateVerificationResult", JValue::Obj(certificate));
-    bean.put("validSignature", valid);
+    if person {
+        bean.put("personCertificate", person);
+        bean.put("tspVerificationResult", JValue::Obj(tsp));
+        bean.put("number", 0);
+        bean.put("serialNumber", serial);
+        bean.put("certificateVerificationResult", JValue::Obj(certificate));
+        bean.put("validSignature", valid);
+    } else {
+        bean.put("tspVerificationResult", JValue::Obj(tsp));
+        bean.put("personCertificate", person);
+        bean.put("number", 0);
+        bean.put("validSignature", valid);
+        bean.put("serialNumber", serial);
+        bean.put("certificateVerificationResult", JValue::Obj(certificate));
+    }
     bean.put_opt("organizationName", first("2.5.4.10")?);
     bean.put("certificateValidityPeriod", period);
     bean.put_opt("tspDate", tsp_date);
     bean.put_opt("bin", bin);
     bean.put_opt("iin", iin);
-    bean.put("tspVerificationResult", JValue::Obj(tsp));
-    bean.put("number", 0);
     bean.put_opt("name", name);
     bean.put("signatureVerificationResult", JValue::Obj(signature));
     Ok(bean)

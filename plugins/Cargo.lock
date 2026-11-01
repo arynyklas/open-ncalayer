@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-arta"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-devart"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "der",
  "oncl-pdk",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-fhs"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "der",
  "oncl-pdk",
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-k2sign"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-metadoc"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "cms",
  "der",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-uchet"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",

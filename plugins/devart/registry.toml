@@ -8,7 +8,7 @@ vendor = "Devart"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Токен getSignerInfo действует только в соединении страницы и хранит выбранный ключ OpenNCALayer, а не путь и пароль хранилища; оригинал держал их в памяти процесса для любого сайта. В соединении хранится не больше 12 токенов (OpenNCALayer держит не больше 16 ключей на соединение), старейший вытесняется."

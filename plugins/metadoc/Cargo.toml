@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-metadoc"
 description = "The OpenNCALayer port of Metadoc's signing module (kz.metadoc.NCAModule): ESEDO CMS with the key file the page names"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

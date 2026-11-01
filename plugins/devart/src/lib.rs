@@ -390,7 +390,8 @@ fn local_date_time(unix_ms: i64) -> String {
 }
 
 /// A certificate time as the provider's validity exceptions print it.
-// Unverified against the original: the date text of Kalkan's validity exceptions.
+// Not observable: the date text of Kalkan's validity exceptions; the original's key window
+// shows its own text for an expired key and gives no reply.
 fn provider_time(unix_ms: i64) -> String {
     let offset = host::local_offset(unix_ms).unwrap_or(0);
     let sign = if offset < 0 { '-' } else { '+' };

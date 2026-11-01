@@ -7,7 +7,7 @@ use der::Encode;
 use oncl_flows::testing::Step;
 use oncl_pki::http::{HttpError, HttpReply, HttpRequest, HttpTransport};
 use oncl_pki::info::{cert_info, common_name, kalkan_dn};
-use oncl_pki::key::HashAlg;
+use oncl_pki::key::{HashAlg, PublicKey, SigAlg};
 use oncl_pki::ocsp::MockOcsp;
 use oncl_port_tests::{Harness, entry, p12};
 use oncl_protocol::Reply;
@@ -1323,6 +1323,37 @@ fn uchet(steps: Vec<Step>, method: &str, args: Value) -> String {
 }
 
 #[test]
+fn uchet_get_message_texts() {
+    // The text of `cert.expired` ends with a space.
+    assert_eq!(
+        uchet(vec![], "getMessage", json!(["cert.expired"])),
+        "Срок действия сертфиката истек "
+    );
+    for (key, message) in [
+        (
+            "cert.not_yet_valid",
+            "Срок действия сертфикатa ещё не натупил",
+        ),
+        (
+            "error.certificate.ca",
+            "Неизвестный удостоверяющий центр. Проверка цепочки сертификатов прошла неуспешно",
+        ),
+        (
+            "error.certificate.ocsp.not_verified",
+            "Ответ OCSP не прошел верификацию",
+        ),
+        ("action.canceled", "Действие отменено"),
+    ] {
+        assert_eq!(uchet(vec![], "getMessage", json!([key])), message, "{key}");
+    }
+    // A key the bundle does not have throws.
+    assert_eq!(
+        uchet(vec![], "getMessage", json!(["nope"])),
+        r#"{"code":"500","message":"java.lang.reflect.InvocationTargetException. Method: getMessage"}"#
+    );
+}
+
+#[test]
 fn uchet_test_raw_text() {
     assert_eq!(uchet(vec![], "test", json!(["abc"])), "trueabc");
     assert_eq!(
@@ -1365,21 +1396,27 @@ fn uchet_get_version() {
     );
 }
 
-/// An attached CAdES-T of `data` by the synthetic key `name` (made by the rating1c port).
-fn cades_t(name: &str, data: &[u8]) -> Vec<u8> {
+/// An attached CAdES of `data` by the synthetic key `name` (made by the rating1c port), with
+/// a time-stamp if `timestamp`.
+fn cades_of(name: &str, data: &[u8], timestamp: bool) -> Vec<u8> {
     let reply = parse(&r1c(
         key(name),
         "createCmsFromBase64",
-        json!(["PKCS12", "SIGNATURE", b64(data), true, true, ""]),
+        json!(["PKCS12", "SIGNATURE", b64(data), true, timestamp, ""]),
     ));
     unb64(reply["responseObject"].as_str().unwrap())
 }
 
 /// `checkCMS` of a CMS file by `name`, the responder answering `status` for it.
 fn uchet_check(name: &str, status: oncl_pki::ocsp::CertStatus) -> String {
+    uchet_check_cms(name, status, true)
+}
+
+/// `checkCMS` of a CMS file of `name` with or without a time-stamp.
+fn uchet_check_cms(name: &str, status: oncl_pki::ocsp::CertStatus, timestamp: bool) -> String {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("signed.cms");
-    std::fs::write(&file, cades_t(name, b"data")).unwrap();
+    std::fs::write(&file, cades_of(name, b"data", timestamp)).unwrap();
     let serial = cert_info(&entry(name).cert).serial_hex;
     let responder: Arc<dyn HttpTransport> =
         Arc::new(MockOcsp::new(entry("ocsp-gost2015")).status(&serial, status));
@@ -1460,6 +1497,41 @@ fn uchet_check_cms_signer_info_order() {
             "certificateVerificationResult",
             "validSignature",
             "certificateValidityPeriod",
+            "name",
+            "signatureVerificationResult",
+            "iin",
+        ]
+    );
+}
+
+/// The certificate of a legal entity: `tspVerificationResult` before `personCertificate` and
+/// `validSignature` before the certificate's result, in the buckets they share.
+#[test]
+fn uchet_check_cms_signer_info_order_of_a_legal_entity() {
+    let raw = uchet_check_cms(
+        "legal-gost2015-sign",
+        oncl_pki::ocsp::CertStatus::Good,
+        false,
+    );
+    let reply = parse(&raw);
+    let signer = &reply["responseObjects"][0];
+    assert_eq!(signer["personCertificate"], false, "{raw}");
+    let observed: Vec<&str> = names(&raw, signer)
+        .into_iter()
+        .filter(|n| *n != "tspDate")
+        .collect();
+    assert_eq!(
+        observed,
+        [
+            "tspVerificationResult",
+            "personCertificate",
+            "number",
+            "validSignature",
+            "serialNumber",
+            "certificateVerificationResult",
+            "organizationName",
+            "certificateValidityPeriod",
+            "bin",
             "name",
             "signatureVerificationResult",
             "iin",
@@ -2037,7 +2109,7 @@ fn arta_sign_document_esedo_attrs() {
     let object = &reply["responseObject"];
     let e = entry("user-rsa-sign");
     assert_eq!(object["dataForSign"], b64(b"raw data"));
-    assert_eq!(object["certificate"], b64(&der_of(&e.cert)));
+    assert_kalkan_lines(object["certificate"].as_str().unwrap(), &der_of(&e.cert));
     // `id` is a JSON number of every digit (serde_json would round it to a float).
     let id = format!("\"id\":{}", oncl_pki::info::serial_dec(&e.cert));
     assert!(raw.contains(&id), "{raw}");
@@ -2115,6 +2187,125 @@ fn arta_sign_xml_first_child_xmldsig_more() {
         xml.trim_end().ends_with("</ds:Signature></a>") || xml.contains("Signature></a>"),
         "{xml}"
     );
+    assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+}
+
+/// `text` as Kalkan writes base64 of `data` in a `SIGN` reply: lines of 60 characters
+/// with `\r\n` between them and none at the end.
+fn assert_kalkan_lines(text: &str, data: &[u8]) {
+    let lines: Vec<&str> = text.split("\r\n").collect();
+    let (last, full) = lines.split_last().unwrap();
+    assert!(full.iter().all(|line| line.len() == 60), "{text:?}");
+    assert!((1..=60).contains(&last.len()), "{text:?}");
+    assert_eq!(unb64(&lines.concat()), data, "{text:?}");
+}
+
+/// The reply of `signDocument SIGN` of `data` with the digest `digest`, after the key of
+/// the synthetic store `name` was chosen.
+fn arta_sign_reply(name: &str, digest: &str, data: &[u8]) -> Value {
+    let h = Harness::new(key(name), vec![]);
+    let mut s = h.session(ARTA);
+    s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
+    let reply = parse(&text(s.call(
+        &call("signDocument", json!([digest, "SIGN", b64(data)])),
+        None,
+    )));
+    assert_eq!(reply["code"], "200", "{reply}");
+    reply["responseObject"].clone()
+}
+
+#[test]
+fn arta_sign_document_raw_signature_of_an_rsa_key() {
+    let e = entry("user-rsa-sign");
+    let public = PublicKey::from_spki(e.cert.tbs_certificate().subject_public_key_info()).unwrap();
+    let digest_object = json!({"digest": b64(&[7; 32])}).to_string();
+    let no_names = json!({"digest": b64(&[7; 32]), "fileNames": []}).to_string();
+    // No digest, a digest object without file names, one with an empty list: the raw
+    // signature of `dataForSign` and no `esedoSign`.
+    for digest in ["", digest_object.as_str(), no_names.as_str()] {
+        let object = arta_sign_reply("user-rsa-sign", digest, b"raw data");
+        assert_eq!(object["dataForSign"], "cmF3IGRhdGE=", "{digest}");
+        assert!(object.get("esedoSign").is_none(), "{object}");
+        let signature = object["signedData"].as_str().unwrap().replace("\r\n", "");
+        public
+            .verify(SigAlg::RsaSha256, b"raw data", &unb64(&signature))
+            .unwrap();
+        // The same bytes every time: PKCS#1 v1.5 is deterministic.
+        let again = arta_sign_reply("user-rsa-sign", digest, b"raw data");
+        assert_eq!(object["signedData"], again["signedData"], "{digest}");
+    }
+}
+
+#[test]
+fn arta_sign_reply_base64_is_in_lines_of_sixty() {
+    let e = entry("user-rsa-sign");
+    let object = arta_sign_reply("user-rsa-sign", "", b"raw data");
+    assert_kalkan_lines(object["certificate"].as_str().unwrap(), &der_of(&e.cert));
+    let signed = object["signedData"].as_str().unwrap();
+    assert!(signed.contains("\r\n"), "{signed:?}");
+    assert_kalkan_lines(signed, &unb64(&signed.replace("\r\n", "")));
+    // The reply carries them as the JSON escapes `\r\n`.
+    let h = Harness::new(key("user-rsa-sign"), vec![]);
+    let mut s = h.session(ARTA);
+    s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
+    let raw = text(s.call(&call("signDocument", json!(["", "SIGN", "cmF3"])), None));
+    assert!(raw.contains(r"\r\n"), "{raw}");
+    assert!(!raw.contains('\n'), "{raw}");
+}
+
+#[test]
+fn arta_sign_document_info_after_a_second_key() {
+    let mut steps = key("user-gost2015-sign");
+    steps.extend(key("user-rsa-sign"));
+    let h = Harness::new(steps, vec![]);
+    let mut s = h.session(ARTA);
+    for _ in 0..2 {
+        s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
+    }
+    assert_eq!(
+        text(s.call(&call("signDocument", json!(["", "INFO", ""])), None)),
+        r#"{"responseObject":"{\"empty\":false}","code":"200"}"#
+    );
+}
+
+#[test]
+fn arta_sign_xml_rsa_has_no_line_breaks_in_the_signature() {
+    let h = Harness::new(key("user-rsa-sign"), vec![]);
+    let mut s = h.session(ARTA);
+    s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
+    let xml = text(s.call(
+        &call(
+            "signXML",
+            json!([r#"<?xml version="1.0"?><r xmlns="urn:x"><c a="1"/><d>t</d></r>"#]),
+        ),
+        None,
+    ));
+    let head = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?>"#,
+        r#"<r xmlns="urn:x"><c a="1"/><d>t</d>"#,
+        r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo>"#,
+        r#"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/>"#,
+        r#"<ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>"#,
+        r#"<ds:Reference URI=""><ds:Transforms>"#,
+        r#"<ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>"#,
+        r#"<ds:Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments"/>"#,
+        r#"</ds:Transforms><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>"#,
+        r#"<ds:DigestValue>"#,
+    );
+    let rest = xml.strip_prefix(head).unwrap_or_else(|| panic!("{xml}"));
+    assert!(
+        rest.contains("</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>"),
+        "{xml}"
+    );
+    assert!(
+        rest.contains("</ds:SignatureValue><ds:KeyInfo><ds:X509Data><ds:X509Certificate>"),
+        "{xml}"
+    );
+    assert!(
+        rest.ends_with("</ds:X509Certificate></ds:X509Data></ds:KeyInfo></ds:Signature></r>"),
+        "{xml}"
+    );
+    assert!(!xml.contains('\n') && !xml.contains('\r'), "{xml}");
     assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
 }
 
@@ -2480,12 +2671,30 @@ fn metadoc_key_info_order_on_collision() {
     assert_eq!(reply["code"], "200", "{reply}");
     assert_eq!(names(&raw, &reply["responseObject"]), observed);
     assert_eq!(reply["responseObject"]["path"], path.to_str().unwrap());
-    // Through the window: the same order without the `path` the core does not tell
-    // (registry.toml).
+    // Through the window: the same order and the path of the file the user chose.
+    let (path, _) = p12("user-gost2015-sign");
     let h = Harness::new(key("user-gost2015-sign"), vec![]);
     let request = json!({"method": "getKeyInfo", "args": ["PKCS12"]}).to_string();
     let raw = text(h.call(METADOC, &request, None));
     let reply = parse(&raw);
-    let without_path: Vec<&str> = observed.into_iter().filter(|n| *n != "path").collect();
-    assert_eq!(names(&raw, &reply["responseObject"]), without_path);
+    assert_eq!(names(&raw, &reply["responseObject"]), observed);
+    assert_eq!(reply["responseObject"]["path"], path.to_str().unwrap());
+}
+
+#[test]
+fn metadoc_key_info_path_is_the_chosen_file_of_each_key() {
+    for name in ["user-gost2015-sign", "user-rsa-sign"] {
+        let (path, _) = p12(name);
+        let h = Harness::new(key(name), vec![]);
+        let request = json!({"method": "getKeyInfo", "args": ["PKCS12"]}).to_string();
+        let reply = parse(&text(h.call(METADOC, &request, None)));
+        assert_eq!(reply["code"], "200", "{reply}");
+        assert_eq!(reply["responseObject"]["path"], path.to_str().unwrap());
+    }
+    // The usage and the algorithm of the RSA key.
+    let h = Harness::new(key("user-rsa-sign"), vec![]);
+    let request = json!({"method": "getKeyInfo", "args": ["PKCS12"]}).to_string();
+    let reply = parse(&text(h.call(METADOC, &request, None)));
+    assert_eq!(reply["responseObject"]["usage"], "sign");
+    assert_eq!(reply["responseObject"]["algorithm"], "RSA");
 }

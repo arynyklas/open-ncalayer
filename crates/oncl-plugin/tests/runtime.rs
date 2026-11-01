@@ -628,6 +628,7 @@ fn abi_types_roundtrip() {
         handle: 3,
         alias: "a".to_owned(),
         certificate: bytes(),
+        path: Some("p".to_owned()),
     }));
     roundtrip(SignCmsArgs {
         handle: 1,

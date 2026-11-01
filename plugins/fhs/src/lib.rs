@@ -174,10 +174,9 @@ fn certificate_path(args: &Map<String, Value>, t: &Texts) -> JValue {
     bean.into()
 }
 
-/// The key of the PKCS#12 file `path` (V2): the first alias in the order of Java's
-/// `HashMap`; `None` on any failure, as the original swallows them all.
-// Unverified against the original: the order of the aliases of a store with several keys
-// (the original's `HashMap` of entries).
+/// The key of the PKCS#12 file `path` (V2): the first alias in the order of Java's `HashMap`
+/// of entries (the same on a store of two and of four aliases); `None` on any failure, as the
+/// original swallows them all.
 fn entity(args: &Map<String, Value>) -> Option<Key> {
     let request = OpenArgs {
         storage: "PKCS12".to_owned(),
@@ -222,21 +221,6 @@ fn certificate(der: &[u8]) -> Result<JObject, String> {
         let offset = host::local_offset(ms).unwrap_or(0);
         format_java(DATE, ms, offset)
     };
-    let mut bean = JObject::hash_map();
-    bean.put("serialNumber", details.serial_dec);
-    bean.put("issuedDate", date(info.not_before));
-    bean.put("expiryDate", date(info.not_after));
-    bean.put(
-        "algorithm",
-        kalkan_key_alg_name(&info.spki_alg_oid).unwrap_or(&info.spki_alg_oid),
-    );
-    // The names of a Java `HashSet<String>`, in its iteration order.
-    let names: Vec<&str> = details.knca_types.iter().map(String::as_str).collect();
-    let ordered = javamap::iteration_order(&names, javamap::DEFAULT_CAPACITY)
-        .into_iter()
-        .map(|i| JValue::from(names[i]))
-        .collect::<Vec<_>>();
-    bean.put("certificateType", JValue::from(ordered));
     let subject = subject(der);
     let first = |oid: &str| {
         subject
@@ -244,12 +228,48 @@ fn certificate(der: &[u8]) -> Result<JObject, String> {
             .find(|(o, _)| o == oid)
             .map(|(_, v)| v.clone())
     };
-    bean.put_opt("fullName", first("2.5.4.3"));
-    bean.put_opt("orgName", first("2.5.4.10"));
-    bean.put_opt("bin", first("2.5.4.11"));
-    bean.put_opt("iin", first("2.5.4.5"));
-    bean.put_opt("surname", first("2.5.4.4"));
-    bean.put_opt("middleName", first("2.5.4.42"));
+    let org_name = first("2.5.4.10");
+    // A legal entity's certificate lists SIGNATURE before AUTHENTICATION (the set of a larger
+    // table than a person's) and puts its properties in a different order, which shows
+    // where they share a bucket of the original's `HashMap`.
+    let legal = org_name.is_some();
+    let capacity = if legal {
+        2 * javamap::DEFAULT_CAPACITY
+    } else {
+        javamap::DEFAULT_CAPACITY
+    };
+    // The names of a Java `HashSet<String>`, in its iteration order.
+    let names: Vec<&str> = details.knca_types.iter().map(String::as_str).collect();
+    let types = javamap::iteration_order(&names, capacity)
+        .into_iter()
+        .map(|i| JValue::from(names[i]))
+        .collect::<Vec<_>>();
+    let algorithm = kalkan_key_alg_name(&info.spki_alg_oid).unwrap_or(&info.spki_alg_oid);
+    let mut bean = JObject::hash_map();
+    if legal {
+        bean.put_opt("orgName", org_name);
+        bean.put_opt("surname", first("2.5.4.4"));
+        bean.put_opt("bin", first("2.5.4.11"));
+        bean.put_opt("fullName", first("2.5.4.3"));
+        bean.put_opt("middleName", first("2.5.4.42"));
+        bean.put("serialNumber", details.serial_dec);
+        bean.put("issuedDate", date(info.not_before));
+        bean.put("expiryDate", date(info.not_after));
+        bean.put("certificateType", JValue::from(types));
+        bean.put("algorithm", algorithm);
+        bean.put_opt("iin", first("2.5.4.5"));
+    } else {
+        bean.put("serialNumber", details.serial_dec);
+        bean.put("issuedDate", date(info.not_before));
+        bean.put("expiryDate", date(info.not_after));
+        bean.put("algorithm", algorithm);
+        bean.put("certificateType", JValue::from(types));
+        bean.put_opt("fullName", first("2.5.4.3"));
+        bean.put_opt("bin", first("2.5.4.11"));
+        bean.put_opt("iin", first("2.5.4.5"));
+        bean.put_opt("surname", first("2.5.4.4"));
+        bean.put_opt("middleName", first("2.5.4.42"));
+    }
     Ok(bean)
 }
 
@@ -386,7 +406,8 @@ fn sign_xml_v2(args: &Map<String, Value>) -> CallResult {
             bean.put("code", "200");
             bean.put("message", String::from_utf8_lossy(&signed).into_owned());
         }
-        // Unverified against the original: the provider's message (the core's here).
+        // The parser's text for a malformed document (the core words it as the JDK's); the
+        // text of other failures is the core's, as none can be provoked with a usable key.
         Err(e) => {
             bean.put("message", e.message);
         }

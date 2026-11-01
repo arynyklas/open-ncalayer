@@ -2392,6 +2392,23 @@ fn workspace_no_token_text() {
     assert_eq!(harness.prompter().password_prompts().len(), 2);
 }
 
+/// A `sign` of a page's attachments with `isKaztoken` and no reader: the reply keeps `code`
+/// (500) before the Kalkan text, after the password window answered, whatever the dialogs
+/// before it left in the script.
+#[test]
+fn workspace_kaztoken_sign_reply_keeps_its_code() {
+    let harness = Harness::new(vec![Step::Password("1".to_owned())], vec![]);
+    let request = workspace(
+        "sign",
+        r#"{"files":["aGVsbG8=","d29ybGQ="],"fileNames":"a.pdf<>b.pdf","storagePath":"C:\\ignored.p12","issuerCert":"x","isKaztoken":true,"alias":"a"}"#,
+    );
+    assert_eq!(
+        text(harness.call("workspace", &request, None)),
+        r#"{"code":500,"message":"kz.gov.pki.kalkan.exception.KalkanException: javax.smartcardio.CardException: DigiFlow LLP. KAZTOKEN 0 not found! [CARD_EXCEPTION]"}"#
+    );
+    assert_eq!(harness.prompter().password_prompts().len(), 1);
+}
+
 static WORKSPACE_TICKS: AtomicI64 = AtomicI64::new(0);
 
 /// The system's clock, moving 3 seconds more every time it is read.

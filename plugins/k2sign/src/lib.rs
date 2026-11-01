@@ -524,8 +524,9 @@ fn choose() -> Result<Key, Failure> {
 /// Kalkan's `createCAdES`, detached: contentType, signingTime, messageDigest and
 /// signingCertificateV2, the signer certificate; with `timestamp`, a time-stamp of Kalkan's
 /// default TSA. Any failure, the time-stamp's too, is `CREATE_CMS_ERROR`.
-// Unverified against the original: the signed attributes of its older `createCAdES`
-// variant, taken to be those of the current one.
+// Not observable: the signed attributes of its older `createCAdES` variant (taken to be those
+// of the current one): the request body with its CMS reaches the page server's log only as
+// binary data.
 fn cades(key: &Key, data: &[u8], timestamp: bool) -> Result<Vec<u8>, Failure> {
     let args = SignCmsExArgs {
         handle: key.handle(),

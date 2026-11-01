@@ -8,7 +8,7 @@ vendor = "АО «Центр электронных финансов»"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Окно выбора ключа — общее окно OpenNCALayer; списка недавних сертификатов плагина нет, ключи use_first_certificate и cert_pass не поддерживаются."

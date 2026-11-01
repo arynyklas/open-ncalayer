@@ -1082,6 +1082,11 @@ pub struct Chosen {
     pub alias: String,
     /// Its certificate, DER.
     pub certificate: Bytes,
+    /// The key store file the user chose, as the user reads its path; only for a plugin
+    /// with `key_files` in its manifest, and `None` for a token or when the host does not
+    /// give it (older cores).
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// `keys_sign_cms`: a CAdES signature.

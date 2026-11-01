@@ -47,15 +47,15 @@ pub const ARTA: Profile = Profile {
         separator: "<>",
         omit_blank: false,
     }),
-    // Unverified against the original: the DER of the signer's DN (its X509Name of the
-    // subject, rendered here from Kalkan's DN text as the E-Otinish module's).
+    // Not observable: the DER of the signer's DN (its X509Name of the subject, rendered here
+    // from Kalkan's DN text as the E-Otinish module's); the original builds no ESEDO CMS here.
     signer_dn: Some(SignerDn::Kalkan),
     description: Some(Description {
         text: "ESEDO",
         kind: StringKind::Printable,
     }),
-    // Unverified against the original: the BasicOCSPResponse inside an OCTET STRING, as the
-    // E-Otinish module's attribute.
+    // Not observable: the BasicOCSPResponse inside an OCTET STRING, as the E-Otinish
+    // module's attribute; the original builds no ESEDO CMS here (its OCSP and TSA calls fail).
     ocsp: Some(OcspForm::OctetBasic),
     ocsp_request: Some(ARTA_OCSP),
 };
@@ -392,6 +392,16 @@ fn sign_document(_: &SignService, args: &Args<'_>, _: &AddInfo) -> Outcome {
     }
 }
 
+/// Kalkan's base64 of a `SIGN` reply: lines of 60 characters, `\r\n` between them.
+fn kalkan_base64(bytes: &[u8]) -> String {
+    let text = base64(bytes);
+    text.as_bytes()
+        .chunks(60)
+        .map(String::from_utf8_lossy)
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
 /// The `KeyStore` bean of a `SIGN`: `dataForSign`, `signedData` (the raw signature),
 /// `certificate`, `id` (the serial number, a JSON number) and `esedoSign`.
 fn sign(key: &Key, digest: &str, data_for_sign: &str) -> Result<JObject, String> {
@@ -400,14 +410,15 @@ fn sign(key: &Key, digest: &str, data_for_sign: &str) -> Result<JObject, String>
         false => esedo(key, digest)?,
     };
     let data = javab64::decode_kalkan(data_for_sign)?;
-    // Unverified against the original: Kalkan's signature of the key's algorithm name
-    // (`RSA` for an RSA key), here the core's signature of the key's algorithm.
+    // Kalkan signs with the key's algorithm name (`RSA` for an RSA key); the core's raw
+    // signature of the key's algorithm is the same: RSA bytes are equal (PKCS#1 v1.5 is
+    // deterministic), a GOST signature matches in form.
     let signed = key.sign_raw(&data).map_err(|e| e.message)?;
     let details = host::cert_details(key.certificate()).map_err(|e| e.message)?;
     let mut object = JObject::hash_map();
     object.put("dataForSign", data_for_sign);
-    object.put("signedData", base64(&signed));
-    object.put("certificate", base64(key.certificate()));
+    object.put("signedData", kalkan_base64(&signed));
+    object.put("certificate", kalkan_base64(key.certificate()));
     object.put("id", JValue::Raw(details.serial_dec));
     object.put_opt("esedoSign", esedo_sign);
     Ok(object)
@@ -563,8 +574,8 @@ fn xml_signature(key: &Key, xml: &str) -> Result<String, String> {
         ),
         _ => (None, None),
     };
-    // Unverified against the original: the line breaks of its XML library inside the
-    // signature and the bytes of the serialized document.
+    // The original's XML library writes no line breaks inside the signature (observed with
+    // an RSA key); the bytes of the serialized document are the core's.
     let signed = key
         .sign_xml_ex(SignXmlExArgs {
             handle: key.handle(),
@@ -583,7 +594,7 @@ fn xml_signature(key: &Key, xml: &str) -> Result<String, String> {
             ]),
             signature_id: None,
             signing_time_object: None,
-            strip_whitespace: false,
+            strip_whitespace: true,
             base64_line_breaks: None,
             output: XmlOutput::Serialize {
                 declaration: true,

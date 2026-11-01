@@ -97,6 +97,7 @@ fn parse_with(xml: &[u8], bounds: Bounds) -> Result<Document<'_>, XmlError> {
     if count(b'<') > bounds.nodes || count(b'=') > bounds.attributes {
         return Err(XmlError::TooLarge);
     }
+    check_prolog(text)?;
     check_markup(xml, bounds)?;
     let options = ParsingOptions {
         allow_dtd: false,
@@ -115,12 +116,18 @@ fn parse_with(xml: &[u8], bounds: Bounds) -> Result<Document<'_>, XmlError> {
 }
 
 /// [`XmlError::NotWellFormed`] with `message` at the end of `text`, where the JDK's parser
+/// (Xerces) stops.
+fn sax_at_end(text: &str, message: &str) -> XmlError {
+    sax_at(text, text.len(), message)
+}
+
+/// [`XmlError::NotWellFormed`] with `message` at byte `at` of `text`, where the JDK's parser
 /// (Xerces) stops: lines broken by LF, CR or CRLF, columns counted in UTF-16 units from 1, a
 /// byte order mark not counted.
-fn sax_at_end(text: &str, message: &str) -> XmlError {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+fn sax_at(text: &str, at: usize, message: &str) -> XmlError {
+    let bom = if text.starts_with('\u{feff}') { 3 } else { 0 };
     let (mut line, mut column) = (1usize, 1usize);
-    let mut chars = text.chars().peekable();
+    let mut chars = text[bom..at.max(bom)].chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\r' | '\n' => {
@@ -136,6 +143,22 @@ fn sax_at_end(text: &str, message: &str) -> XmlError {
     XmlError::NotWellFormed(format!(
         "org.xml.sax.SAXParseException; lineNumber: {line}; columnNumber: {column}; {message}"
     ))
+}
+
+/// The parser's refusal of text where the prolog allows only markup: the first character that
+/// is not white space (after a byte order mark) is not `<`. Xerces stops at that character.
+fn check_prolog(text: &str) -> Result<(), XmlError> {
+    let start = if text.starts_with('\u{feff}') { 3 } else { 0 };
+    let body = &text[start..];
+    let at = body.find(|c: char| !matches!(c, ' ' | '\t' | '\r' | '\n'));
+    match at {
+        Some(at) if !body[at..].starts_with('<') => Err(sax_at(
+            text,
+            start + at,
+            "Content is not allowed in prolog.",
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Rejects a DOCTYPE, nesting deeper than [`MAX_DEPTH`], prefixed `xmlns` attributes and

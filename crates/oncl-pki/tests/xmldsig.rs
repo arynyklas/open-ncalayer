@@ -381,6 +381,33 @@ fn unclosed_root_is_the_jdk_parsers_text() {
     }
 }
 
+/// Text before the first markup: Xerces stops at that character with "Content is not
+/// allowed in prolog." (white space before it is skipped, a BOM is not counted).
+#[test]
+fn text_in_the_prolog_is_the_jdk_parsers_text() {
+    let [(signer, _), ..] = signers();
+    let message = |line: usize, column: usize| {
+        format!(
+            "org.xml.sax.SAXParseException; lineNumber: {line}; columnNumber: {column}; \
+             Content is not allowed in prolog."
+        )
+    };
+    for (xml, line, column) in [
+        ("not xml", 1, 1),
+        ("  \r\n\t not xml", 2, 3),
+        ("\u{FEFF}д<a/>", 1, 1),
+        ("\n\n\u{1F600}<a/>", 3, 1),
+        ("x<a>", 1, 1),
+    ] {
+        let error = sign_enveloped(xml.as_bytes(), &signer.key, &signer.cert).unwrap_err();
+        assert_eq!(
+            error,
+            XmlError::NotWellFormed(message(line, column)),
+            "{xml:?}"
+        );
+    }
+}
+
 #[test]
 fn unsigned_document_has_no_signature() {
     assert_eq!(verify(b"<a><b/></a>"), Err(XmlError::NoSignature));

@@ -224,6 +224,8 @@ pub struct FlowOpen {
 
 /// The keys of an opened store, listed for a flow's key dialog.
 pub struct OpenedFlow {
+    /// The key store file the user chose; none for a token.
+    path: Option<PathBuf>,
     entries: Vec<KeyEntry>,
     infos: Vec<CertInfo>,
     /// The busy indicator, up to the first key dialog.
@@ -233,6 +235,11 @@ pub struct OpenedFlow {
 }
 
 impl OpenedFlow {
+    /// The key store file the user chose; `None` for a token.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
     /// The keys listed, in the key dialog's order.
     pub fn entries(&self) -> &[KeyEntry] {
         &self.entries
@@ -385,6 +392,11 @@ impl KeyChooser {
                     }
                     return FlowOpen {
                         opened: Some(OpenedFlow {
+                            path: answer
+                                .storage
+                                .token_kind()
+                                .is_none()
+                                .then(|| answer.path.clone()),
                             entries,
                             infos,
                             busy: Some(busy),
