@@ -1,9 +1,11 @@
 //! What the site reads besides the ports: the channels' update indexes (data of the
 //! repository: an error stops the build), the list of the project's releases and the facts
 //! of the `upstream` branch (external inputs: the caller turns an error into a warning).
-//! Every file is read with the limit [`MAX_INPUT`].
+//! Small indexes and release lists use [`MAX_INPUT`]; facts stream within [`MAX_FACTS`].
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 use anyhow::{Context, bail};
@@ -14,8 +16,12 @@ use time::OffsetDateTime;
 use crate::index::{check_asset_urls, index_path};
 use crate::plugin::read_limited;
 
-/// The largest input file read.
+/// The largest channel index, release list or upstream history index read.
 pub const MAX_INPUT: u64 = 8 * 1024 * 1024;
+
+/// The watcher's full inventory can be much larger than the registry's view of it.
+/// Accept exactly what the facts publisher accepts, without buffering the whole file.
+pub const MAX_FACTS: u64 = crate::upstream::publish::EMIT_FILE_MAX;
 
 /// What a channel's index offers.
 #[derive(Debug, Clone)]
@@ -353,6 +359,21 @@ struct ManifestFile {
     version: String,
 }
 
+fn read_facts(path: &Path) -> anyhow::Result<FactsFile> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    if file.metadata()?.len() > MAX_FACTS {
+        bail!("{} exceeds {MAX_FACTS} bytes", path.display());
+    }
+    // The metadata check avoids parsing an already oversized inventory. The bounded
+    // reader also enforces the ceiling if the file grows after that check.
+    let mut reader = BufReader::new(file).take(MAX_FACTS + 1);
+    let facts = serde_json::from_reader(&mut reader);
+    if reader.limit() == 0 {
+        bail!("{} exceeds {MAX_FACTS} bytes", path.display());
+    }
+    facts.with_context(|| path.display().to_string())
+}
+
 /// The facts of the `upstream` branch in `dir`: `index.json` and `latest/facts.json`, each
 /// absent if its file is.
 ///
@@ -363,8 +384,7 @@ pub fn read_upstream(dir: &Path) -> anyhow::Result<Upstream> {
     let mut upstream = Upstream::default();
     let facts = dir.join("latest/facts.json");
     if facts.is_file() {
-        let file: FactsFile = serde_json::from_slice(&read_limited(&facts, MAX_INPUT)?)
-            .with_context(|| facts.display().to_string())?;
+        let file = read_facts(&facts)?;
         upstream.facts = Some(Facts {
             version: file.manifest.version,
             bundles: file.bundles,
@@ -424,6 +444,7 @@ fn is_history_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{self, Write};
     use std::path::PathBuf;
 
     use serde_json::json;
@@ -580,6 +601,99 @@ mod tests {
         assert_eq!(change.path, None);
         assert_eq!(change.issues, [17]);
         assert_eq!(change.plugins[0].change, ChangeKind::Changed);
+    }
+
+    /// A large ignored inventory without allocating its bytes in the test either.
+    fn facts_with_inventory(dir: &Path, size: u64) -> std::path::PathBuf {
+        let latest = dir.join("latest");
+        fs::create_dir_all(&latest).unwrap();
+        let path = latest.join("facts.json");
+        let fixture = fs::read(fixtures().join("upstream/latest/facts.json")).unwrap();
+        let prefix = br#"{"distributions":{"test":{"files":[{"path":""#;
+        let suffix = br#""}]}},"#;
+        let fixed = (prefix.len() + suffix.len() + fixture.len() - 1) as u64;
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(prefix).unwrap();
+        io::copy(&mut io::repeat(b'x').take(size - fixed), &mut file).unwrap();
+        file.write_all(suffix).unwrap();
+        file.write_all(&fixture[1..]).unwrap();
+        path
+    }
+
+    #[test]
+    fn upstream_large_ignored_inventory_preserves_facts_and_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let facts = facts_with_inventory(dir.path(), MAX_INPUT + 1024);
+        assert!(fs::metadata(facts).unwrap().len() > MAX_INPUT);
+        fs::copy(
+            fixtures().join("upstream/index.json"),
+            dir.path().join("index.json"),
+        )
+        .unwrap();
+        let upstream = read_upstream(dir.path()).unwrap();
+        let facts = upstream.facts.unwrap();
+        assert_eq!(facts.version, "1.4");
+        assert_eq!(facts.bundles["kz.example.gamma"].version, "1.1");
+        assert!(facts.bundles["kz.gov.pki.kalkan.xmldsig"].required);
+        assert_eq!(upstream.history.len(), 2);
+        assert_eq!(upstream.history[0].kind, HistoryKind::Baseline);
+        assert_eq!(upstream.history[1].issues, [17]);
+        assert!(upstream.warnings.is_empty());
+    }
+
+    #[test]
+    fn upstream_facts_accepts_exact_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        facts_with_inventory(dir.path(), MAX_FACTS);
+        let upstream = read_upstream(dir.path()).unwrap();
+        assert_eq!(upstream.facts.unwrap().version, "1.4");
+    }
+
+    #[test]
+    fn upstream_facts_rejects_over_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = facts_with_inventory(dir.path(), 1024);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(MAX_FACTS + 1)
+            .unwrap();
+        let err = read_upstream(dir.path()).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("facts.json") && message.contains("exceeds"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn upstream_index_keeps_small_input_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::File::create(dir.path().join("index.json"))
+            .unwrap()
+            .set_len(MAX_INPUT + 1)
+            .unwrap();
+        let err = read_upstream(dir.path()).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("index.json") && message.contains("exceeds"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn upstream_facts_rejects_invalid_ignored_inventory_and_trailing_json() {
+        for bytes in [
+            r#"{"manifest":{"version":"1.4"},"distributions":{"files":[invalid]}}"#,
+            r#"{"manifest":{"version":"1.4"}} {}"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::create_dir(dir.path().join("latest")).unwrap();
+            fs::write(dir.path().join("latest/facts.json"), bytes).unwrap();
+            let err = read_upstream(dir.path()).unwrap_err();
+            assert!(format!("{err:#}").contains("facts.json"), "{err:#}");
+        }
     }
 
     fn upstream_with_path(id: &str, path: &str) -> Option<String> {

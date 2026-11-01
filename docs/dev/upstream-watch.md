@@ -98,6 +98,7 @@ cargo xtask upstream run --dry-run --emit target/upstream/emit
 ## 8. Потребители
 
 - Реестр плагинов (P12): `index.json` и `latest/facts.json` (`manifest.version`, `bundles{symname: {version, required}}`), пересборка Pages по `repository_dispatch: upstream`.
+  Для Pages `latest/facts.json` читается потоково через `BufReader` с лимитом 64 MiB — тем же, что у `publish`: большие `distributions` и `jars` проверяются как JSON, но не сохраняются в памяти. `index.json`, индексы каналов и список релизов по-прежнему ограничены 8 MiB каждый. Некорректный или превышающий лимит файл остаётся ошибкой, а не частичными данными.
 - Приватная лаборатория: читает ветку без токена (по sha коммита), скачивает изменившиеся оригиналы со сверкой sha256 из `latest/facts.json`, декомпилирует изменившиеся JAR в песочнице без сети и учётных данных и хранит всё у себя.
 
 ## 9. Известные ограничения
