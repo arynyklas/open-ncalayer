@@ -8,8 +8,9 @@
 //! - `getBundles`: `{symname: version}` of the original's OSGi framework
 //!   (`org.apache.felix.framework`), of its core bundles whose functions this daemon
 //!   implements ([`CORE_BUNDLES`]), of OpenNCALayer itself ([`SYMNAME`], the core's
-//!   version), and of the original bundles the enabled plugins port: a `HashMap` the `uuid`
-//!   goes into too, so the keys are in its order ([`oncl_pdk::javamap`]);
+//!   version), and of the original bundles the enabled plugins port, each version as the
+//!   original's framework prints it, OSGi `major.minor.micro` ([`osgi_version`]): a `HashMap`
+//!   the `uuid` goes into too, so the keys are in its order ([`oncl_pdk::javamap`]);
 //! - `getServices`: `{"services": [module names]}`: the daemon's built-in modules, those the
 //!   original has in the order it lists them on the core's system ([`original_services`]),
 //!   then those of its plugins now, sorted;
@@ -32,7 +33,7 @@ pub mod reply;
 #[cfg(target_arch = "wasm32")]
 mod guest;
 
-pub use reply::{CORE_BUNDLES, MODULE_NAME, SYMNAME, bundles, original_services};
+pub use reply::{CORE_BUNDLES, MODULE_NAME, SYMNAME, bundles, original_services, osgi_version};
 
 use oncl_pdk::abi::{CoreBundles, CoreModules, Os, Window};
 use oncl_pdk::orgjson::{self, JObject, JValue};
@@ -116,7 +117,8 @@ pub fn handle(core: &impl Core, request: &str) -> Result<String, String> {
 }
 
 /// `getBundles`: a `new HashMap()` of the bundles, in the order they go in; a plugin's
-/// bundle of a name already present does not replace it.
+/// bundle of a name already present does not replace it. A plugin's version is the one its
+/// manifest gives the bundle, printed as `Bundle.getVersion().toString()` prints it.
 fn get_bundles(bundles: CoreBundles) -> JObject {
     let mut reply = JObject::hash_map();
     for (symname, version) in CORE_BUNDLES {
@@ -125,7 +127,7 @@ fn get_bundles(bundles: CoreBundles) -> JObject {
     reply.put(SYMNAME, bundles.core_version);
     for (symname, version) in bundles.plugins {
         if reply.get(&symname).is_none() {
-            reply.put(symname, version);
+            reply.put(symname, osgi_version(&version));
         }
     }
     reply

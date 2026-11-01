@@ -50,3 +50,93 @@ pub fn bundles() -> Vec<(&'static str, &'static str)> {
     bundles.push((SYMNAME, env!("CARGO_PKG_VERSION")));
     bundles
 }
+
+/// `Bundle.getVersion().toString()` of a bundle whose manifest says `version`: the OSGi
+/// `Version` the framework parses it into, `major.minor.micro` with `.qualifier` when there is
+/// one, so `1.2` is `1.2.0` and `2` is `2.0.0`.
+///
+/// The grammar is the OSGi core specification's, which Felix's `Version(String)` follows:
+/// `major ['.' minor ['.' micro ['.' qualifier]]]` around surrounding whitespace, the three
+/// numbers decimal digits within `i32`, the qualifier one or more of `A-Z a-z 0-9 _ -`. A
+/// semver pre-release (`1.0.0-beta.2`) is not that: the original's framework refuses it, no
+/// bundle of the original carries one, and no OSGi rendering of it exists, so a `version` that
+/// is not an OSGi version is reported as written.
+pub fn osgi_version(version: &str) -> String {
+    parse_osgi(version).unwrap_or_else(|| version.to_owned())
+}
+
+fn parse_osgi(version: &str) -> Option<String> {
+    let version = version.trim_matches(|c: char| c <= ' ');
+    let mut parts = version.splitn(4, '.');
+    let number = |part: &str| -> Option<u32> {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        part.parse().ok().filter(|&n| n <= i32::MAX as u32)
+    };
+    let major = number(parts.next()?)?;
+    let Some(minor) = parts.next() else {
+        return Some(format!("{major}.0.0"));
+    };
+    let minor = number(minor)?;
+    let Some(micro) = parts.next() else {
+        return Some(format!("{major}.{minor}.0"));
+    };
+    let micro = number(micro)?;
+    match parts.next() {
+        None => Some(format!("{major}.{minor}.{micro}")),
+        Some(q)
+            if !q.is_empty()
+                && q.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') =>
+        {
+            Some(format!("{major}.{minor}.{micro}.{q}"))
+        }
+        Some(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::osgi_version;
+
+    #[test]
+    fn osgi_versions_are_major_minor_micro() {
+        for (written, reported) in [
+            ("1.2", "1.2.0"),
+            ("1.2.0", "1.2.0"),
+            ("2", "2.0.0"),
+            ("0.1.3", "0.1.3"),
+            ("1.0.445", "1.0.445"),
+            ("01.002.0003", "1.2.3"),
+            (" 6.0 ", "6.0.0"),
+            ("1.2.3.RC_1-x", "1.2.3.RC_1-x"),
+            ("1.2.3.20240101", "1.2.3.20240101"),
+            ("2147483647", "2147483647.0.0"),
+        ] {
+            assert_eq!(osgi_version(written), reported, "{written:?}");
+        }
+    }
+
+    #[test]
+    fn what_is_not_an_osgi_version_is_reported_as_written() {
+        for written in [
+            "1.0.0-beta.2",
+            "1.0.0-beta",
+            "1.2.3.",
+            "1.2.3.a.b",
+            "1.2.3.é",
+            "1.",
+            ".1",
+            "1..2",
+            "-1",
+            "+1",
+            "a",
+            "2147483648",
+            "99999999999999999999",
+            "",
+        ] {
+            assert_eq!(osgi_version(written), written, "{written:?}");
+        }
+    }
+}

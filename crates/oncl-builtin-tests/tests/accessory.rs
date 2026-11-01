@@ -321,6 +321,35 @@ fn get_bundles_includes_plugin_replaces() {
     assert!(reply.get("kz.example.echo").is_none());
 }
 
+/// A plugin's bundle version is printed as the original's framework prints an OSGi version:
+/// `major.minor.micro`, whatever the manifest wrote; a string that is no OSGi version (a semver
+/// pre-release) is reported as written.
+#[test]
+fn get_bundles_prints_plugin_versions_as_osgi() {
+    let plugins = Arc::new(FakeBundles::default());
+    let (m, _) = module_with(Arc::clone(&plugins));
+    *plugins.bundles.lock().unwrap() = [
+        ("kz.example.short", "1.2"),
+        ("kz.example.full", "1.2.0"),
+        ("kz.example.pre", "1.0.0-beta.2"),
+        ("kz.example.major", "2"),
+        ("kz.example.qualified", "1.2.3.rc1"),
+    ]
+    .map(|(symname, version)| (symname.to_owned(), version.to_owned()))
+    .to_vec();
+    let reply = call(&m, json!({"method": "getBundles"}), None);
+    let obj = reply.as_object().unwrap();
+    assert_eq!(obj.len(), 14);
+    assert_eq!(obj["kz.example.short"], "1.2.0");
+    assert_eq!(obj["kz.example.full"], "1.2.0");
+    assert_eq!(obj["kz.example.pre"], "1.0.0-beta.2");
+    assert_eq!(obj["kz.example.major"], "2.0.0");
+    assert_eq!(obj["kz.example.qualified"], "1.2.3.rc1");
+    // The core's own bundles are as they were.
+    assert_eq!(obj["org.apache.felix.framework"], "7.0.3");
+    assert_eq!(obj[SYMNAME], env!("CARGO_PKG_VERSION"));
+}
+
 #[test]
 fn get_services_is_live() {
     let plugins = Arc::new(FakeBundles::default());
