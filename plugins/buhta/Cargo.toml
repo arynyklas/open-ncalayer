@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-buhta"
 description = "OpenNCALayer port of Buhta NcaModule: a Protocol Buffers RPC behind CommonInvoker that picks a key by TIN and makes CAdES-T and XML signatures"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

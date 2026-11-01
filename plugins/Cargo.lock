@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-buhta"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "base64",
  "oncl-pdk",
@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-documentolog"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "aes",
  "base64",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-knp"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "base64",
  "der",
@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-qoltanba"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "base64",
  "der",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-skf"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "base64",
  "der",

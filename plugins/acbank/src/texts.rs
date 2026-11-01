@@ -31,6 +31,8 @@ impl Texts {
 
     // The texts of the original's dictionaries; «Отмена»/«Назад» and their translations are
     // the buttons of OpenNCALayer's window, which the original's has not.
+    // Not observable: apart from the window's title, these Kazakh and English texts are
+    // translations; the original's window cannot be read from outside.
     pub(crate) const KK: Texts = Texts {
         title: "ЭЦҚ арқылы деректерге қол қою модулі",
         documents: "Қол қоюға арналған құжаттар:",

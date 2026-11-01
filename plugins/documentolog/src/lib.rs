@@ -199,7 +199,8 @@ const TOKENS: [&str; 4] = [
 /// The file storages it knows.
 const FILES: [&str; 2] = ["PKCS12", "JKS"];
 
-/// Whether `storage` is one the original knows.
+/// Whether `storage` is one the original knows. Not observable: names other than `PKCS12`
+/// (the token storages need a device); an unknown name was seen to fail.
 fn known_storage(storage: &str) -> bool {
     FILES.contains(&storage) || TOKENS.contains(&storage)
 }
@@ -222,9 +223,11 @@ fn browse(args: &Map<String, Value>) -> Out {
         STATE.with_borrow_mut(|state| state.browsing = false);
         out
     };
+    // An unknown storage name leaves the guard up, as a failed browse does: every later
+    // browse answers `unknown` at once.
     if !known_storage(&storage) {
         clear_password();
-        return done(unknown());
+        return unknown();
     }
     if !FILES.contains(&storage.as_str()) {
         let terminals = keys::terminals(&storage).unwrap_or_default();

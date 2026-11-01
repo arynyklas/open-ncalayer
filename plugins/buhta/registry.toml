@@ -8,7 +8,7 @@ vendor = "ТОО «Buhta.kz»"
 
 [port]
 status = "full"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Окно выбора сертификата — общее окно OpenNCALayer (хранилище PKCS#12, ключ из списка) с условием «БИН, а без него ИИН, равен tin»; ключ — любой из хранилища, а не только первый."

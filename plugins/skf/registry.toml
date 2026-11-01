@@ -8,7 +8,7 @@ vendor = "SK-Pharmacy"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Проверка TLS не отключается (у оригинала — для всей JVM), системное свойство knca.ocsp.allowedperiod не ставится, временные файлы не создаются."

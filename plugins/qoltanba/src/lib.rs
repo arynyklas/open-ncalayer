@@ -14,9 +14,10 @@
 //!   a method not found speaks the language of the request before (the original sets it
 //!   only once the method is found). The language lives in the session (the original's in
 //!   the process).
-//! - The key: OpenNCALayer's storage and key dialogs, signing keys of the core's CAs only,
-//!   none with the electronic government's blocked usages; then its OCSP status (revoked or
-//!   unknown refuses it, a responder that cannot be asked does not).
+//! - The key: OpenNCALayer's storage and key dialogs, signing keys without the electronic
+//!   government's blocked usages; once one is chosen, its issuer must be one of the core's
+//!   CAs, then its OCSP status (revoked or unknown refuses it, a responder that cannot be
+//!   asked does not).
 
 mod pdf;
 mod report;
@@ -77,7 +78,8 @@ const NO_TOKEN: &str = "Носитель не обнаружен";
 
 /// The original's text of a failed `createCAdES`/`applyCAdEST`: `"Ошибка. Код: "` and the
 /// code of Kalkan's `ProviderUtilException`.
-// Unverified against the original: the code Kalkan gives a time-stamp that fails.
+// Not observable: the code Kalkan gives a time-stamp that fails; a signature is stopped by
+// the chain check before the time-stamp, and the time-stamp service cannot be made to fail.
 const TSA_FAILED: &str = "Ошибка. Код: TIMESTAMP_CREATION_FAILURE";
 
 /// `dd/MM/yyyy HH:mm:ss`, the dates of a SignerInfo.
@@ -90,9 +92,9 @@ enum Failure {
 }
 
 /// The dispatcher's view of `CMSSignUtil`: its declared methods.
-// Unverified against the original: the order of `getDeclaredMethods()` and the number of
-// parameters of the private methods (a request naming one with another count is a method
-// not found).
+// Not observable: the order of `getDeclaredMethods()` and the number of parameters of the
+// private methods (a request naming one with another count is a method not found); the
+// public methods and their counts are as observed.
 static CLASS: LegacyClass<Qoltanba> = LegacyClass {
     dispatcher: "kz.btsdigital.qoltanba.QoltanbaActivator",
     target: "kz.btsdigital.qoltanba.CMSSignUtil",
@@ -266,8 +268,8 @@ fn fail(state: &Qoltanba, failure: Failure) -> Outcome {
 
 fn sign_file_bytes(state: &Qoltanba, args: &Args<'_>, _: &AddInfo) -> Outcome {
     let (data, storage) = (args.str(0), args.str(1));
-    // Unverified against the original: blank as `trim().isEmpty()`, checked before the
-    // data is decoded.
+    // Not observable: that the original checks blank before the data is decoded; a blank
+    // storage with good data, and blank data with PKCS12, answer as seen here.
     if storage.trim().is_empty() {
         return fail(state, Failure::Key("404"));
     }
@@ -291,18 +293,16 @@ fn sign(data: &str, storage: &str) -> Result<Vec<u8>, Failure> {
     if token && keys::terminals(storage).unwrap_or_default().is_empty() {
         return Err(Failure::Text(NO_TOKEN));
     }
-    // The core's CAs: the NCA's (the original's embedded list).
-    let chain = host::ca_list()
-        .ok()
-        .filter(|cas| !cas.is_empty())
-        .map(|cas| cas.into_iter().map(Bytes::from).collect());
-    // Unverified against the original: closing its storage dialog («Не удалось открыть
-    // хранилище») and its key list (`action.canceled`) are one cancel here.
+    // The key list offers every key of the storage that is of the type SIGNATURE, valid and
+    // without a blocked usage; the chain is judged after the choice. Not observable:
+    // closing the storage dialog («Не удалось открыть хранилище») and the key list
+    // (`action.canceled`) are one cancel here.
     let key = keys::select(&SelectArgs {
         action: Action::Sign,
         storages: vec![storage.to_owned()],
         filter: Filter {
-            chain,
+            // The path to the CAs and the status are asked below, after the choice.
+            chain: Some(Vec::new()),
             // The status is asked below, where a responder that cannot be asked passes.
             allow_revoked: true,
             ..Filter::default()
@@ -318,6 +318,12 @@ fn sign(data: &str, storage: &str) -> Result<Vec<u8>, Failure> {
     })
     .map_err(internal)?
     .ok_or(Failure::Key("action.canceled"))?;
+    if host::ca_issuer(key.certificate())
+        .map_err(internal)?
+        .is_none()
+    {
+        return Err(Failure::Key("error.certificate.ca"));
+    }
     ocsp_check(key.certificate()).map_err(Failure::Key)?;
     let outcome = key
         .sign_cms_ex(SignCmsExArgs {
@@ -429,16 +435,18 @@ impl Verified {
         let valid = [self.tsp, self.certificate, self.signature]
             .iter()
             .all(|judged| *judged == Judged::Valid);
+        // The properties that share a bucket come out in the order they are put: the time-stamp
+        // result before the person flag, the validity before the serial number.
         let mut bean = JObject::hash_map();
+        bean.put("tspVerificationResult", self.tsp.bean(lang));
         bean.put("personCertificate", self.person);
-        bean.put("serialNumber", self.serial.as_str());
         bean.put("validSignature", valid);
+        bean.put("serialNumber", self.serial.as_str());
         bean.put_opt("organizationName", self.organization.as_deref());
         bean.put("certificateValidityPeriod", self.period.as_str());
         bean.put_opt("tspDate", self.tsp_date.as_deref());
         bean.put_opt("bin", self.bin.as_deref());
         bean.put_opt("iin", self.iin.as_deref());
-        bean.put("tspVerificationResult", self.tsp.bean(lang));
         bean.put("number", 0);
         bean.put("certificateVerificationResult", self.certificate.bean(lang));
         bean.put_opt("name", self.name.as_deref());
