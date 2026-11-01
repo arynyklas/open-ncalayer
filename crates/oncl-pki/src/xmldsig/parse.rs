@@ -97,7 +97,6 @@ fn parse_with(xml: &[u8], bounds: Bounds) -> Result<Document<'_>, XmlError> {
     if count(b'<') > bounds.nodes || count(b'=') > bounds.attributes {
         return Err(XmlError::TooLarge);
     }
-    check_prolog(text)?;
     check_markup(xml, bounds)?;
     let options = ParsingOptions {
         allow_dtd: false,
@@ -111,20 +110,26 @@ fn parse_with(xml: &[u8], bounds: Bounds) -> Result<Document<'_>, XmlError> {
             text,
             "XML document structures must start and end within the same entity.",
         ),
-        e => XmlError::Parse(e.to_string()),
+        e => match prolog_sax(text) {
+            Some(sax) => XmlError::Prolog {
+                text: e.to_string(),
+                sax,
+            },
+            None => XmlError::Parse(e.to_string()),
+        },
     })
 }
 
 /// [`XmlError::NotWellFormed`] with `message` at the end of `text`, where the JDK's parser
 /// (Xerces) stops.
 fn sax_at_end(text: &str, message: &str) -> XmlError {
-    sax_at(text, text.len(), message)
+    XmlError::NotWellFormed(sax_at(text, text.len(), message))
 }
 
-/// [`XmlError::NotWellFormed`] with `message` at byte `at` of `text`, where the JDK's parser
-/// (Xerces) stops: lines broken by LF, CR or CRLF, columns counted in UTF-16 units from 1, a
-/// byte order mark not counted.
-fn sax_at(text: &str, at: usize, message: &str) -> XmlError {
+/// The text of the JDK parser's `SAXParseException` with `message` at byte `at` of `text`,
+/// where Xerces stops: lines broken by LF, CR or CRLF, columns counted in UTF-16 units from
+/// 1, a byte order mark not counted.
+fn sax_at(text: &str, at: usize, message: &str) -> String {
     let bom = if text.starts_with('\u{feff}') { 3 } else { 0 };
     let (mut line, mut column) = (1usize, 1usize);
     let mut chars = text[bom..at.max(bom)].chars().peekable();
@@ -140,25 +145,17 @@ fn sax_at(text: &str, at: usize, message: &str) -> XmlError {
             c => column += c.len_utf16(),
         }
     }
-    XmlError::NotWellFormed(format!(
-        "org.xml.sax.SAXParseException; lineNumber: {line}; columnNumber: {column}; {message}"
-    ))
+    format!("org.xml.sax.SAXParseException; lineNumber: {line}; columnNumber: {column}; {message}")
 }
 
-/// The parser's refusal of text where the prolog allows only markup: the first character that
-/// is not white space (after a byte order mark) is not `<`. Xerces stops at that character.
-fn check_prolog(text: &str) -> Result<(), XmlError> {
+/// The parser's text for a document whose first character that is not white space (after a
+/// byte order mark) is not `<`: Xerces stops at that character.
+fn prolog_sax(text: &str) -> Option<String> {
     let start = if text.starts_with('\u{feff}') { 3 } else { 0 };
     let body = &text[start..];
-    let at = body.find(|c: char| !matches!(c, ' ' | '\t' | '\r' | '\n'));
-    match at {
-        Some(at) if !body[at..].starts_with('<') => Err(sax_at(
-            text,
-            start + at,
-            "Content is not allowed in prolog.",
-        )),
-        _ => Ok(()),
-    }
+    let at = body.find(|c: char| !matches!(c, ' ' | '\t' | '\r' | '\n'))?;
+    (!body[at..].starts_with('<'))
+        .then(|| sax_at(text, start + at, "Content is not allowed in prolog."))
 }
 
 /// Rejects a DOCTYPE, nesting deeper than [`MAX_DEPTH`], prefixed `xmlns` attributes and

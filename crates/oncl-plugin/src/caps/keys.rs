@@ -7,7 +7,7 @@
 
 use super::{
     ConsentKind, DialogTurn, MAX_DIALOG_TEXT, MAX_KEY_HANDLES, MAX_LINE, check_line, crypto,
-    denied, failed, invalid, limit, origin, source, source_line,
+    denied, failed, invalid, is_builtin, limit, origin, source, source_line,
 };
 use crate::cause;
 use crate::host::HostState;
@@ -1031,10 +1031,12 @@ pub(crate) fn keys_sign_xml(state: &mut HostState, args: SignXmlArgs) -> HostRes
 
 /// [`keys_sign_xml`] of the document `xml`.
 pub(crate) fn sign_xml(state: &HostState, args: &SignXmlArgs, xml: &[u8]) -> HostResult<Vec<u8>> {
+    let builtin = is_builtin(state);
     let entry = state.keys.get(args.handle)?;
     match &args.element {
         None if args.parent.is_some() => Err(invalid("parent is only for a signed element")),
-        None => xmldsig::sign_enveloped(xml, &entry.key, &entry.cert).map_err(xml_failed),
+        None => xmldsig::sign_enveloped(xml, &entry.key, &entry.cert)
+            .map_err(|e| xml_failed(builtin, e)),
         Some(element) => xmldsig::sign_element(
             xml,
             element,
@@ -1042,7 +1044,7 @@ pub(crate) fn sign_xml(state: &HostState, args: &SignXmlArgs, xml: &[u8]) -> Hos
             &entry.key,
             &entry.cert,
         )
-        .map_err(xml_failed),
+        .map_err(|e| xml_failed(builtin, e)),
     }
 }
 
@@ -1058,6 +1060,7 @@ fn c14n(method: C14n) -> xmldsig::C14n {
 
 /// `keys_sign_xml_ex`: an XML signature as the arguments say.
 pub(crate) fn keys_sign_xml_ex(state: &mut HostState, args: SignXmlExArgs) -> HostResult<Bytes> {
+    let builtin = is_builtin(state);
     let entry = state.keys.get(args.handle)?;
     let spec = xmldsig::XmlSignSpec {
         element: args.element.as_deref(),
@@ -1108,14 +1111,15 @@ pub(crate) fn keys_sign_xml_ex(state: &mut HostState, args: SignXmlExArgs) -> Ho
             },
         },
     };
-    let signed =
-        xmldsig::sign_spec(&args.xml, &spec, &entry.key, &entry.cert).map_err(xml_failed)?;
+    let signed = xmldsig::sign_spec(&args.xml, &spec, &entry.key, &entry.cert)
+        .map_err(|e| xml_failed(builtin, e))?;
     Ok(Bytes::from(signed))
 }
 
 /// `keys_sign_xades`: a XAdES-BASELINE signature of the whole document; time-stamps and
 /// OCSP requests only to the PKI hosts.
 pub(crate) fn keys_sign_xades(state: &mut HostState, args: XadesArgs) -> HostResult<XadesOutcome> {
+    let builtin = is_builtin(state);
     let level = match args.level {
         XadesLevel::B => xades::XadesLevel::B,
         XadesLevel::T => xades::XadesLevel::T,
@@ -1180,7 +1184,7 @@ pub(crate) fn keys_sign_xades(state: &mut HostState, args: XadesArgs) -> HostRes
             )),
             Err(xades::XadesError::Crl { .. }) => XadesOutcome::Invalid(Problem::CrlInvalid),
             Err(e @ xades::XadesError::NoIssuer(_)) => return Err(invalid(e.to_string())),
-            Err(xades::XadesError::Xml(e)) => return Err(xml_failed(e)),
+            Err(xades::XadesError::Xml(e)) => return Err(xml_failed(builtin, e)),
         },
     )
 }
@@ -1190,9 +1194,14 @@ fn cms_failed(e: CmsError) -> HostError {
     failed(&e).with_cause(cause::cms(&e))
 }
 
-/// An XML document that did not sign: `failed` with its cause.
-fn xml_failed(e: xmldsig::XmlError) -> HostError {
-    failed(&e).with_cause(cause::xml(&e))
+/// An XML document that did not sign: `failed` with its cause. A plugin gets the JDK parser's
+/// text for text before the first markup; a built-in module the core's, as before.
+fn xml_failed(builtin: bool, e: xmldsig::XmlError) -> HostError {
+    let cause = cause::xml(&e);
+    match e {
+        xmldsig::XmlError::Prolog { sax, .. } if !builtin => failed(sax).with_cause(cause),
+        e => failed(&e).with_cause(cause),
+    }
 }
 
 /// `keys_release`.

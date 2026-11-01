@@ -937,6 +937,12 @@ fn sign_xml_failures_have_the_original_messages() {
         message("<r>", "", ""),
         "org.xml.sax.SAXParseException; lineNumber: 1; columnNumber: 4; XML document structures must start and end within the same entity."
     );
+    // Text before the first markup keeps the core's own words here: only a plugin gets the
+    // JDK parser's text for it.
+    assert_eq!(
+        message("not xml", "", ""),
+        "malformed XML: unknown token at 1:1"
+    );
 }
 
 #[test]

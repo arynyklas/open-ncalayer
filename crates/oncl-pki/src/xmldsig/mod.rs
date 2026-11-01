@@ -125,6 +125,16 @@ pub enum XmlError {
     /// malformed input is [`XmlError::Parse`].
     #[error("{0}")]
     NotWellFormed(String),
+    /// The input has text before its first markup: for the core [`XmlError::Parse`] with its
+    /// `text`, for a plugin the JDK parser's `SAXParseException` text `sax` (observed for a
+    /// port; the built-in modules keep the core's text).
+    #[error("malformed XML: {text}")]
+    Prolog {
+        /// The core's text, as [`XmlError::Parse`] has it.
+        text: String,
+        /// The text of the JDK parser's `SAXParseException`.
+        sax: String,
+    },
     /// The input has a DOCTYPE declaration.
     #[error("DOCTYPE is not allowed in XML")]
     Doctype,

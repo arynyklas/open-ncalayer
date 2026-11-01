@@ -400,11 +400,13 @@ fn text_in_the_prolog_is_the_jdk_parsers_text() {
         ("x<a>", 1, 1),
     ] {
         let error = sign_enveloped(xml.as_bytes(), &signer.key, &signer.cert).unwrap_err();
-        assert_eq!(
-            error,
-            XmlError::NotWellFormed(message(line, column)),
-            "{xml:?}"
-        );
+        // The core's own words stay the error's text; the parser's text rides along.
+        let XmlError::Prolog { text, sax } = &error else {
+            panic!("{xml:?}: {error:?}");
+        };
+        assert_eq!(sax, &message(line, column), "{xml:?}");
+        assert_eq!(error.to_string(), format!("malformed XML: {text}"));
+        assert!(!text.contains("SAXParseException"), "{text}");
     }
 }
 
@@ -769,8 +771,8 @@ fn malformed_and_non_utf8_input_is_refused() {
     ] {
         assert!(matches!(verify(xml), Err(XmlError::Parse(_))), "{xml:?}");
     }
-    // Text before the first markup has the JDK parser's text.
-    assert!(matches!(verify(b"text"), Err(XmlError::NotWellFormed(_))));
+    // Text before the first markup also carries the JDK parser's text.
+    assert!(matches!(verify(b"text"), Err(XmlError::Prolog { .. })));
 }
 
 #[test]

@@ -1991,3 +1991,18 @@ fn xml_unclosed_root_has_the_jdk_parsers_text() {
         )
     );
 }
+
+/// Text before the first markup: the core's own words, not the JDK parser's (only a plugin
+/// gets those; no recording of the original shows them for a built-in module).
+#[test]
+fn xml_text_before_the_markup_keeps_the_cores_words() {
+    let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);
+    let reply = b.process(&req(xml_args(json!("not xml"), json!({}))), &origin("o"));
+    let core = "malformed XML: unknown token at 1:1";
+    assert_eq!(
+        reply,
+        format!(
+            r#"{{"code":"UNABLE_TO_PARSE_XML","details":"kz.gov.pki.provider.exception.ProviderUtilException: {core}","message":"{core}","status":false}}"#
+        )
+    );
+}
