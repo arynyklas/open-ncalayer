@@ -4291,11 +4291,10 @@ fn skf_sign_xades_expired_key_text() {
         .split_once(") не входит в период валидности сертификата (")
         .unwrap_or_else(|| panic!("{message}"));
     let (from, to) = period.split_once(", ").unwrap();
-    let validity = entry("expired-gost2015-sign")
+    let validity = *entry("expired-gost2015-sign")
         .cert
         .tbs_certificate()
-        .validity()
-        .clone();
+        .validity();
     let date = |t: time::OffsetDateTime| {
         format!("{:02}.{:02}.{:04}", t.day(), u8::from(t.month()), t.year())
     };
