@@ -121,13 +121,14 @@ pub enum XmlError {
     Parse(String),
     /// The input is not well-formed XML, in the words of the JDK's parser: the text of its
     /// `SAXParseException` (`org.xml.sax.SAXParseException; lineNumber: …; columnNumber: …;
-    /// <message>`). Only a document that ends inside its root element is reported so; other
-    /// malformed input is [`XmlError::Parse`].
+    /// <message>`). Only a document that ends inside its root element is reported so (and
+    /// text before the first markup, as [`XmlError::Prolog`] for a plugin); other malformed
+    /// input is [`XmlError::Parse`].
     #[error("{0}")]
     NotWellFormed(String),
     /// The input has text before its first markup: for the core [`XmlError::Parse`] with its
-    /// `text`, for a plugin the JDK parser's `SAXParseException` text `sax` (observed for a
-    /// port; the built-in modules keep the core's text).
+    /// `text`, for a plugin the JDK parser's `SAXParseException` text `sax` (the built-in
+    /// modules keep the core's text).
     #[error("malformed XML: {text}")]
     Prolog {
         /// The core's text, as [`XmlError::Parse`] has it.

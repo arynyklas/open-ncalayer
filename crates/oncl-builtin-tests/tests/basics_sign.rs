@@ -1993,7 +1993,7 @@ fn xml_unclosed_root_has_the_jdk_parsers_text() {
 }
 
 /// Text before the first markup: the core's own words, not the JDK parser's (only a plugin
-/// gets those; no recording of the original shows them for a built-in module).
+/// gets those; the original's built-in modules were not seen to give them).
 #[test]
 fn xml_text_before_the_markup_keeps_the_cores_words() {
     let (b, _) = basics(script![storage("user-gost2015-sign", "Qwerty12"), key(0)]);

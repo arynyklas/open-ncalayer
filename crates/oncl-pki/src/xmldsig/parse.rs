@@ -74,9 +74,10 @@ const SIGNED_BOUNDS: Bounds = Bounds {
 ///
 /// [`XmlError::TooLarge`] for input over [`MAX_INPUT`], [`MAX_NODES`], [`MAX_ATTRIBUTES`] or
 /// the parse work bounds, [`XmlError::TooDeep`], [`XmlError::Doctype`],
-/// [`XmlError::NotWellFormed`] for a document that ends inside its root element, or
-/// [`XmlError::Parse`] for other input that is not well-formed namespace-aware UTF-8 XML (an
-/// attribute with a prefix and the local name `xmlns` included).
+/// [`XmlError::NotWellFormed`] for a document that ends inside its root element,
+/// [`XmlError::Prolog`] for text before the first markup, or [`XmlError::Parse`] for other
+/// input that is not well-formed namespace-aware UTF-8 XML (an attribute with a prefix and
+/// the local name `xmlns` included).
 pub(crate) fn parse(xml: &[u8]) -> Result<Document<'_>, XmlError> {
     if xml.len() > MAX_INPUT {
         return Err(XmlError::TooLarge);

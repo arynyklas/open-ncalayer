@@ -220,9 +220,10 @@ pub mod cause {
     /// A CMS signature that cannot be made as asked.
     pub const CMS_CONSTRAINT: &str = "cms.constraint";
     /// An XML document that does not parse; a document that ends inside its root element
-    /// has the JDK parser's text as the message (`org.xml.sax.SAXParseException; lineNumber:
-    /// …; columnNumber: …; XML document structures must start and end within the same
-    /// entity.`).
+    /// and, from 0.1.0-alpha.6, one that has text before its first markup (plugins only) have
+    /// the JDK parser's text as the message (`org.xml.sax.SAXParseException; lineNumber: …;
+    /// columnNumber: …; XML document structures must start and end within the same entity.`
+    /// or `…; Content is not allowed in prolog.`).
     pub const XML_PARSE: &str = "xml.parse";
     /// An XML document with a DOCTYPE.
     pub const XML_DOCTYPE: &str = "xml.doctype";
