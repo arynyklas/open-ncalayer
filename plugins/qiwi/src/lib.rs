@@ -128,8 +128,9 @@ fn session_sign(args: &[oncl_pdk::serde_json::Value]) -> Option<(Option<String>,
     };
     let xml = orgjson::array_get_string(args, 1).ok()?;
     let signed = sign(&key, xml);
-    // Unverified against the original: it verifies every signature from the last one,
-    // removing each, and answers the last check; here the document's last signature.
+    // Not observable: whether it verifies every signature from the last one, removing each,
+    // and answers the last check (here the document's last signature): the module returns no
+    // signed XML, and no document with several signatures was checked.
     let verification = signed.as_deref().is_some_and(|signed| {
         pki::xml_verify(signed.as_bytes())
             .ok()

@@ -100,7 +100,7 @@ fn taxtech_select_key_errors() {
         text(session.call(
             &taxtech(
                 "selectKey",
-                r#"{"signerParams":{"extKeyUsageOids":[],"chain":["AAAA"]}}"#
+                r#"{"signerParams":{"extKeyUsageOids":[],"chain":["%%%"]}}"#
             ),
             None
         )),
@@ -108,6 +108,60 @@ fn taxtech_select_key_errors() {
     );
     assert_eq!(
         text(session.call(&taxtech("selectKey", TAXTECH_SELECT), None)),
+        r#"{"success":false,"errorMessage":"Key not selected.","errorCode":"KEY_NOT_SELECTED"}"#
+    );
+}
+
+/// The key bean of a legal entity (four fields) is a `HashMap` whose bucket holds `bin`
+/// before `success`, and `subjectDN` before `iin`.
+#[test]
+fn taxtech_key_bean_order_as_written() {
+    let harness = Harness::new(pick("legal-gost2015-sign", 0), vec![]);
+    let mut session = harness.session("taxtech");
+    let reply = text(session.call(&taxtech("selectKey", TAXTECH_SELECT), None));
+    let dn = subject_dn("legal-gost2015-sign");
+    let digits_after = |marker: &str| dn.split(marker).nth(1).map(|rest| rest[..12].to_owned());
+    let bin = digits_after("OU=BIN").unwrap();
+    let iin = digits_after("SERIALNUMBER=IIN").unwrap();
+    let expected = format!(r#"{{"bin":"{bin}","success":true,"subjectDN":"{dn}","iin":"{iin}"}}"#);
+    assert_eq!(reply, expected);
+    assert_eq!(
+        text(session.call(&taxtech("selectedKeyInfo", "{}"), None)),
+        expected
+    );
+}
+
+/// A chain that is base64 but no certificate does not stop the key window; a key is chosen
+/// (an expired one too, as a chain is given), and the answer is the signing failure.
+#[test]
+fn taxtech_select_key_bad_chain_dialog_first() {
+    let signing_failure =
+        r#"{"success":false,"errorMessage":"Signing has failed.","errorCode":"SIGNING_FAILURE"}"#;
+    let bad_chain = taxtech(
+        "selectKey",
+        r#"{"signerParams":{"extKeyUsageOids":[],"chain":["AAAA"]}}"#,
+    );
+    let harness = Harness::new(pick("expired-gost2015-sign", 0), vec![]);
+    let mut session = harness.session("taxtech");
+    assert_eq!(text(session.call(&bad_chain, None)), signing_failure);
+    assert_eq!(harness.prompter().storage_prompts().len(), 1);
+    assert_eq!(harness.prompter().key_prompts().len(), 1);
+    // No key was kept for the page.
+    assert_eq!(
+        text(session.call(&taxtech("selectedKeyInfo", "{}"), None)),
+        r#"{"success":false,"errorMessage":"Key not selected.","errorCode":"KEY_NOT_SELECTED"}"#
+    );
+    // Without a chain to build, the same expired key is disabled in the window.
+    let harness = Harness::new(pick("expired-gost2015-sign", 0), vec![]);
+    let mut session = harness.session("taxtech");
+    assert_eq!(
+        text(session.call(&taxtech("selectKey", TAXTECH_SELECT), None)),
+        r#"{"success":false,"errorMessage":"Key not selected.","errorCode":"KEY_NOT_SELECTED"}"#
+    );
+    // The window comes first: a cancelled one answers before any chain failure.
+    let harness = Harness::new(vec![Step::CancelStorage], vec![]);
+    assert_eq!(
+        text(harness.session("taxtech").call(&bad_chain, None)),
         r#"{"success":false,"errorMessage":"Key not selected.","errorCode":"KEY_NOT_SELECTED"}"#
     );
 }
@@ -801,8 +855,8 @@ const ESF_KEY_INFO: [&str; 13] = [
     "issuerDn",
     "keyId",
     "base64Pem",
-    "alias",
     "pem",
+    "alias",
     "subjectCn",
     "algorithm",
     "subjectDn",
@@ -866,6 +920,20 @@ fn esf_sign_plain_data_reply_order() {
         cert_der("user-gost2015-sign")
     );
     assert_eq!(info["pem"], object["pem"]);
+}
+
+#[test]
+fn esf_osdkz_key_info_order_pem_before_alias() {
+    // Two key stores: `pem` before `alias` in their shared bucket.
+    for store in ["user-gost2015-sign", "legal-gost2015-sign"] {
+        let harness = Harness::new(pick(store, 0), vec![]);
+        let reply = text(harness.call(
+            "esf-osdkz",
+            &esf(r#""method":"signPlainData","storageName":"PKCS12","data":"x""#),
+            None,
+        ));
+        assert_key_order(from_key(&reply, "keyInfo"), &ESF_KEY_INFO);
+    }
 }
 
 #[test]
@@ -1068,17 +1136,17 @@ fn uchet_esf_list_reply() {
     );
     assert_key_order(&reply, &["signedEsf", "x509"]);
     let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
-    // The last key of the store signs.
+    // The key of the store's signature profile signs.
     let store =
         oncl_pki::pkcs12::load(&std::fs::read(p12("multi-gost2015").0).unwrap(), "Qwerty12")
             .unwrap();
-    let last = &store.last().unwrap().cert;
+    let signer = &store.first().unwrap().cert;
     use der::Encode;
     assert_eq!(
         decode_java(value["x509"].as_str().unwrap()).unwrap(),
-        last.to_der().unwrap()
+        signer.to_der().unwrap()
     );
-    let key = PublicKey::from_spki(last.tbs_certificate().subject_public_key_info()).unwrap();
+    let key = PublicKey::from_spki(signer.tbs_certificate().subject_public_key_info()).unwrap();
     let items = value["signedEsf"].as_array().unwrap();
     assert_eq!(items.len(), 2);
     for (item, data) in items.iter().zip(["<a/>", "<b/>"]) {
@@ -1108,6 +1176,54 @@ fn uchet_esf_list_reply() {
         reply.starts_with(r#"{"signedEsf":[],"x509":"MII"#),
         "{reply}"
     );
+}
+
+/// A store of two keys (signature profile first in the file, then authentication): the one
+/// of the last alias in `Hashtable` order signs, whichever the file's order, and it is the
+/// signature key.
+#[test]
+fn uchet_esf_multi_key_store_signs_with_signature_key() {
+    use der::Encode;
+    let store =
+        oncl_pki::pkcs12::load(&std::fs::read(p12("multi-gost2015").0).unwrap(), "Qwerty12")
+            .unwrap();
+    let signature_cert = store[0].cert.to_der().unwrap();
+    let harness = Harness::new(vec![Step::Confirm { yes: true }], vec![]);
+    let mut session = harness.session("uchet-esf");
+    let list = text(session.call(
+        &uchet_esf(
+            "signEsfList",
+            "multi-gost2015",
+            "Qwerty12",
+            r#""esfList":["<a/>"]"#,
+        ),
+        None,
+    ));
+    let value: serde_json::Value = serde_json::from_str(&list).unwrap();
+    assert_eq!(
+        decode_java(value["x509"].as_str().unwrap()).unwrap(),
+        signature_cert
+    );
+    let xml = text(session.call(
+        &uchet_esf(
+            "signXml",
+            "multi-gost2015",
+            "Qwerty12",
+            r#""data":"<esf/>""#,
+        ),
+        None,
+    ));
+    let value: serde_json::Value = serde_json::from_str(&xml).unwrap();
+    let signed = value["signedXml"].as_str().unwrap();
+    // Whatever the prefix: the text between `X509Certificate>` and the next tag.
+    let embedded: String = signed
+        .split("X509Certificate>")
+        .nth(1)
+        .and_then(|rest| rest.split('<').next())
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    assert_eq!(decode_java(&embedded).unwrap(), signature_cert);
 }
 
 #[test]
@@ -2209,6 +2325,73 @@ fn workspace_argument_errors() {
     );
 }
 
+/// An HTTP endpoint that cannot be reached.
+struct Unreachable(oncl_pki::http::HttpErrorKind);
+
+impl oncl_pki::http::HttpTransport for Unreachable {
+    fn send(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        Err(oncl_pki::http::HttpError::new(
+            self.0,
+            format!("{} is down", request.url),
+        ))
+    }
+}
+
+#[test]
+fn workspace_ocsp_connect_failure_text() {
+    use oncl_pki::http::HttpErrorKind;
+    for (kind, message) in [
+        (
+            HttpErrorKind::Timeout,
+            "java.net.ConnectException: Connection timed out: connect",
+        ),
+        (
+            HttpErrorKind::Connect,
+            "java.net.ConnectException: Connection refused: connect",
+        ),
+    ] {
+        let ocsp: std::sync::Arc<dyn oncl_pki::http::HttpTransport> =
+            std::sync::Arc::new(Unreachable(kind));
+        let harness = Harness::new(
+            pick("inter-user-gost2015-sign", 0),
+            vec![("http://ocsp.synthetic.test".to_owned(), ocsp)],
+        )
+        .with_pki_hosts(&["ocsp.synthetic.test"]);
+        assert_eq!(
+            text(harness.call("workspace", &workspace_sign(r#"["aGVsbG8="]"#), None)),
+            format!(r#"{{"code":500,"message":"{message}"}}"#),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn workspace_no_token_text() {
+    let not_found = r#"{"code":500,"message":"kz.gov.pki.kalkan.exception.KalkanException: javax.smartcardio.CardException: DigiFlow LLP. KAZTOKEN 0 not found! [CARD_EXCEPTION]"}"#;
+    let harness = Harness::new(
+        vec![
+            Step::Password("1".to_owned()),
+            Step::Password("1".to_owned()),
+        ],
+        vec![],
+    );
+    let mut session = harness.session("workspace");
+    assert_eq!(
+        text(session.call(&workspace("getKaztokenKeys", "{}"), None)),
+        not_found
+    );
+    let request = workspace(
+        "sign",
+        r#"{"files":["aGVsbG8="],"isKaztoken":true,"alias":"x"}"#,
+    );
+    assert_eq!(text(session.call(&request, None)), not_found);
+    // The password window came first each time.
+    assert_eq!(harness.prompter().password_prompts().len(), 2);
+}
+
 static WORKSPACE_TICKS: AtomicI64 = AtomicI64::new(0);
 
 /// The system's clock, moving 3 seconds more every time it is read.
@@ -2386,8 +2569,8 @@ fn simourg_error_prefix() {
         ("", "Error: storageName.param.empty"),
         ("BKS", "Error: Unknown storage"),
         ("AKKaztokenStore", "Error: Empty storage"),
-        // The empty script closes the dialog.
-        ("PKCS12", "Cancel"),
+        // The empty script closes the first dialog.
+        ("PKCS12", "Error: Отмена операции"),
     ] {
         assert_eq!(
             text(session.call(
@@ -2411,6 +2594,34 @@ fn simourg_error_prefix() {
             None
         )),
         r#"{"code":"500","message":"Error: Illegal base64 character 2d"}"#
+    );
+}
+
+/// The key file's window closed answers the exception text, before the data is read; the
+/// confirmation's «Отменить» is the plain `Cancel`.
+#[test]
+fn simourg_cancelled_file_dialog_error_text() {
+    let harness = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(harness.call(
+            "simourg",
+            &simourg(
+                "createCMSSignatureWithTspFromBase64",
+                r#"["PKCS12","SIGNATURE","%%%",false,"x"]"#
+            ),
+            None
+        )),
+        r#"{"code":"500","message":"Error: Отмена операции"}"#
+    );
+    let mut steps = pick("user-gost2015-sign", 0);
+    steps.push(Step::Choice {
+        button: 2,
+        option: None,
+    });
+    let harness = Harness::new(steps, vec![]);
+    assert_eq!(
+        text(harness.call("simourg", &simourg("createCMSForEsedo", SIMOURG_ARGS), None)),
+        r#"{"code":"500","message":"Cancel"}"#
     );
 }
 
@@ -2474,7 +2685,7 @@ fn motiw_container_list_files_empty() {
     );
     assert_eq!(
         text(session.call(&motiw("getContainerList", "[1]"), None)),
-        r#"{"responseObject":"","code":"400","message":"Error type param[0]. Actual class java.lang.Integer, expected: class java.lang.String","uuid":"7"}"#
+        r#"{"responseObject":"","code":"400","message":"Error type param[0]. Actual java.lang.Integer, expected: class java.lang.String","uuid":"7"}"#
     );
     // An unknown storage and missing arguments drop the connection.
     assert_eq!(
@@ -2491,6 +2702,55 @@ fn motiw_container_list_files_empty() {
     assert_eq!(
         session.call(&format!(r#"{{"module":"{MOTIW}","uuid":"7"}}"#), None),
         Reply::Drop
+    );
+}
+
+#[test]
+fn motiw_type_param_actual_is_class_name() {
+    let harness = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(harness.call("motiw", &motiw("getContainerList", r#"[1]"#), None)),
+        r#"{"responseObject":"","code":"400","message":"Error type param[0]. Actual java.lang.Integer, expected: class java.lang.String","uuid":"7"}"#
+    );
+    assert_eq!(
+        text(harness.call("motiw", &motiw("getContainerList", r#"[2.5]"#), None)),
+        r#"{"responseObject":"","code":"400","message":"Error type param[0]. Actual java.math.BigDecimal, expected: class java.lang.String","uuid":"7"}"#
+    );
+    assert_eq!(
+        text(harness.call("motiw", &motiw("getContainerList", r#"[[]]"#), None)),
+        r#"{"responseObject":"","code":"400","message":"Error type param[0]. Actual org.json.JSONArray, expected: class java.lang.String","uuid":"7"}"#
+    );
+}
+
+#[test]
+fn motiw_token_not_found_names_the_container() {
+    let harness = Harness::new(vec![], vec![]);
+    assert_eq!(
+        text(harness.call(
+            "motiw",
+            &motiw("getCertificateList", r#"["AKKaztokenStore","x","pw"]"#),
+            None
+        )),
+        r#"{"responseObject":"","code":"500","message":"kz.gov.pki.kalkan.exception.KalkanException: javax.smartcardio.CardException: x not found! [CARD_EXCEPTION]","uuid":"7"}"#
+    );
+}
+
+#[test]
+fn motiw_certificate_info_order_not_before_first() {
+    let harness = Harness::new(vec![], vec![]);
+    let cms = motiw_cms("user-rsa-sign", b"hello", true);
+    let reply = text(harness.call("motiw", &motiw("verify", &format!(r#"["{cms}",""]"#)), None));
+    assert_key_order(
+        &reply,
+        &[
+            "notAfter",
+            "serialNumber",
+            "subject",
+            "notBefore",
+            "issuer",
+            "algorithm",
+            "sigAlgName",
+        ],
     );
 }
 
@@ -2523,7 +2783,7 @@ fn motiw_certificate_list_404() {
             ),
             None
         )),
-        r#"{"responseObject":"","code":"400","message":"Error type param[5]. Actual class java.lang.String, expected: class java.lang.Integer","uuid":"7"}"#
+        r#"{"responseObject":"","code":"400","message":"Error type param[5]. Actual java.lang.String, expected: class java.lang.Integer","uuid":"7"}"#
     );
 }
 
@@ -2568,8 +2828,8 @@ fn motiw_verify_ok_and_codes() {
             "notAfter",
             "serialNumber",
             "subject",
-            "issuer",
             "notBefore",
+            "issuer",
             "algorithm",
             "sigAlgName",
         ],
@@ -2693,8 +2953,8 @@ fn motiw_token_certificate_list_and_errors() {
             "serialNumber",
             "subject",
             "alias",
-            "issuer",
             "notBefore",
+            "issuer",
             "algorithm",
             "sigAlgName",
         ],
@@ -2717,7 +2977,7 @@ fn motiw_token_certificate_list_and_errors() {
     );
     assert_eq!(
         list(&mut session, "AKKaztokenStore", "No such reader", TOKEN_PIN),
-        r#"{"responseObject":"","code":"500","message":"Token not found","uuid":"7"}"#
+        r#"{"responseObject":"","code":"500","message":"kz.gov.pki.kalkan.exception.KalkanException: javax.smartcardio.CardException: No such reader not found! [CARD_EXCEPTION]","uuid":"7"}"#
     );
     assert_eq!(
         list(&mut session, "BKS", TOKEN_READER, TOKEN_PIN),

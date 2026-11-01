@@ -8,7 +8,7 @@ vendor = "ТОО «Business Applications Solutions»"
 
 [port]
 status = "partial"
-conformance = "computed"
+conformance = "confirmed"
 
 [[differences]]
 ru = "Окно выбора файла и пароля заменено общими окнами OpenNCALayer: пользователь выбирает ключ (оригинал брал первый ключ файла); трёхминутного ожидания окна нет."

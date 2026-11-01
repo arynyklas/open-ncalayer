@@ -83,8 +83,8 @@ fn tech(message: String) -> Failure {
     Failure::Tech(Some(message))
 }
 
-/// A response bean as org.json writes it. Entries go in the getter order the specs give for
-/// keys sharing a bucket (`success` before `bin`, `subjectDN` before `iin`).
+/// A response bean as org.json writes it: a `HashMap` of 16 buckets, entries of one bucket
+/// in the order they went in (`success` is first; the key bean puts it last).
 fn bean(success: bool) -> JObject {
     let mut reply = JObject::hash_map();
     reply.put("success", success);
@@ -200,6 +200,8 @@ fn select_key(root: &Map<String, Value>, origin: String) -> Result<JObject, Fail
                 .iter()
                 .map(|cert| {
                     let text = cast_string(cert)?.replace(['\r', '\n'], "");
+                    // Not observable: whether text that is not base64 fails before the key
+                    // window too (a base64 text that is no certificate does not).
                     javab64::decode_java(text.trim())
                         .map(Bytes::from)
                         .map_err(|_| Failure::from(CERTIFICATE_PARSING_FAILURE))
@@ -207,6 +209,20 @@ fn select_key(root: &Map<String, Value>, origin: String) -> Result<JObject, Fail
                 .collect::<Result<Vec<_>, _>>()?,
         ),
     };
+    // Base64 that is no certificate fails after the key window, not before it. The window
+    // lists keys of any validity once a chain is given.
+    let chain_is_certificates = chain
+        .iter()
+        .flatten()
+        .all(|der| host::cert_info(der).is_ok());
+    let allow_expired = chain.as_ref().is_some_and(|certs| !certs.is_empty());
+    let chain = chain.map(|certs| {
+        if chain_is_certificates {
+            certs
+        } else {
+            Vec::new()
+        }
+    });
     let ext_key_usages = orgjson::get_array(params, "extKeyUsageOids")
         .map_err(tech)?
         .iter()
@@ -226,7 +242,7 @@ fn select_key(root: &Map<String, Value>, origin: String) -> Result<JObject, Fail
             iin: text("iin"),
             bin: text("bin"),
             serial_number: text("serialNumber"),
-            allow_expired: false,
+            allow_expired,
             chain,
             allow_revoked: false,
         },
@@ -241,9 +257,11 @@ fn select_key(root: &Map<String, Value>, origin: String) -> Result<JObject, Fail
     let key = match keys::select(&request) {
         Ok(Some(key)) => key,
         Ok(None) => return Err(KEY_NOT_SELECTED.into()),
-        Err(e) if e.message.starts_with("chain") => return Err(CERTIFICATE_PARSING_FAILURE.into()),
         Err(e) => return Err(host_failure(e)),
     };
+    if !chain_is_certificates {
+        return Err(SIGNING_FAILURE.into());
+    }
     let subject_dn = host::cert_details(key.certificate())
         .map_err(host_failure)?
         .subject_dn;
@@ -275,12 +293,14 @@ fn twelve_digits_after(dn: &str, marker: &str) -> Option<String> {
     })
 }
 
-/// The reply of `selectKey` and `selectedKeyInfo`.
+/// The reply of `selectKey` and `selectedKeyInfo`: `bin` goes into the bean before `success`
+/// (one bucket), `subjectDN` before `iin` (another).
 fn key_reply(holder: &Holder) -> JObject {
-    let mut reply = bean(true);
+    let mut reply = JObject::hash_map();
     reply.put_opt("bin", holder.bin.clone());
     reply.put("subjectDN", holder.subject_dn.as_str());
     reply.put_opt("iin", holder.iin.clone());
+    reply.put("success", true);
     reply
 }
 
@@ -308,8 +328,6 @@ fn sign(root: &Map<String, Value>, origin: &str) -> Result<JObject, Failure> {
     let format = orgjson::get_string(args, "format").map_err(tech)?;
     let params = orgjson::opt_object(args, "signingParams");
     let decode = params.is_some_and(|p| orgjson::opt_boolean(p, "decode", false));
-    // Unverified against the original: whether a malformed `data` is a TECH_ERROR (read
-    // before signing, as here) or a SIGNING_FAILURE.
     let data: Vec<String> = match orgjson::opt_array(args, "data") {
         Some(items) => (0..items.len())
             .map(|i| orgjson::array_get_string(items, i).map(str::to_owned))
@@ -398,8 +416,6 @@ fn sign_cms(key: &Key, bytes: Vec<u8>, params: &Map<String, Value>) -> Result<St
         timestamp: with_tsp.then_some(TsaChoice::Kalkan),
         output: oncl_pdk::abi::CmsOutput::Der,
     };
-    // Unverified against the original: provider_util codes of signing failures (here all
-    // SIGNING_FAILURE).
     let cms = match key.sign_cms_ex(args) {
         Ok(CmsOutcome::Signed(cms)) => cms,
         Ok(CmsOutcome::TspFailed(_)) | Err(_) => return Err(SIGNING_FAILURE.into()),

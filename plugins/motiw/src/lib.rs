@@ -196,20 +196,20 @@ fn str_at(args: &[Value], i: usize) -> Option<&str> {
     args.get(i).and_then(Value::as_str)
 }
 
-/// `Class.toString()` of the value org.json holds.
+/// `Class.getName()` of the value org.json holds.
 fn java_class(value: &Value) -> &'static str {
     match value {
-        Value::Null => "class org.json.JSONObject$Null",
-        Value::Bool(_) => "class java.lang.Boolean",
+        Value::Null => "org.json.JSONObject$Null",
+        Value::Bool(_) => "java.lang.Boolean",
         Value::Number(n) => match n.as_i64() {
-            Some(i) if i32::try_from(i).is_ok() => "class java.lang.Integer",
-            Some(_) => "class java.lang.Long",
-            None if n.is_u64() => "class java.math.BigInteger",
-            None => "class java.math.BigDecimal",
+            Some(i) if i32::try_from(i).is_ok() => "java.lang.Integer",
+            Some(_) => "java.lang.Long",
+            None if n.is_u64() => "java.math.BigInteger",
+            None => "java.math.BigDecimal",
         },
-        Value::String(_) => "class java.lang.String",
-        Value::Array(_) => "class org.json.JSONArray",
-        Value::Object(_) => "class org.json.JSONObject",
+        Value::String(_) => "java.lang.String",
+        Value::Array(_) => "org.json.JSONArray",
+        Value::Object(_) => "org.json.JSONObject",
     }
 }
 
@@ -232,7 +232,6 @@ fn validate<'a>(
     }
     for (i, (param, value)) in params.iter().zip(args).enumerate() {
         if !param.accepts(value) {
-            // Unverified against the original: `Actual` as `Class.toString()`.
             return Some(Err(Reply::failed(
                 "400",
                 format!(
@@ -307,17 +306,20 @@ fn open(storage: &str, container: &str, password: &str) -> Result<Vec<Key>, Repl
         password: Password::Text(password.to_owned()),
     })
     .map_err(|e| Reply::caught("500", Some(e.message)))?;
-    // Unverified against the original: Kalkan's texts of a token that does not open.
+    // Not observable: Kalkan's texts of a token that is found and does not open; no device.
     let message = match outcome {
         Ok(keys) => return Ok(keys),
         Err(OpenOutcome::NoKeys) => return Ok(Vec::new()),
-        Err(OpenOutcome::WrongPassword { .. }) => "Wrong password",
-        Err(OpenOutcome::Blocked) => "Token is blocked",
-        Err(OpenOutcome::NoDevice | OpenOutcome::NotFound) => "Token not found",
-        Err(OpenOutcome::Declined) => "Access denied",
-        Err(OpenOutcome::Corrupt | OpenOutcome::Opened(_)) => "Token is not readable",
+        Err(OpenOutcome::WrongPassword { .. }) => "Wrong password".to_owned(),
+        Err(OpenOutcome::Blocked) => "Token is blocked".to_owned(),
+        Err(OpenOutcome::NoDevice | OpenOutcome::NotFound) => format!(
+            "kz.gov.pki.kalkan.exception.KalkanException: \
+             javax.smartcardio.CardException: {container} not found! [CARD_EXCEPTION]"
+        ),
+        Err(OpenOutcome::Declined) => "Access denied".to_owned(),
+        Err(OpenOutcome::Corrupt | OpenOutcome::Opened(_)) => "Token is not readable".to_owned(),
     };
-    Err(Reply::caught("500", Some(message.to_owned())))
+    Err(Reply::caught("500", Some(message)))
 }
 
 /// `getCertificateList(storage, container, password)`.
@@ -472,8 +474,9 @@ fn certificate_info(cert: &[u8], alias: Option<&str>, tst: Option<&TimeStamp>) -
     let subject = x509text::rfc2253(&tbs.subject().to_der().ok()?).ok()?;
     let issuer = x509text::rfc2253(&tbs.issuer().to_der().ok()?).ok()?;
     let mut object = JObject::hash_map();
-    // Keys sharing a bucket go in the getter order assumed (serialNumber before tsa, issuer
-    // before notBefore, algorithm before sigAlgName).
+    // Keys sharing a bucket go in the order the original's bean put them in: `notBefore`
+    // before `issuer`. Not observable: serialNumber against tsa here, and algorithm against
+    // sigAlgName (their order differs between operating systems).
     object.put_opt("timeStampDate", tst.and_then(|t| t.gen_time_ms));
     object.put("notAfter", info.not_after);
     object.put("serialNumber", big_integer_hex(&info.serial_hex));
@@ -481,8 +484,8 @@ fn certificate_info(cert: &[u8], alias: Option<&str>, tst: Option<&TimeStamp>) -
     object.put("subject", subject);
     object.put_opt("timeStampSerialNumber", tst.map(|t| t.serial.clone()));
     object.put_opt("alias", alias);
-    object.put("issuer", issuer);
     object.put("notBefore", info.not_before);
+    object.put("issuer", issuer);
     object.put(
         "algorithm",
         x509text::kalkan_key_alg_name(&info.spki_alg_oid).unwrap_or(&info.spki_alg_oid),
@@ -568,7 +571,8 @@ fn time_stamp(attrs: &[u8]) -> Option<TimeStamp> {
         .and_then(|(_, _, time)| generalized_time_ms(std::str::from_utf8(time).ok()?));
     // tsa [0] EXPLICIT GeneralName; a directoryName [4] EXPLICIT Name: BC writes `4: ` and
     // the name in its encoded order.
-    // Unverified against the original: BC's attribute symbols in the name.
+    // Not observable: the time-stamp's name was in no observed reply; it is written as the
+    // names are.
     let tsa = fields
         .iter()
         .find(|(tag, _, _)| *tag == 0xa0)

@@ -1,7 +1,7 @@
 [package]
 name = "oncl-port-motiw"
 description = "OpenNCALayer port of the Motiware module service (ru.motiw.ModuleService): storages, containers, CMS on tokens and CMS verification"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

@@ -37,8 +37,6 @@ fn handle(request: &Request) -> String {
         reply.put("message", "method_not_defined");
         return reply.to_json();
     }
-    // Unverified against the original: whether `args` is read before the method is
-    // looked up (here after: an unknown method answers even without args).
     let Ok(args) = orgjson::get_object(&root, "args") else {
         return dropped();
     };

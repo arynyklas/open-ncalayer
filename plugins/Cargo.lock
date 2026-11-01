@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-esf-osdkz"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
  "oncl-port-pki",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-motiw"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "der",
  "oncl-pdk",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-simourg"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
  "oncl-port-pki",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-taxtech"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
 ]
@@ -861,14 +861,15 @@ dependencies = [
 
 [[package]]
 name = "oncl-port-uchet-esf"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
+ "oncl-port-kit",
 ]
 
 [[package]]
 name = "oncl-port-workspace"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "oncl-pdk",
  "oncl-port-kit",
