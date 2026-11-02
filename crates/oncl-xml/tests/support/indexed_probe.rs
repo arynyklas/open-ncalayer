@@ -96,9 +96,12 @@ impl OperationControl for Control {
     }
 }
 pub fn run(parent: PathBuf, large: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let records = if large { RECORDS } else { 33 };
+    run_records(parent, if large { RECORDS } else { 33 })
+}
+pub fn run_records(parent: PathBuf, records: u64) -> Result<(), Box<dyn std::error::Error>> {
+    assert!((1..=RECORDS).contains(&records));
     let expected = Generated::target_region(records);
-    if large {
+    if records == RECORDS {
         assert!(expected.offset > u32::MAX as u64);
     }
     let limits = ResourceLimits {

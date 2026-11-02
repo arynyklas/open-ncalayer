@@ -446,7 +446,7 @@ impl XmlDocument {
     /// normalization. Spans remain bound to this document; X03 owns c14n.
     pub fn read_attribute(
         &mut self,
-        attribute: &crate::reader::XmlAttribute,
+        attribute: &crate::reader::XmlAttributeSpan,
         offset: u64,
         output: &mut [u8],
     ) -> Result<usize> {

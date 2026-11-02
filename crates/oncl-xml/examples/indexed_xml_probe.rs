@@ -1,10 +1,11 @@
-//! Run with --out <existing scratch parent>; --small selects a quick local run.
+//! Run with --out <existing scratch parent>; --small is 2 MiB, --medium is 64 MiB.
 #[path = "../tests/support/indexed_probe.rs"]
 mod probe;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let mut parent = None;
     let mut large = true;
+    let mut medium = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => {
@@ -14,11 +15,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ))
             }
             "--small" => large = false,
+            "--medium" => medium = true,
             _ => return Err(format!("unknown argument {arg}").into()),
         }
     }
-    probe::run(
-        parent.ok_or("explicit --out scratch parent required")?,
-        large,
-    )
+    let parent = parent.ok_or("explicit --out scratch parent required")?;
+    if medium {
+        probe::run_records(parent, 1024)
+    } else {
+        probe::run(parent, large)
+    }
 }

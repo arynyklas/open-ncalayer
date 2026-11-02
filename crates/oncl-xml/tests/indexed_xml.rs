@@ -297,7 +297,7 @@ fn huge_attribute_is_a_validated_owner_bound_span() {
     let attribute = {
         let mut cursor = doc.events();
         let event = cursor.next_event().unwrap().unwrap();
-        event.attributes[1].clone()
+        event.attributes[1].span()
     };
     assert_eq!(attribute.value_region().len, value.len() as u64);
     let mut bytes = vec![0; 262144];
@@ -497,4 +497,132 @@ fn cached_events_and_empty_id_lookup_observe_cancellation() {
 fn utf8_snapshot_rejects_conflicting_encoding_declaration() {
     assert!(index(b"<?xml version='1.0' encoding='UTF-16'?><r/>").is_err());
     assert!(index(b"<?xml version='1.0' encoding='utf-8'?><r/>").is_ok());
+}
+
+#[test]
+fn declaration_requires_start_or_actual_bom() {
+    for prefix in ["   ", " \t\n", "\r\n ", " ", "\u{feff} "] {
+        let xml = format!("{prefix}<?xml version='1.0'?><r/>");
+        assert!(index(xml.as_bytes()).is_err(), "accepted prefix {prefix:?}");
+    }
+    for prefix in ["", "\u{feff}"] {
+        assert!(index(format!("{prefix}<?xml version='1.0'?><r/>").as_bytes()).is_ok());
+    }
+}
+
+#[test]
+fn entity_reference_state_validates_xml_characters_across_chunks() {
+    let valid = [
+        "&amp;",
+        "&lt;",
+        "&gt;",
+        "&apos;",
+        "&quot;",
+        "&#65;",
+        "&#x41;",
+        "&#000000000000000000000000000000065;",
+        "&#x000000000000000000000000000000041;",
+        "&#9;",
+        "&#10;",
+        "&#13;",
+        "&#xD7FF;",
+        "&#xE000;",
+        "&#xFFFD;",
+        "&#x10000;",
+        "&#x10FFFF;",
+    ];
+    for entity in valid {
+        let prefix = "<r>";
+        let xml = format!(
+            "{prefix}{}{entity}</r>",
+            " ".repeat(262144 - prefix.len() - 2)
+        );
+        assert!(index(xml.as_bytes()).is_ok(), "rejected {entity}");
+        assert!(
+            index(format!("<r data='{entity}'/>").as_bytes()).is_ok(),
+            "attribute rejected {entity}"
+        );
+    }
+    for entity in [
+        "&;",
+        "&AMP;",
+        "&unknown;",
+        "&#;",
+        "&#x;",
+        "&#X41;",
+        "&#-1;",
+        "&#0;",
+        "&#11;",
+        "&#xD800;",
+        "&#xDFFF;",
+        "&#xFFFE;",
+        "&#xFFFF;",
+        "&#x110000;",
+        "&#4294967296;",
+        "&#x100000000;",
+        "&#99999999999999999999999999999999;",
+        "&#xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;",
+        "&amp",
+        "&#65",
+        "&am&amp;",
+    ] {
+        assert!(
+            index(format!("<r>{entity}</r>").as_bytes()).is_err(),
+            "accepted {entity}"
+        );
+        assert!(
+            index(format!("<r data='{entity}'/>").as_bytes()).is_err(),
+            "attribute accepted {entity}"
+        );
+        assert!(
+            index(format!("<r xmlns:p='{entity}'/>").as_bytes()).is_err(),
+            "namespace accepted {entity}"
+        );
+        assert!(
+            index(format!("<r Id='{entity}'/>").as_bytes()).is_err(),
+            "ID accepted {entity}"
+        );
+    }
+}
+
+#[test]
+fn retained_attribute_span_releases_document_metadata_and_admission() {
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let mut scope = budget.begin(limits.clone(), Arc::new(Control)).unwrap();
+    let xml = format!(
+        "<r xmlns:p='urn:{}' p:data='raw&amp;bytes'/>",
+        "namespace".repeat(1000)
+    );
+    let mut doc = XmlDocument::index(
+        Source::sequential(&mut Cursor::new(xml.as_bytes()), None),
+        &XmlLimits::default(),
+        &store,
+        &mut scope,
+    )
+    .unwrap();
+    let span = {
+        let mut cursor = doc.events();
+        let event = cursor.next_event().unwrap().unwrap();
+        assert!(event.attributes[0].name.namespace.as_ref().unwrap().len() > 8000);
+        event.attributes[0].span()
+    };
+    drop(scope);
+    assert!(budget.begin(limits.clone(), Arc::new(Control)).is_err());
+    let mut bytes = [0; 32];
+    let n = doc.read_attribute(&span, 0, &mut bytes).unwrap();
+    assert_eq!(&bytes[..n], b"raw&amp;bytes");
+    drop(doc);
+    // The still-retained opaque span holds only identity/Region, not an
+    // admission lease or the element's large expanded namespace strings.
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let mut other = XmlDocument::index(
+        Source::sequential(&mut Cursor::new(b"<r/>"), None),
+        &XmlLimits::default(),
+        &store,
+        &mut scope,
+    )
+    .unwrap();
+    assert!(other.read_attribute(&span, 0, &mut bytes).is_err());
 }

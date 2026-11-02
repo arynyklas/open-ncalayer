@@ -36,7 +36,8 @@
 //! host's explicit [`oncl_pki::io::TemporaryStore`], with file-backed token and
 //! duplicate-safe ID indexes and stable u64 regions. It does not change the
 //! bounded signature APIs above or implement large-document canonicalization.
-//! Its lending event cursor restores namespace contexts. Ordinary attributes
+//! Its lending event cursor restores namespace contexts at element boundaries;
+//! consumers maintain that scope for non-element tokens. Ordinary attributes
 //! and text remain validated lexical spans, not accumulated values; namespace
 //! declarations and recognized IDs are normalized under explicit small limits.
 //! Documents retain the original operation's quota, cancellation and Deadline.
@@ -46,7 +47,7 @@ mod index;
 mod parse;
 mod reader;
 pub use index::{XmlDocument, XmlLimits, XmlNode};
-pub use reader::{XmlAttribute, XmlEvent, XmlEventKind, XmlEvents, XmlName};
+pub use reader::{XmlAttribute, XmlAttributeSpan, XmlEvent, XmlEventKind, XmlEvents, XmlName};
 pub mod xades;
 mod xpath;
 

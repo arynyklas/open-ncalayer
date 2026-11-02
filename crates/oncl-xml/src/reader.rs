@@ -12,6 +12,9 @@ type Result<T, E = ProcessingError> = std::result::Result<T, E>;
 pub(crate) fn invalid() -> ProcessingError {
     ProcessingError::InvalidInput("invalid indexed XML")
 }
+fn xml_character(c: char) -> bool {
+    matches!(c, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlName {
@@ -22,13 +25,44 @@ pub struct XmlName {
 /// particular a multi-gigabyte ordinary value never becomes a String. Namespace
 /// and ID normalization is performed internally; X03 can normalize other values
 /// while consuming their bounded raw replay.
-#[derive(Debug, Clone)]
+///
+/// Attribute metadata cannot be cloned out of a lending event:
+/// ```compile_fail
+/// fn escape(mut document: oncl_xml::XmlDocument) {
+///     let retained = {
+///         let mut events = document.events();
+///         events.next_event().unwrap().unwrap().attributes[0].clone()
+///     };
+///     drop(document);
+///     let _ = retained.name.local;
+/// }
+/// ```
+#[derive(Debug)]
 pub struct XmlAttribute {
     pub name: XmlName,
     pub(crate) value: Region,
     pub(crate) owner: Weak<()>,
 }
 impl XmlAttribute {
+    /// Retain only the opaque lexical span, not the expanded name metadata.
+    pub fn span(&self) -> XmlAttributeSpan {
+        XmlAttributeSpan {
+            value: self.value,
+            owner: self.owner.clone(),
+        }
+    }
+    pub fn value_region(&self) -> Region {
+        self.value
+    }
+}
+/// A cheap owner-bound raw value handle. It owns no QName/namespace strings and
+/// retains no document buffers, admission or resource reservation.
+#[derive(Debug)]
+pub struct XmlAttributeSpan {
+    pub(crate) value: Region,
+    pub(crate) owner: Weak<()>,
+}
+impl XmlAttributeSpan {
     pub fn value_region(&self) -> Region {
         self.value
     }
@@ -42,8 +76,10 @@ pub enum XmlEventKind {
     Cdata,
     ProcessingInstruction,
 }
-/// Namespace context is the complete bounded context at this token. End events
-/// carry the complete element region; other events carry their lexical region.
+/// Namespace contexts are supplied at Start/End element boundaries only;
+/// consumers maintain that scope for Text/Comment/Cdata/PI events, whose
+/// namespaces field is empty. End events carry the complete element region;
+/// other events carry their lexical region.
 #[derive(Debug)]
 pub struct XmlEvent {
     pub kind: XmlEventKind,
@@ -71,6 +107,7 @@ pub(crate) struct Reader<'a> {
     stack: Vec<Frame>,
     namespaces: BTreeMap<String, String>,
     root: bool,
+    bom: bool,
     pending: Option<XmlEvent>,
     work: u64,
     finished: bool,
@@ -92,6 +129,7 @@ impl<'a> Reader<'a> {
             stack: Vec::new(),
             namespaces: BTreeMap::new(),
             root: false,
+            bom: false,
             pending: None,
             work: 0,
             finished: false,
@@ -172,27 +210,58 @@ impl<'a> Reader<'a> {
             .chars()
             .next()
             .ok_or_else(invalid)?;
-        if !matches!(c, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
-        {
+        if !xml_character(c) {
             return Err(invalid());
         }
         Ok(c)
     }
-    fn entity(&mut self) -> Result<()> {
-        let mut value = String::from("<r>&");
+    fn entity(&mut self) -> Result<([u8; 37], usize)> {
+        // Preserve the existing bounded lexical reference length without an
+        // allocation or miniature DOM per reference. Include ';' for callers
+        // retaining namespace declaration bytes.
+        let mut bytes = [0; 37];
+        let mut len = 0;
         loop {
             let b = self.required()?;
-            if !b.is_ascii() || value.len() > 40 {
+            if !b.is_ascii() || len == bytes.len() {
                 return Err(invalid());
             }
-            value.push(b as char);
+            bytes[len] = b;
+            len += 1;
             if b == b';' {
                 break;
             }
         }
-        value.push_str("</r>");
-        roxmltree::Document::parse(&value).map_err(|_| invalid())?;
-        Ok(())
+        let body = &bytes[..len - 1];
+        if !matches!(body, b"amp" | b"lt" | b"gt" | b"apos" | b"quot") {
+            let (digits, radix) = if let Some(digits) = body.strip_prefix(b"#x") {
+                (digits, 16u32)
+            } else if let Some(digits) = body.strip_prefix(b"#") {
+                (digits, 10u32)
+            } else {
+                return Err(invalid());
+            };
+            if digits.is_empty() {
+                return Err(invalid());
+            }
+            let mut value = 0u32;
+            for b in digits {
+                let digit = match b {
+                    b'0'..=b'9' => (b - b'0') as u32,
+                    b'a'..=b'f' if radix == 16 => (b - b'a' + 10) as u32,
+                    b'A'..=b'F' if radix == 16 => (b - b'A' + 10) as u32,
+                    _ => return Err(invalid()),
+                };
+                value = value
+                    .checked_mul(radix)
+                    .and_then(|v| v.checked_add(digit))
+                    .ok_or_else(invalid)?;
+            }
+            if !char::from_u32(value).is_some_and(xml_character) {
+                return Err(invalid());
+            }
+        }
+        Ok((bytes, len))
     }
     fn delimited(&mut self, delimiter: &[u8], comment: bool) -> Result<()> {
         let mut repeated = 0usize;
@@ -301,15 +370,21 @@ impl<'a> Reader<'a> {
                 if b == b'<' {
                     return Err(invalid());
                 }
-                if namespace {
-                    raw.push(b);
-                    if raw.len() >= self.limits.max_markup_bytes {
-                        return Err(ProcessingError::MetadataLimit);
+                if b == b'&' {
+                    let (entity, len) = self.entity()?;
+                    if namespace {
+                        raw.push(b'&');
+                        raw.extend_from_slice(&entity[..len]);
                     }
-                } else if b == b'&' {
-                    self.entity()?;
                 } else {
-                    self.character(b)?;
+                    let c = self.character(b)?;
+                    if namespace {
+                        let mut encoded = [0; 4];
+                        raw.extend_from_slice(c.encode_utf8(&mut encoded).as_bytes());
+                    }
+                }
+                if raw.len() >= self.limits.max_markup_bytes {
+                    return Err(ProcessingError::MetadataLimit);
                 }
             }
             if !namespace {
@@ -395,7 +470,7 @@ impl<'a> Reader<'a> {
                 || raw.starts_with("<?xml\t")
                 || raw.starts_with("<?xml\r")
                 || raw.starts_with("<?xml\n");
-            if declaration && start != 0 && start != 3 {
+            if declaration && start != 0 && !(self.bom && start == 3) {
                 return Err(invalid());
             }
             let wrapped = if declaration {
@@ -611,6 +686,7 @@ impl<'a> Reader<'a> {
         }
         if start == 0 && b == 0xef {
             self.expect(&[0xbb, 0xbf])?;
+            self.bom = true;
             return self.next();
         }
         let mut current = b;
