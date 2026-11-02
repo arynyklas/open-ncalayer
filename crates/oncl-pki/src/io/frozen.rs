@@ -2,7 +2,7 @@
 use super::{Region, Source, StagedArtifact, TemporaryStore};
 use crate::resource::{IO_CHUNK_BYTES, ProcessingError, ResourceReservation, ResourceScope};
 use std::{
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom},
     sync::Arc,
 };
 
@@ -19,10 +19,19 @@ pub struct FrozenReader<'a> {
     _memory: ResourceReservation,
     _metadata: ResourceReservation,
 }
+/// Closed transforms over actual immutable captured bytes. No caller decoder
+/// can obtain a snapshot-derived capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotEncoding {
+    Identity,
+    PdfByteString,
+}
 pub struct DerivedInput {
     bytes: Vec<u8>,
     parent: Arc<()>,
     scope: ResourceScope,
+    region: Region,
+    encoding: SnapshotEncoding,
     _memory: ResourceReservation,
     _metadata: ResourceReservation,
 }
@@ -34,7 +43,9 @@ impl FrozenInput {
         store: &TemporaryStore,
         scope: &mut ResourceScope,
     ) -> Result<Self, ProcessingError> {
+        let replay = source.is_snapshot_for(scope)?;
         scope.checkpoint()?;
+        scope.check_input()?;
         if let Some(reader) = source.as_seekable() {
             let start = reader.stream_position()?;
             let end = reader.seek(SeekFrom::End(0))?;
@@ -42,7 +53,7 @@ impl FrozenInput {
             let size = end
                 .checked_sub(start)
                 .ok_or(ProcessingError::InvalidInput("source extent"))?;
-            if size > scope.input_remaining() {
+            if size > scope.limits().input_bytes || (!replay && size > scope.input_remaining()) {
                 return Err(ProcessingError::InputLimit);
             }
         }
@@ -51,15 +62,27 @@ impl FrozenInput {
         let mut stage = store.stage_source(scope)?;
         loop {
             scope.checkpoint()?;
-            let request = scope.input_request(buffer.len())?;
+            let request = scope.snapshot_request(buffer.len())?;
+            let request = if replay {
+                request
+            } else {
+                scope.input_request(request)?
+            };
             let count = match source.read(&mut buffer[..request]) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                result => result?,
+                Err(error) => {
+                    scope.checkpoint()?;
+                    return Err(error.into());
+                }
+                Ok(count) => count,
             };
             if count > request {
                 return Err(ProcessingError::InvalidInput("reader exceeded buffer"));
             }
-            scope.consumed_input(count as u64)?;
+            if !replay {
+                scope.consumed_input(count as u64)?;
+            }
+            scope.copied_snapshot(count as u64)?;
             scope.checkpoint()?;
             if count == 0 {
                 break;
@@ -92,8 +115,18 @@ impl FrozenInput {
         scope: &ResourceScope,
     ) -> Result<FrozenReader<'a>, ProcessingError> {
         self.check(scope)?;
+        if regions.len() > 4096 {
+            return Err(ProcessingError::MetadataLimit);
+        }
+        let mut previous_end = 0;
         let mut length = 0u64;
         for region in regions {
+            if region.offset < previous_end {
+                return Err(ProcessingError::InvalidInput(
+                    "overlapping or reordered snapshot regions",
+                ));
+            }
+            previous_end = region.end()?;
             if region.end()? > self.len() {
                 return Err(ProcessingError::InvalidInput(
                     "snapshot region exceeds extent",
@@ -102,6 +135,9 @@ impl FrozenInput {
             length = length
                 .checked_add(region.len)
                 .ok_or(ProcessingError::InputLimit)?;
+        }
+        if length > self.len() || length > scope.limits().input_bytes {
+            return Err(ProcessingError::InputLimit);
         }
         let bytes = (regions.len() as u64)
             .checked_mul(std::mem::size_of::<Region>() as u64)
@@ -119,14 +155,25 @@ impl FrozenInput {
             _metadata: metadata,
         })
     }
-    /// Decode bounded format metadata from an actual immutable encoded region.
-    /// Both buffers are admitted first. The decoder can never emit more bytes
-    /// than the encoded region; the result exposes no unscoped owned buffer.
+    /// Decode bounded metadata using an SDK-controlled closed transform.
+    /// Encoded/output storage is admitted before allocation; neither the bytes
+    /// nor their original operation guards can escape as owned buffers.
+    ///
+    /// ```compile_fail
+    /// fn inject(snapshot: &mut oncl_pki::io::FrozenInput,
+    ///           scope: &oncl_pki::resource::ResourceScope) {
+    ///     let _ = snapshot.derive_region(oncl_pki::io::Region { offset: 0, len: 4 },
+    ///         scope, |_: &[u8], output: &mut dyn std::io::Write| {
+    ///             output.write_all(b"EVIL")?;
+    ///             Ok(())
+    ///         });
+    /// }
+    /// ```
     pub fn derive_region(
         &mut self,
         region: Region,
         scope: &ResourceScope,
-        decode: impl FnOnce(&[u8], &mut dyn Write) -> Result<(), ProcessingError>,
+        encoding: SnapshotEncoding,
     ) -> Result<DerivedInput, ProcessingError> {
         self.check(scope)?;
         if region.end()? > self.len() {
@@ -165,37 +212,28 @@ impl FrozenInput {
             }
             at += n;
         }
-        struct Bounded {
-            bytes: Vec<u8>,
-            limit: usize,
-        }
-        impl Write for Bounded {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                if self
-                    .bytes
-                    .len()
-                    .checked_add(bytes.len())
-                    .is_none_or(|n| n > self.limit)
-                {
-                    return Err(io::Error::other("derived metadata exceeds encoded region"));
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(length)
+            .map_err(|_| ProcessingError::MemoryLimit)?;
+        match encoding {
+            SnapshotEncoding::Identity => output.extend_from_slice(&encoded),
+            SnapshotEncoding::PdfByteString => {
+                let consumed = super::decode_pdf_byte_string(&encoded, &mut output)?;
+                if consumed != encoded.len() {
+                    return Err(ProcessingError::InvalidInput(
+                        "trailing bytes after PDF string",
+                    ));
                 }
-                self.bytes.extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
             }
         }
-        let mut output = Bounded {
-            bytes: Vec::with_capacity(length),
-            limit: length,
-        };
-        decode(&encoded, &mut output)?;
         scope.checkpoint()?;
         Ok(DerivedInput {
-            bytes: output.bytes,
+            bytes: output,
             parent: self.identity.clone(),
             scope: self.stage.scope.retain(),
+            region,
+            encoding,
             _memory: memory,
             _metadata: metadata,
         })
@@ -217,6 +255,12 @@ impl FrozenInput {
 impl DerivedInput {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+    pub fn region(&self) -> Region {
+        self.region
+    }
+    pub fn encoding(&self) -> SnapshotEncoding {
+        self.encoding
     }
 }
 impl FrozenReader<'_> {

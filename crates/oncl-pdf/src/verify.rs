@@ -2,6 +2,7 @@ use crate::{
     ByteRange, PdfDocument, PdfError, PdfLimits, Result,
     objects::{Value, get},
 };
+use oncl_pki::io::padded_der_sequence as canonical_cms;
 use oncl_pki::{
     io::Source,
     key::SigAlg,
@@ -255,44 +256,6 @@ impl PdfDocument<'_, '_> {
         Ok(result)
     }
 }
-fn canonical_cms(contents: &[u8]) -> Result<&[u8]> {
-    if contents.first() != Some(&0x30) {
-        return Err(PdfError::Malformed("Contents CMS sequence"));
-    }
-    let first = *contents.get(1).ok_or(PdfError::Malformed("CMS length"))?;
-    let (header, length) = if first < 128 {
-        (2, usize::from(first))
-    } else {
-        let count = usize::from(first & 127);
-        if count == 0 || count > 8 || contents.get(2) == Some(&0) {
-            return Err(PdfError::Malformed("CMS DER length"));
-        }
-        let mut n = 0usize;
-        for b in contents
-            .get(2..2 + count)
-            .ok_or(PdfError::Malformed("CMS length"))?
-        {
-            n = n
-                .checked_mul(256)
-                .and_then(|n| n.checked_add(usize::from(*b)))
-                .ok_or(PdfError::Limit("CMS length"))?;
-        }
-        if n < 128 {
-            return Err(PdfError::Malformed("noncanonical CMS length"));
-        }
-        (2 + count, n)
-    };
-    let end = header
-        .checked_add(length)
-        .ok_or(PdfError::Limit("CMS length"))?;
-    let cms = contents
-        .get(..end)
-        .ok_or(PdfError::Malformed("truncated CMS"))?;
-    if contents[end..].iter().any(|b| *b != 0) {
-        return Err(PdfError::Malformed("nonzero Contents padding"));
-    }
-    Ok(cms)
-}
 pub fn verify_source(
     input: Source<'_>,
     limits: &PdfLimits,
@@ -337,34 +300,11 @@ pub fn verify_source(
     drop(reader);
     let mut signatures = Vec::new();
     for (revision, candidate) in candidates? {
-        let scratch = candidate
-            .contents
-            .len
-            .checked_mul(2)
-            .ok_or(oncl_pki::resource::ProcessingError::MemoryLimit)?;
-        let _decode_memory = scope.reserve_memory(scratch)?;
-        let _decode_metadata = scope.reserve_metadata(scratch)?;
-        let decoded = snapshot.derive_region(candidate.contents, scope, |encoded, output| {
-            let mut parser = crate::objects::Parser::new(
-                encoded,
-                candidate.contents.offset,
-                limits.max_nodes,
-                limits.max_depth,
-            );
-            let Value::Bytes(bytes, _) = parser.value(0).map_err(|_| {
-                oncl_pki::resource::ProcessingError::InvalidInput("Contents decoding")
-            })?
-            else {
-                return Err(oncl_pki::resource::ProcessingError::InvalidInput(
-                    "Contents string",
-                ));
-            };
-            let cms = canonical_cms(&bytes).map_err(|_| {
-                oncl_pki::resource::ProcessingError::InvalidInput("Contents DER padding")
-            })?;
-            output.write_all(cms)?;
-            Ok(())
-        })?;
+        let decoded = snapshot.derive_region(
+            candidate.contents,
+            scope,
+            oncl_pki::io::SnapshotEncoding::PdfByteString,
+        )?;
         let [offset, len, second, last] = candidate.range.values();
         let report = oncl_pki::cms::stream::verify_snapshot_detached(
             &decoded,

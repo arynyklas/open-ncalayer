@@ -168,100 +168,11 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Value::Name(name))
             }
-            b'<' => {
-                self.pos += 1;
+            b'<' | b'(' => {
                 let mut bytes = Vec::new();
-                let mut high = None;
-                loop {
-                    let b = *self
-                        .bytes
-                        .get(self.pos)
-                        .ok_or(PdfError::Malformed("hex string"))?;
-                    self.pos += 1;
-                    if b == b'>' {
-                        break;
-                    }
-                    if white(b) {
-                        continue;
-                    }
-                    let n = hex(b)?;
-                    if let Some(h) = high.take() {
-                        bytes.push(h * 16 + n);
-                    } else {
-                        high = Some(n);
-                    }
-                }
-                if let Some(h) = high {
-                    bytes.push(h * 16);
-                }
-                Ok(Value::Bytes(
-                    bytes,
-                    self.base + start as u64..self.base + self.pos as u64,
-                ))
-            }
-            b'(' => {
-                self.pos += 1;
-                let mut bytes = Vec::new();
-                let mut nesting = 1;
-                while nesting > 0 {
-                    let b = *self
-                        .bytes
-                        .get(self.pos)
-                        .ok_or(PdfError::Malformed("literal string"))?;
-                    self.pos += 1;
-                    match b {
-                        b'\\' => {
-                            let b = *self
-                                .bytes
-                                .get(self.pos)
-                                .ok_or(PdfError::Malformed("string escape"))?;
-                            self.pos += 1;
-                            match b {
-                                b'n' => bytes.push(b'\n'),
-                                b'r' => bytes.push(b'\r'),
-                                b't' => bytes.push(b'\t'),
-                                b'b' => bytes.push(8),
-                                b'f' => bytes.push(12),
-                                b'\n' => {}
-                                b'\r' => {
-                                    if self.bytes.get(self.pos) == Some(&b'\n') {
-                                        self.pos += 1;
-                                    }
-                                }
-                                b'0'..=b'7' => {
-                                    let mut n = u16::from(b - b'0');
-                                    for _ in 0..2 {
-                                        if let Some(c @ b'0'..=b'7') = self.bytes.get(self.pos) {
-                                            n = n * 8 + u16::from(*c - b'0');
-                                            self.pos += 1;
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                    bytes.push(n as u8);
-                                }
-                                _ => bytes.push(b),
-                            }
-                        }
-                        b'(' => {
-                            nesting += 1;
-                            bytes.push(b)
-                        }
-                        b')' => {
-                            nesting -= 1;
-                            if nesting > 0 {
-                                bytes.push(b)
-                            }
-                        }
-                        b'\r' => {
-                            if self.bytes.get(self.pos) == Some(&b'\n') {
-                                self.pos += 1;
-                            }
-                            bytes.push(b'\n');
-                        }
-                        _ => bytes.push(b),
-                    }
-                }
+                let consumed =
+                    oncl_pki::io::decode_pdf_byte_string(&self.bytes[self.pos..], &mut bytes)?;
+                self.pos += consumed;
                 Ok(Value::Bytes(
                     bytes,
                     self.base + start as u64..self.base + self.pos as u64,

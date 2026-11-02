@@ -20,9 +20,12 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
+#[path = "io/byte_string.rs"]
+mod byte_string;
+pub use byte_string::{decode_pdf_byte_string, padded_der_sequence};
 #[path = "io/frozen.rs"]
 mod frozen;
-pub use frozen::{DerivedInput, FrozenInput, FrozenReader};
+pub use frozen::{DerivedInput, FrozenInput, FrozenReader, SnapshotEncoding};
 
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek + ?Sized> ReadSeek for T {}

@@ -485,3 +485,59 @@ fn forward_prev_cycles_and_xref_outside_revision_are_rejected() {
         Err(PdfError::Malformed("xref entry outside its revision"))
     ));
 }
+
+#[test]
+fn genuine_pdf_verification_accepts_authentic_frozen_source_at_exact_input_quota() {
+    use oncl_pki::io::{FrozenInput, Region, TemporaryStore};
+    let bytes = include_bytes!("fixtures/external-signed.pdf");
+    let limits = ResourceLimits {
+        input_bytes: bytes.len() as u64,
+        ..ResourceLimits::default()
+    };
+    let mut scope = Arc::new(SharedBudget::new(limits.clone()).unwrap())
+        .begin(limits, Arc::new(Control))
+        .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(temp.path()).unwrap();
+    let anchors = CaSet::new(vec![
+        oncl_pki::cert::parse(include_bytes!("fixtures/external-cert.der")).unwrap(),
+    ]);
+    let mut input = Cursor::new(bytes.as_slice());
+    let mut frozen =
+        FrozenInput::capture(Source::seekable(&mut input, None), &store, &mut scope).unwrap();
+    let mut source = frozen
+        .reader(
+            &[Region {
+                offset: 0,
+                len: bytes.len() as u64,
+            }],
+            &scope,
+        )
+        .unwrap();
+    let report = verify_source(
+        source.source(),
+        &PdfLimits::default(),
+        &store,
+        &ValidationContext {
+            policy: ValidationPolicy::OfflineReport,
+            now: time::OffsetDateTime::from_unix_timestamp(1793707200).unwrap(),
+            anchors: &anchors,
+            intermediates: &[],
+            http: &Offline,
+        },
+        &[SigAlg::RsaSha256],
+        &mut scope,
+    )
+    .unwrap();
+    source.finish().unwrap();
+    assert_eq!(scope.progress().bytes_in, bytes.len() as u64);
+    assert_eq!(
+        report.signatures[0].validation.signers[0].signature,
+        CheckStatus::Passed
+    );
+    assert_eq!(
+        report.signatures[0].byte_range.values(),
+        [0, 1055, 5313, 493]
+    );
+    assert_eq!(report.signatures[0].revision_end, 5806);
+}
