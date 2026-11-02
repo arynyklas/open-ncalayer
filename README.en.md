@@ -73,6 +73,26 @@ Keys and certificate requests (`generateCsr`; the Applet's `genKeyPairAndGetPKCS
 
 XMLDSig and CMS signatures and our key files are checked in NCANode (Kalkan): [`docs/dev/interop-ncanode.md`](docs/dev/interop-ncanode.md) (in Russian).
 
+### SDK platform changes (unreleased)
+
+The Rust SDK adds separate CAdES B/T/LT/LTA operations:
+`SignRequest::cades_create` / `cades_add`, `VerifyRequest::cades`, and
+`Engine::extend` / `extend_staged`. Readers take explicit `EvidenceLimits`;
+only the host supplies trust and network authority. Acquiring new T+ timestamps
+requires `CadesConfiguration`; carried-proof verification and B co-signing do
+not. Augmentation requires the separate `Action::Extend`, preserves signed
+fields and does not use a private key. The container level is the verified
+minimum across all signers.
+
+The archive profile is EN 319 122-1 V1.3.1 `archiveTimestampV3` +
+`ATSHashIndexV3`, currently SHA-256 for archive hashing only, not old v2 CAdES-A.
+Existing WSS/CLI contracts are unchanged. Run the local exercise with
+`cargo run -p oncl-core --example sdk_probe -- --case C03 --out target/c03-public`.
+It emits only public synthetic RSA artifacts for all four levels, attached and
+detached content, multiple signers and altered archives for an independent
+oracle; it does not replace full 10-GiB/RSS or desktop-matrix acceptance.
+
+
 ### Certificate checking
 
 Trust comes only from the embedded NCA certificates and `signerParams.chain`, as in the original. The OS and browser trust stores are not read.

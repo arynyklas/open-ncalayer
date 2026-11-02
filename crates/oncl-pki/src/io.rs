@@ -158,6 +158,18 @@ impl StagedArtifact {
         }
         Ok(())
     }
+    pub(crate) fn check_internal_output(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<(), ProcessingError> {
+        scope.checkpoint()?;
+        if !self.scope.same_operation(scope) || !self.source || self.failed || !self.is_empty() {
+            return Err(ProcessingError::InvalidInput(
+                "internal output requires an empty live source artifact from this operation",
+            ));
+        }
+        Ok(())
+    }
     pub(crate) fn fail_sign_output(&mut self) {
         self.failed = true;
     }

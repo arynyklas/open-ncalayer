@@ -48,7 +48,7 @@ pub enum EvidenceOrigin<'a> {
         obtained_at: OffsetDateTime,
     },
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EvidenceLimits {
     pub max_items: usize,
     pub max_bytes: u64,
@@ -59,7 +59,7 @@ pub struct EvidenceLimits {
     pub max_coverage_bytes: u64,
 }
 impl EvidenceLimits {
-    fn validate(&self) -> Result<(), EvidenceError> {
+    pub fn validate(&self) -> Result<(), EvidenceError> {
         if self.max_items == 0
             || self.max_bytes == 0
             || self.max_item_bytes == 0
@@ -156,7 +156,7 @@ impl EvidenceStore {
         entries
             .try_reserve_exact(limits.max_items)
             .map_err(|_| ProcessingError::MemoryLimit)?;
-        let staged = store.stage(scope)?;
+        let staged = store.stage_source(scope)?;
         Ok(Self {
             bundle: EvidenceBundle {
                 owner,
@@ -436,6 +436,12 @@ pub enum CoveragePart<'a> {
         artifact: &'a std::sync::Mutex<StagedArtifact>,
         region: Region,
     },
+    /// Hash a reconstructed standard component, not a caller-supplied digest.
+    /// Nested work and output bytes share the enclosing coverage quotas.
+    Hashed {
+        algorithm: HashAlg,
+        parts: &'a [CoveragePart<'a>],
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProofKind {
@@ -472,36 +478,155 @@ fn coverage_size(
     signer: &SignerEvidence<'_>,
     parts: &[CoveragePart<'_>],
 ) -> Result<u64, EvidenceError> {
-    if parts.is_empty() || parts.len() > bundle.limits.max_coverage_parts {
-        return Err(EvidenceError::Limit);
-    }
-    let mut total = 0u64;
-    for part in parts {
-        let length = match part {
-            CoveragePart::Signature => signer.signature.len() as u64,
-            CoveragePart::Bytes(bytes) => bytes.len() as u64,
-            CoveragePart::Staged { artifact, region } => {
-                let mut artifact = lock_staged(artifact)?;
-                artifact.read_region(*region, &mut [])?;
-                region.len
-            }
-            CoveragePart::Evidence { id, encoding } => {
-                let n = bundle.checked_entry(*id)?.region.len;
-                match encoding {
-                    CoverageEncoding::Raw => n,
-                    CoverageEncoding::Base64 => n
-                        .checked_add(2)
-                        .and_then(|n| (n / 3).checked_mul(4))
-                        .ok_or(EvidenceError::Limit)?,
-                }
-            }
-        };
-        total = total.checked_add(length).ok_or(EvidenceError::Limit)?;
-        if total > bundle.limits.max_coverage_bytes {
+    fn measure(
+        bundle: &EvidenceBundle,
+        signer: &SignerEvidence<'_>,
+        parts: &[CoveragePart<'_>],
+        depth: usize,
+        count: &mut usize,
+        work: &mut u64,
+    ) -> Result<u64, EvidenceError> {
+        if parts.is_empty() || depth > 8 {
             return Err(EvidenceError::Limit);
         }
+        let mut size = 0u64;
+        for part in parts {
+            *count = count.checked_add(1).ok_or(EvidenceError::Limit)?;
+            if *count > bundle.limits.max_coverage_parts {
+                return Err(EvidenceError::Limit);
+            }
+            let length = match part {
+                CoveragePart::Signature => signer.signature.len() as u64,
+                CoveragePart::Bytes(bytes) => bytes.len() as u64,
+                CoveragePart::Staged { artifact, region } => {
+                    lock_staged(artifact)?.read_region(*region, &mut [])?;
+                    region.len
+                }
+                CoveragePart::Evidence { id, encoding } => {
+                    let n = bundle.checked_entry(*id)?.region.len;
+                    match encoding {
+                        CoverageEncoding::Raw => n,
+                        CoverageEncoding::Base64 => n
+                            .checked_add(2)
+                            .and_then(|n| (n / 3).checked_mul(4))
+                            .ok_or(EvidenceError::Limit)?,
+                    }
+                }
+                CoveragePart::Hashed { algorithm, parts } => {
+                    measure(bundle, signer, parts, depth + 1, count, work)?;
+                    match algorithm {
+                        HashAlg::Sha1 => 20,
+                        HashAlg::Sha256 | HashAlg::Gost34311 | HashAlg::Streebog256 => 32,
+                        HashAlg::Sha512 | HashAlg::Streebog512 => 64,
+                    }
+                }
+            };
+            *work = work.checked_add(length).ok_or(EvidenceError::Limit)?;
+            if *work > bundle.limits.max_coverage_bytes {
+                return Err(EvidenceError::Limit);
+            }
+            size = size.checked_add(length).ok_or(EvidenceError::Limit)?;
+        }
+        Ok(size)
     }
-    Ok(total)
+    measure(bundle, signer, parts, 0, &mut 0, &mut 0)
+}
+struct CoverageHasher<'a, 'b, 'c> {
+    bundle: &'a mut EvidenceBundle,
+    signer: &'b SignerEvidence<'c>,
+    work: ResourceScope,
+    raw: WorkingBuffer,
+    encoded: Option<WorkingBuffer>,
+}
+impl CoverageHasher<'_, '_, '_> {
+    fn checkpoint(&self) -> Result<(), EvidenceError> {
+        self.bundle.checkpoint()?;
+        self.work.checkpoint()?;
+        Ok(())
+    }
+    fn feed(
+        &mut self,
+        parts: &[CoveragePart<'_>],
+        hash: &mut HashState,
+    ) -> Result<(), EvidenceError> {
+        for part in parts {
+            self.checkpoint()?;
+            match part {
+                CoveragePart::Signature => {
+                    for bytes in self.signer.signature.chunks(IO_CHUNK_BYTES) {
+                        self.checkpoint()?;
+                        hash.update(bytes);
+                    }
+                }
+                CoveragePart::Bytes(bytes) => {
+                    for bytes in bytes.chunks(IO_CHUNK_BYTES) {
+                        self.checkpoint()?;
+                        hash.update(bytes);
+                    }
+                }
+                CoveragePart::Hashed { algorithm, parts } => {
+                    let mut nested = HashState::new(*algorithm);
+                    self.feed(parts, &mut nested)?;
+                    hash.update(nested.finish().as_bytes());
+                }
+                CoveragePart::Staged { artifact, region } => {
+                    let mut source = lock_staged(artifact)?;
+                    let mut region = *region;
+                    while region.len != 0 {
+                        self.checkpoint()?;
+                        let n = source.read_region(region, &mut self.raw.bytes)?;
+                        self.checkpoint()?;
+                        if n == 0 {
+                            return Err(ProcessingError::InvalidInput(
+                                "short staged coverage source",
+                            )
+                            .into());
+                        }
+                        hash.update(&self.raw.bytes[..n]);
+                        region.offset = region
+                            .offset
+                            .checked_add(n as u64)
+                            .ok_or(EvidenceError::Limit)?;
+                        region.len -= n as u64;
+                    }
+                }
+                CoveragePart::Evidence { id, encoding } => {
+                    let mut region = self.bundle.checked_entry(*id)?.region;
+                    while region.len != 0 {
+                        self.checkpoint()?;
+                        let n = self
+                            .bundle
+                            .staged
+                            .read_region(region, &mut self.raw.bytes)?;
+                        self.checkpoint()?;
+                        if n == 0 {
+                            return Err(ProcessingError::InvalidInput(
+                                "short evidence coverage source",
+                            )
+                            .into());
+                        }
+                        match encoding {
+                            CoverageEncoding::Raw => hash.update(&self.raw.bytes[..n]),
+                            CoverageEncoding::Base64 => {
+                                let out =
+                                    self.encoded.as_mut().ok_or(EvidenceError::InvalidBinding)?;
+                                let count = STANDARD
+                                    .encode_slice(&self.raw.bytes[..n], &mut out.bytes)
+                                    .map_err(|_| ProcessingError::MemoryLimit)?;
+                                hash.update(&out.bytes[..count]);
+                            }
+                        }
+                        region.offset = region
+                            .offset
+                            .checked_add(n as u64)
+                            .ok_or(EvidenceError::Limit)?;
+                        region.len -= n as u64;
+                    }
+                }
+            }
+        }
+        self.checkpoint()
+    }
 }
 fn hash_coverage(
     bundle: &mut EvidenceBundle,
@@ -511,36 +636,47 @@ fn hash_coverage(
     resources: Option<&ResourceScope>,
 ) -> Result<DigestValue, EvidenceError> {
     let work = resources.map_or_else(|| bundle.scope.retain(), ResourceScope::retain);
-    let checkpoint = |bundle: &EvidenceBundle| -> Result<(), EvidenceError> {
-        bundle.checkpoint()?;
-        work.checkpoint()?;
-        Ok(())
-    };
-    checkpoint(bundle)?;
+    bundle.checkpoint()?;
+    work.checkpoint()?;
+    // This walk validates total (not per-recursion) work, part count and depth
+    // before either recursive discovery or any hash state is constructed.
     coverage_size(bundle, signer, parts)?;
-    let _state = work.reserve_metadata(std::mem::size_of::<HashState>() as u64)?;
-    let base64 = parts.iter().any(|p| {
-        matches!(
-            p,
-            CoveragePart::Evidence {
-                encoding: CoverageEncoding::Base64,
-                ..
+    fn features(parts: &[CoveragePart<'_>]) -> (bool, usize) {
+        let mut base64 = false;
+        let mut depth = 0;
+        for part in parts {
+            match part {
+                CoveragePart::Evidence {
+                    encoding: CoverageEncoding::Base64,
+                    ..
+                } => base64 = true,
+                CoveragePart::Hashed { parts, .. } => {
+                    let (nested_base64, nested_depth) = features(parts);
+                    base64 |= nested_base64;
+                    depth = depth.max(nested_depth + 1);
+                }
+                _ => {}
             }
-        )
-    });
-    // Raw base64 chunks are multiples of three: only the final chunk is padded.
+        }
+        (base64, depth)
+    }
+    let (base64, depth) = features(parts);
+    let state_bytes = ((depth + 1) * std::mem::size_of::<HashState>()) as u64;
+    let _state_metadata = work.reserve_metadata(state_bytes)?;
+    let _state_memory = work.reserve_memory(state_bytes)?;
+    // Every nested standard hash reuses these same admitted buffers. Base64
+    // chunks stay multiples of three, so only the final chunk is padded.
     let raw_max = if base64 {
         ((work.available_memory() / 7).min((IO_CHUNK_BYTES / 4) as u64) * 3) as usize
     } else {
         IO_CHUNK_BYTES
     };
     let mut raw = working_buffer(&work, raw_max)?;
-    let mut encoded = if base64 {
+    let encoded = if base64 {
         let capacity = raw.bytes.len() / 3 * 4;
         if capacity < 4 {
             return Err(ProcessingError::MemoryLimit.into());
         }
-        // Round down raw capacity if a small live-memory budget shortened it.
         raw.bytes.truncate(capacity / 4 * 3);
         Some(working_buffer(&work, capacity)?)
     } else {
@@ -554,63 +690,14 @@ fn hash_coverage(
         raw.bytes.truncate(raw_len);
     }
     let mut hash = HashState::new(algorithm);
-    for part in parts {
-        checkpoint(bundle)?;
-        match part {
-            CoveragePart::Signature => {
-                for bytes in signer.signature.chunks(IO_CHUNK_BYTES) {
-                    checkpoint(bundle)?;
-                    hash.update(bytes);
-                }
-            }
-            CoveragePart::Bytes(bytes) => {
-                for bytes in bytes.chunks(IO_CHUNK_BYTES) {
-                    checkpoint(bundle)?;
-                    hash.update(bytes);
-                }
-            }
-            CoveragePart::Staged { artifact, region } => {
-                let mut source = lock_staged(artifact)?;
-                let mut region = *region;
-                while region.len != 0 {
-                    checkpoint(bundle)?;
-                    let n = source.read_region(region, &mut raw.bytes)?;
-                    checkpoint(bundle)?;
-                    hash.update(&raw.bytes[..n]);
-                    region.offset = region
-                        .offset
-                        .checked_add(n as u64)
-                        .ok_or(EvidenceError::Limit)?;
-                    region.len -= n as u64;
-                }
-            }
-            CoveragePart::Evidence { id, encoding } => {
-                let mut region = bundle.checked_entry(*id)?.region;
-                while region.len != 0 {
-                    checkpoint(bundle)?;
-                    let n = bundle.staged.read_region(region, &mut raw.bytes)?;
-                    checkpoint(bundle)?;
-                    match encoding {
-                        CoverageEncoding::Raw => hash.update(&raw.bytes[..n]),
-                        CoverageEncoding::Base64 => {
-                            let out = encoded.as_mut().ok_or(EvidenceError::InvalidBinding)?;
-                            let count = STANDARD
-                                .encode_slice(&raw.bytes[..n], &mut out.bytes)
-                                .map_err(|_| ProcessingError::MemoryLimit)?;
-                            hash.update(&out.bytes[..count]);
-                        }
-                    }
-                    region.offset = region
-                        .offset
-                        .checked_add(n as u64)
-                        .ok_or(EvidenceError::Limit)?;
-                    region.len -= n as u64;
-                    checkpoint(bundle)?;
-                }
-            }
-        }
-    }
-    checkpoint(bundle)?;
+    let mut hasher = CoverageHasher {
+        bundle,
+        signer,
+        work,
+        raw,
+        encoded,
+    };
+    hasher.feed(parts, &mut hash)?;
     Ok(hash.finish())
 }
 
@@ -620,7 +707,7 @@ struct RawEvidence {
 }
 struct ParsedEvidence {
     raw: Vec<RawEvidence>,
-    candidates: Vec<Certificate>,
+    candidates: Vec<(Option<EvidenceId>, Certificate)>,
     _memory: ResourceReservation,
     _metadata: ResourceReservation,
 }
@@ -678,8 +765,8 @@ impl ParsedEvidence {
         )?;
         let mut raw = Vec::with_capacity(bundle.entries.len());
         let mut candidates = Vec::with_capacity(bundle.entries.len() + ctx.intermediates.len());
-        candidates.extend_from_slice(ctx.intermediates);
-        for entry in &bundle.entries {
+        candidates.extend(ctx.intermediates.iter().cloned().map(|cert| (None, cert)));
+        for (index, entry) in bundle.entries.iter().enumerate() {
             resources.checkpoint()?;
             bundle.scope.checkpoint()?;
             let len = usize::try_from(entry.region.len).map_err(|_| EvidenceError::Limit)?;
@@ -703,7 +790,13 @@ impl ParsedEvidence {
             if entry.kind == EvidenceKind::Certificate
                 && let Ok(cert) = cert::parse(&value)
             {
-                candidates.push(cert);
+                candidates.push((
+                    Some(EvidenceId {
+                        owner: bundle.owner,
+                        index,
+                    }),
+                    cert,
+                ));
             }
             resources.checkpoint()?;
             bundle.scope.checkpoint()?;
@@ -722,10 +815,17 @@ impl ParsedEvidence {
         })
     }
 }
+/// Only concrete in-crate standard adapters may derive selections. Public
+/// callers keep the original complete-bundle graph and cannot supply a skiplist.
+pub(crate) struct ArchiveSelection<'a> {
+    pub token: EvidenceId,
+    pub protected: &'a [EvidenceId],
+}
 fn binding_graph(
     bundle: &EvidenceBundle,
     signer: &SignerEvidence<'_>,
     proofs: &[TimestampBinding<'_>],
+    selections: Option<&[ArchiveSelection<'_>]>,
 ) -> Result<(), EvidenceError> {
     if proofs.len() > bundle.limits.max_proofs {
         return Err(EvidenceError::Limit);
@@ -736,7 +836,10 @@ fn binding_graph(
         coverage_size(bundle, signer, proof.coverage)?;
         let entry = bundle.checked_entry(proof.token)?;
         if entry.kind != EvidenceKind::Timestamp
-            || previous.is_some_and(|index| index >= proof.token.index)
+            || (selections.is_none() && previous.is_some_and(|index| index >= proof.token.index))
+            || proofs[..position]
+                .iter()
+                .any(|earlier| earlier.token == proof.token)
         {
             return Err(EvidenceError::InvalidBinding);
         }
@@ -755,33 +858,79 @@ fn binding_graph(
                 if !signature_seen {
                     return Err(EvidenceError::InvalidBinding);
                 }
-                let mut signature = false;
-                let mut index = 0;
-                for part in proof.coverage {
-                    match part {
-                        CoveragePart::Bytes(_) | CoveragePart::Staged { .. } => {}
-                        CoveragePart::Signature if !signature && index == 0 => signature = true,
-                        CoveragePart::Evidence { id, .. }
-                            if signature
-                                && id.owner == bundle.owner
-                                && id.index == index
-                                && index < proof.token.index =>
-                        {
-                            index += 1
-                        }
-                        _ => return Err(EvidenceError::InvalidBinding),
-                    }
-                }
-                if !signature || index != proof.token.index {
+                let selected = selections
+                    .and_then(|values| values.iter().find(|value| value.token == proof.token))
+                    .map(|value| value.protected);
+                if selections.is_some() && selected.is_none() {
                     return Err(EvidenceError::InvalidBinding);
                 }
-                for (index, item) in bundle.entries[..proof.token.index].iter().enumerate() {
-                    if item.kind == EvidenceKind::Timestamp
-                        && !proofs[..position]
-                            .iter()
-                            .any(|earlier| earlier.token.index == index)
+                fn walk(
+                    parts: &[CoveragePart<'_>],
+                    bundle: &EvidenceBundle,
+                    token: EvidenceId,
+                    selected: Option<&[EvidenceId]>,
+                    signature: &mut bool,
+                    index: &mut usize,
+                    depth: usize,
+                ) -> Result<(), EvidenceError> {
+                    for part in parts {
+                        match part {
+                            CoveragePart::Bytes(_) | CoveragePart::Staged { .. } => {}
+                            CoveragePart::Hashed { parts, .. } => {
+                                walk(parts, bundle, token, selected, signature, index, depth + 1)?;
+                            }
+                            CoveragePart::Signature if !*signature && *index == 0 && depth == 0 => {
+                                *signature = true;
+                            }
+                            CoveragePart::Evidence { id, .. }
+                                if *signature
+                                    && id.owner == bundle.owner
+                                    && *id != token
+                                    && (selected.is_some() || id.index < token.index)
+                                    && selected.map_or(id.index == *index, |ids| {
+                                        ids.get(*index) == Some(id)
+                                    }) =>
+                            {
+                                *index += 1;
+                            }
+                            _ => return Err(EvidenceError::InvalidBinding),
+                        }
+                    }
+                    Ok(())
+                }
+                let mut signature = false;
+                let mut index = 0;
+                walk(
+                    proof.coverage,
+                    bundle,
+                    proof.token,
+                    selected,
+                    &mut signature,
+                    &mut index,
+                    0,
+                )?;
+                if !signature || index != selected.map_or(proof.token.index, <[EvidenceId]>::len) {
+                    return Err(EvidenceError::InvalidBinding);
+                }
+                for item_index in 0..selected.map_or(proof.token.index, |_| bundle.entries.len()) {
+                    let id = EvidenceId {
+                        owner: bundle.owner,
+                        index: item_index,
+                    };
+                    let covered = selected.is_none_or(|ids| ids.contains(&id));
+                    let prior = proofs[..position].iter().any(|earlier| earlier.token == id);
+                    if bundle.entries[item_index].kind == EvidenceKind::Timestamp
+                        && ((covered && !prior) || (prior && !covered))
                     {
                         return Err(EvidenceError::InvalidBinding);
+                    }
+                }
+                if let Some(ids) = selected {
+                    for (position, id) in ids.iter().enumerate() {
+                        bundle.checked_entry(*id)?;
+                        if ids[..position].contains(id) {
+                            return Err(EvidenceError::InvalidBinding);
+                        }
                     }
                 }
             }
@@ -829,9 +978,77 @@ pub fn validate_evidence(
     network: &NetworkPolicy,
     resources: &ResourceScope,
 ) -> Result<ValidationReport, EvidenceError> {
+    validate_evidence_impl(
+        signer, bundle, proofs, required, ctx, network, resources, None, None,
+    )
+}
+
+/// One decoded common store for a multi-signer format operation. It cannot be
+/// constructed or transferred outside the concrete in-crate adapters.
+pub(crate) struct PreparedEvidence {
+    owner: u64,
+    parsed: ParsedEvidence,
+}
+pub(crate) fn prepare_evidence(
+    signer: &SignerEvidence<'_>,
+    bundle: &mut EvidenceBundle,
+    ctx: &ValidationContext<'_>,
+    resources: &ResourceScope,
+) -> Result<PreparedEvidence, EvidenceError> {
+    Ok(PreparedEvidence {
+        owner: bundle.owner,
+        parsed: ParsedEvidence::read(bundle, signer, ctx, resources)?,
+    })
+}
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Existing F04 checks with one borrowed cache and format-derived selection, not a second validator"
+)]
+pub(crate) fn validate_prepared_evidence(
+    signer: &SignerEvidence<'_>,
+    bundle: &mut EvidenceBundle,
+    proofs: &[TimestampBinding<'_>],
+    required: AdesLevel,
+    ctx: &ValidationContext<'_>,
+    network: &NetworkPolicy,
+    resources: &ResourceScope,
+    selections: Option<&[ArchiveSelection<'_>]>,
+    prepared: &PreparedEvidence,
+) -> Result<ValidationReport, EvidenceError> {
+    if prepared.owner != bundle.owner {
+        return Err(EvidenceError::InvalidBinding);
+    }
+    validate_evidence_impl(
+        signer,
+        bundle,
+        proofs,
+        required,
+        ctx,
+        network,
+        resources,
+        selections,
+        Some(&prepared.parsed),
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Same F04 validator serves complete public bundles and private selected views"
+)]
+fn validate_evidence_impl(
+    signer: &SignerEvidence<'_>,
+    bundle: &mut EvidenceBundle,
+    proofs: &[TimestampBinding<'_>],
+    required: AdesLevel,
+    ctx: &ValidationContext<'_>,
+    network: &NetworkPolicy,
+    resources: &ResourceScope,
+    selections: Option<&[ArchiveSelection<'_>]>,
+    prepared: Option<&ParsedEvidence>,
+) -> Result<ValidationReport, EvidenceError> {
     resources.checkpoint()?;
     bundle.checkpoint()?;
-    binding_graph(bundle, signer, proofs)?;
+    binding_graph(bundle, signer, proofs, selections)?;
     if signer.signature.len() as u64 > bundle.limits.max_item_bytes {
         return Err(EvidenceError::Limit);
     }
@@ -846,18 +1063,58 @@ pub fn validate_evidence(
         .ok_or(EvidenceError::Limit)? as u64;
     let _reason_memory = bundle.scope.reserve_memory(reason_bytes)?;
     let _reason_metadata = bundle.scope.reserve_metadata(reason_bytes)?;
-    let parsed = ParsedEvidence::read(bundle, signer, ctx, resources)?;
+    let owned = if prepared.is_none() {
+        Some(ParsedEvidence::read(bundle, signer, ctx, resources)?)
+    } else {
+        None
+    };
+    let parsed = prepared
+        .or(owned.as_ref())
+        .ok_or(EvidenceError::InvalidBinding)?;
+    let selected = selections
+        .and_then(|values| values.last())
+        .map(|value| value.protected);
+    let included = |index: usize| {
+        selected.is_none_or(|ids| {
+            ids.contains(&EvidenceId {
+                owner: bundle.owner,
+                index,
+            })
+        })
+    };
+    let candidates: Vec<&Certificate> = parsed
+        .candidates
+        .iter()
+        .filter(|(id, _)| {
+            id.map_or(selected.is_none(), |id| {
+                selected.is_none_or(|ids| ids.contains(&id))
+            })
+        })
+        .map(|(_, cert)| cert)
+        .collect();
+    // A carried source certificate is part of the mandatory archive validation
+    // material, not an unrelated later root-set addition.
+    if selected.is_some()
+        && !parsed
+            .candidates
+            .iter()
+            .any(|(id, cert)| id.is_some_and(|id| included(id.index)) && cert == signer.certificate)
+    {
+        return Err(EvidenceError::InvalidBinding);
+    }
     let responses: Vec<&[u8]> = parsed
         .raw
         .iter()
-        .filter(|item| item.kind == EvidenceKind::Ocsp)
-        .map(|item| item.bytes.as_slice())
+        .enumerate()
+        .filter(|(index, item)| included(*index) && item.kind == EvidenceKind::Ocsp)
+        .map(|(_, item)| item.bytes.as_slice())
         .collect();
     let crls: Vec<&[u8]> = parsed
         .raw
         .iter()
-        .filter(|item| item.kind == EvidenceKind::Crl)
-        .map(|item| item.bytes.as_slice())
+        .enumerate()
+        .filter(|(index, item)| included(*index) && item.kind == EvidenceKind::Crl)
+        .map(|(_, item)| item.bytes.as_slice())
         .collect();
     let original = bundle.scope.retain();
     // The outer owner-A transport and inner current-B transport independently
@@ -914,10 +1171,10 @@ pub fn validate_evidence(
             }
             resources.checkpoint()?;
             bundle.checkpoint()?;
-            let built = pkix::build_anchored_path_limited(
+            let built = pkix::build_anchored_path_selected(
                 &tsa,
                 ctx.anchors,
-                &parsed.candidates,
+                &candidates,
                 info.gen_time,
                 bundle.limits.max_chain_len,
             );
@@ -969,7 +1226,7 @@ pub fn validate_evidence(
             && (!archive_valid
                 || !proofs.last().is_some_and(|proof| {
                     proof.kind == ProofKind::Archive
-                        && proof.token.index + 1 == bundle.entries.len()
+                        && (selections.is_some() || proof.token.index + 1 == bundle.entries.len())
                 }))
         {
             timestamp = combine(timestamp, CheckStatus::Unavailable);
@@ -1014,10 +1271,10 @@ pub fn validate_evidence(
                 crate::cms::Problem::BadSignature,
             ));
         }
-        let built = pkix::build_anchored_path_limited(
+        let built = pkix::build_anchored_path_selected(
             signer.certificate,
             ctx.anchors,
-            &parsed.candidates,
+            &candidates,
             validation::path_time(&certificate_info, at),
             bundle.limits.max_chain_len,
         );

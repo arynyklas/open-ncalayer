@@ -93,6 +93,8 @@ pub struct VerificationReport {
     pub policy: ValidationPolicy,
     pub checked_at: OffsetDateTime,
     pub signers: ScopedSigners,
+    /// Minimum actually verified CAdES level; legacy CMS reports have none.
+    pub ades_level: Option<oncl_pki::evidence::AdesLevel>,
 }
 
 /// Raw structural extraction, not a signature/validation verdict. Arbitrary
@@ -122,7 +124,7 @@ pub(crate) fn stream_error(error: oncl_pki::cms::stream::StreamError) -> Operati
     }
 }
 impl Engine {
-    fn validation_context<'a>(
+    pub(crate) fn validation_context<'a>(
         &'a self,
         ctx: &OperationContext,
         action: Action,
@@ -185,6 +187,7 @@ impl Engine {
             policy: report.policy,
             checked_at: report.checked_at,
             signers: report.signers,
+            ades_level: None,
         })
     }
     /// Host PKI-only bounded fetch using this operation's authorization and
@@ -214,25 +217,26 @@ impl Engine {
         detached: Option<oncl_pki::io::Source<'_>>,
         ctx: &mut OperationContext,
     ) -> Result<VerificationReport, OperationError> {
+        if let crate::VerifyProfile::Cades(required) = request.profile() {
+            return self.verify_cades(request, required, input, detached, ctx);
+        }
         let services = self.validation_context(ctx, Action::Verify)?;
         let now = (services.clock)();
         let transport =
             DeadlineTransport::new(services.http.as_ref(), &services.network, &ctx.scope);
-        let result = match request.profile() {
-            crate::VerifyProfile::Cms => oncl_pki::cms::stream::verify(
-                input,
-                detached,
-                &ValidationContext {
-                    policy: ctx.policy.validation,
-                    now,
-                    anchors: &services.anchors,
-                    intermediates: &services.intermediates,
-                    http: &transport,
-                },
-                ctx.policy.allowed_signature_algorithms,
-                &mut ctx.scope,
-            ),
-        };
+        let result = oncl_pki::cms::stream::verify(
+            input,
+            detached,
+            &ValidationContext {
+                policy: ctx.policy.validation,
+                now,
+                anchors: &services.anchors,
+                intermediates: &services.intermediates,
+                http: &transport,
+            },
+            ctx.policy.allowed_signature_algorithms,
+            &mut ctx.scope,
+        );
         transport.finish()?;
         ctx.scope.checkpoint()?;
         let report = result.map_err(stream_error)?;
@@ -242,6 +246,7 @@ impl Engine {
             policy: report.policy,
             checked_at: report.checked_at,
             signers: report.signers,
+            ades_level: None,
         })
     }
 

@@ -99,7 +99,42 @@
 //! for an empty same-operation output artifact: it chooses one output-accounting
 //! owner, never a writer adapter that double debits a stage. No artifact publishes
 //! implicitly; commit only a completed result. Errors preserve prior key use.
+//!
+//! # CAdES baseline signatures
+//! `SignRequest::cades_create` and `SignRequest::cades_add` take explicit
+//! `oncl_pki::evidence::EvidenceLimits` independently of TSA issuance settings.
+//! `VerifyRequest::cades` takes the required minimum and the same explicit reader
+//! limits. Configure host validation/trust/network and temporary storage for
+//! these operations. Baseline B creation, carried verification and B co-signing
+//! do not require `CadesConfiguration`. Acquiring T/LT/LTA requires an explicit
+//! `EngineServices::with_cades`; absence is `MissingCadesConfiguration` before
+//! private application, not missing validation or an algorithm fallback.
+//!
+//! `Engine::extend` / `extend_staged` require the separate non-private
+//! `Action::Extend`. `ExtendRequest::cms` carries the target, optional detached
+//! source, public validation material and reader limits. Extension checks all
+//! existing signatures/proofs, preserves original signed fields/signature
+//! octets, and never applies a local private key. New signing/co-signing remains
+//! guarded and reports Applied/Unknown truthfully after a private-use failure.
+//! The container level is the verified minimum across all signers; each scoped
+//! signer reports its own level. A bad present archive never becomes Valid B/T.
+//!
+//! The archive profile is EN 319 122-1 V1.3.1 archiveTimestampV3
+//! (`0.4.0.1733.2.4`) with ATSHashIndexV3 (`0.4.0.19122.1.5`), currently SHA-256
+//! only. It is not historical v2 CAdES-A. RSA and GOST source signatures use
+//! their existing actual backends; SHA-256 archive hashing does not change the
+//! source signature algorithm. Signing-time is a claim, not proof of existence.
+//! TSA signature, anchored path and fresh status at the verified proof time are
+//! mandatory. Indexed bytes and predecessor proofs are checked against one
+//! common bounded evidence store; unrelated later root additions are not
+//! silently promoted into protected evidence.
+//!
+//! `cargo run -p oncl-core --example sdk_probe -- --case C03 --out <directory>`
+//! runs a bounded synthetic loopback TSA/OCSP/CRL exercise and emits only public
+//! RSA B/T/LT/LTA, detached/multisigner, extension/Add and negative artifacts.
+//! This is not a full 10-GiB/RSS or platform-matrix acceptance run.
 
+mod cades;
 mod context;
 mod engine;
 mod error;
@@ -109,6 +144,7 @@ mod report;
 mod request;
 mod sign;
 
+pub use cades::{CadesConfiguration, ExtendRequest};
 pub use context::{OperationContext, OperationId};
 pub use engine::{Engine, EngineServices, HashReport};
 pub use error::{ErrorCode, OperationError};
