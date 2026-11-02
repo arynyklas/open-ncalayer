@@ -4,26 +4,42 @@ pub enum VerifyProfile {
     Cms,
     #[cfg(feature = "pdf")]
     Pdf,
+    Cades(oncl_pki::evidence::AdesLevel),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerifyRequest {
     profile: VerifyProfile,
+    limits: Option<oncl_pki::evidence::EvidenceLimits>,
 }
 impl VerifyRequest {
     #[cfg(feature = "pdf")]
     pub const fn pdf() -> Self {
         Self {
             profile: VerifyProfile::Pdf,
+            limits: None,
         }
     }
     pub const fn cms() -> Self {
         Self {
             profile: VerifyProfile::Cms,
+            limits: None,
         }
     }
     pub const fn profile(&self) -> VerifyProfile {
         self.profile
+    }
+    pub const fn cades(
+        required: oncl_pki::evidence::AdesLevel,
+        limits: oncl_pki::evidence::EvidenceLimits,
+    ) -> Self {
+        Self {
+            profile: VerifyProfile::Cades(required),
+            limits: Some(limits),
+        }
+    }
+    pub const fn evidence_limits(&self) -> Option<oncl_pki::evidence::EvidenceLimits> {
+        self.limits
     }
 }
 
@@ -32,6 +48,7 @@ impl VerifyRequest {
 pub enum SignProfile {
     Cms,
     Raw,
+    Cades(oncl_pki::evidence::AdesLevel),
 }
 /// A one-shot request: detached Add sources and secrets are borrowed, not
 /// cloned, serialized or included in Debug output.
@@ -45,6 +62,20 @@ pub(crate) enum SignMode<'a> {
     CmsAdd(
         Vec<crate::keys::KeyRequest<'a>>,
         Option<oncl_pki::io::Source<'a>>,
+    ),
+    CadesCreate(
+        Vec<crate::keys::KeyRequest<'a>>,
+        bool,
+        oncl_pki::evidence::AdesLevel,
+        oncl_pki::cms::ades::ValidationMaterial<'a>,
+        oncl_pki::evidence::EvidenceLimits,
+    ),
+    CadesAdd(
+        Vec<crate::keys::KeyRequest<'a>>,
+        Option<oncl_pki::io::Source<'a>>,
+        oncl_pki::evidence::AdesLevel,
+        oncl_pki::cms::ades::ValidationMaterial<'a>,
+        oncl_pki::evidence::EvidenceLimits,
     ),
 }
 impl<'a> SignRequest<'a> {
@@ -74,10 +105,35 @@ impl<'a> SignRequest<'a> {
             mode: SignMode::CmsAdd(keys, detached),
         }
     }
+    pub fn cades_create(
+        keys: Vec<crate::keys::KeyRequest<'a>>,
+        attached: bool,
+        level: oncl_pki::evidence::AdesLevel,
+        material: oncl_pki::cms::ades::ValidationMaterial<'a>,
+        reader_limits: oncl_pki::evidence::EvidenceLimits,
+    ) -> Self {
+        Self {
+            mode: SignMode::CadesCreate(keys, attached, level, material, reader_limits),
+        }
+    }
+    pub fn cades_add(
+        keys: Vec<crate::keys::KeyRequest<'a>>,
+        detached: Option<oncl_pki::io::Source<'a>>,
+        level: oncl_pki::evidence::AdesLevel,
+        material: oncl_pki::cms::ades::ValidationMaterial<'a>,
+        reader_limits: oncl_pki::evidence::EvidenceLimits,
+    ) -> Self {
+        Self {
+            mode: SignMode::CadesAdd(keys, detached, level, material, reader_limits),
+        }
+    }
     pub fn profile(&self) -> SignProfile {
         match self.mode {
             SignMode::RawMessage(_) | SignMode::RawDigest(..) => SignProfile::Raw,
             SignMode::CmsCreate(..) | SignMode::CmsAdd(..) => SignProfile::Cms,
+            SignMode::CadesCreate(_, _, level, _, _) | SignMode::CadesAdd(_, _, level, _, _) => {
+                SignProfile::Cades(level)
+            }
         }
     }
 }

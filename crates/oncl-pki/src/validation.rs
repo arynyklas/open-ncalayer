@@ -130,6 +130,71 @@ impl std::ops::Deref for ScopedSigners {
         &self.values
     }
 }
+impl ScopedSigners {
+    pub(crate) fn cades_level(&mut self, index: usize, level: crate::evidence::AdesLevel) {
+        if let Some(signer) = self.values.get_mut(index) {
+            signer.ades_level = (signer.verdict() == Verdict::Valid).then_some(level);
+        }
+    }
+    pub(crate) fn cades_failure(
+        &mut self,
+        index: usize,
+        reason: ValidationReason,
+        scope: &ResourceScope,
+    ) -> Result<(), ProcessingError> {
+        if !self._memory.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "CAdES facts belong to another operation",
+            ));
+        }
+        let signer = self
+            .values
+            .get_mut(index)
+            .ok_or(ProcessingError::InvalidInput("missing CAdES signer"))?;
+        if signer.reasons.len() == signer.reasons.capacity() {
+            let slots = self
+                ._sources
+                .len()
+                .checked_add(1)
+                .ok_or(ProcessingError::MemoryLimit)?;
+            let bytes = signer
+                .reasons
+                .len()
+                .checked_add(1)
+                .and_then(|count| count.checked_mul(std::mem::size_of::<ValidationReason>()))
+                .and_then(|bytes| {
+                    slots
+                        .checked_mul(std::mem::size_of::<ReportMemory>())
+                        .and_then(|slots| bytes.checked_add(slots))
+                })
+                .ok_or(ProcessingError::MemoryLimit)? as u64;
+            let growth = ReportMemory {
+                memory: scope.reserve_memory(bytes)?,
+                metadata: scope.reserve_metadata(bytes)?,
+                scope: scope.retain(),
+            };
+            let mut sources = Vec::new();
+            sources
+                .try_reserve_exact(slots)
+                .map_err(|_| ProcessingError::MemoryLimit)?;
+            signer
+                .reasons
+                .try_reserve_exact(1)
+                .map_err(|_| ProcessingError::MemoryLimit)?;
+            sources.append(&mut self._sources);
+            sources.push(growth);
+            self._sources = sources;
+        }
+        if matches!(&reason, ValidationReason::Signature(_)) {
+            signer.signature = CheckStatus::Failed;
+        } else {
+            signer.timestamp = CheckStatus::Failed;
+        }
+        signer.ades_level = None;
+        signer.reasons.push(reason);
+        scope.checkpoint()
+    }
+}
 impl<'a> IntoIterator for &'a ScopedSigners {
     type Item = &'a SignerValidation;
     type IntoIter = std::slice::Iter<'a, SignerValidation>;
@@ -199,6 +264,8 @@ pub struct SignerValidation {
     /// Common evidence validation's fully checked proof, borrowed with this
     /// scoped report. Legacy CMS time provenance remains in `time_basis`.
     pub proof_time: Option<crate::evidence::ProofTime>,
+    /// Actual format level, assigned only by a fully checked standard adapter.
+    pub ades_level: Option<crate::evidence::AdesLevel>,
     pub reasons: Vec<ValidationReason>,
 }
 /// Owned validation output does not expose a separately droppable reservation:
@@ -373,6 +440,7 @@ fn validate_prepared_cms_impl(
                     claimed_signing_time: None,
                     time_basis: TimeBasis::Current(ctx.now),
                     proof_time: None,
+                    ades_level: None,
                     reasons: Vec::with_capacity(SIGNER_REASON_CAPACITY),
                 },
             };
@@ -550,6 +618,7 @@ pub(crate) fn certificate_facts(
         claimed_signing_time: None,
         time_basis: TimeBasis::Current(at),
         proof_time: None,
+        ades_level: None,
         reasons: Vec::with_capacity(SIGNER_REASON_CAPACITY),
     };
     if !is_valid_at(info, at) {

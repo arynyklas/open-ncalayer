@@ -310,9 +310,17 @@ impl<'a, 's> Reader<'a, 's> {
             {
                 return Err(malformed("value exceeds enclosing length"));
             }
-            // A declared value must fit the total wire allowance, including
-            // already buffered but not yet parsed bytes. Do not narrow to usize.
-            if end > self.scope.limits().input_bytes {
+            // Internal CMS output may be larger than the original document's
+            // intake allowance. Its source-role spool already owns admission;
+            // bound declared TLVs to that exact frozen wire, not a new intake.
+            let wire_limit = if self.replay {
+                self.source
+                    .known_len()
+                    .ok_or_else(|| malformed("internal replay requires a bounded source"))?
+            } else {
+                self.scope.limits().input_bytes
+            };
+            if end > wire_limit {
                 return Err(ProcessingError::InputLimit.into());
             }
         }

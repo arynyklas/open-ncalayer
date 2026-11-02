@@ -24,6 +24,7 @@ pub enum ErrorCode {
     AuditFailed,
     KeyFailure,
     MissingValidationServices,
+    MissingCadesConfiguration,
     MissingTemporaryStore,
     ValidationRequired,
 }
@@ -50,6 +51,7 @@ impl From<KeyFailureKind> for ErrorCode {
             KeyFailureKind::Io => Self::Io,
             KeyFailureKind::MissingKeyProvider => Self::MissingKeyProvider,
             KeyFailureKind::MissingValidationServices => Self::MissingValidationServices,
+            KeyFailureKind::MissingCadesConfiguration => Self::MissingCadesConfiguration,
             KeyFailureKind::MissingTemporaryStore => Self::MissingTemporaryStore,
             KeyFailureKind::ValidationRequired => Self::ValidationRequired,
             KeyFailureKind::SecretRequired => Self::SecretRequired,
@@ -85,6 +87,7 @@ pub enum OperationError {
     Processing(ProcessingError),
     MissingKeyProvider,
     MissingValidationServices,
+    MissingCadesConfiguration,
     MissingTemporaryStore,
     ValidationRequired,
     SecretRequired,
@@ -104,6 +107,7 @@ impl OperationError {
             Self::InvalidContext | Self::IdExhausted => ErrorCode::InvalidInput,
             Self::MissingKeyProvider => ErrorCode::MissingKeyProvider,
             Self::MissingValidationServices => ErrorCode::MissingValidationServices,
+            Self::MissingCadesConfiguration => ErrorCode::MissingCadesConfiguration,
             Self::MissingTemporaryStore => ErrorCode::MissingTemporaryStore,
             Self::ValidationRequired => ErrorCode::ValidationRequired,
             Self::SecretRequired => ErrorCode::SecretRequired,
@@ -125,6 +129,7 @@ impl OperationError {
             | Self::Processing(_)
             | Self::MissingKeyProvider
             | Self::MissingValidationServices
+            | Self::MissingCadesConfiguration
             | Self::MissingTemporaryStore
             | Self::ValidationRequired
             | Self::SecretRequired
@@ -166,6 +171,7 @@ impl From<OperationError> for KeyError {
             OperationError::IdExhausted => KeyFailureKind::IdExhausted,
             OperationError::MissingKeyProvider => KeyFailureKind::MissingKeyProvider,
             OperationError::MissingValidationServices => KeyFailureKind::MissingValidationServices,
+            OperationError::MissingCadesConfiguration => KeyFailureKind::MissingCadesConfiguration,
             OperationError::MissingTemporaryStore => KeyFailureKind::MissingTemporaryStore,
             OperationError::ValidationRequired => KeyFailureKind::ValidationRequired,
             OperationError::SecretRequired => KeyFailureKind::SecretRequired,
@@ -190,6 +196,9 @@ impl std::fmt::Display for OperationError {
             Self::MissingTemporaryStore => f.write_str("host temporary store is not configured"),
             Self::MissingValidationServices => {
                 f.write_str("validation services are not configured")
+            }
+            Self::MissingCadesConfiguration => {
+                f.write_str("CAdES acquisition configuration is not configured")
             }
             Self::ValidationRequired => {
                 f.write_str("mandatory validation did not establish validity")

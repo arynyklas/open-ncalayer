@@ -18,18 +18,21 @@ use std::io::{self, Read, Write};
 pub struct CmsSignRequest {
     attached: Option<bool>,
     allowed: &'static [SigAlg],
+    signing_time: Option<time::OffsetDateTime>,
 }
 impl CmsSignRequest {
     pub const fn create(attached: bool) -> Self {
         Self {
             attached: Some(attached),
             allowed: &ALGORITHMS,
+            signing_time: None,
         }
     }
     pub const fn add() -> Self {
         Self {
             attached: None,
             allowed: &ALGORITHMS,
+            signing_time: None,
         }
     }
     /// Trusted host policy for existing signatures; creation still rejects SHA-1.
@@ -37,12 +40,26 @@ impl CmsSignRequest {
         self.allowed = allowed;
         self
     }
+    pub fn with_signing_time(mut self, at: time::OffsetDateTime) -> Self {
+        self.signing_time = Some(at);
+        self
+    }
+    pub(super) fn attachment(&self) -> Option<bool> {
+        self.attached
+    }
+    pub(super) fn with_default_signing_time(mut self, at: time::OffsetDateTime) -> Self {
+        self.signing_time.get_or_insert(at);
+        self
+    }
+    pub(super) fn allowed_algorithms(&self) -> &'static [SigAlg] {
+        self.allowed
+    }
 }
 /// Borrowed trusted-host dependencies for CMS signing. These are not wire
 /// settings, document readers, secrets, or a second operation/resource context.
 pub struct CmsSignServices<'a> {
-    validation: Option<&'a crate::validation::ValidationContext<'a>>,
-    temporary: Option<&'a TemporaryStore>,
+    pub(super) validation: Option<&'a crate::validation::ValidationContext<'a>>,
+    pub(super) temporary: Option<&'a TemporaryStore>,
 }
 impl<'a> CmsSignServices<'a> {
     pub const fn new(
@@ -85,12 +102,16 @@ fn applied(error: StreamError, state: AppliedState) -> StreamError {
         }
     }
 }
-enum Output<'a> {
+pub(super) enum Output<'a> {
     Writer(&'a mut dyn Write),
     Staged(&'a mut StagedArtifact),
 }
 impl Output<'_> {
-    fn write(&mut self, mut bytes: &[u8], scope: &ResourceScope) -> Result<(), StreamError> {
+    pub(super) fn write(
+        &mut self,
+        mut bytes: &[u8],
+        scope: &ResourceScope,
+    ) -> Result<(), StreamError> {
         match self {
             Self::Staged(stage) => {
                 stage.write_chunk(bytes)?;
@@ -118,7 +139,7 @@ impl Output<'_> {
         scope.checkpoint()?;
         Ok(())
     }
-    fn header(
+    pub(super) fn header(
         &mut self,
         tag: u8,
         len: u64,
@@ -138,14 +159,18 @@ impl Output<'_> {
             self.write(&bytes[..n], scope)
         }
     }
-    fn end(&mut self, indefinite: bool, scope: &ResourceScope) -> Result<(), StreamError> {
+    pub(super) fn end(
+        &mut self,
+        indefinite: bool,
+        scope: &ResourceScope,
+    ) -> Result<(), StreamError> {
         if indefinite {
             scope.account_framing(2)?;
             self.write(&[0, 0], scope)?;
         }
         Ok(())
     }
-    fn finish(&mut self, scope: &ResourceScope) -> Result<(), StreamError> {
+    pub(super) fn finish(&mut self, scope: &ResourceScope) -> Result<(), StreamError> {
         scope.checkpoint()?;
         if let Self::Writer(w) = self {
             w.flush().map_err(ProcessingError::from)?;
@@ -154,7 +179,7 @@ impl Output<'_> {
         Ok(())
     }
 }
-fn size(len: u64, indefinite: bool) -> Result<u64, StreamError> {
+pub(super) fn size(len: u64, indefinite: bool) -> Result<u64, StreamError> {
     len.checked_add(if indefinite {
         4
     } else {
@@ -162,16 +187,16 @@ fn size(len: u64, indefinite: bool) -> Result<u64, StreamError> {
     })
     .ok_or_else(|| malformed("CMS output length overflow"))
 }
-fn sum(values: &[u64]) -> Result<u64, StreamError> {
+pub(super) fn sum(values: &[u64]) -> Result<u64, StreamError> {
     values.iter().try_fold(0u64, |n, v| {
         n.checked_add(*v)
             .ok_or_else(|| malformed("CMS output length overflow"))
     })
 }
-struct StageReader<'a> {
-    stage: &'a mut StagedArtifact,
-    position: u64,
-    error: Option<ProcessingError>,
+pub(super) struct StageReader<'a> {
+    pub(super) stage: &'a mut StagedArtifact,
+    pub(super) position: u64,
+    pub(super) error: Option<ProcessingError>,
 }
 impl Read for StageReader<'_> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
@@ -192,7 +217,7 @@ impl Read for StageReader<'_> {
         Ok(n)
     }
 }
-fn copy_region(
+pub(super) fn copy_region(
     stage: &mut StagedArtifact,
     region: Region,
     output: &mut Output<'_>,
@@ -222,7 +247,7 @@ fn copy_region(
     }
     Ok(())
 }
-fn snapshot(
+pub(super) fn snapshot(
     input: Source<'_>,
     store: Option<&TemporaryStore>,
     scope: &mut ResourceScope,
@@ -236,7 +261,7 @@ fn snapshot(
     })?;
     Ok(stage)
 }
-fn metadata_region(
+pub(super) fn metadata_region(
     stage: &mut StagedArtifact,
     region: Region,
     scope: &ResourceScope,
@@ -312,12 +337,13 @@ pub fn sign(
 ) -> Result<SignSummary, StreamError> {
     sign_impl(
         request,
-        input,
+        Some(input),
         detached,
         signers,
         services,
         &mut Output::Writer(output),
         scope,
+        None,
     )
 }
 pub fn sign_staged(
@@ -332,26 +358,81 @@ pub fn sign_staged(
     output.check_sign_output(scope)?;
     let result = sign_impl(
         request,
-        input,
+        Some(input),
         detached,
         signers,
         services,
         &mut Output::Staged(output),
         scope,
+        None,
     );
     if result.is_err() {
         output.fail_sign_output();
     }
     result
 }
-fn sign_impl(
+pub(super) fn sign_prepared_staged(
+    request: &CmsSignRequest,
+    prepared: super::ades::PreparedAdd,
+    signers: &mut [&mut dyn DigestSigner],
+    services: &CmsSignServices<'_>,
+    output: &mut StagedArtifact,
+    scope: &ResourceScope,
+) -> Result<SignSummary, StreamError> {
+    output.check_internal_output(scope)?;
+    let result = sign_impl(
+        request,
+        None,
+        None,
+        signers,
+        services,
+        &mut Output::Staged(output),
+        scope,
+        Some(prepared),
+    );
+    if result.is_err() {
+        output.fail_sign_output();
+    }
+    result
+}
+pub(super) fn sign_internal(
     request: &CmsSignRequest,
     input: Source<'_>,
     detached: Option<Source<'_>>,
     signers: &mut [&mut dyn DigestSigner],
     services: &CmsSignServices<'_>,
+    output: &mut StagedArtifact,
+    scope: &ResourceScope,
+) -> Result<SignSummary, StreamError> {
+    output.check_internal_output(scope)?;
+    let result = sign_impl(
+        request,
+        Some(input),
+        detached,
+        signers,
+        services,
+        &mut Output::Staged(output),
+        scope,
+        None,
+    );
+    if result.is_err() {
+        output.fail_sign_output();
+    }
+    result
+}
+#[allow(
+    clippy::too_many_arguments,
+    reason = "One C02 engine, with private ownership-bearing C03 Add admission"
+)]
+fn sign_impl(
+    request: &CmsSignRequest,
+    input: Option<Source<'_>>,
+    detached: Option<Source<'_>>,
+    signers: &mut [&mut dyn DigestSigner],
+    services: &CmsSignServices<'_>,
     output: &mut Output<'_>,
     scope: &ResourceScope,
+    prepared: Option<super::ades::PreparedAdd>,
 ) -> Result<SignSummary, StreamError> {
     let validation = services.validation;
     let temp = services.temporary;
@@ -367,7 +448,10 @@ fn sign_impl(
     let values;
     let mut content_len = 0u64;
     let attached;
+    let _proof;
     if let Some(mode) = request.attached {
+        _proof = None;
+        let input = input.ok_or_else(|| malformed("Create requires content input"))?;
         let mut states: [Option<HashState>; 4] = std::array::from_fn(|index| {
             signers
                 .iter()
@@ -399,43 +483,50 @@ fn sign_impl(
         })?;
         values = states.map(|state| state.map(HashState::finish));
     } else {
-        let validation =
-            validation.ok_or_else(|| malformed("Add requires host validation services"))?;
-        let mut existing = snapshot(input, temp, &mut operation)?;
-        let length = existing.len();
-        let mut reader = StageReader {
-            stage: &mut existing,
-            position: 0,
-            error: None,
+        let (existing, parsed, digests, proof) = if let Some(prepared) = prepared {
+            prepared.into_parts()
+        } else {
+            let validation =
+                validation.ok_or_else(|| malformed("Add requires host validation services"))?;
+            let input = input.ok_or_else(|| malformed("Add requires CMS input"))?;
+            let mut existing = snapshot(input, temp, &mut operation)?;
+            let length = existing.len();
+            let mut reader = StageReader {
+                stage: &mut existing,
+                position: 0,
+                error: None,
+            };
+            let needed: Vec<_> = signers.iter().map(|s| s.algorithm()).collect();
+            let parsed = super::parse_with(
+                Source::sequential(&mut reader, Some(length)),
+                &mut operation,
+                true,
+                None,
+                &needed,
+                true,
+            );
+            if let Some(error) = reader.error.take() {
+                return Err(error.into());
+            }
+            let mut parsed = parsed?;
+            if !parsed.inspection.detached && detached.is_some() {
+                return Err(malformed("attached Add does not accept detached data"));
+            }
+            let (report, digests) = super::verify::verify_parsed(
+                &mut parsed,
+                detached,
+                validation,
+                request.allowed,
+                &mut operation,
+            )?;
+            if report.verdict != crate::validation::Verdict::Valid {
+                return Err(malformed(
+                    "all existing signatures must validate before Add",
+                ));
+            }
+            (existing, parsed, digests, None)
         };
-        let needed: Vec<_> = signers.iter().map(|s| s.algorithm()).collect();
-        let parsed = super::parse_with(
-            Source::sequential(&mut reader, Some(length)),
-            &mut operation,
-            true,
-            None,
-            &needed,
-            true,
-        );
-        if let Some(error) = reader.error.take() {
-            return Err(error.into());
-        }
-        let mut parsed = parsed?;
-        if !parsed.inspection.detached && detached.is_some() {
-            return Err(malformed("attached Add does not accept detached data"));
-        }
-        let (report, digests) = super::verify::verify_parsed(
-            &mut parsed,
-            detached,
-            validation,
-            request.allowed,
-            &mut operation,
-        )?;
-        if report.verdict != crate::validation::Verdict::Valid {
-            return Err(malformed(
-                "all existing signatures must validate before Add",
-            ));
-        }
+        _proof = proof;
         let prepared = PreparedCms::from_digests(parsed.metadata.as_bytes(), digests);
         content_type = prepared.signed_data()?.encap_content_info.e_content_type;
         attached = !parsed.inspection.detached;
@@ -532,7 +623,9 @@ fn sign_impl(
                 content_type: true,
                 message_digest: true,
                 signing_certificate_v2: true,
-                signing_time: None,
+                signing_time: request
+                    .signing_time
+                    .map(|at| (at, crate::cms::TimeForm::Auto)),
                 extra: Vec::new(),
             };
             let attrs = crate::cms::sign::signed_attributes(

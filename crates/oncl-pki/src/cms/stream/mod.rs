@@ -5,6 +5,8 @@
 //! error. Only verify performs signature, host trust and status validation.
 //! Total input counts wire bytes plus detached bytes; container counts exclude
 //! primitive eContent payload, and framing independently bounds TLV work.
+#[path = "../ades.rs"]
+pub mod ades;
 mod reader;
 mod sign;
 mod verify;

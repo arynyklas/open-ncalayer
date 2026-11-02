@@ -18,6 +18,7 @@ pub(crate) mod asn1;
 pub(crate) mod report;
 mod sign;
 pub mod stream;
+pub use stream::ades;
 mod verify;
 
 use crate::ber::{self, BerError};
