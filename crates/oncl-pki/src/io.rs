@@ -20,6 +20,9 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
+#[path = "io/frozen.rs"]
+mod frozen;
+pub use frozen::{DerivedInput, FrozenInput, FrozenReader};
 
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek + ?Sized> ReadSeek for T {}
@@ -33,22 +36,35 @@ enum Reader<'a> {
 pub struct Source<'a> {
     reader: Reader<'a>,
     len: Option<u64>,
+    admitted: Option<ResourceScope>,
 }
 impl<'a> Source<'a> {
     pub fn sequential(reader: &'a mut dyn Read, len: Option<u64>) -> Self {
         Self {
             reader: Reader::Sequential(reader),
             len,
+            admitted: None,
         }
     }
     pub fn seekable(reader: &'a mut dyn ReadSeek, len: Option<u64>) -> Self {
         Self {
             reader: Reader::Seekable(reader),
             len,
+            admitted: None,
         }
     }
     pub fn known_len(&self) -> Option<u64> {
         self.len
+    }
+    /// True only for an immutable captured source view from this exact operation.
+    pub fn is_snapshot_for(&self, scope: &ResourceScope) -> Result<bool, ProcessingError> {
+        match &self.admitted {
+            Some(original) if !original.same_operation(scope) => Err(
+                ProcessingError::InvalidInput("snapshot belongs to another operation"),
+            ),
+            Some(_) => Ok(true),
+            None => Ok(false),
+        }
     }
     pub fn as_seekable(&mut self) -> Option<&mut dyn ReadSeek> {
         match &mut self.reader {
