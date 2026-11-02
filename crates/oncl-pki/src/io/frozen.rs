@@ -62,11 +62,10 @@ impl FrozenInput {
         let mut stage = store.stage_source(scope)?;
         loop {
             scope.checkpoint()?;
-            let request = scope.snapshot_request(buffer.len())?;
             let request = if replay {
-                request
+                buffer.len()
             } else {
-                scope.input_request(request)?
+                scope.input_request(buffer.len())?
             };
             let count = match source.read(&mut buffer[..request]) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -82,7 +81,6 @@ impl FrozenInput {
             if !replay {
                 scope.consumed_input(count as u64)?;
             }
-            scope.copied_snapshot(count as u64)?;
             scope.checkpoint()?;
             if count == 0 {
                 break;
