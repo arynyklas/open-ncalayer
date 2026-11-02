@@ -138,6 +138,8 @@ struct Usage {
     container: u64,
     framing: u64,
     output: u64,
+    snapshot_copy: u64,
+    snapshot_terminal: bool,
 }
 
 // No user code runs under these locks. Recovery also keeps Drop non-panicking if
@@ -356,6 +358,37 @@ impl ResourceScope {
         }
         if usage.input_terminal {
             Err(ProcessingError::InputLimit)
+        } else {
+            Ok(())
+        }
+    }
+    // Snapshot copying is cumulative work, not new original input. Bound it by
+    // the operation's explicit scratch allowance even after old copies drop.
+    pub(crate) fn snapshot_request(&self, capacity: usize) -> Result<usize, ProcessingError> {
+        let usage = lock(&self.state.usage);
+        if usage.snapshot_terminal {
+            return Err(ProcessingError::TempLimit);
+        }
+        Ok(self
+            .state
+            .limits
+            .temp_bytes
+            .saturating_sub(usage.snapshot_copy)
+            .saturating_add(1)
+            .min(capacity as u64) as usize)
+    }
+    pub(crate) fn copied_snapshot(&self, bytes: u64) -> Result<(), ProcessingError> {
+        let mut usage = lock(&self.state.usage);
+        let Some(next) = usage.snapshot_copy.checked_add(bytes) else {
+            usage.snapshot_terminal = true;
+            return Err(ProcessingError::TempLimit);
+        };
+        usage.snapshot_copy = next;
+        if next > self.state.limits.temp_bytes {
+            usage.snapshot_terminal = true;
+        }
+        if usage.snapshot_terminal {
+            Err(ProcessingError::TempLimit)
         } else {
             Ok(())
         }
