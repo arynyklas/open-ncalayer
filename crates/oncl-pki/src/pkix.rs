@@ -158,52 +158,285 @@ pub fn build_path(
     cas: &CaSet,
     at: OffsetDateTime,
 ) -> Result<Vec<Certificate>, PathError> {
-    let mut path = vec![leaf.clone()];
+    Ok(build_borrowed_path(
+        leaf,
+        CaView {
+            first: cas.certs(),
+            second: &[],
+        },
+        at,
+        None,
+        None,
+    )?
+    .to_owned())
+}
+
+/// Build with explicit host anchors; candidate certificates never grant trust.
+/// Unlike compatibility build_path, a topmost untrusted CA is not an anchor.
+pub fn build_anchored_path(
+    leaf: &Certificate,
+    anchors: &CaSet,
+    candidates: &[Certificate],
+    at: OffsetDateTime,
+) -> Result<Vec<Certificate>, PathError> {
+    Ok(build_borrowed_path(
+        leaf,
+        CaView {
+            first: anchors.certs(),
+            second: candidates,
+        },
+        at,
+        Some(anchors),
+        None,
+    )?
+    .to_owned())
+}
+
+/// Operation-limited anchored path, sharing all legacy trust/crypto rules.
+/// The optional limit is checked before searching/verifying another issuer.
+pub(crate) fn build_anchored_path_limited(
+    leaf: &Certificate,
+    anchors: &CaSet,
+    candidates: &[Certificate],
+    at: OffsetDateTime,
+    max_len: usize,
+) -> Result<Vec<Certificate>, PathError> {
+    if max_len == 0 {
+        return Err(PathError::TooLong);
+    }
+    Ok(build_borrowed_path(
+        leaf,
+        CaView {
+            first: anchors.certs(),
+            second: candidates,
+        },
+        at,
+        Some(anchors),
+        Some(max_len.min(MAX_PATH_LEN)),
+    )?
+    .to_owned())
+}
+
+#[derive(Clone, Copy)]
+struct CaView<'a> {
+    first: &'a [Certificate],
+    second: &'a [Certificate],
+}
+impl<'a> CaView<'a> {
+    fn certificates(self) -> impl Iterator<Item = &'a Certificate> + Clone {
+        self.first.iter().chain(self.second.iter())
+    }
+    fn contains(self, certificate: &Certificate) -> bool {
+        self.first.contains(certificate) || self.second.contains(certificate)
+    }
+    fn issuer(self, certificate: &Certificate) -> Result<&'a Certificate, PathError> {
+        let name = certificate.tbs_certificate().issuer();
+        let aki = authority_key_id(certificate);
+        let mut named = false;
+        // Same stable AKI preference as CaSet::issuers_of, without a Vec of
+        // names or any deep copy of host trust. SKI reads borrow extension DER.
+        for preferred in [true, false] {
+            if aki.is_none() && !preferred {
+                break;
+            }
+            for issuer in self
+                .certificates()
+                .filter(|issuer| issuer.tbs_certificate().subject() == name)
+            {
+                named = true;
+                let matches = aki
+                    .as_deref()
+                    .is_none_or(|id| subject_key_id_ref(issuer) == Some(id));
+                if matches == preferred && cert::verify_signature(certificate, issuer).is_ok() {
+                    return Ok(issuer);
+                }
+            }
+        }
+        Err(if named {
+            PathError::BadSignature
+        } else {
+            PathError::IssuerNotFound
+        })
+    }
+}
+struct BorrowedPath<'a> {
+    certificates: [&'a Certificate; MAX_PATH_LEN],
+    len: usize,
+}
+impl BorrowedPath<'_> {
+    fn as_slice(&self) -> &[&Certificate] {
+        &self.certificates[..self.len]
+    }
+    fn to_owned(&self) -> Vec<Certificate> {
+        self.as_slice()
+            .iter()
+            .map(|certificate| (*certificate).clone())
+            .collect()
+    }
+}
+fn build_borrowed_path<'a>(
+    leaf: &'a Certificate,
+    cas: CaView<'a>,
+    at: OffsetDateTime,
+    anchors: Option<&CaSet>,
+    limit: Option<usize>,
+) -> Result<BorrowedPath<'a>, PathError> {
+    let mut path = BorrowedPath {
+        certificates: [leaf; MAX_PATH_LEN],
+        len: 1,
+    };
     loop {
-        let index = path.len() - 1;
-        let current = &path[index];
+        let index = path.len - 1;
+        let current = path.certificates[index];
         check_certificate(current, index, at)?;
         if index > 0 {
-            check_issuer(&path, index)?;
+            check_issuer(path.as_slice(), index)?;
         }
-        if is_anchor(current, cas) {
+        let anchor = anchors.map_or_else(
+            || {
+                is_self_issued(current)
+                    && cas.contains(current)
+                    && cert::verify_signature(current, current).is_ok()
+            },
+            |roots| roots.certs.contains(current),
+        );
+        if anchor {
             return Ok(path);
         }
-        let issuer = match find_issuer(current, cas) {
-            Ok(issuer) => issuer.clone(),
-            // The topmost CA of the set: the original's trust anchor.
-            Err(PathError::IssuerNotFound) if index > 0 => return Ok(path),
-            Err(e) => return Err(e),
-        };
-        if path.len() == MAX_PATH_LEN {
+        if limit.is_some_and(|limit| path.len >= limit) {
             return Err(PathError::TooLong);
         }
-        path.push(issuer);
+        let issuer = match cas.issuer(current) {
+            Ok(issuer) => issuer,
+            Err(PathError::IssuerNotFound) if index > 0 && anchors.is_none() => return Ok(path),
+            Err(error) => return Err(error),
+        };
+        if path.len == MAX_PATH_LEN {
+            return Err(PathError::TooLong);
+        }
+        path.certificates[path.len] = issuer;
+        path.len += 1;
     }
+}
+
+/// Owns only the selected path, with pre-copy admission held through status
+/// processing. The complete host trust store remains borrowed.
+pub(crate) struct AdmittedPath {
+    certificates: Vec<Certificate>,
+    _memory: crate::resource::ResourceReservation,
+    _metadata: crate::resource::ResourceReservation,
+}
+impl std::ops::Deref for AdmittedPath {
+    type Target = [Certificate];
+    fn deref(&self) -> &Self::Target {
+        &self.certificates
+    }
+}
+pub(crate) enum AdmittedPathError {
+    Path,
+    Processing(crate::resource::ProcessingError),
+}
+pub(crate) fn build_anchored_path_admitted(
+    leaf: &Certificate,
+    anchors: &CaSet,
+    candidates: &[Certificate],
+    at: OffsetDateTime,
+    scope: &crate::resource::ResourceScope,
+) -> Result<AdmittedPath, AdmittedPathError> {
+    use crate::resource::ProcessingError;
+    use der::Encode;
+    scope.checkpoint().map_err(AdmittedPathError::Processing)?;
+    // Issuer selection verifies one borrowed candidate at a time. Admit that
+    // candidate's key-decoding scratch before crypto, without copying or
+    // charging every unrelated host certificate/extension as owned storage.
+    let mut key_bytes = 0u64;
+    for certificate in anchors.certs().iter().chain(candidates.iter()) {
+        let length = certificate
+            .tbs_certificate()
+            .subject_public_key_info()
+            .encoded_len()
+            .map_err(|_| AdmittedPathError::Path)?;
+        key_bytes = key_bytes.max(u64::from(u32::from(length)));
+        scope.checkpoint().map_err(AdmittedPathError::Processing)?;
+    }
+    let _key_memory = scope
+        .reserve_memory(
+            key_bytes
+                .checked_mul(128)
+                .and_then(|bytes| bytes.checked_add(4096))
+                .ok_or(AdmittedPathError::Processing(ProcessingError::MemoryLimit))?,
+        )
+        .map_err(AdmittedPathError::Processing)?;
+    let _key_metadata = scope
+        .reserve_metadata(
+            key_bytes
+                .checked_mul(16)
+                .and_then(|bytes| bytes.checked_add(256))
+                .ok_or(AdmittedPathError::Processing(
+                    ProcessingError::MetadataLimit,
+                ))?,
+        )
+        .map_err(AdmittedPathError::Processing)?;
+    let path = build_borrowed_path(
+        leaf,
+        CaView {
+            first: anchors.certs(),
+            second: candidates,
+        },
+        at,
+        Some(anchors),
+        None,
+    )
+    .map_err(|_| AdmittedPathError::Path)?;
+    let mut bytes = (path.len * std::mem::size_of::<Certificate>()) as u64;
+    for certificate in path.as_slice() {
+        let length = certificate
+            .encoded_len()
+            .map_err(|_| AdmittedPathError::Path)?;
+        bytes = bytes
+            .checked_add(u64::from(u32::from(length)))
+            .ok_or(AdmittedPathError::Processing(ProcessingError::MemoryLimit))?;
+    }
+    let memory = scope
+        .reserve_memory(
+            bytes
+                .checked_mul(128)
+                .ok_or(AdmittedPathError::Processing(ProcessingError::MemoryLimit))?,
+        )
+        .map_err(AdmittedPathError::Processing)?;
+    let metadata = scope
+        .reserve_metadata(bytes.checked_mul(16).ok_or(AdmittedPathError::Processing(
+            ProcessingError::MetadataLimit,
+        ))?)
+        .map_err(AdmittedPathError::Processing)?;
+    scope.checkpoint().map_err(AdmittedPathError::Processing)?;
+    Ok(AdmittedPath {
+        certificates: path.to_owned(),
+        _memory: memory,
+        _metadata: metadata,
+    })
+}
+
+fn subject_key_id_ref(certificate: &Certificate) -> Option<&[u8]> {
+    use der::Decode;
+    let extension = certificate
+        .tbs_certificate()
+        .extensions()?
+        .iter()
+        .find(|extension| {
+            extension.extn_id == der::asn1::ObjectIdentifier::new_unwrap("2.5.29.14")
+        })?;
+    Some(
+        <&der::asn1::OctetStringRef>::from_der(extension.extn_value.as_bytes())
+            .ok()?
+            .as_bytes(),
+    )
 }
 
 /// Time to validate `leaf`'s path at: `now`, or `leaf`'s notAfter once it has expired (the
 /// original's `allowExpired()`: an expired key's own validity is checked elsewhere).
 pub fn validation_time(leaf: &Certificate, now: OffsetDateTime) -> OffsetDateTime {
     now.min(time_of(&leaf.tbs_certificate().validity().not_after))
-}
-
-/// Whether `cert` is a self-signed certificate of `cas`.
-fn is_anchor(cert: &Certificate, cas: &CaSet) -> bool {
-    let tbs = cert.tbs_certificate();
-    tbs.subject() == tbs.issuer()
-        && cas.certs.contains(cert)
-        && cert::verify_signature(cert, cert).is_ok()
-}
-
-fn find_issuer<'a>(cert: &Certificate, cas: &'a CaSet) -> Result<&'a Certificate, PathError> {
-    let mut candidates = cas.issuers_of(cert).peekable();
-    if candidates.peek().is_none() {
-        return Err(PathError::IssuerNotFound);
-    }
-    candidates
-        .find(|issuer| cert::verify_signature(cert, issuer).is_ok())
-        .ok_or(PathError::BadSignature)
 }
 
 /// Rules for every certificate of the path: validity and critical extensions.
@@ -232,14 +465,21 @@ fn check_certificate(
 }
 
 /// Rules for the issuer `path[index]` (`index > 0`): cA, pathLenConstraint, keyCertSign.
-fn check_issuer(path: &[Certificate], index: usize) -> Result<(), PathError> {
-    let tbs = path[index].tbs_certificate();
+fn check_issuer<T: std::borrow::Borrow<Certificate>>(
+    path: &[T],
+    index: usize,
+) -> Result<(), PathError> {
+    let certificate: &Certificate = path[index].borrow();
+    let tbs = certificate.tbs_certificate();
     let constraints = match tbs.get_extension::<BasicConstraints>() {
         Ok(Some((_, bc))) if bc.ca => bc,
         _ => return Err(PathError::NotCa { index }),
     };
     if let Some(max) = constraints.path_len_constraint {
-        let below = path[1..index].iter().filter(|c| !is_self_issued(c)).count();
+        let below = path[1..index]
+            .iter()
+            .filter(|certificate| !is_self_issued((*certificate).borrow()))
+            .count();
         if below > usize::from(max) {
             return Err(PathError::PathLenExceeded { index });
         }

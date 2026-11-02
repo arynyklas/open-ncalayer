@@ -25,6 +25,7 @@ oncl-builtin-commonutils = { path = "crates/oncl-builtin-commonutils" }
 oncl-builtin-tests = { path = "crates/oncl-builtin-tests" }
 # Builds the built-in modules' WebAssembly (the daemon's build script, xtask).
 oncl-builtins-build = { path = "crates/oncl-builtins-build" }
+oncl-core = { path = "crates/oncl-core" }
 oncl-desktop = { path = "crates/oncl-desktop" }
 # The windows, key choice, page paths and page PINs the core gives modules and plugins.
 oncl-flows = { path = "crates/oncl-flows" }
@@ -41,6 +42,7 @@ oncl-token = { path = "crates/oncl-token" }
 oncl-trust = { path = "crates/oncl-trust" }
 oncl-ui = { path = "crates/oncl-ui" }
 oncl-update = { path = "crates/oncl-update" }
+oncl-xml = { path = "crates/oncl-xml" }
 
 aes = "0.9.0"
 anyhow = "1.0.104"
@@ -51,6 +53,8 @@ cbc = { version = "0.2.1", features = ["alloc", "block-padding"] }
 ciborium = "0.2.2"
 clap = { version = "4.6.7", features = ["derive"] }
 crypto-bigint = { version = "0.7.7", default-features = false, features = ["alloc", "zeroize"] }
+# Unix prehashed RSA/OAEP only; TLS remains rustls/ring.
+aws-lc-rs = "=1.19.0"
 der = { version = "0.8.2", features = ["alloc", "derive", "oid", "zeroize"] }
 des = "0.9.0"
 # Gzip-compressed certificates on hardware tokens (`oncl-token`): the version and the pure-Rust
@@ -63,7 +67,9 @@ gost94 = { version = "0.11.0", default-features = false }
 # point to, so no key is stored twice; already in the lock file, no features (std's hasher).
 hashbrown = { version = "0.17.1", default-features = false }
 hex-literal = "1.1.0"
-hmac = "0.13.0"
+# Direct paths also work for independent SDK consumers, which do not inherit
+# this workspace's root [patch.crates-io] entries.
+hmac = { version = "0.13.0", path = "vendor/hmac" }
 httparse = "1.10.1"
 # The tray on Linux (StatusNotifierItem over D-Bus, no GTK): zbus on async-io, like the AT-SPI
 # of Slint's winit backend; `blocking` runs the service in a thread of its own.
@@ -102,7 +108,7 @@ ring = "0.17.14"
 roxmltree = "0.21.2"
 # Only in xtask (`sign`): passwords read without echo; minisign already depends on it.
 rpassword = "7.5.4"
-# Key generation only: `oncl-pki::keygen` (RSA keys of new key files) and xtask fixtures.
+# Production RSA generation/decoding/public operations; synthetic fixture/emulator private operations only.
 rsa = { version = "0.9.10", features = ["sha2"] }
 # oncl-trust on Linux: read-only `cert9.db` (NSS) presence check without `certutil`.
 rusqlite = { version = "0.41.0", default-features = false, features = ["bundled"] }
@@ -122,7 +128,7 @@ sha2 = "0.11.1"
 slint = { version = "~1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "accessibility"] }
 slint-build = "~1.18.1"
 spki = { version = "0.8.1", features = ["alloc"] }
-streebog = { version = "0.11.0", default-features = false }
+streebog = { version = "0.11.0", path = "vendor/streebog", default-features = false }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 time = "0.3.55"
@@ -186,6 +192,11 @@ i-slint-backend-winit = { path = "vendor/i-slint-backend-winit" }
 # package already on disk or rebuilt from deltas is checked by the update source before it
 # is used and before Update.exe is taken from it. The version must stay the one above.
 velopack = { path = "vendor/velopack" }
+
+# Pinned upstream cores with additive secret-input variants for agreement/wrap.
+# Ordinary public-document hash/HMAC APIs retain their original fast path.
+streebog = { path = "vendor/streebog" }
+hmac = { path = "vendor/hmac" }
 
 # RSA key generation (`oncl-pki::keygen` and its tests, `cargo xtask gen-fixtures` and the
 # xtask tests) is very slow unoptimized.

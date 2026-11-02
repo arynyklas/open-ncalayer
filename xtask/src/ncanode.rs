@@ -32,7 +32,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_pki::cms::{self, SignOptions};
 use oncl_pki::pkcs12::KeyEntry;
-use oncl_pki::xmldsig;
+use oncl_xml as xmldsig;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use ureq::Agent;
@@ -798,8 +798,7 @@ mod tests {
         let doc = AWKWARD.bytes();
         let key = synthetic_rsa();
         let signed =
-            oncl_pki::xmldsig::sign_element(&doc, &AWKWARD.xpath(), None, &key.key, &key.cert)
-                .unwrap();
+            oncl_xml::sign_element(&doc, &AWKWARD.xpath(), None, &key.key, &key.cert).unwrap();
         // Kalkan's form drops the BOM and the declaration.
         assert!(signed.starts_with(b"<!-- before the root -->"));
         let with_dtd = AWKWARD.with_id_dtd(&signed);

@@ -71,6 +71,10 @@ pub trait Connection: Send {
 
     /// The card is reset when the connection is dropped (a PIN was sent to it).
     fn reset_on_disconnect(&mut self);
+
+    /// Marks driver-private work for scoped application-state accounting.
+    /// Legacy connections have no operation policy to carry.
+    fn begin_private_operation(&mut self) {}
 }
 
 /// Error of the smart card service.
@@ -100,6 +104,8 @@ pub enum BackendError {
     /// Another failure: the function and its code.
     #[error("smart card service failure: {0}")]
     Failed(String),
+    #[error(transparent)]
+    Execution(#[from] oncl_pki::key::KeyExecutionError),
 }
 
 /// The service when token support is off: there is none.

@@ -19,12 +19,14 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use oncl_pki::cert::{self, Certificate};
 use oncl_pki::cms::{self, VerifiedSigner};
-use oncl_pki::crl::{self, CrlCache, CrlStatus};
+use oncl_pki::crl::CrlCache;
 use oncl_pki::http::HttpTransport;
-use oncl_pki::info::{CertInfo, cert_info};
-use oncl_pki::ocsp::{self, CertStatus};
+use oncl_pki::info::cert_info;
 use oncl_pki::pkix::{CaSet, PathError, build_path};
 use oncl_pki::tsp::{TspError, verify_token_for};
+use oncl_pki::validation::{
+    PathRevocation as Status, check_path_revocation, is_valid_at, path_time,
+};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -300,54 +302,8 @@ fn describe_signer(
     failure.map_or(Ok(verdict), Err)
 }
 
-/// Revocation status of a signer's certification path.
-enum Status {
-    /// The signer is good by OCSP and every CA below the anchor by CRL; `crl` tells whether
-    /// there was such a CA.
-    Good { crl: bool },
-    /// A certificate of the path was revoked at or before the validation time.
-    Revoked(Revoked),
-    /// Every status is known; the earliest revocation found is after the validation time.
-    After(Revoked),
-    /// Some status is unknown: why, and the earliest revocation after the validation time
-    /// found meanwhile.
-    Unavailable { why: String, after: Option<Revoked> },
-    /// `--offline`.
-    NotChecked,
-}
-
-/// A revoked certificate of a signer's path.
-struct Revoked {
-    /// Revocation time.
-    time: OffsetDateTime,
-    /// `ocsp` or `crl`.
-    source: &'static str,
-    /// The CN of the CA, or `None` for the signer itself.
-    ca: Option<String>,
-}
-
-impl Revoked {
-    /// `revoked <time> after signing (<source>)`.
-    fn after_signing(&self) -> String {
-        format!(
-            "revoked {} after signing ({})",
-            rfc3339(self.time),
-            self.source
-        )
-    }
-}
-
-/// Keeps the earlier of `earliest` and `revoked`.
-fn keep_earliest(earliest: &mut Option<Revoked>, revoked: Revoked) {
-    if earliest.as_ref().is_none_or(|e| revoked.time < e.time) {
-        *earliest = Some(revoked);
-    }
-}
-
-/// Revocation status of `path` (`[signer, issuer, …, anchor]`) for the validation time
-/// `at`: the signer by OCSP, then each CA between it and the anchor by the CRL of its
-/// issuer. Responses and CRLs must be current at `now`. A revocation at or before `at`
-/// ends the check.
+/// Explicit legacy policy: leaf OCSP only, cached intermediate CRLs, and the
+/// existing caller-selected CA set. Strict SDK services never inherit this.
 fn revocation(
     path: &[Certificate],
     at: OffsetDateTime,
@@ -355,77 +311,15 @@ fn revocation(
     online: &Online<'_>,
     now: OffsetDateTime,
 ) -> Status {
-    let Some(issuer) = path.get(1) else {
-        return Status::Unavailable {
-            why: "signer certificate is a trust anchor".to_owned(),
-            after: None,
-        };
-    };
-    let mut why: Option<String> = None;
-    let mut after: Option<Revoked> = None;
-
-    match ocsp::check(&path[0], issuer, cas, online.http, now, ocsp::TIMEOUT) {
-        Ok(CertStatus::Good) => {}
-        Ok(CertStatus::Revoked { time, .. }) => {
-            let revoked = Revoked {
-                time,
-                source: "ocsp",
-                ca: None,
-            };
-            if time <= at {
-                return Status::Revoked(revoked);
-            }
-            keep_earliest(&mut after, revoked);
-        }
-        Ok(CertStatus::Unknown) => {
-            why = Some("OCSP responder does not know the certificate".to_owned());
-        }
-        Err(e) => why = Some(e.to_string()),
-    }
-
-    let cache = CrlCache::new(&online.crl_dir);
-    for pair in path[1..].windows(2) {
-        let (ca, issuer) = (&pair[0], &pair[1]);
-        match crl::check(ca, issuer, &cache, online.http, now) {
-            Ok(CrlStatus::Good) => {}
-            Ok(CrlStatus::Revoked { time, .. }) => {
-                let revoked = Revoked {
-                    time,
-                    source: "crl",
-                    ca: Some(cert_name(ca)),
-                };
-                if time <= at {
-                    return Status::Revoked(revoked);
-                }
-                keep_earliest(&mut after, revoked);
-            }
-            Err(e) => {
-                why.get_or_insert_with(|| {
-                    format!("CRL of CA certificate CN={}: {e}", cert_name(ca))
-                });
-            }
-        }
-    }
-
-    match (why, after) {
-        (Some(why), after) => Status::Unavailable { why, after },
-        (None, Some(revoked)) => Status::After(revoked),
-        (None, None) => Status::Good {
-            crl: path.len() > 2,
-        },
-    }
-}
-
-/// Whether `t` is within the certificate's validity, bounds included.
-fn is_valid_at(info: &CertInfo, t: OffsetDateTime) -> bool {
-    info.not_before <= t && t <= info.not_after
-}
-
-/// Time to build the certificate's path at: `at` moved into its validity, so the path is
-/// judged on the CAs and the certificate's own period on the validity line.
-fn path_time(info: &CertInfo, at: OffsetDateTime) -> OffsetDateTime {
-    // Not `clamp`: a hostile certificate may end before it starts.
-    at.max(info.not_before).min(info.not_after)
+    check_path_revocation(
+        path,
+        at,
+        cas,
+        online.http,
+        now,
+        Some(&CrlCache::new(&online.crl_dir)),
+        oncl_pki::validation::ValidationPolicy::NcalayerCompatibility,
+    )
 }
 
 /// `<issuer CN> -> … -> <anchor CN>` of a path (the certificate itself for a path of one),

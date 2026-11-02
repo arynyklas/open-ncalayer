@@ -58,6 +58,7 @@ velopack.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+oncl-xml.workspace = true
 # `testing`: `ScriptedPrompter`, `MemoryRecentPath`, `tsp::MockTsa`, `ocsp::MockOcsp`,
 # `crl::MockCrl` and `http::RouteTransport`.
 oncl-flows = { path = "../oncl-flows", features = ["testing"] }

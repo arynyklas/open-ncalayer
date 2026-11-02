@@ -517,6 +517,35 @@ pub fn fetch_for(
     timeout: Duration,
     now: OffsetDateTime,
 ) -> Result<(Vec<Vec<u8>>, CrlStatus), CrlError> {
+    fetch_for_impl(cert, issuer, http, timeout, now, true)
+}
+
+/// Status-only scoped consumer: response and decode storage never escape as
+/// uncharged owning vectors. Legacy fetch_for still returns its original docs.
+pub(crate) fn fetch_status_for(
+    cert: &Certificate,
+    issuer: &Certificate,
+    http: &dyn HttpTransport,
+    timeout: Duration,
+    now: OffsetDateTime,
+) -> Result<CrlStatus, CrlError> {
+    fetch_for_impl(cert, issuer, http, timeout, now, false).map(|(_, status)| status)
+}
+
+struct DownloadedCrl<'a> {
+    decoded: CertificateList,
+    legacy: Option<Vec<u8>>,
+    _response: Option<crate::http::ScopedHttpReply<'a>>,
+    _decode: Option<crate::http::DecodeGuard<'a>>,
+}
+fn fetch_for_impl(
+    cert: &Certificate,
+    issuer: &Certificate,
+    http: &dyn HttpTransport,
+    timeout: Duration,
+    now: OffsetDateTime,
+    retain_documents: bool,
+) -> Result<(Vec<Vec<u8>>, CrlStatus), CrlError> {
     let urls = crl_urls(cert);
     if urls.is_empty() {
         return Err(CrlError::NoUrl);
@@ -532,13 +561,35 @@ pub fn fetch_for(
         https_only: false,
         redirects: true,
     };
-    let download = |url: &str, delta: bool| -> Result<(Vec<u8>, CertificateList), CrlError> {
-        let reply = http.get_with(url, opts).map_err(CrlError::Http)?;
-        if reply.status != 200 {
-            return Err(CrlError::HttpStatus(reply.status));
+    let download = |url: &str, delta: bool| -> Result<DownloadedCrl<'_>, CrlError> {
+        if retain_documents {
+            let reply = http.get_with(url, opts).map_err(CrlError::Http)?;
+            if reply.status != 200 {
+                return Err(CrlError::HttpStatus(reply.status));
+            }
+            let decoded = verify_any_crl(&reply.body, issuer, now, delta)?;
+            Ok(DownloadedCrl {
+                decoded,
+                legacy: Some(reply.body),
+                _response: None,
+                _decode: None,
+            })
+        } else {
+            let reply = http
+                .send_scoped(&crate::http::HttpRequest::get(url, opts))
+                .map_err(CrlError::Http)?;
+            if reply.status() != 200 {
+                return Err(CrlError::HttpStatus(reply.status()));
+            }
+            let decode = reply.reserve_decode().map_err(CrlError::Http)?;
+            let decoded = verify_any_crl(reply.body(), issuer, now, delta)?;
+            Ok(DownloadedCrl {
+                decoded,
+                legacy: None,
+                _response: Some(reply),
+                _decode: decode,
+            })
         }
-        let crl = verify_any_crl(&reply.body, issuer, now, delta)?;
-        Ok((reply.body, crl))
     };
     let first = |urls: &[String], delta: bool| {
         let mut last = CrlError::NoUrl;
@@ -551,13 +602,17 @@ pub fn fetch_for(
         Err(last)
     };
     let serial = tbs.serial_number().as_bytes();
-    let (base_der, base) = first(&urls, false)?;
-    let mut status = lookup(&base, serial);
-    let mut crls = vec![base_der];
+    let mut base = first(&urls, false)?;
+    let mut status = lookup(&base.decoded, serial);
+    let mut crls = Vec::new();
+    if let Some(document) = base.legacy.take() {
+        crls.push(document);
+    }
+    drop(base);
     let deltas = freshest_urls(cert);
     if !deltas.is_empty() {
-        let (delta_der, delta) = first(&deltas, true)?;
-        match lookup(&delta, serial) {
+        let mut delta = first(&deltas, true)?;
+        match lookup(&delta.decoded, serial) {
             CrlStatus::Revoked {
                 reason: Some(REMOVE_FROM_CRL),
                 ..
@@ -565,7 +620,9 @@ pub fn fetch_for(
             revoked @ CrlStatus::Revoked { .. } => status = revoked,
             CrlStatus::Good => {}
         }
-        crls.push(delta_der);
+        if let Some(document) = delta.legacy.take() {
+            crls.push(document);
+        }
     }
     Ok((crls, status))
 }

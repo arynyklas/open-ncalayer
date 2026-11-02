@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+oncl-xml.workspace = true
 # `registry`: the versions of the core's own bundles, as `getBundles` reports them; `index`:
 # the bundles no plugin may replace.
 oncl-builtin-accessory.workspace = true

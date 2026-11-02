@@ -292,30 +292,12 @@ fn build(
     }
     .map_err(CmsError::Key)?;
 
-    let tbs = entry.cert.tbs_certificate();
-    let sid = IssuerAndSerialNumber {
-        issuer: tbs.issuer().clone(),
-        serial_number: Int::new(tbs.serial_number().as_bytes())?,
-    }
-    .to_der()?;
+    let signer_info = encode_signer_info(&entry.cert, alg, attrs.as_deref(), &signature)?;
     let digest_algorithm = AlgorithmIdentifierRef {
         oid: alg.digest_oid(),
         parameters: Some(AnyRef::NULL),
-    };
-    let signer_info = SignerInfo {
-        version: 1,
-        sid: AnyRef::from_der(&sid)?,
-        digest_algorithm,
-        signed_attrs: attrs.as_deref().map(RawSet),
-        signature_algorithm: AlgorithmIdentifierRef {
-            oid: alg.signature_oid(),
-            parameters: Some(AnyRef::NULL),
-        },
-        signature: OctetStringRef::new(&signature)?,
-        unsigned_attrs: None,
     }
     .to_der()?;
-    let digest_algorithm = digest_algorithm.to_der()?;
 
     let mut digest_algorithms = Vec::new();
     let mut certificates = Vec::new();
@@ -383,6 +365,37 @@ fn build(
     };
     Ok(SignedContentInfo {
         signed_data: &signed_data,
+    }
+    .to_der()?)
+}
+
+/// Shared bounded metadata encoding; callers select the real leaf algorithm.
+pub(super) fn encode_signer_info(
+    certificate: &Certificate,
+    alg: crate::key::SigAlg,
+    attrs: Option<&[u8]>,
+    signature: &[u8],
+) -> Result<Vec<u8>, CmsError> {
+    let tbs = certificate.tbs_certificate();
+    let sid = IssuerAndSerialNumber {
+        issuer: tbs.issuer().clone(),
+        serial_number: Int::new(tbs.serial_number().as_bytes())?,
+    }
+    .to_der()?;
+    Ok(SignerInfo {
+        version: 1,
+        sid: AnyRef::from_der(&sid)?,
+        digest_algorithm: AlgorithmIdentifierRef {
+            oid: alg.digest_oid(),
+            parameters: Some(AnyRef::NULL),
+        },
+        signed_attrs: attrs.map(RawSet),
+        signature_algorithm: AlgorithmIdentifierRef {
+            oid: alg.signature_oid(),
+            parameters: Some(AnyRef::NULL),
+        },
+        signature: OctetStringRef::new(signature)?,
+        unsigned_attrs: None,
     }
     .to_der()?)
 }

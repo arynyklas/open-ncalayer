@@ -153,8 +153,9 @@ pub(crate) fn open_error(e: &TokenError) -> OpenError {
         },
         TokenError::PinBlocked => OpenError::PinBlocked,
         TokenError::InvalidPin => OpenError::InvalidPin,
-        TokenError::Card { .. } | TokenError::Malformed(_) | TokenError::Transport(_) => {
-            OpenError::TokenFailure
-        }
+        TokenError::Card { .. }
+        | TokenError::Malformed(_)
+        | TokenError::Transport(_)
+        | TokenError::Execution(_) => OpenError::TokenFailure,
     }
 }

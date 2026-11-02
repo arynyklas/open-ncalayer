@@ -1,0 +1,73 @@
+# Research metadata only. No entry below authorizes CMS/envelope selection.
+# A registry label or Russian primitive vector is not a proven KZ profile.
+schema_version = 1
+kz_envelope_profiles = []
+
+[[primitive_vector]]
+id = "rfc7836-vko-2012-256-tc26-512-a"
+status = "published-exact-vector-verified"
+source = "https://www.rfc-editor.org/rfc/rfc7836#appendix-B"
+example = 7
+curve = "id-tc26-gost-3410-12-512-paramSetA"
+digest = "GOST-R-34.11-2012-256"
+public_encoding = "X_LE_64 || Y_LE_64"
+ukm_hex = "1d80603c8544c727"
+expected_kek_hex = "c9a9a77320e2cc559ed72dce6f47e2192ccea95fa648670582c054c0ef36c221"
+oracle = "RFC7836 B7 exact bytes verified on Windows and Linux; not KZ profile interoperability"
+
+[[primitive_vector]]
+id = "rfc7836-vko-2012-512-tc26-512-a"
+status = "published-exact-vector-verified"
+source = "https://www.rfc-editor.org/rfc/rfc7836#appendix-B"
+example = 8
+curve = "id-tc26-gost-3410-12-512-paramSetA"
+digest = "GOST-R-34.11-2012-512"
+public_encoding = "X_LE_64 || Y_LE_64"
+ukm_hex = "1d80603c8544c727"
+expected_kek_hex = "79f002a96940ce7bde3259a52e015297adaad84597a0d205b50e3e1719f97bfa7ee1d2661fa9979a5aa235b558a7e6d9f88f982dd63fc35a8ec0dd5e242d3bdf"
+oracle = "RFC7836 B8 exact bytes verified on Windows and Linux; not KZ profile interoperability"
+
+[[primitive_vector]]
+id = "rfc7836-wrap-tc26-z"
+status = "published-exact-vector-verified"
+source = "https://www.rfc-editor.org/rfc/rfc7836#section-4.6"
+example_source = "https://www.rfc-editor.org/rfc/rfc7836#appendix-B"
+example = 11
+cipher_parameter_oid = "1.2.643.7.1.2.5.1.1"
+kdf = "KDF_GOSTR3411_2012_256"
+label_hex = "26bdb878"
+seed_hex = "af21434145656378"
+encoding = "seed || CEK_ENC_32 || CEK_MAC_4"
+expected_wrapped_hex = "af21434145656378d15547f8ee85121bc87d4b1027d26027ecc071bba6e72f3fec6f620f56834c5abe33f052"
+oracle = "RFC7836 B11 exact bytes verified on Windows and Linux; independent Kalkan ECB and CBC-MAC-equivalent bytes match, native KZ profile not proven"
+
+# Primary KZ registry labels ONLY: parameters/encodings/mechanisms not specified
+# by the registry cannot be filled by analogy with Russian cryptographic OIDs.
+[[registered_algorithm]]
+id = "kz-gost2004-signing-key"
+oid = "1.2.398.3.10.1.1.1.1"
+parameter_a_oid = "1.2.398.3.10.1.1.1.1.1"
+source = "https://root.gov.kz/oid/"
+status = "registry-identity-only-not-envelope-profile"
+
+[[registered_algorithm]]
+id = "kz-gost2015-512-signing-key"
+oid = "1.2.398.3.10.1.1.2.2"
+parameter_a_oid = "1.2.398.3.10.1.1.2.2.1"
+source = "https://root.gov.kz/oid/"
+status = "registry-identity-only-not-envelope-profile"
+
+[[registered_algorithm]]
+id = "kz-gost2015-512-agreement-key"
+oid = "1.2.398.3.10.1.4.1.2"
+parameter_a_oid = "1.2.398.3.10.1.4.1.2.1"
+source = "https://root.gov.kz/oid/?oid=1.2.398.3.10.1.4.1.2"
+status = "registry-identity-only-not-envelope-profile"
+
+[[registered_algorithm]]
+id = "kz-gost28147-encryption"
+oid = "1.2.398.3.10.1.2.1"
+parameter_test_oid = "1.2.398.3.10.1.2.1.1.0"
+parameter_a_oid = "1.2.398.3.10.1.2.1.1.1"
+source = "https://root.gov.kz/oid/?oid=1.2.398.3.10.1.2.1"
+status = "registry-identity-only-not-envelope-profile"

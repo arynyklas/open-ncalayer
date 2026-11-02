@@ -417,17 +417,16 @@ impl OcspCheck {
             self.http.as_ref(),
             self.now,
         );
-        match status? {
-            CertStatus::Revoked { time, reason } => {
+        match &status {
+            Some(CertStatus::Revoked { time, reason }) => {
                 tracing::info!(%serial, %time, ?reason, "OCSP: the certificate is revoked");
-                Some(time)
             }
-            CertStatus::Good => None,
-            CertStatus::Unknown => {
+            Some(CertStatus::Unknown) => {
                 tracing::warn!(%serial, "OCSP: the responder does not know the certificate; the key stays available");
-                None
             }
+            _ => {}
         }
+        oncl_pki::validation::compatibility_revoked(status)
     }
 }
 

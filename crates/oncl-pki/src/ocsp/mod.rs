@@ -32,8 +32,8 @@ use crate::asn1util::{RawSequence, TimeError, generalized_time};
 use crate::ber::{self, BerError};
 use crate::cert::Certificate;
 use crate::http::{
-    CONNECT_TIMEOUT, GetOptions, HttpError, HttpTransport, MAX_RESPONSE_LEN, NetKind, NonceSpec,
-    PkiMethod, nca_get_url, pki_send,
+    CONNECT_TIMEOUT, GetOptions, HttpError, HttpRequest, HttpTransport, MAX_RESPONSE_LEN, NetKind,
+    NonceSpec, PkiMethod, nca_get_url, pki_send,
 };
 use crate::key::{HashAlg, PublicKey, SigAlg};
 use crate::oid;
@@ -396,6 +396,31 @@ pub fn check_answer(
     now: OffsetDateTime,
     timeout: Duration,
 ) -> Result<OcspAnswer, OcspError> {
+    check_answer_for(cert, issuer, cas, http, now, timeout, false)
+}
+
+/// Strict responder authorization: the delegated responder must be issued by
+/// this certificate's actual issuer, not merely some CA in a shared trust set.
+pub fn check_issuer_bound(
+    cert: &Certificate,
+    issuer: &Certificate,
+    cas: &CaSet,
+    http: &dyn HttpTransport,
+    now: OffsetDateTime,
+    timeout: Duration,
+) -> Result<CertStatus, OcspError> {
+    check_answer_for(cert, issuer, cas, http, now, timeout, true).map(|answer| answer.status)
+}
+
+fn check_answer_for(
+    cert: &Certificate,
+    issuer: &Certificate,
+    cas: &CaSet,
+    http: &dyn HttpTransport,
+    now: OffsetDateTime,
+    timeout: Duration,
+    bound: bool,
+) -> Result<OcspAnswer, OcspError> {
     let url = ocsp_url(cert).ok_or(OcspError::NoUrl)?;
     let requested = RequestedId::new(cert, issuer);
     let opts = GetOptions {
@@ -406,15 +431,26 @@ pub fn check_answer(
         redirects: true,
     };
     let reply = http
-        .get_with(&nca_get_url(&url, &requested.request_der(None)), opts)
+        .send_scoped(&HttpRequest::get(
+            &nca_get_url(&url, &requested.request_der(None)),
+            opts,
+        ))
         .map_err(OcspError::Http)?;
-    if reply.status != 200 {
-        return Err(OcspError::HttpStatus(reply.status));
+    if reply.status() != 200 {
+        return Err(OcspError::HttpStatus(reply.status()));
     }
-    if !is_ocsp_response(reply.content_type.as_deref()) {
-        return Err(OcspError::ContentType(reply.content_type));
+    if !is_ocsp_response(reply.content_type()) {
+        return Err(OcspError::ContentType(
+            reply.content_type().map(str::to_owned),
+        ));
     }
-    read_response(&reply.body, &requested, cas, now)
+    // This guard outlives every normalized/decoded owned structure below,
+    // while reply retains the body and its original operation reservations.
+    let _decode = reply.reserve_decode().map_err(OcspError::Http)?;
+    if bound {
+        check_issuer_binding(&successful_basic(reply.body())?, issuer)?;
+    }
+    read_response(reply.body(), &requested, cas, now)
 }
 
 /// The `CertID` of a request.
@@ -585,6 +621,53 @@ pub fn check_embedded(
         cas,
         at,
     )
+}
+
+/// Embedded evidence with the same strict issuer delegation as online status.
+pub fn check_embedded_issuer_bound(
+    response: &[u8],
+    cert: &Certificate,
+    issuer: &Certificate,
+    cas: &CaSet,
+    now: OffsetDateTime,
+) -> Result<OcspAnswer, OcspError> {
+    let der = ber::to_der(response)?;
+    let basic = match asn1::OcspResponse::from_der(&der) {
+        Ok(_) => successful_basic(&der)?,
+        Err(_) => der,
+    };
+    // A common evidence collection contains answers for other certificates.
+    // Reject nonmatching identifiers before expensive trust/signature checks;
+    // a matching identifier still establishes nothing until all checks pass.
+    let decoded = asn1::BasicOcspResponse::from_der(&basic)?;
+    let data: asn1::ResponseData<'_> = decoded.tbs_response_data.decode_as()?;
+    let single = data.responses.first().ok_or(OcspError::NoSingleResponse)?;
+    let hash = HashAlg::from_oid(&single.cert_id.hash_algorithm.oid)
+        .ok_or_else(|| OcspError::Malformed("unsupported CertID hash".into()))?;
+    if !RequestedId::with_hash(cert, issuer, hash).matches(&single.cert_id) {
+        return Err(OcspError::CertIdMismatch);
+    }
+    check_issuer_binding(&basic, issuer)?;
+    check_embedded(response, cert, issuer, cas, now)
+}
+
+fn check_issuer_binding(basic_der: &[u8], issuer: &Certificate) -> Result<(), OcspError> {
+    let basic = asn1::BasicOcspResponse::from_der(basic_der)?;
+    let data: asn1::ResponseData<'_> = basic.tbs_response_data.decode_as()?;
+    let responder_id = ResponderId::read(data.responder_id)?;
+    let responder = basic
+        .certs
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|cert| responder_id.identifies(cert))
+        .ok_or(OcspError::ResponderNotFound)?;
+    if responder.tbs_certificate().issuer() != issuer.tbs_certificate().subject()
+        || crate::cert::verify_signature(responder, issuer).is_err()
+    {
+        return Err(OcspError::ResponderNotTrusted(PathError::BadSignature));
+    }
+    Ok(())
 }
 
 /// Checks a DER `BasicOCSPResponse`: the responder, its signature, and the first

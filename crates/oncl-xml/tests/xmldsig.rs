@@ -8,11 +8,11 @@ use der::Encode;
 use oncl_pki::cert;
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
-use oncl_pki::xmldsig::{
+use oncl_testkit::{ncanode, read, synthetic};
+use oncl_xml::{
     C14n, MAX_INPUT, MAX_NODES, NodeRef, XmlError, canonicalize, sign_element, sign_enveloped,
     verify,
 };
-use oncl_testkit::{ncanode, read, synthetic};
 use std::time::{Duration, Instant};
 
 const DSIG: &str = "http://www.w3.org/2000/09/xmldsig#";
@@ -60,7 +60,7 @@ fn replace_once(xml: &[u8], from: &str, to: &str) -> Vec<u8> {
     [&xml[..at], to.as_bytes(), &xml[at + from.len()..]].concat()
 }
 
-fn algs(infos: &[oncl_pki::xmldsig::XmlSignatureInfo]) -> Vec<SigAlg> {
+fn algs(infos: &[oncl_xml::XmlSignatureInfo]) -> Vec<SigAlg> {
     infos.iter().map(|i| i.sig_alg).collect()
 }
 

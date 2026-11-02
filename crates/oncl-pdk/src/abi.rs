@@ -257,6 +257,12 @@ pub mod cause {
     pub const KEY_NOT_EXPORTABLE: &str = "key.not_exportable";
     /// A token that failed or refused the operation.
     pub const KEY_TOKEN: &str = "key.token";
+    /// A native key backend that failed to execute the operation.
+    pub const KEY_BACKEND_FAILURE: &str = "key.backend_failure";
+    /// A private-key decryption that failed, without padding-oracle detail.
+    pub const KEY_DECRYPTION_FAILED: &str = "key.decryption_failed";
+    /// A scoped key operation that failed authorization, audit or execution.
+    pub const KEY_EXECUTION: &str = "key.execution";
     /// No HTTP reply from the TSA.
     pub const TSP_HTTP: &str = "tsp.http";
     /// An HTTP status other than 200 from the TSA.
@@ -373,6 +379,9 @@ pub mod cause {
         KEY_BAD_SIGNATURE,
         KEY_NOT_EXPORTABLE,
         KEY_TOKEN,
+        KEY_BACKEND_FAILURE,
+        KEY_DECRYPTION_FAILED,
+        KEY_EXECUTION,
         TSP_HTTP,
         TSP_STATUS,
         TSP_CONTENT_TYPE,

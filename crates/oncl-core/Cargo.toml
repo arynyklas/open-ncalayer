@@ -1,0 +1,32 @@
+[package]
+name = "oncl-core"
+description = "Typed streaming operations and resource policies for OpenNCALayer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+tokens = ["dep:oncl-token"]
+xml = ["dep:oncl-xml"]
+
+[dependencies]
+oncl-pki.workspace = true
+oncl-token = { workspace = true, optional = true }
+oncl-xml = { workspace = true, optional = true }
+zeroize.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+oncl-pki = { workspace = true, features = ["testing"] }
+oncl-testkit.workspace = true
+oncl-token = { workspace = true, features = ["emulator"] }
+der.workspace = true
+time = { workspace = true, features = ["macros"] }
+
+[[test]]
+name = "key_sources"
+required-features = ["tokens"]

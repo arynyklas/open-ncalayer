@@ -141,7 +141,7 @@ fn basics_signs_long_documents_as_oncl_pki() {
             "signerParams": {"extKeyUsageOids": [], "chain": []},
         })),
     );
-    let signed = oncl_pki::xmldsig::sign_enveloped(xml.as_bytes(), &key.key, &key.cert).unwrap();
+    let signed = oncl_xml::sign_enveloped(xml.as_bytes(), &key.key, &key.cert).unwrap();
     assert_eq!(
         r["body"]["result"][0],
         Value::String(String::from_utf8(signed).unwrap())
@@ -226,7 +226,7 @@ fn common_utils_signs_long_documents_as_oncl_pki() {
     let xml = format!("<a>{doc}</a>");
     let key = entry(KEY);
     let r = reply(&c, cu("signXml", json!(["PKCS12", "", xml, "", ""])));
-    let signed = oncl_pki::xmldsig::sign_enveloped(xml.as_bytes(), &key.key, &key.cert).unwrap();
+    let signed = oncl_xml::sign_enveloped(xml.as_bytes(), &key.key, &key.cert).unwrap();
     assert_eq!(
         r,
         json!({"code": "200", "responseObject": String::from_utf8(signed).unwrap()})
@@ -246,7 +246,7 @@ fn applet_signs_long_documents_as_oncl_pki() {
     let xml = format!("<a>{}</a>", long_text(6));
     let key = entry(KEY);
     let request = json!({"method": "signXml", "args": ["PKCS12", "", "SIGN", xml], "uuid": "u"});
-    let signed = oncl_pki::xmldsig::sign_enveloped(xml.as_bytes(), &key.key, &key.cert).unwrap();
+    let signed = oncl_xml::sign_enveloped(xml.as_bytes(), &key.key, &key.cert).unwrap();
     assert_eq!(
         reply(&a, request),
         json!({
@@ -284,8 +284,7 @@ fn signed_xml_replies_escape_as_org_json() {
     let key = entry(KEY);
     for body in ["x".to_owned(), long_text(12)] {
         let xml = format!("<a><b>x</b>{body}</a>");
-        let signed =
-            oncl_pki::xmldsig::sign_enveloped(xml.as_bytes(), &key.key, &key.cert).unwrap();
+        let signed = oncl_xml::sign_enveloped(xml.as_bytes(), &key.key, &key.cert).unwrap();
         let quoted = org_json_quoted(std::str::from_utf8(&signed).unwrap());
         assert!(quoted.contains(r"<b>x<\/b>") && !quoted.contains("</"));
 

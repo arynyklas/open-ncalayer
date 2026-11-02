@@ -46,6 +46,8 @@ pub enum TokenError {
     /// The exchange with the card failed.
     #[error("smart card exchange failed: {0}")]
     Transport(String),
+    #[error(transparent)]
+    Execution(#[from] oncl_pki::key::KeyExecutionError),
 }
 
 fn tries_text(tries: Option<u8>) -> String {
@@ -61,6 +63,7 @@ impl From<BackendError> for TokenError {
             }
             BackendError::Removed | BackendError::Reset => TokenError::CardRemoved,
             BackendError::Sharing | BackendError::Failed(_) => TokenError::Transport(e.to_string()),
+            BackendError::Execution(error) => TokenError::Execution(error),
         }
     }
 }

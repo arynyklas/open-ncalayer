@@ -457,10 +457,7 @@ async fn common_utils_over_wss() {
     assert_eq!(reply["code"], "200", "{reply}");
     assert_eq!(reply["uuid"], "u-7");
     let signed = reply["responseObject"].as_str().unwrap();
-    assert_eq!(
-        oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap().len(),
-        1
-    );
+    assert_eq!(oncl_xml::verify(signed.as_bytes()).unwrap().len(), 1);
     assert_eq!(srv.prompter.storage_prompts()[0].origin, ORIGIN);
 }
 
@@ -510,7 +507,7 @@ async fn basics_sign_xml_egov_login_over_wss() {
     let result = reply["body"]["result"].as_array().unwrap();
     assert_eq!(result.len(), 1, "{reply}");
     let signed = result[0].as_str().unwrap();
-    let infos = oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+    let infos = oncl_xml::verify(signed.as_bytes()).unwrap();
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].cert, entry("user-gost2015-auth").cert);
     assert_eq!(srv.prompter.storage_prompts()[0].origin, ORIGIN);

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use ureq::http::Uri;
 use ureq::{Proxy, ProxyProtocol};
 
+pub mod deadline;
 mod forward;
 mod system_proxy;
 
@@ -183,6 +184,73 @@ pub trait HttpTransport: Send + Sync {
     ///
     /// [`HttpError`] if no response arrived, or the request's options refuse it.
     fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError>;
+
+    /// Scoped PKI connection routing. Custom transports are trusted host code;
+    /// the built-in Ureq transport connects only to these explicit address pins.
+    fn send_pinned(
+        &self,
+        request: &HttpRequest<'_>,
+        _pins: &[std::net::SocketAddr],
+    ) -> Result<HttpReply, HttpError> {
+        self.send(request)
+    }
+
+    /// Scoped status processing. Legacy trusted transports remain functional;
+    /// the built-in pinned adapter admits actual buffer growth before allocation.
+    fn send_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        self.send(request).map(ScopedHttpReply::unscoped)
+    }
+    fn send_scoped_with<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        budget: ResponseBudget<'a>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        let mut resources = ReplyResources::new(&budget)?;
+        resources.grow(request.opts.max_len)?;
+        let reply = self.send(request)?;
+        if reply.body.capacity() as u64 > request.opts.max_len {
+            return Err(HttpError::other(
+                "trusted transport exceeded scoped response capacity",
+            ));
+        }
+        resources.shrink(request.opts.max_len - reply.body.capacity() as u64)?;
+        Ok(ScopedHttpReply {
+            reply,
+            resources: Some(resources),
+        })
+    }
+    fn send_pinned_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        pins: &[std::net::SocketAddr],
+        budget: ResponseBudget<'a>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        let mut resources = ReplyResources::new(&budget)?;
+        resources.grow(request.opts.max_len)?;
+        let reply = self.send_pinned(request, pins)?;
+        if reply.body.capacity() as u64 > request.opts.max_len {
+            return Err(HttpError::other(
+                "trusted transport exceeded scoped response capacity",
+            ));
+        }
+        resources.shrink(request.opts.max_len - reply.body.capacity() as u64)?;
+        Ok(ScopedHttpReply {
+            reply,
+            resources: Some(resources),
+        })
+    }
+    /// Present only on an operation adapter; legacy transports have no scope.
+    fn resource_scope(&self) -> Option<&crate::resource::ResourceScope> {
+        None
+    }
+    /// Operation adapters retain this typed cause for finish(), never infer it
+    /// from a network error's text. Default is used only by unscoped host code.
+    fn resource_failure(&self, _error: crate::resource::ProcessingError) -> HttpError {
+        HttpError::other("PKI resource admission failed")
+    }
 
     /// `GET url` within `opts`.
     ///
@@ -489,27 +557,41 @@ impl UreqTransport {
             return Err(HttpError::new(HttpErrorKind::Timeout, "timed out"));
         }
         let agent = self.agent(proxy, left, opts.connect_timeout);
-        let response = match request.method {
-            HttpMethod::Post => {
-                let mut builder = agent.post(url);
-                for (name, value) in request.headers {
-                    builder = builder.header(*name, *value);
-                }
-                if let Some(content_type) = request.content_type {
-                    builder = builder.header("Content-Type", content_type);
-                }
-                builder.send(request.body)
-            }
-            HttpMethod::Get => {
-                let mut builder = agent.get(url);
-                for (name, value) in request.headers {
-                    builder = builder.header(*name, *value);
-                }
-                builder.call()
-            }
-        };
-        reply(response, opts.max_len)
+        send_agent(&agent, request)
     }
+}
+
+fn request_agent(
+    agent: &ureq::Agent,
+    request: &HttpRequest<'_>,
+) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    let url = request.url;
+    match request.method {
+        HttpMethod::Post => {
+            let mut builder = agent.post(url);
+            for (name, value) in request.headers {
+                builder = builder.header(*name, *value);
+            }
+            if let Some(content_type) = request.content_type {
+                builder = builder.header("Content-Type", content_type);
+            }
+            builder.send(request.body)
+        }
+        HttpMethod::Get => {
+            let mut builder = agent.get(url);
+            for (name, value) in request.headers {
+                builder = builder.header(*name, *value);
+            }
+            builder.call()
+        }
+    }
+}
+
+fn send_agent(
+    agent: &ureq::Agent,
+    request: &HttpRequest<'_>,
+) -> Result<(HttpReply, Option<String>), HttpError> {
+    reply(request_agent(agent, request), request.opts.max_len)
 }
 
 /// The kind of an I/O failure of a request.
@@ -617,6 +699,92 @@ fn is_https(url: &str) -> bool {
 impl HttpTransport for UreqTransport {
     fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
         self.send_following(request)
+    }
+
+    fn send_pinned(
+        &self,
+        request: &HttpRequest<'_>,
+        pins: &[std::net::SocketAddr],
+    ) -> Result<HttpReply, HttpError> {
+        let agent = self.pinned_agent(request, pins)?;
+        let (mut response, location) = send_agent(&agent, request)?;
+        response.location = location;
+        Ok(response)
+    }
+
+    fn send_scoped_with<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        budget: ResponseBudget<'a>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        self.send_following_scoped(request, budget)
+    }
+
+    fn send_pinned_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        pins: &[std::net::SocketAddr],
+        budget: ResponseBudget<'a>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        let mut resources = ReplyResources::new(&budget)?;
+        // Header/agent/read scratch is admitted before constructing Ureq state.
+        resources.grow(64 * 1024)?;
+        let agent = self.pinned_agent(request, pins)?;
+        read_scoped_reply(
+            request_agent(&agent, request),
+            request.opts.max_len,
+            resources,
+        )
+    }
+}
+
+impl UreqTransport {
+    fn pinned_agent(
+        &self,
+        request: &HttpRequest<'_>,
+        pins: &[std::net::SocketAddr],
+    ) -> Result<ureq::Agent, HttpError> {
+        if pins.is_empty() || pins.len() > 16 {
+            return Err(HttpError::other(
+                "PKI hostname requires operator address pins",
+            ));
+        }
+        #[derive(Debug)]
+        struct Pinned(Vec<std::net::SocketAddr>);
+        impl ureq::unversioned::resolver::Resolver for Pinned {
+            fn resolve(
+                &self,
+                _: &Uri,
+                _: &ureq::config::Config,
+                _: ureq::unversioned::transport::NextTimeout,
+            ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+                let mut result = self.empty();
+                for address in &self.0 {
+                    result
+                        .try_push(*address)
+                        .map_err(|_| ureq::Error::HostNotFound)?;
+                }
+                Ok(result)
+            }
+        }
+        let mut config = ureq::Agent::config_builder()
+            .timeout_global(Some(request.opts.timeout))
+            .timeout_connect(Some(request.opts.connect_timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None);
+        if let Some(roots) = &self.roots {
+            config = config.tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::Specific(Arc::clone(roots)))
+                    .build(),
+            );
+        }
+        Ok(ureq::Agent::with_parts(
+            config.build(),
+            ureq::unversioned::transport::DefaultConnector::new(),
+            Pinned(pins.to_vec()),
+        ))
     }
 }
 
@@ -1552,5 +1720,525 @@ mod tests {
             matches!(e.kind, HttpErrorKind::Connect | HttpErrorKind::Timeout),
             "{e}"
         );
+    }
+}
+
+const MAX_SCOPE_LAYERS: usize = 8;
+/// A borrowed request-time budget chain. Only operation adapters construct it.
+/// Exact ScopeState clones deduplicate; distinct operations sharing a global
+/// budget still each enforce their own controls, deadlines and reservations.
+pub struct ResponseBudget<'a> {
+    scopes: [Option<&'a crate::resource::ResourceScope>; MAX_SCOPE_LAYERS],
+    owner: &'a dyn HttpTransport,
+    observers: FailureObservers<'a>,
+}
+impl<'a> ResponseBudget<'a> {
+    pub(crate) fn new(
+        scope: &'a crate::resource::ResourceScope,
+        owner: &'a dyn HttpTransport,
+    ) -> Self {
+        let mut scopes = [None; MAX_SCOPE_LAYERS];
+        scopes[0] = Some(scope);
+        Self {
+            scopes,
+            owner,
+            observers: [None; MAX_SCOPE_LAYERS],
+        }
+    }
+    pub(crate) fn reborrow(&self) -> Self {
+        Self {
+            scopes: self.scopes,
+            owner: self.owner,
+            observers: self.observers,
+        }
+    }
+    pub(crate) fn checkpoint(&self) -> Result<(), HttpError> {
+        for scope in self.scopes.iter().flatten() {
+            scope
+                .checkpoint()
+                .map_err(|error| fanout_failure(self.owner, &self.observers, error))?;
+        }
+        Ok(())
+    }
+    pub(crate) fn remaining(&self) -> Duration {
+        self.scopes
+            .iter()
+            .flatten()
+            .map(|scope| scope.deadline().remaining())
+            .min()
+            .unwrap_or_default()
+    }
+    pub(crate) fn with_scope(
+        mut self,
+        scope: &'a crate::resource::ResourceScope,
+        observer: &'a dyn HttpTransport,
+    ) -> Result<Self, HttpError> {
+        if !std::ptr::addr_eq(self.owner, observer)
+            && !self
+                .observers
+                .iter()
+                .flatten()
+                .any(|previous| std::ptr::addr_eq(*previous, observer))
+        {
+            let Some(slot) = self.observers.iter_mut().find(|slot| slot.is_none()) else {
+                let _ =
+                    observer.resource_failure(crate::resource::ProcessingError::CapacityExceeded);
+                return Err(fanout_failure(
+                    self.owner,
+                    &self.observers,
+                    crate::resource::ProcessingError::CapacityExceeded,
+                ));
+            };
+            *slot = Some(observer);
+        }
+        if self
+            .scopes
+            .iter()
+            .flatten()
+            .any(|previous| previous.same_operation(scope))
+        {
+            return Ok(self);
+        }
+        let slot = self
+            .scopes
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or_else(|| {
+                fanout_failure(
+                    self.owner,
+                    &self.observers,
+                    crate::resource::ProcessingError::CapacityExceeded,
+                )
+            })?;
+        *slot = Some(scope);
+        Ok(self)
+    }
+}
+
+struct ReplyResources<'a> {
+    owner: &'a dyn HttpTransport,
+    observers: FailureObservers<'a>,
+    scopes: [Option<crate::resource::ResourceScope>; MAX_SCOPE_LAYERS],
+    metadata: [Option<crate::resource::ResourceReservation>; MAX_SCOPE_LAYERS],
+    // F01 metadata reservations already debit BOTH metadata and live memory.
+    // Status body/decode bytes therefore need no second memory reservation.
+}
+impl<'a> ReplyResources<'a> {
+    fn new(budget: &ResponseBudget<'a>) -> Result<Self, HttpError> {
+        Self::from_scopes(
+            budget.owner,
+            budget.observers,
+            std::array::from_fn(|index| {
+                budget.scopes[index].map(crate::resource::ResourceScope::retain)
+            }),
+        )
+    }
+    fn from_scopes(
+        owner: &'a dyn HttpTransport,
+        observers: FailureObservers<'a>,
+        scopes: [Option<crate::resource::ResourceScope>; MAX_SCOPE_LAYERS],
+    ) -> Result<Self, HttpError> {
+        let mut result = Self {
+            owner,
+            observers,
+            scopes,
+            metadata: std::array::from_fn(|_| None),
+        };
+        for (index, scope) in result.scopes.iter().enumerate() {
+            if let Some(scope) = scope {
+                result.metadata[index] = Some(
+                    scope
+                        .reserve_metadata(0)
+                        .map_err(|error| fanout_failure(owner, &observers, error))?,
+                );
+            }
+        }
+        result.checkpoint()?;
+        Ok(result)
+    }
+    fn checkpoint(&self) -> Result<(), HttpError> {
+        for scope in self.scopes.iter().flatten() {
+            scope.checkpoint().map_err(|error| self.failure(error))?;
+        }
+        Ok(())
+    }
+    fn grow(&mut self, bytes: u64) -> Result<(), HttpError> {
+        self.checkpoint()?;
+        for reservation in self.metadata.iter_mut().flatten() {
+            reservation
+                .grow(bytes)
+                .map_err(|error| fanout_failure(self.owner, &self.observers, error))?;
+        }
+        Ok(())
+    }
+    fn shrink(&mut self, bytes: u64) -> Result<(), HttpError> {
+        for reservation in self.metadata.iter_mut().flatten() {
+            reservation
+                .shrink(bytes)
+                .map_err(|error| fanout_failure(self.owner, &self.observers, error))?;
+        }
+        Ok(())
+    }
+    fn failure(&self, error: crate::resource::ProcessingError) -> HttpError {
+        fanout_failure(self.owner, &self.observers, error)
+    }
+    fn append(&mut self, body: &mut Vec<u8>, bytes: &[u8], max_len: u64) -> Result<(), HttpError> {
+        self.checkpoint()?;
+        let length = body
+            .len()
+            .checked_add(bytes.len())
+            .ok_or_else(|| self.failure(crate::resource::ProcessingError::MemoryLimit))?;
+        if length as u64 > max_len {
+            return Err(HttpError::other("oversized PKI response"));
+        }
+        if length > body.capacity() {
+            let previous = body.capacity();
+            let capacity = length
+                .max(previous.saturating_mul(2))
+                .min(usize::try_from(max_len).unwrap_or(usize::MAX));
+            self.grow(capacity as u64)?;
+            body.try_reserve_exact(capacity - body.len())
+                .map_err(|_| self.failure(crate::resource::ProcessingError::MemoryLimit))?;
+            self.shrink(previous as u64)?;
+        }
+        body.extend_from_slice(bytes);
+        self.checkpoint()
+    }
+}
+/// Body storage cannot be detached from its original operation reservations.
+/// Borrowed bytes are available for the actual status parser; no Clone,
+/// DerefMut, public raw-vector transfer or separate permit is exposed.
+pub struct ScopedHttpReply<'a> {
+    reply: HttpReply,
+    resources: Option<ReplyResources<'a>>,
+}
+pub(crate) struct DecodeGuard<'a> {
+    _resources: ReplyResources<'a>,
+}
+impl<'a> ScopedHttpReply<'a> {
+    fn unscoped(reply: HttpReply) -> Self {
+        Self {
+            reply,
+            resources: None,
+        }
+    }
+    pub fn status(&self) -> u16 {
+        self.reply.status
+    }
+    pub fn content_type(&self) -> Option<&str> {
+        self.reply.content_type.as_deref()
+    }
+    pub fn body(&self) -> &[u8] {
+        &self.reply.body
+    }
+    pub(crate) fn into_unscoped(self) -> Result<HttpReply, HttpError> {
+        if self.resources.is_some() {
+            return Err(HttpError::other(
+                "scoped response storage cannot be detached",
+            ));
+        }
+        Ok(self.reply)
+    }
+    pub(crate) fn reserve_decode(&self) -> Result<Option<DecodeGuard<'a>>, HttpError> {
+        let Some(resources) = &self.resources else {
+            return Ok(None);
+        };
+        let mut guard = ReplyResources::from_scopes(
+            resources.owner,
+            resources.observers,
+            std::array::from_fn(|index| {
+                resources.scopes[index]
+                    .as_ref()
+                    .map(crate::resource::ResourceScope::retain)
+            }),
+        )?;
+        // Bounded metadata normalization tree, owned OCSP/CRL structures,
+        // responder certificates and crypto scratch: proportional to this
+        // ACTUAL response, never a huge global max-response reservation.
+        let bytes = (self.body().len() as u64)
+            .checked_mul(128)
+            .and_then(|bytes| bytes.checked_add(2048))
+            .ok_or_else(|| resources.failure(crate::resource::ProcessingError::MemoryLimit))?;
+        guard.grow(bytes)?;
+        Ok(Some(DecodeGuard { _resources: guard }))
+    }
+}
+
+/// Adds the caller's actual operation budget to an existing host transport
+/// without replacing its pins, network policy, deadline or trust configuration.
+pub(crate) struct ResourceTransport<'a> {
+    inner: &'a dyn HttpTransport,
+    scope: crate::resource::ResourceScope,
+    fatal: std::sync::Mutex<Option<crate::resource::ProcessingError>>,
+}
+impl<'a> ResourceTransport<'a> {
+    pub(crate) fn new(
+        inner: &'a dyn HttpTransport,
+        scope: &crate::resource::ResourceScope,
+    ) -> Self {
+        Self {
+            inner,
+            scope: scope.retain(),
+            fatal: std::sync::Mutex::new(None),
+        }
+    }
+    pub(crate) fn finish(&self) -> Result<(), crate::resource::ProcessingError> {
+        if let Some(error) = self
+            .fatal
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            return Err(error);
+        }
+        self.scope.checkpoint()
+    }
+}
+impl HttpTransport for ResourceTransport<'_> {
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        self.inner.send(request)
+    }
+    fn send_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        if self
+            .fatal
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
+        {
+            return Err(HttpError::other("PKI operation already failed"));
+        }
+        self.inner
+            .send_scoped_with(request, ResponseBudget::new(&self.scope, self))
+    }
+    fn send_scoped_with<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        budget: ResponseBudget<'a>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        self.inner
+            .send_scoped_with(request, budget.with_scope(&self.scope, self)?)
+    }
+    fn send_pinned_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        pins: &[std::net::SocketAddr],
+        budget: ResponseBudget<'a>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        self.inner
+            .send_pinned_scoped(request, pins, budget.with_scope(&self.scope, self)?)
+    }
+    fn resource_scope(&self) -> Option<&crate::resource::ResourceScope> {
+        Some(&self.scope)
+    }
+    fn resource_failure(&self, error: crate::resource::ProcessingError) -> HttpError {
+        let mut fatal = self.fatal.lock().unwrap_or_else(|error| error.into_inner());
+        if fatal.is_none() {
+            *fatal = Some(error);
+        }
+        HttpError::other("PKI resource admission failed")
+    }
+}
+
+type FailureObservers<'a> = [Option<&'a dyn HttpTransport>; MAX_SCOPE_LAYERS];
+
+fn scalar_failure(
+    error: &crate::resource::ProcessingError,
+) -> Option<crate::resource::ProcessingError> {
+    use crate::resource::ProcessingError as E;
+    Some(match error {
+        E::Cancelled => E::Cancelled,
+        E::DeadlineExceeded => E::DeadlineExceeded,
+        E::CapacityExceeded => E::CapacityExceeded,
+        E::InputLimit => E::InputLimit,
+        E::ContainerLimit => E::ContainerLimit,
+        E::FramingLimit => E::FramingLimit,
+        E::OutputLimit => E::OutputLimit,
+        E::MemoryLimit => E::MemoryLimit,
+        E::TempLimit => E::TempLimit,
+        E::MetadataLimit => E::MetadataLimit,
+        E::InvalidLimits => E::InvalidLimits,
+        E::InvalidInput(reason) => E::InvalidInput(reason),
+        E::Io(_) => return None,
+    })
+}
+#[derive(Debug)]
+struct SharedIoCause(Arc<std::io::Error>);
+impl fmt::Display for SharedIoCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.0.as_ref(), f)
+    }
+}
+impl std::error::Error for SharedIoCause {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+fn shared_io(error: Arc<std::io::Error>) -> std::io::Error {
+    match Arc::try_unwrap(error) {
+        Ok(error) => error,
+        Err(error) => match error.raw_os_error() {
+            Some(code) => std::io::Error::from_raw_os_error(code),
+            None => std::io::Error::new(error.kind(), SharedIoCause(error)),
+        },
+    }
+}
+fn fanout_failure(
+    owner: &dyn HttpTransport,
+    observers: &FailureObservers<'_>,
+    error: crate::resource::ProcessingError,
+) -> HttpError {
+    if observers.iter().all(Option::is_none) {
+        return owner.resource_failure(error);
+    }
+    match error {
+        crate::resource::ProcessingError::Io(error) => {
+            // Only non-Clone I/O causes require shared ownership. Preserve the
+            // raw OS code or original custom source chain, never parse text.
+            let error = Arc::new(error);
+            for observer in observers.iter().flatten() {
+                let _ = observer.resource_failure(crate::resource::ProcessingError::Io(shared_io(
+                    error.clone(),
+                )));
+            }
+            owner.resource_failure(crate::resource::ProcessingError::Io(shared_io(error)))
+        }
+        error => {
+            for observer in observers.iter().flatten() {
+                if let Some(copy) = scalar_failure(&error) {
+                    let _ = observer.resource_failure(copy);
+                }
+            }
+            owner.resource_failure(error)
+        }
+    }
+}
+
+fn read_scoped_reply<'a>(
+    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    max_len: u64,
+    mut resources: ReplyResources<'a>,
+) -> Result<ScopedHttpReply<'a>, HttpError> {
+    let mut response = response.map_err(ureq_error)?;
+    let header = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    let content_type = header(ureq::http::header::CONTENT_TYPE);
+    let location = header(ureq::http::header::LOCATION);
+    let status = response.status().as_u16();
+    let mut body = Vec::new();
+    let mut reader = response.body_mut().with_config().limit(max_len).reader();
+    let mut chunk = [0u8; 8192];
+    loop {
+        resources.checkpoint()?;
+        let count = match std::io::Read::read(&mut reader, &mut chunk) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.map_err(|error| HttpError::new(io_kind(&error), error.to_string()))?,
+        };
+        resources.checkpoint()?;
+        if count == 0 {
+            break;
+        }
+        resources.append(&mut body, &chunk[..count], max_len)?;
+    }
+    Ok(ScopedHttpReply {
+        reply: HttpReply {
+            status,
+            content_type,
+            location,
+            body,
+        },
+        resources: Some(resources),
+    })
+}
+
+impl UreqTransport {
+    /// Same explicitly selected legacy route/redirect/proxy behavior, with
+    /// admitted body growth. This is not a fallback from an authorized pin map:
+    /// pinned Core calls use send_pinned_scoped directly and keep proxy=None.
+    fn send_following_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        budget: ResponseBudget<'a>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        budget.checkpoint()?;
+        let opts = request.opts;
+        let timeout = opts.timeout.min(budget.remaining());
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| HttpError::other("invalid PKI request timeout"))?;
+        let mut url = request.url.to_owned();
+        let mut current = *request;
+        for _ in 0..=MAX_REDIRECTS {
+            budget.checkpoint()?;
+            if opts.https_only && !is_https(&url) {
+                return Err(HttpError::other(format!("{url} is not an https URL")));
+            }
+            let left = deadline
+                .saturating_duration_since(Instant::now())
+                .min(budget.remaining());
+            if left.is_zero() {
+                budget.checkpoint()?;
+                return Err(HttpError::new(HttpErrorKind::Timeout, "timed out"));
+            }
+            let step = HttpRequest {
+                url: &url,
+                opts: GetOptions {
+                    timeout: left,
+                    connect_timeout: opts.connect_timeout.min(left),
+                    ..opts
+                },
+                ..current
+            };
+            let mut resources = ReplyResources::new(&budget)?;
+            resources.grow(64 * 1024)?;
+            let mut response = match self.route(&url)? {
+                Route::Forward(proxy) => {
+                    // Existing bounded proxy head/input/chunk/trailer storage.
+                    resources.grow(448 * 1024)?;
+                    forward::send_scoped(&proxy, &step, deadline, resources)?
+                }
+                Route::Tunnel(proxy) => {
+                    let agent = self.agent(Some(proxy), left, step.opts.connect_timeout);
+                    read_scoped_reply(request_agent(&agent, &step), opts.max_len, resources)?
+                }
+                Route::Direct => {
+                    let agent = self.agent(None, left, step.opts.connect_timeout);
+                    read_scoped_reply(request_agent(&agent, &step), opts.max_len, resources)?
+                }
+            };
+            budget.checkpoint()?;
+            let next = if opts.redirects {
+                redirect(
+                    &url,
+                    &response.reply,
+                    response.reply.location.as_deref(),
+                    step.method == HttpMethod::Post,
+                )?
+            } else {
+                None
+            };
+            match next {
+                Some(next) => {
+                    url = next;
+                    current = HttpRequest::get("", opts);
+                }
+                None => {
+                    if !(300..400).contains(&response.reply.status) {
+                        response.reply.location = None;
+                    }
+                    return Ok(response);
+                }
+            }
+        }
+        Err(HttpError::other(format!(
+            "too many redirects (more than {MAX_REDIRECTS})"
+        )))
     }
 }

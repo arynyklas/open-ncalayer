@@ -272,8 +272,7 @@ fn native_sign(key: &str, request: &str, clock: fn() -> OffsetDateTime) -> Durat
             }
             "xml" => {
                 let signed =
-                    oncl_pki::xmldsig::sign_enveloped(text.as_bytes(), &entry.key, &entry.cert)
-                        .unwrap();
+                    oncl_xml::sign_enveloped(text.as_bytes(), &entry.key, &entry.cert).unwrap();
                 json!([String::from_utf8(signed).unwrap()])
             }
             other => panic!("format {other}"),
@@ -411,7 +410,7 @@ fn bench_xml_whole_document() {
         let doc = xml_document(size);
         let request = sign_request("xml", &doc, json!({}));
         let direct = median(|| {
-            let _ = oncl_pki::xmldsig::sign_enveloped(doc.as_bytes(), &key.key, &key.cert).unwrap();
+            let _ = oncl_xml::sign_enveloped(doc.as_bytes(), &key.key, &key.cert).unwrap();
         });
         let wasm = wasm_sign("user-rsa-sign", &request, rsa_time);
         let native = native_sign("user-rsa-sign", &request, rsa_time);

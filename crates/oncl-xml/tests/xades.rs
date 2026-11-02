@@ -1,4 +1,4 @@
-//! XAdES-BASELINE-B, -T and -LT signatures ([`oncl_pki::xades::sign`]): the signed
+//! XAdES-BASELINE-B, -T and -LT signatures ([`oncl_xml::xades::sign`]): the signed
 //! properties under their own reference, the signature time-stamp over the canonical
 //! `SignatureValue`, the chain and OCSP responses, each signature verified.
 
@@ -11,9 +11,9 @@ use oncl_pki::http::{HttpError, HttpReply, HttpRequest, HttpTransport, RouteTran
 use oncl_pki::ocsp::{CertStatus, MockOcsp};
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::tsp::{self, MockTsa, TsaProfile, TsaSpec};
-use oncl_pki::xades::{XadesError, XadesLevel, XadesSpec, sign};
-use oncl_pki::xmldsig::{XmlError, verify};
 use oncl_testkit::{read, synthetic, synthetic_cert};
+use oncl_xml::xades::{XadesError, XadesLevel, XadesSpec, sign};
+use oncl_xml::{XmlError, verify};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use time::OffsetDateTime;

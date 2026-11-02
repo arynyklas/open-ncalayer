@@ -332,7 +332,7 @@ fn buhta_sign_xml_whitespace_and_no_line_breaks() {
         assert!(signature.contains(method), "{signature}");
         // The signature is the document element's last child.
         assert!(xml.ends_with("</ds:Signature></root>"), "{xml}");
-        assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+        assert_eq!(oncl_xml::verify(xml.as_bytes()).unwrap().len(), 1);
     }
 }
 
@@ -1283,7 +1283,7 @@ fn knp_sign_document_layout() {
     let at = xml.find("<timestamp").unwrap();
     let stamp = &xml[xml[at..].find('>').unwrap() + at + 1..xml.find("</timestamp>").unwrap()];
     assert_eq!(stamp.len(), "29-10-2026 17:00:00 +0500".len(), "{stamp}");
-    assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+    assert_eq!(oncl_xml::verify(xml.as_bytes()).unwrap().len(), 1);
     // The signature is written as Kalkan does: no line breaks between its elements, its
     // base64 on one line.
     assert!(!xml.contains('\n') && !xml.contains("&#13;"), "{xml}");
@@ -1395,10 +1395,7 @@ fn knp_sign_agreement_flow() {
     assert_eq!(reply["resultStatus"]["resultCode"], "OK", "{reply}");
     let signed = reply["signedAgreement"].as_str().unwrap();
     assert!(signed.contains("<text>Согласие</text>"), "{signed}");
-    assert_eq!(
-        oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap().len(),
-        1
-    );
+    assert_eq!(oncl_xml::verify(signed.as_bytes()).unwrap().len(), 1);
     assert_eq!(
         server.requests()[0].2,
         format!(
@@ -1429,10 +1426,7 @@ fn knp_sign_agreement_flow() {
         signed.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?><cancel>"),
         "{signed}"
     );
-    assert_eq!(
-        oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap().len(),
-        1
-    );
+    assert_eq!(oncl_xml::verify(signed.as_bytes()).unwrap().len(), 1);
 }
 
 fn agreement_error(code: &str) -> String {
@@ -4022,7 +4016,7 @@ fn skf_get_keys_unknown_issuer_empty_object() {
 /// The XML of a XAdES signature signed by the synthetic `inter-user` key: it verifies, with
 /// the time-stamp and the long-term values.
 fn assert_xades(xml: &str) {
-    let checks = oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap();
+    let checks = oncl_xml::verify(xml.as_bytes()).unwrap();
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].cert, entry("inter-user-gost2015-sign").cert);
     for part in [

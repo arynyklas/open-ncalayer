@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+oncl-xml.workspace = true
 # `keystore_new_key`: the DER of a new key's PEM request.
 base64.workspace = true
 # The DER of a chosen key's certificate.

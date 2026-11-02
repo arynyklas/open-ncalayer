@@ -5,12 +5,12 @@
 use oncl_builtin_tests::applet::Applet;
 use oncl_flows::testing::{ScriptedPrompter, Step};
 use oncl_flows::{OpenError, ReaderEntry, StorageKind};
-use oncl_pki::xmldsig;
 use oncl_protocol::{AddInfo, Module};
 use oncl_testkit::synthetic;
 use oncl_token::backend::{Backend, BackendError, Connection, ReaderState};
 use oncl_token::emulator::{CardSpec, EmuKey, EmulatorBackend, card};
 use oncl_token::{IdCardInfo, TokenKind, Tokens};
+use oncl_xml as xmldsig;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

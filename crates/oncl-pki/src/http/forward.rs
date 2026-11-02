@@ -72,6 +72,43 @@ pub(super) fn send(
     read_reply(&mut Input::new(stream), max_len).map_err(fail)
 }
 
+/// Existing absolute-form proxy protocol with original routing/DNS/connect and
+/// framing rules; only body capacity growth acquires the caller's budget first.
+pub(super) fn send_scoped<'a>(
+    proxy: &Proxy,
+    request: &super::HttpRequest<'_>,
+    deadline: Instant,
+    mut resources: super::ReplyResources<'a>,
+) -> Result<super::ScopedHttpReply<'a>, HttpError> {
+    resources.checkpoint()?;
+    let at = format!("proxy {}:{}", proxy.host(), proxy.port());
+    let fail = |error: io::Error| HttpError::new(io_kind(&error), format!("{at}: {error}"));
+    let post = match request.method {
+        super::HttpMethod::Post => Some((request.content_type, request.body)),
+        super::HttpMethod::Get => None,
+    };
+    let head = request_head(proxy, request.url, request.headers, post)?;
+    let mut stream = connect(proxy, deadline, request.opts.connect_timeout).map_err(fail)?;
+    resources.checkpoint()?;
+    stream.write_all(head.as_bytes()).map_err(fail)?;
+    if let Some((_, body)) = post {
+        stream.write_all(body).map_err(fail)?;
+    }
+    stream.flush().map_err(fail)?;
+    let mut forwarded = read_reply_with(
+        &mut Input::new(stream),
+        request.opts.max_len,
+        Some(&mut resources),
+    )
+    .map_err(fail)?;
+    resources.checkpoint()?;
+    forwarded.reply.location = forwarded.location;
+    Ok(super::ScopedHttpReply {
+        reply: forwarded.reply,
+        resources: Some(resources),
+    })
+}
+
 /// The request line and headers of `url` for `proxy`.
 fn request_head(
     proxy: &Proxy,
@@ -285,13 +322,25 @@ impl<R: Read> Input<R> {
     }
 
     /// Appends exactly `n` bytes to `out`.
-    fn take(&mut self, mut n: usize, out: &mut Vec<u8>) -> io::Result<()> {
+    fn take(&mut self, n: usize, out: &mut Vec<u8>) -> io::Result<()> {
+        self.take_with(n, out, u64::MAX, None)
+    }
+    fn take_with(
+        &mut self,
+        mut n: usize,
+        out: &mut Vec<u8>,
+        max: u64,
+        mut resources: Option<&mut super::ReplyResources<'_>>,
+    ) -> io::Result<()> {
         while n > 0 {
+            if let Some(resources) = resources.as_deref() {
+                resources.checkpoint().map_err(io::Error::other)?;
+            }
             if self.pending().is_empty() && !self.fill()? {
                 return Err(truncated());
             }
             let k = n.min(self.pending().len());
-            out.extend_from_slice(&self.pending()[..k]);
+            append_body(out, &self.pending()[..k], max, resources.as_deref_mut())?;
             self.pos += k;
             n -= k;
         }
@@ -301,8 +350,19 @@ impl<R: Read> Input<R> {
     /// Appends everything up to the end of the connection to `out`, refusing more than
     /// `max` bytes in `out`.
     fn rest(&mut self, out: &mut Vec<u8>, max: u64) -> io::Result<()> {
+        self.rest_with(out, max, None)
+    }
+    fn rest_with(
+        &mut self,
+        out: &mut Vec<u8>,
+        max: u64,
+        mut resources: Option<&mut super::ReplyResources<'_>>,
+    ) -> io::Result<()> {
         loop {
-            out.extend_from_slice(self.pending());
+            if let Some(resources) = resources.as_deref() {
+                resources.checkpoint().map_err(io::Error::other)?;
+            }
+            append_body(out, self.pending(), max, resources.as_deref_mut())?;
             self.pos = self.buf.len();
             if out.len() as u64 > max {
                 return Err(too_long(max));
@@ -311,6 +371,26 @@ impl<R: Read> Input<R> {
                 return Ok(());
             }
         }
+    }
+}
+
+fn append_body(
+    out: &mut Vec<u8>,
+    bytes: &[u8],
+    max: u64,
+    resources: Option<&mut super::ReplyResources<'_>>,
+) -> io::Result<()> {
+    if let Some(resources) = resources {
+        if (out.len() as u64)
+            .checked_add(bytes.len() as u64)
+            .is_none_or(|length| length > max)
+        {
+            return Err(too_long(max));
+        }
+        resources.append(out, bytes, max).map_err(io::Error::other)
+    } else {
+        out.extend_from_slice(bytes);
+        Ok(())
     }
 }
 
@@ -352,9 +432,19 @@ struct Head {
 /// Reads one response (after at most [`MAX_INTERIM`] interim ones) with a body of at most
 /// `max_len` bytes.
 fn read_reply<R: Read>(input: &mut Input<R>, max_len: u64) -> io::Result<Forwarded> {
+    read_reply_with(input, max_len, None)
+}
+fn read_reply_with<R: Read>(
+    input: &mut Input<R>,
+    max_len: u64,
+    mut resources: Option<&mut super::ReplyResources<'_>>,
+) -> io::Result<Forwarded> {
     let mut head_budget = MAX_HEAD;
     let mut interim = 0;
     let head = loop {
+        if let Some(resources) = resources.as_deref() {
+            resources.checkpoint().map_err(io::Error::other)?;
+        }
         let head = read_head(input, &mut head_budget)?;
         if !(100..200).contains(&head.status) {
             break head;
@@ -369,9 +459,20 @@ fn read_reply<R: Read>(input: &mut Input<R>, max_len: u64) -> io::Result<Forward
         Framing::Empty => {}
         Framing::Length(len) if len > max_len => return Err(too_long(max_len)),
         // Within `max_len`, which a `Vec` of the received bytes holds.
-        Framing::Length(len) => input.take(len as usize, &mut body)?,
-        Framing::Chunked => read_chunked(input, &mut body, max_len)?,
-        Framing::Close => input.rest(&mut body, max_len)?,
+        Framing::Length(len) => match resources.as_deref_mut() {
+            Some(resources) => {
+                input.take_with(len as usize, &mut body, max_len, Some(resources))?
+            }
+            None => input.take(len as usize, &mut body)?,
+        },
+        Framing::Chunked => match resources.as_deref_mut() {
+            Some(resources) => read_chunked_with(input, &mut body, max_len, Some(resources))?,
+            None => read_chunked(input, &mut body, max_len)?,
+        },
+        Framing::Close => match resources {
+            Some(resources) => input.rest_with(&mut body, max_len, Some(resources))?,
+            None => input.rest(&mut body, max_len)?,
+        },
     }
     Ok(Forwarded {
         reply: HttpReply {
@@ -465,7 +566,18 @@ fn head_of(response: &httparse::Response<'_, '_>) -> io::Result<Head> {
 /// Decodes a chunked body into `out`, refusing more than `max` bytes; the trailer (at most
 /// [`MAX_TRAILER`] bytes) is skipped.
 fn read_chunked<R: Read>(input: &mut Input<R>, out: &mut Vec<u8>, max: u64) -> io::Result<()> {
+    read_chunked_with(input, out, max, None)
+}
+fn read_chunked_with<R: Read>(
+    input: &mut Input<R>,
+    out: &mut Vec<u8>,
+    max: u64,
+    mut resources: Option<&mut super::ReplyResources<'_>>,
+) -> io::Result<()> {
     loop {
+        if let Some(resources) = resources.as_deref() {
+            resources.checkpoint().map_err(io::Error::other)?;
+        }
         let line = input.line(MAX_CHUNK_LINE, "chunk size line")?;
         let size = line.split(|&b| b == b';').next().unwrap_or_default();
         let size = std::str::from_utf8(size)
@@ -491,7 +603,7 @@ fn read_chunked<R: Read>(input: &mut Input<R>, out: &mut Vec<u8>, max: u64) -> i
             return Err(too_long(max));
         }
         // Within `max`, which a `Vec` of the received bytes holds.
-        input.take(size as usize, out)?;
+        input.take_with(size as usize, out, max, resources.as_deref_mut())?;
         if !input.line(MAX_CHUNK_LINE, "chunk end")?.is_empty() {
             return Err(invalid("chunk not followed by CRLF"));
         }

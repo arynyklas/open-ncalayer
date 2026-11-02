@@ -7,8 +7,8 @@ use oncl_pki::key::{
     KeyAlg, KeyError, PrivateKey, PublicKey, SigAlg, TokenKey, TokenSigner, digest_info,
 };
 use oncl_pki::pkcs12::{KeyEntry, load};
-use oncl_pki::xmldsig;
 use oncl_testkit::{read, synthetic};
+use oncl_xml as xmldsig;
 use rsa::Pkcs1v15Sign;
 use rsa::pkcs8::DecodePrivateKey;
 use std::sync::Arc;

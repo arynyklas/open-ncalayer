@@ -82,6 +82,7 @@ pub struct MockOcsp {
     tamper: OcspTamper,
     calls: Mutex<Vec<String>>,
     requests: Mutex<Vec<Vec<u8>>>,
+    now: Option<OffsetDateTime>,
 }
 
 impl MockOcsp {
@@ -93,6 +94,7 @@ impl MockOcsp {
             tamper: OcspTamper::None,
             calls: Mutex::new(Vec::new()),
             requests: Mutex::new(Vec::new()),
+            now: None,
         }
     }
 
@@ -105,6 +107,12 @@ impl MockOcsp {
     #[must_use]
     pub fn status(mut self, serial_hex: &str, status: CertStatus) -> Self {
         self.statuses.insert(serial_from_hex(serial_hex), status);
+        self
+    }
+
+    /// Fix the issuance clock for deterministic signed validation fixtures.
+    pub fn with_now(mut self, now: OffsetDateTime) -> Self {
+        self.now = Some(now);
         self
     }
 
@@ -157,7 +165,7 @@ impl MockOcsp {
             ..requested
         };
 
-        let now = OffsetDateTime::now_utc();
+        let now = self.now.unwrap_or_else(OffsetDateTime::now_utc);
         let hour = time::Duration::HOUR;
         let (this_update, next_update) = match self.tamper {
             OcspTamper::Stale => (now - 2 * hour, Some(now - hour)),

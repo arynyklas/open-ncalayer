@@ -102,6 +102,11 @@ impl SigningKey {
         self.curve
     }
 
+    /// Borrowed internal scalar; agreement must not serialize/export it.
+    pub(crate) fn secret_scalar(&self) -> &BoxedUint {
+        &self.d
+    }
+
     /// Public half of this key.
     pub fn verifying_key(&self) -> &VerifyingKey {
         &self.public
@@ -179,6 +184,11 @@ impl VerifyingKey {
     /// Curve of this key.
     pub fn curve(&self) -> CurveId {
         self.curve
+    }
+
+    /// Borrowed validated coordinates for internal agreement.
+    pub(crate) fn affine_coordinates(&self) -> (&BoxedUint, &BoxedUint) {
+        (&self.x, &self.y)
     }
 
     /// KZ encoding `X_LE ‖ Y_LE`, always `2 · coord_len` bytes.

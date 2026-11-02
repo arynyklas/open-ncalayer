@@ -404,6 +404,6 @@ mod tests {
     }
 
     fn parse_doc(xml: &str) -> Document<'_> {
-        crate::xmldsig::parse::parse(xml.as_bytes()).unwrap()
+        crate::parse::parse(xml.as_bytes()).unwrap()
     }
 }

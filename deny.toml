@@ -3,7 +3,7 @@ all-features = true
 
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2023-0071", reason = "Marvin timing attack on rsa decryption/signing: oncl-pki uses rsa only to generate keys (RSA signing is ring); xtask also signs public test fixtures, and the token emulator (oncl-token feature `emulator`, tests and CI only, never in a release) signs with rsa for its software cards" },
+    { id = "RUSTSEC-2023-0071", reason = "No patched rsa0.9 exists: production oncl-pki uses it only for generation/decoding/public operations; private prehash/OAEP use BCrypt on Windows and aws-lc-rs1.19.0 on Unix. Synthetic-fixture tests/xtask and the test-only token emulator perform raw RSA with synthetic keys, never server/user private operations." },
     # Unmaintained (no vulnerability, no maintained release yet) deep in Slint's winit
     # backend on Linux: Wayland title bar fonts, and the zbus split crates of AT-SPI.
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser: transitive via winit/sctk-adwaita, unmaintained only" },
@@ -40,10 +40,8 @@ multiple-versions = "allow"
 wildcards = "deny"
 allow-wildcard-paths = true
 deny = [
-    { crate = "aws-lc-rs", reason = "ring is the only crypto provider" },
-    { crate = "aws-lc-sys", reason = "ring is the only crypto provider" },
-    { crate = "openssl", reason = "ring is the only crypto provider" },
-    { crate = "openssl-sys", reason = "ring is the only crypto provider" },
+    { crate = "openssl", reason = "Unix private RSA uses pinned AWS-LC, not system OpenSSL; TLS remains rustls/ring" },
+    { crate = "openssl-sys", reason = "No system OpenSSL dependency; preserve deployment/Win7 matrix" },
     { crate = "native-tls", reason = "rustls on ring is the only TLS stack" },
 ]
 

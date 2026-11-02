@@ -15,8 +15,9 @@
 //!   ones unless already there).
 
 pub(crate) mod asn1;
-mod report;
+pub(crate) mod report;
 mod sign;
+pub mod stream;
 mod verify;
 
 use crate::ber::{self, BerError};
@@ -28,7 +29,7 @@ use x509_cert::Certificate;
 
 pub use report::{
     ChainPolicy, Check, NetFailure, NetStage, Problem, Report, ReportSpec, Revocation,
-    SignerReport, TspReport, VerifyAt, report,
+    SignerReport, TspReport, VerifyAt, report, visit_signers,
 };
 #[cfg(feature = "testing")]
 pub(crate) use sign::sign_content;

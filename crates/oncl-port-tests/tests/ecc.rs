@@ -272,7 +272,7 @@ fn market_xml_escapes_closing_tags() {
         "{reply_text}"
     );
     let xml = result(&reply);
-    let signatures = oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap();
+    let signatures = oncl_xml::verify(xml.as_bytes()).unwrap();
     assert_eq!(signatures.len(), 1);
 }
 
@@ -287,7 +287,7 @@ fn market_xml_drops_the_declaration() {
     let reply = harness.call("market", &request.to_string(), None);
     let xml = result(&reply);
     assert!(xml.starts_with("<doc><a>x</a>"), "{xml}");
-    assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+    assert_eq!(oncl_xml::verify(xml.as_bytes()).unwrap().len(), 1);
 }
 
 #[test]
@@ -391,7 +391,7 @@ fn efactoring_xml_element_with_parent() {
         ),
         "{xml}"
     );
-    let signatures = oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap();
+    let signatures = oncl_xml::verify(xml.as_bytes()).unwrap();
     assert_eq!(signatures.len(), 1);
 }
 
@@ -420,7 +420,7 @@ fn efactoring_xml_drops_the_declaration() {
         let xml = result(&reply);
         assert!(xml.starts_with(&data[..6]), "{xml}");
         assert!(!xml.contains('\n') && !xml.contains("&#13;"), "{xml}");
-        assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+        assert_eq!(oncl_xml::verify(xml.as_bytes()).unwrap().len(), 1);
     }
 }
 
@@ -462,7 +462,7 @@ fn efactoring_soap_prefix_xpath() {
     let reply = harness.call("efactoring", &request.to_string(), None);
     let xml = result(&reply);
     assert!(xml.contains(r##"URI="#body""##), "{xml}");
-    let signatures = oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap();
+    let signatures = oncl_xml::verify(xml.as_bytes()).unwrap();
     assert_eq!(signatures.len(), 1);
 }
 
@@ -922,7 +922,7 @@ fn nursign_xml_local_without_declaration() {
         "{reply:?}"
     );
     let xml = result(&reply);
-    assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+    assert_eq!(oncl_xml::verify(xml.as_bytes()).unwrap().len(), 1);
 
     // No `data`: before the key dialog.
     let harness = Harness::new(vec![Step::Message], vec![]);
@@ -997,7 +997,7 @@ fn nursign_multixml_not_array_drops() {
     assert!(docs[0].as_str().unwrap().starts_with("<a>1"));
     for doc in docs {
         assert_eq!(
-            oncl_pki::xmldsig::verify(doc.as_str().unwrap().as_bytes())
+            oncl_xml::verify(doc.as_str().unwrap().as_bytes())
                 .unwrap()
                 .len(),
             1

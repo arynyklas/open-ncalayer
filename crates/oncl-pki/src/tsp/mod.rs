@@ -410,7 +410,7 @@ pub fn verify_token(token: &[u8]) -> Result<TstInfo, TspError> {
 
 /// [`verify_token`], the TSA's key usage required or not, also returning the TSA
 /// certificate that signed the token.
-fn verify_token_signed(
+pub(crate) fn verify_token_signed(
     token: &[u8],
     require_eku: bool,
 ) -> Result<(TstInfo, Certificate), TspError> {
@@ -489,6 +489,27 @@ pub fn verify_token_for(
     Ok((tst, tsa))
 }
 
+/// Verify a token against an incrementally computed, algorithm-tagged imprint.
+/// Like `verify_token_for`, this does not establish trust or revocation status.
+pub fn verify_token_imprint(
+    token: &[u8],
+    imprint: &crate::digest::DigestValue,
+) -> Result<(TstInfo, Certificate), TspError> {
+    let (info, tsa) = verify_token_signed(token, true)?;
+    check_imprint(&info, imprint)?;
+    Ok((info, tsa))
+}
+
+pub(crate) fn check_imprint(
+    info: &TstInfo,
+    imprint: &crate::digest::DigestValue,
+) -> Result<(), TspError> {
+    if info.imprint_alg != imprint.algorithm().oid() || info.imprint != imprint.as_bytes() {
+        return Err(TspError::ImprintMismatch);
+    }
+    Ok(())
+}
+
 /// Time-stamps signer `signer_index` of a DER or BER `ContentInfo{SignedData}`: requests a
 /// token for its signature from the TSA of `profile` and returns the CMS (DER) with the
 /// token as that signer's id-aa-timeStampToken unsigned attribute, replacing an earlier
@@ -533,6 +554,24 @@ pub fn request(
     imprint: &[u8],
     http: &dyn HttpTransport,
 ) -> Result<TspReply, TspError> {
+    request_clock(spec, imprint, http, None)
+}
+
+pub(crate) fn request_at(
+    spec: &TsaSpec,
+    imprint: &[u8],
+    http: &dyn HttpTransport,
+    now: OffsetDateTime,
+) -> Result<TspReply, TspError> {
+    request_clock(spec, imprint, http, Some(now))
+}
+
+fn request_clock(
+    spec: &TsaSpec,
+    imprint: &[u8],
+    http: &dyn HttpTransport,
+    now: Option<OffsetDateTime>,
+) -> Result<TspReply, TspError> {
     let nonce = spec.nonce.draw();
     let request = request_spec_der(spec, imprint, nonce.as_deref());
     let opts = GetOptions {
@@ -567,7 +606,7 @@ pub fn request(
     let (token, tst, tsa_cert) = parse_response_signed(&body, spec.require_tsa_eku)?;
     check_answers(&tst, spec, imprint, nonce.as_deref())?;
     if let Some(skew) = spec.check_skew
-        && (tst.gen_time - OffsetDateTime::now_utc()).unsigned_abs() > skew
+        && (tst.gen_time - now.unwrap_or_else(OffsetDateTime::now_utc)).unsigned_abs() > skew
     {
         return Err(TspError::ClockSkew);
     }

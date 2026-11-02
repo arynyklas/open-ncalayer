@@ -107,6 +107,7 @@ pub(super) fn certificates<'a>(
 pub(super) struct ContentDigests<'a> {
     content: Option<&'a [u8]>,
     by_alg: [OnceCell<Vec<u8>>; 4],
+    precomputed: Option<[Option<crate::digest::DigestValue>; 4]>,
 }
 
 impl<'a> ContentDigests<'a> {
@@ -115,17 +116,31 @@ impl<'a> ContentDigests<'a> {
         ContentDigests {
             content,
             by_alg: Default::default(),
+            precomputed: None,
+        }
+    }
+
+    pub(super) fn from_values(values: [Option<crate::digest::DigestValue>; 4]) -> Self {
+        Self {
+            content: None,
+            by_alg: Default::default(),
+            precomputed: Some(values),
         }
     }
 
     fn get(&self, alg: SigAlg) -> Option<&[u8]> {
-        let content = self.content?;
         let slot = match alg {
             SigAlg::Gost2004 => 0,
             SigAlg::Gost2015_512 => 1,
             SigAlg::RsaSha256 => 2,
             SigAlg::RsaSha1 => 3,
         };
+        if let Some(values) = &self.precomputed {
+            return values[slot]
+                .as_ref()
+                .map(crate::digest::DigestValue::as_bytes);
+        }
+        let content = self.content?;
         Some(self.by_alg[slot].get_or_init(|| alg.digest(content)))
     }
 }
@@ -316,6 +331,9 @@ impl Signer<'_> {
                     seen.ess_matches = Some(matches);
                 }
             }
+        }
+        if !content_type_seen {
+            return Err(self.malformed("no contentType attribute"));
         }
         if !digest_seen {
             return Err(self.malformed("no messageDigest attribute"));

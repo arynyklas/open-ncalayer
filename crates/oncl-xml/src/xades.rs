@@ -1,7 +1,7 @@
 //! XAdES-BASELINE signatures (ETSI EN 319 132-1, XAdES 1.3.2) of a whole XML document, at
 //! the levels plugins ask for:
 //!
-//! - **B**: an enveloped `ds:Signature` (as [`xmldsig::sign_enveloped`] makes it, with an
+//! - **B**: an enveloped `ds:Signature` (as [`crate::sign_enveloped`] makes it, with an
 //!   `Id`) with `xades:QualifyingProperties` in a `ds:Object`; its `SignedProperties`
 //!   (`SigningTime`, `SigningCertificateV2` with the SHA-256 of the signer's certificate)
 //!   are signed by a second reference of the type `http://uri.etsi.org/01903#SignedProperties`;
@@ -17,18 +17,18 @@
 //! The signature and algorithm URIs follow the signer's certificate as Kalkan's do (GOST
 //! 2015-512, GOST 2004, RSA-SHA256), unless the spec names them. Byte-for-byte equality
 //! with other XAdES signers is not a goal; the structure is B-LT's, and the signature passes
-//! [`xmldsig::verify`].
+//! [`crate::verify`].
 
-use crate::cert::{self, Certificate};
-use crate::crl::{self, CrlError, CrlStatus};
-use crate::http::{HttpTransport, NonceSpec, PkiMethod};
-use crate::key::{HashAlg, PrivateKey};
-use crate::ocsp::{self, CertStatus, OcspError};
-use crate::tsp::{self, TsaSpec, TspError};
-use crate::xmldsig::{self, C14n, QualifyingObject, XmlError, XmlSignSpec};
+use crate::{C14n, QualifyingObject, XmlError, XmlSignSpec};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use der::Encode;
+use oncl_pki::cert::{self, Certificate};
+use oncl_pki::crl::{self, CrlError, CrlStatus};
+use oncl_pki::http::{HttpTransport, NonceSpec, PkiMethod};
+use oncl_pki::key::{HashAlg, PrivateKey};
+use oncl_pki::ocsp::{self, CertStatus, OcspError};
+use oncl_pki::tsp::{self, TsaSpec, TspError};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -132,7 +132,7 @@ pub enum XadesError {
 ///
 /// # Errors
 ///
-/// [`XadesError::Xml`] as [`xmldsig::sign_spec`] fails, and for T or LT without a TSA;
+/// [`XadesError::Xml`] as [`crate::sign_spec`] fails, and for T or LT without a TSA;
 /// [`XadesError::Tsp`]; for LT, [`XadesError::NoIssuer`], the OCSP and CRL failures
 /// (including a certificate naming neither a responder nor a distribution point), and a
 /// certificate that is not good.
@@ -188,7 +188,7 @@ pub fn sign(
         strip_whitespace: false,
         ..XmlSignSpec::kalkan(None, None)
     };
-    let signed = xmldsig::sign_qualified(
+    let signed = crate::sign_qualified(
         xml,
         &xml_spec,
         key,
@@ -202,7 +202,7 @@ pub fn sign(
         return Ok(signed);
     };
 
-    let value = xmldsig::signature_value_c14n(&signed, &id)?;
+    let value = crate::signature_value_c14n(&signed, &id)?;
     let stamp = tsp::request(tsa, &tsa.hash.digest(&value), http)?;
     let mut unsigned = format!(
         "<xades:UnsignedProperties><xades:UnsignedSignatureProperties>\
@@ -247,7 +247,7 @@ pub fn sign(
         unsigned.push_str("</xades:RevocationValues>");
     }
     unsigned.push_str("</xades:UnsignedSignatureProperties></xades:UnsignedProperties>");
-    Ok(xmldsig::append_qualifying(&signed, &id, &unsigned)?)
+    Ok(crate::append_qualifying(&signed, &id, &unsigned)?)
 }
 
 /// An `Id` for the signature: of the document, the certificate and the time, so two

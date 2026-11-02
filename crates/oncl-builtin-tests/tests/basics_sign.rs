@@ -1670,7 +1670,7 @@ fn xml_leading_comment_and_pi_are_kept_and_signed() {
         signed.starts_with("<!-- c --><?pi x?>\n<a>1<ds:Signature"),
         "{r}"
     );
-    oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+    oncl_xml::verify(signed.as_bytes()).unwrap();
 }
 
 #[test]
@@ -1866,7 +1866,7 @@ fn xml_egov_login_signs_with_the_chosen_key() {
         signed.starts_with("<login><client-type>PORTAL</client-type><ds:Signature"),
         "{signed}"
     );
-    let infos = oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+    let infos = oncl_xml::verify(signed.as_bytes()).unwrap();
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].cert, entry("user-gost2015-auth").cert);
     assert_eq!(infos[0].sig_alg, SigAlg::Gost2015_512);
@@ -1891,7 +1891,7 @@ fn xml_array_of_documents() {
         let signed = signed.as_str().unwrap();
         let root_end = doc.rfind("</").unwrap();
         assert!(signed.starts_with(&doc[..root_end]), "{signed}");
-        let infos = oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+        let infos = oncl_xml::verify(signed.as_bytes()).unwrap();
         assert_eq!(infos[0].cert, entry("user-gost2004-sign").cert);
     }
 }
@@ -1923,7 +1923,7 @@ fn xml_allow_expired_makes_expired_keys_selectable() {
         Availability::Enabled
     );
     let signed = r["body"]["result"][0].as_str().unwrap();
-    oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+    oncl_xml::verify(signed.as_bytes()).unwrap();
 
     // Without it (and for other formats) the expired key stays unselectable.
     for args in [

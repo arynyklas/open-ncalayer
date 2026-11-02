@@ -33,17 +33,18 @@
 
 mod c14n;
 mod parse;
+pub mod xades;
 mod xpath;
 
 pub use c14n::{C14n, MAX_CANONICAL, NodeRef, canonicalize};
 pub use parse::{MAX_ATTRIBUTES, MAX_DEPTH, MAX_INPUT, MAX_NODES};
 
-use crate::cert::{self, Certificate};
-use crate::key::{HashAlg, KeyError, PrivateKey, PublicKey, SigAlg};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use c14n::{Canonicalizer, escape_attribute, escape_text};
 use der::Encode;
+use oncl_pki::cert::{self, Certificate};
+use oncl_pki::key::{HashAlg, KeyError, PrivateKey, PublicKey, SigAlg};
 use roxmltree::{Document, Node, NodeId};
 
 const DSIG_NS: &str = "http://www.w3.org/2000/09/xmldsig#";

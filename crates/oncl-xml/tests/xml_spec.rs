@@ -1,4 +1,4 @@
-//! XML signatures by profile ([`oncl_pki::xmldsig::sign_spec`]): placement, algorithm URIs,
+//! XML signatures by profile ([`oncl_xml::sign_spec`]): placement, algorithm URIs,
 //! canonicalization, namespaces in XPaths, a signature `Id` with a signing-time object,
 //! layout and output form, as the plugins' clients expect them; each one verifying.
 
@@ -7,11 +7,11 @@ use base64::engine::general_purpose::STANDARD;
 use der::Encode;
 use oncl_pki::key::SigAlg;
 use oncl_pki::pkcs12::{KeyEntry, load};
-use oncl_pki::xmldsig::{
+use oncl_testkit::{read, synthetic};
+use oncl_xml::{
     C14n, Placement, SigningTimeObject, Transform, XmlError, XmlOutput, XmlSignSpec, sign_element,
     sign_enveloped, sign_spec, verify, verify_each,
 };
-use oncl_testkit::{read, synthetic};
 use sha2::{Digest, Sha256};
 
 const DOC: &[u8] = b"<?xml version=\"1.0\"?>\n<!-- c --><root xmlns=\"urn:x\" a=\"1\"><data Id=\"d1\">text<!-- in --></data><p/></root>";

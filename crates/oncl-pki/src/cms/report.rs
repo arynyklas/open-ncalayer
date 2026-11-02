@@ -14,6 +14,9 @@
 //!   good: the signature was made before.
 //! - A time-stamp token is verified against the signer's signature (imprint) and its TSA
 //!   certificate's path at its genTime.
+//!   This legacy report is not a `evidence::ProofTime`: common validation also
+//!   requires host-anchored trust and fresh status for every non-anchor TSA
+//!   path member. A timestamp field or `VerifyAt::TspTime` is not that evidence.
 
 use super::CmsError;
 use super::asn1::{ContentInfo, SignedData, SignerInfo};
@@ -227,6 +230,36 @@ pub fn report(
     http: &dyn HttpTransport,
     now: OffsetDateTime,
 ) -> Result<Report, CmsError> {
+    let mut signers = Vec::new();
+    let (content, _) = visit_impl(cms, data, spec, http, now, true, |signer| {
+        signers.push(signer);
+        std::ops::ControlFlow::<()>::Continue(())
+    })?;
+    Ok(Report { content, signers })
+}
+
+/// Visit completed signer checks one at a time without retaining certificate
+/// clones for all signers. Break preserves the caller's typed fatal cause.
+pub fn visit_signers<B>(
+    cms: &[u8],
+    data: Option<&[u8]>,
+    spec: &ReportSpec<'_>,
+    http: &dyn HttpTransport,
+    now: OffsetDateTime,
+    visit: impl FnMut(SignerReport) -> std::ops::ControlFlow<B>,
+) -> Result<std::ops::ControlFlow<B>, CmsError> {
+    visit_impl(cms, data, spec, http, now, false, visit).map(|(_, flow)| flow)
+}
+
+fn visit_impl<B>(
+    cms: &[u8],
+    data: Option<&[u8]>,
+    spec: &ReportSpec<'_>,
+    http: &dyn HttpTransport,
+    now: OffsetDateTime,
+    include_content: bool,
+    mut visit: impl FnMut(SignerReport) -> std::ops::ControlFlow<B>,
+) -> Result<(Option<Vec<u8>>, std::ops::ControlFlow<B>), CmsError> {
     let der = ber::to_der(cms)?;
     let content_info = ContentInfo::from_der(&der)?;
     if content_info.content_type != oid::SIGNED_DATA {
@@ -239,40 +272,146 @@ pub fn report(
     let encap = signed_data.encap_content_info;
     let encapsulated = encap.e_content.map(|c| c.as_bytes());
     let digests = ContentDigests::new(encapsulated.or(data));
-    let certs = certificates(&signed_data)?;
-    let carried = ocsp_in_crls(&signed_data);
-    let mut tlvs = signed_data.signer_infos.tlvs()?;
-    if tlvs.is_empty() {
+    let flow = visit_parsed_signers(&signed_data, &digests, spec, http, now, &mut visit)?;
+    if let std::ops::ControlFlow::Break(cause) = flow {
+        return Ok((None, std::ops::ControlFlow::Break(cause)));
+    }
+    Ok((
+        if include_content {
+            encapsulated.map(<[u8]>::to_vec)
+        } else {
+            None
+        },
+        std::ops::ControlFlow::Continue(()),
+    ))
+}
+
+/// A borrowed view cannot outlive the reserved metadata owner (or the bounded
+/// legacy caller's already charged normalization buffer).
+pub(crate) struct PreparedCms<'a> {
+    encoded: &'a [u8],
+    digests: ContentDigests<'a>,
+}
+impl<'a> PreparedCms<'a> {
+    pub(crate) fn from_content(
+        encoded: &'a [u8],
+        detached: Option<&'a [u8]>,
+    ) -> Result<Self, CmsError> {
+        let info = ContentInfo::from_der(encoded)?;
+        let data: SignedData<'_> = info.content.decode_as()?;
+        Ok(Self {
+            encoded,
+            digests: ContentDigests::new(
+                data.encap_content_info
+                    .e_content
+                    .map(|content| content.as_bytes())
+                    .or(detached),
+            ),
+        })
+    }
+    pub(crate) fn from_digests(
+        encoded: &'a [u8],
+        values: [Option<crate::digest::DigestValue>; 4],
+    ) -> Self {
+        Self {
+            encoded,
+            digests: ContentDigests::from_values(values),
+        }
+    }
+    pub(crate) fn encoded(&self) -> &'a [u8] {
+        self.encoded
+    }
+    pub(crate) fn signed_data(&self) -> Result<SignedData<'a>, CmsError> {
+        let info = ContentInfo::from_der(self.encoded)?;
+        if info.content_type != oid::SIGNED_DATA {
+            return Err(CmsError::Malformed("content is not SignedData".to_owned()));
+        }
+        Ok(info.content.decode_as()?)
+    }
+    pub(crate) fn signer_count(&self) -> Result<usize, CmsError> {
+        let data = self.signed_data()?;
+        let mut reader = SliceReader::new(data.signer_infos.0)?;
+        let mut count = 0usize;
+        while !reader.is_finished() {
+            let _ = reader.tlv_bytes()?;
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| CmsError::Malformed("too many signers".to_owned()))?;
+        }
+        if count == 0 {
+            return Err(CmsError::Malformed("no signers".to_owned()));
+        }
+        Ok(count)
+    }
+    pub(crate) fn certificates(&self) -> Result<Vec<Certificate>, CmsError> {
+        Ok(certificates(&self.signed_data()?)?
+            .into_iter()
+            .map(|(certificate, _)| certificate)
+            .collect())
+    }
+}
+
+pub(crate) fn visit_prepared_signers<B>(
+    prepared: &PreparedCms<'_>,
+    spec: &ReportSpec<'_>,
+    http: &dyn HttpTransport,
+    now: OffsetDateTime,
+    mut visit: impl FnMut(SignerReport) -> std::ops::ControlFlow<B>,
+) -> Result<std::ops::ControlFlow<B>, CmsError> {
+    visit_parsed_signers(
+        &prepared.signed_data()?,
+        &prepared.digests,
+        spec,
+        http,
+        now,
+        &mut visit,
+    )
+}
+
+fn visit_parsed_signers<B>(
+    signed_data: &SignedData<'_>,
+    digests: &ContentDigests<'_>,
+    spec: &ReportSpec<'_>,
+    http: &dyn HttpTransport,
+    now: OffsetDateTime,
+    visit: &mut impl FnMut(SignerReport) -> std::ops::ControlFlow<B>,
+) -> Result<std::ops::ControlFlow<B>, CmsError> {
+    let certs = certificates(signed_data)?;
+    let carried = if spec.revocation == Revocation::None {
+        Vec::new()
+    } else {
+        ocsp_in_crls(signed_data)
+    };
+    let mut reader = SliceReader::new(signed_data.signer_infos.0)?;
+    let mut index = 0usize;
+    if reader.is_finished() {
         return Err(CmsError::Malformed("no signers".to_owned()));
     }
-    if spec.first_signer_only {
-        tlvs.truncate(1);
+    while !reader.is_finished() {
+        let signer = Signer {
+            index,
+            info: SignerInfo::from_der(reader.tlv_bytes()?)?,
+            content_type: signed_data.encap_content_info.e_content_type,
+            digests,
+        };
+        let report = Judge {
+            signer: &signer,
+            certs: &certs,
+            carried: &carried,
+            spec,
+            http,
+            now,
+        }
+        .report();
+        if let std::ops::ControlFlow::Break(cause) = visit(report) {
+            return Ok(std::ops::ControlFlow::Break(cause));
+        }
+        if spec.first_signer_only {
+            break;
+        }
+        index += 1;
     }
-    let signers = tlvs
-        .into_iter()
-        .enumerate()
-        .map(|(index, tlv)| {
-            let signer = Signer {
-                index,
-                info: SignerInfo::from_der(tlv)?,
-                content_type: encap.e_content_type,
-                digests: &digests,
-            };
-            Ok(Judge {
-                signer: &signer,
-                certs: &certs,
-                carried: &carried,
-                spec,
-                http,
-                now,
-            }
-            .report())
-        })
-        .collect::<Result<Vec<_>, CmsError>>()?;
-    Ok(Report {
-        content: encapsulated.map(<[u8]>::to_vec),
-        signers,
-    })
+    Ok(std::ops::ControlFlow::Continue(()))
 }
 
 /// The id-ri-ocsp-response `OCSPResponse`s among the `crls` of `signed_data`; whatever does
@@ -488,7 +627,7 @@ impl Judge<'_, '_> {
         if !carried.is_empty() {
             let mut first_problem = None;
             for response in &carried {
-                match ocsp::check_embedded(response, cert, issuer, self.spec.trust, at) {
+                match ocsp::check_embedded(response, cert, issuer, self.spec.trust, self.now) {
                     Ok(answer) => return decide(answer.status, at),
                     Err(e) => {
                         first_problem.get_or_insert_with(|| ocsp_problem(&e));

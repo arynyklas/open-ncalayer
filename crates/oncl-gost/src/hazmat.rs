@@ -64,7 +64,7 @@ impl CurveParams {
     /// # Panics
     ///
     /// If `p` or `q` is even, or a parameter is wider than `p`.
-    fn curve(&self) -> Curve {
+    pub(crate) fn curve(&self) -> Curve {
         Curve::new(
             &self.p,
             &self.field("q", &self.q),

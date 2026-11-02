@@ -10,9 +10,8 @@ use oncl_gost::{CurveId, SigningKey};
 use rsa::pkcs8::EncodePrivateKey;
 use rsa::rand_core::{self, CryptoRng, RngCore};
 
-/// Modulus sizes of RSA keys for sha256WithRSA. The original passes the request's `length`
-/// to the key pair generator; `ring`, which signs with the key, takes moduli of 2048 to 4096
-/// bits whose primes are multiples of 512 bits, so these three.
+/// Supported generation sizes for sha256WithRSA. Keep the established 2048/3072/4096
+/// profile; generated keys are imported into the platform's native private backend.
 const RSA_BITS: [u32; 3] = [2048, 3072, 4096];
 
 /// Most keys one page request may generate (basics `generateCsr` `params`, the Applet's
@@ -82,7 +81,7 @@ impl KeySpec {
 /// A new private key of `spec`. GOST scalars are drawn uniformly from `[1, q − 1]` with the
 /// operating system RNG, and redrawn while the public key has a short coordinate (as Kalkan's
 /// generators do); RSA keys come from `rsa` with the same RNG and are used
-/// through their PKCS#8 (signing is `ring`).
+/// through their PKCS#8 by the platform-native private backend.
 ///
 /// # Errors
 ///
@@ -109,7 +108,7 @@ pub fn generate(spec: KeySpec) -> Result<PrivateKey, KeystoreError> {
                 rsa::RsaPrivateKey::new(&mut OsRng, bits as usize).expect("RSA key generation");
             let pkcs8 = key.to_pkcs8_der().expect("RSA PKCS#8 encodes");
             Ok(PrivateKey::from_pkcs8_der(pkcs8.as_bytes(), None)
-                .expect("ring reads a generated RSA key of a supported size"))
+                .expect("native backend imports a generated RSA key of a supported size"))
         }
         KeySpec::RsaSha256(_) | KeySpec::Rsa1Sha1(_) => Err(KeystoreError::UnknownAlgorithm),
     }

@@ -8,7 +8,7 @@ use oncl_pki::cms::CmsError;
 use oncl_pki::key::KeyError;
 use oncl_pki::keystore::KeystoreError;
 use oncl_pki::tsp::TspError;
-use oncl_pki::xmldsig::XmlError;
+use oncl_xml::XmlError;
 
 /// The cause of a CMS failure; a key's failure inside it is the key's.
 pub fn cms(e: &CmsError) -> &'static str {
@@ -54,6 +54,10 @@ pub fn key(e: &KeyError) -> &'static str {
         KeyError::BadSignature => cause::KEY_BAD_SIGNATURE,
         KeyError::NotExportable => cause::KEY_NOT_EXPORTABLE,
         KeyError::Token(_) => cause::KEY_TOKEN,
+        KeyError::BackendFailure => cause::KEY_BACKEND_FAILURE,
+        KeyError::DecryptionFailed => cause::KEY_DECRYPTION_FAILED,
+        KeyError::Execution(_) => cause::KEY_EXECUTION,
+        KeyError::WithAppliedState { source, .. } => key(source),
     }
 }
 

@@ -1,0 +1,13 @@
+{
+  "package": "hmac",
+  "version": "0.13.0",
+  "release_archive_sha256": "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f",
+  "source": "https://crates.io/api/v1/crates/hmac/0.13.0/download",
+  "licenses": [
+    "MIT",
+    "Apache-2.0"
+  ],
+  "ordinary_api_and_fast_path_must_remain_unchanged": true,
+  "secret_mode_state": "implemented; machine-code cleanup acceptance pending",
+  "constant_time_certification": false
+}

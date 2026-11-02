@@ -1,6 +1,6 @@
 [package]
 name = "oncl-pki"
-description = "BER normalization, keys, PKCS#8/PKCS#12, certificate checks, CMS, RFC 3161 time-stamping and XMLDSig for OpenNCALayer"
+description = "BER normalization, keys, PKCS#8/PKCS#12, certificate checks, CMS, RFC 3161 time-stamping for OpenNCALayer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,6 +24,7 @@ cbc.workspace = true
 der.workspace = true
 des.workspace = true
 getrandom.workspace = true
+gost94.workspace = true
 hmac.workspace = true
 # Response heads of plain HTTP sent through a proxy (`http::forward`).
 httparse.workspace = true
@@ -32,14 +33,14 @@ pbkdf2.workspace = true
 pkcs8.workspace = true
 rc2.workspace = true
 ring.workspace = true
-roxmltree.workspace = true
-# RSA key generation only (`keygen`); RSA signing stays on `ring`.
+# Generation/decoding/public operations only; native backends own private operations.
 rsa.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 spki.workspace = true
+streebog.workspace = true
 thiserror.workspace = true
-time.workspace = true
+time = { workspace = true, features = ["formatting"] }
 x509-cert.workspace = true
 ureq.workspace = true
 webpki-root-certs = { workspace = true, optional = true }
@@ -48,8 +49,17 @@ zeroize.workspace = true
 [target.'cfg(windows)'.dependencies]
 # Read only: the Internet Options proxy of `ProxySetting::System`.
 oncl-registry.workspace = true
+# Private SDK spool directories: explicit owner-only protected DACL at creation.
+# These security/filesystem functions are available on Windows 7.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+# Descriptor-relative private spool creation, unlink and no-clobber publication.
+libc.workspace = true
+aws-lc-rs.workspace = true
 
 [dev-dependencies]
+oncl-xml.workspace = true
 hex-literal.workspace = true
 oncl-testkit.workspace = true
 tempfile.workspace = true
@@ -88,5 +98,9 @@ name = "cms_report"
 required-features = ["testing"]
 
 [[test]]
-name = "xades"
+name = "cms_stream"
+required-features = ["testing"]
+
+[[test]]
+name = "cms_stream_sign"
 required-features = ["testing"]

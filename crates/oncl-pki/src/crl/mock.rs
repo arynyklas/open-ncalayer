@@ -58,6 +58,11 @@ impl MockCrl {
             calls: Mutex::new(Vec::new()),
         }
     }
+    /// Fix thisUpdate for deterministic genuinely signed CRL fixtures.
+    pub fn with_this_update(mut self, at: OffsetDateTime) -> Self {
+        self.this_update = at;
+        self
+    }
 
     /// The same CRL, listing `serial` (unsigned big-endian bytes; leading zeros do not
     /// matter) as revoked at `time`, without a reason code.

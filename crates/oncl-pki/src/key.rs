@@ -130,14 +130,9 @@ impl HashAlg {
 
     /// The digest of `data`.
     pub fn digest(self, data: &[u8]) -> Vec<u8> {
-        match self {
-            HashAlg::Sha1 => sha1::Sha1::digest(data).to_vec(),
-            HashAlg::Sha256 => sha2::Sha256::digest(data).to_vec(),
-            HashAlg::Sha512 => sha2::Sha512::digest(data).to_vec(),
-            HashAlg::Gost34311 => oncl_gost::gost34311(data).to_vec(),
-            HashAlg::Streebog256 => oncl_gost::streebog256(data).to_vec(),
-            HashAlg::Streebog512 => oncl_gost::streebog512(data).to_vec(),
-        }
+        let mut state = crate::digest::HashState::new(self);
+        state.update(data);
+        state.finish().as_bytes().to_vec()
     }
 
     /// Its OID, as a CMS `digestAlgorithm` names it.
@@ -170,6 +165,112 @@ impl SigAlg {
     }
 }
 
+/// Whether private-key application is known, independent of response delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppliedState {
+    NotApplied,
+    Applied,
+    Unknown,
+}
+impl AppliedState {
+    /// Aggregate attempts without claiming that uncertain/private work vanished.
+    pub fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Applied, _) | (_, Self::Applied) => Self::Applied,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::NotApplied, Self::NotApplied) => Self::NotApplied,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyFailureKind {
+    PermissionDenied,
+    InvalidContext,
+    IdExhausted,
+    Cancelled,
+    DeadlineExceeded,
+    CapacityExceeded,
+    InputLimit,
+    ContainerLimit,
+    FramingLimit,
+    OutputLimit,
+    MemoryLimit,
+    TempLimit,
+    MetadataLimit,
+    InvalidLimits,
+    InvalidInput,
+    Io,
+    MissingKeyProvider,
+    SecretRequired,
+    KeyNotFound,
+    InvalidKeySource,
+    AuditFailed,
+    Backend,
+    MissingValidationServices,
+    MissingTemporaryStore,
+    ValidationRequired,
+}
+impl From<&crate::resource::ProcessingError> for KeyFailureKind {
+    fn from(error: &crate::resource::ProcessingError) -> Self {
+        use crate::resource::ProcessingError;
+        match error {
+            ProcessingError::Cancelled => Self::Cancelled,
+            ProcessingError::DeadlineExceeded => Self::DeadlineExceeded,
+            ProcessingError::CapacityExceeded => Self::CapacityExceeded,
+            ProcessingError::InputLimit => Self::InputLimit,
+            ProcessingError::ContainerLimit => Self::ContainerLimit,
+            ProcessingError::FramingLimit => Self::FramingLimit,
+            ProcessingError::OutputLimit => Self::OutputLimit,
+            ProcessingError::MemoryLimit => Self::MemoryLimit,
+            ProcessingError::TempLimit => Self::TempLimit,
+            ProcessingError::MetadataLimit => Self::MetadataLimit,
+            ProcessingError::InvalidLimits => Self::InvalidLimits,
+            ProcessingError::InvalidInput(_) => Self::InvalidInput,
+            ProcessingError::Io(_) => Self::Io,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("key execution {kind:?} ({applied:?})")]
+pub struct KeyExecutionError {
+    pub kind: KeyFailureKind,
+    pub applied: AppliedState,
+}
+impl KeyExecutionError {
+    pub fn processing(error: &crate::resource::ProcessingError, applied: AppliedState) -> Self {
+        Self {
+            kind: KeyFailureKind::from(error),
+            applied,
+        }
+    }
+}
+
+/// Prehash seam for format modules; Core's adapter adds per-use host authority.
+pub trait DigestSigner {
+    fn certificate(&self) -> &Certificate;
+    fn algorithm(&self) -> SigAlg;
+    fn sign_digest(&mut self, digest: &crate::digest::DigestValue) -> Result<Vec<u8>, KeyError>;
+}
+pub fn leaf_signature_algorithm(alg: KeyAlg) -> SigAlg {
+    match alg {
+        KeyAlg::Gost2004 => SigAlg::Gost2004,
+        KeyAlg::Gost2015_512 => SigAlg::Gost2015_512,
+        KeyAlg::Rsa => SigAlg::RsaSha256,
+    }
+}
+impl DigestSigner for crate::pkcs12::KeyEntry {
+    fn certificate(&self) -> &Certificate {
+        &self.cert
+    }
+    fn algorithm(&self) -> SigAlg {
+        leaf_signature_algorithm(self.key.alg())
+    }
+    fn sign_digest(&mut self, digest: &crate::digest::DigestValue) -> Result<Vec<u8>, KeyError> {
+        self.key.sign_digest(self.algorithm(), digest)
+    }
+}
+
 /// Error of a key operation.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KeyError {
@@ -194,6 +295,51 @@ pub enum KeyError {
     /// A hardware token failed or refused the operation.
     #[error("token: {0}")]
     Token(String),
+    #[error("native key operation failed")]
+    BackendFailure,
+    #[error("decryption failed")]
+    DecryptionFailed,
+    #[error(transparent)]
+    Execution(#[from] KeyExecutionError),
+    /// Retain a raw key cause/payload when its surrounding operation knows more
+    /// about application than that cause's default (e.g. post-use audit failure).
+    #[error("{source} (key application: {applied:?})")]
+    WithAppliedState {
+        source: Box<KeyError>,
+        applied: AppliedState,
+    },
+}
+
+impl KeyError {
+    pub fn applied_state(&self) -> AppliedState {
+        match self {
+            Self::Execution(error) => error.applied,
+            Self::WithAppliedState { applied, .. } => *applied,
+            Self::BackendFailure | Self::DecryptionFailed | Self::Token(_) => AppliedState::Unknown,
+            Self::Malformed(_)
+            | Self::UnknownKeyAlgorithm(_)
+            | Self::UnsupportedAlgorithm
+            | Self::KeyMismatch
+            | Self::BadSignature
+            | Self::NotExportable => AppliedState::NotApplied,
+        }
+    }
+    /// The outer operation's actual state is authoritative, even for a nested
+    /// wrapper. Do not replace the original category with generic Backend.
+    pub fn with_applied_state(self, applied: AppliedState) -> Self {
+        match self {
+            Self::Execution(mut error) => {
+                error.applied = applied;
+                Self::Execution(error)
+            }
+            Self::WithAppliedState { source, .. } => Self::WithAppliedState { source, applied },
+            error if error.applied_state() == applied => error,
+            error => Self::WithAppliedState {
+                source: Box::new(error),
+                applied,
+            },
+        }
+    }
 }
 
 fn malformed(e: impl std::fmt::Display) -> KeyError {
@@ -273,37 +419,22 @@ pub fn digest_info(alg: SigAlg, digest: &[u8]) -> Result<Vec<u8>, KeyError> {
     Ok([prefix, digest].concat())
 }
 
-/// RSA private key: the `ring` key pair and the PKCS#8 it was read from (zeroized on drop).
+/// Encoded RSA owner. Native private handles are transient, never retained in
+/// parallel with a second parsed private backend.
 pub struct RsaKeyPair {
-    pair: ring::rsa::KeyPair,
+    public: Vec<u8>,
     pkcs8: Zeroizing<Vec<u8>>,
 }
-
 impl RsaKeyPair {
-    /// The DER `RSAPublicKey`.
     pub fn public_key_der(&self) -> &[u8] {
-        self.pair.public().as_ref()
-    }
-
-    /// A PKCS#1 v1.5 signature of `message` with SHA-256.
-    fn sign_sha256(&self, message: &[u8]) -> Vec<u8> {
-        let mut sig = vec![0; self.pair.public().modulus_len()];
-        self.pair
-            .sign(
-                &signature::RSA_PKCS1_SHA256,
-                &ring::rand::SystemRandom::new(),
-                message,
-                &mut sig,
-            )
-            .expect("RSA signing with a valid key and buffer");
-        sig
+        &self.public
     }
 }
 
 impl std::fmt::Debug for RsaKeyPair {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RsaKeyPair")
-            .field("pair", &self.pair)
+            .field("public_bytes", &self.public.len())
             .finish_non_exhaustive()
     }
 }
@@ -425,23 +556,52 @@ impl PrivateKey {
     ///
     /// If the operating system RNG fails.
     pub fn sign(&self, alg: SigAlg, message: &[u8]) -> Result<Vec<u8>, KeyError> {
-        if let PrivateKey::Token(key) = self {
-            if alg.key_alg() != self.alg() || alg == SigAlg::RsaSha1 {
-                return Err(KeyError::UnsupportedAlgorithm);
-            }
-            let sig = key.0.sign_digest(alg, &alg.digest(message))?;
-            key.0.public_key().verify(alg, message, &sig).map_err(|_| {
-                KeyError::Token("the token's signature does not verify with its public key".into())
-            })?;
-            return Ok(sig);
+        if alg == SigAlg::RsaSha1 || alg.key_alg() != self.alg() {
+            return Err(KeyError::UnsupportedAlgorithm);
         }
-        match (self, alg) {
-            (PrivateKey::Gost(key), SigAlg::Gost2004 | SigAlg::Gost2015_512)
-                if alg.key_alg() == self.alg() =>
-            {
-                Ok(key.sign_digest(&alg.digest(message)))
+        let mut hash = crate::digest::HashState::new(alg.hash_alg());
+        hash.update(message);
+        self.sign_digest(alg, &hash.finish())
+    }
+
+    /// Sign the tagged prehash directly, without hashing its bytes again.
+    pub fn sign_digest(
+        &self,
+        alg: SigAlg,
+        digest: &crate::digest::DigestValue,
+    ) -> Result<Vec<u8>, KeyError> {
+        if alg == SigAlg::RsaSha1
+            || alg.key_alg() != self.alg()
+            || digest.algorithm() != alg.hash_alg()
+        {
+            return Err(KeyError::UnsupportedAlgorithm);
+        }
+        match self {
+            Self::Gost(key) => Ok(key.sign_digest(digest.as_bytes())),
+            Self::Rsa(key) => crate::rsa::sign(&key.pkcs8, digest),
+            Self::Token(key) => {
+                let signature = key.0.sign_digest(alg, digest.as_bytes())?;
+                key.0
+                    .public_key()
+                    .verify_digest(alg, digest, &signature)
+                    .map_err(|_| {
+                        KeyError::Token(
+                            "the token's signature does not verify with its public key".into(),
+                        )
+                    })?;
+                Ok(signature)
             }
-            (PrivateKey::Rsa(key), SigAlg::RsaSha256) => Ok(key.sign_sha256(message)),
+        }
+    }
+
+    /// RSA OAEP SHA256/MGF1-SHA256 with an exact byte label.
+    pub fn decrypt_oaep_sha256(
+        &self,
+        ciphertext: &[u8],
+        label: &[u8],
+    ) -> Result<Vec<u8>, KeyError> {
+        match self {
+            Self::Rsa(key) => crate::rsa::decrypt(&key.pkcs8, ciphertext, label),
             _ => Err(KeyError::UnsupportedAlgorithm),
         }
     }
@@ -476,11 +636,12 @@ fn decode_pkcs8(der: &[u8], expected: Expected<'_>) -> Result<PrivateKey, KeyErr
     let info = PrivateKeyInfoRef::from_der(&der).map_err(malformed)?;
 
     if info.algorithm.oid == oid::RSA_ENCRYPTION {
-        let pair = ring::rsa::KeyPair::from_pkcs8(&der).map_err(malformed)?;
-        if !expected.accepts(&PublicKey::Rsa(pair.public().as_ref().to_vec())) {
+        let public = crate::rsa::public_der(&der)?;
+        crate::rsa::validate(&der)?;
+        if !expected.accepts(&PublicKey::Rsa(public.clone())) {
             return Err(KeyError::KeyMismatch);
         }
-        return Ok(PrivateKey::Rsa(Arc::new(RsaKeyPair { pair, pkcs8: der })));
+        return Ok(PrivateKey::Rsa(Arc::new(RsaKeyPair { public, pkcs8: der })));
     }
 
     let params = info
@@ -599,6 +760,32 @@ impl PublicKey {
                 UnparsedPublicKey::new(params, key)
                     .verify(message, sig)
                     .map_err(|_| KeyError::BadSignature)
+            }
+        }
+    }
+
+    pub fn verify_digest(
+        &self,
+        alg: SigAlg,
+        digest: &crate::digest::DigestValue,
+        signature: &[u8],
+    ) -> Result<(), KeyError> {
+        if digest.algorithm() != alg.hash_alg() {
+            return Err(KeyError::UnsupportedAlgorithm);
+        }
+        match self {
+            Self::Gost(key) => {
+                if alg.gost().map(GostAlg::curve) != Some(key.curve()) {
+                    return Err(KeyError::UnsupportedAlgorithm);
+                }
+                key.verify_digest(digest.as_bytes(), signature)
+                    .map_err(|_| KeyError::BadSignature)
+            }
+            Self::Rsa(public) => {
+                if alg.key_alg() != KeyAlg::Rsa {
+                    return Err(KeyError::UnsupportedAlgorithm);
+                }
+                crate::rsa::verify(public, alg, digest, signature)
             }
         }
     }

@@ -33,3 +33,15 @@ check), and src/manager.rs (download_updates) checks with it a full package alre
 disk before skipping the download, deleting one that fails, and a package rebuilt from
 deltas before it is renamed into place and Squirrel.exe is extracted from it, falling
 back to the full download when it fails.
+
+vendor/streebog is streebog 0.11.0 and vendor/hmac is hmac 0.13.0 from crates.io
+(https://github.com/RustCrypto/hashes and https://github.com/RustCrypto/MACs),
+Streebog credits Copyright (c) 2016-2026 The RustCrypto Project Developers and
+Copyright (c) 2016 Artyom Pavlov; HMAC credits Copyright (c) 2017 Artyom Pavlov.
+Both are distributed under the MIT or Apache-2.0 licenses
+(see each package's LICENSE-MIT and LICENSE-APACHE). Exact upstream archive hashes
+are recorded in each package's .omp-upstream.json. Additive secret-input variants
+reuse the upstream algorithms with explicit secret-state ownership and cleanup;
+ordinary public-document APIs retain their existing behavior. These local changes
+are not an upstream certification or a blanket constant-time guarantee for every
+compiler, target, build profile, or caller-supplied digest implementation.

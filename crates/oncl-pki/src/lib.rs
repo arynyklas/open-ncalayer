@@ -3,8 +3,7 @@
 //! and writing rules and Kalkan-shaped key files, Java KeyStore (JKS) files read-only,
 //! certificate signature checks and certificate details, certification path building
 //! against the embedded NCA roots, OCSP, CRLs with an on-disk cache, CMS signing and
-//! verification, RFC 3161 time-stamping over a shared HTTP transport, XML signatures
-//! (XMLDSig) with XML canonicalization, PEM output.
+//! verification, RFC 3161 time-stamping over a shared HTTP transport, and PEM output.
 
 mod asn1util;
 pub mod ber;
@@ -12,9 +11,12 @@ pub mod cert;
 pub mod cms;
 pub mod crl;
 pub mod csr;
+pub mod digest;
+pub mod evidence;
 pub mod fsutil;
 pub mod http;
 pub mod info;
+pub mod io;
 pub mod jks;
 pub mod key;
 pub mod keygen;
@@ -24,9 +26,10 @@ pub mod oid;
 pub mod pem;
 pub mod pkcs12;
 pub mod pkix;
+pub mod resource;
 pub mod roots;
+mod rsa;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod tsp;
-pub mod xades;
-pub mod xmldsig;
+pub mod validation;

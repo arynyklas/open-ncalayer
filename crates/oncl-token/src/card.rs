@@ -53,6 +53,10 @@ impl<'c> Card<'c> {
         self.conn.reset_on_disconnect();
     }
 
+    pub(crate) fn begin_private_operation(&mut self) {
+        self.conn.begin_private_operation();
+    }
+
     /// Sends `cmd` and returns the whole response: under T=0 a case 4 command goes as case
     /// 3, `61xx` is followed by GET RESPONSE until the data is complete, `6Cxx` resends the
     /// command once with Le `xx`.

@@ -60,7 +60,7 @@ cargo xtask interop-ncanode
   - `ceo_sign_revoked_2004.p12` (`KEY_CEO_SIGN_REVOKED_2004`) — ГОСТ 34.310-2004, издатель `ҰКО 3.0 (GOST TEST)`, пароль `Qwerty12`, истёк 2023-01-18;
   - `individual_valid_sign_2004.p12` (`KEY_INDIVIDUAL_VALID_SIGN_2004`) — несмотря на имя, это RSA-2048 / sha256WithRSA, издатель `ҰКО 3.0 (RSA TEST)`, пароль `Qwerty12`, истёк 2022-01-18. В выводе — «NCANode RSA».
 
-Подписываем в процессе (`oncl_pki::xmldsig`, `oncl_pki::cms`), а результат отправляем в HTTP API NCANode.
+Подписываем в процессе (`oncl_xml`, `oncl_pki::cms`), а результат отправляем в HTTP API NCANode.
 
 | Проверка | Как |
 |---|---|
@@ -94,6 +94,6 @@ NCANode оценивает подпись по порядку (`AdesVerification
 - В `/xml/verify` подпись ищется как `ds:Signature` среди детей корня и снимается через `root.removeChild`. Поэтому NCANode проверяет только подписи с префиксом `ds:`, вставленные в корень. Наши подписи такие и есть.
 - Для XML с несколькими подписями NCANode возвращает оценку только первой по документу подписи (проверяет он с последней), а `valid` — по всем. Поэтому проверка «XML 2 signatures: count, 1st graded» сверяет число подписантов и оценку первой подписи, но не вторую. Вторую подпись покрывают проверка «XML document» с синтетическим RSA (Kalkan принимает нашу RSA-подпись) и «Kalkan digest: over our signature» (наш digest документа, уже несущего подпись, совпадает с Kalkan).
 
-Правило Kalkan для `xml:*` в Canonical XML: при наследовании от опущенных предков побеждает **внешнее** значение (`crates/oncl-pki/src/xmldsig/c14n.rs`). Это показывают проверки «#e1 under 2 xml:lang»: digest элемента `<e Id="e1">` под `<r xml:lang="ru">` → `<m xml:lang="kk">` совпадает с digest Kalkan, и NCANode принимает нашу подпись этого элемента.
+Правило Kalkan для `xml:*` в Canonical XML: при наследовании от опущенных предков побеждает **внешнее** значение (`crates/oncl-xml/src/c14n.rs`). Это показывают проверки «#e1 under 2 xml:lang»: digest элемента `<e Id="e1">` под `<r xml:lang="ru">` → `<m xml:lang="kk">` совпадает с digest Kalkan, и NCANode принимает нашу подпись этого элемента.
 
 Проверки «our key file»: `opened` в колонке `signature` значит, что ответ NCANode совпал с ожидаемым (для «key alone» — список alias из одного keyId, для «certificate installed» — серийный номер выпущенного сертификата, как его печатает NCANode: `BigInteger.toString(16)`), `UNEXPECTED` — что не совпал (ожидаемое значение дописано в последнюю колонку). Проверка «Kalkan signs CMS» читается как остальные проверки CMS. Ключи генерируются заново при каждом запуске, поэтому keyId и серийные номера в выводе каждый раз другие.

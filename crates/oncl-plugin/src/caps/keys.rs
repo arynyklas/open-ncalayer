@@ -43,9 +43,10 @@ use oncl_pki::key::{KeyAlg, KeyError, SigAlg};
 use oncl_pki::ocsp::CertStatus;
 use oncl_pki::pkcs12::{self, KeyEntry, Pkcs12Error};
 use oncl_pki::pkix::CaSet;
-use oncl_pki::xades;
-use oncl_pki::{cert, tsp, xmldsig};
+use oncl_pki::{cert, tsp};
 use oncl_token::{TokenError, TokenKind};
+use oncl_xml as xmldsig;
+use oncl_xml::xades;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -779,9 +780,10 @@ pub(crate) fn open_token(
                 | TokenError::NoDevice
                 | TokenError::WrongCard
                 | TokenError::CardRemoved => Ok(OpenOutcome::NoDevice),
-                TokenError::Card { .. } | TokenError::Malformed(_) | TokenError::Transport(_) => {
-                    Err(failed(e))
-                }
+                TokenError::Card { .. }
+                | TokenError::Malformed(_)
+                | TokenError::Transport(_)
+                | TokenError::Execution(_) => Err(failed(e)),
             };
         }
     };

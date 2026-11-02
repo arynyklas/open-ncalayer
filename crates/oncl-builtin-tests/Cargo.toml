@@ -33,6 +33,7 @@ zeroize.workspace = true
 oncl-builtins-build.workspace = true
 
 [dev-dependencies]
+oncl-xml.workspace = true
 base64.workspace = true
 der.workspace = true
 # `testing`: `tsp::MockTsa`, `ocsp::MockOcsp`, `testing::issue_cert`.

@@ -57,6 +57,7 @@ pub struct Tokens {
     /// Shared with the keys of the opened tokens.
     enabled: Arc<AtomicBool>,
     trace: AtomicBool,
+    scoped: bool,
 }
 
 impl Tokens {
@@ -67,6 +68,7 @@ impl Tokens {
             backend,
             enabled: Arc::new(AtomicBool::new(enabled)),
             trace: AtomicBool::new(trace_enabled()),
+            scoped: false,
         })
     }
 
@@ -153,6 +155,42 @@ impl Tokens {
                 .is_ok_and(|readers| readers.iter().any(|r| r.atr.is_some()))
     }
 
+    /// Canonical open, bound to one operation's root and live checkpoints.
+    pub fn open_scoped(
+        &self,
+        reader: &str,
+        kind: TokenKind,
+        pin: &str,
+        execution: crate::execution::TokenExecution,
+    ) -> Result<Vec<KeyEntry>, TokenError> {
+        if !self.is_enabled() {
+            return Err(TokenError::Disabled);
+        }
+        // Require exact backend spelling; permissive native lookup must not
+        // create two admission identities for one actual reader.
+        let readers = self.backend.readers()?;
+        if reader != execution.device.reader()
+            || readers
+                .iter()
+                .filter(|r| r.name.eq_ignore_ascii_case(reader))
+                .count()
+                != 1
+            || !readers.iter().any(|r| r.name == reader)
+        {
+            return Err(TokenError::NoDevice);
+        }
+        let scoped = Self {
+            backend: Arc::new(crate::execution::ScopedBackend {
+                inner: self.backend.clone(),
+                execution: Arc::new(execution),
+            }),
+            enabled: self.enabled.clone(),
+            trace: AtomicBool::new(self.trace()),
+            scoped: true,
+        };
+        scoped.open(reader, kind, pin)
+    }
+
     /// Opens the token of `kind` in `reader` with `pin`: its keys that have a certificate
     /// matching their public key, in the token's order, as entries whose keys sign on the
     /// card.
@@ -196,6 +234,7 @@ impl Tokens {
             pin: Zeroizing::new(pin.to_owned()),
             pin_rejected: AtomicBool::new(false),
             trace,
+            scoped: self.scoped,
         });
         Ok(keys
             .into_iter()
@@ -357,6 +396,10 @@ impl Connection for FirstCommand<'_> {
     fn reset_on_disconnect(&mut self) {
         self.conn.reset_on_disconnect();
     }
+
+    fn begin_private_operation(&mut self) {
+        self.conn.begin_private_operation();
+    }
 }
 
 /// Logs out; a failure only matters to the log, the disconnect resets the card anyway (a
@@ -426,6 +469,7 @@ struct OpenToken {
     /// The token refused the PIN: none of its keys sends it again.
     pin_rejected: AtomicBool,
     trace: bool,
+    scoped: bool,
 }
 
 /// A key on a token: signs in a transaction of its own, after checking that the same token
@@ -449,7 +493,19 @@ impl CardKey {
                 return Err(TokenError::WrongCard);
             }
             driver.verify_pin(&mut card, &t.pin)?;
-            let sig = driver.sign(&mut card, &self.slot, alg, data);
+            card.begin_private_operation();
+            let sig = driver
+                .sign(&mut card, &self.slot, alg, data)
+                .map_err(|error| {
+                    if t.scoped && !matches!(error, TokenError::Execution(_)) {
+                        TokenError::Execution(oncl_pki::key::KeyExecutionError {
+                            kind: oncl_pki::key::KeyFailureKind::Backend,
+                            applied: oncl_pki::key::AppliedState::Unknown,
+                        })
+                    } else {
+                        error
+                    }
+                });
             logout(&mut *driver, &mut card);
             sig
         })
@@ -473,9 +529,21 @@ impl TokenSigner for CardKey {
     fn sign_digest(&self, alg: SigAlg, digest: &[u8]) -> Result<Vec<u8>, KeyError> {
         let t = &*self.token;
         if !t.enabled.load(Ordering::SeqCst) {
+            if t.scoped {
+                return Err(KeyError::Execution(oncl_pki::key::KeyExecutionError {
+                    kind: oncl_pki::key::KeyFailureKind::PermissionDenied,
+                    applied: oncl_pki::key::AppliedState::NotApplied,
+                }));
+            }
             return Err(KeyError::Token(TokenError::Disabled.to_string()));
         }
         if t.pin_rejected.load(Ordering::SeqCst) {
+            if t.scoped {
+                return Err(KeyError::Execution(oncl_pki::key::KeyExecutionError {
+                    kind: oncl_pki::key::KeyFailureKind::Backend,
+                    applied: oncl_pki::key::AppliedState::NotApplied,
+                }));
+            }
             return Err(KeyError::Token(PIN_REFUSED.to_owned()));
         }
         let data = match self.slot.alg {
@@ -483,10 +551,21 @@ impl TokenSigner for CardKey {
             KeyAlg::Gost2004 | KeyAlg::Gost2015_512 => digest.to_vec(),
         };
         self.sign_on_card(alg, &data).map_err(|e| match e {
+            TokenError::Execution(error) => KeyError::Execution(error),
             TokenError::WrongPin { .. } | TokenError::PinBlocked | TokenError::InvalidPin => {
                 t.pin_rejected.store(true, Ordering::SeqCst);
+                if t.scoped {
+                    return KeyError::Execution(oncl_pki::key::KeyExecutionError {
+                        kind: oncl_pki::key::KeyFailureKind::Backend,
+                        applied: oncl_pki::key::AppliedState::NotApplied,
+                    });
+                }
                 KeyError::Token(PIN_REFUSED.to_owned())
             }
+            _ if t.scoped => KeyError::Execution(oncl_pki::key::KeyExecutionError {
+                kind: oncl_pki::key::KeyFailureKind::Backend,
+                applied: oncl_pki::key::AppliedState::NotApplied,
+            }),
             TokenError::WrongCard => KeyError::Token("another token is in the reader".to_owned()),
             e => KeyError::Token(e.to_string()),
         })

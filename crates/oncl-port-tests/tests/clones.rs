@@ -416,10 +416,7 @@ fn rating1c_sign_xml_six_args() {
     ));
     assert_eq!(reply["code"], "200", "{reply}");
     let signed = reply["responseObject"].as_str().unwrap();
-    assert_eq!(
-        oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap().len(),
-        1
-    );
+    assert_eq!(oncl_xml::verify(signed.as_bytes()).unwrap().len(), 1);
     // The BIN check fails before signing: the message lists the failure.
     assert_eq!(
         r1c(
@@ -450,10 +447,7 @@ fn rating1c_sign_xml_drops_the_declaration() {
         assert_eq!(reply["code"], "200", "{reply}");
         let signed = reply["responseObject"].as_str().unwrap();
         assert!(signed.starts_with("<a><b"), "{signed}");
-        assert_eq!(
-            oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap().len(),
-            1
-        );
+        assert_eq!(oncl_xml::verify(signed.as_bytes()).unwrap().len(), 1);
     }
 }
 
@@ -1663,7 +1657,7 @@ fn uchet_sign_xml_api_consent_and_message() {
         let xml = reply["message"].as_str().unwrap();
         // The original prepended a declaration, which its serializer then omitted.
         assert!(xml.starts_with("<doc>"), "{xml}");
-        assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+        assert_eq!(oncl_xml::verify(xml.as_bytes()).unwrap().len(), 1);
     }
     // Asked once for the session.
     assert_eq!(h.prompter().confirm_prompts().len(), 1);
@@ -2244,7 +2238,7 @@ fn arta_sign_xml_first_child_xmldsig_more() {
         xml.trim_end().ends_with("</ds:Signature></a>") || xml.contains("Signature></a>"),
         "{xml}"
     );
-    assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+    assert_eq!(oncl_xml::verify(xml.as_bytes()).unwrap().len(), 1);
 }
 
 /// `text` as Kalkan writes base64 of `data` in a `SIGN` reply: lines of 60 characters
@@ -2365,7 +2359,7 @@ fn arta_sign_xml_rsa_has_no_line_breaks_in_the_signature() {
         "{xml}"
     );
     assert!(!xml.contains('\n') && !xml.contains('\r'), "{xml}");
-    assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+    assert_eq!(oncl_xml::verify(xml.as_bytes()).unwrap().len(), 1);
 }
 
 #[test]
@@ -2409,7 +2403,7 @@ fn arta_sign_xml_gost2015_signs_by_the_keys_algorithm() {
     let mut s = h.session(ARTA);
     s.call(&call("getKeyInfo", json!(["PKCS12"])), None);
     let xml = text(s.call(&call("signXML", json!(["<a><b>1</b></a>"])), None));
-    assert_eq!(oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap().len(), 1);
+    assert_eq!(oncl_xml::verify(xml.as_bytes()).unwrap().len(), 1);
 }
 
 // ---------------------------------------------------------------------------------------

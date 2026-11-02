@@ -11,6 +11,7 @@ pub mod drivers;
 #[cfg(feature = "emulator")]
 pub mod emulator;
 mod error;
+pub mod execution;
 mod gzip;
 mod kind;
 pub mod pcsc;

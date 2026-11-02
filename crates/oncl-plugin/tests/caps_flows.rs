@@ -22,12 +22,12 @@ use oncl_pki::key::KeyError;
 use oncl_pki::pkcs12::{KeyEntry, load};
 use oncl_pki::pkix::CaSet;
 use oncl_pki::tsp::{MockTsa, TsaProfile, TspError};
-use oncl_pki::xmldsig::XmlError;
 use oncl_pki::{cert, oid};
 use oncl_plugin::{Engine, HostServices, Instance, SessionContext, Trust, cause};
 use oncl_testkit::{read, synthetic, synthetic_cert};
 use oncl_token::emulator::{CardSpec, EmuKey, EmulatorBackend, card};
 use oncl_token::{TokenKind, Tokens};
+use oncl_xml::XmlError;
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -818,6 +818,16 @@ fn causes_cover_every_variant() {
         KeyError::BadSignature,
         KeyError::NotExportable,
         KeyError::Token(String::new()),
+        KeyError::BackendFailure,
+        KeyError::DecryptionFailed,
+        KeyError::Execution(oncl_pki::key::KeyExecutionError {
+            kind: oncl_pki::key::KeyFailureKind::Cancelled,
+            applied: oncl_pki::key::AppliedState::NotApplied,
+        }),
+        KeyError::WithAppliedState {
+            source: Box::new(KeyError::KeyMismatch),
+            applied: oncl_pki::key::AppliedState::Applied,
+        },
     ];
     let cms_errors = [
         CmsError::NoEncapsulatedData,
@@ -868,7 +878,7 @@ fn causes_cover_every_variant() {
     for c in &causes {
         assert!(abi::cause::ALL.contains(c), "{c} is not in abi::cause");
     }
-    // Each variant has its own; a nested key or CMS error is the key's or the CMS's.
+    // Raw variants have distinct causes; nested key/CMS/state wrappers retain the source's cause.
     assert_eq!(
         cause::cms(&CmsError::Key(KeyError::KeyMismatch)),
         abi::cause::KEY_MISMATCH
@@ -900,6 +910,52 @@ fn causes_cover_every_variant() {
         all
     );
     assert_eq!(all.len(), abi::cause::ALL.len(), "causes are distinct");
+
+    // A guest receives execution failure, not an invalid-signature verdict.
+    // Exercise the real nested cause adapter and CBOR error envelope, including
+    // cancellation, failed after-use audit, and bounded admission rejection.
+    for (kind, applied) in [
+        (
+            oncl_pki::key::KeyFailureKind::Cancelled,
+            oncl_pki::key::AppliedState::NotApplied,
+        ),
+        (
+            oncl_pki::key::KeyFailureKind::AuditFailed,
+            oncl_pki::key::AppliedState::Applied,
+        ),
+        (
+            oncl_pki::key::KeyFailureKind::CapacityExceeded,
+            oncl_pki::key::AppliedState::NotApplied,
+        ),
+    ] {
+        let error = CmsError::Key(KeyError::Execution(oncl_pki::key::KeyExecutionError {
+            kind,
+            applied,
+        }));
+        let envelope = oncl_pdk::abi::HostError::new(ErrorCode::Failed, error.to_string())
+            .with_cause(cause::cms(&error));
+        let decoded: oncl_pdk::abi::HostError = abi::decode(&abi::encode(&envelope)).unwrap();
+        assert_eq!(decoded.code, ErrorCode::Failed);
+        assert_eq!(decoded.cause(), Some("key.execution"));
+        assert_ne!(decoded.cause(), Some(abi::cause::KEY_BAD_SIGNATURE));
+        assert_ne!(decoded.cause(), Some(abi::cause::CMS_BAD_SIGNATURE));
+    }
+    for (error, expected) in [
+        (KeyError::BackendFailure, "key.backend_failure"),
+        (KeyError::DecryptionFailed, "key.decryption_failed"),
+        (KeyError::UnsupportedAlgorithm, "key.unsupported"),
+    ] {
+        let error = CmsError::Key(error.with_applied_state(oncl_pki::key::AppliedState::Applied));
+        let envelope = oncl_pdk::abi::HostError::new(ErrorCode::Failed, error.to_string())
+            .with_cause(cause::cms(&error));
+        let decoded: oncl_pdk::abi::HostError = abi::decode(&abi::encode(&envelope)).unwrap();
+        assert_eq!(decoded.code, ErrorCode::Failed);
+        assert_eq!(
+            decoded.cause(),
+            Some(expected),
+            "application metadata must not erase the original key cause"
+        );
+    }
 
     // Through the ABI: a document that does not parse.
     let (_, services) = scripted(vec![store(KEY), Step::Key(0)]);

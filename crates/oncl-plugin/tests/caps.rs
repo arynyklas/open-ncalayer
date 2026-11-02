@@ -186,7 +186,7 @@ fn sign_raw_and_xml() {
         sign_args(json!({"xml": "<doc><a>1</a></doc>"})),
     );
     let signed = xml["body"].as_str().unwrap();
-    let verified = oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+    let verified = oncl_xml::verify(signed.as_bytes()).unwrap();
     assert_eq!(verified.len(), 1);
     assert_eq!(verified[0].cert, entry.cert);
 }

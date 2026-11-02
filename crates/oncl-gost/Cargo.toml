@@ -12,7 +12,8 @@ publish.workspace = true
 crypto-bigint.workspace = true
 getrandom.workspace = true
 gost94.workspace = true
-streebog.workspace = true
+hmac = { workspace = true, features = ["secret-input", "zeroize"] }
+streebog = { workspace = true, features = ["secret-input", "zeroize"] }
 thiserror.workspace = true
 zeroize.workspace = true
 

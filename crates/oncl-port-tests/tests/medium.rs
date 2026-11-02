@@ -321,7 +321,7 @@ fn taxtech_sign_xml_every_document() {
     let docs = value["result"].as_array().unwrap();
     assert_eq!(docs.len(), 2);
     for doc in docs {
-        oncl_pki::xmldsig::verify(doc.as_str().unwrap().as_bytes()).unwrap();
+        oncl_xml::verify(doc.as_str().unwrap().as_bytes()).unwrap();
     }
 }
 
@@ -718,7 +718,7 @@ fn eproc_sign_xml_new_chain() {
     assert_eq!(chain.as_bytes()[14], b'4');
     let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
     let signed = value["responseObject"].as_str().unwrap();
-    oncl_pki::xmldsig::verify(signed.as_bytes()).unwrap();
+    oncl_xml::verify(signed.as_bytes()).unwrap();
     // The storage dialog offers the page's storage only.
     let prompts = harness.prompter().storage_prompts();
     assert_eq!(prompts[0].storages.len(), 1);
@@ -1111,7 +1111,7 @@ fn uchet_esf_sign_xml_status_number() {
     );
     assert!(reply.ends_with(r#"","status":200}"#));
     let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
-    oncl_pki::xmldsig::verify(value["signedXml"].as_str().unwrap().as_bytes()).unwrap();
+    oncl_xml::verify(value["signedXml"].as_str().unwrap().as_bytes()).unwrap();
     // The page's file is allowed once in the session.
     assert!(text(session.call(&request, None)).ends_with(r#""status":200}"#));
     assert_eq!(harness.prompter().confirm_prompts().len(), 1);
@@ -1371,7 +1371,7 @@ fn qiwi_signature_layout_and_uris() {
             value["responseObject"]["verificationResult"], true,
             "{store}"
         );
-        oncl_pki::xmldsig::verify(xml.as_bytes()).unwrap();
+        oncl_xml::verify(xml.as_bytes()).unwrap();
     }
 }
 

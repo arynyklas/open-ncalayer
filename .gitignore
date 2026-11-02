@@ -3,6 +3,9 @@
 /crates/oncl-pdk/example/target/
 # The plugin ports' workspace, when built in place.
 /plugins/target/
+# Standalone verification of locally patched cryptographic dependencies.
+/vendor/streebog/target/
+/vendor/hmac/target/
 /.worktrees/
 # Built programs and downloads; nothing like them is committed.
 *.exe
