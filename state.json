@@ -581,8 +581,8 @@
       "sha256": "765376a94dde29f4b075c7eacae359e652652c64bfd73464fcf3cba69f1fdefe",
       "published_sha1": null,
       "manifest_hash": null,
-      "failures": 0,
-      "status": "ok"
+      "failures": 1,
+      "status": "failing"
     },
     "page:korporativnoy-seti": {
       "url": "https://ncl.pki.gov.kz/download.php",
