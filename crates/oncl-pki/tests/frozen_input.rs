@@ -349,12 +349,14 @@ fn derived_storage_and_container_limits_are_admitted_before_closed_decode() {
 }
 
 #[test]
-fn repeated_snapshot_copy_work_is_bounded_after_previous_copy_drops() {
+fn snapshot_copies_reuse_live_disk_quota_and_keep_original_deadline() {
+    use std::time::{Duration, Instant};
     let temp = tempfile::tempdir().unwrap();
     let store = TemporaryStore::new(temp.path()).unwrap();
     let mut scope = scope(ResourceLimits {
         input_bytes: 3,
         temp_bytes: 6,
+        operation_timeout: Duration::from_secs(1),
         ..ResourceLimits::default()
     });
     let mut bytes = Cursor::new(b"abc");
@@ -367,19 +369,90 @@ fn repeated_snapshot_copy_work_is_bounded_after_previous_copy_drops() {
         ),
         Err(ProcessingError::InvalidInput(_))
     ));
-    let mut source = snapshot
+    let started = Instant::now();
+    let mut completed = 0;
+    loop {
+        let mut source = match snapshot.reader(&[Region { offset: 0, len: 3 }], &scope) {
+            Ok(source) => source,
+            Err(ProcessingError::DeadlineExceeded) => break,
+            Err(error) => panic!("unexpected source failure: {error}"),
+        };
+        let copied = match FrozenInput::capture(source.source(), &store, &mut scope) {
+            Ok(copied) => copied,
+            Err(ProcessingError::DeadlineExceeded) => break,
+            Err(error) => panic!("live disk should be reusable: {error}"),
+        };
+        drop(source);
+        // Original N + copied N exhaust the real live 2N disk allowance.
+        match scope.reserve_temp(1) {
+            Err(ProcessingError::TempLimit) => {}
+            Err(ProcessingError::DeadlineExceeded) => break,
+            _ => panic!("copy did not retain the real live N-byte reservation"),
+        }
+        assert_eq!(copied.len(), 3);
+        drop(copied);
+        // Copy drop releases exactly N, while the original N remains live.
+        let available = match scope.reserve_temp(3) {
+            Ok(available) => available,
+            Err(ProcessingError::DeadlineExceeded) => break,
+            Err(error) => panic!("copy drop did not free disk: {error}"),
+        };
+        drop(available);
+        completed += 1;
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "recapture reset original deadline"
+        );
+    }
+    assert!(
+        completed >= 3,
+        "expected repeated real copy/drop reuse before deadline"
+    );
+    assert_eq!(scope.progress().bytes_in, 3);
+}
+
+#[test]
+fn recapture_keeps_original_cancellation_after_successful_copy_drop() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Cancel(Arc<AtomicBool>);
+    impl OperationControl for Cancel {
+        fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+            if self.0.load(Ordering::SeqCst) {
+                Err(ProcessingError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(temp.path()).unwrap();
+    let limits = ResourceLimits {
+        input_bytes: 3,
+        temp_bytes: 6,
+        ..ResourceLimits::default()
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut scope = Arc::new(SharedBudget::new(limits.clone()).unwrap())
+        .begin(limits, Arc::new(Cancel(cancelled.clone())))
+        .unwrap();
+    let mut bytes = Cursor::new(b"abc");
+    let mut original =
+        FrozenInput::capture(Source::sequential(&mut bytes, None), &store, &mut scope).unwrap();
+    let mut source = original
         .reader(&[Region { offset: 0, len: 3 }], &scope)
         .unwrap();
     let copied = FrozenInput::capture(source.source(), &store, &mut scope).unwrap();
-    source.finish().unwrap();
-    drop(source);
     drop(copied);
-    let mut source = snapshot
+    drop(source);
+    let mut source = original
         .reader(&[Region { offset: 0, len: 3 }], &scope)
         .unwrap();
-    assert!(matches!(
-        FrozenInput::capture(source.source(), &store, &mut scope),
-        Err(ProcessingError::TempLimit)
-    ));
+    cancelled.store(true, Ordering::SeqCst);
+    for _ in 0..2 {
+        assert!(matches!(
+            FrozenInput::capture(source.source(), &store, &mut scope),
+            Err(ProcessingError::Cancelled)
+        ));
+    }
     assert_eq!(scope.progress().bytes_in, 3);
 }

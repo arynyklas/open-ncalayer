@@ -467,8 +467,9 @@ policy; unsupported input never becomes Valid.
 Metadata provenance is issued only by the closed SDK transforms
 `SnapshotEncoding::{Identity,PdfByteString}`, never by a caller-provided decoder.
 Re-capturing an authentic same-operation snapshot Source preserves `bytes_in`;
-foreign operations fail before source I/O. New copies still consume scratch and
-cumulative copy work bounded by `temp_bytes`, even after earlier copies drop.
+foreign operations fail before source I/O. New copies retain actual live scratch
+and memory reservations; dropping a copy frees its disk capacity. Every replay
+keeps the original deadline/control and bounded ordered region extents.
 Run `cargo test -p oncl-pdf --test verify`, or the real runtime probe:
 `cargo run -p oncl-core --features pdf --example sdk_probe -- --case P01 --out target/p01-smoke`.
 The probe uses an externally pyHanko-signed RSA PDF, an inside-revision mutation,
