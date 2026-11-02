@@ -53,7 +53,7 @@ fn attribute_crosses_chunk() {
     );
     let mut events = doc.events();
     while let Some(event) = events.next_event().unwrap() {
-        if event.kind == XmlEventKind::Start && event.name.as_ref().unwrap().local == "a" {
+        if event.kind == XmlEventKind::Start && event.name.as_ref().unwrap().local() == "a" {
             let value = event.attributes[1].value_region();
             assert_eq!(
                 &xml.as_bytes()[value.offset as usize..value.end().unwrap() as usize],
@@ -73,11 +73,8 @@ fn utf8_namespace_split() {
     let mut events = doc.events();
     let mut found = false;
     while let Some(event) = events.next_event().unwrap() {
-        if event.kind == XmlEventKind::Start && event.name.as_ref().unwrap().local == "а" {
-            assert_eq!(
-                event.name.as_ref().unwrap().namespace.as_deref(),
-                Some("urn:қазақ")
-            );
+        if event.kind == XmlEventKind::Start && event.name.as_ref().unwrap().local() == "а" {
+            assert_eq!(event.name.as_ref().unwrap().namespace(), Some("urn:қазақ"));
             found = true;
         }
     }
@@ -91,8 +88,15 @@ fn namespace_restore_and_attribute_spans() {
     let mut events = doc.events();
     let mut namespaces = Vec::new();
     while let Some(event) = events.next_event().unwrap() {
-        if event.kind == XmlEventKind::Start && event.name.as_ref().unwrap().local == "x" {
-            namespaces.push(event.name.as_ref().unwrap().namespace.clone().unwrap());
+        if event.kind == XmlEventKind::Start && event.name.as_ref().unwrap().local() == "x" {
+            let namespace = event.name.as_ref().unwrap().namespace().unwrap();
+            assert_eq!(
+                event.namespaces().find(|(prefix, _)| *prefix == "p"),
+                Some(("p", namespace))
+            );
+            // Deliberate application-owned copies of borrowed strings are
+            // supported; SDK-owned name/context cloning is not.
+            namespaces.push(namespace.to_owned());
             if !event.attributes.is_empty() {
                 let value = event.attributes[0].value_region();
                 assert_eq!(
@@ -335,7 +339,7 @@ fn namespace_undeclaration_and_id_aliases() {
     while let Some(event) = cursor.next_event().unwrap() {
         if event.kind == XmlEventKind::Start {
             let name = event.name.as_ref().unwrap();
-            names.push((name.local.clone(), name.namespace.clone()));
+            names.push((name.local().to_owned(), name.namespace().map(str::to_owned)));
         }
     }
     assert_eq!(
@@ -590,7 +594,10 @@ fn retained_attribute_span_releases_document_metadata_and_admission() {
     let limits = ResourceLimits::default();
     let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
     let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
-    let mut scope = budget.begin(limits.clone(), Arc::new(Control)).unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut scope = budget
+        .begin(limits.clone(), Arc::new(Cancel(cancelled.clone())))
+        .unwrap();
     let xml = format!(
         "<r xmlns:p='urn:{}' p:data='raw&amp;bytes'/>",
         "namespace".repeat(1000)
@@ -605,12 +612,18 @@ fn retained_attribute_span_releases_document_metadata_and_admission() {
     let span = {
         let mut cursor = doc.events();
         let event = cursor.next_event().unwrap().unwrap();
-        assert!(event.attributes[0].name.namespace.as_ref().unwrap().len() > 8000);
+        assert!(event.attributes[0].name.namespace().unwrap().len() > 8000);
         event.attributes[0].span()
     };
     drop(scope);
     assert!(budget.begin(limits.clone(), Arc::new(Control)).is_err());
     let mut bytes = [0; 32];
+    cancelled.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        doc.read_attribute(&span, 0, &mut bytes),
+        Err(ProcessingError::Cancelled)
+    ));
+    cancelled.store(false, Ordering::Relaxed);
     let n = doc.read_attribute(&span, 0, &mut bytes).unwrap();
     assert_eq!(&bytes[..n], b"raw&amp;bytes");
     drop(doc);

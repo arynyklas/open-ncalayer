@@ -16,10 +16,37 @@ fn xml_character(c: char) -> bool {
     matches!(c, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Expanded names are lending event metadata, not retainable SDK-owned copies.
+/// ```compile_fail
+/// fn escape(mut document: oncl_xml::XmlDocument) -> oncl_xml::XmlName {
+///     let retained_name = {
+///         let mut events = document.events();
+///         events.next_event().unwrap().unwrap().attributes[0].name.clone()
+///     };
+///     drop(document);
+///     retained_name
+/// }
+/// ```
+#[derive(Debug, PartialEq, Eq)]
 pub struct XmlName {
-    pub namespace: Option<String>,
-    pub local: String,
+    namespace: Option<String>,
+    local: String,
+}
+impl XmlName {
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
+    }
+    pub fn local(&self) -> &str {
+        &self.local
+    }
+    // Only the bounded active frame/event pair needs an owning copy. It stays
+    // inside the reader and is covered by the document's existing reservation.
+    fn copy_for_frame(&self) -> Self {
+        Self {
+            namespace: self.namespace.clone(),
+            local: self.local.clone(),
+        }
+    }
 }
 /// Attribute values are validated lexical spans, excluding quotes. In
 /// particular a multi-gigabyte ordinary value never becomes a String. Namespace
@@ -28,13 +55,13 @@ pub struct XmlName {
 ///
 /// Attribute metadata cannot be cloned out of a lending event:
 /// ```compile_fail
-/// fn escape(mut document: oncl_xml::XmlDocument) {
+/// fn escape(mut document: oncl_xml::XmlDocument) -> oncl_xml::XmlAttribute {
 ///     let retained = {
 ///         let mut events = document.events();
 ///         events.next_event().unwrap().unwrap().attributes[0].clone()
 ///     };
 ///     drop(document);
-///     let _ = retained.name.local;
+///     retained
 /// }
 /// ```
 #[derive(Debug)]
@@ -80,6 +107,18 @@ pub enum XmlEventKind {
 /// consumers maintain that scope for Text/Comment/Cdata/PI events, whose
 /// namespaces field is empty. End events carry the complete element region;
 /// other events carry their lexical region.
+///
+/// Namespace storage cannot be cloned into retained SDK metadata:
+/// ```compile_fail
+/// fn escape(mut document: oncl_xml::XmlDocument) -> Vec<(String, String)> {
+///     let retained_context = {
+///         let mut events = document.events();
+///         events.next_event().unwrap().unwrap().namespaces.clone()
+///     };
+///     drop(document);
+///     retained_context
+/// }
+/// ```
 #[derive(Debug)]
 pub struct XmlEvent {
     pub kind: XmlEventKind,
@@ -87,8 +126,17 @@ pub struct XmlEvent {
     pub depth: usize,
     pub name: Option<XmlName>,
     pub attributes: Vec<XmlAttribute>,
-    pub namespaces: Vec<(String, String)>,
+    namespaces: Vec<(String, String)>,
     pub(crate) ids: Vec<String>,
+}
+impl XmlEvent {
+    /// Current bindings at an element boundary, borrowed from this lending
+    /// event. The iterator and returned strings cannot outlive the event.
+    pub fn namespaces(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
+        self.namespaces
+            .iter()
+            .map(|(prefix, uri)| (prefix.as_str(), uri.as_str()))
+    }
 }
 struct Frame {
     qname: String,
@@ -638,7 +686,7 @@ impl<'a> Reader<'a> {
         self.root = true;
         self.stack.push(Frame {
             qname,
-            name: name.clone(),
+            name: name.copy_for_frame(),
             start,
             ids,
             changes,
