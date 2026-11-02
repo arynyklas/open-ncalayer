@@ -22,8 +22,13 @@ time = { workspace = true, features = ["formatting"] }
 
 [dev-dependencies]
 oncl-testkit.workspace = true
+tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 
 [[test]]
 name = "xades"
+required-features = ["testing"]
+
+[[example]]
+name = "indexed_xml_probe"
 required-features = ["testing"]

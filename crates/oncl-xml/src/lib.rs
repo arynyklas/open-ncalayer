@@ -25,14 +25,28 @@
 //! leave comments out whatever the canonicalization method says, as XMLDSig requires and
 //! Santuario does.
 //!
-//! Input is untrusted: no DOCTYPE (so no entity expansion and nothing fetched), at most
+//! The legacy signing/verification input is untrusted: no DOCTYPE (so no entity
+//! expansion and nothing fetched), at most
 //! [`MAX_INPUT`] bytes, [`MAX_DEPTH`] levels, [`MAX_NODES`] nodes and [`MAX_ATTRIBUTES`]
 //! attributes, bounded parse work for attributes and namespaces in scope, canonical forms
 //! of at most [`MAX_CANONICAL`] bytes, at most [`REFERENCE_WORK`] bytes canonicalized by
 //! [`verify`], and XPaths of at most 32 steps. Signing holds one parse tree at a time.
+//!
+//! [`XmlDocument::index`] separately freezes a streaming UTF-8 source into the
+//! host's explicit [`oncl_pki::io::TemporaryStore`], with file-backed token and
+//! duplicate-safe ID indexes and stable u64 regions. It does not change the
+//! bounded signature APIs above or implement large-document canonicalization.
+//! Its lending event cursor restores namespace contexts. Ordinary attributes
+//! and text remain validated lexical spans, not accumulated values; namespace
+//! declarations and recognized IDs are normalized under explicit small limits.
+//! Documents retain the original operation's quota, cancellation and Deadline.
 
 mod c14n;
+mod index;
 mod parse;
+mod reader;
+pub use index::{XmlDocument, XmlLimits, XmlNode};
+pub use reader::{XmlAttribute, XmlEvent, XmlEventKind, XmlEvents, XmlName};
 pub mod xades;
 mod xpath;
 
