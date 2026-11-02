@@ -11,11 +11,13 @@ publish.workspace = true
 [features]
 tokens = ["dep:oncl-token"]
 xml = ["dep:oncl-xml"]
+pdf = ["dep:oncl-pdf"]
 
 [dependencies]
 oncl-pki.workspace = true
 oncl-token = { workspace = true, optional = true }
 oncl-xml = { workspace = true, optional = true }
+oncl-pdf = { workspace = true, optional = true }
 zeroize.workspace = true
 time.workspace = true
 

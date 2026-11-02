@@ -23,7 +23,7 @@ use der::{Decode, Reader as _, SliceReader};
 use reader::{Metadata, Reader, malformed};
 use std::io::Write;
 
-pub use verify::verify;
+pub use verify::{verify, verify_snapshot_detached};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {

@@ -2,6 +2,8 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VerifyProfile {
     Cms,
+    #[cfg(feature = "pdf")]
+    Pdf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9,6 +11,12 @@ pub struct VerifyRequest {
     profile: VerifyProfile,
 }
 impl VerifyRequest {
+    #[cfg(feature = "pdf")]
+    pub const fn pdf() -> Self {
+        Self {
+            profile: VerifyProfile::Pdf,
+        }
+    }
     pub const fn cms() -> Self {
         Self {
             profile: VerifyProfile::Cms,

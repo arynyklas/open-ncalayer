@@ -29,6 +29,62 @@ pub fn verify(
     .0)
 }
 
+/// Verify bounded decoded metadata against actual immutable captured regions.
+/// No caller-supplied content digest is accepted. The derived metadata must
+/// originate from this snapshot and the same original operation.
+pub fn verify_snapshot_detached(
+    metadata: &crate::io::DerivedInput,
+    snapshot: &mut crate::io::FrozenInput,
+    regions: &[crate::io::Region],
+    validation: &ValidationContext<'_>,
+    allowed_signature_algorithms: &[SigAlg],
+    scope: &mut ResourceScope,
+) -> Result<ValidationReport, StreamError> {
+    snapshot.binds(metadata, scope)?;
+    if regions.is_empty() || regions.len() > 4096 {
+        return Err(malformed("snapshot region count"));
+    }
+    let mut end = 0;
+    let mut total = 0u64;
+    for region in regions {
+        if region.len == 0 || region.offset < end || region.end()? > snapshot.len() {
+            return Err(malformed("overlapping or out-of-bounds snapshot regions"));
+        }
+        end = region.end()?;
+        total = total
+            .checked_add(region.len)
+            .ok_or_else(|| malformed("snapshot region work overflow"))?;
+    }
+    if total > snapshot.len() {
+        return Err(malformed("snapshot region work exceeds extent"));
+    }
+    if metadata.as_bytes().is_empty() {
+        return Err(malformed("empty decoded CMS metadata"));
+    }
+    let mut cursor = std::io::Cursor::new(metadata.as_bytes());
+    let mut parsed = super::parse_with(
+        Source::sequential(&mut cursor, None),
+        scope,
+        true,
+        None,
+        &[],
+        true,
+    )?;
+    if !parsed.inspection.detached {
+        return Err(malformed("embedded signature must use detached CMS"));
+    }
+    let mut reader = snapshot.reader(regions, scope)?;
+    let result = verify_parsed(
+        &mut parsed,
+        Some(reader.source()),
+        validation,
+        allowed_signature_algorithms,
+        scope,
+    );
+    reader.finish()?;
+    Ok(result?.0)
+}
+
 pub(super) fn verify_parsed(
     parsed: &mut super::Parsed,
     detached: Option<Source<'_>>,
