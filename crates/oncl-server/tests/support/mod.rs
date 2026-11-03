@@ -30,6 +30,22 @@ pub struct ActualKey {
     pub pause: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     pub audit: DurableAuditGuard,
 }
+impl ActualKey {
+    pub fn wrap(mut entry: KeyEntry, audit: DurableAuditGuard) -> (KeyEntry, Arc<Self>) {
+        let actual = Arc::new(Self {
+            public: entry.key.public_key(),
+            key: entry.key,
+            calls: AtomicUsize::new(0),
+            signatures: Mutex::new(Vec::new()),
+            after: Mutex::new(None),
+            lose_response: AtomicBool::new(false),
+            pause: Mutex::new(None),
+            audit,
+        });
+        entry.key = PrivateKey::Token(TokenKey::new(actual.clone()));
+        (entry, actual)
+    }
+}
 impl TokenSigner for ActualKey {
     fn alg(&self) -> KeyAlg {
         self.key.alg()
@@ -93,21 +109,10 @@ impl Rig {
     }
     pub fn with_key(audit: DurableAuditGuard, name: &str) -> Self {
         let fixture = oncl_testkit::synthetic(name);
-        let mut entry =
-            oncl_pki::pkcs12::load(&oncl_testkit::read(fixture.path), &fixture.password)
-                .unwrap()
-                .remove(0);
-        let actual = Arc::new(ActualKey {
-            public: entry.key.public_key(),
-            key: entry.key.clone(),
-            calls: AtomicUsize::new(0),
-            signatures: Mutex::new(Vec::new()),
-            after: Mutex::new(None),
-            lose_response: AtomicBool::new(false),
-            pause: Mutex::new(None),
-            audit: audit.clone(),
-        });
-        entry.key = PrivateKey::Token(TokenKey::new(actual.clone()));
+        let entry = oncl_pki::pkcs12::load(&oncl_testkit::read(fixture.path), &fixture.password)
+            .unwrap()
+            .remove(0);
+        let (entry, actual) = ActualKey::wrap(entry, audit.clone());
         let id = KeyId::new("host-private-path/password-must-not-appear").unwrap();
         let provider = Arc::new(Provider {
             entry,

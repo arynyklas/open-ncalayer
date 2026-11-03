@@ -20,6 +20,7 @@ const MAGIC: &[u8; 8] = b"ONCLAU01";
 const IDENTITY: &str = "oncl-audit.identity";
 const MAX_BINDINGS: usize = 1024;
 const MAX_KEYS_PER_OPERATION: usize = 32;
+const MAX_BATCH_ITEMS: u16 = 1024;
 
 /// Opaque host-assigned identity. Never constructed from paths, subject names,
 /// passwords, request bodies or Debug-formatted KeyId. No textual metadata API.
@@ -97,6 +98,8 @@ pub struct AuditEvent {
     pub sequence: u64,
     pub use_id: u64,
     pub operation_id: u64,
+    /// Original Core batch item, not a private-use counter; None outside batch.
+    pub batch_item: Option<u16>,
     pub session: [u8; 16],
     pub principal: AuditLabel,
     pub key: AuditLabel,
@@ -234,6 +237,7 @@ fn blank(kind: RecordKind) -> AuditEvent {
         sequence: 0,
         use_id: 0,
         operation_id: 0,
+        batch_item: None,
         session: [0; 16],
         principal: AuditLabel([0; 16]),
         key: AuditLabel([0; 16]),
@@ -276,6 +280,10 @@ fn encode(record: &AuditEvent, identity: [u8; 16]) -> [u8; 160] {
     bytes[107] = u8::from(record.succeeded);
     bytes[108..116].copy_from_slice(&record.repair_from.to_le_bytes());
     bytes[116..124].copy_from_slice(&record.repair_to.to_le_bytes());
+    if let Some(item) = record.batch_item {
+        bytes[124..126].copy_from_slice(&item.to_le_bytes());
+        bytes[126] = 1;
+    }
     let sum = checksum(&bytes[..128]);
     bytes[128..].copy_from_slice(&sum);
     bytes
@@ -284,8 +292,17 @@ fn decode(bytes: &[u8; 160], identity: [u8; 16]) -> io::Result<AuditEvent> {
     if &bytes[..8] != MAGIC
         || bytes[8..24] != identity
         || bytes[128..] != checksum(&bytes[..128])
-        || bytes[124..128] != [0; 4]
+        || bytes[127] != 0
     {
+        return Err(damaged());
+    }
+    let item = u16::from_le_bytes(bytes[124..126].try_into().unwrap());
+    let batch_item = match (bytes[126], item) {
+        (0, 0) => None,
+        (1, item) if item < MAX_BATCH_ITEMS => Some(item),
+        _ => return Err(damaged()),
+    };
+    if batch_item.is_some() && !matches!(bytes[104], 1 | 2) {
         return Err(damaged());
     }
     let word =
@@ -301,6 +318,7 @@ fn decode(bytes: &[u8; 160], identity: [u8; 16]) -> io::Result<AuditEvent> {
         sequence: word(24),
         use_id: word(32),
         operation_id: word(40),
+        batch_item,
         session: bytes[48..64].try_into().unwrap(),
         principal: AuditLabel(bytes[64..80].try_into().unwrap()),
         key: AuditLabel(bytes[80..96].try_into().unwrap()),
@@ -394,8 +412,15 @@ fn partial_final_matches(file: &mut File, pending: &BTreeMap<u64, Pending>) -> i
             Action::SignDigest => 2,
             _ => return Err(damaged()),
         };
+        let mut expected_item = [0; 4];
+        if let Some(item) = original.event.batch_item {
+            expected_item[..2].copy_from_slice(&item.to_le_bytes());
+            expected_item[2] = 1;
+        }
+        let item_prefix = tail.saturating_sub(124).min(4);
         if (tail <= 32 || bytes[32..end] == expected[..end - 32])
             && (tail <= 105 || bytes[105] == action)
+            && (item_prefix == 0 || bytes[124..124 + item_prefix] == expected_item[..item_prefix])
         {
             return Ok(true);
         }
@@ -636,6 +661,7 @@ impl DurableAuditGuard {
                     || prior.event.principal != record.principal
                     || prior.event.key != record.key
                     || prior.event.action != record.action
+                    || prior.event.batch_item != record.batch_item
                 {
                     return Err(damaged());
                 }
@@ -1034,6 +1060,7 @@ impl KeyUseGuard for DurableAuditGuard {
             record.key = key;
             record.unix_millis = now()?;
             record.action = Some(event.action);
+            record.batch_item = event.batch_item().map(|item| item.get());
             if let Err(error) = Self::append(&mut state, &record) {
                 // No receipt escaped, so this process knows private use was not
                 // admitted. Replay will ignore this fact if no whole BEGIN exists.
@@ -1085,8 +1112,9 @@ impl KeyUseGuard for DurableAuditGuard {
                 && p.event.session == state.session
                 && p.event.operation_id == event.operation_id.get()
                 && p.key.as_ref() == Some(&event.key_id)
-                && p.action == event.action)
-                .then_some(id)
+                && p.action == event.action
+                && p.event.batch_item == event.batch_item().map(|item| item.get()))
+            .then_some(id)
         });
         let Some(id) = id else {
             state.health = AuditHealth::Failed;

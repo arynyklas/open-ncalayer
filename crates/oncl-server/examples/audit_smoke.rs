@@ -1,4 +1,6 @@
 //! Local synthetic-only acceptance harness; never reads operator private keys.
+#[path = "../tests/support/batch.rs"]
+mod batch_support;
 #[path = "../tests/support/mod.rs"]
 mod support;
 use oncl_core::keys::AppliedState;
@@ -179,5 +181,79 @@ fn main() {
         "probe-retry: segment=640 quota=960 actual_key_calls=1 Artifact=NoPublish FINAL={:?} complete_frames=4 health={:?}",
         final_record.applied,
         audit.health()
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let batch_audit = DurableAuditGuard::create(config(output.join("batch-audit"))).unwrap();
+    let batch = batch_support::BatchRig::new(batch_audit.clone(), scratch.path());
+    let proof = batch.exercise(None);
+    let records = batch_audit.records().unwrap();
+    let items: Vec<_> = records
+        .iter()
+        .filter(|record| record.kind == RecordKind::Begin)
+        .map(|record| record.batch_item)
+        .collect();
+    let finals: Vec<_> = records
+        .iter()
+        .filter(|record| record.kind == RecordKind::Final)
+        .map(|record| record.batch_item)
+        .collect();
+    assert_eq!(items, [None, Some(0), Some(2), Some(2), Some(5), None]);
+    assert_eq!(items, finals);
+    assert_eq!(proof.summary.completed, 6);
+    assert!(
+        records
+            .iter()
+            .filter(|record| matches!(record.kind, RecordKind::Begin | RecordKind::Final))
+            .all(|record| record.operation_id == proof.operation)
+    );
+    assert!(proof.actual_proof.is_empty());
+    std::fs::write(output.join("batch-zero.published.sig"), &proof.raw_zero).unwrap();
+    std::fs::write(output.join("batch-two-keys.published.cms"), &proof.cms).unwrap();
+    std::fs::write(output.join("batch-gost.published.sig"), &proof.gost).unwrap();
+    std::fs::write(output.join("batch-outside.published.sig"), &proof.outside).unwrap();
+    if let oncl_pki::key::PublicKey::Rsa(der) = batch.rsa_public() {
+        std::fs::write(output.join("batch-public-rsa.pkcs1.der"), der).unwrap();
+    }
+    println!(
+        "batch: completed={} actual_key_calls={:?} original_operation={} BEGIN_items={items:?} FINAL_items={finals:?}",
+        proof.summary.completed,
+        batch.counts(),
+        proof.operation
+    );
+    let failed_audit = DurableAuditGuard::create(config(output.join("batch-after"))).unwrap();
+    let failed = batch_support::BatchRig::new(failed_audit.clone(), scratch.path());
+    let proof = failed.exercise(Some(FaultPoint::PartialWrite));
+    assert!(
+        proof.raw_zero.is_empty()
+            && proof.cms.is_empty()
+            && proof.gost.is_empty()
+            && proof.outside.is_empty()
+    );
+    std::fs::write(
+        output.join("batch-after.actual-proof.sig"),
+        &proof.actual_proof,
+    )
+    .unwrap();
+    let blocked = failed.nonbatch().unwrap_err();
+    assert_eq!(blocked.applied_state(), AppliedState::NotApplied);
+    assert_eq!(failed.counts(), [2, 0]);
+    failed_audit.recover().unwrap();
+    assert_eq!(
+        failed_audit
+            .records()
+            .unwrap()
+            .iter()
+            .find(|record| record.kind == RecordKind::Final && record.batch_item == Some(0))
+            .unwrap()
+            .applied,
+        AppliedState::Applied
+    );
+    assert!(!failed.nonbatch().unwrap().is_empty());
+    println!(
+        "batch-after: item=Some(0) Applied={:?} Artifact=NoPublish later_context={:?} after_recovery={:?} fresh_actual_key_calls={:?}",
+        proof.summary.results()[0].applied_state(),
+        blocked.applied_state(),
+        failed_audit.health(),
+        failed.counts()
     );
 }

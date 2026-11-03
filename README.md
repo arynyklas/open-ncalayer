@@ -95,6 +95,10 @@ Rust SDK добавляет отдельные CAdES B/T/LT/LTA: `SignRequest::c
 Хозяин подключает `DurableAuditGuard` через `EngineServices::with_keys` и перед
 работой привязывает исходный `OperationContext` к аутентифицированному opaque
 principal и безопасным 16-байтовым меткам ключей (`bind` / `AuditBinding`).
+BEGIN/FINAL сохраняют настоящий zero-based `batch_item` исходного Core-вызова
+(0–1023), не номер применения ключа: hash/verify оставляют пропуски, несколько
+подписантов одного item получают тот же ordinal, вне пакета — None. Some(0)
+имеет отдельный presence-bit; guest ID/имя item не становится principal/меткой ключа.
 Содержимое документов, пути, имена файлов, пароли, произвольные `KeyId::Debug`
 и тексты ошибок в журнал не попадают. BEGIN синхронизируется **до** применения
 ключа; FINAL сохраняет фактический Applied/NotApplied/Unknown. Отказ FINAL

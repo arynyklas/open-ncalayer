@@ -1,3 +1,5 @@
+#[path = "support/batch.rs"]
+mod batch_support;
 mod support;
 use oncl_core::keys::{
     AppliedState, KeyId, KeyUseEvent, KeyUseGuard, KeyUseOutcome, KeyUseReceipt,
@@ -22,11 +24,7 @@ fn context() -> OperationContext {
         .unwrap()
 }
 fn event(ctx: &OperationContext, key: &KeyId) -> KeyUseEvent {
-    KeyUseEvent {
-        operation_id: ctx.id(),
-        key_id: key.clone(),
-        action: Action::SignDigest,
-    }
+    KeyUseEvent::new(ctx, key.clone(), Action::SignDigest)
 }
 fn config(path: &std::path::Path) -> AuditConfig {
     AuditConfig::new(path.to_owned(), 4096, 16384, 3, 32).unwrap()
@@ -1045,4 +1043,292 @@ fn failed_replacement_creation_keeps_durable_records_and_foreign_file() {
         std::fs::read(foreign).unwrap(),
         b"foreign existing segment name"
     );
+}
+
+#[test]
+fn real_mixed_batch_persists_original_zero_gaps_multi_key_and_nonbatch_ordinals() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard = DurableAuditGuard::create(config(&path)).unwrap();
+    let rig = batch_support::BatchRig::new(guard.clone(), temp.path());
+    let proof = rig.exercise(None);
+    assert_eq!(proof.summary.completed, 6);
+    assert!(
+        !proof.raw_zero.is_empty()
+            && !proof.cms.is_empty()
+            && !proof.gost.is_empty()
+            && !proof.outside.is_empty()
+    );
+    assert!(proof.actual_proof.is_empty());
+    let before = rig.observed.before.lock().unwrap();
+    let finished = rig.observed.finished.lock().unwrap();
+    let expected = [None, Some(0), Some(2), Some(2), Some(5), None];
+    assert_eq!(
+        before
+            .iter()
+            .map(|observed| observed.event.batch_item().map(|item| item.get()))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        finished
+            .iter()
+            .map(|observed| observed.event.batch_item().map(|item| item.get()))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    let records = guard.records().unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.kind == RecordKind::Begin)
+            .map(|record| record.batch_item)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.kind == RecordKind::Final)
+            .map(|record| record.batch_item)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    let bytes = std::fs::read(journal(&path)).unwrap();
+    let frames: Vec<_> = bytes
+        .as_chunks::<{ FRAME_BYTES as usize }>()
+        .0
+        .iter()
+        .skip(1)
+        .collect();
+    assert_eq!(frames.len(), expected.len() * 2);
+    for (index, observed) in before.iter().enumerate() {
+        let begin = frames[index * 2];
+        let final_record = frames[index * 2 + 1];
+        for frame in [begin, final_record] {
+            let item = match frame[126] {
+                0 => None,
+                1 => Some(u16::from_le_bytes(frame[124..126].try_into().unwrap())),
+                _ => panic!("unknown item framing"),
+            };
+            assert_eq!(item, expected[index]);
+            assert_eq!(
+                u64::from_le_bytes(frame[32..40].try_into().unwrap()),
+                observed.correlation.1
+            );
+            assert_eq!(
+                u64::from_le_bytes(frame[40..48].try_into().unwrap()),
+                proof.operation
+            );
+            assert_eq!(&frame[64..80], &[0x55; 16]);
+        }
+        assert_eq!(begin[104], 1);
+        assert_eq!(final_record[104], 2);
+        assert_eq!(final_record[106], 1);
+        assert_eq!(final_record[107], 1);
+    }
+    assert!(
+        !bytes
+            .windows(b"drive_C:/guest/secret-name".len())
+            .any(|window| window == b"drive_C:/guest/secret-name")
+    );
+}
+
+#[test]
+fn real_batch_post_use_audit_failure_keeps_item_zero_applied_and_no_publish() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard = DurableAuditGuard::create(config(&path)).unwrap();
+    let rig = batch_support::BatchRig::new(guard.clone(), temp.path());
+    let proof = rig.exercise(Some(FaultPoint::PartialWrite));
+    assert_eq!(proof.summary.completed, 0);
+    assert_eq!(rig.counts(), [2, 0]);
+    rig.rsa_public()
+        .verify(
+            oncl_pki::key::SigAlg::RsaSha256,
+            support::MESSAGE,
+            &proof.actual_proof,
+        )
+        .unwrap();
+    assert!(
+        proof.raw_zero.is_empty()
+            && proof.cms.is_empty()
+            && proof.gost.is_empty()
+            && proof.outside.is_empty()
+    );
+    let before = rig.observed.before.lock().unwrap();
+    let finished = rig.observed.finished.lock().unwrap();
+    assert_eq!(before.last().unwrap().event.batch_item().unwrap().get(), 0);
+    assert_eq!(
+        finished.last().unwrap().event.batch_item().unwrap().get(),
+        0
+    );
+    assert_eq!(
+        finished.last().unwrap().outcome.unwrap().applied,
+        AppliedState::Applied
+    );
+    assert!(!finished.last().unwrap().acknowledged);
+    drop(before);
+    drop(finished);
+    assert_eq!(
+        rig.nonbatch().unwrap_err().applied_state(),
+        AppliedState::NotApplied
+    );
+    assert_eq!(rig.counts(), [2, 0]);
+    guard.recover().unwrap();
+    let bytes = std::fs::read(journal(&path)).unwrap();
+    let finals: Vec<_> = bytes
+        .as_chunks::<{ FRAME_BYTES as usize }>()
+        .0
+        .iter()
+        .filter(|frame| frame[104] == 2)
+        .collect();
+    assert_eq!(finals.len(), 2);
+    let repaired = finals.last().unwrap();
+    assert_eq!(repaired[126], 1);
+    assert_eq!(
+        u16::from_le_bytes(repaired[124..126].try_into().unwrap()),
+        0
+    );
+    assert_eq!(repaired[106], 1);
+    let records = guard.records().unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.kind.is_final())
+            .map(|record| record.batch_item)
+            .collect::<Vec<_>>(),
+        [None, Some(0)]
+    );
+    assert!(!rig.nonbatch().unwrap().is_empty());
+    assert_eq!(rig.counts(), [3, 0]);
+}
+
+#[test]
+fn original_context_event_constructor_cannot_swap_another_pending_use() {
+    let temp = tempfile::tempdir().unwrap();
+    let guard = DurableAuditGuard::create(config(&temp.path().join("audit"))).unwrap();
+    let first = context();
+    let other = context();
+    let key = KeyId::new("host key").unwrap();
+    let _first = binding(&guard, &first, &key);
+    let _other = guard
+        .bind(
+            &other,
+            AuditLabel::new([9; 16]),
+            [(key.clone(), AuditLabel::new([8; 16]))],
+        )
+        .unwrap();
+    let receipt = guard.before_use(&event(&first, &key)).unwrap();
+    let correlation = receipt.correlation().unwrap();
+    let wrong = KeyUseReceipt::with_correlation(
+        KeyUseEvent::new(&other, key.clone(), Action::SignDigest),
+        correlation.0,
+        correlation.1,
+    );
+    let outcome = KeyUseOutcome {
+        applied: AppliedState::NotApplied,
+        succeeded: false,
+    };
+    assert!(guard.finish(wrong, outcome).is_err());
+    assert_eq!(
+        guard
+            .records()
+            .unwrap()
+            .iter()
+            .filter(|record| record.kind.is_final())
+            .count(),
+        0
+    );
+    assert!(guard.finish(receipt, outcome).is_err());
+    let records = guard.records().unwrap();
+    let final_record = records
+        .iter()
+        .find(|record| record.kind.is_final())
+        .unwrap();
+    assert_eq!(final_record.operation_id, first.id().get());
+    assert_eq!(final_record.principal, AuditLabel::new([1; 16]));
+    assert_eq!(final_record.key, AuditLabel::new([2; 16]));
+    assert_eq!(final_record.batch_item, None);
+    assert_eq!(final_record.applied, AppliedState::NotApplied);
+}
+
+#[test]
+fn bounded_item_codec_checks_numeric_domain_even_with_complete_checksums() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard = DurableAuditGuard::create(config(&path)).unwrap();
+    let rig = Rig::new(guard.clone());
+    let (mut ctx, _bound) = rig.begin();
+    rig.verify(&rig.sign(&mut ctx).unwrap());
+    let file = journal(&path);
+    let original = std::fs::read(&file).unwrap();
+    // Journal decoder input, not authority or a claim that this non-batch call
+    // came from item1023: owner-edited frames are intentionally not nonrepudiation.
+    let with_item = |item: u16| {
+        let mut bytes = original.clone();
+        for frame in bytes
+            .as_chunks_mut::<{ FRAME_BYTES as usize }>()
+            .0
+            .iter_mut()
+            .skip(1)
+        {
+            frame[124..126].copy_from_slice(&item.to_le_bytes());
+            frame[126] = 1;
+            let mut hash = oncl_pki::digest::HashState::new(oncl_pki::key::HashAlg::Sha256);
+            hash.update(&frame[..128]);
+            frame[128..].copy_from_slice(hash.finish().as_bytes());
+        }
+        bytes
+    };
+    std::fs::write(&file, with_item(1023)).unwrap();
+    let records = guard.records().unwrap();
+    assert_eq!(records[1].batch_item, Some(1023));
+    assert_eq!(records[2].batch_item, Some(1023));
+    let invalid = with_item(1024);
+    std::fs::write(&file, &invalid).unwrap();
+    assert!(guard.records().is_err());
+    assert_eq!(guard.health(), AuditHealth::Failed);
+    assert!(guard.recover().is_err());
+    assert_eq!(std::fs::read(file).unwrap(), invalid);
+    assert_eq!(rig.calls(), 1);
+}
+
+#[test]
+fn real_batch_restart_preserves_item_zero_and_unknown_applied_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let (operation, public, signature) = {
+        let guard = DurableAuditGuard::create(config(&path)).unwrap();
+        let rig = batch_support::BatchRig::new(guard, temp.path());
+        let proof = rig.exercise(Some(FaultPoint::PartialWrite));
+        assert_eq!(rig.counts(), [2, 0]);
+        (
+            proof.operation,
+            rig.rsa_public().clone(),
+            proof.actual_proof,
+        )
+    };
+    public
+        .verify(
+            oncl_pki::key::SigAlg::RsaSha256,
+            support::MESSAGE,
+            &signature,
+        )
+        .unwrap();
+    let guard = DurableAuditGuard::open(config(&path)).unwrap();
+    assert_eq!(guard.health(), AuditHealth::RecoveryRequired);
+    let repaired = guard.recover().unwrap();
+    assert_eq!(repaired.truncated_bytes, 79);
+    assert_eq!(repaired.resolved_unknown, 1);
+    let records = guard.records().unwrap();
+    let final_record = records
+        .iter()
+        .find(|record| record.kind.is_final() && record.batch_item == Some(0))
+        .unwrap();
+    assert_eq!(final_record.operation_id, operation);
+    assert_eq!(final_record.applied, AppliedState::Unknown);
+    assert!(!final_record.succeeded);
+    assert_eq!(final_record.principal, AuditLabel::new([0x55; 16]));
+    assert_eq!(final_record.key, AuditLabel::new([0x61; 16]));
 }
