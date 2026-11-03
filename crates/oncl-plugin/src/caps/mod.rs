@@ -50,7 +50,7 @@ pub(crate) use keys::{
     keys_open, keys_release, keys_select, keys_sign_cms, keys_sign_cms_ex, keys_sign_raw,
     keys_sign_xades, keys_sign_xml, keys_sign_xml_ex, keys_terminals, tokens_scan,
 };
-pub(crate) use keys::{cms_output, cms_spec};
+pub(crate) use keys::{cms_output, cms_spec, xades_spec, xml_spec, xml_spec_ex};
 pub(crate) use keystore::{
     KeyFiles, dialog_csr, dialog_import, keystore_change_password, keystore_install_cert,
     keystore_new_key, tokens_id_card,

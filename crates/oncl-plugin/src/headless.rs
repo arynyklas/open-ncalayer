@@ -373,6 +373,20 @@ impl PkiServices<'_> {
         .map_err(|error| crate::caps::tsp_failure(spec, &error))
     }
 }
+/// Original ABI selectors, with borrowed strings and no private-key access.
+pub fn xml_spec(args: &abi::SignXmlArgs) -> abi::HostResult<oncl_xml::XmlSignSpec<'_>> {
+    crate::caps::xml_spec(args)
+}
+pub fn xml_spec_ex(args: &abi::SignXmlExArgs) -> oncl_xml::XmlSignSpec<'_> {
+    crate::caps::xml_spec_ex(args)
+}
+pub fn xades_spec(
+    args: &abi::XadesArgs,
+    tsa: Option<oncl_pki::tsp::TsaSpec>,
+) -> abi::HostResult<oncl_xml::xades::XadesSpec<'_>> {
+    crate::caps::xades_spec(args, tsa)
+}
+
 pub fn cms_spec<'a>(
     args: &'a abi::SignCmsExArgs,
     now: time::OffsetDateTime,

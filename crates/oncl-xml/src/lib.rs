@@ -497,7 +497,7 @@ fn sign_with_backend(
     scope: Option<&oncl_pki::resource::ResourceScope>,
 ) -> Result<Vec<u8>, XmlError> {
     let plan = bounded_plan(xml, spec, Some(backend), scope, None)?;
-    finish_bounded_plan(xml, spec, backend, qualifying, scope, plan)
+    finish_bounded_plan(xml, spec, backend, qualifying, scope, plan, None)
 }
 struct BoundedPlan<'a> {
     algorithms: Option<Algorithms<'a>>,
@@ -654,6 +654,7 @@ fn finish_bounded_plan(
     qualifying: Option<QualifyingObject<'_>>,
     scope: Option<&oncl_pki::resource::ResourceScope>,
     plan: BoundedPlan<'_>,
+    admit: Option<&mut dyn FnMut(u64) -> Result<(), oncl_pki::resource::ProcessingError>>,
 ) -> Result<Vec<u8>, XmlError> {
     let BoundedPlan {
         algorithms,
@@ -700,7 +701,7 @@ fn finish_bounded_plan(
         separator: if spec.strip_whitespace { "" } else { "\n" },
         line_breaks: spec.base64_line_breaks.unwrap_or(!spec.strip_whitespace),
     };
-    let signed = template.insert(xml, &point, backend, scope)?;
+    let signed = template.insert(xml, &point, backend, scope, spec.output, admit)?;
     Ok(output(signed, spec.output))
 }
 
@@ -775,44 +776,52 @@ impl<'a> Algorithms<'a> {
 
 /// `signed` in the `output` form.
 fn output(signed: Vec<u8>, output: XmlOutput) -> Vec<u8> {
+    if matches!(output, XmlOutput::AsIs) {
+        return signed;
+    }
+    let (declaration, body) = output_parts(&signed, output);
+    let mut out = Vec::with_capacity(declaration.len() + body.len());
+    out.extend_from_slice(declaration);
+    out.extend_from_slice(body);
+    out
+}
+
+/// One normalization rule shared by actual emission and allocation-free sizing.
+fn output_parts(signed: &[u8], output: XmlOutput) -> (&'static [u8], &[u8]) {
     let XmlOutput::Serialize {
         declaration,
         standalone_no,
         trim,
     } = output
     else {
-        return signed;
+        return (&[], signed);
     };
-    let mut body = signed.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&signed);
+    let mut body = signed.strip_prefix(b"\xef\xbb\xbf").unwrap_or(signed);
     if body.starts_with(b"<?xml")
         && let Some(end) = body.windows(2).position(|w| w == b"?>")
     {
         body = &body[end + 2..];
     }
-    // The document's prolog whitespace is not part of a DOM.
     let start = body
         .iter()
         .position(|b| !b.is_ascii_whitespace())
         .unwrap_or(body.len());
     let mut body = &body[start..];
     if trim {
-        // `String.trim()`: every character up to U+0020.
         while let [rest @ .., last] = body
             && *last <= b' '
         {
             body = rest;
         }
     }
-    let mut out = Vec::with_capacity(body.len() + 60);
-    if declaration {
-        out.extend_from_slice(b"<?xml version=\"1.0\" encoding=\"UTF-8\"");
-        if standalone_no {
-            out.extend_from_slice(b" standalone=\"no\"");
-        }
-        out.extend_from_slice(b"?>");
-    }
-    out.extend_from_slice(body);
-    out
+    let prefix = if !declaration {
+        &[][..]
+    } else if standalone_no {
+        b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>".as_slice()
+    } else {
+        b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>".as_slice()
+    };
+    (prefix, body)
 }
 
 /// One signature found by [`verify_each`].
@@ -971,6 +980,20 @@ impl SplicePoint {
     /// Offset of the signature in the spliced document.
     fn signature_offset(&self) -> usize {
         self.at + usize::from(self.close.is_some())
+    }
+    fn output_len(
+        &self,
+        xml: &[u8],
+        signature_bytes: u64,
+        output: XmlOutput,
+    ) -> Result<u64, XmlError> {
+        let (prefix, body) = output_parts(xml, output);
+        let closing = self.close.as_ref().map_or(0, |name| name.len() as u64 + 2);
+        (prefix.len() as u64)
+            .checked_add(body.len() as u64)
+            .and_then(|n| n.checked_add(signature_bytes))
+            .and_then(|n| n.checked_add(closing))
+            .ok_or_else(|| XmlError::Constraint("serialized XML size overflow".into()))
     }
 
     /// `xml` with `signature` spliced in; the other input bytes are kept.

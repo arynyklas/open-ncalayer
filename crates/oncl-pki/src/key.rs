@@ -344,6 +344,34 @@ impl KeyError {
     }
 }
 
+/// Exact encoded signature width for an already validated leaf key/algorithm.
+/// This public-key projection grants no signing authority or validation verdict.
+pub fn signature_width(
+    certificate: &crate::cert::Certificate,
+    alg: SigAlg,
+) -> Result<u64, KeyError> {
+    match alg {
+        SigAlg::Gost2004 => Ok(64),
+        SigAlg::Gost2015_512 => Ok(128),
+        SigAlg::RsaSha256 | SigAlg::RsaSha1 => {
+            #[derive(der::Sequence)]
+            struct RsaPublic<'a> {
+                modulus: der::asn1::UintRef<'a>,
+                exponent: der::asn1::UintRef<'a>,
+            }
+            let bits = certificate
+                .tbs_certificate()
+                .subject_public_key_info()
+                .subject_public_key
+                .as_bytes()
+                .ok_or_else(|| malformed("RSA subject public key bit string"))?;
+            let public = RsaPublic::from_der(bits).map_err(malformed)?;
+            let _ = public.exponent;
+            Ok(public.modulus.as_bytes().len() as u64)
+        }
+    }
+}
+
 fn malformed(e: impl std::fmt::Display) -> KeyError {
     KeyError::Malformed(e.to_string())
 }

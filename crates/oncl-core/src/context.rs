@@ -36,6 +36,8 @@ pub struct OperationContext {
     pub(crate) plugin_network_budget: Option<crate::plugins::InvocationHttpBudget>,
     #[cfg(feature = "plugins")]
     pub(crate) plugin_pki: Option<crate::plugins::InvocationPkiAuthority>,
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_xml_output_limit: Option<u64>,
 }
 impl OperationContext {
     pub(crate) fn account_borrowed(

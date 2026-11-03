@@ -1,6 +1,8 @@
 //! Actual WASM, synthetic-only private use and an independent OpenSSL RSA oracle.
 #[path = "plugin_fixture.rs"]
 mod fixture;
+#[path = "plugin_xml_probe.rs"]
+mod xml_probe;
 use fixture::*;
 use oncl_core::{ErrorCode, plugins::*};
 use oncl_pdk::abi::{self, Import};
@@ -205,6 +207,7 @@ pub(super) fn run(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
         out.join("report.json"),
         r#"{"case":"L01","actual_wasm":true,"private_uses":1,"openssl_signature":"verified","altered":"rejected","forbidden_key":"permission_denied_before_open","prompt":"interaction_required_before_private_use","forged_origin":"permission_denied_without_network","fixture_limits":{"wasm_memory":1048576,"abi_transfer":262144},"platform_acceptance":false}"#,
     )?;
+    xml_probe::run(&out)?;
     println!(
         "case=L01 actual-wasm=executed private-uses=1 signature=openssl-verified altered=rejected forbidden-key=denied prompt=interaction-required forged-origin=denied out={}",
         out.display()

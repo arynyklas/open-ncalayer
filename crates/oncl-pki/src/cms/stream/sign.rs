@@ -675,7 +675,8 @@ fn sign_impl(
                     sum(&[
                         fixed,
                         size(
-                            crate::cms::sign::fixed_signature_len(signer.certificate(), alg)?,
+                            crate::key::signature_width(signer.certificate(), alg)
+                                .map_err(crate::cms::CmsError::Key)?,
                             false,
                         )?,
                     ])?,
