@@ -179,6 +179,10 @@ pub fn load_contents(pfx: &[u8], password: &str) -> Result<Contents, Pkcs12Error
 
 /// Public aliases/certificates only. Safe integrity is checked, encrypted safes
 /// may be opened, but private-key bags are never decrypted/imported.
+///
+/// Inspection resource refusals remain typed [`crate::resource::ProcessingError`]
+/// values. They do not extend the legacy [`Pkcs12Error`] loading contract or
+/// classify a valid container as malformed.
 pub fn inspect_metadata(
     pfx: &[u8],
     password: &str,
@@ -220,10 +224,8 @@ pub fn inspect_metadata(
         return Err(error);
     }
     scope.checkpoint()?;
-    let (keys, certs) = parsed.map_err(|error| match error {
-        Pkcs12Error::InspectionLimit => ProcessingError::MetadataLimit,
-        _ => ProcessingError::InvalidInput("PKCS12 integrity or structure"),
-    })?;
+    let (keys, certs) =
+        parsed.map_err(|_| ProcessingError::InvalidInput("PKCS12 integrity or structure"))?;
     result.set_integrity(integrity);
     for key in keys {
         scope.checkpoint()?;
@@ -365,14 +367,15 @@ struct InspectionControl<'a> {
     fatal: std::cell::RefCell<Option<crate::resource::ProcessingError>>,
 }
 impl InspectionControl<'_> {
+    fn fail(&self, error: crate::resource::ProcessingError) -> Pkcs12Error {
+        let mut fatal = self.fatal.borrow_mut();
+        if fatal.is_none() {
+            *fatal = Some(error);
+        }
+        Pkcs12Error::Unsupported("scoped inspection stopped".into())
+    }
     fn checkpoint(&self) -> Result<(), Pkcs12Error> {
-        self.scope.checkpoint().map_err(|error| {
-            let mut fatal = self.fatal.borrow_mut();
-            if fatal.is_none() {
-                *fatal = Some(error);
-            }
-            Pkcs12Error::Unsupported("inspection interrupted".into())
-        })
+        self.scope.checkpoint().map_err(|error| self.fail(error))
     }
 }
 
@@ -389,7 +392,8 @@ fn bags(
     let auth_safe = data_content(&pfx.auth_safe)?;
     let infos = Vec::<ContentInfo>::from_der(&ber::to_der(auth_safe.as_bytes())?)?;
     let mut safes = Vec::with_capacity(infos.len());
-    let mut remaining = inspection.map(|_| limits.map_or(4096, |limits| limits.key_bags));
+    let mut remaining =
+        inspection.map(|control| (control, limits.map_or(4096, |limits| limits.key_bags)));
     for info in &infos {
         safes.push(match info.content_type {
             oid::DATA => Safe::Bags(safe_bags(data_content(info)?.as_bytes(), &mut remaining)?),
@@ -471,16 +475,19 @@ fn bags(
 }
 
 /// The bags of a safe's contents (DER or BER).
-fn safe_bags(contents: &[u8], remaining: &mut Option<usize>) -> Result<Vec<SafeBag>, Pkcs12Error> {
+fn safe_bags(
+    contents: &[u8],
+    remaining: &mut Option<(&InspectionControl<'_>, usize)>,
+) -> Result<Vec<SafeBag>, Pkcs12Error> {
     let der = Zeroizing::new(ber::to_der(contents)?);
-    if let Some(remaining) = remaining {
+    if let Some((control, remaining)) = remaining {
         let sequence = der::asn1::AnyRef::from_der(&der)?;
         let mut reader = SliceReader::new(sequence.value())?;
         while !reader.is_finished() {
             reader.tlv_bytes()?;
             *remaining = remaining
                 .checked_sub(1)
-                .ok_or(Pkcs12Error::InspectionLimit)?;
+                .ok_or_else(|| control.fail(crate::resource::ProcessingError::MetadataLimit))?;
         }
     }
     Ok(Vec::<SafeBag>::from_der(&der)?)
