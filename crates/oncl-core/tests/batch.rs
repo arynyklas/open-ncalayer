@@ -2179,7 +2179,12 @@ fn successful_private_output_followed_by_batch_finalization_cancel_remains_appli
         target = Some(next);
     }
     assert_eq!(fault_cases, observed_checkpoints.unwrap());
-    println!("checkpoint_sweep observed={} faults={} complete_verified_failed_signature_cases={}", observed_checkpoints.unwrap(), fault_cases, complete_failed_signature_cases);
+    println!(
+        "checkpoint_sweep observed={} faults={} complete_verified_failed_signature_cases={}",
+        observed_checkpoints.unwrap(),
+        fault_cases,
+        complete_failed_signature_cases
+    );
     assert!(
         complete_failed_signature_cases > 0,
         "sweep must cover a failed item with a complete independently valid actual signature"
@@ -2425,4 +2430,140 @@ fn oversized_jose_capture_is_refused_before_any_scan_checkpoint() {
         control.0.load(Ordering::SeqCst) - before < 5,
         "no per-chunk scan checkpoints"
     );
+}
+
+#[cfg(feature = "pdf")]
+#[test]
+fn pades_batch_sign_and_keyless_extension_keep_the_pdf_profile() {
+    use oncl_core::{
+        ExtendRequest, SignProfile, SignRequest, VerifyRequest,
+        batch::{BatchOutcome, BatchReport},
+        keys::{AppliedState, KeyRequest},
+    };
+    use oncl_pki::{
+        cms::ades::ValidationMaterial,
+        evidence::{AdesLevel, EvidenceLimits},
+        validation::Verdict,
+    };
+    use std::sync::atomic::Ordering;
+    let limits = EvidenceLimits {
+        max_items: 64,
+        max_bytes: 8 << 20,
+        max_item_bytes: 1 << 20,
+        max_chain_len: 8,
+        max_proofs: 8,
+        max_coverage_parts: 1024,
+        max_coverage_bytes: 10_737_418_240,
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let store = oncl_pki::io::TemporaryStore::new(scratch.path()).unwrap();
+    let guard = Arc::new(fixture::Guard::default());
+    let provider = Arc::new(fixture::Provider::default());
+    let engine = fixture::engine(
+        store.clone(),
+        guard.clone(),
+        provider.clone(),
+        ResourceLimits::default(),
+    );
+    let key = fixture::selector("user-rsa-sign");
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Sign]).with_keys([key.key_id()]),
+            OperationPolicy::strict_online(),
+            Arc::new(Control),
+        )
+        .unwrap();
+    let mut original =
+        include_bytes!("../../oncl-pdf/tests/fixtures/external-multipage.pdf").as_slice();
+    let mut signed = Vec::new();
+    let plan = engine
+        .capture_batch(
+            [BatchItem::new(
+                "pades",
+                BatchOperation::Sign {
+                    request: SignRequest::pades(
+                        KeyRequest::new(&key, Some(fixture::PASSWORD)),
+                        oncl_pdf::PdfSignProfile::default(),
+                        AdesLevel::B,
+                        ValidationMaterial {
+                            certificates: &[],
+                            ocsp: &[],
+                            crls: &[],
+                        },
+                        limits,
+                    ),
+                    input: Source::sequential(&mut original, None),
+                    output: &mut signed,
+                },
+            )],
+            &mut ctx,
+        )
+        .unwrap();
+    let approval = plan.authorize(&ctx).unwrap();
+    let report = engine.run_batch(plan, approval, &mut ctx, |_| {}).unwrap();
+    let BatchOutcome::Completed(BatchReport::Sign(result)) = report.results()[0].outcome() else {
+        panic!(
+            "PAdES batch signing failed: {:?}",
+            report.results()[0].outcome()
+        );
+    };
+    assert_eq!(result.profile, SignProfile::Pades(AdesLevel::B));
+    assert_eq!(result.applied, AppliedState::Applied);
+    assert_eq!(result.signer_count(), 1);
+    assert_eq!(guard.applied.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.opens.load(Ordering::SeqCst), 1);
+    drop((report, ctx));
+    let keyless = Engine::new(
+        EngineServices::hash_only(ResourceLimits::default())
+            .with_temporary_store(store)
+            .with_validation(fixture::validation()),
+    )
+    .unwrap();
+    let mut ctx = keyless
+        .begin(
+            ExecutionGrant::new([Action::Extend, Action::Verify]),
+            OperationPolicy::strict_online(),
+            Arc::new(Control),
+        )
+        .unwrap();
+    let mut source = signed.as_slice();
+    let mut extended = Vec::new();
+    let plan = keyless
+        .capture_batch(
+            [BatchItem::new(
+                "pades-extension",
+                BatchOperation::Extend {
+                    request: ExtendRequest::pdf(AdesLevel::B, oncl_pdf::PdfLimits::default())
+                        .with_evidence_limits(limits),
+                    input: Source::sequential(&mut source, None),
+                    output: &mut extended,
+                },
+            )],
+            &mut ctx,
+        )
+        .unwrap();
+    let approval = plan.authorize(&ctx).unwrap();
+    let report = keyless.run_batch(plan, approval, &mut ctx, |_| {}).unwrap();
+    let BatchOutcome::Completed(BatchReport::Extend(result)) = report.results()[0].outcome() else {
+        panic!(
+            "PAdES batch extension failed: {:?}",
+            report.results()[0].outcome()
+        );
+    };
+    assert_eq!(result.profile, SignProfile::Pades(AdesLevel::B));
+    assert_eq!(result.applied, AppliedState::NotApplied);
+    assert_eq!(guard.applied.load(Ordering::SeqCst), 1);
+    drop(report);
+    let mut source = extended.as_slice();
+    let checked = keyless
+        .verify(
+            &VerifyRequest::pades(AdesLevel::B, limits),
+            Source::sequential(&mut source, None),
+            None,
+            &mut ctx,
+        )
+        .unwrap();
+    assert_eq!(checked.verdict, Verdict::Valid);
+    assert_eq!(checked.ades_level, Some(AdesLevel::B));
+    assert_eq!(checked.signers.len(), 1);
 }

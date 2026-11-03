@@ -39,7 +39,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let case = args.next().ok_or("missing probe case")?;
         if !matches!(
             case.as_str(),
-            "F04" | "C01" | "C02" | "C03" | "X01" | "X03" | "P01" | "P02" | "P03" | "J01" | "I01" | "B01"
+            "F04"
+                | "C01"
+                | "C02"
+                | "C03"
+                | "X01"
+                | "X03"
+                | "P01"
+                | "P02"
+                | "P03"
+                | "J01"
+                | "I01"
+                | "B01"
         ) {
             return Err("unsupported probe case".into());
         }

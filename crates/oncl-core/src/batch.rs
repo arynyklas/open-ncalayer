@@ -533,7 +533,8 @@ impl Engine {
                         | crate::request::SignMode::CadesCreate(k, ..)
                         | crate::request::SignMode::CadesAdd(k, ..) => (k.as_slice(), Action::Sign),
                         #[cfg(feature = "pdf")]
-                        crate::request::SignMode::Pdf(k, _) => {
+                        crate::request::SignMode::Pdf(k, _)
+                        | crate::request::SignMode::Pades(k, ..) => {
                             (std::slice::from_ref(k), Action::Sign)
                         }
                     };
@@ -1065,6 +1066,8 @@ impl Engine {
                     SignMode::CadesAdd(k, _, l, m, e) => SignMode::CadesAdd(k, data, l, m, e),
                     #[cfg(feature = "pdf")]
                     SignMode::Pdf(k, p) => SignMode::Pdf(k, p),
+                    #[cfg(feature = "pdf")]
+                    SignMode::Pades(k, p, l, m, e) => SignMode::Pades(k, p, l, m, e),
                 };
                 self.sign(SignRequest { mode }, input.unwrap(), output, ctx)
                     .map(BatchReport::Sign)
@@ -1076,7 +1079,13 @@ impl Engine {
                 .validate_cms(input, detached, ctx)
                 .map(BatchReport::Validate),
             Dispatch::Extend(request, output) => {
-                let mut bound = ExtendRequest::cms(request.level).with_material(request.material);
+                let bound = ExtendRequest::cms(request.level);
+                #[cfg(feature = "pdf")]
+                let bound = match request.pdf_limits {
+                    Some(limits) => ExtendRequest::pdf(request.level, limits),
+                    None => bound,
+                };
+                let mut bound = bound.with_material(request.material);
                 if let Some(limits) = request.limits {
                     bound = bound.with_evidence_limits(limits);
                 }
