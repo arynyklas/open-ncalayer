@@ -92,6 +92,16 @@ impl FrozenInput {
             identity: Arc::new(()),
         })
     }
+    /// Read only this snapshot's original-scope immutable region. Delegates the
+    /// existing artifact's checked bounds, 256-KiB chunk, cursor restore and
+    /// original control/deadline; no replay capability or owned buffer escapes.
+    pub fn read_region(
+        &mut self,
+        region: Region,
+        output: &mut [u8],
+    ) -> Result<usize, ProcessingError> {
+        self.stage.read_region(region, output)
+    }
     pub fn len(&self) -> u64 {
         self.stage.len()
     }
@@ -266,7 +276,7 @@ impl FrozenReader<'_> {
         let length = self.length;
         let admitted = self.input.stage.scope.retain();
         Source {
-            reader: super::Reader::Seekable(self),
+            reader: super::Reader::Snapshot(self),
             len: Some(length),
             admitted: Some(admitted),
         }
@@ -322,5 +332,11 @@ impl Seek for FrozenReader<'_> {
         .ok_or_else(|| io::Error::other("snapshot seek overflow"))?;
         self.position = position;
         Ok(position)
+    }
+}
+
+impl super::SnapshotReader for FrozenReader<'_> {
+    fn finish_snapshot(&mut self) -> Result<(), ProcessingError> {
+        self.finish()
     }
 }
