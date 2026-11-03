@@ -536,6 +536,7 @@ fn authentic_public_snapshot_inspection_counts_intake_once() {
 #[cfg(feature = "tokens")]
 #[test]
 fn token_metadata_uses_public_driver_reads_without_private_signer_or_pin_cache() {
+    use der::Encode;
     use oncl_token::{
         TokenKind, Tokens,
         emulator::{CardSpec, EmuKey, EmulatorBackend, card},
@@ -545,6 +546,16 @@ fn token_metadata_uses_public_driver_reads_without_private_signer_or_pin_cache()
     let entry = oncl_pki::pkcs12::load(&oncl_testkit::read(f.path), &f.password)
         .unwrap()
         .remove(0);
+    let expected = entry.cert.to_der().unwrap();
+    let other_fixture = oncl_testkit::synthetic("user-gost2004-sign");
+    let other_entry = oncl_pki::pkcs12::load(
+        &oncl_testkit::read(other_fixture.path),
+        &other_fixture.password,
+    )
+    .unwrap()
+    .remove(0);
+    let other_expected = other_entry.cert.to_der().unwrap();
+    assert_ne!(expected, other_expected);
     let backend = Arc::new(EmulatorBackend::new());
     backend.add_reader("I01 reader");
     backend.insert(
@@ -552,7 +563,7 @@ fn token_metadata_uses_public_driver_reads_without_private_signer_or_pin_cache()
         card(CardSpec::new(
             TokenKind::Kaztoken,
             "123456",
-            vec![EmuKey { entry }],
+            vec![EmuKey { entry: other_entry }, EmuKey { entry }],
         )),
     );
     let sources = KeySources::new().with_tokens(
@@ -580,17 +591,31 @@ fn token_metadata_uses_public_driver_reads_without_private_signer_or_pin_cache()
     );
     assert!(backend.exchanges("I01 reader").is_empty());
     drop(ctx);
-    let mut ctx = begin(
-        &engine,
-        ExecutionGrant::new([Action::Inspect]).with_keys([selector.key_id()]),
-    );
-    let report = engine
-        .inspect(&InspectRequest::named_key(&request), None, &mut ctx)
-        .unwrap();
-    assert_eq!(
-        report.entries()[0].alias(),
-        Some("460569d78dda2a142a2d8f23389bba378ccd7e53")
-    );
+    for (alias, certificate) in [
+        (f.aliases[0].as_str(), expected.as_slice()),
+        (other_fixture.aliases[0].as_str(), other_expected.as_slice()),
+    ] {
+        let selected = KeySelector::token(
+            TokenDeviceId::new("I01 reader").unwrap(),
+            TokenKind::Kaztoken,
+            alias.to_owned(),
+        );
+        let request = KeyRequest::new(&selected, Some("123456"));
+        let mut ctx = begin(
+            &engine,
+            ExecutionGrant::new([Action::Inspect]).with_keys([selected.key_id()]),
+        );
+        let report = engine
+            .inspect(&InspectRequest::named_key(&request), None, &mut ctx)
+            .unwrap();
+        assert_eq!(report.entries().len(), 1);
+        assert_eq!(report.entries()[0].alias(), Some(alias));
+        assert_eq!(report.entries()[0].certificate_der(), Some(certificate));
+        assert_eq!(
+            report.entries()[0].fingerprint().unwrap().as_bytes(),
+            oncl_pki::key::HashAlg::Sha256.digest(certificate)
+        );
+    }
     assert!(
         !backend
             .exchanges("I01 reader")

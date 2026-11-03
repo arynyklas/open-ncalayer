@@ -121,6 +121,7 @@ impl OperationError {
             Self::AuditFailed => ErrorCode::AuditFailed,
             Self::AfterKeyUse { source, .. } => source.code(),
             Self::Key(error) => error.into(),
+            Self::Timestamp(oncl_pki::tsp::TspError::Http(_)) => ErrorCode::Io,
             Self::Timestamp(_) => ErrorCode::InvalidInput,
             Self::Processing(error) => KeyFailureKind::from(error).into(),
         }
@@ -186,6 +187,7 @@ impl From<OperationError> for KeyError {
             OperationError::SecretRequired => KeyFailureKind::SecretRequired,
             OperationError::KeyNotFound => KeyFailureKind::KeyNotFound,
             OperationError::InvalidKeySource => KeyFailureKind::InvalidKeySource,
+            OperationError::Timestamp(oncl_pki::tsp::TspError::Http(_)) => KeyFailureKind::Io,
             OperationError::Timestamp(_) => KeyFailureKind::InvalidInput,
             OperationError::AuditFailed => KeyFailureKind::AuditFailed,
         };

@@ -1,8 +1,10 @@
 //! Bounded memory-only intake for certificates, tokens and secret containers.
+//! Replacements admit old plus new live capacity and wipe the old owner before
+//! deallocation. Known hints and bounded geometric growth avoid per-chunk moves.
 use super::Source;
 use crate::resource::{ProcessingError, ResourceReservation, ResourceScope};
 use std::io::{self, Read};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 /// Immutable charged bytes. No owning buffer or independent reservation escapes.
 pub struct MetadataInput {
     bytes: Zeroizing<Vec<u8>>,
@@ -34,6 +36,13 @@ impl MetadataInput {
         let _chunk = scope.reserve_memory(4096)?;
         let mut bytes = Zeroizing::new(Vec::new());
         let mut chunk = Zeroizing::new([0u8; 4096]);
+        let maximum_capacity =
+            usize::try_from(maximum).map_err(|_| ProcessingError::MemoryLimit)?;
+        let initial_capacity = source
+            .known_len()
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| ProcessingError::MemoryLimit)?;
         loop {
             scope.checkpoint()?;
             let remaining = maximum.saturating_sub(bytes.len() as u64);
@@ -67,18 +76,37 @@ impl MetadataInput {
             if count as u64 > remaining {
                 return Err(ProcessingError::ContainerLimit);
             }
-            // Account both the old and new allocation while reallocating.
-            let old = bytes.capacity() as u64;
-            let target = bytes
+            let required = bytes
                 .len()
                 .checked_add(count)
                 .ok_or(ProcessingError::MemoryLimit)?;
-            memory.grow(target as u64)?;
-            metadata.grow((target as u64).saturating_sub(metadata.bytes()))?;
-            bytes
-                .try_reserve_exact(count)
-                .map_err(|_| ProcessingError::MemoryLimit)?;
-            memory.shrink(old)?;
+            if required > bytes.capacity() {
+                let old_capacity = bytes.capacity();
+                let capacity = if old_capacity == 0 {
+                    initial_capacity.unwrap_or(chunk.len()).max(required)
+                } else {
+                    old_capacity.saturating_mul(2).max(required)
+                }
+                .min(maximum_capacity);
+                // Both owners are live during replacement. Never ask Vec to
+                // reallocate an allocation that already contains secret bytes.
+                memory.grow(capacity as u64)?;
+                metadata.grow(capacity as u64)?;
+                let mut replacement = Zeroizing::new(Vec::new());
+                replacement
+                    .try_reserve_exact(capacity)
+                    .map_err(|_| ProcessingError::MemoryLimit)?;
+                // Global Vec allocation uses the requested layout. Fail closed
+                // before copying secrets if an allocator ever over-reserves it.
+                if replacement.capacity() != capacity {
+                    return Err(ProcessingError::MemoryLimit);
+                }
+                replacement.extend_from_slice(&bytes);
+                bytes.zeroize();
+                bytes = replacement; // the retired owner was wiped before free
+                memory.shrink(old_capacity as u64)?;
+                metadata.shrink(old_capacity as u64)?;
+            }
             bytes.extend_from_slice(&chunk[..count]);
         }
         Ok(Self {

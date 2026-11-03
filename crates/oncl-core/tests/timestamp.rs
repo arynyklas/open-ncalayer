@@ -526,6 +526,7 @@ fn acquisition_nonce_mismatch_preserves_original_tsp_cause_without_output() {
         error,
         oncl_core::OperationError::Timestamp(oncl_pki::tsp::TspError::NonceMismatch)
     ));
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert!(output.is_empty());
     assert_eq!(error.applied_state(), AppliedState::NotApplied);
 }
@@ -663,4 +664,63 @@ fn authentic_document_snapshot_stamp_counts_source_once_and_token_as_output_only
     assert_eq!(report.bytes_in(), 0);
     assert_eq!(ctx.resources().progress().bytes_in, DATA.len() as u64);
     assert_eq!(ctx.resources().progress().bytes_out, output.len() as u64);
+}
+
+#[test]
+fn refused_real_tsa_connection_is_io_and_retains_original_transport_cause() {
+    use oncl_pki::http::{HttpErrorKind, ProxySetting, UreqTransport};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let fixture = SignedFixtures::new(&origin, NOW, Status::Good);
+    let transport = Arc::new(UreqTransport::with_proxy(ProxySetting::None));
+    let engine = Engine::new(
+        EngineServices::hash_only(ResourceLimits::default())
+            .with_validation(fixture.services_with(true, transport)),
+    )
+    .unwrap();
+    drop(listener); // The actual pinned destination refuses TCP, not a fake parser.
+    let mut ctx = begin(&engine, Action::Stamp);
+    let mut data = DATA;
+    let mut output = Vec::new();
+    let error = engine
+        .stamp(
+            &StampRequest::new(fixture.spec()),
+            Source::sequential(&mut data, None),
+            &mut output,
+            &mut ctx,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, oncl_core::OperationError::Timestamp(oncl_pki::tsp::TspError::Http(cause))
+        if matches!(cause.kind, HttpErrorKind::Connect | HttpErrorKind::Timeout) && !cause.message.is_empty()),
+        "{error:?}"
+    );
+    assert_eq!(error.code(), ErrorCode::Io);
+    let cause = match &error {
+        oncl_core::OperationError::Timestamp(oncl_pki::tsp::TspError::Http(cause)) => cause,
+        _ => unreachable!("the typed transport variant was checked"),
+    };
+    let nested = std::error::Error::source(&error)
+        .and_then(std::error::Error::source)
+        .and_then(|source| source.downcast_ref::<oncl_pki::http::HttpError>());
+    assert_eq!(nested, Some(cause));
+    assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    assert!(output.is_empty());
+    let bridge: oncl_pki::key::KeyError = error.into();
+    assert_eq!(ErrorCode::from(&bridge), ErrorCode::Io);
+}
+
+#[test]
+fn timestamp_protocol_mismatches_remain_invalid_input_with_distinct_causes() {
+    use oncl_pki::tsp::TspError;
+    for cause in [
+        TspError::NonceMismatch,
+        TspError::PolicyMismatch,
+        TspError::ImprintMismatch,
+        TspError::Malformed("invalid TimeStampResp".into()),
+    ] {
+        let error = oncl_core::OperationError::Timestamp(cause);
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert!(std::error::Error::source(&error).is_some());
+    }
 }
