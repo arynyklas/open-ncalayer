@@ -140,6 +140,18 @@ impl WsseVerifyProfile {
 impl SourceWsseSignProfile {
     pub fn preflight(&self, scope: &ResourceScope) -> Result<ResourceReservation> {
         let mut admission = self.verification.preflight(scope)?;
+        if self.verification.xml.required_level.is_some() {
+            return Err(XmlSourceError::Unsupported(
+                "WSSE generation does not create EN baseline properties",
+            ));
+        }
+        let references = 1usize
+            .checked_add(self.verification.required_headers.len())
+            .and_then(|n| n.checked_add(usize::from(self.timestamp.is_some())))
+            .ok_or(ProcessingError::MetadataLimit)?;
+        if references > self.verification.xml.max_references {
+            return Err(ProcessingError::MetadataLimit.into());
+        }
         bounded_id(&self.body_id, &self.verification.xml)?;
         bounded_id(&self.token_id, &self.verification.xml)?;
         if let Some(timestamp) = &self.timestamp {
@@ -151,8 +163,169 @@ impl SourceWsseSignProfile {
                 + self.timestamp.as_ref().map_or(0, |t| t.id.len())
                 + 256) as u64,
         )?;
+        let _sizing = scope.reserve_metadata(
+            16384 + references as u64 * (self.verification.xml.xml.max_id_bytes as u64 + 512),
+        )?;
+        minimum_generation_metadata(
+            self,
+            "",
+            self.verification
+                .required_headers
+                .iter()
+                .map(String::as_str)
+                .chain(self.timestamp.iter().map(|timestamp| timestamp.id.as_str())),
+        )?;
         Ok(admission)
     }
+}
+fn token_metadata(profile: &SourceWsseSignProfile, certificate: &[u8]) -> (String, String) {
+    let encoded = STANDARD.encode(certificate);
+    match profile.token_reference {
+        TokenReference::NcanodeX509KeyIdentifier => (
+            String::new(),
+            format!(
+                "<wsse:SecurityTokenReference xmlns:wsse=\"{WSSE_NS}\"><wsse:KeyIdentifier EncodingType=\"{BASE64_BINARY}\" ValueType=\"{X509_V3}\">{encoded}</wsse:KeyIdentifier></wsse:SecurityTokenReference>"
+            ),
+        ),
+        TokenReference::BinarySecurityToken => (
+            format!(
+                "<wsse:BinarySecurityToken xmlns:wsse=\"{WSSE_NS}\" xmlns:wsu=\"{WSU_NS}\" wsu:Id=\"{}\" EncodingType=\"{BASE64_BINARY}\" ValueType=\"{X509_V3}\">{encoded}</wsse:BinarySecurityToken>",
+                crate::escape_attribute(&profile.token_id)
+            ),
+            format!(
+                "<wsse:SecurityTokenReference xmlns:wsse=\"{WSSE_NS}\"><wsse:Reference URI=\"#{}\" ValueType=\"{X509_V3}\"/></wsse:SecurityTokenReference>",
+                crate::escape_attribute(&profile.token_id)
+            ),
+        ),
+    }
+}
+fn minimum_generation_metadata<'a>(
+    profile: &SourceWsseSignProfile,
+    body_id: &str,
+    ids: impl Iterator<Item = &'a str> + Clone,
+) -> Result<()> {
+    // Layout-only lower bound from the SAME signature renderer, not a crypto
+    // result or a stand-in certificate. Actual selected DER is checked later.
+    let (token, key_info) = token_metadata(profile, &[]);
+    let uri = format!("#{body_id}");
+    let mut supported = false;
+    for algorithm in profile.verification.xml.allowed_signature_algorithms {
+        let Some((signature_uri, digest_uri)) = crate::signing_uris(*algorithm) else {
+            continue;
+        };
+        supported = true;
+        let digest = oncl_pki::digest::HashState::new(algorithm.hash_alg()).finish();
+        let references: Vec<_> = ids.clone().map(|id| (id.to_owned(), digest)).collect();
+        let template = crate::sign::Template {
+            algorithms: crate::Algorithms {
+                signature: *algorithm,
+                signature_uri,
+                digest: algorithm.hash_alg(),
+                digest_uri,
+            },
+            method: C14n::Exclusive,
+            uri: &uri,
+            transforms: &[C14n::Exclusive.uri()],
+            digest: digest.as_bytes().to_vec(),
+            cert: Vec::new(),
+            id: None,
+            object: None,
+            reference_c14n: C14n::Exclusive,
+            separator: "",
+            line_breaks: false,
+        };
+        let length = template.wsse_metadata_len(
+            &crate::sign::WsseTemplate {
+                key_info: &key_info,
+                references: &references,
+            },
+            &[],
+        );
+        if length
+            .checked_add(token.len())
+            .is_some_and(|n| n <= profile.verification.xml.max_metadata_bytes)
+        {
+            return Ok(());
+        }
+    }
+    if !supported {
+        return Err(XmlSourceError::AlgorithmDenied);
+    }
+    Err(ProcessingError::MetadataLimit.into())
+}
+fn security_open(profile: &WsseVerifyProfile) -> String {
+    let soap = profile.soap;
+    let ns = soap.namespace();
+    let role = profile
+        .role
+        .as_ref()
+        .map(|role| {
+            format!(
+                " env:{}=\"{}\"",
+                soap.role_attribute(),
+                crate::escape_attribute(role)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "<wsse:Security xmlns:wsse=\"{WSSE_NS}\" xmlns:env=\"{ns}\" env:mustUnderstand=\"1\"{role}>"
+    )
+}
+fn generation_framing(layout: &Layout, profile: &WsseVerifyProfile) -> Result<()> {
+    let mut total = 0u64;
+    let mut add = |length: u64| -> Result<()> {
+        total = total
+            .checked_add(length)
+            .ok_or(ProcessingError::MetadataLimit)?;
+        if length > profile.xml.max_metadata_bytes as u64
+            || total > profile.xml.max_metadata_bytes as u64
+        {
+            return Err(ProcessingError::MetadataLimit.into());
+        }
+        Ok(())
+    };
+    let size = |element: &Element| -> Result<u64> {
+        Ok(if let Some(closing) = element.closing {
+            element
+                .start
+                .len
+                .checked_add(closing.len)
+                .ok_or(ProcessingError::MetadataLimit)?
+        } else {
+            element
+                .start
+                .len
+                .checked_add(element.qname.len() as u64 + 2)
+                .ok_or(ProcessingError::MetadataLimit)?
+        })
+    };
+    let selected = recipient(layout, profile)?;
+    for security in &layout.securities {
+        if !security.signatures.is_empty()
+            || selected.is_some_and(|s| s.element.whole == security.element.whole)
+        {
+            add(size(&security.element)?)?;
+        }
+    }
+    if selected.is_none() {
+        add(security_open(profile).len() as u64 + "</wsse:Security>".len() as u64)?;
+    }
+    if layout.header_only_security {
+        if let Some(header) = &layout.header {
+            add(size(header)?)?;
+        } else {
+            let name_len = layout
+                .envelope
+                .qname
+                .rsplit_once(':')
+                .map_or(6, |(prefix, _)| prefix.len() + 7);
+            add((name_len as u64)
+                .checked_mul(2)
+                .and_then(|n| n.checked_add(5))
+                .ok_or(ProcessingError::MetadataLimit)?)?;
+        }
+    }
+    Ok(())
 }
 fn invalid(s: &'static str) -> XmlSourceError {
     XmlSourceError::Malformed(s)
@@ -177,6 +350,7 @@ fn profile(p: &WsseVerifyProfile) -> Result<()> {
         || p.xml.max_signers > 64
         || p.xml.max_references == 0
         || p.xml.max_references > 4096
+        || p.xml.max_manifest_depth > 16
         || p.xml.max_metadata_bytes == 0
         || p.xml.max_metadata_bytes > 1048576
         || p.xml.max_work == 0
@@ -186,11 +360,19 @@ fn profile(p: &WsseVerifyProfile) -> Result<()> {
     {
         return Err(ProcessingError::InvalidLimits.into());
     }
+    if let Some(limits) = &p.xml.evidence_limits {
+        limits.validate()?;
+    }
     if p.role
         .as_ref()
         .is_some_and(|r| r.is_empty() || r.len() > p.xml.xml.max_id_bytes || !r.contains(':'))
     {
         return Err(invalid("WSSE host role must be an absolute URI"));
+    }
+    if p.soap == SoapVersion::Soap12
+        && p.role.as_deref() == Some("http://www.w3.org/2003/05/soap-envelope/role/none")
+    {
+        return Err(invalid("SOAP role/none cannot be a host processing target"));
     }
     for (i, id) in p.required_headers.iter().enumerate() {
         bounded_id(id, &p.xml)?;
@@ -312,7 +494,15 @@ fn layout(
                     }
                     soap = Some(version);
                     envelope = Some(element_start(event)?);
-                } else if matches!(n.local(), "Envelope" | "Header" | "Body") {
+                } else if matches!(n.local(), "Envelope" | "Header" | "Body")
+                    && matches!(
+                        n.namespace(),
+                        Some(
+                            "http://schemas.xmlsoap.org/soap/envelope/"
+                                | "http://www.w3.org/2003/05/soap-envelope"
+                        )
+                    )
+                {
                     if event.depth != 1
                         || n.namespace()
                             != Some(soap.ok_or_else(|| invalid("SOAP root"))?.namespace())
@@ -618,7 +808,7 @@ fn token_shape(node: roxmltree::Node<'_, '_>) -> Result<()> {
     )?;
     if node.attribute("ValueType") != Some(X509_V3)
         || node.attribute("EncodingType") != Some(BASE64_BINARY)
-        || node.children().any(|n| n.is_element())
+        || node.children().any(|n| !n.is_text())
     {
         return Err(XmlSourceError::Unsupported(
             "X509v3 token type/encoding/content",
@@ -854,6 +1044,17 @@ fn timestamp(
         .attribute((WSU_NS, "Id"))
         .ok_or_else(|| invalid("Timestamp WSU Id"))?;
     bounded_id(id, p)?;
+    if root.children().any(|node| {
+        !node.is_element()
+            && (!node.is_text()
+                || node
+                    .text()
+                    .unwrap_or("")
+                    .bytes()
+                    .any(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n')))
+    }) {
+        return Err(invalid("unsupported non-layout Timestamp framing"));
+    }
     let mut children = root.children().filter(roxmltree::Node::is_element);
     let created = children.next().ok_or_else(|| invalid("missing Created"))?;
     let expires = children.next().ok_or_else(|| invalid("missing Expires"))?;
@@ -869,14 +1070,21 @@ fn timestamp(
     }
     let parse_time = |node: roxmltree::Node<'_, '_>| -> Result<time::OffsetDateTime> {
         attributes(node, &[], false)?;
-        if node.children().any(|n| n.is_element()) {
-            return Err(invalid("Timestamp nested value"));
+        let mut value = String::with_capacity(64);
+        for child in node.children() {
+            if !child.is_text() {
+                return Err(invalid("unsupported mixed Timestamp value"));
+            }
+            let text = child.text().ok_or_else(|| invalid("Timestamp value"))?;
+            if value.len().checked_add(text.len()).is_none_or(|n| n > 64) {
+                return Err(invalid("Timestamp UTC lexical value"));
+            }
+            value.push_str(text);
         }
-        let value = node.text().ok_or_else(|| invalid("Timestamp value"))?;
-        if value.len() > 64 || !value.ends_with('Z') {
+        if !value.ends_with('Z') {
             return Err(invalid("Timestamp UTC lexical value"));
         }
-        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        time::OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339)
             .map_err(|_| invalid("Timestamp date"))
     };
     Ok((id.to_owned(), parse_time(created)?, parse_time(expires)?))
@@ -1142,6 +1350,7 @@ pub struct PreparedWsseSign<'a> {
     store: TemporaryStore,
     existing: Option<XmlVerification>,
     _metadata: ResourceReservation,
+    place: crate::sign::Placement,
 }
 fn canonical_options(region: Region) -> Options<'static> {
     Options {
@@ -1202,6 +1411,21 @@ pub fn prepare_source<'a>(
     if p.mode == XmlSignMode::Add && recipient(&l, &p.verification)?.is_none() {
         return Err(invalid("WSSE Add requires selected Security"));
     }
+    if l.securities
+        .iter()
+        .map(|security| security.signatures.len())
+        .sum::<usize>()
+        .checked_add(1)
+        .is_none_or(|n| n > vp.max_signers)
+    {
+        return Err(ProcessingError::MetadataLimit.into());
+    }
+    let parent = recipient(&l, &p.verification)?
+        .map(|s| s.element.whole)
+        .or_else(|| l.header.as_ref().map(|header| header.whole))
+        .unwrap_or(l.envelope.whole);
+    let place = crate::sign::placement(&mut document, parent, vp.max_metadata_bytes, scope)?;
+    generation_framing(&l, &p.verification)?;
     let body_id = l.body_id.clone().unwrap_or_else(|| p.body_id.clone());
     bounded_id(&body_id, vp)?;
     if l.body_id.is_none() && document.lookup_id(&body_id)?.is_some() {
@@ -1294,6 +1518,19 @@ pub fn prepare_source<'a>(
     } else {
         String::new()
     };
+    if additional
+        .len()
+        .checked_add(1)
+        .is_none_or(|n| n > vp.max_references)
+    {
+        return Err(ProcessingError::MetadataLimit.into());
+    }
+    {
+        let _sizing = scope.reserve_metadata(
+            16384 + additional.len() as u64 * (vp.xml.max_id_bytes as u64 + 512) * 4,
+        )?;
+        minimum_generation_metadata(p, &body_id, additional.iter().map(|part| part.id.as_str()))?;
+    }
     let hashing = additional
         .iter()
         .try_fold(body.len(), |n, part| n.checked_add(part.stage.len()))
@@ -1318,6 +1555,7 @@ pub fn prepare_source<'a>(
         work,
         store: store.clone(),
         existing: None,
+        place,
         _metadata: admission,
     })
 }
@@ -1330,6 +1568,7 @@ impl PreparedWsseSign<'_> {
         clock: Option<&(dyn Fn() -> time::OffsetDateTime + Send + Sync)>,
     ) -> Result<()> {
         self.document.check_scope(scope)?;
+        self.existing = None;
         let now = clock.map_or(validation.now, |clock| clock());
         if now < validation.now {
             return Err(invalid(
@@ -1376,6 +1615,17 @@ impl PreparedWsseSign<'_> {
             return Err(invalid(
                 "existing WSSE signature/body/token validation failed",
             ));
+        }
+        let existing_references = report
+            .signatures()
+            .iter()
+            .try_fold(0usize, |n, signer| n.checked_add(signer.references().len()))
+            .ok_or(ProcessingError::MetadataLimit)?;
+        if existing_references
+            .checked_add(self.additional.len() + 1)
+            .is_none_or(|n| n > self.profile.verification.xml.max_references)
+        {
+            return Err(ProcessingError::MetadataLimit.into());
         }
         self.existing = Some(report);
         Ok(())
@@ -1426,32 +1676,9 @@ impl PreparedWsseSign<'_> {
         if cert.len() > p.max_metadata_bytes / 4 {
             return Err(ProcessingError::MetadataLimit.into());
         }
-        let encoded = STANDARD.encode(&cert);
-        let (token, key_info) = match self.profile.token_reference {
-            TokenReference::NcanodeX509KeyIdentifier => (
-                String::new(),
-                format!(
-                    "<wsse:SecurityTokenReference xmlns:wsse=\"{WSSE_NS}\"><wsse:KeyIdentifier EncodingType=\"{BASE64_BINARY}\" ValueType=\"{X509_V3}\">{encoded}</wsse:KeyIdentifier></wsse:SecurityTokenReference>"
-                ),
-            ),
-            TokenReference::BinarySecurityToken => (
-                format!(
-                    "<wsse:BinarySecurityToken xmlns:wsse=\"{WSSE_NS}\" xmlns:wsu=\"{WSU_NS}\" wsu:Id=\"{}\" EncodingType=\"{BASE64_BINARY}\" ValueType=\"{X509_V3}\">{encoded}</wsse:BinarySecurityToken>",
-                    crate::escape_attribute(&self.profile.token_id)
-                ),
-                format!(
-                    "<wsse:SecurityTokenReference xmlns:wsse=\"{WSSE_NS}\"><wsse:Reference URI=\"#{}\" ValueType=\"{X509_V3}\"/></wsse:SecurityTokenReference>",
-                    crate::escape_attribute(&self.profile.token_id)
-                ),
-            ),
-        };
+        let (token, key_info) = token_metadata(self.profile, &cert);
         let security = recipient(&self.layout, &self.profile.verification)?;
-        let parent = security
-            .map(|s| s.element.whole)
-            .or_else(|| self.layout.header.as_ref().map(|h| h.whole))
-            .unwrap_or(self.layout.envelope.whole);
-        let place =
-            crate::sign::placement(&mut self.document, parent, p.max_metadata_bytes, scope)?;
+        let place = self.place;
         let uri = format!("#{}", self.body_id);
         let template = crate::sign::Template {
             algorithms: crate::Algorithms {
@@ -1464,13 +1691,42 @@ impl PreparedWsseSign<'_> {
             uri: &uri,
             transforms: &[C14n::Exclusive.uri()],
             digest: digest.as_bytes().to_vec(),
-            cert,
+            // Actual DER is already in STR/BST, not the unused X509Data slot.
+            cert: Vec::new(),
             id: None,
             object: None,
             reference_c14n: C14n::Exclusive,
             separator: "",
             line_breaks: false,
         };
+        let signature_bound = match algorithm {
+            oncl_pki::key::SigAlg::Gost2004 => 64,
+            oncl_pki::key::SigAlg::Gost2015_512 => 128,
+            oncl_pki::key::SigAlg::RsaSha256 => signer
+                .certificate()
+                .tbs_certificate()
+                .subject_public_key_info()
+                .subject_public_key
+                .as_bytes()
+                .ok_or_else(|| invalid("RSA public key encoding"))?
+                .len(),
+            oncl_pki::key::SigAlg::RsaSha1 => return Err(XmlSourceError::AlgorithmDenied),
+        };
+        let signature_layout = vec![0; signature_bound];
+        let size = template
+            .wsse_metadata_len(
+                &crate::sign::WsseTemplate {
+                    key_info: &key_info,
+                    references: &references,
+                },
+                &signature_layout,
+            )
+            .checked_add(token.len())
+            .and_then(|n| n.checked_add(self.timestamp_xml.len()))
+            .ok_or(ProcessingError::MetadataLimit)?;
+        if size > p.max_metadata_bytes {
+            return Err(ProcessingError::MetadataLimit.into());
+        }
         let prepared = template.signed_with(
             |rendered, _, method, hash| {
                 let xml = crate::sign::wrap(&place.context, rendered)?;
@@ -1515,23 +1771,9 @@ impl PreparedWsseSign<'_> {
                 format!("{}{content}{}", place.open, place.close),
             ));
         } else {
-            let soap = self.profile.verification.soap;
-            let ns = soap.namespace();
-            let role = self
-                .profile
-                .verification
-                .role
-                .as_ref()
-                .map(|r| {
-                    format!(
-                        " env:{}=\"{}\"",
-                        soap.role_attribute(),
-                        crate::escape_attribute(r)
-                    )
-                })
-                .unwrap_or_default();
             let security = format!(
-                "<wsse:Security xmlns:wsse=\"{WSSE_NS}\" xmlns:env=\"{ns}\" env:mustUnderstand=\"1\"{role}>{content}</wsse:Security>"
+                "{}{content}</wsse:Security>",
+                security_open(&self.profile.verification)
             );
             if self.layout.header.is_some() {
                 insertions.push((
@@ -1540,7 +1782,7 @@ impl PreparedWsseSign<'_> {
                     format!("{}{security}{}", place.open, place.close),
                 ));
             } else {
-                let qname = self.layout.body.qname.rsplit_once(':').map_or_else(
+                let qname = self.layout.envelope.qname.rsplit_once(':').map_or_else(
                     || String::from("Header"),
                     |(prefix, _)| format!("{prefix}:Header"),
                 );
@@ -1633,10 +1875,19 @@ pub fn sign_source(
             "Add requires prepared existing-signature validation",
         ));
     }
-    prepare_source(input, p, store, scope)?.finish(signer, &mut External(output), scope)
+    let prepared = prepare_source(input, p, store, scope)?;
+    if p.timestamp.is_some()
+        || recipient(&prepared.layout, &p.verification)?
+            .is_some_and(|security| !security.timestamps.is_empty())
+    {
+        return Err(XmlSourceError::Unsupported(
+            "Timestamp-bearing creation requires an explicit trusted validation context",
+        ));
+    }
+    prepared.finish(signer, &mut External(output), scope)
 }
 pub fn sign_prepared(
-    prepared: PreparedWsseSign<'_>,
+    mut prepared: PreparedWsseSign<'_>,
     signer: &mut dyn DigestSigner,
     validation: &ValidationContext<'_>,
     network: &NetworkPolicy,
@@ -1644,6 +1895,7 @@ pub fn sign_prepared(
     output: &mut XmlSignatureOutput<'_>,
     scope: &mut ResourceScope,
 ) -> Result<(XmlSignSummary, WsseVerification)> {
+    prepared.verify_existing(validation, network, scope, clock)?;
     let _profile_admission = prepared.profile.verification.preflight(scope)?;
     let profile = prepared.profile.verification.clone();
     let store = prepared.store.clone();
@@ -1678,6 +1930,22 @@ pub fn sign_prepared(
 
 /// Exact XML-owned security geometry, not an exemption for arbitrary Header data.
 /// Existing signature/proof geometry is independently derived by the shared scanner.
+fn framing_push(
+    regions: &mut Vec<Region>,
+    region: Region,
+    total: &mut u64,
+    cap: usize,
+) -> Result<()> {
+    let next = total
+        .checked_add(region.len)
+        .ok_or(ProcessingError::MetadataLimit)?;
+    if region.len > cap as u64 || next > cap as u64 {
+        return Err(ProcessingError::MetadataLimit.into());
+    }
+    geometry_push(regions, region)?;
+    *total = next;
+    Ok(())
+}
 fn geometry_push(regions: &mut Vec<Region>, region: Region) -> Result<()> {
     if regions.len() == 4096 {
         return Err(ProcessingError::MetadataLimit.into());
@@ -1735,13 +2003,19 @@ pub(crate) fn metadata_regions(
         return Ok((regions, admission));
     }
     regions.extend_from_slice(&l.body_metadata);
+    let mut framing = 0;
     for security in &l.securities {
         if security.signatures.is_empty() {
             continue;
         }
-        geometry_push(&mut regions, security.element.start)?;
+        framing_push(
+            &mut regions,
+            security.element.start,
+            &mut framing,
+            p.max_metadata_bytes,
+        )?;
         if let Some(closing) = security.element.closing {
-            geometry_push(&mut regions, closing)?;
+            framing_push(&mut regions, closing, &mut framing, p.max_metadata_bytes)?;
         }
         for token in &security.tokens {
             let b = bound(document, *token, scope)?;
@@ -1764,9 +2038,14 @@ pub(crate) fn metadata_regions(
     if l.header_only_security
         && let Some(header) = &l.header
     {
-        geometry_push(&mut regions, header.start)?;
+        framing_push(
+            &mut regions,
+            header.start,
+            &mut framing,
+            p.max_metadata_bytes,
+        )?;
         if let Some(closing) = header.closing {
-            geometry_push(&mut regions, closing)?;
+            framing_push(&mut regions, closing, &mut framing, p.max_metadata_bytes)?;
         }
     }
     Ok((regions, admission))

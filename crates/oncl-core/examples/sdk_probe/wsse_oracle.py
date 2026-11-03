@@ -17,6 +17,7 @@ from pathlib import Path
 from lxml import etree
 import cryptography
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
@@ -183,7 +184,16 @@ def main():
     def duplicate(r):
         etree.SubElement(r.find(f"{{{SOAP}}}Header"), "{urn:attacker}duplicate", {f"{{{WSU}}}Id": body(r).get(f"{{{WSU}}}Id")})
     report["negative_controls"].append(negative("duplicate-wsu-id", root, duplicate))
-    report["negative_controls"].append(negative("changed-signedinfo", root, lambda r: r.find(f".//{{{DS}}}SignatureMethod").set("Algorithm", "urn:attacker")))
+    report["negative_controls"].append(negative("unsupported-signature-algorithm", root, lambda r: r.find(f".//{{{DS}}}SignatureMethod").set("Algorithm", "urn:attacker")))
+    changed_info = copy.deepcopy(root)
+    changed_info.find(f".//{{{DS}}}SignedInfo").set("Id", "changed-supported-signed-info")
+    insist(canonical(body(changed_info)) == canonical(body(root)), "SignedInfo control changed Body")
+    try:
+        verify(changed_info)
+    except InvalidSignature:
+        report["negative_controls"].append("supported-signedinfo-change-fails-actual-rsa-math")
+    else:
+        raise AssertionError("supported SignedInfo mutation did not fail at RSA signature verification")
     report["negative_controls"].append(negative("wrong-token-valuetype", root, lambda r: r.find(f".//{{{WSSE}}}KeyIdentifier").set("ValueType", "urn:attacker")))
     report["negative_controls"].append(negative("wrong-header-recipient", root, lambda r: r.find(f".//{{{WSSE}}}Security").set(f"{{{SOAP}}}actor", "urn:other")))
     changed = copy.deepcopy(root)

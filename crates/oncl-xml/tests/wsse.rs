@@ -32,16 +32,39 @@ fn signed(xml: &[u8], profile: &SourceWsseSignProfile) -> Vec<u8> {
     let mut key = oncl_pki::pkcs12::load(&read(&f.path), &f.password)
         .unwrap()
         .remove(0);
-    let mut out = Vec::new();
-    wsse::sign_source(
+    let anchors = CaSet::new(vec![
+        oncl_pki::cert::parse(&oncl_testkit::synthetic_cert("root-rsa")).unwrap(),
+    ]);
+    let validation = ValidationContext {
+        policy: ValidationPolicy::OfflineReport,
+        now: time::OffsetDateTime::from_unix_timestamp(1793707200).unwrap(),
+        anchors: &anchors,
+        intermediates: &[],
+        http: &Offline,
+    };
+    let prepared = wsse::prepare_source(
         Source::sequential(&mut Cursor::new(xml), None),
         profile,
-        &mut key,
         &store,
-        &mut out,
         &mut scope,
     )
     .unwrap();
+    let mut stage = store.stage(&mut scope).unwrap();
+    let mut output = oncl_pki::io::XmlSignatureOutput::new(&mut stage, &scope).unwrap();
+    let (_, report) = wsse::sign_prepared(
+        prepared,
+        &mut key,
+        &validation,
+        &NetworkPolicy::deny_all(),
+        None,
+        &mut output,
+        &mut scope,
+    )
+    .unwrap();
+    drop(report);
+    output.finish(&scope).unwrap();
+    let mut out = Vec::new();
+    stage.copy_to(&mut out).unwrap();
     out
 }
 fn check(
@@ -423,4 +446,492 @@ fn malformed_unreferenced_x509_token_is_not_ignored_or_free_application_data() {
     );
     let changed = original.replace("</wsse:Security>", &format!("{token}</wsse:Security>"));
     assert!(check(changed.as_bytes(), &WsseVerifyProfile::default()).is_err());
+}
+
+#[test]
+fn fix_header_creation_uses_soap_namespace_not_body_local_binding() {
+    for body in [
+        "<b:Body xmlns:b='http://schemas.xmlsoap.org/soap/envelope/'><m:request xmlns:m='urn:app' a='&quot;'>protected</m:request></b:Body>",
+        "<Body xmlns='http://schemas.xmlsoap.org/soap/envelope/'><m:request xmlns:m='urn:app' a='&quot;'>protected</m:request></Body>",
+    ] {
+        let input = format!(
+            "<e:Envelope xmlns:e='http://schemas.xmlsoap.org/soap/envelope/'>{body}</e:Envelope>"
+        );
+        let output = signed(input.as_bytes(), &SourceWsseSignProfile::default());
+        assert!(
+            String::from_utf8_lossy(&output)
+                .contains("<m:request xmlns:m='urn:app' a='&quot;'>protected</m:request>")
+        );
+        assert_eq!(
+            check(&output, &WsseVerifyProfile::default())
+                .unwrap()
+                .xml
+                .validation
+                .signers[0]
+                .signature,
+            CheckStatus::Passed
+        );
+    }
+}
+
+#[test]
+fn fix_foreign_application_container_local_names_are_not_soap() {
+    let input = SOAP
+        .replace(
+            "</s:Header>",
+            "<m:Header xmlns:m='urn:application'>application header</m:Header></s:Header>",
+        )
+        .replace(
+            ">protected<",
+            "><m:Envelope><m:Header/><m:Body>protected</m:Body></m:Envelope><",
+        );
+    let output = signed(input.as_bytes(), &SourceWsseSignProfile::default());
+    assert_eq!(
+        check(&output, &WsseVerifyProfile::default())
+            .unwrap()
+            .xml
+            .validation
+            .signers[0]
+            .signature,
+        CheckStatus::Passed
+    );
+    let nested = input
+        .replace("<m:Body>", "<s:Body>")
+        .replace("</m:Body>", "</s:Body>");
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    assert!(
+        wsse::prepare_source(
+            Source::sequential(&mut Cursor::new(nested), None),
+            &SourceWsseSignProfile::default(),
+            &store,
+            &mut scope
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn fix_unicode_header_and_timestamp_ids_have_one_bare_fragment_contract() {
+    let now = time::OffsetDateTime::from_unix_timestamp(1793707200).unwrap();
+    let mut p = SourceWsseSignProfile {
+        body_id: "body-é".into(),
+        ..Default::default()
+    };
+    p.verification.required_headers = vec!["route-é".into()];
+    p.timestamp = Some(wsse::WsseTimestamp {
+        id: "ts-é".into(),
+        created: now - time::Duration::SECOND,
+        expires: now + time::Duration::MINUTE,
+    });
+    let input = SOAP.replace(
+        "<m:note",
+        &format!("<m:note xmlns:u='{}' u:Id='route-é'", wsse::WSU_NS),
+    );
+    let output = signed(input.as_bytes(), &p);
+    let text = std::str::from_utf8(&output).unwrap();
+    for id in ["body-é", "route-é", "ts-é"] {
+        assert!(text.contains(&format!("URI=\"#{id}\"")));
+    }
+    assert_eq!(
+        check(&output, &p.verification)
+            .unwrap()
+            .xml
+            .validation
+            .signers[0]
+            .signature,
+        CheckStatus::Passed
+    );
+}
+
+struct CountingSigner {
+    entry: oncl_pki::pkcs12::KeyEntry,
+    uses: usize,
+}
+impl CountingSigner {
+    fn new() -> Self {
+        let f = synthetic("user-rsa-sign");
+        Self {
+            entry: oncl_pki::pkcs12::load(&read(&f.path), &f.password)
+                .unwrap()
+                .remove(0),
+            uses: 0,
+        }
+    }
+}
+impl oncl_pki::key::DigestSigner for CountingSigner {
+    fn certificate(&self) -> &oncl_pki::cert::Certificate {
+        &self.entry.cert
+    }
+    fn algorithm(&self) -> SigAlg {
+        SigAlg::RsaSha256
+    }
+    fn sign_digest(
+        &mut self,
+        digest: &oncl_pki::digest::DigestValue,
+    ) -> Result<Vec<u8>, oncl_pki::key::KeyError> {
+        self.uses += 1;
+        self.entry.key.sign_digest(SigAlg::RsaSha256, digest)
+    }
+}
+
+#[test]
+fn fix_public_create_time_policy_is_mandatory_at_private_boundary() {
+    let now = time::OffsetDateTime::from_unix_timestamp(1793707200).unwrap();
+    for existing in [false, true] {
+        for prepared_boundary in [false, true] {
+            let limits = ResourceLimits::default();
+            let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+            let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+            let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+            let mut signer = CountingSigner::new();
+            let mut p = SourceWsseSignProfile::default();
+            let mut input = SOAP.to_owned();
+            if existing {
+                input = input.replace("</s:Header>", &format!("<w:Security xmlns:w='{}'><u:Timestamp xmlns:u='{}' u:Id='future'><u:Created>2026-11-04T12:00:00Z</u:Created><u:Expires>2026-11-04T12:01:00Z</u:Expires></u:Timestamp></w:Security></s:Header>", wsse::WSSE_NS, wsse::WSU_NS));
+            } else {
+                p.timestamp = Some(wsse::WsseTimestamp {
+                    id: "future".into(),
+                    created: now + time::Duration::MINUTE,
+                    expires: now + time::Duration::minutes(2),
+                });
+            }
+            let failed = if prepared_boundary {
+                let prepared = wsse::prepare_source(
+                    Source::sequential(&mut Cursor::new(&input), None),
+                    &p,
+                    &store,
+                    &mut scope,
+                )
+                .unwrap();
+                let anchors = CaSet::new(vec![]);
+                let ctx = ValidationContext {
+                    policy: ValidationPolicy::OfflineReport,
+                    now,
+                    anchors: &anchors,
+                    intermediates: &[],
+                    http: &Offline,
+                };
+                let mut stage = store.stage(&mut scope).unwrap();
+                let mut output = oncl_pki::io::XmlSignatureOutput::new(&mut stage, &scope).unwrap();
+                wsse::sign_prepared(
+                    prepared,
+                    &mut signer,
+                    &ctx,
+                    &NetworkPolicy::deny_all(),
+                    None,
+                    &mut output,
+                    &mut scope,
+                )
+                .is_err()
+            } else {
+                wsse::sign_source(
+                    Source::sequential(&mut Cursor::new(&input), None),
+                    &p,
+                    &mut signer,
+                    &store,
+                    &mut Vec::new(),
+                    &mut scope,
+                )
+                .is_err()
+            };
+            assert!(failed);
+            assert_eq!(
+                signer.uses, 0,
+                "existing={existing}, prepared={prepared_boundary}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fix_soap12_none_is_not_a_host_processing_role() {
+    let mut p = SourceWsseSignProfile::default();
+    p.verification.soap = wsse::SoapVersion::Soap12;
+    p.verification.role = Some("http://www.w3.org/2003/05/soap-envelope/role/none".into());
+    let input = SOAP.replace(
+        "http://schemas.xmlsoap.org/soap/envelope/",
+        p.verification.soap.namespace(),
+    );
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let mut signer = CountingSigner::new();
+    assert!(
+        wsse::sign_source(
+            Source::sequential(&mut Cursor::new(&input), None),
+            &p,
+            &mut signer,
+            &store,
+            &mut Vec::new(),
+            &mut scope
+        )
+        .is_err()
+    );
+    assert_eq!(signer.uses, 0);
+}
+
+fn canonical_test_node(xml: &str, id: Option<&str>) -> Vec<u8> {
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let mut doc = oncl_xml::XmlDocument::index(
+        Source::sequential(&mut Cursor::new(xml), None),
+        &oncl_xml::XmlLimits::default(),
+        &store,
+        &mut scope,
+    )
+    .unwrap();
+    let node = match id {
+        Some(id) => doc.lookup_id(id).unwrap().unwrap(),
+        None => doc
+            .select_xpath(
+                "/s:Envelope/s:Header/w:Security/ds:Signature/ds:SignedInfo",
+                &[
+                    ("s", "http://schemas.xmlsoap.org/soap/envelope/"),
+                    ("w", wsse::WSSE_NS),
+                    ("ds", "http://www.w3.org/2000/09/xmldsig#"),
+                ],
+                &mut scope,
+            )
+            .unwrap()
+            .unwrap(),
+    };
+    let mut out = Vec::new();
+    doc.canonicalize(
+        Some(&node),
+        oncl_xml::C14n::Exclusive,
+        oncl_xml::C14nProfile::Standard,
+        &mut out,
+        &mut scope,
+    )
+    .unwrap();
+    out
+}
+
+fn resign_timestamp_fixture(mut xml: String) -> String {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(
+        oncl_pki::key::HashAlg::Sha256.digest(&canonical_test_node(&xml, Some("freshness"))),
+    );
+    let parsed = roxmltree::Document::parse(&xml).unwrap();
+    let reference = parsed
+        .descendants()
+        .find(|n| n.tag_name().name() == "Reference" && n.attribute("URI") == Some("#freshness"))
+        .unwrap();
+    let digest = reference
+        .children()
+        .find(|n| n.tag_name().name() == "DigestValue")
+        .unwrap()
+        .range();
+    xml.replace_range(
+        digest,
+        &format!("<ds:DigestValue>{encoded}</ds:DigestValue>"),
+    );
+    let info = canonical_test_node(&xml, None);
+    let key = CountingSigner::new();
+    let signature = key.entry.key.sign(SigAlg::RsaSha256, &info).unwrap();
+    key.entry
+        .key
+        .public_key()
+        .verify(SigAlg::RsaSha256, &info, &signature)
+        .unwrap();
+    let parsed = roxmltree::Document::parse(&xml).unwrap();
+    let range = parsed
+        .descendants()
+        .find(|n| n.tag_name().name() == "SignatureValue")
+        .unwrap()
+        .range();
+    xml.replace_range(
+        range,
+        &format!(
+            "<ds:SignatureValue>{}</ds:SignatureValue>",
+            base64::engine::general_purpose::STANDARD.encode(signature)
+        ),
+    );
+    xml
+}
+
+#[test]
+fn fix_complete_signed_timestamp_character_value_and_framing() {
+    let now = time::OffsetDateTime::from_unix_timestamp(1793707200).unwrap();
+    let p = SourceWsseSignProfile {
+        timestamp: Some(wsse::WsseTimestamp {
+            id: "freshness".into(),
+            created: now - time::Duration::SECOND,
+            expires: now + time::Duration::MINUTE,
+        }),
+        ..Default::default()
+    };
+    let original = String::from_utf8(signed(SOAP.as_bytes(), &p)).unwrap();
+    assert_eq!(
+        check(original.as_bytes(), &p.verification)
+            .unwrap()
+            .xml
+            .validation
+            .signers[0]
+            .signature,
+        CheckStatus::Passed
+    );
+    for change in [
+        original.replace("</wsu:Created>", "<!--split-->junk</wsu:Created>"),
+        original.replace("</wsu:Expires>", "<!--split-->junk</wsu:Expires>"),
+        original.replace("<wsu:Created>", "surplus-character-content<wsu:Created>"),
+    ] {
+        let actual_signed = resign_timestamp_fixture(change);
+        assert!(check(actual_signed.as_bytes(), &p.verification).is_err());
+    }
+}
+
+#[test]
+fn fix_comments_in_valid_token_or_signed_timestamp_are_not_free_metadata() {
+    let now = time::OffsetDateTime::from_unix_timestamp(1793707200).unwrap();
+    let p = SourceWsseSignProfile {
+        token_reference: wsse::TokenReference::BinarySecurityToken,
+        timestamp: Some(wsse::WsseTimestamp {
+            id: "freshness".into(),
+            created: now - time::Duration::SECOND,
+            expires: now + time::Duration::MINUTE,
+        }),
+        ..Default::default()
+    };
+    let original = String::from_utf8(signed(SOAP.as_bytes(), &p)).unwrap();
+    for marker in [
+        "</wsse:BinarySecurityToken>",
+        "</wsu:Created>",
+        "</wsu:Timestamp>",
+    ] {
+        let changed = original.replace(marker, &format!("<!--application-->{marker}"));
+        let limits = ResourceLimits {
+            input_bytes: SOAP.len() as u64,
+            ..Default::default()
+        };
+        let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+        let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+        let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+        let result = oncl_xml::capture_signed_input(
+            Source::sequential(&mut Cursor::new(changed.as_bytes()), None),
+            &p.verification.xml,
+            &store,
+            &mut scope,
+        );
+        assert!(
+            result.is_err(),
+            "typed metadata must not credit arbitrary comments at {marker}"
+        );
+        assert_eq!(scope.progress().bytes_in, changed.len() as u64);
+    }
+}
+
+fn capture_test_counts(
+    xml: &str,
+    p: &WsseVerifyProfile,
+    input_bytes: u64,
+) -> Result<(u64, u64), oncl_xml::XmlSourceError> {
+    let limits = ResourceLimits {
+        input_bytes,
+        ..Default::default()
+    };
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let result = oncl_xml::capture_signed_input(
+        Source::sequential(&mut Cursor::new(xml.as_bytes()), None),
+        &p.xml,
+        &store,
+        &mut scope,
+    );
+    assert_eq!(scope.progress().bytes_in, xml.len() as u64);
+    result.map(|owner| {
+        assert_eq!(
+            owner.document_bytes() + owner.container_bytes(),
+            owner.len()
+        );
+        (owner.document_bytes(), owner.container_bytes())
+    })
+}
+
+#[test]
+fn fix_raw_wrapper_width_and_checked_framing_total_cap() {
+    for ordinary in [false, true] {
+        let input = if ordinary {
+            SOAP.to_owned()
+        } else {
+            SOAP.replace("<m:note xmlns:m='urn:note'>uncovered</m:note>", "")
+        };
+        let original =
+            String::from_utf8(signed(input.as_bytes(), &SourceWsseSignProfile::default())).unwrap();
+        let mut p = WsseVerifyProfile::default();
+        p.xml.max_metadata_bytes = 4096;
+        let (document, _) = capture_test_counts(&original, &p, 1 << 20).unwrap();
+        let parsed = roxmltree::Document::parse(&original).unwrap();
+        let header = parsed
+            .descendants()
+            .find(|n| n.tag_name().name() == "Header")
+            .unwrap()
+            .range();
+        let security = parsed
+            .descendants()
+            .find(|n| n.tag_name().name() == "Security")
+            .unwrap()
+            .range();
+        let framing = |range: std::ops::Range<usize>| {
+            let text = &original[range];
+            text.find('>').unwrap() + 1 + text.len() - text.rfind("</").unwrap()
+        };
+        let total = framing(security.clone()) + if ordinary { 0 } else { framing(header.clone()) };
+        for (name, target) in [("security", security), ("header", header)] {
+            let at = target.start + original[target.clone()].find('>').unwrap();
+            let pad = 4096 - total;
+            let mut exact = original.clone();
+            exact.insert_str(at, &" ".repeat(pad));
+            if ordinary && name == "header" {
+                assert_eq!(
+                    capture_test_counts(&exact, &p, document + pad as u64)
+                        .unwrap()
+                        .0,
+                    document + pad as u64
+                );
+                assert!(capture_test_counts(&exact, &p, document + pad as u64 - 1).is_err());
+            } else {
+                assert_eq!(
+                    capture_test_counts(&exact, &p, document).unwrap().0,
+                    document
+                );
+                let mut over = exact;
+                over.insert(at, ' ');
+                assert!(
+                    capture_test_counts(&over, &p, document).is_err(),
+                    "{name} ordinary={ordinary}: raw framing cap+1 was credited"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn fix_role_none_carrier_is_preserved_but_never_selected() {
+    let mut p = SourceWsseSignProfile::default();
+    p.verification.soap = wsse::SoapVersion::Soap12;
+    let carrier = format!(
+        "<w:Security xmlns:w='{}' xmlns:e='{}' e:role='http://www.w3.org/2003/05/soap-envelope/role/none'/>",
+        wsse::WSSE_NS,
+        p.verification.soap.namespace()
+    );
+    let input = SOAP
+        .replace(
+            "http://schemas.xmlsoap.org/soap/envelope/",
+            p.verification.soap.namespace(),
+        )
+        .replace("</s:Header>", &format!("{carrier}</s:Header>"));
+    let bytes = signed(input.as_bytes(), &p);
+    assert!(std::str::from_utf8(&bytes).unwrap().contains(&carrier));
+    let report = check(&bytes, &p.verification).unwrap();
+    assert_eq!(report.signers().len(), 1);
+    assert!(report.signers()[0].selected_recipient());
+    assert_eq!(report.signers()[0].processing_role(), "");
 }

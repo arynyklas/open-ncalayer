@@ -660,6 +660,19 @@ necessary WSU Id insertion receive format accounting; ordinary headers/body
 remain application bytes. Exact lexical bytes otherwise survive insertion.
 Scoped `XmlVerificationFacts::wsse()` exposes per-signer actual Body/header/
 Timestamp coverage; `read_used_soap_body` borrows only original-scope bytes.
+Processing `role/none` is forbidden; foreign application elements named Header,
+Body or Envelope are not SOAP containers. IDs use one unambiguous Unicode
+bare-fragment spelling for generation and verification. Typed token/Timestamp
+metadata rejects comments, processing instructions and surplus timestamp text;
+actual raw Security/security-only Header framing must fit the selected metadata
+cap. Such content is never made free by a normalized lexer buffer.
+`wsse::sign_prepared` always checks explicit host time before applying a key.
+The convenience `wsse::sign_source` has no clock authority and refuses
+Timestamp-bearing input/profile; use the prepared API with a trusted
+ValidationContext. Unsupported EN-baseline generation requirements and
+impossible known layout/reference limits fail before provider access. Existing
+carried XAdES proofs remain verifiable; WSSE generation does not silently claim
+to generate EN baseline properties.
 
 Runtime: `cargo run -p oncl-core --features xml --example sdk_probe -- --case X05 --out target/x05-smoke`.
 It exercises a substantive protected SOAP Body over 64 MiB, RSA and GOST Add,

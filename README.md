@@ -758,6 +758,18 @@ SKI/issuer-serial lookup, шифрование, SAML и неизвестные r
 остаются прикладными байтами. Остальные lexical bytes сохраняются.
 Scoped `XmlVerificationFacts::wsse()` возвращает реальные per-signer Body/header/
 Timestamp coverage; `read_used_soap_body` читает только байты исходного scope.
+Host не может выбрать `role/none` для обработки. Прикладные Header/Body/Envelope
+в чужом namespace не являются SOAP-контейнерами. Unicode Id одинаково записываются
+и проверяются как однозначные bare fragments. Комментарии/PI в типизированных
+token/Timestamp и лишний текст Timestamp явно отклоняются, а не становятся
+бесплатными metadata. Проверяется фактическая raw-длина Security и содержащего
+только Security Header вместе с суммарным framing, не нормализованный lexer buffer.
+`wsse::sign_prepared` обязательно проверяет явное host time до применения ключа.
+У convenience `wsse::sign_source` нет clock authority: Timestamp-bearing input/
+profile требует prepared API с trusted ValidationContext. Неподдержанное требование
+генерации EN baseline и заведомо невозможные layout/reference limits отклоняются
+до provider. Проверка существующих carried XAdES proofs сохранена; генератор WSSE
+не приписывает себе EN baseline properties.
 
 Runtime: `cargo run -p oncl-core --features xml --example sdk_probe -- --case X05 --out target/x05-smoke`.
 Probe покрывает содержательный SOAP Body более 64 МиБ, RSA и GOST Add, все три

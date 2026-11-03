@@ -3235,7 +3235,7 @@ fn wsse_provider_zero_for_structure_work_policy_and_sticky_postuse_output_failur
     }
     const SOAP: &[u8] = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Body><request>protected</request></s:Body></s:Envelope>";
     let selector = selector("user-rsa-sign");
-    for case in 0..10 {
+    for case in 0..15 {
         let dir = tempfile::tempdir().unwrap();
         let opens = Arc::new(AtomicUsize::new(0));
         let guard = Arc::new(Guard::default());
@@ -3273,6 +3273,14 @@ fn wsse_provider_zero_for_structure_work_policy_and_sticky_postuse_output_failur
             6 => profile.timestamp = Some(oncl_xml::wsse::WsseTimestamp { id: "future".into(), created: NOW + time::Duration::MINUTE, expires: NOW + time::Duration::minutes(2) }),
             8 => source = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Body><ds:Signature xmlns:ds='http://www.w3.org/2000/09/xmldsig#'/></s:Body></s:Envelope>".to_vec(),
             9 => source = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Header><w:Security xmlns:w='http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd'><u:Timestamp xmlns:u='http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd' u:Id='future'><u:Created>2026-11-03T12:00:00Z</u:Created><u:Expires>2026-11-03T12:01:00Z</u:Expires></u:Timestamp></w:Security></s:Header><s:Body><request>protected</request></s:Body></s:Envelope>".to_vec(),
+            10 => profile.verification.xml.required_level = Some(oncl_pki::evidence::AdesLevel::B),
+            11 => profile.verification.xml.max_metadata_bytes = 1,
+            12 => {
+                profile.verification.xml.max_references = 1;
+                profile.timestamp = Some(oncl_xml::wsse::WsseTimestamp { id: "timestamp".into(), created: NOW-time::Duration::SECOND, expires: NOW+time::Duration::MINUTE });
+            }
+            13 => profile.verification.xml.max_manifest_depth = 17,
+            14 => profile.verification.xml.max_metadata_bytes = 2048,
             _ => {}
         }
         let mut stage = store.stage(&mut ctx.resources().shared_view()).unwrap();
@@ -3286,7 +3294,7 @@ fn wsse_provider_zero_for_structure_work_policy_and_sticky_postuse_output_failur
             .unwrap_err();
         assert_eq!(
             opens.load(Ordering::SeqCst),
-            usize::from(case == 7),
+            usize::from(case == 7 || case == 14),
             "case {case}"
         );
         assert_eq!(guard.events.lock().unwrap().len(), usize::from(case == 7));
@@ -3305,6 +3313,360 @@ fn wsse_provider_zero_for_structure_work_policy_and_sticky_postuse_output_failur
             assert!(sign(&engine, &selector, &mut ctx, &mut out).is_err());
             assert!(out.is_empty());
             assert_eq!(guard.events.lock().unwrap().len(), 1);
+        }
+    }
+}
+
+#[cfg(feature = "xml")]
+#[test]
+fn wsse_fixround_fresh_core_and_b01_reject_comment_framing_and_generation_failures() {
+    use oncl_core::keys::{KeyLease, KeyProvider};
+    use oncl_core::{
+        VerifyRequest,
+        batch::{BatchItem, BatchOperation, BatchOutcome},
+    };
+    use oncl_xml::wsse::{SourceWsseSignProfile, TokenReference, WsseTimestamp, WsseVerifyProfile};
+    struct Provider {
+        opens: Arc<AtomicUsize>,
+        inner: KeySources,
+    }
+    impl KeyProvider for Provider {
+        fn open(
+            &self,
+            request: &KeyRequest<'_>,
+            ctx: &mut OperationContext,
+        ) -> Result<KeyLease, OperationError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            self.inner.open(request, ctx)
+        }
+    }
+    let soap = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Header/><s:Body><request>protected</request></s:Body></s:Envelope>";
+    let selector = selector("user-rsa-sign");
+    let dir = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(dir.path()).unwrap();
+    let creator = engine(
+        Arc::new(Guard::default()),
+        KeySources::new(),
+        Some(store.clone()),
+        true,
+    );
+    let mut ctx = begin(
+        &creator,
+        &selector,
+        &[Action::Sign],
+        OperationPolicy::strict_online(),
+        Arc::new(Control::default()),
+    );
+    let p = SourceWsseSignProfile {
+        token_reference: TokenReference::BinarySecurityToken,
+        timestamp: Some(WsseTimestamp {
+            id: "freshness".into(),
+            created: NOW - time::Duration::SECOND,
+            expires: NOW + time::Duration::MINUTE,
+        }),
+        ..Default::default()
+    };
+    let mut signed = Vec::new();
+    creator
+        .sign(
+            SignRequest::wsse(KeyRequest::new(&selector, Some("C02 synthetic")), p),
+            Source::sequential(&mut Cursor::new(soap), None),
+            &mut signed,
+            &mut ctx,
+        )
+        .unwrap();
+    drop(ctx);
+    let signed = String::from_utf8(signed).unwrap();
+    let mut verify_profile = WsseVerifyProfile::default();
+    verify_profile.xml.max_metadata_bytes = 4096;
+    let mut scope = creator
+        .begin(
+            ExecutionGrant::new([Action::Verify]),
+            OperationPolicy::strict_online(),
+            Arc::new(Control::default()),
+        )
+        .unwrap();
+    let baseline = oncl_xml::capture_signed_input(
+        Source::sequential(&mut Cursor::new(&signed), None),
+        &verify_profile.xml,
+        &store,
+        &mut scope.resources().shared_view(),
+    )
+    .unwrap();
+    let document = baseline.document_bytes();
+    assert_eq!(document + baseline.container_bytes(), signed.len() as u64);
+    drop((baseline, scope));
+    for case in 0..7 {
+        let mut wire = signed.clone();
+        let mut profile = SourceWsseSignProfile {
+            verification: verify_profile.clone(),
+            mode: oncl_xml::XmlSignMode::Add,
+            ..Default::default()
+        };
+        match case {
+            0 => {
+                wire = wire.replace(
+                    "</wsse:BinarySecurityToken>",
+                    "<!--application--></wsse:BinarySecurityToken>",
+                )
+            }
+            1 => wire = wire.replace("</wsu:Created>", "<!--application--></wsu:Created>"),
+            2 | 3 => {
+                let marker = if case == 2 {
+                    "<wsse:Security "
+                } else {
+                    "<s:Header>"
+                };
+                let start = wire.find(marker).unwrap();
+                let at = start + wire[start..].find('>').unwrap();
+                wire.insert_str(at, &" ".repeat(4097));
+            }
+            _ => {
+                wire = std::str::from_utf8(soap).unwrap().to_owned();
+                profile.mode = oncl_xml::XmlSignMode::Create;
+                if case == 4 {
+                    profile.verification.xml.required_level =
+                        Some(oncl_pki::evidence::AdesLevel::B);
+                }
+                if case == 5 {
+                    profile.verification.xml.max_metadata_bytes = 1;
+                }
+                if case == 6 {
+                    profile.verification.xml.max_references = 1;
+                    profile.timestamp = Some(WsseTimestamp {
+                        id: "ts".into(),
+                        created: NOW - time::Duration::SECOND,
+                        expires: NOW + time::Duration::MINUTE,
+                    });
+                }
+            }
+        }
+        let opens = Arc::new(AtomicUsize::new(0));
+        let guard = Arc::new(Guard::default());
+        let limits = ResourceLimits {
+            input_bytes: if case < 2 {
+                document + "<!--application-->".len() as u64 - 1
+            } else if case < 4 {
+                document
+            } else {
+                soap.len() as u64
+            },
+            ..Default::default()
+        };
+        let engine = Engine::new(
+            EngineServices::hash_only(limits)
+                .with_validation(validation())
+                .with_temporary_store(store.clone())
+                .with_keys(
+                    Arc::new(Provider {
+                        opens: opens.clone(),
+                        inner: KeySources::new(),
+                    }),
+                    guard.clone(),
+                ),
+        )
+        .unwrap();
+        if case < 4 {
+            let mut context = engine
+                .begin(
+                    ExecutionGrant::new([Action::Verify]),
+                    OperationPolicy::strict_online(),
+                    Arc::new(Control::default()),
+                )
+                .unwrap();
+            assert!(
+                engine
+                    .verify(
+                        &VerifyRequest::wsse(verify_profile.clone()),
+                        Source::sequential(&mut Cursor::new(&wire), None),
+                        None,
+                        &mut context
+                    )
+                    .is_err()
+            );
+            assert_eq!(context.resources().progress().bytes_in, wire.len() as u64);
+            assert_eq!(
+                context.resources().input_remaining(),
+                0,
+                "rejected unclassified wire must not refund document capacity"
+            );
+        }
+        let mut context = begin(
+            &engine,
+            &selector,
+            &[Action::Sign],
+            OperationPolicy::strict_online(),
+            Arc::new(Control::default()),
+        );
+        let mut output = Vec::new();
+        let mut batch_input = Cursor::new(&wire);
+        let captured = engine.capture_batch(
+            [BatchItem::new(
+                "rejected",
+                BatchOperation::Sign {
+                    request: SignRequest::wsse(
+                        KeyRequest::new(&selector, Some("C02 synthetic")),
+                        profile,
+                    ),
+                    input: Source::sequential(&mut batch_input, None),
+                    output: &mut output,
+                },
+            )],
+            &mut context,
+        );
+        if let Ok(plan) = captured
+            && let Ok(approval) = plan.authorize(&context)
+            && let Ok(summary) = engine.run_batch(plan, approval, &mut context, |_| {})
+        {
+            assert!(!matches!(
+                summary.results()[0].outcome(),
+                BatchOutcome::Completed(_)
+            ));
+        }
+        assert_eq!(context.resources().progress().bytes_in, wire.len() as u64);
+        if case < 4 {
+            assert_eq!(context.resources().input_remaining(), 0);
+        }
+        assert_eq!(opens.load(Ordering::SeqCst), 0, "case {case}");
+        assert!(guard.events.lock().unwrap().is_empty());
+        assert!(output.is_empty());
+    }
+    // Exact-cap raw framing remains usable, including real Core/B01 verification.
+    for ordinary in [false, true] {
+        let wire = if ordinary {
+            signed.replace(
+                "</s:Header>",
+                "<m:Header xmlns:m='urn:application'>ordinary</m:Header></s:Header>",
+            )
+        } else {
+            signed.clone()
+        };
+        let mut count_ctx = creator
+            .begin(
+                ExecutionGrant::new([Action::Verify]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control::default()),
+            )
+            .unwrap();
+        let owner = oncl_xml::capture_signed_input(
+            Source::sequential(&mut Cursor::new(&wire), None),
+            &verify_profile.xml,
+            &store,
+            &mut count_ctx.resources().shared_view(),
+        )
+        .unwrap();
+        let base_doc = owner.document_bytes();
+        drop((owner, count_ctx));
+        let parsed = roxmltree::Document::parse(&wire).unwrap();
+        let header = parsed
+            .descendants()
+            .find(|n| {
+                n.tag_name().name() == "Header"
+                    && n.tag_name().namespace() == Some("http://schemas.xmlsoap.org/soap/envelope/")
+            })
+            .unwrap()
+            .range();
+        let security = parsed
+            .descendants()
+            .find(|n| n.tag_name().name() == "Security")
+            .unwrap()
+            .range();
+        let size = |range: std::ops::Range<usize>| {
+            let text = &wire[range];
+            text.find('>').unwrap() + 1 + text.len() - text.rfind("</").unwrap()
+        };
+        for header_target in [false, true] {
+            let target = if header_target {
+                header.clone()
+            } else {
+                security.clone()
+            };
+            let at = target.start + wire[target].find('>').unwrap();
+            let total = size(security.clone()) + if ordinary { 0 } else { size(header.clone()) };
+            let padding = 4096 - total;
+            for over in [false, true] {
+                let mut changed = wire.clone();
+                changed.insert_str(at, &" ".repeat(padding + usize::from(over)));
+                let ordinary_header = ordinary && header_target;
+                let expected_doc = base_doc
+                    + if ordinary_header {
+                        padding as u64 + u64::from(over)
+                    } else {
+                        0
+                    };
+                let allowed = !over || ordinary_header;
+                let limits = ResourceLimits {
+                    input_bytes: expected_doc,
+                    ..Default::default()
+                };
+                let verifier = Engine::new(
+                    EngineServices::hash_only(limits)
+                        .with_validation(validation())
+                        .with_temporary_store(store.clone()),
+                )
+                .unwrap();
+                {
+                    let mut context = verifier
+                        .begin(
+                            ExecutionGrant::new([Action::Verify]),
+                            OperationPolicy::strict_online(),
+                            Arc::new(Control::default()),
+                        )
+                        .unwrap();
+                    let result = verifier.verify(
+                        &VerifyRequest::wsse(verify_profile.clone()),
+                        Source::sequential(&mut Cursor::new(&changed), None),
+                        None,
+                        &mut context,
+                    );
+                    assert_eq!(result.is_ok(), allowed);
+                    if let Ok(report) = result {
+                        assert_eq!(report.verdict, oncl_pki::validation::Verdict::Valid);
+                    }
+                    assert_eq!(
+                        context.resources().progress().bytes_in,
+                        changed.len() as u64
+                    );
+                    assert_eq!(context.resources().input_remaining(), 0);
+                }
+                let mut context = verifier
+                    .begin(
+                        ExecutionGrant::new([Action::Verify]),
+                        OperationPolicy::strict_online(),
+                        Arc::new(Control::default()),
+                    )
+                    .unwrap();
+                let mut input = Cursor::new(&changed);
+                let result = verifier.capture_batch(
+                    [BatchItem::new(
+                        "framing",
+                        BatchOperation::Verify {
+                            request: VerifyRequest::wsse(verify_profile.clone()),
+                            input: Source::sequential(&mut input, None),
+                            detached: None,
+                        },
+                    )],
+                    &mut context,
+                );
+                if allowed {
+                    let plan = result.unwrap();
+                    let approval = plan.authorize(&context).unwrap();
+                    let summary = verifier
+                        .run_batch(plan, approval, &mut context, |_| {})
+                        .unwrap();
+                    assert!(matches!(
+                        summary.results()[0].outcome(),
+                        BatchOutcome::Completed(_)
+                    ));
+                } else {
+                    assert!(result.is_err());
+                }
+                assert_eq!(
+                    context.resources().progress().bytes_in,
+                    changed.len() as u64
+                );
+                assert_eq!(context.resources().input_remaining(), 0);
+            }
         }
     }
 }

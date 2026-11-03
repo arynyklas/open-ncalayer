@@ -999,6 +999,9 @@ pub(crate) struct WsseTemplate<'a> {
     pub references: &'a [(String, oncl_pki::digest::DigestValue)],
 }
 impl Template<'_> {
+    pub(crate) fn wsse_metadata_len(&self, wsse: &WsseTemplate<'_>, signature: &[u8]) -> usize {
+        self.render_with(Some(signature), None, Some(wsse)).len()
+    }
     fn base64(&self, bytes: &[u8]) -> String {
         if self.line_breaks {
             base64_lines(bytes)
@@ -1094,7 +1097,7 @@ impl Template<'_> {
             for (id, digest) in wsse.references {
                 self.reference(
                     &mut s,
-                    &format!("#{}", percent_id(id)),
+                    &format!("#{id}"),
                     None,
                     &[C14n::Exclusive.uri()],
                     digest.as_bytes(),
