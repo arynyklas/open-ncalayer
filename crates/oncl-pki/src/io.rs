@@ -251,7 +251,154 @@ pub struct StagedArtifact {
     source: bool,
     output_failure: Option<Arc<AtomicBool>>,
 }
+/// Monotonic publication lifecycle, not a validation or authorization receipt.
+/// Retains the original resource root through a producer's later replay/report
+/// checks. Dropping it unfinished only marks its admitted OUTPUT unpublishable.
+pub struct OutputPublicationGuard {
+    original: ResourceScope,
+    failure: Arc<AtomicBool>,
+    finished: bool,
+    _metadata: Option<ResourceReservation>,
+}
+impl OutputPublicationGuard {
+    fn check(&self) -> Result<(), ProcessingError> {
+        if self.failure.load(Ordering::SeqCst) {
+            return Err(ProcessingError::InvalidInput(
+                "output publication was aborted",
+            ));
+        }
+        self.original.checkpoint()?;
+        if self.failure.load(Ordering::SeqCst) {
+            return Err(ProcessingError::InvalidInput(
+                "output publication was aborted",
+            ));
+        }
+        Ok(())
+    }
+    pub fn finish(mut self) -> Result<(), ProcessingError> {
+        self.check()?;
+        self.finished = true;
+        Ok(())
+    }
+}
+impl Drop for OutputPublicationGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.failure.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Closed producer-owned output transaction. Every write reserves and charges
+/// output and temporary storage; unfinished or failed execution is unpublishable.
+/// It never exposes a file, an unchecked writer, or a separately owned permit.
+pub struct OutputTransaction<'a> {
+    stage: &'a mut StagedArtifact,
+    original: ResourceScope,
+    finished: bool,
+}
+impl<'a> OutputTransaction<'a> {
+    pub fn new(
+        stage: &'a mut StagedArtifact,
+        scope: &ResourceScope,
+    ) -> Result<Self, ProcessingError> {
+        // A foreign or SOURCE artifact is not admitted and must remain untouched.
+        if stage.source || !stage.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "output transaction requires same-operation OUTPUT",
+            ));
+        }
+        stage.attach_output_failure();
+        let transaction = Self {
+            stage,
+            original: scope.retain(),
+            finished: false,
+        };
+        transaction.check_live()?;
+        if !transaction.stage.is_empty() {
+            return Err(ProcessingError::InvalidInput(
+                "output transaction requires empty OUTPUT",
+            ));
+        }
+        Ok(transaction)
+    }
+    fn check_live(&self) -> Result<(), ProcessingError> {
+        if self.stage.is_failed() || self.stage.file.is_none() {
+            return Err(ProcessingError::InvalidInput(
+                "output transaction is failed or closed",
+            ));
+        }
+        self.original.checkpoint()?;
+        self.stage.scope.checkpoint()?;
+        if self.stage.is_failed() || self.stage.file.is_none() {
+            return Err(ProcessingError::InvalidInput(
+                "output transaction is failed or closed",
+            ));
+        }
+        Ok(())
+    }
+    pub fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), ProcessingError> {
+        let result = self
+            .check_live()
+            .and_then(|()| self.stage.write_chunk(bytes));
+        if result.is_err() {
+            self.stage.fail_sign_output();
+        }
+        result
+    }
+    pub fn len(&self) -> u64 {
+        self.stage.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.stage.is_empty()
+    }
+    pub fn finish(mut self) -> Result<(), ProcessingError> {
+        self.check_live()?;
+        self.finished = true;
+        Ok(())
+    }
+}
+impl Drop for OutputTransaction<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.stage.fail_sign_output();
+        }
+    }
+}
+
 impl StagedArtifact {
+    /// Admit an empty live same-operation OUTPUT before producer execution.
+    /// Foreign/SOURCE refusals leave the artifact untouched. Every later own
+    /// execution failure, including initial cancellation, is sticky.
+    pub fn publication_guard(
+        &mut self,
+        scope: &ResourceScope,
+    ) -> Result<OutputPublicationGuard, ProcessingError> {
+        if self.source || !self.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "publication requires same-operation OUTPUT",
+            ));
+        }
+        let failure = self.attach_output_failure();
+        let mut guard = OutputPublicationGuard {
+            original: scope.retain(),
+            failure,
+            finished: false,
+            _metadata: None,
+        };
+        if self.file.is_none() || !self.is_empty() || self.is_failed() {
+            return Err(ProcessingError::InvalidInput(
+                "publication requires empty live OUTPUT",
+            ));
+        }
+        guard.check()?;
+        self.scope.checkpoint()?;
+        guard._metadata = Some(scope.reserve_metadata(
+            (std::mem::size_of::<OutputPublicationGuard>() + std::mem::size_of::<AtomicBool>())
+                as u64,
+        )?);
+        Ok(guard)
+    }
     fn attach_output_failure(&mut self) -> Arc<AtomicBool> {
         let failed = self.failed;
         self.output_failure

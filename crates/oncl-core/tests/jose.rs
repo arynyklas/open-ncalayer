@@ -1499,3 +1499,44 @@ fn many_host_roots_keep_original_operation_deadline() {
         .unwrap_err();
     assert_eq!(error.code(), oncl_core::ErrorCode::DeadlineExceeded);
 }
+
+#[test]
+fn staged_jose_output_charged_once_and_late_failure_retains_applied() {
+    let key = selector("user-rsa-sign");
+    let p = profile(JwsSerialization::Compact, false);
+    let guard = Arc::new(Guard::default());
+    let original = engine(guard.clone(), ResourceLimits::default(), true, true);
+    let expected = create(&original, &[&key], p, DATA);
+    let dir = tempfile::tempdir().unwrap();
+    let store = oncl_pki::io::TemporaryStore::new(dir.path()).unwrap();
+    for cap in [expected.len() as u64, expected.len() as u64 - 1] {
+        let engine = engine(
+            guard.clone(),
+            ResourceLimits {
+                output_bytes: cap,
+                ..ResourceLimits::default()
+            },
+            true,
+            true,
+        );
+        let mut ctx = begin(&engine, &[&key], &[Action::Sign]);
+        let mut stage = store.stage(ctx.resources()).unwrap();
+        let result = engine.jws_create_staged(
+            p,
+            vec![KeyRequest::new(&key, Some("J01 synthetic"))],
+            DATA,
+            &mut stage,
+            &mut ctx,
+        );
+        if cap == expected.len() as u64 {
+            assert_eq!(result.unwrap().bytes_out, cap);
+            assert_eq!(ctx.resources().progress().bytes_out, cap);
+            let mut bytes = Vec::new();
+            stage.copy_to(&mut bytes).unwrap();
+            assert_eq!(bytes, expected);
+        } else {
+            assert_eq!(result.unwrap_err().applied_state(), AppliedState::Applied);
+            assert!(stage.commit(&dir.path().join("failed")).is_err());
+        }
+    }
+}

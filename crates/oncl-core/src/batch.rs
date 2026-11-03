@@ -11,6 +11,64 @@ use std::{io::Write, sync::Arc};
 pub(crate) const MAX_ITEMS: usize = 1024;
 const MAX_ID_BYTES: usize = 128;
 
+/// The producer selects its accounting path. Writer sinks may retain prefixes;
+/// staged sinks are same-operation transactional artifacts, never raw files.
+pub enum BatchOutput<'a> {
+    Writer(&'a mut dyn Write),
+    Staged(&'a mut oncl_pki::io::StagedArtifact),
+    /// Requires run_batch_with_outputs, so completion transfers ownership before
+    /// the next item can cancel or consume the original operation's deadline.
+    OwnedStaged(oncl_pki::io::StagedArtifact),
+}
+impl BatchOutput<'_> {
+    fn publication_guard(
+        &mut self,
+        ctx: &OperationContext,
+    ) -> Result<Option<oncl_pki::io::OutputPublicationGuard>, OperationError> {
+        match self {
+            Self::Writer(_) => Ok(None),
+            Self::Staged(stage) => Ok(Some(stage.publication_guard(&ctx.scope)?)),
+            Self::OwnedStaged(stage) => Ok(Some(stage.publication_guard(&ctx.scope)?)),
+        }
+    }
+    fn execute<T>(
+        self,
+        completed: &mut Option<oncl_pki::io::StagedArtifact>,
+        execute: impl FnOnce(crate::sign::Output<'_>) -> Result<T, OperationError>,
+    ) -> Result<T, OperationError> {
+        match self {
+            Self::Writer(writer) => execute(crate::sign::Output::Writer(writer)),
+            Self::Staged(stage) => execute(crate::sign::Output::Staged(stage)),
+            Self::OwnedStaged(mut stage) => {
+                let report = execute(crate::sign::Output::Staged(&mut stage))?;
+                *completed = Some(stage);
+                Ok(report)
+            }
+        }
+    }
+}
+
+/// A completed output owner, not a mutable producer or independent quota permit.
+/// Publication remains explicit host work. A failed copy may retain a prefix.
+pub struct CompletedOutput {
+    stage: oncl_pki::io::StagedArtifact,
+}
+impl CompletedOutput {
+    pub fn len(&self) -> u64 {
+        self.stage.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.stage.is_empty()
+    }
+    pub fn commit(self, destination: &std::path::Path) -> Result<(), OperationError> {
+        self.stage.commit(destination).map_err(Into::into)
+    }
+    pub fn copy_to(self, output: &mut dyn Write) -> Result<u64, OperationError> {
+        self.stage.copy_to(output).map_err(Into::into)
+    }
+}
+type OutputReceiver<'a> =
+    dyn FnMut(usize, &str, &BatchReport, CompletedOutput) -> Result<(), OperationError> + 'a;
 /// Requests and destinations move into the plan; none can be replaced after approval.
 pub enum BatchOperation<'a> {
     Hash {
@@ -24,7 +82,7 @@ pub enum BatchOperation<'a> {
     Sign {
         request: SignRequest<'a>,
         input: Source<'a>,
-        output: &'a mut dyn Write,
+        output: BatchOutput<'a>,
     },
     Verify {
         request: VerifyRequest,
@@ -34,11 +92,11 @@ pub enum BatchOperation<'a> {
     Extend {
         request: ExtendRequest<'a>,
         input: Source<'a>,
-        output: &'a mut dyn Write,
+        output: BatchOutput<'a>,
     },
     Extract {
         input: Source<'a>,
-        output: &'a mut dyn Write,
+        output: BatchOutput<'a>,
     },
     Inspect {
         request: InspectRequest<'a>,
@@ -47,7 +105,7 @@ pub enum BatchOperation<'a> {
     Stamp {
         request: StampRequest,
         input: Source<'a>,
-        output: &'a mut dyn Write,
+        output: BatchOutput<'a>,
     },
     VerifyStamp {
         request: StampVerifyRequest,
@@ -65,14 +123,14 @@ pub enum BatchJoseOperation<'a> {
         profile: jose::JoseProfile,
         keys: Vec<keys::KeyRequest<'a>>,
         payload: &'a [u8],
-        output: &'a mut dyn Write,
+        output: BatchOutput<'a>,
     },
     Add {
         request: jose::JwsVerifyRequest<'a>,
         keys: Vec<keys::KeyRequest<'a>>,
         input: &'a [u8],
         detached: Option<&'a [u8]>,
-        output: &'a mut dyn Write,
+        output: BatchOutput<'a>,
     },
     Verify {
         request: jose::JwsVerifyRequest<'a>,
@@ -82,7 +140,7 @@ pub enum BatchJoseOperation<'a> {
     JwtEncode {
         key: keys::KeyRequest<'a>,
         claims: &'a [u8],
-        output: &'a mut dyn Write,
+        output: BatchOutput<'a>,
     },
     JwtDecode {
         input: &'a [u8],
@@ -327,16 +385,34 @@ impl CapturedReader<'_> {
 }
 enum Dispatch<'a> {
     Hash(HashAlg),
-    Sign(SignRequest<'a>, &'a mut dyn Write),
+    Sign(SignRequest<'a>, BatchOutput<'a>),
     Verify(VerifyRequest),
     ValidateCms(&'a [u8], Option<&'a [u8]>),
-    Extend(ExtendRequest<'a>, &'a mut dyn Write),
-    Extract(&'a mut dyn Write),
+    Extend(ExtendRequest<'a>, BatchOutput<'a>),
+    Extract(BatchOutput<'a>),
     Inspect(Result<InspectionReport, OperationError>),
-    Stamp(StampRequest, &'a mut dyn Write),
+    Stamp(StampRequest, BatchOutput<'a>),
     VerifyStamp(StampVerifyRequest),
     #[cfg(feature = "jose")]
     Jose(BatchJoseOperation<'a>),
+}
+impl Dispatch<'_> {
+    fn has_owned_output(&self) -> bool {
+        let output = match self {
+            Self::Sign(_, output)
+            | Self::Extend(_, output)
+            | Self::Extract(output)
+            | Self::Stamp(_, output) => Some(output),
+            #[cfg(feature = "jose")]
+            Self::Jose(
+                BatchJoseOperation::Create { output, .. }
+                | BatchJoseOperation::Add { output, .. }
+                | BatchJoseOperation::JwtEncode { output, .. },
+            ) => Some(output),
+            _ => None,
+        };
+        matches!(output, Some(BatchOutput::OwnedStaged(_)))
+    }
 }
 pub enum BatchReport {
     Hash(HashReport),
@@ -1302,7 +1378,35 @@ impl Engine {
         ctx: &mut OperationContext,
         emit: impl FnMut(BatchEvent<'_>),
     ) -> Result<BatchSummary, BatchError> {
-        let result = self.run_batch_inner(plan, approval, ctx, emit);
+        self.run_batch_receiver(plan, approval, ctx, emit, None)
+    }
+    /// Deliver each fully completed owned artifact before ItemFinished or the
+    /// next item. The host explicitly publishes it; callback failure is an item
+    /// execution failure retaining the producer's actual private application.
+    pub fn run_batch_with_outputs(
+        &self,
+        plan: CapturedBatch<'_>,
+        approval: BatchApproval,
+        ctx: &mut OperationContext,
+        emit: impl FnMut(BatchEvent<'_>),
+        mut on_output: impl FnMut(
+            usize,
+            &str,
+            &BatchReport,
+            CompletedOutput,
+        ) -> Result<(), OperationError>,
+    ) -> Result<BatchSummary, BatchError> {
+        self.run_batch_receiver(plan, approval, ctx, emit, Some(&mut on_output))
+    }
+    fn run_batch_receiver(
+        &self,
+        plan: CapturedBatch<'_>,
+        approval: BatchApproval,
+        ctx: &mut OperationContext,
+        emit: impl FnMut(BatchEvent<'_>),
+        on_output: Option<&mut OutputReceiver<'_>>,
+    ) -> Result<BatchSummary, BatchError> {
+        let result = self.run_batch_inner(plan, approval, ctx, emit, on_output);
         if matches!(&result, Ok(summary) if summary.stop.is_some())
             || matches!(&result, Err(BatchError::Operation(error)) if terminal(error))
         {
@@ -1317,6 +1421,7 @@ impl Engine {
         approval: BatchApproval,
         ctx: &mut OperationContext,
         mut emit: impl FnMut(BatchEvent<'_>),
+        mut on_output: Option<&mut OutputReceiver<'_>>,
     ) -> Result<BatchSummary, BatchError> {
         if !Arc::ptr_eq(&plan.identity, &approval.plan)
             || !Arc::ptr_eq(&plan.owner, &approval.owner)
@@ -1327,6 +1432,17 @@ impl Engine {
             || !plan.scope.same_operation(&ctx.scope)
         {
             return Err(BatchError::ConsentMismatch);
+        }
+        if on_output.is_none()
+            && plan
+                .items
+                .iter()
+                .any(|item| item.operation.has_owned_output())
+        {
+            return Err(oncl_pki::resource::ProcessingError::InvalidInput(
+                "owned batch output requires a consumer",
+            )
+            .into());
         }
         let total = plan.items.len();
         let mut summary = BatchSummary {
@@ -1362,12 +1478,36 @@ impl Engine {
                     if let Some(error) = item.error.take() {
                         Err(error)
                     } else {
-                        self.dispatch_batch_item(
+                        let (report, output) = self.dispatch_batch_item(
                             item.operation,
                             item.source.as_mut(),
                             item.detached.as_mut(),
                             ctx,
-                        )
+                        )?;
+                        if let Some(output) = output {
+                            let receiver =
+                                on_output.as_deref_mut().expect("owned output preflighted");
+                            receiver(index, item.id, &report, output).map_err(|error| {
+                                let applied = match &report {
+                                    BatchReport::Sign(report) | BatchReport::Extend(report) => {
+                                        report.applied
+                                    }
+                                    #[cfg(feature = "jose")]
+                                    BatchReport::JoseWrite(report) => report.applied,
+                                    _ => AppliedState::NotApplied,
+                                }
+                                .combine(error.applied_state());
+                                if applied == AppliedState::NotApplied {
+                                    error
+                                } else {
+                                    OperationError::AfterKeyUse {
+                                        source: Box::new(error),
+                                        applied,
+                                    }
+                                }
+                            })?;
+                        }
+                        Ok(report)
                     }
                 }));
                 ctx.batch_item = previous;
@@ -1426,11 +1566,26 @@ impl Engine {
     }
     fn dispatch_batch_item(
         &self,
-        operation: Dispatch<'_>,
+        mut operation: Dispatch<'_>,
         source: Option<&mut CapturedSource>,
         detached: Option<&mut FrozenInput>,
         ctx: &mut OperationContext,
-    ) -> Result<BatchReport, OperationError> {
+    ) -> Result<(BatchReport, Option<CompletedOutput>), OperationError> {
+        // The closed plan was already Engine/grant/approval-bound by run_batch.
+        // Keep this outer guard alive through the final replay checks below.
+        let publication = match &mut operation {
+            Dispatch::Sign(_, output)
+            | Dispatch::Extend(_, output)
+            | Dispatch::Extract(output)
+            | Dispatch::Stamp(_, output) => output.publication_guard(ctx)?,
+            #[cfg(feature = "jose")]
+            Dispatch::Jose(
+                BatchJoseOperation::Create { output, .. }
+                | BatchJoseOperation::Add { output, .. }
+                | BatchJoseOperation::JwtEncode { output, .. },
+            ) => output.publication_guard(ctx)?,
+            _ => None,
+        };
         let mut source = source.map(|s| s.reader(&ctx.scope)).transpose()?;
         let mut detached = detached
             .map(|s| {
@@ -1443,6 +1598,7 @@ impl Engine {
             .transpose()?;
         let input = source.as_mut().map(|s| s.source());
         let data = detached.as_mut().map(|s| s.source());
+        let mut completed_output = None;
         let result = match operation {
             Dispatch::Hash(algorithm) => self
                 .hash(algorithm, input.unwrap(), ctx)
@@ -1467,7 +1623,15 @@ impl Engine {
                     #[cfg(feature = "xml")]
                     SignMode::XadesLegacy(k, s) => SignMode::XadesLegacy(k, s),
                 };
-                self.sign(SignRequest { mode }, input.unwrap(), output, ctx)
+                output
+                    .execute(&mut completed_output, |output| match output {
+                        crate::sign::Output::Writer(writer) => {
+                            self.sign(SignRequest { mode }, input.unwrap(), writer, ctx)
+                        }
+                        crate::sign::Output::Staged(stage) => {
+                            self.sign_staged(SignRequest { mode }, input.unwrap(), stage, ctx)
+                        }
+                    })
                     .map(BatchReport::Sign)
             }
             Dispatch::Verify(request) => self
@@ -1487,15 +1651,37 @@ impl Engine {
                     limits: request.limits,
                     format: request.format,
                 };
-                self.extend(&bound, input.unwrap(), output, ctx)
+                output
+                    .execute(&mut completed_output, |output| match output {
+                        crate::sign::Output::Writer(writer) => {
+                            self.extend(&bound, input.unwrap(), writer, ctx)
+                        }
+                        crate::sign::Output::Staged(stage) => {
+                            self.extend_staged(&bound, input.unwrap(), stage, ctx)
+                        }
+                    })
                     .map(BatchReport::Extend)
             }
-            Dispatch::Extract(output) => self
-                .extract(input.unwrap(), output, ctx)
+            Dispatch::Extract(output) => output
+                .execute(&mut completed_output, |output| match output {
+                    crate::sign::Output::Writer(writer) => {
+                        self.extract(input.unwrap(), writer, ctx)
+                    }
+                    crate::sign::Output::Staged(stage) => {
+                        self.extract_staged(input.unwrap(), stage, ctx)
+                    }
+                })
                 .map(BatchReport::Extract),
             Dispatch::Inspect(result) => result.map(BatchReport::Inspect),
-            Dispatch::Stamp(request, output) => self
-                .stamp(&request, input.unwrap(), output, ctx)
+            Dispatch::Stamp(request, output) => output
+                .execute(&mut completed_output, |output| match output {
+                    crate::sign::Output::Writer(writer) => {
+                        self.stamp(&request, input.unwrap(), writer, ctx)
+                    }
+                    crate::sign::Output::Staged(stage) => {
+                        self.stamp_staged(&request, input.unwrap(), stage, ctx)
+                    }
+                })
                 .map(BatchReport::Stamp),
             Dispatch::VerifyStamp(request) => self
                 .verify_stamp(&request, input.unwrap(), data, ctx)
@@ -1509,8 +1695,15 @@ impl Engine {
                         keys,
                         payload,
                         output,
-                    } => self
-                        .jws_create(profile, keys, payload, output, ctx)
+                    } => output
+                        .execute(&mut completed_output, |output| match output {
+                            crate::sign::Output::Writer(writer) => {
+                                self.jws_create(profile, keys, payload, writer, ctx)
+                            }
+                            crate::sign::Output::Staged(stage) => {
+                                self.jws_create_staged(profile, keys, payload, stage, ctx)
+                            }
+                        })
                         .map(BatchReport::JoseWrite),
                     Add {
                         request,
@@ -1518,8 +1711,15 @@ impl Engine {
                         input,
                         detached,
                         output,
-                    } => self
-                        .jws_add(request, keys, input, detached, output, ctx)
+                    } => output
+                        .execute(&mut completed_output, |output| match output {
+                            crate::sign::Output::Writer(writer) => {
+                                self.jws_add(request, keys, input, detached, writer, ctx)
+                            }
+                            crate::sign::Output::Staged(stage) => {
+                                self.jws_add_staged(request, keys, input, detached, stage, ctx)
+                            }
+                        })
                         .map(BatchReport::JoseWrite),
                     Verify {
                         request,
@@ -1532,8 +1732,15 @@ impl Engine {
                         key,
                         claims,
                         output,
-                    } => self
-                        .jwt_encode(key, claims, output, ctx)
+                    } => output
+                        .execute(&mut completed_output, |output| match output {
+                            crate::sign::Output::Writer(writer) => {
+                                self.jwt_encode(key, claims, writer, ctx)
+                            }
+                            crate::sign::Output::Staged(stage) => {
+                                self.jwt_encode_staged(key, claims, stage, ctx)
+                            }
+                        })
                         .map(BatchReport::JoseWrite),
                     JwtDecode { input } => self
                         .jwt_decode_unverified(input, ctx)
@@ -1563,6 +1770,9 @@ impl Engine {
                 if let Some(reader) = detached.as_mut() {
                     reader.finish()?;
                 }
+                if let Some(publication) = publication {
+                    publication.finish()?;
+                }
                 Ok::<(), OperationError>(())
             })();
             if let Err(error) = finalized {
@@ -1576,6 +1786,11 @@ impl Engine {
                 });
             }
         }
-        result
+        result.map(|report| {
+            (
+                report,
+                completed_output.map(|stage| CompletedOutput { stage }),
+            )
+        })
     }
 }

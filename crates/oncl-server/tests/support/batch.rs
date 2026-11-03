@@ -265,7 +265,7 @@ impl BatchRig {
                                 None,
                             )),
                             input: Source::sequential(&mut zero, None),
-                            output: &mut raw_zero,
+                            output: oncl_core::batch::BatchOutput::Writer(&mut raw_zero),
                         },
                     ),
                     BatchItem::new(
@@ -286,7 +286,7 @@ impl BatchRig {
                                 true,
                             ),
                             input: Source::sequential(&mut multi, None),
-                            output: &mut cms,
+                            output: oncl_core::batch::BatchOutput::Writer(&mut cms),
                         },
                     ),
                     BatchItem::new(
@@ -312,7 +312,7 @@ impl BatchRig {
                                 None,
                             )),
                             input: Source::sequential(&mut last, None),
-                            output: &mut gost,
+                            output: oncl_core::batch::BatchOutput::Writer(&mut gost),
                         },
                     ),
                 ],
