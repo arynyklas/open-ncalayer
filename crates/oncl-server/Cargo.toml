@@ -37,6 +37,7 @@ time = { workspace = true, features = ["macros"] }
 oncl-token = { workspace = true, features = ["emulator"] }
 rcgen.workspace = true
 hyper = { version = "=1.12.0", default-features = false, features = ["client", "http1"] }
+socket2 = "=0.6.5"
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }

@@ -13,6 +13,18 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+/// Only the IPv4-mapped representation aliases IPv4. Compatible/native IPv6
+/// addresses remain distinct; headers never participate in peer normalization.
+pub(crate) fn normalized_peer(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        ip => ip,
+    }
+}
+
 #[derive(Clone, Default, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Exposure {
@@ -222,7 +234,7 @@ impl ServerConfig {
             Exposure::TrustedProxy { peers }
                 if peers.is_empty()
                     || peers.len() > 64
-                    || peers.iter().any(IpAddr::is_unspecified) =>
+                    || peers.iter().any(|ip| normalized_peer(*ip).is_unspecified()) =>
             {
                 return Err(invalid());
             }

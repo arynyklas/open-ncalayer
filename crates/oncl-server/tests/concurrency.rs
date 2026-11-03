@@ -544,3 +544,167 @@ fn actual_process_deadline_covers_incomplete_intake() {
     );
     process.stop();
 }
+
+fn delivery_fixture() -> (
+    tempfile::TempDir,
+    Arc<oncl_server::service::ServiceHost>,
+    oncl_api::server::RequestMetadata,
+) {
+    let directory = server_support::sandbox();
+    let token = oncl_server::auth::TokenSecret::generate().unwrap();
+    let mut config = oncl_server::config::ServerConfig::default();
+    config.max_in_flight = 1;
+    config.operation_timeout_ms = 1000;
+    config.header_timeout_ms = 1000;
+    config.audit_directory = directory.path().join("audit");
+    config.hosts = vec!["delivery.test".into()];
+    config.tokens = vec![oncl_server::config::TokenConfig {
+        id: "actor".into(),
+        verifier: token.verifier().encoded(),
+        actions: vec![oncl_server::config::Permission::Hash],
+        keys: Vec::new(),
+        inline_pkcs12: false,
+    }];
+    let host = oncl_server::service::ServiceHost::new(config).unwrap();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("host", "delivery.test".parse().unwrap());
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", *token.bearer()).parse().unwrap(),
+    );
+    (
+        directory,
+        host,
+        oncl_api::server::RequestMetadata {
+            peer: "127.0.0.1:3456".parse().unwrap(),
+            headers,
+            content_length: Some(3),
+        },
+    )
+}
+
+#[test]
+fn deferred_real_hash_body_cannot_emit_after_original_deadline() {
+    use oncl_api::server::HashHost;
+    runtime().block_on(async {
+        let (_directory, host, metadata) = delivery_fixture();
+        let response = host
+            .hash(metadata, axum::body::Body::from("abc"))
+            .await
+            .unwrap();
+        assert!(
+            host.engine
+                .begin(
+                    ExecutionGrant::new([Action::Hash]),
+                    OperationPolicy::strict_online(),
+                    Arc::new(Cancellation::new())
+                )
+                .is_err()
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let result = axum::body::to_bytes(response.into_body(), 512).await;
+        let error =
+            result.expect_err("deferred first body poll emitted success after original deadline");
+        let mut cause = Some(&error as &dyn std::error::Error);
+        let mut deadline_error = false;
+        while let Some(current) = cause {
+            if matches!(
+                current.downcast_ref::<ProcessingError>(),
+                Some(ProcessingError::DeadlineExceeded)
+            ) {
+                deadline_error = true;
+                break;
+            }
+            cause = current.source();
+        }
+        assert!(
+            deadline_error,
+            "deferred body must retain the typed original deadline failure"
+        );
+        drop(error);
+        drop(context(&host.engine));
+    });
+}
+
+#[test]
+fn extracted_real_response_slices_retain_root_even_after_expiry() {
+    use oncl_api::server::HashHost;
+    runtime().block_on(async {
+        let (_directory, host, metadata) = delivery_fixture();
+        let response = host
+            .hash(metadata, axum::body::Body::from("abc"))
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 512)
+            .await
+            .unwrap();
+        let first = bytes.clone();
+        let last = bytes.slice(1..);
+        drop(bytes);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            host.engine
+                .begin(
+                    ExecutionGrant::new([Action::Hash]),
+                    OperationPolicy::strict_online(),
+                    Arc::new(Cancellation::new())
+                )
+                .is_err()
+        );
+        drop(first);
+        assert!(
+            host.engine
+                .begin(
+                    ExecutionGrant::new([Action::Hash]),
+                    OperationPolicy::strict_online(),
+                    Arc::new(Cancellation::new())
+                )
+                .is_err()
+        );
+        drop(last);
+        drop(context(&host.engine));
+    });
+}
+
+#[test]
+fn actual_hash_transport_write_barrier_obeys_original_delivery_deadline() {
+    use server_support::delivery::{GatedSocket, ObserveDelivery, WriteGate};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    runtime().block_on(async {
+        for release_before_expiry in [true,false] {
+            let (_directory,host,metadata)=delivery_fixture();
+            let authorization=metadata.headers.get("authorization").unwrap().to_str().unwrap().to_owned();
+            let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+            let mut client=tokio::net::TcpStream::connect(address).await.unwrap();
+            let (socket,peer)=listener.accept().await.unwrap();drop(listener);
+            let (gate,write_pending)=WriteGate::new();let (ready,delivery_ready)=tokio::sync::oneshot::channel();
+            let observer=Arc::new(ObserveDelivery{host:host.clone(),ready:std::sync::Mutex::new(Some(ready))});
+            let router=oncl_api::server::router(observer);
+            let server=tokio::spawn(oncl_server::service::serve_connection(GatedSocket::new(socket,gate.clone()),peer,router,Duration::from_secs(1),tokio::time::Instant::now()+Duration::from_secs(20)));
+            client.write_all(format!("POST /v1/hash HTTP/1.1\r\nHost: delivery.test\r\nAuthorization: {authorization}\r\nContent-Length: 3\r\n\r\nabc").as_bytes()).await.unwrap();
+            let original=delivery_ready.await.unwrap();write_pending.await.unwrap();
+            assert!(!original.is_expired());
+            assert!(host.engine.begin(ExecutionGrant::new([Action::Hash]),OperationPolicy::strict_online(),Arc::new(Cancellation::new())).is_err());
+            if release_before_expiry {
+                gate.release();
+                let mut response=Vec::new();client.read_to_end(&mut response).await.unwrap();
+                let response=String::from_utf8(response).unwrap();assert!(response.starts_with("HTTP/1.1 200"));
+                let dto:oncl_api::dto::HashResponse=serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(dto.digest,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+                server.await.unwrap().unwrap();
+            } else {
+                // The accepted connection allows 20s, but the genuine hash's
+                // earlier 1s deadline must abort while writes remain barred.
+                let error=tokio::time::timeout(Duration::from_secs(3),server).await.expect("original delivery deadline must wake pending transport").unwrap().unwrap_err();
+                assert_eq!(error.kind(),std::io::ErrorKind::TimedOut);
+                assert!(original.is_expired());
+                gate.release();
+                let mut response=Vec::new();client.read_to_end(&mut response).await.unwrap();
+                let response=String::from_utf8(response).unwrap();
+                assert!(response.starts_with("HTTP/1.1 200"),"real headers were already committed before body write stalled");
+                assert!(response.split_once("\r\n\r\n").unwrap().1.is_empty(),"expired buffered body bytes or a fabricated JSON error were written after headers");
+            }
+            drop(context(&host.engine));
+        }
+    });
+}

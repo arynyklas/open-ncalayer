@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod delivery;
 pub mod token;
 use oncl_pki::private_fs::PrivateDirectory;
 use std::{

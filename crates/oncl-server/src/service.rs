@@ -1,7 +1,7 @@
 use crate::{
     audit::{AuditBinding, AuditConfig, AuditHealth, DurableAuditGuard},
     auth::{AccessPolicy, Principal},
-    config::{Exposure, ServerConfig, invalid},
+    config::{Exposure, ServerConfig, invalid, normalized_peer},
     executor::{BoundedExecutor, CancelOnDrop, Cancellation},
     keys::{KeyBinding, OperatorKeys},
 };
@@ -32,11 +32,13 @@ use std::{
     future::Future,
     io::{self, Read},
     net::SocketAddr,
-    sync::Arc,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpListener,
 };
 
@@ -61,8 +63,13 @@ impl OperationControl for InvocationControl {
 impl ServiceHost {
     /// Synchronous startup only, before the network runtime/listener. Configuration
     /// owns all mounts and the journal; an existing journal requires explicit recovery.
-    pub fn new(config: ServerConfig) -> io::Result<Arc<Self>> {
+    pub fn new(mut config: ServerConfig) -> io::Result<Arc<Self>> {
         config.validate()?;
+        if let Exposure::TrustedProxy { peers } = &mut config.exposure {
+            for peer in peers {
+                *peer = normalized_peer(*peer);
+            }
+        }
         let policy = Arc::new(AccessPolicy::new(
             config
                 .tokens
@@ -135,8 +142,12 @@ impl ServiceHost {
     }
     fn principal(&self, metadata: &RequestMetadata) -> Result<Principal, ApiError> {
         let denied = || ApiError::not_applied(ErrorCode::PermissionDenied);
+        let peer = normalized_peer(metadata.peer.ip());
+        if peer.is_unspecified() {
+            return Err(denied());
+        }
         if let Exposure::TrustedProxy { peers } = &self.config.exposure
-            && !peers.contains(&metadata.peer.ip())
+            && !peers.contains(&peer)
         {
             return Err(denied());
         }
@@ -273,9 +284,10 @@ impl HashHost for ServiceHost {
             Ok((ctx, binding, metadata_reservation, deadline))
         });
         Box::pin(async move {
-            let _disconnect = CancelOnDrop(cancel.clone());
+            let disconnect = Arc::new(CancelOnDrop(cancel.clone()));
             let (ctx, binding, metadata_reservation, deadline) = admitted?;
             let runtime = tokio::runtime::Handle::current();
+            let worker_cancel = cancel.clone();
             let work = executor
                 .submit(ctx, move |ctx| {
                     let _binding = binding;
@@ -286,7 +298,7 @@ impl HashHost for ServiceHost {
                         pending: Bytes::new(),
                         runtime,
                         deadline,
-                        cancel,
+                        cancel: worker_cancel,
                     };
                     let report = engine
                         .hash(
@@ -325,13 +337,26 @@ impl HashHost for ServiceHost {
                 .await
                 .map_err(|_| ApiError::not_applied(ErrorCode::DeadlineExceeded))?
                 .map_err(processing_error)?;
-            let ((bytes, reservation), ctx) = (output.value, output.context);
+            let ((bytes, reservation), mut ctx) = (output.value, output.context);
+            let delivery = ResponseDelivery {
+                deadline,
+                cancel,
+                control: ctx.resources().operation_control(),
+                _disconnect: disconnect.clone(),
+            };
+            delivery.checkpoint().map_err(processing_error)?;
             let owner = ResponseOwner {
+                _disconnect: disconnect,
                 bytes,
                 _context: ctx,
                 _reservation: reservation,
             };
-            let mut response = Body::from(Bytes::from_owner(owner)).into_response();
+            let mut response = Body::new(DeliveryBody {
+                data: Some(Bytes::from_owner(owner)),
+                delivery: delivery.clone(),
+            })
+            .into_response();
+            response.extensions_mut().insert(delivery);
             response
                 .headers_mut()
                 .insert("content-type", HeaderValue::from_static("application/json"));
@@ -357,6 +382,7 @@ impl HashHost for ServiceHost {
     }
 }
 struct ResponseOwner {
+    _disconnect: Arc<CancelOnDrop>,
     bytes: Vec<u8>,
     _context: OperationContext,
     _reservation: ResourceReservation,
@@ -364,6 +390,56 @@ struct ResponseOwner {
 impl AsRef<[u8]> for ResponseOwner {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
+    }
+}
+/// Read-only original invocation delivery state carried in response extensions.
+/// Transport integrations must not replace this deadline with a fresh timeout.
+#[derive(Clone)]
+pub struct ResponseDelivery {
+    deadline: Deadline,
+    cancel: Arc<Cancellation>,
+    control: Arc<dyn OperationControl>,
+    _disconnect: Arc<CancelOnDrop>,
+}
+impl ResponseDelivery {
+    pub fn deadline(&self) -> Deadline {
+        self.deadline
+    }
+    fn checkpoint(&self) -> Result<(), ProcessingError> {
+        self.deadline.checkpoint()?;
+        self.control.checkpoint(Progress::default())?;
+        self.deadline.checkpoint()
+    }
+}
+struct DeliveryBody {
+    data: Option<Bytes>,
+    delivery: ResponseDelivery,
+}
+impl axum::body::HttpBody for DeliveryBody {
+    type Data = Bytes;
+    type Error = ProcessingError;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, ProcessingError>>> {
+        if self.data.is_none() {
+            return Poll::Ready(None);
+        }
+        if let Err(error) = self.delivery.checkpoint() {
+            self.data.take();
+            return Poll::Ready(Some(Err(error)));
+        }
+        Poll::Ready(
+            self.data
+                .take()
+                .map(|bytes| Ok(hyper::body::Frame::data(bytes))),
+        )
+    }
+    fn is_end_stream(&self) -> bool {
+        self.data.is_none()
+    }
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        hyper::body::SizeHint::with_exact(self.data.as_ref().map_or(0, |bytes| bytes.len() as u64))
     }
 }
 struct BodyReader {
@@ -449,6 +525,202 @@ pub fn tls_configuration(config: &ServerConfig) -> io::Result<Option<tokio_rustl
     .map_err(|_| invalid())?;
     Ok(Some(tokio_rustls::TlsAcceptor::from(Arc::new(tls))))
 }
+#[derive(Default)]
+struct ConnectionDelivery {
+    delivery: Mutex<Option<ResponseDelivery>>,
+    changed: tokio::sync::Notify,
+}
+impl ConnectionDelivery {
+    fn install(&self, delivery: ResponseDelivery) {
+        let mut slot = self
+            .delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Keep-alive is disabled: this connection has one original invocation.
+        // Re-registration must never replace/refresh its delivery bound.
+        if slot.is_none() {
+            *slot = Some(delivery);
+        }
+        drop(slot);
+        self.changed.notify_waiters();
+    }
+    fn checkpoint(&self) -> io::Result<()> {
+        let delivery = self
+            .delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        delivery.as_ref().map_or(Ok(()), |delivery| {
+            delivery.checkpoint().map_err(delivery_io_error)
+        })
+    }
+    async fn stopped(&self) -> ProcessingError {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let delivery = self
+                .delivery
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(delivery) = delivery {
+                if let Err(error) = delivery.checkpoint() {
+                    return error;
+                }
+                return tokio::select! {
+                    biased;
+                    _=delivery.cancel.cancelled()=>ProcessingError::Cancelled,
+                    _=tokio::time::sleep(delivery.deadline().remaining())=>ProcessingError::DeadlineExceeded,
+                };
+            }
+            changed.await;
+        }
+    }
+}
+fn delivery_io_error(error: ProcessingError) -> io::Error {
+    match error {
+        ProcessingError::DeadlineExceeded => io::Error::new(
+            io::ErrorKind::TimedOut,
+            "operation delivery deadline exceeded",
+        ),
+        ProcessingError::Cancelled => io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "operation delivery cancelled",
+        ),
+        _ => io::Error::other("operation delivery refused"),
+    }
+}
+struct ConnectionDisconnect(Arc<ConnectionDelivery>);
+impl Drop for ConnectionDisconnect {
+    fn drop(&mut self) {
+        let cancel = self
+            .0
+            .delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|delivery| delivery.cancel.clone());
+        if let Some(cancel) = cancel {
+            cancel.cancel();
+        }
+    }
+}
+// The timer aborts an unpolled/pending write; the I/O checkpoint also refuses a
+// newly-ready write at the boundary, including Bytes already buffered by Hyper.
+struct DeliveryIo<S> {
+    stream: S,
+    delivery: Arc<ConnectionDelivery>,
+}
+impl<S: AsyncRead + Unpin> AsyncRead for DeliveryIo<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if let Err(error) = this.delivery.checkpoint() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut this.stream).poll_read(cx, buffer)
+    }
+}
+impl<S: AsyncWrite + Unpin> AsyncWrite for DeliveryIo<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if let Err(error) = this.delivery.checkpoint() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut this.stream).poll_write(cx, buffer)
+    }
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffers: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if let Err(error) = this.delivery.checkpoint() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut this.stream).poll_write_vectored(cx, buffers)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if let Err(error) = this.delivery.checkpoint() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut this.stream).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if let Err(error) = this.delivery.checkpoint() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut this.stream).poll_shutdown(cx)
+    }
+}
+/// Serve one accepted transport (plain/TLS/wrapped I/O). The trusted acceptor
+/// supplies the ACTUAL peer and finite accept/header bounds, never request data.
+/// A response's original invocation bound can only shorten these outer bounds.
+pub async fn serve_connection<S>(
+    stream: S,
+    peer: SocketAddr,
+    router: axum::Router,
+    header_timeout: Duration,
+    connection_deadline: tokio::time::Instant,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    if header_timeout.is_zero() {
+        return Err(invalid());
+    }
+    let delivery = Arc::new(ConnectionDelivery::default());
+    let _disconnect = ConnectionDisconnect(delivery.clone());
+    let service_delivery = delivery.clone();
+    let service = hyper::service::service_fn(move |mut request: Request<hyper::body::Incoming>| {
+        request.extensions_mut().insert(ConnectInfo(peer));
+        let router = router.clone();
+        let delivery = service_delivery.clone();
+        async move {
+            use hyper::service::Service;
+            let service = hyper_util::service::TowerToHyperService::new(router);
+            let response = service.call(request).await?;
+            if let Some(state) = response.extensions().get::<ResponseDelivery>() {
+                delivery.install(state.clone());
+            }
+            Ok::<_, std::convert::Infallible>(response)
+        }
+    });
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder
+        .keep_alive(false)
+        .max_headers(64)
+        .max_buf_size(32_768)
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(header_timeout);
+    let connection = builder.serve_connection(
+        hyper_util::rt::TokioIo::new(DeliveryIo {
+            stream,
+            delivery: delivery.clone(),
+        }),
+        service,
+    );
+    tokio::pin!(connection);
+    tokio::select! {
+        biased;
+        error=delivery.stopped()=>Err(delivery_io_error(error)),
+        _=tokio::time::sleep_until(connection_deadline)=>Err(io::Error::new(io::ErrorKind::TimedOut,"connection time bound exceeded")),
+        result=&mut connection=>result.map_err(|_|io::Error::new(io::ErrorKind::ConnectionAborted,"HTTP connection closed")),
+    }
+}
 trait NetworkStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> NetworkStream for T {}
 /// Listener is supplied only by the explicitly enabled standalone composition.
@@ -484,30 +756,8 @@ pub async fn serve<F: Future<Output = ()>>(
             } else {
                 Box::new(socket)
             };
-            let service =
-                hyper::service::service_fn(move |mut request: Request<hyper::body::Incoming>| {
-                    request.extensions_mut().insert(ConnectInfo(peer));
-                    let router = router.clone();
-                    async move {
-                        use hyper::service::Service;
-                        use std::convert::Infallible;
-                        let service = hyper_util::service::TowerToHyperService::new(router);
-                        let response = service.call(request).await;
-                        response.map_err(|never: Infallible| match never {})
-                    }
-                });
-            let mut builder = hyper::server::conn::http1::Builder::new();
-            builder
-                .keep_alive(false)
-                .max_headers(64)
-                .max_buf_size(32_768)
-                .timer(hyper_util::rt::TokioTimer::new())
-                .header_read_timeout(header_timeout);
-            let _ = tokio::time::timeout_at(
-                connection_deadline,
-                builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service),
-            )
-            .await;
+            let _ =
+                serve_connection(stream, peer, router, header_timeout, connection_deadline).await;
         });
         while tasks.try_join_next().is_some() {}
     }
