@@ -27,7 +27,10 @@ use crate::tsp::{self, TsaSpec};
 use crate::validation::{ValidationContext, ValidationReason, ValidationReport, Verdict};
 use der::asn1::{AnyRef, ObjectIdentifier, OctetString};
 use der::{Decode, Encode, Sequence};
-pub use pdf::{SnapshotDocumentTimestamp, SnapshotMaterial, verify_snapshot_pades};
+pub use pdf::{
+    SnapshotDocumentTimestamp, SnapshotMaterial, SnapshotPadesIntoIter, SnapshotPadesReports,
+    SnapshotSignature, verify_snapshot_pades,
+};
 use std::io::{self, Cursor, Read, Write};
 use time::OffsetDateTime;
 
@@ -451,23 +454,7 @@ fn store_common<'a>(
         });
     }
     for bytes in statuses {
-        let (kind, payload, prefix, suffix) = match bytes.first() {
-            Some(0x30) => (EvidenceKind::Crl, *bytes, &[][..], &[][..]),
-            Some(0xa1) => {
-                let fields = ber::raw_children(bytes)?;
-                if fields.len() != 2 || ObjectIdentifier::from_der(fields[0])? != OCSP_RESPONSE {
-                    return Err(invalid("unsupported CAdES other revocation format"));
-                }
-                let start = fields[1].as_ptr() as usize - bytes.as_ptr() as usize;
-                (
-                    EvidenceKind::Ocsp,
-                    fields[1],
-                    &bytes[..start],
-                    &bytes[start + fields[1].len()..],
-                )
-            }
-            _ => return Err(invalid("unsupported CAdES revocation choice")),
-        };
+        let (kind, payload, prefix, suffix) = revocation_parts(bytes)?;
         revocation.push(Record {
             id: collect(store, kind, payload)?,
             wire: bytes,
@@ -476,6 +463,46 @@ fn store_common<'a>(
         });
     }
     Ok((certs, revocation))
+}
+type RevocationParts<'a> = (EvidenceKind, &'a [u8], &'a [u8], &'a [u8]);
+fn revocation_parts(bytes: &[u8]) -> Result<RevocationParts<'_>, AdesError> {
+    Ok(match bytes.first() {
+        Some(0x30) => (EvidenceKind::Crl, bytes, &[][..], &[][..]),
+        Some(0xa1) => {
+            let fields = ber::raw_children(bytes)?;
+            if fields.len() != 2 || ObjectIdentifier::from_der(fields[0])? != OCSP_RESPONSE {
+                return Err(invalid("unsupported CAdES other revocation format"));
+            }
+            let start = fields[1].as_ptr() as usize - bytes.as_ptr() as usize;
+            (
+                EvidenceKind::Ocsp,
+                fields[1],
+                &bytes[..start],
+                &bytes[start + fields[1].len()..],
+            )
+        }
+        _ => return Err(invalid("unsupported CAdES revocation choice")),
+    })
+}
+#[allow(
+    clippy::type_complexity,
+    reason = "Borrowed standard unsigned attribute OID/value and owned evidence ID"
+)]
+fn signer_tokens<'a>(
+    signers: &[&'a [u8]],
+    mut collect_token: impl FnMut(&'a [u8]) -> Result<EvidenceId, AdesError>,
+) -> Result<Vec<Vec<(ObjectIdentifier, &'a [u8], EvidenceId)>>, AdesError> {
+    signers
+        .iter()
+        .map(|encoded| {
+            let raw = RawSigner::new(encoded)?;
+            raw.unsigned_values()?
+                .into_iter()
+                .filter(|(oid, _, _)| *oid == SIGNATURE_TIMESTAMP || *oid == ARCHIVE_TIMESTAMP)
+                .map(|(oid, _, value)| Ok((oid, value, collect_token(value)?)))
+                .collect()
+        })
+        .collect()
 }
 fn index_from_token(token: &[u8]) -> Result<Vec<u8>, AdesError> {
     let content = ber::raw_children(token)?;
@@ -820,8 +847,12 @@ fn verify_frozen(
     allowed: &[SigAlg],
     scope: &ResourceScope,
 ) -> Result<AdesReport, AdesError> {
-    verify_frozen_impl(required, frozen, services, allowed, scope, None)
+    verify_frozen_impl(required, frozen, services, allowed, scope, None, None)
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "One scoped C03 validator with an optional private shared PDF evidence owner"
+)]
 fn verify_frozen_impl(
     required: AdesLevel,
     frozen: &Frozen,
@@ -829,6 +860,7 @@ fn verify_frozen_impl(
     allowed: &[SigAlg],
     scope: &ResourceScope,
     pdf: Option<&pdf::PdfContext<'_, '_>>,
+    shared: Option<&mut pdf::SharedEvidence<'_>>,
 ) -> Result<AdesReport, AdesError> {
     scope.checkpoint()?;
     let encoded_size = frozen.parsed.metadata.as_bytes().len() as u64;
@@ -851,30 +883,47 @@ fn verify_frozen_impl(
         .ok_or(ProcessingError::MemoryLimit)? as u64;
     let memory = scope.reserve_memory(report_bytes)?;
     let metadata = scope.reserve_metadata(report_bytes)?;
-    let mut operation = scope.retain();
-    let mut store =
-        EvidenceStore::new(services.temporary.clone(), services.limits, &mut operation)?;
-    let (cert_records, status_records) = store_common(&mut store, &certificates, &statuses)?;
-    let mut token_ids = Vec::with_capacity(signer_bytes.len());
-    for encoded in &signer_bytes {
-        let raw = RawSigner::new(encoded)?;
-        let mut tokens = Vec::new();
-        for (oid, _, value) in raw.unsigned_values()? {
-            if oid == SIGNATURE_TIMESTAMP || oid == ARCHIVE_TIMESTAMP {
-                tokens.push((
-                    oid,
-                    value,
-                    collect(&mut store, EvidenceKind::Timestamp, value)?,
-                ));
-            }
-        }
-        token_ids.push(tokens);
-    }
-    let document_ids = pdf
-        .map(|pdf| pdf.collect_tokens(&mut store))
-        .transpose()?
-        .unwrap_or_default();
-    let mut bundle = store.finish();
+    let mut local_bundle;
+    let mut local_prepared = None;
+    let local_documents = [];
+    let (
+        bundle,
+        prepared_evidence,
+        cert_records,
+        status_records,
+        token_ids,
+        document_ids,
+        required_certificates,
+    ) = if let Some(common) = shared {
+        let token_ids = signer_tokens(&signer_bytes, |value| common.token_id(value))?;
+        (
+            &mut common.bundle,
+            &mut common.prepared,
+            Vec::new(),
+            Vec::new(),
+            token_ids,
+            common.documents.as_slice(),
+            common.required_certificates.as_slice(),
+        )
+    } else {
+        let mut operation = scope.retain();
+        let mut store =
+            EvidenceStore::new(services.temporary.clone(), services.limits, &mut operation)?;
+        let (cert_records, status_records) = store_common(&mut store, &certificates, &statuses)?;
+        let token_ids = signer_tokens(&signer_bytes, |value| {
+            collect(&mut store, EvidenceKind::Timestamp, value)
+        })?;
+        local_bundle = store.finish();
+        (
+            &mut local_bundle,
+            &mut local_prepared,
+            cert_records,
+            status_records,
+            token_ids,
+            local_documents.as_slice(),
+            [].as_slice(),
+        )
+    };
     let prepared = PreparedCms::from_digests(frozen.parsed.metadata.as_bytes(), frozen.values);
     let data = prepared.signed_data()?;
     let other_revocations = data
@@ -892,7 +941,6 @@ fn verify_frozen_impl(
     let normalized_infos = data.signer_infos.tlvs()?;
     let mut reports = Vec::with_capacity(signer_bytes.len());
     let mut minimum = AdesLevel::Lta;
-    let mut prepared_evidence = None;
     for (index, encoded) in signer_bytes.iter().enumerate() {
         scope.checkpoint()?;
         let raw = RawSigner::new(encoded)?;
@@ -964,12 +1012,20 @@ fn verify_frozen_impl(
         minimum = minimum.min(level);
         let signature_coverage = [CoveragePart::Signature];
         if prepared_evidence.is_none() {
-            prepared_evidence = Some(prepare_evidence(
+            *prepared_evidence = Some(prepare_evidence(
                 &evidence,
-                &mut bundle,
+                bundle,
                 services.validation,
                 scope,
             )?);
+        }
+        if required_certificates.iter().any(|id| {
+            !prepared_evidence
+                .as_ref()
+                .expect("prepared above")
+                .has_certificate(*id)
+        }) {
+            return Err(invalid("DSS contains a malformed certificate"));
         }
         let checked = (|| -> Result<ValidationReport, AdesError> {
             if let Some(pdf) = pdf {
@@ -983,9 +1039,9 @@ fn verify_frozen_impl(
                 }
                 return pdf.validate(
                     &evidence,
-                    &mut bundle,
+                    bundle,
                     &signatures,
-                    &document_ids,
+                    document_ids,
                     level,
                     services,
                     scope,
@@ -1182,7 +1238,7 @@ fn verify_frozen_impl(
                 .collect();
             Ok(validate_prepared_evidence(
                 &evidence,
-                &mut bundle,
+                bundle,
                 &proofs,
                 level,
                 services.validation,
@@ -1207,7 +1263,7 @@ fn verify_frozen_impl(
                     .collect::<Vec<_>>();
                 let mut report = validate_prepared_evidence(
                     &evidence,
-                    &mut bundle,
+                    bundle,
                     &proofs,
                     if proofs.is_empty() {
                         AdesLevel::B

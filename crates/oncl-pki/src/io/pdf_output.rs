@@ -571,4 +571,127 @@ mod tests {
         cancelled.store(false, Ordering::SeqCst);
         assert!(stage.copy_to(&mut Vec::new()).is_err());
     }
+    fn initially_cancelled_output_entry(snapshot: bool) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Cancel(Arc<AtomicBool>);
+        impl crate::resource::OperationControl for Cancel {
+            fn checkpoint(&self, _: crate::resource::Progress) -> Result<(), ProcessingError> {
+                if self.0.load(Ordering::SeqCst) {
+                    Err(ProcessingError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let limits = crate::resource::ResourceLimits::default();
+        let budget = Arc::new(crate::resource::SharedBudget::new(limits.clone()).unwrap());
+        let mut scope = budget
+            .begin(limits, Arc::new(Cancel(cancelled.clone())))
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(temp.path()).unwrap();
+        let mut stage = store.stage(&mut scope).unwrap();
+        stage.write_chunk(b"protected bytes").unwrap();
+        cancelled.store(true, Ordering::SeqCst);
+        let error = if snapshot {
+            PdfSignatureOutput::with_snapshot(&mut stage, &scope, |_| Ok::<_, ProcessingError>(()))
+                .unwrap_err()
+        } else {
+            match PdfSignatureOutput::resume_checked(&mut stage, &scope) {
+                Ok(_) => panic!("cancelled renewal unexpectedly admitted"),
+                Err(error) => error,
+            }
+        };
+        assert!(matches!(error, ProcessingError::Cancelled));
+        cancelled.store(false, Ordering::SeqCst);
+        assert!(
+            stage.copy_to(&mut Vec::new()).is_err(),
+            "failed entry must poison without a caller abort"
+        );
+        let mut normal = store.stage(&mut scope).unwrap();
+        normal.write_chunk(b"positive").unwrap();
+        if snapshot {
+            PdfSignatureOutput::with_snapshot(&mut normal, &scope, |mut view| {
+                let mut actual = [0; 8];
+                assert_eq!(
+                    view.read_region(Region { offset: 0, len: 8 }, &mut actual)?,
+                    8
+                );
+                assert_eq!(&actual, b"positive");
+                Ok::<_, ProcessingError>(())
+            })
+            .unwrap();
+        } else {
+            let mut transaction = PdfSignatureOutput::resume_checked(&mut normal, &scope).unwrap();
+            transaction.append(b" tail").unwrap();
+            transaction.finish_validation_update(&scope).unwrap();
+        }
+        let mut delivered = Vec::new();
+        normal.copy_to(&mut delivered).unwrap();
+        assert_eq!(
+            delivered,
+            if snapshot {
+                b"positive".as_slice()
+            } else {
+                b"positive tail".as_slice()
+            }
+        );
+    }
+    #[test]
+    fn initially_cancelled_resume_is_sticky_after_control_clear() {
+        initially_cancelled_output_entry(false);
+    }
+    #[test]
+    fn initially_cancelled_snapshot_is_sticky_after_control_clear() {
+        initially_cancelled_output_entry(true);
+    }
+    #[test]
+    fn failed_output_entry_does_not_poison_foreign_or_source_artifacts() {
+        let limits = crate::resource::ResourceLimits::default();
+        let budget = Arc::new(crate::resource::SharedBudget::new(limits.clone()).unwrap());
+        let mut owner = budget.begin(limits.clone(), Arc::new(Control)).unwrap();
+        let foreign = Arc::new(crate::resource::SharedBudget::new(limits.clone()).unwrap())
+            .begin(limits, Arc::new(Control))
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(temp.path()).unwrap();
+        for snapshot in [false, true] {
+            let mut output = store.stage(&mut owner).unwrap();
+            output.write_chunk(b"owner bytes").unwrap();
+            let mut source = store.stage_source(&mut owner).unwrap();
+            source.write_chunk(b"source").unwrap();
+            if snapshot {
+                assert!(
+                    PdfSignatureOutput::with_snapshot(&mut output, &foreign, |_| Ok::<
+                        _,
+                        ProcessingError,
+                    >(
+                        ()
+                    ))
+                    .is_err()
+                );
+                assert!(
+                    PdfSignatureOutput::with_snapshot(&mut source, &owner, |_| Ok::<
+                        _,
+                        ProcessingError,
+                    >(
+                        ()
+                    ))
+                    .is_err()
+                );
+            } else {
+                assert!(PdfSignatureOutput::resume_checked(&mut output, &foreign).is_err());
+                assert!(PdfSignatureOutput::resume_checked(&mut source, &owner).is_err());
+            }
+            let mut bytes = Vec::new();
+            output.copy_to(&mut bytes).unwrap();
+            assert_eq!(bytes, b"owner bytes");
+            let mut original = [0; 6];
+            source
+                .read_region(Region { offset: 0, len: 6 }, &mut original)
+                .unwrap();
+            assert_eq!(&original, b"source");
+        }
+    }
 }

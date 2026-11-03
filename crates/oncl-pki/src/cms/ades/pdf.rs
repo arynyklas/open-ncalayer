@@ -32,21 +32,6 @@ fn contains(ranges: &[Region], value: Region) -> bool {
     })
 }
 impl PdfContext<'_, '_> {
-    pub(super) fn collect_tokens(
-        &self,
-        store: &mut EvidenceStore,
-    ) -> Result<Vec<EvidenceId>, AdesError> {
-        self.documents
-            .iter()
-            .map(|doc| {
-                collect(
-                    store,
-                    EvidenceKind::Timestamp,
-                    crate::io::padded_der_sequence(doc.token.as_bytes())?,
-                )
-            })
-            .collect()
-    }
     pub(super) fn achieved(&self, signature_timestamp: bool) -> AdesLevel {
         let time = signature_timestamp
             || self
@@ -244,7 +229,10 @@ impl SnapshotProofGraph<'_, '_> {
                 return Err(EvidenceError::InvalidBinding);
             }
             for (part, region) in proof.coverage.iter().zip(doc.regions) {
-                if !matches!(part, CoveragePart::Snapshot { input, region: actual } if std::ptr::eq(*input, self.context.snapshot as &dyn PdfSnapshotCoverage) && *actual == region)
+                // Sealed coverage has exactly this snapshot owner. Compare its
+                // data address, not trait-object vtables: codegen may duplicate
+                // vtables for the same concrete type in different units.
+                if !matches!(part, CoveragePart::Snapshot { input, region: actual } if std::ptr::addr_eq(*input, self.context.snapshot as &dyn PdfSnapshotCoverage) && *actual == region)
                 {
                     return Err(EvidenceError::InvalidBinding);
                 }
@@ -284,98 +272,376 @@ impl SnapshotProofGraph<'_, '_> {
     }
 }
 
-/// Verify actual CMS detached regions plus inclusion-bound document timestamps.
-/// This reports crypto/evidence facts only: the PDF caller remains responsible
-/// for physical dictionary/field/xref association and allowed revision changes.
+/// One source CMS and its actual immutable detached PDF ranges.
+pub struct SnapshotSignature<'a> {
+    pub metadata: &'a DerivedInput,
+    pub regions: [Region; 2],
+}
+
+/// Scoped per-source reports. Moving a report transfers its existing scoped
+/// owners; dropping the collection or iterator cannot detach a yielded report.
+pub struct SnapshotPadesReports {
+    reports: Vec<AdesReport>,
+    _memory: ResourceReservation,
+    _metadata: ResourceReservation,
+}
+pub struct SnapshotPadesIntoIter {
+    reports: std::vec::IntoIter<AdesReport>,
+    _memory: ResourceReservation,
+    _metadata: ResourceReservation,
+}
+impl IntoIterator for SnapshotPadesReports {
+    type Item = AdesReport;
+    type IntoIter = SnapshotPadesIntoIter;
+    fn into_iter(self) -> Self::IntoIter {
+        SnapshotPadesIntoIter {
+            reports: self.reports.into_iter(),
+            _memory: self._memory,
+            _metadata: self._metadata,
+        }
+    }
+}
+impl Iterator for SnapshotPadesIntoIter {
+    type Item = AdesReport;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.reports.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.reports.size_hint()
+    }
+}
+impl ExactSizeIterator for SnapshotPadesIntoIter {}
+
+pub(super) struct SharedEvidence<'a> {
+    pub(super) bundle: EvidenceBundle,
+    pub(super) prepared: Option<PreparedEvidence>,
+    tokens: Vec<(&'a [u8], EvidenceId)>,
+    pub(super) documents: Vec<EvidenceId>,
+    pub(super) required_certificates: Vec<EvidenceId>,
+    _memory: ResourceReservation,
+    _metadata: ResourceReservation,
+}
+impl SharedEvidence<'_> {
+    pub(super) fn token_id(&self, value: &[u8]) -> Result<EvidenceId, AdesError> {
+        self.tokens
+            .iter()
+            .find(|(bytes, _)| *bytes == value)
+            .map(|(_, id)| *id)
+            .ok_or_else(|| invalid("timestamp absent from shared immutable evidence"))
+    }
+}
+
+fn collect_unique<'a>(
+    store: &mut EvidenceStore,
+    entries: &mut Vec<(EvidenceKind, &'a [u8], EvidenceId)>,
+    kind: EvidenceKind,
+    bytes: &'a [u8],
+    maximum: usize,
+) -> Result<EvidenceId, AdesError> {
+    if let Some((_, _, id)) = entries
+        .iter()
+        .find(|(existing_kind, value, _)| *existing_kind == kind && *value == bytes)
+    {
+        return Ok(*id);
+    }
+    if entries.len() >= maximum {
+        return Err(EvidenceError::Limit.into());
+    }
+    let id = store.collect(
+        kind,
+        Source::sequential(&mut Cursor::new(bytes), Some(bytes.len() as u64)),
+        EvidenceOrigin::Embedded {
+            label: "PAdES immutable snapshot evidence",
+        },
+    )?;
+    entries.push((kind, bytes, id));
+    Ok(id)
+}
+
+fn common_evidence<'a>(
+    frozen: &'a [Frozen],
+    material: &'a [SnapshotMaterial<'a>],
+    documents: &'a [SnapshotDocumentTimestamp<'a>],
+    services: &AdesServices<'_>,
+    scope: &ResourceScope,
+) -> Result<SharedEvidence<'a>, AdesError> {
+    let headers = (services.limits.max_items as u64)
+        .checked_mul(256)
+        .ok_or(ProcessingError::MetadataLimit)?;
+    let memory = scope.reserve_memory(headers)?;
+    let metadata = scope.reserve_metadata(headers)?;
+    let mut raw_tokens = Vec::new();
+    for source in frozen {
+        for encoded in raw_set(source.signers.as_bytes())? {
+            for (oid, _, value) in RawSigner::new(encoded)?.unsigned_values()? {
+                if (oid == SIGNATURE_TIMESTAMP || oid == ARCHIVE_TIMESTAMP)
+                    && !raw_tokens.contains(&value)
+                {
+                    if raw_tokens.len() >= services.limits.max_items {
+                        return Err(EvidenceError::Limit.into());
+                    }
+                    raw_tokens.push(value);
+                }
+            }
+        }
+    }
+    for document in documents {
+        let token = crate::io::padded_der_sequence(document.token.as_bytes())?;
+        if !raw_tokens.contains(&token) {
+            if raw_tokens.len() >= services.limits.max_items {
+                return Err(EvidenceError::Limit.into());
+            }
+            raw_tokens.push(token);
+        }
+    }
+    // Normalize each real token once so its certificate SET can be borrowed.
+    // F04's shared prepared store then decodes certificate/TSTInfo/signature
+    // math once; per-signer graphs still recheck inclusion, imprint and policy.
+    let mut normalized = Vec::with_capacity(raw_tokens.len());
+    for token in &raw_tokens {
+        let mut value = Metadata::new(scope)?;
+        value.append(&ber::to_der(token)?)?;
+        normalized.push(value);
+    }
+    let mut host_certificates = Metadata::new(scope)?;
+    if material.is_empty() {
+        for certificate in services.material.certificates {
+            host_certificates.append(&certificate.to_der()?)?;
+        }
+    }
+    let mut operation = scope.shared_view();
+    let mut store =
+        EvidenceStore::new(services.temporary.clone(), services.limits, &mut operation)?;
+    let mut entries = Vec::new();
+    let maximum = services.limits.max_items;
+    for source in frozen {
+        for certificate in raw_set(source.certificates.as_bytes())? {
+            collect_unique(
+                &mut store,
+                &mut entries,
+                EvidenceKind::Certificate,
+                certificate,
+                maximum,
+            )?;
+        }
+        for status in ber::raw_children(source.status.as_bytes())? {
+            let (kind, bytes, _, _) = revocation_parts(status)?;
+            collect_unique(&mut store, &mut entries, kind, bytes, maximum)?;
+        }
+    }
+    let mut required_certificates = Vec::new();
+    for item in material {
+        let id = collect_unique(
+            &mut store,
+            &mut entries,
+            item.kind,
+            item.value.as_bytes(),
+            maximum,
+        )?;
+        if item.kind == EvidenceKind::Certificate {
+            required_certificates.push(id);
+        }
+    }
+    if material.is_empty() {
+        for certificate in raw_set(host_certificates.as_bytes())? {
+            collect_unique(
+                &mut store,
+                &mut entries,
+                EvidenceKind::Certificate,
+                certificate,
+                maximum,
+            )?;
+        }
+        for response in services.material.ocsp {
+            collect_unique(
+                &mut store,
+                &mut entries,
+                EvidenceKind::Ocsp,
+                response,
+                maximum,
+            )?;
+        }
+        for crl in services.material.crls {
+            collect_unique(&mut store, &mut entries, EvidenceKind::Crl, crl, maximum)?;
+        }
+    }
+    for token in &normalized {
+        let content = ContentInfo::from_der(token.as_bytes())?;
+        let data: SignedData<'_> = content.content.decode_as()?;
+        if let Some(certificates) = data.certificates {
+            for certificate in certificates.tlvs()? {
+                if certificate.first() == Some(&0x30) {
+                    collect_unique(
+                        &mut store,
+                        &mut entries,
+                        EvidenceKind::Certificate,
+                        certificate,
+                        maximum,
+                    )?;
+                }
+            }
+        }
+    }
+    let mut tokens = Vec::with_capacity(raw_tokens.len());
+    for token in raw_tokens {
+        let id = collect_unique(
+            &mut store,
+            &mut entries,
+            EvidenceKind::Timestamp,
+            token,
+            maximum,
+        )?;
+        tokens.push((token, id));
+    }
+    let documents = documents
+        .iter()
+        .map(|document| {
+            let bytes = crate::io::padded_der_sequence(document.token.as_bytes())?;
+            tokens
+                .iter()
+                .find(|(value, _)| *value == bytes)
+                .map(|(_, id)| *id)
+                .ok_or_else(|| invalid("missing shared document timestamp"))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(SharedEvidence {
+        bundle: store.finish(),
+        prepared: None,
+        tokens,
+        documents,
+        required_certificates,
+        _memory: memory,
+        _metadata: metadata,
+    })
+}
+
+/// Verify an entire operation's source CMS signatures against one immutable
+/// snapshot and one common evidence owner/prepared decode. These are crypto and
+/// evidence facts; PDF structural/permission validation remains the caller's job.
 #[allow(
     clippy::too_many_arguments,
-    reason = "Closed snapshot and actual format-derived material"
+    reason = "One operation batch with closed source and common evidence bindings"
 )]
 pub fn verify_snapshot_pades(
     required: AdesLevel,
-    metadata: &DerivedInput,
+    signatures: &[SnapshotSignature<'_>],
     snapshot: &Mutex<PdfSnapshot<'_>>,
-    regions: &[Region],
     material: &[SnapshotMaterial<'_>],
     documents: &[SnapshotDocumentTimestamp<'_>],
     services: &AdesServices<'_>,
     allowed: &[SigAlg],
     scope: &ResourceScope,
-) -> Result<AdesReport, AdesError> {
+) -> Result<SnapshotPadesReports, AdesError> {
     services.limits.validate()?;
+    if signatures.is_empty() {
+        return Err(invalid("empty PAdES source signature batch"));
+    }
     if material.len() > services.limits.max_items || documents.len() > services.limits.max_proofs {
         return Err(EvidenceError::Limit.into());
     }
-    let bytes = material
+    let mut bytes = signatures
         .iter()
-        .map(|item| item.value.as_bytes())
+        .map(|source| source.metadata.as_bytes())
+        .chain(material.iter().map(|item| item.value.as_bytes()))
         .chain(documents.iter().map(|item| item.token.as_bytes()))
-        .try_fold(metadata.as_bytes().len() as u64, |sum, value| {
+        .try_fold(0u64, |sum, value| {
             sum.checked_add(value.len() as u64)
                 .ok_or(ProcessingError::MetadataLimit)
         })?;
-    let _memory =
+    if material.is_empty() {
+        for certificate in services.material.certificates {
+            let length: u32 = certificate.encoded_len()?.into();
+            bytes = bytes
+                .checked_add(u64::from(length))
+                .ok_or(ProcessingError::MetadataLimit)?;
+        }
+        for status in services.material.ocsp.iter().chain(services.material.crls) {
+            bytes = bytes
+                .checked_add(status.len() as u64)
+                .ok_or(ProcessingError::MetadataLimit)?;
+        }
+    }
+    let _working =
         scope.reserve_memory(bytes.checked_mul(128).ok_or(ProcessingError::MemoryLimit)?)?;
-    let _metadata = scope.reserve_metadata(
+    let _decode = scope.reserve_metadata(
         bytes
             .checked_mul(16)
             .ok_or(ProcessingError::MetadataLimit)?,
     )?;
-    let mut operation = scope.shared_view();
+    let headers = (signatures.len() as u64)
+        .checked_mul((std::mem::size_of::<Frozen>() + std::mem::size_of::<AdesReport>()) as u64 * 2)
+        .ok_or(ProcessingError::MetadataLimit)?;
+    let memory = scope.reserve_memory(headers)?;
+    let metadata = scope.reserve_metadata(headers)?;
     let mut input = lock_snapshot(snapshot)?;
-    input.binds(metadata, scope)?;
-    if metadata.encoding() != SnapshotEncoding::PdfByteString {
-        return Err(invalid("PAdES requires closed PDF string decoding"));
+    for source in signatures {
+        input.binds(source.metadata, scope)?;
+        if source.metadata.encoding() != SnapshotEncoding::PdfByteString {
+            return Err(invalid("PAdES requires closed PDF string decoding"));
+        }
     }
-    let encoded = crate::io::padded_der_sequence(metadata.as_bytes())?;
-    let mut cms = services.temporary.stage_source(&mut operation)?;
-    cms.write_chunk(encoded)?;
-    let mut reader = input.reader(regions, scope)?;
-    let frozen = freeze_stage_extra(cms, Some(reader.source()), true, scope, allowed);
-    reader.finish()?;
-    drop(reader);
-    let mut frozen = frozen?;
-    if !frozen.parsed.inspection.detached {
-        return Err(invalid("PAdES requires detached CMS"));
-    }
-    let mut certs = Vec::new();
-    let mut ocsp = Vec::new();
-    let mut crls = Vec::new();
     for item in material {
         input.binds(item.value, scope)?;
-        if item.value.encoding() != SnapshotEncoding::Identity {
-            return Err(invalid("DSS requires closed raw stream decoding"));
-        }
-        match item.kind {
-            EvidenceKind::Certificate => certs.push(Certificate::from_der(item.value.as_bytes())?),
-            EvidenceKind::Ocsp => ocsp.push(item.value.as_bytes()),
-            EvidenceKind::Crl => crls.push(item.value.as_bytes()),
-            EvidenceKind::Timestamp => return Err(invalid("timestamp is not DSS status material")),
+        if item.value.encoding() != SnapshotEncoding::Identity
+            || !matches!(
+                item.kind,
+                EvidenceKind::Certificate | EvidenceKind::Ocsp | EvidenceKind::Crl
+            )
+        {
+            return Err(invalid(
+                "DSS requires closed raw validation stream decoding",
+            ));
         }
     }
-    // Host material may assist B/T validation, but never becomes carried LT data.
-    if material.is_empty() {
-        certs.extend_from_slice(services.material.certificates);
-        ocsp.extend_from_slice(services.material.ocsp);
-        crls.extend_from_slice(services.material.crls);
+    for document in documents {
+        input.binds(document.token, scope)?;
+        if document.token.encoding() != SnapshotEncoding::PdfByteString {
+            return Err(invalid(
+                "document timestamp requires closed PDF string decoding",
+            ));
+        }
     }
-    let carried = AdesServices {
-        material: ValidationMaterial {
-            certificates: &certs,
-            ocsp: &ocsp,
-            crls: &crls,
-        },
-        ..*services
-    };
-    add_material(&mut frozen, &carried, scope)?;
+    let mut frozen = Vec::with_capacity(signatures.len());
+    for source in signatures {
+        let encoded = crate::io::padded_der_sequence(source.metadata.as_bytes())?;
+        let mut operation = scope.shared_view();
+        let mut cms = services.temporary.stage_source(&mut operation)?;
+        cms.write_chunk(encoded)?;
+        let mut reader = input.reader(&source.regions, scope)?;
+        let value = freeze_stage_extra(cms, Some(reader.source()), true, scope, allowed);
+        reader.finish()?;
+        drop(reader);
+        let value = value?;
+        if !value.parsed.inspection.detached {
+            return Err(invalid("PAdES requires detached CMS"));
+        }
+        frozen.push(value);
+    }
     drop(input);
-    let context = PdfContext {
-        snapshot,
-        metadata,
-        material,
-        documents,
-    };
-    verify_frozen_impl(required, &frozen, &carried, allowed, scope, Some(&context))
+    let mut common = common_evidence(&frozen, material, documents, services, scope)?;
+    let mut reports = Vec::with_capacity(signatures.len());
+    for (source, frozen) in signatures.iter().zip(&frozen) {
+        let context = PdfContext {
+            snapshot,
+            metadata: source.metadata,
+            material,
+            documents,
+        };
+        reports.push(verify_frozen_impl(
+            required,
+            frozen,
+            services,
+            allowed,
+            scope,
+            Some(&context),
+            Some(&mut common),
+        )?);
+    }
+    Ok(SnapshotPadesReports {
+        reports,
+        _memory: memory,
+        _metadata: metadata,
+    })
 }
 
 /// Add only the standard CMS signature-time-stamp attribute. This internal

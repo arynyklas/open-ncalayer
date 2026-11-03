@@ -919,7 +919,7 @@ fn incremental_revision_limit_is_enforced_on_verify_and_extension() {
 #[test]
 fn closed_document_proof_rejects_foreign_snapshot_wrong_imprint_and_own_gap() {
     use oncl_pki::{
-        cms::ades::{SnapshotDocumentTimestamp, verify_snapshot_pades},
+        cms::ades::{SnapshotDocumentTimestamp, SnapshotSignature, verify_snapshot_pades},
         io::{FrozenInput, PdfSnapshot, Region, SnapshotEncoding},
     };
     use std::sync::Mutex;
@@ -997,15 +997,20 @@ fn closed_document_proof_rejects_foreign_snapshot_wrong_imprint_and_own_gap() {
         assert_eq!(
             verify_snapshot_pades(
                 AdesLevel::T,
-                &cms,
+                &[SnapshotSignature {
+                    metadata: &cms,
+                    regions: signed_ranges
+                }],
                 &snapshot,
-                &signed_ranges,
                 &[],
                 &documents,
                 services,
                 &[SigAlg::RsaSha256],
                 &s
             )
+            .unwrap()
+            .into_iter()
+            .next()
             .unwrap()
             .verdict,
             Verdict::Valid
@@ -1024,16 +1029,18 @@ fn closed_document_proof_rejects_foreign_snapshot_wrong_imprint_and_own_gap() {
             assert!(
                 !verify_snapshot_pades(
                     AdesLevel::T,
-                    &cms,
+                    &[SnapshotSignature {
+                        metadata: &cms,
+                        regions: signed_ranges
+                    }],
                     &snapshot,
-                    &signed_ranges,
                     &[],
                     &documents,
                     services,
                     &[SigAlg::RsaSha256],
                     &s
                 )
-                .is_ok_and(|r| r.verdict == Verdict::Valid)
+                .is_ok_and(|reports| reports.into_iter().next().unwrap().verdict == Verdict::Valid)
             );
         }
         let mut other = FrozenInput::capture(
@@ -1049,9 +1056,11 @@ fn closed_document_proof_rejects_foreign_snapshot_wrong_imprint_and_own_gap() {
         assert!(
             verify_snapshot_pades(
                 AdesLevel::T,
-                &foreign,
+                &[SnapshotSignature {
+                    metadata: &foreign,
+                    regions: signed_ranges
+                }],
                 &snapshot,
-                &signed_ranges,
                 &[],
                 &documents,
                 services,
@@ -1125,4 +1134,252 @@ fn initial_signed_catalog_permissions_are_not_silently_accepted() {
         bytes[range[1] + 2 + index * 2] = b"0123456789ABCDEF"[(byte & 15) as usize];
     }
     f.rejected(&bytes);
+}
+
+// Count real allocation work on this test thread only. Other parallel tests
+// never enter this measurement. The existing host OperationControl imposes the
+// finite work admission; no production quota or allocator is changed.
+struct AllocationWork;
+thread_local! {
+    static ALLOCATION_WORK: std::cell::Cell<(bool,u64)> = const { std::cell::Cell::new((false,0)) };
+}
+fn record_allocation(bytes: usize) {
+    let _ = ALLOCATION_WORK.try_with(|work| {
+        let (enabled, total) = work.get();
+        if enabled {
+            work.set((true, total.saturating_add(bytes as u64)));
+        }
+    });
+}
+unsafe impl std::alloc::GlobalAlloc for AllocationWork {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let value = unsafe { std::alloc::System.alloc(layout) };
+        if !value.is_null() {
+            record_allocation(layout.size());
+        }
+        value
+    }
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let value = unsafe { std::alloc::System.alloc_zeroed(layout) };
+        if !value.is_null() {
+            record_allocation(layout.size());
+        }
+        value
+    }
+    unsafe fn realloc(&self, pointer: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        let value = unsafe { std::alloc::System.realloc(pointer, layout, size) };
+        if !value.is_null() {
+            record_allocation(size);
+        }
+        value
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(pointer, layout) }
+    }
+}
+#[global_allocator]
+static ALLOCATOR: AllocationWork = AllocationWork;
+struct MeasureAllocations;
+impl MeasureAllocations {
+    fn start() -> Self {
+        ALLOCATION_WORK.with(|work| work.set((true, 0)));
+        Self
+    }
+    fn bytes(&self) -> u64 {
+        ALLOCATION_WORK.with(|work| work.get().1)
+    }
+}
+impl Drop for MeasureAllocations {
+    fn drop(&mut self) {
+        ALLOCATION_WORK.with(|work| work.set((false, 0)));
+    }
+}
+struct AllocationAdmission(u64);
+impl OperationControl for AllocationAdmission {
+    fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+        if ALLOCATION_WORK.with(|work| work.get().1) > self.0 {
+            Err(ProcessingError::MemoryLimit)
+        } else {
+            Ok(())
+        }
+    }
+}
+#[test]
+fn multisigner_common_dss_fits_one_shared_allocation_work_admission() {
+    let mut f = Fixture::new();
+    let (one_t, _) = f.run(None, AdesLevel::T);
+    let mut many_t = one_t.clone();
+    let mut certificates = vec![f.root.cert.clone(), f.tsa.cert.clone(), f.doc.cert.clone()];
+    for serial in [9, 10] {
+        let mut spec = TestCertSpec::from_cert(&f.doc.cert);
+        spec.serial = vec![0x63, 0x17, serial];
+        f.doc.cert = issue_cert(&f.root, spec);
+        certificates.push(f.doc.cert.clone());
+        many_t = with_tsa(&f, NOW, NOW, |services| {
+            let mut s = scope();
+            let mut output = services.temporary.stage(&mut s).unwrap();
+            ades::sign(
+                AdesLevel::T,
+                Source::sequential(&mut Cursor::new(&many_t), None),
+                &PdfSignProfile::default(),
+                &mut f.doc.clone(),
+                services,
+                &mut output,
+                &s,
+            )
+            .unwrap();
+            let mut bytes = Vec::new();
+            output.copy_to(&mut bytes).unwrap();
+            bytes
+        });
+    }
+    // Genuine issuer-signed renewal certificates, not padding or mock data.
+    for serial in 32..80 {
+        let mut spec = TestCertSpec::from_cert(&f.doc.cert);
+        spec.serial = vec![0x63, 0x17, serial];
+        certificates.push(issue_cert(&f.root, spec));
+    }
+    let extend = |input: &[u8]| {
+        with_tsa(&f, NOW, NOW, |services| {
+            let configured = AdesServices {
+                validation: services.validation,
+                network: services.network,
+                temporary: services.temporary,
+                limits: services.limits,
+                tsa: services.tsa,
+                material: ValidationMaterial {
+                    certificates: &certificates,
+                    ocsp: &[],
+                    crls: services.material.crls,
+                },
+            };
+            let mut s = scope();
+            let mut output = services.temporary.stage(&mut s).unwrap();
+            ades::extend(
+                AdesLevel::Lta,
+                Source::sequential(&mut Cursor::new(input), None),
+                &PdfLimits::default(),
+                &configured,
+                &[SigAlg::RsaSha256],
+                &mut output,
+                &s,
+            )
+            .unwrap();
+            let mut bytes = Vec::new();
+            output.copy_to(&mut bytes).unwrap();
+            bytes
+        })
+    };
+    let one = extend(&one_t);
+    let many = extend(&many_t);
+    f.context(NOW,&f.crl,|services|{
+        let verify=|bytes:&[u8],admission:u64|{
+            let limits=ResourceLimits::default();
+            let mut s=Arc::new(SharedBudget::new(limits.clone()).unwrap()).begin(limits,Arc::new(AllocationAdmission(admission))).unwrap();
+            let measured=MeasureAllocations::start();
+            let result=ades::verify(AdesLevel::Lta,Source::sequential(&mut Cursor::new(bytes),None),&PdfLimits::default(),services,&[SigAlg::RsaSha256],&mut s);
+            let work=measured.bytes();drop(measured);(result,work)
+        };
+        let (single,single_work)=verify(&one,u64::MAX);let single=single.unwrap();
+        assert_eq!(single.verdict,Verdict::Valid);assert_eq!(single.signatures().len(),1);drop(single);
+        let (large_control,many_work)=verify(&many,u64::MAX);let large_control=large_control.unwrap();
+        assert_eq!(large_control.verdict,Verdict::Valid);assert_eq!(large_control.signatures().len(),3);drop(large_control);
+        let admission=single_work.checked_mul(2).unwrap();
+        eprintln!("real common certificates={} single_allocation_bytes={single_work} three_allocation_bytes={many_work} shared_admission={admission}",certificates.len());
+        let (same_budget_control,_)=verify(&one,admission);assert_eq!(same_budget_control.unwrap().verdict,Verdict::Valid);
+        let (shared,_) = verify(&many,admission);
+        let shared=shared.expect("three actual source signatures must reuse common evidence within the one shared work admission");
+        assert_eq!(shared.verdict,Verdict::Valid);assert_eq!(shared.level(),Some(AdesLevel::Lta));assert_eq!(shared.signatures().len(),3);
+    });
+}
+
+#[test]
+fn yielded_batch_report_retains_original_admission_after_iterator_drop() {
+    use oncl_pki::{
+        cms::ades::{SnapshotSignature, verify_snapshot_pades},
+        io::{FrozenInput, PdfSnapshot, Region, SnapshotEncoding},
+    };
+    use std::sync::Mutex;
+    let f = Fixture::new();
+    let (bytes, _) = f.run(None, AdesLevel::T);
+    let doc = lopdf::Document::load_mem(&bytes).unwrap();
+    let dictionary = doc
+        .objects
+        .values()
+        .find_map(|value| {
+            value.as_dict().ok().filter(|dict| {
+                dict.get(b"Type")
+                    .is_ok_and(|v| v.as_name().is_ok_and(|n| n == b"Sig"))
+            })
+        })
+        .unwrap();
+    let range: Vec<_> = dictionary
+        .get(b"ByteRange")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as u64)
+        .collect();
+    f.context(NOW, &f.crl, |services| {
+        let limits = ResourceLimits::default();
+        let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+        let report = {
+            let mut s = budget.begin(limits.clone(), Arc::new(Control)).unwrap();
+            let mut frozen = FrozenInput::capture(
+                Source::sequential(&mut Cursor::new(&bytes), None),
+                services.temporary,
+                &mut s,
+            )
+            .unwrap();
+            let mut view = PdfSnapshot::input(&mut frozen, &s).unwrap();
+            let metadata = view
+                .derive_region(
+                    Region {
+                        offset: range[1],
+                        len: range[2] - range[1],
+                    },
+                    &s,
+                    SnapshotEncoding::PdfByteString,
+                )
+                .unwrap();
+            let snapshot = Mutex::new(view);
+            let mut reports = verify_snapshot_pades(
+                AdesLevel::T,
+                &[SnapshotSignature {
+                    metadata: &metadata,
+                    regions: [
+                        Region {
+                            offset: range[0],
+                            len: range[1],
+                        },
+                        Region {
+                            offset: range[2],
+                            len: range[3],
+                        },
+                    ],
+                }],
+                &snapshot,
+                &[],
+                &[],
+                services,
+                &[SigAlg::RsaSha256],
+                &s,
+            )
+            .unwrap()
+            .into_iter();
+            let report = reports.next().unwrap();
+            assert!(reports.next().is_none());
+            drop(reports);
+            report
+        };
+        assert_eq!(report.verdict, Verdict::Valid);
+        assert_eq!(report.level(), Some(AdesLevel::T));
+        assert!(matches!(
+            budget.begin(limits.clone(), Arc::new(Control)),
+            Err(ProcessingError::CapacityExceeded)
+        ));
+        drop(report);
+        assert!(budget.begin(limits, Arc::new(Control)).is_ok());
+    });
 }

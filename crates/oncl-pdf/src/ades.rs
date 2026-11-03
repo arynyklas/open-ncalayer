@@ -13,7 +13,9 @@ use crate::{
 };
 use der::Encode;
 use oncl_pki::{
-    cms::ades::{self, AdesServices, SnapshotDocumentTimestamp, SnapshotMaterial},
+    cms::ades::{
+        self, AdesServices, SnapshotDocumentTimestamp, SnapshotMaterial, SnapshotSignature,
+    },
     digest::HashState,
     evidence::{AdesLevel, EvidenceKind},
     io::{
@@ -625,23 +627,30 @@ fn verify_view(
     let snapshot = Mutex::new(view);
     let mut signatures = Vec::new();
     let mut minimum = AdesLevel::Lta;
-    for ((revision, candidate), decoded) in parsed
+    let sources: Vec<_> = parsed
         .candidates
         .iter()
         .zip(&decoded)
-        .filter(|((_, c), _)| !c.document_timestamp)
+        .filter(|((_, candidate), _)| !candidate.document_timestamp)
+        .map(|((_, candidate), metadata)| SnapshotSignature {
+            metadata,
+            regions: regions(candidate),
+        })
+        .collect();
+    let reports = ades::verify_snapshot_pades(
+        required, &sources, &snapshot, &material, &documents, services, allowed, scope,
+    )?
+    .into_iter();
+    if reports.len() != sources.len() {
+        return Err(PdfError::Malformed("PAdES source report count"));
+    }
+    for (((revision, candidate), _), report) in parsed
+        .candidates
+        .iter()
+        .zip(&decoded)
+        .filter(|((_, candidate), _)| !candidate.document_timestamp)
+        .zip(reports)
     {
-        let report = ades::verify_snapshot_pades(
-            required,
-            decoded,
-            &snapshot,
-            &regions(candidate),
-            &material,
-            &documents,
-            services,
-            allowed,
-            scope,
-        )?;
         if let Some(level) = report.level() {
             minimum = minimum.min(level);
         }
