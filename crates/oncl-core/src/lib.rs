@@ -184,6 +184,10 @@
 //! metadata checks a present MAC/opens encrypted safes without decrypting or
 //! importing private-key bags; absent MAC is explicitly `NotPresent`.
 //! JKS skips protected keys entirely.
+//! Known-length secret intake reserves a fallible replacement of that bounded
+//! capacity; unknown-length intake grows geometrically. Old and new live
+//! capacities are admitted together, and the old owner is explicitly wiped
+//! before deallocation. Retained capacity remains charged to the original scope.
 //!
 //! `EngineServices::with_metadata_provider` configures a separate
 //! `ReadMetadataProvider`; `keys::KeySources` implements it. Exact source/named
@@ -213,6 +217,8 @@
 //! TSP cryptography and F03/F04 anchored path/current status at genTime.
 //! No local user private key or auto-consent guard is used. HTTP body/decode
 //! admission and fatal resource/cancel/deadline causes retain the same root.
+//! Ordinary TSA transport failures retain their HTTP cause and report `Io`;
+//! malformed tokens and nonce/policy/imprint protocol failures remain InvalidInput.
 //!
 //! A timestamp report distinguishes token signature/EKU/path/validity/current
 //! revocation, expectation checks, current host clock, genTime, algorithm and
