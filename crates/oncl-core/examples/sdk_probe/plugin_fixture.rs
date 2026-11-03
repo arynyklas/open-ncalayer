@@ -22,6 +22,21 @@ pub(crate) fn caller() -> CallerContext {
 pub(crate) fn permission(imports: &[Import], keys: &[KeySelector]) -> PluginPermission {
     PluginPermission::new(ID, "sign", caller(), imports.iter().copied())
         .with_keys(keys.iter().map(KeySelector::key_id))
+        .with_pki_endpoints([
+            (
+                oncl_pki::http::HttpMethod::Get,
+                "http://ocsp.synthetic.test",
+            ),
+            (
+                oncl_pki::http::HttpMethod::Get,
+                "http://crl.synthetic.test/root-gost2015.crl",
+            ),
+            (
+                oncl_pki::http::HttpMethod::Get,
+                "http://crl.synthetic.test/inter-gost2015.crl",
+            ),
+        ])
+        .unwrap()
 }
 pub(crate) fn wasm(calls: &[(Import, Vec<u8>)]) -> Vec<u8> {
     let mut imports = String::new();
@@ -93,6 +108,14 @@ pub(crate) fn engine_configured(
     host_permission: PluginPermission,
     configure: impl FnOnce(EngineServices) -> EngineServices,
 ) -> (Engine, Arc<crypto::Guard>, Arc<crypto::Provider>) {
+    engine_limited(calls, host_permission, ResourceLimits::default(), configure)
+}
+pub(crate) fn engine_limited(
+    calls: &[(Import, Vec<u8>)],
+    host_permission: PluginPermission,
+    limits: ResourceLimits,
+    configure: impl FnOnce(EngineServices) -> EngineServices,
+) -> (Engine, Arc<crypto::Guard>, Arc<crypto::Provider>) {
     let manifest = Manifest::from_toml(&format!(
         r#"id = "{ID}"
 name.ru = "L01 synthetic"
@@ -128,7 +151,7 @@ origins = ["https://trusted.example"]
     let guard = Arc::new(crypto::Guard::default());
     let provider = Arc::new(crypto::Provider::default());
     let engine = Engine::new(configure(
-        EngineServices::hash_only(ResourceLimits::default())
+        EngineServices::hash_only(limits)
             .with_keys(provider.clone(), guard.clone())
             .with_validation(crypto::validation())
             .with_plugins(plugins),

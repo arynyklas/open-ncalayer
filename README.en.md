@@ -251,6 +251,12 @@ code requires `oncl-plugin/distribution`, explicitly selected by desktop consume
 settings remain available in the runtime. Actual WASM and independent OpenSSL smoke:
 `cargo run -p oncl-core --features plugins,tokens --example sdk_probe -- --case L01 --out target/l01-smoke`.
 This bounded ABI exercise is not 10-GiB/RSS, NCA-token or desktop-matrix acceptance.
+PKI grants bind an HTTP method and exact base URL, including mandatory certificate
+validation before signing. Derived GET targets require provenance from the shared
+PKI encoder for that exact base; origin/prefix wildcards and redirects never widen
+authority. Bound certificate chains and predictable DER/Base64/PEM outputs are
+admitted under original quotas before private use; preflight does not debit output
+bytes. Headless `log` acknowledges the call without emitting guest payload.
 
 
 A plugin is a WebAssembly module serving its own `module` names (a port of a third-party module of the original NCALayer, for example) in a sandbox: it sees only the request and the page's `origin`, and reaches keys, windows, files and the network only through the capabilities its manifest declares. Its window is «Плагины…» (Plugins…) in the icon's menu (or `showBundleManager` from a page): the installed plugins with their version, source and state (turn off/on, remove), those available in the catalog (install), install from a file (`*.onclp`), and refresh the catalog.

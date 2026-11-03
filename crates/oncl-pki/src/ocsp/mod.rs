@@ -32,8 +32,8 @@ use crate::asn1util::{RawSequence, TimeError, generalized_time};
 use crate::ber::{self, BerError};
 use crate::cert::Certificate;
 use crate::http::{
-    CONNECT_TIMEOUT, GetOptions, HttpError, HttpRequest, HttpTransport, MAX_RESPONSE_LEN, NetKind,
-    NonceSpec, PkiMethod, nca_get_url, pki_send,
+    CONNECT_TIMEOUT, GetOptions, HttpError, HttpTransport, MAX_RESPONSE_LEN, NetKind, NonceSpec,
+    PkiMethod, pki_send,
 };
 use crate::key::{HashAlg, PublicKey, SigAlg};
 use crate::oid;
@@ -430,12 +430,15 @@ fn check_answer_for(
         https_only: false,
         redirects: true,
     };
-    let reply = http
-        .send_scoped(&HttpRequest::get(
-            &nca_get_url(&url, &requested.request_der(None)),
-            opts,
-        ))
-        .map_err(OcspError::Http)?;
+    let reply = crate::http::pki_send_scoped(
+        http,
+        &crate::http::PkiMethod::GetUrlEncoded,
+        &url,
+        OCSP_REQUEST,
+        &requested.request_der(None),
+        opts,
+    )
+    .map_err(OcspError::Http)?;
     if reply.status() != 200 {
         return Err(OcspError::HttpStatus(reply.status()));
     }

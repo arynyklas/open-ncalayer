@@ -71,6 +71,7 @@ impl ValidationServices {
             &self.intermediates,
         );
         transport.finish()?;
+        ctx.network_status()?;
         ctx.scope.checkpoint()?;
         if report.verdict() != Verdict::Valid {
             return Err(OperationError::ValidationRequired);

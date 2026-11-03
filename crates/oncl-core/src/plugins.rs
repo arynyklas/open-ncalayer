@@ -13,6 +13,9 @@ use oncl_pki::{
     resource::{OperationLease, ProcessingError, ResourceReservation},
 };
 pub use oncl_plugin::headless::CallerContext;
+mod authority;
+pub(crate) use authority::InvocationPkiAuthority;
+mod metadata;
 use oncl_plugin::headless::{CapabilityBackend, HeadlessBindings, HeadlessError};
 use oncl_plugin::{Compiled, InstanceLimits, Manifest};
 use std::cell::RefCell;
@@ -30,7 +33,7 @@ pub struct PluginPermission {
     keys: Vec<KeyId>,
     files: Vec<String>,
     endpoints: Vec<String>,
-    pki_endpoints: Vec<String>,
+    pki_endpoints: Vec<PkiEndpoint>,
 }
 impl PluginPermission {
     pub fn new(
@@ -65,11 +68,19 @@ impl PluginPermission {
         self.endpoints = checked_endpoints(endpoints)?;
         Ok(self)
     }
+    /// Exact method-qualified configured PKI bases, never an origin/path wildcard.
+    /// Only the shared PKI encoder's borrowed provenance may derive a GET target.
     pub fn with_pki_endpoints(
         mut self,
-        endpoints: impl IntoIterator<Item = impl AsRef<str>>,
+        endpoints: impl IntoIterator<Item = (oncl_pki::http::HttpMethod, impl AsRef<str>)>,
     ) -> Result<Self, OperationError> {
-        self.pki_endpoints = checked_endpoints(endpoints)?;
+        self.pki_endpoints = endpoints
+            .into_iter()
+            .map(|(method, url)| {
+                let url = checked_endpoint(url)?;
+                Ok(PkiEndpoint { method, url })
+            })
+            .collect::<Result<_, OperationError>>()?;
         Ok(self)
     }
     fn matches(&self, call: &PluginCall<'_>, caller: &CallerContext) -> bool {
@@ -85,26 +96,29 @@ impl PluginPermission {
 fn checked_endpoints(
     endpoints: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<Vec<String>, OperationError> {
-    endpoints
-        .into_iter()
-        .map(|endpoint| {
-            let mut url = oncl_plugin::Url::parse(endpoint.as_ref())
-                .map_err(|_| ProcessingError::InvalidInput("invalid plugin HTTP endpoint"))?;
-            if !matches!(url.scheme(), "http" | "https")
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-            {
-                return Err(ProcessingError::InvalidInput("invalid plugin HTTP endpoint").into());
-            }
-            url.set_fragment(None);
-            Ok(url.to_string())
-        })
-        .collect()
+    endpoints.into_iter().map(checked_endpoint).collect()
+}
+fn checked_endpoint(endpoint: impl AsRef<str>) -> Result<String, OperationError> {
+    let mut url = oncl_plugin::Url::parse(endpoint.as_ref())
+        .map_err(|_| ProcessingError::InvalidInput("invalid plugin HTTP endpoint"))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(ProcessingError::InvalidInput("invalid plugin HTTP endpoint").into());
+    }
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+#[derive(Clone, Debug)]
+struct PkiEndpoint {
+    method: oncl_pki::http::HttpMethod,
+    url: String,
 }
 struct Installed {
     compiled: Compiled,
-    policy: Vec<PluginPermission>,
+    policy: Arc<[PluginPermission]>,
     capabilities: oncl_plugin::Capabilities,
     shared: Arc<oncl_plugin::SharedState>,
 }
@@ -152,7 +166,7 @@ impl PluginRegistry {
             manifest.id,
             Installed {
                 compiled,
-                policy,
+                policy: policy.into(),
                 capabilities: manifest.capabilities,
                 shared: Arc::default(),
             },
@@ -292,14 +306,23 @@ struct Backend<'a, 'b> {
     ctx: &'a mut OperationContext,
     call: PluginCall<'a>,
     bindings: &'a PluginBindings<'b>,
-    host: &'a [PluginPermission],
-    failure: Option<OperationError>,
-    applied: AppliedState,
+    host: &'a Arc<[PluginPermission]>,
+    state: &'a mut BackendState,
     capabilities: &'a oncl_plugin::Capabilities,
     shared: &'a oncl_plugin::SharedState,
+    transfer: usize,
+}
+struct BackendState {
+    failure: Option<OperationError>,
+    applied: AppliedState,
     outputs: Vec<(String, StagedArtifact)>,
     released: Vec<u32>,
-    transfer: usize,
+    admission: Option<CapabilityAdmission>,
+}
+struct CapabilityAdmission {
+    metadata: ResourceReservation,
+    base: u64,
+    host_work: u64,
 }
 impl Backend<'_, '_> {
     fn authorize(&self, import: Import, key: Option<&KeyId>) -> Result<(), OperationError> {
@@ -308,7 +331,7 @@ impl Backend<'_, '_> {
                 .iter()
                 .any(|p| p.matches(&self.call, self.bindings.caller) && p.permits(import, key))
         };
-        if !allowed(&self.ctx.grant.plugins)
+        if !allowed(self.ctx.grant.plugin_permissions())
             || !allowed(self.host)
             || key.is_some_and(|key| !self.ctx.grant.allows_key(key))
         {
@@ -343,7 +366,7 @@ impl Backend<'_, '_> {
             }
             Import::KeysSignRaw => {
                 let args: abi::SignRawArgs = decode(args)?;
-                if self.released.contains(&args.handle) {
+                if self.state.released.contains(&args.handle) {
                     return Err(OperationError::PermissionDenied);
                 }
                 let key = self
@@ -370,7 +393,7 @@ impl Backend<'_, '_> {
                     Ok(report) => report.applied,
                     Err(error) => error.applied_state(),
                 };
-                self.applied = match (self.applied, applied) {
+                self.state.applied = match (self.state.applied, applied) {
                     (AppliedState::Unknown, _) | (_, AppliedState::Unknown) => {
                         AppliedState::Unknown
                     }
@@ -389,7 +412,7 @@ impl Backend<'_, '_> {
     }
     fn failed<T>(&mut self, result: Result<T, OperationError>) -> Result<T, HeadlessError> {
         result.map_err(|error| {
-            self.failure = Some(self.ctx.network_status().err().unwrap_or(error));
+            self.state.failure = Some(self.ctx.network_status().err().unwrap_or(error));
             HeadlessError::Backend
         })
     }
@@ -409,17 +432,60 @@ impl CapabilityBackend for Backend<'_, '_> {
         self.failed(result)
     }
     fn invoke(&mut self, import: Import, args: &[u8]) -> Result<Vec<u8>, HeadlessError> {
+        let grant = self
+            .ctx
+            .grant
+            .plugins
+            .as_ref()
+            .expect("plugin authority preflighted")
+            .clone();
+        let identity = grant
+            .iter()
+            .position(|p| p.matches(&self.call, self.bindings.caller))
+            .expect("caller preflighted");
+        let authority = InvocationPkiAuthority {
+            grant,
+            host: self.host.clone(),
+            identity,
+            import,
+            budget: self
+                .ctx
+                .plugin_network
+                .as_ref()
+                .expect("budget active")
+                .clone(),
+        };
+        let scope = authority::ActivePkiScope::new(&mut *self.ctx, authority);
+        let mut scoped = Backend {
+            engine: self.engine,
+            ctx: scope.ctx,
+            call: PluginCall {
+                plugin_id: self.call.plugin_id,
+                operation: self.call.operation,
+                args: self.call.args,
+            },
+            bindings: self.bindings,
+            host: self.host,
+            state: &mut *self.state,
+            capabilities: self.capabilities,
+            shared: self.shared,
+            transfer: self.transfer,
+        };
         let result = (|| {
             let workspace = (args.len() as u64)
                 .checked_mul(128)
                 .and_then(|n| n.checked_add(65536))
                 .ok_or(ProcessingError::MemoryLimit)?;
-            let _memory = self.ctx.scope.reserve_memory(workspace)?;
-            let _metadata = self.ctx.scope.reserve_metadata(workspace)?;
-            self.ctx.scope.account_container(args.len() as u64)?;
-            self.execute(import, args)
+            scoped.state.admission = Some(CapabilityAdmission {
+                metadata: scoped.ctx.scope.reserve_metadata(workspace)?,
+                base: workspace,
+                host_work: 0,
+            });
+            scoped.ctx.scope.account_container(args.len() as u64)?;
+            scoped.execute(import, args)
         })();
-        self.failed(result)
+        scoped.state.admission = None;
+        scoped.failed(result)
     }
 }
 fn after_use(error: OperationError, applied: AppliedState) -> OperationError {
@@ -446,7 +512,7 @@ impl Engine {
         let matches = |p: &&PluginPermission| p.matches(call, bindings.caller);
         if !ctx
             .grant
-            .plugins
+            .plugin_permissions()
             .iter()
             .any(|p| p.matches(call, bindings.caller))
         {
@@ -496,7 +562,7 @@ impl Engine {
             .copied()
             .filter(|import| {
                 ctx.grant
-                    .plugins
+                    .plugin_permissions()
                     .iter()
                     .filter(matches)
                     .any(|p| p.permits(*import, None))
@@ -507,6 +573,13 @@ impl Engine {
                         .any(|p| p.permits(*import, None))
             })
             .collect();
+        let mut state = BackendState {
+            failure: None,
+            applied: AppliedState::NotApplied,
+            outputs: Vec::new(),
+            released: Vec::new(),
+            admission: None,
+        };
         let mut backend = Backend {
             engine: self,
             ctx,
@@ -517,11 +590,8 @@ impl Engine {
             },
             bindings,
             host: &installed.policy,
-            failure: None,
-            applied: AppliedState::NotApplied,
+            state: &mut state,
             capabilities: &installed.capabilities,
-            outputs: Vec::new(),
-            released: Vec::new(),
             transfer: limits.max_transfer,
             shared: &installed.shared,
         };
@@ -533,8 +603,8 @@ impl Engine {
             },
             call.args,
         );
-        let applied = backend.applied;
-        if let Some(error) = backend.failure {
+        let applied = backend.state.applied;
+        if let Some(error) = backend.state.failure.take() {
             return Err(after_use(error, applied));
         }
         let response = result.map_err(|error| after_use(OperationError::Plugin(error), applied))?;
@@ -552,7 +622,7 @@ impl Engine {
         Ok(PluginResult {
             response,
             applied,
-            outputs: backend.outputs,
+            outputs: std::mem::take(&mut backend.state.outputs),
             _memory: memory,
             _root: root,
         })
@@ -562,7 +632,7 @@ impl Engine {
 #[derive(Clone, Default)]
 pub(crate) struct InvocationHttpBudget {
     requests: oncl_plugin::headless::RequestBudget,
-    exhausted: Arc<std::sync::atomic::AtomicBool>,
+    fatal: Arc<std::sync::atomic::AtomicU8>,
 }
 impl std::fmt::Debug for InvocationHttpBudget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -572,17 +642,30 @@ impl std::fmt::Debug for InvocationHttpBudget {
 impl InvocationHttpBudget {
     pub(crate) fn take(&self) -> Result<(), OperationError> {
         self.requests.take().map_err(|_| {
-            self.exhausted
-                .store(true, std::sync::atomic::Ordering::Release);
+            let _ = self.fatal.compare_exchange(
+                0,
+                1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            );
             OperationError::from(ProcessingError::CapacityExceeded)
         })
     }
     pub(crate) fn status(&self) -> Result<(), OperationError> {
-        if self.exhausted.load(std::sync::atomic::Ordering::Acquire) {
-            Err(ProcessingError::CapacityExceeded.into())
-        } else {
-            Ok(())
+        match self.fatal.load(std::sync::atomic::Ordering::Acquire) {
+            1 => Err(ProcessingError::CapacityExceeded.into()),
+            2 => Err(OperationError::PermissionDenied),
+            _ => Ok(()),
         }
+    }
+    pub(crate) fn reject(&self) -> OperationError {
+        let _ = self.fatal.compare_exchange(
+            0,
+            2,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+        self.status().unwrap_err()
     }
 }
 struct InvocationScope<'a> {

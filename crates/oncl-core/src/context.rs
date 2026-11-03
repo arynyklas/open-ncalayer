@@ -34,6 +34,8 @@ pub struct OperationContext {
     pub(crate) plugin_network: Option<crate::plugins::InvocationHttpBudget>,
     #[cfg(feature = "plugins")]
     pub(crate) plugin_network_budget: Option<crate::plugins::InvocationHttpBudget>,
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_pki: Option<crate::plugins::InvocationPkiAuthority>,
 }
 impl OperationContext {
     pub(crate) fn account_borrowed(
@@ -79,6 +81,21 @@ impl OperationContext {
             inner,
             #[cfg(feature = "plugins")]
             budget: self.plugin_network.clone(),
+            #[cfg(feature = "plugins")]
+            authority: self.plugin_pki.clone(),
+        }
+    }
+    #[cfg(feature = "plugins")]
+    pub(crate) fn guest_http<'a>(
+        &self,
+        inner: &'a dyn oncl_pki::http::HttpTransport,
+    ) -> ContextHttp<'a> {
+        ContextHttp {
+            inner,
+            #[cfg(feature = "plugins")]
+            budget: self.plugin_network.clone(),
+            #[cfg(feature = "plugins")]
+            authority: None,
         }
     }
     pub(crate) fn network_status(&self) -> Result<(), OperationError> {
@@ -96,9 +113,23 @@ pub(crate) struct ContextHttp<'a> {
     inner: &'a dyn oncl_pki::http::HttpTransport,
     #[cfg(feature = "plugins")]
     budget: Option<crate::plugins::InvocationHttpBudget>,
+    #[cfg(feature = "plugins")]
+    authority: Option<crate::plugins::InvocationPkiAuthority>,
 }
 impl ContextHttp<'_> {
-    fn take(&self) -> Result<(), oncl_pki::http::HttpError> {
+    fn take(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+        target: Option<&oncl_pki::http::ProtocolTarget<'_>>,
+    ) -> Result<(), oncl_pki::http::HttpError> {
+        #[cfg(feature = "plugins")]
+        if let Some(authority) = &self.authority {
+            authority
+                .check(request, target)
+                .map_err(|_| oncl_pki::http::HttpError::other("PKI invocation authority denied"))?;
+        }
+        #[cfg(not(feature = "plugins"))]
+        let _ = (request, target);
         #[cfg(feature = "plugins")]
         if let Some(budget) = &self.budget {
             budget
@@ -113,7 +144,7 @@ impl oncl_pki::http::HttpTransport for ContextHttp<'_> {
         &self,
         request: &oncl_pki::http::HttpRequest<'_>,
     ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
-        self.take()?;
+        self.take(request, None)?;
         self.inner.send(request)
     }
     fn send_pinned(
@@ -121,14 +152,14 @@ impl oncl_pki::http::HttpTransport for ContextHttp<'_> {
         request: &oncl_pki::http::HttpRequest<'_>,
         pins: &[std::net::SocketAddr],
     ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
-        self.take()?;
+        self.take(request, None)?;
         self.inner.send_pinned(request, pins)
     }
     fn send_scoped<'a>(
         &'a self,
         request: &oncl_pki::http::HttpRequest<'_>,
     ) -> Result<oncl_pki::http::ScopedHttpReply<'a>, oncl_pki::http::HttpError> {
-        self.take()?;
+        self.take(request, None)?;
         self.inner.send_scoped(request)
     }
     fn send_scoped_with<'a>(
@@ -136,7 +167,7 @@ impl oncl_pki::http::HttpTransport for ContextHttp<'_> {
         request: &oncl_pki::http::HttpRequest<'_>,
         budget: oncl_pki::http::ResponseBudget<'a>,
     ) -> Result<oncl_pki::http::ScopedHttpReply<'a>, oncl_pki::http::HttpError> {
-        self.take()?;
+        self.take(request, None)?;
         self.inner.send_scoped_with(request, budget)
     }
     fn send_pinned_scoped<'a>(
@@ -145,8 +176,61 @@ impl oncl_pki::http::HttpTransport for ContextHttp<'_> {
         pins: &[std::net::SocketAddr],
         budget: oncl_pki::http::ResponseBudget<'a>,
     ) -> Result<oncl_pki::http::ScopedHttpReply<'a>, oncl_pki::http::HttpError> {
-        self.take()?;
+        self.take(request, None)?;
         self.inner.send_pinned_scoped(request, pins, budget)
+    }
+    fn redirect_policy(&self) -> oncl_pki::http::RedirectPolicy {
+        #[cfg(feature = "plugins")]
+        if self.authority.is_some() {
+            return oncl_pki::http::RedirectPolicy::Never;
+        }
+        self.inner.redirect_policy()
+    }
+    fn send_protocol(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+        target: &oncl_pki::http::ProtocolTarget<'_>,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        self.take(request, Some(target))?;
+        self.inner.send_protocol(request, target)
+    }
+    fn send_pinned_protocol(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+        target: &oncl_pki::http::ProtocolTarget<'_>,
+        pins: &[std::net::SocketAddr],
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        self.take(request, Some(target))?;
+        self.inner.send_pinned_protocol(request, target, pins)
+    }
+    fn send_protocol_scoped<'a>(
+        &'a self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+        target: &oncl_pki::http::ProtocolTarget<'_>,
+    ) -> Result<oncl_pki::http::ScopedHttpReply<'a>, oncl_pki::http::HttpError> {
+        self.take(request, Some(target))?;
+        self.inner.send_protocol_scoped(request, target)
+    }
+    fn send_protocol_scoped_with<'a>(
+        &'a self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+        target: &oncl_pki::http::ProtocolTarget<'_>,
+        budget: oncl_pki::http::ResponseBudget<'a>,
+    ) -> Result<oncl_pki::http::ScopedHttpReply<'a>, oncl_pki::http::HttpError> {
+        self.take(request, Some(target))?;
+        self.inner
+            .send_protocol_scoped_with(request, target, budget)
+    }
+    fn send_pinned_protocol_scoped<'a>(
+        &'a self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+        target: &oncl_pki::http::ProtocolTarget<'_>,
+        pins: &[std::net::SocketAddr],
+        budget: oncl_pki::http::ResponseBudget<'a>,
+    ) -> Result<oncl_pki::http::ScopedHttpReply<'a>, oncl_pki::http::HttpError> {
+        self.take(request, Some(target))?;
+        self.inner
+            .send_pinned_protocol_scoped(request, target, pins, budget)
     }
     fn resource_scope(&self) -> Option<&ResourceScope> {
         self.inner.resource_scope()

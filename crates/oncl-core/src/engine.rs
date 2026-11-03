@@ -161,6 +161,8 @@ impl Engine {
             plugin_network: None,
             #[cfg(feature = "plugins")]
             plugin_network_budget: None,
+            #[cfg(feature = "plugins")]
+            plugin_pki: None,
         })
     }
     pub fn hash(

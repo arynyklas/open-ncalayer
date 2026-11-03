@@ -64,6 +64,11 @@ pub(crate) fn container_with_certificate(name: &str) -> (Vec<u8>, oncl_pki::cert
     (container, certificate)
 }
 pub(crate) fn validation() -> ValidationServices {
+    validation_using(|transport| transport)
+}
+pub(crate) fn validation_using(
+    wrap: impl FnOnce(Arc<dyn oncl_pki::http::HttpTransport>) -> Arc<dyn oncl_pki::http::HttpTransport>,
+) -> ValidationServices {
     use oncl_pki::{
         crl::MockCrl,
         http::{HttpTransport, RouteTransport},
@@ -85,11 +90,11 @@ pub(crate) fn validation() -> ValidationServices {
     ValidationServices::new(
         CaSet::new(vec![raw("root-gost2015.key").cert]),
         vec![raw("inter-gost2015.key").cert],
-        Arc::new(RouteTransport::new(vec![
+        wrap(Arc::new(RouteTransport::new(vec![
             ("http://ocsp.synthetic.test".into(), ocsp),
             ("http://crl.synthetic.test/root-gost2015.crl".into(), root),
             ("http://crl.synthetic.test/inter-gost2015.crl".into(), inter),
-        ])),
+        ]))),
         NetworkPolicy::only_endpoints(["http://ocsp.synthetic.test", "http://crl.synthetic.test"])
             .unwrap(),
         Arc::new(|| NOW),

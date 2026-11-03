@@ -197,6 +197,7 @@ impl DeadlineTransport<'_> {
         request: &HttpRequest<'_>,
         budget: Option<super::ResponseBudget<'a>>,
         outer_pins: Option<&[SocketAddr]>,
+        target: Option<&super::ProtocolTarget<'_>>,
     ) -> Result<super::ScopedHttpReply<'a>, HttpError> {
         let mut url = request.url.to_owned();
         let mut current = *request;
@@ -256,13 +257,25 @@ impl DeadlineTransport<'_> {
                 opts,
                 ..current
             };
+            let target = target.filter(|target| target.matches(&actual));
             let result = if let Some(budget) = &budget {
-                self.inner
-                    .send_pinned_scoped(&actual, pins, budget.reborrow())
+                match target {
+                    Some(target) => self.inner.send_pinned_protocol_scoped(
+                        &actual,
+                        target,
+                        pins,
+                        budget.reborrow(),
+                    ),
+                    None => self
+                        .inner
+                        .send_pinned_scoped(&actual, pins, budget.reborrow()),
+                }
             } else {
-                self.inner
-                    .send_pinned(&actual, pins)
-                    .map(super::ScopedHttpReply::unscoped)
+                match target {
+                    Some(target) => self.inner.send_pinned_protocol(&actual, target, pins),
+                    None => self.inner.send_pinned(&actual, pins),
+                }
+                .map(super::ScopedHttpReply::unscoped)
             };
             if let Some(budget) = &budget {
                 budget.checkpoint()?;
@@ -272,7 +285,9 @@ impl DeadlineTransport<'_> {
             if reply.body().len() as u64 > opts.max_len {
                 return Err(HttpError::other("oversized PKI response"));
             }
-            let next = if request.opts.redirects {
+            let next = if request.opts.redirects
+                && self.inner.redirect_policy() != super::RedirectPolicy::Never
+            {
                 super::redirect(
                     &url,
                     &reply.reply,
@@ -297,7 +312,7 @@ impl DeadlineTransport<'_> {
 
 impl HttpTransport for DeadlineTransport<'_> {
     fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
-        self.send_impl(request, None, None)
+        self.send_impl(request, None, None, None)
             .and_then(super::ScopedHttpReply::into_unscoped)
     }
     fn send_scoped<'a>(
@@ -308,6 +323,7 @@ impl HttpTransport for DeadlineTransport<'_> {
             request,
             Some(super::ResponseBudget::new(&self.scope, self)),
             None,
+            None,
         )
     }
     fn send_scoped_with<'a>(
@@ -315,7 +331,12 @@ impl HttpTransport for DeadlineTransport<'_> {
         request: &HttpRequest<'_>,
         budget: super::ResponseBudget<'a>,
     ) -> Result<super::ScopedHttpReply<'a>, HttpError> {
-        self.send_impl(request, Some(budget.with_scope(&self.scope, self)?), None)
+        self.send_impl(
+            request,
+            Some(budget.with_scope(&self.scope, self)?),
+            None,
+            None,
+        )
     }
     fn send_pinned_scoped<'a>(
         &'a self,
@@ -327,6 +348,66 @@ impl HttpTransport for DeadlineTransport<'_> {
             request,
             Some(budget.with_scope(&self.scope, self)?),
             Some(pins),
+            None,
+        )
+    }
+    fn redirect_policy(&self) -> super::RedirectPolicy {
+        self.inner.redirect_policy()
+    }
+    fn send_protocol(
+        &self,
+        request: &HttpRequest<'_>,
+        target: &super::ProtocolTarget<'_>,
+    ) -> Result<HttpReply, HttpError> {
+        self.send_impl(request, None, None, Some(target))
+            .and_then(super::ScopedHttpReply::into_unscoped)
+    }
+    fn send_pinned_protocol(
+        &self,
+        request: &HttpRequest<'_>,
+        target: &super::ProtocolTarget<'_>,
+        pins: &[SocketAddr],
+    ) -> Result<HttpReply, HttpError> {
+        self.send_impl(request, None, Some(pins), Some(target))
+            .and_then(super::ScopedHttpReply::into_unscoped)
+    }
+    fn send_protocol_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        target: &super::ProtocolTarget<'_>,
+    ) -> Result<super::ScopedHttpReply<'a>, HttpError> {
+        self.send_impl(
+            request,
+            Some(super::ResponseBudget::new(&self.scope, self)),
+            None,
+            Some(target),
+        )
+    }
+    fn send_protocol_scoped_with<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        target: &super::ProtocolTarget<'_>,
+        budget: super::ResponseBudget<'a>,
+    ) -> Result<super::ScopedHttpReply<'a>, HttpError> {
+        self.send_impl(
+            request,
+            Some(budget.with_scope(&self.scope, self)?),
+            None,
+            Some(target),
+        )
+    }
+    fn send_pinned_protocol_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        target: &super::ProtocolTarget<'_>,
+        pins: &[SocketAddr],
+        budget: super::ResponseBudget<'a>,
+    ) -> Result<super::ScopedHttpReply<'a>, HttpError> {
+        self.send_impl(
+            request,
+            Some(budget.with_scope(&self.scope, self)?),
+            Some(pins),
+            Some(target),
         )
     }
     fn resource_scope(&self) -> Option<&ResourceScope> {

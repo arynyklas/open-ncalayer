@@ -29,7 +29,7 @@ impl Backend<'_, '_> {
                     }
             })
         };
-        if allowed(&self.ctx.grant.plugins) && allowed(self.host) {
+        if allowed(self.ctx.grant.plugin_permissions()) && allowed(self.host) {
             Ok(())
         } else {
             Err(OperationError::PermissionDenied)
@@ -70,20 +70,12 @@ impl Backend<'_, '_> {
                 ))
             }
             Import::Log => {
-                let args: abi::LogArgs = decode(args)?;
-                let end = args
-                    .message
-                    .char_indices()
-                    .map(|(i, _)| i)
-                    .take_while(|i| *i <= 4096)
-                    .last()
-                    .unwrap_or(0);
-                let text = if args.message.len() > 4096 {
-                    &args.message[..end]
-                } else {
-                    &args.message
-                };
-                tracing::info!(plugin = self.call.plugin_id, text, "headless plugin log");
+                let _: abi::LogArgs = decode(args)?;
+                tracing::info!(
+                    plugin = self.call.plugin_id,
+                    capability = "log",
+                    "headless plugin event"
+                );
                 Ok(encoded(()))
             }
             Import::SettingsGet => {
@@ -128,13 +120,29 @@ impl Backend<'_, '_> {
                     .find(|key| key.handle == args.handle)
                     .ok_or(OperationError::PermissionDenied)?;
                 self.authorize(import, Some(&binding.key.selector().key_id()))?;
-                if self.released.contains(&args.handle) {
+                if self.state.released.contains(&args.handle) {
                     return Err(OperationError::PermissionDenied);
                 }
                 let metadata = binding
                     .metadata
                     .as_ref()
                     .ok_or(OperationError::PermissionDenied)?;
+                let selected = if import == Import::KeysChain {
+                    metadata.chain
+                } else {
+                    &[]
+                };
+                super::metadata::admit_bound_metadata(
+                    self.state,
+                    &self.ctx.scope,
+                    metadata.certificate,
+                    selected,
+                    if import == Import::KeysDescribe {
+                        metadata.alias
+                    } else {
+                        ""
+                    },
+                )?;
                 if import == Import::KeysChain {
                     let chain = std::iter::once(metadata.certificate)
                         .chain(metadata.chain.iter())
@@ -183,10 +191,10 @@ impl Backend<'_, '_> {
                     .find(|k| k.handle == args.handle)
                     .ok_or(OperationError::PermissionDenied)?;
                 self.authorize(import, Some(&key.key.selector().key_id()))?;
-                if self.released.contains(&args.handle) {
+                if self.state.released.contains(&args.handle) {
                     return Err(OperationError::PermissionDenied);
                 }
-                self.released.push(args.handle);
+                self.state.released.push(args.handle);
                 Ok(encoded(()))
             }
             _ => Err(OperationError::PermissionDenied),
@@ -258,7 +266,7 @@ impl Backend<'_, '_> {
             .outputs
             .iter()
             .any(|b| b.directory == args.dir && b.name == args.name)
-            || self.outputs.iter().any(|(key, _)| key == &name)
+            || self.state.outputs.iter().any(|(key, _)| key == &name)
         {
             return Err(OperationError::PermissionDenied);
         }
@@ -269,7 +277,7 @@ impl Backend<'_, '_> {
             .ok_or(OperationError::MissingTemporaryStore)?;
         let mut stage = store.stage(&mut self.ctx.scope)?;
         stage.write_chunk(&args.data)?;
-        self.outputs.push((name.clone(), stage));
+        self.state.outputs.push((name.clone(), stage));
         Ok(encoded(abi::PageWrite::Written(name)))
     }
     fn http(&mut self, import: Import, args: &[u8]) -> Result<Vec<u8>, OperationError> {
@@ -299,7 +307,7 @@ impl Backend<'_, '_> {
         )
         .map_err(host_error)?;
         self.resource(import, prepared.url(), true)?;
-        let counted = self.ctx.http(inner);
+        let counted = self.ctx.guest_http(inner);
         let transport = DeadlineTransport::new(&counted, policy, &self.ctx.scope);
         let request = prepared.request((self.transfer as u64).min(oncl_plugin::MAX_HTTP_BODY));
         let result = transport.send_scoped(&request);
@@ -335,7 +343,14 @@ impl Backend<'_, '_> {
         import: Import,
         operation: impl FnOnce(&oncl_plugin::headless::PkiServices<'_>) -> Result<T, OperationError>,
     ) -> Result<T, OperationError> {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        let authorize = self
+            .ctx
+            .plugin_pki
+            .as_ref()
+            .ok_or(OperationError::InvalidContext)?;
+        if authorize.import != import {
+            return Err(OperationError::InvalidContext);
+        }
         let host = self
             .engine
             .validation
@@ -343,51 +358,6 @@ impl Backend<'_, '_> {
             .ok_or(OperationError::MissingValidationServices)?;
         let counted = self.ctx.http(host.http.as_ref());
         let transport = DeadlineTransport::new(&counted, &host.network, &self.ctx.scope);
-        let denied = AtomicBool::new(false);
-        let grants = &self.ctx.grant.plugins;
-        let policy = self.host;
-        let call = &self.call;
-        let caller = self.bindings.caller;
-        let authorize = |url: &str| {
-            let checked = oncl_plugin::Url::parse(url).ok().filter(|url| {
-                matches!(url.scheme(), "http" | "https")
-                    && url.host_str().is_some()
-                    && url.username().is_empty()
-                    && url.password().is_none()
-            });
-            let allowed = checked.is_some_and(|mut url| {
-                url.set_fragment(None);
-                // An explicit origin grant permits its protocol-generated GET
-                // request path; a configured non-root endpoint remains exact.
-                let endpoint = |granted: &String| {
-                    granted == url.as_str()
-                        || oncl_plugin::Url::parse(granted).is_ok_and(|base| {
-                            base.path() == "/"
-                                && base.query().is_none()
-                                && base.origin() == url.origin()
-                        })
-                };
-                let matches =
-                    |p: &&PluginPermission| p.matches(call, caller) && p.permits(import, None);
-                grants
-                    .iter()
-                    .filter(matches)
-                    .any(|p| p.pki_endpoints.iter().any(endpoint))
-                    && policy
-                        .iter()
-                        .filter(matches)
-                        .any(|p| p.pki_endpoints.iter().any(endpoint))
-            });
-            if allowed {
-                Ok(())
-            } else {
-                denied.store(true, Ordering::Release);
-                Err(abi::HostError::new(
-                    abi::ErrorCode::Denied,
-                    "PKI endpoint not authorized",
-                ))
-            }
-        };
         let default_tsa = oncl_pki::tsp::TsaSpec::from(oncl_pki::tsp::TsaProfile::basics_default());
         let tsa = self
             .engine
@@ -399,12 +369,9 @@ impl Backend<'_, '_> {
             clock: host.clock.as_ref(),
             tsa,
             http: &transport,
-            authorize: &authorize,
+            authorize,
         };
         let result = operation(&services);
-        if denied.load(Ordering::Acquire) {
-            return Err(OperationError::PermissionDenied);
-        }
         self.ctx.network_status()?;
         let result = result?;
         transport.finish()?;

@@ -95,6 +95,9 @@ pub(crate) trait CryptoHost {
     fn now(&self) -> OffsetDateTime;
     fn basics_tsa(&self) -> TsaSpec;
     fn check_url(&self, url: &str) -> HostResult<()>;
+    fn check_tsa(&self, spec: &TsaSpec) -> HostResult<()> {
+        self.check_url(&spec.url)
+    }
     fn pki_http(&self) -> PkiHttp<'_>;
 }
 impl CryptoHost for HostState {
@@ -203,7 +206,7 @@ enum PkiPolicy<'a> {
         hosts: Option<&'a [String]>,
         budget: &'a RequestBudget,
     },
-    Bound(&'a (dyn Fn(&str) -> HostResult<()> + Send + Sync)),
+    Bound(&'a dyn crate::headless::PkiAuthority),
 }
 impl<'a> PkiHttp<'a> {
     pub(crate) fn of(state: &'a dyn CryptoHost) -> Self {
@@ -211,21 +214,25 @@ impl<'a> PkiHttp<'a> {
     }
     pub(crate) fn bound(
         http: &'a dyn HttpTransport,
-        authorize: &'a (dyn Fn(&str) -> HostResult<()> + Send + Sync),
+        authorize: &'a dyn crate::headless::PkiAuthority,
     ) -> Self {
         Self {
             http,
             policy: PkiPolicy::Bound(authorize),
         }
     }
-    fn checked(&self, request: &HttpRequest<'_>) -> Result<(), HttpError> {
+    fn checked(
+        &self,
+        request: &HttpRequest<'_>,
+        target: Option<&http::ProtocolTarget<'_>>,
+    ) -> Result<(), HttpError> {
         match &self.policy {
             PkiPolicy::Legacy { hosts: None, .. } => Ok(()),
             PkiPolicy::Legacy {
                 hosts: Some(hosts),
                 budget,
             } => check_pki_url_in(hosts, request.url).and_then(|()| budget.take()),
-            PkiPolicy::Bound(authorize) => authorize(request.url),
+            PkiPolicy::Bound(authorize) => authorize.authorize_request(request, target),
         }
         .map_err(|e| HttpError::other(e.message))
     }
@@ -239,7 +246,7 @@ impl<'a> PkiHttp<'a> {
 }
 impl HttpTransport for PkiHttp<'_> {
     fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
-        self.checked(request)?;
+        self.checked(request, None)?;
         self.http.send(&self.request(request))
     }
     fn send_pinned(
@@ -247,14 +254,14 @@ impl HttpTransport for PkiHttp<'_> {
         request: &HttpRequest<'_>,
         pins: &[std::net::SocketAddr],
     ) -> Result<HttpReply, HttpError> {
-        self.checked(request)?;
+        self.checked(request, None)?;
         self.http.send_pinned(&self.request(request), pins)
     }
     fn send_scoped<'a>(
         &'a self,
         request: &HttpRequest<'_>,
     ) -> Result<http::ScopedHttpReply<'a>, HttpError> {
-        self.checked(request)?;
+        self.checked(request, None)?;
         self.http.send_scoped(&self.request(request))
     }
     fn send_scoped_with<'a>(
@@ -262,7 +269,7 @@ impl HttpTransport for PkiHttp<'_> {
         request: &HttpRequest<'_>,
         budget: http::ResponseBudget<'a>,
     ) -> Result<http::ScopedHttpReply<'a>, HttpError> {
-        self.checked(request)?;
+        self.checked(request, None)?;
         self.http.send_scoped_with(&self.request(request), budget)
     }
     fn send_pinned_scoped<'a>(
@@ -271,9 +278,63 @@ impl HttpTransport for PkiHttp<'_> {
         pins: &[std::net::SocketAddr],
         budget: http::ResponseBudget<'a>,
     ) -> Result<http::ScopedHttpReply<'a>, HttpError> {
-        self.checked(request)?;
+        self.checked(request, None)?;
         self.http
             .send_pinned_scoped(&self.request(request), pins, budget)
+    }
+    fn redirect_policy(&self) -> http::RedirectPolicy {
+        match self.policy {
+            PkiPolicy::Legacy { hosts: None, .. } => self.http.redirect_policy(),
+            _ => http::RedirectPolicy::Never,
+        }
+    }
+    fn send_protocol(
+        &self,
+        request: &HttpRequest<'_>,
+        target: &http::ProtocolTarget<'_>,
+    ) -> Result<HttpReply, HttpError> {
+        self.checked(request, Some(target))?;
+        self.http.send_protocol(&self.request(request), target)
+    }
+    fn send_pinned_protocol(
+        &self,
+        request: &HttpRequest<'_>,
+        target: &http::ProtocolTarget<'_>,
+        pins: &[std::net::SocketAddr],
+    ) -> Result<HttpReply, HttpError> {
+        self.checked(request, Some(target))?;
+        self.http
+            .send_pinned_protocol(&self.request(request), target, pins)
+    }
+    fn send_protocol_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        target: &http::ProtocolTarget<'_>,
+    ) -> Result<http::ScopedHttpReply<'a>, HttpError> {
+        self.checked(request, Some(target))?;
+        self.http
+            .send_protocol_scoped(&self.request(request), target)
+    }
+    fn send_protocol_scoped_with<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        target: &http::ProtocolTarget<'_>,
+        budget: http::ResponseBudget<'a>,
+    ) -> Result<http::ScopedHttpReply<'a>, HttpError> {
+        self.checked(request, Some(target))?;
+        self.http
+            .send_protocol_scoped_with(&self.request(request), target, budget)
+    }
+    fn send_pinned_protocol_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        target: &http::ProtocolTarget<'_>,
+        pins: &[std::net::SocketAddr],
+        budget: http::ResponseBudget<'a>,
+    ) -> Result<http::ScopedHttpReply<'a>, HttpError> {
+        self.checked(request, Some(target))?;
+        self.http
+            .send_pinned_protocol_scoped(&self.request(request), target, pins, budget)
     }
     fn resource_scope(&self) -> Option<&oncl_pki::resource::ResourceScope> {
         self.http.resource_scope()
@@ -418,7 +479,7 @@ pub(crate) fn tsa_spec(state: &dyn CryptoHost, choice: &TsaChoice) -> HostResult
             }
         }
     };
-    check_pki_url(state, &spec.url)?;
+    state.check_tsa(&spec)?;
     Ok(Ok(spec))
 }
 
