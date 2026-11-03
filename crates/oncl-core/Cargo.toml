@@ -12,6 +12,7 @@ publish.workspace = true
 tokens = ["dep:oncl-token"]
 xml = ["dep:oncl-xml"]
 pdf = ["dep:oncl-pdf"]
+jose = ["dep:base64", "dep:serde", "dep:serde_json", "dep:der"]
 
 [dependencies]
 oncl-pki.workspace = true
@@ -20,6 +21,10 @@ oncl-xml = { workspace = true, optional = true }
 oncl-pdf = { workspace = true, optional = true }
 zeroize.workspace = true
 time.workspace = true
+base64 = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true, features = ["raw_value"] }
+der = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
