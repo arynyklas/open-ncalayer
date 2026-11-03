@@ -594,7 +594,7 @@ impl<'a> InvocationScope<'a> {
         let previous = ctx.plugin_network.take();
         let budget = ctx
             .plugin_network_budget
-            .get_or_insert_with(InvocationHttpBudget::default);
+            .get_or_insert_with(|| previous.clone().unwrap_or_default());
         ctx.plugin_network = Some(previous.clone().unwrap_or_else(|| budget.clone()));
         Self { ctx, previous }
     }
