@@ -68,7 +68,7 @@ fn check(condition: bool, message: &str) -> Result<()> {
         Err(io::Error::other(message.to_owned()).into())
     }
 }
-fn strip(spec: &mut TestCertSpec) {
+pub(super) fn strip(spec: &mut TestCertSpec) {
     spec.extensions.retain(|e| {
         !matches!(
             e.extn_id.to_string().as_str(),
@@ -82,7 +82,7 @@ fn short_tlv(tag: u8, body: &[u8]) -> Vec<u8> {
     out.extend_from_slice(body);
     out
 }
-fn aia(url: &str) -> Extension {
+pub(super) fn aia(url: &str) -> Extension {
     let mut access = vec![6, 8, 43, 6, 1, 5, 5, 7, 48, 1];
     access.extend(short_tlv(0x86, url.as_bytes()));
     Extension {
@@ -92,7 +92,7 @@ fn aia(url: &str) -> Extension {
             .expect("public AIA DER"),
     }
 }
-fn pki(origin: &str) -> Result<(KeyEntry, KeyEntry, KeyEntry, KeyEntry, KeyEntry)> {
+pub(super) fn pki(origin: &str) -> Result<(KeyEntry, KeyEntry, KeyEntry, KeyEntry, KeyEntry)> {
     // New ephemeral synthetic CA/TSA/responder keys. Only public certificates,
     // requests, signatures and status responses are persisted by this probe.
     let mut root = fixture_entry("user-rsa-sign");
@@ -133,10 +133,10 @@ fn pki(origin: &str) -> Result<(KeyEntry, KeyEntry, KeyEntry, KeyEntry, KeyEntry
     gost.cert = issue_cert(&root, spec);
     Ok((root, tsa, responder, rsa, gost))
 }
-struct PkiServer {
+pub(super) struct PkiServer {
     stop: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
-    calls: Arc<AtomicUsize>,
+    pub(super) calls: Arc<AtomicUsize>,
 }
 impl Drop for PkiServer {
     fn drop(&mut self) {
@@ -147,7 +147,7 @@ impl Drop for PkiServer {
     }
 }
 impl PkiServer {
-    fn start(
+    pub(super) fn start(
         listener: TcpListener,
         origin: String,
         tsa: KeyEntry,
@@ -327,7 +327,7 @@ impl KeyProvider for Provider {
         self.inner.open(request, ctx)
     }
 }
-fn selector(entry: &KeyEntry) -> Result<KeySelector> {
+pub(super) fn selector(entry: &KeyEntry) -> Result<KeySelector> {
     Ok(KeySelector::inline(
         pkcs12::write(
             &[pkcs12::WriteEntry {

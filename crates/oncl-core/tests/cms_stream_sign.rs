@@ -3146,3 +3146,165 @@ fn guarded_xades_spec_checks_actual_request_chain_before_capture_and_key_open() 
     assert_eq!(ctx.resources().progress().bytes_in, 0);
     assert!(output.is_empty());
 }
+
+#[cfg(feature = "xml")]
+#[test]
+fn wsse_core_real_algorithms_fresh_signed_quota_and_exact_body_facts() {
+    use oncl_xml::wsse::{SourceWsseSignProfile, WsseVerifyProfile};
+    const SOAP: &[u8] = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Body><request>protected</request></s:Body></s:Envelope>";
+    for name in ["user-rsa-sign", "user-gost2004-sign", "user-gost2015-sign"] {
+        let selector = selector(name);
+        let guard = Arc::new(Guard::default());
+        let dir = tempfile::tempdir().unwrap();
+        let limits = ResourceLimits {
+            input_bytes: SOAP.len() as u64,
+            output_bytes: SOAP.len() as u64 + 65536,
+            ..Default::default()
+        };
+        let engine = Engine::new(
+            EngineServices::hash_only(limits)
+                .with_validation(validation())
+                .with_temporary_store(TemporaryStore::new(dir.path()).unwrap())
+                .with_keys(Arc::new(KeySources::new()), guard.clone()),
+        )
+        .unwrap();
+        let mut ctx = begin(
+            &engine,
+            &selector,
+            &[Action::Sign],
+            OperationPolicy::strict_online(),
+            Arc::new(Control::default()),
+        );
+        let mut signed = Vec::new();
+        let report = engine
+            .sign(
+                SignRequest::wsse(
+                    KeyRequest::new(&selector, Some("C02 synthetic")),
+                    SourceWsseSignProfile::default(),
+                ),
+                Source::sequential(&mut Cursor::new(SOAP), None),
+                &mut signed,
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(report.profile, oncl_core::SignProfile::Wsse);
+        assert_eq!(report.applied, AppliedState::Applied);
+        assert_eq!(guard.events.lock().unwrap().len(), 1);
+        assert!(report.xml().unwrap().facts.wsse().unwrap().signers()[0].body_digest_matches());
+        drop(report);
+        drop(ctx);
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Verify]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control::default()),
+            )
+            .unwrap();
+        let report = engine
+            .verify(
+                &oncl_core::VerifyRequest::wsse(WsseVerifyProfile::default()),
+                Source::sequential(&mut Cursor::new(&signed), None),
+                None,
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(report.verdict, oncl_pki::validation::Verdict::Valid);
+        assert!(report.xml.unwrap().wsse().unwrap().signers()[0].body_digest_matches());
+        assert_eq!(ctx.resources().progress().bytes_in, signed.len() as u64);
+    }
+}
+
+#[cfg(feature = "xml")]
+#[test]
+fn wsse_provider_zero_for_structure_work_policy_and_sticky_postuse_output_failure() {
+    use oncl_core::keys::{KeyLease, KeyProvider};
+    use oncl_xml::wsse::SourceWsseSignProfile;
+    struct Provider {
+        opens: Arc<AtomicUsize>,
+        inner: KeySources,
+    }
+    impl KeyProvider for Provider {
+        fn open(
+            &self,
+            request: &KeyRequest<'_>,
+            ctx: &mut OperationContext,
+        ) -> Result<KeyLease, OperationError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            self.inner.open(request, ctx)
+        }
+    }
+    const SOAP: &[u8] = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Body><request>protected</request></s:Body></s:Envelope>";
+    let selector = selector("user-rsa-sign");
+    for case in 0..10 {
+        let dir = tempfile::tempdir().unwrap();
+        let opens = Arc::new(AtomicUsize::new(0));
+        let guard = Arc::new(Guard::default());
+        guard.finish_fail.store(case == 7, Ordering::SeqCst);
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let engine = Engine::new(
+            EngineServices::hash_only(ResourceLimits::default())
+                .with_validation(validation())
+                .with_temporary_store(store.clone())
+                .with_keys(
+                    Arc::new(Provider {
+                        opens: opens.clone(),
+                        inner: KeySources::new(),
+                    }),
+                    guard.clone(),
+                ),
+        )
+        .unwrap();
+        let mut ctx = begin(
+            &engine,
+            &selector,
+            &[Action::Sign],
+            OperationPolicy::strict_online(),
+            Arc::new(Control::default()),
+        );
+        let mut profile = SourceWsseSignProfile::default();
+        let mut source = SOAP.to_vec();
+        match case {
+            0 => profile.verification.xml.max_work = 1,
+            1 => profile.verification.xml.allowed_signature_algorithms = &[],
+            2 => source = b"<Envelope xmlns='urn:fake'><Body/></Envelope>".to_vec(),
+            3 => source = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Body/><s:Body/></s:Envelope>".to_vec(),
+            4 => profile.verification.timestamp.required = true,
+            5 => profile.verification.required_headers = vec!["missing".into()],
+            6 => profile.timestamp = Some(oncl_xml::wsse::WsseTimestamp { id: "future".into(), created: NOW + time::Duration::MINUTE, expires: NOW + time::Duration::minutes(2) }),
+            8 => source = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Body><ds:Signature xmlns:ds='http://www.w3.org/2000/09/xmldsig#'/></s:Body></s:Envelope>".to_vec(),
+            9 => source = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Header><w:Security xmlns:w='http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd'><u:Timestamp xmlns:u='http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd' u:Id='future'><u:Created>2026-11-03T12:00:00Z</u:Created><u:Expires>2026-11-03T12:01:00Z</u:Expires></u:Timestamp></w:Security></s:Header><s:Body><request>protected</request></s:Body></s:Envelope>".to_vec(),
+            _ => {}
+        }
+        let mut stage = store.stage(&mut ctx.resources().shared_view()).unwrap();
+        let error = engine
+            .sign_staged(
+                SignRequest::wsse(KeyRequest::new(&selector, Some("C02 synthetic")), profile),
+                Source::sequential(&mut Cursor::new(&source), None),
+                &mut stage,
+                &mut ctx,
+            )
+            .unwrap_err();
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            usize::from(case == 7),
+            "case {case}"
+        );
+        assert_eq!(guard.events.lock().unwrap().len(), usize::from(case == 7));
+        assert_eq!(
+            error.applied_state(),
+            if case == 7 {
+                AppliedState::Applied
+            } else {
+                AppliedState::NotApplied
+            }
+        );
+        assert!(stage.copy_to(&mut Vec::new()).is_err());
+        if case == 7 {
+            guard.finish_fail.store(false, Ordering::SeqCst);
+            let mut out = Vec::new();
+            assert!(sign(&engine, &selector, &mut ctx, &mut out).is_err());
+            assert!(out.is_empty());
+            assert_eq!(guard.events.lock().unwrap().len(), 1);
+        }
+    }
+}

@@ -2681,6 +2681,120 @@ mod xml_batch {
 
     const ORIGINAL: &[u8] = b"<r><p Id='p'>protected exact document</p><s Id='s'/></r>";
 
+    #[test]
+    fn wsse_real_batch_create_verify_add_preserves_scope_and_body_binding() {
+        use oncl_xml::wsse::{SourceWsseSignProfile, WsseVerifyProfile};
+        const SOAP: &[u8] = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Body><request>protected</request></s:Body></s:Envelope>";
+        let scratch = tempfile::tempdir().unwrap();
+        let guard = Arc::new(fixture::Guard::default());
+        let provider = Arc::new(fixture::Provider::default());
+        let limits = ResourceLimits {
+            input_bytes: SOAP.len() as u64,
+            output_bytes: SOAP.len() as u64 + 65536,
+            ..Default::default()
+        };
+        let engine = fixture::engine(
+            TemporaryStore::new(scratch.path()).unwrap(),
+            guard.clone(),
+            provider.clone(),
+            limits,
+        );
+        let key = fixture::selector("user-rsa-sign");
+        let mut bytes = SOAP.to_vec();
+        for add in [false, true] {
+            let mut ctx = begin(&engine, Some(&key), &[Action::Sign]);
+            let mut input = bytes.as_slice();
+            let mut output = Vec::new();
+            let profile = SourceWsseSignProfile {
+                mode: if add {
+                    oncl_xml::XmlSignMode::Add
+                } else {
+                    oncl_xml::XmlSignMode::Create
+                },
+                ..Default::default()
+            };
+            let plan = engine
+                .capture_batch(
+                    [BatchItem::new(
+                        "wsse",
+                        BatchOperation::Sign {
+                            request: SignRequest::wsse(
+                                KeyRequest::new(&key, Some(fixture::PASSWORD)),
+                                profile,
+                            ),
+                            input: Source::sequential(&mut input, None),
+                            output: &mut output,
+                        },
+                    )],
+                    &mut ctx,
+                )
+                .unwrap();
+            assert_eq!(
+                plan.items().next().unwrap().sources[0].sha256().as_bytes(),
+                HashAlg::Sha256.digest(&bytes)
+            );
+            assert_eq!(plan.items().next().unwrap().keys.len(), 1);
+            let approval = plan.authorize(&ctx).unwrap();
+            let summary = engine.run_batch(plan, approval, &mut ctx, |_| {}).unwrap();
+            let BatchOutcome::Completed(BatchReport::Sign(report)) = summary.results()[0].outcome()
+            else {
+                panic!("WSSE sign: {:?}", summary.results()[0].outcome());
+            };
+            assert_eq!(report.profile, SignProfile::Wsse);
+            assert_eq!(report.signer_count(), if add { 2 } else { 1 });
+            assert!(
+                report
+                    .xml()
+                    .unwrap()
+                    .facts
+                    .wsse()
+                    .unwrap()
+                    .signers()
+                    .iter()
+                    .all(|s| s.body_digest_matches())
+            );
+            drop((summary, ctx));
+            bytes = output;
+            let mut ctx = begin(&engine, None, &[Action::Verify]);
+            let mut input = bytes.as_slice();
+            let plan = engine
+                .capture_batch(
+                    [BatchItem::new(
+                        "verify",
+                        BatchOperation::Verify {
+                            request: VerifyRequest::wsse(WsseVerifyProfile::default()),
+                            input: Source::sequential(&mut input, None),
+                            detached: None,
+                        },
+                    )],
+                    &mut ctx,
+                )
+                .unwrap();
+            let approval = plan.authorize(&ctx).unwrap();
+            let summary = engine.run_batch(plan, approval, &mut ctx, |_| {}).unwrap();
+            let BatchOutcome::Completed(BatchReport::Verify(report)) =
+                summary.results()[0].outcome()
+            else {
+                panic!("WSSE verify: {:?}", summary.results()[0].outcome());
+            };
+            assert_eq!(report.verdict, Verdict::Valid);
+            assert!(
+                report
+                    .xml
+                    .as_ref()
+                    .unwrap()
+                    .wsse()
+                    .unwrap()
+                    .signers()
+                    .iter()
+                    .all(|s| s.body_digest_matches())
+            );
+            assert_eq!(summary.progress.bytes_in, bytes.len() as u64);
+        }
+        assert_eq!(provider.opens.load(Ordering::SeqCst), 2);
+        assert_eq!(guard.applied.load(Ordering::SeqCst), 2);
+    }
+
     fn limits() -> ResourceLimits {
         ResourceLimits {
             input_bytes: ORIGINAL.len() as u64,

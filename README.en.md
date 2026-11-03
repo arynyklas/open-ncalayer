@@ -606,8 +606,9 @@ the original ResourceScope, retaining selectors/placement/output/layout/limits
 and sharing the actual metadata/crypto builder and canonical writer. Source
 signing never constructs a large document DOM. Add preserves old signatures,
 but a standard whole-document reference may be invalidated by later Add.
-Large XML WSSE is not added. Internal hash/evidence replay spends no final-output
-quota; external `copy_entry` charges every delivery. OUTPUT-derived captures
+WS-Security uses the same immutable index, reference engine and canonical writer.
+Internal hash/evidence replay spends no final-output quota; external `copy_entry`
+charges every delivery. OUTPUT-derived captures
 remain OUTPUT and a failed closed output transaction cannot publish after the
 host clears cancellation.
 Core `SignRequest::xml_legacy` retains the bounded XmlSignSpec wire contract
@@ -639,6 +640,40 @@ separate per-signer artifacts. Run the bounded independent oracle with
 `python crates/oncl-core/examples/sdk_probe/xml_oracle.py --out target/x03-smoke`
 (lxml/libxml2 and cryptography: exact C14N/digests and RSA math, not GOST or trust).
 Meaningful 10-GiB processing and the 1-GiB peak-RSS gate remain V01 work.
+
+X05 adds `oncl_xml::wsse::{SourceWsseSignProfile, WsseVerifyProfile}` and Core
+`SignRequest::wsse` / `VerifyRequest::wsse`, including approved batch Create/Add.
+The used Body is the unique direct Body of the actual SOAP 1.1/1.2 Envelope,
+with one globally unique WSU Id. Every signer is checked against that exact
+region; whole-document math, a moved old Body, unsigned replacement, ID aliases,
+wrong namespaces and cross-recipient token fallback do not establish coverage.
+The host selects the Security actor/role, required direct application headers,
+and optional signed UTC Created/Expires policy. A Timestamp is only a signed
+freshness claim, never proof of existence or replay prevention.
+Supported X.509 forms are the pinned NCANode complete-certificate KeyIdentifier
+compatibility variant and standard local BinarySecurityToken/STR Reference.
+Remote tokens, SKI/issuer-serial lookup, decryption, SAML and unknown recognized
+Security proofs are explicit unsupported cases. New signatures use RSA-SHA256,
+GOST-2004 or GOST-2015/512, preserving strict host PKI/algorithm/key authority.
+Only bounded recognized Security framing, typed token/Timestamp metadata and
+necessary WSU Id insertion receive format accounting; ordinary headers/body
+remain application bytes. Exact lexical bytes otherwise survive insertion.
+Scoped `XmlVerificationFacts::wsse()` exposes per-signer actual Body/header/
+Timestamp coverage; `read_used_soap_body` borrows only original-scope bytes.
+
+Runtime: `cargo run -p oncl-core --features xml --example sdk_probe -- --case X05 --out target/x05-smoke`.
+It exercises a substantive protected SOAP Body over 64 MiB, RSA and GOST Add,
+all three bounded algorithms, real pinned loopback PKI and mutation/wrapping
+controls. The bounded independent oracle (hard DOM cap 1 MiB) is
+`python crates/oncl-core/examples/sdk_probe/wsse_oracle.py target/x05-smoke`;
+copy `crates/oncl-xml/tests/support/wsse-ncanode.xml` to the output directory as
+`pinned-ncanode.xml` first. It independently checks libxml2 exclusive C14N,
+SHA-256 and RSA signature math against the external pinned fixture and generated
+RSA fixture. GOST canonical decomposition is not independent GOST signature
+verification; the expired external fixture is math-only, not trusted Valid.
+No Java/Kalkan runtime, production certification, measured RSS, 4-GiB or 10-GiB
+acceptance is implied; those large-platform gates remain V01.
+
 
 P03 adds explicit `SignRequest::pades(key, profile, level, material, evidence_limits)`,
 `VerifyRequest::pades(required, evidence_limits)` and

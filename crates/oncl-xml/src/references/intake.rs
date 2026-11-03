@@ -326,7 +326,7 @@ fn covers(regions: &[Region], whole: Region) -> Result<bool> {
     }
     Ok(false)
 }
-fn whitespace(
+pub(crate) fn whitespace(
     document: &mut dyn oncl_pki::io::CapturedInput,
     region: Region,
     scope: &ResourceScope,
@@ -631,8 +631,18 @@ fn geometry(
             }
         }
     }
+    let (wsse, _wsse_admission) = crate::wsse::metadata_regions(document, profile, scope)?;
+    for region in &wsse {
+        regions.push(*region)?;
+    }
     regions.normalize()?;
     for parent in parents {
+        if wsse
+            .iter()
+            .any(|region| contains(*region, parent.closing).unwrap_or(false))
+        {
+            continue;
+        }
         if parent.closing.len != parent.qname_bytes as u64 + 3 {
             continue;
         }

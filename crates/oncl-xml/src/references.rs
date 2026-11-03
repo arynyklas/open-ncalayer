@@ -83,6 +83,9 @@ pub struct XmlSignerResult {
     pub signed_info: Region,
     pub signature_value: Region,
     pub algorithm: oncl_pki::key::SigAlg,
+    pub key_info: Option<Region>,
+    /// Actual selected certificate-bearing element, not a global token search.
+    pub certificate: Region,
     pub certificate_sha256: [u8; 32],
     pub level: Option<AdesLevel>,
     references: Vec<XmlReferenceResult>,
@@ -107,6 +110,7 @@ pub struct XmlVerification {
 pub struct XmlVerificationFacts {
     signatures: Vec<XmlSignerResult>,
     _metadata: ResourceReservation,
+    pub(crate) wsse: Option<Box<crate::wsse::WsseCoverageFacts>>,
 }
 impl XmlVerification {
     pub fn signatures(&self) -> &[XmlSignerResult] {
@@ -129,6 +133,20 @@ impl XmlVerificationFacts {
     pub fn signatures(&self) -> &[XmlSignerResult] {
         &self.signatures
     }
+    pub fn wsse(&self) -> Option<&crate::wsse::WsseCoverageFacts> {
+        self.wsse.as_deref()
+    }
+    pub fn read_used_soap_body(
+        &mut self,
+        offset: u64,
+        output: &mut [u8],
+        scope: &ResourceScope,
+    ) -> Result<usize> {
+        self.wsse
+            .as_mut()
+            .ok_or_else(|| invalid("report has no SOAP Body binding"))?
+            .read_used_body(offset, output, scope)
+    }
 }
 impl std::fmt::Debug for XmlVerificationFacts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -137,7 +155,7 @@ impl std::fmt::Debug for XmlVerificationFacts {
             .finish()
     }
 }
-type BoundMetadata = (Region, Vec<(String, String)>);
+pub(crate) type BoundMetadata = (Region, Vec<(String, String)>);
 struct ExtraMetadata {
     bound: BoundMetadata,
     _metadata: ResourceReservation,
@@ -564,6 +582,7 @@ fn scan_optional(
                             .ok_or_else(|| invalid("missing SignatureValue"))?,
                         certificate: pending
                             .certificate
+                            .or_else(|| pending.key_info.as_ref().map(|key| key.bound.clone()))
                             .ok_or_else(|| invalid("missing certificate"))?,
                         targets: pending.targets,
                         proofs: pending.proofs,
@@ -582,9 +601,25 @@ fn scan_optional(
             path.pop().ok_or_else(|| invalid("signature path"))?;
         }
     }
+    drop(events);
+    for signature in &mut signatures {
+        if let Some(key) = &signature.key_info {
+            if let Some(certificate) = crate::wsse::certificate_binding(
+                document,
+                signature.signature,
+                &key.bound,
+                profile,
+                scope,
+            )? {
+                signature.certificate = certificate;
+            } else if signature.certificate.0 == key.bound.0 {
+                return Err(invalid("missing certificate"));
+            }
+        }
+    }
     Ok(signatures)
 }
-fn metadata(
+pub(crate) fn metadata(
     document: &mut XmlDocument,
     region: Region,
     namespaces: &[(String, String)],
@@ -635,7 +670,11 @@ fn base64(node: Node<'_, '_>) -> Result<Vec<u8>> {
     }
     crate::base64_content(node).map_err(|_| invalid("base64 signature metadata"))
 }
-fn attribute_value(document: &mut XmlDocument, span: Region, cap: usize) -> Result<String> {
+pub(crate) fn attribute_value(
+    document: &mut XmlDocument,
+    span: Region,
+    cap: usize,
+) -> Result<String> {
     if span.len > cap as u64 {
         return Err(ProcessingError::MetadataLimit.into());
     }
@@ -1360,6 +1399,8 @@ pub(crate) fn verify_document_timed(
             signed_info: signature.info,
             signature_value: signature.value.0,
             algorithm: prepared.algorithm,
+            key_info: signature.key_info.as_ref().map(|key| key.bound.0),
+            certificate: signature.certificate.0,
             certificate_sha256: prepared.certificate_sha256,
             level,
             references: prepared.references,
@@ -1381,6 +1422,7 @@ pub(crate) fn verify_document_timed(
         facts: XmlVerificationFacts {
             signatures: records,
             _metadata: metadata_guard,
+            wsse: None,
         },
     })
 }

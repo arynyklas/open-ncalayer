@@ -71,7 +71,7 @@
 //! present supported proof is checked. Multiple independent SignatureTimeStamp
 //! proofs, other archive versions and distributed coverage are explicit
 //! unsupported errors, never a lower-level Valid claim.
-//! Large XML WSSE and actual 10-GiB/1-GiB-RSS acceptance are not claimed here.
+//! Actual 10-GiB/1-GiB-RSS platform acceptance is not claimed here.
 
 mod c14n;
 mod canonical_stream;
@@ -103,6 +103,7 @@ pub use sign::{
     prepare_legacy_source, prepare_source, sign_prepared, sign_prepared_with_clock, sign_source,
     sign_spec_source,
 };
+pub mod wsse;
 pub mod xades;
 mod xpath;
 

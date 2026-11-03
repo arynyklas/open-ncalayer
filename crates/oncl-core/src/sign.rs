@@ -212,6 +212,10 @@ impl Engine {
             return Err(OperationError::InvalidContext);
         }
         #[cfg(feature = "xml")]
+        if let SignMode::Wsse(key, profile) = request.mode {
+            return self.sign_wsse_operation(key, profile, input, output, ctx);
+        }
+        #[cfg(feature = "xml")]
         if let SignMode::Xml(key, profile, level) = request.mode {
             return self.sign_xml_operation(key, profile, level, input, output, ctx);
         }
@@ -267,6 +271,7 @@ impl Engine {
             ),
             #[cfg(feature = "xml")]
             SignMode::Xml(key, _, _)
+            | SignMode::Wsse(key, _)
             | SignMode::XmlLegacy(key, _)
             | SignMode::XadesLegacy(key, _) => (
                 std::slice::from_ref(key),
@@ -451,6 +456,10 @@ impl Engine {
                 output,
                 &ctx.scope,
             ),
+            #[cfg(feature = "xml")]
+            SignMode::Wsse(key, profile) => {
+                return self.sign_wsse_operation(key, profile, input, output, ctx);
+            }
             #[cfg(feature = "xml")]
             SignMode::Xml(key, profile, level) => {
                 return self.sign_xml_operation(key, profile, level, input, output, ctx);

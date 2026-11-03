@@ -692,7 +692,7 @@ baseline-свойств не получает достигнутый baseline-у
 исходный ResourceScope; старые XPath/placement/output/layout/лимиты сохранены,
 builder и canonical writer общие. Source sign не строит DOM большого документа;
 Add сохраняет прежние подписи, но стандартная whole-document reference может
-быть нарушена последующим Add. WSSE для больших XML не добавлен.
+быть нарушена последующим Add. WS-Security использует тот же индекс и canonical writer.
 Внутренние hash/evidence replay не расходуют финальную output-квоту; внешний
 `copy_entry` списывает каждую доставку. OUTPUT-derived captures остаются OUTPUT,
 а отмена/ошибка закрытого output transaction запрещает публикацию после очистки
@@ -738,6 +738,39 @@ X04 выполняет настоящие sign/Add/LTA над содержате
 issuer-bound synthetic RSA status, порядок/покрытие и отрицательные контроли.
 Это bounded direct-root профиль, не универсальный PKIX/XAdES validator и не
 независимое доказательство ГОСТ, 10 ГиБ или RSS.
+
+X05 добавляет `oncl_xml::wsse::{SourceWsseSignProfile, WsseVerifyProfile}` и Core
+`SignRequest::wsse` / `VerifyRequest::wsse`, включая approved batch Create/Add.
+Используемый Body — единственный прямой Body настоящего SOAP 1.1/1.2 Envelope,
+с одним глобально уникальным WSU Id. Каждый signer проверяется относительно
+этого региона: whole-document math, перенесённый старый Body, неподписанная
+подмена, ID aliases, неверный namespace и token из другого recipient не дают
+утверждения о покрытии. Host выбирает Security actor/role, обязательные прямые
+прикладные headers и политику подписанного UTC Created/Expires. Timestamp —
+только signed freshness claim, не proof of existence и не replay prevention.
+Поддержаны полный сертификат в KeyIdentifier (фактический pinned NCANode variant)
+и стандартный локальный BinarySecurityToken/STR Reference. Remote tokens,
+SKI/issuer-serial lookup, шифрование, SAML и неизвестные recognized Security proofs
+явно не поддержаны. Новые подписи — RSA-SHA256, ГОСТ-2004 и ГОСТ-2015/512 через
+прежние строгие host PKI/algorithm/key authority.
+Только bounded recognized Security framing, типизированные token/Timestamp и
+необходимая вставка WSU Id получают format accounting; обычные headers и Body
+остаются прикладными байтами. Остальные lexical bytes сохраняются.
+Scoped `XmlVerificationFacts::wsse()` возвращает реальные per-signer Body/header/
+Timestamp coverage; `read_used_soap_body` читает только байты исходного scope.
+
+Runtime: `cargo run -p oncl-core --features xml --example sdk_probe -- --case X05 --out target/x05-smoke`.
+Probe покрывает содержательный SOAP Body более 64 МиБ, RSA и GOST Add, все три
+алгоритма на bounded случаях, настоящий pinned loopback PKI и mutation/wrapping.
+Независимый bounded oracle (жёсткий DOM cap 1 МиБ):
+`python crates/oncl-core/examples/sdk_probe/wsse_oracle.py target/x05-smoke`;
+сначала скопируйте `crates/oncl-xml/tests/support/wsse-ncanode.xml` в output как
+`pinned-ncanode.xml`. Он независимо сверяет libxml2 exclusive C14N, SHA-256 и RSA
+math внешнего pinned fixture и нового RSA fixture. GOST canonical decomposition
+не является независимой проверкой GOST math, просроченный внешний fixture —
+только math, не trusted Valid. Нет Java/Kalkan runtime, production-сертификации,
+измеренного RSS либо приёмки 4/10 ГиБ: эти платформенные гейты остаются в V01.
+
 
 
 

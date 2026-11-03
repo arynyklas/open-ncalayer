@@ -29,7 +29,7 @@ pub(crate) fn error(error: XmlSourceError) -> OperationError {
         }
     }
 }
-fn intersect(a: &[SigAlg], b: &[SigAlg]) -> &'static [SigAlg] {
+pub(crate) fn intersect(a: &[SigAlg], b: &[SigAlg]) -> &'static [SigAlg] {
     let mut mask = 0;
     for (i, alg) in [SigAlg::Gost2004, SigAlg::Gost2015_512, SigAlg::RsaSha256]
         .iter()
@@ -49,6 +49,34 @@ fn intersect(a: &[SigAlg], b: &[SigAlg]) -> &'static [SigAlg] {
         &[SigAlg::Gost2015_512, SigAlg::RsaSha256],
         &[SigAlg::Gost2004, SigAlg::Gost2015_512, SigAlg::RsaSha256],
     ];
+    SETS[mask]
+}
+pub(crate) fn intersect_verification(a: &[SigAlg], b: &[SigAlg]) -> &'static [SigAlg] {
+    use SigAlg::{Gost2004 as G04, Gost2015_512 as G15, RsaSha1 as R1, RsaSha256 as R256};
+    const SETS: [&[SigAlg]; 16] = [
+        &[],
+        &[G04],
+        &[G15],
+        &[G04, G15],
+        &[R256],
+        &[G04, R256],
+        &[G15, R256],
+        &[G04, G15, R256],
+        &[R1],
+        &[G04, R1],
+        &[G15, R1],
+        &[G04, G15, R1],
+        &[R256, R1],
+        &[G04, R256, R1],
+        &[G15, R256, R1],
+        &[G04, G15, R256, R1],
+    ];
+    let mut mask = 0;
+    for (i, algorithm) in [G04, G15, R256, R1].iter().enumerate() {
+        if a.contains(algorithm) && b.contains(algorithm) {
+            mask |= 1 << i;
+        }
+    }
     SETS[mask]
 }
 struct TrackedSigner<'a> {
@@ -219,6 +247,25 @@ impl Engine {
         };
         use crate::request::SignMode;
         let result = match &request.mode {
+            SignMode::Wsse(_, profile) => {
+                let _profile_admission = profile.preflight(&ctx.scope).map_err(error)?;
+                let mut profile = profile.clone();
+                profile.verification.xml.allowed_signature_algorithms = intersect(
+                    profile.verification.xml.allowed_signature_algorithms,
+                    ctx.policy.allowed_signature_algorithms,
+                );
+                let mut prepared =
+                    oncl_xml::wsse::prepare_source(input, &profile, store, &mut ctx.scope)
+                        .map_err(error)?;
+                prepared
+                    .verify_existing(
+                        &context,
+                        &validation.network,
+                        &mut ctx.scope,
+                        Some(validation.clock.as_ref()),
+                    )
+                    .map_err(error)
+            }
             SignMode::Xml(_, profile, level) => {
                 let mut profile = profile.clone();
                 profile.allowed_signature_algorithms = intersect(
@@ -497,6 +544,108 @@ impl Engine {
             SignProvenance::Document,
             applied,
             report,
+        ))
+    }
+    pub(crate) fn sign_wsse_operation(
+        &self,
+        key: KeyRequest<'_>,
+        profile: oncl_xml::wsse::SourceWsseSignProfile,
+        input: Source<'_>,
+        output: Output<'_>,
+        ctx: &mut OperationContext,
+    ) -> Result<OperationReport, OperationError> {
+        match output {
+            Output::Staged(stage) => self.sign_wsse_staged(key, profile, input, stage, ctx),
+            Output::Writer(writer) => {
+                let store = self
+                    .temporary
+                    .as_ref()
+                    .ok_or(OperationError::MissingTemporaryStore)?;
+                let mut stage = store.stage(&mut ctx.scope)?;
+                let report = self.sign_wsse_staged(key, profile, input, &mut stage, ctx)?;
+                stage
+                    .copy_to(writer)
+                    .map_err(|e| after(e.into(), report.applied))?;
+                Ok(report)
+            }
+        }
+    }
+    fn sign_wsse_staged(
+        &self,
+        key: KeyRequest<'_>,
+        mut profile: oncl_xml::wsse::SourceWsseSignProfile,
+        input: Source<'_>,
+        stage: &mut StagedArtifact,
+        ctx: &mut OperationContext,
+    ) -> Result<OperationReport, OperationError> {
+        let mut output = XmlSignatureOutput::new(stage, &ctx.scope)?;
+        let validation = self.validation_context(ctx, Action::Sign)?;
+        let store = self
+            .temporary
+            .as_ref()
+            .ok_or(OperationError::MissingTemporaryStore)?;
+        profile.verification.xml.allowed_signature_algorithms = intersect(
+            profile.verification.xml.allowed_signature_algorithms,
+            ctx.policy.allowed_signature_algorithms,
+        );
+        profile.verification.xml.evidence_limits = intersect_evidence_limits(
+            self.cades.as_ref().map(|c| c.evidence_limits),
+            profile.verification.xml.evidence_limits,
+        );
+        let scoped_http = ctx.http(validation.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &validation.network, &ctx.scope);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: (validation.clock)(),
+            anchors: &validation.anchors,
+            intermediates: &validation.intermediates,
+            http: &transport,
+        };
+        let mut prepared = oncl_xml::wsse::prepare_source(input, &profile, store, &mut ctx.scope)
+            .map_err(error)?;
+        prepared
+            .verify_existing(
+                &context,
+                &validation.network,
+                &mut ctx.scope,
+                Some(validation.clock.as_ref()),
+            )
+            .map_err(error)?;
+        transport.finish()?;
+        let index = self.prepare_sign_keys(std::slice::from_ref(&key), ctx, Action::Sign)?[0];
+        let mut signer = self.operation_signer(index, ctx, Action::Sign)?;
+        let mut tracked = TrackedSigner {
+            signer: &mut signer,
+            applied: AppliedState::NotApplied,
+        };
+        let mut resources = ctx.scope.shared_view();
+        let result = oncl_xml::wsse::sign_prepared(
+            prepared,
+            &mut tracked,
+            &context,
+            &validation.network,
+            Some(validation.clock.as_ref()),
+            &mut output,
+            &mut resources,
+        );
+        let applied = tracked.applied;
+        transport.finish().map_err(|e| after(e.into(), applied))?;
+        resources
+            .checkpoint()
+            .map_err(|e| after(e.into(), applied))?;
+        let (summary, verification) = result.map_err(|e| after(error(e), applied))?;
+        output
+            .finish(&resources)
+            .map_err(|e| after(e.into(), applied))?;
+        Ok(OperationReport::xml_operation(
+            ctx.id,
+            SignProfile::Wsse,
+            SignProvenance::Document,
+            applied,
+            oncl_xml::xades::XadesReport {
+                summary,
+                verification: verification.xml,
+            },
         ))
     }
     pub(crate) fn extend_xml_operation(

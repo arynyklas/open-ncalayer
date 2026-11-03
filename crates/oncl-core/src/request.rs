@@ -13,19 +13,33 @@ pub enum VerifyProfile {
     XmlKalkan,
     #[cfg(feature = "xml")]
     Xades(oncl_pki::evidence::AdesLevel),
+    #[cfg(feature = "xml")]
+    Wsse,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct VerifyRequest {
     profile: VerifyProfile,
     limits: Option<oncl_pki::evidence::EvidenceLimits>,
+    #[cfg(feature = "xml")]
+    pub(crate) wsse: Option<oncl_xml::wsse::WsseVerifyProfile>,
 }
 impl VerifyRequest {
+    #[cfg(feature = "xml")]
+    pub fn wsse(profile: oncl_xml::wsse::WsseVerifyProfile) -> Self {
+        Self {
+            profile: VerifyProfile::Wsse,
+            limits: None,
+            wsse: Some(profile),
+        }
+    }
     #[cfg(feature = "xml")]
     pub const fn xades(required: oncl_pki::evidence::AdesLevel) -> Self {
         Self {
             profile: VerifyProfile::Xades(required),
             limits: None,
+            #[cfg(feature = "xml")]
+            wsse: None,
         }
     }
     #[cfg(feature = "xml")]
@@ -33,6 +47,7 @@ impl VerifyRequest {
         Self {
             profile: VerifyProfile::Xml,
             limits: None,
+            wsse: None,
         }
     }
     #[cfg(feature = "xml")]
@@ -40,6 +55,7 @@ impl VerifyRequest {
         Self {
             profile: VerifyProfile::XmlKalkan,
             limits: None,
+            wsse: None,
         }
     }
     #[cfg(feature = "pdf")]
@@ -47,6 +63,8 @@ impl VerifyRequest {
         Self {
             profile: VerifyProfile::Pdf,
             limits: None,
+            #[cfg(feature = "xml")]
+            wsse: None,
         }
     }
     #[cfg(feature = "pdf")]
@@ -57,12 +75,16 @@ impl VerifyRequest {
         Self {
             profile: VerifyProfile::Pades(required),
             limits: Some(limits),
+            #[cfg(feature = "xml")]
+            wsse: None,
         }
     }
     pub const fn cms() -> Self {
         Self {
             profile: VerifyProfile::Cms,
             limits: None,
+            #[cfg(feature = "xml")]
+            wsse: None,
         }
     }
     pub const fn profile(&self) -> VerifyProfile {
@@ -75,6 +97,8 @@ impl VerifyRequest {
         Self {
             profile: VerifyProfile::Cades(required),
             limits: Some(limits),
+            #[cfg(feature = "xml")]
+            wsse: None,
         }
     }
     pub const fn evidence_limits(&self) -> Option<oncl_pki::evidence::EvidenceLimits> {
@@ -96,6 +120,8 @@ pub enum SignProfile {
     Xml,
     #[cfg(feature = "xml")]
     Xades(oncl_pki::evidence::AdesLevel),
+    #[cfg(feature = "xml")]
+    Wsse,
 }
 /// A one-shot request: detached Add sources and secrets are borrowed, not
 /// cloned, serialized or included in Debug output.
@@ -144,8 +170,22 @@ pub(crate) enum SignMode<'a> {
     XmlLegacy(crate::keys::KeyRequest<'a>, oncl_xml::XmlSignSpec<'a>),
     #[cfg(feature = "xml")]
     XadesLegacy(crate::keys::KeyRequest<'a>, oncl_xml::xades::XadesSpec<'a>),
+    #[cfg(feature = "xml")]
+    Wsse(
+        crate::keys::KeyRequest<'a>,
+        oncl_xml::wsse::SourceWsseSignProfile,
+    ),
 }
 impl<'a> SignRequest<'a> {
+    #[cfg(feature = "xml")]
+    pub fn wsse(
+        key: crate::keys::KeyRequest<'a>,
+        profile: oncl_xml::wsse::SourceWsseSignProfile,
+    ) -> Self {
+        Self {
+            mode: SignMode::Wsse(key, profile),
+        }
+    }
     /// Bounded compatibility signing with the original selector, placement and
     /// wire-layout contract, through the same authorized key and canonical writer.
     #[cfg(feature = "xml")]
@@ -262,6 +302,8 @@ impl<'a> SignRequest<'a> {
             SignMode::Xml(_, _, None) | SignMode::XmlLegacy(..) => SignProfile::Xml,
             #[cfg(feature = "xml")]
             SignMode::Xml(_, _, Some(level)) => SignProfile::Xades(level),
+            #[cfg(feature = "xml")]
+            SignMode::Wsse(..) => SignProfile::Wsse,
             #[cfg(feature = "xml")]
             SignMode::XadesLegacy(_, ref spec) => SignProfile::Xades(match spec.level {
                 oncl_xml::xades::XadesLevel::B => oncl_pki::evidence::AdesLevel::B,

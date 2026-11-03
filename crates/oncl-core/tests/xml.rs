@@ -149,3 +149,43 @@ fn xml_timestamp_dispatch_uses_f03_without_final_output_credit_or_trust_promotio
             .all(|r| r.digest_matches)
     );
 }
+
+#[test]
+fn wsse_legacy_rsa_sha1_is_host_selected_verification_only() {
+    let source = include_bytes!("../../oncl-xml/tests/support/wsse-legacy-rsa-sha1.xml");
+    let temp = tempfile::tempdir().unwrap();
+    let services = ValidationServices::new(
+        CaSet::new(vec![]),
+        vec![],
+        Arc::new(Offline),
+        oncl_pki::validation::NetworkPolicy::deny_all(),
+        Arc::new(|| time::OffsetDateTime::from_unix_timestamp(1793707200).unwrap()),
+    );
+    let engine = Engine::new(
+        EngineServices::hash_only(ResourceLimits::default())
+            .with_validation(services)
+            .with_temporary_store(TemporaryStore::new(temp.path()).unwrap()),
+    )
+    .unwrap();
+    let mut profile = oncl_xml::wsse::WsseVerifyProfile::default();
+    profile.xml.allowed_signature_algorithms = &[oncl_pki::key::SigAlg::RsaSha1];
+    let mut policy = OperationPolicy::offline_report();
+    policy.allowed_signature_algorithms = &[oncl_pki::key::SigAlg::RsaSha1];
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Verify]),
+            policy,
+            Arc::new(Control),
+        )
+        .unwrap();
+    let report = engine
+        .verify(
+            &VerifyRequest::wsse(profile),
+            Source::sequential(&mut Cursor::new(source), None),
+            None,
+            &mut ctx,
+        )
+        .unwrap();
+    assert_eq!(report.signers[0].signature, CheckStatus::Passed);
+    assert!(report.xml.unwrap().wsse().unwrap().signers()[0].body_digest_matches());
+}

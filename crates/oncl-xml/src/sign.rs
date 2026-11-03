@@ -904,7 +904,7 @@ pub(crate) fn percent_id(id: &str) -> String {
     }
     text
 }
-fn write(
+pub(crate) fn write(
     bytes: &[u8],
     output: &mut dyn SignatureOutput,
     scope: &ResourceScope,
@@ -919,7 +919,7 @@ fn write(
     }
     Ok(())
 }
-fn copy(
+pub(crate) fn copy(
     document: &mut XmlDocument,
     mut region: Region,
     output: &mut dyn SignatureOutput,
@@ -994,6 +994,10 @@ pub(super) struct Template<'t> {
     pub(super) line_breaks: bool,
 }
 
+pub(crate) struct WsseTemplate<'a> {
+    pub key_info: &'a str,
+    pub references: &'a [(String, oncl_pki::digest::DigestValue)],
+}
 impl Template<'_> {
     fn base64(&self, bytes: &[u8]) -> String {
         if self.line_breaks {
@@ -1036,7 +1040,12 @@ impl Template<'_> {
 
     /// `ds:Signature` element; without `value` the `SignatureValue` is empty, without
     /// `object_digest` the signing-time object's reference has an empty digest.
-    fn render(&self, value: Option<&[u8]>, object_digest: Option<&[u8]>) -> String {
+    fn render_with(
+        &self,
+        value: Option<&[u8]>,
+        object_digest: Option<&[u8]>,
+        wsse: Option<&WsseTemplate<'_>>,
+    ) -> String {
         let n = self.separator;
         let id = self
             .id
@@ -1081,6 +1090,18 @@ impl Template<'_> {
                 None,
             );
         }
+        if let Some(wsse) = wsse {
+            for (id, digest) in wsse.references {
+                self.reference(
+                    &mut s,
+                    &format!("#{}", percent_id(id)),
+                    None,
+                    &[C14n::Exclusive.uri()],
+                    digest.as_bytes(),
+                    None,
+                );
+            }
+        }
         s.push_str(&format!("</ds:SignedInfo>{n}<ds:SignatureValue>"));
         if let Some(value) = value {
             // Santuario puts a long value on lines of its own.
@@ -1097,10 +1118,15 @@ impl Template<'_> {
         } else {
             cert
         };
-        s.push_str(&format!(
-            "</ds:SignatureValue>{n}<ds:KeyInfo>{n}<ds:X509Data>{n}<ds:X509Certificate>{cert}\
-             </ds:X509Certificate>{n}</ds:X509Data>{n}</ds:KeyInfo>{n}"
-        ));
+        s.push_str(&format!("</ds:SignatureValue>{n}<ds:KeyInfo>{n}"));
+        if let Some(wsse) = wsse {
+            s.push_str(wsse.key_info);
+        } else {
+            s.push_str(&format!(
+                "<ds:X509Data>{n}<ds:X509Certificate>{cert}</ds:X509Certificate>{n}</ds:X509Data>{n}"
+            ));
+        }
+        s.push_str(&format!("</ds:KeyInfo>{n}"));
         match &self.object {
             Some(ObjectTemplate::SigningTime {
                 object,
@@ -1222,6 +1248,18 @@ impl Template<'_> {
     /// Source supplies original-scope, standard canonical metadata hashes.
     fn signed<E>(
         &self,
+        hash: impl FnMut(
+            &str,
+            Option<&str>,
+            C14n,
+            oncl_pki::key::HashAlg,
+        ) -> Result<oncl_pki::digest::DigestValue, E>,
+        sign: impl FnMut(&oncl_pki::digest::DigestValue) -> Result<Vec<u8>, E>,
+    ) -> Result<PreparedSignature, E> {
+        self.signed_with(hash, sign, None, None)
+    }
+    pub(crate) fn signed_with<E>(
+        &self,
         mut hash: impl FnMut(
             &str,
             Option<&str>,
@@ -1229,6 +1267,7 @@ impl Template<'_> {
             oncl_pki::key::HashAlg,
         ) -> Result<oncl_pki::digest::DigestValue, E>,
         mut sign: impl FnMut(&oncl_pki::digest::DigestValue) -> Result<Vec<u8>, E>,
+        wsse: Option<&WsseTemplate<'_>>,
         admit: Option<&mut MetadataAdmission<'_, E>>,
     ) -> Result<PreparedSignature, E> {
         let object_digest = self
@@ -1237,14 +1276,15 @@ impl Template<'_> {
             .and_then(|o| o.reference(self))
             .map(|(id, _, _, method)| {
                 hash(
-                    &self.render(None, None),
+                    &self.render_with(None, None, wsse),
                     Some(id),
                     method,
                     self.algorithms.digest,
                 )
             })
             .transpose()?;
-        let unsigned = self.render(None, object_digest.as_ref().map(|d| d.as_bytes()));
+        let unsigned =
+            self.render_with(None, object_digest.as_ref().map(|d| d.as_bytes()), wsse);
         let signed_digest = hash(
             &unsigned,
             None,
@@ -1257,7 +1297,11 @@ impl Template<'_> {
         drop(unsigned);
         let value = sign(&signed_digest)?;
         Ok(PreparedSignature {
-            xml: self.render(Some(&value), object_digest.as_ref().map(|d| d.as_bytes())),
+            xml: self.render_with(
+                Some(&value),
+                object_digest.as_ref().map(|d| d.as_bytes()),
+                wsse,
+            ),
             digest: signed_digest,
             value,
         })
@@ -1285,8 +1329,8 @@ impl Template<'_> {
     }
 }
 
-struct PreparedSignature {
-    xml: String,
+pub(crate) struct PreparedSignature {
+    pub(crate) xml: String,
     digest: oncl_pki::digest::DigestValue,
     value: Vec<u8>,
 }
