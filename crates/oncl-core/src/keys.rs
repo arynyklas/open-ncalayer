@@ -433,6 +433,15 @@ pub struct KeyUseEvent {
     batch_item: Option<BatchItemOrdinal>,
 }
 impl KeyUseEvent {
+    /// Describe the original invocation/item. This grants no private-key authority.
+    pub fn new(ctx: &OperationContext, key_id: KeyId, action: Action) -> Self {
+        Self {
+            operation_id: ctx.id(),
+            key_id,
+            action,
+            batch_item: ctx.batch_item,
+        }
+    }
     pub fn batch_item(&self) -> Option<BatchItemOrdinal> {
         self.batch_item
     }
@@ -611,12 +620,11 @@ impl AuthorizedSigner<'_> {
                 .ok_or(OperationError::MissingValidationServices)?;
             validation.check_private(&self.ctx.leases[self.index].entry.cert, self.ctx)?;
         }
-        let event = KeyUseEvent {
-            operation_id: self.ctx.id(),
-            key_id: self.ctx.leases[self.index].id.clone(),
-            action: self.action,
-            batch_item: self.ctx.batch_item,
-        };
+        let event = KeyUseEvent::new(
+            self.ctx,
+            self.ctx.leases[self.index].id.clone(),
+            self.action,
+        );
         let receipt = self.guard.before_use(&event).inspect_err(|_| {
             self.ctx
                 .private_use_stopped

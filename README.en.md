@@ -95,7 +95,11 @@ oracle; it does not replace full 10-GiB/RSS or desktop-matrix acceptance.
 `oncl-server` is a standalone durable-audit library, not an HTTP-server scaffold.
 The host installs `DurableAuditGuard` through `EngineServices::with_keys` and
 binds the original `OperationContext` to its authenticated opaque principal and
-safe 16-byte key labels (`bind` / `AuditBinding`). The journal never serializes
+safe 16-byte key labels (`bind` / `AuditBinding`). BEGIN/FINAL retain the original
+Core zero-based `batch_item` (0–1023), not a private-use counter: hash/verify keep
+gaps, multiple signers of one item keep its ordinal, and non-batch calls have None.
+Some(0) has a distinct presence bit; guest item IDs never become principal/key labels.
+The journal never serializes
 document contents, paths, filenames, passwords, arbitrary `KeyId::Debug` values
 or raw errors. BEGIN is synchronized **before** private use; FINAL records actual
 Applied/NotApplied/Unknown. A failed FINAL cannot undo a signature: Core preserves
