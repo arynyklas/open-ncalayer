@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::{collections::BTreeMap, io::Cursor, sync::Arc};
 mod capabilities;
 mod cms;
+mod xml;
 
 /// Host-issued exact invocation permission. No Deserialize and no wildcard methods/keys.
 #[derive(Clone, Debug)]

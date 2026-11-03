@@ -86,6 +86,18 @@ pub(crate) enum LegacySpec<'a> {
     Xml(oncl_xml::XmlSignSpec<'a>),
     Xades(oncl_xml::xades::XadesSpec<'a>),
 }
+fn check_legacy_output(ctx: &OperationContext, length: u64) -> Result<(), ProcessingError> {
+    ctx.scope.check_output_capacity(length)?;
+    #[cfg(feature = "plugins")]
+    if ctx
+        .plugin_xml_output_limit
+        .is_some_and(|limit| length > limit)
+    {
+        return Err(ProcessingError::ContainerLimit);
+    }
+    Ok(())
+}
+
 enum LegacySpecRef<'spec, 'data> {
     Xml(&'spec oncl_xml::XmlSignSpec<'data>),
     Xades(&'spec oncl_xml::xades::XadesSpec<'data>),
@@ -262,6 +274,9 @@ impl Engine {
     ) -> Result<OperationReport, OperationError> {
         let mut output = XmlSignatureOutput::new(stage, &ctx.scope)?;
         let validation = self.validation_context(ctx, Action::Sign)?;
+        // A signed document necessarily contains these structural element tags,
+        // even before a leaf certificate/algorithm is available for exact sizing.
+        check_legacy_output(ctx, b"<Signature></Signature>".len() as u64)?;
         let store = self
             .temporary
             .as_ref()
@@ -301,13 +316,22 @@ impl Engine {
             applied: AppliedState::NotApplied,
         };
         let mut resources = ctx.scope.shared_view();
+        let mut admit = |length| check_legacy_output(ctx, length);
         let result = match prepared {
-            LegacyPrepared::Xades(prepared) => {
-                prepared.sign_transaction(&mut tracked, &services, &mut output, &mut resources)
-            }
+            LegacyPrepared::Xades(prepared) => prepared.sign_transaction(
+                &mut tracked,
+                &services,
+                &mut output,
+                &mut resources,
+                &mut admit,
+            ),
             LegacyPrepared::Xml(prepared) => (|| {
-                let summary =
-                    prepared.sign_transaction(&mut tracked, &mut output, &mut resources)?;
+                let summary = prepared.sign_transaction(
+                    &mut tracked,
+                    &mut output,
+                    &mut resources,
+                    &mut admit,
+                )?;
                 let profile = XmlVerifyProfile {
                     canonicalization: oncl_xml::C14nProfile::KalkanLegacy,
                     allowed_signature_algorithms: ctx.policy.allowed_signature_algorithms,

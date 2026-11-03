@@ -245,7 +245,7 @@ The Rust SDK (`oncl-core`, feature `plugins`) executes WebAssembly in a scoped
 headless host: installation grants no invocation authority. The embedding host
 binds caller, operation, nested ABI methods, keys, frozen inputs/unpublished
 outputs and network endpoints; permissions intersect the manifest and host policy.
-Raw/CMS signing retains the original `OperationContext` and guard; mandatory UI
+Raw/CMS/XML/XAdES signing retains the original `OperationContext` and guard; mandatory UI
 returns `InteractionRequired` without taking a dialog lock. Package/catalog/updater
 code requires `oncl-plugin/distribution`, explicitly selected by desktop consumers;
 settings remain available in the runtime. Actual WASM and independent OpenSSL smoke:
@@ -257,6 +257,15 @@ PKI encoder for that exact base; origin/prefix wildcards and redirects never wid
 authority. Bound certificate chains and predictable DER/Base64/PEM outputs are
 admitted under original quotas before private use; preflight does not debit output
 bytes. Headless `log` acknowledges the call without emitting guest payload.
+
+`KeysSignXml`, `KeysSignXmlEx` and `KeysSignXades` use real guarded legacy Core
+facades with the original XPath/namespace/layout selectors. T/LT requires the
+matching host TSA and actual baseline evidence. Guest chain data never becomes
+a trust anchor; legacy algorithm defaults cannot bypass the actual signer type.
+Serialized XML is admitted before private use under the original quota and
+temporary ABI target; late trap/TSA failure retains `Applied` without publishing
+a prefix. L01 also runs a bounded libxml2/cryptography oracle (Python `lxml`,
+`cryptography`) covering RSA, every reference and a negative mutation, not PKIX/GOST/NCA qualification.
 
 
 A plugin is a WebAssembly module serving its own `module` names (a port of a third-party module of the original NCALayer, for example) in a sandbox: it sees only the request and the page's `origin`, and reaches keys, windows, files and the network only through the capabilities its manifest declares. Its window is «Плагины…» (Plugins…) in the icon's menu (or `showBundleManager` from a page): the installed plugins with their version, source and state (turn off/on, remove), those available in the catalog (install), install from a file (`*.onclp`), and refresh the catalog.

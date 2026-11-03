@@ -247,7 +247,7 @@ Rust SDK (`oncl-core`, feature `plugins`) выполняет WebAssembly чер�
 host: установка плагина не даёт права вызова. Хозяин явно связывает caller,
 operation, вложенные ABI-методы, ключи, замороженные источники/неопубликованные
 результаты и сетевые endpoints; полномочия пересекаются с манифестом и host policy.
-Raw/CMS-подписи используют исходный `OperationContext` и guard, обязательный диалог
+Raw/CMS/XML/XAdES-подписи используют исходный `OperationContext` и guard, обязательный диалог
 даёт `InteractionRequired` без UI-lock. Пакеты, каталог и updater доступны только
 с отдельной feature `oncl-plugin/distribution`, которую выбирает desktop; settings
 остаются в runtime. Проверка с настоящим WASM и независимым OpenSSL:
@@ -259,6 +259,15 @@ PKI-права задают HTTP-метод и точный base URL, включ
 не расширяют полномочия. Цепочки сертификатов и предсказуемые DER/Base64/PEM
 результаты проходят admission исходных квот до применения ключа; preflight
 не списывает выходные байты. Headless `log` подтверждается без записи guest payload.
+
+`KeysSignXml`, `KeysSignXmlEx` и `KeysSignXades` вызывают реальные guarded legacy
+фасады Core с исходными селекторами XPath/namespace/layout; T/LT требуют совпадающего
+host TSA и фактических baseline evidence. Публичная цепочка из guest не становится
+trust anchor, а legacy default алгоритма не обходит соответствие реальному ключу.
+Размер serialized XML проверяется до private use по исходной квоте и временному
+ABI target; поздний trap/TSA failure сохраняет `Applied`, не публикуя префикс.
+L01 также запускает bounded libxml2/cryptography oracle (Python `lxml`, `cryptography`):
+проверка RSA, всех references и отрицательной мутации; это не PKIX/GOST/NCA-сертификация.
 
 
 Плагин — модуль WebAssembly, который обслуживает свои имена `module` (например, порт стороннего модуля оригинального NCALayer) и работает в песочнице: он видит только запрос и `origin` страницы, а ключи, окна, файлы и сеть получает лишь через заявленные в манифесте возможности (capabilities). Окно — «Плагины…» в меню значка (или `showBundleManager` со страницы): установленные плагины с версией, источником и состоянием (кнопки «Выключить»/«Включить» и «Удалить»), доступные в каталоге («Установить…»), «Установить из файла…» (`*.onclp`) и «Обновить каталог».

@@ -503,7 +503,8 @@ fn build(
     if let Some(admit) = admit {
         use der::EncodeValue;
         let empty = prepared.value(&[])?;
-        let signature_len = fixed_signature_len(signer.certificate(), alg)?;
+        let signature_len =
+            crate::key::signature_width(signer.certificate(), alg).map_err(CmsError::Key)?;
         let info_value: u32 = empty.value_len()?.into();
         let empty_value: u32 = empty.signature.encoded_len()?.into();
         let info_len = tlv(u64::from(info_value) - u64::from(empty_value) + tlv(signature_len)?)?;
@@ -688,28 +689,6 @@ fn certificate_work(
             n.checked_add((selected.len() as u64 + 1).checked_mul(certificate_slot_bytes())?)
         })
         .ok_or_else(|| CmsError::Constraint("certificate working size overflow".into()))
-}
-pub(super) fn fixed_signature_len(certificate: &Certificate, alg: SigAlg) -> Result<u64, CmsError> {
-    match alg {
-        SigAlg::Gost2004 => Ok(64),
-        SigAlg::Gost2015_512 => Ok(128),
-        SigAlg::RsaSha256 | SigAlg::RsaSha1 => {
-            #[derive(der::Sequence)]
-            struct RsaPublic<'a> {
-                modulus: der::asn1::UintRef<'a>,
-                exponent: der::asn1::UintRef<'a>,
-            }
-            let bits = certificate
-                .tbs_certificate()
-                .subject_public_key_info()
-                .subject_public_key
-                .as_bytes()
-                .ok_or_else(|| CmsError::Malformed("RSA subject public key bit string".into()))?;
-            let public = RsaPublic::from_der(bits)?;
-            let _ = public.exponent;
-            Ok(public.modulus.as_bytes().len() as u64)
-        }
-    }
 }
 
 fn bounded_metadata_work(

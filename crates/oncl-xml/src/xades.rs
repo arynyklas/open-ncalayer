@@ -526,6 +526,7 @@ impl PreparedXadesSpec<'_> {
         services: &XadesServices<'_>,
         output: &mut oncl_pki::io::XmlSignatureOutput<'_>,
         scope: &mut oncl_pki::resource::ResourceScope,
+        admit: &mut dyn FnMut(u64) -> Result<(), oncl_pki::resource::ProcessingError>,
     ) -> Result<XadesReport, crate::XmlSourceError> {
         use oncl_pki::{evidence::SignerEvidence, resource::ProcessingError, validation::Verdict};
         let spec = XadesSourceSpec {
@@ -551,15 +552,14 @@ impl PreparedXadesSpec<'_> {
                     data_reference_id: Some(&reference_id),
                 },
             )),
+            Some(admit),
         )?;
         let (signature, digest, raw_value) = {
             let doc = crate::parse::parse_admitted(&signed.bytes, false, Some(scope))?;
             let signature = doc
                 .descendants()
                 .find(|n| crate::is_ds(*n, "Signature") && n.attribute("Id") == Some(&self.id))
-                .ok_or(crate::XmlSourceError::Malformed(
-                    "generated bounded Signature",
-                ))?;
+                .ok_or(crate::XmlSourceError::Malformed("generated Signature"))?;
             let digest = crate::canonicalizer(C14n::Exclusive)
                 .hash(
                     crate::ds_child(signature, "SignedInfo")?,

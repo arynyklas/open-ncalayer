@@ -976,19 +976,8 @@ pub(crate) fn keys_sign_xml(state: &mut HostState, args: SignXmlArgs) -> HostRes
 pub(crate) fn sign_xml(state: &HostState, args: &SignXmlArgs, xml: &[u8]) -> HostResult<Vec<u8>> {
     let builtin = is_builtin(state);
     let entry = state.keys.get(args.handle)?;
-    match &args.element {
-        None if args.parent.is_some() => Err(invalid("parent is only for a signed element")),
-        None => xmldsig::sign_enveloped(xml, &entry.key, &entry.cert)
-            .map_err(|e| xml_failed(builtin, e)),
-        Some(element) => xmldsig::sign_element(
-            xml,
-            element,
-            args.parent.as_deref(),
-            &entry.key,
-            &entry.cert,
-        )
-        .map_err(|e| xml_failed(builtin, e)),
-    }
+    let spec = xml_spec(args)?;
+    xmldsig::sign_spec(xml, &spec, &entry.key, &entry.cert).map_err(|e| xml_failed(builtin, e))
 }
 
 /// The core's canonicalization of `method`.
@@ -1005,55 +994,7 @@ fn c14n(method: C14n) -> xmldsig::C14n {
 pub(crate) fn keys_sign_xml_ex(state: &mut HostState, args: SignXmlExArgs) -> HostResult<Bytes> {
     let builtin = is_builtin(state);
     let entry = state.keys.get(args.handle)?;
-    let spec = xmldsig::XmlSignSpec {
-        element: args.element.as_deref(),
-        parent: args.parent.as_deref(),
-        namespaces: args
-            .namespaces
-            .iter()
-            .map(|b| (b.prefix.as_str(), b.uri.as_str()))
-            .collect(),
-        other_prefix_uri: args.other_prefix_uri.as_deref(),
-        placement: match args.placement {
-            Placement::DocumentElement => xmldsig::Placement::DocumentElement,
-            Placement::FirstChildOfDocument => xmldsig::Placement::FirstChildOfDocument,
-            Placement::Parent => xmldsig::Placement::Parent,
-        },
-        signature_method: args.signature_method.as_deref(),
-        digest_method: args.digest_method.as_deref(),
-        signed_info_c14n: args.signed_info_c14n.map(c14n),
-        transforms: args.transforms.as_ref().map(|transforms| {
-            transforms
-                .iter()
-                .map(|t| match t {
-                    Transform::Enveloped => xmldsig::Transform::Enveloped,
-                    Transform::C14n(method) => xmldsig::Transform::C14n(c14n(*method)),
-                })
-                .collect()
-        }),
-        signature_id: args.signature_id.as_deref(),
-        signing_time_object: args.signing_time_object.as_ref().map(|object| {
-            xmldsig::SigningTimeObject {
-                property_id: &object.property_id,
-                target_ref: object.target_ref,
-                text: &object.text,
-            }
-        }),
-        strip_whitespace: args.strip_whitespace,
-        base64_line_breaks: args.base64_line_breaks,
-        output: match args.output {
-            XmlOutput::AsIs => xmldsig::XmlOutput::AsIs,
-            XmlOutput::Serialize {
-                declaration,
-                standalone_no,
-                trim,
-            } => xmldsig::XmlOutput::Serialize {
-                declaration,
-                standalone_no,
-                trim,
-            },
-        },
-    };
+    let spec = xml_spec_ex(&args);
     let signed = xmldsig::sign_spec(&args.xml, &spec, &entry.key, &entry.cert)
         .map_err(|e| xml_failed(builtin, e))?;
     Ok(Bytes::from(signed))
@@ -1063,11 +1004,7 @@ pub(crate) fn keys_sign_xml_ex(state: &mut HostState, args: SignXmlExArgs) -> Ho
 /// OCSP requests only to the PKI hosts.
 pub(crate) fn keys_sign_xades(state: &mut HostState, args: XadesArgs) -> HostResult<XadesOutcome> {
     let builtin = is_builtin(state);
-    let level = match args.level {
-        XadesLevel::B => xades::XadesLevel::B,
-        XadesLevel::T => xades::XadesLevel::T,
-        XadesLevel::Lt => xades::XadesLevel::Lt,
-    };
+    let level = xades_level(args.level);
     let tsa = match level {
         xades::XadesLevel::B => None,
         _ => match crypto::tsa_spec(state, &args.tsa)? {
@@ -1075,18 +1012,7 @@ pub(crate) fn keys_sign_xades(state: &mut HostState, args: XadesArgs) -> HostRes
             Err(failure) => return Ok(XadesOutcome::Failed(failure)),
         },
     };
-    let chain = args
-        .chain
-        .iter()
-        .map(|der| crypto::parse(der))
-        .collect::<HostResult<Vec<_>>>()?;
-    let spec = xades::XadesSpec {
-        level,
-        tsa,
-        chain,
-        signature_method: args.signature_method.as_deref(),
-        digest_method: args.digest_method.as_deref(),
-    };
+    let spec = xades_spec(&args, tsa)?;
     let now = (state.services.clock)();
     let http = crypto::PkiHttp::of(state);
     let entry = state.keys.get(args.handle)?;
@@ -1218,6 +1144,94 @@ pub(crate) fn cms_spec<'a>(
             extra,
         },
         certificates,
+    };
+    Ok(spec)
+}
+
+/// The original ABI selector translation, borrowed by both host modes.
+pub(crate) fn xml_spec(args: &SignXmlArgs) -> HostResult<xmldsig::XmlSignSpec<'_>> {
+    if args.element.is_none() && args.parent.is_some() {
+        return Err(invalid("parent is only for a signed element"));
+    }
+    Ok(xmldsig::XmlSignSpec::kalkan(
+        args.element.as_deref(),
+        args.parent.as_deref(),
+    ))
+}
+pub(crate) fn xml_spec_ex(args: &SignXmlExArgs) -> xmldsig::XmlSignSpec<'_> {
+    xmldsig::XmlSignSpec {
+        element: args.element.as_deref(),
+        parent: args.parent.as_deref(),
+        namespaces: args
+            .namespaces
+            .iter()
+            .map(|b| (b.prefix.as_str(), b.uri.as_str()))
+            .collect(),
+        other_prefix_uri: args.other_prefix_uri.as_deref(),
+        placement: match args.placement {
+            Placement::DocumentElement => xmldsig::Placement::DocumentElement,
+            Placement::FirstChildOfDocument => xmldsig::Placement::FirstChildOfDocument,
+            Placement::Parent => xmldsig::Placement::Parent,
+        },
+        signature_method: args.signature_method.as_deref(),
+        digest_method: args.digest_method.as_deref(),
+        signed_info_c14n: args.signed_info_c14n.map(c14n),
+        transforms: args.transforms.as_ref().map(|transforms| {
+            transforms
+                .iter()
+                .map(|t| match t {
+                    Transform::Enveloped => xmldsig::Transform::Enveloped,
+                    Transform::C14n(method) => xmldsig::Transform::C14n(c14n(*method)),
+                })
+                .collect()
+        }),
+        signature_id: args.signature_id.as_deref(),
+        signing_time_object: args.signing_time_object.as_ref().map(|object| {
+            xmldsig::SigningTimeObject {
+                property_id: &object.property_id,
+                target_ref: object.target_ref,
+                text: &object.text,
+            }
+        }),
+        strip_whitespace: args.strip_whitespace,
+        base64_line_breaks: args.base64_line_breaks,
+        output: match args.output {
+            XmlOutput::AsIs => xmldsig::XmlOutput::AsIs,
+            XmlOutput::Serialize {
+                declaration,
+                standalone_no,
+                trim,
+            } => xmldsig::XmlOutput::Serialize {
+                declaration,
+                standalone_no,
+                trim,
+            },
+        },
+    }
+}
+pub(crate) fn xades_level(level: XadesLevel) -> xades::XadesLevel {
+    match level {
+        XadesLevel::B => xades::XadesLevel::B,
+        XadesLevel::T => xades::XadesLevel::T,
+        XadesLevel::Lt => xades::XadesLevel::Lt,
+    }
+}
+pub(crate) fn xades_spec(
+    args: &XadesArgs,
+    tsa: Option<oncl_pki::tsp::TsaSpec>,
+) -> HostResult<xades::XadesSpec<'_>> {
+    let level = xades_level(args.level);
+    let chain = args
+        .chain
+        .iter()
+        .map(|der| crypto::parse(der))
+        .collect::<HostResult<Vec<_>>>()?;
+    let spec = xades::XadesSpec {
+        level,
+        tsa,
+        chain,
+        signature_method: args.signature_method.as_deref(),
+        digest_method: args.digest_method.as_deref(),
     };
     Ok(spec)
 }

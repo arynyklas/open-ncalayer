@@ -98,6 +98,9 @@ impl Backend<'_, '_> {
             Import::PageFileWrite => self.write_bound_file(import, args),
             Import::HttpRequest | Import::HttpRequestEx => self.http(import, args),
             Import::KeysSignCms | Import::KeysSignCmsEx => self.sign_cms(import, args),
+            Import::KeysSignXml | Import::KeysSignXmlEx | Import::KeysSignXades => {
+                self.sign_xml(import, args)
+            }
             Import::CmsVerify => self.verify_cms(args),
             Import::CaList
             | Import::CaIssuer

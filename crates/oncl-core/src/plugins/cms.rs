@@ -14,7 +14,7 @@ struct RecordedSigner<'ctx, 'state> {
     applied: &'state Cell<AppliedState>,
     failure: &'state RefCell<Option<OperationError>>,
 }
-fn aggregate(old: AppliedState, new: AppliedState) -> AppliedState {
+pub(super) fn aggregate(old: AppliedState, new: AppliedState) -> AppliedState {
     match (old, new) {
         (AppliedState::Unknown, _) | (_, AppliedState::Unknown) => AppliedState::Unknown,
         (AppliedState::Applied, _) | (_, AppliedState::Applied) => AppliedState::Applied,

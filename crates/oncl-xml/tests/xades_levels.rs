@@ -1298,8 +1298,16 @@ fn guarded_bounded_xades_spec_uses_shared_real_evidence_for_b_t_lt() {
                 &mut scope,
             )
             .unwrap();
+            let admission_scope = scope.shared_view();
+            let mut admission = |bytes| admission_scope.check_output_capacity(bytes);
             let report = prepared
-                .sign_transaction(&mut pki.signer, &services, &mut output, &mut scope)
+                .sign_transaction(
+                    &mut pki.signer,
+                    &services,
+                    &mut output,
+                    &mut scope,
+                    &mut admission,
+                )
                 .unwrap_or_else(|e| panic!("{name}/{level:?}: {e:?}"));
             assert_eq!(report.verification.validation.verdict, Verdict::Valid);
             assert_eq!(report.verification.signatures()[0].level, Some(expected));

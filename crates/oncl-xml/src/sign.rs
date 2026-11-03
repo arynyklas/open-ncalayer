@@ -694,12 +694,16 @@ impl PreparedXmlSign<'_> {
             state.update(&canonical);
             Ok(state.finish())
         };
-        let prepared = template.signed(metadata_hash, |digest| {
-            scope.checkpoint()?;
-            let value = signer.sign_digest(digest).map_err(crate::XmlError::Key)?;
-            scope.checkpoint()?;
-            Ok::<_, XmlSourceError>(value)
-        })?;
+        let prepared = template.signed(
+            metadata_hash,
+            |digest| {
+                scope.checkpoint()?;
+                let value = signer.sign_digest(digest).map_err(crate::XmlError::Key)?;
+                scope.checkpoint()?;
+                Ok::<_, XmlSourceError>(value)
+            },
+            None,
+        )?;
         let signature = prepared.xml;
         let signature = if let Some((spec, services)) = ades {
             crate::xades::source::complete_signature(
@@ -1160,7 +1164,41 @@ impl Template<'_> {
         point: &SplicePoint,
         backend: &mut BoundedSigner<'_>,
         scope: Option<&ResourceScope>,
+        output: crate::XmlOutput,
+        mut admit: Option<&mut dyn FnMut(u64) -> Result<(), ProcessingError>>,
     ) -> Result<Vec<u8>, XmlError> {
+        let width = if scope.is_some() || admit.is_some() {
+            Some(
+                oncl_pki::key::signature_width(backend.certificate(), self.algorithms.signature)
+                    .map_err(XmlError::Key)?,
+            )
+        } else {
+            None
+        };
+        let mut project = |signature: &str| {
+            let delta = self.signature_value_len(
+                width.ok_or_else(|| XmlError::Constraint("missing signature width".into()))?,
+            )?;
+            let bytes = (signature.len() as u64)
+                .checked_add(delta)
+                .ok_or_else(|| XmlError::Constraint("signature size overflow".into()))?;
+            let length = point.output_len(xml, bytes, output)?;
+            use oncl_pki::key::{AppliedState, KeyError, KeyExecutionError};
+            let processing = |error: ProcessingError| {
+                XmlError::Key(KeyError::Execution(KeyExecutionError::processing(
+                    &error,
+                    AppliedState::NotApplied,
+                )))
+            };
+            if let Some(scope) = scope {
+                scope.check_output_capacity(length).map_err(processing)?;
+            }
+            if let Some(admit) = admit.as_deref_mut() {
+                admit(length).map_err(processing)?;
+            }
+            Ok(())
+        };
+        let preflight = width.map(|_| &mut project as &mut dyn FnMut(&str) -> Result<(), XmlError>);
         let signed = self.signed(
             |rendered, id, method, algorithm| {
                 self.in_place(xml, point, rendered, scope, |signature| {
@@ -1175,6 +1213,7 @@ impl Template<'_> {
                 })
             },
             |digest| backend.sign_digest(self.algorithms.signature, digest),
+            preflight,
         )?;
         Ok(point.splice(xml, &signed.xml))
     }
@@ -1190,6 +1229,7 @@ impl Template<'_> {
             oncl_pki::key::HashAlg,
         ) -> Result<oncl_pki::digest::DigestValue, E>,
         mut sign: impl FnMut(&oncl_pki::digest::DigestValue) -> Result<Vec<u8>, E>,
+        admit: Option<&mut MetadataAdmission<'_, E>>,
     ) -> Result<PreparedSignature, E> {
         let object_digest = self
             .object
@@ -1204,18 +1244,44 @@ impl Template<'_> {
                 )
             })
             .transpose()?;
+        let unsigned = self.render(None, object_digest.as_ref().map(|d| d.as_bytes()));
         let signed_digest = hash(
-            &self.render(None, object_digest.as_ref().map(|d| d.as_bytes())),
+            &unsigned,
             None,
             self.method,
             self.algorithms.signature.hash_alg(),
         )?;
+        if let Some(admit) = admit {
+            admit(&unsigned)?;
+        }
+        drop(unsigned);
         let value = sign(&signed_digest)?;
         Ok(PreparedSignature {
             xml: self.render(Some(&value), object_digest.as_ref().map(|d| d.as_bytes())),
             digest: signed_digest,
             value,
         })
+    }
+    fn signature_value_len(&self, width: u64) -> Result<u64, XmlError> {
+        let body = width
+            .checked_add(2)
+            .and_then(|n| (n / 3).checked_mul(4))
+            .ok_or_else(|| XmlError::Constraint("Base64 size overflow".into()))?;
+        let wrapped = self.line_breaks;
+        let breaks = if wrapped && body != 0 {
+            (body - 1) / 76
+        } else {
+            0
+        };
+        let text = body
+            .checked_add(
+                breaks
+                    .checked_mul(6)
+                    .ok_or_else(|| XmlError::Constraint("Base64 size overflow".into()))?,
+            )
+            .ok_or_else(|| XmlError::Constraint("Base64 size overflow".into()))?;
+        text.checked_add(if wrapped && text > 76 { 2 } else { 0 })
+            .ok_or_else(|| XmlError::Constraint("Base64 size overflow".into()))
     }
 }
 
@@ -1473,6 +1539,7 @@ impl<'a> PreparedLegacySign<'a> {
         signer: &mut dyn DigestSigner,
         scope: &mut ResourceScope,
         qualified: Option<(&'b str, crate::QualifyingObject<'b>)>,
+        admit: Option<&mut dyn FnMut(u64) -> Result<(), ProcessingError>>,
     ) -> Result<BoundedSigned>
     where
         'a: 'b,
@@ -1507,6 +1574,7 @@ impl<'a> PreparedLegacySign<'a> {
             qualified.map(|(_, q)| q),
             Some(scope),
             plan,
+            admit,
         )?;
         let summary = XmlSignSummary {
             bytes_in: self.frozen.len(),
@@ -1527,7 +1595,7 @@ impl<'a> PreparedLegacySign<'a> {
         output: &mut dyn Write,
         scope: &mut ResourceScope,
     ) -> Result<XmlSignSummary> {
-        let signed = self.sign_bytes(signer, scope, None)?;
+        let signed = self.sign_bytes(signer, scope, None, None)?;
         let mut written = 0;
         write(
             &signed.bytes,
@@ -1542,10 +1610,13 @@ impl<'a> PreparedLegacySign<'a> {
         signer: &mut dyn DigestSigner,
         output: &mut XmlSignatureOutput<'_>,
         scope: &mut ResourceScope,
+        admit: &mut dyn FnMut(u64) -> Result<(), ProcessingError>,
     ) -> Result<XmlSignSummary> {
-        let signed = self.sign_bytes(signer, scope, None)?;
+        let signed = self.sign_bytes(signer, scope, None, Some(admit))?;
         let mut written = 0;
         write(&signed.bytes, &mut StageWriter(output), scope, &mut written)?;
         Ok(signed.summary)
     }
 }
+
+type MetadataAdmission<'a, E> = dyn FnMut(&str) -> Result<(), E> + 'a;
