@@ -17,6 +17,11 @@ pub enum Action {
     Extract,
     /// Add and verify public CAdES evidence; never a private-key action.
     Extend,
+    /// Read public metadata only; never authorizes a private application.
+    Inspect,
+    /// Request a remote TSA token; does not use a local private key.
+    Stamp,
+    VerifyStamp,
 }
 
 /// Authority supplied by a trusted host/authorizer, intentionally not Deserialize.
@@ -29,6 +34,10 @@ pub struct ExecutionGrant {
     verify: bool,
     extract: bool,
     extend: bool,
+    inspect: bool,
+    stamp: bool,
+    verify_stamp: bool,
+    metadata_aliases: Vec<String>,
     keys: Vec<crate::keys::KeyId>,
 }
 impl ExecutionGrant {
@@ -42,6 +51,10 @@ impl ExecutionGrant {
             verify: false,
             extract: false,
             extend: false,
+            inspect: false,
+            stamp: false,
+            verify_stamp: false,
+            metadata_aliases: Vec::new(),
         };
         for action in actions {
             match action {
@@ -52,6 +65,9 @@ impl ExecutionGrant {
                 Action::Verify => grant.verify = true,
                 Action::Extract => grant.extract = true,
                 Action::Extend => grant.extend = true,
+                Action::Inspect => grant.inspect = true,
+                Action::Stamp => grant.stamp = true,
+                Action::VerifyStamp => grant.verify_stamp = true,
             }
         }
         grant
@@ -65,6 +81,9 @@ impl ExecutionGrant {
             Action::Verify => self.verify,
             Action::Extract => self.extract,
             Action::Extend => self.extend,
+            Action::Inspect => self.inspect,
+            Action::Stamp => self.stamp,
+            Action::VerifyStamp => self.verify_stamp,
         }
     }
     pub fn with_keys(mut self, keys: impl IntoIterator<Item = crate::keys::KeyId>) -> Self {
@@ -74,6 +93,17 @@ impl ExecutionGrant {
     pub fn allows_key(&self, key: &crate::keys::KeyId) -> bool {
         self.keys.contains(key)
     }
+    /// Exact host-authorized container aliases. No wildcard or client expansion.
+    pub fn with_metadata_aliases(
+        mut self,
+        aliases: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.metadata_aliases = aliases.into_iter().map(Into::into).collect();
+        self
+    }
+    pub(crate) fn metadata_aliases(&self) -> &[String] {
+        &self.metadata_aliases
+    }
     pub(crate) fn is_empty(&self) -> bool {
         !self.hash
             && !self.sign
@@ -82,6 +112,9 @@ impl ExecutionGrant {
             && !self.verify
             && !self.extract
             && !self.extend
+            && !self.inspect
+            && !self.stamp
+            && !self.verify_stamp
     }
 }
 

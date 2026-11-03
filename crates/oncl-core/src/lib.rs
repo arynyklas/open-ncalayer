@@ -163,11 +163,67 @@
 //! `cargo run -p oncl-core --features jose --example sdk_probe -- --case J01 --out <directory>`
 //! emits public standard JWS/JWT/Add/detached artifacts and runs independent
 //! OpenSSL RS256 positive/negative controls (OpenSSL must be on PATH).
+//!
+//! # Public inspection and standalone timestamps
+//!
+//! `Engine::inspect` requires `Action::Inspect`, never signing permission.
+//! Certificate and CMS structural inspection need no key provider, temporary
+//! store, validation services or network. Container inspection additionally
+//! requires exact host-granted aliases and a borrowed password; secrets are
+//! read into bounded zeroizing memory only, never `TemporaryStore`. PKCS#12
+//! metadata checks a present MAC/opens encrypted safes without decrypting or
+//! importing private-key bags; absent MAC is explicitly `NotPresent`.
+//! JKS skips protected keys entirely.
+//!
+//! `EngineServices::with_metadata_provider` configures a separate
+//! `ReadMetadataProvider`; `keys::KeySources` implements it. Exact source/named
+//! key grants are checked before the provider, secret or card. Named IDs refer
+//! to immutable host slots, not client-asserted certificate fingerprints.
+//! The optional token path reads only the authorized slot's public certificate
+//! in a fresh scoped transaction, with no `TokenKey`/PIN cache or signing guard.
+//! Every returned metadata owner is checked against the original operation.
+//!
+//! Host `InspectionLimits` defaults bound each KDF to 10,000 iterations and
+//! aggregate derivations to 100,000 iteration-block units, at most 64 safes,
+//! 4096 bags/entries, 1024 salt bytes and 4096 password UTF-8 bytes. A validated
+//! `with_inspection_limits` host profile may explicitly increase work up to
+//! the existing legacy iteration ceiling. Resource refusal is MetadataLimit,
+//! not an assertion that the store is malformed. Legacy load policy is unchanged.
+//! Password encodings are admitted before allocation, bag counts before owned
+//! collections, and KDF work before derivation; checkpoints separate bounded
+//! synchronous KDF calls. Such calls can overshoot a deadline by one admitted
+//! KDF, not promise hard-real-time preemption. Conservative 64x input plus fixed
+//! decode/output admission is retained with immutable public metadata.
+//!
+//! `stamp(StampRequest::new(TsaSpec), Source, output, ctx)` needs the separate
+//! `Action::Stamp` and real host `ValidationServices`; the explicit spec has
+//! no implicit TSA endpoint. Host network policy/pins still authorize it.
+//! Carried `verify_stamp` needs only validation services, `VerifyStamp`, and
+//! an explicit expectation request, never issuance configuration. Both reuse
+//! TSP cryptography and F03/F04 anchored path/current status at genTime.
+//! No local user private key or auto-consent guard is used. HTTP body/decode
+//! admission and fatal resource/cancel/deadline causes retain the same root.
+//!
+//! A timestamp report distinguishes token signature/EKU/path/validity/current
+//! revocation, expectation checks, current host clock, genTime, algorithm and
+//! document imprint. Absent data is `NotProvided`/Indeterminate, never Matched
+//! or a viewed-document claim. Retained canonical tokens/facts/metadata expose
+//! borrowed immutable buffers only, without Clone/Default or detachable permits.
+//! An issuance followed by output failure may already have happened remotely:
+//! no exactly-once or rollback assertion is made. Arbitrary sinks may retain a
+//! prefix; token input is not charged as document output.
+//!
+//! `cargo run -p oncl-core --example sdk_probe -- --case I01 --out <directory>`
+//! exercises real loopback pinned HTTP TSA/OCSP/CRL and file Sources, emits only
+//! public artifacts, and checks original/altered/untrusted controls with OpenSSL.
+//! This synthetic RSA/RFC3161 check is not NCA trust, hardware or V01 large-file
+//! XML/PDF/RSS/platform acceptance.
 
 mod cades;
 mod context;
 mod engine;
 mod error;
+mod inspect;
 #[cfg(feature = "jose")]
 pub mod jose;
 pub mod keys;
@@ -175,12 +231,17 @@ mod policy;
 mod report;
 mod request;
 mod sign;
+mod timestamp;
 
 pub use cades::{CadesConfiguration, ExtendRequest};
 pub use context::{OperationContext, OperationId};
 pub use engine::{Engine, EngineServices, HashReport};
 pub use error::{ErrorCode, OperationError};
+pub use inspect::{
+    InspectRequest, InspectionKind, InspectionReport, ReadMetadataProvider, SignatureMetadata,
+};
 pub use policy::{Action, ExecutionGrant, OperationPolicy};
 pub use report::{ExtractionReport, ValidationServices, VerificationReport};
 pub use request::{SignProfile, SignRequest, VerifyProfile, VerifyRequest};
 pub use sign::{OperationReport, SignProvenance};
+pub use timestamp::{StampRequest, StampVerifyRequest, TimestampReport};

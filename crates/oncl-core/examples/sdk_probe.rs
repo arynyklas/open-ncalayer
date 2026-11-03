@@ -6,6 +6,8 @@ use std::{fs::File, io, sync::Arc};
 
 #[path = "sdk_probe/cades.rs"]
 mod cades_probe;
+#[path = "sdk_probe/i01.rs"]
+mod i01_probe;
 #[cfg(feature = "jose")]
 #[path = "sdk_probe/jose.rs"]
 mod jose_probe;
@@ -32,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let case = args.next().ok_or("missing probe case")?;
         if !matches!(
             case.as_str(),
-            "F04" | "C01" | "C02" | "C03" | "X01" | "P01" | "P02" | "J01"
+            "F04" | "C01" | "C02" | "C03" | "X01" | "P01" | "P02" | "J01" | "I01"
         ) {
             return Err("unsupported probe case".into());
         }
@@ -80,6 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "C03" => cades_probe::run(std::path::Path::new(&out)),
+            "I01" => i01_probe::run(std::path::Path::new(&out)),
             "X01" => {
                 #[cfg(feature = "xml")]
                 {
@@ -111,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command.as_deref() != Some("hash") {
         return Err(
-            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|P01|P02|J01> --out <directory>".into(),
+            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|P01|P02|J01|I01> --out <directory>".into(),
         );
     }
     let mut algorithm = None;

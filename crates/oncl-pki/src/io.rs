@@ -29,6 +29,8 @@ pub use frozen::{DerivedInput, FrozenInput, FrozenReader, SnapshotEncoding};
 #[path = "io/pdf_output.rs"]
 mod pdf_output;
 pub use pdf_output::PdfSignatureOutput;
+mod metadata;
+pub use metadata::MetadataInput;
 
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek + ?Sized> ReadSeek for T {}

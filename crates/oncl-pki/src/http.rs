@@ -908,20 +908,45 @@ pub fn pki_send(
     request: &[u8],
     opts: GetOptions,
 ) -> Result<HttpReply, HttpError> {
+    pki_send_with(method, url, media_type, request, opts, |request| {
+        http.send(request)
+    })
+}
+/// Same standard PKI binding with inseparable scoped body/decode admission.
+pub fn pki_send_scoped<'a>(
+    http: &'a dyn HttpTransport,
+    method: &PkiMethod,
+    url: &str,
+    media_type: &str,
+    request: &[u8],
+    opts: GetOptions,
+) -> Result<ScopedHttpReply<'a>, HttpError> {
+    pki_send_with(method, url, media_type, request, opts, |request| {
+        http.send_scoped(request)
+    })
+}
+fn pki_send_with<T>(
+    method: &PkiMethod,
+    url: &str,
+    media_type: &str,
+    request: &[u8],
+    opts: GetOptions,
+    mut send: impl FnMut(&HttpRequest<'_>) -> Result<T, HttpError>,
+) -> Result<T, HttpError> {
     match method {
         PkiMethod::Get => {
             let base = url.strip_suffix('/').unwrap_or(url);
             let url = format!("{base}/{}", STANDARD.encode(request));
-            http.send(&HttpRequest::get(&url, opts))
+            send(&HttpRequest::get(&url, opts))
         }
-        PkiMethod::GetUrlEncoded => http.send(&HttpRequest::get(&nca_get_url(url, request), opts)),
-        PkiMethod::Post { content_type } => http.send(&HttpRequest::post(
+        PkiMethod::GetUrlEncoded => send(&HttpRequest::get(&nca_get_url(url, request), opts)),
+        PkiMethod::Post { content_type } => send(&HttpRequest::post(
             url,
             Some(content_type.as_deref().unwrap_or(media_type)),
             request,
             opts,
         )),
-        PkiMethod::PostWithPath => http.send(&HttpRequest::post(
+        PkiMethod::PostWithPath => send(&HttpRequest::post(
             &nca_get_url(url, request),
             Some(media_type),
             request,
@@ -931,9 +956,9 @@ pub fn pki_send(
             let get = nca_get_url(url, request);
             let encoded = get.len() - url.strip_suffix('/').unwrap_or(url).len() - 1;
             if encoded < usize::from(*limit) {
-                http.send(&HttpRequest::get(&get, opts))
+                send(&HttpRequest::get(&get, opts))
             } else {
-                http.send(&HttpRequest::post(url, Some(media_type), request, opts))
+                send(&HttpRequest::post(url, Some(media_type), request, opts))
             }
         }
     }

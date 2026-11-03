@@ -55,7 +55,7 @@ impl KeyBag {
 /// [`Pkcs12Error::Malformed`] for invalid structures or keys that do not match their
 /// certificates, [`Pkcs12Error::Unsupported`] for unsupported algorithms.
 pub fn load(pfx: &[u8], password: &str) -> Result<Vec<KeyEntry>, Pkcs12Error> {
-    let (keys, certs) = bags(pfx, password, None)?;
+    let (keys, certs) = bags(pfx, password, None, None)?;
     Ok(paired(keys, certs)?.entries)
 }
 
@@ -88,7 +88,7 @@ pub struct Loaded {
 ///
 /// As [`load`]; [`Pkcs12Error::Unsupported`] for a store over `limits`.
 pub fn load_within(pfx: &[u8], password: &str, limits: &Limits) -> Result<Loaded, Pkcs12Error> {
-    let (keys, certs) = bags(pfx, password, Some(limits))?;
+    let (keys, certs) = bags(pfx, password, Some(limits), None)?;
     paired(keys, certs)
 }
 
@@ -134,7 +134,7 @@ fn paired(keys: Vec<KeyBag>, certs: Vec<CertBagEntry>) -> Result<Loaded, Pkcs12E
 /// As [`load`]; also [`Pkcs12Error::Malformed`] / [`Pkcs12Error::Unsupported`] for a key
 /// without a certificate that has no `localKeyId`, matches none, or cannot be read.
 pub fn load_contents(pfx: &[u8], password: &str) -> Result<Contents, Pkcs12Error> {
-    let (keys, certs) = bags(pfx, password, None)?;
+    let (keys, certs) = bags(pfx, password, None, None)?;
     let mut paired = vec![false; certs.len()];
     let mut stored = Vec::with_capacity(keys.len());
     for key in keys {
@@ -177,6 +177,163 @@ pub fn load_contents(pfx: &[u8], password: &str) -> Result<Contents, Pkcs12Error
     })
 }
 
+/// Public aliases/certificates only. Safe integrity is checked, encrypted safes
+/// may be opened, but private-key bags are never decrypted/imported.
+pub fn inspect_metadata(
+    pfx: &[u8],
+    password: &str,
+    allowed: &[String],
+    scope: &crate::resource::ResourceScope,
+    limits: &crate::info::InspectionLimits,
+) -> Result<crate::info::PublicMetadata, crate::resource::ProcessingError> {
+    use crate::resource::ProcessingError;
+    limits.validate()?;
+    if allowed.len() > limits.max_entries {
+        return Err(ProcessingError::MetadataLimit);
+    }
+    let mut result = crate::info::PublicMetadata::admitted(pfx.len(), scope)?;
+    scope.checkpoint()?;
+    if password.len() > limits.password_bytes {
+        return Err(ProcessingError::MetadataLimit);
+    }
+    let _password = scope.reserve_metadata(
+        (password.len() as u64)
+            .checked_mul(4)
+            .and_then(|len| len.checked_add(16))
+            .ok_or(ProcessingError::MetadataLimit)?,
+    )?;
+    let integrity = inspect_work(pfx, limits, scope)?;
+    let control = InspectionControl {
+        scope,
+        fatal: std::cell::RefCell::new(None),
+    };
+    let parsed = bags(
+        pfx,
+        password,
+        Some(&Limits {
+            key_bags: limits.max_entries,
+            encrypted_safes: limits.max_safes,
+        }),
+        Some(&control),
+    );
+    if let Some(error) = control.fatal.into_inner() {
+        return Err(error);
+    }
+    scope.checkpoint()?;
+    let (keys, certs) = parsed.map_err(|error| match error {
+        Pkcs12Error::InspectionLimit => ProcessingError::MetadataLimit,
+        _ => ProcessingError::InvalidInput("PKCS12 integrity or structure"),
+    })?;
+    result.set_integrity(integrity);
+    for key in keys {
+        scope.checkpoint()?;
+        let alias = key.alias();
+        if !allowed.iter().any(|allowed| allowed == &alias) {
+            continue;
+        }
+        let cert = certs.iter().find(|cert| {
+            key.attrs
+                .local_key_id
+                .as_ref()
+                .is_some_and(|id| cert.attrs.local_key_id.as_ref() == Some(id))
+                || key
+                    .attrs
+                    .friendly_name
+                    .as_ref()
+                    .is_some_and(|name| cert.attrs.friendly_name.as_ref() == Some(name))
+        });
+        result.push(Some(&alias), cert.map(|entry| &entry.cert))?;
+    }
+    for entry in &certs {
+        scope.checkpoint()?;
+        let alias = entry
+            .attrs
+            .friendly_name
+            .clone()
+            .or_else(|| entry.attrs.local_key_id.as_deref().map(hex));
+        if let Some(alias) = alias
+            && allowed.iter().any(|allowed| allowed == &alias)
+            && !result
+                .entries()
+                .iter()
+                .any(|entry| entry.alias() == Some(alias.as_str()))
+        {
+            result.push(Some(&alias), Some(&entry.cert))?;
+        }
+    }
+    result.sort();
+    scope.checkpoint()?;
+    Ok(result)
+}
+
+fn inspect_work(
+    input: &[u8],
+    limits: &crate::info::InspectionLimits,
+    scope: &crate::resource::ResourceScope,
+) -> Result<crate::info::MetadataIntegrity, crate::resource::ProcessingError> {
+    use crate::resource::ProcessingError;
+    fn bad<T>(_: T) -> ProcessingError {
+        ProcessingError::InvalidInput("PKCS12 structure")
+    }
+    let der = ber::to_der(input).map_err(bad)?;
+    let pfx = Pfx::from_der(&der).map_err(bad)?;
+    let auth = data_content(&pfx.auth_safe).map_err(bad)?;
+    let encoded = ber::to_der(auth.as_bytes()).map_err(bad)?;
+    let mut reader = SliceReader::new(&encoded).map_err(bad)?;
+    let sequence: der::asn1::AnyRef<'_> = reader.decode().map_err(bad)?;
+    let mut children = SliceReader::new(sequence.value()).map_err(bad)?;
+    let mut count = 0usize;
+    while !children.is_finished() {
+        scope.checkpoint()?;
+        children.tlv_bytes().map_err(bad)?;
+        count += 1;
+        if count > limits.max_safes {
+            return Err(ProcessingError::MetadataLimit);
+        }
+    }
+    let mut total = 0u64;
+    let mut admit =
+        |iterations: u32, salt: usize, multiplier: u64| -> Result<(), ProcessingError> {
+            scope.checkpoint()?;
+            total = total
+                .checked_add(
+                    u64::from(iterations)
+                        .checked_mul(multiplier)
+                        .ok_or(ProcessingError::MetadataLimit)?,
+                )
+                .ok_or(ProcessingError::MetadataLimit)?;
+            if iterations == 0
+                || iterations > limits.kdf_iterations
+                || salt > limits.salt_bytes
+                || total > limits.aggregate_kdf_iterations
+            {
+                return Err(ProcessingError::MetadataLimit);
+            }
+            Ok(())
+        };
+    if let Some(mac) = &pfx.mac_data {
+        admit(mac.iterations, mac.mac_salt.as_bytes().len(), 2)?;
+    }
+    for info in Vec::<ContentInfo>::from_der(&encoded).map_err(bad)? {
+        if info.content_type == oid::ENCRYPTED_DATA {
+            let data: EncryptedData = content(&info).map_err(bad)?.decode_as().map_err(bad)?;
+            let alg = &data.encrypted_content_info.content_encryption_algorithm;
+            if alg.oid == oid::PBES2 {
+                let params = super::Pbes2::parse(alg).map_err(bad)?;
+                admit(params.iterations, params.salt.len(), 2)?;
+            } else {
+                let params: super::Pkcs12PbeParams = super::params(alg).map_err(bad)?;
+                admit(params.iterations, params.salt.as_bytes().len(), 3)?;
+            }
+        }
+    }
+    Ok(if pfx.mac_data.is_some() {
+        crate::info::MetadataIntegrity::PasswordMacVerified
+    } else {
+        crate::info::MetadataIntegrity::NotPresent
+    })
+}
+
 /// A safe of the authenticated safe: its bags, or still encrypted.
 enum Safe<'a> {
     Bags(Vec<SafeBag>),
@@ -201,21 +358,41 @@ fn check_key_bags(key_bags: usize, limits: Option<&Limits>) -> Result<(), Pkcs12
     }
 }
 
+/// Preserve the first exact one-shot control error across the legacy parser's
+/// error type. It is restored before parsing failures can classify it as input.
+struct InspectionControl<'a> {
+    scope: &'a crate::resource::ResourceScope,
+    fatal: std::cell::RefCell<Option<crate::resource::ProcessingError>>,
+}
+impl InspectionControl<'_> {
+    fn checkpoint(&self) -> Result<(), Pkcs12Error> {
+        self.scope.checkpoint().map_err(|error| {
+            let mut fatal = self.fatal.borrow_mut();
+            if fatal.is_none() {
+                *fatal = Some(error);
+            }
+            Pkcs12Error::Unsupported("inspection interrupted".into())
+        })
+    }
+}
+
 /// The key and certificate bags of a key store, decrypted, in stored order; within
 /// `limits`, if given, checked before the key derivations they bound.
 fn bags(
     pfx: &[u8],
     password: &str,
     limits: Option<&Limits>,
+    inspection: Option<&InspectionControl<'_>>,
 ) -> Result<(Vec<KeyBag>, Vec<CertBagEntry>), Pkcs12Error> {
     let der = ber::to_der(pfx)?;
     let pfx = Pfx::from_der(&der)?;
     let auth_safe = data_content(&pfx.auth_safe)?;
     let infos = Vec::<ContentInfo>::from_der(&ber::to_der(auth_safe.as_bytes())?)?;
     let mut safes = Vec::with_capacity(infos.len());
+    let mut remaining = inspection.map(|_| limits.map_or(4096, |limits| limits.key_bags));
     for info in &infos {
         safes.push(match info.content_type {
-            oid::DATA => Safe::Bags(safe_bags(data_content(info)?.as_bytes())?),
+            oid::DATA => Safe::Bags(safe_bags(data_content(info)?.as_bytes(), &mut remaining)?),
             oid::ENCRYPTED_DATA => Safe::Encrypted(info),
             other => {
                 return Err(Pkcs12Error::Unsupported(format!(
@@ -245,12 +422,18 @@ fn bags(
         .sum();
     check_key_bags(plain_key_bags, limits)?;
 
+    if let Some(control) = inspection {
+        control.checkpoint()?;
+    }
     let mut passwords = Passwords::new(password);
     if let Some(mac) = &pfx.mac_data
         && !mac_matches(mac, &passwords.bmp, auth_safe.as_bytes())?
     {
         // OpenSSL encodes an empty password as a lone terminator; Kalkan retries with it.
         let double_zero = [0u8, 0];
+        if let Some(control) = inspection {
+            control.checkpoint()?;
+        }
         if password.is_empty() && mac_matches(mac, &double_zero, auth_safe.as_bytes())? {
             passwords.bmp = Zeroizing::new(double_zero.to_vec());
         } else {
@@ -260,6 +443,9 @@ fn bags(
 
     let mut opened = Vec::with_capacity(safes.len());
     for safe in safes {
+        if let Some(control) = inspection {
+            control.checkpoint()?;
+        }
         opened.push(match safe {
             Safe::Bags(bags) => bags,
             Safe::Encrypted(info) => {
@@ -267,7 +453,7 @@ fn bags(
                 let eci = &data.encrypted_content_info;
                 let encrypted = encrypted_content(eci.encrypted_content.as_ref())?;
                 let decrypted = decrypt(&eci.content_encryption_algorithm, &passwords, &encrypted)?;
-                safe_bags(&decrypted)?
+                safe_bags(&decrypted, &mut remaining)?
             }
         });
     }
@@ -276,14 +462,27 @@ fn bags(
     let mut keys = Vec::new();
     let mut certs = Vec::new();
     for bag in opened.into_iter().flatten() {
-        collect_bag(bag, &passwords, &mut keys, &mut certs)?;
+        if let Some(control) = inspection {
+            control.checkpoint()?;
+        }
+        collect_bag(bag, &passwords, &mut keys, &mut certs, inspection.is_some())?;
     }
     Ok((keys, certs))
 }
 
 /// The bags of a safe's contents (DER or BER).
-fn safe_bags(contents: &[u8]) -> Result<Vec<SafeBag>, Pkcs12Error> {
+fn safe_bags(contents: &[u8], remaining: &mut Option<usize>) -> Result<Vec<SafeBag>, Pkcs12Error> {
     let der = Zeroizing::new(ber::to_der(contents)?);
+    if let Some(remaining) = remaining {
+        let sequence = der::asn1::AnyRef::from_der(&der)?;
+        let mut reader = SliceReader::new(sequence.value())?;
+        while !reader.is_finished() {
+            reader.tlv_bytes()?;
+            *remaining = remaining
+                .checked_sub(1)
+                .ok_or(Pkcs12Error::InspectionLimit)?;
+        }
+    }
     Ok(Vec::<SafeBag>::from_der(&der)?)
 }
 
@@ -364,10 +563,18 @@ fn collect_bag(
     passwords: &Passwords,
     keys: &mut Vec<KeyBag>,
     certs: &mut Vec<CertBagEntry>,
+    metadata_only: bool,
 ) -> Result<(), Pkcs12Error> {
     let attrs = bag_attributes(bag.bag_attributes.as_ref())?;
     match bag.bag_id {
         oid::PKCS8_SHROUDED_KEY_BAG => {
+            if metadata_only {
+                keys.push(KeyBag {
+                    pkcs8: Zeroizing::new(Vec::new()),
+                    attrs,
+                });
+                return Ok(());
+            }
             let info: EncryptedPrivateKeyInfo = bag.bag_value.decode_as()?;
             let pkcs8 = decrypt(
                 &info.encryption_algorithm,
@@ -377,6 +584,13 @@ fn collect_bag(
             keys.push(KeyBag { pkcs8, attrs });
         }
         oid::KEY_BAG => {
+            if metadata_only {
+                keys.push(KeyBag {
+                    pkcs8: Zeroizing::new(Vec::new()),
+                    attrs,
+                });
+                return Ok(());
+            }
             let pkcs8 = Zeroizing::new(der::Encode::to_der(&bag.bag_value)?);
             keys.push(KeyBag { pkcs8, attrs });
         }

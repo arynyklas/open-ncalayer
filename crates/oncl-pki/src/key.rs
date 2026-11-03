@@ -202,6 +202,7 @@ pub enum KeyFailureKind {
     InvalidInput,
     Io,
     MissingKeyProvider,
+    MissingMetadataProvider,
     SecretRequired,
     KeyNotFound,
     InvalidKeySource,
