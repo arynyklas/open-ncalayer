@@ -21,6 +21,8 @@ pub struct EngineServices {
     validation: Option<Arc<crate::ValidationServices>>,
     temporary: Option<oncl_pki::io::TemporaryStore>,
     cades: Option<crate::CadesConfiguration>,
+    metadata: Option<Arc<dyn crate::ReadMetadataProvider>>,
+    inspection_limits: oncl_pki::info::InspectionLimits,
 }
 impl EngineServices {
     pub fn hash_only(limits: ResourceLimits) -> Self {
@@ -31,6 +33,8 @@ impl EngineServices {
             validation: None,
             temporary: None,
             cades: None,
+            metadata: None,
+            inspection_limits: oncl_pki::info::InspectionLimits::default(),
         }
     }
     pub fn with_shared_budget(mut self, budget: Arc<SharedBudget>) -> Self {
@@ -59,6 +63,18 @@ impl EngineServices {
         self.cades = Some(configuration);
         self
     }
+    pub fn with_metadata_provider(
+        mut self,
+        provider: Arc<dyn crate::ReadMetadataProvider>,
+    ) -> Self {
+        self.metadata = Some(provider);
+        self
+    }
+    /// Trusted host resource profile, never selected by a container/request.
+    pub fn with_inspection_limits(mut self, limits: oncl_pki::info::InspectionLimits) -> Self {
+        self.inspection_limits = limits;
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -70,10 +86,13 @@ pub struct Engine {
     pub(crate) validation: Option<Arc<crate::ValidationServices>>,
     pub(crate) temporary: Option<oncl_pki::io::TemporaryStore>,
     pub(crate) cades: Option<crate::CadesConfiguration>,
+    pub(crate) metadata: Option<Arc<dyn crate::ReadMetadataProvider>>,
+    pub(crate) inspection_limits: oncl_pki::info::InspectionLimits,
 }
 impl Engine {
     pub fn new(services: EngineServices) -> Result<Self, OperationError> {
         services.limits.validate()?;
+        services.inspection_limits.validate()?;
         if let Some(configuration) = &services.cades {
             configuration.evidence_limits.validate().map_err(|error| {
                 crate::cades::error(oncl_pki::cms::ades::AdesError::Evidence(error))
@@ -97,6 +116,8 @@ impl Engine {
             validation: services.validation,
             temporary: services.temporary,
             cades: services.cades,
+            metadata: services.metadata,
+            inspection_limits: services.inspection_limits,
         })
     }
     pub fn begin(

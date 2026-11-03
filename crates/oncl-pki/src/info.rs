@@ -14,6 +14,8 @@ use x509_cert::Certificate;
 use x509_cert::ext::pkix::name::DirectoryString;
 use x509_cert::ext::pkix::{ExtendedKeyUsage, KeyUsage};
 use x509_cert::name::Name;
+mod inspection;
+pub use inspection::{InspectionLimits, MetadataIntegrity, PublicEntry, PublicMetadata};
 
 /// Key usage bits NCALayer looks at.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

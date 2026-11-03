@@ -163,6 +163,14 @@ impl Tokens {
         pin: &str,
         execution: crate::execution::TokenExecution,
     ) -> Result<Vec<KeyEntry>, TokenError> {
+        self.scoped_service(reader, execution)?
+            .open(reader, kind, pin)
+    }
+    fn scoped_service(
+        &self,
+        reader: &str,
+        execution: crate::execution::TokenExecution,
+    ) -> Result<Self, TokenError> {
         if !self.is_enabled() {
             return Err(TokenError::Disabled);
         }
@@ -179,7 +187,7 @@ impl Tokens {
         {
             return Err(TokenError::NoDevice);
         }
-        let scoped = Self {
+        Ok(Self {
             backend: Arc::new(crate::execution::ScopedBackend {
                 inner: self.backend.clone(),
                 execution: Arc::new(execution),
@@ -187,8 +195,77 @@ impl Tokens {
             enabled: self.enabled.clone(),
             trace: AtomicBool::new(self.trace()),
             scoped: true,
+        })
+    }
+
+    /// Exact-alias public inspection in a fresh scoped card transaction. No
+    /// TokenKey/OpenToken or cached PIN is constructed; logout/reset is the
+    /// existing transaction cleanup, including failure paths.
+    pub fn inspect_scoped(
+        &self,
+        device: &crate::execution::TokenDeviceId,
+        kind: TokenKind,
+        pin: &str,
+        alias: &str,
+        gates: Arc<crate::execution::TokenGateRegistry>,
+        scope: &oncl_pki::resource::ResourceScope,
+    ) -> Result<oncl_pki::info::PublicMetadata, TokenError> {
+        use oncl_pki::key::{AppliedState, KeyExecutionError};
+        let reader = device.reader();
+        let execution = crate::execution::TokenExecution::new(
+            device.clone(),
+            scope.lease(),
+            scope.operation_control(),
+            gates,
+        );
+        let failure = |error: oncl_pki::resource::ProcessingError| {
+            TokenError::Execution(KeyExecutionError::processing(
+                &error,
+                AppliedState::NotApplied,
+            ))
         };
-        scoped.open(reader, kind, pin)
+        scope.checkpoint().map_err(failure)?;
+        if alias.len() > 4096 || pin.len() > 4096 {
+            return Err(failure(oncl_pki::resource::ProcessingError::MetadataLimit));
+        }
+        // Covers the drivers' bounded object lists, compressed/decompressed
+        // certificate, parser scratch and PIN encoding before any card work.
+        let _working = scope
+            .reserve_metadata(64 * crate::MAX_CERT as u64)
+            .map_err(failure)?;
+        check_pin(kind, pin)?;
+        let scoped = self.scoped_service(reader, execution)?;
+        on_card(
+            &*scoped.backend,
+            reader,
+            kind,
+            || TokenError::NoDevice,
+            |conn| {
+                let mut card = Card::new(conn, false); // inspection never logs PIN APDUs
+                let mut driver = open_driver(kind, &mut card)?;
+                driver.verify_pin(&mut card, pin)?;
+                let result = (|| {
+                    scope.checkpoint().map_err(failure)?;
+                    let slots = driver.keys(&mut card)?;
+                    if slots.len() > 4096 {
+                        return Err(failure(oncl_pki::resource::ProcessingError::MetadataLimit));
+                    }
+                    let slot = slots
+                        .into_iter()
+                        .find(|slot| slot.alias == alias)
+                        .ok_or_else(|| {
+                            TokenError::Malformed("authorized token alias is absent".into())
+                        })?;
+                    scope.checkpoint().map_err(failure)?;
+                    let der = driver.certificate(&mut card, &slot)?;
+                    scope.checkpoint().map_err(failure)?;
+                    oncl_pki::info::PublicMetadata::named_certificate(alias, der.as_deref(), scope)
+                        .map_err(failure)
+                })();
+                logout(&mut *driver, &mut card);
+                result
+            },
+        )
     }
 
     /// Opens the token of `kind` in `reader` with `pin`: its keys that have a certificate
