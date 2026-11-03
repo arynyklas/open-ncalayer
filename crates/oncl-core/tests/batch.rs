@@ -1936,3 +1936,411 @@ fn unavailable_authorized_key_is_a_known_local_item_failure() {
         .verify(oncl_pki::key::SigAlg::RsaSha256, b"last", &last_out)
         .unwrap();
 }
+
+#[test]
+fn replacing_full_scope_before_confirmation_or_execution_requires_new_consent() {
+    for before_approval in [true, false] {
+        let scratch = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            EngineServices::hash_only(ResourceLimits {
+                max_in_flight: 2,
+                ..ResourceLimits::default()
+            })
+            .with_temporary_store(oncl_pki::io::TemporaryStore::new(scratch.path()).unwrap()),
+        )
+        .unwrap();
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Hash]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control),
+            )
+            .unwrap();
+        let mut other = engine
+            .begin(
+                ExecutionGrant::new([Action::Hash]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control),
+            )
+            .unwrap();
+        let mut input = &b"original scope"[..];
+        let plan = engine
+            .capture_batch(
+                [BatchItem::new(
+                    "one",
+                    BatchOperation::Hash {
+                        algorithm: HashAlg::Sha256,
+                        input: Source::sequential(&mut input, None),
+                    },
+                )],
+                &mut ctx,
+            )
+            .unwrap();
+        let genuine = ctx.resources().shared_view();
+        *ctx.resources() = genuine;
+        let authority = plan.authorize(&ctx).unwrap();
+        *ctx.resources() = other.resources().shared_view();
+        if before_approval {
+            assert!(matches!(
+                plan.authorize(&ctx),
+                Err(BatchError::ConsentMismatch)
+            ));
+        }
+        let mut callbacks = 0;
+        assert!(matches!(
+            engine.run_batch(plan, authority, &mut ctx, |_| callbacks += 1),
+            Err(BatchError::ConsentMismatch)
+        ));
+        assert_eq!(callbacks, 0);
+    }
+}
+
+#[test]
+fn successful_private_output_followed_by_batch_finalization_cancel_remains_applied() {
+    use oncl_core::{
+        SignRequest,
+        batch::{BatchOutcome, BatchReport},
+        keys::KeyRequest,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct FinalizeControl(AtomicBool);
+    impl OperationControl for FinalizeControl {
+        fn checkpoint(&self, progress: Progress) -> Result<(), ProcessingError> {
+            if progress.bytes_out != 0 {
+                let stack = std::backtrace::Backtrace::force_capture().to_string();
+                if stack.contains("dispatch_batch_item")
+                    && !stack.contains("sign_operation")
+                    && !stack.contains("sign_raw")
+                {
+                    self.0.store(true, Ordering::SeqCst);
+                    return Err(ProcessingError::Cancelled);
+                }
+            }
+            Ok(())
+        }
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    let guard = Arc::new(fixture::Guard::default());
+    let provider = Arc::new(fixture::Provider::default());
+    let engine = fixture::engine(
+        oncl_pki::io::TemporaryStore::new(scratch.path()).unwrap(),
+        guard.clone(),
+        provider,
+        ResourceLimits::default(),
+    );
+    let key = fixture::selector("user-rsa-sign");
+    let control = Arc::new(FinalizeControl(AtomicBool::new(false)));
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Hash, Action::Sign]).with_keys([key.key_id()]),
+            OperationPolicy::strict_online(),
+            control.clone(),
+        )
+        .unwrap();
+    let mut prior = &b"prior"[..];
+    let mut actual = &b"actually signed"[..];
+    let mut later = &b"not signed"[..];
+    let mut out = vec![];
+    let mut later_out = vec![];
+    let plan = engine
+        .capture_batch(
+            [
+                BatchItem::new(
+                    "prior",
+                    BatchOperation::Hash {
+                        algorithm: HashAlg::Sha256,
+                        input: Source::sequential(&mut prior, None),
+                    },
+                ),
+                BatchItem::new(
+                    "actual",
+                    BatchOperation::Sign {
+                        request: SignRequest::raw_message(KeyRequest::new(
+                            &key,
+                            Some(fixture::PASSWORD),
+                        )),
+                        input: Source::sequential(&mut actual, None),
+                        output: &mut out,
+                    },
+                ),
+                BatchItem::new(
+                    "later",
+                    BatchOperation::Sign {
+                        request: SignRequest::raw_message(KeyRequest::new(
+                            &key,
+                            Some(fixture::PASSWORD),
+                        )),
+                        input: Source::sequential(&mut later, None),
+                        output: &mut later_out,
+                    },
+                ),
+            ],
+            &mut ctx,
+        )
+        .unwrap();
+    let approval = plan.authorize(&ctx).unwrap();
+    let summary = engine.run_batch(plan, approval, &mut ctx, |_| {}).unwrap();
+    assert!(
+        control.0.load(Ordering::SeqCst),
+        "control must target the post-dispatch finalization checkpoint"
+    );
+    assert!(matches!(
+        summary.results()[0].outcome(),
+        BatchOutcome::Completed(BatchReport::Hash(_))
+    ));
+    assert!(
+        matches!(summary.results()[1].outcome(), BatchOutcome::Failed(e) if e.code() == oncl_core::ErrorCode::Cancelled && e.applied_state() == oncl_core::keys::AppliedState::Applied)
+    );
+    assert!(matches!(
+        summary.results()[2].outcome(),
+        BatchOutcome::NotRun
+    ));
+    assert_eq!(guard.applied.load(Ordering::SeqCst), 1);
+    fixture::raw("user-rsa-sign")
+        .key
+        .public_key()
+        .verify(oncl_pki::key::SigAlg::RsaSha256, b"actually signed", &out)
+        .unwrap();
+    assert!(later_out.is_empty());
+}
+
+#[test]
+fn borrowed_capture_charges_mixed_aggregate_before_dispatch_and_cancel() {
+    use oncl_core::batch::BatchOutcome;
+    let scratch = tempfile::tempdir().unwrap();
+    let engine = Engine::new(
+        EngineServices::hash_only(ResourceLimits {
+            input_bytes: 6,
+            ..ResourceLimits::default()
+        })
+        .with_temporary_store(oncl_pki::io::TemporaryStore::new(scratch.path()).unwrap()),
+    )
+    .unwrap();
+    let control = Arc::new(Cancel::default());
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Hash, Action::Validate]),
+            OperationPolicy::offline_report(),
+            control.clone(),
+        )
+        .unwrap();
+    let mut source = &b"abc"[..];
+    let plan = engine
+        .capture_batch(
+            [
+                BatchItem::new(
+                    "source",
+                    BatchOperation::Hash {
+                        algorithm: HashAlg::Sha256,
+                        input: Source::sequential(&mut source, None),
+                    },
+                ),
+                BatchItem::new(
+                    "borrowed",
+                    BatchOperation::ValidateCms {
+                        input: b"def",
+                        detached: None,
+                    },
+                ),
+            ],
+            &mut ctx,
+        )
+        .unwrap();
+    assert_eq!(ctx.resources().progress().bytes_in, 6);
+    let approval = plan.authorize(&ctx).unwrap();
+    control.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = engine.run_batch(plan, approval, &mut ctx, |_| {}).unwrap();
+    assert_eq!(result.progress.bytes_in, 6);
+    assert!(
+        result
+            .results()
+            .iter()
+            .all(|r| matches!(r.outcome(), BatchOutcome::NotRun))
+    );
+}
+
+#[test]
+fn borrowed_capture_rejects_known_aggregate_overflow_without_scanning_new_item() {
+    let engine = Engine::new(EngineServices::hash_only(ResourceLimits {
+        input_bytes: 5,
+        ..ResourceLimits::default()
+    }))
+    .unwrap();
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Validate]),
+            OperationPolicy::offline_report(),
+            Arc::new(Control),
+        )
+        .unwrap();
+    let result = engine.capture_batch(
+        [
+            BatchItem::new(
+                "first",
+                BatchOperation::ValidateCms {
+                    input: b"abc",
+                    detached: None,
+                },
+            ),
+            BatchItem::new(
+                "second",
+                BatchOperation::ValidateCms {
+                    input: b"def",
+                    detached: None,
+                },
+            ),
+        ],
+        &mut ctx,
+    );
+    assert!(
+        matches!(result,Err(BatchError::Operation(e)) if e.code()==oncl_core::ErrorCode::InputLimit)
+    );
+    assert_eq!(ctx.resources().progress().bytes_in, 3);
+}
+
+#[cfg(feature = "jose")]
+#[test]
+fn jose_rebound_scope_is_rejected_before_private_dispatch() {
+    use oncl_core::{
+        batch::BatchJoseOperation,
+        jose::{JoseProfile, JwsSerialization},
+        keys::KeyRequest,
+    };
+    use std::sync::atomic::Ordering;
+    let scratch = tempfile::tempdir().unwrap();
+    let guard = Arc::new(fixture::Guard::default());
+    let provider = Arc::new(fixture::Provider::default());
+    let engine = fixture::engine(
+        oncl_pki::io::TemporaryStore::new(scratch.path()).unwrap(),
+        guard.clone(),
+        provider.clone(),
+        ResourceLimits {
+            max_in_flight: 2,
+            ..ResourceLimits::default()
+        },
+    );
+    let key = fixture::selector("user-rsa-sign");
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Sign]).with_keys([key.key_id()]),
+            OperationPolicy::strict_online(),
+            Arc::new(Control),
+        )
+        .unwrap();
+    let mut other = engine
+        .begin(
+            ExecutionGrant::new([Action::Hash]),
+            OperationPolicy::strict_online(),
+            Arc::new(Control),
+        )
+        .unwrap();
+    let mut output = vec![];
+    let plan = engine
+        .capture_batch(
+            [BatchItem::new(
+                "jose",
+                BatchOperation::Jose(BatchJoseOperation::Create {
+                    profile: JoseProfile::new(JwsSerialization::Compact, false),
+                    keys: vec![KeyRequest::new(&key, Some(fixture::PASSWORD))],
+                    payload: b"bound",
+                    output: &mut output,
+                }),
+            )],
+            &mut ctx,
+        )
+        .unwrap();
+    let approval = plan.authorize(&ctx).unwrap();
+    let opens = provider.opens.load(Ordering::SeqCst);
+    *ctx.resources() = other.resources().shared_view();
+    assert!(matches!(
+        plan.authorize(&ctx),
+        Err(BatchError::ConsentMismatch)
+    ));
+    assert!(matches!(
+        engine.run_batch(plan, approval, &mut ctx, |_| panic!("rebound callback")),
+        Err(BatchError::ConsentMismatch)
+    ));
+    assert_eq!(provider.opens.load(Ordering::SeqCst), opens);
+    assert_eq!(guard.applied.load(Ordering::SeqCst), 0);
+    assert!(output.is_empty());
+}
+
+#[test]
+fn cancellation_during_borrowed_capture_retains_consumed_chunk_total() {
+    struct AfterChunk;
+    impl OperationControl for AfterChunk {
+        fn checkpoint(&self, p: Progress) -> Result<(), ProcessingError> {
+            if p.bytes_in > 0 {
+                Err(ProcessingError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let engine = Engine::new(EngineServices::hash_only(ResourceLimits::default())).unwrap();
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Validate]),
+            OperationPolicy::offline_report(),
+            Arc::new(AfterChunk),
+        )
+        .unwrap();
+    let bytes = vec![1u8; oncl_pki::resource::IO_CHUNK_BYTES + 1];
+    assert!(
+        matches!(engine.capture_batch([BatchItem::new("borrowed",BatchOperation::ValidateCms{input:&bytes,detached:None})],&mut ctx),Err(BatchError::Operation(e)) if e.code()==oncl_core::ErrorCode::Cancelled)
+    );
+    assert_eq!(
+        ctx.resources().progress().bytes_in,
+        oncl_pki::resource::IO_CHUNK_BYTES as u64
+    );
+}
+
+#[cfg(feature = "jose")]
+#[test]
+fn oversized_jose_capture_is_refused_before_any_scan_checkpoint() {
+    use oncl_core::{
+        batch::BatchJoseOperation,
+        jose::{JoseProfile, JwsSerialization, MAX_CONTAINER_BYTES},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Count(AtomicUsize);
+    impl OperationControl for Count {
+        fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let engine = Engine::new(EngineServices::hash_only(ResourceLimits::default())).unwrap();
+    let control = Arc::new(Count(AtomicUsize::new(0)));
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Verify]),
+            OperationPolicy::offline_report(),
+            control.clone(),
+        )
+        .unwrap();
+    let bytes = vec![b'a'; MAX_CONTAINER_BYTES + 1];
+    let before = control.0.load(Ordering::SeqCst);
+    let result = engine.capture_batch(
+        [BatchItem::new(
+            "oversized",
+            BatchOperation::Jose(BatchJoseOperation::Verify {
+                request: oncl_core::jose::JwsVerifyRequest {
+                    profile: JoseProfile::new(JwsSerialization::Compact, false),
+                    certificate: None,
+                },
+                input: &bytes,
+                detached: None,
+            }),
+        )],
+        &mut ctx,
+    );
+    assert!(
+        matches!(result,Err(BatchError::Operation(e)) if e.code()==oncl_core::ErrorCode::InvalidInput)
+    );
+    assert_eq!(ctx.resources().progress().bytes_in, 0);
+    assert!(
+        control.0.load(Ordering::SeqCst) - before < 5,
+        "no per-chunk scan checkpoints"
+    );
+}

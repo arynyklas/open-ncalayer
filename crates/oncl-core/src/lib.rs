@@ -259,6 +259,14 @@
 //!
 //! Capture, confirmation, dispatch and retained results share the original
 //! aggregate quotas, deadline, control and root; no item starts a fresh context.
+//! Approval and run compare the complete original scope identity, rejecting safe
+//! resource-scope replacement before callbacks or admission. Borrowed CMS/JOSE
+//! capture checks concrete format caps and remaining aggregate allowance before
+//! scanning, charges each captured chunk, and lends only a private exact-slice,
+//! original-scope replay proof during closed dispatch. Result slots are admitted
+//! during capture, so cancellation before run still returns explicit NotRun facts.
+//! A final source checkpoint after successful signing preserves actual Applied
+//! state and the original execution cause instead of implying a private rollback.
 //! Progress is cumulative resource intake/output, including prior capture;
 //! authenticated replay is not charged again. Existing format reports retain
 //! their resource-delta semantics; `BatchItemResult::sources` separately retains
