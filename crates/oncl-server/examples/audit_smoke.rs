@@ -96,6 +96,12 @@ fn main() {
             );
         }
     }
+    let identity = std::fs::read(output.join("writable/oncl-audit.identity")).unwrap();
+    assert_eq!(&identity[..8], b"ONCLAU02");
+    println!(
+        "journal_format={}",
+        std::str::from_utf8(&identity[..8]).unwrap()
+    );
     let path = output.join("rotation");
     let audit =
         DurableAuditGuard::create(AuditConfig::new(path.clone(), 800, 1120, 1, 32).unwrap())
