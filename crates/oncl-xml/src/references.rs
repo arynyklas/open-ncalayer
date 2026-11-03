@@ -1062,7 +1062,7 @@ pub fn verify_source(
             max_coverage_parts: 256,
             max_coverage_bytes: profile.max_work,
         };
-        let mut evidence = EvidenceStore::new(store.clone(), evidence_limits.clone(), scope)?;
+        let mut evidence = EvidenceStore::new(store.clone(), evidence_limits, scope)?;
         for (kind, item) in &signature.evidence {
             let xml = metadata(
                 &mut document,

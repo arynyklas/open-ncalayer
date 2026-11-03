@@ -21,12 +21,14 @@ impl VerifyRequest {
     pub const fn xml() -> Self {
         Self {
             profile: VerifyProfile::Xml,
+            limits: None,
         }
     }
     #[cfg(feature = "xml")]
     pub const fn xml_kalkan() -> Self {
         Self {
             profile: VerifyProfile::XmlKalkan,
+            limits: None,
         }
     }
     #[cfg(feature = "pdf")]
