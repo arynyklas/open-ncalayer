@@ -279,6 +279,7 @@ struct Frozen {
     certificates: Metadata,
     status: Metadata,
     signers: Metadata,
+    content_type: Metadata,
     values: [Option<DigestValue>; 4],
 }
 /// Only this module can construct an Add admission: it retains the exact
@@ -398,12 +399,14 @@ fn freeze_stage_extra(
         }
     };
     let signers = metadata_region(&mut source, parsed.layout.signers, scope)?;
+    let content_type = metadata_region(&mut source, parsed.layout.content_type, scope)?;
     Ok(Frozen {
         source,
         parsed,
         certificates,
         status,
         signers,
+        content_type,
         values,
     })
 }
@@ -1106,13 +1109,12 @@ fn verify_frozen(
             }
             // Prefix the actual content type and independently streamed document
             // digest to the signer fields + reconstructed hash index.
-            let content_type_der = data.encap_content_info.e_content_type.to_der()?;
             let document_hash = frozen.values[2]
                 .as_ref()
                 .ok_or_else(|| invalid("archive document hash missing"))?;
             for coverage in &mut coverages {
                 coverage.insert(0, CoveragePart::Bytes(document_hash.as_bytes()));
-                coverage.insert(0, CoveragePart::Bytes(&content_type_der));
+                coverage.insert(0, CoveragePart::Bytes(frozen.content_type.as_bytes()));
             }
             let mut proofs = Vec::with_capacity(1 + archives.len());
             if let Some((_, _, id)) = signatures.first() {
@@ -1135,6 +1137,7 @@ fn verify_frozen(
                 .map(|((_, _, token, _), protected)| ArchiveSelection {
                     token: *token,
                     protected,
+                    algorithm: HashAlg::Sha256,
                 })
                 .collect();
             Ok(validate_prepared_evidence(
@@ -1395,7 +1398,6 @@ fn extend_frozen(
     if level >= AdesLevel::Lta {
         let certs = raw_set(frozen.certificates.as_bytes())?;
         let statuses = ber::raw_children(frozen.status.as_bytes())?;
-        let content_type = crate::oid::DATA.to_der()?;
         let document = frozen.values[2]
             .as_ref()
             .ok_or_else(|| invalid("missing archive document hash"))?;
@@ -1426,7 +1428,7 @@ fn extend_frozen(
             }
             .to_der()?;
             let mut imprint = HashState::new(HashAlg::Sha256);
-            imprint.update(&content_type);
+            imprint.update(frozen.content_type.as_bytes());
             imprint.update(document.as_bytes());
             for field in &raw.fields[..6] {
                 imprint.update(field);

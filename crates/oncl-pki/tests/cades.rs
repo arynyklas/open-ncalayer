@@ -977,7 +977,10 @@ mod cades {
             http: &http,
         };
         let network = NetworkPolicy::only_endpoints([URL]).unwrap();
-        let profile = profile();
+        // Exact output-size comparison needs deterministic DER nonce lengths,
+        // not the random nonce's optional leading INTEGER sign octet.
+        let mut profile = profile();
+        profile.nonce = oncl_pki::http::NonceSpec::Value(vec![0x63; 8]);
         let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
         let crls = [f.crl.as_slice()];
         let services = services(&context, &network, &store, &profile, &certs, &crls);
@@ -1244,5 +1247,283 @@ mod cades {
         let mut bytes = Vec::new();
         assert!(output.copy_to(&mut bytes).is_err());
         assert!(bytes.is_empty());
+    }
+    // Bounded fixture-only TLV slicing, deliberately retaining received BER
+    // length octets instead of asking a DER encoder for archive authority.
+    fn wire_children(input: &[u8]) -> Vec<Vec<u8>> {
+        fn end(input: &[u8], at: usize) -> (usize, usize) {
+            let length = input[at + 1];
+            if length < 128 {
+                return (at + 2, at + 2 + length as usize);
+            }
+            let count = (length & 127) as usize;
+            assert!((1..=8).contains(&count));
+            let mut size = 0usize;
+            for byte in &input[at + 2..at + 2 + count] {
+                size = size
+                    .checked_mul(256)
+                    .unwrap()
+                    .checked_add(*byte as usize)
+                    .unwrap();
+            }
+            (at + 2 + count, at + 2 + count + size)
+        }
+        let (mut at, limit) = end(input, 0);
+        assert_eq!(limit, input.len());
+        let mut result = Vec::new();
+        while at < limit {
+            let (_, next) = end(input, at);
+            assert!(next <= limit);
+            result.push(input[at..next].to_vec());
+            at = next;
+        }
+        result
+    }
+    fn nonminimal_content_type(source: &[u8]) -> Vec<u8> {
+        let ci = wire_children(source);
+        let mut sd = wire_children(&wire_children(&ci[1])[0]);
+        let mut encap = wire_children(&sd[2]);
+        assert_eq!(encap[0][0], 6);
+        assert!(encap[0][1] < 128);
+        encap[0].insert(1, 0x81);
+        sd[2] = tlv(0x30, &encap.concat());
+        tlv(
+            0x30,
+            &[ci[0].clone(), tlv(0xa0, &tlv(0x30, &sd.concat()))].concat(),
+        )
+    }
+    fn reissue_archive(f: &Fixture, source: &[u8], outer: oncl_pki::key::HashAlg) -> Vec<u8> {
+        use oncl_pki::{digest::HashState, tsp};
+        let ci = wire_children(source);
+        let mut sd = wire_children(&wire_children(&ci[1])[0]);
+        let content_type = wire_children(&sd[2])[0].clone();
+        let mut infos = wire_children(sd.last().unwrap());
+        for info in &mut infos {
+            let mut fields = wire_children(info);
+            let mut attrs = wire_children(&fields[6]);
+            for attr in &mut attrs {
+                let af = wire_children(attr);
+                let oid: der::asn1::ObjectIdentifier =
+                    der::asn1::ObjectIdentifier::from_der(&af[0]).unwrap();
+                if oid.to_string() != "0.4.0.1733.2.4" {
+                    continue;
+                }
+                let old_token = wire_children(&af[1])[0].clone();
+                let tc = wire_children(&old_token);
+                let td = wire_children(&wire_children(&tc[1])[0]);
+                let ts = wire_children(&wire_children(td.last().unwrap())[0]);
+                let index_attr = wire_children(&ts[6])[0].clone();
+                let index = wire_children(&wire_children(&index_attr)[1])[0].clone();
+                let mut document = HashState::new(oncl_pki::key::HashAlg::Sha256);
+                document.update(DATA);
+                let mut imprint = HashState::new(outer);
+                imprint.update(&content_type);
+                imprint.update(document.finish().as_bytes());
+                for field in &fields[..6] {
+                    imprint.update(field);
+                }
+                imprint.update(&index);
+                let digest = imprint.finish();
+                let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
+                let mut spec = profile();
+                spec.hash = outer;
+                let token = tsp::request(&spec, digest.as_bytes(), &http).unwrap().token;
+                let checked = tsp::verify_token(&token).unwrap();
+                assert_eq!(checked.imprint_alg, outer.oid());
+                assert_eq!(checked.imprint, digest.as_bytes());
+                let nc = wire_children(&token);
+                let mut nd = wire_children(&wire_children(&nc[1])[0]);
+                let mut ns = wire_children(&wire_children(nd.last().unwrap())[0]);
+                assert_eq!(ns.len(), 6);
+                ns.push(tlv(0xa1, &index_attr));
+                let last = nd.len() - 1;
+                nd[last] = tlv(0x31, &tlv(0x30, &ns.concat()));
+                let token = tlv(
+                    0x30,
+                    &[nc[0].clone(), tlv(0xa0, &tlv(0x30, &nd.concat()))].concat(),
+                );
+                *attr = tlv(0x30, &[af[0].clone(), tlv(0x31, &token)].concat());
+            }
+            fields[6] = tlv(0xa1, &attrs.concat());
+            *info = tlv(0x30, &fields.concat());
+        }
+        let last = sd.len() - 1;
+        sd[last] = tlv(0x31, &infos.concat());
+        tlv(
+            0x30,
+            &[ci[0].clone(), tlv(0xa0, &tlv(0x30, &sd.concat()))].concat(),
+        )
+    }
+    #[test]
+    fn received_archive_binds_actual_imprint_algorithm_to_hash_index() {
+        use oncl_pki::{
+            digest::DigestValue,
+            key::{DigestSigner, HashAlg, KeyError},
+        };
+        struct Spy {
+            key: KeyEntry,
+            calls: usize,
+        }
+        impl DigestSigner for Spy {
+            fn certificate(&self) -> &Certificate {
+                &self.key.cert
+            }
+            fn algorithm(&self) -> SigAlg {
+                SigAlg::RsaSha256
+            }
+            fn sign_digest(&mut self, digest: &DigestValue) -> Result<Vec<u8>, KeyError> {
+                self.calls += 1;
+                DigestSigner::sign_digest(&mut self.key, digest)
+            }
+        }
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let (source, positive) = run(
+            &f,
+            &baseline(&f, true, NOW, &store),
+            true,
+            AdesLevel::Lta,
+            NOW,
+        );
+        assert_eq!(positive.level(), Some(AdesLevel::Lta));
+        let mixed = reissue_archive(&f, &source, HashAlg::Sha512);
+        assert_eq!(oncl_pki::cms::verify(&mixed, None).unwrap().len(), 1);
+        let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: NOW,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &http,
+        };
+        let network = NetworkPolicy::only_endpoints([URL]).unwrap();
+        let profile = profile();
+        let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
+        let crls = [f.crl.as_slice()];
+        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        let report = ades::verify(
+            AdesLevel::B,
+            Source::sequential(&mut Cursor::new(&mixed), None),
+            None,
+            &services,
+            &[SigAlg::RsaSha256],
+            &scope(),
+        )
+        .unwrap();
+        assert_eq!(report.verdict, Verdict::Invalid);
+        assert_eq!(report.level(), None);
+        let mut key = f.doc.clone();
+        let mut spec = TestCertSpec::from_cert(&key.cert);
+        spec.serial = vec![0x63, 0x03, 0x71];
+        key.cert = issue_cert(&f.root, spec);
+        let mut spy = Spy { key, calls: 0 };
+        let mut output = Vec::new();
+        let error = ades::sign(
+            &CmsSignRequest::add(),
+            AdesLevel::B,
+            Source::sequential(&mut Cursor::new(mixed), None),
+            None,
+            &mut [&mut spy],
+            &CmsSignServices::new(Some(&context), Some(&store)),
+            Some(&services),
+            &mut output,
+            &scope(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("proofs must validate before Add")
+        );
+        assert_eq!(spy.calls, 0);
+        assert!(output.is_empty());
+    }
+    #[test]
+    fn received_archive_protects_raw_ber_content_type_and_preserves_it_on_extension() {
+        use oncl_pki::key::HashAlg;
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let (source, _) = run(
+            &f,
+            &baseline(&f, true, NOW, &store),
+            true,
+            AdesLevel::Lta,
+            NOW,
+        );
+        let changed = nonminimal_content_type(&source);
+        assert_eq!(oncl_pki::cms::verify(&changed, None).unwrap().len(), 1);
+        let http = MockTsa::new(f.tsa.clone()).with_gen_time(NOW);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: NOW,
+            anchors: &f.anchors,
+            intermediates: &[],
+            http: &http,
+        };
+        let network = NetworkPolicy::only_endpoints([URL]).unwrap();
+        let profile = profile();
+        let certs = [f.root.cert.clone(), f.tsa.cert.clone()];
+        let crls = [f.crl.as_slice()];
+        let services = services(&context, &network, &store, &profile, &certs, &crls);
+        let report = ades::verify(
+            AdesLevel::B,
+            Source::sequential(&mut Cursor::new(&changed), None),
+            None,
+            &services,
+            &[SigAlg::RsaSha256],
+            &scope(),
+        )
+        .unwrap();
+        assert_eq!(report.verdict, Verdict::Invalid);
+        assert_eq!(report.level(), None);
+        let genuine_ber = reissue_archive(&f, &changed, HashAlg::Sha256);
+        let report = ades::verify(
+            AdesLevel::Lta,
+            Source::sequential(&mut Cursor::new(&genuine_ber), None),
+            None,
+            &services,
+            &[SigAlg::RsaSha256],
+            &scope(),
+        )
+        .unwrap();
+        assert_eq!(report.verdict, Verdict::Valid);
+        let (extended, report) = run(&f, &genuine_ber, true, AdesLevel::Lta, NOW);
+        assert_eq!(report.verdict, Verdict::Valid);
+        let ci = wire_children(&extended);
+        let sd = wire_children(&wire_children(&ci[1])[0]);
+        assert_eq!(&wire_children(&sd[2])[0][..3], &[6, 0x81, 9]);
+        let mut key = f.doc.clone();
+        let mut spec = TestCertSpec::from_cert(&key.cert);
+        spec.serial = vec![0x63, 0x03, 0x72];
+        key.cert = issue_cert(&f.root, spec);
+        let mut added = Vec::new();
+        ades::sign(
+            &CmsSignRequest::add(),
+            AdesLevel::Lta,
+            Source::sequential(&mut Cursor::new(&genuine_ber), None),
+            None,
+            &mut [&mut key],
+            &CmsSignServices::new(Some(&context), Some(&store)),
+            Some(&services),
+            &mut added,
+            &scope(),
+        )
+        .unwrap();
+        let report = ades::verify(
+            AdesLevel::Lta,
+            Source::sequential(&mut Cursor::new(&added), None),
+            None,
+            &services,
+            &[SigAlg::RsaSha256],
+            &scope(),
+        )
+        .unwrap();
+        assert_eq!(report.verdict, Verdict::Valid);
+        assert_eq!(report.reports().len(), 2);
+        let ci = wire_children(&added);
+        let sd = wire_children(&wire_children(&ci[1])[0]);
+        assert_eq!(&wire_children(&sd[2])[0][..3], &[6, 0x81, 9]);
     }
 }

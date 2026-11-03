@@ -820,6 +820,9 @@ impl ParsedEvidence {
 pub(crate) struct ArchiveSelection<'a> {
     pub token: EvidenceId,
     pub protected: &'a [EvidenceId],
+    /// Format-derived index algorithm, bound to the cryptographically checked
+    /// TSTInfo message imprint, not the TSA's independent signature algorithm.
+    pub algorithm: HashAlg,
 }
 fn binding_graph(
     bundle: &EvidenceBundle,
@@ -1160,6 +1163,14 @@ fn validate_evidence_impl(
                 timestamp = combine(timestamp, CheckStatus::Failed);
                 continue;
             };
+            if selections.is_some_and(|values| {
+                values.iter().any(|selection| {
+                    selection.token == proof.token && selection.algorithm != algorithm
+                })
+            }) {
+                timestamp = combine(timestamp, CheckStatus::Failed);
+                continue;
+            }
             let imprint =
                 hash_coverage(bundle, signer, proof.coverage, algorithm, Some(resources))?;
             if tsp::check_imprint(&info, &imprint).is_err()
