@@ -76,7 +76,7 @@ impl DocumentReader<'_> {
 }
 #[derive(Default)]
 pub(super) struct Failure {
-    state: Mutex<(bool, Option<ProcessingError>)>,
+    state: Mutex<Option<Arc<ProcessingError>>>,
 }
 impl Failure {
     fn record(&self, error: ProcessingError) {
@@ -84,25 +84,55 @@ impl Failure {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !state.0 {
-            state.0 = true;
-            state.1 = Some(error);
+        if state.is_none() {
+            *state = Some(Arc::new(error));
         }
     }
     fn stopped(&self) -> bool {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .0
+            .is_some()
     }
     pub(super) fn recover(&self, fallback: ProcessingError) -> ProcessingError {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.0 = true;
-        state.1.take().unwrap_or(fallback)
+        let original = state.get_or_insert_with(|| Arc::new(fallback)).clone();
+        ProcessingError::Io(io::Error::other(SharedFatal(original)))
     }
+}
+
+// An intermediate Read/worker bridge owns a shared reference, never the only
+// copy of the first cause. Display/Debug do not disclose an underlying I/O path.
+struct SharedFatal(Arc<ProcessingError>);
+impl std::fmt::Debug for SharedFatal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedIntakeFailure")
+    }
+}
+impl std::fmt::Display for SharedFatal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("original intake failure")
+    }
+}
+impl std::error::Error for SharedFatal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+pub(in crate::service) fn first_cause(mut error: &ProcessingError) -> &ProcessingError {
+    while let ProcessingError::Io(carrier) = error {
+        match carrier
+            .get_ref()
+            .and_then(|cause| cause.downcast_ref::<SharedFatal>())
+        {
+            Some(shared) => error = shared.0.as_ref(),
+            None => break,
+        }
+    }
+    error
 }
 pub(super) struct Ledger {
     scope: ResourceScope,
@@ -526,5 +556,193 @@ impl Payload {
                 Ok(Documents::Frozen(documents))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::{BoundedExecutor, ExecutorConfig};
+    use oncl_core::ExecutionGrant;
+    use oncl_pki::resource::ResourceLimits;
+    use std::sync::Condvar;
+
+    struct Release(Arc<(Mutex<bool>, Condvar)>);
+    impl Release {
+        fn open(&self) {
+            let (lock, changed) = &*self.0;
+            *lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            changed.notify_all();
+        }
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.open();
+        }
+    }
+    #[derive(Clone, Copy)]
+    enum First {
+        Framing,
+        Metadata,
+        Cancelled,
+        Deadline,
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn original_first_fatal_survives_recovery_while_worker_delivery_is_held() {
+        for (first, expected, status) in [
+            (First::Framing, ErrorCode::FramingLimit, 413),
+            (First::Metadata, ErrorCode::MetadataLimit, 413),
+            (First::Cancelled, ErrorCode::Cancelled, 408),
+            (First::Deadline, ErrorCode::DeadlineExceeded, 504),
+        ] {
+            let engine = Engine::new(EngineServices::hash_only(ResourceLimits {
+                max_in_flight: 1,
+                framing_bytes: 32,
+                metadata_bytes: 32,
+                operation_timeout: Duration::from_millis(500),
+                ..ResourceLimits::default()
+            }))
+            .unwrap();
+            let cancel = Arc::new(Cancellation::new());
+            let ctx = engine
+                .begin(
+                    ExecutionGrant::new([Action::Hash]),
+                    OperationPolicy::strict_online(),
+                    cancel.clone(),
+                )
+                .unwrap();
+            let deadline = ctx.deadline();
+            let executor = BoundedExecutor::new(ExecutorConfig {
+                blocking_workers: 1,
+                queue_capacity: 0,
+                admission_wait: Duration::from_millis(100),
+            })
+            .unwrap();
+            let failure = Arc::new(Failure::default());
+            let worker_failure = failure.clone();
+            let gate = Arc::new((Mutex::new(false), Condvar::new()));
+            let release = Release(gate.clone());
+            let (entered, observed) = tokio::sync::oneshot::channel();
+            let work = executor
+                .submit(ctx, move |ctx| {
+                    let cause = match first {
+                        First::Framing => ctx.resources().account_framing(33).err(),
+                        First::Metadata => ctx.resources().reserve_metadata(33).err(),
+                        First::Cancelled => {
+                            cancel.cancel();
+                            ctx.resources().checkpoint().err()
+                        }
+                        First::Deadline => None,
+                    };
+                    let recovered = cause.map(|cause| {
+                        worker_failure.record(cause);
+                        worker_failure.recover(ProcessingError::InvalidInput("worker bridge"))
+                    });
+                    let _ = entered.send(());
+                    let (lock, changed) = &*gate;
+                    let mut open = lock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    while !*open {
+                        open = changed
+                            .wait(open)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                    drop(open);
+                    match recovered {
+                        Some(error) => Err(error),
+                        None => Ok(()),
+                    }
+                })
+                .await
+                .unwrap();
+            observed.await.unwrap(); // Actual quota/control cause was recovered.
+            let error = match super::super::await_worker(work, deadline, &failure).await {
+                Err(error) => error,
+                Ok(_) => panic!("held native work cannot publish before release"),
+            };
+            assert_eq!(error.code, expected);
+            assert_eq!(error.into_response().status().as_u16(), status);
+            assert_eq!(
+                executor.running(),
+                1,
+                "deadline must not release native permit"
+            );
+            assert!(matches!(engine.admit(Arc::new(Cancellation::new())),
+                Err(error) if error.code() == oncl_core::ErrorCode::CapacityExceeded));
+            release.open();
+            executor.idle().await;
+            assert_eq!(executor.running(), 0);
+        }
+    }
+
+    #[test]
+    fn repeated_bridges_retain_the_same_owned_io_cause() {
+        let failure = Failure::default();
+        failure.record(ProcessingError::Io(io::Error::from_raw_os_error(5)));
+        let first = failure.recover(ProcessingError::FramingLimit);
+        let second = failure.recover(ProcessingError::DeadlineExceeded);
+        assert!(std::ptr::eq(first_cause(&first), first_cause(&second)));
+        drop(first);
+        drop(second);
+        let final_bridge = failure.recover(ProcessingError::Cancelled);
+        match first_cause(&final_bridge) {
+            ProcessingError::Io(original) => assert_eq!(original.raw_os_error(), Some(5)),
+            _ => panic!("original I/O cause was replaced"),
+        }
+        assert!(failure.stopped());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn successful_worker_wait_preserves_result_context_without_recording_failure() {
+        let engine =
+            Arc::new(Engine::new(EngineServices::hash_only(ResourceLimits::default())).unwrap());
+        let ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Hash]),
+                OperationPolicy::strict_online(),
+                Arc::new(Cancellation::new()),
+            )
+            .unwrap();
+        let original_id = ctx.id();
+        let deadline = ctx.deadline();
+        let executor = BoundedExecutor::new(ExecutorConfig {
+            blocking_workers: 1,
+            queue_capacity: 0,
+            admission_wait: Duration::from_millis(100),
+        })
+        .unwrap();
+        let failure = Failure::default();
+        let worker_engine = engine.clone();
+        let work = executor
+            .submit(ctx, move |ctx| {
+                worker_engine
+                    .hash(
+                        HashAlg::Sha256,
+                        Source::sequential(&mut &b"abc"[..], None),
+                        ctx,
+                    )
+                    .map_err(|error| match error {
+                        OperationError::Processing(error) => error,
+                        _ => ProcessingError::InvalidInput("unexpected SDK error"),
+                    })
+            })
+            .await
+            .unwrap();
+        let output = super::super::await_worker(work, deadline, &failure)
+            .await
+            .unwrap();
+        assert_eq!(output.context.id(), original_id);
+        assert_eq!(
+            crate::auth::encode(output.value.digest.as_bytes()),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(!failure.stopped());
+        drop(output);
+        executor.idle().await;
+        assert!(engine.admit(Arc::new(Cancellation::new())).is_ok());
     }
 }

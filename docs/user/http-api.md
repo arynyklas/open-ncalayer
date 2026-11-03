@@ -95,8 +95,9 @@ waiting or header-map allocation. An over-budget complete or partial part header
 is `FramingLimit`/413 even when its document body is never sent. Exhausting the
 separate header admission cap is `MetadataLimit`/413; malformed/truncated framing
 remains `InvalidRequest`/400. The first owned transport/resource/control cause is
-retained through parser and synchronous field-reader boundaries, never inferred
-from error text or replaced by a later cancellation.
+shared immutably through parser, field-reader, worker and terminal-status
+selection, including when worker delivery is delayed past the original deadline.
+It is never inferred from error text or replaced by a later cancellation.
 
 The implementation uses pinned `multer` 3.1.0 for multipart parsing. Its feeder
 admits at most 8,192 new bytes while parsing unknown-role headers/preamble, in

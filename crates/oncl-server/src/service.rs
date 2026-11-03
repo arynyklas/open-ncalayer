@@ -249,7 +249,7 @@ impl ServiceHost {
     }
 }
 fn processing_error(error: ProcessingError) -> ApiError {
-    let code = match error {
+    let code = match operations::intake::first_cause(&error) {
         ProcessingError::CapacityExceeded => ErrorCode::CapacityExceeded,
         ProcessingError::DeadlineExceeded => ErrorCode::DeadlineExceeded,
         ProcessingError::Cancelled => ErrorCode::Cancelled,

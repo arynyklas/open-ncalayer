@@ -1,5 +1,5 @@
 mod dispatch;
-mod intake;
+pub(super) mod intake;
 
 use super::*;
 use oncl_api::dto::{
@@ -100,6 +100,16 @@ fn algorithm(value: HashAlgorithm) -> HashAlg {
         HashAlgorithm::Streebog512 => HashAlg::Streebog512,
     }
 }
+async fn await_worker<T>(
+    work: crate::executor::WorkHandle<T>,
+    deadline: Deadline,
+    failure: &intake::Failure,
+) -> Result<crate::executor::WorkOutput<T>, ApiError> {
+    tokio::time::timeout(deadline.remaining(), work.wait())
+        .await
+        .map_err(|_| processing_error(failure.recover(ProcessingError::DeadlineExceeded)))?
+        .map_err(|error| processing_error(failure.recover(error)))
+}
 impl ServiceHost {
     pub(super) fn dispatch_operations(
         &self,
@@ -197,10 +207,7 @@ impl ServiceHost {
                 })
                 .await
                 .map_err(|error| processing_error(failure.recover(error)))?;
-            let output = tokio::time::timeout(deadline.remaining(), work.wait())
-                .await
-                .map_err(|_| processing_error(failure.recover(ProcessingError::DeadlineExceeded)))?
-                .map_err(|error| processing_error(failure.recover(error)))?;
+            let output = await_worker(work, deadline, &failure).await?;
             let ((bytes, reservation), mut ctx) = (output.value, output.context);
             let delivery = ResponseDelivery {
                 deadline,
