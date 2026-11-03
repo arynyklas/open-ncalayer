@@ -4251,6 +4251,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-server"
+version = "0.1.0-alpha.6"
+dependencies = [
+ "getrandom 0.4.3",
+ "oncl-core",
+ "oncl-pki",
+ "oncl-testkit",
+ "rsa",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "oncl-testkit"
 version = "0.1.0-alpha.6"
 dependencies = [

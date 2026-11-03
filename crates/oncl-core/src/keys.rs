@@ -440,13 +440,28 @@ impl KeyUseEvent {
 /// Non-cloneable successful host receipt, returned to the same guard after use.
 pub struct KeyUseReceipt {
     event: KeyUseEvent,
+    correlation: Option<(u64, u64)>,
 }
 impl KeyUseReceipt {
     pub fn new(event: KeyUseEvent) -> Self {
-        Self { event }
+        Self {
+            event,
+            correlation: None,
+        }
     }
     pub fn event(&self) -> &KeyUseEvent {
         &self.event
+    }
+    /// Host guard correlation, carried unchanged through the actual private use.
+    /// This is not authority against a privileged host implementing this trait.
+    pub fn with_correlation(event: KeyUseEvent, guard_instance: u64, use_id: u64) -> Self {
+        Self {
+            event,
+            correlation: Some((guard_instance, use_id)),
+        }
+    }
+    pub fn correlation(&self) -> Option<(u64, u64)> {
+        self.correlation
     }
 }
 #[derive(Clone, Copy, Debug)]

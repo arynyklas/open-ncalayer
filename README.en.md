@@ -92,6 +92,34 @@ It emits only public synthetic RSA artifacts for all four levels, attached and
 detached content, multiple signers and altered archives for an independent
 oracle; it does not replace full 10-GiB/RSS or desktop-matrix acceptance.
 
+`oncl-server` is a standalone durable-audit library, not an HTTP-server scaffold.
+The host installs `DurableAuditGuard` through `EngineServices::with_keys` and
+binds the original `OperationContext` to its authenticated opaque principal and
+safe 16-byte key labels (`bind` / `AuditBinding`). The journal never serializes
+document contents, paths, filenames, passwords, arbitrary `KeyId::Debug` values
+or raw errors. BEGIN is synchronized **before** private use; FINAL records actual
+Applied/NotApplied/Unknown. A failed FINAL cannot undo a signature: Core preserves
+Applied, withholds the result, and shared health blocks new uses across contexts.
+Already-admitted uses may finish; an unfinished BEGIN after restart means Unknown,
+never a claim that the private key was not used.
+
+The journal has an owner-only pinned root, exclusive cross-process ownership,
+160-byte checksummed frames and actual rotation/retention/quota enforcement.
+Complete corrupt frames and foreign headers are never truncated. Every `open`,
+including a clean journal, requires explicit `recover()` and a durable probe
+before new uses. Recovery repairs only an incomplete own-journal tail; recorded
+boundaries describe the observed committed repair, not lost uncommitted history.
+Journal quota is at most 64 MiB, with at most 1024 registrations/closed tombstones
+until original deadlines and 32 mapped keys per registration. Binding drop releases
+admission unless FINAL is still pending; tombstones retain no documents, keys or
+operation leases. Windows uses a protected DACL, WRITE_THROUGH and file `sync_all`;
+unavailable directory-fsync is explicit `NamespaceSync::Unsupported`. Unix uses
+descriptor-relative nofollow I/O and directory-fsync. ACLs do not defend against a
+privileged host; checksums are not nonrepudiation. Run
+`cargo test -p oncl-server --test audit`, then the actual synthetic signing smoke:
+`cargo run -p oncl-server --example audit_smoke -- target/s01-smoke`.
+This enables no HTTP/auth/OTLP and does not replace Windows 7 platform acceptance.
+
 
 ### Certificate checking
 
