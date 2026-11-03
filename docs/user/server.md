@@ -47,6 +47,9 @@ total_memory = 536870912
 temp_per_operation = 34359738368
 total_temp = 68719476736
 metadata_bytes = 1048576
+framing_bytes = 67108864
+# Optional, required for multipart public-document snapshots:
+# scratch_directory = "/private/oncl-scratch"
 inline_pkcs12 = false
 
 [[tokens]]
@@ -78,6 +81,8 @@ stopped; persistent audit files are retained, not deleted at shutdown.
 Only these routes exist:
 
 * `POST /v1/hash`: raw binary request body, SHA-256, authenticated hash ACL.
+* `POST /v1/operations`: typed JSON-small or metadata-first multipart hashing;
+  see [the HTTP request contract](http-api.md).
 * `GET /health`: authenticated hash ACL; reports the actual local audit health.
 
 Send `Authorization: Bearer <token-file-content>`, the configured `Host`, and the

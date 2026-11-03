@@ -311,7 +311,7 @@ mod timestamp;
 
 pub use cades::{CadesConfiguration, ExtendRequest};
 pub use context::{OperationContext, OperationId};
-pub use engine::{Engine, EngineServices, HashReport};
+pub use engine::{Engine, EngineServices, HashReport, OperationAdmission};
 pub use error::{ErrorCode, OperationError};
 pub use inspect::{
     InspectRequest, InspectionKind, InspectionReport, ReadMetadataProvider, SignatureMetadata,

@@ -3503,6 +3503,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin",
+ "version_check",
+]
+
+[[package]]
 name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4068,7 +4085,14 @@ name = "oncl-api"
 version = "0.1.0-alpha.6"
 dependencies = [
  "axum",
+ "futures-util",
+ "multer",
+ "oncl-server",
  "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -4388,10 +4412,12 @@ version = "0.1.0-alpha.6"
 dependencies = [
  "axum",
  "clap",
+ "futures-util",
  "getrandom 0.4.3",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "multer",
  "oncl-api",
  "oncl-core",
  "oncl-pki",

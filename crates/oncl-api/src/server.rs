@@ -1,5 +1,5 @@
-//! Host authorization and execution stay in the standalone service. This module
-//! has no tokens, grants, filesystem paths or private-operation DTOs.
+//! Host authorization and execution stay in the standalone service. Wire metadata
+//! contains no tokens, grants, filesystem paths or operator configuration.
 use crate::error::{ApiError, ErrorCode};
 use axum::{
     Router,
@@ -21,10 +21,12 @@ pub type ResponseFuture = Pin<Box<dyn Future<Output = Result<Response, ApiError>
 pub trait HashHost: Send + Sync + 'static {
     fn hash(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture;
     fn health(&self, metadata: RequestMetadata) -> ResponseFuture;
+    fn operations(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture;
 }
 pub fn router(host: Arc<dyn HashHost>) -> Router {
     Router::new()
         .route("/v1/hash", post(hash))
+        .route("/v1/operations", post(operations))
         .route("/health", on(MethodFilter::GET, health))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -51,6 +53,7 @@ async fn target_boundary(request: Request<Body>, next: Next) -> Response {
     }
     let expected = match request.uri().path() {
         "/v1/hash" => Some((Method::POST, "POST")),
+        "/v1/operations" => Some((Method::POST, "POST")),
         "/health" => Some((Method::GET, "GET")),
         _ => None,
     };
@@ -107,6 +110,23 @@ async fn hash(
     let content_length = metadata(peer, &request, "hash")?;
     let (parts, body) = request.into_parts();
     host.hash(
+        RequestMetadata {
+            peer,
+            headers: parts.headers,
+            content_length,
+        },
+        body,
+    )
+    .await
+}
+async fn operations(
+    State(host): State<Arc<dyn HashHost>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let content_length = metadata(peer, &request, "operations")?;
+    let (parts, body) = request.into_parts();
+    host.operations(
         RequestMetadata {
             peer,
             headers: parts.headers,

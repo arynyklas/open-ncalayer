@@ -89,6 +89,23 @@ pub struct Engine {
     pub(crate) metadata: Option<Arc<dyn crate::ReadMetadataProvider>>,
     pub(crate) inspection_limits: oncl_pki::info::InspectionLimits,
 }
+
+/// One original invocation root admitted for bounded metadata intake, without
+/// any cryptographic/key authority. Consuming it is the only context transition.
+pub struct OperationAdmission {
+    id: OperationId,
+    owner: Arc<()>,
+    scope: oncl_pki::resource::ResourceScope,
+    original_scope: oncl_pki::resource::ResourceScope,
+}
+impl OperationAdmission {
+    pub fn id(&self) -> OperationId {
+        self.id
+    }
+    pub fn resources(&mut self) -> &mut oncl_pki::resource::ResourceScope {
+        &mut self.scope
+    }
+}
 impl Engine {
     pub fn new(services: EngineServices) -> Result<Self, OperationError> {
         services.limits.validate()?;
@@ -129,22 +146,62 @@ impl Engine {
         if grant.is_empty() {
             return Err(OperationError::PermissionDenied);
         }
+        Ok(Self::admitted_context(self.admit(control)?, grant, policy))
+    }
+    /// Admit bounded intake before the trusted host has resolved wire metadata
+    /// into authority. This does not permit any SDK operation or key opening.
+    pub fn admit(
+        &self,
+        control: Arc<dyn OperationControl>,
+    ) -> Result<OperationAdmission, OperationError> {
         let scope = self.budget.begin(self.limits.clone(), control)?;
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| OperationError::IdExhausted)?;
-        Ok(OperationContext {
+        Ok(OperationAdmission {
             id: OperationId(id),
             owner: self.identity.clone(),
+            original_scope: scope.shared_view(),
+            scope,
+        })
+    }
+    /// Consume the original intake state only after host authorization. Scope
+    /// replacement through the public mutable resource handle cannot rebound
+    /// this admission onto another operation, even within the same Engine.
+    pub fn begin_admitted(
+        &self,
+        admission: OperationAdmission,
+        grant: ExecutionGrant,
+        policy: OperationPolicy,
+    ) -> Result<OperationContext, OperationError> {
+        if !Arc::ptr_eq(&admission.owner, &self.identity)
+            || !admission.scope.same_operation(&admission.original_scope)
+        {
+            return Err(OperationError::InvalidContext);
+        }
+        if grant.is_empty() {
+            return Err(OperationError::PermissionDenied);
+        }
+        admission.scope.checkpoint()?;
+        Ok(Self::admitted_context(admission, grant, policy))
+    }
+    fn admitted_context(
+        admission: OperationAdmission,
+        grant: ExecutionGrant,
+        policy: OperationPolicy,
+    ) -> OperationContext {
+        OperationContext {
+            id: admission.id,
+            owner: admission.owner,
             grant,
             policy,
-            scope,
+            scope: admission.scope,
             leases: Vec::new(),
             private_use_stopped: std::sync::atomic::AtomicBool::new(false),
             batch_item: None,
             borrowed_replay: None,
-        })
+        }
     }
     pub fn hash(
         &self,

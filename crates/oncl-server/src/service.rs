@@ -1,3 +1,5 @@
+mod operations;
+
 use crate::{
     audit::{AuditBinding, AuditConfig, AuditHealth, DurableAuditGuard},
     auth::{AccessPolicy, Principal},
@@ -49,6 +51,7 @@ pub struct ServiceHost {
     pub keys: Arc<OperatorKeys>,
     pub audit: DurableAuditGuard,
     config: ServerConfig,
+    store: Option<oncl_pki::io::TemporaryStore>,
 }
 struct InvocationControl {
     cancel: Arc<Cancellation>,
@@ -122,14 +125,26 @@ impl ServiceHost {
             return Err(io::Error::other("audit unavailable"));
         }
         let budget = Arc::new(SharedBudget::new(config.aggregate_limits()).map_err(|_| invalid())?);
-        let engine = Arc::new(
-            Engine::new(
-                EngineServices::hash_only(config.limits())
-                    .with_shared_budget(budget)
-                    .with_keys(keys.clone(), Arc::new(audit.clone())),
+        let store = if config.scratch_directory.as_os_str().is_empty() {
+            None
+        } else {
+            if config.scratch_directory.exists() {
+                oncl_pki::private_fs::PrivateDirectory::open(&config.scratch_directory)?;
+            } else {
+                oncl_pki::private_fs::PrivateDirectory::create(&config.scratch_directory)?;
+            }
+            Some(
+                oncl_pki::io::TemporaryStore::new(&config.scratch_directory)
+                    .map_err(|_| invalid())?,
             )
-            .map_err(|_| invalid())?,
-        );
+        };
+        let mut services = EngineServices::hash_only(config.limits())
+            .with_shared_budget(budget)
+            .with_keys(keys.clone(), Arc::new(audit.clone()));
+        if let Some(store) = &store {
+            services = services.with_temporary_store(store.clone());
+        }
+        let engine = Arc::new(Engine::new(services).map_err(|_| invalid())?);
         let executor = BoundedExecutor::new(config.executor()).map_err(|_| invalid())?;
         Ok(Arc::new(Self {
             engine,
@@ -138,6 +153,7 @@ impl ServiceHost {
             keys,
             audit,
             config,
+            store,
         }))
     }
     fn principal(&self, metadata: &RequestMetadata) -> Result<Principal, ApiError> {
@@ -362,6 +378,9 @@ impl HashHost for ServiceHost {
                 .insert("content-type", HeaderValue::from_static("application/json"));
             Ok(response)
         })
+    }
+    fn operations(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture {
+        self.dispatch_operations(metadata, body)
     }
     fn health(&self, metadata: RequestMetadata) -> ResponseFuture {
         let result = self
