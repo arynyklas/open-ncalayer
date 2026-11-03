@@ -77,7 +77,7 @@ fn services() -> HostServices {
     let tsa = oncl_pki::pkcs12::load(&read(&tsa.path), &tsa.password)
         .unwrap()
         .remove(0);
-    HostServices::new(
+    HostServices::interactive(
         Arc::new(ScriptedPrompter::new(Vec::new())),
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(MockTsa::new(tsa)),

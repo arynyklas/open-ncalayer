@@ -167,8 +167,8 @@ impl Engine {
                 ProcessingError::InvalidInput("detached CAdES input was already consumed").into(),
             );
         }
-        let transport =
-            DeadlineTransport::new(validation.http.as_ref(), &validation.network, &ctx.scope);
+        let scoped_http = ctx.http(validation.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &validation.network, &ctx.scope);
         let context = ValidationContext {
             policy: ValidationPolicy::StrictOnline,
             now: (validation.clock)(),
@@ -238,8 +238,8 @@ impl Engine {
             .ok_or(ProcessingError::InvalidInput(
                 "CAdES reader limits are required",
             ))?;
-        let transport =
-            DeadlineTransport::new(validation.http.as_ref(), &validation.network, &ctx.scope);
+        let scoped_http = ctx.http(validation.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &validation.network, &ctx.scope);
         let context = ValidationContext {
             policy: ctx.policy.validation,
             now: (validation.clock)(),

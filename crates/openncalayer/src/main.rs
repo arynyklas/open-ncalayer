@@ -555,7 +555,7 @@ fn host_services(
     HostServices {
         locale: Arc::new(move || load_settings(&settings).ui_locale()),
         settings_dir: Some(oncl_plugin::Store::settings_dir_in(&paths.data)),
-        ..HostServices::new(prompter, recent, Arc::clone(http) as _, Arc::clone(tokens))
+        ..HostServices::interactive(prompter, recent, Arc::clone(http) as _, Arc::clone(tokens))
     }
 }
 
@@ -1260,7 +1260,7 @@ mod tests {
         )
         .unwrap();
         let tokens = Tokens::new(Arc::new(emu), true);
-        let services = HostServices::new(
+        let services = HostServices::interactive(
             Arc::new(oncl_flows::testing::ScriptedPrompter::new(Vec::new())),
             Arc::new(oncl_flows::testing::MemoryRecentPath::new(None)),
             Arc::new(LiveProxyTransport::new(oncl_desktop::ProxySetting::None)),

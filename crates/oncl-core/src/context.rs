@@ -30,6 +30,10 @@ pub struct OperationContext {
     pub(crate) private_use_stopped: std::sync::atomic::AtomicBool,
     pub(crate) batch_item: Option<crate::keys::BatchItemOrdinal>,
     pub(crate) borrowed_replay: Option<crate::batch::BorrowedReplay>,
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_network: Option<crate::plugins::InvocationHttpBudget>,
+    #[cfg(feature = "plugins")]
+    pub(crate) plugin_network_budget: Option<crate::plugins::InvocationHttpBudget>,
 }
 impl OperationContext {
     pub(crate) fn account_borrowed(
@@ -69,5 +73,88 @@ impl OperationContext {
     }
     pub fn lease(&self) -> OperationLease {
         self.scope.lease()
+    }
+    pub(crate) fn http<'a>(&self, inner: &'a dyn oncl_pki::http::HttpTransport) -> ContextHttp<'a> {
+        ContextHttp {
+            inner,
+            #[cfg(feature = "plugins")]
+            budget: self.plugin_network.clone(),
+        }
+    }
+    pub(crate) fn network_status(&self) -> Result<(), OperationError> {
+        #[cfg(feature = "plugins")]
+        if let Some(budget) = &self.plugin_network {
+            budget.status()?;
+        }
+        Ok(())
+    }
+}
+
+/// Delegates routing, pins and response admission without changing the original
+/// resource scope or introducing another transport budget.
+pub(crate) struct ContextHttp<'a> {
+    inner: &'a dyn oncl_pki::http::HttpTransport,
+    #[cfg(feature = "plugins")]
+    budget: Option<crate::plugins::InvocationHttpBudget>,
+}
+impl ContextHttp<'_> {
+    fn take(&self) -> Result<(), oncl_pki::http::HttpError> {
+        #[cfg(feature = "plugins")]
+        if let Some(budget) = &self.budget {
+            budget
+                .take()
+                .map_err(|_| oncl_pki::http::HttpError::other("plugin request budget exceeded"))?;
+        }
+        Ok(())
+    }
+}
+impl oncl_pki::http::HttpTransport for ContextHttp<'_> {
+    fn send(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        self.take()?;
+        self.inner.send(request)
+    }
+    fn send_pinned(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+        pins: &[std::net::SocketAddr],
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        self.take()?;
+        self.inner.send_pinned(request, pins)
+    }
+    fn send_scoped<'a>(
+        &'a self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+    ) -> Result<oncl_pki::http::ScopedHttpReply<'a>, oncl_pki::http::HttpError> {
+        self.take()?;
+        self.inner.send_scoped(request)
+    }
+    fn send_scoped_with<'a>(
+        &'a self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+        budget: oncl_pki::http::ResponseBudget<'a>,
+    ) -> Result<oncl_pki::http::ScopedHttpReply<'a>, oncl_pki::http::HttpError> {
+        self.take()?;
+        self.inner.send_scoped_with(request, budget)
+    }
+    fn send_pinned_scoped<'a>(
+        &'a self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+        pins: &[std::net::SocketAddr],
+        budget: oncl_pki::http::ResponseBudget<'a>,
+    ) -> Result<oncl_pki::http::ScopedHttpReply<'a>, oncl_pki::http::HttpError> {
+        self.take()?;
+        self.inner.send_pinned_scoped(request, pins, budget)
+    }
+    fn resource_scope(&self) -> Option<&ResourceScope> {
+        self.inner.resource_scope()
+    }
+    fn resource_failure(
+        &self,
+        error: oncl_pki::resource::ProcessingError,
+    ) -> oncl_pki::http::HttpError {
+        self.inner.resource_failure(error)
     }
 }

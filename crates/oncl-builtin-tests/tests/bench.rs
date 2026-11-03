@@ -133,7 +133,7 @@ fn services(
     http: Arc<dyn HttpTransport>,
     clock: fn() -> OffsetDateTime,
 ) -> HostServices {
-    let mut services = HostServices::new(
+    let mut services = HostServices::interactive(
         prompter,
         Arc::new(MemoryRecentPath::new(None)),
         http,

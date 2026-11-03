@@ -14,7 +14,7 @@ oncl-flows = { workspace = true, features = ["testing"] }
 oncl-pdk.workspace = true
 # `MockTsa`, `MockOcsp`, `MockCrl`, `RouteTransport`: the PKI services ports reach.
 oncl-pki = { workspace = true, features = ["testing"] }
-oncl-plugin.workspace = true
+oncl-plugin = { workspace = true, features = ["distribution"] }
 oncl-protocol.workspace = true
 # The ports' workspace built once per process, the synthetic key stores.
 oncl-testkit.workspace = true

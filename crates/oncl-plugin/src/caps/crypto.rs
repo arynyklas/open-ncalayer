@@ -89,16 +89,56 @@ pub(crate) fn cert_details(args: CertArgs) -> HostResult<CertDetails> {
     })
 }
 
+/// Explicit host PKI configuration, independent of dialogs/browser/key storage.
+pub(crate) trait CryptoHost {
+    fn cas(&self) -> &CaSet;
+    fn now(&self) -> OffsetDateTime;
+    fn basics_tsa(&self) -> TsaSpec;
+    fn check_url(&self, url: &str) -> HostResult<()>;
+    fn pki_http(&self) -> PkiHttp<'_>;
+}
+impl CryptoHost for HostState {
+    fn cas(&self) -> &CaSet {
+        &self.services.cas
+    }
+    fn now(&self) -> OffsetDateTime {
+        (self.services.clock)()
+    }
+    fn basics_tsa(&self) -> TsaSpec {
+        TsaSpec::from(if is_builtin(self) {
+            self.services.tsa.clone()
+        } else {
+            TsaProfile::basics_default()
+        })
+    }
+    fn check_url(&self, url: &str) -> HostResult<()> {
+        if is_builtin(self) {
+            Ok(())
+        } else {
+            check_pki_url_in(&self.services.pki_hosts, url)
+        }
+    }
+    fn pki_http(&self) -> PkiHttp<'_> {
+        PkiHttp {
+            http: self.services.http.as_ref(),
+            policy: PkiPolicy::Legacy {
+                hosts: (!is_builtin(self)).then_some(&self.services.pki_hosts),
+                budget: &self.call.http_requests,
+            },
+        }
+    }
+}
+
 /// `ca_list`: the CAs the core trusts, in their order.
-pub(crate) fn ca_list(state: &HostState) -> Vec<Bytes> {
-    state.services.cas.certs().iter().map(der_of).collect()
+pub(crate) fn ca_list(state: &dyn CryptoHost) -> Vec<Bytes> {
+    state.cas().certs().iter().map(der_of).collect()
 }
 
 /// `ca_issuer`: the CA among them that issued the certificate (by name, the one whose key
 /// identifier matches first), if any.
-pub(crate) fn ca_issuer(state: &HostState, args: CertArgs) -> HostResult<Option<Bytes>> {
+pub(crate) fn ca_issuer(state: &dyn CryptoHost, args: CertArgs) -> HostResult<Option<Bytes>> {
     let cert = parse(&args.der)?;
-    Ok(state.services.cas.issuers_of(&cert).next().map(der_of))
+    Ok(state.cas().issuers_of(&cert).next().map(der_of))
 }
 
 /// The PKI hosts of the NCA: the only hosts the core asks for time-stamps, OCSP and CRLs
@@ -126,11 +166,8 @@ const DEFAULT_OCSP: &str = "http://ocsp.pki.gov.kz";
 
 /// A URL of a PKI service, if the core may ask it: `http(s)://` to one of the PKI hosts
 /// or a subdomain of one; any for a built-in module.
-fn check_pki_url(state: &HostState, url: &str) -> HostResult<()> {
-    if is_builtin(state) {
-        return Ok(());
-    }
-    check_pki_url_in(&state.services.pki_hosts, url)
+fn check_pki_url(state: &dyn CryptoHost, url: &str) -> HostResult<()> {
+    state.check_url(url)
 }
 
 /// [`check_pki_url`] against `pki_hosts`.
@@ -157,42 +194,99 @@ fn check_pki_url_in(pki_hosts: &[String], url: &str) -> HostResult<()> {
 /// hosts, never to where a redirect points (a 3xx reply is the reply), each request
 /// counted in the call's [`super::MAX_HTTP_REQUESTS`]; a built-in module's are the core's
 /// own.
-pub(super) struct PkiHttp {
-    /// `None` for a built-in module.
-    hosts: Option<Arc<[String]>>,
-    http: Arc<dyn HttpTransport>,
-    budget: RequestBudget,
+pub(crate) struct PkiHttp<'a> {
+    http: &'a dyn HttpTransport,
+    policy: PkiPolicy<'a>,
 }
-
-impl PkiHttp {
-    pub(super) fn of(state: &HostState) -> Self {
-        PkiHttp {
-            hosts: (!is_builtin(state)).then(|| Arc::clone(&state.services.pki_hosts)),
-            http: Arc::clone(&state.services.http),
-            budget: state.call.http_requests.clone(),
+enum PkiPolicy<'a> {
+    Legacy {
+        hosts: Option<&'a [String]>,
+        budget: &'a RequestBudget,
+    },
+    Bound(&'a (dyn Fn(&str) -> HostResult<()> + Send + Sync)),
+}
+impl<'a> PkiHttp<'a> {
+    pub(crate) fn of(state: &'a dyn CryptoHost) -> Self {
+        state.pki_http()
+    }
+    pub(crate) fn bound(
+        http: &'a dyn HttpTransport,
+        authorize: &'a (dyn Fn(&str) -> HostResult<()> + Send + Sync),
+    ) -> Self {
+        Self {
+            http,
+            policy: PkiPolicy::Bound(authorize),
         }
     }
-}
-
-impl HttpTransport for PkiHttp {
-    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
-        let Some(hosts) = &self.hosts else {
-            return self.http.send(request);
-        };
-        check_pki_url_in(hosts, request.url).map_err(|e| HttpError::other(e.message))?;
-        self.budget
-            .take()
-            .map_err(|e| HttpError::other(e.message))?;
+    fn checked(&self, request: &HttpRequest<'_>) -> Result<(), HttpError> {
+        match &self.policy {
+            PkiPolicy::Legacy { hosts: None, .. } => Ok(()),
+            PkiPolicy::Legacy {
+                hosts: Some(hosts),
+                budget,
+            } => check_pki_url_in(hosts, request.url).and_then(|()| budget.take()),
+            PkiPolicy::Bound(authorize) => authorize(request.url),
+        }
+        .map_err(|e| HttpError::other(e.message))
+    }
+    fn request<'b>(&self, request: &HttpRequest<'b>) -> HttpRequest<'b> {
         let mut request = *request;
-        request.opts.redirects = false;
-        self.http.send(&request)
+        if !matches!(self.policy, PkiPolicy::Legacy { hosts: None, .. }) {
+            request.opts.redirects = false;
+        }
+        request
+    }
+}
+impl HttpTransport for PkiHttp<'_> {
+    fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+        self.checked(request)?;
+        self.http.send(&self.request(request))
+    }
+    fn send_pinned(
+        &self,
+        request: &HttpRequest<'_>,
+        pins: &[std::net::SocketAddr],
+    ) -> Result<HttpReply, HttpError> {
+        self.checked(request)?;
+        self.http.send_pinned(&self.request(request), pins)
+    }
+    fn send_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+    ) -> Result<http::ScopedHttpReply<'a>, HttpError> {
+        self.checked(request)?;
+        self.http.send_scoped(&self.request(request))
+    }
+    fn send_scoped_with<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        budget: http::ResponseBudget<'a>,
+    ) -> Result<http::ScopedHttpReply<'a>, HttpError> {
+        self.checked(request)?;
+        self.http.send_scoped_with(&self.request(request), budget)
+    }
+    fn send_pinned_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        pins: &[std::net::SocketAddr],
+        budget: http::ResponseBudget<'a>,
+    ) -> Result<http::ScopedHttpReply<'a>, HttpError> {
+        self.checked(request)?;
+        self.http
+            .send_pinned_scoped(&self.request(request), pins, budget)
+    }
+    fn resource_scope(&self) -> Option<&oncl_pki::resource::ResourceScope> {
+        self.http.resource_scope()
+    }
+    fn resource_failure(&self, error: oncl_pki::resource::ProcessingError) -> HttpError {
+        self.http.resource_failure(error)
     }
 }
 
 /// The URL of `url`: the default one, the one `cert_url` reads from the certificate, or the
 /// given one; `None` if the certificate names none. It must be a PKI host's.
 fn pki_url(
-    state: &HostState,
+    state: &dyn CryptoHost,
     url: &PkiUrl,
     default: &str,
     cert_url: impl Fn(&Certificate) -> Option<String>,
@@ -297,10 +391,9 @@ pub(crate) type Tsa = Result<TsaSpec, NetFailure>;
 
 /// The core's TSA spec of `choice`, its URL checked. A built-in module's basics TSA is the
 /// core's ([`crate::HostServices::tsa`]).
-pub(crate) fn tsa_spec(state: &HostState, choice: &TsaChoice) -> HostResult<Tsa> {
+pub(crate) fn tsa_spec(state: &dyn CryptoHost, choice: &TsaChoice) -> HostResult<Tsa> {
     let spec = match choice {
-        TsaChoice::Basics if is_builtin(state) => TsaSpec::from(state.services.tsa.clone()),
-        TsaChoice::Basics => TsaSpec::from(TsaProfile::basics_default()),
+        TsaChoice::Basics => state.basics_tsa(),
         TsaChoice::Kalkan => TsaSpec::from(TsaProfile::kalkan_default()),
         TsaChoice::Custom(custom) => {
             if custom.retries > MAX_TSP_RETRIES {
@@ -336,12 +429,16 @@ pub(crate) fn tsp_failure(spec: &TsaSpec, e: &tsp::TspError) -> NetFailure {
 
 /// `tsp_stamp`: time-stamps of signers of a CMS. A signer of a certificate is the first
 /// one Kalkan's way finds; without one nothing is asked.
-pub(crate) fn tsp_stamp(state: &HostState, args: StampArgs) -> HostResult<StampOutcome> {
+pub(crate) fn tsp_stamp(state: &dyn CryptoHost, args: StampArgs) -> HostResult<StampOutcome> {
     stamp(state, &args, &args.cms)
 }
 
 /// [`tsp_stamp`] of the CMS `cms`.
-pub(crate) fn stamp(state: &HostState, args: &StampArgs, cms: &[u8]) -> HostResult<StampOutcome> {
+pub(crate) fn stamp(
+    state: &dyn CryptoHost,
+    args: &StampArgs,
+    cms: &[u8],
+) -> HostResult<StampOutcome> {
     let cms_invalid = |e: cms::CmsError| invalid(e.to_string()).with_cause(cause::cms(&e));
     let count = || cms::signer_count(cms).map_err(cms_invalid);
     let signers = match &args.signers {
@@ -387,7 +484,7 @@ pub(crate) fn stamp(state: &HostState, args: &StampArgs, cms: &[u8]) -> HostResu
 }
 
 /// `tsp_request`: a time-stamp of a hash.
-pub(crate) fn tsp_request(state: &HostState, args: TspRequestArgs) -> HostResult<TspOutcome> {
+pub(crate) fn tsp_request(state: &dyn CryptoHost, args: TspRequestArgs) -> HostResult<TspOutcome> {
     let spec = match tsa_spec(state, &TsaChoice::Custom(args.tsa))? {
         Ok(spec) => spec,
         Err(failure) => return Ok(TspOutcome::Failed(failure)),
@@ -407,9 +504,9 @@ pub(crate) fn tsp_request(state: &HostState, args: TspRequestArgs) -> HostResult
 
 /// `pkix_path`: whether a certification path from the certificate through the CAs the
 /// core trusts is valid at the time asked.
-pub(crate) fn pkix_path(state: &HostState, args: PathArgs) -> HostResult<PathOutcome> {
+pub(crate) fn pkix_path(state: &dyn CryptoHost, args: PathArgs) -> HostResult<PathOutcome> {
     let cert = parse(&args.cert)?;
-    let now = (state.services.clock)();
+    let now = state.now();
     let at = match args.at {
         PathTime::Now => now,
         PathTime::NotAfterIfExpired => pkix::validation_time(&cert, now),
@@ -418,7 +515,7 @@ pub(crate) fn pkix_path(state: &HostState, args: PathArgs) -> HostResult<PathOut
                 .map_err(|e| invalid(format!("the time: {e}")))?
         }
     };
-    Ok(match pkix::build_path(&cert, &state.services.cas, at) {
+    Ok(match pkix::build_path(&cert, state.cas(), at) {
         Ok(_) => PathOutcome::Valid,
         Err(PathError::IssuerNotFound) => PathOutcome::IssuerNotFound,
         Err(e) => PathOutcome::Invalid(e.to_string()),
@@ -426,11 +523,14 @@ pub(crate) fn pkix_path(state: &HostState, args: PathArgs) -> HostResult<PathOut
 }
 
 /// The issuer `issuer` names for `cert`.
-fn issuer_of(state: &HostState, cert: &Certificate, issuer: &IssuerSel) -> HostResult<Certificate> {
+fn issuer_of(
+    state: &dyn CryptoHost,
+    cert: &Certificate,
+    issuer: &IssuerSel,
+) -> HostResult<Certificate> {
     match issuer {
         IssuerSel::HostCas => state
-            .services
-            .cas
+            .cas()
             .issuers_of(cert)
             .next()
             .cloned()
@@ -476,7 +576,7 @@ fn ocsp_problem(e: &OcspError) -> Problem {
 
 /// `ocsp_fetch`: an OCSP request about a certificate, the response read and, if asked,
 /// checked.
-pub(crate) fn ocsp_fetch(state: &HostState, args: OcspArgs) -> HostResult<OcspOutcome> {
+pub(crate) fn ocsp_fetch(state: &dyn CryptoHost, args: OcspArgs) -> HostResult<OcspOutcome> {
     let cert = parse(&args.cert)?;
     let issuer = issuer_of(state, &cert, &args.issuer)?;
     let Some(url) = pki_url(state, &args.url, DEFAULT_OCSP, ocsp::ocsp_url)? else {
@@ -489,9 +589,9 @@ pub(crate) fn ocsp_fetch(state: &HostState, args: OcspArgs) -> HostResult<OcspOu
         url: Some(url.clone()),
         timeout: timeout(args.timeout_ms)?,
     };
-    let cas = &state.services.cas;
-    let now = (state.services.clock)();
-    let check = args.check.then_some((cas.as_ref(), now));
+    let cas = state.cas();
+    let now = state.now();
+    let check = args.check.then_some((cas, now));
     Ok(
         match ocsp::fetch(&cert, &issuer, &spec, &PkiHttp::of(state), check) {
             Ok(fetched) => OcspOutcome::Ok {
@@ -512,7 +612,7 @@ pub(crate) fn ocsp_fetch(state: &HostState, args: OcspArgs) -> HostResult<OcspOu
 
 /// `crl_fetch`: the CRLs of a certificate's distribution points and its status in them.
 /// Every distribution point must be on a PKI host.
-pub(crate) fn crl_fetch(state: &HostState, args: CrlArgs) -> HostResult<CrlOutcome> {
+pub(crate) fn crl_fetch(state: &dyn CryptoHost, args: CrlArgs) -> HostResult<CrlOutcome> {
     let cert = parse(&args.cert)?;
     let issuer = issuer_of(state, &cert, &args.issuer)?;
     let timeout = timeout(args.timeout_ms)?;
@@ -521,7 +621,7 @@ pub(crate) fn crl_fetch(state: &HostState, args: CrlArgs) -> HostResult<CrlOutco
         check_pki_url(state, url)?;
     }
     let address = urls.first().cloned().unwrap_or_default();
-    let now = (state.services.clock)();
+    let now = state.now();
     Ok(
         match crl::fetch_for(&cert, &issuer, &PkiHttp::of(state), timeout, now) {
             Ok((crls, crl_status)) => CrlOutcome::Ok {
@@ -592,7 +692,7 @@ fn problem_abi(problem: cms::Problem) -> Problem {
 
 /// `cms_verify`: a report on the signers of a CMS; the revocation sources its certificates
 /// name are asked only on the PKI hosts.
-pub(crate) fn cms_verify(state: &HostState, args: VerifyArgs) -> HostResult<VerifyReport> {
+pub(crate) fn cms_verify(state: &dyn CryptoHost, args: VerifyArgs) -> HostResult<VerifyReport> {
     let custom = match &args.chain {
         Some(list) if !list.is_empty() => Some(CaSet::new(
             list.iter()
@@ -601,7 +701,7 @@ pub(crate) fn cms_verify(state: &HostState, args: VerifyArgs) -> HostResult<Veri
         )),
         _ => None,
     };
-    let trust = custom.as_ref().unwrap_or(&state.services.cas);
+    let trust = custom.as_ref().unwrap_or(state.cas());
     let chain = match &args.chain {
         Some(list) if list.is_empty() => cms::ChainPolicy::Skip,
         _ => cms::ChainPolicy::Through(trust),
@@ -632,7 +732,7 @@ pub(crate) fn cms_verify(state: &HostState, args: VerifyArgs) -> HostResult<Veri
         first_signer_only: args.first_signer_only,
         require_key_usage,
     };
-    let now = (state.services.clock)();
+    let now = state.now();
     let report = cms::report(
         &args.cms,
         args.data.as_deref().map(Vec::as_slice),
@@ -641,7 +741,11 @@ pub(crate) fn cms_verify(state: &HostState, args: VerifyArgs) -> HostResult<Veri
         now,
     )
     .map_err(|e| invalid(e.to_string()))?;
-    Ok(VerifyReport {
+    Ok(project_report(report))
+}
+
+pub(crate) fn project_report(report: cms::Report) -> VerifyReport {
+    VerifyReport {
         content: report.content.map(Bytes::from),
         signers: report
             .signers
@@ -661,7 +765,7 @@ pub(crate) fn cms_verify(state: &HostState, args: VerifyArgs) -> HostResult<Veri
                 }),
             })
             .collect(),
-    })
+    }
 }
 
 /// `xml_verify`: every signature of the document, in document order, each verified with

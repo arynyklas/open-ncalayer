@@ -683,8 +683,8 @@ impl Engine {
             .as_deref()
             .ok_or(OperationError::MissingValidationServices)?;
         let now = (services.clock)();
-        let transport =
-            DeadlineTransport::new(services.http.as_ref(), &services.network, &ctx.scope);
+        let scoped_http = ctx.http(services.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &services.network, &ctx.scope);
         let _http_memory = ctx
             .scope
             .reserve_memory(4 * oncl_pki::http::MAX_RESPONSE_LEN)?;

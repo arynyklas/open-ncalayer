@@ -98,7 +98,7 @@ impl Sandbox {
             format!(r#"{{"updates": {{"enabled": {updates}, "channel": "stable"}}}}"#),
         )
         .unwrap();
-        let services = HostServices::new(
+        let services = HostServices::interactive(
             Arc::new(ScriptedPrompter::new(Vec::<Step>::new())),
             Arc::new(MemoryRecentPath::new(None)),
             Arc::new(FakeTransport::default()),

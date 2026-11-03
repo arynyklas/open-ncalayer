@@ -51,7 +51,7 @@ pub fn services_with(
 ) -> HostServices {
     HostServices {
         clock,
-        ..HostServices::new(
+        ..HostServices::interactive(
             prompter,
             Arc::new(MemoryRecentPath::new(None)),
             http,

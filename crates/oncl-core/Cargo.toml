@@ -13,12 +13,16 @@ tokens = ["dep:oncl-token"]
 xml = ["dep:oncl-xml"]
 pdf = ["dep:oncl-pdf"]
 jose = ["dep:base64", "dep:serde", "dep:serde_json"]
+plugins = ["dep:oncl-plugin", "dep:oncl-pdk", "dep:serde", "dep:tracing"]
 
 [dependencies]
 oncl-pki.workspace = true
 oncl-token = { workspace = true, optional = true }
 oncl-xml = { workspace = true, optional = true }
 oncl-pdf = { workspace = true, optional = true }
+oncl-plugin = { workspace = true, optional = true, default-features = false }
+oncl-pdk = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 zeroize.workspace = true
 time.workspace = true
 base64 = { workspace = true, optional = true }
@@ -35,6 +39,11 @@ der.workspace = true
 base64.workspace = true
 time = { workspace = true, features = ["macros"] }
 lopdf.workspace = true
+wat.workspace = true
+
+[[test]]
+name = "plugin_access"
+required-features = ["plugins", "tokens"]
 
 [[test]]
 name = "key_sources"

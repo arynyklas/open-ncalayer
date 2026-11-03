@@ -118,8 +118,8 @@ impl Engine {
         let before = ctx.scope.progress();
         let digest = hash_source(input, request.spec.hash, &mut ctx.scope)?;
         let now = (services.clock)();
-        let transport =
-            DeadlineTransport::new(services.http.as_ref(), &services.network, &ctx.scope);
+        let scoped_http = ctx.http(services.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &services.network, &ctx.scope);
         let result = oncl_pki::tsp::acquire_document_timestamp(
             &request.spec,
             &digest,
@@ -164,8 +164,8 @@ impl Engine {
         let services = self.validation_context(ctx, Action::VerifyStamp)?;
         let before = ctx.scope.progress().bytes_in;
         let token = MetadataInput::read(token, &mut ctx.scope, oncl_pki::http::MAX_RESPONSE_LEN)?;
-        let transport =
-            DeadlineTransport::new(services.http.as_ref(), &services.network, &ctx.scope);
+        let scoped_http = ctx.http(services.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &services.network, &ctx.scope);
         let result = oncl_pki::tsp::validate_document_token(
             token.as_bytes(),
             &ValidationContext {

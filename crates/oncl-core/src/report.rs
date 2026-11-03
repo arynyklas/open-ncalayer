@@ -55,7 +55,8 @@ impl ValidationServices {
             .scope
             .reserve_metadata(oncl_pki::http::MAX_RESPONSE_LEN)?;
         ctx.scope.checkpoint()?;
-        let transport = DeadlineTransport::new(self.http.as_ref(), &self.network, &ctx.scope);
+        let scoped_http = ctx.http(self.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &self.network, &ctx.scope);
         let now = (self.clock)();
         let report = validation::validate_certificate(
             cert,
@@ -163,8 +164,8 @@ impl Engine {
         let _metadata = ctx.scope.reserve_metadata(bytes)?;
         let now = (services.clock)();
         ctx.scope.checkpoint()?;
-        let transport =
-            DeadlineTransport::new(services.http.as_ref(), &services.network, &ctx.scope);
+        let scoped_http = ctx.http(services.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &services.network, &ctx.scope);
         let result = validation::validate_cms(
             input,
             detached,
@@ -209,8 +210,8 @@ impl Engine {
         let _memory = ctx
             .scope
             .reserve_memory(request.opts.max_len.min(oncl_pki::http::MAX_RESPONSE_LEN))?;
-        let transport =
-            DeadlineTransport::new(services.http.as_ref(), &services.network, &ctx.scope);
+        let scoped_http = ctx.http(services.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &services.network, &ctx.scope);
         let result = transport.send(request);
         transport.finish()?;
         result.map_err(|_| OperationError::ValidationRequired)
@@ -234,8 +235,8 @@ impl Engine {
         }
         let services = self.validation_context(ctx, Action::Verify)?;
         let now = (services.clock)();
-        let transport =
-            DeadlineTransport::new(services.http.as_ref(), &services.network, &ctx.scope);
+        let scoped_http = ctx.http(services.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &services.network, &ctx.scope);
         #[cfg(feature = "pdf")]
         let mut pdf = None;
         #[cfg(feature = "xml")]

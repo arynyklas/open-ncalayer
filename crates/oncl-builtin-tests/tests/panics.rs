@@ -73,7 +73,7 @@ fn a_host_functions_panic_spoils_nothing_but_its_call() {
     // storage of the first call is scripted, and the key windows of the six that follow.
     let steps = [rsa(1)[..1].to_vec(), rsa(6)].concat();
     let scripted = Arc::new(ScriptedPrompter::new(steps));
-    let mut services = HostServices::new(
+    let mut services = HostServices::interactive(
         Arc::new(PanicOnKey::new(scripted.clone(), 1)),
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(MockTsa::new({
@@ -139,7 +139,7 @@ fn every_call_may_panic_and_the_pool_still_answers() {
             .chain(rsa(1))
             .collect(),
     ));
-    let mut services = HostServices::new(
+    let mut services = HostServices::interactive(
         Arc::new(PanicOnKey::new(scripted.clone(), 3)),
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(MockTsa::new({

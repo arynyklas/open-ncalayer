@@ -891,66 +891,7 @@ pub(crate) fn sign_cms_ex(
         CmsCerts::Chain => chain_of(state, args.handle)?,
         CmsCerts::Signer | CmsCerts::Extra(_) => Vec::new(),
     };
-    let certificates = match &args.certificates {
-        CmsCerts::Signer => CertSpec::Signer,
-        CmsCerts::Chain => CertSpec::Chain,
-        CmsCerts::Extra(certs) => CertSpec::Extra(
-            certs
-                .iter()
-                .map(|der| crypto::parse(der))
-                .collect::<HostResult<_>>()?,
-        ),
-    };
-    let oid =
-        |text: &str| ObjectIdentifier::new(text).map_err(|e| invalid(format!("OID {text:?}: {e}")));
-    let signing_time = match &args.attrs.signing_time {
-        None => None,
-        Some(time) => {
-            let at = match time.at {
-                TimeSource::Now => (state.services.clock)(),
-                TimeSource::UnixMs(ms) => {
-                    OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
-                        .map_err(|e| invalid(format!("signing time: {e}")))?
-                }
-            };
-            let form = match time.form {
-                abi::TimeForm::Auto => TimeForm::Auto,
-                abi::TimeForm::Utc => TimeForm::Utc,
-                abi::TimeForm::Generalized => TimeForm::Generalized,
-            };
-            Some((at, form))
-        }
-    };
-    let extra = args
-        .attrs
-        .extra
-        .iter()
-        .map(|attr| {
-            Ok((
-                oid(&attr.oid)?,
-                attr.values.iter().map(|v| v.to_vec()).collect(),
-            ))
-        })
-        .collect::<HostResult<_>>()?;
-    let spec = SignSpec {
-        content,
-        encapsulate: args.encapsulate,
-        cosign: match &args.cosign {
-            abi::CoSign::Auto => CoSign::Auto,
-            abi::CoSign::Never => CoSign::Never,
-            abi::CoSign::Into(cms) => CoSign::Into(into.unwrap_or(cms)),
-        },
-        econtent_type: args.econtent_type.as_deref().map(oid).transpose()?,
-        digest: args.digest.map(crypto::hash_alg),
-        attrs: AttrSpec {
-            content_type: args.attrs.content_type,
-            message_digest: args.attrs.message_digest,
-            signing_certificate_v2: args.attrs.signing_certificate_v2,
-            signing_time,
-            extra,
-        },
-        certificates,
-    };
+    let spec = cms_spec(args, content, into, state.services.clock)?;
     let entry = state.keys.get(args.handle)?;
     let der = cms::sign_spec(entry, &chain, &spec).map_err(|e| match e {
         CmsError::Key(_) | CmsError::UnknownAlgorithm(_) => cms_failed(e),
@@ -1209,4 +1150,74 @@ fn xml_failed(builtin: bool, e: xmldsig::XmlError) -> HostError {
 /// `keys_release`.
 pub(crate) fn keys_release(state: &mut HostState, args: Handle) -> HostResult<()> {
     state.keys.remove(args.handle)
+}
+
+/// Shared ABI selector translation; no authority, network or private key access.
+pub(crate) fn cms_spec<'a>(
+    args: &'a SignCmsExArgs,
+    content: Content<'a>,
+    into: Option<&'a [u8]>,
+    now: impl FnOnce() -> OffsetDateTime,
+) -> HostResult<SignSpec<'a>> {
+    let certificates = match &args.certificates {
+        CmsCerts::Signer => CertSpec::Signer,
+        CmsCerts::Chain => CertSpec::Chain,
+        CmsCerts::Extra(certs) => CertSpec::Extra(
+            certs
+                .iter()
+                .map(|der| crypto::parse(der))
+                .collect::<HostResult<_>>()?,
+        ),
+    };
+    let oid =
+        |text: &str| ObjectIdentifier::new(text).map_err(|e| invalid(format!("OID {text:?}: {e}")));
+    let signing_time = match &args.attrs.signing_time {
+        None => None,
+        Some(time) => {
+            let at = match time.at {
+                TimeSource::Now => now(),
+                TimeSource::UnixMs(ms) => {
+                    OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
+                        .map_err(|e| invalid(format!("signing time: {e}")))?
+                }
+            };
+            let form = match time.form {
+                abi::TimeForm::Auto => TimeForm::Auto,
+                abi::TimeForm::Utc => TimeForm::Utc,
+                abi::TimeForm::Generalized => TimeForm::Generalized,
+            };
+            Some((at, form))
+        }
+    };
+    let extra = args
+        .attrs
+        .extra
+        .iter()
+        .map(|attr| {
+            Ok((
+                oid(&attr.oid)?,
+                attr.values.iter().map(|v| v.to_vec()).collect(),
+            ))
+        })
+        .collect::<HostResult<_>>()?;
+    let spec = SignSpec {
+        content,
+        encapsulate: args.encapsulate,
+        cosign: match &args.cosign {
+            abi::CoSign::Auto => CoSign::Auto,
+            abi::CoSign::Never => CoSign::Never,
+            abi::CoSign::Into(cms) => CoSign::Into(into.unwrap_or(cms)),
+        },
+        econtent_type: args.econtent_type.as_deref().map(oid).transpose()?,
+        digest: args.digest.map(crypto::hash_alg),
+        attrs: AttrSpec {
+            content_type: args.attrs.content_type,
+            message_digest: args.attrs.message_digest,
+            signing_certificate_v2: args.attrs.signing_certificate_v2,
+            signing_time,
+            extra,
+        },
+        certificates,
+    };
+    Ok(spec)
 }
