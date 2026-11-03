@@ -92,6 +92,8 @@ impl Engine {
             signers: report.signers,
             pdf: Some(facts),
             ades_level,
+            #[cfg(feature = "xml")]
+            xml: None,
         })
     }
     pub(crate) fn extend_pades(
