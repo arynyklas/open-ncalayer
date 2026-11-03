@@ -40,8 +40,21 @@ pub struct ExtendRequest<'a> {
     pub(crate) limits: Option<EvidenceLimits>,
     #[cfg(feature = "pdf")]
     pub(crate) pdf_limits: Option<oncl_pdf::PdfLimits>,
+    #[cfg(feature = "xml")]
+    pub(crate) xml: Option<oncl_xml::XmlVerifyProfile>,
 }
 impl<'a> ExtendRequest<'a> {
+    #[cfg(feature = "xml")]
+    pub fn xml(level: AdesLevel) -> Self {
+        let mut request = Self::cms(level);
+        request.xml = Some(oncl_xml::XmlVerifyProfile::default());
+        request
+    }
+    #[cfg(feature = "xml")]
+    pub fn with_xml_profile(mut self, profile: oncl_xml::XmlVerifyProfile) -> Self {
+        self.xml = Some(profile);
+        self
+    }
     pub fn cms(level: AdesLevel) -> Self {
         Self {
             level,
@@ -55,6 +68,8 @@ impl<'a> ExtendRequest<'a> {
             limits: None,
             #[cfg(feature = "pdf")]
             pdf_limits: None,
+            #[cfg(feature = "xml")]
+            xml: None,
         }
     }
     #[cfg(feature = "pdf")]
@@ -146,6 +161,24 @@ impl Engine {
                 );
             }
             return self.extend_pades(request, limits, input, output, staged, ctx);
+        }
+        #[cfg(feature = "xml")]
+        if let Some(profile) = &request.xml {
+            if request.detached_requested {
+                return Err(
+                    ProcessingError::InvalidInput("XML does not accept detached input").into(),
+                );
+            }
+            return self.extend_xml_operation(
+                request.level,
+                profile,
+                &request.material,
+                request.limits,
+                input,
+                output,
+                staged,
+                ctx,
+            );
         }
         let validation = self.validation_context(ctx, Action::Extend)?;
         let temporary = self

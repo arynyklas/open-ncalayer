@@ -40,6 +40,8 @@ enum OperationResult {
         reports: [oncl_pki::validation::ValidationReport; 1],
         facts: oncl_pdf::PdfRevisionFacts,
     },
+    #[cfg(feature = "xml")]
+    Xml(oncl_xml::xades::XadesReport),
 }
 impl OperationReport {
     pub fn signer_count(&self) -> usize {
@@ -52,6 +54,8 @@ impl OperationReport {
                 .sum(),
             #[cfg(feature = "pdf")]
             OperationResult::PdfExtended { reports, .. } => reports[0].signers.len(),
+            #[cfg(feature = "xml")]
+            OperationResult::Xml(report) => report.verification.signatures().len(),
         }
     }
     /// All requested signers completed. Partial application is always an error,
@@ -115,6 +119,36 @@ impl OperationReport {
             #[cfg(feature = "pdf")]
             OperationResult::PdfExtended { reports, .. } => Some(reports),
             OperationResult::Signed(_) => None,
+            #[cfg(feature = "xml")]
+            OperationResult::Xml(report) => {
+                Some(std::slice::from_ref(&report.verification.validation))
+            }
+        }
+    }
+}
+#[cfg(feature = "xml")]
+impl OperationReport {
+    pub fn xml(&self) -> Option<&oncl_xml::XmlVerification> {
+        match &self.result {
+            OperationResult::Xml(report) => Some(&report.verification),
+            _ => None,
+        }
+    }
+    pub(crate) fn xml_operation(
+        id: OperationId,
+        profile: SignProfile,
+        provenance: SignProvenance,
+        applied: AppliedState,
+        report: oncl_xml::xades::XadesReport,
+    ) -> Self {
+        Self {
+            id,
+            profile,
+            provenance,
+            bytes_in: report.summary.bytes_in,
+            bytes_out: report.summary.bytes_out,
+            applied,
+            result: OperationResult::Xml(report),
         }
     }
 }
@@ -138,7 +172,7 @@ impl DigestSigner for StatusCheckedSigner<'_, '_> {
         self.signer.sign_digest(digest)
     }
 }
-enum Output<'a> {
+pub(crate) enum Output<'a> {
     Writer(&'a mut dyn Write),
     Staged(&'a mut StagedArtifact),
 }
@@ -177,6 +211,10 @@ impl Engine {
         if !Arc::ptr_eq(&ctx.owner, &self.identity) {
             return Err(OperationError::InvalidContext);
         }
+        #[cfg(feature = "xml")]
+        if let SignMode::Xml(key, profile, level) = request.mode {
+            return self.sign_xml_operation(key, profile, level, input, output, ctx);
+        }
         #[cfg(feature = "pdf")]
         if matches!(request.mode, SignMode::Pdf(..) | SignMode::Pades(..))
             && let Output::Staged(stage) = &output
@@ -203,6 +241,12 @@ impl Engine {
             }
             #[cfg(feature = "pdf")]
             SignMode::Pdf(key, _) | SignMode::Pades(key, ..) => (
+                std::slice::from_ref(key),
+                Action::Sign,
+                SignProvenance::Document,
+            ),
+            #[cfg(feature = "xml")]
+            SignMode::Xml(key, _, _) => (
                 std::slice::from_ref(key),
                 Action::Sign,
                 SignProvenance::Document,
@@ -385,6 +429,10 @@ impl Engine {
                 output,
                 &ctx.scope,
             ),
+            #[cfg(feature = "xml")]
+            SignMode::Xml(key, profile, level) => {
+                return self.sign_xml_operation(key, profile, level, input, output, ctx);
+            }
         };
         let transport_result = transport.finish();
         if let Err(error) = transport_result {

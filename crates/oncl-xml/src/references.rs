@@ -13,6 +13,8 @@ use oncl_pki::{
 };
 use roxmltree::Node;
 type Result<T, E = XmlSourceError> = std::result::Result<T, E>;
+#[path = "references/ades.rs"]
+pub(crate) mod ades;
 #[derive(Debug, thiserror::Error)]
 pub enum XmlSourceError {
     #[error(transparent)]
@@ -27,6 +29,8 @@ pub enum XmlSourceError {
     Malformed(&'static str),
     #[error("unsupported XML signature: {0}")]
     Unsupported(&'static str),
+    #[error("PKI evidence acquisition: {0}")]
+    Acquisition(String),
 }
 /// Host-selected source verification limits, not embedded trust/policy flags.
 /// Defaults: 16 signers, 1024 references across all signers/Manifests, 256 KiB
@@ -43,6 +47,9 @@ pub struct XmlVerifyProfile {
     pub max_metadata_bytes: usize,
     pub max_work: u64,
     pub max_manifest_depth: usize,
+    /// Minimum requested AdES level; carried proofs are always checked too.
+    pub required_level: Option<AdesLevel>,
+    pub evidence_limits: Option<EvidenceLimits>,
 }
 impl Default for XmlVerifyProfile {
     fn default() -> Self {
@@ -59,6 +66,8 @@ impl Default for XmlVerifyProfile {
             max_metadata_bytes: 262144,
             max_work: 1 << 40,
             max_manifest_depth: 8,
+            required_level: None,
+            evidence_limits: None,
         }
     }
 }
@@ -74,6 +83,7 @@ pub struct XmlSignerResult {
     pub signature_value: Region,
     pub algorithm: oncl_pki::key::SigAlg,
     pub certificate_sha256: [u8; 32],
+    pub level: Option<AdesLevel>,
     references: Vec<XmlReferenceResult>,
 }
 impl XmlSignerResult {
@@ -102,6 +112,18 @@ impl XmlVerification {
     pub fn signatures(&self) -> &[XmlSignerResult] {
         self.facts.signatures()
     }
+    /// Minimum actually validated format level, never a timestamp-presence or
+    /// failed/indeterminate-evidence promotion.
+    pub fn minimum_level(&self) -> Option<AdesLevel> {
+        if self.validation.verdict != oncl_pki::validation::Verdict::Valid {
+            return None;
+        }
+        self.signatures()
+            .iter()
+            .try_fold(AdesLevel::Lta, |minimum, signer| {
+                signer.level.map(|level| minimum.min(level))
+            })
+    }
 }
 impl XmlVerificationFacts {
     pub fn signatures(&self) -> &[XmlSignerResult] {
@@ -128,8 +150,14 @@ struct Metadata {
     value: BoundMetadata,
     certificate: BoundMetadata,
     targets: Vec<Region>,
-    proofs: Vec<ExtraMetadata>,
+    proofs: Vec<(oncl_pki::evidence::ProofKind, ExtraMetadata)>,
     evidence: Vec<(oncl_pki::evidence::EvidenceKind, ExtraMetadata)>,
+    key_info: Option<ExtraMetadata>,
+    signed_properties: Option<ExtraMetadata>,
+    unsigned: Vec<ExtraMetadata>,
+    objects: Vec<Region>,
+    qualifying: Option<Region>,
+    unsigned_container: Option<Region>,
 }
 struct Pending {
     depth: usize,
@@ -137,8 +165,14 @@ struct Pending {
     value: Option<BoundMetadata>,
     certificate: Option<BoundMetadata>,
     targets: Vec<Region>,
-    proofs: Vec<ExtraMetadata>,
+    proofs: Vec<(oncl_pki::evidence::ProofKind, ExtraMetadata)>,
     evidence: Vec<(oncl_pki::evidence::EvidenceKind, ExtraMetadata)>,
+    key_info: Option<ExtraMetadata>,
+    signed_properties: Option<ExtraMetadata>,
+    unsigned: Vec<ExtraMetadata>,
+    objects: Vec<Region>,
+    qualifying: Option<Region>,
+    unsigned_container: Option<Region>,
     key_info_seen: bool,
     x509_data_seen: bool,
 }
@@ -209,15 +243,18 @@ fn scan(
             .ok_or_else(|| invalid("missing XML name"))?;
         let ds = name.namespace() == Some(crate::DSIG_NS);
         let xades = name.namespace() == Some(crate::XADES_NS);
+        let archive = name.namespace() == Some("http://uri.etsi.org/01903/v1.4.1#")
+            && name.local() == "ArchiveTimeStamp";
         if matches!(
             name.namespace(),
             Some(
-                "http://uri.etsi.org/01903/v1.4.1#"
-                    | "http://uri.etsi.org/01903/v1.2.2#"
+                "http://uri.etsi.org/01903/v1.2.2#"
                     | "http://uri.etsi.org/01903/v1.1.1#"
                     | "http://uri.etsi.org/01903#"
             )
-        ) {
+        ) || (name.namespace() == Some("http://uri.etsi.org/01903/v1.4.1#")
+            && !matches!(name.local(), "ArchiveTimeStamp" | "TimeStampValidationData"))
+        {
             return Err(XmlSourceError::Unsupported("XAdES namespace/version"));
         }
         if event.kind == XmlEventKind::Start {
@@ -236,6 +273,12 @@ fn scan(
                     targets: Vec::new(),
                     proofs: Vec::new(),
                     evidence: Vec::new(),
+                    key_info: None,
+                    signed_properties: None,
+                    unsigned: Vec::new(),
+                    objects: Vec::new(),
+                    qualifying: None,
+                    unsigned_container: None,
                     key_info_seen: false,
                     x509_data_seen: false,
                 });
@@ -281,7 +324,7 @@ fn scan(
                 pending.targets.push(targets[0].value);
             }
             if xades
-                && (name.local().starts_with("ArchiveTimeStamp")
+                && (name.local().starts_with("ArchiveTimeStamp") && !archive
                     || (name.local().ends_with("TimeStamp")
                         && !matches!(name.local(), "SignatureTimeStamp" | "EncapsulatedTimeStamp")))
             {
@@ -292,6 +335,8 @@ fn scan(
                     1
                 } else if xades {
                     2
+                } else if archive {
+                    3
                 } else {
                     0
                 },
@@ -351,18 +396,21 @@ fn scan(
                         &path,
                         &[(2, "SignatureTimeStamp"), (2, "EncapsulatedTimeStamp")],
                     )
+                    && !suffix(
+                        &path,
+                        &[(3, "ArchiveTimeStamp"), (2, "EncapsulatedTimeStamp")],
+                    )
                 {
                     return Err(invalid("unbound EncapsulatedTimeStamp"));
                 }
-                if xades && name.local() == "SignatureTimeStamp" {
+                if (xades && name.local() == "SignatureTimeStamp") || archive {
                     if !suffix(
-                        &path,
+                        &path[..path.len().saturating_sub(1)],
                         &[
                             (1, "Object"),
                             (2, "QualifyingProperties"),
                             (2, "UnsignedProperties"),
                             (2, "UnsignedSignatureProperties"),
-                            (2, "SignatureTimeStamp"),
                         ],
                     ) {
                         return Err(invalid("signature timestamp location"));
@@ -371,7 +419,14 @@ fn scan(
                     if proof_count > 8 {
                         return Err(ProcessingError::MetadataLimit.into());
                     }
-                    pending.proofs.push(extra(event, profile, scope)?);
+                    pending.proofs.push((
+                        if archive {
+                            oncl_pki::evidence::ProofKind::Archive
+                        } else {
+                            oncl_pki::evidence::ProofKind::Signature
+                        },
+                        extra(event, profile, scope)?,
+                    ));
                 }
                 let kind = if xades {
                     match name.local() {
@@ -395,6 +450,69 @@ fn scan(
                     }
                     pending.evidence.push((kind, extra(event, profile, scope)?));
                 }
+                if ds && name.local() == "KeyInfo" && event.depth == pending.depth + 1 {
+                    unique(&mut pending.key_info, extra(event, profile, scope)?)?;
+                }
+                if xades && name.local() == "QualifyingProperties" {
+                    unique(&mut pending.qualifying, event.region)?;
+                }
+                if xades && name.local() == "UnsignedSignatureProperties" {
+                    if !suffix(
+                        &path,
+                        &[
+                            (1, "Object"),
+                            (2, "QualifyingProperties"),
+                            (2, "UnsignedProperties"),
+                            (2, "UnsignedSignatureProperties"),
+                        ],
+                    ) {
+                        return Err(invalid("unsigned signature properties location"));
+                    }
+                    unique(&mut pending.unsigned_container, event.region)?;
+                }
+                if xades && name.local() == "SignedProperties" {
+                    if !suffix(
+                        &path,
+                        &[
+                            (1, "Object"),
+                            (2, "QualifyingProperties"),
+                            (2, "SignedProperties"),
+                        ],
+                    ) {
+                        return Err(invalid("signed properties location"));
+                    }
+                    unique(
+                        &mut pending.signed_properties,
+                        extra(event, profile, scope)?,
+                    )?;
+                }
+                if suffix(
+                    &path[..path.len().saturating_sub(1)],
+                    &[
+                        (1, "Object"),
+                        (2, "QualifyingProperties"),
+                        (2, "UnsignedProperties"),
+                        (2, "UnsignedSignatureProperties"),
+                    ],
+                ) {
+                    if pending.unsigned.len() == 64 {
+                        return Err(ProcessingError::MetadataLimit.into());
+                    }
+                    pending.unsigned.push(extra(event, profile, scope)?);
+                }
+                if ds
+                    && name.local() == "Object"
+                    && event.depth == pending.depth + 1
+                    && !pending.targets.iter().any(|r| {
+                        r.offset >= event.region.offset
+                            && r.offset < event.region.offset + event.region.len
+                    })
+                {
+                    if pending.objects.len() == 64 {
+                        return Err(ProcessingError::MetadataLimit.into());
+                    }
+                    pending.objects.push(event.region);
+                }
                 if ds && name.local() == "Signature" && event.depth == pending.depth {
                     let pending = current.take().expect("active signature");
                     let (info, info_namespaces) =
@@ -412,6 +530,12 @@ fn scan(
                         targets: pending.targets,
                         proofs: pending.proofs,
                         evidence: pending.evidence,
+                        key_info: pending.key_info,
+                        signed_properties: pending.signed_properties,
+                        unsigned: pending.unsigned,
+                        objects: pending.objects,
+                        qualifying: pending.qualifying,
+                        unsigned_container: pending.unsigned_container,
                     });
                 }
             } else if xades {
@@ -655,7 +779,8 @@ struct ReferenceVerifier<'a> {
     scope: &'a mut ResourceScope,
     work: &'a mut u64,
     count: &'a mut usize,
-    checked: &'a mut ValidationReport,
+    failures: &'a mut Vec<FormatFailure>,
+    archive_references: Option<&'a mut oncl_pki::io::StagedArtifact>,
     results: &'a mut Vec<XmlReferenceResult>,
 }
 impl ReferenceVerifier<'_> {
@@ -858,20 +983,34 @@ impl ReferenceVerifier<'_> {
                 == expected
         };
         if !matches {
-            self.checked.invalidate_signer(
-                0,
-                if missing {
-                    FormatFailure::ReferenceTargetMissing
-                } else {
-                    FormatFailure::ReferenceDigestMismatch
-                },
-                self.scope,
-            )?;
+            self.failures.push(if missing {
+                FormatFailure::ReferenceTargetMissing
+            } else {
+                FormatFailure::ReferenceDigestMismatch
+            });
         }
         self.results.push(XmlReferenceResult {
             target,
             digest_matches: matches,
         });
+        if depth == 0
+            && !missing
+            && let Some(archive) = self.archive_references.as_deref_mut()
+        {
+            self.document.canonical_append(
+                Options {
+                    target,
+                    method,
+                    profile: self.profile.canonicalization,
+                    prefixes: &inclusive,
+                    excluded: &excluded,
+                    metadata_limit: None,
+                },
+                archive,
+                self.scope,
+                self.work,
+            )?;
+        }
         if reference.attribute("Type") == Some("http://www.w3.org/2000/09/xmldsig#Manifest")
             && !missing
         {
@@ -919,6 +1058,18 @@ pub fn verify_source(
     network: &NetworkPolicy,
     scope: &mut ResourceScope,
 ) -> Result<XmlVerification> {
+    let mut document = XmlDocument::index(input, &profile.xml, store, scope)?;
+    verify_document(&mut document, profile, store, ctx, network, scope)
+}
+pub(crate) fn verify_document(
+    mut document: &mut XmlDocument,
+    profile: &XmlVerifyProfile,
+    store: &TemporaryStore,
+    ctx: &ValidationContext<'_>,
+    network: &NetworkPolicy,
+    scope: &mut ResourceScope,
+) -> Result<XmlVerification> {
+    document.check_scope(scope)?;
     profile.xml.reservation()?;
     if profile.max_signers == 0
         || profile.max_signers > 64
@@ -938,7 +1089,6 @@ pub fn verify_source(
         + profile.xml.max_depth as u64 * (profile.xml.max_name_bytes as u64 + 128);
     let memory = scope.reserve_memory(retained)?;
     let metadata_guard = scope.reserve_metadata(retained)?;
-    let mut document = XmlDocument::index(input, &profile.xml, store, scope)?;
     let signatures = scan(&mut document, profile, scope)?;
     let scratch =
         (profile.max_metadata_bytes as u64) * 10 + profile.xml.max_namespace_bytes as u64 * 4;
@@ -1040,12 +1190,6 @@ pub fn verify_source(
                 return Err(invalid("qualifying properties bound to another signature"));
             }
         }
-        if signature.proofs.len() > 1 {
-            return Err(XmlError::UnsupportedAlgorithm(
-                "multiple independent SignatureTimeStamp proofs".into(),
-            )
-            .into());
-        }
         let signer = SignerEvidence {
             certificate: &certificate,
             algorithm: signature_algorithm,
@@ -1053,164 +1197,17 @@ pub fn verify_source(
             signature: &value,
             claimed_time: None,
         };
-        let evidence_limits = EvidenceLimits {
-            max_items: 24,
-            max_bytes: 24 * profile.max_metadata_bytes as u64,
-            max_item_bytes: profile.max_metadata_bytes as u64,
-            max_chain_len: 16,
-            max_proofs: 8,
-            max_coverage_parts: 256,
-            max_coverage_bytes: profile.max_work,
-        };
-        let mut evidence = EvidenceStore::new(store.clone(), evidence_limits, scope)?;
-        for (kind, item) in &signature.evidence {
-            let xml = metadata(
-                &mut document,
-                item.bound.0,
-                &item.bound.1,
-                profile.max_metadata_bytes,
-            )?;
-            let _parsed = parse_guards(scope, xml.len())?;
-            let parsed =
-                roxmltree::Document::parse(&xml).map_err(|_| invalid("embedded evidence XML"))?;
-            let bytes = base64(
-                parsed
-                    .root_element()
-                    .first_element_child()
-                    .ok_or_else(|| invalid("embedded evidence"))?,
-            )?;
-            evidence.collect(
-                *kind,
-                Source::sequential(&mut std::io::Cursor::new(&bytes), Some(bytes.len() as u64)),
-                oncl_pki::evidence::EvidenceOrigin::Embedded {
-                    label: "XML embedded evidence",
-                },
-            )?;
-        }
-        let mut bound_proofs = Vec::with_capacity(signature.proofs.len());
-        for proof in &signature.proofs {
-            use oncl_pki::evidence::{BoundSignatureRepresentation, EvidenceKind, EvidenceOrigin};
-            let xml = metadata(
-                &mut document,
-                proof.bound.0,
-                &proof.bound.1,
-                profile.max_metadata_bytes,
-            )?;
-            let _parsed = parse_guards(scope, xml.len())?;
-            let parsed =
-                roxmltree::Document::parse(&xml).map_err(|_| invalid("SignatureTimeStamp XML"))?;
-            let timestamp = parsed
-                .root_element()
-                .first_element_child()
-                .ok_or_else(|| invalid("SignatureTimeStamp"))?;
-            let canonical: Vec<_> = timestamp
-                .children()
-                .filter(|n| crate::is_ds(*n, "CanonicalizationMethod"))
-                .collect();
-            if canonical.len() > 1 {
-                return Err(invalid("timestamp canonicalization method"));
-            }
-            let (method, prefixes) = if let Some(canonical) = canonical.first() {
-                let uri = algorithm(*canonical)?;
-                (
-                    C14n::from_uri(uri).ok_or(XmlSourceError::Unsupported(
-                        "timestamp canonicalization URI",
-                    ))?,
-                    prefixes(*canonical)?,
-                )
-            } else {
-                (C14n::Inclusive, Vec::new())
-            };
-            let values: Vec<_> = timestamp
-                .children()
-                .filter(|n| {
-                    n.is_element()
-                        && n.tag_name().namespace() == Some(crate::XADES_NS)
-                        && n.tag_name().name() == "EncapsulatedTimeStamp"
-                })
-                .collect();
-            if values.len() != 1 {
-                return Err(invalid("encapsulated timestamp cardinality"));
-            }
-            if timestamp
-                .children()
-                .filter(Node::is_element)
-                .any(|n| !crate::is_ds(n, "CanonicalizationMethod") && n != values[0])
-            {
-                return Err(XmlError::UnsupportedAlgorithm(
-                    "timestamp include/transform coverage".into(),
-                )
-                .into());
-            }
-            let token = base64(values[0])?;
-            let (artifact, projections) = document.canonical_proof(
-                Options {
-                    target: Some(signature.value.0),
-                    method,
-                    profile: profile.canonicalization,
-                    prefixes: &prefixes,
-                    excluded: &[],
-                    metadata_limit: Some(profile.max_metadata_bytes as u64),
-                },
-                store,
-                scope,
-                &mut work,
-            )?;
-            let region = Region {
-                offset: 0,
-                len: artifact.len(),
-            };
-            let representation = BoundSignatureRepresentation::from_base64_projection(
-                artifact,
-                region,
-                &projections,
-                &signer,
-                &evidence_limits,
-                scope,
-            )?;
-            let token_id = evidence.collect(
-                EvidenceKind::Timestamp,
-                Source::sequential(&mut std::io::Cursor::new(&token), Some(token.len() as u64)),
-                EvidenceOrigin::Embedded {
-                    label: "XML SignatureTimeStamp",
-                },
-            )?;
-            bound_proofs.push((token_id, representation));
-        }
-        let mut bundle = evidence.finish();
-        let coverages: Vec<_> = bound_proofs
-            .iter()
-            .map(|(_, representation)| {
-                [oncl_pki::evidence::CoveragePart::BoundSignature(
-                    representation,
-                )]
-            })
-            .collect();
-        let proofs: Vec<_> = bound_proofs
-            .iter()
-            .zip(&coverages)
-            .map(
-                |((token, _), coverage)| oncl_pki::evidence::TimestampBinding {
-                    token: *token,
-                    kind: oncl_pki::evidence::ProofKind::Signature,
-                    coverage: coverage.as_slice(),
-                },
-            )
-            .collect();
-        let mut checked = validate_evidence(
-            &signer,
-            &mut bundle,
-            &proofs,
-            if proofs.is_empty() {
-                AdesLevel::B
-            } else {
-                AdesLevel::T
-            },
-            ctx,
-            network,
-            scope,
-        )?;
         let mut references = Vec::new();
+        let mut failures = Vec::new();
+        let mut archive_references = if signature
+            .proofs
+            .iter()
+            .any(|(kind, _)| *kind == oncl_pki::evidence::ProofKind::Archive)
+        {
+            Some(store.stage_source(scope)?)
+        } else {
+            None
+        };
         ReferenceVerifier {
             document: &mut document,
             profile,
@@ -1219,16 +1216,34 @@ pub fn verify_source(
             scope,
             work: &mut work,
             count: &mut count,
-            checked: &mut checked,
+            failures: &mut failures,
+            archive_references: archive_references.as_mut(),
             results: &mut references,
         }
         .verify_all(info, 0, &mut Vec::new())?;
+        let (mut checked, level) = ades::check_carried_evidence(
+            &mut document,
+            signature,
+            info,
+            signer,
+            profile,
+            store,
+            archive_references.as_mut(),
+            ctx,
+            network,
+            scope,
+            &mut work,
+        )?;
+        for failure in failures {
+            checked.invalidate_signer(0, failure, scope)?;
+        }
         records.push(XmlSignerResult {
             signature: signature.signature,
             signed_info: signature.info,
             signature_value: signature.value.0,
             algorithm: signature_algorithm,
             certificate_sha256,
+            level,
             references,
         });
         if let Some(report) = combined.as_mut() {

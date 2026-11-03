@@ -242,6 +242,8 @@ impl Engine {
         let mut pdf = None;
         #[cfg(feature = "xml")]
         let mut xml = None;
+        #[cfg(feature = "xml")]
+        let mut ades_level = None;
         let result = match request.profile() {
             // CAdES is dispatched before constructing the generic transport above.
             // Keep the real handler here as well so the profile match stays exhaustive.
@@ -311,7 +313,9 @@ impl Engine {
                 }
             }
             #[cfg(feature = "xml")]
-            crate::VerifyProfile::Xml | crate::VerifyProfile::XmlKalkan => {
+            crate::VerifyProfile::Xml
+            | crate::VerifyProfile::XmlKalkan
+            | crate::VerifyProfile::Xades(_) => {
                 if detached.is_some() {
                     return Err(OperationError::Processing(
                         oncl_pki::resource::ProcessingError::InvalidInput(
@@ -326,6 +330,10 @@ impl Engine {
                         oncl_xml::C14nProfile::Standard
                     },
                     allowed_signature_algorithms: ctx.policy.allowed_signature_algorithms,
+                    required_level: match request.profile() {
+                        crate::VerifyProfile::Xades(level) => Some(level),
+                        _ => None,
+                    },
                     ..oncl_xml::XmlVerifyProfile::default()
                 };
                 match oncl_xml::verify_source(
@@ -345,6 +353,7 @@ impl Engine {
                     &mut ctx.scope,
                 ) {
                     Ok(report) => {
+                        ades_level = report.minimum_level();
                         xml = Some(report.facts);
                         Ok(report.validation)
                     }
@@ -373,6 +382,9 @@ impl Engine {
             signers: report.signers,
             #[cfg(feature = "pdf")]
             pdf,
+            #[cfg(feature = "xml")]
+            ades_level,
+            #[cfg(not(feature = "xml"))]
             ades_level: None,
             #[cfg(feature = "xml")]
             xml,

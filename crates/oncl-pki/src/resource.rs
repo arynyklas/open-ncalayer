@@ -348,6 +348,11 @@ impl ResourceScope {
             .min(representable)
             .min(capacity as u64) as usize)
     }
+    /// An actually over-consumed format-bound input is terminal for this same
+    /// operation, even when the format cap is below the resource-wide cap.
+    pub(crate) fn terminate_input_limit(&self) {
+        lock(&self.state.usage).input_terminal = true;
+    }
     /// Unlike pre-admission accounting, an actual successful read is irrevocable.
     /// Do not call cancellation/deadline code until its bytes have been recorded.
     pub(crate) fn consumed_input(&self, bytes: u64) -> Result<(), ProcessingError> {

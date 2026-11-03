@@ -30,6 +30,9 @@ mod plugin_probe;
 #[cfg(feature = "xml")]
 #[path = "sdk_probe/xml.rs"]
 mod xml_probe;
+#[cfg(feature = "xml")]
+#[path = "sdk_probe/xml_sign.rs"]
+mod xml_sign_probe;
 
 struct Control;
 impl OperationControl for Control {
@@ -50,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | "C03"
                 | "X01"
                 | "X03"
+                | "X04"
                 | "P01"
                 | "P02"
                 | "P03"
@@ -114,6 +118,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "C03" => cades_probe::run(std::path::Path::new(&out)),
+            "X04" => {
+                #[cfg(feature = "xml")]
+                {
+                    xml_sign_probe::run(std::path::Path::new(&out))
+                }
+                #[cfg(not(feature = "xml"))]
+                {
+                    Err("X04 probe requires the xml feature".into())
+                }
+            }
             "X03" => {
                 #[cfg(feature = "xml")]
                 {
@@ -167,7 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command.as_deref() != Some("hash") {
         return Err(
-            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|X03|P01|P02|P03|J01|I01|B01|L01> --out <directory>".into(),
+            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|X03|X04|P01|P02|P03|J01|I01|B01|L01> --out <directory>".into(),
         );
     }
     let mut algorithm = None;

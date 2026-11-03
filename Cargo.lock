@@ -4160,6 +4160,7 @@ dependencies = [
  "oncl-testkit",
  "oncl-token",
  "oncl-xml",
+ "roxmltree",
  "serde",
  "serde_json",
  "tempfile",
@@ -4167,6 +4168,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wat",
+ "x509-cert",
  "zeroize",
 ]
 

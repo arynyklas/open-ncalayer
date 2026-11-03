@@ -1758,3 +1758,282 @@ fn pdf_token_backends_verify_real_rsa_and_gost_signatures() {
         assert_eq!(guard.events.lock().unwrap()[0].action, Action::Sign);
     }
 }
+
+#[cfg(feature = "xml")]
+#[test]
+fn xml_core_source_guard_reports_and_keyless_lta_renewal() {
+    use oncl_core::{CadesConfiguration, ExtendRequest, VerifyRequest};
+    use oncl_pki::{
+        crl::MockCrl,
+        evidence::{AdesLevel, EvidenceLimits},
+        http::{HttpTransport, RouteTransport},
+        ocsp::MockOcsp,
+        tsp::{MockTsa, TsaProfile, TsaSpec},
+        validation::{NetworkPolicy, Verdict},
+    };
+    let guard = Arc::new(Guard::default());
+    let key = selector("user-rsa-sign");
+    let mut tsa = TsaSpec::from(TsaProfile::kalkan_default());
+    tsa.url = "http://tsa.synthetic.test".into();
+    let routes = Arc::new(RouteTransport::new(vec![
+        (
+            tsa.url.clone(),
+            Arc::new(MockTsa::new(issued("tsa-gost2015")).with_gen_time(NOW))
+                as Arc<dyn HttpTransport>,
+        ),
+        (
+            "http://ocsp.synthetic.test".into(),
+            Arc::new(MockOcsp::new(raw("ocsp-gost2015")).with_now(NOW)),
+        ),
+        (
+            "http://crl.synthetic.test/root-gost2015.crl".into(),
+            Arc::new(
+                MockCrl::new(raw("root-gost2015.key"))
+                    .with_this_update(NOW - time::Duration::MINUTE)
+                    .next_update(Some(NOW + time::Duration::HOUR)),
+            ),
+        ),
+        (
+            "http://crl.synthetic.test/inter-gost2015.crl".into(),
+            Arc::new(
+                MockCrl::new(raw("inter-gost2015.key"))
+                    .with_this_update(NOW - time::Duration::MINUTE)
+                    .next_update(Some(NOW + time::Duration::HOUR)),
+            ),
+        ),
+    ]));
+    let validation = || {
+        ValidationServices::new(
+            oncl_pki::pkix::CaSet::new(vec![raw("root-gost2015.key").cert]),
+            vec![raw("inter-gost2015.key").cert],
+            routes.clone(),
+            NetworkPolicy::only_endpoints([
+                "http://tsa.synthetic.test",
+                "http://ocsp.synthetic.test",
+                "http://crl.synthetic.test",
+            ])
+            .unwrap(),
+            Arc::new(|| NOW),
+        )
+    };
+    let cap = ResourceLimits::default();
+    let shared = Arc::new(oncl_pki::resource::SharedBudget::new(cap.clone()).unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(dir.path()).unwrap();
+    let engine = Engine::new(
+        EngineServices::hash_only(cap.clone())
+            .with_shared_budget(shared.clone())
+            .with_keys(Arc::new(KeySources::new()), guard.clone())
+            .with_validation(validation())
+            .with_temporary_store(store.clone()),
+    )
+    .unwrap();
+    let mut ctx = begin(
+        &engine,
+        &key,
+        &[Action::Sign],
+        OperationPolicy::strict_online(),
+        Arc::new(Control::default()),
+    );
+    let profile = oncl_xml::XmlSignProfile {
+        target: Some("p"),
+        parent: Some("s"),
+        signature_id: Some("sig"),
+        ..Default::default()
+    };
+    let mut bytes = Vec::new();
+    let report = engine
+        .sign(
+            SignRequest::xades(
+                KeyRequest::new(&key, Some("C02 synthetic")),
+                profile,
+                AdesLevel::B,
+            ),
+            Source::sequential(
+                &mut Cursor::new(b"<r><p Id='p'>protected</p><s Id='s'/></r>"),
+                None,
+            ),
+            &mut bytes,
+            &mut ctx,
+        )
+        .unwrap();
+    assert_eq!(report.applied, AppliedState::Applied);
+    assert_eq!(report.xml().unwrap().validation.verdict, Verdict::Valid);
+    assert_eq!(guard.events.lock().unwrap().len(), 1);
+    drop(report);
+    drop(ctx);
+    // A completely keyless host can extend and renew; no fake missing-provider branch.
+    let keyless = Engine::new(
+        EngineServices::hash_only(cap)
+            .with_shared_budget(shared)
+            .with_validation(validation())
+            .with_temporary_store(store)
+            .with_cades(CadesConfiguration::new(
+                EvidenceLimits {
+                    max_items: 24,
+                    max_bytes: 6291456,
+                    max_item_bytes: 262144,
+                    max_chain_len: 16,
+                    max_proofs: 8,
+                    max_coverage_parts: 256,
+                    max_coverage_bytes: 1 << 40,
+                },
+                tsa,
+            )),
+    )
+    .unwrap();
+    for level in [AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta, AdesLevel::Lta] {
+        let mut ctx = keyless
+            .begin(
+                ExecutionGrant::new([Action::Extend]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control::default()),
+            )
+            .unwrap();
+        let mut out = Vec::new();
+        let report = keyless
+            .extend(
+                &ExtendRequest::xml(level),
+                Source::sequential(&mut Cursor::new(&bytes), None),
+                &mut out,
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(report.applied, AppliedState::NotApplied);
+        assert_eq!(report.xml().unwrap().signatures()[0].level, Some(level));
+        assert_eq!(report.xml().unwrap().validation.verdict, Verdict::Valid);
+        bytes = out;
+    }
+    assert_eq!(guard.events.lock().unwrap().len(), 1);
+    let mut ctx = keyless
+        .begin(
+            ExecutionGrant::new([Action::Verify]),
+            OperationPolicy::strict_online(),
+            Arc::new(Control::default()),
+        )
+        .unwrap();
+    let report = keyless
+        .verify(
+            &VerifyRequest::xades(AdesLevel::Lta),
+            Source::sequential(&mut Cursor::new(&bytes), None),
+            None,
+            &mut ctx,
+        )
+        .unwrap();
+    assert_eq!(report.ades_level, Some(AdesLevel::Lta));
+    assert_eq!(
+        report.xml.unwrap().signatures()[0].level,
+        Some(AdesLevel::Lta)
+    );
+}
+
+#[cfg(feature = "xml")]
+#[test]
+fn xml_tsa_preflight_rejects_configuration_before_intake_key_open_and_guard() {
+    use oncl_core::{
+        CadesConfiguration,
+        keys::{KeyLease, KeyProvider},
+    };
+    use oncl_pki::{
+        evidence::{AdesLevel, EvidenceLimits},
+        http::NonceSpec,
+        tsp::{TsaProfile, TsaSpec},
+    };
+    struct Provider {
+        opens: Arc<AtomicUsize>,
+        inner: KeySources,
+    }
+    impl KeyProvider for Provider {
+        fn open(
+            &self,
+            r: &KeyRequest<'_>,
+            ctx: &mut OperationContext,
+        ) -> Result<KeyLease, OperationError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            self.inner.open(r, ctx)
+        }
+    }
+    struct Input {
+        reads: Arc<AtomicUsize>,
+        inner: Cursor<&'static [u8]>,
+    }
+    impl io::Read for Input {
+        fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            io::Read::read(&mut self.inner, b)
+        }
+    }
+    let key = selector("user-rsa-sign");
+    let dir = tempfile::tempdir().unwrap();
+    for case in 0..6 {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let guard = Arc::new(Guard::default());
+        let mut tsa = TsaSpec::from(TsaProfile::kalkan_default());
+        match case {
+            0 => tsa.cert_req = false,
+            1 => tsa.policy = None,
+            2 => tsa.nonce = NonceSpec::None,
+            3 => tsa.retries = 3,
+            4 => tsa.timeout = std::time::Duration::ZERO,
+            _ => tsa.nonce = NonceSpec::Random(0),
+        }
+        let engine = Engine::new(
+            EngineServices::hash_only(ResourceLimits::default())
+                .with_validation(validation())
+                .with_temporary_store(TemporaryStore::new(dir.path()).unwrap())
+                .with_keys(
+                    Arc::new(Provider {
+                        opens: opens.clone(),
+                        inner: KeySources::new(),
+                    }),
+                    guard.clone(),
+                )
+                .with_cades(CadesConfiguration::new(
+                    EvidenceLimits {
+                        max_items: 24,
+                        max_bytes: 6291456,
+                        max_item_bytes: 262144,
+                        max_chain_len: 16,
+                        max_proofs: 8,
+                        max_coverage_parts: 256,
+                        max_coverage_bytes: 1 << 40,
+                    },
+                    tsa,
+                )),
+        )
+        .unwrap();
+        let mut ctx = begin(
+            &engine,
+            &key,
+            &[Action::Sign],
+            OperationPolicy::strict_online(),
+            Arc::new(Control::default()),
+        );
+        let mut input = Input {
+            reads: reads.clone(),
+            inner: Cursor::new(b"<r/>"),
+        };
+        let mut out = Vec::new();
+        let error = engine
+            .sign(
+                SignRequest::xades(
+                    KeyRequest::new(&key, Some("C02 synthetic")),
+                    oncl_xml::XmlSignProfile {
+                        signature_id: Some("sig"),
+                        ..Default::default()
+                    },
+                    AdesLevel::T,
+                ),
+                Source::sequential(&mut input, None),
+                &mut out,
+                &mut ctx,
+            )
+            .unwrap_err();
+        assert_eq!(error.applied_state(), AppliedState::NotApplied);
+        assert_eq!(reads.load(Ordering::SeqCst), 0, "case {case}");
+        assert_eq!(opens.load(Ordering::SeqCst), 0);
+        assert!(guard.events.lock().unwrap().is_empty());
+        assert!(out.is_empty());
+    }
+}

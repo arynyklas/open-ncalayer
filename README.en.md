@@ -558,10 +558,12 @@ and a separate later incremental update. The virtual xref-above-4-GiB test prove
 only arithmetic/seek handling, not meaningful 10-GiB PDF processing or a 1-GiB RSS
 ceiling: those remain V01 acceptance gates.
 
-The optional `oncl-core/xml` feature adds UTF-8 Source **verification** through
-`VerifyRequest::xml()` (standard C14N) or explicit `VerifyRequest::xml_kalkan()`
-byte compatibility. Configure host `ValidationServices` and `TemporaryStore`;
-requests cannot choose trust anchors or network policy. `oncl-xml::verify_source`
+The optional `oncl-core/xml` feature provides UTF-8 Source sign/Add/verify and
+keyless evidence extension through `SignRequest::xml/xades`,
+`VerifyRequest::xml/xades` and `ExtendRequest::xml`. Explicit
+`VerifyRequest::xml_kalkan()` selects old Kalkan byte compatibility. Configure
+host `ValidationServices`, `TemporaryStore` and shared `CadesConfiguration` TSA;
+requests cannot expand trust anchors or network policy. `oncl-xml::verify_source`
 checks every real SignedInfo, certificate, SignatureValue and Reference. Scoped
 per-signer facts retain the actual certificate SHA-256 and exact covered regions.
 One canonical writer serves bounded DOM and indexed raw-span inputs; large XML
@@ -572,13 +574,23 @@ namespace-bound `not(ancestor-or-self::ds:Signature)` XPath filter. Enveloped
 excludes the current signature; excluding later signatures is explicit
 `KalkanLegacy` compatibility only. Ambiguous IDs/KeyInfo/X509Data and unsupported
 transforms fail; uncovered-node changes are not attributed to a signature.
-XAdES 1.3.2 SignatureTimeStamp binds the actual canonical source SignatureValue
-through a closed Base64 projection and F03/F04, including current TSA status.
-This is not an achieved-AdES-level claim: archive coverage, other XAdES versions
-and multiple independent SignatureTimeStamp proofs are explicitly unsupported.
-Large XML sign/Add and WSSE are not added. Existing bounded limits and CMS/PDF
-signing remain unchanged. Internal hashing/evidence intake spends no final-output
-quota; external `copy_entry` admits and charges every delivery before writing.
+XAdES B/T/LT/LTA uses F03/F04, not timestamp-element presence. SignatureTimeStamp
+1.3.2 covers the complete canonical SignatureValue. The chosen archive profile
+is EN 319 132-1 V1.2.1 section 5.5.2.2 non-distributed ArchiveTimeStamp 1.4.1:
+actual transformed References, SignedInfo/SignatureValue/KeyInfo, every prior
+unsigned property and other Objects, in normative order. Extend/renewal checks
+all old/current proofs without a KeyProvider or Sign guard. A verified minimum
+level requires Valid; unsupported versions/distributed archive coverage/multiple
+independent signature-time proofs never become a lower-level Valid result.
+`oncl-xml::sign_spec_source` exposes bounded XmlSignSpec through DigestSigner and
+the original ResourceScope, retaining selectors/placement/output/layout/limits
+and sharing the actual metadata/crypto builder and canonical writer. Source
+signing never constructs a large document DOM. Add preserves old signatures,
+but a standard whole-document reference may be invalidated by later Add.
+Large XML WSSE is not added. Internal hash/evidence replay spends no final-output
+quota; external `copy_entry` charges every delivery. OUTPUT-derived captures
+remain OUTPUT and a failed closed output transaction cannot publish after the
+host clears cancellation.
 
 Run `cargo test -p oncl-xml --features testing`, then
 `cargo run -p oncl-core --features xml --example sdk_probe -- --case X03 --out target/x03-smoke`.
@@ -633,6 +645,18 @@ negative controls, use pyHanko 0.38+:
 `python crates/oncl-core/examples/sdk_probe/pades_oracle.py --out target/p03-smoke`.
 These synthetic-root checks are not qualified/NCA certification, an independent
 GOST matrix, or the meaningful 2/4/10-GiB PDF, RSS and platform V01 gates.
+
+X04 performs actual sign/Add/LTA over a substantive protected reference larger
+than 64 MiB, content/evidence mutations and private-use counts; its bounded Core
+matrix covers B/T/LT/LTA/renewal. PKI uses only explicitly pinned loopback:
+`cargo run -p oncl-core --features xml --release --example sdk_probe -- --case X04 --out target/x04-smoke`.
+Run the independent oracle:
+`python crates/oncl-core/examples/sdk_probe/xml_xades_oracle.py --out target/x04-smoke`.
+It compares exact canonical/archive bytes, RSA XML/CMS math, RFC3161 nonce,
+issuer-bound synthetic RSA status, normative order/coverage and negative controls.
+This is a bounded direct-root profile, not a general PKIX/XAdES validator or an
+independent GOST, 10-GiB or peak-RSS proof.
+
 
 
 

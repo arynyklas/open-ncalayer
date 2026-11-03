@@ -32,6 +32,11 @@ use oncl_pki::tsp::{self, TsaSpec, TspError};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use time::OffsetDateTime;
+pub(crate) mod source;
+pub use source::{
+    XadesReport, XadesServices, XadesSourceSpec, extend_source, extend_staged, extend_transaction,
+    prepare_source, sign_prepared, sign_source, sign_staged,
+};
 
 /// The `DigestMethod` of `SigningCertificateV2`.
 const SHA256_URI: &str = "http://www.w3.org/2001/04/xmlenc#sha256";

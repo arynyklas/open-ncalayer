@@ -19,7 +19,10 @@ use crate::resource::{IO_CHUNK_BYTES, ProcessingError, ResourceReservation, Reso
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 #[path = "io/byte_string.rs"]
 mod byte_string;
 pub use byte_string::{decode_pdf_byte_string, padded_der_sequence};
@@ -34,11 +37,15 @@ pub use metadata::MetadataInput;
 #[path = "io/pdf_snapshot.rs"]
 mod pdf_snapshot;
 pub use pdf_snapshot::{PdfSnapshot, PdfSnapshotCoverage, PdfSnapshotReader};
+#[path = "io/xml_output.rs"]
+mod xml_output;
+pub use xml_output::XmlSignatureOutput;
 
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek + ?Sized> ReadSeek for T {}
 trait SnapshotReader: ReadSeek {
     fn finish_snapshot(&mut self) -> Result<(), ProcessingError>;
+    fn invalidate_snapshot(&mut self);
 }
 
 enum Reader<'a> {
@@ -55,6 +62,7 @@ pub struct Source<'a> {
     reader: Reader<'a>,
     len: Option<u64>,
     admitted: Option<ResourceScope>,
+    output_failure: Option<Arc<AtomicBool>>,
 }
 impl<'a> Source<'a> {
     pub fn sequential(reader: &'a mut dyn Read, len: Option<u64>) -> Self {
@@ -62,6 +70,7 @@ impl<'a> Source<'a> {
             reader: Reader::Sequential(reader),
             len,
             admitted: None,
+            output_failure: None,
         }
     }
     pub fn seekable(reader: &'a mut dyn ReadSeek, len: Option<u64>) -> Self {
@@ -69,6 +78,7 @@ impl<'a> Source<'a> {
             reader: Reader::Seekable(reader),
             len,
             admitted: None,
+            output_failure: None,
         }
     }
     pub fn known_len(&self) -> Option<u64> {
@@ -97,6 +107,12 @@ impl<'a> Source<'a> {
         match &mut self.reader {
             Reader::Snapshot(reader) | Reader::OutputProjection(reader) => reader.finish_snapshot(),
             _ => Ok(()),
+        }
+    }
+    fn invalidate_output_projection(&mut self) {
+        if let Reader::OutputProjection(reader) = &mut self.reader {
+            reader.invalidate_snapshot();
+            mark_output_failure(&self.output_failure);
         }
     }
     pub fn as_seekable(&mut self) -> Option<&mut dyn ReadSeek> {
@@ -179,6 +195,7 @@ impl TemporaryStore {
             _metadata: metadata,
             failed: false,
             source,
+            output_failure: None,
         })
     }
 }
@@ -198,15 +215,29 @@ pub struct StagedArtifact {
     _metadata: ResourceReservation,
     failed: bool,
     source: bool,
+    output_failure: Option<Arc<AtomicBool>>,
 }
 impl StagedArtifact {
+    fn attach_output_failure(&mut self) -> Arc<AtomicBool> {
+        let failed = self.failed;
+        self.output_failure
+            .get_or_insert_with(|| Arc::new(AtomicBool::new(failed)))
+            .clone()
+    }
+    fn is_failed(&self) -> bool {
+        self.failed
+            || self
+                .output_failure
+                .as_ref()
+                .is_some_and(|state| state.load(Ordering::SeqCst))
+    }
     pub(crate) fn check_source_binding(
         &self,
         scope: &ResourceScope,
     ) -> Result<(), ProcessingError> {
         scope.checkpoint()?;
         self.scope.checkpoint()?;
-        if !self.source || self.failed || !self.scope.same_operation(scope) {
+        if !self.source || self.is_failed() || !self.scope.same_operation(scope) {
             return Err(ProcessingError::InvalidInput(
                 "immutable source binding owner/role",
             ));
@@ -215,7 +246,8 @@ impl StagedArtifact {
     }
     pub(crate) fn check_sign_output(&self, scope: &ResourceScope) -> Result<(), ProcessingError> {
         scope.checkpoint()?;
-        if !self.scope.same_operation(scope) || self.source || self.failed || !self.is_empty() {
+        if !self.scope.same_operation(scope) || self.source || self.is_failed() || !self.is_empty()
+        {
             return Err(ProcessingError::InvalidInput(
                 "sign output requires an empty live output artifact from this operation",
             ));
@@ -227,7 +259,8 @@ impl StagedArtifact {
         scope: &ResourceScope,
     ) -> Result<(), ProcessingError> {
         scope.checkpoint()?;
-        if !self.scope.same_operation(scope) || !self.source || self.failed || !self.is_empty() {
+        if !self.scope.same_operation(scope) || !self.source || self.is_failed() || !self.is_empty()
+        {
             return Err(ProcessingError::InvalidInput(
                 "internal output requires an empty live source artifact from this operation",
             ));
@@ -236,6 +269,7 @@ impl StagedArtifact {
     }
     pub(crate) fn fail_sign_output(&mut self) {
         self.failed = true;
+        mark_output_failure(&self.output_failure);
     }
     fn check_pdf_live_output(&mut self, scope: &ResourceScope) -> Result<(), ProcessingError> {
         // Foreign/SOURCE artifacts are not ours to poison. Once the immutable
@@ -246,7 +280,8 @@ impl StagedArtifact {
                 "PDF requires live same-operation OUTPUT",
             ));
         }
-        let result = if self.failed || self.file.is_none() {
+        self.attach_output_failure();
+        let result = if self.is_failed() || self.file.is_none() {
             Err(ProcessingError::InvalidInput(
                 "PDF output is failed or closed",
             ))
@@ -256,7 +291,7 @@ impl StagedArtifact {
             current.and(original)
         };
         if result.is_err() {
-            self.failed = true;
+            self.fail_sign_output();
         }
         result
     }
@@ -276,8 +311,19 @@ impl StagedArtifact {
         region: Region,
         output: &mut [u8],
     ) -> Result<usize, ProcessingError> {
+        let result = self.read_region_inner(region, output);
+        if result.is_err() && self.output_failure.is_some() {
+            self.fail_sign_output();
+        }
+        result
+    }
+    fn read_region_inner(
+        &mut self,
+        region: Region,
+        output: &mut [u8],
+    ) -> Result<usize, ProcessingError> {
         self.scope.checkpoint()?;
-        if self.failed {
+        if self.is_failed() {
             return Err(ProcessingError::InvalidInput(
                 "artifact has an incomplete write",
             ));
@@ -333,8 +379,15 @@ impl StagedArtifact {
         result
     }
     pub fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), ProcessingError> {
+        let result = self.write_chunk_inner(bytes);
+        if result.is_err() && self.output_failure.is_some() {
+            self.fail_sign_output();
+        }
+        result
+    }
+    fn write_chunk_inner(&mut self, bytes: &[u8]) -> Result<(), ProcessingError> {
         self.scope.checkpoint()?;
-        if self.failed {
+        if self.is_failed() {
             return Err(ProcessingError::InvalidInput(
                 "artifact has an incomplete write",
             ));
@@ -368,7 +421,7 @@ impl StagedArtifact {
                 "source snapshot cannot be published",
             ));
         }
-        if self.failed {
+        if self.is_failed() {
             return Err(ProcessingError::InvalidInput(
                 "artifact has an incomplete write",
             ));
@@ -393,7 +446,7 @@ impl StagedArtifact {
                 "source snapshot cannot be delivered",
             ));
         }
-        if self.failed {
+        if self.is_failed() {
             return Err(ProcessingError::InvalidInput(
                 "artifact has an incomplete write",
             ));
@@ -434,6 +487,12 @@ impl StagedArtifact {
         output.flush()?;
         self.scope.checkpoint()?;
         Ok(copied)
+    }
+}
+
+fn mark_output_failure(failure: &Option<Arc<AtomicBool>>) {
+    if let Some(state) = failure {
+        state.store(true, Ordering::SeqCst);
     }
 }
 impl Drop for StagedArtifact {

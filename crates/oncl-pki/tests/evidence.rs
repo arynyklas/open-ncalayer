@@ -3365,3 +3365,434 @@ fn bound_signature_representation_retains_admission_and_rejects_foreign_bundle()
     drop(bound);
     assert!(budget.begin(cap, Arc::new(Control)).is_ok());
 }
+
+#[test]
+fn bound_archive_representation_covers_exact_current_value_and_prior_evidence() {
+    use oncl_pki::evidence::{BoundArchiveRepresentation, BoundSignatureRepresentation};
+    let fixture = Fixture::new();
+    let mut resources = scope();
+    let parent = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(parent.path()).unwrap();
+    let value = format!("<v>{}</v>", STANDARD.encode(&fixture.signature)).into_bytes();
+    let mut stage = store.stage_source(&mut resources).unwrap();
+    stage.write_chunk(&value).unwrap();
+    let bound = BoundSignatureRepresentation::from_base64_projection(
+        stage,
+        Region {
+            offset: 0,
+            len: value.len() as u64,
+        },
+        &[Region {
+            offset: 3,
+            len: (value.len() - 7) as u64,
+        }],
+        &fixture.signer(),
+        &evidence_limits(),
+        &resources,
+    )
+    .unwrap();
+    let mut evidence =
+        EvidenceStore::new(store.clone(), evidence_limits(), &mut resources).unwrap();
+    let signature_token = fixture.token(&value, PROVEN);
+    let mut prior = vec![(
+        collect(&mut evidence, EvidenceKind::Timestamp, &signature_token),
+        signature_token,
+    )];
+    for (kind, bytes) in fixture.payloads(Status::Good, Status::Good) {
+        prior.push((collect(&mut evidence, kind, &bytes), bytes));
+    }
+    let mut canonical = b"<data>actual transformed reference</data><SignedInfo/>".to_vec();
+    let signature_region = Region {
+        offset: canonical.len() as u64,
+        len: value.len() as u64,
+    };
+    canonical.extend_from_slice(&value);
+    let mut projections = Vec::new();
+    for (id, bytes) in &prior {
+        canonical.extend_from_slice(b"<e>");
+        let encoded = STANDARD.encode(bytes);
+        let span = Region {
+            offset: canonical.len() as u64,
+            len: encoded.len() as u64,
+        };
+        canonical.extend_from_slice(encoded.as_bytes());
+        canonical.extend_from_slice(b"</e>");
+        projections.push((*id, vec![span]));
+    }
+    let archive_token = fixture.token(&canonical, ARCHIVE);
+    let archive_id = collect(&mut evidence, EvidenceKind::Timestamp, &archive_token);
+    let mut bundle = evidence.finish();
+    let mut stage = store.stage_source(&mut resources).unwrap();
+    stage.write_chunk(&canonical).unwrap();
+    let groups: Vec<_> = projections
+        .iter()
+        .map(|(id, spans)| (*id, spans.as_slice()))
+        .collect();
+    let archive = BoundArchiveRepresentation::from_base64_projections(
+        stage,
+        &bound,
+        signature_region,
+        &groups,
+        &fixture.signer(),
+        &mut bundle,
+        Some(archive_id),
+        &resources,
+    )
+    .unwrap();
+    let signature_coverage = [CoveragePart::BoundSignature(&bound)];
+    let archive_coverage = [CoveragePart::BoundArchive(&archive)];
+    let proofs = [
+        TimestampBinding {
+            token: prior[0].0,
+            kind: ProofKind::Signature,
+            coverage: &signature_coverage,
+        },
+        TimestampBinding {
+            token: archive_id,
+            kind: ProofKind::Archive,
+            coverage: &archive_coverage,
+        },
+    ];
+    let http = Offline::new();
+    let report = validate_evidence(
+        &fixture.signer(),
+        &mut bundle,
+        &proofs,
+        AdesLevel::Lta,
+        &fixture.context(&http, ValidationPolicy::OfflineReport),
+        &NetworkPolicy::deny_all(),
+        &resources,
+    )
+    .unwrap();
+    assert_eq!(report.signers[0].timestamp, CheckStatus::Passed);
+    let mut wrong = fixture.signature.clone();
+    wrong[0] ^= 1;
+    let mut signer = fixture.signer();
+    signer.signature = &wrong;
+    assert!(
+        validate_evidence(
+            &signer,
+            &mut bundle,
+            &proofs,
+            AdesLevel::Lta,
+            &fixture.context(&http, ValidationPolicy::OfflineReport),
+            &NetworkPolicy::deny_all(),
+            &resources
+        )
+        .is_err()
+    );
+    let mut resumed = EvidenceStore::resume(bundle);
+    assert!(
+        matches!(
+            resumed.request_timestamp(
+                &fixture.signer(),
+                &archive_coverage,
+                &request_spec(),
+                &fixture.context(&http, ValidationPolicy::StrictOnline),
+                &NetworkPolicy::only_endpoints([TSA_URL]).unwrap(),
+            ),
+            Err(EvidenceError::InvalidBinding)
+        ),
+        "a stale prefix must not omit the already appended archive token"
+    );
+    assert_eq!(http.0.load(Ordering::SeqCst), 0);
+    let mut bundle = resumed.finish();
+    for failure in 0..5 {
+        let mut stage = store.stage_source(&mut resources).unwrap();
+        let mut bytes = canonical.clone();
+        if failure == 0 {
+            bytes[signature_region.offset as usize] = b'!';
+        }
+        stage.write_chunk(&bytes).unwrap();
+        let mut bad = projections.clone();
+        match failure {
+            1 => {
+                bad.pop();
+            }
+            2 => {
+                bad[0].0 = archive_id;
+            }
+            3 => {
+                bad[1].1 = bad[0].1.clone();
+            }
+            4 => {
+                bad.push(bad[0].clone());
+            }
+            _ => {}
+        }
+        let groups: Vec<_> = bad
+            .iter()
+            .map(|(id, spans)| (*id, spans.as_slice()))
+            .collect();
+        assert!(
+            BoundArchiveRepresentation::from_base64_projections(
+                stage,
+                &bound,
+                signature_region,
+                &groups,
+                &fixture.signer(),
+                &mut bundle,
+                Some(archive_id),
+                &resources,
+            )
+            .is_err(),
+            "failure {failure} accepted"
+        );
+    }
+}
+
+#[test]
+fn internal_evidence_read_preserves_bounds_and_external_delivery_accounting() {
+    let mut cap = limits();
+    cap.output_bytes = 0;
+    let budget = Arc::new(SharedBudget::new(cap.clone()).unwrap());
+    let mut resources = budget.begin(cap, Arc::new(Control)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(dir.path()).unwrap();
+    let mut evidence = EvidenceStore::new(store, evidence_limits(), &mut resources).unwrap();
+    let id = collect(&mut evidence, EvidenceKind::Crl, b"actual DER replay bytes");
+    let mut bundle = evidence.finish();
+    let mut bytes = [0; 6];
+    assert_eq!(bundle.read_entry(id, 7, &mut bytes).unwrap(), 6);
+    assert_eq!(&bytes, b"DER re");
+    assert!(bundle.read_entry(id, 100, &mut bytes).is_err());
+    assert!(bundle.copy_entry(id, &mut Vec::new()).is_err());
+    assert_eq!(resources.progress().bytes_out, 0);
+}
+
+#[test]
+fn evidence_resume_preserves_consumption_owner_and_terminal_poison() {
+    struct Broken(bool);
+    impl Read for Broken {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            if self.0 {
+                Err(io::Error::other("actual intake failure"))
+            } else {
+                self.0 = true;
+                out[..3].copy_from_slice(b"abc");
+                Ok(3)
+            }
+        }
+    }
+    let mut resources = scope();
+    let dir = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(dir.path()).unwrap();
+    let mut cap = evidence_limits();
+    cap.max_bytes = 6;
+    cap.max_item_bytes = 6;
+    let mut evidence = EvidenceStore::new(store.clone(), cap, &mut resources).unwrap();
+    let id = collect(&mut evidence, EvidenceKind::Crl, b"abc");
+    let mut resumed = EvidenceStore::resume(evidence.finish());
+    collect(&mut resumed, EvidenceKind::Crl, b"def");
+    assert!(matches!(
+        resumed.collect(
+            EvidenceKind::Crl,
+            Source::sequential(&mut &b"g"[..], Some(1)),
+            EvidenceOrigin::Embedded { label: "over cap" }
+        ),
+        Err(EvidenceError::Limit)
+    ));
+    let mut bundle = resumed.finish();
+    let mut bytes = [0; 3];
+    assert_eq!(bundle.read_entry(id, 0, &mut bytes).unwrap(), 3);
+    assert_eq!(&bytes, b"abc");
+    let mut evidence = EvidenceStore::new(store, evidence_limits(), &mut resources).unwrap();
+    assert!(
+        evidence
+            .collect(
+                EvidenceKind::Crl,
+                Source::sequential(&mut Broken(false), None),
+                EvidenceOrigin::Embedded { label: "fault" }
+            )
+            .is_err()
+    );
+    let mut resumed = EvidenceStore::resume(evidence.finish());
+    assert!(
+        resumed
+            .collect(
+                EvidenceKind::Crl,
+                Source::sequential(&mut &b"valid"[..], Some(5)),
+                EvidenceOrigin::Embedded {
+                    label: "must remain poisoned"
+                }
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn bound_archive_trailing_material_is_current_tsa_only_and_cannot_repair_prior_lt() {
+    use oncl_pki::evidence::{BoundArchiveRepresentation, BoundSignatureRepresentation};
+    let fixture = Fixture::new();
+    let mut current = fixture.tsa.clone();
+    let mut spec = TestCertSpec::from_cert(&current.cert);
+    spec.serial = vec![0x74, 0x05];
+    current.cert = issue_cert(&fixture.intermediate, spec);
+    for case in 0..4 {
+        let mut resources = scope();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let value = format!("<v>{}</v>", STANDARD.encode(&fixture.signature)).into_bytes();
+        let mut stage = store.stage_source(&mut resources).unwrap();
+        stage.write_chunk(&value).unwrap();
+        let bound = BoundSignatureRepresentation::from_base64_projection(
+            stage,
+            Region {
+                offset: 0,
+                len: value.len() as u64,
+            },
+            &[Region {
+                offset: 3,
+                len: (value.len() - 7) as u64,
+            }],
+            &fixture.signer(),
+            &evidence_limits(),
+            &resources,
+        )
+        .unwrap();
+        let mut evidence =
+            EvidenceStore::new(store.clone(), evidence_limits(), &mut resources).unwrap();
+        let signature_token = fixture.token(&value, PROVEN);
+        let signature_id = collect(&mut evidence, EvidenceKind::Timestamp, &signature_token);
+        let mut prior = vec![(signature_id, signature_token)];
+        for (kind, bytes) in fixture.payloads(
+            if case == 2 {
+                Status::Missing
+            } else {
+                Status::Good
+            },
+            Status::Good,
+        ) {
+            prior.push((collect(&mut evidence, kind, &bytes), bytes));
+        }
+        let mut canonical = b"<ReferenceData/><SignedInfo/>".to_vec();
+        let value_region = Region {
+            offset: canonical.len() as u64,
+            len: value.len() as u64,
+        };
+        canonical.extend_from_slice(&value);
+        let mut groups = Vec::new();
+        for (id, bytes) in &prior {
+            canonical.extend_from_slice(b"<e>");
+            let encoded = STANDARD.encode(bytes);
+            let span = Region {
+                offset: canonical.len() as u64,
+                len: encoded.len() as u64,
+            };
+            canonical.extend_from_slice(encoded.as_bytes());
+            canonical.extend_from_slice(b"</e>");
+            groups.push((*id, vec![span]));
+        }
+        let archive = fixture.token_with(current.clone(), &canonical, ARCHIVE);
+        let archive_id = collect(&mut evidence, EvidenceKind::Timestamp, &archive);
+        if case != 1 {
+            collect(
+                &mut evidence,
+                EvidenceKind::Ocsp,
+                &fixture.ocsp(&current.cert, Status::Good).unwrap(),
+            );
+        }
+        if matches!(case, 1 | 2) {
+            collect(
+                &mut evidence,
+                EvidenceKind::Ocsp,
+                &fixture.ocsp(&fixture.doc.cert, Status::Good).unwrap(),
+            );
+        }
+        if case == 3 {
+            collect(
+                &mut evidence,
+                EvidenceKind::Certificate,
+                &fixture.doc.cert.to_der().unwrap(),
+            );
+        }
+        let mut bundle = evidence.finish();
+        let mut stage = store.stage_source(&mut resources).unwrap();
+        stage.write_chunk(&canonical).unwrap();
+        let projections: Vec<_> = groups
+            .iter()
+            .map(|(id, spans)| (*id, spans.as_slice()))
+            .collect();
+        let bound_archive = BoundArchiveRepresentation::from_base64_projections(
+            stage,
+            &bound,
+            value_region,
+            &projections,
+            &fixture.signer(),
+            &mut bundle,
+            Some(archive_id),
+            &resources,
+        )
+        .unwrap();
+        let signature_coverage = [CoveragePart::BoundSignature(&bound)];
+        let archive_coverage = [CoveragePart::BoundArchive(&bound_archive)];
+        let proofs = [
+            TimestampBinding {
+                token: signature_id,
+                kind: ProofKind::Signature,
+                coverage: &signature_coverage,
+            },
+            TimestampBinding {
+                token: archive_id,
+                kind: ProofKind::Archive,
+                coverage: &archive_coverage,
+            },
+        ];
+        let http = Offline::new();
+        let report = validate_evidence(
+            &fixture.signer(),
+            &mut bundle,
+            &proofs,
+            AdesLevel::Lta,
+            &fixture.context(&http, ValidationPolicy::OfflineReport),
+            &NetworkPolicy::deny_all(),
+            &resources,
+        );
+        if case == 0 {
+            assert_eq!(
+                report.unwrap().verdict,
+                Verdict::Valid,
+                "rotated current TSA status may follow its noncyclic archive"
+            );
+        } else {
+            assert!(
+                report.is_err() || report.unwrap().verdict != Verdict::Valid,
+                "case {case} promoted unrelated or missing prior validation data"
+            );
+        }
+    }
+}
+
+#[test]
+fn timestamp_configuration_preflight_is_the_issuance_gate_without_private_or_http_work() {
+    use oncl_pki::evidence::validate_timestamp_configuration;
+    let valid = request_spec();
+    validate_timestamp_configuration(&valid, ValidationPolicy::StrictOnline).unwrap();
+    for case in 0..11 {
+        let mut spec = valid.clone();
+        match case {
+            0 => spec.cert_req = false,
+            1 => spec.policy = None,
+            2 => spec.nonce = oncl_pki::http::NonceSpec::None,
+            3 => spec.retries = 3,
+            4 => spec.hash = HashAlg::Sha1,
+            5 => spec.require_tsa_eku = false,
+            6 => spec.timeout = Duration::ZERO,
+            7 => spec.url = "x".repeat(4097),
+            8 => spec.nonce = oncl_pki::http::NonceSpec::Random(0),
+            9 => spec.nonce = oncl_pki::http::NonceSpec::Value(vec![]),
+            _ => spec.nonce = oncl_pki::http::NonceSpec::Value(vec![1; 65]),
+        }
+        assert!(
+            matches!(
+                validate_timestamp_configuration(&spec, ValidationPolicy::StrictOnline),
+                Err(EvidenceError::InvalidBinding)
+            ),
+            "case {case}"
+        );
+    }
+    assert!(matches!(
+        validate_timestamp_configuration(&valid, ValidationPolicy::OfflineReport),
+        Err(EvidenceError::InvalidBinding)
+    ));
+}

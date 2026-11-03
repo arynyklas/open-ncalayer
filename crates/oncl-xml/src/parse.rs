@@ -91,33 +91,112 @@ pub(crate) fn parse_signed(xml: &[u8]) -> Result<Document<'_>, XmlError> {
     parse_with(xml, SIGNED_BOUNDS)
 }
 
-fn parse_with(xml: &[u8], bounds: Bounds) -> Result<Document<'_>, XmlError> {
+struct ParsePlan<'a> {
+    text: &'a str,
+    bounds: Bounds,
+    metadata: u64,
+}
+fn plan(xml: &[u8], bounds: Bounds) -> Result<ParsePlan<'_>, XmlError> {
     let text = std::str::from_utf8(xml)
         .map_err(|e| XmlError::Parse(format!("the input is not UTF-8: {e}")))?;
-    let count = |byte: u8| xml.iter().filter(|&&b| b == byte).count();
-    if count(b'<') > bounds.nodes || count(b'=') > bounds.attributes {
+    let (nodes, attributes) = xml.iter().fold((0u64, 0u64), |(n, a), b| {
+        (n + u64::from(*b == b'<'), a + u64::from(*b == b'='))
+    });
+    if nodes > bounds.nodes as u64 || attributes > bounds.attributes as u64 {
         return Err(XmlError::TooLarge);
     }
-    check_markup(xml, bounds)?;
-    let options = ParsingOptions {
-        allow_dtd: false,
-        nodes_limit: u32::try_from(bounds.nodes).expect("node bound fits u32"),
-        ..ParsingOptions::default()
-    };
-    Document::parse_with_options(text, options).map_err(|e| match e {
-        roxmltree::Error::DtdDetected => XmlError::Doctype,
-        roxmltree::Error::NodesLimitReached => XmlError::TooLarge,
-        roxmltree::Error::UnclosedRootNode => sax_at_end(
-            text,
-            "XML document structures must start and end within the same entity.",
-        ),
-        e => match prolog_sax(text) {
-            Some(sax) => XmlError::Prolog {
-                text: e.to_string(),
-                sax,
+    let copies = check_markup(xml, bounds)? as u64;
+    let metadata = nodes
+        .checked_mul(192)
+        .and_then(|n| attributes.checked_mul(128).and_then(|a| n.checked_add(a)))
+        .and_then(|n| copies.checked_mul(64).and_then(|c| n.checked_add(c)))
+        .and_then(|n| n.checked_add(4096))
+        .ok_or(XmlError::TooLarge)?;
+    Ok(ParsePlan {
+        text,
+        bounds,
+        metadata,
+    })
+}
+fn parse_with(xml: &[u8], bounds: Bounds) -> Result<Document<'_>, XmlError> {
+    plan(xml, bounds)?.parse()
+}
+impl<'a> ParsePlan<'a> {
+    fn parse(self) -> Result<Document<'a>, XmlError> {
+        let text = self.text;
+        let options = ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: u32::try_from(self.bounds.nodes).expect("node bound fits u32"),
+            ..ParsingOptions::default()
+        };
+        Document::parse_with_options(text, options).map_err(|e| match e {
+            roxmltree::Error::DtdDetected => XmlError::Doctype,
+            roxmltree::Error::NodesLimitReached => XmlError::TooLarge,
+            roxmltree::Error::UnclosedRootNode => sax_at_end(
+                text,
+                "XML document structures must start and end within the same entity.",
+            ),
+            e => match prolog_sax(text) {
+                Some(sax) => XmlError::Prolog {
+                    text: e.to_string(),
+                    sax,
+                },
+                None => XmlError::Parse(e.to_string()),
             },
-            None => XmlError::Parse(e.to_string()),
-        },
+        })
+    }
+}
+
+pub(crate) struct AdmittedDocument<'a> {
+    document: Document<'a>,
+    _metadata: Option<oncl_pki::resource::ResourceReservation>,
+}
+impl<'a> std::ops::Deref for AdmittedDocument<'a> {
+    type Target = Document<'a>;
+    fn deref(&self) -> &Self::Target {
+        &self.document
+    }
+}
+fn resource(error: oncl_pki::resource::ProcessingError) -> XmlError {
+    XmlError::Key(oncl_pki::key::KeyError::Execution(
+        oncl_pki::key::KeyExecutionError::processing(
+            &error,
+            oncl_pki::key::AppliedState::NotApplied,
+        ),
+    ))
+}
+/// The same bounded parser/work scan, with actual node/attribute/namespace
+/// metadata admitted before the DOM allocation. Document value buffers are
+/// separately admitted by the bounded adapter, never charged as metadata twice.
+pub(crate) fn parse_admitted<'a>(
+    xml: &'a [u8],
+    signed: bool,
+    scope: Option<&oncl_pki::resource::ResourceScope>,
+) -> Result<AdmittedDocument<'a>, XmlError> {
+    if !signed && xml.len() > MAX_INPUT {
+        return Err(XmlError::TooLarge);
+    }
+    let bounds = if signed { SIGNED_BOUNDS } else { BOUNDS };
+    let Some(scope) = scope else {
+        return Ok(AdmittedDocument {
+            document: parse_with(xml, bounds)?,
+            _metadata: None,
+        });
+    };
+    scope.checkpoint().map_err(resource)?;
+    let plan = {
+        let _scratch = scope
+            .reserve_metadata((MAX_DEPTH * std::mem::size_of::<usize>() + 4096) as u64)
+            .map_err(resource)?;
+        plan(xml, bounds)?
+    };
+    let metadata = scope.reserve_metadata(plan.metadata).map_err(resource)?;
+    scope.checkpoint().map_err(resource)?;
+    let parsed = plan.parse();
+    scope.checkpoint().map_err(resource)?;
+    Ok(AdmittedDocument {
+        document: parsed?,
+        _metadata: Some(metadata),
     })
 }
 
@@ -162,7 +241,7 @@ fn prolog_sax(text: &str) -> Option<String> {
 /// Rejects a DOCTYPE, nesting deeper than [`MAX_DEPTH`], prefixed `xmlns` attributes and
 /// input over the work bounds in one linear scan, before the tree is built. Otherwise only
 /// well-formed input matters here: anything malformed is reported by the parser afterwards.
-fn check_markup(xml: &[u8], bounds: Bounds) -> Result<(), XmlError> {
+fn check_markup(xml: &[u8], bounds: Bounds) -> Result<usize, XmlError> {
     // Namespaces in scope (an upper bound) of each open element.
     let mut in_scope: Vec<usize> = Vec::new();
     let mut attribute_work = 0usize;
@@ -225,7 +304,7 @@ fn check_markup(xml: &[u8], bounds: Bounds) -> Result<(), XmlError> {
             end
         };
     }
-    Ok(())
+    Ok(namespace_copies)
 }
 
 /// Position after the first `needle` at or after `from`, or the end of the input.

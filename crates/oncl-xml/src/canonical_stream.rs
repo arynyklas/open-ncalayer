@@ -127,6 +127,49 @@ pub(crate) fn hash(
     result?;
     Ok(sink.state.finish())
 }
+pub(crate) fn append(
+    source: &mut FrozenInput,
+    limits: &XmlLimits,
+    owner: &Arc<()>,
+    options: Options<'_>,
+    artifact: &mut oncl_pki::io::StagedArtifact,
+    scope: &ResourceScope,
+    work: &mut u64,
+) -> Result<()> {
+    struct Sink<'a> {
+        stage: &'a mut oncl_pki::io::StagedArtifact,
+        error: Option<ProcessingError>,
+    }
+    impl Write for Sink<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Err(error) = self.stage.write_chunk(bytes) {
+                self.error = Some(error);
+                return Err(std::io::Error::other("canonical source stage"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut sink = Sink {
+        stage: artifact,
+        error: None,
+    };
+    let result = render(
+        source,
+        limits,
+        owner,
+        options,
+        RenderOutput {
+            sink: &mut sink,
+            projections: None,
+        },
+        scope,
+        work,
+    );
+    sink.error.map_or(result, Err)
+}
 pub(crate) fn stage(
     source: &mut FrozenInput,
     limits: &XmlLimits,

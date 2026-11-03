@@ -450,6 +450,9 @@ impl XmlDocument {
             output,
         )
     }
+    pub(crate) fn read_region(&mut self, region: Region, output: &mut [u8]) -> Result<usize> {
+        self.source.read_region(region, output)
+    }
     pub(crate) fn indexed_node(&self, region: Region) -> XmlNode {
         XmlNode {
             owner: Arc::downgrade(&self.owner),
@@ -469,6 +472,23 @@ impl XmlDocument {
             &self.owner,
             options,
             algorithm,
+            scope,
+            work,
+        )
+    }
+    pub(crate) fn canonical_append(
+        &mut self,
+        options: crate::canonical_stream::Options<'_>,
+        artifact: &mut StagedArtifact,
+        scope: &ResourceScope,
+        work: &mut u64,
+    ) -> Result<()> {
+        crate::canonical_stream::append(
+            &mut self.source,
+            &self.limits,
+            &self.owner,
+            options,
+            artifact,
             scope,
             work,
         )
