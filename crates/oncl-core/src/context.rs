@@ -1,4 +1,4 @@
-use crate::{ExecutionGrant, OperationPolicy};
+use crate::{ExecutionGrant, OperationError, OperationPolicy};
 use oncl_pki::resource::{Deadline, OperationLease, ResourceScope};
 use std::sync::Arc;
 
@@ -29,8 +29,29 @@ pub struct OperationContext {
     pub(crate) leases: Vec<crate::keys::KeyLease>,
     pub(crate) private_use_stopped: std::sync::atomic::AtomicBool,
     pub(crate) batch_item: Option<crate::keys::BatchItemOrdinal>,
+    pub(crate) borrowed_replay: Option<crate::batch::BorrowedReplay>,
 }
 impl OperationContext {
+    pub(crate) fn account_borrowed(
+        &self,
+        input: &[u8],
+        detached: Option<&[u8]>,
+    ) -> Result<(), OperationError> {
+        if self
+            .borrowed_replay
+            .as_ref()
+            .is_some_and(|proof| proof.matches(input, detached, &self.scope))
+        {
+            self.scope.checkpoint()?;
+            return Ok(());
+        }
+        self.scope.account_input(
+            (input.len() as u64)
+                .checked_add(detached.map_or(0, |d| d.len() as u64))
+                .ok_or(oncl_pki::resource::ProcessingError::InputLimit)?,
+        )?;
+        Ok(())
+    }
     pub fn id(&self) -> OperationId {
         self.id
     }

@@ -158,8 +158,12 @@ pub struct CapturedBatch<'a> {
     identity: Arc<()>,
     owner: Arc<()>,
     operation: OperationId,
+    scope: oncl_pki::resource::ResourceScope,
     number: u64,
     items: Vec<CapturedItem<'a>>,
+    results: Vec<BatchItemResult>,
+    result_memory: ResourceReservation,
+    result_metadata: ResourceReservation,
     _memory: ResourceReservation,
     _metadata: ResourceReservation,
 }
@@ -220,7 +224,10 @@ impl CapturedBatch<'_> {
     /// Call only from the trusted host after confirming these exact immutable
     /// items/sources/destinations. Capture and run never call this implicitly.
     pub fn authorize(&self, ctx: &OperationContext) -> Result<BatchApproval, BatchError> {
-        if self.operation != ctx.id || !Arc::ptr_eq(&self.owner, &ctx.owner) {
+        if self.operation != ctx.id
+            || !Arc::ptr_eq(&self.owner, &ctx.owner)
+            || !self.scope.same_operation(&ctx.scope)
+        {
             return Err(BatchError::ConsentMismatch);
         }
         ctx.scope.checkpoint()?;
@@ -232,6 +239,30 @@ impl CapturedBatch<'_> {
         })
     }
 }
+/// Only a completed batch capture constructs this proof. The closed Dispatch
+/// retains immutable slice borrows for the entire installation lifetime.
+pub(crate) struct BorrowedReplay {
+    scope: oncl_pki::resource::ResourceScope,
+    first: (usize, usize),
+    second: Option<(usize, usize)>,
+}
+impl std::fmt::Debug for BorrowedReplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BorrowedReplay { scoped: true }")
+    }
+}
+impl BorrowedReplay {
+    pub(crate) fn matches(
+        &self,
+        input: &[u8],
+        detached: Option<&[u8]>,
+        scope: &oncl_pki::resource::ResourceScope,
+    ) -> bool {
+        self.scope.same_operation(scope)
+            && self.first == (input.as_ptr() as usize, input.len())
+            && self.second == detached.map(|d| (d.as_ptr() as usize, d.len()))
+    }
+}
 struct CapturedItem<'a> {
     id: &'a str,
     action: Action,
@@ -241,6 +272,7 @@ struct CapturedItem<'a> {
     digests: Vec<BatchSourceIdentity>,
     keys: Vec<BatchKeyBinding>,
     error: Option<OperationError>,
+    replay: Option<BorrowedReplay>,
     _key_memory: Option<ResourceReservation>,
     _key_metadata: Option<ResourceReservation>,
 }
@@ -654,6 +686,7 @@ impl Engine {
                 digests: Vec::with_capacity(2),
                 keys: bindings,
                 error: preflight_error,
+                replay: None,
                 _key_memory: key_memory,
                 _key_metadata: key_metadata,
             };
@@ -679,6 +712,43 @@ impl Engine {
             if let Some((first, second)) = borrowed
                 && entry.error.is_none()
             {
+                let total = (first.len() as u64)
+                    .checked_add(second.map_or(0, |d| d.len() as u64))
+                    .ok_or(oncl_pki::resource::ProcessingError::InputLimit)?;
+                if total > ctx.scope.input_remaining() {
+                    return Err(oncl_pki::resource::ProcessingError::InputLimit.into());
+                }
+                match &entry.operation {
+                    Dispatch::ValidateCms(..) => {
+                        if total > ctx.scope.limits().metadata_bytes
+                            || total > ctx.scope.limits().memory_bytes
+                        {
+                            return Err(oncl_pki::resource::ProcessingError::MetadataLimit.into());
+                        }
+                    }
+                    #[cfg(feature = "jose")]
+                    Dispatch::Jose(operation) => {
+                        use BatchJoseOperation::*;
+                        let valid = match operation {
+                            Create { .. } => first.len() <= jose::MAX_PAYLOAD_BYTES,
+                            JwtEncode { .. } => first.len() <= jose::MAX_CLAIMS_BYTES,
+                            Add { .. } | Verify { .. } => {
+                                first.len() <= jose::MAX_CONTAINER_BYTES
+                                    && second.is_none_or(|d| d.len() <= jose::MAX_PAYLOAD_BYTES)
+                            }
+                            JwtDecode { .. } | JwtVerify { .. } => {
+                                first.len() <= jose::MAX_CONTAINER_BYTES
+                            }
+                        };
+                        if !valid {
+                            return Err(oncl_pki::resource::ProcessingError::InvalidInput(
+                                "borrowed input exceeds format profile",
+                            )
+                            .into());
+                        }
+                    }
+                    _ => {}
+                }
                 for bytes in [Some(first), second].into_iter().flatten() {
                     if bytes.len() as u64 > ctx.scope.limits().input_bytes {
                         return Err(oncl_pki::resource::ProcessingError::InputLimit.into());
@@ -686,13 +756,20 @@ impl Engine {
                     let mut hash = oncl_pki::digest::HashState::new(HashAlg::Sha256);
                     for chunk in bytes.chunks(oncl_pki::resource::IO_CHUNK_BYTES) {
                         ctx.scope.checkpoint()?;
+                        ctx.scope.account_input(chunk.len() as u64)?;
                         hash.update(chunk);
+                        ctx.scope.checkpoint()?;
                     }
                     entry.digests.push(BatchSourceIdentity {
                         digest: hash.finish(),
                         bytes: bytes.len() as u64,
                     });
                 }
+                entry.replay = Some(BorrowedReplay {
+                    scope: ctx.scope.shared_view(),
+                    first: (first.as_ptr() as usize, first.len()),
+                    second: second.map(|d| (d.as_ptr() as usize, d.len())),
+                });
             }
             for (source, destination) in
                 [(source, &mut entry.source), (detached, &mut entry.detached)]
@@ -738,12 +815,33 @@ impl Engine {
                 return Err(captured.pop().unwrap().error.unwrap().into());
             }
         }
+        let bytes = (captured.len() * std::mem::size_of::<BatchItemResult>()) as u64;
+        let result_memory = ctx.scope.reserve_memory(bytes)?;
+        let result_metadata = ctx.scope.reserve_metadata(bytes)?;
+        let mut results = Vec::with_capacity(captured.len());
+        for item in &captured {
+            let bytes = (std::mem::size_of::<BatchItemResult>()
+                + item.id.len()
+                + 2 * std::mem::size_of::<BatchSourceIdentity>()) as u64;
+            results.push(BatchItemResult {
+                id: item.id.to_owned(),
+                outcome: BatchOutcome::NotRun,
+                applied: AppliedState::NotApplied,
+                sources: Vec::new(),
+                _memory: ctx.scope.reserve_memory(bytes)?,
+                _metadata: ctx.scope.reserve_metadata(bytes)?,
+            });
+        }
         Ok(CapturedBatch {
             identity: Arc::new(()),
             owner: self.identity.clone(),
             operation: ctx.id,
+            scope: ctx.scope.shared_view(),
             number,
             items: captured,
+            results,
+            result_memory,
+            result_metadata,
             _memory: memory,
             _metadata: metadata,
         })
@@ -823,40 +921,21 @@ impl Engine {
             || !Arc::ptr_eq(&plan.owner, &ctx.owner)
             || plan.operation != approval.operation
             || plan.operation != ctx.id
+            || !plan.scope.same_operation(&ctx.scope)
         {
             return Err(BatchError::ConsentMismatch);
         }
         let total = plan.items.len();
-        let bytes = (total * std::mem::size_of::<BatchItemResult>()) as u64;
-        let memory = ctx.scope.reserve_memory(bytes)?;
-        let metadata = ctx.scope.reserve_metadata(bytes)?;
         let mut summary = BatchSummary {
-            results: Vec::with_capacity(total),
+            results: plan.results,
             attempted: 0,
             completed: 0,
             total,
             progress: ctx.scope.progress(),
             stop: None,
-            _memory: memory,
-            _metadata: metadata,
+            _memory: plan.result_memory,
+            _metadata: plan.result_metadata,
         };
-        // Admit every result slot before the first private application. A later
-        // reservation failure must never erase earlier real outputs/results.
-        for item in &plan.items {
-            let bytes = (std::mem::size_of::<BatchItemResult>()
-                + item.id.len()
-                + 2 * std::mem::size_of::<BatchSourceIdentity>()) as u64;
-            let memory = ctx.scope.reserve_memory(bytes)?;
-            let metadata = ctx.scope.reserve_metadata(bytes)?;
-            summary.results.push(BatchItemResult {
-                id: item.id.to_owned(),
-                outcome: BatchOutcome::NotRun,
-                applied: AppliedState::NotApplied,
-                sources: Vec::new(),
-                _memory: memory,
-                _metadata: metadata,
-            });
-        }
         emit(BatchEvent::Started { total });
         for (index, mut item) in plan.items.into_iter().enumerate() {
             if summary.stop.is_none()
@@ -872,6 +951,8 @@ impl Engine {
                 let previous = ctx
                     .batch_item
                     .replace(keys::BatchItemOrdinal::from_batch_index(index));
+                let previous_replay =
+                    std::mem::replace(&mut ctx.borrowed_replay, item.replay.take());
                 // Restore correlation even when trusted host guard/provider code
                 // panics and the host catches the unwind to reuse this context.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -887,6 +968,7 @@ impl Engine {
                     }
                 }));
                 ctx.batch_item = previous;
+                ctx.borrowed_replay = previous_replay;
                 let result = match result {
                     Ok(result) => result,
                     Err(payload) => std::panic::resume_unwind(payload),
@@ -1061,12 +1143,31 @@ impl Engine {
             }
         };
         // Preserve format/key errors, including Applied, ahead of replay failures.
-        if result.is_ok() {
-            if let Some(reader) = source.as_mut() {
-                reader.finish()?;
-            }
-            if let Some(reader) = detached.as_mut() {
-                reader.finish()?;
+        if let Ok(report) = &result {
+            let applied = match report {
+                BatchReport::Sign(report) | BatchReport::Extend(report) => report.applied,
+                #[cfg(feature = "jose")]
+                BatchReport::JoseWrite(report) => report.applied,
+                _ => AppliedState::NotApplied,
+            };
+            let finalized = (|| {
+                if let Some(reader) = source.as_mut() {
+                    reader.finish()?;
+                }
+                if let Some(reader) = detached.as_mut() {
+                    reader.finish()?;
+                }
+                Ok::<(), oncl_pki::resource::ProcessingError>(())
+            })();
+            if let Err(error) = finalized {
+                return Err(if applied == AppliedState::NotApplied {
+                    error.into()
+                } else {
+                    OperationError::AfterKeyUse {
+                        source: Box::new(error.into()),
+                        applied,
+                    }
+                });
             }
         }
         result

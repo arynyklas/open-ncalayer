@@ -303,8 +303,9 @@ fn parse(
     profile: JoseProfile,
     detached: Option<&[u8]>,
     payload_limit: usize,
-    scope: &ResourceScope,
+    ctx: &OperationContext,
 ) -> Result<Parsed, OperationError> {
+    let scope = &ctx.scope;
     if input.len() > MAX_CONTAINER_BYTES || detached.is_some_and(|v| v.len() > payload_limit) {
         return Err(invalid("JOSE input exceeds bounded profile"));
     }
@@ -312,7 +313,7 @@ fn parse(
         return Err(invalid("detached source/profile mismatch"));
     }
     let admission = Admission::new(scope, input.len() + detached.map_or(0, <[u8]>::len))?;
-    scope.account_input((input.len() + detached.map_or(0, <[u8]>::len)) as u64)?;
+    ctx.account_borrowed(input, detached)?;
     scope.account_container(input.len() as u64)?;
     let (encoded, signatures) = match profile.serialization {
         JwsSerialization::Compact => {
@@ -527,7 +528,7 @@ impl Engine {
         }
         validate_count(profile, keys.len())?;
         let admission = Admission::new(&ctx.scope, payload.len() + MAX_HEADER_BYTES * keys.len())?;
-        ctx.scope.account_input(payload.len() as u64)?;
+        ctx.account_borrowed(payload, None)?;
         if jwt {
             parse_claims(payload)?;
         }
@@ -616,13 +617,7 @@ impl Engine {
         ctx: &mut OperationContext,
     ) -> Result<JoseWriteReport, OperationError> {
         self.jose_authority(ctx, Action::Sign)?;
-        let parsed = parse(
-            input,
-            request.profile,
-            detached,
-            MAX_PAYLOAD_BYTES,
-            &ctx.scope,
-        )?;
+        let parsed = parse(input, request.profile, detached, MAX_PAYLOAD_BYTES, ctx)?;
         let mut report = self.jose_verify_parsed(request, parsed, ctx)?;
         if report.verdict != Verdict::Valid {
             return Err(OperationError::ValidationRequired);
@@ -674,13 +669,7 @@ impl Engine {
         ctx: &mut OperationContext,
     ) -> Result<JwsVerificationReport, OperationError> {
         self.jose_authority(ctx, Action::Verify)?;
-        let parsed = parse(
-            input,
-            request.profile,
-            detached,
-            MAX_PAYLOAD_BYTES,
-            &ctx.scope,
-        )?;
+        let parsed = parse(input, request.profile, detached, MAX_PAYLOAD_BYTES, ctx)?;
         self.jose_verify_parsed(request, parsed, ctx)
     }
     fn jose_verify_parsed(
@@ -1002,7 +991,7 @@ impl Engine {
             JoseProfile::new(JwsSerialization::Compact, false),
             None,
             MAX_CLAIMS_BYTES,
-            &ctx.scope,
+            ctx,
         )?;
         jwt_header(&parsed)?;
         let claims = parse_claims(&parsed.payload)?;
@@ -1020,7 +1009,7 @@ impl Engine {
             return Err(invalid("invalid trusted JWT clock"));
         }
         let profile = JoseProfile::new(JwsSerialization::Compact, false);
-        let parsed = parse(input, profile, None, MAX_CLAIMS_BYTES, &ctx.scope)?;
+        let parsed = parse(input, profile, None, MAX_CLAIMS_BYTES, ctx)?;
         jwt_header(&parsed)?;
         let claims = parse_claims(&parsed.payload)?;
         let claims_report = validate_claims(&claims, policy);

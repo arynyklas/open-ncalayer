@@ -158,7 +158,7 @@ impl Engine {
         let bytes = (input.len() as u64)
             .checked_add(detached.map_or(0, |b| b.len() as u64))
             .ok_or(oncl_pki::resource::ProcessingError::MetadataLimit)?;
-        ctx.scope.account_input(bytes)?;
+        ctx.account_borrowed(input, detached)?;
         ctx.scope.account_container(input.len() as u64)?;
         let _metadata = ctx.scope.reserve_metadata(bytes)?;
         let now = (services.clock)();

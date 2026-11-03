@@ -143,6 +143,7 @@ impl Engine {
             leases: Vec::new(),
             private_use_stopped: std::sync::atomic::AtomicBool::new(false),
             batch_item: None,
+            borrowed_replay: None,
         })
     }
     pub fn hash(
