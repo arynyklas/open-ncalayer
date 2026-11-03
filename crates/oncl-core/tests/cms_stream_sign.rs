@@ -3523,7 +3523,11 @@ fn wsse_fixround_fresh_core_and_b01_reject_comment_framing_and_generation_failur
                 BatchOutcome::Completed(_)
             ));
         }
-        assert_eq!(context.resources().progress().bytes_in, wire.len() as u64);
+        assert_eq!(
+            context.resources().progress().bytes_in,
+            if case < 4 { wire.len() as u64 } else { 0 },
+            "known generation configuration fails before B01 intake"
+        );
         if case < 4 {
             assert_eq!(context.resources().input_remaining(), 0);
         }

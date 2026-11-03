@@ -18,6 +18,7 @@ mod capture_allocations {
     struct Totals {
         allocated: usize,
         released: usize,
+        largest: usize,
         overflow: bool,
     }
     std::thread_local! {
@@ -32,6 +33,7 @@ mod capture_allocations {
         // const-initialized; teardown on unrelated threads is simply ignored.
         let _ = ACTIVE.try_with(|active| {
             if let Some(mut totals) = active.get() {
+                totals.largest = totals.largest.max(allocated);
                 match (
                     totals.allocated.checked_add(allocated),
                     totals.released.checked_add(released),
@@ -86,6 +88,10 @@ mod capture_allocations {
         }
     }
     pub(super) fn observe<T>(capture: impl FnOnce() -> T) -> (T, usize) {
+        let (result, allocated, _) = observe_with_largest(capture);
+        (result, allocated)
+    }
+    pub(super) fn observe_with_largest<T>(capture: impl FnOnce() -> T) -> (T, usize, usize) {
         ACTIVE.with(|active| {
             assert!(active.get().is_none(), "nested allocation observation");
             active.set(Some(Totals::default()));
@@ -97,7 +103,7 @@ mod capture_allocations {
         assert!(!totals.overflow, "allocation accounting overflow");
         // Cumulative successful allocation requests, not net/live bytes:
         // freeing an inadmissible clone must not hide its allocation cost.
-        (result, totals.allocated)
+        (result, totals.allocated, totals.largest)
     }
 }
 
@@ -2680,6 +2686,242 @@ mod xml_batch {
     use std::sync::atomic::Ordering;
 
     const ORIGINAL: &[u8] = b"<r><p Id='p'>protected exact document</p><s Id='s'/></r>";
+
+    #[test]
+    fn wsse_escaped_id_sizing_does_not_allocate_full_xml_before_admission() {
+        use oncl_xml::wsse::SourceWsseSignProfile;
+        const SOAP: &[u8] = b"<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/'><s:Body/></s:Envelope>";
+        for batch in [false, true] {
+            let scratch = tempfile::tempdir().unwrap();
+            let guard = Arc::new(fixture::Guard::default());
+            let provider = Arc::new(fixture::Provider::default());
+            let limits = ResourceLimits {
+                metadata_bytes: if batch { 8 * 1024 * 1024 } else { 400 * 1024 },
+                ..Default::default()
+            };
+            let engine = fixture::engine(
+                TemporaryStore::new(scratch.path()).unwrap(),
+                guard.clone(),
+                provider.clone(),
+                limits,
+            );
+            let key = fixture::selector("user-rsa-sign");
+            let (baseline_allocated, baseline_largest) = if batch {
+                // Observe B01's fixed 1024-slot admission separately, rather
+                // than letting that unrelated fixed allocation hide XML sizing.
+                let mut baseline_context = begin(&engine, Some(&key), &[Action::Sign]);
+                let mut baseline_profile = SourceWsseSignProfile::default();
+                baseline_profile.verification.xml.max_metadata_bytes = 1;
+                let mut baseline_input = std::io::Cursor::new(SOAP);
+                let mut baseline_output = Vec::new();
+                let (result, total, largest) = capture_allocations::observe_with_largest(|| {
+                    engine
+                        .capture_batch(
+                            [BatchItem::new(
+                                "base",
+                                BatchOperation::Sign {
+                                    request: SignRequest::wsse(
+                                        KeyRequest::new(&key, Some(fixture::PASSWORD)),
+                                        baseline_profile,
+                                    ),
+                                    input: Source::sequential(&mut baseline_input, None),
+                                    output: &mut baseline_output,
+                                },
+                            )],
+                            &mut baseline_context,
+                        )
+                        .is_err()
+                });
+                assert!(result);
+                assert_eq!(baseline_input.position(), 0);
+                (total, largest)
+            } else {
+                (0, 0)
+            };
+            let mut context = begin(&engine, Some(&key), &[Action::Sign]);
+            let mut profile = SourceWsseSignProfile::default();
+            profile.verification.required_headers = (0..128)
+                .map(|i| format!("route-{i:03}-{}", "&".repeat(1014)))
+                .collect();
+            assert!(
+                profile
+                    .verification
+                    .required_headers
+                    .iter()
+                    .all(|id| id.len() == 1024)
+            );
+            let mut input = std::io::Cursor::new(SOAP);
+            let mut output = Vec::new();
+            let (failed, allocated, largest) = capture_allocations::observe_with_largest(|| {
+                if batch {
+                    engine
+                        .capture_batch(
+                            [BatchItem::new(
+                                "escaped",
+                                BatchOperation::Sign {
+                                    request: SignRequest::wsse(
+                                        KeyRequest::new(&key, Some(fixture::PASSWORD)),
+                                        profile,
+                                    ),
+                                    input: Source::sequential(&mut input, None),
+                                    output: &mut output,
+                                },
+                            )],
+                            &mut context,
+                        )
+                        .is_err()
+                } else {
+                    engine
+                        .sign(
+                            SignRequest::wsse(
+                                KeyRequest::new(&key, Some(fixture::PASSWORD)),
+                                profile,
+                            ),
+                            Source::sequential(&mut input, None),
+                            &mut output,
+                            &mut context,
+                        )
+                        .is_err()
+                }
+            });
+            println!(
+                "escaped_id_sizing batch={batch} allocated_cumulative={allocated} largest_request={largest} baseline_allocated={baseline_allocated} baseline_largest={baseline_largest} metadata_limit={}",
+                context.resources().limits().metadata_bytes
+            );
+            assert!(failed);
+            assert!(
+                largest <= baseline_largest.max(64 * 1024),
+                "sizing built a whole escaped XML allocation before refusing it: {largest}"
+            );
+            assert!(
+                allocated.saturating_sub(baseline_allocated) < 128 * 1024,
+                "XML sizing allocated beyond its admitted small buffers"
+            );
+            assert_eq!(input.position(), 0);
+            assert_eq!(context.resources().progress().bytes_in, 0);
+            assert_eq!(provider.opens.load(Ordering::SeqCst), 0);
+            assert_eq!(guard.applied.load(Ordering::SeqCst), 0);
+            assert!(output.is_empty());
+            let all_metadata = context.resources().limits().metadata_bytes;
+            drop(
+                context
+                    .resources()
+                    .reserve_metadata(all_metadata)
+                    .expect("rejected sizing must release its admitted temporary buffers"),
+            );
+        }
+    }
+
+    #[test]
+    fn wsse_layout_dependent_sizing_streams_actual_body_identity() {
+        use oncl_xml::wsse::SourceWsseSignProfile;
+        let scratch = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(scratch.path()).unwrap();
+        let guard = Arc::new(fixture::Guard::default());
+        let provider = Arc::new(fixture::Provider::default());
+        let engine = fixture::engine(
+            store.clone(),
+            guard.clone(),
+            provider.clone(),
+            ResourceLimits::default(),
+        );
+        let key = fixture::selector("user-rsa-sign");
+        let mut profile = SourceWsseSignProfile::default();
+        profile.verification.required_headers = (0..128)
+            .map(|i| format!("route-{i:03}-{}", "&".repeat(1014)))
+            .collect();
+        let mut context = begin(&engine, Some(&key), &[Action::Sign]);
+        // Find the exact initial lower-bound cap without rendering a document.
+        let (mut low, mut high) = (1usize, 1_048_576usize);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            profile.verification.xml.max_metadata_bytes = middle;
+            if profile.preflight(context.resources()).is_ok() {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        profile.verification.xml.max_metadata_bytes = low;
+        assert!(profile.preflight(context.resources()).is_ok());
+        let headers = profile
+            .verification
+            .required_headers
+            .iter()
+            .map(|id| {
+                format!(
+                    "<h:route u:Id='{}'>covered</h:route>",
+                    id.replace('&', "&amp;")
+                )
+            })
+            .collect::<String>();
+        let body_id = format!("body-{}", "&".repeat(195));
+        let input = format!(
+            "<s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/' xmlns:h='urn:route' xmlns:u='{}'><s:Header>{headers}</s:Header><s:Body u:Id='{}'><request>protected</request></s:Body></s:Envelope>",
+            oncl_xml::wsse::WSU_NS,
+            body_id.replace('&', "&amp;")
+        );
+        let request = SignRequest::wsse(
+            KeyRequest::new(&key, Some(fixture::PASSWORD)),
+            profile.clone(),
+        );
+        let mut reader = std::io::Cursor::new(&input);
+        let mut output = Vec::new();
+        let (result, allocated, largest) = capture_allocations::observe_with_largest(|| {
+            engine.sign(
+                request,
+                Source::sequential(&mut reader, None),
+                &mut output,
+                &mut context,
+            )
+        });
+        println!(
+            "layout_sizing initial_cap={low} wire={} allocated_cumulative={allocated} largest_request={largest}",
+            input.len()
+        );
+        assert!(matches!(
+            result,
+            Err(oncl_core::OperationError::Processing(
+                ProcessingError::MetadataLimit
+            ))
+        ));
+        assert_eq!(reader.position(), input.len() as u64);
+        assert_eq!(context.resources().progress().bytes_in, input.len() as u64);
+        // Placement legitimately reads a bounded original parent tail. It must
+        // not add an allocation as large as the larger escaped signature XML.
+        assert!(
+            largest <= input.len(),
+            "layout sizing allocated a whole escaped signature: {largest}"
+        );
+        assert_eq!(provider.opens.load(Ordering::SeqCst), 0);
+        assert_eq!(guard.applied.load(Ordering::SeqCst), 0);
+        assert!(output.is_empty());
+        drop(context);
+        // The same actual parsed geometry is preparable with a sufficient
+        // existing component profile; this is not a fabricated prepared flag.
+        profile.verification.xml.max_metadata_bytes = low + 4096;
+        let mut context = begin(&engine, Some(&key), &[Action::Sign]);
+        let mut resources = context.resources().shared_view();
+        let (prepared, positive_allocated, positive_largest) =
+            capture_allocations::observe_with_largest(|| {
+                oncl_xml::wsse::prepare_source(
+                    Source::sequential(&mut std::io::Cursor::new(&input), None),
+                    &profile,
+                    &store,
+                    &mut resources,
+                )
+            });
+        let prepared = prepared.unwrap();
+        println!(
+            "layout_sizing positive allocated_cumulative={positive_allocated} largest_request={positive_largest}"
+        );
+        assert_eq!(
+            largest, positive_largest,
+            "rejected counting must not add a full rendered-metadata allocation"
+        );
+        drop(prepared);
+        assert_eq!(resources.progress().bytes_in, input.len() as u64);
+    }
 
     #[test]
     fn wsse_real_batch_create_verify_add_preserves_scope_and_body_binding() {

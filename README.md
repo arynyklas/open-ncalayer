@@ -770,6 +770,12 @@ profile требует prepared API с trusted ValidationContext. Неподде
 генерации EN baseline и заведомо невозможные layout/reference limits отклоняются
 до provider. Проверка существующих carried XAdES proofs сохранена; генератор WSSE
 не приписывает себе EN baseline properties.
+Предварительный размер считает тот же signature emitter через checked UTF-8 sink
+с потоковым XML attribute escaping. References заимствуют допущенные Id: полная
+escaped подпись и копии строк Id ради подсчёта не создаются. Временные descriptor/
+token buffers допускаются до allocation. Известный из profile отказ по размеру
+происходит до Core/B01 intake, provider и private use, без повышения metadata caps; metadata
+reservation уже учитывает live RAM.
 
 Runtime: `cargo run -p oncl-core --features xml --example sdk_probe -- --case X05 --out target/x05-smoke`.
 Probe покрывает содержательный SOAP Body более 64 МиБ, RSA и GOST Add, все три

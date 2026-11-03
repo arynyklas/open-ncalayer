@@ -673,6 +673,12 @@ ValidationContext. Unsupported EN-baseline generation requirements and
 impossible known layout/reference limits fail before provider access. Existing
 carried XAdES proofs remain verifiable; WSSE generation does not silently claim
 to generate EN baseline properties.
+Size preflight now sends the same signature emitter to a checked UTF-8 counting
+sink, including streamed XML attribute escaping. References borrow admitted IDs;
+no whole escaped signature or copied ID strings are created merely to count
+them. Small descriptor/token-wrapper temporaries are admitted before allocation.
+Profile-known sizing refusals precede Core and B01 intake/provider/private access without
+raising metadata caps; metadata reservations already account for live RAM.
 
 Runtime: `cargo run -p oncl-core --features xml --example sdk_probe -- --case X05 --out target/x05-smoke`.
 It exercises a substantive protected SOAP Body over 64 MiB, RSA and GOST Add,

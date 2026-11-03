@@ -675,6 +675,8 @@ fn fix_soap12_none_is_not_a_host_processing_role() {
 }
 
 fn canonical_test_node(xml: &str, id: Option<&str>) -> Vec<u8> {
+    let parsed = roxmltree::Document::parse(xml).unwrap();
+    let soap_namespace = parsed.root_element().tag_name().namespace().unwrap();
     let limits = ResourceLimits::default();
     let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
     let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
@@ -692,7 +694,7 @@ fn canonical_test_node(xml: &str, id: Option<&str>) -> Vec<u8> {
             .select_xpath(
                 "/s:Envelope/s:Header/w:Security/ds:Signature/ds:SignedInfo",
                 &[
-                    ("s", "http://schemas.xmlsoap.org/soap/envelope/"),
+                    ("s", soap_namespace),
                     ("w", wsse::WSSE_NS),
                     ("ds", "http://www.w3.org/2000/09/xmldsig#"),
                 ],
@@ -934,4 +936,123 @@ fn fix_role_none_carrier_is_preserved_but_never_selected() {
     assert_eq!(report.signers().len(), 1);
     assert!(report.signers()[0].selected_recipient());
     assert_eq!(report.signers()[0].processing_role(), "");
+}
+
+#[test]
+fn sizing_unicode_many_headers_timestamp_exact_fit_and_one_byte_short() {
+    use base64::Engine as _;
+    let now = time::OffsetDateTime::from_unix_timestamp(1793707200).unwrap();
+    for soap in [wsse::SoapVersion::Soap11, wsse::SoapVersion::Soap12] {
+        let ids: Vec<_> = (0..128).map(|i| format!("route-é-{i:03}")).collect();
+        let headers = ids
+            .iter()
+            .map(|id| format!("<h:route u:Id='{id}'>real covered route</h:route>"))
+            .collect::<String>();
+        let input = format!(
+            "<e:Envelope xmlns:e='{}' xmlns:h='urn:route' xmlns:u='{}'><e:Header>{headers}</e:Header><b:Body xmlns:b='{}' u:Id='body-é'><m:request xmlns:m='urn:app'>protected</m:request></b:Body></e:Envelope>",
+            soap.namespace(),
+            wsse::WSU_NS,
+            soap.namespace()
+        );
+        let mut p = SourceWsseSignProfile::default();
+        p.verification.soap = soap;
+        p.verification.required_headers = ids;
+        // Select the actual 64-KiB component profile; don't combine all default
+        // parser/signer scratch maxima or widen the operation's metadata quota.
+        p.verification.xml.max_metadata_bytes = 64 * 1024;
+        p.timestamp = Some(wsse::WsseTimestamp {
+            id: "time-é".into(),
+            created: now - time::Duration::SECOND,
+            expires: now + time::Duration::MINUTE,
+        });
+        let original = signed(input.as_bytes(), &p);
+        let parsed = roxmltree::Document::parse(std::str::from_utf8(&original).unwrap()).unwrap();
+        let security = parsed
+            .descendants()
+            .find(|n| {
+                n.tag_name().namespace() == Some(wsse::WSSE_NS) && n.tag_name().name() == "Security"
+            })
+            .unwrap();
+        let content = security
+            .children()
+            .filter(roxmltree::Node::is_element)
+            .map(|n| n.range().len())
+            .sum::<usize>();
+        let signature = parsed
+            .descendants()
+            .find(|n| n.tag_name().name() == "SignatureValue")
+            .unwrap();
+        let actual = base64::engine::general_purpose::STANDARD
+            .decode(signature.text().unwrap())
+            .unwrap()
+            .len();
+        let key = CountingSigner::new();
+        let public_bound = key
+            .entry
+            .cert
+            .tbs_certificate()
+            .subject_public_key_info()
+            .subject_public_key
+            .as_bytes()
+            .unwrap()
+            .len();
+        let fitting = (content + public_bound.div_ceil(3) * 4 - actual.div_ceil(3) * 4)
+            .max(canonical_test_node(std::str::from_utf8(&original).unwrap(), None).len());
+        for short in [false, true] {
+            let mut selected = p.clone();
+            selected.verification.xml.max_metadata_bytes = fitting - usize::from(short);
+            let limits = ResourceLimits::default();
+            let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+            let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+            let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+            let prepared = wsse::prepare_source(
+                Source::sequential(&mut Cursor::new(&input), None),
+                &selected,
+                &store,
+                &mut scope,
+            )
+            .unwrap();
+            let anchors = CaSet::new(vec![
+                oncl_pki::cert::parse(&oncl_testkit::synthetic_cert("root-rsa")).unwrap(),
+            ]);
+            let validation = ValidationContext {
+                policy: ValidationPolicy::OfflineReport,
+                now,
+                anchors: &anchors,
+                intermediates: &[],
+                http: &Offline,
+            };
+            let mut signer = CountingSigner::new();
+            let mut stage = store.stage(&mut scope).unwrap();
+            let mut output = oncl_pki::io::XmlSignatureOutput::new(&mut stage, &scope).unwrap();
+            let result = wsse::sign_prepared(
+                prepared,
+                &mut signer,
+                &validation,
+                &NetworkPolicy::deny_all(),
+                None,
+                &mut output,
+                &mut scope,
+            );
+            if short {
+                assert!(matches!(
+                    result,
+                    Err(oncl_xml::XmlSourceError::Processing(
+                        ProcessingError::MetadataLimit
+                    )) | Err(oncl_xml::XmlSourceError::Xml(oncl_xml::XmlError::TooLarge))
+                ));
+                assert_eq!(signer.uses, 0);
+                drop(output);
+                assert!(stage.copy_to(&mut Vec::new()).is_err());
+            } else {
+                let (_, report) = result.unwrap();
+                assert_eq!(signer.uses, 1);
+                assert_eq!(report.signers()[0].covered_headers().len(), 128);
+                assert!(report.signers()[0].covered_timestamp().is_some());
+                assert!(report.signers()[0].body_digest_matches());
+                drop(report);
+                output.finish(&scope).unwrap();
+            }
+        }
+    }
 }

@@ -1,7 +1,7 @@
 //! Source signing keeps the document immutable and only materializes bounded metadata.
 use crate::{
     Algorithms, DSIG_NS, QualifyingObject, SIGNED_PROPERTIES_TYPE, SigningTimeObject, SplicePoint,
-    XADES_NS, XmlError, base64_lines, canonicalizer, escape_attribute, escape_text, parse,
+    XADES_NS, XmlError, base64_lines, canonicalizer, escape_text, parse,
 };
 use crate::{
     C14n, C14nProfile, XmlDocument, XmlEventKind, XmlLimits, XmlSourceError,
@@ -996,11 +996,55 @@ pub(super) struct Template<'t> {
 
 pub(crate) struct WsseTemplate<'a> {
     pub key_info: &'a str,
-    pub references: &'a [(String, oncl_pki::digest::DigestValue)],
+    pub references: &'a [(&'a str, oncl_pki::digest::DigestValue)],
+}
+enum ReferenceUri<'a> {
+    Raw(&'a str),
+    Fragment(&'a str),
+}
+struct XmlSize {
+    bytes: usize,
+    limit: usize,
+}
+impl XmlSize {
+    fn add(&mut self, length: usize) -> std::fmt::Result {
+        let Some(next) = self.bytes.checked_add(length).filter(|n| *n <= self.limit) else {
+            return Err(std::fmt::Error);
+        };
+        self.bytes = next;
+        Ok(())
+    }
+}
+impl std::fmt::Write for XmlSize {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        self.add(value.len())
+    }
 }
 impl Template<'_> {
-    pub(crate) fn wsse_metadata_len(&self, wsse: &WsseTemplate<'_>, signature: &[u8]) -> usize {
-        self.render_with(Some(signature), None, Some(wsse)).len()
+    pub(crate) fn wsse_metadata_len(
+        &self,
+        wsse: &WsseTemplate<'_>,
+        signature_bytes: usize,
+        limit: usize,
+    ) -> std::result::Result<usize, ProcessingError> {
+        // WSSE uses single-line Base64. Count actual emitted XML with the SAME
+        // renderer; project only the encoded signature length, never fake bytes.
+        if self.line_breaks {
+            return Err(ProcessingError::InvalidInput(
+                "WSSE sizing requires single-line Base64",
+            ));
+        }
+        let mut size = XmlSize { bytes: 0, limit };
+        self.render_into(&mut size, None, None, Some(wsse))
+            .map_err(|_| ProcessingError::MetadataLimit)?;
+        let encoded = signature_bytes
+            .checked_add(2)
+            .and_then(|n| n.checked_div(3))
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(ProcessingError::MetadataLimit)?;
+        size.add(encoded)
+            .map_err(|_| ProcessingError::MetadataLimit)?;
+        Ok(size.bytes)
     }
     fn base64(&self, bytes: &[u8]) -> String {
         if self.line_breaks {
@@ -1009,127 +1053,140 @@ impl Template<'_> {
             STANDARD.encode(bytes)
         }
     }
-
     fn reference(
         &self,
-        s: &mut String,
-        uri: &str,
+        s: &mut impl std::fmt::Write,
+        uri: ReferenceUri<'_>,
         kind: Option<&str>,
         transforms: &[&str],
         digest: &[u8],
         id: Option<&str>,
-    ) {
+    ) -> std::fmt::Result {
+        use crate::c14n::AttributeDisplay as Escaped;
         let n = self.separator;
-        let kind = kind
-            .map(|kind| format!(" Type=\"{}\"", escape_attribute(kind)))
-            .unwrap_or_default();
-        let id = id
-            .map(|id| format!(" Id=\"{}\"", escape_attribute(id)))
-            .unwrap_or_default();
-        s.push_str(&format!(
-            "<ds:Reference{id} URI=\"{}\"{kind}>{n}<ds:Transforms>{n}",
-            escape_attribute(uri)
-        ));
-        for transform in transforms {
-            s.push_str(&format!("<ds:Transform Algorithm=\"{transform}\"/>{n}"));
+        let (prefix, value) = match uri {
+            ReferenceUri::Raw(value) => ("", value),
+            ReferenceUri::Fragment(value) => ("#", value),
+        };
+        s.write_str("<ds:Reference")?;
+        if let Some(id) = id {
+            write!(s, " Id=\"{}\"", Escaped(id))?;
         }
-        s.push_str(&format!(
+        write!(s, " URI=\"{prefix}{}\"", Escaped(value))?;
+        if let Some(kind) = kind {
+            write!(s, " Type=\"{}\"", Escaped(kind))?;
+        }
+        write!(s, ">{n}<ds:Transforms>{n}")?;
+        for transform in transforms {
+            write!(s, "<ds:Transform Algorithm=\"{transform}\"/>{n}")?;
+        }
+        write!(
+            s,
             "</ds:Transforms>{n}<ds:DigestMethod Algorithm=\"{}\"/>{n}\
-             <ds:DigestValue>{}</ds:DigestValue>{n}</ds:Reference>{n}",
-            escape_attribute(self.algorithms.digest_uri),
-            self.base64(digest),
-        ));
+            <ds:DigestValue>{}</ds:DigestValue>{n}</ds:Reference>{n}",
+            Escaped(self.algorithms.digest_uri),
+            self.base64(digest)
+        )
     }
-
-    /// `ds:Signature` element; without `value` the `SignatureValue` is empty, without
-    /// `object_digest` the signing-time object's reference has an empty digest.
     fn render_with(
         &self,
         value: Option<&[u8]>,
         object_digest: Option<&[u8]>,
         wsse: Option<&WsseTemplate<'_>>,
     ) -> String {
+        let mut output = String::new();
+        self.render_into(&mut output, value, object_digest, wsse)
+            .expect("writing to String is infallible");
+        output
+    }
+    /// The single XMLDSig emitter: real String output and checked byte counting
+    /// traverse identical markup, escaping and reference-order branches.
+    fn render_into(
+        &self,
+        s: &mut impl std::fmt::Write,
+        value: Option<&[u8]>,
+        object_digest: Option<&[u8]>,
+        wsse: Option<&WsseTemplate<'_>>,
+    ) -> std::fmt::Result {
+        use crate::c14n::AttributeDisplay as Escaped;
         let n = self.separator;
-        let id = self
-            .id
-            .map(|id| format!(" Id=\"{}\"", escape_attribute(id)))
-            .unwrap_or_default();
-        let mut s = format!(
-            "<ds:Signature xmlns:ds=\"{DSIG_NS}\"{id}>{n}<ds:SignedInfo>{n}\
-             <ds:CanonicalizationMethod Algorithm=\"{}\"/>{n}\
-             <ds:SignatureMethod Algorithm=\"{}\"/>{n}",
+        write!(s, "<ds:Signature xmlns:ds=\"{DSIG_NS}\"")?;
+        if let Some(id) = self.id {
+            write!(s, " Id=\"{}\"", Escaped(id))?;
+        }
+        write!(
+            s,
+            ">{n}<ds:SignedInfo>{n}<ds:CanonicalizationMethod Algorithm=\"{}\"/>{n}\
+            <ds:SignatureMethod Algorithm=\"{}\"/>{n}",
             self.method.uri(),
-            escape_attribute(self.algorithms.signature_uri),
-        );
+            Escaped(self.algorithms.signature_uri)
+        )?;
         let data_reference_id = match &self.object {
             Some(ObjectTemplate::Qualifying(q)) => q.data_reference_id,
             _ => None,
         };
         self.reference(
-            &mut s,
-            self.uri,
+            s,
+            ReferenceUri::Raw(self.uri),
             None,
             self.transforms,
             &self.digest,
             data_reference_id,
-        );
+        )?;
         if let Some((id, kind, transforms, _)) =
             self.object.as_ref().and_then(|o| o.reference(self))
         {
-            let uri = format!(
-                "#{}",
-                if data_reference_id.is_some() {
-                    percent_id(id)
-                } else {
-                    id.to_owned()
-                }
-            );
+            let encoded;
+            let id = if data_reference_id.is_some() {
+                encoded = percent_id(id);
+                encoded.as_str()
+            } else {
+                id
+            };
             self.reference(
-                &mut s,
-                &uri,
+                s,
+                ReferenceUri::Fragment(id),
                 kind,
                 &transforms,
                 object_digest.unwrap_or_default(),
                 None,
-            );
+            )?;
         }
         if let Some(wsse) = wsse {
             for (id, digest) in wsse.references {
                 self.reference(
-                    &mut s,
-                    &format!("#{id}"),
+                    s,
+                    ReferenceUri::Fragment(id),
                     None,
                     &[C14n::Exclusive.uri()],
                     digest.as_bytes(),
                     None,
-                );
+                )?;
             }
         }
-        s.push_str(&format!("</ds:SignedInfo>{n}<ds:SignatureValue>"));
+        write!(s, "</ds:SignedInfo>{n}<ds:SignatureValue>")?;
         if let Some(value) = value {
-            // Santuario puts a long value on lines of its own.
             let text = self.base64(value);
             if self.line_breaks && text.len() > 76 {
-                s.push_str(&format!("\n{text}\n"));
+                write!(s, "\n{text}\n")?;
             } else {
-                s.push_str(&text);
+                s.write_str(&text)?;
             }
         }
-        let cert = self.base64(&self.cert);
-        let cert = if self.line_breaks {
-            format!("\n{cert}\n")
-        } else {
-            cert
-        };
-        s.push_str(&format!("</ds:SignatureValue>{n}<ds:KeyInfo>{n}"));
+        write!(s, "</ds:SignatureValue>{n}<ds:KeyInfo>{n}")?;
         if let Some(wsse) = wsse {
-            s.push_str(wsse.key_info);
+            s.write_str(wsse.key_info)?;
         } else {
-            s.push_str(&format!(
-                "<ds:X509Data>{n}<ds:X509Certificate>{cert}</ds:X509Certificate>{n}</ds:X509Data>{n}"
-            ));
+            let cert = self.base64(&self.cert);
+            write!(s, "<ds:X509Data>{n}<ds:X509Certificate>")?;
+            if self.line_breaks {
+                write!(s, "\n{cert}\n")?;
+            } else {
+                s.write_str(&cert)?;
+            }
+            write!(s, "</ds:X509Certificate>{n}</ds:X509Data>{n}")?;
         }
-        s.push_str(&format!("</ds:KeyInfo>{n}"));
+        write!(s, "</ds:KeyInfo>{n}")?;
         match &self.object {
             Some(ObjectTemplate::SigningTime {
                 object,
@@ -1140,30 +1197,37 @@ impl Template<'_> {
                 } else {
                     ""
                 };
-                s.push_str(&format!(
+                write!(
+                    s,
                     "<ds:Object>{n}<ds:SignatureProperties>{n}\
-                     <ds:SignatureProperty Id=\"{}\" Target=\"#{}\">{n}\
-                     <timestamp{reset}>{}</timestamp>{n}</ds:SignatureProperty>{n}\
-                     </ds:SignatureProperties>{n}</ds:Object>{n}",
-                    escape_attribute(object.property_id),
-                    escape_attribute(self.id.unwrap_or_default()),
-                    escape_text(object.text),
-                ));
+                    <ds:SignatureProperty Id=\"{}\" Target=\"#{}\">{n}\
+                    <timestamp{reset}>{}</timestamp>{n}</ds:SignatureProperty>{n}\
+                    </ds:SignatureProperties>{n}</ds:Object>{n}",
+                    Escaped(object.property_id),
+                    Escaped(self.id.unwrap_or_default()),
+                    escape_text(object.text)
+                )?;
             }
-            Some(ObjectTemplate::Qualifying(q)) => s.push_str(&format!(
-                "<ds:Object>{n}<xades:QualifyingProperties xmlns:xades=\"{XADES_NS}\" \
-                 Target=\"#{}\">{n}{}{n}</xades:QualifyingProperties>{n}</ds:Object>{n}",
-                escape_attribute(&if q.data_reference_id.is_some() {
-                    percent_id(self.id.unwrap_or_default())
+            Some(ObjectTemplate::Qualifying(q)) => {
+                let encoded;
+                let id = self.id.unwrap_or_default();
+                let id = if q.data_reference_id.is_some() {
+                    encoded = percent_id(id);
+                    encoded.as_str()
                 } else {
-                    self.id.unwrap_or_default().to_owned()
-                }),
-                q.signed_properties,
-            )),
+                    id
+                };
+                write!(
+                    s,
+                    "<ds:Object>{n}<xades:QualifyingProperties xmlns:xades=\"{XADES_NS}\" \
+                    Target=\"#{}\">{n}{}{n}</xades:QualifyingProperties>{n}</ds:Object>{n}",
+                    Escaped(id),
+                    q.signed_properties
+                )?;
+            }
             None => {}
         }
-        s.push_str("</ds:Signature>");
-        s
+        s.write_str("</ds:Signature>")
     }
 
     /// The signature spliced into `xml` at `point`, parsed: `f` on its element.
@@ -1667,3 +1731,94 @@ impl<'a> PreparedLegacySign<'a> {
 }
 
 type MetadataAdmission<'a, E> = dyn FnMut(&str) -> Result<(), E> + 'a;
+
+#[cfg(test)]
+mod wsse_size_projection_tests {
+    use super::*;
+
+    #[test]
+    fn checked_count_matches_real_signature_xml_escaping_and_exact_cap() {
+        let fixture = oncl_testkit::synthetic("user-rsa-sign");
+        let key = oncl_pki::pkcs12::load(&oncl_testkit::read(&fixture.path), &fixture.password)
+            .unwrap()
+            .remove(0);
+        let (signature_uri, digest_uri) = crate::signing_uris(SigAlg::RsaSha256).unwrap();
+        let mut hash = oncl_pki::digest::HashState::new(oncl_pki::key::HashAlg::Sha256);
+        hash.update(b"<body>projection fixture</body>");
+        let digest = hash.finish();
+        let ids: Vec<_> = (0..128)
+            .map(|i| format!("route-{i:03}-{}é", "&<>\"".repeat(128)))
+            .collect();
+        let references: Vec<_> = ids.iter().map(|id| (id.as_str(), digest)).collect();
+        let key_info = format!(
+            "<wsse:SecurityTokenReference xmlns:wsse=\"{}\"><wsse:KeyIdentifier EncodingType=\"{}\" ValueType=\"{}\">{}</wsse:KeyIdentifier></wsse:SecurityTokenReference>",
+            crate::wsse::WSSE_NS,
+            crate::wsse::BASE64_BINARY,
+            crate::wsse::X509_V3,
+            STANDARD.encode(crate::cert_der(&key.cert).unwrap())
+        );
+        let wsse = WsseTemplate {
+            key_info: &key_info,
+            references: &references,
+        };
+        let template = Template {
+            algorithms: Algorithms {
+                signature: SigAlg::RsaSha256,
+                signature_uri,
+                digest: oncl_pki::key::HashAlg::Sha256,
+                digest_uri,
+            },
+            method: C14n::Exclusive,
+            uri: "#body-é",
+            transforms: &[C14n::Exclusive.uri()],
+            digest: digest.as_bytes().to_vec(),
+            cert: Vec::new(),
+            id: None,
+            object: None,
+            reference_c14n: C14n::Exclusive,
+            separator: "",
+            line_breaks: false,
+        };
+        // Real RSA signs the actual serialized SignedInfo. This is a serializer
+        // length test, not a claim that these fixture header targets are present.
+        let signed = template
+            .signed_with(
+                |xml, _, method, algorithm| {
+                    let parsed = crate::parse::parse_signed(xml.as_bytes())?;
+                    let info = crate::ds_child(parsed.root_element(), "SignedInfo")?;
+                    let mut canonical = Vec::new();
+                    crate::canonicalizer(method).write_to_profile(
+                        info,
+                        &mut canonical,
+                        C14nProfile::Standard,
+                    )?;
+                    let mut state = oncl_pki::digest::HashState::new(algorithm);
+                    state.update(&canonical);
+                    Ok::<_, XmlError>(state.finish())
+                },
+                |value| {
+                    key.key
+                        .sign_digest(SigAlg::RsaSha256, value)
+                        .map_err(XmlError::Key)
+                },
+                Some(&wsse),
+                None,
+            )
+            .unwrap();
+        key.key
+            .public_key()
+            .verify_digest(SigAlg::RsaSha256, &signed.digest, &signed.value)
+            .unwrap();
+        assert_eq!(
+            template
+                .wsse_metadata_len(&wsse, signed.value.len(), signed.xml.len())
+                .unwrap(),
+            signed.xml.len()
+        );
+        assert!(matches!(
+            template.wsse_metadata_len(&wsse, signed.value.len(), signed.xml.len() - 1),
+            Err(ProcessingError::MetadataLimit)
+        ));
+        assert!(signed.xml.contains("&amp;&lt;>&quot;"));
+    }
+}

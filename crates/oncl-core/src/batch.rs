@@ -565,6 +565,8 @@ impl Engine {
                             oncl_pki::key::KeyError::UnsupportedAlgorithm,
                         ));
                     }
+                    let _profile_admission =
+                        profile.preflight(&ctx.scope).map_err(crate::xml::error)?;
                     if profile.mode != XmlSignMode::Add {
                         return Ok(None);
                     }

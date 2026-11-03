@@ -163,9 +163,6 @@ impl SourceWsseSignProfile {
                 + self.timestamp.as_ref().map_or(0, |t| t.id.len())
                 + 256) as u64,
         )?;
-        let _sizing = scope.reserve_metadata(
-            16384 + references as u64 * (self.verification.xml.xml.max_id_bytes as u64 + 512),
-        )?;
         minimum_generation_metadata(
             self,
             "",
@@ -174,6 +171,7 @@ impl SourceWsseSignProfile {
                 .iter()
                 .map(String::as_str)
                 .chain(self.timestamp.iter().map(|timestamp| timestamp.id.as_str())),
+            scope,
         )?;
         Ok(admission)
     }
@@ -199,11 +197,45 @@ fn token_metadata(profile: &SourceWsseSignProfile, certificate: &[u8]) -> (Strin
         ),
     }
 }
+fn sizing_admission(
+    profile: &SourceWsseSignProfile,
+    body_id: &str,
+    references: usize,
+    scope: &ResourceScope,
+) -> Result<ResourceReservation> {
+    // Reference descriptors borrow IDs; attribute escaping is streamed by the
+    // common emitter. Only the small token wrapper still has escaped temporaries:
+    // at most 6 UTF-8 output bytes/input byte, String capacity and overlap included.
+    let token_id = if profile.token_reference == TokenReference::BinarySecurityToken {
+        profile.token_id.len() as u64
+    } else {
+        0
+    };
+    let bytes = (references as u64)
+        .checked_mul(std::mem::size_of::<(&str, oncl_pki::digest::DigestValue)>() as u64)
+        .and_then(|n| n.checked_add(16_384))
+        .and_then(|n| {
+            token_id
+                .checked_mul(6 * 8)
+                .and_then(|token| n.checked_add(token))
+        })
+        .and_then(|n| {
+            (body_id.len() as u64)
+                .checked_add(1)
+                .and_then(|body| body.checked_mul(2))
+                .and_then(|body| n.checked_add(body))
+        })
+        .ok_or(ProcessingError::MetadataLimit)?;
+    Ok(scope.reserve_metadata(bytes)?)
+}
 fn minimum_generation_metadata<'a>(
     profile: &SourceWsseSignProfile,
     body_id: &str,
     ids: impl Iterator<Item = &'a str> + Clone,
+    scope: &ResourceScope,
 ) -> Result<()> {
+    let count = ids.clone().count();
+    let _sizing = sizing_admission(profile, body_id, count, scope)?;
     // Layout-only lower bound from the SAME signature renderer, not a crypto
     // result or a stand-in certificate. Actual selected DER is checked later.
     let (token, key_info) = token_metadata(profile, &[]);
@@ -215,7 +247,8 @@ fn minimum_generation_metadata<'a>(
         };
         supported = true;
         let digest = oncl_pki::digest::HashState::new(algorithm.hash_alg()).finish();
-        let references: Vec<_> = ids.clone().map(|id| (id.to_owned(), digest)).collect();
+        let mut references = Vec::with_capacity(count);
+        references.extend(ids.clone().map(|id| (id, digest)));
         let template = crate::sign::Template {
             algorithms: crate::Algorithms {
                 signature: *algorithm,
@@ -234,18 +267,25 @@ fn minimum_generation_metadata<'a>(
             separator: "",
             line_breaks: false,
         };
-        let length = template.wsse_metadata_len(
+        let Some(limit) = profile
+            .verification
+            .xml
+            .max_metadata_bytes
+            .checked_sub(token.len())
+        else {
+            continue;
+        };
+        match template.wsse_metadata_len(
             &crate::sign::WsseTemplate {
                 key_info: &key_info,
                 references: &references,
             },
-            &[],
-        );
-        if length
-            .checked_add(token.len())
-            .is_some_and(|n| n <= profile.verification.xml.max_metadata_bytes)
-        {
-            return Ok(());
+            0,
+            limit,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(ProcessingError::MetadataLimit) => {}
+            Err(error) => return Err(error.into()),
         }
     }
     if !supported {
@@ -1525,12 +1565,12 @@ pub fn prepare_source<'a>(
     {
         return Err(ProcessingError::MetadataLimit.into());
     }
-    {
-        let _sizing = scope.reserve_metadata(
-            16384 + additional.len() as u64 * (vp.xml.max_id_bytes as u64 + 512) * 4,
-        )?;
-        minimum_generation_metadata(p, &body_id, additional.iter().map(|part| part.id.as_str()))?;
-    }
+    minimum_generation_metadata(
+        p,
+        &body_id,
+        additional.iter().map(|part| part.id.as_str()),
+        scope,
+    )?;
     let hashing = additional
         .iter()
         .try_fold(body.len(), |n, part| n.checked_add(part.stage.len()))
@@ -1663,7 +1703,7 @@ impl PreparedWsseSign<'_> {
         let mut references = Vec::with_capacity(self.additional.len());
         for part in &mut self.additional {
             references.push((
-                part.id.clone(),
+                part.id.as_str(),
                 crate::xades::source::hash_stage(
                     &mut part.stage,
                     algorithm.hash_alg(),
@@ -1712,21 +1752,19 @@ impl PreparedWsseSign<'_> {
                 .len(),
             oncl_pki::key::SigAlg::RsaSha1 => return Err(XmlSourceError::AlgorithmDenied),
         };
-        let signature_layout = vec![0; signature_bound];
-        let size = template
-            .wsse_metadata_len(
-                &crate::sign::WsseTemplate {
-                    key_info: &key_info,
-                    references: &references,
-                },
-                &signature_layout,
-            )
-            .checked_add(token.len())
-            .and_then(|n| n.checked_add(self.timestamp_xml.len()))
+        let limit = p
+            .max_metadata_bytes
+            .checked_sub(token.len())
+            .and_then(|n| n.checked_sub(self.timestamp_xml.len()))
             .ok_or(ProcessingError::MetadataLimit)?;
-        if size > p.max_metadata_bytes {
-            return Err(ProcessingError::MetadataLimit.into());
-        }
+        template.wsse_metadata_len(
+            &crate::sign::WsseTemplate {
+                key_info: &key_info,
+                references: &references,
+            },
+            signature_bound,
+            limit,
+        )?;
         let prepared = template.signed_with(
             |rendered, _, method, hash| {
                 let xml = crate::sign::wrap(&place.context, rendered)?;

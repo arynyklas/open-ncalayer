@@ -355,6 +355,22 @@ fn attribute_escape(b: u8) -> Option<&'static [u8]> {
         _ => None,
     }
 }
+/// Borrowed attribute escaping, using exactly the canonical writer's byte rules.
+/// A formatting/counting sink never needs an escaped temporary String.
+pub(crate) struct AttributeDisplay<'a>(pub &'a str);
+impl std::fmt::Display for AttributeDisplay<'_> {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut start = 0;
+        for (at, byte) in self.0.bytes().enumerate() {
+            if let Some(replacement) = attribute_escape(byte) {
+                out.write_str(&self.0[start..at])?;
+                out.write_str(std::str::from_utf8(replacement).expect("XML escapes are ASCII"))?;
+                start = at + 1;
+            }
+        }
+        out.write_str(&self.0[start..])
+    }
+}
 
 fn escaped_len(text: &str, escape: Escape) -> usize {
     text.bytes().map(|b| escape(b).map_or(1, <[u8]>::len)).sum()
