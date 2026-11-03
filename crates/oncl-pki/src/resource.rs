@@ -375,6 +375,17 @@ impl ResourceScope {
     pub fn account_framing(&self, bytes: u64) -> Result<(), ProcessingError> {
         self.account(Count::Framing, bytes)
     }
+    /// Non-debiting preflight only, not a reservation or an output/replay permit.
+    /// Actual writers must still call account_output under the original scope.
+    pub fn check_output_capacity(&self, bytes: u64) -> Result<(), ProcessingError> {
+        self.checkpoint()?;
+        lock(&self.state.usage)
+            .output
+            .checked_add(bytes)
+            .filter(|n| *n <= self.state.limits.output_bytes)
+            .map(|_| ())
+            .ok_or(ProcessingError::OutputLimit)
+    }
     pub fn account_output(&self, bytes: u64) -> Result<(), ProcessingError> {
         self.account(Count::Output, bytes)
     }

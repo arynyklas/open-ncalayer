@@ -225,6 +225,7 @@ pub fn sign_spec(
             content_type,
             content,
             base,
+            None,
         )
     })
 }
@@ -236,10 +237,28 @@ pub fn sign_spec_with_signer(
     signer: &mut dyn DigestSigner,
     chain: &[Certificate],
     spec: &SignSpec<'_>,
+    admit: &mut dyn FnMut(CmsAdmission) -> Result<(), CmsError>,
 ) -> Result<Vec<u8>, CmsError> {
     with_content(spec, |content_type, content, base| {
-        build(signer, chain, spec, content_type, content, base)
+        build(
+            signer,
+            chain,
+            spec,
+            content_type,
+            content,
+            base,
+            Some(admit),
+        )
     })
+}
+
+/// Checked read-only allocation/output sizes, never authority or a detached permit.
+#[derive(Clone, Copy, Debug)]
+pub struct CmsAdmission {
+    pub metadata_bytes: u64,
+    /// Non-metadata encoder RAM; metadata is already included in scoped RAM.
+    pub memory_bytes: u64,
+    pub output_der_bytes: Option<u64>,
 }
 
 fn with_content(
@@ -319,6 +338,7 @@ fn build(
     content_type: &ObjectIdentifier,
     content: Content<'_>,
     base: Option<&SignedData<'_>>,
+    mut admit: Option<&mut dyn FnMut(CmsAdmission) -> Result<(), CmsError>>,
 ) -> Result<Vec<u8>, CmsError> {
     let alg = signer.algorithm();
     if spec.digest.is_some_and(|digest| digest != alg.hash_alg()) {
@@ -326,6 +346,18 @@ fn build(
             "the digest of a {alg:?} signature is {:?}",
             alg.hash_alg()
         )));
+    }
+    let metadata_work = if admit.is_some() {
+        bounded_metadata_work(signer.certificate(), chain, spec, base)?
+    } else {
+        0
+    };
+    if let Some(admit) = admit.as_deref_mut() {
+        admit(CmsAdmission {
+            metadata_bytes: metadata_work,
+            memory_bytes: 0,
+            output_der_bytes: None,
+        })?;
     }
     let digest = match content {
         Content::Data(data) => alg.digest(data),
@@ -348,11 +380,6 @@ fn build(
             ));
         }
     };
-    let signature = signer
-        .sign_digest(&signature_digest)
-        .map_err(CmsError::Key)?;
-
-    let signer_info = encode_signer_info(signer.certificate(), alg, attrs.as_deref(), &signature)?;
     let digest_algorithm = AlgorithmIdentifierRef {
         oid: alg.digest_oid(),
         parameters: Some(AnyRef::NULL),
@@ -360,13 +387,9 @@ fn build(
     .to_der()?;
 
     let mut digest_algorithms = Vec::new();
-    let mut certificates = Vec::new();
     let mut signer_infos = Vec::new();
     if let Some(base) = base {
         digest_algorithms.extend_from_slice(base.digest_algorithms.0);
-        if let Some(certs) = base.certificates {
-            certificates.extend_from_slice(certs.0);
-        }
         signer_infos.extend_from_slice(base.signer_infos.0);
     }
     let digest_known = base.is_some_and(|b| {
@@ -379,26 +402,79 @@ fn build(
     if !digest_known {
         digest_algorithms.extend_from_slice(&digest_algorithm);
     }
-    let mut added = vec![cert_der];
-    match &spec.certificates {
-        CertSpec::Signer => {}
-        CertSpec::Chain => {
-            for cert in chain {
-                added.push(cert.to_der()?);
-            }
+    let selected = selected_certificates(chain, spec);
+    let mut added = Vec::new();
+    added
+        .try_reserve_exact(
+            selected
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| CmsError::Constraint("certificate count overflow".into()))?,
+        )
+        .map_err(|_| allocation_failure())?;
+    added.push(cert_der);
+    for certificate in selected {
+        if let Some(admit) = admit.as_deref_mut() {
+            admit(CmsAdmission {
+                metadata_bytes: metadata_work,
+                memory_bytes: 0,
+                output_der_bytes: None,
+            })?;
         }
-        CertSpec::Extra(extra) => {
-            for cert in extra {
-                added.push(cert.to_der()?);
-            }
+        added.push(certificate.to_der()?);
+    }
+    let base_certificates = base
+        .and_then(|base| base.certificates)
+        .map_or(&[][..], |set| set.0);
+    let old = RawSet(base_certificates).tlvs()?;
+    let total = old
+        .len()
+        .checked_add(added.len())
+        .ok_or_else(|| CmsError::Constraint("certificate count overflow".into()))?;
+    let mut order = Vec::new();
+    order
+        .try_reserve_exact(total)
+        .map_err(|_| allocation_failure())?;
+    order.extend(old.into_iter().map(|certificate| (0usize, certificate)));
+    order.extend(
+        added
+            .iter()
+            .enumerate()
+            .map(|(index, certificate)| (index + 1, certificate.as_slice())),
+    );
+    // Sort only borrowed references, never DER payloads; preserve original base
+    // bytes and first-added order when emitting the exact deduplicated union.
+    order.sort_unstable_by(|left, right| left.1.cmp(right.1).then(left.0.cmp(&right.0)));
+    let mut unique = Vec::new();
+    unique
+        .try_reserve_exact(added.len())
+        .map_err(|_| allocation_failure())?;
+    let mut previous = None;
+    for (index, certificate) in order {
+        if previous == Some(certificate) {
+            continue;
+        }
+        previous = Some(certificate);
+        if index != 0 {
+            unique.push(index - 1);
         }
     }
-    for cert in added {
-        if !RawSet(&certificates).tlvs()?.contains(&cert.as_slice()) {
-            certificates.extend_from_slice(&cert);
-        }
+    unique.sort_unstable();
+    let size = unique
+        .iter()
+        .try_fold(base_certificates.len(), |size, index| {
+            size.checked_add(added[*index].len())
+                .ok_or_else(|| CmsError::Constraint("certificate bytes overflow".into()))
+        })?;
+    let mut certificates = Vec::new();
+    certificates
+        .try_reserve_exact(size)
+        .map_err(|_| allocation_failure())?;
+    certificates.extend_from_slice(base_certificates);
+    for index in unique {
+        certificates.extend_from_slice(&added[index]);
     }
-    signer_infos.extend_from_slice(&signer_info);
+    drop(added);
 
     let encapsulated = match (spec.encapsulate, content) {
         (false, _) => None,
@@ -421,24 +497,46 @@ fn build(
         },
         certificates: Some(RawSet(&certificates)),
         crls: base.and_then(|b| b.crls),
-        signer_infos: RawSet(&signer_infos),
+        signer_infos: RawSet(base.map_or(&[], |base| base.signer_infos.0)),
     };
+    let prepared = PreparedSignerInfo::new(signer.certificate(), alg, attrs.as_deref())?;
+    if let Some(admit) = admit {
+        use der::EncodeValue;
+        let empty = prepared.value(&[])?;
+        let signature_len = fixed_signature_len(signer.certificate(), alg)?;
+        let info_value: u32 = empty.value_len()?.into();
+        let empty_value: u32 = empty.signature.encoded_len()?.into();
+        let info_len = tlv(u64::from(info_value) - u64::from(empty_value) + tlv(signature_len)?)?;
+        let old_set: u32 = signed_data.signer_infos.encoded_len()?.into();
+        let value: u32 = signed_data.value_len()?.into();
+        let value =
+            u64::from(value) - u64::from(old_set) + tlv(signer_infos.len() as u64 + info_len)?;
+        let oid: u32 = oid::SIGNED_DATA.encoded_len()?.into();
+        let total = tlv(u64::from(oid) + tlv(tlv(value)?)?)?;
+        admit(CmsAdmission {
+            metadata_bytes: metadata_work,
+            memory_bytes: match content {
+                Content::Data(data) if spec.encapsulate => (data.len() as u64)
+                    .checked_mul(3)
+                    .ok_or_else(|| CmsError::Constraint("CMS size overflow".into()))?,
+                _ => 0,
+            },
+            output_der_bytes: Some(total),
+        })?;
+    }
+    let signature = signer
+        .sign_digest(&signature_digest)
+        .map_err(CmsError::Key)?;
+
+    let signer_info = prepared.value(&signature)?.to_der()?;
+    signer_infos.extend_from_slice(&signer_info);
     Ok(SignedContentInfo {
-        signed_data: &signed_data,
+        signed_data: &SignedData {
+            signer_infos: RawSet(&signer_infos),
+            ..signed_data
+        },
     }
     .to_der()?)
-}
-
-/// Shared bounded metadata encoding; callers select the real leaf algorithm.
-pub(super) fn encode_signer_info(
-    certificate: &Certificate,
-    alg: crate::key::SigAlg,
-    attrs: Option<&[u8]>,
-    signature: &[u8],
-) -> Result<Vec<u8>, CmsError> {
-    Ok(PreparedSignerInfo::new(certificate, alg, attrs)?
-        .value(signature)?
-        .to_der()?)
 }
 
 /// Reuse the actual SID/attribute encoder both before private use (DER sizing)
@@ -561,6 +659,134 @@ fn encode_time(t: OffsetDateTime, form: TimeForm) -> Result<Vec<u8>, CmsError> {
     } else {
         GeneralizedTime::from_unix_duration(since_epoch)?.to_der()?
     })
+}
+
+fn tlv(value: u64) -> Result<u64, CmsError> {
+    let value = der::Length::from(
+        u32::try_from(value)
+            .map_err(|_| CmsError::Constraint("CMS length exceeds DER bound".into()))?,
+    );
+    let length: u32 = value.for_tlv(der::Tag::Sequence)?.into();
+    Ok(u64::from(length))
+}
+fn certificate_work(
+    leaf: &Certificate,
+    chain: &[Certificate],
+    spec: &SignSpec<'_>,
+) -> Result<u64, CmsError> {
+    let selected = selected_certificates(chain, spec);
+    let mut bytes = 0u64;
+    for cert in std::iter::once(leaf).chain(selected) {
+        let size: u32 = cert.encoded_len()?.into();
+        bytes = bytes
+            .checked_add(u64::from(size))
+            .ok_or_else(|| CmsError::Constraint("certificate sizes overflow".into()))?;
+    }
+    bytes
+        .checked_mul(3)
+        .and_then(|n| {
+            n.checked_add((selected.len() as u64 + 1).checked_mul(certificate_slot_bytes())?)
+        })
+        .ok_or_else(|| CmsError::Constraint("certificate working size overflow".into()))
+}
+pub(super) fn fixed_signature_len(certificate: &Certificate, alg: SigAlg) -> Result<u64, CmsError> {
+    match alg {
+        SigAlg::Gost2004 => Ok(64),
+        SigAlg::Gost2015_512 => Ok(128),
+        SigAlg::RsaSha256 | SigAlg::RsaSha1 => {
+            #[derive(der::Sequence)]
+            struct RsaPublic<'a> {
+                modulus: der::asn1::UintRef<'a>,
+                exponent: der::asn1::UintRef<'a>,
+            }
+            let bits = certificate
+                .tbs_certificate()
+                .subject_public_key_info()
+                .subject_public_key
+                .as_bytes()
+                .ok_or_else(|| CmsError::Malformed("RSA subject public key bit string".into()))?;
+            let public = RsaPublic::from_der(bits)?;
+            let _ = public.exponent;
+            Ok(public.modulus.as_bytes().len() as u64)
+        }
+    }
+}
+
+fn bounded_metadata_work(
+    leaf: &Certificate,
+    chain: &[Certificate],
+    spec: &SignSpec<'_>,
+    base: Option<&SignedData<'_>>,
+) -> Result<u64, CmsError> {
+    let mut work = certificate_work(leaf, chain, spec)?;
+    let mut extra = 0u64;
+    for (_, values) in &spec.attrs.extra {
+        for value in values {
+            extra = extra
+                .checked_add(value.len() as u64)
+                .and_then(|n| n.checked_add(32))
+                .ok_or_else(|| CmsError::Constraint("attribute sizes overflow".into()))?;
+        }
+    }
+    if let Some(base) = base {
+        use der::Reader;
+        let mut reader = der::SliceReader::new(base.certificates.map_or(&[], |set| set.0))?;
+        let mut count = 0u64;
+        while !reader.is_finished() {
+            let _ = reader.tlv_bytes()?;
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| CmsError::Constraint("certificate count overflow".into()))?;
+        }
+        work = work
+            .checked_add(
+                count
+                    .checked_mul(certificate_slot_bytes())
+                    .ok_or_else(|| CmsError::Constraint("certificate slots overflow".into()))?,
+            )
+            .ok_or_else(|| CmsError::Constraint("certificate slots overflow".into()))?;
+        for bytes in [
+            base.digest_algorithms.0,
+            base.signer_infos.0,
+            base.certificates.map_or(&[], |set| set.0),
+            base.crls.map_or(&[], |set| set.0),
+        ] {
+            extra = extra
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| CmsError::Constraint("existing metadata sizes overflow".into()))?;
+        }
+    }
+    work = work
+        .checked_add(
+            extra
+                .checked_mul(3)
+                .ok_or_else(|| CmsError::Constraint("metadata working size overflow".into()))?,
+        )
+        .ok_or_else(|| CmsError::Constraint("metadata working size overflow".into()))?;
+    Ok(work)
+}
+
+fn selected_certificates<'a>(
+    chain: &'a [Certificate],
+    spec: &'a SignSpec<'_>,
+) -> &'a [Certificate] {
+    match &spec.certificates {
+        CertSpec::Signer => &[],
+        CertSpec::Chain => chain,
+        CertSpec::Extra(extra) => extra,
+    }
+}
+fn certificate_slot_bytes() -> u64 {
+    (2 * std::mem::size_of::<Vec<u8>>()
+        + std::mem::size_of::<(usize, &[u8])>()
+        + std::mem::size_of::<usize>()
+        + std::mem::size_of::<&[u8]>()) as u64
+}
+fn allocation_failure() -> CmsError {
+    CmsError::Key(KeyError::Execution(crate::key::KeyExecutionError {
+        kind: crate::key::KeyFailureKind::MemoryLimit,
+        applied: crate::key::AppliedState::NotApplied,
+    }))
 }
 
 #[cfg(test)]

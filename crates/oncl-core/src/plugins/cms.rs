@@ -96,7 +96,7 @@ impl Backend<'_, '_> {
             .find(|key| key.handle == args.handle)
             .ok_or(OperationError::PermissionDenied)?;
         self.authorize(import, Some(&binding.key.selector().key_id()))?;
-        if self.released.contains(&args.handle) {
+        if self.state.released.contains(&args.handle) {
             return Err(OperationError::PermissionDenied);
         }
         let action = if matches!(args.content, abi::CmsContent::Digest(_)) {
@@ -130,6 +130,19 @@ impl Backend<'_, '_> {
         } else {
             &[]
         };
+        if matches!(args.certificates, abi::CmsCerts::Chain) {
+            let metadata = binding
+                .metadata
+                .as_ref()
+                .ok_or(OperationError::PermissionDenied)?;
+            super::metadata::admit_bound_metadata(
+                self.state,
+                &self.ctx.scope,
+                metadata.certificate,
+                chain,
+                "",
+            )?;
+        }
         // Decode/normalization/attributes/certificates are admitted before the shared
         // bounded builder allocates, independently of the guest's linear memory.
         let content = match &args.content {
@@ -161,17 +174,43 @@ impl Backend<'_, '_> {
         if let abi::CmsContent::Digest(digest) = &args.content {
             DigestValue::from_bytes(signer.algorithm().hash_alg(), digest)?;
         }
-        let applied = Cell::new(self.applied);
+        let applied = Cell::new(self.state.applied);
         let failure = RefCell::new(None);
         let mut signer = RecordedSigner {
             signer,
             applied: &applied,
             failure: &failure,
         };
-        let signed = cms::sign_spec_with_signer(&mut signer, chain, &spec);
+        let admission = self
+            .state
+            .admission
+            .as_mut()
+            .ok_or(OperationError::InvalidContext)?;
+        let admission_failure = RefCell::new(None);
+        let scope = &self.ctx.scope;
+        let transfer = self.transfer;
+        let mut admit = |plan: cms::CmsAdmission| {
+            let result = super::metadata::admit_cms_output(
+                admission,
+                scope,
+                transfer,
+                import,
+                args.output,
+                plan,
+            );
+            if let Err(error) = result {
+                *admission_failure.borrow_mut() = Some(error);
+                return Err(cms::CmsError::Key(KeyError::BackendFailure));
+            }
+            Ok(())
+        };
+        let signed = cms::sign_spec_with_signer(&mut signer, chain, &spec, &mut admit);
         drop(signer);
-        self.applied = applied.get();
+        self.state.applied = applied.get();
         if let Some(error) = failure.into_inner() {
+            return Err(error);
+        }
+        if let Some(error) = admission_failure.into_inner() {
             return Err(error);
         }
         let mut der = signed.map_err(cms_error)?;
@@ -186,8 +225,8 @@ impl Backend<'_, '_> {
                 }
             }
         }
-        self.ctx.scope.account_output(der.len() as u64)?;
         let output = oncl_plugin::headless::format_cms(der, args.output);
+        self.ctx.scope.account_output(output.len() as u64)?;
         if import == Import::KeysSignCms {
             Ok(abi::encode(&Ok::<_, abi::HostError>(output)))
         } else {

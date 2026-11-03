@@ -40,7 +40,7 @@ pub struct ExecutionGrant {
     metadata_aliases: Vec<String>,
     keys: Vec<crate::keys::KeyId>,
     #[cfg(feature = "plugins")]
-    pub(crate) plugins: Vec<crate::plugins::PluginPermission>,
+    pub(crate) plugins: Option<std::sync::Arc<[crate::plugins::PluginPermission]>>,
 }
 impl ExecutionGrant {
     pub fn new(actions: impl IntoIterator<Item = Action>) -> Self {
@@ -58,7 +58,7 @@ impl ExecutionGrant {
             verify_stamp: false,
             metadata_aliases: Vec::new(),
             #[cfg(feature = "plugins")]
-            plugins: Vec::new(),
+            plugins: None,
         };
         for action in actions {
             match action {
@@ -102,8 +102,12 @@ impl ExecutionGrant {
         mut self,
         permissions: impl IntoIterator<Item = crate::plugins::PluginPermission>,
     ) -> Self {
-        self.plugins = permissions.into_iter().collect();
+        self.plugins = Some(permissions.into_iter().collect());
         self
+    }
+    #[cfg(feature = "plugins")]
+    pub(crate) fn plugin_permissions(&self) -> &[crate::plugins::PluginPermission] {
+        self.plugins.as_deref().unwrap_or_default()
     }
     /// Exact host-authorized container aliases. No wildcard or client expansion.
     pub fn with_metadata_aliases(
@@ -118,7 +122,7 @@ impl ExecutionGrant {
     }
     pub(crate) fn is_empty(&self) -> bool {
         #[cfg(feature = "plugins")]
-        if !self.plugins.is_empty() {
+        if !self.plugin_permissions().is_empty() {
             return false;
         }
         !self.hash

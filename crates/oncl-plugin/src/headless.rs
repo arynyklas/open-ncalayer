@@ -298,12 +298,24 @@ impl RequestBudget {
 
 /// Borrowed explicit PKI services. URL authority is separate from guest HTTP,
 /// and its transport retains the embedding host's pins, scope and request cap.
+/// Trusted host authority; protocol provenance is minted only below this crate.
+pub trait PkiAuthority: Send + Sync {
+    fn authorize_url(&self, url: &str) -> abi::HostResult<()>;
+    fn authorize_request(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+        target: Option<&oncl_pki::http::ProtocolTarget<'_>>,
+    ) -> abi::HostResult<()>;
+    fn authorize_tsa(&self, spec: &oncl_pki::tsp::TsaSpec) -> abi::HostResult<()>;
+}
+/// Explicit borrowed PKI services; authority checks both initial bindings and
+/// every actual request, independently of the guest HTTP capability.
 pub struct PkiServices<'a> {
     pub cas: &'a oncl_pki::pkix::CaSet,
     pub clock: &'a (dyn Fn() -> time::OffsetDateTime + Send + Sync),
     pub tsa: &'a oncl_pki::tsp::TsaSpec,
     pub http: &'a dyn oncl_pki::http::HttpTransport,
-    pub authorize: &'a (dyn Fn(&str) -> abi::HostResult<()> + Send + Sync),
+    pub authorize: &'a dyn PkiAuthority,
 }
 impl crate::caps::CryptoHost for PkiServices<'_> {
     fn cas(&self) -> &oncl_pki::pkix::CaSet {
@@ -316,7 +328,10 @@ impl crate::caps::CryptoHost for PkiServices<'_> {
         self.tsa.clone()
     }
     fn check_url(&self, url: &str) -> abi::HostResult<()> {
-        (self.authorize)(url)
+        self.authorize.authorize_url(url)
+    }
+    fn check_tsa(&self, spec: &oncl_pki::tsp::TsaSpec) -> abi::HostResult<()> {
+        self.authorize.authorize_tsa(spec)
     }
     fn pki_http(&self) -> crate::caps::PkiHttp<'_> {
         crate::caps::PkiHttp::bound(self.http, self.authorize)
@@ -524,5 +539,157 @@ dialogs=true
         drop(turn);
         thread.join().unwrap();
         assert_eq!(result.unwrap(), Err(HeadlessError::InteractionRequired));
+    }
+    struct Effects {
+        checks: usize,
+        cancel_at: Option<usize>,
+        calls: usize,
+    }
+    impl CapabilityBackend for Effects {
+        fn checkpoint(&mut self) -> Result<(), HeadlessError> {
+            self.checks += 1;
+            if self.cancel_at == Some(self.checks) {
+                Err(HeadlessError::Backend)
+            } else {
+                Ok(())
+            }
+        }
+        fn invoke(&mut self, import: Import, _: &[u8]) -> Result<Vec<u8>, HeadlessError> {
+            assert_eq!(import, Import::Log);
+            self.calls += 1;
+            Ok(abi::encode(&Ok::<(), abi::HostError>(())))
+        }
+    }
+    fn allocator_guest(allocator: &str, process: &str, fuel: u64) -> Compiled {
+        let manifest = crate::Manifest::from_toml(
+            r#"id="test.allocator"
+version="1.0.0"
+min_core="0.1.0"
+modules=["test.allocator"]
+name.ru="test"
+name.kk="test"
+name.en="test"
+"#,
+        )
+        .unwrap();
+        let args = abi::encode(&abi::LogArgs {
+            level: abi::Level::Info,
+            message: "effect".into(),
+        });
+        let output = abi::encode(&abi::Output {
+            response: "complete".into(),
+        });
+        let escape = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|b| format!("\\{b:02x}"))
+                .collect::<String>()
+        };
+        let wasm = wat::parse_str(format!(
+            r#"(module
+          (import "oncl" "log" (func $effect (param i32 i32) (result i64)))
+          (memory (export "memory") 1)
+          (global $allocations (mut i32) (i32.const 0))
+          (func (export "oncl_abi_version") (result i32) i32.const 1)
+          (func (export "oncl_alloc") (param i32) (result i32) (local $n i32)
+            (global.set $allocations (i32.add (global.get $allocations) (i32.const 1)))
+            {allocator} i32.const 4096)
+          (func (export "oncl_free") (param i32 i32))
+          (data (i32.const 128) "{}") (data (i32.const 1024) "{}")
+          (func (export "oncl_process") (param i32 i32) (result i64) (local $n i32)
+            i32.const 1024 i32.const {} call $effect drop
+            {process} i64.const {}))"#,
+            escape(&output),
+            escape(&args),
+            args.len(),
+            abi::pack(128, output.len() as u32)
+        ))
+        .unwrap();
+        crate::Engine::new()
+            .compile(&manifest, &wasm)
+            .unwrap()
+            .with_limits(crate::InstanceLimits {
+                max_memory: 65536,
+                max_transfer: 4096,
+                fuel,
+                ..crate::InstanceLimits::default()
+            })
+    }
+    fn counted_loop(iterations: u32) -> String {
+        format!(
+            "(local.set $n (i32.const {iterations})) (loop $work (local.set $n (i32.sub (local.get $n) (i32.const 1))) (br_if $work (local.get $n)))"
+        )
+    }
+    #[test]
+    fn initial_allocator_loop_observes_scoped_control_without_effects() {
+        let guest = allocator_guest("(loop $spin br $spin)", "", 500_000);
+        let mut backend = Effects {
+            checks: 0,
+            cancel_at: Some(2),
+            calls: 0,
+        };
+        let caller = CallerContext::LocalOperator("allocator".into());
+        assert_eq!(
+            guest.call_headless(
+                &mut backend,
+                HeadlessBindings {
+                    caller: &caller,
+                    imports: &[Import::Log]
+                },
+                "{}"
+            ),
+            Err(HeadlessError::Backend)
+        );
+        assert_eq!(backend.calls, 0);
+    }
+    #[test]
+    fn nested_reply_allocator_crosses_slices_without_replaying_host_effect() {
+        let allocator = format!(
+            "(if (i32.gt_u (global.get $allocations) (i32.const 1)) (then {}))",
+            counted_loop(200_000)
+        );
+        let guest = allocator_guest(&allocator, "", 2_000_000);
+        let mut backend = Effects {
+            checks: 0,
+            cancel_at: Some(5),
+            calls: 0,
+        };
+        let caller = CallerContext::LocalOperator("allocator".into());
+        assert_eq!(
+            guest.call_headless(
+                &mut backend,
+                HeadlessBindings {
+                    caller: &caller,
+                    imports: &[Import::Log]
+                },
+                "{}"
+            ),
+            Err(HeadlessError::Backend)
+        );
+        assert_eq!(backend.calls, 1);
+        assert_eq!(backend.checks, 5);
+    }
+    #[test]
+    fn allocator_and_process_share_one_total_fuel_bank() {
+        let work = counted_loop(40_000);
+        let guest = allocator_guest(&work, &work, 500_000);
+        let mut backend = Effects {
+            checks: 0,
+            cancel_at: None,
+            calls: 0,
+        };
+        let caller = CallerContext::LocalOperator("allocator".into());
+        assert_eq!(
+            guest.call_headless(
+                &mut backend,
+                HeadlessBindings {
+                    caller: &caller,
+                    imports: &[Import::Log]
+                },
+                "{}"
+            ),
+            Err(HeadlessError::Plugin(PluginError::OutOfFuel))
+        );
+        assert_eq!(backend.calls, 1);
     }
 }
