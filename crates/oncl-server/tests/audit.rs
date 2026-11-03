@@ -190,6 +190,9 @@ fn writable_real_rsa_and_gost_signatures_have_correlated_frames() {
         assert!(final_record.succeeded);
         let bytes = std::fs::read(journal(&temp.path().join("audit"))).unwrap();
         assert_eq!(bytes.len() as u64, FRAME_BYTES * 3);
+        for frame in bytes.as_chunks::<{ FRAME_BYTES as usize }>().0 {
+            assert_eq!(&frame[..8], b"ONCLAU02");
+        }
         for forbidden in [
             b"host-private-path/password-must-not-appear".as_slice(),
             b"Qwerty12".as_slice(),
@@ -201,6 +204,12 @@ fn writable_real_rsa_and_gost_signatures_have_correlated_frames() {
                     .any(|window| window == forbidden)
             );
         }
+        drop(_binding);
+        drop(ctx);
+        drop(rig);
+        drop(guard);
+        let identity = std::fs::read(temp.path().join("audit/oncl-audit.identity")).unwrap();
+        assert_eq!(&identity[..8], b"ONCLAU02");
     }
 }
 #[test]
@@ -1331,4 +1340,199 @@ fn real_batch_restart_preserves_item_zero_and_unknown_applied_state() {
     assert!(!final_record.succeeded);
     assert_eq!(final_record.principal, AuditLabel::new([0x55; 16]));
     assert_eq!(final_record.key, AuditLabel::new([0x61; 16]));
+}
+
+fn legacy_format_image(bytes: &[u8]) -> Vec<u8> {
+    assert!(bytes.len().is_multiple_of(FRAME_BYTES as usize));
+    let mut legacy = bytes.to_vec();
+    for frame in legacy.as_chunks_mut::<{ FRAME_BYTES as usize }>().0 {
+        frame[..8].copy_from_slice(b"ONCLAU01");
+        frame[124..128].fill(0);
+        let mut hash = oncl_pki::digest::HashState::new(oncl_pki::key::HashAlg::Sha256);
+        hash.update(&frame[..128]);
+        frame[128..].copy_from_slice(hash.finish().as_bytes());
+    }
+    legacy
+}
+
+fn journal_images(
+    path: &std::path::Path,
+    identity: bool,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    std::fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| identity || path.file_name().unwrap() != "oncl-audit.identity")
+        .map(|path| {
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn legacy_own_complete_and_pending_batch_journals_are_refused_without_mutation() {
+    for pending in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("audit");
+        {
+            let guard = DurableAuditGuard::create(config(&path)).unwrap();
+            let rig = batch_support::BatchRig::new(guard, temp.path());
+            let proof = rig.exercise(pending.then_some(FaultPoint::BeforeWrite));
+            assert_eq!(rig.counts(), if pending { [2, 0] } else { [4, 2] });
+            if pending {
+                rig.rsa_public()
+                    .verify(
+                        oncl_pki::key::SigAlg::RsaSha256,
+                        support::MESSAGE,
+                        &proof.actual_proof,
+                    )
+                    .unwrap();
+                assert!(
+                    proof.raw_zero.is_empty()
+                        && proof.cms.is_empty()
+                        && proof.gost.is_empty()
+                        && proof.outside.is_empty()
+                );
+            } else {
+                assert_eq!(proof.summary.completed, 6);
+            }
+        }
+        for (file, bytes) in journal_images(&path, true) {
+            // Real own identity/headers and actual private-use history rendered
+            // exactly as v01: valid checksums, reserved zero, item unknowable.
+            std::fs::write(file, legacy_format_image(&bytes)).unwrap();
+        }
+        let before = journal_images(&path, true);
+        let mut accepted = false;
+        let mut extra_calls = 0;
+        if let Ok(guard) = DurableAuditGuard::open(config(&path)) {
+            accepted = true;
+            if guard.recover().is_ok() {
+                let rig = Rig::new(guard);
+                let (mut ctx, _bound) = rig.begin();
+                if let Ok(signature) = rig.sign(&mut ctx) {
+                    rig.verify(&signature);
+                }
+                extra_calls = rig.calls();
+            }
+        }
+        assert!(
+            !accepted,
+            "legacy accepted; extra actual key calls={extra_calls}"
+        );
+        assert_eq!(extra_calls, 0);
+        assert_eq!(journal_images(&path, true), before);
+    }
+}
+
+#[test]
+fn legacy_identity_header_and_records_fail_closed_in_live_read_and_recovery() {
+    let components: &[usize] = if cfg!(windows) {
+        &[1, 2, 3]
+    } else {
+        &[0, 1, 2, 3]
+    };
+    for &component in components {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("audit");
+        let guard = DurableAuditGuard::create(config(&path)).unwrap();
+        let rig = Rig::new(guard.clone());
+        let (mut ctx, _bound) = rig.begin();
+        rig.verify(&rig.sign(&mut ctx).unwrap());
+        #[cfg(windows)]
+        assert!(
+            std::fs::read(path.join("oncl-audit.identity")).is_err(),
+            "exclusive Windows identity lock must refuse an unrelated handle"
+        );
+        let file = if component == 0 {
+            path.join("oncl-audit.identity")
+        } else {
+            journal(&path)
+        };
+        let mut bytes = std::fs::read(&file).unwrap();
+        let frame = if component == 0 { 0 } else { component - 1 };
+        let start = frame * FRAME_BYTES as usize;
+        let legacy = legacy_format_image(&bytes[start..start + FRAME_BYTES as usize]);
+        bytes[start..start + FRAME_BYTES as usize].copy_from_slice(&legacy);
+        std::fs::write(&file, bytes).unwrap();
+        let before = journal_images(&path, cfg!(unix));
+        assert!(guard.records().is_err(), "legacy component={component}");
+        assert_eq!(guard.health(), AuditHealth::Failed);
+        assert!(guard.recover().is_err());
+        let (mut fresh, _fresh_bound) = rig.begin();
+        assert_eq!(
+            rig.sign(&mut fresh).unwrap_err().applied_state(),
+            AppliedState::NotApplied
+        );
+        assert_eq!(rig.calls(), 1);
+        assert_eq!(journal_images(&path, cfg!(unix)), before);
+    }
+}
+
+#[test]
+fn legacy_mixed_identity_header_and_record_versions_refuse_open_without_repair() {
+    for component in [0, 1, 2, 3] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("audit");
+        {
+            let guard = DurableAuditGuard::create(config(&path)).unwrap();
+            let rig = Rig::new(guard);
+            let (mut ctx, _bound) = rig.begin();
+            rig.verify(&rig.sign(&mut ctx).unwrap());
+            assert_eq!(rig.calls(), 1);
+        }
+        let file = if component == 0 {
+            path.join("oncl-audit.identity")
+        } else {
+            journal(&path)
+        };
+        let mut bytes = std::fs::read(&file).unwrap();
+        let frame = if component == 0 { 0 } else { component - 1 };
+        let start = frame * FRAME_BYTES as usize;
+        let legacy = legacy_format_image(&bytes[start..start + FRAME_BYTES as usize]);
+        bytes[start..start + FRAME_BYTES as usize].copy_from_slice(&legacy);
+        std::fs::write(&file, bytes).unwrap();
+        let before = journal_images(&path, true);
+        assert!(
+            DurableAuditGuard::open(config(&path)).is_err(),
+            "legacy component={component}"
+        );
+        assert_eq!(journal_images(&path, true), before);
+    }
+}
+
+#[test]
+fn current_presence_reserved_and_header_item_fields_fail_closed_without_mutation() {
+    for (target, item, presence, reserved) in
+        [(1, 0u16, 2, 0), (1, 1, 0, 0), (1, 0, 0, 1), (0, 0, 1, 0)]
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("audit");
+        let guard = DurableAuditGuard::create(config(&path)).unwrap();
+        let rig = Rig::new(guard.clone());
+        let (mut ctx, _bound) = rig.begin();
+        rig.verify(&rig.sign(&mut ctx).unwrap());
+        let file = journal(&path);
+        let mut bytes = std::fs::read(&file).unwrap();
+        let start = target * FRAME_BYTES as usize;
+        let frame = &mut bytes[start..start + FRAME_BYTES as usize];
+        frame[124..126].copy_from_slice(&item.to_le_bytes());
+        frame[126] = presence;
+        frame[127] = reserved;
+        let mut hash = oncl_pki::digest::HashState::new(oncl_pki::key::HashAlg::Sha256);
+        hash.update(&frame[..128]);
+        frame[128..].copy_from_slice(hash.finish().as_bytes());
+        std::fs::write(&file, &bytes).unwrap();
+        assert!(guard.records().is_err());
+        assert_eq!(guard.health(), AuditHealth::Failed);
+        assert!(guard.recover().is_err());
+        let (mut fresh, _fresh_bound) = rig.begin();
+        assert_eq!(
+            rig.sign(&mut fresh).unwrap_err().applied_state(),
+            AppliedState::NotApplied
+        );
+        assert_eq!(rig.calls(), 1);
+        assert_eq!(std::fs::read(file).unwrap(), bytes);
+    }
 }

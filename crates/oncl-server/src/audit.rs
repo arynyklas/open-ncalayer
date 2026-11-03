@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const FRAME_BYTES: u64 = 160;
-const MAGIC: &[u8; 8] = b"ONCLAU01";
+// v01's zero reserved item bits are unknowable, not authoritative non-batch.
+const MAGIC: &[u8; 8] = b"ONCLAU02";
 const IDENTITY: &str = "oncl-audit.identity";
 const MAX_BINDINGS: usize = 1024;
 const MAX_KEYS_PER_OPERATION: usize = 32;
@@ -149,7 +150,7 @@ struct Segment {
 struct State {
     health: AuditHealth,
     directory: PrivateDirectory,
-    _identity_lock: File,
+    identity_lock: File,
     identity: [u8; 16],
     session: [u8; 16],
     segments: Vec<Segment>,
@@ -288,12 +289,15 @@ fn encode(record: &AuditEvent, identity: [u8; 16]) -> [u8; 160] {
     bytes[128..].copy_from_slice(&sum);
     bytes
 }
+fn check_version(bytes: &[u8; 160]) -> io::Result<()> {
+    if &bytes[..8] != MAGIC {
+        return Err(damaged());
+    }
+    Ok(())
+}
 fn decode(bytes: &[u8; 160], identity: [u8; 16]) -> io::Result<AuditEvent> {
-    if &bytes[..8] != MAGIC
-        || bytes[8..24] != identity
-        || bytes[128..] != checksum(&bytes[..128])
-        || bytes[127] != 0
-    {
+    check_version(bytes)?;
+    if bytes[8..24] != identity || bytes[128..] != checksum(&bytes[..128]) || bytes[127] != 0 {
         return Err(damaged());
     }
     let item = u16::from_le_bytes(bytes[124..126].try_into().unwrap());
@@ -381,6 +385,26 @@ fn read_header(file: &mut File, identity: [u8; 16], number: u64) -> io::Result<A
     }
     Ok(header)
 }
+fn read_identity(file: &File, expected: Option<[u8; 16]>) -> io::Result<[u8; 16]> {
+    if file.metadata()?.len() != FRAME_BYTES {
+        return Err(damaged());
+    }
+    // Borrow the held lock handle: a separate handle cannot read its mandatory
+    // locked region on Windows, and no duplicate descriptor is needed.
+    let mut reader = file;
+    reader.seek(SeekFrom::Start(0))?;
+    let mut bytes = [0; 160];
+    reader.read_exact(&mut bytes)?;
+    let identity = bytes[8..24].try_into().unwrap();
+    if expected.is_some_and(|expected| expected != identity) {
+        return Err(damaged());
+    }
+    let header = decode(&bytes, identity)?;
+    if header.kind != RecordKind::Header || header.use_id != 0 {
+        return Err(damaged());
+    }
+    Ok(identity)
+}
 fn partial_final_matches(file: &mut File, pending: &BTreeMap<u64, Pending>) -> io::Result<bool> {
     let len = file.metadata()?.len();
     let tail = (len % FRAME_BYTES) as usize;
@@ -454,16 +478,7 @@ impl DurableAuditGuard {
             directory.sync()?;
             id
         } else {
-            if identity_lock.metadata()?.len() != FRAME_BYTES {
-                return Err(damaged());
-            }
-            let mut bytes = [0; 160];
-            identity_lock.read_exact(&mut bytes)?;
-            let id = bytes[8..24].try_into().unwrap();
-            if decode(&bytes, id)?.kind != RecordKind::Header {
-                return Err(damaged());
-            }
-            id
+            read_identity(&identity_lock, None)?
         };
         let mut numbers = Vec::new();
         for entry in directory.names()? {
@@ -504,7 +519,7 @@ impl DurableAuditGuard {
                 AuditHealth::RecoveryRequired
             },
             directory,
-            _identity_lock: identity_lock,
+            identity_lock,
             identity,
             session: random()?,
             segments: Vec::new(),
@@ -542,6 +557,7 @@ impl DurableAuditGuard {
             }
             for _ in 1..len / FRAME_BYTES {
                 file.read_exact(&mut bytes)?;
+                check_version(&bytes)?;
                 match decode(&bytes, identity)
                     .and_then(|record| Self::replay(&mut state, record, &config))
                 {
@@ -825,6 +841,7 @@ impl DurableAuditGuard {
         result
     }
     fn read_frames(state: &State, config: &AuditConfig) -> io::Result<(Vec<AuditEvent>, u64)> {
+        read_identity(&state.identity_lock, Some(state.identity))?;
         let mut records = Vec::new();
         let mut total = FRAME_BYTES;
         let mut sequence = None;

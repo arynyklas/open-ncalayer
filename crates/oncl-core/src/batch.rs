@@ -720,12 +720,11 @@ impl Engine {
                     return Err(oncl_pki::resource::ProcessingError::InputLimit.into());
                 }
                 match &entry.operation {
-                    Dispatch::ValidateCms(..) => {
+                    Dispatch::ValidateCms(..)
                         if total > ctx.scope.limits().metadata_bytes
-                            || total > ctx.scope.limits().memory_bytes
-                        {
-                            return Err(oncl_pki::resource::ProcessingError::MetadataLimit.into());
-                        }
+                            || total > ctx.scope.limits().memory_bytes =>
+                    {
+                        return Err(oncl_pki::resource::ProcessingError::MetadataLimit.into());
                     }
                     #[cfg(feature = "jose")]
                     Dispatch::Jose(operation) => {

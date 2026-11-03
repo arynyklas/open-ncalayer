@@ -109,6 +109,11 @@ never a claim that the private key was not used.
 
 The journal has an owner-only pinned root, exclusive cross-process ownership,
 160-byte checksummed frames and actual rotation/retention/quota enforcement.
+The format is **ONCLAU02** throughout identity/header/records. Old ONCLAU01 could
+not distinguish an unknown batch item from genuine None: open/read/recovery
+refuse it before mutation or a new BEGIN, leaving old bytes for the operator.
+There is no automatic header rewrite, inferred item or compatibility fallback;
+manual external migration is outside this library.
 Complete corrupt frames and foreign headers are never truncated. Every `open`,
 including a clean journal, requires explicit `recover()` and a durable probe
 before new uses. Recovery repairs only an incomplete own-journal tail; recorded
