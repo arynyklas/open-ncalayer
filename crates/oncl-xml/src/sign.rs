@@ -1351,8 +1351,7 @@ impl Template<'_> {
                 )
             })
             .transpose()?;
-        let unsigned =
-            self.render_with(None, object_digest.as_ref().map(|d| d.as_bytes()), wsse);
+        let unsigned = self.render_with(None, object_digest.as_ref().map(|d| d.as_bytes()), wsse);
         let signed_digest = hash(
             &unsigned,
             None,
