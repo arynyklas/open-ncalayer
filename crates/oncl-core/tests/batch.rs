@@ -2000,108 +2000,190 @@ fn successful_private_output_followed_by_batch_finalization_cancel_remains_appli
     use oncl_core::{
         SignRequest,
         batch::{BatchOutcome, BatchReport},
-        keys::KeyRequest,
+        keys::{AppliedState, KeyRequest},
     };
-    use std::sync::atomic::{AtomicBool, Ordering};
-    struct FinalizeControl(AtomicBool);
-    impl OperationControl for FinalizeControl {
-        fn checkpoint(&self, progress: Progress) -> Result<(), ProcessingError> {
-            if progress.bytes_out != 0 {
-                let stack = std::backtrace::Backtrace::force_capture().to_string();
-                if stack.contains("dispatch_batch_item")
-                    && !stack.contains("sign_operation")
-                    && !stack.contains("sign_raw")
-                {
-                    self.0.store(true, Ordering::SeqCst);
-                    return Err(ProcessingError::Cancelled);
-                }
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct SweepControl {
+        count: AtomicUsize,
+        fail_at: AtomicUsize,
+    }
+    impl OperationControl for SweepControl {
+        fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+            let index = self.count.fetch_add(1, Ordering::SeqCst);
+            if index >= self.fail_at.load(Ordering::SeqCst) {
+                Err(ProcessingError::Cancelled)
+            } else {
+                Ok(())
             }
-            Ok(())
         }
     }
-    let scratch = tempfile::tempdir().unwrap();
-    let guard = Arc::new(fixture::Guard::default());
-    let provider = Arc::new(fixture::Provider::default());
-    let engine = fixture::engine(
-        oncl_pki::io::TemporaryStore::new(scratch.path()).unwrap(),
-        guard.clone(),
-        provider,
-        ResourceLimits::default(),
-    );
     let key = fixture::selector("user-rsa-sign");
-    let control = Arc::new(FinalizeControl(AtomicBool::new(false)));
-    let mut ctx = engine
-        .begin(
-            ExecutionGrant::new([Action::Hash, Action::Sign]).with_keys([key.key_id()]),
-            OperationPolicy::strict_online(),
-            control.clone(),
-        )
-        .unwrap();
-    let mut prior = &b"prior"[..];
-    let mut actual = &b"actually signed"[..];
-    let mut later = &b"not signed"[..];
-    let mut out = vec![];
-    let mut later_out = vec![];
-    let plan = engine
-        .capture_batch(
-            [
-                BatchItem::new(
-                    "prior",
-                    BatchOperation::Hash {
-                        algorithm: HashAlg::Sha256,
-                        input: Source::sequential(&mut prior, None),
-                    },
-                ),
-                BatchItem::new(
-                    "actual",
-                    BatchOperation::Sign {
-                        request: SignRequest::raw_message(KeyRequest::new(
-                            &key,
-                            Some(fixture::PASSWORD),
-                        )),
-                        input: Source::sequential(&mut actual, None),
-                        output: &mut out,
-                    },
-                ),
-                BatchItem::new(
-                    "later",
-                    BatchOperation::Sign {
-                        request: SignRequest::raw_message(KeyRequest::new(
-                            &key,
-                            Some(fixture::PASSWORD),
-                        )),
-                        input: Source::sequential(&mut later, None),
-                        output: &mut later_out,
-                    },
-                ),
-            ],
-            &mut ctx,
-        )
-        .unwrap();
-    let approval = plan.authorize(&ctx).unwrap();
-    let summary = engine.run_batch(plan, approval, &mut ctx, |_| {}).unwrap();
+    let public = fixture::raw("user-rsa-sign").key.public_key();
+    let mut observed_checkpoints = None;
+    let mut complete_failed_signature_cases = 0;
+    let mut fault_cases = 0;
+    // First measure a genuine no-fault run; sweep every observed checkpoint,
+    // rather than pinning an incidental call count or stack/symbol spelling.
+    let mut target = None;
+    loop {
+        let scratch = tempfile::tempdir().unwrap();
+        let guard = Arc::new(fixture::Guard::default());
+        let engine = fixture::engine(
+            oncl_pki::io::TemporaryStore::new(scratch.path()).unwrap(),
+            guard.clone(),
+            Arc::new(fixture::Provider::default()),
+            ResourceLimits::default(),
+        );
+        let control = Arc::new(SweepControl {
+            count: AtomicUsize::new(0),
+            fail_at: AtomicUsize::new(usize::MAX),
+        });
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Hash, Action::Sign]).with_keys([key.key_id()]),
+                OperationPolicy::strict_online(),
+                control.clone(),
+            )
+            .unwrap();
+        let mut prior = &b"prior"[..];
+        let mut actual = &b"actually signed"[..];
+        let mut later = &b"later signed"[..];
+        let mut output = vec![];
+        let mut later_output = vec![];
+        let plan = engine
+            .capture_batch(
+                [
+                    BatchItem::new(
+                        "prior",
+                        BatchOperation::Hash {
+                            algorithm: HashAlg::Sha256,
+                            input: Source::sequential(&mut prior, None),
+                        },
+                    ),
+                    BatchItem::new(
+                        "actual",
+                        BatchOperation::Sign {
+                            request: SignRequest::raw_message(KeyRequest::new(
+                                &key,
+                                Some(fixture::PASSWORD),
+                            )),
+                            input: Source::sequential(&mut actual, None),
+                            output: &mut output,
+                        },
+                    ),
+                    BatchItem::new(
+                        "later",
+                        BatchOperation::Sign {
+                            request: SignRequest::raw_message(KeyRequest::new(
+                                &key,
+                                Some(fixture::PASSWORD),
+                            )),
+                            input: Source::sequential(&mut later, None),
+                            output: &mut later_output,
+                        },
+                    ),
+                ],
+                &mut ctx,
+            )
+            .unwrap();
+        let authority = plan.authorize(&ctx).unwrap();
+        control.count.store(0, Ordering::SeqCst);
+        control
+            .fail_at
+            .store(target.unwrap_or(usize::MAX), Ordering::SeqCst);
+        let report = engine.run_batch(plan, authority, &mut ctx, |_| {}).unwrap();
+        let used = guard.applied.load(Ordering::SeqCst);
+        if target.is_none() {
+            assert_eq!(report.completed, 3);
+            assert!(report.stop.is_none());
+            assert_eq!(used, 2);
+            public
+                .verify(
+                    oncl_pki::key::SigAlg::RsaSha256,
+                    b"actually signed",
+                    &output,
+                )
+                .unwrap();
+            public
+                .verify(
+                    oncl_pki::key::SigAlg::RsaSha256,
+                    b"later signed",
+                    &later_output,
+                )
+                .unwrap();
+            observed_checkpoints = Some(control.count.load(Ordering::SeqCst));
+            assert!(observed_checkpoints.unwrap() > 0);
+            target = Some(0);
+            continue;
+        }
+        fault_cases += 1;
+        assert_eq!(
+            report.stop.as_ref().unwrap().code(),
+            oncl_core::ErrorCode::Cancelled
+        );
+        let mut reported_applications = 0;
+        let mut saw_failure_or_notrun = false;
+        for (index, result) in report.results().iter().enumerate() {
+            if result.applied_state() == AppliedState::Applied {
+                reported_applications += 1;
+            }
+            match result.outcome() {
+                BatchOutcome::Failed(error) => {
+                    assert_eq!(error.code(), oncl_core::ErrorCode::Cancelled);
+                    assert!(!saw_failure_or_notrun);
+                    saw_failure_or_notrun = true;
+                    if index == 1
+                        && result.applied_state() == AppliedState::Applied
+                        && public
+                            .verify(
+                                oncl_pki::key::SigAlg::RsaSha256,
+                                b"actually signed",
+                                &output,
+                            )
+                            .is_ok()
+                    {
+                        complete_failed_signature_cases += 1;
+                        assert!(matches!(
+                            report.results()[0].outcome(),
+                            BatchOutcome::Completed(BatchReport::Hash(_))
+                        ));
+                        assert!(matches!(
+                            report.results()[2].outcome(),
+                            BatchOutcome::NotRun
+                        ));
+                        assert!(later_output.is_empty());
+                        assert_eq!(used, 1);
+                    }
+                }
+                BatchOutcome::NotRun => {
+                    saw_failure_or_notrun = true;
+                    assert_eq!(result.applied_state(), AppliedState::NotApplied);
+                }
+                BatchOutcome::Completed(_) => assert!(!saw_failure_or_notrun),
+            }
+        }
+        assert_eq!(
+            reported_applications, used,
+            "every actual key use must retain Applied"
+        );
+        if used > 0 {
+            assert!(matches!(
+                report.results()[0].outcome(),
+                BatchOutcome::Completed(BatchReport::Hash(_))
+            ));
+        }
+        let next = target.unwrap() + 1;
+        if next == observed_checkpoints.unwrap() {
+            break;
+        }
+        target = Some(next);
+    }
+    assert_eq!(fault_cases, observed_checkpoints.unwrap());
+    println!("checkpoint_sweep observed={} faults={} complete_verified_failed_signature_cases={}", observed_checkpoints.unwrap(), fault_cases, complete_failed_signature_cases);
     assert!(
-        control.0.load(Ordering::SeqCst),
-        "control must target the post-dispatch finalization checkpoint"
+        complete_failed_signature_cases > 0,
+        "sweep must cover a failed item with a complete independently valid actual signature"
     );
-    assert!(matches!(
-        summary.results()[0].outcome(),
-        BatchOutcome::Completed(BatchReport::Hash(_))
-    ));
-    assert!(
-        matches!(summary.results()[1].outcome(), BatchOutcome::Failed(e) if e.code() == oncl_core::ErrorCode::Cancelled && e.applied_state() == oncl_core::keys::AppliedState::Applied)
-    );
-    assert!(matches!(
-        summary.results()[2].outcome(),
-        BatchOutcome::NotRun
-    ));
-    assert_eq!(guard.applied.load(Ordering::SeqCst), 1);
-    fixture::raw("user-rsa-sign")
-        .key
-        .public_key()
-        .verify(oncl_pki::key::SigAlg::RsaSha256, b"actually signed", &out)
-        .unwrap();
-    assert!(later_out.is_empty());
 }
 
 #[test]

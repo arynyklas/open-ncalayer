@@ -823,13 +823,15 @@ impl Engine {
             let bytes = (std::mem::size_of::<BatchItemResult>()
                 + item.id.len()
                 + 2 * std::mem::size_of::<BatchSourceIdentity>()) as u64;
+            let memory = ctx.scope.reserve_memory(bytes)?;
+            let metadata = ctx.scope.reserve_metadata(bytes)?;
             results.push(BatchItemResult {
                 id: item.id.to_owned(),
                 outcome: BatchOutcome::NotRun,
                 applied: AppliedState::NotApplied,
                 sources: Vec::new(),
-                _memory: ctx.scope.reserve_memory(bytes)?,
-                _metadata: ctx.scope.reserve_metadata(bytes)?,
+                _memory: memory,
+                _metadata: metadata,
             });
         }
         Ok(CapturedBatch {
