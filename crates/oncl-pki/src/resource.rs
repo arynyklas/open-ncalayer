@@ -277,7 +277,7 @@ impl ResourceScope {
     }
     /// Identity of the complete quota/control/deadline state, not merely its
     /// application budget. Used only to deduplicate nested scoped I/O charges.
-    pub(crate) fn same_operation(&self, other: &Self) -> bool {
+    pub fn same_operation(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.state, &other.state)
     }
     pub(crate) fn retain(&self) -> Self {

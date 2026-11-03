@@ -411,3 +411,68 @@ mod write {
         ));
     }
 }
+
+#[test]
+fn inspection_bag_limit_is_distinct_from_malformed_and_legacy_loading() {
+    use oncl_pki::{
+        info::InspectionLimits,
+        resource::{OperationControl, ProcessingError, Progress, ResourceLimits, SharedBudget},
+    };
+    use std::sync::Arc;
+    struct Control;
+    impl OperationControl for Control {
+        fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+            Ok(())
+        }
+    }
+    let fixture = oncl_testkit::synthetic("multi-gost2015");
+    let bytes = read(&fixture.path);
+    let allowed = vec!["2174a152307df0e311ee3c01e07f7ecad448780c".to_owned()];
+    let resources = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(resources.clone()).unwrap());
+    let scope = budget.begin(resources, Arc::new(Control)).unwrap();
+    let restricted = InspectionLimits {
+        max_entries: 1,
+        ..InspectionLimits::default()
+    };
+    assert!(matches!(
+        oncl_pki::pkcs12::inspect_metadata(
+            &bytes,
+            &fixture.password,
+            &allowed,
+            &scope,
+            &restricted,
+        ),
+        Err(ProcessingError::MetadataLimit)
+    ));
+    assert!(matches!(
+        oncl_pki::pkcs12::inspect_metadata(
+            b"not a PKCS12 store",
+            &fixture.password,
+            &allowed,
+            &scope,
+            &restricted,
+        ),
+        Err(ProcessingError::InvalidInput(_))
+    ));
+    let projected = oncl_pki::pkcs12::inspect_metadata(
+        &bytes,
+        &fixture.password,
+        &allowed,
+        &scope,
+        &InspectionLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(projected.entries()[0].alias(), Some(allowed[0].as_str()));
+    let legacy = load(&bytes, &fixture.password).unwrap();
+    assert_eq!(
+        legacy
+            .iter()
+            .map(|entry| entry.alias.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "2174a152307df0e311ee3c01e07f7ecad448780c",
+            "b8a0dd2f7728b2381484dd51a0ee85785b1f5343",
+        ]
+    );
+}

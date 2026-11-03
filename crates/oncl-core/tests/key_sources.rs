@@ -501,12 +501,37 @@ fn guard_rechecks_every_use_and_finish_failure_reports_applied() {
     assert_eq!(denied.applied_state(), AppliedState::NotApplied);
     guard.consent.store(true, Ordering::SeqCst);
     guard.fail_before.store(true, Ordering::SeqCst);
+    let stopped = signer.sign_digest(&digest(HashAlg::Sha256)).unwrap_err();
+    assert_eq!(stopped.code(), ErrorCode::PermissionDenied);
+    assert_eq!(stopped.applied_state(), AppliedState::NotApplied);
+    assert_eq!(guard.events.lock().unwrap().len(), 1);
+    assert_eq!(guard.outcomes.lock().unwrap().len(), 1);
+    drop(signer);
+    drop(ctx);
+    let mut ctx = begin(&engine, [selector.key_id()]);
+    let mut signer = engine
+        .signer(&KeyRequest::new(&selector, Some(&password)), &mut ctx)
+        .unwrap();
     let error = signer.sign_digest(&digest(HashAlg::Sha256)).unwrap_err();
     assert_eq!(error.code(), ErrorCode::AuditFailed);
     assert_eq!(error.applied_state(), AppliedState::NotApplied);
     assert_eq!(guard.outcomes.lock().unwrap().len(), 1);
     guard.fail_before.store(false, Ordering::SeqCst);
     guard.fail_finish.store(true, Ordering::SeqCst);
+    assert_eq!(
+        signer
+            .sign_digest(&digest(HashAlg::Sha256))
+            .unwrap_err()
+            .code(),
+        ErrorCode::PermissionDenied
+    );
+    assert_eq!(guard.events.lock().unwrap().len(), 1);
+    drop(signer);
+    drop(ctx);
+    let mut ctx = begin(&engine, [selector.key_id()]);
+    let mut signer = engine
+        .signer(&KeyRequest::new(&selector, Some(&password)), &mut ctx)
+        .unwrap();
     let error = signer.sign_digest(&digest(HashAlg::Sha256)).unwrap_err();
     assert_eq!(error.code(), ErrorCode::AuditFailed);
     assert_eq!(error.applied_state(), AppliedState::Applied);
@@ -514,6 +539,16 @@ fn guard_rechecks_every_use_and_finish_failure_reports_applied() {
         guard.outcomes.lock().unwrap().last().unwrap().applied,
         AppliedState::Applied
     );
+    assert_eq!(guard.outcomes.lock().unwrap().len(), 2);
+    guard.fail_finish.store(false, Ordering::SeqCst);
+    assert_eq!(
+        signer
+            .sign_digest(&digest(HashAlg::Sha256))
+            .unwrap_err()
+            .code(),
+        ErrorCode::PermissionDenied
+    );
+    assert_eq!(guard.outcomes.lock().unwrap().len(), 2);
 }
 
 // A transparent transport probe. All transaction/reset/APDU behavior is delegated
@@ -918,6 +953,24 @@ fn token_consent_denial_sends_no_private_command_and_no_signature() {
     assert!(rig.begins.try_recv().is_err());
     guard.consent.store(true, Ordering::SeqCst);
     guard.fail_before.store(true, Ordering::SeqCst);
+    assert_eq!(
+        signer
+            .sign_digest(&digest(HashAlg::Sha256))
+            .unwrap_err()
+            .code(),
+        ErrorCode::PermissionDenied
+    );
+    assert!(rig.emu.exchanges(READER_A).is_empty());
+    assert!(rig.begins.try_recv().is_err());
+    assert!(guard.events.lock().unwrap().is_empty());
+    rig.armed.store(false, Ordering::SeqCst);
+    drop(signer);
+    drop(ctx);
+    let mut ctx = begin(&engine, [selector.key_id()]);
+    let mut signer = engine
+        .signer(&KeyRequest::new(&selector, Some(PIN)), &mut ctx)
+        .unwrap();
+    rig.arm();
     let audit_error = signer.sign_digest(&digest(HashAlg::Sha256)).unwrap_err();
     assert_eq!(audit_error.code(), ErrorCode::AuditFailed);
     assert_eq!(audit_error.applied_state(), AppliedState::NotApplied);
@@ -927,11 +980,37 @@ fn token_consent_denial_sends_no_private_command_and_no_signature() {
     );
     assert!(rig.begins.try_recv().is_err());
     guard.fail_before.store(false, Ordering::SeqCst);
+    assert_eq!(
+        signer
+            .sign_digest(&digest(HashAlg::Sha256))
+            .unwrap_err()
+            .code(),
+        ErrorCode::PermissionDenied
+    );
+    assert!(rig.emu.exchanges(READER_A).is_empty());
+    assert!(rig.begins.try_recv().is_err());
+    rig.armed.store(false, Ordering::SeqCst);
+    drop(signer);
+    drop(ctx);
+    let mut ctx = begin(&engine, [selector.key_id()]);
+    let mut signer = engine
+        .signer(&KeyRequest::new(&selector, Some(PIN)), &mut ctx)
+        .unwrap();
+    rig.arm();
     assert_signature(
         "user-rsa-sign",
         SigAlg::RsaSha256,
         &signer.sign_digest(&digest(HashAlg::Sha256)).unwrap(),
     );
+    assert_eq!(
+        rig.emu
+            .exchanges(READER_A)
+            .iter()
+            .filter(|e| e.command.starts_with(&[0x00, 0x2A, 0x9E, 0x9A]))
+            .count(),
+        1
+    );
+    assert_eq!(guard.outcomes.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -1216,9 +1295,34 @@ fn format_digest_signer_cannot_bypass_guard() {
     assert!(rig.emu.exchanges(READER_A).is_empty());
     assert!(rig.begins.try_recv().is_err());
     guard.consent.store(true, Ordering::SeqCst);
+    let error = OperationError::from(
+        oncl_pki::key::DigestSigner::sign_digest(&mut signer, &digest(HashAlg::Sha256))
+            .unwrap_err(),
+    );
+    assert_eq!(error.code(), ErrorCode::PermissionDenied);
+    assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    assert!(rig.emu.exchanges(READER_A).is_empty());
+    assert!(rig.begins.try_recv().is_err());
+    assert!(guard.events.lock().unwrap().is_empty());
+    rig.armed.store(false, Ordering::SeqCst);
+    drop(signer);
+    drop(ctx);
+    let mut ctx = begin(&engine, [selector.key_id()]);
+    let mut signer = engine
+        .signer(&KeyRequest::new(&selector, Some(PIN)), &mut ctx)
+        .unwrap();
+    rig.arm();
     let signature =
         oncl_pki::key::DigestSigner::sign_digest(&mut signer, &digest(HashAlg::Sha256)).unwrap();
     assert_signature("user-rsa-sign", SigAlg::RsaSha256, &signature);
+    assert_eq!(
+        rig.emu
+            .exchanges(READER_A)
+            .iter()
+            .filter(|e| e.command.starts_with(&[0x00, 0x2A, 0x9E, 0x9A]))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -1250,17 +1354,39 @@ fn format_trait_retains_supported_cause_and_application_state() {
     assert_eq!(error.code(), ErrorCode::PermissionDenied);
     assert_eq!(error.applied_state(), AppliedState::NotApplied);
     guard.consent.store(true, Ordering::SeqCst);
+    let stopped = OperationError::from(DigestSigner::sign_digest(&mut signer, &hash).unwrap_err());
+    assert_eq!(stopped.code(), ErrorCode::PermissionDenied);
+    assert_eq!(stopped.applied_state(), AppliedState::NotApplied);
+    assert!(guard.events.lock().unwrap().is_empty());
+    drop(signer);
+    drop(ctx);
+    let mut ctx = engine
+        .begin(grant([selector.key_id()]), policy(), control.clone())
+        .unwrap();
+    let mut signer = engine
+        .signer(&KeyRequest::new(&selector, Some(&password)), &mut ctx)
+        .unwrap();
     control.cancelled.store(true, Ordering::SeqCst);
     let error = OperationError::from(DigestSigner::sign_digest(&mut signer, &hash).unwrap_err());
     assert_eq!(error.code(), ErrorCode::Cancelled);
     assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    assert!(guard.outcomes.lock().unwrap().is_empty());
+    drop(signer);
+    drop(ctx);
     control.cancelled.store(false, Ordering::SeqCst);
+    let mut ctx = engine
+        .begin(grant([selector.key_id()]), policy(), control.clone())
+        .unwrap();
+    let mut signer = engine
+        .signer(&KeyRequest::new(&selector, Some(&password)), &mut ctx)
+        .unwrap();
     let signature = DigestSigner::sign_digest(&mut signer, &hash).unwrap();
     assert_signature("user-rsa-sign", SigAlg::RsaSha256, &signature);
     guard.fail_finish.store(true, Ordering::SeqCst);
     let error = OperationError::from(DigestSigner::sign_digest(&mut signer, &hash).unwrap_err());
     assert_eq!(error.code(), ErrorCode::AuditFailed);
     assert_eq!(error.applied_state(), AppliedState::Applied);
+    assert_eq!(guard.outcomes.lock().unwrap().len(), 2);
 }
 
 #[test]

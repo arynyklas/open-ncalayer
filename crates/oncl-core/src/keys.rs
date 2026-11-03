@@ -412,11 +412,30 @@ impl KeyLease {
         })
     }
 }
+/// Zero-based ordinal in one closed, bounded approved batch, not a free-form
+/// client label or a process-global private-use counter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BatchItemOrdinal(u16);
+impl BatchItemOrdinal {
+    pub fn get(self) -> u16 {
+        self.0
+    }
+    pub(crate) fn from_batch_index(index: usize) -> Self {
+        assert!(index < crate::batch::MAX_ITEMS);
+        Self(index as u16)
+    }
+}
 #[derive(Clone, Debug)]
 pub struct KeyUseEvent {
     pub operation_id: OperationId,
     pub key_id: KeyId,
     pub action: Action,
+    batch_item: Option<BatchItemOrdinal>,
+}
+impl KeyUseEvent {
+    pub fn batch_item(&self) -> Option<BatchItemOrdinal> {
+        self.batch_item
+    }
 }
 /// Non-cloneable successful host receipt, returned to the same guard after use.
 pub struct KeyUseReceipt {
@@ -507,6 +526,12 @@ impl Engine {
         if !Arc::ptr_eq(&ctx.owner, &self.identity) {
             return Err(OperationError::InvalidContext);
         }
+        if ctx
+            .private_use_stopped
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(OperationError::PermissionDenied);
+        }
         authority(ctx.grant(), &request.selector.id)?;
         if !ctx.grant().allows(Action::SignDigest) {
             return Err(OperationError::PermissionDenied);
@@ -556,6 +581,13 @@ impl AuthorizedSigner<'_> {
         self.algorithm
     }
     pub fn sign_digest(&mut self, digest: &DigestValue) -> Result<Vec<u8>, OperationError> {
+        if self
+            .ctx
+            .private_use_stopped
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(OperationError::PermissionDenied);
+        }
         let lease = &self.ctx.leases[self.index];
         authority(self.ctx.grant(), &lease.id)?;
         if !self.ctx.grant().allows(self.action) {
@@ -583,8 +615,13 @@ impl AuthorizedSigner<'_> {
             operation_id: self.ctx.id(),
             key_id: self.ctx.leases[self.index].id.clone(),
             action: self.action,
+            batch_item: self.ctx.batch_item,
         };
-        let receipt = self.guard.before_use(&event)?;
+        let receipt = self.guard.before_use(&event).inspect_err(|_| {
+            self.ctx
+                .private_use_stopped
+                .store(true, std::sync::atomic::Ordering::Release);
+        })?;
         // User guard code may take time or revoke/cancel while recording consent.
         let result = match self.ctx.scope.checkpoint() {
             Err(error) => Err(OperationError::from(error)),
@@ -615,6 +652,9 @@ impl AuthorizedSigner<'_> {
                 succeeded: result.is_ok(),
             },
         ) {
+            self.ctx
+                .private_use_stopped
+                .store(true, std::sync::atomic::Ordering::Release);
             return Err(OperationError::AfterKeyUse {
                 source: Box::new(error),
                 applied,
@@ -644,6 +684,12 @@ impl Engine {
     ) -> Result<Vec<usize>, OperationError> {
         if !Arc::ptr_eq(&ctx.owner, &self.identity) {
             return Err(OperationError::InvalidContext);
+        }
+        if ctx
+            .private_use_stopped
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(OperationError::PermissionDenied);
         }
         if !ctx.grant.allows(action)
             || (action == Action::SignDigest && !ctx.policy.allow_prehashed)

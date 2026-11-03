@@ -235,6 +235,64 @@
 //! This synthetic RSA/RFC3161 check is not NCA trust, hardware or V01 large-file
 //! XML/PDF/RSS/platform acceptance.
 
+//! # Closed, sequential batches
+//!
+//! `Engine::capture_batch` admits at most 1024 uniquely named typed items
+//! (IDs are 1..=128 UTF-8 bytes). It consumes at most one additional iterator
+//! element to reject an oversized plan, never an unbounded queue. Public document
+//! readers, including nested detached Add/extension and timestamp token/data
+//! readers, become immutable `FrozenInput` snapshots in the explicit host store.
+//! JOSE/already-bounded CMS byte APIs retain immutable borrows instead of copying
+//! documents. Key containers/passwords are never document-spooled: inspection
+//! prepares only bounded public metadata under the original inspection grant.
+//!
+//! Capture resolves permitted signing keys into this context's opaque leases
+//! before confirmation, pinning the exact certificate rather than reopening a
+//! file/slot after confirmation. `CapturedBatch::items` lends source SHA-256/byte
+//! identities, action/profile and exact key/certificate bindings for host review.
+//! Only the trusted host calls `CapturedBatch::authorize`; do not map this to
+//! an untrusted request flag or auto-answer a desktop confirmation. The resulting
+//! non-Clone approval is bound to this exact closed plan/engine/operation/root.
+//! `run_batch(plan, approval, ctx, emit)` consumes both. Pairing an old approval
+//! with recaptured bytes, requests, keys, order or IDs is `ConsentMismatch`
+//! before execution I/O/private use. Neither value permits replacement inputs.
+//!
+//! Capture, confirmation, dispatch and retained results share the original
+//! aggregate quotas, deadline, control and root; no item starts a fresh context.
+//! Approval and run compare the complete original scope identity, rejecting safe
+//! resource-scope replacement before callbacks or admission. Borrowed CMS/JOSE
+//! capture checks concrete format caps and remaining aggregate allowance before
+//! scanning, charges each captured chunk, and lends only a private exact-slice,
+//! original-scope replay proof during closed dispatch. Result slots are admitted
+//! during capture, so cancellation before run still returns explicit NotRun facts.
+//! A final source checkpoint after successful signing preserves actual Applied
+//! state and the original execution cause instead of implying a private rollback.
+//! Progress is cumulative resource intake/output, including prior capture;
+//! authenticated replay is not charged again. Existing format reports retain
+//! their resource-delta semantics; `BatchItemResult::sources` separately retains
+//! the exact complete captured source sizes/digests. The run's total is the
+//! actual closed plan length, not a guessed iterator size hint.
+//!
+//! Results distinguish completed reports (including Invalid verification),
+//! actual errors with NotApplied/Applied/Unknown, and explicit NotRun items.
+//! Local malformed/unavailable inputs preserve earlier results and can continue;
+//! quota/control/guard/audit failures stop the batch and permanently stop new
+//! private use in that context. Hash/verification remain independent of private
+//! authority. A new legitimate context never inherits an unlocked lease or this
+//! local stop latch. No rollback, retry, idempotency or exactly-once is promised.
+//! Result/event collections keep their original reservations/root. Event
+//! callbacks borrow immutable results; use the shared control for cancellation.
+//! Audit events expose only the closed zero-based `BatchItemOrdinal`, identical
+//! across every signer in that item, and None for nonbatch use. Correlation is
+//! restored before callbacks and even when trusted host guard code unwinds.
+//!
+//! `sdk_probe --case B01 --out <directory>` exercises actual files, mixed CMS
+//! sign/verify plus an unavailable source, cancellation after the first real
+//! output, exact private/key-open counts, absent unexecuted outputs, and positive
+//! and altered-negative OpenSSL controls. It is not large-file/platform or NCA
+//! trust acceptance.
+//!
+pub mod batch;
 mod cades;
 mod context;
 mod engine;
