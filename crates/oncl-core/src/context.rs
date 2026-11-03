@@ -27,6 +27,8 @@ pub struct OperationContext {
     pub(crate) policy: OperationPolicy,
     pub(crate) scope: ResourceScope,
     pub(crate) leases: Vec<crate::keys::KeyLease>,
+    pub(crate) private_use_stopped: std::sync::atomic::AtomicBool,
+    pub(crate) batch_item: Option<crate::keys::BatchItemOrdinal>,
 }
 impl OperationContext {
     pub fn id(&self) -> OperationId {

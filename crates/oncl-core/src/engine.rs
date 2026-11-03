@@ -141,6 +141,8 @@ impl Engine {
             policy,
             scope,
             leases: Vec::new(),
+            private_use_stopped: std::sync::atomic::AtomicBool::new(false),
+            batch_item: None,
         })
     }
     pub fn hash(
