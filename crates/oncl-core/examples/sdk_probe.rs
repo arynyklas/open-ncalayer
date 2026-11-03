@@ -4,6 +4,8 @@ use oncl_pki::resource::{OperationControl, ProcessingError, Progress, ResourceLi
 use oncl_pki::{io::Source, key::HashAlg};
 use std::{fs::File, io, sync::Arc};
 
+#[path = "sdk_probe/cades.rs"]
+mod cades_probe;
 #[cfg(feature = "pdf")]
 #[path = "sdk_probe/pdf.rs"]
 mod pdf_probe;
@@ -25,7 +27,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = args.next();
     if command.as_deref() == Some("--case") {
         let case = args.next().ok_or("missing probe case")?;
-        if !matches!(case.as_str(), "F04" | "C01" | "C02" | "X01" | "P01" | "P02") {
+        if !matches!(
+            case.as_str(),
+            "F04" | "C01" | "C02" | "C03" | "X01" | "P01" | "P02"
+        ) {
             return Err("unsupported probe case".into());
         }
         if args.next().as_deref() != Some("--out") {
@@ -61,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err("P01 probe requires the pdf feature".into())
                 }
             }
+            "C03" => cades_probe::run(std::path::Path::new(&out)),
             "X01" => {
                 #[cfg(feature = "xml")]
                 {
@@ -92,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command.as_deref() != Some("hash") {
         return Err(
-            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|X01|P01|P02> --out <directory>".into(),
+            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|P01|P02> --out <directory>".into(),
         );
     }
     let mut algorithm = None;

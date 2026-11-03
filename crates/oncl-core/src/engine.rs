@@ -20,6 +20,7 @@ pub struct EngineServices {
     keys: Option<crate::keys::KeyServices>,
     validation: Option<Arc<crate::ValidationServices>>,
     temporary: Option<oncl_pki::io::TemporaryStore>,
+    cades: Option<crate::CadesConfiguration>,
 }
 impl EngineServices {
     pub fn hash_only(limits: ResourceLimits) -> Self {
@@ -29,6 +30,7 @@ impl EngineServices {
             keys: None,
             validation: None,
             temporary: None,
+            cades: None,
         }
     }
     pub fn with_shared_budget(mut self, budget: Arc<SharedBudget>) -> Self {
@@ -53,6 +55,10 @@ impl EngineServices {
         self.temporary = Some(store);
         self
     }
+    pub fn with_cades(mut self, configuration: crate::CadesConfiguration) -> Self {
+        self.cades = Some(configuration);
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -63,10 +69,22 @@ pub struct Engine {
     pub(crate) keys: Option<crate::keys::KeyServices>,
     pub(crate) validation: Option<Arc<crate::ValidationServices>>,
     pub(crate) temporary: Option<oncl_pki::io::TemporaryStore>,
+    pub(crate) cades: Option<crate::CadesConfiguration>,
 }
 impl Engine {
     pub fn new(services: EngineServices) -> Result<Self, OperationError> {
         services.limits.validate()?;
+        if let Some(configuration) = &services.cades {
+            configuration.evidence_limits.validate().map_err(|error| {
+                crate::cades::error(oncl_pki::cms::ades::AdesError::Evidence(error))
+            })?;
+            if configuration.tsa.hash != HashAlg::Sha256 || !configuration.tsa.require_tsa_eku {
+                return Err(oncl_pki::resource::ProcessingError::InvalidInput(
+                    "CAdES acquisition requires SHA-256 and TSA EKU",
+                )
+                .into());
+            }
+        }
         let budget = match services.shared {
             Some(shared) => shared,
             None => Arc::new(SharedBudget::new(services.limits.clone())?),
@@ -78,6 +96,7 @@ impl Engine {
             keys: services.keys,
             validation: services.validation,
             temporary: services.temporary,
+            cades: services.cades,
         })
     }
     pub fn begin(

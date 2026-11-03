@@ -17,6 +17,7 @@ use std::{io::Write, sync::Arc};
 pub enum SignProvenance {
     Document,
     ProvidedDigest,
+    EvidenceExtension,
 }
 /// Completion facts own the PKI result's original reservations/root lifetime.
 /// No signature/key buffer or independent quota token can be detached.
@@ -28,16 +29,51 @@ pub struct OperationReport {
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub applied: AppliedState,
-    result: SignSummary,
+    result: OperationResult,
+}
+#[derive(Debug)]
+enum OperationResult {
+    Signed(SignSummary),
+    Extended(oncl_pki::cms::ades::AdesReport),
 }
 impl OperationReport {
     pub fn signer_count(&self) -> usize {
-        self.result.signer_count
+        match &self.result {
+            OperationResult::Signed(report) => report.signer_count,
+            OperationResult::Extended(report) => report
+                .reports()
+                .iter()
+                .map(|report| report.signers.len())
+                .sum(),
+        }
     }
     /// All requested signers completed. Partial application is always an error,
     /// carrying its conservative application state, never a successful artifact.
     pub fn signer_states(&self) -> impl ExactSizeIterator<Item = AppliedState> + '_ {
-        (0..self.result.signer_count).map(|_| AppliedState::Applied)
+        (0..self.signer_count()).map(|_| self.applied)
+    }
+    pub(crate) fn extended(
+        id: OperationId,
+        profile: SignProfile,
+        provenance: SignProvenance,
+        applied: AppliedState,
+        report: oncl_pki::cms::ades::AdesReport,
+    ) -> Self {
+        Self {
+            id,
+            profile,
+            provenance,
+            bytes_in: report.bytes_in(),
+            bytes_out: report.bytes_out(),
+            applied,
+            result: OperationResult::Extended(report),
+        }
+    }
+    pub fn validation_reports(&self) -> Option<&[oncl_pki::validation::ValidationReport]> {
+        match &self.result {
+            OperationResult::Extended(report) => Some(report.reports()),
+            OperationResult::Signed(_) => None,
+        }
     }
 }
 struct StatusCheckedSigner<'s, 'http> {
@@ -117,7 +153,10 @@ impl Engine {
                 Action::SignDigest,
                 SignProvenance::ProvidedDigest,
             ),
-            SignMode::CmsCreate(keys, _) | SignMode::CmsAdd(keys, _) => {
+            SignMode::CmsCreate(keys, _)
+            | SignMode::CmsAdd(keys, _)
+            | SignMode::CadesCreate(keys, _, _, _, _)
+            | SignMode::CadesAdd(keys, _, _, _, _) => {
                 (keys.as_slice(), Action::Sign, SignProvenance::Document)
             }
             #[cfg(feature = "pdf")]
@@ -127,6 +166,15 @@ impl Engine {
                 SignProvenance::Document,
             ),
         };
+        if !ctx.grant.allows(action) {
+            return Err(OperationError::PermissionDenied);
+        }
+        if let SignProfile::Cades(level) = profile
+            && level > oncl_pki::evidence::AdesLevel::B
+            && self.cades.is_none()
+        {
+            return Err(OperationError::MissingCadesConfiguration);
+        }
         if requests.is_empty() || requests.len() > 64 {
             return Err(ProcessingError::InvalidInput("signer count must be 1..=64").into());
         }
@@ -181,11 +229,13 @@ impl Engine {
                 &cms_services,
                 output,
                 &ctx.scope,
-            ),
+            )
+            .map_err(crate::report::stream_error),
             SignMode::RawMessage(_) => match output {
                 Output::Writer(writer) => stream::sign_raw(input, refs[0], writer, &ctx.scope),
                 Output::Staged(stage) => stream::sign_raw_staged(input, refs[0], stage, &ctx.scope),
-            },
+            }
+            .map_err(crate::report::stream_error),
             SignMode::RawDigest(_, digest) => match output {
                 Output::Writer(writer) => {
                     stream::sign_raw_digest(input, &digest, refs[0], writer, &ctx.scope)
@@ -193,7 +243,8 @@ impl Engine {
                 Output::Staged(stage) => {
                     stream::sign_raw_digest_staged(input, &digest, refs[0], stage, &ctx.scope)
                 }
-            },
+            }
+            .map_err(crate::report::stream_error),
             SignMode::CmsCreate(_, attached) => match output {
                 Output::Writer(writer) => stream::sign(
                     &CmsSignRequest::create(attached),
@@ -213,7 +264,8 @@ impl Engine {
                     stage,
                     &ctx.scope,
                 ),
-            },
+            }
+            .map_err(crate::report::stream_error),
             SignMode::CmsAdd(_, detached) => match output {
                 Output::Writer(writer) => stream::sign(
                     &CmsSignRequest::add()
@@ -235,10 +287,44 @@ impl Engine {
                     stage,
                     &ctx.scope,
                 ),
-            },
+            }
+            .map_err(crate::report::stream_error),
+            SignMode::CadesCreate(_, attached, level, material, limits) => cades_sign(
+                self,
+                &CmsSignRequest::create(attached)
+                    .with_signing_time(validation.now)
+                    .with_allowed_algorithms(ctx.policy.allowed_signature_algorithms),
+                level,
+                input,
+                None,
+                &mut refs,
+                &cms_services,
+                &validation,
+                services,
+                material,
+                limits,
+                output,
+                &ctx.scope,
+            ),
+            SignMode::CadesAdd(_, detached, level, material, limits) => cades_sign(
+                self,
+                &CmsSignRequest::add()
+                    .with_signing_time(validation.now)
+                    .with_allowed_algorithms(ctx.policy.allowed_signature_algorithms),
+                level,
+                input,
+                detached,
+                &mut refs,
+                &cms_services,
+                &validation,
+                services,
+                material,
+                limits,
+                output,
+                &ctx.scope,
+            ),
         };
         let transport_result = transport.finish();
-        let result = result.map_err(crate::report::stream_error);
         if let Err(error) = transport_result {
             let applied = match &result {
                 Ok(report) => report.applied,
@@ -260,9 +346,70 @@ impl Engine {
             bytes_in: result.bytes_in,
             bytes_out: result.bytes_out,
             applied: result.applied,
-            result,
+            result: OperationResult::Signed(result),
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cades_sign(
+    engine: &Engine,
+    request: &CmsSignRequest,
+    level: oncl_pki::evidence::AdesLevel,
+    input: Source<'_>,
+    detached: Option<Source<'_>>,
+    signers: &mut [&mut dyn DigestSigner],
+    cms: &CmsSignServices<'_>,
+    validation: &ValidationContext<'_>,
+    host: &crate::ValidationServices,
+    material: oncl_pki::cms::ades::ValidationMaterial<'_>,
+    limits: oncl_pki::evidence::EvidenceLimits,
+    output: Output<'_>,
+    scope: &oncl_pki::resource::ResourceScope,
+) -> Result<SignSummary, OperationError> {
+    let temporary = engine
+        .temporary
+        .as_ref()
+        .ok_or(OperationError::MissingTemporaryStore)?;
+    limits
+        .validate()
+        .map_err(|error| crate::cades::error(error.into()))?;
+    let services = oncl_pki::cms::ades::AdesServices {
+        validation,
+        network: &host.network,
+        temporary,
+        limits,
+        tsa: engine
+            .cades
+            .as_ref()
+            .map(|configuration| &configuration.tsa),
+        material,
+    };
+    match output {
+        Output::Writer(writer) => oncl_pki::cms::ades::sign(
+            request,
+            level,
+            input,
+            detached,
+            signers,
+            cms,
+            Some(&services),
+            writer,
+            scope,
+        ),
+        Output::Staged(stage) => oncl_pki::cms::ades::sign_staged(
+            request,
+            level,
+            input,
+            detached,
+            signers,
+            cms,
+            Some(&services),
+            stage,
+            scope,
+        ),
+    }
+    .map_err(crate::cades::error)
 }
 
 #[cfg(feature = "pdf")]

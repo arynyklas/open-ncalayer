@@ -2191,8 +2191,9 @@ fn repeated_external_evidence_delivery_cannot_bypass_output_quota() {
     let fixture = Fixture::new();
     let bytes = fixture.root.cert.to_der().unwrap();
     let mut cap = limits();
-    // Initial staging plus exactly one external delivery fit; another does not.
-    cap.output_bytes = 2 * bytes.len() as u64;
+    // Internal evidence storage is source-role; exactly one external delivery
+    // fits the output allowance and another must fail before calling the writer.
+    cap.output_bytes = bytes.len() as u64;
     let budget = Arc::new(SharedBudget::new(cap.clone()).unwrap());
     let mut resources = budget.begin(cap, Arc::new(Control)).unwrap();
     let parent = tempfile::tempdir().unwrap();
@@ -2204,6 +2205,7 @@ fn repeated_external_evidence_delivery_cannot_bypass_output_quota() {
     .unwrap();
     let id = collect(&mut store, EvidenceKind::Certificate, &bytes);
     let mut bundle = store.finish();
+    assert_eq!(resources.progress().bytes_out, 0);
     assert_eq!(
         bundle.copy_entry(id, &mut io::sink()).unwrap(),
         bytes.len() as u64
@@ -2950,4 +2952,110 @@ fn multichunk_base64_archive_matches_full_encoding_for_all_remainders_and_small_
             assert_eq!(http.0.load(Ordering::SeqCst), 0);
         }
     }
+}
+
+#[test]
+fn nested_standard_hash_index_reuses_one_scoped_work_buffer() {
+    let fixture = Fixture::new();
+    let payloads = fixture.payloads(Status::Good, Status::Good);
+    let token = fixture.token(&fixture.signature, PROVEN);
+    let mut transformed = payloads[0].1.clone();
+    for _ in 0..8 {
+        transformed = Sha256::digest(&transformed).to_vec();
+    }
+    let mut covered = fixture.signature.clone();
+    covered.extend_from_slice(&transformed);
+    for (_, value) in &payloads[1..] {
+        covered.extend_from_slice(value);
+    }
+    covered.extend_from_slice(&token);
+    let archive = fixture.token(&covered, ARCHIVE);
+    let parent = tempfile::tempdir().unwrap();
+    let mut quota = limits();
+    quota.memory_bytes = 1024 * 1024;
+    let mut resources = Arc::new(SharedBudget::new(quota.clone()).unwrap())
+        .begin(quota, Arc::new(Control))
+        .unwrap();
+    let mut case = prepare(
+        &mut resources,
+        parent.path(),
+        &payloads,
+        &token,
+        Some(&archive),
+    );
+    let leaf = [CoveragePart::Evidence {
+        id: case.ids[0],
+        encoding: CoverageEncoding::Raw,
+    }];
+    let one = [CoveragePart::Hashed {
+        algorithm: HashAlg::Sha256,
+        parts: &leaf,
+    }];
+    let two = [CoveragePart::Hashed {
+        algorithm: HashAlg::Sha256,
+        parts: &one,
+    }];
+    let three = [CoveragePart::Hashed {
+        algorithm: HashAlg::Sha256,
+        parts: &two,
+    }];
+    let four = [CoveragePart::Hashed {
+        algorithm: HashAlg::Sha256,
+        parts: &three,
+    }];
+    let five = [CoveragePart::Hashed {
+        algorithm: HashAlg::Sha256,
+        parts: &four,
+    }];
+    let six = [CoveragePart::Hashed {
+        algorithm: HashAlg::Sha256,
+        parts: &five,
+    }];
+    let seven = [CoveragePart::Hashed {
+        algorithm: HashAlg::Sha256,
+        parts: &six,
+    }];
+    let mut coverage = vec![
+        CoveragePart::Signature,
+        CoveragePart::Hashed {
+            algorithm: HashAlg::Sha256,
+            parts: &seven,
+        },
+    ];
+    coverage.extend(
+        case.ids[1..]
+            .iter()
+            .chain(std::iter::once(&case.signature_token))
+            .map(|id| CoveragePart::Evidence {
+                id: *id,
+                encoding: CoverageEncoding::Raw,
+            }),
+    );
+    let signature = [CoveragePart::Signature];
+    let proofs = [
+        TimestampBinding {
+            token: case.signature_token,
+            kind: ProofKind::Signature,
+            coverage: &signature,
+        },
+        TimestampBinding {
+            token: case.archive_token.unwrap(),
+            kind: ProofKind::Archive,
+            coverage: &coverage,
+        },
+    ];
+    let http = Offline::new();
+    let report = validate_evidence(
+        &fixture.signer(),
+        &mut case.bundle,
+        &proofs,
+        AdesLevel::Lta,
+        &fixture.context(&http, ValidationPolicy::OfflineReport),
+        &NetworkPolicy::deny_all(),
+        &resources,
+    )
+    .unwrap();
+    assert_eq!(report.verdict, Verdict::Valid);
+    assert_proven(&report, case.signature_token);
+    assert_eq!(http.0.load(Ordering::SeqCst), 0);
 }

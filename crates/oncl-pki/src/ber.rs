@@ -65,6 +65,61 @@ pub fn to_der(input: &[u8]) -> Result<Vec<u8>, BerError> {
     Ok(out)
 }
 
+/// Exact encoded children for bounded format metadata. Unlike normalization,
+/// this retains the received length octets and signed/unsigned field bytes.
+pub(crate) fn raw_children(input: &[u8]) -> Result<Vec<&[u8]>, BerError> {
+    let mut parser = Parser { input, pos: 0 };
+    let tag = parser.byte()?;
+    if tag & CONSTRUCTED == 0 || tag & 0x1f == 0x1f {
+        return Err(BerError::Invalid {
+            offset: 0,
+            reason: "constructed metadata required",
+        });
+    }
+    let length = parser.length()?;
+    let end = match length {
+        Length::Definite(length) => parser
+            .pos
+            .checked_add(length)
+            .filter(|end| *end == input.len())
+            .ok_or(BerError::Truncated {
+                offset: input.len(),
+            })?,
+        Length::Indefinite => input.len(),
+    };
+    let mut children = Vec::new();
+    while parser.pos < end {
+        if matches!(length, Length::Indefinite) && parser.at_end_of_contents() {
+            parser.pos += 2;
+            if parser.pos != input.len() {
+                return Err(BerError::TrailingData { offset: parser.pos });
+            }
+            return Ok(children);
+        }
+        let start = parser.pos;
+        parser.element(1)?;
+        if parser.pos > end {
+            return Err(BerError::Truncated { offset: end });
+        }
+        children.push(&input[start..parser.pos]);
+    }
+    if matches!(length, Length::Indefinite) {
+        return Err(BerError::Truncated { offset: end });
+    }
+    Ok(children)
+}
+
+pub(crate) fn raw_elements(input: &[u8]) -> Result<Vec<&[u8]>, BerError> {
+    let mut parser = Parser { input, pos: 0 };
+    let mut values = Vec::new();
+    while parser.pos < input.len() {
+        let start = parser.pos;
+        parser.element(0)?;
+        values.push(&input[start..parser.pos]);
+    }
+    Ok(values)
+}
+
 /// Parsed element; byte ranges point into the input.
 struct Node {
     /// Identifier octets as in the input (rewritten to primitive for flattened strings).

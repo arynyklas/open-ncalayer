@@ -208,6 +208,7 @@ pub enum KeyFailureKind {
     AuditFailed,
     Backend,
     MissingValidationServices,
+    MissingCadesConfiguration,
     MissingTemporaryStore,
     ValidationRequired,
 }

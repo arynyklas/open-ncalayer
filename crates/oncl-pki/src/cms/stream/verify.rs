@@ -61,9 +61,11 @@ pub fn verify_snapshot_detached(
     if metadata.as_bytes().is_empty() {
         return Err(malformed("empty decoded CMS metadata"));
     }
-    let mut cursor = std::io::Cursor::new(crate::io::padded_der_sequence(metadata.as_bytes())?);
+    let encoded = crate::io::padded_der_sequence(metadata.as_bytes())?;
+    let encoded_len = u64::try_from(encoded.len()).map_err(|_| ProcessingError::MetadataLimit)?;
+    let mut cursor = std::io::Cursor::new(encoded);
     let mut parsed = super::parse_with(
-        Source::sequential(&mut cursor, None),
+        Source::sequential(&mut cursor, Some(encoded_len)),
         scope,
         true,
         None,

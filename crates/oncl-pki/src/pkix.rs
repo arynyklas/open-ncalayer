@@ -163,6 +163,7 @@ pub fn build_path(
         CaView {
             first: cas.certs(),
             second: &[],
+            selected: &[],
         },
         at,
         None,
@@ -184,6 +185,7 @@ pub fn build_anchored_path(
         CaView {
             first: anchors.certs(),
             second: candidates,
+            selected: &[],
         },
         at,
         Some(anchors),
@@ -192,12 +194,12 @@ pub fn build_anchored_path(
     .to_owned())
 }
 
-/// Operation-limited anchored path, sharing all legacy trust/crypto rules.
-/// The optional limit is checked before searching/verifying another issuer.
-pub(crate) fn build_anchored_path_limited(
+/// Borrowed format-derived candidate view, using the same PKIX search and
+/// signature/path checks as the complete-bundle entry point.
+pub(crate) fn build_anchored_path_selected(
     leaf: &Certificate,
     anchors: &CaSet,
-    candidates: &[Certificate],
+    candidates: &[&Certificate],
     at: OffsetDateTime,
     max_len: usize,
 ) -> Result<Vec<Certificate>, PathError> {
@@ -208,7 +210,8 @@ pub(crate) fn build_anchored_path_limited(
         leaf,
         CaView {
             first: anchors.certs(),
-            second: candidates,
+            second: &[],
+            selected: candidates,
         },
         at,
         Some(anchors),
@@ -216,18 +219,22 @@ pub(crate) fn build_anchored_path_limited(
     )?
     .to_owned())
 }
-
 #[derive(Clone, Copy)]
 struct CaView<'a> {
     first: &'a [Certificate],
     second: &'a [Certificate],
+    selected: &'a [&'a Certificate],
 }
 impl<'a> CaView<'a> {
     fn certificates(self) -> impl Iterator<Item = &'a Certificate> + Clone {
-        self.first.iter().chain(self.second.iter())
+        self.first
+            .iter()
+            .chain(self.second.iter())
+            .chain(self.selected.iter().copied())
     }
     fn contains(self, certificate: &Certificate) -> bool {
-        self.first.contains(certificate) || self.second.contains(certificate)
+        self.certificates()
+            .any(|candidate| candidate == certificate)
     }
     fn issuer(self, certificate: &Certificate) -> Result<&'a Certificate, PathError> {
         let name = certificate.tbs_certificate().issuer();
@@ -382,6 +389,7 @@ pub(crate) fn build_anchored_path_admitted(
         CaView {
             first: anchors.certs(),
             second: candidates,
+            selected: &[],
         },
         at,
         Some(anchors),

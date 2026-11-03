@@ -15,6 +15,8 @@ pub enum Action {
     Verify,
     /// Structural CMS content extraction; never a verification assertion.
     Extract,
+    /// Add and verify public CAdES evidence; never a private-key action.
+    Extend,
 }
 
 /// Authority supplied by a trusted host/authorizer, intentionally not Deserialize.
@@ -26,6 +28,7 @@ pub struct ExecutionGrant {
     validate: bool,
     verify: bool,
     extract: bool,
+    extend: bool,
     keys: Vec<crate::keys::KeyId>,
 }
 impl ExecutionGrant {
@@ -38,6 +41,7 @@ impl ExecutionGrant {
             validate: false,
             verify: false,
             extract: false,
+            extend: false,
         };
         for action in actions {
             match action {
@@ -47,6 +51,7 @@ impl ExecutionGrant {
                 Action::Validate => grant.validate = true,
                 Action::Verify => grant.verify = true,
                 Action::Extract => grant.extract = true,
+                Action::Extend => grant.extend = true,
             }
         }
         grant
@@ -59,6 +64,7 @@ impl ExecutionGrant {
             Action::Validate => self.validate,
             Action::Verify => self.verify,
             Action::Extract => self.extract,
+            Action::Extend => self.extend,
         }
     }
     pub fn with_keys(mut self, keys: impl IntoIterator<Item = crate::keys::KeyId>) -> Self {
@@ -75,6 +81,7 @@ impl ExecutionGrant {
             && !self.validate
             && !self.verify
             && !self.extract
+            && !self.extend
     }
 }
 

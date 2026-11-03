@@ -95,6 +95,8 @@ pub struct VerificationReport {
     pub signers: ScopedSigners,
     #[cfg(feature = "pdf")]
     pub pdf: Option<oncl_pdf::PdfRevisionFacts>,
+    /// Minimum actually verified CAdES level; legacy CMS reports have none.
+    pub ades_level: Option<oncl_pki::evidence::AdesLevel>,
 }
 
 /// Raw structural extraction, not a signature/validation verdict. Arbitrary
@@ -124,7 +126,7 @@ pub(crate) fn stream_error(error: oncl_pki::cms::stream::StreamError) -> Operati
     }
 }
 impl Engine {
-    fn validation_context<'a>(
+    pub(crate) fn validation_context<'a>(
         &'a self,
         ctx: &OperationContext,
         action: Action,
@@ -189,6 +191,7 @@ impl Engine {
             signers: report.signers,
             #[cfg(feature = "pdf")]
             pdf: None,
+            ades_level: None,
         })
     }
     /// Host PKI-only bounded fetch using this operation's authorization and
@@ -218,6 +221,9 @@ impl Engine {
         detached: Option<oncl_pki::io::Source<'_>>,
         ctx: &mut OperationContext,
     ) -> Result<VerificationReport, OperationError> {
+        if let crate::VerifyProfile::Cades(required) = request.profile() {
+            return self.verify_cades(request, required, input, detached, ctx);
+        }
         let services = self.validation_context(ctx, Action::Verify)?;
         let now = (services.clock)();
         let transport =
@@ -225,6 +231,11 @@ impl Engine {
         #[cfg(feature = "pdf")]
         let mut pdf = None;
         let result = match request.profile() {
+            // CAdES is dispatched before constructing the generic transport above.
+            // Keep the real handler here as well so the profile match stays exhaustive.
+            crate::VerifyProfile::Cades(required) => {
+                return self.verify_cades(request, required, input, detached, ctx);
+            }
             crate::VerifyProfile::Cms => oncl_pki::cms::stream::verify(
                 input,
                 detached,
@@ -295,6 +306,7 @@ impl Engine {
             signers: report.signers,
             #[cfg(feature = "pdf")]
             pdf,
+            ades_level: None,
         })
     }
 
