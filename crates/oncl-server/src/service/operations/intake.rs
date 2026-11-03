@@ -79,7 +79,7 @@ pub(super) struct Failure {
     state: Mutex<Option<Arc<ProcessingError>>>,
 }
 impl Failure {
-    fn record(&self, error: ProcessingError) {
+    pub(super) fn record(&self, error: ProcessingError) {
         let mut state = self
             .state
             .lock()

@@ -1,4 +1,4 @@
-mod operations;
+pub(crate) mod operations;
 
 use crate::{
     audit::{AuditBinding, AuditConfig, AuditHealth, DurableAuditGuard},
@@ -52,15 +52,21 @@ pub struct ServiceHost {
     pub audit: DurableAuditGuard,
     config: ServerConfig,
     store: Option<oncl_pki::io::TemporaryStore>,
+    output_store: Option<Arc<operations::artifact::ArtifactStore>>,
 }
 struct InvocationControl {
     cancel: Arc<Cancellation>,
     deadline: Deadline,
+    progress: Option<Arc<operations::progress::ProgressHub>>,
 }
 impl OperationControl for InvocationControl {
     fn checkpoint(&self, progress: Progress) -> Result<(), ProcessingError> {
         self.deadline.checkpoint()?;
-        self.cancel.checkpoint(progress)
+        self.cancel.checkpoint(progress)?;
+        if let Some(hub) = &self.progress {
+            hub.publish(progress);
+        }
+        Ok(())
     }
 }
 impl ServiceHost {
@@ -141,19 +147,19 @@ impl ServiceHost {
         let mut services = EngineServices::hash_only(config.limits())
             .with_shared_budget(budget)
             .with_keys(keys.clone(), Arc::new(audit.clone()))
-            .with_validation(oncl_core::ValidationServices::new(
-                oncl_pki::pkix::CaSet::new(Vec::new()),
-                Vec::new(),
-                Arc::new(oncl_pki::http::UreqTransport::with_proxy(
-                    oncl_pki::http::ProxySetting::None,
-                )),
-                oncl_pki::validation::NetworkPolicy::deny_all(),
-                Arc::new(time::OffsetDateTime::now_utc),
-            ));
+            .with_validation(config.pki.services()?);
         if let Some(store) = &store {
             services = services.with_temporary_store(store.clone());
         }
         let engine = Arc::new(Engine::new(services).map_err(|_| invalid())?);
+        let output_store = if store.is_some() {
+            Some(
+                operations::artifact::ArtifactStore::new(&config.scratch_directory)
+                    .map_err(|_| invalid())?,
+            )
+        } else {
+            None
+        };
         let executor = BoundedExecutor::new(config.executor()).map_err(|_| invalid())?;
         Ok(Arc::new(Self {
             engine,
@@ -163,6 +169,7 @@ impl ServiceHost {
             audit,
             config,
             store,
+            output_store,
         }))
     }
     fn principal(&self, metadata: &RequestMetadata) -> Result<Principal, ApiError> {
@@ -286,6 +293,7 @@ impl HashHost for ServiceHost {
                 Arc::new(InvocationControl {
                     cancel: cancel.clone(),
                     deadline,
+                    progress: None,
                 }),
             )?;
             if metadata

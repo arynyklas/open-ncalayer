@@ -9,11 +9,13 @@ pub(super) fn action(operation: &Operation) -> Action {
     match operation {
         Operation::Hash { .. } => Action::Hash,
         Operation::Verify { .. } => Action::Verify,
+        Operation::Extract { .. } => Action::Extract,
     }
 }
 pub(super) fn inputs(operation: &Operation) -> impl Iterator<Item = &str> {
     let names = match operation {
         Operation::Hash { input, .. } => [Some(input.as_str()), None],
+        Operation::Extract { input } => [Some(input.as_str()), None],
         Operation::Verify {
             input, detached, ..
         } => [Some(input.as_str()), detached.as_deref()],
@@ -91,12 +93,25 @@ pub(super) fn signer(value: &oncl_pki::validation::SignerValidation) -> SignerCh
         reasons: value.reasons.iter().map(|r| format!("{r:?}")).collect(),
     }
 }
+pub(super) struct ArtifactSink<'a> {
+    pub store: &'a Arc<super::artifact::ArtifactStore>,
+    pub owner: &'a Arc<super::ownership::OperationOutput>,
+    pub id: String,
+}
 pub(super) fn run(
     operation: Operation,
     documents: &mut intake::Documents,
     engine: &Engine,
     ctx: &mut OperationContext,
-) -> Result<(OperationResult, ResourceReservation), OperationError> {
+    output: Option<ArtifactSink<'_>>,
+) -> Result<
+    (
+        OperationResult,
+        ResourceReservation,
+        Option<super::artifact::FinishedArtifact>,
+    ),
+    OperationError,
+> {
     match operation {
         Operation::Hash {
             algorithm: hash,
@@ -115,6 +130,7 @@ pub(super) fn run(
                     bytes_in,
                 },
                 projection,
+                None,
             ))
         }
         Operation::Verify {
@@ -161,6 +177,29 @@ pub(super) fn run(
                     signers: report.signers.iter().map(signer).collect(),
                 },
                 projection,
+                None,
+            ))
+        }
+        Operation::Extract { input } => {
+            let output = output.ok_or(OperationError::MissingTemporaryStore)?;
+            let mut document = documents.take(&input)?;
+            let mut reader = document.reader(ctx.resources())?;
+            let mut writer = super::artifact::ArtifactWriter::new(
+                output.store.clone(),
+                output.owner.clone(),
+                ctx,
+            )?;
+            let report = engine.extract(reader.source(), &mut writer, ctx)?;
+            reader.finish()?;
+            let artifact = writer.finish(report.bytes_written)?;
+            let projection = ctx.resources().reserve_metadata(512)?;
+            Ok((
+                OperationResult::Extraction {
+                    artifact: output.id,
+                    bytes_written: report.bytes_written,
+                },
+                projection,
+                Some(artifact),
             ))
         }
     }

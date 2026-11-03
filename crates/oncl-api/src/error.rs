@@ -9,6 +9,7 @@ pub enum ErrorCode {
     Cancelled,
     InputLimit,
     FramingLimit,
+    MissingTemporaryStore,
     MemoryLimit,
     TempLimit,
     MetadataLimit,
@@ -52,7 +53,9 @@ impl axum::response::IntoResponse for ApiError {
             | ErrorCode::TempLimit
             | ErrorCode::MetadataLimit
             | ErrorCode::OutputLimit => StatusCode::PAYLOAD_TOO_LARGE,
-            ErrorCode::AuditUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::AuditUnavailable | ErrorCode::MissingTemporaryStore => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, axum::Json(self)).into_response()

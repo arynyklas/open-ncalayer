@@ -1,7 +1,7 @@
 //! Admission is finite BEFORE spawn_blocking. Cancellation drops the receiver,
 //! not a running native closure or its worker/resource permits.
-use oncl_core::OperationContext;
-use oncl_pki::resource::{OperationControl, ProcessingError, Progress};
+use oncl_core::{OperationAdmission, OperationContext};
+use oncl_pki::resource::{OperationControl, ProcessingError, Progress, ResourceScope};
 use std::{
     sync::{
         Arc,
@@ -89,12 +89,12 @@ pub struct WorkOutput<T> {
     pub context: OperationContext,
 }
 pub struct WorkHandle<T> {
-    receiver: oneshot::Receiver<Result<WorkOutput<T>, ProcessingError>>,
+    receiver: oneshot::Receiver<Result<T, ProcessingError>>,
     abandoned: Arc<Cancellation>,
     deadline: oncl_pki::resource::Deadline,
 }
 impl<T> WorkHandle<T> {
-    pub async fn wait(mut self) -> Result<WorkOutput<T>, ProcessingError> {
+    pub async fn wait(mut self) -> Result<T, ProcessingError> {
         match tokio::time::timeout(self.deadline.remaining(), &mut self.receiver).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(ProcessingError::Cancelled),
@@ -168,12 +168,69 @@ impl BoundedExecutor {
         &self,
         mut ctx: OperationContext,
         work: F,
-    ) -> Result<WorkHandle<T>, ProcessingError>
+    ) -> Result<WorkHandle<WorkOutput<T>>, ProcessingError>
     where
         T: Send + 'static,
         F: FnOnce(&mut OperationContext) -> Result<T, ProcessingError> + Send + 'static,
     {
-        ctx.resources().checkpoint()?;
+        let scope = ctx.resources().shared_view();
+        self.launch(scope, move || {
+            work(&mut ctx).map(|value| WorkOutput {
+                value,
+                context: ctx,
+            })
+        })
+        .await
+    }
+    /// Consume an original grantless intake admission in the same bounded native
+    /// worker pool. Only the host can turn it into an authorized SDK context.
+    pub async fn submit_admitted<T, F>(
+        &self,
+        mut admission: OperationAdmission,
+        work: F,
+    ) -> Result<WorkHandle<T>, ProcessingError>
+    where
+        T: Send + 'static,
+        F: FnOnce(OperationAdmission) -> Result<T, ProcessingError> + Send + 'static,
+    {
+        let scope = admission.resources().shared_view();
+        self.launch(scope, move || work(admission)).await
+    }
+    /// Transfer the actual context to a native owner without cloning authority.
+    /// Result/output ownership is independent from the native worker permit.
+    pub async fn submit_owned<T, F>(
+        &self,
+        mut ctx: OperationContext,
+        work: F,
+    ) -> Result<WorkHandle<T>, ProcessingError>
+    where
+        T: Send + 'static,
+        F: FnOnce(OperationContext) -> Result<T, ProcessingError> + Send + 'static,
+    {
+        let scope = ctx.resources().shared_view();
+        self.launch(scope, move || work(ctx)).await
+    }
+    /// Only the server's sealed finished-artifact task can submit delivery I/O.
+    /// A read holds the same native permit until return, never while the socket
+    /// waits for its consumer. This does not expose arbitrary scope submission.
+    pub(crate) async fn read_output(
+        &self,
+        task: crate::service::operations::artifact::OutputReadTask,
+    ) -> Result<WorkHandle<crate::service::operations::artifact::OutputReadResult>, ProcessingError>
+    {
+        let scope = task.scope();
+        self.launch(scope, move || task.execute()).await
+    }
+    async fn launch<T, F>(
+        &self,
+        scope: ResourceScope,
+        work: F,
+    ) -> Result<WorkHandle<T>, ProcessingError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, ProcessingError> + Send + 'static,
+    {
+        scope.checkpoint()?;
         let slot = self
             .shared
             .slots
@@ -198,7 +255,7 @@ impl BoundedExecutor {
         let (sender, receiver) = oneshot::channel();
         let abandoned = Arc::new(Cancellation::new());
         let stop = abandoned.clone();
-        let deadline = ctx.deadline();
+        let deadline = scope.deadline();
         let shared = self.shared.clone();
         tokio::spawn(async move {
             let worker = match immediate {
@@ -218,7 +275,8 @@ impl BoundedExecutor {
                         Ok(permit) => permit,
                         Err(error) => {
                             drop(waiting);
-                            drop(ctx);
+                            drop(work);
+                            drop(scope);
                             drop(active);
                             let _ = sender.send(Err(error));
                             return;
@@ -227,12 +285,12 @@ impl BoundedExecutor {
                 }
             };
             drop(waiting);
-            if let Err(error) = ctx
-                .resources()
+            if let Err(error) = scope
                 .checkpoint()
                 .and_then(|_| stop.checkpoint(Progress::default()))
             {
-                drop(ctx);
+                drop(work);
+                drop(scope);
                 drop(worker);
                 drop(active);
                 let _ = sender.send(Err(error));
@@ -243,13 +301,11 @@ impl BoundedExecutor {
             // Worker permit, admission slot, context and reservations are INSIDE
             // the real closure, never merely inside a cancellable async waiter.
             tokio::task::spawn_blocking(move || {
+                let _scope = scope;
                 let _active = active;
                 let _worker = worker;
                 let _running = running;
-                let result = work(&mut ctx).map(|value| WorkOutput {
-                    value,
-                    context: ctx,
-                });
+                let result = work();
                 let _ = sender.send(result);
             });
         });

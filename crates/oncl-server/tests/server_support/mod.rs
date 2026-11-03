@@ -27,7 +27,11 @@ impl Process {
         Self::start_at(extra, "127.0.0.1:0")
     }
     pub fn start_at(extra: &str, bind: &str) -> Self {
+        Self::configured(bind, |_| extra.to_owned())
+    }
+    pub fn configured(bind: &str, configure: impl FnOnce(&std::path::Path) -> String) -> Self {
         let directory = sandbox();
+        let extra = configure(directory.path());
         let operator_path = directory.path().join("operator");
         let operator = PrivateDirectory::create(&operator_path).unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_oncl-server"))
@@ -88,6 +92,10 @@ impl Process {
         self.child.stdin.take().unwrap().write_all(b"\n").unwrap();
         let output = self.child.wait_with_output_ref();
         assert!(output.0.success(), "standalone exit failure");
+        assert_eq!(
+            output.1.trim(),
+            "stopped: owned listener and workers released"
+        );
         assert!(output.2.is_empty(), "unexpected standalone stderr");
         assert!(
             std::net::TcpStream::connect(self.address).is_err(),

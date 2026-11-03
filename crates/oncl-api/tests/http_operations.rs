@@ -424,3 +424,259 @@ async fn aggregate_wire_overflow_inside_metadata_keeps_original_limit() {
     assert!(String::from_utf8_lossy(&response).contains("\"code\":\"FramingLimit\""));
     service.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_operator_configured_roots_establish_the_verification_chain() {
+    let fixture = oncl_testkit::synthetic("user-rsa-sign");
+    let service = Running::start_with(|config| {
+        config.tokens[0].actions.push(Permission::Verify);
+        config.metadata_bytes = 67_108_864;
+        config.pki.anchors = vec![fixture.root.clone()];
+        config.pki.intermediates = vec![fixture.issuer.clone()];
+    })
+    .await;
+    let cms = signed_cms(b"operator-configured trust, not payload authority");
+    let (status, response) = service.chunked(&verification_multipart(&cms), 65536).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.contains("\"chain\":\"Passed\""), "{text}");
+    assert!(text.contains("\"signature\":\"Passed\""), "{text}");
+    assert!(text.contains("\"policy\":\"StrictOnline\""), "{text}");
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn certificates_carried_by_the_container_are_not_operator_trust_anchors() {
+    use oncl_pki::cms::{self, AttrSpec, CertSpec, CoSign, Content, SignSpec};
+    let fixture = oncl_testkit::synthetic("user-rsa-sign");
+    let key = oncl_pki::pkcs12::load(&oncl_testkit::read(&fixture.path), &fixture.password)
+        .unwrap()
+        .remove(0);
+    let candidates = vec![
+        oncl_pki::cert::parse(&oncl_testkit::read(&fixture.issuer)).unwrap(),
+        oncl_pki::cert::parse(&oncl_testkit::read(&fixture.root)).unwrap(),
+    ];
+    let cms = cms::sign_spec(
+        &key,
+        &[],
+        &SignSpec {
+            content: Content::Data(b"untrusted carried root"),
+            encapsulate: true,
+            cosign: CoSign::Never,
+            econtent_type: None,
+            digest: None,
+            attrs: AttrSpec {
+                content_type: true,
+                message_digest: true,
+                signing_certificate_v2: true,
+                signing_time: None,
+                extra: vec![],
+            },
+            certificates: CertSpec::Extra(candidates),
+        },
+    )
+    .unwrap();
+    let service = Running::start_with(|config| {
+        config.tokens[0].actions.push(Permission::Verify);
+        config.metadata_bytes = 67_108_864;
+    })
+    .await;
+    let (status, response) = service.chunked(&verification_multipart(&cms), 65536).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.contains("\"signature\":\"Passed\""), "{text}");
+    assert!(!text.contains("\"chain\":\"Passed\""), "{text}");
+    service.stop().await;
+}
+
+#[test]
+fn operator_pki_address_pins_are_applied_not_ignored_or_resolved_from_wire() {
+    use oncl_server::config::{PkiConfig, PkiEndpoint};
+    for (address, permitted) in [("127.0.0.1:7777", true), ("127.0.0.2:7777", false)] {
+        let directory = tempfile::tempdir().unwrap();
+        let secret = TokenSecret::generate().unwrap();
+        let config = ServerConfig {
+            enabled: true,
+            audit_directory: directory.path().join("audit"),
+            tokens: vec![TokenConfig {
+                id: "pki".into(),
+                verifier: secret.verifier().encoded(),
+                actions: vec![Permission::Verify],
+                keys: vec![],
+                inline_pkcs12: false,
+            }],
+            pki: PkiConfig {
+                endpoints: vec![PkiEndpoint {
+                    origin: "http://127.0.0.1:7777".into(),
+                    addresses: vec![address.parse().unwrap()],
+                }],
+                ..PkiConfig::default()
+            },
+            ..ServerConfig::default()
+        };
+        let result = ServiceHost::new(config);
+        assert_eq!(result.is_ok(), permitted);
+        if !permitted {
+            assert_eq!(
+                result.err().unwrap().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+    }
+}
+
+fn spool_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        let kind = entry.file_type().unwrap();
+        if kind.is_file() {
+            files.push(entry.path());
+        } else if kind.is_dir() {
+            files.extend(spool_files(&entry.path()));
+        }
+    }
+    files
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_role_with_pdf_filename_is_not_reclassified_or_spooled() {
+    let service = Running::start_with(|config| {
+        config.operation_timeout_ms = 500;
+        config.header_timeout_ms = 100;
+        config.admission_wait_ms = 100;
+    })
+    .await;
+    let scratch = service._directory.path().join("scratch");
+    assert!(spool_files(&scratch).is_empty());
+    let metadata = r#"{"items":[{"id":"hash","operation":{"kind":"hash","algorithm":"sha256","input":"secret"}}],"parts":[{"name":"secret","item_id":"hash","role":"secret"}]}"#;
+    let prefix = format!(
+        "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--b\r\nContent-Disposition: form-data; name=\"secret\"; filename=\"../../do-not-create.pdf\"\r\nContent-Type: application/pdf\r\n\r\nM1-DECLARED-SECRET-DO-NOT-SPOOL"
+    );
+    let response = unsent_tail(&service, prefix.as_bytes()).await;
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    assert!(spool_files(&scratch).is_empty());
+    assert!(!service._directory.path().join("do-not-create.pdf").exists());
+    assert!(!response.contains("M1-DECLARED-SECRET-DO-NOT-SPOOL"));
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exact_128_document_parts_complete_over_actual_chunked_http() {
+    let service = Running::start().await;
+    let mut items = Vec::with_capacity(128);
+    let mut parts = Vec::with_capacity(128);
+    for index in 0..128 {
+        items.push(serde_json::json!({"id":format!("item-{index}"),"operation":{"kind":"hash","algorithm":"sha256","input":format!("doc-{index}")}}));
+        parts.push(serde_json::json!({"name":format!("doc-{index}"),"item_id":format!("item-{index}"),"role":"document"}));
+    }
+    let metadata =
+        serde_json::to_string(&serde_json::json!({"items":items,"parts":parts})).unwrap();
+    let mut body =
+        format!("--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n")
+            .into_bytes();
+    for index in 0..128 {
+        body.extend_from_slice(format!("--b\r\nContent-Disposition: form-data; name=\"doc-{index}\"; filename=\"client-name-{index}.bin\"\r\n\r\nabc\r\n").as_bytes());
+    }
+    body.extend_from_slice(b"--b--\r\n");
+    let (status, response) = service.chunked(&body, 65536).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    let final_result: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(final_result["type"], "final");
+    assert_eq!(final_result["status"], "completed");
+    let results = final_result["results"].as_array().unwrap();
+    assert_eq!(results.len(), 128);
+    for (index, result) in results.iter().enumerate() {
+        assert_eq!(result["item_id"], format!("item-{index}"));
+        assert_eq!(result["result"]["bytes_in"], 3);
+        assert_eq!(
+            result["result"]["digest"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+    assert!(spool_files(&service._directory.path().join("scratch")).is_empty());
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_sdk_extraction_streams_binary_artifact_and_mandatory_final() {
+    use http_body_util::{BodyExt, Full};
+    let service =
+        Running::start_with(|config| config.tokens[0].actions.push(Permission::Extract)).await;
+    let payload = b"binary artifact exact\0bytes";
+    let cms = signed_cms(payload);
+    let metadata = r#"{"items":[{"id":"extraction","operation":{"kind":"extract","input":"container"}}],"parts":[{"name":"container","item_id":"extraction","role":"document"}]}"#;
+    let mut body=format!("--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--b\r\nContent-Disposition: form-data; name=\"container\"\r\n\r\n").into_bytes();
+    body.extend_from_slice(&cms);
+    body.extend_from_slice(b"\r\n--b--\r\n");
+    let stream = tokio::net::TcpStream::connect(service.address)
+        .await
+        .unwrap();
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+            .await
+            .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = hyper::Request::builder()
+        .method("POST")
+        .uri("/v1/operations")
+        .header("host", service.address.to_string())
+        .header(
+            "authorization",
+            format!("Bearer {}", service.token.as_str()),
+        )
+        .header("content-type", "multipart/form-data; boundary=b")
+        .body(Full::new(axum::body::Bytes::from(body)))
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let media: mime::Mime = content_type.parse().unwrap();
+    assert_eq!(media.type_(), mime::MULTIPART);
+    assert_eq!(media.subtype().as_str(), "mixed");
+    let boundary = media.get_param(mime::BOUNDARY).unwrap().as_str().to_owned();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let source = futures_util::stream::once(async move { Ok::<_, std::io::Error>(bytes) });
+    let mut parser = multer::Multipart::new(source, boundary);
+    let mut artifact = None;
+    let mut final_result = None;
+    let mut progress = false;
+    while let Some(field) = parser.next_field().await.unwrap() {
+        assert!(
+            final_result.is_none(),
+            "parts after terminal final are not success"
+        );
+        match field.name().unwrap() {
+            "progress" => {
+                progress = true;
+                field.bytes().await.unwrap();
+            }
+            "artifact" => {
+                assert!(artifact.is_none());
+                artifact = Some(field.bytes().await.unwrap());
+            }
+            "final" => {
+                final_result = Some(
+                    serde_json::from_slice::<serde_json::Value>(&field.bytes().await.unwrap())
+                        .unwrap(),
+                );
+            }
+            _ => panic!("unexpected response part"),
+        }
+    }
+    assert!(progress);
+    assert_eq!(artifact.unwrap().as_ref(), payload);
+    let final_result = final_result.expect("no terminal result is never success");
+    assert_eq!(final_result["type"], "final");
+    assert_eq!(final_result["status"], "completed");
+    assert_eq!(final_result["results"][0]["result"]["kind"], "extraction");
+    service.stop().await;
+}

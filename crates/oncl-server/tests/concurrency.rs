@@ -441,29 +441,38 @@ fn actual_process_overload_heartbeat_and_disconnect() {
         "max_in_flight = 1\nblocking_workers = 1\nqueue_capacity = 1",
     );
     let mut pending = std::net::TcpStream::connect(process.address).unwrap();
-    write!(pending,"POST /v1/hash HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nab",process.address,*process.token).unwrap();
-    // Synchronize on observable admission, not a sleep or throughput benchmark.
+    // Hyper 1.12 sends Continue only after Incoming is polled. Here that happens
+    // inside the admitted native hash worker, not merely after TCP accept.
+    pending
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let headers = format!(
+        "POST /v1/hash HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n",
+        process.address, *process.token
+    );
+    pending.write_all(headers.as_bytes()).unwrap();
+    let mut informational = Vec::with_capacity(64);
+    while !informational.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        pending.read_exact(&mut byte).unwrap();
+        informational.push(byte[0]);
+        assert!(informational.len() <= 1024);
+    }
+    assert_eq!(informational, b"HTTP/1.1 100 Continue\r\n\r\n");
+    pending.write_all(b"3\r\nab").unwrap();
     server_support::runtime().block_on(async {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let (status, body) = server_support::request(
-                process.address,
-                &process.token,
-                "/v1/hash",
-                b"abc",
-                &[],
-                None,
-            )
-            .await;
-            if status == 503 {
-                let error: oncl_api::error::ApiError = serde_json::from_slice(&body).unwrap();
-                assert_eq!(error.code, oncl_api::error::ErrorCode::CapacityExceeded);
-                break;
-            }
-            assert_eq!(status, 200);
-            assert!(tokio::time::Instant::now() < deadline);
-            tokio::task::yield_now().await;
-        }
+        let (status, body) = server_support::request(
+            process.address,
+            &process.token,
+            "/v1/hash",
+            b"abc",
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(status, 503);
+        let error: oncl_api::error::ApiError = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, oncl_api::error::ErrorCode::CapacityExceeded);
         assert_eq!(
             server_support::request(process.address, &process.token, "/health", b"", &[], None)
                 .await

@@ -81,8 +81,8 @@ stopped; persistent audit files are retained, not deleted at shutdown.
 Only these routes exist:
 
 * `POST /v1/hash`: raw binary request body, SHA-256, authenticated hash ACL.
-* `POST /v1/operations`: typed JSON-small or metadata-first multipart hashing and
-  verification; see [the HTTP request contract](http-api.md).
+* `POST /v1/operations`: typed JSON-small or metadata-first multipart hashing,
+  verification and binary streaming extraction; see [the HTTP contract](http-api.md).
 * `GET /health`: authenticated hash ACL; reports the actual local audit health.
 
 Send `Authorization: Bearer <token-file-content>`, the configured `Host`, and the
@@ -230,3 +230,28 @@ The server stack is optional/server-only: minimal SDK crates and desktop/Win7
 build closures do not depend on Axum/Hyper, and static CRT/toolchain policy is
 unchanged. This Windows-host acceptance is not a Linux/macOS/Win7 runtime result
 or the later 10-GiB XML/PDF resource-harness gate.
+
+## Explicit PKI roots and endpoint pins
+
+Verification has no implicit document trust store and denies outbound PKI by
+default. Configure trusted certificate files and exact address-pinned origins in
+the private operator configuration, never in request metadata:
+
+```toml
+[pki]
+anchors = ["/operator/roots/root.der"]
+intermediates = ["/operator/roots/intermediate.der"]
+
+[[pki.endpoints]]
+origin = "https://ca.example:443"
+addresses = ["203.0.113.10:443"]
+```
+
+Each file is one DER/PEM certificate, at most 1 MiB; total configured certificate
+bytes are capped at 16 MiB, with at most 256 anchors and 256 intermediates. Keep
+these operator trust files protected against modification. Origins have at most
+16 explicit addresses each, at most 128 origins; a literal host cannot be silently
+repinned to another IP/port. The SDK's actual network policy validates these pins.
+No incoming URL, certificate-carried root or JSON policy flag installs trust.
+TLS listener certificates and document-validation roots are separate settings.
+The service does not install certificates in the OS/browser trust stores.

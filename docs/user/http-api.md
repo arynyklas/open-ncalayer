@@ -121,8 +121,44 @@ A completed typed hash response has `Content-Type: application/json`:
 The operation ID varies; item IDs echo the validated metadata. Item `bytes_in`
 counts the actual document bytes, including immutable uploaded snapshots; replay
 does not debit the original input quota a second time. Only a complete terminal
-result is success. This transport does not advertise an unused progress stream
-or binary-artifact protocol.
+result is success.
+
+## Streaming artifact responses
+
+`extract` is an actual SDK structural CMS-content extraction operation, not a
+signature-validation assertion. Its request metadata is
+`{"kind":"extract","input":"container"}` with the referenced public document.
+It requires the distinct `extract` token action and configured private scratch.
+
+Requests containing extraction return `multipart/mixed` with a random boundary.
+JSON `progress` parts contain actual operation ID and coalesced byte counters;
+they are not success receipts. Binary `artifact` parts carry a server-generated
+`Content-ID` and exact `Content-Length`. The JSON `final` part links the extraction
+result's `artifact` ID to those bytes and is the sole completed-result authority.
+There are no callback URLs, stored jobs or follow-up artifact paths.
+
+The server completes bounded input staging before starting this response, so a
+blocking upload-then-read client need not consume output concurrently with upload.
+SDK processing remains in the admitted native worker. That worker materializes
+bounded public output and releases its permit; socket backpressure never keeps a
+PKI worker occupied. Delivery reads one admitted 256-KiB region at a time through
+the SAME bounded executor. Its opaque task accepts only a finished artifact and
+the actual matching output owner, never an arbitrary caller-supplied scope.
+The original context, root, output files and reservations remain attached to all
+actual response-byte clones/slices until their final drop.
+
+Small progress/final metadata and MIME framing have actual output accounting;
+SDK-produced artifact bytes are not charged a second time by the disk adapter.
+The private disk adapter reserves temporary storage before file growth, caps a
+write quantum, records successful partial writes and checks flush/sync/extent
+before making an artifact readable. Header/nonce ownership authorizes deletion
+only of its own generated files; incomplete or failed output is never published.
+
+A client must stage artifact bytes and require the final result, closing MIME
+delimiter AND successful completion of the HTTP entity before publishing. An
+execution/read/deadline failure after headers can abort transport; a valid prefix
+or a progress part is never partial success. No terminal result means no publish,
+not a claim that a prior private effect was rolled back.
 
 Before a completed response, execution failures use the stable `code` and
 `applied` envelope from the raw service: 403 PermissionDenied, 400 InvalidRequest,

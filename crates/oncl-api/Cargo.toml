@@ -26,3 +26,7 @@ serde_json.workspace = true
 zeroize.workspace = true
 oncl-pki.workspace = true
 oncl-testkit.workspace = true
+hyper = { version = "=1.12.0", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio"] }
+http-body-util = { version = "=0.1.5", default-features = false }
+mime = "=0.3.17"

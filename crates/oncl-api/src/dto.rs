@@ -38,6 +38,9 @@ pub enum Operation {
         #[serde(default)]
         detached: Option<String>,
     },
+    Extract {
+        input: String,
+    },
 }
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -112,6 +115,10 @@ pub enum OperationResult {
         policy: &'static str,
         checked_at_unix: i64,
         signers: Vec<SignerChecks>,
+    },
+    Extraction {
+        artifact: String,
+        bytes_written: u64,
     },
 }
 

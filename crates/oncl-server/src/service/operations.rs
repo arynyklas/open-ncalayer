@@ -1,5 +1,9 @@
+pub(crate) mod artifact;
 mod dispatch;
 pub(super) mod intake;
+mod ownership;
+pub(super) mod progress;
+mod streaming;
 
 use super::*;
 use oncl_api::dto::{
@@ -104,7 +108,7 @@ async fn await_worker<T>(
     work: crate::executor::WorkHandle<T>,
     deadline: Deadline,
     failure: &intake::Failure,
-) -> Result<crate::executor::WorkOutput<T>, ApiError> {
+) -> Result<T, ApiError> {
     tokio::time::timeout(deadline.remaining(), work.wait())
         .await
         .map_err(|_| processing_error(failure.recover(ProcessingError::DeadlineExceeded)))?
@@ -124,14 +128,17 @@ impl ServiceHost {
         let policy = self.policy.clone();
         let executor = self.executor.clone();
         let store = self.store.clone();
+        let output_store = self.output_store.clone();
         Box::pin(async move {
             let deadline = deadline?;
             let principal = principal?;
             let disconnect = Arc::new(CancelOnDrop(cancel.clone()));
+            let (progress_hub, progress_receiver) = progress::ProgressHub::channel();
             let mut admission = engine
                 .admit(Arc::new(InvocationControl {
                     cancel: cancel.clone(),
                     deadline,
+                    progress: Some(progress_hub.clone()),
                 }))
                 .map_err(core_error)?;
             let header_bytes = metadata
@@ -145,7 +152,7 @@ impl ServiceHost {
                 .resources()
                 .reserve_metadata(header_bytes)
                 .map_err(processing_error)?;
-            let prepared =
+            let mut prepared =
                 intake::prepare(&metadata, body, &mut admission, deadline, cancel.clone()).await?;
             // Recheck the actual Principal generation and each resolved operation
             // after bounded metadata intake, before the first SDK dispatch.
@@ -159,9 +166,40 @@ impl ServiceHost {
             }
             let grant = oncl_core::ExecutionGrant::new(actions);
             let failure = prepared.failure.clone();
-            let ctx = engine
+            let mut ctx = engine
                 .begin_admitted(admission, grant, OperationPolicy::strict_online())
                 .map_err(core_error)?;
+            if prepared
+                .metadata
+                .items
+                .iter()
+                .any(|item| matches!(item.operation, Operation::Extract { .. }))
+            {
+                let output_store = output_store
+                    .ok_or_else(|| ApiError::not_applied(ErrorCode::MissingTemporaryStore))?;
+                prepared.reservations.push(headers);
+                let delivery = ResponseDelivery {
+                    deadline,
+                    cancel,
+                    control: ctx.resources().operation_control(),
+                    _disconnect: disconnect,
+                };
+                return streaming::response(
+                    streaming::StreamRuntime {
+                        engine,
+                        executor,
+                        source_store: store,
+                        output_store,
+                        delivery,
+                        progress: progress_hub,
+                        receiver: progress_receiver,
+                        failure,
+                    },
+                    ctx,
+                    prepared,
+                )
+                .await;
+            }
             let runtime = tokio::runtime::Handle::current();
             let work = executor
                 .submit(ctx, move |ctx| {
@@ -175,15 +213,14 @@ impl ServiceHost {
                     let mut results = Vec::with_capacity(request.items.len());
                     let mut result_reservations = Vec::with_capacity(request.items.len());
                     for item in request.items {
-                        let (result, reservation) =
-                            dispatch::run(item.operation, &mut documents, &engine, ctx).map_err(
-                                |error| match error {
+                        let (result, reservation, _) =
+                            dispatch::run(item.operation, &mut documents, &engine, ctx, None)
+                                .map_err(|error| match error {
                                     OperationError::Processing(error) => error,
                                     _ => {
                                         ProcessingError::InvalidInput("operation execution failed")
                                     }
-                                },
-                            )?;
+                                })?;
                         result_reservations.push(reservation);
                         results.push(ItemResult {
                             item_id: item.id,

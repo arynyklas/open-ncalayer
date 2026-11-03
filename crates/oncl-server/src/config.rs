@@ -75,6 +75,7 @@ pub enum Permission {
     Sign,
     SignDigest,
     Verify,
+    Extract,
 }
 impl Permission {
     fn action(self) -> Action {
@@ -83,6 +84,7 @@ impl Permission {
             Self::Sign => Action::Sign,
             Self::SignDigest => Action::SignDigest,
             Self::Verify => Action::Verify,
+            Self::Extract => Action::Extract,
         }
     }
 }
@@ -125,6 +127,86 @@ pub enum KeyConfig {
         secret: SecretMount,
     },
 }
+/// Immutable operator trust/network configuration, never request metadata.
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PkiConfig {
+    pub anchors: Vec<PathBuf>,
+    pub intermediates: Vec<PathBuf>,
+    pub endpoints: Vec<PkiEndpoint>,
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PkiEndpoint {
+    pub origin: String,
+    pub addresses: Vec<SocketAddr>,
+}
+impl PkiConfig {
+    fn validate_limits(&self) -> io::Result<()> {
+        if self.anchors.len() > 256
+            || self.intermediates.len() > 256
+            || self.endpoints.len() > 128
+            || self.endpoints.iter().any(|endpoint| {
+                endpoint.origin.len() > 2048
+                    || endpoint.addresses.is_empty()
+                    || endpoint.addresses.len() > 16
+            })
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(crate) fn services(&self) -> io::Result<oncl_core::ValidationServices> {
+        let mut network = oncl_pki::validation::NetworkPolicy::deny_all();
+        for endpoint in &self.endpoints {
+            network = network
+                .with_resolved_endpoint(&endpoint.origin, endpoint.addresses.clone())
+                .map_err(|_| invalid())?;
+        }
+        let mut total = 0;
+        let anchors = read_public_certificates(&self.anchors, &mut total)?;
+        let intermediates = read_public_certificates(&self.intermediates, &mut total)?;
+        Ok(oncl_core::ValidationServices::new(
+            oncl_pki::pkix::CaSet::new(anchors),
+            intermediates,
+            std::sync::Arc::new(oncl_pki::http::UreqTransport::with_proxy(
+                oncl_pki::http::ProxySetting::None,
+            )),
+            network,
+            std::sync::Arc::new(time::OffsetDateTime::now_utc),
+        ))
+    }
+}
+fn read_public_certificates(
+    paths: &[PathBuf],
+    total: &mut u64,
+) -> io::Result<Vec<oncl_pki::cert::Certificate>> {
+    let mut certificates = Vec::with_capacity(paths.len());
+    for path in paths {
+        let mut file = std::fs::File::open(path)?;
+        let length = file.metadata()?.len();
+        if length > 1_048_576 {
+            return Err(invalid());
+        }
+        let next = total
+            .checked_add(length)
+            .filter(|n| *n <= 16_777_216)
+            .ok_or_else(invalid)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length as usize)
+            .map_err(|_| invalid())?;
+        bytes.resize(length as usize, 0);
+        file.read_exact(&mut bytes)?;
+        if file.read(&mut [0])? != 0 {
+            return Err(invalid());
+        }
+        certificates.push(oncl_pki::cert::parse(&bytes).map_err(|_| invalid())?);
+        *total = next;
+    }
+    Ok(certificates)
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
@@ -156,6 +238,7 @@ pub struct ServerConfig {
     pub inline_pkcs12: bool,
     pub tokens: Vec<TokenConfig>,
     pub keys: Vec<KeyConfig>,
+    pub pki: PkiConfig,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -186,6 +269,7 @@ impl Default for ServerConfig {
             inline_pkcs12: false,
             tokens: Vec::new(),
             keys: Vec::new(),
+            pki: PkiConfig::default(),
         }
     }
 }
@@ -209,6 +293,7 @@ impl ServerConfig {
         Ok(config)
     }
     pub fn validate(&self) -> io::Result<()> {
+        self.pki.validate_limits()?;
         if self.max_in_flight == 0
             || self.max_in_flight > 256
             || self.blocking_workers == 0
