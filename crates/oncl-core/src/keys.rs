@@ -297,6 +297,85 @@ impl KeyProvider for KeySources {
         Ok(lease)
     }
 }
+
+impl crate::ReadMetadataProvider for KeySources {
+    fn inspect(
+        &self,
+        request: &KeyRequest<'_>,
+        limits: &oncl_pki::info::InspectionLimits,
+        ctx: &mut OperationContext,
+    ) -> Result<oncl_pki::info::PublicMetadata, OperationError> {
+        // Named IDs authorize the immutable host slot, not a wire-supplied
+        // certificate fingerprint. Check the slot before resolving its source.
+        let id = request.selector.key_id();
+        if !ctx.grant.allows(Action::Inspect) || !ctx.grant.allows_key(&id) {
+            return Err(OperationError::PermissionDenied);
+        }
+        ctx.scope.checkpoint()?;
+        let selector = if matches!(request.selector.source, Source::Named) {
+            self.named.get(&id).ok_or(OperationError::KeyNotFound)?
+        } else {
+            request.selector
+        };
+        let alias = match &selector.source {
+            Source::File(_, alias) | Source::Inline(_, alias) => alias.as_ref(),
+            Source::Named => return Err(OperationError::InvalidKeySource),
+            #[cfg(feature = "tokens")]
+            Source::Token(_, _, alias) => Some(alias),
+        };
+        let aliases = alias.map_or(ctx.grant.metadata_aliases(), std::slice::from_ref);
+        if aliases.is_empty() {
+            return Err(OperationError::PermissionDenied);
+        }
+        if aliases.len() > limits.max_entries {
+            return Err(oncl_pki::resource::ProcessingError::MetadataLimit.into());
+        }
+        let secret = request.secret.ok_or(OperationError::SecretRequired)?;
+        match &selector.source {
+            Source::File(path, _) => {
+                let mut file =
+                    File::open(path).map_err(|error| OperationError::Processing(error.into()))?;
+                let length = file
+                    .metadata()
+                    .map_err(|error| OperationError::Processing(error.into()))?
+                    .len();
+                crate::inspect::container(
+                    oncl_pki::io::Source::sequential(&mut file, Some(length)),
+                    secret,
+                    aliases,
+                    limits,
+                    &mut ctx.scope,
+                )
+            }
+            Source::Inline(bytes, _) => {
+                let mut input = bytes.as_slice();
+                crate::inspect::container(
+                    oncl_pki::io::Source::sequential(&mut input, Some(bytes.len() as u64)),
+                    secret,
+                    aliases,
+                    limits,
+                    &mut ctx.scope,
+                )
+            }
+            Source::Named => Err(OperationError::InvalidKeySource),
+            #[cfg(feature = "tokens")]
+            Source::Token(device, kind, alias) => {
+                let (tokens, gates) = self
+                    .tokens
+                    .as_ref()
+                    .ok_or(OperationError::MissingMetadataProvider)?;
+                tokens
+                    .inspect_scoped(device, *kind, secret, alias, gates.clone(), &ctx.scope)
+                    .map_err(|error| match error {
+                        oncl_token::TokenError::Execution(error) => {
+                            OperationError::Key(KeyError::Execution(error))
+                        }
+                        _ => OperationError::InvalidKeySource,
+                    })
+            }
+        }
+    }
+}
 /// Opaque operation-bound private material. No raw signer/accessor/export/Clone.
 pub struct KeyLease {
     id: KeyId,

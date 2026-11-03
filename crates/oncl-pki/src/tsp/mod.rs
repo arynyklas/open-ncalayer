@@ -14,8 +14,12 @@
 //! - The token goes into the signer's unsigned attributes as id-aa-timeStampToken.
 
 mod asn1;
+mod document;
 #[cfg(feature = "testing")]
 mod mock;
+pub use document::{
+    DocumentImprint, DocumentTimestamp, acquire_document_timestamp, validate_document_token,
+};
 
 #[cfg(feature = "testing")]
 pub use mock::{MockTamper, MockTsa};
@@ -377,18 +381,21 @@ fn parse_response_signed(
     resp: &[u8],
     require_eku: bool,
 ) -> Result<(Vec<u8>, TstInfo, Certificate), TspError> {
+    let token = response_token(resp)?;
+    let (tst, tsa) = verify_token_signed(&token, require_eku)?;
+    Ok((token, tst, tsa))
+}
+fn response_token(resp: &[u8]) -> Result<Vec<u8>, TspError> {
     let der = ber::to_der(resp)?;
     let resp = asn1::TimeStampResp::from_der(&der)?;
     let status = resp.status.status;
     if !matches!(status, 0 | 1) {
         return Err(TspError::Rejected(status));
     }
-    let token = resp
-        .time_stamp_token
+    resp.time_stamp_token
         .ok_or_else(|| TspError::Malformed("granted response without a token".to_owned()))?
-        .to_der()?;
-    let (tst, tsa) = verify_token_signed(&token, require_eku)?;
-    Ok((token, tst, tsa))
+        .to_der()
+        .map_err(Into::into)
 }
 
 /// Verifies a time-stamp token (a DER or BER `ContentInfo{SignedData}` of a `TSTInfo`): a

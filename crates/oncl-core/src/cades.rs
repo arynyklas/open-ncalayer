@@ -281,6 +281,8 @@ impl Engine {
             #[cfg(feature = "pdf")]
             pdf: None,
             ades_level,
+            #[cfg(feature = "xml")]
+            xml: None,
         })
     }
 }

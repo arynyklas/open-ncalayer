@@ -89,6 +89,16 @@
 //! caps network waits to the original operation deadline; it cannot forcibly
 //! preempt arbitrary host HttpTransport code that ignores synchronous limits.
 //!
+//! With the optional `xml` feature, `VerifyRequest::xml()` verifies an immutable
+//! UTF-8 Source through indexed streaming C14N and every signer/reference, using
+//! the same host validation services and original scope. Configure an explicit
+//! TemporaryStore. `VerifyRequest::xml_kalkan()` selects existing Kalkan byte
+//! compatibility explicitly; neither request chooses trust anchors or URL policy.
+//! `VerificationReport::xml` owns immutable certificate/region/reference facts and
+//! their reservations. Canonical hash work and evidence intake do not debit final
+//! output; external evidence delivery and canonical writes do. This adds verify
+//! only: default CMS behavior and SignRequest families remain unchanged.
+//!
 //! # Source-bound signing
 //! `SignRequest` is consumed by `Engine::sign`: CMS Create/Add and raw message
 //! signing require `Action::Sign`, not prehash permission. Explicit raw digests
@@ -133,11 +143,105 @@
 //! runs a bounded synthetic loopback TSA/OCSP/CRL exercise and emits only public
 //! RSA B/T/LT/LTA, detached/multisigner, extension/Add and negative artifacts.
 //! This is not a full 10-GiB/RSS or platform-matrix acceptance run.
+//!
+//! # Bounded JOSE (`jose` feature)
+//!
+//! `Engine::jws_create`, `jws_add`, and `jws_verify` accept explicit
+//! `jose::JoseProfile` serialization/detachment and bounded borrowed bytes.
+//! Compact, flattened/general JSON and detached base64url payloads use RS256 or
+//! the pinned `ECGOST3410-2015-512` profile. Add verifies every old signature and
+//! host trust before opening new keys; private work uses `Action::Sign`, never a
+//! prehashed privilege. Legacy AcBank wire formatting is unchanged.
+//!
+//! `jwt_encode`, `jwt_decode_unverified`, and `jwt_verify` are distinct operations.
+//! Decode needs `Action::Extract` and never reports verification. Verify needs
+//! `Action::Verify` plus a trusted `jose::JwtValidationPolicy::new(fixed_now)`:
+//! exp is required, leeway is zero, `now == exp` is invalid, `now == nbf` is valid.
+//! Representable negative NumericDates/clocks follow those same boundaries;
+//! iat is type/range-checked, not an inferred freshness policy.
+//! Expected issuer/audience, clock, roots, algorithm/key authority and network
+//! policy come only from the host. Crypto, certificate trust and claims are
+//! reported separately; valid crypto cannot hide invalid claims/unknown status.
+//!
+//! Payload/header/claims/container bounds and unsupported extensions are
+//! documented in `jose`. Parsed/reported buffers retain original quota/root guards.
+//! Signature/x5c collection admission rejects the ninth entry before parsing it.
+//! Token candidate limits do not cap the host root store: admitted PKIX borrows
+//! configured roots and charges actual key scratch/selected copies to the scope.
+//! These bounded token APIs do not claim large
+//! XML/PDF or whole-platform acceptance.
+//! `cargo run -p oncl-core --features jose --example sdk_probe -- --case J01 --out <directory>`
+//! emits public standard JWS/JWT/Add/detached artifacts and runs independent
+//! OpenSSL RS256 positive/negative controls (OpenSSL must be on PATH).
+//!
+//! # Public inspection and standalone timestamps
+//!
+//! `Engine::inspect` requires `Action::Inspect`, never signing permission.
+//! Certificate and CMS structural inspection need no key provider, temporary
+//! store, validation services or network. Container inspection additionally
+//! requires exact host-granted aliases and a borrowed password; secrets are
+//! read into bounded zeroizing memory only, never `TemporaryStore`. PKCS#12
+//! metadata checks a present MAC/opens encrypted safes without decrypting or
+//! importing private-key bags; absent MAC is explicitly `NotPresent`.
+//! JKS skips protected keys entirely.
+//! Known-length secret intake reserves a fallible replacement of that bounded
+//! capacity; unknown-length intake grows geometrically. Old and new live
+//! capacities are admitted together, and the old owner is explicitly wiped
+//! before deallocation. Retained capacity remains charged to the original scope.
+//!
+//! `EngineServices::with_metadata_provider` configures a separate
+//! `ReadMetadataProvider`; `keys::KeySources` implements it. Exact source/named
+//! key grants are checked before the provider, secret or card. Named IDs refer
+//! to immutable host slots, not client-asserted certificate fingerprints.
+//! The optional token path reads only the authorized slot's public certificate
+//! in a fresh scoped transaction, with no `TokenKey`/PIN cache or signing guard.
+//! Every returned metadata owner is checked against the original operation.
+//!
+//! Host `InspectionLimits` defaults bound each KDF to 10,000 iterations and
+//! aggregate derivations to 100,000 iteration-block units, at most 64 safes,
+//! 4096 bags/entries, 1024 salt bytes and 4096 password UTF-8 bytes. A validated
+//! `with_inspection_limits` host profile may explicitly increase work up to
+//! the existing legacy iteration ceiling. Resource refusal is MetadataLimit,
+//! not an assertion that the store is malformed. Legacy load policy is unchanged.
+//! Password encodings are admitted before allocation, bag counts before owned
+//! collections, and KDF work before derivation; checkpoints separate bounded
+//! synchronous KDF calls. Such calls can overshoot a deadline by one admitted
+//! KDF, not promise hard-real-time preemption. Conservative 64x input plus fixed
+//! decode/output admission is retained with immutable public metadata.
+//!
+//! `stamp(StampRequest::new(TsaSpec), Source, output, ctx)` needs the separate
+//! `Action::Stamp` and real host `ValidationServices`; the explicit spec has
+//! no implicit TSA endpoint. Host network policy/pins still authorize it.
+//! Carried `verify_stamp` needs only validation services, `VerifyStamp`, and
+//! an explicit expectation request, never issuance configuration. Both reuse
+//! TSP cryptography and F03/F04 anchored path/current status at genTime.
+//! No local user private key or auto-consent guard is used. HTTP body/decode
+//! admission and fatal resource/cancel/deadline causes retain the same root.
+//! Ordinary TSA transport failures retain their HTTP cause and report `Io`;
+//! malformed tokens and nonce/policy/imprint protocol failures remain InvalidInput.
+//!
+//! A timestamp report distinguishes token signature/EKU/path/validity/current
+//! revocation, expectation checks, current host clock, genTime, algorithm and
+//! document imprint. Absent data is `NotProvided`/Indeterminate, never Matched
+//! or a viewed-document claim. Retained canonical tokens/facts/metadata expose
+//! borrowed immutable buffers only, without Clone/Default or detachable permits.
+//! An issuance followed by output failure may already have happened remotely:
+//! no exactly-once or rollback assertion is made. Arbitrary sinks may retain a
+//! prefix; token input is not charged as document output.
+//!
+//! `cargo run -p oncl-core --example sdk_probe -- --case I01 --out <directory>`
+//! exercises real loopback pinned HTTP TSA/OCSP/CRL and file Sources, emits only
+//! public artifacts, and checks original/altered/untrusted controls with OpenSSL.
+//! This synthetic RSA/RFC3161 check is not NCA trust, hardware or V01 large-file
+//! XML/PDF/RSS/platform acceptance.
 
 mod cades;
 mod context;
 mod engine;
 mod error;
+mod inspect;
+#[cfg(feature = "jose")]
+pub mod jose;
 pub mod keys;
 #[cfg(feature = "pdf")]
 mod pades;
@@ -145,12 +249,17 @@ mod policy;
 mod report;
 mod request;
 mod sign;
+mod timestamp;
 
 pub use cades::{CadesConfiguration, ExtendRequest};
 pub use context::{OperationContext, OperationId};
 pub use engine::{Engine, EngineServices, HashReport};
 pub use error::{ErrorCode, OperationError};
+pub use inspect::{
+    InspectRequest, InspectionKind, InspectionReport, ReadMetadataProvider, SignatureMetadata,
+};
 pub use policy::{Action, ExecutionGrant, OperationPolicy};
 pub use report::{ExtractionReport, ValidationServices, VerificationReport};
 pub use request::{SignProfile, SignRequest, VerifyProfile, VerifyRequest};
 pub use sign::{OperationReport, SignProvenance};
+pub use timestamp::{StampRequest, StampVerifyRequest, TimestampReport};

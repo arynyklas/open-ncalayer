@@ -18,6 +18,7 @@ pub enum ErrorCode {
     MetadataLimit,
     Io,
     MissingKeyProvider,
+    MissingMetadataProvider,
     SecretRequired,
     KeyNotFound,
     UnsupportedAlgorithm,
@@ -50,6 +51,7 @@ impl From<KeyFailureKind> for ErrorCode {
             KeyFailureKind::MetadataLimit => Self::MetadataLimit,
             KeyFailureKind::Io => Self::Io,
             KeyFailureKind::MissingKeyProvider => Self::MissingKeyProvider,
+            KeyFailureKind::MissingMetadataProvider => Self::MissingMetadataProvider,
             KeyFailureKind::MissingValidationServices => Self::MissingValidationServices,
             KeyFailureKind::MissingCadesConfiguration => Self::MissingCadesConfiguration,
             KeyFailureKind::MissingTemporaryStore => Self::MissingTemporaryStore,
@@ -86,6 +88,7 @@ pub enum OperationError {
     IdExhausted,
     Processing(ProcessingError),
     MissingKeyProvider,
+    MissingMetadataProvider,
     MissingValidationServices,
     MissingCadesConfiguration,
     MissingTemporaryStore,
@@ -95,6 +98,7 @@ pub enum OperationError {
     InvalidKeySource,
     AuditFailed,
     Key(oncl_pki::key::KeyError),
+    Timestamp(oncl_pki::tsp::TspError),
     AfterKeyUse {
         source: Box<OperationError>,
         applied: oncl_pki::key::AppliedState,
@@ -106,6 +110,7 @@ impl OperationError {
             Self::PermissionDenied => ErrorCode::PermissionDenied,
             Self::InvalidContext | Self::IdExhausted => ErrorCode::InvalidInput,
             Self::MissingKeyProvider => ErrorCode::MissingKeyProvider,
+            Self::MissingMetadataProvider => ErrorCode::MissingMetadataProvider,
             Self::MissingValidationServices => ErrorCode::MissingValidationServices,
             Self::MissingCadesConfiguration => ErrorCode::MissingCadesConfiguration,
             Self::MissingTemporaryStore => ErrorCode::MissingTemporaryStore,
@@ -116,6 +121,8 @@ impl OperationError {
             Self::AuditFailed => ErrorCode::AuditFailed,
             Self::AfterKeyUse { source, .. } => source.code(),
             Self::Key(error) => error.into(),
+            Self::Timestamp(oncl_pki::tsp::TspError::Http(_)) => ErrorCode::Io,
+            Self::Timestamp(_) => ErrorCode::InvalidInput,
             Self::Processing(error) => KeyFailureKind::from(error).into(),
         }
     }
@@ -127,7 +134,9 @@ impl OperationError {
             | Self::InvalidContext
             | Self::IdExhausted
             | Self::Processing(_)
+            | Self::Timestamp(_)
             | Self::MissingKeyProvider
+            | Self::MissingMetadataProvider
             | Self::MissingValidationServices
             | Self::MissingCadesConfiguration
             | Self::MissingTemporaryStore
@@ -170,6 +179,7 @@ impl From<OperationError> for KeyError {
             OperationError::InvalidContext => KeyFailureKind::InvalidContext,
             OperationError::IdExhausted => KeyFailureKind::IdExhausted,
             OperationError::MissingKeyProvider => KeyFailureKind::MissingKeyProvider,
+            OperationError::MissingMetadataProvider => KeyFailureKind::MissingMetadataProvider,
             OperationError::MissingValidationServices => KeyFailureKind::MissingValidationServices,
             OperationError::MissingCadesConfiguration => KeyFailureKind::MissingCadesConfiguration,
             OperationError::MissingTemporaryStore => KeyFailureKind::MissingTemporaryStore,
@@ -177,6 +187,8 @@ impl From<OperationError> for KeyError {
             OperationError::SecretRequired => KeyFailureKind::SecretRequired,
             OperationError::KeyNotFound => KeyFailureKind::KeyNotFound,
             OperationError::InvalidKeySource => KeyFailureKind::InvalidKeySource,
+            OperationError::Timestamp(oncl_pki::tsp::TspError::Http(_)) => KeyFailureKind::Io,
+            OperationError::Timestamp(_) => KeyFailureKind::InvalidInput,
             OperationError::AuditFailed => KeyFailureKind::AuditFailed,
         };
         Self::Execution(KeyExecutionError {
@@ -193,6 +205,9 @@ impl std::fmt::Display for OperationError {
             Self::IdExhausted => f.write_str("operation identifier space exhausted"),
             Self::Processing(error) => std::fmt::Display::fmt(error, f),
             Self::MissingKeyProvider => f.write_str("key provider is not configured"),
+            Self::MissingMetadataProvider => {
+                f.write_str("read-only metadata provider is not configured")
+            }
             Self::MissingTemporaryStore => f.write_str("host temporary store is not configured"),
             Self::MissingValidationServices => {
                 f.write_str("validation services are not configured")
@@ -208,6 +223,7 @@ impl std::fmt::Display for OperationError {
             Self::InvalidKeySource => f.write_str("invalid key source or secret"),
             Self::AuditFailed => f.write_str("key-use audit failed"),
             Self::Key(error) => std::fmt::Display::fmt(error, f),
+            Self::Timestamp(error) => std::fmt::Display::fmt(error, f),
             Self::AfterKeyUse { source, applied } => {
                 write!(f, "{source} (key application: {applied:?})")
             }
@@ -219,6 +235,7 @@ impl std::error::Error for OperationError {
         match self {
             Self::Processing(error) => Some(error),
             Self::Key(error) => Some(error),
+            Self::Timestamp(error) => Some(error),
             Self::AfterKeyUse { source, .. } => Some(source.as_ref()),
             _ => None,
         }

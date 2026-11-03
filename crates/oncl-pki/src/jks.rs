@@ -148,6 +148,9 @@ pub enum JksEntryKind {
 /// [`JksError::Malformed`] for an invalid layout or certificate (a truncated file
 /// included); [`JksError::Unsupported`] for certificate types other than X.509.
 pub fn entries(data: &[u8]) -> Result<Vec<JksEntry>, JksError> {
+    entries_inner(data, None)
+}
+fn entries_inner(data: &[u8], maximum: Option<usize>) -> Result<Vec<JksEntry>, JksError> {
     let mut r = Reader { data, pos: 0 };
     let magic = r.u32()?;
     let version = r.u32()?;
@@ -155,6 +158,9 @@ pub fn entries(data: &[u8]) -> Result<Vec<JksEntry>, JksError> {
         return Err(JksError::Malformed("not a JKS file".to_owned()));
     }
     let count = r.u32()?;
+    if maximum.is_some_and(|maximum| count as usize > maximum) {
+        return Err(JksError::Unsupported("inspection entry limit".into()));
+    }
     let mut out = Vec::new();
     for _ in 0..count {
         match r.u32()? {
@@ -163,6 +169,9 @@ pub fn entries(data: &[u8]) -> Result<Vec<JksEntry>, JksError> {
                 r.take(8)?;
                 r.block()?;
                 let certs = r.u32()?;
+                if maximum.is_some_and(|maximum| certs as usize > maximum) {
+                    return Err(JksError::Unsupported("inspection chain limit".into()));
+                }
                 let chain = (0..certs)
                     .map(|_| r.cert(version))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -184,6 +193,69 @@ pub fn entries(data: &[u8]) -> Result<Vec<JksEntry>, JksError> {
         }
     }
     Ok(out)
+}
+
+/// Authenticated public projection; protected key bytes are never recovered.
+pub fn inspect_metadata(
+    data: &[u8],
+    password: &str,
+    allowed: &[String],
+    scope: &crate::resource::ResourceScope,
+    limits: &crate::info::InspectionLimits,
+) -> Result<crate::info::PublicMetadata, crate::resource::ProcessingError> {
+    use crate::resource::ProcessingError;
+    limits.validate()?;
+    if allowed.len() > limits.max_entries {
+        return Err(ProcessingError::MetadataLimit);
+    }
+    let mut result = crate::info::PublicMetadata::admitted(data.len(), scope)?;
+    scope.checkpoint()?;
+    if password.len() > limits.password_bytes {
+        return Err(ProcessingError::MetadataLimit);
+    }
+    let _password = scope.reserve_metadata(
+        (password.len() as u64)
+            .checked_mul(2)
+            .ok_or(ProcessingError::MetadataLimit)?,
+    )?;
+    let count = data
+        .get(8..12)
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .map(u32::from_be_bytes)
+        .ok_or(ProcessingError::InvalidInput("JKS header"))?;
+    if count as usize > limits.max_entries {
+        return Err(ProcessingError::MetadataLimit);
+    }
+    let end = data
+        .len()
+        .checked_sub(DIGEST_LEN)
+        .ok_or(ProcessingError::InvalidInput("JKS integrity"))?;
+    let passwd = password_bytes(password);
+    let mut hash = Sha1::new().chain_update(&*passwd).chain_update(WHITENER);
+    for chunk in data[..end].chunks(crate::resource::IO_CHUNK_BYTES) {
+        scope.checkpoint()?;
+        hash.update(chunk);
+    }
+    if hash.finalize().as_slice() != &data[end..] {
+        return Err(ProcessingError::InvalidInput("JKS integrity"));
+    }
+    result.set_integrity(crate::info::MetadataIntegrity::PasswordMacVerified);
+    for entry in entries_inner(data, Some(limits.max_entries)).map_err(|error| match error {
+        JksError::Unsupported(_) => ProcessingError::MetadataLimit,
+        _ => ProcessingError::InvalidInput("JKS structure"),
+    })? {
+        scope.checkpoint()?;
+        if !allowed.iter().any(|alias| alias == &entry.alias) {
+            continue;
+        }
+        let cert = match &entry.kind {
+            JksEntryKind::PrivateKey { chain } => chain.first(),
+            JksEntryKind::TrustedCert(cert) => Some(cert.as_ref()),
+        };
+        result.push(Some(&entry.alias), cert)?;
+    }
+    result.sort();
+    Ok(result)
 }
 
 /// The password as Java's key store code hashes it: each UTF-16 unit high byte first.

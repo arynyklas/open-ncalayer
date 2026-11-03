@@ -29,6 +29,8 @@ pub use frozen::{DerivedInput, FrozenInput, FrozenReader, SnapshotEncoding};
 #[path = "io/pdf_output.rs"]
 mod pdf_output;
 pub use pdf_output::PdfSignatureOutput;
+mod metadata;
+pub use metadata::MetadataInput;
 #[path = "io/pdf_snapshot.rs"]
 mod pdf_snapshot;
 pub use pdf_snapshot::{PdfSnapshot, PdfSnapshotCoverage, PdfSnapshotReader};
@@ -198,6 +200,19 @@ pub struct StagedArtifact {
     source: bool,
 }
 impl StagedArtifact {
+    pub(crate) fn check_source_binding(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<(), ProcessingError> {
+        scope.checkpoint()?;
+        self.scope.checkpoint()?;
+        if !self.source || self.failed || !self.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "immutable source binding owner/role",
+            ));
+        }
+        Ok(())
+    }
     pub(crate) fn check_sign_output(&self, scope: &ResourceScope) -> Result<(), ProcessingError> {
         scope.checkpoint()?;
         if !self.scope.same_operation(scope) || self.source || self.failed || !self.is_empty() {

@@ -6,10 +6,11 @@
 
 use super::XmlError;
 use super::parse::{self, element_qname};
+use crate::{
+    C14nProfile,
+    canonical_writer::{Attribute, CanonicalWriter},
+};
 use roxmltree::{Document, Node, NodeId, NodeType};
-use std::collections::{HashMap, HashSet};
-
-const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 
 /// Canonicalization method.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -133,277 +134,198 @@ pub(crate) struct Canonicalizer<'s> {
     pub limit: usize,
 }
 
-/// Output plus the namespace bindings in effect in it.
-struct Output<'a> {
-    bytes: Vec<u8>,
-    limit: usize,
-    /// URIs each prefix is bound to by the open output elements, innermost last.
-    bindings: HashMap<&'a str, Vec<&'a str>>,
-}
-
-impl Output<'_> {
-    /// URI the output binds `prefix` to (`""` for the default namespace when unbound).
-    fn bound(&self, prefix: &str) -> &str {
-        self.bindings
-            .get(prefix)
-            .and_then(|uris| uris.last())
-            .copied()
-            .unwrap_or("")
-    }
-
-    fn room(&self, len: usize) -> Result<(), XmlError> {
-        if self.bytes.len().saturating_add(len) > self.limit {
-            return Err(XmlError::TooLarge);
-        }
-        Ok(())
-    }
-
-    fn put(&mut self, bytes: &[u8]) -> Result<(), XmlError> {
-        self.room(bytes.len())?;
-        self.bytes.extend_from_slice(bytes);
-        Ok(())
-    }
-
-    fn put_escaped(&mut self, text: &str, escape: Escape) -> Result<(), XmlError> {
-        self.room(escaped_len(text, escape))?;
-        push_escaped(&mut self.bytes, text, escape);
-        Ok(())
-    }
-
-    /// Comment or processing instruction content: line ends normalized to `#xA` (the
-    /// parser keeps them raw there).
-    fn put_newlines_normalized(&mut self, text: &str) -> Result<(), XmlError> {
-        self.room(text.len())?;
-        let mut bytes = text.bytes().peekable();
-        while let Some(b) = bytes.next() {
-            if b == b'\r' {
-                bytes.next_if_eq(&b'\n');
-                self.bytes.push(b'\n');
-            } else {
-                self.bytes.push(b);
-            }
-        }
-        Ok(())
-    }
-}
-
 impl Canonicalizer<'_> {
-    /// Canonical form of the document (`node` is the root) or of an element subtree.
-    ///
-    /// # Errors
-    ///
-    /// [`XmlError::TooLarge`] if the output would exceed the limit.
+    /// The bounded DOM is an input adapter for the same canonical writer used
+    /// by indexed sources; it never implements a second namespace renderer.
     pub(crate) fn run(&self, node: Node<'_, '_>) -> Result<Vec<u8>, XmlError> {
-        let mut out = Output {
-            bytes: Vec::new(),
-            limit: self.limit,
-            bindings: HashMap::new(),
-        };
-        if node.node_type() == NodeType::Root {
-            self.document(&mut out, node)?;
-        } else {
-            self.element(&mut out, node, true)?;
-        }
-        Ok(out.bytes)
+        let mut bytes = Vec::new();
+        self.write_to(node, &mut bytes)?;
+        Ok(bytes)
     }
-
-    fn document<'a>(&self, out: &mut Output<'a>, root: Node<'a, '_>) -> Result<(), XmlError> {
-        let mut after_element = false;
-        for child in root.children() {
-            match child.node_type() {
+    pub(crate) fn hash(
+        &self,
+        node: Node<'_, '_>,
+        algorithm: oncl_pki::key::HashAlg,
+    ) -> Result<(oncl_pki::digest::DigestValue, usize), XmlError> {
+        struct Sink(oncl_pki::digest::HashState);
+        impl std::io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut sink = Sink(oncl_pki::digest::HashState::new(algorithm));
+        let count = self.write_to(node, &mut sink)?;
+        Ok((sink.0.finish(), count))
+    }
+    fn write_to(
+        &self,
+        node: Node<'_, '_>,
+        sink: &mut dyn std::io::Write,
+    ) -> Result<usize, XmlError> {
+        fn visit<'a, 'i: 'a>(
+            config: &Canonicalizer<'_>,
+            out: &mut CanonicalWriter<'_, &'a str>,
+            node: Node<'a, 'i>,
+            target: std::ops::Range<usize>,
+            excluded: bool,
+        ) -> Result<(), oncl_pki::resource::ProcessingError> {
+            let excluded = excluded
+                || (node.is_element()
+                    && target.contains(&node.range().start)
+                    && config
+                        .excluded
+                        .binary_search_by_key(&node.id().get(), |id| id.get())
+                        .is_ok());
+            let selected = !excluded && target.contains(&node.range().start);
+            match node.node_type() {
+                NodeType::Root => {
+                    let mut after = false;
+                    for child in node.children() {
+                        let outside = matches!(child.node_type(), NodeType::Comment | NodeType::PI)
+                            && selected
+                            && target.contains(&child.range().start)
+                            && (child.is_pi() || out.comments());
+                        if outside && after {
+                            out.put(b"\n")?;
+                        }
+                        visit(config, out, child, target.clone(), excluded)?;
+                        if outside && !after {
+                            out.put(b"\n")?;
+                        }
+                        if child.is_element() {
+                            after = true;
+                        }
+                    }
+                }
                 NodeType::Element => {
-                    self.element(out, child, false)?;
-                    after_element = true;
+                    if excluded || (!selected && !node.range().contains(&target.start)) {
+                        return Ok(());
+                    }
+                    let src = node.document().input_text();
+                    let attributes = node
+                        .attributes()
+                        .map(|a| Attribute {
+                            namespace: a.namespace().unwrap_or("").to_owned(),
+                            local: a.name().to_owned(),
+                            qname: src[a.range_qname()].to_owned(),
+                            value: a.value(),
+                        })
+                        .collect();
+                    let apex = selected && !out.selected();
+                    let declarations = if !apex && !config.exclusive {
+                        parse::declared_prefixes(node)
+                    } else {
+                        Vec::new()
+                    };
+                    let mut namespaces: Vec<(String, String)> = if config.exclusive {
+                        let mut visible = vec![(
+                            parse::prefix(element_qname(node)).to_owned(),
+                            node.tag_name().namespace().unwrap_or("").to_owned(),
+                        )];
+                        for a in node.attributes() {
+                            let prefix = parse::prefix(&src[a.range_qname()]);
+                            if !prefix.is_empty() && prefix != "xml" {
+                                visible.push((
+                                    prefix.to_owned(),
+                                    a.namespace().unwrap_or("").to_owned(),
+                                ));
+                            }
+                        }
+                        for prefix in config.inclusive_prefixes {
+                            if let Some(uri) =
+                                node.lookup_namespace_uri((!prefix.is_empty()).then_some(*prefix))
+                            {
+                                visible.push(((*prefix).to_owned(), uri.to_owned()));
+                            }
+                        }
+                        visible
+                    } else if apex || !declarations.is_empty() {
+                        node.namespaces()
+                            .filter(|ns| apex || declarations.contains(&ns.name().unwrap_or("")))
+                            .map(|ns| (ns.name().unwrap_or("").to_owned(), ns.uri().to_owned()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    if parse::prefix(element_qname(node)).is_empty()
+                        && !namespaces.iter().any(|(p, _)| p.is_empty())
+                    {
+                        namespaces.push((
+                            String::new(),
+                            node.tag_name().namespace().unwrap_or("").to_owned(),
+                        ));
+                    }
+                    out.start(
+                        element_qname(node).to_owned(),
+                        namespaces,
+                        attributes,
+                        selected,
+                        |value, out| out.escaped(value.as_bytes(), true),
+                    )?;
+                    for child in node.children() {
+                        visit(config, out, child, target.clone(), excluded)?;
+                    }
+                    out.end()?;
                 }
-                NodeType::Comment | NodeType::PI => {
-                    if !self.writes(child) {
-                        continue;
-                    }
-                    if after_element {
-                        out.put(b"\n")?;
-                    }
-                    self.leaf(out, child)?;
-                    if !after_element {
-                        out.put(b"\n")?;
-                    }
+                NodeType::Text if out.selected() => {
+                    out.escaped(node.text().unwrap_or("").as_bytes(), false)?
                 }
-                NodeType::Root | NodeType::Text => {}
-            }
-        }
-        Ok(())
-    }
-
-    /// Whether a comment or processing instruction is output.
-    fn writes(&self, node: Node<'_, '_>) -> bool {
-        node.is_pi() || (self.comments && node.is_comment())
-    }
-
-    /// Writes a comment (if comments are kept) or a processing instruction.
-    fn leaf(&self, out: &mut Output<'_>, node: Node<'_, '_>) -> Result<(), XmlError> {
-        if !self.writes(node) {
-            return Ok(());
-        }
-        if let Some(pi) = node.pi() {
-            out.put(b"<?")?;
-            out.put(pi.target.as_bytes())?;
-            if let Some(value) = pi.value {
-                out.put(b" ")?;
-                out.put_newlines_normalized(value)?;
-            }
-            out.put(b"?>")
-        } else {
-            out.put(b"<!--")?;
-            out.put_newlines_normalized(node.text().unwrap_or(""))?;
-            out.put(b"-->")
-        }
-    }
-
-    fn element<'a, 'i: 'a>(
-        &self,
-        out: &mut Output<'a>,
-        node: Node<'a, 'i>,
-        apex: bool,
-    ) -> Result<(), XmlError> {
-        if self
-            .excluded
-            .binary_search_by_key(&node.id().get(), |id| id.get())
-            .is_ok()
-        {
-            return Ok(());
-        }
-        let qname = element_qname(node);
-
-        let mut declarations: Vec<(&'a str, &'a str)> = self
-            .namespace_candidates(node, qname, apex)
-            .into_iter()
-            .filter(|&(prefix, uri)| out.bound(prefix) != uri)
-            .collect();
-        declarations.sort_unstable_by_key(|&(prefix, _)| prefix);
-        declarations.dedup_by_key(|&mut (prefix, _)| prefix);
-
-        let src = node.document().input_text();
-        // (namespace URI, local name, qualified name, value)
-        let mut attributes: Vec<(&'a str, &'a str, &'a str, &'a str)> = node
-            .attributes()
-            .map(|a| {
-                let qname = &src[a.range_qname()];
-                (a.namespace().unwrap_or(""), a.name(), qname, a.value())
-            })
-            .collect();
-        if apex && !self.exclusive {
-            // Canonical XML 1.0 carries the xml:* attributes of omitted ancestors over to the
-            // apex. The apex's own ones win; among the ancestors Kalkan's Santuario keeps the
-            // OUTERMOST value, where the specification says the nearest: `handleParent`
-            // (Canonicalizer20010315) adds every ancestor's xml:* attributes to one
-            // XmlAttrStack level, root first (`push(-1)` does not start a new level), and
-            // `getXmlnsAttr` keeps the first of each name. We follow Kalkan.
-            let mut seen: HashSet<&str> = attributes
-                .iter()
-                .filter(|(ns, ..)| *ns == XML_NS)
-                .map(|&(_, local, ..)| local)
-                .collect();
-            let ancestors: Vec<Node<'a, 'i>> =
-                node.ancestors().skip(1).filter(Node::is_element).collect();
-            for ancestor in ancestors.iter().rev() {
-                for a in ancestor.attributes() {
-                    if a.namespace() == Some(XML_NS) && seen.insert(a.name()) {
-                        let qname = &src[a.range_qname()];
-                        attributes.push((XML_NS, a.name(), qname, a.value()));
-                    }
+                NodeType::Comment if selected && out.comments() => {
+                    out.put(b"<!--")?;
+                    let normalized = node
+                        .text()
+                        .unwrap_or("")
+                        .replace("\r\n", "\n")
+                        .replace('\r', "\n");
+                    out.put(normalized.as_bytes())?;
+                    out.put(b"-->")?;
                 }
+                NodeType::PI if selected => {
+                    let pi = node.pi().expect("PI node");
+                    out.put(b"<?")?;
+                    out.put(pi.target.as_bytes())?;
+                    if let Some(value) = pi.value {
+                        out.put(b" ")?;
+                        let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+                        out.put(normalized.as_bytes())?;
+                    }
+                    out.put(b"?>")?;
+                }
+                _ => {}
             }
+            Ok(())
         }
-        attributes.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-
-        out.put(b"<")?;
-        out.put(qname.as_bytes())?;
-        for (prefix, uri) in &declarations {
-            out.put(b" xmlns")?;
-            if !prefix.is_empty() {
-                out.put(b":")?;
-                out.put(prefix.as_bytes())?;
-            }
-            out.put(b"=\"")?;
-            out.put_escaped(uri, attribute_escape)?;
-            out.put(b"\"")?;
-        }
-        for (_, _, qname, value) in &attributes {
-            out.put(b" ")?;
-            out.put(qname.as_bytes())?;
-            out.put(b"=\"")?;
-            out.put_escaped(value, attribute_escape)?;
-            out.put(b"\"")?;
-        }
-        out.put(b">")?;
-        for &(prefix, uri) in &declarations {
-            out.bindings.entry(prefix).or_default().push(uri);
-        }
-
-        for child in node.children() {
-            match child.node_type() {
-                NodeType::Element => self.element(out, child, false)?,
-                NodeType::Text => out.put_escaped(child.text().unwrap_or(""), text_escape)?,
-                NodeType::Comment | NodeType::PI => self.leaf(out, child)?,
-                NodeType::Root => {}
-            }
-        }
-
-        out.put(b"</")?;
-        out.put(qname.as_bytes())?;
-        out.put(b">")?;
-        for (prefix, _) in &declarations {
-            if let Some(uris) = out.bindings.get_mut(prefix) {
-                uris.pop();
-            }
-        }
-        Ok(())
-    }
-
-    /// Namespace nodes that may be rendered on `node`. Canonical XML: the namespaces in
-    /// scope that may differ from the output's: all of them at the apex, below it only the
-    /// ones the element declares (the others are its parent's, which the output already
-    /// binds). Exclusive: the visibly utilized ones, plus those of the first kind in the
-    /// `InclusiveNamespaces` list.
-    fn namespace_candidates<'a, 'i: 'a>(
-        &self,
-        node: Node<'a, 'i>,
-        qname: &'a str,
-        apex: bool,
-    ) -> Vec<(&'a str, &'a str)> {
-        let mut declared = if apex {
-            Vec::new()
-        } else {
-            parse::declared_prefixes(node)
+        let method = match (self.exclusive, self.comments) {
+            (false, false) => C14n::Inclusive,
+            (false, true) => C14n::InclusiveWithComments,
+            (true, false) => C14n::Exclusive,
+            (true, true) => C14n::ExclusiveWithComments,
         };
-        declared.sort_unstable();
-        let in_scope: Vec<(&'a str, &'a str)> = if apex || !declared.is_empty() {
-            node.namespaces()
-                .map(|ns| (ns.name().unwrap_or(""), ns.uri()))
-                .filter(|(prefix, _)| apex || declared.binary_search(prefix).is_ok())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if !self.exclusive {
-            return in_scope;
-        }
-        let src = node.document().input_text();
-        let mut candidates = vec![(
-            parse::prefix(qname),
-            node.tag_name().namespace().unwrap_or(""),
-        )];
-        for a in node.attributes() {
-            let prefix = parse::prefix(&src[a.range_qname()]);
-            if !prefix.is_empty() && prefix != "xml" {
-                candidates.push((prefix, a.namespace().unwrap_or("")));
-            }
-        }
-        candidates.extend(
-            in_scope
-                .into_iter()
-                .filter(|(prefix, _)| self.inclusive_prefixes.binary_search(prefix).is_ok()),
+        let prefixes: Vec<String> = self
+            .inclusive_prefixes
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let mut writer = CanonicalWriter::new(
+            sink,
+            method,
+            C14nProfile::KalkanLegacy,
+            &prefixes,
+            self.limit as u64,
+            None,
         );
-        candidates
+        let target = if node.is_root() {
+            0..node.document().input_text().len().saturating_add(1)
+        } else {
+            node.range()
+        };
+        visit(self, &mut writer, node.document().root(), target, false)
+            .map_err(|_| XmlError::TooLarge)?;
+        usize::try_from(writer.written()).map_err(|_| XmlError::TooLarge)
     }
 }
 
@@ -586,4 +508,43 @@ mod tests {
             "a&amp;&lt;&quot;&#x9;&#xA;&#xD;>'b"
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn bounded_adapter_hashes_shared_writer_without_canonical_buffer() {
+    let document = parse::parse(b"<r a='&quot;'>text&amp;</r>").unwrap();
+    let canonicalizer = Canonicalizer {
+        exclusive: false,
+        comments: false,
+        inclusive_prefixes: &[],
+        excluded: &[],
+        limit: MAX_CANONICAL,
+    };
+    let (digest, count) = canonicalizer
+        .hash(document.root(), oncl_pki::key::HashAlg::Sha256)
+        .unwrap();
+    let expected = b"<r a=\"&quot;\">text&amp;</r>";
+    assert_eq!(count, expected.len());
+    assert_eq!(
+        digest.as_bytes(),
+        oncl_pki::key::HashAlg::Sha256.digest(expected)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn bounded_root_element_subtree_omits_outside_pis_without_spurious_newlines() {
+    let document = parse::parse(b"<r Id='x'/><?after value?><!--outside-->").unwrap();
+    let canonicalizer = Canonicalizer {
+        exclusive: false,
+        comments: true,
+        inclusive_prefixes: &[],
+        excluded: &[],
+        limit: MAX_CANONICAL,
+    };
+    assert_eq!(
+        canonicalizer.run(document.root_element()).unwrap(),
+        b"<r Id=\"x\"></r>"
+    );
 }

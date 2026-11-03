@@ -585,6 +585,38 @@ OUTPUT renewal — только append в новом transaction epoch, без �
 
 
 
+Опциональная фича `oncl-core/xml` добавляет **проверку** UTF-8 Source:
+`VerifyRequest::xml()` (стандартная C14N) и явно выбранный
+`VerifyRequest::xml_kalkan()` (прежние байты Kalkan). Нужны host-настройки
+`ValidationServices` и `TemporaryStore`; запрос не задаёт корни/сетевую политику.
+`oncl-xml::verify_source` проверяет каждый SignedInfo, сертификат, SignatureValue
+и Reference; отчёт хранит scoped per-signer факты, SHA-256 реального сертификата
+и точные диапазоны покрытых узлов. Один canonical writer обслуживает bounded DOM
+и индексированный raw-span Source; полного DOM/канонического буфера большого XML нет.
+Поддерживаются inclusive/exclusive C14N с вариантами comments, InclusiveNamespaces,
+ID/percent-URI, однозначные XPointer location paths, ограниченные Manifest и
+namespace-bound XPath-фильтр `not(ancestor-or-self::ds:Signature)`. Enveloped
+исключает текущую подпись; прежнее исключение последующих подписей включено только
+в `KalkanLegacy`. Неоднозначные IDs/KeyInfo/X509Data и неподдерживаемые трансформации
+отклоняются; изменение неподписанного узла не приписывается подписи.
+SignatureTimeStamp XAdES 1.3.2 связан с каноническим **исходным** SignatureValue
+через закрытую Base64-проекцию и F03/F04, включая текущий статус TSA. Это не
+заявление полной поддержки уровней AdES: archive coverage, другие версии XAdES и
+несколько независимых SignatureTimeStamp явно unsupported. Большие XML sign/Add
+и WSSE сюда не входят. Bounded legacy API, его лимиты и CMS/PDF sign не меняются.
+Внутренние hash/evidence intake не расходуют финальную output-квоту; внешний
+`copy_entry` списывает каждую доставку до записи, включая повторную.
+
+Проверки: `cargo test -p oncl-xml --features testing`; runtime:
+`cargo run -p oncl-core --features xml --example sdk_probe -- --case X03 --out target/x03-smoke`.
+Probe создаёт содержательный XML с двумя настоящими подписями и защищённой ссылкой
+более 64 МиБ, проверяет дальнюю mutation и положительный неподписанный контроль,
+записывает отдельные per-signer артефакты. Независимый bounded oracle:
+`python crates/oncl-core/examples/sdk_probe/xml_oracle.py --out target/x03-smoke`
+(lxml/libxml2 и cryptography; exact C14N/digests и RSA math, не ГОСТ и не trust).
+Это не гейт содержательных 10 ГиБ/пикового RSS 1 ГиБ — он остаётся в V01.
+
+
 Тестовые ключи в `fixtures/synthetic/` синтетические, пароль `Qwerty12`. Их можно использовать на демо-странице. По умолчанию демо отправляет `chain: []`, поэтому синтетические и тестовые ключи NCANode доступны. Вариант «синтетический тестовый корень» передаёт `root-gost2015`: ключи других корней и промежуточного CA становятся недоступны.
 
 Тесты с пометкой `live_` обращаются к настоящим сервисам НУЦ и по умолчанию не запускаются:
