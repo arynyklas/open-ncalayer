@@ -26,6 +26,7 @@ pub(crate) struct Revision {
 pub(crate) struct Indirect {
     pub value: Value,
     pub stream: Option<Vec<u8>>,
+    pub stream_region: Option<oncl_pki::io::Region>,
     pub end: u64,
 }
 type XrefSection = (BTreeMap<u32, Entry>, BTreeMap<Vec<u8>, Value>, u64);
@@ -63,6 +64,7 @@ impl PdfDocument<'_, '_> {
         let value = p.value(0)?;
         p.ws();
         let mut stream = None;
+        let mut stream_region = None;
         if p.bytes.get(p.pos..p.pos + 6) == Some(b"stream") {
             p.pos += 6;
             if p.bytes.get(p.pos) == Some(&b'\r') {
@@ -85,6 +87,10 @@ impl PdfDocument<'_, '_> {
                 .pos
                 .checked_add(length)
                 .ok_or(PdfError::Limit("stream size"))?;
+            stream_region = Some(oncl_pki::io::Region {
+                offset: offset + p.pos as u64,
+                len: length as u64,
+            });
             let encoded = p
                 .bytes
                 .get(p.pos..end)
@@ -151,6 +157,7 @@ impl PdfDocument<'_, '_> {
         Ok(Indirect {
             value,
             stream,
+            stream_region,
             end: offset + p.pos as u64,
         })
     }

@@ -301,6 +301,8 @@ mod inspect;
 #[cfg(feature = "jose")]
 pub mod jose;
 pub mod keys;
+#[cfg(feature = "pdf")]
+mod pades;
 mod policy;
 mod report;
 mod request;

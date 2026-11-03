@@ -38,6 +38,8 @@ pub struct ExtendRequest<'a> {
     pub(crate) detached: RefCell<Option<Source<'a>>>,
     pub(crate) detached_requested: bool,
     pub(crate) limits: Option<EvidenceLimits>,
+    #[cfg(feature = "pdf")]
+    pub(crate) pdf_limits: Option<oncl_pdf::PdfLimits>,
 }
 impl<'a> ExtendRequest<'a> {
     pub fn cms(level: AdesLevel) -> Self {
@@ -51,6 +53,15 @@ impl<'a> ExtendRequest<'a> {
             detached: RefCell::new(None),
             detached_requested: false,
             limits: None,
+            #[cfg(feature = "pdf")]
+            pdf_limits: None,
+        }
+    }
+    #[cfg(feature = "pdf")]
+    pub fn pdf(level: AdesLevel, limits: oncl_pdf::PdfLimits) -> Self {
+        Self {
+            pdf_limits: Some(limits),
+            ..Self::cms(level)
         }
     }
     pub fn with_material(mut self, material: ValidationMaterial<'a>) -> Self {
@@ -127,6 +138,15 @@ impl Engine {
         staged: Option<&mut StagedArtifact>,
         ctx: &mut OperationContext,
     ) -> Result<OperationReport, OperationError> {
+        #[cfg(feature = "pdf")]
+        if let Some(limits) = &request.pdf_limits {
+            if request.detached_requested {
+                return Err(
+                    ProcessingError::InvalidInput("PAdES does not accept detached input").into(),
+                );
+            }
+            return self.extend_pades(request, limits, input, output, staged, ctx);
+        }
         let validation = self.validation_context(ctx, Action::Extend)?;
         let temporary = self
             .temporary

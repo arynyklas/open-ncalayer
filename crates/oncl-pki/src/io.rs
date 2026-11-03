@@ -31,6 +31,9 @@ mod pdf_output;
 pub use pdf_output::PdfSignatureOutput;
 mod metadata;
 pub use metadata::MetadataInput;
+#[path = "io/pdf_snapshot.rs"]
+mod pdf_snapshot;
+pub use pdf_snapshot::{PdfSnapshot, PdfSnapshotCoverage, PdfSnapshotReader};
 
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek + ?Sized> ReadSeek for T {}
@@ -81,10 +84,7 @@ impl<'a> Source<'a> {
             None => Ok(false),
         }
     }
-    pub(crate) fn is_output_projection_for(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<bool, ProcessingError> {
+    pub fn is_output_projection_for(&self, scope: &ResourceScope) -> Result<bool, ProcessingError> {
         match &self.admitted {
             Some(original) if !original.same_operation(scope) => Err(
                 ProcessingError::InvalidInput("output projection belongs to another operation"),
@@ -236,6 +236,29 @@ impl StagedArtifact {
     }
     pub(crate) fn fail_sign_output(&mut self) {
         self.failed = true;
+    }
+    fn check_pdf_live_output(&mut self, scope: &ResourceScope) -> Result<(), ProcessingError> {
+        // Foreign/SOURCE artifacts are not ours to poison. Once the immutable
+        // role/operation check admits this OUTPUT, every failure is terminal,
+        // including a checkpoint returned before a transaction can be created.
+        if self.source || !self.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "PDF requires live same-operation OUTPUT",
+            ));
+        }
+        let result = if self.failed || self.file.is_none() {
+            Err(ProcessingError::InvalidInput(
+                "PDF output is failed or closed",
+            ))
+        } else {
+            let current = scope.checkpoint();
+            let original = self.scope.checkpoint();
+            current.and(original)
+        };
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
     }
     pub fn len(&self) -> u64 {
         self.temp.bytes()

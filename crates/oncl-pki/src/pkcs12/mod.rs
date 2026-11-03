@@ -71,9 +71,6 @@ pub enum Pkcs12Error {
     /// The key store uses an algorithm or structure that is not supported.
     #[error("unsupported PKCS#12 feature: {0}")]
     Unsupported(String),
-    /// Read-only SDK resource profile refused work before collection/KDF.
-    #[error("PKCS12 inspection resource profile exceeded")]
-    InspectionLimit,
 }
 
 impl From<der::Error> for Pkcs12Error {
