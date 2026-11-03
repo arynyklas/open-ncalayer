@@ -109,6 +109,11 @@ Complete corrupt frames and foreign headers are never truncated. Every `open`,
 including a clean journal, requires explicit `recover()` and a durable probe
 before new uses. Recovery repairs only an incomplete own-journal tail; recorded
 boundaries describe the observed committed repair, not lost uncommitted history.
+Repeated recovery can rotate closed journals while health remains blocked.
+An interrupted durable probe is completed by newly synchronized FINALs without
+consuming an extra reserved slot; a new tail repair then belongs to the first
+recovered FINAL, never a rewritten older Recovery record. An incomplete non-final
+segment is corruption and is never repaired.
 Journal quota is at most 64 MiB, with at most 1024 registrations/closed tombstones
 until original deadlines and 32 mapped keys per registration. Binding drop releases
 admission unless FINAL is still pending; tombstones retain no documents, keys or

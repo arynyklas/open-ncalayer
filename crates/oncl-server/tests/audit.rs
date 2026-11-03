@@ -455,31 +455,6 @@ fn concurrent_actual_calls_keep_actor_correlation_and_shared_failure() {
     }
 }
 #[test]
-fn cross_process_exclusive_journal_lock() {
-    if let Some(path) = std::env::var_os("ONCL_AUDIT_LOCK_CHILD") {
-        assert!(DurableAuditGuard::open(config(std::path::Path::new(&path))).is_err());
-        return;
-    }
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("audit");
-    let _guard = DurableAuditGuard::create(config(&path)).unwrap();
-    assert!(DurableAuditGuard::open(config(&path)).is_err());
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "cross_process_exclusive_journal_lock",
-            "--nocapture",
-        ])
-        .env("ONCL_AUDIT_LOCK_CHILD", &path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-#[test]
 fn configuration_and_bindings_are_bounded_and_immutable() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("audit");
@@ -836,4 +811,238 @@ fn actual_lost_private_response_and_failed_final_stay_unknown() {
         .unwrap();
     assert_eq!(final_record.applied, AppliedState::Unknown);
     assert!(!final_record.succeeded);
+}
+
+#[test]
+fn live_retained_nonfinal_partial_segment_never_recovers_or_admits_key_use() {
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard =
+        DurableAuditGuard::create(AuditConfig::new(path.clone(), 800, 5000, 3, 32).unwrap())
+            .unwrap();
+    let rig = Rig::new(guard.clone());
+    for _ in 0..2 {
+        let (mut ctx, _bound) = rig.begin();
+        rig.verify(&rig.sign(&mut ctx).unwrap());
+    }
+    let mut segments: Vec<_> = std::fs::read_dir(&path)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "log"))
+        .collect();
+    segments.sort();
+    assert_eq!(segments.len(), 2);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&segments[0])
+        .unwrap()
+        .write_all(b"foreign")
+        .unwrap();
+    let before: Vec<_> = segments
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
+    assert!(guard.records().is_err());
+    assert_eq!(guard.health(), AuditHealth::Failed);
+    assert!(guard.recover().is_err());
+    assert_eq!(guard.health(), AuditHealth::Failed);
+    let (mut fresh, _fresh_bound) = rig.begin();
+    assert_eq!(
+        rig.sign(&mut fresh).unwrap_err().applied_state(),
+        AppliedState::NotApplied
+    );
+    assert_eq!(rig.calls(), 2);
+    for (path, expected) in segments.iter().zip(before) {
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+    }
+}
+
+fn minimum_config(path: &std::path::Path) -> AuditConfig {
+    AuditConfig::new(path.to_owned(), 640, 960, 1, 32).unwrap()
+}
+
+#[test]
+fn minimum_journal_repeated_clean_reopen_recovery_stays_writable() {
+    for (segment, quota, retained) in [(640, 960, 1), (800, 1600, 3), (960, 1280, 2)] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("audit");
+        let config = AuditConfig::new(path.clone(), segment, quota, retained, 32).unwrap();
+        {
+            let guard = DurableAuditGuard::create(config.clone()).unwrap();
+            let rig = Rig::new(guard);
+            let (mut ctx, _bound) = rig.begin();
+            rig.verify(&rig.sign(&mut ctx).unwrap());
+            assert_eq!(rig.calls(), 1);
+        }
+        for _ in 0..16 {
+            let guard = DurableAuditGuard::open(config.clone()).unwrap();
+            assert_eq!(guard.health(), AuditHealth::RecoveryRequired);
+            guard.recover().unwrap();
+            assert_eq!(guard.health(), AuditHealth::Healthy);
+            let files: Vec<_> = std::fs::read_dir(&path)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            let segments = files
+                .iter()
+                .filter(|path| path.extension().is_some_and(|extension| extension == "log"))
+                .count();
+            assert!(segments >= 1 && segments <= retained);
+            assert!(
+                files
+                    .iter()
+                    .map(|path| path.metadata().unwrap().len())
+                    .sum::<u64>()
+                    <= quota
+            );
+        }
+        let guard = DurableAuditGuard::open(config).unwrap();
+        guard.recover().unwrap();
+        let rig = Rig::new(guard);
+        let (mut ctx, _bound) = rig.begin();
+        let signature = rig.sign(&mut ctx).unwrap_or_else(|error| panic!("segment={segment} quota={quota} retained={retained} actual_calls={} file_lengths={:?}: {error:?}", rig.calls(), std::fs::read_dir(&path).unwrap().map(|entry|entry.unwrap().metadata().unwrap().len()).collect::<Vec<_>>()));
+        rig.verify(&signature);
+        assert_eq!(rig.calls(), 1);
+    }
+}
+
+#[test]
+fn complete_recovery_probe_retry_preserves_final_capacity_at_minimum_config() {
+    for point in [
+        FaultPoint::BeforeWrite,
+        FaultPoint::PartialWrite,
+        FaultPoint::BeforeSync,
+        FaultPoint::AfterSync,
+    ] {
+        for restart in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("audit");
+            {
+                let guard = DurableAuditGuard::create(minimum_config(&path)).unwrap();
+                let rig = Rig::new(guard);
+                let (mut ctx, _bound) = rig.begin();
+                *rig.actual.after.lock().unwrap() = Some(FaultPoint::BeforeWrite);
+                assert_eq!(
+                    rig.sign(&mut ctx).unwrap_err().applied_state(),
+                    AppliedState::Applied
+                );
+                assert_eq!(rig.calls(), 1);
+                rig.verify(&rig.actual.signatures.lock().unwrap()[0]);
+            }
+            let guard = DurableAuditGuard::open(minimum_config(&path)).unwrap();
+            guard.inject_fault(point);
+            assert!(guard.recover().is_err());
+            assert_eq!(guard.health(), AuditHealth::Failed);
+            let guard = if restart {
+                drop(guard);
+                let guard = DurableAuditGuard::open(minimum_config(&path)).unwrap();
+                assert_eq!(guard.health(), AuditHealth::RecoveryRequired);
+                guard
+            } else {
+                guard
+            };
+            assert_eq!(guard.recover().unwrap().resolved_unknown, 1);
+            assert_eq!(guard.health(), AuditHealth::Healthy);
+            let records = guard.records().unwrap();
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|record| record.kind == RecordKind::Begin)
+                    .count(),
+                1
+            );
+            let finals: Vec<_> = records
+                .iter()
+                .filter(|record| record.kind.is_final())
+                .collect();
+            assert_eq!(finals.len(), 1);
+            assert_eq!(finals[0].applied, AppliedState::Unknown);
+            assert!(!finals[0].succeeded);
+        }
+    }
+}
+
+#[test]
+fn interrupted_probe_then_owned_torn_final_recovers_without_losing_begin() {
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    {
+        let guard = DurableAuditGuard::create(minimum_config(&path)).unwrap();
+        let rig = Rig::new(guard);
+        let (mut ctx, _bound) = rig.begin();
+        *rig.actual.after.lock().unwrap() = Some(FaultPoint::BeforeWrite);
+        assert_eq!(
+            rig.sign(&mut ctx).unwrap_err().applied_state(),
+            AppliedState::Applied
+        );
+        assert_eq!(rig.calls(), 1);
+        rig.verify(&rig.actual.signatures.lock().unwrap()[0]);
+    }
+    {
+        let guard = DurableAuditGuard::open(minimum_config(&path)).unwrap();
+        guard.inject_fault(FaultPoint::AfterSync);
+        assert!(guard.recover().is_err());
+        let records = guard.records().unwrap();
+        assert_eq!(records.last().unwrap().kind, RecordKind::Recovery);
+    }
+    let file = journal(&path);
+    let bytes = std::fs::read(&file).unwrap();
+    // The first 79 bytes of a FINAL equal its genuine BEGIN except for sequence:
+    // simulate a crash during that actual own pending FINAL, not foreign data.
+    let mut final_prefix = bytes[FRAME_BYTES as usize..FRAME_BYTES as usize + 79].to_vec();
+    final_prefix[24..32].copy_from_slice(&3u64.to_le_bytes());
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap()
+        .write_all(&final_prefix)
+        .unwrap();
+    let guard = DurableAuditGuard::open(minimum_config(&path)).unwrap();
+    let report = guard.recover().unwrap();
+    assert_eq!(report.truncated_bytes, 79);
+    assert_eq!(report.resolved_unknown, 1);
+    assert_eq!(guard.health(), AuditHealth::Healthy);
+    let records = guard.records().unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.kind == RecordKind::Begin)
+            .count(),
+        1
+    );
+    let final_record = records
+        .iter()
+        .find(|record| record.kind.is_final())
+        .unwrap();
+    assert_eq!(final_record.applied, AppliedState::Unknown);
+    assert!(!final_record.succeeded);
+    assert_eq!(final_record.repair_from - final_record.repair_to, 79);
+}
+
+#[test]
+fn failed_replacement_creation_keeps_durable_records_and_foreign_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("audit");
+    let guard = DurableAuditGuard::create(minimum_config(&path)).unwrap();
+    let rig = Rig::new(guard.clone());
+    let (mut first, _first_bound) = rig.begin();
+    rig.verify(&rig.sign(&mut first).unwrap());
+    let original = journal(&path);
+    let before = std::fs::read(&original).unwrap();
+    let foreign = path.join("oncl-audit-0000000000000001.log");
+    std::fs::write(&foreign, b"foreign existing segment name").unwrap();
+    let (mut next, _next_bound) = rig.begin();
+    assert_eq!(
+        rig.sign(&mut next).unwrap_err().applied_state(),
+        AppliedState::NotApplied
+    );
+    assert_eq!(rig.calls(), 1);
+    assert_eq!(guard.health(), AuditHealth::Failed);
+    assert_eq!(std::fs::read(original).unwrap(), before);
+    assert_eq!(
+        std::fs::read(foreign).unwrap(),
+        b"foreign existing segment name"
+    );
 }

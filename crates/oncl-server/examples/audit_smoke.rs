@@ -117,4 +117,67 @@ fn main() {
         "rotation: actual_key_calls={} retained_segments=1 quota_bytes={bytes}/1120 foreign=untouched",
         rig.calls()
     );
+    let path = output.join("minimum-restarts");
+    let minimum = || AuditConfig::new(path.clone(), 640, 960, 1, 32).unwrap();
+    let mut calls = 0;
+    {
+        let rig = Rig::new(DurableAuditGuard::create(minimum()).unwrap());
+        let (mut ctx, _binding) = rig.begin();
+        rig.verify(&rig.sign(&mut ctx).unwrap());
+        calls += rig.calls();
+    }
+    for _ in 0..16 {
+        let audit = DurableAuditGuard::open(minimum()).unwrap();
+        assert_eq!(audit.health(), AuditHealth::RecoveryRequired);
+        audit.recover().unwrap();
+        assert_eq!(audit.health(), AuditHealth::Healthy);
+    }
+    {
+        let audit = DurableAuditGuard::open(minimum()).unwrap();
+        audit.recover().unwrap();
+        let rig = Rig::new(audit);
+        let (mut ctx, _binding) = rig.begin();
+        rig.verify(&rig.sign(&mut ctx).unwrap());
+        calls += rig.calls();
+    }
+    assert_eq!(calls, 2);
+    let bytes: u64 = std::fs::read_dir(&path)
+        .unwrap()
+        .map(|entry| entry.unwrap().metadata().unwrap().len())
+        .sum();
+    assert!(bytes <= 960);
+    println!(
+        "minimum-restarts: segment=640 quota_bytes={bytes}/960 retained=1 explicit_recoveries=17 actual_key_calls={calls} writable=true"
+    );
+    let path = output.join("probe-retry");
+    let minimum = || AuditConfig::new(path.clone(), 640, 960, 1, 32).unwrap();
+    {
+        let rig = Rig::new(DurableAuditGuard::create(minimum()).unwrap());
+        let (mut ctx, _binding) = rig.begin();
+        *rig.actual.after.lock().unwrap() = Some(FaultPoint::BeforeWrite);
+        assert_eq!(
+            rig.sign(&mut ctx).unwrap_err().applied_state(),
+            AppliedState::Applied
+        );
+        assert_eq!(rig.calls(), 1);
+        rig.verify(&rig.actual.signatures.lock().unwrap()[0]);
+    }
+    {
+        let audit = DurableAuditGuard::open(minimum()).unwrap();
+        audit.inject_fault(FaultPoint::AfterSync);
+        assert!(audit.recover().is_err());
+    }
+    let audit = DurableAuditGuard::open(minimum()).unwrap();
+    assert_eq!(audit.recover().unwrap().resolved_unknown, 1);
+    assert_eq!(audit.health(), AuditHealth::Healthy);
+    let records = audit.records().unwrap();
+    assert_eq!(records.len(), 4);
+    let final_record = records.last().unwrap();
+    assert_eq!(final_record.applied, AppliedState::Unknown);
+    assert!(!final_record.succeeded);
+    println!(
+        "probe-retry: segment=640 quota=960 actual_key_calls=1 Artifact=NoPublish FINAL={:?} complete_frames=4 health={:?}",
+        final_record.applied,
+        audit.health()
+    );
 }

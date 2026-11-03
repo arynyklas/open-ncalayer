@@ -104,6 +104,8 @@ pub struct AuditEvent {
     pub applied: AppliedState,
     pub succeeded: bool,
     pub action: Option<Action>,
+    /// Observed byte boundary in a Recovery record's `use_id` segment, or in
+    /// this FINAL's segment when completing a previously durable recovery probe.
     pub repair_from: u64,
     pub repair_to: u64,
 }
@@ -343,6 +345,63 @@ fn check_partial_tail(file: &mut File, identity: [u8; 16], sequence: u64) -> io:
     }
     Ok(())
 }
+fn check_segment_len(len: u64, last: bool, config: &AuditConfig) -> io::Result<()> {
+    if len < FRAME_BYTES
+        || len > config.segment_bytes
+        || (!last && !len.is_multiple_of(FRAME_BYTES))
+    {
+        return Err(damaged());
+    }
+    Ok(())
+}
+fn read_header(file: &mut File, identity: [u8; 16], number: u64) -> io::Result<AuditEvent> {
+    let mut bytes = [0; 160];
+    file.read_exact(&mut bytes)?;
+    let header = decode(&bytes, identity)?;
+    if header.kind != RecordKind::Header || header.use_id != number {
+        return Err(damaged());
+    }
+    Ok(header)
+}
+fn partial_final_matches(file: &mut File, pending: &BTreeMap<u64, Pending>) -> io::Result<bool> {
+    let len = file.metadata()?.len();
+    let tail = (len % FRAME_BYTES) as usize;
+    if tail == 0 {
+        return Ok(true);
+    }
+    let mut bytes = [0; 160];
+    file.seek(SeekFrom::Start(len - tail as u64))?;
+    file.read_exact(&mut bytes[..tail])?;
+    if (tail > 104 && bytes[104] != 2)
+        || (tail > 106 && bytes[106] > 2)
+        || (tail > 107 && bytes[107] > 1)
+    {
+        return Ok(false);
+    }
+    if tail > 128 && bytes[128..tail] != checksum(&bytes[..128])[..tail - 128] {
+        return Ok(false);
+    }
+    for original in pending.values() {
+        let mut expected = [0; 64];
+        expected[..8].copy_from_slice(&original.event.use_id.to_le_bytes());
+        expected[8..16].copy_from_slice(&original.event.operation_id.to_le_bytes());
+        expected[16..32].copy_from_slice(&original.event.session);
+        expected[32..48].copy_from_slice(&original.event.principal.0);
+        expected[48..64].copy_from_slice(&original.event.key.0);
+        let end = tail.min(96);
+        let action = match original.action {
+            Action::Sign => 1,
+            Action::SignDigest => 2,
+            _ => return Err(damaged()),
+        };
+        if (tail <= 32 || bytes[32..end] == expected[..end - 32])
+            && (tail <= 105 || bytes[105] == action)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 impl DurableAuditGuard {
     pub fn create(config: AuditConfig) -> io::Result<Self> {
         Self::load(config, true)
@@ -435,12 +494,11 @@ impl DurableAuditGuard {
         for (index, n) in numbers.iter().enumerate() {
             let mut file = state.directory.open_file(&name(*n))?;
             let len = file.metadata()?.len();
-            if len < FRAME_BYTES
-                || len > config.segment_bytes
-                || state
-                    .total
-                    .checked_add(len)
-                    .is_none_or(|sum| sum > config.quota_bytes)
+            check_segment_len(len, index + 1 == numbers.len(), &config)?;
+            if state
+                .total
+                .checked_add(len)
+                .is_none_or(|sum| sum > config.quota_bytes)
             {
                 return Err(damaged());
             }
@@ -449,12 +507,8 @@ impl DurableAuditGuard {
                 number: *n,
                 bytes: len,
             });
+            let header = read_header(&mut file, identity, *n)?;
             let mut bytes = [0; 160];
-            file.read_exact(&mut bytes)?;
-            let header = decode(&bytes, identity)?;
-            if header.kind != RecordKind::Header || header.use_id != *n {
-                return Err(damaged());
-            }
             if index > 0 && header.sequence != state.sequence {
                 return Err(damaged());
             }
@@ -478,9 +532,7 @@ impl DurableAuditGuard {
                 break;
             }
             if len % FRAME_BYTES != 0 {
-                if index + 1 != numbers.len()
-                    || check_partial_tail(&mut file, identity, state.sequence).is_err()
-                {
+                if check_partial_tail(&mut file, identity, state.sequence).is_err() {
                     state.fatal_corruption = true;
                 }
                 state.health = AuditHealth::RecoveryRequired;
@@ -635,7 +687,34 @@ impl DurableAuditGuard {
         }
         result
     }
-    fn rotate(state: &mut State, config: &AuditConfig) -> io::Result<()> {
+    fn retire_closed(state: &mut State, config: &AuditConfig, headroom: u64) -> io::Result<()> {
+        if !state.pending.is_empty() {
+            return Err(blocked());
+        }
+        while state.segments.len() > config.retained_segments
+            || state
+                .total
+                .checked_add(headroom)
+                .is_none_or(|n| n > config.quota_bytes)
+        {
+            if state.segments.len() <= 1 {
+                return Err(blocked());
+            }
+            let old = &state.segments[0];
+            let mut file = state.directory.open_file(&name(old.number))?;
+            read_header(&mut file, state.identity, old.number)?;
+            if file.metadata()?.len() != old.bytes {
+                return Err(damaged());
+            }
+            drop(file);
+            state.directory.remove_file(&name(old.number))?;
+            state.directory.sync()?;
+            state.total -= old.bytes;
+            state.segments.remove(0);
+        }
+        Ok(())
+    }
+    fn rotate(state: &mut State, config: &AuditConfig, headroom: u64) -> io::Result<()> {
         if !state.pending.is_empty() {
             return Err(blocked());
         }
@@ -651,14 +730,16 @@ impl DurableAuditGuard {
             .checked_add(FRAME_BYTES)
             .is_none_or(|n| n > config.quota_bytes)
         {
-            return Err(blocked());
+            // A previously identified active replacement is kept and synced
+            // before retiring older CLOSED segments to make new-header room.
+            state.active.sync_all()?;
+            state.directory.sync()?;
+            Self::retire_closed(state, config, FRAME_BYTES)?;
         }
         let mut active = state.directory.create_file(&name(next))?;
         let mut header = blank(RecordKind::Header);
         header.use_id = next;
         header.sequence = state.sequence;
-        // Preserve the old durable journal until its identified replacement
-        // header has been fully synchronized. A namespace crash is fail-closed.
         active.write_all(&encode(&header, state.identity))?;
         active.sync_all()?;
         state.directory.sync()?;
@@ -668,33 +749,7 @@ impl DurableAuditGuard {
             number: next,
             bytes: FRAME_BYTES,
         });
-        while state.segments.len() > config.retained_segments
-            || state
-                .total
-                .checked_add(FRAME_BYTES * 4)
-                .is_none_or(|n| n > config.quota_bytes)
-        {
-            if state.segments.len() <= 1 {
-                return Err(blocked());
-            }
-            let old = &state.segments[0];
-            let mut file = state.directory.open_file(&name(old.number))?;
-            let mut bytes = [0; 160];
-            file.read_exact(&mut bytes)?;
-            let header = decode(&bytes, state.identity)?;
-            if header.kind != RecordKind::Header
-                || header.use_id != old.number
-                || file.metadata()?.len() != old.bytes
-            {
-                return Err(damaged());
-            }
-            drop(file);
-            state.directory.remove_file(&name(old.number))?;
-            state.directory.sync()?;
-            state.total -= old.bytes;
-            state.segments.remove(0);
-        }
-        Ok(())
+        Self::retire_closed(state, config, headroom)
     }
     fn reconcile_complete_tail(state: &mut State) -> io::Result<()> {
         let len = state.active.metadata()?.len();
@@ -737,30 +792,48 @@ impl DurableAuditGuard {
     /// bytes are omitted, never represented as a successful FINAL.
     pub fn records(&self) -> io::Result<Vec<AuditEvent>> {
         let mut state = self.lock()?;
-        let result = (|| {
-            let mut records = Vec::new();
-            for segment in &state.segments {
-                let mut file = state.directory.open_file(&name(segment.number))?;
-                let len = file.metadata()?.len();
-                if len < FRAME_BYTES
-                    || len > self.shared.config.segment_bytes
-                    || records.len() as u64 + len / FRAME_BYTES
-                        > self.shared.config.quota_bytes / FRAME_BYTES
-                {
-                    return Err(damaged());
-                }
-                let mut bytes = [0; 160];
-                for _ in 0..len / FRAME_BYTES {
-                    file.read_exact(&mut bytes)?;
-                    records.push(decode(&bytes, state.identity)?);
-                }
-            }
-            Ok(records)
-        })();
+        let result = Self::read_frames(&state, &self.shared.config).map(|(records, _)| records);
         if result.is_err() {
             state.health = AuditHealth::Failed;
         }
         result
+    }
+    fn read_frames(state: &State, config: &AuditConfig) -> io::Result<(Vec<AuditEvent>, u64)> {
+        let mut records = Vec::new();
+        let mut total = FRAME_BYTES;
+        let mut sequence = None;
+        for (index, segment) in state.segments.iter().enumerate() {
+            let mut file = state.directory.open_file(&name(segment.number))?;
+            let len = file.metadata()?.len();
+            check_segment_len(len, index + 1 == state.segments.len(), config)?;
+            total = total
+                .checked_add(len)
+                .filter(|sum| *sum <= config.quota_bytes)
+                .ok_or_else(damaged)?;
+            let header = read_header(&mut file, state.identity, segment.number)?;
+            if sequence.is_some_and(|previous| previous != header.sequence) {
+                return Err(damaged());
+            }
+            sequence = Some(header.sequence);
+            records.push(header);
+            let mut bytes = [0; 160];
+            for _ in 1..len / FRAME_BYTES {
+                file.read_exact(&mut bytes)?;
+                let record = decode(&bytes, state.identity)?;
+                if record.kind == RecordKind::Header
+                    || Some(record.sequence)
+                        != sequence.and_then(|previous| previous.checked_add(1))
+                {
+                    return Err(damaged());
+                }
+                sequence = Some(record.sequence);
+                records.push(record);
+            }
+            if index + 1 == state.segments.len() {
+                check_partial_tail(&mut file, state.identity, sequence.ok_or_else(damaged)?)?;
+            }
+        }
+        Ok((records, total))
     }
     /// Explicit operator action. Refuses live private uses and complete corrupt
     /// frames. Only a partial final tail may be truncated; its exact byte range
@@ -776,23 +849,12 @@ impl DurableAuditGuard {
         state.health = AuditHealth::Failed;
         // Re-read complete disk frames: a failed sync may nevertheless have
         // persisted a whole BEGIN/FINAL; never append duplicate sequence numbers.
-        let mut disk = Vec::new();
-        for segment in &state.segments {
-            let mut file = state.directory.open_file(&name(segment.number))?;
-            let len = file.metadata()?.len();
-            if len < FRAME_BYTES
-                || len > self.shared.config.segment_bytes
-                || disk.len() as u64 + len / FRAME_BYTES
-                    > self.shared.config.quota_bytes / FRAME_BYTES
-            {
-                return Err(damaged());
-            }
-            let mut bytes = [0; 160];
-            for _ in 0..len / FRAME_BYTES {
-                file.read_exact(&mut bytes)?;
-                disk.push(decode(&bytes, state.identity)?);
-            }
-        }
+        let (disk, total) = Self::read_frames(&state, &self.shared.config)?;
+        state.total = total;
+        let complete_probe = disk
+            .iter()
+            .rfind(|record| record.kind == RecordKind::Recovery)
+            .map(|record| record.sequence);
         let known_outcomes: HashMap<_, _> = state
             .pending
             .iter()
@@ -827,6 +889,8 @@ impl DurableAuditGuard {
             }
         }
         let original = state.active.metadata()?.len();
+        state.segments.last_mut().unwrap().bytes = original;
+        let repair_segment = state.segments.last().unwrap().number;
         let tail = original % FRAME_BYTES;
         let repaired = original - tail;
         let identity = state.identity;
@@ -835,16 +899,26 @@ impl DurableAuditGuard {
             state.fatal_corruption = true;
             return Err(damaged());
         }
-        let needed = (state.pending.len() as u64 + 1) * FRAME_BYTES;
-        if repaired
+        let mut reuse_probe = !state.pending.is_empty()
+            && complete_probe.is_some_and(|probe| state.pending.keys().all(|begin| *begin < probe));
+        if reuse_probe && tail > 0 {
+            let State {
+                active, pending, ..
+            } = &mut *state;
+            reuse_probe = partial_final_matches(active, pending)?;
+        }
+        let needed = (state.pending.len() as u64 + u64::from(!reuse_probe))
+            .checked_mul(FRAME_BYTES)
+            .ok_or_else(blocked)?;
+        let needs_rotation = repaired
             .checked_add(needed)
             .is_none_or(|n| n > self.shared.config.segment_bytes)
             || state
                 .total
                 .checked_sub(tail)
                 .and_then(|n| n.checked_add(needed))
-                .is_none_or(|n| n > self.shared.config.quota_bytes)
-        {
+                .is_none_or(|n| n > self.shared.config.quota_bytes);
+        if needs_rotation && !state.pending.is_empty() {
             return Err(blocked());
         }
         if tail > 0 {
@@ -852,6 +926,9 @@ impl DurableAuditGuard {
             state.active.sync_all()?;
             state.total -= tail;
             state.segments.last_mut().unwrap().bytes = repaired;
+        }
+        if needs_rotation {
+            Self::rotate(&mut state, &self.shared.config, FRAME_BYTES)?;
         }
         state.active.seek(SeekFrom::End(0))?;
         let pending: Vec<_> = state.pending.values().map(|p| p.event.clone()).collect();
@@ -868,21 +945,27 @@ impl DurableAuditGuard {
         };
         // These are this recovery's observed boundaries, not a forensic claim
         // about uncommitted repairs interrupted before a Recovery frame synced.
-        let mut recovery = blank(RecordKind::Recovery);
-        recovery.sequence = state.sequence.checked_add(1).ok_or_else(blocked)?;
-        recovery.session = state.session;
-        recovery.unix_millis = now()?;
-        recovery.use_id = state.segments.last().unwrap().number;
-        recovery.repair_from = original;
-        recovery.repair_to = repaired;
-        Self::append(&mut state, &recovery)?;
-        for mut event in pending {
+        if !reuse_probe {
+            let mut recovery = blank(RecordKind::Recovery);
+            recovery.sequence = state.sequence.checked_add(1).ok_or_else(blocked)?;
+            recovery.session = state.session;
+            recovery.unix_millis = now()?;
+            recovery.use_id = repair_segment;
+            recovery.repair_from = original;
+            recovery.repair_to = repaired;
+            Self::append(&mut state, &recovery)?;
+        }
+        for (index, mut event) in pending.into_iter().enumerate() {
             event.kind = RecordKind::Final;
             event.sequence = state.sequence.checked_add(1).ok_or_else(blocked)?;
             let outcome = known_outcomes.get(&event.use_id);
             event.applied = outcome.map_or(AppliedState::Unknown, |o| o.applied);
             event.succeeded = outcome.is_some_and(|o| o.succeeded);
             event.unix_millis = now()?;
+            if reuse_probe && tail > 0 && index == 0 {
+                event.repair_from = original;
+                event.repair_to = repaired;
+            }
             Self::append(&mut state, &event)?;
             state.pending.remove(&event.use_id);
         }
@@ -927,8 +1010,12 @@ impl KeyUseGuard for DurableAuditGuard {
                 .bytes
                 .checked_add(reserved)
                 .is_none_or(|n| n > self.shared.config.segment_bytes)
+                || state
+                    .total
+                    .checked_add(reserved)
+                    .is_none_or(|n| n > self.shared.config.quota_bytes)
             {
-                Self::rotate(&mut state, &self.shared.config)?;
+                Self::rotate(&mut state, &self.shared.config, reserved)?;
             }
             if state
                 .total
