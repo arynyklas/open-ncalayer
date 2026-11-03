@@ -541,3 +541,147 @@ fn independent_eof_signature(
     stage.copy_to(&mut bytes).unwrap();
     bytes
 }
+
+fn cms_and_ranges(output: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let start = output
+        .windows(12)
+        .rposition(|w| w == b"/ByteRange [")
+        .unwrap()
+        + 12;
+    let end = start + output[start..].iter().position(|b| *b == b']').unwrap();
+    let ranges: Vec<usize> = std::str::from_utf8(&output[start..end])
+        .unwrap()
+        .split_whitespace()
+        .map(|n| n.parse().unwrap())
+        .collect();
+    let padded: Vec<u8> = output[ranges[1] + 1..ranges[2] - 1]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    let cms = oncl_pki::io::padded_der_sequence(&padded).unwrap().to_vec();
+    let mut signed = output[..ranges[1]].to_vec();
+    signed.extend_from_slice(&output[ranges[2]..]);
+    (cms, signed)
+}
+
+#[test]
+fn exact_cms_reservation_is_checked_before_real_private_use() {
+    for name in ["user-rsa-sign", "user-gost2004-sign", "user-gost2015-sign"] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(temp.path()).unwrap();
+        let mut key = Counted {
+            entry: entry(name),
+            uses: 0,
+        };
+        let mut s = scope();
+        let mut stage = store.stage(&mut s).unwrap();
+        sign_source(
+            Source::sequential(&mut Cursor::new(unsigned()), None),
+            &PdfSignProfile::default(),
+            &mut key,
+            &CmsSignServices::new(None, Some(&store)),
+            &mut stage,
+            &s,
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        stage.copy_to(&mut output).unwrap();
+        let (cms, signed) = cms_and_ranges(&output);
+        assert_eq!(cms::verify(&cms, Some(&signed)).unwrap().len(), 1);
+        for reservation in [1, 8, cms.len() - 1, cms.len(), cms.len() + 1] {
+            let mut key = Counted {
+                entry: entry(name),
+                uses: 0,
+            };
+            let mut s = scope();
+            let mut stage = store.stage(&mut s).unwrap();
+            let result = sign_source(
+                Source::sequential(&mut Cursor::new(unsigned()), None),
+                &PdfSignProfile::new(reservation).unwrap(),
+                &mut key,
+                &CmsSignServices::new(None, Some(&store)),
+                &mut stage,
+                &s,
+            );
+            if reservation < cms.len() {
+                assert!(result.is_err(), "{name} reservation={reservation}");
+                assert_eq!(key.uses, 0, "{name} reservation={reservation}");
+                assert!(stage.copy_to(&mut Vec::new()).is_err());
+            } else {
+                result.unwrap();
+                assert_eq!(key.uses, 1);
+                let mut output = Vec::new();
+                stage.copy_to(&mut output).unwrap();
+                let (actual, signed) = cms_and_ranges(&output);
+                assert_eq!(actual.len(), cms.len());
+                assert_eq!(cms::verify(&actual, Some(&signed)).unwrap().len(), 1);
+            }
+        }
+    }
+}
+
+struct OversizedAfterRealUse {
+    entry: oncl_pki::pkcs12::KeyEntry,
+    uses: usize,
+}
+impl oncl_pki::key::DigestSigner for OversizedAfterRealUse {
+    fn certificate(&self) -> &oncl_pki::cert::Certificate {
+        &self.entry.cert
+    }
+    fn algorithm(&self) -> oncl_pki::key::SigAlg {
+        oncl_pki::key::DigestSigner::algorithm(&self.entry)
+    }
+    fn sign_digest(
+        &mut self,
+        digest: &oncl_pki::digest::DigestValue,
+    ) -> Result<Vec<u8>, oncl_pki::key::KeyError> {
+        let algorithm = oncl_pki::key::DigestSigner::algorithm(&self.entry);
+        let mut signature = oncl_pki::key::DigestSigner::sign_digest(&mut self.entry, digest)?;
+        self.entry
+            .key
+            .public_key()
+            .verify_digest(algorithm, digest, &signature)
+            .unwrap();
+        self.uses += 1;
+        // A faulty backend oversizes its response only AFTER a genuine,
+        // independently public-verified private application.
+        signature.resize(16384, 0);
+        Ok(signature)
+    }
+}
+
+#[test]
+fn unpredictable_post_use_overflow_is_applied_and_unpublishable() {
+    for name in ["user-rsa-sign", "user-gost2004-sign", "user-gost2015-sign"] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(temp.path()).unwrap();
+        let mut key = OversizedAfterRealUse {
+            entry: entry(name),
+            uses: 0,
+        };
+        let mut s = scope();
+        let mut stage = store.stage(&mut s).unwrap();
+        let error = sign_source(
+            Source::sequential(&mut Cursor::new(unsigned()), None),
+            &PdfSignProfile::default(),
+            &mut key,
+            &CmsSignServices::new(None, Some(&store)),
+            &mut stage,
+            &s,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            oncl_pdf::PdfError::Cms(oncl_pki::cms::stream::StreamError::AfterKeyUse {
+                applied: oncl_pki::key::AppliedState::Applied,
+                ..
+            })
+        ));
+        assert_eq!(key.uses, 1);
+        let mut output = Vec::new();
+        assert!(stage.copy_to(&mut output).is_err());
+        assert!(output.is_empty());
+    }
+}
