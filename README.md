@@ -492,9 +492,12 @@ P02 сохраняет весь исходный байтовый префикс
 последней ревизии: unsigned последующее обновление нельзя «узаконить» новой
 подписью. Сертификационные/field-lock permission transforms и XFA честно
 отклоняются, а не обходятся. `PdfSignProfile::new(bytes)` задаёт конечный reservation
-CMS (по умолчанию 16 КиБ); переполнение после использования ключа возвращает
-Applied-ошибку и делает staging непубликуемым, без скрытого повторного использования
-ключа. Core требует обычное `Action::Sign`, текущую strict validation и guard;
+CMS (по умолчанию 16 КиБ). Перед private use тот же ASN.1 encoder вычисляет точный
+DER-размер с фактическими сертификатом/атрибутами и фиксированной длиной RSA/ГОСТ
+подписи: заведомо малая ёмкость отклоняется NotApplied, без guard/private use.
+Неожиданно oversized ответ backend после настоящего применения ключа остаётся
+Applied-ошибкой с непубликуемым staging, без скрытого повтора.
+Core требует обычное `Action::Sign`, текущую strict validation и guard;
 `SignDigest`/`allow_prehashed` не дают права подписи PDF.
 Для исторического bare `%%EOF`/CR `revision_end` остаётся точным концом подписанного
 ByteRange; отдельные `parser_revision_end` и `PdfEndpointScope` показывают

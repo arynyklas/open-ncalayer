@@ -376,28 +376,49 @@ pub(super) fn encode_signer_info(
     attrs: Option<&[u8]>,
     signature: &[u8],
 ) -> Result<Vec<u8>, CmsError> {
-    let tbs = certificate.tbs_certificate();
-    let sid = IssuerAndSerialNumber {
-        issuer: tbs.issuer().clone(),
-        serial_number: Int::new(tbs.serial_number().as_bytes())?,
+    Ok(PreparedSignerInfo::new(certificate, alg, attrs)?
+        .value(signature)?
+        .to_der()?)
+}
+
+/// Reuse the actual SID/attribute encoder both before private use (DER sizing)
+/// and afterwards (encoding), without serializing a speculative signature/CMS.
+pub(super) struct PreparedSignerInfo<'a> {
+    sid: Vec<u8>,
+    alg: crate::key::SigAlg,
+    attrs: Option<&'a [u8]>,
+}
+impl<'a> PreparedSignerInfo<'a> {
+    pub(super) fn new(
+        certificate: &Certificate,
+        alg: crate::key::SigAlg,
+        attrs: Option<&'a [u8]>,
+    ) -> Result<Self, CmsError> {
+        let tbs = certificate.tbs_certificate();
+        let sid = IssuerAndSerialNumber {
+            issuer: tbs.issuer().clone(),
+            serial_number: Int::new(tbs.serial_number().as_bytes())?,
+        }
+        .to_der()?;
+        Ok(Self { sid, alg, attrs })
     }
-    .to_der()?;
-    Ok(SignerInfo {
-        version: 1,
-        sid: AnyRef::from_der(&sid)?,
-        digest_algorithm: AlgorithmIdentifierRef {
-            oid: alg.digest_oid(),
-            parameters: Some(AnyRef::NULL),
-        },
-        signed_attrs: attrs.map(RawSet),
-        signature_algorithm: AlgorithmIdentifierRef {
-            oid: alg.signature_oid(),
-            parameters: Some(AnyRef::NULL),
-        },
-        signature: OctetStringRef::new(signature)?,
-        unsigned_attrs: None,
+    pub(super) fn value<'s>(&'s self, signature: &'s [u8]) -> Result<SignerInfo<'s>, CmsError> {
+        Ok(SignerInfo {
+            version: 1,
+            sid: AnyRef::from_der(&self.sid)?,
+            digest_algorithm: AlgorithmIdentifierRef {
+                oid: self.alg.digest_oid(),
+                parameters: Some(AnyRef::NULL),
+            },
+            signed_attrs: self.attrs.map(RawSet),
+            signature_algorithm: AlgorithmIdentifierRef {
+                oid: self.alg.signature_oid(),
+                parameters: Some(AnyRef::NULL),
+            },
+            signature: OctetStringRef::new(signature)?,
+            unsigned_attrs: None,
+        })
     }
-    .to_der()?)
 }
 
 /// Contents of the DER `SET OF Attribute` of the signed attributes of `spec`; `None`

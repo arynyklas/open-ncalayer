@@ -155,7 +155,8 @@ impl<'a> PdfSignatureOutput<'a> {
             len: Some(extent - gap.len),
             admitted: Some(scope.retain()),
         };
-        let outcome = stream::sign_pdf_contents(source, signer, services, &mut sink, scope);
+        let outcome =
+            stream::sign_pdf_contents(source, signer, services, &mut sink, capacity, scope);
         // Replay completes before CMS performs any private operation.
         if let Some(error) = reader.error.take() {
             return Err(error.into());

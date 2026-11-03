@@ -1466,7 +1466,7 @@ fn pdf_once(engine: &Engine, key: &KeySelector, input: &[u8]) -> Result<Vec<u8>,
 
 #[cfg(feature = "pdf")]
 #[test]
-fn pdf_reservation_overflow_is_applied_and_poisoned_not_partial_success() {
+fn pdf_impossible_reservation_is_not_applied_and_poisoned() {
     let parent = tempfile::tempdir().unwrap();
     let store = TemporaryStore::new(parent.path()).unwrap();
     let guard = Arc::new(Guard::default());
@@ -1491,9 +1491,9 @@ fn pdf_reservation_overflow_is_applied_and_poisoned_not_partial_success() {
             &mut ctx,
         )
         .unwrap_err();
-    assert_eq!(error.applied_state(), AppliedState::Applied);
-    assert_eq!(guard.events.lock().unwrap().len(), 1);
-    assert_eq!(guard.outcomes.lock().unwrap().len(), 1);
+    assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    assert!(guard.events.lock().unwrap().is_empty());
+    assert!(guard.outcomes.lock().unwrap().is_empty());
     let mut bytes = Vec::new();
     assert!(stage.copy_to(&mut bytes).is_err());
     assert!(bytes.is_empty());
