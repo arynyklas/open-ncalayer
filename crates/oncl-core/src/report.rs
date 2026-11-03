@@ -93,6 +93,8 @@ pub struct VerificationReport {
     pub policy: ValidationPolicy,
     pub checked_at: OffsetDateTime,
     pub signers: ScopedSigners,
+    #[cfg(feature = "pdf")]
+    pub pdf: Option<oncl_pdf::PdfRevisionFacts>,
     /// Minimum actually verified CAdES level; legacy CMS reports have none.
     pub ades_level: Option<oncl_pki::evidence::AdesLevel>,
 }
@@ -187,6 +189,8 @@ impl Engine {
             policy: report.policy,
             checked_at: report.checked_at,
             signers: report.signers,
+            #[cfg(feature = "pdf")]
+            pdf: None,
             ades_level: None,
         })
     }
@@ -224,19 +228,73 @@ impl Engine {
         let now = (services.clock)();
         let transport =
             DeadlineTransport::new(services.http.as_ref(), &services.network, &ctx.scope);
-        let result = oncl_pki::cms::stream::verify(
-            input,
-            detached,
-            &ValidationContext {
-                policy: ctx.policy.validation,
-                now,
-                anchors: &services.anchors,
-                intermediates: &services.intermediates,
-                http: &transport,
-            },
-            ctx.policy.allowed_signature_algorithms,
-            &mut ctx.scope,
-        );
+        #[cfg(feature = "pdf")]
+        let mut pdf = None;
+        let result = match request.profile() {
+            // CAdES is dispatched before constructing the generic transport above.
+            // Keep the real handler here as well so the profile match stays exhaustive.
+            crate::VerifyProfile::Cades(required) => {
+                return self.verify_cades(request, required, input, detached, ctx);
+            }
+            crate::VerifyProfile::Cms => oncl_pki::cms::stream::verify(
+                input,
+                detached,
+                &ValidationContext {
+                    policy: ctx.policy.validation,
+                    now,
+                    anchors: &services.anchors,
+                    intermediates: &services.intermediates,
+                    http: &transport,
+                },
+                ctx.policy.allowed_signature_algorithms,
+                &mut ctx.scope,
+            ),
+            #[cfg(feature = "pdf")]
+            crate::VerifyProfile::Pdf => {
+                if detached.is_some() {
+                    return Err(OperationError::Processing(
+                        oncl_pki::resource::ProcessingError::InvalidInput(
+                            "PDF does not accept detached input",
+                        ),
+                    ));
+                }
+                let result = oncl_pdf::verify_source(
+                    input,
+                    &oncl_pdf::PdfLimits::default(),
+                    self.temporary
+                        .as_ref()
+                        .ok_or(OperationError::MissingTemporaryStore)?,
+                    &ValidationContext {
+                        policy: ctx.policy.validation,
+                        now,
+                        anchors: &services.anchors,
+                        intermediates: &services.intermediates,
+                        http: &transport,
+                    },
+                    ctx.policy.allowed_signature_algorithms,
+                    &mut ctx.scope,
+                )
+                .and_then(|report| report.into_aggregate(&ctx.scope));
+                match result {
+                    Ok((report, facts)) => {
+                        pdf = Some(facts);
+                        Ok(report)
+                    }
+                    Err(oncl_pdf::PdfError::Cms(error)) => Err(error),
+                    Err(oncl_pdf::PdfError::Processing(error)) => Err(error.into()),
+                    Err(oncl_pdf::PdfError::Io(error)) => {
+                        Err(oncl_pki::resource::ProcessingError::Io(error).into())
+                    }
+                    Err(oncl_pdf::PdfError::Limit(_)) => {
+                        Err(oncl_pki::resource::ProcessingError::MetadataLimit.into())
+                    }
+                    Err(_) => Err(oncl_pki::resource::ProcessingError::InvalidInput(
+                        "unsupported or malformed PDF",
+                    )
+                    .into()),
+                }
+            }
+        };
         transport.finish()?;
         ctx.scope.checkpoint()?;
         let report = result.map_err(stream_error)?;
@@ -246,6 +304,8 @@ impl Engine {
             policy: report.policy,
             checked_at: report.checked_at,
             signers: report.signers,
+            #[cfg(feature = "pdf")]
+            pdf,
             ades_level: None,
         })
     }

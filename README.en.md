@@ -475,6 +475,29 @@ cargo test --workspace --all-features
 
 `cargo xtask fetch-fixtures` downloads [NCANode](https://github.com/ncanode-kz/NCANode) test files from a pinned commit and verifies their sha256. These files are never committed. A repeated run downloads nothing when the files are already in place.
 
+The low-level `oncl-pdf` crate and optional `oncl-core/pdf` feature verify existing
+PDF signatures (`VerifyRequest::pdf()`); they do not create PDF/PAdES signatures.
+Verification requires an explicitly configured `TemporaryStore`: actual input is
+captured once into a private source-role snapshot. Bounded readers handle xref
+tables/streams, object streams, incremental `/Prev` chains and signed ByteRanges.
+The snapshot ignores length hints and prevents file changes between parsing and
+hashing. Reports bind signers to their protected revision, exact `Contents` token
+gap and later-change facts. CMS mathematics does not replace the full F03 trust
+policy; unsupported input never becomes Valid.
+Metadata provenance is issued only by the closed SDK transforms
+`SnapshotEncoding::{Identity,PdfByteString}`, never by a caller-provided decoder.
+Re-capturing an authentic same-operation snapshot Source preserves `bytes_in`;
+foreign operations fail before source I/O. New copies retain actual live scratch
+and memory reservations; dropping a copy frees its disk capacity. Every replay
+keeps the original deadline/control and bounded ordered region extents.
+Run `cargo test -p oncl-pdf --test verify`, or the real runtime probe:
+`cargo run -p oncl-core --features pdf --example sdk_probe -- --case P01 --out target/p01-smoke`.
+The probe uses an externally pyHanko-signed RSA PDF, an inside-revision mutation,
+and a separate later incremental update. The virtual xref-above-4-GiB test proves
+only arithmetic/seek handling, not meaningful 10-GiB PDF processing or a 1-GiB RSS
+ceiling: those remain V01 acceptance gates.
+
+
 The test keys in `fixtures/synthetic/` are synthetic, password `Qwerty12`. They work on the demo page. By default the demo sends `chain: []`, so synthetic and NCANode test keys are available. The «synthetic test root» choice sends `root-gost2015`: keys of the other roots and of the intermediate CA become unavailable.
 
 Tests prefixed with `live_` call real NCA services and are skipped by default:

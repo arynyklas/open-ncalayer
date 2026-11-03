@@ -4019,6 +4019,7 @@ name = "oncl-core"
 version = "0.1.0-alpha.6"
 dependencies = [
  "der 0.8.2",
+ "oncl-pdf",
  "oncl-pki",
  "oncl-testkit",
  "oncl-token",
@@ -4095,6 +4096,18 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "oncl-pdf"
+version = "0.1.0-alpha.6"
+dependencies = [
+ "flate2",
+ "lopdf",
+ "oncl-pki",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
 ]
 
 [[package]]
@@ -4375,6 +4388,7 @@ dependencies = [
  "oncl-testkit",
  "roxmltree",
  "sha2 0.11.1",
+ "tempfile",
  "thiserror 2.0.21",
  "time",
 ]

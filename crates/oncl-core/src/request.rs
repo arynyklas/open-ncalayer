@@ -2,6 +2,8 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VerifyProfile {
     Cms,
+    #[cfg(feature = "pdf")]
+    Pdf,
     Cades(oncl_pki::evidence::AdesLevel),
 }
 
@@ -11,6 +13,13 @@ pub struct VerifyRequest {
     limits: Option<oncl_pki::evidence::EvidenceLimits>,
 }
 impl VerifyRequest {
+    #[cfg(feature = "pdf")]
+    pub const fn pdf() -> Self {
+        Self {
+            profile: VerifyProfile::Pdf,
+            limits: None,
+        }
+    }
     pub const fn cms() -> Self {
         Self {
             profile: VerifyProfile::Cms,

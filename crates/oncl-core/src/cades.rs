@@ -258,6 +258,8 @@ impl Engine {
             policy: report.policy,
             checked_at: report.checked_at,
             signers: report.signers,
+            #[cfg(feature = "pdf")]
+            pdf: None,
             ades_level,
         })
     }

@@ -20,40 +20,70 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
+#[path = "io/byte_string.rs"]
+mod byte_string;
+pub use byte_string::{decode_pdf_byte_string, padded_der_sequence};
+#[path = "io/frozen.rs"]
+mod frozen;
+pub use frozen::{DerivedInput, FrozenInput, FrozenReader, SnapshotEncoding};
 
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek + ?Sized> ReadSeek for T {}
+trait SnapshotReader: ReadSeek {
+    fn finish_snapshot(&mut self) -> Result<(), ProcessingError>;
+}
 
 enum Reader<'a> {
     Sequential(&'a mut dyn Read),
     Seekable(&'a mut dyn ReadSeek),
+    Snapshot(&'a mut dyn SnapshotReader),
 }
 /// A source starts at the reader's current position; length is an optional
 /// admission hint, never a substitute for counting bytes actually consumed.
 pub struct Source<'a> {
     reader: Reader<'a>,
     len: Option<u64>,
+    admitted: Option<ResourceScope>,
 }
 impl<'a> Source<'a> {
     pub fn sequential(reader: &'a mut dyn Read, len: Option<u64>) -> Self {
         Self {
             reader: Reader::Sequential(reader),
             len,
+            admitted: None,
         }
     }
     pub fn seekable(reader: &'a mut dyn ReadSeek, len: Option<u64>) -> Self {
         Self {
             reader: Reader::Seekable(reader),
             len,
+            admitted: None,
         }
     }
     pub fn known_len(&self) -> Option<u64> {
         self.len
     }
+    /// True only for an immutable captured source view from this exact operation.
+    pub fn is_snapshot_for(&self, scope: &ResourceScope) -> Result<bool, ProcessingError> {
+        match &self.admitted {
+            Some(original) if !original.same_operation(scope) => Err(
+                ProcessingError::InvalidInput("snapshot belongs to another operation"),
+            ),
+            Some(_) => Ok(true),
+            None => Ok(false),
+        }
+    }
+    pub(crate) fn finish_snapshot(&mut self) -> Result<(), ProcessingError> {
+        match &mut self.reader {
+            Reader::Snapshot(reader) => reader.finish_snapshot(),
+            _ => Ok(()),
+        }
+    }
     pub fn as_seekable(&mut self) -> Option<&mut dyn ReadSeek> {
         match &mut self.reader {
             Reader::Sequential(_) => None,
             Reader::Seekable(reader) => Some(&mut **reader),
+            Reader::Snapshot(reader) => Some(&mut **reader),
         }
     }
 }
@@ -62,6 +92,7 @@ impl Read for Source<'_> {
         match &mut self.reader {
             Reader::Sequential(reader) => reader.read(buffer),
             Reader::Seekable(reader) => reader.read(buffer),
+            Reader::Snapshot(reader) => reader.read(buffer),
         }
     }
 }

@@ -50,6 +50,79 @@ pub struct ScopedSigners {
     _memory: ReportMemory,
     _sources: Vec<ReportMemory>,
 }
+impl ScopedSigners {
+    /// Append checked signers without detaching any original reservation/root.
+    /// Admission includes old and new Vec storage during reallocations.
+    pub fn append(&mut self, other: Self, scope: &ResourceScope) -> Result<(), ProcessingError> {
+        scope.checkpoint()?;
+        if !self._memory.scope.same_operation(scope) || !other._memory.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "reports belong to another operation",
+            ));
+        }
+        let count = self
+            .values
+            .len()
+            .checked_add(other.values.len())
+            .ok_or(ProcessingError::MetadataLimit)?;
+        let guards = self
+            ._sources
+            .len()
+            .checked_add(other._sources.len())
+            .and_then(|n| n.checked_add(1))
+            .ok_or(ProcessingError::MetadataLimit)?;
+        let values_bytes = if count > self.values.capacity() {
+            (count as u64)
+                .checked_mul(std::mem::size_of::<SignerValidation>() as u64)
+                .ok_or(ProcessingError::MemoryLimit)?
+        } else {
+            0
+        };
+        let guards_bytes = if guards > self._sources.capacity() {
+            (guards as u64)
+                .checked_mul(std::mem::size_of::<ReportMemory>() as u64)
+                .ok_or(ProcessingError::MemoryLimit)?
+        } else {
+            0
+        };
+        let extra = values_bytes
+            .checked_add(guards_bytes)
+            .ok_or(ProcessingError::MemoryLimit)?;
+        let old_values = if values_bytes != 0 {
+            (self.values.capacity() as u64)
+                .checked_mul(std::mem::size_of::<SignerValidation>() as u64)
+                .ok_or(ProcessingError::MemoryLimit)?
+        } else {
+            0
+        };
+        let old_guards = if guards_bytes != 0 {
+            (self._sources.capacity() as u64)
+                .checked_mul(std::mem::size_of::<ReportMemory>() as u64)
+                .ok_or(ProcessingError::MemoryLimit)?
+        } else {
+            0
+        };
+        let reclaimed = old_values
+            .checked_add(old_guards)
+            .ok_or(ProcessingError::MemoryLimit)?;
+        self._memory.memory.grow(extra)?;
+        self._memory.metadata.grow(extra)?;
+        // A failed allocation retains the conservative extra charge. No live
+        // buffer or source guard is ever made free by the failure path.
+        self._sources
+            .try_reserve_exact(guards - self._sources.len())
+            .map_err(|_| ProcessingError::MemoryLimit)?;
+        self.values
+            .try_reserve_exact(count - self.values.len())
+            .map_err(|_| ProcessingError::MemoryLimit)?;
+        self._memory.memory.shrink(reclaimed)?;
+        self._memory.metadata.shrink(reclaimed)?;
+        self._sources.push(other._memory);
+        self._sources.extend(other._sources);
+        self.values.extend(other.values);
+        Ok(())
+    }
+}
 impl std::ops::Deref for ScopedSigners {
     type Target = [SignerValidation];
 
@@ -58,62 +131,6 @@ impl std::ops::Deref for ScopedSigners {
     }
 }
 impl ScopedSigners {
-    /// Move checked facts from this same operation while retaining every source
-    /// allocation/root guard. No unscoped Vec or independently droppable permit
-    /// is exposed, and capacity is admitted before either owning Vec grows.
-    pub fn append(
-        &mut self,
-        mut other: Self,
-        scope: &ResourceScope,
-    ) -> Result<(), ProcessingError> {
-        scope.checkpoint()?;
-        if !self._memory.scope.same_operation(scope) || !other._memory.scope.same_operation(scope) {
-            return Err(ProcessingError::InvalidInput(
-                "signer reports belong to another operation",
-            ));
-        }
-        let count = self
-            .values
-            .len()
-            .checked_add(other.values.len())
-            .ok_or(ProcessingError::MemoryLimit)?;
-        let guards = self
-            ._sources
-            .len()
-            .checked_add(other._sources.len())
-            .and_then(|count| count.checked_add(2))
-            .ok_or(ProcessingError::MemoryLimit)?;
-        let bytes = count
-            .checked_mul(std::mem::size_of::<SignerValidation>())
-            .and_then(|bytes| {
-                guards
-                    .checked_mul(std::mem::size_of::<ReportMemory>())
-                    .and_then(|guards| bytes.checked_add(guards))
-            })
-            .ok_or(ProcessingError::MemoryLimit)? as u64;
-        let growth = ReportMemory {
-            memory: scope.reserve_memory(bytes)?,
-            metadata: scope.reserve_metadata(bytes)?,
-            scope: scope.retain(),
-        };
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(count)
-            .map_err(|_| ProcessingError::MemoryLimit)?;
-        let mut sources = Vec::new();
-        sources
-            .try_reserve_exact(guards)
-            .map_err(|_| ProcessingError::MemoryLimit)?;
-        values.append(&mut self.values);
-        values.append(&mut other.values);
-        sources.append(&mut self._sources);
-        sources.append(&mut other._sources);
-        sources.push(other._memory);
-        sources.push(growth);
-        self.values = values;
-        self._sources = sources;
-        scope.checkpoint()
-    }
     pub(crate) fn cades_level(&mut self, index: usize, level: crate::evidence::AdesLevel) {
         if let Some(signer) = self.values.get_mut(index) {
             signer.ades_level = (signer.verdict() == Verdict::Valid).then_some(level);

@@ -32,6 +32,7 @@ oncl-flows = { path = "crates/oncl-flows" }
 oncl-gost = { path = "crates/oncl-gost" }
 oncl-ipc = { path = "crates/oncl-ipc" }
 oncl-pki = { path = "crates/oncl-pki" }
+oncl-pdf = { path = "crates/oncl-pdf" }
 oncl-pdk = { path = "crates/oncl-pdk" }
 oncl-plugin = { path = "crates/oncl-plugin" }
 oncl-protocol = { path = "crates/oncl-protocol" }
