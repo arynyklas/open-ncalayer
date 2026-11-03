@@ -35,6 +35,11 @@ pub struct OperationReport {
 enum OperationResult {
     Signed(SignSummary),
     Extended(oncl_pki::cms::ades::AdesReport),
+    #[cfg(feature = "pdf")]
+    PdfExtended {
+        reports: [oncl_pki::validation::ValidationReport; 1],
+        facts: oncl_pdf::PdfRevisionFacts,
+    },
 }
 impl OperationReport {
     pub fn signer_count(&self) -> usize {
@@ -45,6 +50,8 @@ impl OperationReport {
                 .iter()
                 .map(|report| report.signers.len())
                 .sum(),
+            #[cfg(feature = "pdf")]
+            OperationResult::PdfExtended { reports, .. } => reports[0].signers.len(),
         }
     }
     /// All requested signers completed. Partial application is always an error,
@@ -69,9 +76,44 @@ impl OperationReport {
             result: OperationResult::Extended(report),
         }
     }
+    #[cfg(feature = "pdf")]
+    pub(crate) fn extended_pdf(
+        id: OperationId,
+        bytes_in: u64,
+        bytes_out: u64,
+        report: oncl_pdf::ades::PadesReport,
+        scope: &oncl_pki::resource::ResourceScope,
+    ) -> Result<Self, OperationError> {
+        let level = report.level().ok_or(OperationError::ValidationRequired)?;
+        let (validation, facts) = report
+            .into_verification()
+            .into_aggregate(scope)
+            .map_err(crate::pades::error)?;
+        Ok(Self {
+            id,
+            profile: SignProfile::Pades(level),
+            provenance: SignProvenance::EvidenceExtension,
+            bytes_in,
+            bytes_out,
+            applied: AppliedState::NotApplied,
+            result: OperationResult::PdfExtended {
+                reports: [validation],
+                facts,
+            },
+        })
+    }
+    #[cfg(feature = "pdf")]
+    pub fn pdf_revision_facts(&self) -> Option<&oncl_pdf::PdfRevisionFacts> {
+        match &self.result {
+            OperationResult::PdfExtended { facts, .. } => Some(facts),
+            _ => None,
+        }
+    }
     pub fn validation_reports(&self) -> Option<&[oncl_pki::validation::ValidationReport]> {
         match &self.result {
             OperationResult::Extended(report) => Some(report.reports()),
+            #[cfg(feature = "pdf")]
+            OperationResult::PdfExtended { reports, .. } => Some(reports),
             OperationResult::Signed(_) => None,
         }
     }
@@ -136,7 +178,7 @@ impl Engine {
             return Err(OperationError::InvalidContext);
         }
         #[cfg(feature = "pdf")]
-        if matches!(request.mode, SignMode::Pdf(..))
+        if matches!(request.mode, SignMode::Pdf(..) | SignMode::Pades(..))
             && let Output::Staged(stage) = &output
         {
             oncl_pki::io::PdfSignatureOutput::check_output(stage, &ctx.scope)?;
@@ -160,7 +202,7 @@ impl Engine {
                 (keys.as_slice(), Action::Sign, SignProvenance::Document)
             }
             #[cfg(feature = "pdf")]
-            SignMode::Pdf(key, _) => (
+            SignMode::Pdf(key, _) | SignMode::Pades(key, ..) => (
                 std::slice::from_ref(key),
                 Action::Sign,
                 SignProvenance::Document,
@@ -171,6 +213,12 @@ impl Engine {
         }
         if let SignProfile::Cades(level) = profile
             && level > oncl_pki::evidence::AdesLevel::B
+            && self.cades.is_none()
+        {
+            return Err(OperationError::MissingCadesConfiguration);
+        }
+        #[cfg(feature = "pdf")]
+        if matches!(profile, SignProfile::Pades(level) if level > oncl_pki::evidence::AdesLevel::B)
             && self.cades.is_none()
         {
             return Err(OperationError::MissingCadesConfiguration);
@@ -231,6 +279,20 @@ impl Engine {
                 &ctx.scope,
             )
             .map_err(crate::report::stream_error),
+            #[cfg(feature = "pdf")]
+            SignMode::Pades(_, profile, level, material, limits) => pades_sign(
+                self,
+                level,
+                input,
+                &profile.with_allowed_algorithms(ctx.policy.allowed_signature_algorithms),
+                refs[0],
+                &validation,
+                services,
+                material,
+                limits,
+                output,
+                &ctx.scope,
+            ),
             SignMode::RawMessage(_) => match output {
                 Output::Writer(writer) => stream::sign_raw(input, refs[0], writer, &ctx.scope),
                 Output::Staged(stage) => stream::sign_raw_staged(input, refs[0], stage, &ctx.scope),
@@ -445,6 +507,57 @@ fn sign_pdf(
                 .copy_to(writer)
                 .map_err(|e| stream::StreamError::AfterKeyUse {
                     source: Box::new(e.into()),
+                    applied: report.applied,
+                })?;
+            Ok(report)
+        }
+    }
+}
+
+#[cfg(feature = "pdf")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Existing private operation context with explicit PAdES acquisition"
+)]
+fn pades_sign(
+    engine: &Engine,
+    level: oncl_pki::evidence::AdesLevel,
+    input: Source<'_>,
+    profile: &oncl_pdf::PdfSignProfile,
+    signer: &mut dyn DigestSigner,
+    validation: &ValidationContext<'_>,
+    host: &crate::ValidationServices,
+    material: oncl_pki::cms::ades::ValidationMaterial<'_>,
+    limits: oncl_pki::evidence::EvidenceLimits,
+    output: Output<'_>,
+    scope: &oncl_pki::resource::ResourceScope,
+) -> Result<SignSummary, OperationError> {
+    let temporary = engine
+        .temporary
+        .as_ref()
+        .ok_or(OperationError::MissingTemporaryStore)?;
+    let services = oncl_pki::cms::ades::AdesServices {
+        validation,
+        network: &host.network,
+        temporary,
+        limits,
+        tsa: engine.cades.as_ref().map(|c| &c.tsa),
+        material,
+    };
+    match output {
+        Output::Staged(stage) => {
+            oncl_pdf::ades::sign(level, input, profile, signer, &services, stage, scope)
+                .map_err(crate::pades::error)
+        }
+        Output::Writer(writer) => {
+            let mut stage = temporary.stage(&mut scope.shared_view())?;
+            let report =
+                oncl_pdf::ades::sign(level, input, profile, signer, &services, &mut stage, scope)
+                    .map_err(crate::pades::error)?;
+            stage
+                .copy_to(writer)
+                .map_err(|error| OperationError::AfterKeyUse {
+                    source: Box::new(error.into()),
                     applied: report.applied,
                 })?;
             Ok(report)

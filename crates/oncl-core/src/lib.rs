@@ -139,6 +139,8 @@ mod context;
 mod engine;
 mod error;
 pub mod keys;
+#[cfg(feature = "pdf")]
+mod pades;
 mod policy;
 mod report;
 mod request;

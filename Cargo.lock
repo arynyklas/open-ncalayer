@@ -4103,6 +4103,7 @@ dependencies = [
 name = "oncl-pdf"
 version = "0.1.0-alpha.6"
 dependencies = [
+ "der 0.8.2",
  "flate2",
  "lopdf",
  "oncl-pki",
@@ -4110,6 +4111,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "x509-cert",
 ]
 
 [[package]]

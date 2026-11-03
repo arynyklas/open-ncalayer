@@ -436,6 +436,12 @@ pub enum CoveragePart<'a> {
         artifact: &'a std::sync::Mutex<StagedArtifact>,
         region: Region,
     },
+    /// Immutable captured bytes. Used by the closed inclusion-bound PDF adapter;
+    /// this is not a caller-supplied digest or an owning source capability.
+    Snapshot {
+        input: &'a dyn crate::io::PdfSnapshotCoverage,
+        region: Region,
+    },
     /// Hash a reconstructed standard component, not a caller-supplied digest.
     /// Nested work and output bytes share the enclosing coverage quotas.
     Hashed {
@@ -447,6 +453,9 @@ pub enum CoveragePart<'a> {
 pub enum ProofKind {
     Signature,
     Archive,
+    /// RFC3161 over immutable document ranges; only the closed in-crate
+    /// inclusion adapter can authorize this graph shape.
+    Document,
 }
 pub struct TimestampBinding<'a> {
     pub token: EvidenceId,
@@ -500,6 +509,10 @@ fn coverage_size(
                 CoveragePart::Bytes(bytes) => bytes.len() as u64,
                 CoveragePart::Staged { artifact, region } => {
                     lock_staged(artifact)?.read_region(*region, &mut [])?;
+                    region.len
+                }
+                CoveragePart::Snapshot { input, region } => {
+                    input.read_region(*region, &mut [])?;
                     region.len
                 }
                 CoveragePart::Evidence { id, encoding } => {
@@ -579,6 +592,27 @@ impl CoverageHasher<'_, '_, '_> {
                         if n == 0 {
                             return Err(ProcessingError::InvalidInput(
                                 "short staged coverage source",
+                            )
+                            .into());
+                        }
+                        hash.update(&self.raw.bytes[..n]);
+                        region.offset = region
+                            .offset
+                            .checked_add(n as u64)
+                            .ok_or(EvidenceError::Limit)?;
+                        region.len -= n as u64;
+                    }
+                }
+                CoveragePart::Snapshot { input, region } => {
+                    let source = input;
+                    let mut region = *region;
+                    while region.len != 0 {
+                        self.checkpoint()?;
+                        let n = source.read_region(region, &mut self.raw.bytes)?;
+                        self.checkpoint()?;
+                        if n == 0 {
+                            return Err(ProcessingError::InvalidInput(
+                                "short snapshot coverage source",
                             )
                             .into());
                         }
@@ -937,6 +971,7 @@ fn binding_graph(
                     }
                 }
             }
+            ProofKind::Document => return Err(EvidenceError::InvalidBinding),
         }
     }
     Ok(())
@@ -982,7 +1017,7 @@ pub fn validate_evidence(
     resources: &ResourceScope,
 ) -> Result<ValidationReport, EvidenceError> {
     validate_evidence_impl(
-        signer, bundle, proofs, required, ctx, network, resources, None, None,
+        signer, bundle, proofs, required, ctx, network, resources, None, None, None,
     )
 }
 
@@ -1031,6 +1066,39 @@ pub(crate) fn validate_prepared_evidence(
         resources,
         selections,
         Some(&prepared.parsed),
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Closed format binding into the existing F04 validator"
+)]
+pub(crate) fn validate_snapshot_evidence(
+    signer: &SignerEvidence<'_>,
+    bundle: &mut EvidenceBundle,
+    proofs: &[TimestampBinding<'_>],
+    required: AdesLevel,
+    ctx: &ValidationContext<'_>,
+    network: &NetworkPolicy,
+    resources: &ResourceScope,
+    prepared: &PreparedEvidence,
+    graph: &crate::cms::ades::pdf::SnapshotProofGraph<'_, '_>,
+) -> Result<ValidationReport, EvidenceError> {
+    if prepared.owner != bundle.owner {
+        return Err(EvidenceError::InvalidBinding);
+    }
+    validate_evidence_impl(
+        signer,
+        bundle,
+        proofs,
+        required,
+        ctx,
+        network,
+        resources,
+        None,
+        Some(&prepared.parsed),
+        Some(graph),
     )
 }
 
@@ -1048,10 +1116,21 @@ fn validate_evidence_impl(
     resources: &ResourceScope,
     selections: Option<&[ArchiveSelection<'_>]>,
     prepared: Option<&ParsedEvidence>,
+    snapshot_graph: Option<&crate::cms::ades::pdf::SnapshotProofGraph<'_, '_>>,
 ) -> Result<ValidationReport, EvidenceError> {
     resources.checkpoint()?;
     bundle.checkpoint()?;
-    binding_graph(bundle, signer, proofs, selections)?;
+    if let Some(graph) = snapshot_graph {
+        graph.check(proofs, resources)?;
+        for proof in proofs {
+            coverage_size(bundle, signer, proof.coverage)?;
+            if bundle.checked_entry(proof.token)?.kind != EvidenceKind::Timestamp {
+                return Err(EvidenceError::InvalidBinding);
+            }
+        }
+    } else {
+        binding_graph(bundle, signer, proofs, selections)?;
+    }
     if signer.signature.len() as u64 > bundle.limits.max_item_bytes {
         return Err(EvidenceError::Limit);
     }
@@ -1227,6 +1306,18 @@ fn validate_evidence_impl(
                     ProofKind::Archive => {
                         archive_valid = proof_time.is_some() && timestamp == CheckStatus::Passed
                     }
+                    ProofKind::Document => {
+                        archive_valid = proof_time.is_some()
+                            && timestamp == CheckStatus::Passed
+                            && snapshot_graph.is_some_and(|graph| graph.is_archive(proof.token));
+                        if proof_time.is_none() {
+                            proof_time = Some(ProofTime {
+                                at: info.gen_time,
+                                token: proof.token,
+                                imprint,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -1236,8 +1327,10 @@ fn validate_evidence_impl(
         if required == AdesLevel::Lta
             && (!archive_valid
                 || !proofs.last().is_some_and(|proof| {
-                    proof.kind == ProofKind::Archive
-                        && (selections.is_some() || proof.token.index + 1 == bundle.entries.len())
+                    (proof.kind == ProofKind::Archive
+                        && (selections.is_some() || proof.token.index + 1 == bundle.entries.len()))
+                        || (proof.kind == ProofKind::Document
+                            && snapshot_graph.is_some_and(|graph| graph.is_archive(proof.token)))
                 }))
         {
             timestamp = combine(timestamp, CheckStatus::Unavailable);
@@ -1346,4 +1439,12 @@ fn lock_staged(
             "staged coverage lock is poisoned",
         )),
     }
+}
+
+pub(crate) fn lock_snapshot<'a, 's>(
+    input: &'a std::sync::Mutex<crate::io::PdfSnapshot<'s>>,
+) -> Result<std::sync::MutexGuard<'a, crate::io::PdfSnapshot<'s>>, ProcessingError> {
+    input
+        .try_lock()
+        .map_err(|_| ProcessingError::InvalidInput("snapshot already borrowed"))
 }

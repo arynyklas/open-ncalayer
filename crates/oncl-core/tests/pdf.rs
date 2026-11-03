@@ -70,3 +70,87 @@ fn pdf_engine_keeps_revision_facts_and_scoped_signers() {
     assert!(facts.signatures[0].later_changes);
     assert_eq!(facts.signatures[0].revision_end, 5806);
 }
+
+#[test]
+fn pades_nonprivate_extend_and_private_sign_have_distinct_grants() {
+    use oncl_core::{
+        ErrorCode, ExtendRequest, SignRequest,
+        keys::{KeyRequest, KeySelector},
+    };
+    use oncl_pki::{
+        cms::ades::ValidationMaterial,
+        evidence::{AdesLevel, EvidenceLimits},
+    };
+    struct NoRead;
+    impl std::io::Read for NoRead {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("must preflight before intake")
+        }
+    }
+    let engine = Engine::new(EngineServices::hash_only(ResourceLimits::default())).unwrap();
+    let limits = EvidenceLimits {
+        max_items: 64,
+        max_bytes: 8 << 20,
+        max_item_bytes: 1 << 20,
+        max_chain_len: 8,
+        max_proofs: 8,
+        max_coverage_parts: 1024,
+        max_coverage_bytes: 10_737_418_240,
+    };
+    let key = KeySelector::inline(vec![], None);
+    for grant in [Action::Sign, Action::SignDigest] {
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([grant]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control),
+            )
+            .unwrap();
+        let error = engine
+            .sign(
+                SignRequest::pades(
+                    KeyRequest::new(&key, None),
+                    oncl_pdf::PdfSignProfile::default(),
+                    AdesLevel::T,
+                    ValidationMaterial {
+                        certificates: &[],
+                        ocsp: &[],
+                        crls: &[],
+                    },
+                    limits,
+                ),
+                Source::sequential(&mut NoRead, None),
+                &mut Vec::new(),
+                &mut ctx,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            if grant == Action::Sign {
+                ErrorCode::MissingCadesConfiguration
+            } else {
+                ErrorCode::PermissionDenied
+            }
+        );
+        assert_eq!(
+            error.applied_state(),
+            oncl_pki::key::AppliedState::NotApplied
+        );
+    }
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Sign]),
+            OperationPolicy::strict_online(),
+            Arc::new(Control),
+        )
+        .unwrap();
+    let error = engine
+        .extend(
+            &ExtendRequest::pdf(AdesLevel::Lta, oncl_pdf::PdfLimits::default()),
+            Source::sequential(&mut NoRead, None),
+            &mut Vec::new(),
+            &mut ctx,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::PermissionDenied);
+}

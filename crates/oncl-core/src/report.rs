@@ -224,6 +224,10 @@ impl Engine {
         if let crate::VerifyProfile::Cades(required) = request.profile() {
             return self.verify_cades(request, required, input, detached, ctx);
         }
+        #[cfg(feature = "pdf")]
+        if let crate::VerifyProfile::Pades(required) = request.profile() {
+            return self.verify_pades(request, required, input, detached, ctx);
+        }
         let services = self.validation_context(ctx, Action::Verify)?;
         let now = (services.clock)();
         let transport =
@@ -235,6 +239,10 @@ impl Engine {
             // Keep the real handler here as well so the profile match stays exhaustive.
             crate::VerifyProfile::Cades(required) => {
                 return self.verify_cades(request, required, input, detached, ctx);
+            }
+            #[cfg(feature = "pdf")]
+            crate::VerifyProfile::Pades(required) => {
+                return self.verify_pades(request, required, input, detached, ctx);
             }
             crate::VerifyProfile::Cms => oncl_pki::cms::stream::verify(
                 input,

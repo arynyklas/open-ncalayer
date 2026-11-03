@@ -108,8 +108,9 @@ impl FrozenInput {
     pub fn is_empty(&self) -> bool {
         self.stage.is_empty()
     }
-    fn check(&self, scope: &ResourceScope) -> Result<(), ProcessingError> {
+    pub(super) fn check(&self, scope: &ResourceScope) -> Result<(), ProcessingError> {
         scope.checkpoint()?;
+        self.stage.scope.checkpoint()?;
         if !self.stage.scope.same_operation(scope) {
             return Err(ProcessingError::InvalidInput(
                 "snapshot belongs to another operation",
@@ -189,62 +190,14 @@ impl FrozenInput {
                 "derived region exceeds snapshot",
             ));
         }
-        // Charge the entire encoded container region before decoding; decoded
-        // output is bounded by this admission, including reserved padding.
-        scope.account_container(region.len)?;
-        let length = usize::try_from(region.len).map_err(|_| ProcessingError::MetadataLimit)?;
-        let memory = scope.reserve_memory(
-            region
-                .len
-                .checked_mul(2)
-                .ok_or(ProcessingError::MemoryLimit)?,
-        )?;
-        let metadata = scope.reserve_metadata(
-            region
-                .len
-                .checked_mul(2)
-                .ok_or(ProcessingError::MetadataLimit)?,
-        )?;
-        let mut encoded = vec![0; length];
-        let mut at = 0;
-        while at < length {
-            let n = self.stage.read_region(
-                Region {
-                    offset: region.offset + at as u64,
-                    len: region.len - at as u64,
-                },
-                &mut encoded[at..],
-            )?;
-            if n == 0 {
-                return Err(ProcessingError::InvalidInput("short snapshot region"));
-            }
-            at += n;
-        }
-        let mut output = Vec::new();
-        output
-            .try_reserve_exact(length)
-            .map_err(|_| ProcessingError::MemoryLimit)?;
-        match encoding {
-            SnapshotEncoding::Identity => output.extend_from_slice(&encoded),
-            SnapshotEncoding::PdfByteString => {
-                let consumed = super::decode_pdf_byte_string(&encoded, &mut output)?;
-                if consumed != encoded.len() {
-                    return Err(ProcessingError::InvalidInput(
-                        "trailing bytes after PDF string",
-                    ));
-                }
-            }
-        }
-        scope.checkpoint()?;
-        Ok(DerivedInput {
-            bytes: output,
-            parent: self.identity.clone(),
-            scope: self.stage.scope.retain(),
+        decode_region(
             region,
+            scope,
+            &self.identity,
+            &self.stage.scope.retain(),
             encoding,
-            _memory: memory,
-            _metadata: metadata,
-        })
+            |region, out| self.stage.read_region(region, out),
+        )
     }
     pub(crate) fn binds(
         &self,
@@ -260,6 +213,67 @@ impl FrozenInput {
         Ok(())
     }
 }
+
+pub(super) fn decode_region(
+    region: Region,
+    scope: &ResourceScope,
+    identity: &Arc<()>,
+    owner: &ResourceScope,
+    encoding: SnapshotEncoding,
+    mut read: impl FnMut(Region, &mut [u8]) -> Result<usize, ProcessingError>,
+) -> Result<DerivedInput, ProcessingError> {
+    owner.checkpoint()?;
+    scope.checkpoint()?;
+    scope.account_container(region.len)?;
+    let length = usize::try_from(region.len).map_err(|_| ProcessingError::MetadataLimit)?;
+    let size = region
+        .len
+        .checked_mul(2)
+        .ok_or(ProcessingError::MemoryLimit)?;
+    let memory = scope.reserve_memory(size)?;
+    let metadata = scope.reserve_metadata(size)?;
+    let mut encoded = vec![0; length];
+    let mut at = 0;
+    while at < length {
+        scope.checkpoint()?;
+        let n = read(
+            Region {
+                offset: region.offset + at as u64,
+                len: region.len - at as u64,
+            },
+            &mut encoded[at..],
+        )?;
+        if n == 0 {
+            return Err(ProcessingError::InvalidInput("short snapshot region"));
+        }
+        at += n;
+    }
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(length)
+        .map_err(|_| ProcessingError::MemoryLimit)?;
+    match encoding {
+        SnapshotEncoding::Identity => output.extend_from_slice(&encoded),
+        SnapshotEncoding::PdfByteString => {
+            if super::decode_pdf_byte_string(&encoded, &mut output)? != encoded.len() {
+                return Err(ProcessingError::InvalidInput(
+                    "trailing bytes after PDF string",
+                ));
+            }
+        }
+    }
+    owner.checkpoint()?;
+    scope.checkpoint()?;
+    Ok(DerivedInput {
+        bytes: output,
+        parent: identity.clone(),
+        scope: owner.retain(),
+        region,
+        encoding,
+        _memory: memory,
+        _metadata: metadata,
+    })
+}
 impl DerivedInput {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
@@ -269,6 +283,20 @@ impl DerivedInput {
     }
     pub fn encoding(&self) -> SnapshotEncoding {
         self.encoding
+    }
+    pub(super) fn binds_origin(
+        &self,
+        identity: &Arc<()>,
+        scope: &ResourceScope,
+    ) -> Result<(), ProcessingError> {
+        self.scope.checkpoint()?;
+        scope.checkpoint()?;
+        if !Arc::ptr_eq(identity, &self.parent) || !self.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "derived metadata belongs to another snapshot",
+            ));
+        }
+        Ok(())
     }
 }
 impl FrozenReader<'_> {

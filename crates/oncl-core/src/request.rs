@@ -4,6 +4,8 @@ pub enum VerifyProfile {
     Cms,
     #[cfg(feature = "pdf")]
     Pdf,
+    #[cfg(feature = "pdf")]
+    Pades(oncl_pki::evidence::AdesLevel),
     Cades(oncl_pki::evidence::AdesLevel),
 }
 
@@ -18,6 +20,16 @@ impl VerifyRequest {
         Self {
             profile: VerifyProfile::Pdf,
             limits: None,
+        }
+    }
+    #[cfg(feature = "pdf")]
+    pub const fn pades(
+        required: oncl_pki::evidence::AdesLevel,
+        limits: oncl_pki::evidence::EvidenceLimits,
+    ) -> Self {
+        Self {
+            profile: VerifyProfile::Pades(required),
+            limits: Some(limits),
         }
     }
     pub const fn cms() -> Self {
@@ -51,6 +63,8 @@ pub enum SignProfile {
     Cades(oncl_pki::evidence::AdesLevel),
     #[cfg(feature = "pdf")]
     Pdf,
+    #[cfg(feature = "pdf")]
+    Pades(oncl_pki::evidence::AdesLevel),
 }
 /// A one-shot request: detached Add sources and secrets are borrowed, not
 /// cloned, serialized or included in Debug output.
@@ -81,6 +95,14 @@ pub(crate) enum SignMode<'a> {
     ),
     #[cfg(feature = "pdf")]
     Pdf(crate::keys::KeyRequest<'a>, oncl_pdf::PdfSignProfile),
+    #[cfg(feature = "pdf")]
+    Pades(
+        crate::keys::KeyRequest<'a>,
+        oncl_pdf::PdfSignProfile,
+        oncl_pki::evidence::AdesLevel,
+        oncl_pki::cms::ades::ValidationMaterial<'a>,
+        oncl_pki::evidence::EvidenceLimits,
+    ),
 }
 impl<'a> SignRequest<'a> {
     /// Incrementally sign an existing PDF, validating every existing signature
@@ -89,6 +111,18 @@ impl<'a> SignRequest<'a> {
     pub fn pdf(key: crate::keys::KeyRequest<'a>, profile: oncl_pdf::PdfSignProfile) -> Self {
         Self {
             mode: SignMode::Pdf(key, profile),
+        }
+    }
+    #[cfg(feature = "pdf")]
+    pub fn pades(
+        key: crate::keys::KeyRequest<'a>,
+        profile: oncl_pdf::PdfSignProfile,
+        level: oncl_pki::evidence::AdesLevel,
+        material: oncl_pki::cms::ades::ValidationMaterial<'a>,
+        limits: oncl_pki::evidence::EvidenceLimits,
+    ) -> Self {
+        Self {
+            mode: SignMode::Pades(key, profile, level, material, limits),
         }
     }
     pub fn raw_message(key: crate::keys::KeyRequest<'a>) -> Self {
@@ -148,6 +182,8 @@ impl<'a> SignRequest<'a> {
             }
             #[cfg(feature = "pdf")]
             SignMode::Pdf(..) => SignProfile::Pdf,
+            #[cfg(feature = "pdf")]
+            SignMode::Pades(_, _, level, _, _) => SignProfile::Pades(level),
         }
     }
 }

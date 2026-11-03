@@ -1,4 +1,5 @@
 //! Bounded PDF signature inspection and incremental signing; never renders or executes actions.
+pub mod ades;
 mod byte_range;
 mod objects;
 mod sign;
@@ -30,6 +31,8 @@ pub enum PdfError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Cms(#[from] oncl_pki::cms::stream::StreamError),
+    #[error(transparent)]
+    Ades(#[from] oncl_pki::cms::ades::AdesError),
 }
 pub type Result<T, E = PdfError> = std::result::Result<T, E>;
 #[derive(Debug, Clone)]
