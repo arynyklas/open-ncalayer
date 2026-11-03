@@ -1,6 +1,6 @@
 //! Public synthetic CAdES artifacts; private fixture material never leaves scratch.
 use super::*;
-use der::{Decode, Encode, Reader as _, SliceReader};
+use der::{Decode, Encode};
 use oncl_pki::{
     cert::Certificate,
     cms::ades::{self, AdesServices, ValidationMaterial},
@@ -82,14 +82,177 @@ impl oncl_core::keys::KeyUseGuard for Consent {
         Ok(())
     }
 }
+// Fixture-only slicing preserves received TLVs, including legal nonminimal BER
+// length octets. It does not replace the SDK's bounded streaming parser.
 fn children(bytes: &[u8]) -> Result<Vec<&[u8]>, Box<dyn std::error::Error>> {
-    let any = der::asn1::AnyRef::from_der(bytes)?;
-    let mut reader = SliceReader::new(any.value())?;
+    fn frame(bytes: &[u8], at: usize) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+        let length = *bytes
+            .get(at.checked_add(1).ok_or("fixture offset overflow")?)
+            .ok_or("short fixture length")?;
+        let (header, len) = if length < 128 {
+            (at + 2, length as usize)
+        } else {
+            let count = (length & 127) as usize;
+            if !(1..=8).contains(&count) {
+                return Err("unsupported fixture length".into());
+            }
+            let lengths = bytes
+                .get(at + 2..at + 2 + count)
+                .ok_or("short fixture length")?;
+            let mut len = 0usize;
+            for byte in lengths {
+                len = len
+                    .checked_mul(256)
+                    .and_then(|len| len.checked_add(*byte as usize))
+                    .ok_or("fixture length overflow")?;
+            }
+            (at + 2 + count, len)
+        };
+        let end = header.checked_add(len).ok_or("fixture end overflow")?;
+        if end > bytes.len() {
+            return Err("short fixture value".into());
+        }
+        Ok((header, end))
+    }
+    if bytes.len() > 16 << 20 {
+        return Err("fixture metadata cap".into());
+    }
+    let (mut at, end) = frame(bytes, 0)?;
+    if end != bytes.len() {
+        return Err("trailing fixture value".into());
+    }
     let mut values = Vec::new();
-    while !reader.is_finished() {
-        values.push(reader.tlv_bytes()?);
+    while at < end {
+        let (_, next) = frame(bytes, at)?;
+        values.push(&bytes[at..next]);
+        at = next;
     }
     Ok(values)
+}
+fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut output = vec![tag];
+    if body.len() < 128 {
+        output.push(body.len() as u8);
+    } else {
+        let length = body.len().to_be_bytes();
+        let bytes = &length[length
+            .iter()
+            .position(|byte| *byte != 0)
+            .expect("nonzero length")..];
+        output.push(0x80 | bytes.len() as u8);
+        output.extend_from_slice(bytes);
+    }
+    output.extend_from_slice(body);
+    output
+}
+fn changed_content_type(source: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let ci = children(source)?;
+    let explicit = children(ci[1])?;
+    let mut data = children(explicit[0])?
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    let mut encap = children(&data[2])?
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    if encap[0][0] != 6 || encap[0][1] >= 128 {
+        return Err("fixture content type is not short-form OID".into());
+    }
+    encap[0].insert(1, 0x81);
+    data[2] = tlv(0x30, &encap.concat());
+    Ok(tlv(
+        0x30,
+        &[ci[0], &tlv(0xa0, &tlv(0x30, &data.concat()))].concat(),
+    ))
+}
+fn reissue_archives(
+    source: &[u8],
+    document: &[u8],
+    outer: HashAlg,
+    spec: &TsaSpec,
+    http: &dyn HttpTransport,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use oncl_pki::digest::HashState;
+    let ci = children(source)?;
+    let explicit = children(ci[1])?;
+    let mut data = children(explicit[0])?
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    let content_type = children(&data[2])?[0].to_vec();
+    let mut infos = children(data.last().ok_or("missing fixture signers")?)?
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    for info in &mut infos {
+        let mut fields = children(info)?
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        let mut attrs = children(&fields[6])?
+            .into_iter()
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        for attr in &mut attrs {
+            let af = children(attr)?;
+            let oid: der::asn1::ObjectIdentifier = der::asn1::ObjectIdentifier::from_der(af[0])?;
+            if oid.to_string() != "0.4.0.1733.2.4" {
+                continue;
+            }
+            let old = children(af[1])?[0];
+            let tc = children(old)?;
+            let te = children(tc[1])?;
+            let td = children(te[0])?;
+            let old_infos = children(td.last().ok_or("missing fixture TSA signer")?)?;
+            let ts = children(old_infos[0])?;
+            let index_attr = children(ts[6])?[0];
+            let ia = children(index_attr)?;
+            let index = children(ia[1])?[0];
+            let mut content_hash = HashState::new(HashAlg::Sha256);
+            content_hash.update(document);
+            let mut hash = HashState::new(outer);
+            hash.update(&content_type);
+            hash.update(content_hash.finish().as_bytes());
+            for field in &fields[..6] {
+                hash.update(field);
+            }
+            hash.update(index);
+            let mut requested = spec.clone();
+            requested.hash = outer;
+            let token = oncl_pki::tsp::request(&requested, hash.finish().as_bytes(), http)?.token;
+            let nc = children(&token)?;
+            let ne = children(nc[1])?;
+            let mut nd = children(ne[0])?
+                .into_iter()
+                .map(<[u8]>::to_vec)
+                .collect::<Vec<_>>();
+            let new_infos = children(nd.last().ok_or("missing new TSA signer")?)?;
+            let mut ns = children(new_infos[0])?
+                .into_iter()
+                .map(<[u8]>::to_vec)
+                .collect::<Vec<_>>();
+            if ns.len() != 6 {
+                return Err("unexpected fixture TSA unsigned values".into());
+            }
+            ns.push(tlv(0xa1, index_attr));
+            let last = nd.len() - 1;
+            nd[last] = tlv(0x31, &tlv(0x30, &ns.concat()));
+            let token = tlv(
+                0x30,
+                &[nc[0], &tlv(0xa0, &tlv(0x30, &nd.concat()))].concat(),
+            );
+            *attr = tlv(0x30, &[af[0], &tlv(0x31, &token)].concat());
+        }
+        fields[6] = tlv(0xa1, &attrs.concat());
+        *info = tlv(0x30, &fields.concat());
+    }
+    let last = data.len() - 1;
+    data[last] = tlv(0x31, &infos.concat());
+    Ok(tlv(
+        0x30,
+        &[ci[0], &tlv(0xa0, &tlv(0x30, &data.concat()))].concat(),
+    ))
 }
 fn tokens(cms: &[u8]) -> Result<Vec<&[u8]>, Box<dyn std::error::Error>> {
     let ci = children(cms)?;
@@ -593,6 +756,103 @@ pub(super) fn run(out: &std::path::Path) -> Result<(), Box<dyn std::error::Error
         }
         std::fs::write(out.join(format!("rsa-{label}-Lta-altered.p7s")), altered)?;
         summary.push_str(&format!("rsa-{label}-altered=Invalid\n"));
+        drop(report);
+        if attached {
+            let original = std::fs::read(out.join("rsa-attached-Lta.p7s"))?;
+            let changed = changed_content_type(&original)?;
+            let (ber, mixed) = {
+                let resources = scope()?;
+                let http = oncl_pki::http::deadline::DeadlineTransport::new(
+                    &transport, &network, &resources,
+                );
+                let ber = reissue_archives(&changed, document, HashAlg::Sha256, &tsa_spec, &http)?;
+                let mixed =
+                    reissue_archives(&original, document, HashAlg::Sha512, &tsa_spec, &http)?;
+                http.finish()?;
+                (ber, mixed)
+            };
+            for (name, bytes, expected) in [
+                ("review-raw-ber-Lta", &ber, Verdict::Valid),
+                ("review-altered-content-type", &changed, Verdict::Invalid),
+                ("review-mixed-imprint", &mixed, Verdict::Invalid),
+            ] {
+                let report = ades::verify(
+                    AdesLevel::Lta,
+                    Source::sequential(&mut Cursor::new(bytes), None),
+                    None,
+                    &services,
+                    &[SigAlg::RsaSha256],
+                    &scope()?,
+                )?;
+                if report.verdict != expected {
+                    return Err(format!(
+                        "C03 {name}: expected {expected:?}, got {:?}",
+                        report.verdict
+                    )
+                    .into());
+                }
+                std::fs::write(out.join(format!("{name}.p7s")), bytes)?;
+                summary.push_str(&format!("{name}={expected:?}\n"));
+            }
+            let before = add_guard.calls.load(Ordering::SeqCst);
+            let mut rejected = Vec::new();
+            let error = add_engine
+                .sign(
+                    oncl_core::SignRequest::cades_add(
+                        vec![oncl_core::keys::KeyRequest::new(
+                            &third_selector,
+                            Some("C03 synthetic"),
+                        )],
+                        None,
+                        AdesLevel::B,
+                        material(),
+                        limits,
+                    ),
+                    Source::sequential(&mut Cursor::new(&mixed), None),
+                    &mut rejected,
+                    &mut ctx,
+                )
+                .err()
+                .ok_or("mixed archive reached Core Add")?;
+            if error.applied_state() != oncl_core::keys::AppliedState::NotApplied
+                || add_guard.calls.load(Ordering::SeqCst) != before
+                || !rejected.is_empty()
+            {
+                return Err("mixed archive reached a new guard/private application".into());
+            }
+            let mut added = Vec::new();
+            add_engine.sign(
+                oncl_core::SignRequest::cades_add(
+                    vec![oncl_core::keys::KeyRequest::new(
+                        &third_selector,
+                        Some("C03 synthetic"),
+                    )],
+                    None,
+                    AdesLevel::B,
+                    material(),
+                    limits,
+                ),
+                Source::sequential(&mut Cursor::new(&ber), None),
+                &mut added,
+                &mut ctx,
+            )?;
+            std::fs::write(out.join("review-ber-Add-B.p7s"), added)?;
+            let mut extended = Vec::new();
+            let report = ades::extend(
+                AdesLevel::Lta,
+                Source::sequential(&mut Cursor::new(&ber), None),
+                None,
+                &services,
+                &[SigAlg::RsaSha256],
+                &mut extended,
+                &scope()?,
+            )?;
+            if report.verdict != Verdict::Valid {
+                return Err("raw BER extension failed".into());
+            }
+            std::fs::write(out.join("review-ber-extended-Lta.p7s"), extended)?;
+            summary.push_str("review-mixed-Add=NotApplied new_guard_calls=0\nreview-ber-Add=Applied\nreview-ber-extend=Valid\n");
+        }
     }
     server.finish()?;
     summary.push_str(&format!(

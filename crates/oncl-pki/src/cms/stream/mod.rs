@@ -151,6 +151,7 @@ pub(super) struct Layout {
     pub version: Region,
     pub algorithms: Region,
     pub encap: Region,
+    pub content_type: Region,
     pub certificates: Option<Region>,
     pub status: Option<Region>,
     pub signers: Region,
@@ -275,6 +276,7 @@ pub(super) fn parse_with(
     reader.enter(encap)?;
     let content_type_header = reader.required(6)?;
     let content_type = reader.metadata(content_type_header)?;
+    let content_type_region = span(content_type_header.start(), reader.offset);
     let _content_type: ObjectIdentifier = ObjectIdentifier::from_der(content_type.as_bytes())?;
     // A bounded metadata-only EncapsulatedContentInfo, with no eContent bytes.
     body.append_tlv(0x30, content_type.as_bytes())?;
@@ -385,6 +387,7 @@ pub(super) fn parse_with(
             version: version_region,
             algorithms: algorithms_region,
             encap: encap_region,
+            content_type: content_type_region,
             certificates: certificates_region,
             status: status_region,
             signers: signers_region,
