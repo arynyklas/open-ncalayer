@@ -7,8 +7,13 @@ use std::{
 };
 
 pub struct FrozenInput {
-    stage: StagedArtifact,
-    identity: Arc<()>,
+    pub(super) stage: StagedArtifact,
+    pub(super) identity: Arc<()>,
+    pub(super) output_derived: bool,
+    pub(super) pending_format: bool,
+    pub(super) pending_accounting: bool,
+    pub(super) classification: Option<Arc<super::provisional::FormatClassification>>,
+    pub(super) wire_digest: Option<crate::digest::DigestValue>,
 }
 pub struct FrozenReader<'a> {
     input: &'a mut FrozenInput,
@@ -32,65 +37,248 @@ pub struct DerivedInput {
     scope: ResourceScope,
     region: Region,
     encoding: SnapshotEncoding,
+    output_derived: bool,
+    format_specific: bool,
     _memory: ResourceReservation,
     _metadata: ResourceReservation,
 }
 impl FrozenInput {
+    pub(super) fn output_failure(&self) -> Option<Arc<super::AtomicBool>> {
+        self.stage.output_failure.clone()
+    }
     /// Capture exactly the actual source bytes from its logical current start.
     /// The only persistent storage is the host's explicit source-role store.
     pub fn capture(
-        mut source: Source<'_>,
+        source: Source<'_>,
         store: &TemporaryStore,
         scope: &mut ResourceScope,
     ) -> Result<Self, ProcessingError> {
-        let replay = source.is_snapshot_for(scope)?;
-        scope.checkpoint()?;
-        scope.check_input()?;
-        if let Some(reader) = source.as_seekable() {
-            let start = reader.stream_position()?;
-            let end = reader.seek(SeekFrom::End(0))?;
-            reader.seek(SeekFrom::Start(start))?;
-            let size = end
-                .checked_sub(start)
-                .ok_or(ProcessingError::InvalidInput("source extent"))?;
-            if size > scope.limits().input_bytes || (!replay && size > scope.input_remaining()) {
-                return Err(ProcessingError::InputLimit);
+        Self::capture_limited(source, store, scope, None, None)
+    }
+    /// Narrow the existing input/output role limit; never grant fresh input
+    /// credit or convert an authenticated output projection to original input.
+    pub fn capture_bounded(
+        source: Source<'_>,
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        maximum: u64,
+    ) -> Result<Self, ProcessingError> {
+        Self::capture_limited(source, store, scope, Some(maximum), None)
+    }
+    pub(super) fn capture_format(
+        source: Source<'_>,
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        maximum_overhead: u64,
+    ) -> Result<Self, ProcessingError> {
+        Self::capture_limited(source, store, scope, None, Some(maximum_overhead))
+    }
+    fn capture_limited(
+        mut source: Source<'_>,
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        maximum: Option<u64>,
+        format_overhead: Option<u64>,
+    ) -> Result<Self, ProcessingError> {
+        // Authentic roles/foreign identities are checked BEFORE any debit,
+        // pending ownership or originating-output invalidation.
+        let format = matches!(source.reader, super::Reader::FormatSnapshot(_));
+        let prior = if format {
+            if format_overhead.is_none() {
+                return Err(ProcessingError::InvalidInput(
+                    "format-specific source requires classification",
+                ));
             }
-        }
-        let _memory = scope.reserve_memory(IO_CHUNK_BYTES as u64)?;
-        let mut buffer = vec![0; IO_CHUNK_BYTES];
-        let mut stage = store.stage_source(scope)?;
-        loop {
-            scope.checkpoint()?;
-            let request = if replay {
-                buffer.len()
+            if source
+                .admitted
+                .as_ref()
+                .is_none_or(|original| !original.same_operation(scope))
+            {
+                return Err(ProcessingError::InvalidInput("foreign format snapshot"));
+            }
+            Some(
+                source
+                    .classification
+                    .clone()
+                    .ok_or(ProcessingError::InvalidInput(
+                        "unclassified source cannot replay",
+                    ))?,
+            )
+        } else {
+            None
+        };
+        let replay = if format {
+            true
+        } else {
+            source.is_snapshot_for(scope)?
+        };
+        let output_derived = source.is_output_projection_for(scope)?;
+        let failure = source.output_failure.clone();
+        let pending = format_overhead.is_some() && !replay && !output_derived;
+        let identity = prior
+            .as_ref()
+            .map_or_else(|| Arc::new(()), |ledger| ledger.identity.clone());
+        let mut ticket: Option<PendingCapture> = None;
+        let result = (|| {
+            let resource_limit = if output_derived {
+                scope.limits().output_bytes
+            } else if let Some(ledger) = &prior {
+                ledger.extent
+            } else if pending {
+                (u128::from(scope.input_remaining())
+                    + u128::from(
+                        scope
+                            .container_remaining()
+                            .min(format_overhead.expect("pending overhead")),
+                    ))
+                .min(u128::from(u64::MAX)) as u64
             } else {
-                scope.input_request(buffer.len())?
+                scope.limits().input_bytes
             };
-            let count = match source.read(&mut buffer[..request]) {
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => {
-                    scope.checkpoint()?;
-                    return Err(error.into());
+            let extent_limit = maximum.map_or(resource_limit, |m| m.min(resource_limit));
+            let limit_error = || {
+                if output_derived {
+                    ProcessingError::OutputLimit
+                } else {
+                    ProcessingError::InputLimit
                 }
-                Ok(count) => count,
             };
-            if count > request {
-                return Err(ProcessingError::InvalidInput("reader exceeded buffer"));
-            }
-            if !replay {
-                scope.consumed_input(count as u64)?;
-            }
             scope.checkpoint()?;
-            if count == 0 {
-                break;
+            if !output_derived {
+                scope.check_input()?;
             }
-            stage.write_chunk(&buffer[..count])?;
+            if output_derived
+                && failure
+                    .as_ref()
+                    .is_some_and(|f| f.load(super::Ordering::SeqCst))
+            {
+                return Err(ProcessingError::InvalidInput("failed output projection"));
+            }
+            if (maximum.is_some() || pending || format)
+                && source.known_len().is_some_and(|n| n > extent_limit)
+            {
+                return Err(limit_error());
+            }
+            if let Some(reader) = source.as_seekable() {
+                let start = reader.stream_position()?;
+                let end = reader.seek(SeekFrom::End(0))?;
+                reader.seek(SeekFrom::Start(start))?;
+                let size = end
+                    .checked_sub(start)
+                    .ok_or(ProcessingError::InvalidInput("source extent"))?;
+                if format && (start != 0 || size != prior.as_ref().expect("format ledger").extent) {
+                    return Err(ProcessingError::InvalidInput(
+                        "classified replay must be a complete fixed view",
+                    ));
+                }
+                if size > extent_limit
+                    || (!replay && !output_derived && !pending && size > scope.input_remaining())
+                {
+                    return Err(limit_error());
+                }
+            }
+            if pending {
+                scope.begin_signed_input(&identity)?;
+                ticket = Some(PendingCapture {
+                    scope: scope.retain(),
+                    identity: identity.clone(),
+                    active: true,
+                });
+            }
+            let mut hash = (format_overhead.is_some() && prior.is_none())
+                .then(|| crate::digest::HashState::new(crate::key::HashAlg::Sha256));
+            let capacity = if maximum.is_some() {
+                extent_limit
+                    .saturating_add(1)
+                    .min(IO_CHUNK_BYTES as u64)
+                    .max(1) as usize
+            } else {
+                IO_CHUNK_BYTES
+            };
+            let _memory = scope.reserve_memory(capacity as u64)?;
+            let mut buffer = vec![0; capacity];
+            let mut stage = store.stage_source(scope)?;
+            stage.output_failure = failure.clone();
+            loop {
+                scope.checkpoint()?;
+                let offered = extent_limit
+                    .saturating_sub(stage.len())
+                    .saturating_add(1)
+                    .min(buffer.len() as u64) as usize;
+                let request = if pending {
+                    scope.signed_input_request(
+                        &identity,
+                        format_overhead.expect("pending overhead"),
+                        offered,
+                    )?
+                } else if replay || output_derived {
+                    offered
+                } else {
+                    scope.input_request(offered)?
+                };
+                let count = match source.read(&mut buffer[..request]) {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        scope.checkpoint()?;
+                        return Err(e.into());
+                    }
+                    Ok(count) => count,
+                };
+                if count > request {
+                    return Err(ProcessingError::InvalidInput("reader exceeded buffer"));
+                }
+                if pending {
+                    scope.consumed_signed_input(
+                        &identity,
+                        format_overhead.expect("pending overhead"),
+                        count as u64,
+                    )?;
+                } else if !replay && !output_derived {
+                    scope.consumed_input(count as u64)?;
+                }
+                if stage
+                    .len()
+                    .checked_add(count as u64)
+                    .is_none_or(|n| n > extent_limit)
+                {
+                    if !output_derived {
+                        scope.terminate_input_limit();
+                    }
+                    return Err(limit_error());
+                }
+                scope.checkpoint()?;
+                if count == 0 {
+                    break;
+                }
+                if let Some(hash) = &mut hash {
+                    hash.update(&buffer[..count]);
+                }
+                stage.write_chunk(&buffer[..count])?;
+            }
+            source.finish_snapshot()?;
+            Ok(Self {
+                stage,
+                identity: identity.clone(),
+                output_derived,
+                pending_format: format_overhead.is_some() && !output_derived && prior.is_none(),
+                pending_accounting: pending,
+                wire_digest: prior
+                    .as_ref()
+                    .map(|ledger| ledger.digest)
+                    .or_else(|| hash.map(crate::digest::HashState::finish)),
+                classification: prior.clone(),
+            })
+        })();
+        if result.is_ok()
+            && let Some(ticket) = &mut ticket
+        {
+            ticket.active = false;
         }
-        Ok(Self {
-            stage,
-            identity: Arc::new(()),
-        })
+        if result.is_err() && output_derived {
+            source.invalidate_output_projection();
+            super::mark_output_failure(&failure);
+        }
+        result
     }
     /// Read only this snapshot's original-scope immutable region. Delegates the
     /// existing artifact's checked bounds, 256-KiB chunk, cursor restore and
@@ -108,6 +296,15 @@ impl FrozenInput {
     pub fn is_empty(&self) -> bool {
         self.stage.is_empty()
     }
+    pub(super) fn is_output_derived(&self) -> bool {
+        self.output_derived
+    }
+    pub(super) fn invalidate_output(&mut self) {
+        if self.output_derived {
+            self.stage.failed = true;
+            super::mark_output_failure(&self.stage.output_failure);
+        }
+    }
     pub(super) fn check(&self, scope: &ResourceScope) -> Result<(), ProcessingError> {
         scope.checkpoint()?;
         self.stage.scope.checkpoint()?;
@@ -116,9 +313,29 @@ impl FrozenInput {
                 "snapshot belongs to another operation",
             ));
         }
+        if self.stage.is_failed() {
+            return Err(ProcessingError::InvalidInput("failed output snapshot"));
+        }
         Ok(())
     }
     pub fn reader<'a>(
+        &'a mut self,
+        regions: &[Region],
+        scope: &ResourceScope,
+    ) -> Result<FrozenReader<'a>, ProcessingError> {
+        if !self.stage.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "snapshot belongs to another operation",
+            ));
+        }
+        let failure = self.stage.output_failure.clone();
+        let result = self.reader_inner(regions, scope);
+        if result.is_err() {
+            super::mark_output_failure(&failure);
+        }
+        result
+    }
+    fn reader_inner<'a>(
         &'a mut self,
         regions: &[Region],
         scope: &ResourceScope,
@@ -145,7 +362,14 @@ impl FrozenInput {
                 .checked_add(region.len)
                 .ok_or(ProcessingError::InputLimit)?;
         }
-        if length > self.len() || length > scope.limits().input_bytes {
+        let extent_limit = if self.output_derived {
+            scope.limits().output_bytes
+        } else if self.pending_format || self.classification.is_some() {
+            self.len()
+        } else {
+            scope.limits().input_bytes
+        };
+        if length > self.len() || length > extent_limit {
             return Err(ProcessingError::InputLimit);
         }
         let bytes = (regions.len() as u64)
@@ -184,6 +408,24 @@ impl FrozenInput {
         scope: &ResourceScope,
         encoding: SnapshotEncoding,
     ) -> Result<DerivedInput, ProcessingError> {
+        if !self.stage.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "snapshot belongs to another operation",
+            ));
+        }
+        let failure = self.stage.output_failure.clone();
+        let result = self.derive_region_inner(region, scope, encoding);
+        if result.is_err() {
+            super::mark_output_failure(&failure);
+        }
+        result
+    }
+    fn derive_region_inner(
+        &mut self,
+        region: Region,
+        scope: &ResourceScope,
+        encoding: SnapshotEncoding,
+    ) -> Result<DerivedInput, ProcessingError> {
         self.check(scope)?;
         if region.end()? > self.len() {
             return Err(ProcessingError::InvalidInput(
@@ -193,8 +435,12 @@ impl FrozenInput {
         decode_region(
             region,
             scope,
-            &self.identity,
-            &self.stage.scope.retain(),
+            DecodeOrigin {
+                identity: &self.identity,
+                scope: &self.stage.scope.retain(),
+                output_derived: self.output_derived,
+                format_specific: self.pending_format || self.classification.is_some(),
+            },
             encoding,
             |region, out| self.stage.read_region(region, out),
         )
@@ -205,7 +451,14 @@ impl FrozenInput {
         scope: &ResourceScope,
     ) -> Result<(), ProcessingError> {
         self.check(scope)?;
-        if !Arc::ptr_eq(&self.identity, &derived.parent) || !derived.scope.same_operation(scope) {
+        if self.output_derived
+            || derived.output_derived
+            || self.pending_format
+            || self.classification.is_some()
+            || derived.format_specific
+            || !Arc::ptr_eq(&self.identity, &derived.parent)
+            || !derived.scope.same_operation(scope)
+        {
             return Err(ProcessingError::InvalidInput(
                 "derived metadata belongs to another snapshot",
             ));
@@ -214,14 +467,26 @@ impl FrozenInput {
     }
 }
 
+pub(super) struct DecodeOrigin<'a> {
+    pub identity: &'a Arc<()>,
+    pub scope: &'a ResourceScope,
+    pub output_derived: bool,
+    pub format_specific: bool,
+}
+
 pub(super) fn decode_region(
     region: Region,
     scope: &ResourceScope,
-    identity: &Arc<()>,
-    owner: &ResourceScope,
+    origin: DecodeOrigin<'_>,
     encoding: SnapshotEncoding,
     mut read: impl FnMut(Region, &mut [u8]) -> Result<usize, ProcessingError>,
 ) -> Result<DerivedInput, ProcessingError> {
+    let DecodeOrigin {
+        identity,
+        scope: owner,
+        output_derived,
+        format_specific,
+    } = origin;
     owner.checkpoint()?;
     scope.checkpoint()?;
     scope.account_container(region.len)?;
@@ -270,6 +535,8 @@ pub(super) fn decode_region(
         scope: owner.retain(),
         region,
         encoding,
+        output_derived,
+        format_specific,
         _memory: memory,
         _metadata: metadata,
     })
@@ -301,20 +568,42 @@ impl DerivedInput {
 }
 impl FrozenReader<'_> {
     pub fn source(&mut self) -> Source<'_> {
-        let length = self.length;
+        let length = self.length.saturating_sub(self.position);
         let admitted = self.input.stage.scope.retain();
+        let output_derived = self.input.output_derived;
+        let output_failure = self.input.stage.output_failure.clone();
+        let format = self.input.pending_format || self.input.classification.is_some();
+        let classification = self.input.classification.clone();
         Source {
-            reader: super::Reader::Snapshot(self),
+            reader: if output_derived {
+                super::Reader::OutputProjection(self)
+            } else if format {
+                super::Reader::FormatSnapshot(self)
+            } else {
+                super::Reader::Snapshot(self)
+            },
             len: Some(length),
             admitted: Some(admitted),
+            output_failure,
+            classification,
         }
     }
     pub fn finish(&mut self) -> Result<(), ProcessingError> {
-        if let Some(error) = self.error.take() {
+        let result = if let Some(error) = self.error.take() {
             Err(error)
         } else {
-            self.input.stage.scope.checkpoint()
+            self.input.stage.scope.checkpoint().and_then(|_| {
+                if self.input.stage.is_failed() {
+                    Err(ProcessingError::InvalidInput("failed output snapshot"))
+                } else {
+                    Ok(())
+                }
+            })
+        };
+        if result.is_err() && self.input.output_derived {
+            self.input.stage.fail_sign_output();
         }
+        result
     }
 }
 impl Read for FrozenReader<'_> {
@@ -366,5 +655,39 @@ impl Seek for FrozenReader<'_> {
 impl super::SnapshotReader for FrozenReader<'_> {
     fn finish_snapshot(&mut self) -> Result<(), ProcessingError> {
         self.finish()
+    }
+    fn invalidate_snapshot(&mut self) {
+        if self.input.output_derived {
+            self.input.stage.fail_sign_output();
+        }
+    }
+}
+
+struct PendingCapture {
+    scope: ResourceScope,
+    identity: Arc<()>,
+    active: bool,
+}
+impl Drop for PendingCapture {
+    fn drop(&mut self) {
+        if self.active {
+            self.scope.abandon_signed_input(&self.identity);
+        }
+    }
+}
+impl super::captured_private::Sealed for FrozenInput {}
+impl super::CapturedInput for FrozenInput {
+    fn len(&self) -> u64 {
+        self.len()
+    }
+    fn read_region(&mut self, region: Region, output: &mut [u8]) -> Result<usize, ProcessingError> {
+        self.read_region(region, output)
+    }
+    fn reader<'a>(
+        &'a mut self,
+        regions: &[Region],
+        scope: &ResourceScope,
+    ) -> Result<FrozenReader<'a>, ProcessingError> {
+        self.reader(regions, scope)
     }
 }

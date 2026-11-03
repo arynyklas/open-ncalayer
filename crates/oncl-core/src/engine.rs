@@ -220,6 +220,8 @@ impl Engine {
             plugin_network_budget: None,
             #[cfg(feature = "plugins")]
             plugin_pki: None,
+            #[cfg(feature = "plugins")]
+            plugin_xml_output_limit: None,
         }
     }
     pub fn hash(

@@ -13,7 +13,7 @@ tokens = ["dep:oncl-token"]
 xml = ["dep:oncl-xml"]
 pdf = ["dep:oncl-pdf"]
 jose = ["dep:base64", "dep:serde", "dep:serde_json"]
-plugins = ["dep:oncl-plugin", "dep:oncl-pdk", "dep:serde", "dep:tracing"]
+plugins = ["xml", "dep:oncl-plugin", "dep:oncl-pdk", "dep:serde", "dep:tracing"]
 
 [dependencies]
 oncl-pki.workspace = true
@@ -41,6 +41,8 @@ time = { workspace = true, features = ["macros"] }
 lopdf.workspace = true
 wat.workspace = true
 tracing-subscriber.workspace = true
+roxmltree.workspace = true
+x509-cert.workspace = true
 
 [[test]]
 name = "plugin_access"

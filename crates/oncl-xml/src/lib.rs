@@ -40,8 +40,9 @@
 //!
 //! [`XmlDocument::canonicalize`] writes external canonical bytes under the output
 //! quota. The indexed/lending raw-span adapter and bounded DOM input adapter use
-//! one canonical writer; signature/reference hashing does not materialize canonical
-//! documents or debit final output. [`C14nProfile::Standard`] uses nearest inherited
+//! one canonical writer. Canonical references may be retained in admitted
+//! temporary files before key opening, never as large RAM buffers or final
+//! output. [`C14nProfile::Standard`] uses nearest inherited
 //! xml:* values and the current enveloped signature only; explicit
 //! [`C14nProfile::KalkanLegacy`] preserves outermost xml:* and cascading-signature
 //! compatibility. The old bounded convenience APIs retain their existing limits.
@@ -54,12 +55,23 @@
 //! bound `not(ancestor-or-self::ds:Signature)` XPath filter. General XPath node sets,
 //! XSLT, external document references and DTDs are not accepted.
 //!
-//! Recognized XAdES 1.3.2 SignatureTimeStamp proofs cover the actual canonical
-//! source SignatureValue through a sealed reversible Base64 projection; raw
-//! signature bytes, TSA trust/status and time binding are checked, not assumed.
-//! Archive coverage, other XAdES versions and multiple independent signature-time
-//! proofs are explicitly unsupported, not silently promoted to trusted AdES levels.
-//! No new large XML signing/Add/WSSE operation is declared here.
+//! [`prepare_source`] performs source/ID/placement preflight before a host opens
+//! its key; [`sign_source`] hashes actual references and signs bounded metadata.
+//! [`sign_spec_source`] retains the exact bounded legacy XmlSignSpec selector,
+//! placement, layout and output contract through DigestSigner and the SAME
+//! metadata/crypto builder; it never extracts a Core private key.
+//!
+//! XAdES B/T/LT/LTA generation and proof-only extension use shared F03/F04
+//! trust/status/time checks. SignatureTimeStamp covers whole canonical
+//! SignatureValue. EN 319 132-1 V1.2.1 section 5.5.2.2 non-distributed v1.4.1
+//! ArchiveTimeStamp covers actual transformed references (including properties),
+//! SignedInfo/SignatureValue/KeyInfo, every prior unsigned property and other
+//! Objects, in normative order. The supported proof graph is one optional
+//! SignatureTimeStamp followed by multiple ArchiveTimeStamp renewals; every
+//! present supported proof is checked. Multiple independent SignatureTimeStamp
+//! proofs, other archive versions and distributed coverage are explicit
+//! unsupported errors, never a lower-level Valid claim.
+//! Large XML WSSE and actual 10-GiB/1-GiB-RSS acceptance are not claimed here.
 
 mod c14n;
 mod canonical_stream;
@@ -77,11 +89,19 @@ mod index;
 mod parse;
 mod reader;
 mod references;
+mod sign;
 pub use index::{XmlDocument, XmlLimits, XmlNode};
 pub use reader::{XmlAttribute, XmlAttributeSpan, XmlEvent, XmlEventKind, XmlEvents, XmlName};
+pub use references::intake::{SignedXmlInput, SignedXmlReader, capture_signed_input};
 pub use references::{
     XmlReferenceResult, XmlSignerResult, XmlSourceError, XmlVerification, XmlVerificationFacts,
-    XmlVerifyProfile, verify_source,
+    XmlVerifyProfile, verify_source, verify_source_with_clock,
+};
+use sign::{BoundedSigner, ObjectTemplate, Template};
+pub use sign::{
+    PreparedLegacySign, PreparedXmlSign, XmlSignMode, XmlSignProfile, XmlSignSummary,
+    prepare_legacy_source, prepare_source, sign_prepared, sign_prepared_with_clock, sign_source,
+    sign_spec_source,
 };
 pub mod xades;
 mod xpath;
@@ -116,6 +136,8 @@ pub(crate) struct QualifyingObject<'a> {
     pub(crate) signed_properties: &'a str,
     /// Its `Id`.
     pub(crate) signed_properties_id: &'a str,
+    /// New baseline data Reference identity; None preserves old bounded wire.
+    pub(crate) data_reference_id: Option<&'a str>,
 }
 
 /// Bound on the references of a document times its size, the bytes [`verify`] may
@@ -464,6 +486,35 @@ fn sign_with(
     cert: &Certificate,
     qualifying: Option<QualifyingObject<'_>>,
 ) -> Result<Vec<u8>, XmlError> {
+    let mut backend = BoundedSigner::Legacy { key, cert };
+    sign_with_backend(xml, spec, &mut backend, qualifying, None)
+}
+fn sign_with_backend(
+    xml: &[u8],
+    spec: &XmlSignSpec<'_>,
+    backend: &mut BoundedSigner<'_>,
+    qualifying: Option<QualifyingObject<'_>>,
+    scope: Option<&oncl_pki::resource::ResourceScope>,
+) -> Result<Vec<u8>, XmlError> {
+    let plan = bounded_plan(xml, spec, Some(backend), scope, None)?;
+    finish_bounded_plan(xml, spec, backend, qualifying, scope, plan, None)
+}
+struct BoundedPlan<'a> {
+    algorithms: Option<Algorithms<'a>>,
+    digest: Option<Vec<u8>>,
+    point: SplicePoint,
+    uri: String,
+    default_namespace: bool,
+    reference_c14n: C14n,
+    transforms: Vec<Transform>,
+}
+fn bounded_plan<'a>(
+    xml: &[u8],
+    spec: &XmlSignSpec<'a>,
+    backend: Option<&BoundedSigner<'_>>,
+    scope: Option<&oncl_pki::resource::ResourceScope>,
+    canonical: Option<&mut dyn std::io::Write>,
+) -> Result<BoundedPlan<'a>, XmlError> {
     let transforms = spec
         .transforms
         .clone()
@@ -483,9 +534,11 @@ fn sign_with(
     }
     // Only one parse tree at a time: this one is gone before the signature is spliced in.
     let (algorithms, digest, point, uri, default_namespace) = {
-        let doc = parse::parse(xml)?;
+        let doc = parse::parse_admitted(xml, false, scope)?;
         // Kalkan parses, then checks the certificate algorithm, then evaluates the XPaths.
-        let algorithms = Algorithms::of(spec, key, cert)?;
+        let algorithms = backend
+            .map(|backend| backend.algorithms(spec))
+            .transpose()?;
         let ns = (!spec.namespaces.is_empty() || spec.other_prefix_uri.is_some()).then_some(
             xpath::Namespaces {
                 bindings: &spec.namespaces,
@@ -559,20 +612,63 @@ fn sign_with(
         // The new signature is the only node the enveloped transform drops, so the digest
         // is that of the target as it is now; comments are out (a same-document reference).
         let target = tbs.unwrap_or_else(|| doc.root());
-        let (digest, _) = canonicalizer(reference_c14n).hash(target, algorithms.digest)?;
+        let digest = if let Some(algorithms) = &algorithms {
+            Some(
+                canonicalizer(reference_c14n)
+                    .hash(target, algorithms.digest)?
+                    .0
+                    .as_bytes()
+                    .to_vec(),
+            )
+        } else {
+            canonicalizer(reference_c14n).write_to_profile(
+                target,
+                canonical.ok_or_else(|| {
+                    XmlError::Constraint("canonical reference sink missing".into())
+                })?,
+                C14nProfile::KalkanLegacy,
+            )?;
+            None
+        };
         let point = SplicePoint::of(xml, parent)?;
         let default_namespace = parent
             .lookup_namespace_uri(None)
             .is_some_and(|uri| !uri.is_empty());
         drop(doc);
-        (
-            algorithms,
-            digest.as_bytes().to_vec(),
-            point,
-            uri,
-            default_namespace,
-        )
+        (algorithms, digest, point, uri, default_namespace)
     };
+    Ok(BoundedPlan {
+        algorithms,
+        digest,
+        point,
+        uri,
+        default_namespace,
+        reference_c14n,
+        transforms,
+    })
+}
+fn finish_bounded_plan(
+    xml: &[u8],
+    spec: &XmlSignSpec<'_>,
+    backend: &mut BoundedSigner<'_>,
+    qualifying: Option<QualifyingObject<'_>>,
+    scope: Option<&oncl_pki::resource::ResourceScope>,
+    plan: BoundedPlan<'_>,
+    admit: Option<&mut dyn FnMut(u64) -> Result<(), oncl_pki::resource::ProcessingError>>,
+) -> Result<Vec<u8>, XmlError> {
+    let BoundedPlan {
+        algorithms,
+        digest,
+        point,
+        uri,
+        default_namespace,
+        reference_c14n,
+        transforms,
+    } = plan;
+    let algorithms =
+        algorithms.ok_or_else(|| XmlError::Constraint("unresolved signature algorithms".into()))?;
+    let digest =
+        digest.ok_or_else(|| XmlError::Constraint("unresolved reference digest".into()))?;
     let method = spec.signed_info_c14n.unwrap_or(if spec.element.is_some() {
         C14n::Exclusive
     } else {
@@ -591,7 +687,7 @@ fn sign_with(
         uri: &uri,
         transforms: &transform_uris,
         digest,
-        cert: cert_der(cert)?,
+        cert: cert_der(backend.certificate())?,
         id: spec.signature_id,
         object: match (spec.signing_time_object, qualifying) {
             (Some(object), _) => Some(ObjectTemplate::SigningTime {
@@ -605,7 +701,7 @@ fn sign_with(
         separator: if spec.strip_whitespace { "" } else { "\n" },
         line_breaks: spec.base64_line_breaks.unwrap_or(!spec.strip_whitespace),
     };
-    let signed = template.insert(xml, &point, key)?;
+    let signed = template.insert(xml, &point, backend, scope, spec.output, admit)?;
     Ok(output(signed, spec.output))
 }
 
@@ -636,6 +732,13 @@ struct Algorithms<'a> {
 
 impl<'a> Algorithms<'a> {
     fn of(spec: &XmlSignSpec<'a>, key: &PrivateKey, cert: &Certificate) -> Result<Self, XmlError> {
+        Self::of_capabilities(spec, key.alg(), cert)
+    }
+    fn of_capabilities(
+        spec: &XmlSignSpec<'a>,
+        key: oncl_pki::key::KeyAlg,
+        cert: &Certificate,
+    ) -> Result<Self, XmlError> {
         let (signature, signature_uri, paired) = match spec.signature_method {
             None => {
                 let alg = signing_alg(cert)?;
@@ -650,7 +753,7 @@ impl<'a> Algorithms<'a> {
                         "the signature method {uri} is unsupported: SHA-1 RSA signatures are not made"
                     )));
                 }
-                if alg.key_alg() != key.alg() {
+                if alg.key_alg() != key {
                     return Err(XmlError::Constraint(format!(
                         "the signature method {uri} does not fit the key"
                     )));
@@ -673,44 +776,52 @@ impl<'a> Algorithms<'a> {
 
 /// `signed` in the `output` form.
 fn output(signed: Vec<u8>, output: XmlOutput) -> Vec<u8> {
+    if matches!(output, XmlOutput::AsIs) {
+        return signed;
+    }
+    let (declaration, body) = output_parts(&signed, output);
+    let mut out = Vec::with_capacity(declaration.len() + body.len());
+    out.extend_from_slice(declaration);
+    out.extend_from_slice(body);
+    out
+}
+
+/// One normalization rule shared by actual emission and allocation-free sizing.
+fn output_parts(signed: &[u8], output: XmlOutput) -> (&'static [u8], &[u8]) {
     let XmlOutput::Serialize {
         declaration,
         standalone_no,
         trim,
     } = output
     else {
-        return signed;
+        return (&[], signed);
     };
-    let mut body = signed.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&signed);
+    let mut body = signed.strip_prefix(b"\xef\xbb\xbf").unwrap_or(signed);
     if body.starts_with(b"<?xml")
         && let Some(end) = body.windows(2).position(|w| w == b"?>")
     {
         body = &body[end + 2..];
     }
-    // The document's prolog whitespace is not part of a DOM.
     let start = body
         .iter()
         .position(|b| !b.is_ascii_whitespace())
         .unwrap_or(body.len());
     let mut body = &body[start..];
     if trim {
-        // `String.trim()`: every character up to U+0020.
         while let [rest @ .., last] = body
             && *last <= b' '
         {
             body = rest;
         }
     }
-    let mut out = Vec::with_capacity(body.len() + 60);
-    if declaration {
-        out.extend_from_slice(b"<?xml version=\"1.0\" encoding=\"UTF-8\"");
-        if standalone_no {
-            out.extend_from_slice(b" standalone=\"no\"");
-        }
-        out.extend_from_slice(b"?>");
-    }
-    out.extend_from_slice(body);
-    out
+    let prefix = if !declaration {
+        &[][..]
+    } else if standalone_no {
+        b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>".as_slice()
+    } else {
+        b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>".as_slice()
+    };
+    (prefix, body)
 }
 
 /// One signature found by [`verify_each`].
@@ -840,230 +951,6 @@ fn canonicalizer(method: C14n) -> Canonicalizer<'static> {
     }
 }
 
-/// The `ds:Object` of a signature to write.
-enum ObjectTemplate<'t> {
-    /// A signing-time object.
-    SigningTime {
-        object: SigningTimeObject<'t>,
-        /// The signature's parent has a default namespace: `<timestamp>` resets it.
-        reset_default_namespace: bool,
-    },
-    /// XAdES qualifying properties.
-    Qualifying(QualifyingObject<'t>),
-}
-
-impl ObjectTemplate<'_> {
-    /// The `Id`, `Type`, transforms and canonicalization of the second reference, if the
-    /// object has one.
-    fn reference<'s>(
-        &'s self,
-        template: &'s Template<'_>,
-    ) -> Option<(&'s str, Option<&'static str>, Vec<&'s str>, C14n)> {
-        match self {
-            ObjectTemplate::SigningTime { object, .. } => object.target_ref.then(|| {
-                (
-                    object.property_id,
-                    None,
-                    template.transforms.to_vec(),
-                    template.reference_c14n,
-                )
-            }),
-            ObjectTemplate::Qualifying(q) => Some((
-                q.signed_properties_id,
-                Some(SIGNED_PROPERTIES_TYPE),
-                vec![C14n::Exclusive.uri()],
-                C14n::Exclusive,
-            )),
-        }
-    }
-}
-
-/// The signature to write.
-struct Template<'t> {
-    algorithms: Algorithms<'t>,
-    method: C14n,
-    uri: &'t str,
-    transforms: &'t [&'t str],
-    digest: Vec<u8>,
-    cert: Vec<u8>,
-    id: Option<&'t str>,
-    object: Option<ObjectTemplate<'t>>,
-    /// The canonicalization of the references.
-    reference_c14n: C14n,
-    /// Between the elements: a line break, or nothing.
-    separator: &'static str,
-    /// Base64 in lines.
-    line_breaks: bool,
-}
-
-impl Template<'_> {
-    fn base64(&self, bytes: &[u8]) -> String {
-        if self.line_breaks {
-            base64_lines(bytes)
-        } else {
-            STANDARD.encode(bytes)
-        }
-    }
-
-    fn reference(
-        &self,
-        s: &mut String,
-        uri: &str,
-        kind: Option<&str>,
-        transforms: &[&str],
-        digest: &[u8],
-    ) {
-        let n = self.separator;
-        let kind = kind
-            .map(|kind| format!(" Type=\"{}\"", escape_attribute(kind)))
-            .unwrap_or_default();
-        s.push_str(&format!(
-            "<ds:Reference URI=\"{}\"{kind}>{n}<ds:Transforms>{n}",
-            escape_attribute(uri)
-        ));
-        for transform in transforms {
-            s.push_str(&format!("<ds:Transform Algorithm=\"{transform}\"/>{n}"));
-        }
-        s.push_str(&format!(
-            "</ds:Transforms>{n}<ds:DigestMethod Algorithm=\"{}\"/>{n}\
-             <ds:DigestValue>{}</ds:DigestValue>{n}</ds:Reference>{n}",
-            escape_attribute(self.algorithms.digest_uri),
-            self.base64(digest),
-        ));
-    }
-
-    /// `ds:Signature` element; without `value` the `SignatureValue` is empty, without
-    /// `object_digest` the signing-time object's reference has an empty digest.
-    fn render(&self, value: Option<&[u8]>, object_digest: Option<&[u8]>) -> String {
-        let n = self.separator;
-        let id = self
-            .id
-            .map(|id| format!(" Id=\"{}\"", escape_attribute(id)))
-            .unwrap_or_default();
-        let mut s = format!(
-            "<ds:Signature xmlns:ds=\"{DSIG_NS}\"{id}>{n}<ds:SignedInfo>{n}\
-             <ds:CanonicalizationMethod Algorithm=\"{}\"/>{n}\
-             <ds:SignatureMethod Algorithm=\"{}\"/>{n}",
-            self.method.uri(),
-            escape_attribute(self.algorithms.signature_uri),
-        );
-        self.reference(&mut s, self.uri, None, self.transforms, &self.digest);
-        if let Some((id, kind, transforms, _)) =
-            self.object.as_ref().and_then(|o| o.reference(self))
-        {
-            let uri = format!("#{id}");
-            self.reference(
-                &mut s,
-                &uri,
-                kind,
-                &transforms,
-                object_digest.unwrap_or_default(),
-            );
-        }
-        s.push_str(&format!("</ds:SignedInfo>{n}<ds:SignatureValue>"));
-        if let Some(value) = value {
-            // Santuario puts a long value on lines of its own.
-            let text = self.base64(value);
-            if self.line_breaks && text.len() > 76 {
-                s.push_str(&format!("\n{text}\n"));
-            } else {
-                s.push_str(&text);
-            }
-        }
-        let cert = self.base64(&self.cert);
-        let cert = if self.line_breaks {
-            format!("\n{cert}\n")
-        } else {
-            cert
-        };
-        s.push_str(&format!(
-            "</ds:SignatureValue>{n}<ds:KeyInfo>{n}<ds:X509Data>{n}<ds:X509Certificate>{cert}\
-             </ds:X509Certificate>{n}</ds:X509Data>{n}</ds:KeyInfo>{n}"
-        ));
-        match &self.object {
-            Some(ObjectTemplate::SigningTime {
-                object,
-                reset_default_namespace,
-            }) => {
-                let reset = if *reset_default_namespace {
-                    " xmlns=\"\""
-                } else {
-                    ""
-                };
-                s.push_str(&format!(
-                    "<ds:Object>{n}<ds:SignatureProperties>{n}\
-                     <ds:SignatureProperty Id=\"{}\" Target=\"#{}\">{n}\
-                     <timestamp{reset}>{}</timestamp>{n}</ds:SignatureProperty>{n}\
-                     </ds:SignatureProperties>{n}</ds:Object>{n}",
-                    escape_attribute(object.property_id),
-                    escape_attribute(self.id.unwrap_or_default()),
-                    escape_text(object.text),
-                ));
-            }
-            Some(ObjectTemplate::Qualifying(q)) => s.push_str(&format!(
-                "<ds:Object>{n}<xades:QualifyingProperties xmlns:xades=\"{XADES_NS}\" \
-                 Target=\"#{}\">{n}{}{n}</xades:QualifyingProperties>{n}</ds:Object>{n}",
-                escape_attribute(self.id.unwrap_or_default()),
-                q.signed_properties,
-            )),
-            None => {}
-        }
-        s.push_str("</ds:Signature>");
-        s
-    }
-
-    /// The signature spliced into `xml` at `point`, parsed: `f` on its element.
-    fn in_place<T>(
-        &self,
-        xml: &[u8],
-        point: &SplicePoint,
-        object_digest: Option<&[u8]>,
-        f: impl FnOnce(Node<'_, '_>) -> Result<T, XmlError>,
-    ) -> Result<T, XmlError> {
-        let unsigned = point.splice(xml, &self.render(None, object_digest));
-        let doc = parse::parse_signed(&unsigned)?;
-        let signature = doc
-            .descendants()
-            .find(|n| n.is_element() && n.range().start == point.signature_offset())
-            .expect("the inserted signature");
-        f(signature)
-    }
-
-    /// Splices the signature into the parent at `point` as its last child, then fills in the
-    /// signing-time object's digest over the object as canonicalized in place, and the value
-    /// over the SignedInfo as canonicalized in place.
-    fn insert(
-        &self,
-        xml: &[u8],
-        point: &SplicePoint,
-        key: &PrivateKey,
-    ) -> Result<Vec<u8>, XmlError> {
-        let object_digest = match self.object.as_ref().and_then(|o| o.reference(self)) {
-            Some((id, _, _, c14n)) => Some(self.in_place(xml, point, None, |signature| {
-                let target = signature
-                    .descendants()
-                    .find(|n| n.is_element() && n.attribute("Id") == Some(id))
-                    .expect("the object's signed element");
-                // The enveloped-signature transform does not drop it: a document-order
-                // filter of a subtree inside the signature never meets the signature.
-                let (digest, _) = canonicalizer(c14n).hash(target, self.algorithms.digest)?;
-                Ok(digest.as_bytes().to_vec())
-            })?),
-            None => None,
-        };
-        let tbs = self.in_place(xml, point, object_digest.as_deref(), |signature| {
-            let signed_info = signature.first_element_child().expect("SignedInfo");
-            Ok(canonicalizer(self.method)
-                .hash(signed_info, self.algorithms.signature.hash_alg())?
-                .0)
-        })?;
-        let value = key
-            .sign_digest(self.algorithms.signature, &tbs)
-            .map_err(XmlError::Key)?;
-        Ok(point.splice(xml, &self.render(Some(&value), object_digest.as_deref())))
-    }
-}
-
 /// Where a signature goes into its parent: before the parent's end tag, or into its
 /// empty-element tag, which is opened (`<p/>` becomes `<p>…</p>`).
 struct SplicePoint {
@@ -1093,6 +980,20 @@ impl SplicePoint {
     /// Offset of the signature in the spliced document.
     fn signature_offset(&self) -> usize {
         self.at + usize::from(self.close.is_some())
+    }
+    fn output_len(
+        &self,
+        xml: &[u8],
+        signature_bytes: u64,
+        output: XmlOutput,
+    ) -> Result<u64, XmlError> {
+        let (prefix, body) = output_parts(xml, output);
+        let closing = self.close.as_ref().map_or(0, |name| name.len() as u64 + 2);
+        (prefix.len() as u64)
+            .checked_add(body.len() as u64)
+            .and_then(|n| n.checked_add(signature_bytes))
+            .and_then(|n| n.checked_add(closing))
+            .ok_or_else(|| XmlError::Constraint("serialized XML size overflow".into()))
     }
 
     /// `xml` with `signature` spliced in; the other input bytes are kept.

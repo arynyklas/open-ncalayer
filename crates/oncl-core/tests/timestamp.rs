@@ -724,3 +724,406 @@ fn timestamp_protocol_mismatches_remain_invalid_input_with_distinct_causes() {
         assert!(std::error::Error::source(&error).is_some());
     }
 }
+
+struct ReplyClock {
+    fixture: Arc<SignedFixtures>,
+    now: Arc<std::sync::Mutex<time::OffsetDateTime>>,
+    after_reply: time::OffsetDateTime,
+    wrong_imprint: bool,
+}
+impl oncl_pki::http::HttpTransport for ReplyClock {
+    fn send(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        let mut body;
+        let actual = if self.wrong_imprint && request.url.ends_with("/tsa") {
+            body = request.body.to_vec();
+            let digest = HashAlg::Sha256.digest(DATA);
+            let offset = body
+                .windows(digest.len())
+                .position(|bytes| bytes == digest)
+                .unwrap();
+            body[offset] ^= 1;
+            oncl_pki::http::HttpRequest {
+                body: &body,
+                ..*request
+            }
+        } else {
+            *request
+        };
+        let reply = oncl_pki::http::HttpTransport::send(self.fixture.as_ref(), &actual)?;
+        if request.url.ends_with("/tsa") {
+            *self.now.lock().unwrap() = self.after_reply;
+        }
+        Ok(reply)
+    }
+}
+fn clocked_engine(
+    fixture: &Arc<SignedFixtures>,
+    trusted: bool,
+    http: Arc<dyn oncl_pki::http::HttpTransport>,
+    clock: Arc<dyn Fn() -> time::OffsetDateTime + Send + Sync>,
+) -> Engine {
+    let services = oncl_core::ValidationServices::new(
+        oncl_pki::pkix::CaSet::new(if trusted {
+            vec![fixture.root.clone()]
+        } else {
+            vec![]
+        }),
+        vec![],
+        http,
+        oncl_pki::validation::NetworkPolicy::only_endpoints([&fixture.origin]).unwrap(),
+        clock,
+    );
+    Engine::new(EngineServices::hash_only(ResourceLimits::default()).with_validation(services))
+        .unwrap()
+}
+struct ClockAfterRead<'a> {
+    input: &'a [u8],
+    done: Arc<AtomicBool>,
+    now: Arc<std::sync::Mutex<time::OffsetDateTime>>,
+    after_read: time::OffsetDateTime,
+}
+impl std::io::Read for ClockAfterRead<'_> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let count = std::io::Read::read(&mut self.input, output)?;
+        if count == 0 {
+            *self.now.lock().unwrap() = self.after_read;
+            self.done.store(true, Ordering::SeqCst);
+        }
+        Ok(count)
+    }
+}
+#[test]
+fn acquisition_samples_host_after_actual_hash_and_signed_reply() {
+    let issued = NOW + time::Duration::SECOND;
+    let checked = NOW + time::Duration::seconds(2);
+    let f = SignedFixtures::new("http://127.0.0.1:19015", issued, Status::Good);
+    let now = Arc::new(std::sync::Mutex::new(NOW - time::Duration::MINUTE));
+    let done = Arc::new(AtomicBool::new(false));
+    let http = Arc::new(ReplyClock {
+        fixture: f.clone(),
+        now: now.clone(),
+        after_reply: checked,
+        wrong_imprint: false,
+    });
+    let clock = {
+        let now = now.clone();
+        let done = done.clone();
+        Arc::new(move || {
+            assert!(
+                done.load(Ordering::SeqCst),
+                "host time must follow the whole document hash"
+            );
+            *now.lock().unwrap()
+        })
+    };
+    let engine = clocked_engine(&f, true, http, clock);
+    let mut input = ClockAfterRead {
+        input: DATA,
+        done,
+        now,
+        after_read: NOW,
+    };
+    let mut ctx = begin(&engine, Action::Stamp);
+    let mut output = Vec::new();
+    let mut spec = f.spec();
+    spec.nonce = oncl_pki::http::NonceSpec::Random(16);
+    let report = engine
+        .stamp(
+            &StampRequest::new(spec),
+            Source::sequential(&mut input, None),
+            &mut output,
+            &mut ctx,
+        )
+        .unwrap();
+    assert_eq!(report.verdict(), Verdict::Valid);
+    assert_eq!(report.facts().gen_time(), issued);
+    assert_eq!(report.facts().checked_at(), checked);
+    assert_eq!(report.facts().imprint(), DocumentImprint::Matched);
+    assert_eq!(report.facts().token(), output);
+    assert_eq!(f.tsa.requests().len(), 1);
+}
+#[test]
+fn post_reply_host_clock_does_not_relax_timestamp_rejection_checks() {
+    use oncl_pki::tsp::{MockTamper, TspError};
+    let checked = NOW + time::Duration::seconds(2);
+    for (issued, started, post, status, trusted, tamper, expected) in [
+        (
+            checked + time::Duration::SECOND,
+            NOW,
+            checked,
+            Status::Good,
+            true,
+            MockTamper::None,
+            "future",
+        ),
+        (
+            NOW,
+            checked,
+            NOW,
+            Status::Good,
+            true,
+            MockTamper::None,
+            "backwards",
+        ),
+        (
+            NOW + time::Duration::SECOND,
+            NOW,
+            checked,
+            Status::Stale,
+            true,
+            MockTamper::None,
+            "validation",
+        ),
+        (
+            NOW + time::Duration::SECOND,
+            NOW,
+            checked,
+            Status::Good,
+            false,
+            MockTamper::None,
+            "validation",
+        ),
+        (
+            NOW + time::Duration::SECOND,
+            NOW,
+            checked,
+            Status::Good,
+            true,
+            MockTamper::Nonce,
+            "nonce",
+        ),
+        (
+            NOW + time::Duration::SECOND,
+            NOW,
+            checked,
+            Status::Good,
+            true,
+            MockTamper::None,
+            "imprint",
+        ),
+    ] {
+        let f =
+            SignedFixtures::variant("http://127.0.0.1:19016", issued, status, true, None, tamper);
+        let now = Arc::new(std::sync::Mutex::new(started));
+        let http = Arc::new(ReplyClock {
+            fixture: f.clone(),
+            now: now.clone(),
+            after_reply: post,
+            wrong_imprint: expected == "imprint",
+        });
+        let clock = Arc::new(move || *now.lock().unwrap());
+        let engine = clocked_engine(&f, trusted, http, clock);
+        let mut ctx = begin(&engine, Action::Stamp);
+        let mut input = DATA;
+        let mut output = Vec::new();
+        let error = engine
+            .stamp(
+                &StampRequest::new(f.spec()),
+                Source::sequential(&mut input, None),
+                &mut output,
+                &mut ctx,
+            )
+            .unwrap_err();
+        match expected {
+            "future" | "backwards" => assert!(matches!(
+                error,
+                oncl_core::OperationError::Timestamp(TspError::ClockSkew)
+            )),
+            "nonce" => assert!(matches!(
+                error,
+                oncl_core::OperationError::Timestamp(TspError::NonceMismatch)
+            )),
+            "imprint" => assert!(matches!(
+                error,
+                oncl_core::OperationError::Timestamp(TspError::ImprintMismatch)
+            )),
+            _ => assert!(matches!(
+                error,
+                oncl_core::OperationError::ValidationRequired
+            )),
+        }
+        assert!(output.is_empty());
+        assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    }
+}
+#[test]
+fn verification_hashes_actual_document_before_current_host_validation() {
+    let issued = NOW + time::Duration::SECOND;
+    let checked = NOW + time::Duration::seconds(2);
+    let f = SignedFixtures::new("http://127.0.0.1:19017", issued, Status::Good);
+    let encoded = token(&f);
+    let now = Arc::new(std::sync::Mutex::new(NOW));
+    let done = Arc::new(AtomicBool::new(false));
+    let late_samples = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let clock = {
+        let now = now.clone();
+        let done = done.clone();
+        let late_samples = late_samples.clone();
+        Arc::new(move || {
+            if done.load(Ordering::SeqCst) {
+                late_samples.fetch_add(1, Ordering::SeqCst);
+            }
+            *now.lock().unwrap()
+        })
+    };
+    let engine = clocked_engine(&f, true, f.clone(), clock);
+    let mut input = ClockAfterRead {
+        input: DATA,
+        done,
+        now,
+        after_read: checked,
+    };
+    let mut ctx = begin(&engine, Action::VerifyStamp);
+    let mut encoded = encoded.as_slice();
+    let report = engine
+        .verify_stamp(
+            &StampVerifyRequest::new(),
+            Source::sequential(&mut encoded, None),
+            Some(Source::sequential(&mut input, None)),
+            &mut ctx,
+        )
+        .unwrap();
+    assert_eq!(report.verdict(), Verdict::Valid);
+    assert_eq!(report.facts().gen_time(), issued);
+    assert_eq!(report.facts().checked_at(), checked);
+    assert_eq!(report.facts().imprint(), DocumentImprint::Matched);
+    assert_eq!(late_samples.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        report.bytes_in(),
+        (report.facts().token().len() + DATA.len()) as u64
+    );
+}
+
+#[test]
+fn final_document_hash_time_does_not_reuse_pre_hash_tsa_status_freshness() {
+    let f = SignedFixtures::new("http://127.0.0.1:19018", NOW, Status::Good);
+    let encoded = token(&f);
+    let checked = NOW + time::Duration::hours(2);
+    let now = Arc::new(std::sync::Mutex::new(NOW));
+    let clock = {
+        let now = now.clone();
+        Arc::new(move || *now.lock().unwrap())
+    };
+    let engine = clocked_engine(&f, true, f.clone(), clock);
+    let mut input = ClockAfterRead {
+        input: DATA,
+        done: Arc::new(AtomicBool::new(false)),
+        now,
+        after_read: checked,
+    };
+    let mut ctx = begin(&engine, Action::VerifyStamp);
+    let mut encoded = encoded.as_slice();
+    let report = engine
+        .verify_stamp(
+            &StampVerifyRequest::new(),
+            Source::sequential(&mut encoded, None),
+            Some(Source::sequential(&mut input, None)),
+            &mut ctx,
+        )
+        .unwrap();
+    assert_eq!(report.verdict(), Verdict::Indeterminate);
+    assert_eq!(report.facts().revocation(), CheckStatus::Unavailable);
+    assert_eq!(report.facts().gen_time(), NOW);
+    assert_eq!(report.facts().checked_at(), checked);
+    assert_eq!(report.facts().imprint(), DocumentImprint::Matched);
+}
+#[test]
+fn data_read_failure_precedes_timestamp_status_network_and_preserves_io_cause() {
+    struct FailedData;
+    impl std::io::Read for FailedData {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "actual document read",
+            ))
+        }
+    }
+    let f = SignedFixtures::new("http://127.0.0.1:19019", NOW, Status::Good);
+    let encoded = token(&f);
+    let requests_before = f.requests.load(Ordering::SeqCst);
+    let engine = engine(&f, true);
+    let mut ctx = begin(&engine, Action::VerifyStamp);
+    let mut encoded = encoded.as_slice();
+    let error = engine
+        .verify_stamp(
+            &StampVerifyRequest::new(),
+            Source::sequential(&mut encoded, None),
+            Some(Source::sequential(&mut FailedData, None)),
+            &mut ctx,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        &error,
+        oncl_core::OperationError::Processing(ProcessingError::Io(cause))
+            if cause.kind() == std::io::ErrorKind::BrokenPipe
+    ));
+    assert_eq!(error.code(), ErrorCode::Io);
+    assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    assert_eq!(f.requests.load(Ordering::SeqCst), requests_before);
+}
+#[test]
+fn static_document_acquisition_retains_explicit_as_of_semantics() {
+    let f = SignedFixtures::new("http://127.0.0.1:19020", NOW, Status::Good);
+    let mut hash = HashState::new(HashAlg::Sha256);
+    hash.update(DATA);
+    let anchors = oncl_pki::pkix::CaSet::new(vec![f.root.clone()]);
+    let checked = NOW + time::Duration::seconds(3);
+    let validation = oncl_pki::validation::ValidationContext {
+        policy: oncl_pki::validation::ValidationPolicy::StrictOnline,
+        now: checked,
+        anchors: &anchors,
+        intermediates: &[],
+        http: f.as_ref(),
+    };
+    let limits = ResourceLimits::default();
+    let scope = Arc::new(SharedBudget::new(limits.clone()).unwrap())
+        .begin(limits, Arc::new(Control::default()))
+        .unwrap();
+    let report =
+        oncl_pki::tsp::acquire_document_timestamp(&f.spec(), &hash.finish(), &validation, &scope)
+            .unwrap();
+    assert_eq!(report.verdict(), Verdict::Valid);
+    assert_eq!(report.gen_time(), NOW);
+    assert_eq!(report.checked_at(), checked);
+    assert_eq!(report.imprint(), DocumentImprint::Matched);
+}
+
+#[test]
+fn backwards_final_host_clock_cannot_validate_an_otherwise_historical_token() {
+    let f = SignedFixtures::new(
+        "http://127.0.0.1:19021",
+        NOW - time::Duration::MINUTE,
+        Status::Good,
+    );
+    let encoded = token(&f);
+    let now = Arc::new(std::sync::Mutex::new(NOW));
+    let clock = {
+        let now = now.clone();
+        Arc::new(move || *now.lock().unwrap())
+    };
+    let engine = clocked_engine(&f, true, f.clone(), clock);
+    let mut input = ClockAfterRead {
+        input: DATA,
+        done: Arc::new(AtomicBool::new(false)),
+        now,
+        after_read: NOW - time::Duration::SECOND,
+    };
+    let mut ctx = begin(&engine, Action::VerifyStamp);
+    let mut encoded = encoded.as_slice();
+    let error = engine
+        .verify_stamp(
+            &StampVerifyRequest::new(),
+            Source::sequential(&mut encoded, None),
+            Some(Source::sequential(&mut input, None)),
+            &mut ctx,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        oncl_core::OperationError::Timestamp(oncl_pki::tsp::TspError::ClockSkew)
+    ));
+    assert_eq!(error.applied_state(), AppliedState::NotApplied);
+}

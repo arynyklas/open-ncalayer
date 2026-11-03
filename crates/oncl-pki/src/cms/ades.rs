@@ -99,6 +99,16 @@ pub struct AdesServices<'a> {
     pub limits: EvidenceLimits,
     pub tsa: Option<&'a TsaSpec>,
     pub material: ValidationMaterial<'a>,
+    /// Trusted host service; None preserves explicit-as-of validation.
+    pub host_clock: Option<&'a (dyn Fn() -> time::OffsetDateTime + Send + Sync)>,
+}
+impl AdesServices<'_> {
+    fn validation_context(&self) -> ValidationContext<'_> {
+        ValidationContext {
+            now: self.host_clock.map_or(self.validation.now, |clock| clock()),
+            ..*self.validation
+        }
+    }
 }
 /// A level is exposed only after all signers' required proofs actually validate.
 /// All owning reports and their original admissions remain inseparable.
@@ -941,6 +951,8 @@ fn verify_frozen_impl(
     let normalized_infos = data.signer_infos.tlvs()?;
     let mut reports = Vec::with_capacity(signer_bytes.len());
     let mut minimum = AdesLevel::Lta;
+    // Data/source digests and issuance precede one shared final policy instant.
+    let mut final_context = services.validation_context();
     for (index, encoded) in signer_bytes.iter().enumerate() {
         scope.checkpoint()?;
         let raw = RawSigner::new(encoded)?;
@@ -1012,12 +1024,10 @@ fn verify_frozen_impl(
         minimum = minimum.min(level);
         let signature_coverage = [CoveragePart::Signature];
         if prepared_evidence.is_none() {
-            *prepared_evidence = Some(prepare_evidence(
-                &evidence,
-                bundle,
-                services.validation,
-                scope,
-            )?);
+            *prepared_evidence = Some(prepare_evidence(&evidence, bundle, &final_context, scope)?);
+        }
+        if let Some(pdf) = pdf {
+            final_context = pdf.validation_context(services)?;
         }
         if required_certificates.iter().any(|id| {
             !prepared_evidence
@@ -1241,7 +1251,7 @@ fn verify_frozen_impl(
                 bundle,
                 &proofs,
                 level,
-                services.validation,
+                &final_context,
                 services.network,
                 scope,
                 (!archives.is_empty()).then_some(selections.as_slice()),
@@ -1270,7 +1280,7 @@ fn verify_frozen_impl(
                     } else {
                         AdesLevel::T
                     },
-                    services.validation,
+                    &final_context,
                     services.network,
                     scope,
                     None,
@@ -1338,10 +1348,23 @@ pub(crate) fn request_imprint(
     let memory = scope.reserve_memory(crate::http::MAX_RESPONSE_LEN * 64)?;
     let metadata = scope.reserve_metadata(crate::http::MAX_RESPONSE_LEN * 16)?;
     let http = DeadlineTransport::new(services.validation.http, services.network, scope);
-    let result = tsp::request_at(spec, imprint.as_bytes(), &http, services.validation.now);
+    let result = if let Some(clock) = services.host_clock {
+        crate::tsp::request_with_clock_scoped(spec, imprint.as_bytes(), &http, clock).and_then(
+            |(reply, checked_at)| {
+                if reply.reply.tst.gen_time > checked_at {
+                    Err(crate::tsp::TspError::ClockSkew)
+                } else {
+                    Ok(reply)
+                }
+            },
+        )
+    } else {
+        crate::tsp::request_at_scoped(spec, imprint.as_bytes(), &http, services.validation.now)
+    };
     http.finish()?;
+    let reply = result?;
     Ok(ScopedToken {
-        bytes: result?.token,
+        bytes: reply.reply.token.clone(),
         _memory: memory,
         _metadata: metadata,
     })

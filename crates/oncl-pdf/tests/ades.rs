@@ -115,6 +115,7 @@ impl Fixture {
         let crls = [self.crl.as_slice()];
         let services = AdesServices {
             validation: &validation,
+            host_clock: None,
             network: &network,
             temporary: &store,
             limits: EvidenceLimits {
@@ -227,6 +228,7 @@ impl Fixture {
         };
         let services = AdesServices {
             validation: &validation,
+            host_clock: None,
             network: &network,
             temporary: &store,
             limits: EvidenceLimits {
@@ -554,6 +556,7 @@ fn multisigner_augmentation_preserves_existing_vri_entries() {
         let tsa = TsaSpec::from(profile);
         let configured = AdesServices {
             validation: services.validation,
+            host_clock: services.host_clock,
             network: services.network,
             temporary: services.temporary,
             limits: services.limits,
@@ -628,6 +631,7 @@ fn with_tsa<T>(
     tsa.check_skew = None;
     let services = AdesServices {
         validation: &validation,
+        host_clock: None,
         network: &network,
         temporary: &store,
         limits: EvidenceLimits {
@@ -1243,6 +1247,7 @@ fn multisigner_common_dss_fits_one_shared_allocation_work_admission() {
         with_tsa(&f, NOW, NOW, |services| {
             let configured = AdesServices {
                 validation: services.validation,
+                host_clock: services.host_clock,
                 network: services.network,
                 temporary: services.temporary,
                 limits: services.limits,
@@ -1381,5 +1386,192 @@ fn yielded_batch_report_retains_original_admission_after_iterator_drop() {
         ));
         drop(report);
         assert!(budget.begin(limits, Arc::new(Control)).is_ok());
+    });
+}
+
+struct ReplyHostClock {
+    tsa: MockTsa,
+    now: Arc<std::sync::Mutex<OffsetDateTime>>,
+    post_reply: OffsetDateTime,
+}
+impl oncl_pki::http::HttpTransport for ReplyHostClock {
+    fn send(
+        &self,
+        request: &oncl_pki::http::HttpRequest<'_>,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        let reply = oncl_pki::http::HttpTransport::send(&self.tsa, request)?;
+        *self.now.lock().unwrap() = self.post_reply;
+        Ok(reply)
+    }
+}
+#[test]
+fn document_timestamp_uses_post_reply_host_time_without_future_or_backwards_grace() {
+    let f = Fixture::new();
+    let (b, _) = f.run(None, AdesLevel::B);
+    let checked = NOW + time::Duration::seconds(2);
+    for (started, issued, post_reply, valid) in [
+        (NOW, NOW + time::Duration::SECOND, checked, true),
+        (NOW, checked + time::Duration::SECOND, checked, false),
+        (checked, NOW, NOW, false),
+    ] {
+        f.context(NOW, &f.crl, |base| {
+            let now = Arc::new(std::sync::Mutex::new(started));
+            let clock = || *now.lock().unwrap();
+            let http = ReplyHostClock {
+                tsa: MockTsa::new(f.tsa.clone()).with_gen_time(issued),
+                now: now.clone(),
+                post_reply,
+            };
+            let validation = ValidationContext {
+                http: &http,
+                ..*base.validation
+            };
+            let mut profile = TsaProfile::kalkan_default();
+            profile.url = URL.into();
+            profile.method = TsaMethod::Post;
+            let mut tsa = TsaSpec::from(profile);
+            tsa.check_skew = None;
+            let services = AdesServices {
+                validation: &validation,
+                host_clock: Some(&clock),
+                network: base.network,
+                temporary: base.temporary,
+                limits: base.limits,
+                tsa: Some(&tsa),
+                material: ValidationMaterial {
+                    certificates: base.material.certificates,
+                    ocsp: base.material.ocsp,
+                    crls: base.material.crls,
+                },
+            };
+            let mut s = scope();
+            let mut output = services.temporary.stage(&mut s).unwrap();
+            let result = ades::extend(
+                AdesLevel::T,
+                Source::sequential(&mut Cursor::new(&b), None),
+                &PdfLimits::default(),
+                &services,
+                &[SigAlg::RsaSha256],
+                &mut output,
+                &s,
+            );
+            if valid {
+                let report = result.unwrap();
+                assert_eq!(report.verdict, Verdict::Valid);
+                let signer = &report.signatures()[0].validation;
+                assert_eq!(signer.checked_at, checked);
+                assert_eq!(signer.signers[0].proof_time.as_ref().unwrap().at(), issued);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(oncl_pdf::PdfError::Ades(
+                        oncl_pki::cms::ades::AdesError::Timestamp(
+                            oncl_pki::tsp::TspError::ClockSkew
+                        )
+                    ))
+                ));
+                assert!(output.copy_to(&mut Vec::new()).is_err());
+            }
+        });
+    }
+}
+#[test]
+fn every_source_cms_uses_one_fresh_final_host_instant() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut f = Fixture::new();
+    let (first, _) = f.run(None, AdesLevel::B);
+    let mut spec = TestCertSpec::from_cert(&f.doc.cert);
+    spec.serial = vec![0x63, 0x17, 99];
+    f.doc.cert = issue_cert(&f.root, spec);
+    let second = f.context(NOW, &f.crl, |services| {
+        let mut s = scope();
+        let mut output = services.temporary.stage(&mut s).unwrap();
+        ades::sign(
+            AdesLevel::B,
+            Source::sequential(&mut Cursor::new(&first), None),
+            &PdfSignProfile::default(),
+            &mut f.doc.clone(),
+            services,
+            &mut output,
+            &s,
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        output.copy_to(&mut bytes).unwrap();
+        bytes
+    });
+    f.context(NOW, &f.crl, |base| {
+        let samples = AtomicUsize::new(0);
+        let clock = || {
+            let sample = samples.fetch_add(1, Ordering::SeqCst) + 1;
+            NOW + time::Duration::seconds(sample as i64)
+        };
+        let services = AdesServices {
+            validation: base.validation,
+            host_clock: Some(&clock),
+            network: base.network,
+            temporary: base.temporary,
+            limits: base.limits,
+            tsa: base.tsa,
+            material: ValidationMaterial {
+                certificates: base.material.certificates,
+                ocsp: base.material.ocsp,
+                crls: base.material.crls,
+            },
+        };
+        let report = ades::verify(
+            AdesLevel::B,
+            Source::sequential(&mut Cursor::new(&second), None),
+            &PdfLimits::default(),
+            &services,
+            &[SigAlg::RsaSha256],
+            &mut scope(),
+        )
+        .unwrap();
+        assert_eq!(report.verdict, Verdict::Valid);
+        assert_eq!(report.signatures().len(), 2);
+        assert_eq!(samples.load(Ordering::SeqCst), 1);
+        for signature in report.signatures() {
+            assert_eq!(
+                signature.validation.checked_at,
+                NOW + time::Duration::SECOND
+            );
+        }
+    });
+}
+
+#[test]
+fn final_pades_host_clock_must_not_move_backwards_from_initial_host_context() {
+    let f = Fixture::new();
+    let (bytes, _) = f.run(None, AdesLevel::B);
+    f.context(NOW, &f.crl, |base| {
+        let clock = || NOW - time::Duration::SECOND;
+        let services = AdesServices {
+            validation: base.validation,
+            host_clock: Some(&clock),
+            network: base.network,
+            temporary: base.temporary,
+            limits: base.limits,
+            tsa: base.tsa,
+            material: ValidationMaterial {
+                certificates: base.material.certificates,
+                ocsp: base.material.ocsp,
+                crls: base.material.crls,
+            },
+        };
+        let result = ades::verify(
+            AdesLevel::B,
+            Source::sequential(&mut Cursor::new(&bytes), None),
+            &PdfLimits::default(),
+            &services,
+            &[SigAlg::RsaSha256],
+            &mut scope(),
+        );
+        assert!(matches!(
+            result,
+            Err(oncl_pdf::PdfError::Ades(
+                oncl_pki::cms::ades::AdesError::Timestamp(oncl_pki::tsp::TspError::ClockSkew)
+            ))
+        ));
     });
 }

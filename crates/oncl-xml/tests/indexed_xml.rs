@@ -769,3 +769,43 @@ fn foreign_snapshot_rejected_before_source_io() {
     reader.read_exact(&mut bytes).unwrap();
     assert_eq!(&bytes, b"<r/>");
 }
+
+#[test]
+fn index_metadata_is_live_ram_once_plus_the_actual_capture_buffer() {
+    let xml_limits = XmlLimits {
+        max_depth: 1,
+        max_markup_bytes: 32,
+        max_namespace_bytes: 64,
+        ..Default::default()
+    };
+    let index_bound = 12 * 1024 * 1024 + 32 * 3 + 64 + 8192;
+    let capture_header = (std::mem::size_of::<oncl_pki::io::StagedArtifact>() + 512) as u64;
+    for short in [false, true] {
+        let limits = ResourceLimits {
+            memory_bytes: index_bound + oncl_pki::resource::IO_CHUNK_BYTES as u64 + capture_header
+                - u64::from(short),
+            ..Default::default()
+        };
+        let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+        let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+        let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+        let result = XmlDocument::index(
+            Source::sequential(&mut Cursor::new(b"<r/>"), None),
+            &xml_limits,
+            &store,
+            &mut scope,
+        );
+        if short {
+            assert!(matches!(
+                result,
+                Err(ProcessingError::MemoryLimit | ProcessingError::MetadataLimit)
+            ));
+        } else {
+            assert!(
+                result.is_ok(),
+                "one index metadata reservation and actual capture buffer must fit: {:?}",
+                result.err()
+            );
+        }
+    }
+}

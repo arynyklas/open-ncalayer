@@ -39,6 +39,9 @@ pub(crate) fn permission(imports: &[Import], keys: &[KeySelector]) -> PluginPerm
         .unwrap()
 }
 pub(crate) fn wasm(calls: &[(Import, Vec<u8>)]) -> Vec<u8> {
+    wasm_with_tail(calls, "")
+}
+pub(crate) fn wasm_with_tail(calls: &[(Import, Vec<u8>)], tail: &str) -> Vec<u8> {
     let mut imports = String::new();
     let mut data = String::new();
     let mut body = String::new();
@@ -61,9 +64,10 @@ pub(crate) fn wasm(calls: &[(Import, Vec<u8>)]) -> Vec<u8> {
         ));
         at += args.len();
     }
+    let heap = at.div_ceil(65536).max(1) * 65536;
     wat::parse_str(format!(r#"(module {imports}
       (memory (export "memory") 16 16)
-      (global $heap (mut i32) (i32.const 65536))
+      (global $heap (mut i32) (i32.const {heap}))
       (func (export "oncl_abi_version") (result i32) (i32.const 1))
       (func (export "oncl_alloc") (param $n i32) (result i32) (local $p i32)
         (local.set $p (global.get $heap))
@@ -72,7 +76,7 @@ pub(crate) fn wasm(calls: &[(Import, Vec<u8>)]) -> Vec<u8> {
       {data} (data (i32.const 512) "0123456789abcdef")
       (func (export "oncl_process") (param i32 i32) (result i64)
         (local $r i64) (local $src i32) (local $len i32) (local $i i32) (local $b i32) (local $out i32) (local $hex i32)
-        {body}
+        {body} {tail}
         (local.set $src (i32.wrap_i64 (i64.shr_u (local.get $r) (i64.const 32))))
         (local.set $len (i32.wrap_i64 (local.get $r)))
         (local.set $out (global.get $heap))
@@ -116,6 +120,33 @@ pub(crate) fn engine_limited(
     limits: ResourceLimits,
     configure: impl FnOnce(EngineServices) -> EngineServices,
 ) -> (Engine, Arc<crypto::Guard>, Arc<crypto::Provider>) {
+    engine_wasm(&wasm(calls), host_permission, limits, configure)
+}
+pub(crate) fn engine_wasm(
+    wasm: &[u8],
+    host_permission: PluginPermission,
+    limits: ResourceLimits,
+    configure: impl FnOnce(EngineServices) -> EngineServices,
+) -> (Engine, Arc<crypto::Guard>, Arc<crypto::Provider>) {
+    engine_profile(
+        wasm,
+        host_permission,
+        limits,
+        InstanceLimits {
+            max_memory: 1 << 20,
+            max_transfer: 1 << 18,
+            ..InstanceLimits::default()
+        },
+        configure,
+    )
+}
+pub(crate) fn engine_profile(
+    wasm: &[u8],
+    host_permission: PluginPermission,
+    limits: ResourceLimits,
+    module_limits: InstanceLimits,
+    configure: impl FnOnce(EngineServices) -> EngineServices,
+) -> (Engine, Arc<crypto::Guard>, Arc<crypto::Provider>) {
     let manifest = Manifest::from_toml(&format!(
         r#"id = "{ID}"
 name.ru = "L01 synthetic"
@@ -137,16 +168,7 @@ origins = ["https://trusted.example"]
     .unwrap();
     let mut plugins = PluginRegistry::new();
     plugins
-        .install(
-            manifest,
-            &wasm(calls),
-            InstanceLimits {
-                max_memory: 1 << 20,
-                max_transfer: 1 << 18,
-                ..InstanceLimits::default()
-            },
-            vec![host_permission],
-        )
+        .install(manifest, wasm, module_limits, vec![host_permission])
         .unwrap();
     let guard = Arc::new(crypto::Guard::default());
     let provider = Arc::new(crypto::Provider::default());

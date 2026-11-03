@@ -69,12 +69,24 @@ pub(crate) fn validation() -> ValidationServices {
 pub(crate) fn validation_using(
     wrap: impl FnOnce(Arc<dyn oncl_pki::http::HttpTransport>) -> Arc<dyn oncl_pki::http::HttpTransport>,
 ) -> ValidationServices {
+    validation_network(
+        wrap,
+        oncl_pki::validation::NetworkPolicy::only_endpoints([
+            "http://ocsp.synthetic.test",
+            "http://crl.synthetic.test",
+        ])
+        .unwrap(),
+    )
+}
+pub(crate) fn validation_network(
+    wrap: impl FnOnce(Arc<dyn oncl_pki::http::HttpTransport>) -> Arc<dyn oncl_pki::http::HttpTransport>,
+    network: oncl_pki::validation::NetworkPolicy,
+) -> ValidationServices {
     use oncl_pki::{
         crl::MockCrl,
         http::{HttpTransport, RouteTransport},
         ocsp::MockOcsp,
         pkix::CaSet,
-        validation::NetworkPolicy,
     };
     let ocsp: Arc<dyn HttpTransport> = Arc::new(MockOcsp::new(raw("ocsp-gost2015")).with_now(NOW));
     let root: Arc<dyn HttpTransport> = Arc::new(
@@ -95,8 +107,7 @@ pub(crate) fn validation_using(
             ("http://crl.synthetic.test/root-gost2015.crl".into(), root),
             ("http://crl.synthetic.test/inter-gost2015.crl".into(), inter),
         ]))),
-        NetworkPolicy::only_endpoints(["http://ocsp.synthetic.test", "http://crl.synthetic.test"])
-            .unwrap(),
+        network,
         Arc::new(|| NOW),
     )
 }

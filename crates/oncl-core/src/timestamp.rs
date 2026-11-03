@@ -120,7 +120,7 @@ impl Engine {
         let now = (services.clock)();
         let scoped_http = ctx.http(services.http.as_ref());
         let transport = DeadlineTransport::new(&scoped_http, &services.network, &ctx.scope);
-        let result = oncl_pki::tsp::acquire_document_timestamp(
+        let result = oncl_pki::tsp::acquire_document_timestamp_with_clock(
             &request.spec,
             &digest,
             &ValidationContext {
@@ -130,6 +130,7 @@ impl Engine {
                 intermediates: &services.intermediates,
                 http: &transport,
             },
+            services.clock.as_ref(),
             &ctx.scope,
         );
         transport.finish()?;
@@ -166,8 +167,10 @@ impl Engine {
         let token = MetadataInput::read(token, &mut ctx.scope, oncl_pki::http::MAX_RESPONSE_LEN)?;
         let scoped_http = ctx.http(services.http.as_ref());
         let transport = DeadlineTransport::new(&scoped_http, &services.network, &ctx.scope);
-        let result = oncl_pki::tsp::validate_document_token(
+        let has_data = data.is_some();
+        let result = oncl_pki::tsp::validate_document_token_with_clock(
             token.as_bytes(),
+            data,
             &ValidationContext {
                 policy: ctx.policy.validation,
                 now: (services.clock)(),
@@ -175,19 +178,18 @@ impl Engine {
                 intermediates: &services.intermediates,
                 http: &transport,
             },
+            services.clock.as_ref(),
             &ctx.scope,
         );
         transport.finish()?;
-        let mut facts = result.map_err(error)?;
-        // End the immutable transport borrow before streaming data into scope.
-        drop(transport);
-        if let Some(data) = data {
-            let algorithm = facts.algorithm().ok_or(OperationError::Key(
-                oncl_pki::key::KeyError::UnsupportedAlgorithm,
-            ))?;
-            let digest = hash_source(data, algorithm, &mut ctx.scope)?;
-            facts.check_document(&digest);
-        }
+        let mut facts = result.map_err(|cause| match cause {
+            EvidenceError::Timestamp(oncl_pki::tsp::TspError::UnsupportedImprintAlgorithm(_))
+                if has_data =>
+            {
+                OperationError::Key(oncl_pki::key::KeyError::UnsupportedAlgorithm)
+            }
+            cause => error(cause),
+        })?;
         facts.check_expectations(
             request.algorithm,
             request.policy,

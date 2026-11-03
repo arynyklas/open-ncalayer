@@ -33,21 +33,28 @@ impl<'a> PdfSignatureOutput<'a> {
                 "cannot abort foreign or SOURCE artifact",
             ));
         }
-        stage.failed = true;
+        stage.fail_sign_output();
         Ok(())
     }
     pub fn new(
         stage: &'a mut StagedArtifact,
         scope: &ResourceScope,
     ) -> Result<Self, ProcessingError> {
-        stage.check_sign_output(scope)?;
-        Ok(Self {
+        if stage.source || !stage.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "foreign or source PDF output",
+            ));
+        }
+        stage.attach_output_failure();
+        let transaction = Self {
             stage,
             range_offset: None,
             contents: None,
             complete: false,
             append_start: 0,
-        })
+        };
+        transaction.stage.check_sign_output(scope)?;
+        Ok(transaction)
     }
     /// Append-only renewal transaction. No previous epoch's patch slots survive.
     pub fn resume_checked(
@@ -74,7 +81,7 @@ impl<'a> PdfSignatureOutput<'a> {
         stage.check_pdf_live_output(scope)?;
         let result = (|| action(PdfSnapshot::output(stage, scope)?))();
         if result.is_err() {
-            stage.failed = true;
+            stage.fail_sign_output();
         }
         result
     }
@@ -87,14 +94,14 @@ impl<'a> PdfSignatureOutput<'a> {
     pub fn append(&mut self, bytes: &[u8]) -> Result<(), ProcessingError> {
         let result = self.stage.write_chunk(bytes);
         if result.is_err() {
-            self.stage.failed = true;
+            self.stage.fail_sign_output();
         }
         result
     }
     /// Emits exactly one physical token and a fixed-width 64-bit ByteRange.
     pub fn reserve_contents(&mut self, bytes: usize) -> Result<Region, ProcessingError> {
         if self.contents.is_some() || bytes == 0 || bytes > 16 * 1024 * 1024 {
-            self.stage.failed = true;
+            self.stage.fail_sign_output();
             return Err(ProcessingError::InvalidInput(
                 "invalid PDF signature reservation",
             ));
@@ -125,7 +132,7 @@ impl<'a> PdfSignatureOutput<'a> {
     }
     fn patch(&mut self, offset: u64, bytes: &[u8]) -> Result<(), ProcessingError> {
         self.stage.scope.checkpoint()?;
-        if self.stage.failed {
+        if self.stage.is_failed() {
             return Err(ProcessingError::InvalidInput("failed PDF output"));
         }
         if offset < self.append_start
@@ -133,7 +140,7 @@ impl<'a> PdfSignatureOutput<'a> {
                 .checked_add(bytes.len() as u64)
                 .is_none_or(|end| end > self.len())
         {
-            self.stage.failed = true;
+            self.stage.fail_sign_output();
             return Err(ProcessingError::InvalidInput(
                 "PDF patch outside current append transaction",
             ));
@@ -150,7 +157,7 @@ impl<'a> PdfSignatureOutput<'a> {
         })();
         let restored = file.seek(SeekFrom::Start(position));
         if let Err(e) = restored {
-            self.stage.failed = true;
+            self.stage.fail_sign_output();
             return Err(e.into());
         }
         result
@@ -214,10 +221,13 @@ impl<'a> PdfSignatureOutput<'a> {
             position: 0,
             error: None,
         };
+        let output_failure = reader.stage.output_failure.clone();
         let source = Source {
             reader: Reader::OutputProjection(&mut reader),
             len: Some(extent - gap.len),
             admitted: Some(scope.retain()),
+            output_failure,
+            classification: None,
         };
         let outcome =
             stream::sign_pdf_contents(source, signer, services, &mut sink, capacity, scope);
@@ -361,7 +371,7 @@ impl<'a> PdfSignatureOutput<'a> {
 impl Drop for PdfSignatureOutput<'_> {
     fn drop(&mut self) {
         if !self.complete {
-            self.stage.failed = true;
+            self.stage.fail_sign_output();
         }
     }
 }
@@ -445,6 +455,9 @@ impl SnapshotReader for OutputReplay<'_> {
         }
         self.stage.scope.checkpoint()
     }
+    fn invalidate_snapshot(&mut self) {
+        self.stage.fail_sign_output();
+    }
 }
 
 #[cfg(test)]
@@ -484,6 +497,7 @@ mod tests {
         let store = TemporaryStore::new(temp.path()).unwrap();
         let mut stage = store.stage(&mut scope).unwrap();
         stage.write_chunk(b"abc<0000>xyz").unwrap();
+        let output_failure = Some(stage.attach_output_failure());
         let mut reader = OutputReplay {
             stage: &mut stage,
             gap: Region { offset: 3, len: 6 },
@@ -494,6 +508,8 @@ mod tests {
             reader: Reader::OutputProjection(&mut reader),
             len: Some(6),
             admitted: Some(scope.retain()),
+            output_failure,
+            classification: None,
         };
         assert!(!source.is_snapshot_for(&scope).unwrap());
         assert!(source.is_output_projection_for(&scope).unwrap());

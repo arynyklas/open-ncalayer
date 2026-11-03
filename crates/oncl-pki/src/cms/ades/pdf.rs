@@ -5,7 +5,7 @@ use crate::evidence::{
     EvidenceBundle, PreparedEvidence, lock_snapshot, validate_snapshot_evidence,
 };
 use crate::io::{DerivedInput, PdfSnapshot, PdfSnapshotCoverage, SnapshotEncoding};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// A closed decoding of actual evidence stream bytes in the same snapshot.
 /// No host trust, digest, or claimed proof time can be supplied by this record.
@@ -23,6 +23,8 @@ pub(super) struct PdfContext<'a, 's> {
     metadata: &'a DerivedInput,
     material: &'a [SnapshotMaterial<'a>],
     documents: &'a [SnapshotDocumentTimestamp<'a>],
+    checked_at: &'a OnceLock<OffsetDateTime>,
+    host_clock: Option<&'a (dyn Fn() -> OffsetDateTime + Send + Sync)>,
 }
 fn contains(ranges: &[Region], value: Region) -> bool {
     value.end().is_ok_and(|end| {
@@ -32,6 +34,23 @@ fn contains(ranges: &[Region], value: Region) -> bool {
     })
 }
 impl PdfContext<'_, '_> {
+    pub(super) fn validation_context<'a>(
+        &self,
+        services: &'a AdesServices<'_>,
+    ) -> Result<ValidationContext<'a>, AdesError> {
+        // Called only after every source hash and the shared evidence decode.
+        let now = *self.checked_at.get_or_init(|| {
+            self.host_clock
+                .map_or(services.validation.now, |clock| clock())
+        });
+        if self.host_clock.is_some() && now < services.validation.now {
+            return Err(tsp::TspError::ClockSkew.into());
+        }
+        Ok(ValidationContext {
+            now,
+            ..*services.validation
+        })
+    }
     pub(super) fn achieved(&self, signature_timestamp: bool) -> AdesLevel {
         let time = signature_timestamp
             || self
@@ -137,12 +156,13 @@ impl PdfContext<'_, '_> {
             documents,
             signature: signatures.first().map(|(_, _, id)| *id),
         };
+        let current = self.validation_context(services)?;
         Ok(validate_snapshot_evidence(
             signer,
             bundle,
             &proofs,
             level,
-            services.validation,
+            &current,
             services.network,
             scope,
             prepared,
@@ -619,6 +639,22 @@ pub fn verify_snapshot_pades(
     }
     drop(input);
     let mut common = common_evidence(&frozen, material, documents, services, scope)?;
+    let checked_at = OnceLock::new();
+    // Keep the existing CMS validator's static context construction from sampling
+    // once per source; PdfContext samples only after its lazy common preparation.
+    let as_of = AdesServices {
+        validation: services.validation,
+        host_clock: None,
+        network: services.network,
+        temporary: services.temporary,
+        limits: services.limits,
+        tsa: services.tsa,
+        material: ValidationMaterial {
+            certificates: services.material.certificates,
+            ocsp: services.material.ocsp,
+            crls: services.material.crls,
+        },
+    };
     let mut reports = Vec::with_capacity(signatures.len());
     for (source, frozen) in signatures.iter().zip(&frozen) {
         let context = PdfContext {
@@ -626,11 +662,13 @@ pub fn verify_snapshot_pades(
             metadata: source.metadata,
             material,
             documents,
+            checked_at: &checked_at,
+            host_clock: services.host_clock,
         };
         reports.push(verify_frozen_impl(
             required,
             frozen,
-            services,
+            &as_of,
             allowed,
             scope,
             Some(&context),

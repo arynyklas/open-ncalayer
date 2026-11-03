@@ -2,7 +2,7 @@
 //! byte and represented by a Region, never accumulated in a String.
 use crate::index::XmlLimits;
 use oncl_pki::{
-    io::{FrozenInput, Region},
+    io::{CapturedInput, Region},
     resource::{IO_CHUNK_BYTES, OperationControl, ProcessingError, Progress},
 };
 use std::collections::BTreeMap;
@@ -130,6 +130,9 @@ pub struct XmlEvent {
     pub region: Region,
     pub depth: usize,
     pub name: Option<XmlName>,
+    /// Actual lexical closing tag; None for a self-closing element's synthetic end.
+    pub(crate) closing_tag: Option<Region>,
+    pub(crate) xml_declaration: bool,
     pub attributes: Vec<XmlAttribute>,
     namespaces: Vec<(String, String)>,
     pub(crate) ids: Vec<String>,
@@ -154,7 +157,7 @@ struct Frame {
     changes: Vec<(String, Option<String>)>,
 }
 pub(crate) struct Reader<'a> {
-    pub(crate) file: &'a mut FrozenInput,
+    pub(crate) file: &'a mut dyn CapturedInput,
     limits: &'a XmlLimits,
     buffer: Vec<u8>,
     at: usize,
@@ -164,13 +167,18 @@ pub(crate) struct Reader<'a> {
     namespaces: BTreeMap<String, String>,
     root: bool,
     bom: bool,
+    prolog_bom: Option<Region>,
     pending: Option<XmlEvent>,
     work: u64,
     finished: bool,
     owner: Weak<()>,
 }
 impl<'a> Reader<'a> {
-    pub(crate) fn new(file: &'a mut FrozenInput, limits: &'a XmlLimits, owner: &Arc<()>) -> Self {
+    pub(crate) fn new(
+        file: &'a mut dyn CapturedInput,
+        limits: &'a XmlLimits,
+        owner: &Arc<()>,
+    ) -> Self {
         Self {
             file,
             limits,
@@ -182,6 +190,7 @@ impl<'a> Reader<'a> {
             namespaces: BTreeMap::new(),
             root: false,
             bom: false,
+            prolog_bom: None,
             pending: None,
             work: 0,
             finished: false,
@@ -233,6 +242,8 @@ impl<'a> Reader<'a> {
         XmlEvent {
             kind,
             region: self.region(start),
+            closing_tag: None,
+            xml_declaration: false,
             depth: self.stack.len(),
             name: None,
             attributes: Vec::new(),
@@ -545,7 +556,9 @@ impl<'a> Reader<'a> {
                     return Err(ProcessingError::InvalidInput("indexed XML requires UTF-8"));
                 }
             }
-            return Ok(self.event(XmlEventKind::ProcessingInstruction, start));
+            let mut event = self.event(XmlEventKind::ProcessingInstruction, start);
+            event.xml_declaration = declaration;
+            return Ok(event);
         }
         if first == b'/' {
             let name = raw[2..raw.len() - 1].trim_end_matches([' ', '\t', '\r', '\n']);
@@ -554,6 +567,7 @@ impl<'a> Reader<'a> {
                 return Err(invalid());
             }
             let mut event = self.event(XmlEventKind::End, frame.start);
+            event.closing_tag = Some(self.region(start));
             event.name = Some(frame.name);
             event.ids = frame.ids;
             event.namespaces = self
@@ -741,6 +755,7 @@ impl<'a> Reader<'a> {
         if start == 0 && b == 0xef {
             self.expect(&[0xbb, 0xbf])?;
             self.bom = true;
+            self.prolog_bom = Some(self.region(start));
             return self.next();
         }
         let mut current = b;
@@ -768,6 +783,9 @@ impl<'a> Reader<'a> {
             }
         }
         Ok(Some(self.event(XmlEventKind::Text, start)))
+    }
+    pub(crate) fn bom_region(&self) -> Option<Region> {
+        self.prolog_bom
     }
 }
 // Bound parser's quadratic attribute checks before constructing the one-tag
