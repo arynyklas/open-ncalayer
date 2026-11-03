@@ -74,7 +74,7 @@ impl Basics {
 }
 
 fn build(s: Settings) -> Box<dyn Module> {
-    let mut services = HostServices::new(
+    let mut services = HostServices::interactive(
         s.prompter,
         s.recent,
         s.http,

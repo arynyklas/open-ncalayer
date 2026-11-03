@@ -4154,7 +4154,9 @@ dependencies = [
  "der 0.8.2",
  "lopdf",
  "oncl-pdf",
+ "oncl-pdk",
  "oncl-pki",
+ "oncl-plugin",
  "oncl-testkit",
  "oncl-token",
  "oncl-xml",
@@ -4162,6 +4164,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "time",
+ "tracing",
+ "wat",
  "zeroize",
 ]
 

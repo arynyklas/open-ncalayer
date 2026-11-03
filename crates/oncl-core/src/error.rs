@@ -5,6 +5,7 @@ use oncl_pki::resource::ProcessingError;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
     PermissionDenied,
+    InteractionRequired,
     InvalidInput,
     Cancelled,
     DeadlineExceeded,
@@ -84,6 +85,8 @@ impl From<&KeyError> for ErrorCode {
 #[derive(Debug)]
 pub enum OperationError {
     PermissionDenied,
+    #[cfg(feature = "plugins")]
+    Plugin(oncl_plugin::headless::HeadlessError),
     InvalidContext,
     IdExhausted,
     Processing(ProcessingError),
@@ -108,6 +111,23 @@ impl OperationError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::PermissionDenied => ErrorCode::PermissionDenied,
+            #[cfg(feature = "plugins")]
+            Self::Plugin(error) => match error {
+                oncl_plugin::headless::HeadlessError::Denied => ErrorCode::PermissionDenied,
+                oncl_plugin::headless::HeadlessError::InteractionRequired => {
+                    ErrorCode::InteractionRequired
+                }
+                oncl_plugin::headless::HeadlessError::Plugin(
+                    oncl_plugin::PluginError::TooLarge,
+                ) => ErrorCode::ContainerLimit,
+                oncl_plugin::headless::HeadlessError::Plugin(
+                    oncl_plugin::PluginError::MemoryLimit,
+                ) => ErrorCode::MemoryLimit,
+                oncl_plugin::headless::HeadlessError::Plugin(
+                    oncl_plugin::PluginError::OutOfFuel,
+                ) => ErrorCode::CapacityExceeded,
+                _ => ErrorCode::InvalidInput,
+            },
             Self::InvalidContext | Self::IdExhausted => ErrorCode::InvalidInput,
             Self::MissingKeyProvider => ErrorCode::MissingKeyProvider,
             Self::MissingMetadataProvider => ErrorCode::MissingMetadataProvider,
@@ -129,6 +149,8 @@ impl OperationError {
     pub fn applied_state(&self) -> AppliedState {
         match self {
             Self::AfterKeyUse { applied, .. } => *applied,
+            #[cfg(feature = "plugins")]
+            Self::Plugin(_) => AppliedState::NotApplied,
             Self::Key(error) => error.applied_state(),
             Self::PermissionDenied
             | Self::InvalidContext
@@ -176,6 +198,8 @@ impl From<OperationError> for KeyError {
                 ));
             }
             OperationError::PermissionDenied => KeyFailureKind::PermissionDenied,
+            #[cfg(feature = "plugins")]
+            OperationError::Plugin(_) => KeyFailureKind::Backend,
             OperationError::InvalidContext => KeyFailureKind::InvalidContext,
             OperationError::IdExhausted => KeyFailureKind::IdExhausted,
             OperationError::MissingKeyProvider => KeyFailureKind::MissingKeyProvider,
@@ -201,6 +225,8 @@ impl std::fmt::Display for OperationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PermissionDenied => f.write_str("action not granted"),
+            #[cfg(feature = "plugins")]
+            Self::Plugin(error) => std::fmt::Display::fmt(error, f),
             Self::InvalidContext => f.write_str("operation context belongs to another engine"),
             Self::IdExhausted => f.write_str("operation identifier space exhausted"),
             Self::Processing(error) => std::fmt::Display::fmt(error, f),

@@ -46,7 +46,7 @@ impl HttpTransport for Offline {
 }
 
 fn build(s: Settings) -> Box<dyn Module> {
-    let services = HostServices::new(
+    let services = HostServices::interactive(
         s.prompter,
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(Offline),

@@ -1,6 +1,5 @@
 //! B01 actual file/CMS/progress/cancel exercise; synthetic trust only.
-#[path = "batch_fixture.rs"]
-mod fixture;
+use crate::plugin_crypto as fixture;
 use oncl_core::{
     Action, ExecutionGrant, OperationPolicy, SignRequest, VerifyRequest,
     batch::*,

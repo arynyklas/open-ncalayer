@@ -241,6 +241,18 @@ The `kz.gov.pki.knca.applet.Applet` module (legacy; it answers requests without 
 
 ### Plugins
 
+The Rust SDK (`oncl-core`, feature `plugins`) executes WebAssembly in a scoped
+headless host: installation grants no invocation authority. The embedding host
+binds caller, operation, nested ABI methods, keys, frozen inputs/unpublished
+outputs and network endpoints; permissions intersect the manifest and host policy.
+Raw/CMS signing retains the original `OperationContext` and guard; mandatory UI
+returns `InteractionRequired` without taking a dialog lock. Package/catalog/updater
+code requires `oncl-plugin/distribution`, explicitly selected by desktop consumers;
+settings remain available in the runtime. Actual WASM and independent OpenSSL smoke:
+`cargo run -p oncl-core --features plugins,tokens --example sdk_probe -- --case L01 --out target/l01-smoke`.
+This bounded ABI exercise is not 10-GiB/RSS, NCA-token or desktop-matrix acceptance.
+
+
 A plugin is a WebAssembly module serving its own `module` names (a port of a third-party module of the original NCALayer, for example) in a sandbox: it sees only the request and the page's `origin`, and reaches keys, windows, files and the network only through the capabilities its manifest declares. Its window is «Плагины…» (Plugins…) in the icon's menu (or `showBundleManager` from a page): the installed plugins with their version, source and state (turn off/on, remove), those available in the catalog (install), install from a file (`*.onclp`), and refresh the catalog.
 
 - **From the catalog.** The catalog is part of OpenNCALayer's signed update index; a package is checked against the index's size, sha256 and manifest. Before installing, the «Установка плагина» (Plugin installation) window shows who asks, what the plugin replaces and what it will be able to do: choose your key and sign with it, show windows, open and save files you choose, reach the listed addresses.

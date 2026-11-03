@@ -88,7 +88,7 @@ pub(crate) fn http_request(state: &mut HostState, args: HttpArgs) -> HostResult<
 
 /// `url` as checked under the first of `prefixes` that allows it, without its fragment
 /// (which stays with the client, as in browsers).
-fn allowed_url(prefixes: &[HttpPrefix], url: &str) -> HostResult<url::Url> {
+pub(crate) fn allowed_url(prefixes: &[HttpPrefix], url: &str) -> HostResult<url::Url> {
     let mut checked = prefixes
         .iter()
         .find_map(|prefix| prefix.check(url))
@@ -165,13 +165,13 @@ pub(crate) fn http_request_ex(state: &mut HostState, args: HttpExArgs) -> HostRe
 }
 
 /// Whether `text` has CR, LF or NUL, which would end a header line.
-fn has_line_break(text: &str) -> bool {
+pub(crate) fn has_line_break(text: &str) -> bool {
     text.contains(['\r', '\n', '\0'])
 }
 
 /// The headers of `args` as the transport takes them: at most [`MAX_HEADERS`] of
 /// [`ALLOWED_HEADERS`] (any case), without CR, LF or NUL, [`MAX_HEADER_BYTES`] together.
-fn checked_headers(args: &HttpExArgs) -> HostResult<Vec<(&str, &str)>> {
+pub(crate) fn checked_headers(args: &HttpExArgs) -> HostResult<Vec<(&str, &str)>> {
     if args.headers.len() > MAX_HEADERS {
         return Err(limit(format!("more than {MAX_HEADERS} headers")));
     }
@@ -212,7 +212,7 @@ fn checked_headers(args: &HttpExArgs) -> HostResult<Vec<(&str, &str)>> {
 /// - (c) it is under a prefix of `http_insecure` (`http`, exact host and port).
 ///
 /// Anything else, other schemes and calls without a URL origin included, is denied.
-fn allowed_ex_url(
+pub(crate) fn allowed_ex_url(
     caps: &Capabilities,
     origin: Option<&str>,
     url: &str,

@@ -48,7 +48,8 @@ impl Engine {
             .ok_or(ProcessingError::InvalidInput(
                 "PAdES reader limits required",
             ))?;
-        let transport = DeadlineTransport::new(host.http.as_ref(), &host.network, &ctx.scope);
+        let scoped_http = ctx.http(host.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &host.network, &ctx.scope);
         let validation = ValidationContext {
             policy: ctx.policy.validation,
             now: (host.clock)(),
@@ -116,7 +117,8 @@ impl Engine {
             .ok_or(ProcessingError::InvalidInput(
                 "PAdES reader limits required",
             ))?;
-        let transport = DeadlineTransport::new(host.http.as_ref(), &host.network, &ctx.scope);
+        let scoped_http = ctx.http(host.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &host.network, &ctx.scope);
         let validation = ValidationContext {
             policy: ValidationPolicy::StrictOnline,
             now: (host.clock)(),

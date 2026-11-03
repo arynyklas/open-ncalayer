@@ -1953,6 +1953,9 @@ impl<'a> ScopedHttpReply<'a> {
     pub fn content_type(&self) -> Option<&str> {
         self.reply.content_type.as_deref()
     }
+    pub fn location(&self) -> Option<&str> {
+        self.reply.location.as_deref()
+    }
     pub fn body(&self) -> &[u8] {
         &self.reply.body
     }

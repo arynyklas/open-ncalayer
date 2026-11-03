@@ -6,8 +6,9 @@ use super::asn1::{
     SignedContentInfo, SignedData, SignerInfo, SigningCertificateV2, der_set_contents,
 };
 use crate::ber;
+use crate::digest::{DigestValue, HashState};
 use crate::info::cert_info;
-use crate::key::HashAlg;
+use crate::key::{DigestSigner, HashAlg, KeyError, SigAlg};
 use crate::oid;
 use crate::pkcs12::KeyEntry;
 use der::asn1::{AnyRef, GeneralizedTime, Int, ObjectIdentifier, OctetStringRef, UtcTime};
@@ -213,6 +214,42 @@ pub fn sign_spec(
     chain: &[Certificate],
     spec: &SignSpec<'_>,
 ) -> Result<Vec<u8>, CmsError> {
+    with_content(spec, |content_type, content, base| {
+        let algorithm = cert_info(&entry.cert)
+            .signing_alg()
+            .map_err(|e| CmsError::UnknownAlgorithm(e.0))?;
+        build(
+            &mut LegacySigner { entry, algorithm },
+            chain,
+            spec,
+            content_type,
+            content,
+            base,
+        )
+    })
+}
+
+/// The same bounded CMS profile builder with an explicit leaf signer. This
+/// function grants no authority and establishes no trust: embedding hosts supply
+/// their guarded signer and resource admission before invoking it.
+pub fn sign_spec_with_signer(
+    signer: &mut dyn DigestSigner,
+    chain: &[Certificate],
+    spec: &SignSpec<'_>,
+) -> Result<Vec<u8>, CmsError> {
+    with_content(spec, |content_type, content, base| {
+        build(signer, chain, spec, content_type, content, base)
+    })
+}
+
+fn with_content(
+    spec: &SignSpec<'_>,
+    finish: impl FnOnce(
+        &ObjectIdentifier,
+        Content<'_>,
+        Option<&SignedData<'_>>,
+    ) -> Result<Vec<u8>, CmsError>,
+) -> Result<Vec<u8>, CmsError> {
     let base_der = match spec.cosign {
         CoSign::Into(cms) => Some(ber::to_der(cms)?),
         CoSign::Auto => match spec.content {
@@ -253,22 +290,37 @@ pub fn sign_spec(
         ),
         (_, None) => (spec.content, spec.econtent_type.unwrap_or(oid::DATA)),
     };
-    build(entry, chain, spec, &content_type, content, base.as_ref())
+    finish(&content_type, content, base.as_ref())
+}
+
+/// Explicit legacy certificate-algorithm convention, kept out of guarded hosts.
+struct LegacySigner<'a> {
+    entry: &'a KeyEntry,
+    algorithm: SigAlg,
+}
+impl DigestSigner for LegacySigner<'_> {
+    fn certificate(&self) -> &Certificate {
+        &self.entry.cert
+    }
+    fn algorithm(&self) -> SigAlg {
+        self.algorithm
+    }
+    fn sign_digest(&mut self, digest: &DigestValue) -> Result<Vec<u8>, KeyError> {
+        self.entry.key.sign_digest(self.algorithm, digest)
+    }
 }
 
 /// Builds the `ContentInfo` of `spec` over `content`, appending the new signer to `base`
 /// when co-signing.
 fn build(
-    entry: &KeyEntry,
+    signer: &mut dyn DigestSigner,
     chain: &[Certificate],
     spec: &SignSpec<'_>,
     content_type: &ObjectIdentifier,
     content: Content<'_>,
     base: Option<&SignedData<'_>>,
 ) -> Result<Vec<u8>, CmsError> {
-    let alg = cert_info(&entry.cert)
-        .signing_alg()
-        .map_err(|e| CmsError::UnknownAlgorithm(e.0))?;
+    let alg = signer.algorithm();
     if spec.digest.is_some_and(|digest| digest != alg.hash_alg()) {
         return Err(CmsError::Constraint(format!(
             "the digest of a {alg:?} signature is {:?}",
@@ -279,20 +331,28 @@ fn build(
         Content::Data(data) => alg.digest(data),
         Content::Digest(digest) => digest.to_vec(),
     };
-    let cert_der = entry.cert.to_der()?;
+    let cert_der = signer.certificate().to_der()?;
     let attrs = signed_attributes(&spec.attrs, content_type, &digest, &cert_der)?;
-    let signature = match (&attrs, content) {
-        (Some(attrs), _) => entry.key.sign(alg, &RawSet(attrs).to_der()?),
-        (None, Content::Data(data)) => entry.key.sign(alg, data),
+    let signature_digest = match (&attrs, content) {
+        (Some(attrs), _) => {
+            let mut hash = HashState::new(alg.hash_alg());
+            hash.update(&RawSet(attrs).to_der()?);
+            hash.finish()
+        }
+        (None, Content::Data(_)) => {
+            DigestValue::from_bytes(alg.hash_alg(), &digest).map_err(CmsError::Key)?
+        }
         (None, Content::Digest(_)) => {
             return Err(CmsError::Constraint(
                 "a digest is signed only through signed attributes".to_owned(),
             ));
         }
-    }
-    .map_err(CmsError::Key)?;
+    };
+    let signature = signer
+        .sign_digest(&signature_digest)
+        .map_err(CmsError::Key)?;
 
-    let signer_info = encode_signer_info(&entry.cert, alg, attrs.as_deref(), &signature)?;
+    let signer_info = encode_signer_info(signer.certificate(), alg, attrs.as_deref(), &signature)?;
     let digest_algorithm = AlgorithmIdentifierRef {
         oid: alg.digest_oid(),
         parameters: Some(AnyRef::NULL),

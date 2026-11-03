@@ -513,7 +513,7 @@ fn call(
 ) -> (Outcome, Arc<Builtins>) {
     let prompter = Arc::new(ScriptedPrompter::new(steps));
     let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
-    let mut services = HostServices::new(
+    let mut services = HostServices::interactive(
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         tsa,

@@ -21,7 +21,7 @@ oncl-builtin-basics.workspace = true
 oncl-builtin-commonutils.workspace = true
 oncl-pki.workspace = true
 # The guests' runtime and the core's hooks.
-oncl-plugin.workspace = true
+oncl-plugin = { workspace = true, features = ["distribution"] }
 oncl-protocol.workspace = true
 oncl-token.workspace = true
 time.workspace = true

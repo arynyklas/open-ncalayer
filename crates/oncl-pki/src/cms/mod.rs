@@ -36,6 +36,7 @@ pub use report::{
 pub(crate) use sign::sign_content;
 pub use sign::{
     AttrSpec, CertSpec, CoSign, Content, SignOptions, SignSpec, TimeForm, sign, sign_spec,
+    sign_spec_with_signer,
 };
 pub use verify::{VerifiedSigner, verify};
 

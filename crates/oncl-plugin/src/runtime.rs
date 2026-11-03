@@ -5,7 +5,7 @@
 //! and its instance is not used again.
 
 use crate::caps::{DialogTurn, SharedState};
-use crate::host::{self, HostServices, HostState, Phase};
+use crate::host::{self, AbiState, HostServices, HostState, Phase};
 use crate::manifest::{Capabilities, Localized, Manifest};
 use oncl_pdk::abi::{self, ABI_VERSION, Capability, IMPORT_MODULE, Import, Output, exports};
 use oncl_protocol::{AddInfo, Reply, SessionId};
@@ -131,7 +131,7 @@ pub enum LoadError {
     #[error("the plugin could not be instantiated: {0}")]
     Instantiate(String),
     /// A module the plugin serves is served already: by a built-in module or another
-    /// plugin. `owner` is that plugin's id, or [`BUILT_IN`](crate::BUILT_IN).
+    /// plugin. `owner` is that plugin's id, or `OpenNCALayer` for a built-in module.
     #[error("the module {module} is served by {owner} already")]
     ModuleTaken { module: String, owner: String },
 }
@@ -369,14 +369,7 @@ impl Compiled {
         services: &HostServices,
         ctx: SessionContext,
     ) -> Result<Instance, LoadError> {
-        let limits = StoreLimitsBuilder::new()
-            .memory_size(self.limits.max_memory)
-            .table_elements(MAX_TABLE_ELEMENTS)
-            .instances(1)
-            .memories(1)
-            .tables(1)
-            .trap_on_grow_failure(true)
-            .build();
+        let limits = self.store_limits();
         let state = HostState::new(
             limits,
             services.clone(),
@@ -389,19 +382,60 @@ impl Compiled {
                 0
             },
         );
-        let mut store = Store::new(&self.engine, state);
-        store.limiter(|state| &mut state.limits);
+        Ok(Instance {
+            guest: Guest::new(self, state)?,
+            poisoned: false,
+        })
+    }
+}
+
+/// A plugin instance: the guest's state between the requests of its session.
+pub struct Instance {
+    guest: Guest<HostState>,
+    poisoned: bool,
+}
+
+/// The single ABI implementation, including instantiation, memory, fuel, phase
+/// checks and output decoding. A scoped headless Store may borrow its backend.
+pub(crate) struct Guest<T> {
+    pub(crate) store: Store<T>,
+    memory: Memory,
+    alloc: TypedFunc<i32, i32>,
+    free: TypedFunc<(i32, i32), ()>,
+    process: TypedFunc<(i32, i32), i64>,
+    pub(crate) limits: InstanceLimits,
+}
+
+impl Compiled {
+    pub(crate) fn store_limits(&self) -> wasmi::StoreLimits {
+        StoreLimitsBuilder::new()
+            .memory_size(self.limits.max_memory)
+            .table_elements(MAX_TABLE_ELEMENTS)
+            .instances(1)
+            .memories(1)
+            .tables(1)
+            .trap_on_grow_failure(true)
+            .build()
+    }
+    pub fn limits(&self) -> InstanceLimits {
+        self.limits
+    }
+}
+
+impl<T: AbiState> Guest<T> {
+    pub(crate) fn new(compiled: &Compiled, state: T) -> Result<Self, LoadError> {
+        let mut store = Store::new(&compiled.engine, state);
+        store.limiter(|state| state.limits());
         let failed = |e: wasmi::Error| LoadError::Instantiate(e.to_string());
         store.set_fuel(INIT_FUEL).map_err(failed)?;
-
-        let mut linker = <Linker<HostState>>::new(&self.engine);
+        let mut linker = Linker::<T>::new(&compiled.engine);
         for import in Import::ALL {
-            if declares(&self.capabilities, import) {
+            if declares(&compiled.capabilities, import) {
                 host::define(&mut linker, import).map_err(failed)?;
             }
         }
         let instance = linker
-            .instantiate_and_start(&mut store, &self.module)
+            .instantiate_and_start(&mut store, &compiled.module)
             .map_err(failed)?;
         let typed = |name: &'static str| {
             instance
@@ -424,32 +458,44 @@ impl Compiled {
             .get_memory(&store, exports::MEMORY)
             .ok_or(LoadError::MissingExport(exports::MEMORY))?;
         store.data_mut().attach(memory, alloc);
-
-        let found = version.call(&mut store, ()).map_err(failed)?;
+        let found = host::call_guest(version, &mut store, ()).map_err(failed)?;
         if u32::try_from(found) != Ok(ABI_VERSION) {
             return Err(LoadError::AbiVersion(found));
         }
-        Ok(Instance {
+        Ok(Self {
             store,
             memory,
             alloc,
             free,
             process,
-            limits: self.limits,
-            poisoned: false,
+            limits: compiled.limits,
         })
     }
-}
 
-/// A plugin instance: the guest's state between the requests of its session.
-pub struct Instance {
-    store: Store<HostState>,
-    memory: Memory,
-    alloc: TypedFunc<i32, i32>,
-    free: TypedFunc<(i32, i32), ()>,
-    process: TypedFunc<(i32, i32), i64>,
-    limits: InstanceLimits,
-    poisoned: bool,
+    pub(crate) fn invoke(&mut self, input: &[u8]) -> Result<Output, PluginError> {
+        let len = transfer_len(input.len(), self.limits.max_transfer)?;
+        self.store
+            .set_fuel(self.limits.fuel)
+            .map_err(|e| PluginError::Trap(e.to_string()))?;
+        self.store.data_mut().set_phase(Phase::Host);
+        let ptr = host::call_guest(self.alloc, &mut self.store, len).map_err(failure)?;
+        host::write_guest(self.memory.data_mut(&mut self.store), ptr, input).map_err(failure)?;
+        self.store.data_mut().set_phase(Phase::Guest);
+        let packed =
+            host::call_guest(self.process, &mut self.store, (ptr, len)).map_err(failure)?;
+        self.store.data_mut().set_phase(Phase::Host);
+        let (out_ptr, out_len) = abi::unpack(packed);
+        if out_len as usize > self.limits.max_transfer {
+            return Err(PluginError::TooLarge);
+        }
+        let output = host::read_guest(self.memory.data(&self.store), out_ptr, out_len)
+            .map_err(failure)?
+            .to_vec();
+        host::call_guest(self.free, &mut self.store, (out_ptr as i32, out_len as i32))
+            .map_err(failure)?;
+        self.store.data_mut().set_phase(Phase::Idle);
+        abi::decode(&output).map_err(|e| PluginError::Output(e.message))
+    }
 }
 
 /// Instances move to the threads that run their requests.
@@ -461,7 +507,7 @@ const _: fn() = || {
 impl Instance {
     /// The size of the guest's linear memory now, in bytes.
     pub fn memory_size(&self) -> usize {
-        self.memory.data(&self.store).len()
+        self.guest.memory.data(&self.guest.store).len()
     }
 
     /// Has the guest answer `request`: its reply, or [`Reply::Drop`] if it called
@@ -477,23 +523,24 @@ impl Instance {
             return Err(PluginError::Poisoned);
         }
         let turn = DialogTurn::scope();
-        let locale = (self.store.data().services.locale)();
-        self.store
+        let locale = (self.guest.store.data().services.locale)();
+        self.guest
+            .store
             .data_mut()
             .begin_call(add_info.origin.clone(), locale);
         let result = self.run(request, add_info, locale);
-        let dropped = self.store.data().call.drop;
-        self.store.data_mut().end_call();
+        let dropped = self.guest.store.data().call.drop;
+        self.guest.store.data_mut().end_call();
         drop(turn);
         if let Err(e) = &result {
             tracing::warn!(
-                plugin = %self.store.data().session.plugin_id,
-                session = self.store.data().session.session,
+                plugin = %self.guest.store.data().session.plugin_id,
+                session = self.guest.store.data().session.session,
                 error = %e,
                 "the plugin failed; its instance is dropped"
             );
             self.poisoned = true;
-            self.store.data_mut().release_all();
+            self.guest.store.data_mut().release_all();
         }
         result.map(|text| if dropped { Reply::Drop } else { text.into() })
     }
@@ -506,14 +553,15 @@ impl Instance {
     /// Lets go of the keys, passwords and consents of the calls so far: what a pooled
     /// instance must not carry to its next call.
     pub(crate) fn release_all(&mut self) {
-        self.store.data_mut().release_all();
+        self.guest.store.data_mut().release_all();
     }
 
     /// The fuel the last call used.
     pub(crate) fn fuel_used(&self) -> u64 {
-        self.limits
+        self.guest
+            .limits
             .fuel
-            .saturating_sub(self.store.get_fuel().unwrap_or(0))
+            .saturating_sub(self.guest.store.get_fuel().unwrap_or(0))
     }
 
     fn run(
@@ -522,9 +570,9 @@ impl Instance {
         add_info: &AddInfo,
         locale: oncl_flows::Locale,
     ) -> Result<String, PluginError> {
-        let max = self.limits.max_transfer;
-        let keep = self.limits.keep_request;
-        let (request, data_prefix) = match self.store.data_mut().call.data.as_mut() {
+        let max = self.guest.limits.max_transfer;
+        let keep = self.guest.limits.keep_request;
+        let (request, data_prefix) = match self.guest.store.data_mut().call.data.as_mut() {
             Some(data) => (
                 if keep {
                     data.keep_request(request, max)
@@ -541,43 +589,15 @@ impl Instance {
         if request.len() > max {
             return Err(PluginError::TooLarge);
         }
-        let input = abi::encode(&InputRef {
-            request: &request,
-            origin: add_info.origin.as_deref(),
-            locale: locale_code(locale),
-            data_prefix: data_prefix.as_deref(),
-        });
+        let input = encode_input(
+            &request,
+            add_info.origin.as_deref(),
+            locale_code(locale),
+            data_prefix.as_deref(),
+        );
         drop(request);
-        let len = transfer_len(input.len(), max)?;
-        self.store
-            .set_fuel(self.limits.fuel)
-            .map_err(|e| PluginError::Trap(e.to_string()))?;
-
-        self.store.data_mut().phase = Phase::Host;
-        let ptr = self.alloc.call(&mut self.store, len).map_err(failure)?;
-        host::write_guest(self.memory.data_mut(&mut self.store), ptr, &input).map_err(failure)?;
-
-        self.store.data_mut().phase = Phase::Guest;
-        let packed = self
-            .process
-            .call(&mut self.store, (ptr, len))
-            .map_err(failure)?;
-        self.store.data_mut().phase = Phase::Host;
-
-        let (out_ptr, out_len) = abi::unpack(packed);
-        if out_len as usize > self.limits.max_transfer {
-            return Err(PluginError::TooLarge);
-        }
-        let output = host::read_guest(self.memory.data(&self.store), out_ptr, out_len)
-            .map_err(failure)?
-            .to_vec();
-        // Lengths within the limit fit an i32; the pointer is the guest's own, as given.
-        self.free
-            .call(&mut self.store, (out_ptr as i32, out_len as i32))
-            .map_err(failure)?;
-        self.store.data_mut().phase = Phase::Idle;
-        let output: Output = abi::decode(&output).map_err(|e| PluginError::Output(e.message))?;
-        match &self.store.data().call.data {
+        let output = self.guest.invoke(&input)?;
+        match &self.guest.store.data().call.data {
             Some(data) => data
                 .splice(output.response, crate::BUILTIN_MAX_REPLY)
                 .map_err(PluginError::Output),
@@ -620,6 +640,20 @@ struct InputRef<'a> {
     origin: Option<&'a str>,
     locale: &'a str,
     data_prefix: Option<&'a str>,
+}
+
+pub(crate) fn encode_input(
+    request: &str,
+    origin: Option<&str>,
+    locale: &str,
+    data_prefix: Option<&str>,
+) -> Vec<u8> {
+    abi::encode(&InputRef {
+        request,
+        origin,
+        locale,
+        data_prefix,
+    })
 }
 
 #[cfg(test)]

@@ -22,6 +22,11 @@ mod pdf_probe;
 #[cfg(feature = "pdf")]
 #[path = "sdk_probe/pdf_sign.rs"]
 mod pdf_sign_probe;
+#[path = "sdk_probe/batch_fixture.rs"]
+pub(crate) mod plugin_crypto;
+#[cfg(feature = "plugins")]
+#[path = "sdk_probe/plugin.rs"]
+mod plugin_probe;
 #[cfg(feature = "xml")]
 #[path = "sdk_probe/xml.rs"]
 mod xml_probe;
@@ -51,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | "J01"
                 | "I01"
                 | "B01"
+                | "L01"
         ) {
             return Err("unsupported probe case".into());
         }
@@ -120,6 +126,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "I01" => i01_probe::run(std::path::Path::new(&out)),
             "B01" => batch_probe::run(std::path::Path::new(&out)),
+            "L01" => {
+                #[cfg(feature = "plugins")]
+                {
+                    plugin_probe::run(std::path::Path::new(&out))
+                }
+                #[cfg(not(feature = "plugins"))]
+                {
+                    Err("L01 probe requires the plugins feature".into())
+                }
+            }
             "X01" => {
                 #[cfg(feature = "xml")]
                 {
@@ -151,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command.as_deref() != Some("hash") {
         return Err(
-            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|X03|P01|P02|P03|J01|I01|B01> --out <directory>".into(),
+            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|X03|P01|P02|P03|J01|I01|B01|L01> --out <directory>".into(),
         );
     }
     let mut algorithm = None;

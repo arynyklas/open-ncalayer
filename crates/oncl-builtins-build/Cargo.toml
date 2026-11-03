@@ -15,5 +15,5 @@ toml.workspace = true
 
 [dev-dependencies]
 # `BUILTIN_ID_PREFIX`, compared with this crate's copy.
-oncl-plugin.workspace = true
+oncl-plugin = { workspace = true, features = ["distribution"] }
 tempfile.workspace = true

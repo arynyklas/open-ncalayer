@@ -36,7 +36,7 @@ mod tests {
     use std::sync::Arc;
 
     fn services() -> HostServices {
-        HostServices::new(
+        HostServices::interactive(
             Arc::new(ScriptedPrompter::new(Vec::<Step>::new())),
             Arc::new(MemoryRecentPath::new(None)),
             Arc::new(crate::LiveProxyTransport::new(
