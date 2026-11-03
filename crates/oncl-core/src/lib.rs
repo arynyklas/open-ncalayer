@@ -310,6 +310,8 @@ mod report;
 mod request;
 mod sign;
 mod timestamp;
+#[cfg(feature = "xml")]
+mod xml;
 
 pub use cades::{CadesConfiguration, ExtendRequest};
 pub use context::{OperationContext, OperationId};

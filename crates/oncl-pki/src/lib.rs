@@ -26,6 +26,7 @@ pub mod oid;
 pub mod pem;
 pub mod pkcs12;
 pub mod pkix;
+pub mod private_fs;
 pub mod resource;
 pub mod roots;
 mod rsa;

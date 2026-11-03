@@ -131,10 +131,31 @@ impl DocumentTimestamp {
     }
 }
 /// Decode bounded token metadata, verify its actual signature/EKU, then reuse
-/// F03/F04 current status evaluated at genTime. No data means no document proof.
+/// F03/F04 current status at ctx.now and certificate validity at genTime. No data
+/// means no document proof.
 pub fn validate_document_token(
     token: &[u8],
     ctx: &ValidationContext<'_>,
+    scope: &ResourceScope,
+) -> Result<DocumentTimestamp, EvidenceError> {
+    validate_document_token_scoped(token, None, ctx, None, scope)
+}
+/// Hash optional actual document data before sampling the trusted host clock and
+/// evaluating current status. Initial bounded decoding establishes no trust.
+pub fn validate_document_token_with_clock(
+    token: &[u8],
+    data: Option<crate::io::Source<'_>>,
+    ctx: &ValidationContext<'_>,
+    clock: &(dyn Fn() -> OffsetDateTime + Send + Sync),
+    scope: &ResourceScope,
+) -> Result<DocumentTimestamp, EvidenceError> {
+    validate_document_token_scoped(token, data, ctx, Some(clock), scope)
+}
+fn validate_document_token_scoped(
+    token: &[u8],
+    data: Option<crate::io::Source<'_>>,
+    ctx: &ValidationContext<'_>,
+    clock: Option<&(dyn Fn() -> OffsetDateTime + Send + Sync)>,
     scope: &ResourceScope,
 ) -> Result<DocumentTimestamp, EvidenceError> {
     if ctx
@@ -155,13 +176,15 @@ pub fn validate_document_token(
         intermediates: ctx.intermediates,
         http: &http,
     };
-    let result = validate_document_token_inner(token, &scoped, scope);
+    let result = validate_document_token_inner(token, data, &scoped, clock, scope);
     http.finish()?;
     result
 }
 fn validate_document_token_inner(
     token: &[u8],
+    data: Option<crate::io::Source<'_>>,
     ctx: &ValidationContext<'_>,
+    clock: Option<&(dyn Fn() -> OffsetDateTime + Send + Sync)>,
     scope: &ResourceScope,
 ) -> Result<DocumentTimestamp, EvidenceError> {
     scope.checkpoint()?;
@@ -189,6 +212,25 @@ fn validate_document_token_inner(
     let info = tst_info(content.as_bytes())?;
     let algorithm =
         HashAlg::from_oid(&info.imprint_alg).filter(|algorithm| *algorithm != HashAlg::Sha1);
+    let digest = if let Some(data) = data {
+        let algorithm = algorithm.ok_or(TspError::UnsupportedImprintAlgorithm(info.imprint_alg))?;
+        Some(crate::digest::hash_source(
+            data,
+            algorithm,
+            &mut scope.shared_view(),
+        )?)
+    } else {
+        None
+    };
+    scope.checkpoint()?;
+    let current = ValidationContext {
+        now: clock.map_or(ctx.now, |clock| clock()),
+        ..*ctx
+    };
+    if clock.is_some() && current.now < ctx.now {
+        return Err(TspError::ClockSkew.into());
+    }
+    let ctx = &current;
     let mut result = DocumentTimestamp {
         token: Vec::new(),
         info,
@@ -260,6 +302,9 @@ fn validate_document_token_inner(
     }
     scope.checkpoint()?;
     result.token = token;
+    if let Some(digest) = digest {
+        result.check_document(&digest);
+    }
     Ok(result)
 }
 /// Request only a digest; scoped HTTP owns both network body and decoder work.
@@ -268,6 +313,26 @@ pub fn acquire_document_timestamp(
     spec: &TsaSpec,
     digest: &DigestValue,
     ctx: &ValidationContext<'_>,
+    scope: &ResourceScope,
+) -> Result<DocumentTimestamp, EvidenceError> {
+    acquire_document_timestamp_scoped(spec, digest, ctx, None, scope)
+}
+/// Acquire through the shared RFC3161 request implementation, then validate at
+/// its post-reply trusted host sample. Static acquisition remains explicit-as-of.
+pub fn acquire_document_timestamp_with_clock(
+    spec: &TsaSpec,
+    digest: &DigestValue,
+    ctx: &ValidationContext<'_>,
+    clock: &(dyn Fn() -> OffsetDateTime + Send + Sync),
+    scope: &ResourceScope,
+) -> Result<DocumentTimestamp, EvidenceError> {
+    acquire_document_timestamp_scoped(spec, digest, ctx, Some(clock), scope)
+}
+fn acquire_document_timestamp_scoped(
+    spec: &TsaSpec,
+    digest: &DigestValue,
+    ctx: &ValidationContext<'_>,
+    clock: Option<&(dyn Fn() -> OffsetDateTime + Send + Sync)>,
     scope: &ResourceScope,
 ) -> Result<DocumentTimestamp, EvidenceError> {
     if ctx
@@ -288,7 +353,7 @@ pub fn acquire_document_timestamp(
         intermediates: ctx.intermediates,
         http: &http,
     };
-    let result = acquire_document_timestamp_inner(spec, digest, &scoped, scope);
+    let result = acquire_document_timestamp_inner(spec, digest, &scoped, clock, scope);
     http.finish()?;
     result
 }
@@ -296,6 +361,7 @@ fn acquire_document_timestamp_inner(
     spec: &TsaSpec,
     digest: &DigestValue,
     ctx: &ValidationContext<'_>,
+    clock: Option<&(dyn Fn() -> OffsetDateTime + Send + Sync)>,
     scope: &ResourceScope,
 ) -> Result<DocumentTimestamp, EvidenceError> {
     if spec.hash != digest.algorithm()
@@ -315,54 +381,23 @@ fn acquire_document_timestamp_inner(
     }
     let _request = scope.reserve_metadata((spec.url.len() as u64 + nonce_len as u64 + 4096) * 8)?;
     scope.checkpoint()?;
-    let nonce = spec.nonce.draw();
-    let request = request_spec_der(spec, digest.as_bytes(), nonce.as_deref());
-    let opts = GetOptions {
-        timeout: spec.timeout,
-        ..GetOptions::default()
+    let (reply, checked_at) = if let Some(clock) = clock {
+        request_with_clock_scoped(spec, digest.as_bytes(), ctx.http, clock)?
+    } else {
+        (
+            request_at_scoped(spec, digest.as_bytes(), ctx.http, ctx.now)?,
+            ctx.now,
+        )
     };
-    let mut attempt = 0;
-    loop {
-        scope.checkpoint()?;
-        let reply = crate::http::pki_send_scoped(
-            ctx.http,
-            &spec.method,
-            &spec.url,
-            TIMESTAMP_QUERY,
-            &request,
-            opts,
-        );
-        let reply = match reply {
-            Err(_) if attempt < spec.retries => {
-                attempt += 1;
-                continue;
-            }
-            Err(error) => return Err(TspError::Http(error).into()),
-            Ok(reply) => reply,
-        };
-        if reply.status() != 200 || !is_timestamp_reply(reply.content_type()) {
-            if attempt < spec.retries {
-                attempt += 1;
-                continue;
-            }
-            return Err(if reply.status() != 200 {
-                TspError::Status(reply.status())
-            } else {
-                TspError::ContentType(reply.content_type().map(str::to_owned))
-            }
-            .into());
-        }
-        let _decode = reply.reserve_decode().map_err(TspError::from)?;
-        let token = response_token(reply.body())?;
-        let mut result = validate_document_token(&token, ctx, scope)?;
-        check_answers(&result.info, spec, digest.as_bytes(), nonce.as_deref())?;
-        if spec
-            .check_skew
-            .is_some_and(|skew| (result.info.gen_time - ctx.now).unsigned_abs() > skew)
-        {
-            return Err(TspError::ClockSkew.into());
-        }
-        result.check_document(digest);
-        return Ok(result);
+    if clock.is_some() && (reply.reply.tst.gen_time > checked_at || checked_at < ctx.now) {
+        return Err(TspError::ClockSkew.into());
     }
+    let current = ValidationContext {
+        now: checked_at,
+        ..*ctx
+    };
+    let mut result =
+        validate_document_token_inner(&reply.reply.token, None, &current, None, scope)?;
+    result.check_document(digest);
+    Ok(result)
 }

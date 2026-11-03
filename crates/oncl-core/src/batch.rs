@@ -267,7 +267,7 @@ struct CapturedItem<'a> {
     id: &'a str,
     action: Action,
     operation: Dispatch<'a>,
-    source: Option<FrozenInput>,
+    source: Option<CapturedSource>,
     detached: Option<FrozenInput>,
     digests: Vec<BatchSourceIdentity>,
     keys: Vec<BatchKeyBinding>,
@@ -275,6 +275,55 @@ struct CapturedItem<'a> {
     replay: Option<BorrowedReplay>,
     _key_memory: Option<ResourceReservation>,
     _key_metadata: Option<ResourceReservation>,
+}
+// Only XML's classifier can construct the signed-wire owner. Ordinary frozen
+// input remains Original and can never be upgraded/rebucketed by this batch.
+enum CapturedSource {
+    Original(FrozenInput),
+    #[cfg(feature = "xml")]
+    SignedXml(oncl_xml::SignedXmlInput),
+}
+enum CapturedReader<'a> {
+    Original(oncl_pki::io::FrozenReader<'a>),
+    #[cfg(feature = "xml")]
+    SignedXml(oncl_xml::SignedXmlReader<'a>),
+}
+impl CapturedSource {
+    fn reader<'a>(
+        &'a mut self,
+        scope: &oncl_pki::resource::ResourceScope,
+    ) -> Result<CapturedReader<'a>, OperationError> {
+        match self {
+            Self::Original(input) => {
+                let region = Region {
+                    offset: 0,
+                    len: input.len(),
+                };
+                Ok(CapturedReader::Original(input.reader(&[region], scope)?))
+            }
+            #[cfg(feature = "xml")]
+            Self::SignedXml(input) => input
+                .reader(scope)
+                .map(CapturedReader::SignedXml)
+                .map_err(crate::xml::error),
+        }
+    }
+}
+impl CapturedReader<'_> {
+    fn source(&mut self) -> Source<'_> {
+        match self {
+            Self::Original(reader) => reader.source(),
+            #[cfg(feature = "xml")]
+            Self::SignedXml(reader) => reader.source(),
+        }
+    }
+    fn finish(&mut self) -> Result<(), OperationError> {
+        match self {
+            Self::Original(reader) => reader.finish().map_err(Into::into),
+            #[cfg(feature = "xml")]
+            Self::SignedXml(reader) => reader.finish().map_err(crate::xml::error),
+        }
+    }
 }
 enum Dispatch<'a> {
     Hash(HashAlg),
@@ -444,7 +493,249 @@ fn terminal(error: &OperationError) -> bool {
             | ErrorCode::SecretRequired
     ) || error.applied_state() != AppliedState::NotApplied
 }
+fn capture_original(
+    source: Source<'_>,
+    store: &oncl_pki::io::TemporaryStore,
+    scope: &mut oncl_pki::resource::ResourceScope,
+) -> Result<(FrozenInput, BatchSourceIdentity), OperationError> {
+    let mut input = FrozenInput::capture(source, store, scope)?;
+    let region = Region {
+        offset: 0,
+        len: input.len(),
+    };
+    let mut reader = input.reader(&[region], scope)?;
+    let digest = hash_source(reader.source(), HashAlg::Sha256, scope)?;
+    reader.finish()?;
+    drop(reader);
+    let identity = BatchSourceIdentity {
+        digest,
+        bytes: input.len(),
+    };
+    Ok((input, identity))
+}
+#[cfg(feature = "xml")]
+fn batch_xml_algorithms(
+    requested: &[oncl_pki::key::SigAlg],
+    allowed: &[oncl_pki::key::SigAlg],
+) -> &'static [oncl_pki::key::SigAlg] {
+    use oncl_pki::key::SigAlg::{Gost2004, Gost2015_512, RsaSha256};
+    const SETS: [&[oncl_pki::key::SigAlg]; 8] = [
+        &[],
+        &[Gost2004],
+        &[Gost2015_512],
+        &[Gost2004, Gost2015_512],
+        &[RsaSha256],
+        &[Gost2004, RsaSha256],
+        &[Gost2015_512, RsaSha256],
+        &[Gost2004, Gost2015_512, RsaSha256],
+    ];
+    let mut mask = 0;
+    for (index, algorithm) in [Gost2004, Gost2015_512, RsaSha256].iter().enumerate() {
+        if requested.contains(algorithm) && allowed.contains(algorithm) {
+            mask |= 1 << index;
+        }
+    }
+    SETS[mask]
+}
+
 impl Engine {
+    #[cfg(feature = "xml")]
+    fn batch_xml_profile(
+        &self,
+        operation: &mut Dispatch<'_>,
+        ctx: &OperationContext,
+    ) -> Result<Option<oncl_xml::XmlVerifyProfile>, OperationError> {
+        use crate::request::SignMode;
+        use oncl_xml::{C14nProfile, XmlSignMode, XmlSignProfile, XmlVerifyProfile};
+        let profile = match operation {
+            Dispatch::Sign(request, _) => match &mut request.mode {
+                SignMode::Xml(_, profile, level) => {
+                    self.validation_context(ctx, Action::Sign)?;
+                    profile.allowed_signature_algorithms = batch_xml_algorithms(
+                        profile.allowed_signature_algorithms,
+                        ctx.policy.allowed_signature_algorithms,
+                    );
+                    if profile.allowed_signature_algorithms.is_empty() {
+                        return Err(OperationError::Key(
+                            oncl_pki::key::KeyError::UnsupportedAlgorithm,
+                        ));
+                    }
+                    if profile.max_metadata_bytes == 0
+                        || profile.max_metadata_bytes > 1048576
+                        || profile.max_work == 0
+                    {
+                        return Err(oncl_pki::resource::ProcessingError::InvalidLimits.into());
+                    }
+                    if let Some(level) = level {
+                        profile.evidence_limits = Some(self.batch_xml_evidence(
+                            *level,
+                            profile,
+                            oncl_pki::cms::ades::ValidationMaterial {
+                                certificates: &[],
+                                ocsp: &[],
+                                crls: &[],
+                            },
+                            ctx,
+                            Action::Sign,
+                        )?);
+                    }
+                    if profile.mode != XmlSignMode::Add {
+                        return Ok(None);
+                    }
+                    XmlVerifyProfile {
+                        xml: profile.xml.clone(),
+                        canonicalization: profile.canonicalization,
+                        allowed_signature_algorithms: profile.allowed_signature_algorithms,
+                        max_metadata_bytes: profile.max_metadata_bytes,
+                        max_work: profile.max_work,
+                        evidence_limits: profile.evidence_limits,
+                        ..Default::default()
+                    }
+                }
+                SignMode::XadesLegacy(_, spec) => {
+                    use oncl_pki::evidence::AdesLevel;
+                    let level = match spec.level {
+                        oncl_xml::xades::XadesLevel::B => AdesLevel::B,
+                        oncl_xml::xades::XadesLevel::T => AdesLevel::T,
+                        oncl_xml::xades::XadesLevel::Lt => AdesLevel::Lt,
+                    };
+                    if level > AdesLevel::B {
+                        let configuration = self
+                            .cades
+                            .as_ref()
+                            .ok_or(OperationError::MissingCadesConfiguration)?;
+                        if spec.tsa.as_ref() != Some(&configuration.tsa) {
+                            return Err(oncl_pki::resource::ProcessingError::InvalidInput(
+                                "XadesSpec TSA must equal explicit host configuration",
+                            )
+                            .into());
+                        }
+                    }
+                    self.batch_xml_evidence(
+                        level,
+                        &XmlSignProfile::default(),
+                        oncl_pki::cms::ades::ValidationMaterial {
+                            certificates: if level >= AdesLevel::Lt {
+                                &spec.chain
+                            } else {
+                                &[]
+                            },
+                            ocsp: &[],
+                            crls: &[],
+                        },
+                        ctx,
+                        Action::Sign,
+                    )?;
+                    return Ok(None);
+                }
+                SignMode::XmlLegacy(..) => {
+                    self.validation_context(ctx, Action::Sign)?;
+                    return Ok(None);
+                }
+                _ => return Ok(None),
+            },
+            Dispatch::Verify(request) => {
+                match request.profile() {
+                    VerifyProfile::Xml | VerifyProfile::XmlKalkan | VerifyProfile::Xades(_) => {}
+                    _ => return Ok(None),
+                }
+                self.validation_context(ctx, Action::Verify)?;
+                XmlVerifyProfile {
+                    canonicalization: if request.profile() == VerifyProfile::XmlKalkan {
+                        C14nProfile::KalkanLegacy
+                    } else {
+                        C14nProfile::Standard
+                    },
+                    allowed_signature_algorithms: ctx.policy.allowed_signature_algorithms,
+                    evidence_limits: crate::xml::intersect_evidence_limits(
+                        self.cades.as_ref().map(|c| c.evidence_limits),
+                        request.evidence_limits(),
+                    ),
+                    required_level: match request.profile() {
+                        VerifyProfile::Xades(level) => Some(level),
+                        _ => None,
+                    },
+                    ..Default::default()
+                }
+            }
+            Dispatch::Extend(request, _) => {
+                let crate::cades::ExtendFormat::Xml(profile) = &mut request.format else {
+                    return Ok(None);
+                };
+                if request.detached_requested {
+                    return Err(oncl_pki::resource::ProcessingError::InvalidInput(
+                        "XML does not accept detached input",
+                    )
+                    .into());
+                }
+                profile.allowed_signature_algorithms = batch_xml_algorithms(
+                    profile.allowed_signature_algorithms,
+                    ctx.policy.allowed_signature_algorithms,
+                );
+                profile.evidence_limits =
+                    crate::xml::intersect_evidence_limits(request.limits, profile.evidence_limits);
+                let generation = XmlSignProfile {
+                    max_metadata_bytes: profile.max_metadata_bytes,
+                    max_work: profile.max_work,
+                    evidence_limits: profile.evidence_limits,
+                    ..Default::default()
+                };
+                profile.evidence_limits = Some(self.batch_xml_evidence(
+                    request.level,
+                    &generation,
+                    crate::cades::material(&request.material),
+                    ctx,
+                    Action::Extend,
+                )?);
+                profile.clone()
+            }
+            _ => return Ok(None),
+        };
+        // The owner retains classified immutable wire, never a cached verdict.
+        if let Some(limits) = profile.evidence_limits {
+            limits.validate().map_err(|e| crate::xml::error(e.into()))?;
+        }
+        Ok(Some(profile))
+    }
+    #[cfg(feature = "xml")]
+    fn batch_xml_evidence(
+        &self,
+        level: oncl_pki::evidence::AdesLevel,
+        profile: &oncl_xml::XmlSignProfile<'_>,
+        material: oncl_pki::cms::ades::ValidationMaterial<'_>,
+        ctx: &OperationContext,
+        action: Action,
+    ) -> Result<oncl_pki::evidence::EvidenceLimits, OperationError> {
+        let validation = self.validation_context(ctx, action)?;
+        let store = self
+            .temporary
+            .as_ref()
+            .ok_or(OperationError::MissingTemporaryStore)?;
+        if level > oncl_pki::evidence::AdesLevel::B && self.cades.is_none() {
+            return Err(OperationError::MissingCadesConfiguration);
+        }
+        let scoped_http = ctx.http(validation.http.as_ref());
+        let context = oncl_pki::validation::ValidationContext {
+            policy: oncl_pki::validation::ValidationPolicy::StrictOnline,
+            now: (validation.clock)(),
+            anchors: &validation.anchors,
+            intermediates: &validation.intermediates,
+            http: &scoped_http,
+        };
+        let services = oncl_xml::xades::XadesServices {
+            validation: &context,
+            network: &validation.network,
+            temporary: store,
+            tsa: self.cades.as_ref().map(|c| &c.tsa),
+            material,
+            evidence_limits: self.cades.as_ref().map(|c| c.evidence_limits),
+            host_clock: Some(validation.clock.as_ref()),
+        };
+        services
+            .preflight(level, profile)
+            .map_err(crate::xml::error)?;
+        services.bounded_limits(profile).map_err(crate::xml::error)
+    }
     pub fn capture_batch<'a>(
         &self,
         items: impl IntoIterator<Item = BatchItem<'a>>,
@@ -510,9 +801,21 @@ impl Engine {
                     input,
                     output,
                 } => {
-                    input
-                        .is_snapshot_for(&ctx.scope)
-                        .map_err(|_| BatchError::ConsentMismatch)?;
+                    #[cfg(feature = "xml")]
+                    let signed_xml = matches!(&request.mode,
+                        crate::request::SignMode::Xml(_, profile, _)
+                        if profile.mode == oncl_xml::XmlSignMode::Add);
+                    #[cfg(not(feature = "xml"))]
+                    let signed_xml = false;
+                    if signed_xml {
+                        input
+                            .is_output_projection_for(&ctx.scope)
+                            .map_err(|_| BatchError::ConsentMismatch)?;
+                    } else {
+                        input
+                            .is_snapshot_for(&ctx.scope)
+                            .map_err(|_| BatchError::ConsentMismatch)?;
+                    }
                     match &request.mode {
                         crate::request::SignMode::CmsAdd(_, Some(d))
                         | crate::request::SignMode::CadesAdd(_, Some(d), ..) => {
@@ -537,23 +840,41 @@ impl Engine {
                         | crate::request::SignMode::Pades(k, ..) => {
                             (std::slice::from_ref(k), Action::Sign)
                         }
+                        #[cfg(feature = "xml")]
+                        crate::request::SignMode::Xml(k, ..)
+                        | crate::request::SignMode::XmlLegacy(k, _)
+                        | crate::request::SignMode::XadesLegacy(k, _) => {
+                            (std::slice::from_ref(k), Action::Sign)
+                        }
                     };
                     // Resolve and pin opaque lease/certificate before host confirmation,
                     // never spool key containers or apply a private key at capture.
-                    match self.capture_batch_keys(keys, ctx, action) {
-                        Ok((values, memory, metadata)) => {
-                            bindings = values;
-                            key_reservations = Some((memory, metadata));
+                    // XML admission/classification must precede provider access.
+                    #[cfg(feature = "xml")]
+                    let deferred = matches!(
+                        &request.mode,
+                        crate::request::SignMode::Xml(..)
+                            | crate::request::SignMode::XmlLegacy(..)
+                            | crate::request::SignMode::XadesLegacy(..)
+                    );
+                    #[cfg(not(feature = "xml"))]
+                    let deferred = false;
+                    if !deferred {
+                        match self.capture_batch_keys(keys, ctx, action) {
+                            Ok((values, memory, metadata)) => {
+                                bindings = values;
+                                key_reservations = Some((memory, metadata));
+                            }
+                            Err(error)
+                                if !terminal(&error)
+                                    && !ctx
+                                        .private_use_stopped
+                                        .load(std::sync::atomic::Ordering::Acquire) =>
+                            {
+                                preflight_error = Some(error)
+                            }
+                            Err(error) => return Err(error.into()),
                         }
-                        Err(error)
-                            if !terminal(&error)
-                                && !ctx
-                                    .private_use_stopped
-                                    .load(std::sync::atomic::Ordering::Acquire) =>
-                        {
-                            preflight_error = Some(error)
-                        }
-                        Err(error) => return Err(error.into()),
                     }
                     let detached = match &mut request.mode {
                         crate::request::SignMode::CmsAdd(_, d)
@@ -691,6 +1012,8 @@ impl Engine {
                 _key_memory: key_memory,
                 _key_metadata: key_metadata,
             };
+            #[cfg(feature = "xml")]
+            let xml_profile = self.batch_xml_profile(&mut entry.operation, ctx)?;
             let borrowed = match &entry.operation {
                 Dispatch::ValidateCms(input, detached) => Some((*input, *detached)),
                 #[cfg(feature = "jose")]
@@ -771,41 +1094,119 @@ impl Engine {
                     second: second.map(|d| (d.as_ptr() as usize, d.len())),
                 });
             }
-            for (source, destination) in
-                [(source, &mut entry.source), (detached, &mut entry.detached)]
+            if entry.error.is_none()
+                && let Some(source) = source
             {
-                if entry.error.is_some() {
-                    break;
-                }
-                if let Some(source) = source {
+                #[cfg(feature = "xml")]
+                let signed_xml = xml_profile.is_some();
+                #[cfg(not(feature = "xml"))]
+                let signed_xml = false;
+                if signed_xml {
+                    // This validates the complete scope without treating a
+                    // format-specific view as an ordinary Original snapshot.
+                    source
+                        .is_output_projection_for(&ctx.scope)
+                        .map_err(|_| BatchError::ConsentMismatch)?;
+                } else {
                     source
                         .is_snapshot_for(&ctx.scope)
                         .map_err(|_| BatchError::ConsentMismatch)?;
-                    let store = self
-                        .temporary
-                        .as_ref()
-                        .ok_or(OperationError::MissingTemporaryStore)?;
-                    match FrozenInput::capture(source, store, &mut ctx.scope) {
-                        Ok(mut frozen) => {
-                            let region = Region {
-                                offset: 0,
-                                len: frozen.len(),
-                            };
-                            let mut reader = frozen.reader(&[region], &ctx.scope)?;
-                            let digest =
-                                hash_source(reader.source(), HashAlg::Sha256, &mut ctx.scope)?;
-                            reader.finish()?;
-                            drop(reader);
+                }
+                let store = self
+                    .temporary
+                    .as_ref()
+                    .ok_or(OperationError::MissingTemporaryStore)?;
+                #[cfg(feature = "xml")]
+                let signed = xml_profile.as_ref();
+                #[cfg(not(feature = "xml"))]
+                let signed: Option<&()> = None;
+                #[cfg(feature = "xml")]
+                if let Some(profile) = signed {
+                    match oncl_xml::capture_signed_input(source, profile, store, &mut ctx.scope) {
+                        Ok(input) => {
                             entry.digests.push(BatchSourceIdentity {
-                                digest,
-                                bytes: frozen.len(),
+                                digest: *input.wire_digest(),
+                                bytes: input.len(),
                             });
-                            *destination = Some(frozen);
+                            entry.source = Some(CapturedSource::SignedXml(input));
                         }
-                        Err(error) => {
-                            entry.error = Some(error.into());
-                            break;
+                        Err(error) => entry.error = Some(crate::xml::error(error)),
+                    }
+                } else {
+                    match capture_original(source, store, &mut ctx.scope) {
+                        Ok((input, identity)) => {
+                            entry.digests.push(identity);
+                            entry.source = Some(CapturedSource::Original(input));
                         }
+                        Err(error) => entry.error = Some(error),
+                    }
+                }
+                #[cfg(not(feature = "xml"))]
+                {
+                    let _ = signed;
+                    match capture_original(source, store, &mut ctx.scope) {
+                        Ok((input, identity)) => {
+                            entry.digests.push(identity);
+                            entry.source = Some(CapturedSource::Original(input));
+                        }
+                        Err(error) => entry.error = Some(error),
+                    }
+                }
+            }
+            if entry.error.is_none()
+                && let Some(source) = detached
+            {
+                source
+                    .is_snapshot_for(&ctx.scope)
+                    .map_err(|_| BatchError::ConsentMismatch)?;
+                let store = self
+                    .temporary
+                    .as_ref()
+                    .ok_or(OperationError::MissingTemporaryStore)?;
+                match capture_original(source, store, &mut ctx.scope) {
+                    Ok((input, identity)) => {
+                        entry.digests.push(identity);
+                        entry.detached = Some(input);
+                    }
+                    Err(error) => entry.error = Some(error),
+                }
+            }
+            #[cfg(feature = "xml")]
+            if entry.error.is_none()
+                && let Dispatch::Sign(request, _) = &entry.operation
+            {
+                use crate::request::SignMode;
+                let key = match &request.mode {
+                    SignMode::Xml(key, ..)
+                    | SignMode::XmlLegacy(key, _)
+                    | SignMode::XadesLegacy(key, _) => Some(key),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    // Parse/canonicalize the exact immutable owner and validate
+                    // existing Add signatures before even resolving a provider.
+                    // Drop the large prepared index now; execution repeats this
+                    // accounted work rather than retaining one index per item.
+                    let admission = (|| {
+                        let mut reader = entry
+                            .source
+                            .as_mut()
+                            .ok_or(oncl_pki::resource::ProcessingError::InvalidInput(
+                                "missing captured XML source",
+                            ))?
+                            .reader(&ctx.scope)?;
+                        self.preflight_batch_xml(request, reader.source(), ctx)?;
+                        reader.finish()
+                    })();
+                    match admission.and_then(|()| {
+                        self.capture_batch_keys(std::slice::from_ref(key), ctx, entry.action)
+                    }) {
+                        Ok((bindings, memory, metadata)) => {
+                            entry.keys = bindings;
+                            entry._key_memory = Some(memory);
+                            entry._key_metadata = Some(metadata);
+                        }
+                        Err(error) => entry.error = Some(error),
                     }
                 }
             }
@@ -1026,19 +1427,11 @@ impl Engine {
     fn dispatch_batch_item(
         &self,
         operation: Dispatch<'_>,
-        source: Option<&mut FrozenInput>,
+        source: Option<&mut CapturedSource>,
         detached: Option<&mut FrozenInput>,
         ctx: &mut OperationContext,
     ) -> Result<BatchReport, OperationError> {
-        let mut source = source
-            .map(|s| {
-                let region = Region {
-                    offset: 0,
-                    len: s.len(),
-                };
-                s.reader(&[region], &ctx.scope)
-            })
-            .transpose()?;
+        let mut source = source.map(|s| s.reader(&ctx.scope)).transpose()?;
         let mut detached = detached
             .map(|s| {
                 let region = Region {
@@ -1067,6 +1460,12 @@ impl Engine {
                     SignMode::Pdf(k, p) => SignMode::Pdf(k, p),
                     #[cfg(feature = "pdf")]
                     SignMode::Pades(k, p, l, m, e) => SignMode::Pades(k, p, l, m, e),
+                    #[cfg(feature = "xml")]
+                    SignMode::Xml(k, p, l) => SignMode::Xml(k, p, l),
+                    #[cfg(feature = "xml")]
+                    SignMode::XmlLegacy(k, s) => SignMode::XmlLegacy(k, s),
+                    #[cfg(feature = "xml")]
+                    SignMode::XadesLegacy(k, s) => SignMode::XadesLegacy(k, s),
                 };
                 self.sign(SignRequest { mode }, input.unwrap(), output, ctx)
                     .map(BatchReport::Sign)
@@ -1078,19 +1477,16 @@ impl Engine {
                 .validate_cms(input, detached, ctx)
                 .map(BatchReport::Validate),
             Dispatch::Extend(request, output) => {
-                let bound = ExtendRequest::cms(request.level);
-                #[cfg(feature = "pdf")]
-                let bound = match request.pdf_limits {
-                    Some(limits) => ExtendRequest::pdf(request.level, limits),
-                    None => bound,
+                // Move every immutable selector/profile/material field instead
+                // of rebuilding a CMS request (which loses XML selection).
+                let bound = ExtendRequest {
+                    level: request.level,
+                    material: request.material,
+                    detached: std::cell::RefCell::new(data),
+                    detached_requested: request.detached_requested,
+                    limits: request.limits,
+                    format: request.format,
                 };
-                let mut bound = bound.with_material(request.material);
-                if let Some(limits) = request.limits {
-                    bound = bound.with_evidence_limits(limits);
-                }
-                if let Some(data) = data {
-                    bound = bound.with_detached(data);
-                }
                 self.extend(&bound, input.unwrap(), output, ctx)
                     .map(BatchReport::Extend)
             }
@@ -1167,14 +1563,14 @@ impl Engine {
                 if let Some(reader) = detached.as_mut() {
                     reader.finish()?;
                 }
-                Ok::<(), oncl_pki::resource::ProcessingError>(())
+                Ok::<(), OperationError>(())
             })();
             if let Err(error) = finalized {
                 return Err(if applied == AppliedState::NotApplied {
-                    error.into()
+                    error
                 } else {
                     OperationError::AfterKeyUse {
-                        source: Box::new(error.into()),
+                        source: Box::new(error),
                         applied,
                     }
                 });

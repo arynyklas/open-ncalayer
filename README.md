@@ -91,6 +91,49 @@ Rust SDK добавляет отдельные CAdES B/T/LT/LTA: `SignRequest::c
 уровней, attached/detached, несколько подписантов и изменённые архивы для
 независимого оракула; не заменяет полный стенд 10 ГиБ/RSS и desktop-матрицу.
 
+`oncl-server` — самостоятельная библиотека durable-аудита, без HTTP-сервера.
+Хозяин подключает `DurableAuditGuard` через `EngineServices::with_keys` и перед
+работой привязывает исходный `OperationContext` к аутентифицированному opaque
+principal и безопасным 16-байтовым меткам ключей (`bind` / `AuditBinding`).
+BEGIN/FINAL сохраняют настоящий zero-based `batch_item` исходного Core-вызова
+(0–1023), не номер применения ключа: hash/verify оставляют пропуски, несколько
+подписантов одного item получают тот же ordinal, вне пакета — None. Some(0)
+имеет отдельный presence-bit; guest ID/имя item не становится principal/меткой ключа.
+Содержимое документов, пути, имена файлов, пароли, произвольные `KeyId::Debug`
+и тексты ошибок в журнал не попадают. BEGIN синхронизируется **до** применения
+ключа; FINAL сохраняет фактический Applied/NotApplied/Unknown. Отказ FINAL
+не отменяет подпись: Core возвращает фактический Applied, не публикует результат,
+а общий health закрывает новые применения во всех контекстах этого журнала.
+Уже допущенные применения могут завершиться; незавершённый BEGIN после перезапуска
+означает Unknown, а не отсутствие применения.
+
+Журнал использует owner-only закреплённый каталог, единственного межпроцессного
+владельца, 160-байтовые checksummed frames и реальные rotation/retention/quota.
+Формат — **ONCLAU02** во всех identity/header/record. Старый ONCLAU01 не различал
+неизвестный batch item и настоящий None: `open`/чтение/recovery отказывают до
+изменений или нового BEGIN, оставляя старые байты оператору. Автоматического
+переписывания заголовка, угадывания item или совместимого fallback нет;
+ручная внешняя миграция не входит в библиотеку.
+Полные повреждённые записи и чужие заголовки не обрезаются. Любой `open`, даже
+чистого журнала, требует явного `recover()` с durable probe перед новой работой.
+Recovery ремонтирует только неполный хвост собственного журнала; границы относятся
+к наблюдаемому завершённому ремонту, не к утраченным незафиксированным действиям.
+Повторный recovery умеет ротировать завершённый журнал даже при закрытом health.
+Прерванный durable probe завершается новыми синхронизированными FINAL без расхода
+дополнительного зарезервированного слота; новый обрезанный хвост в таком случае
+фиксируется в первом восстановленном FINAL, не переписывает старый Recovery.
+Неполный хвост не последнего сегмента — повреждение, он никогда не ремонтируется.
+Квота журнала — до 64 МиБ; максимум 1024 регистрации/закрытых tombstone до исходного
+deadline, 32 host-mapped ключа на регистрацию. Drop binding освобождает admission,
+если нет незавершённого FINAL; tombstone не удерживает документы/ключи/lease.
+Windows использует защищённый DACL, WRITE_THROUGH и `sync_all` файлов;
+directory-fsync недоступен и явно обозначен `NamespaceSync::Unsupported`.
+Unix использует descriptor-relative nofollow I/O и directory-fsync. ACL не
+защищает от привилегированного хозяина, checksum не означает неотказуемость.
+Проверка: `cargo test -p oncl-server --test audit`; настоящий синтетический smoke:
+`cargo run -p oncl-server --example audit_smoke -- target/s01-smoke`.
+Это не включает HTTP/auth/OTLP и не заменяет платформенную приёмку Windows 7.
+
 
 ### Проверка сертификатов
 
@@ -603,27 +646,69 @@ OUTPUT renewal — только append в новом transaction epoch, без �
 
 
 
-Опциональная фича `oncl-core/xml` добавляет **проверку** UTF-8 Source:
-`VerifyRequest::xml()` (стандартная C14N) и явно выбранный
-`VerifyRequest::xml_kalkan()` (прежние байты Kalkan). Нужны host-настройки
-`ValidationServices` и `TemporaryStore`; запрос не задаёт корни/сетевую политику.
+Опциональная фича `oncl-core/xml` добавляет UTF-8 Source sign/Add/verify и
+keyless evidence extension: `SignRequest::xml/xades`, `VerifyRequest::xml/xades`,
+`ExtendRequest::xml`. Явный `VerifyRequest::xml_kalkan()` сохраняет прежние байты
+Kalkan. Нужны host-настройки `ValidationServices` и `TemporaryStore`; TSA задаёт
+общий `CadesConfiguration`, запрос не расширяет корни или сетевую политику.
 `oncl-xml::verify_source` проверяет каждый SignedInfo, сертификат, SignatureValue
 и Reference; отчёт хранит scoped per-signer факты, SHA-256 реального сертификата
 и точные диапазоны покрытых узлов. Один canonical writer обслуживает bounded DOM
-и индексированный raw-span Source; полного DOM/канонического буфера большого XML нет.
+и индексированный raw-span Source; большого DOM/RAM-буфера нет. Канонические
+References могут храниться в учтённом TemporaryStore до открытия ключа.
 Поддерживаются inclusive/exclusive C14N с вариантами comments, InclusiveNamespaces,
 ID/percent-URI, однозначные XPointer location paths, ограниченные Manifest и
 namespace-bound XPath-фильтр `not(ancestor-or-self::ds:Signature)`. Enveloped
 исключает текущую подпись; прежнее исключение последующих подписей включено только
 в `KalkanLegacy`. Неоднозначные IDs/KeyInfo/X509Data и неподдерживаемые трансформации
 отклоняются; изменение неподписанного узла не приписывается подписи.
-SignatureTimeStamp XAdES 1.3.2 связан с каноническим **исходным** SignatureValue
-через закрытую Base64-проекцию и F03/F04, включая текущий статус TSA. Это не
-заявление полной поддержки уровней AdES: archive coverage, другие версии XAdES и
-несколько независимых SignatureTimeStamp явно unsupported. Большие XML sign/Add
-и WSSE сюда не входят. Bounded legacy API, его лимиты и CMS/PDF sign не меняются.
-Внутренние hash/evidence intake не расходуют финальную output-квоту; внешний
-`copy_entry` списывает каждую доставку до записи, включая повторную.
+XAdES B/T/LT/LTA использует F03/F04, а не наличие timestamp-элемента.
+SignatureTimeStamp 1.3.2 покрывает целый канонический SignatureValue; выбран
+недистрибутивный ArchiveTimeStamp 1.4.1 из ETSI EN 319 132-1 V1.2.1 §5.5.2.2:
+все преобразованные References, SignedInfo/SignatureValue/KeyInfo, предыдущие
+unsigned properties и прочие Objects в установленном порядке. Extend/renewal
+проверяет все старые и новые proofs и не требует KeyProvider или Sign guard.
+Минимальный проверенный уровень возвращается только при Valid. Поддержан один
+SignatureTimeStamp и несколько ArchiveTimeStamp renewal; каждый proof проверяется.
+Независимые повторные SignatureTimeStamp, другие версии и распределённое archive
+coverage отклоняются явно, а не превращаются в lower-level Valid.
+Новые baseline-подписи содержат подписанный DataObjectFormat/MimeType для каждой
+data Reference; ObjectReference связан с Reference@Id, а не ID подписанных данных.
+Прежний bounded XAdES остаётся математически проверяемым, но без обязательных
+baseline-свойств не получает достигнутый baseline-уровень. Keyless LTA renewal
+обновляет устаревшие публичные статусы только после проверки всех прежних proofs
+и до выпуска архива, покрывающего весь текущий evidence; финальная проверка
+защищённого archive prefix не ослаблена.
+`oncl-xml::sign_spec_source` даёт bounded `XmlSignSpec` через DigestSigner и
+исходный ResourceScope; старые XPath/placement/output/layout/лимиты сохранены,
+builder и canonical writer общие. Source sign не строит DOM большого документа;
+Add сохраняет прежние подписи, но стандартная whole-document reference может
+быть нарушена последующим Add. WSSE для больших XML не добавлен.
+Внутренние hash/evidence replay не расходуют финальную output-квоту; внешний
+`copy_entry` списывает каждую доставку. OUTPUT-derived captures остаются OUTPUT,
+а отмена/ошибка закрытого output transaction запрещает публикацию после очистки
+сигнала отмены.
+Core `SignRequest::xml_legacy` сохраняет bounded wire-контракт XmlSignSpec через
+исходный AuthorizedSigner. `SignRequest::xades_legacy` принимает bounded XadesSpec
+и создаёт полный B/T/LT общим evidence kernel, не раскрывая raw key; TSA должен
+совпадать с явной host-конфигурацией. Селекторы и канонические References
+подготавливаются до открытия ключа.
+Выбранные LT request chain и публичный host material совместно проверяются по
+encoded размеру/числу до capture и ключа, без предварительного копирования/DER.
+B/T сохраняют совместимость и не сериализуют request chain.
+`capture_signed_input` сохраняет SHA-256 неизменяемого signed wire и закрытую
+роль format-reader для approval/replay в той же операции. Signed intake
+необратимо считает фактический wire progress, отдельно классифицируя ограниченный
+реальный signature overhead. Прикладные Objects, fake metadata, whitespace и PI
+остаются document bytes. Кредит сериализации получают только распознанные parser
+bounded declaration/BOM и раскрытие пустого parent, содержащего лишь подписи;
+это не утверждение о первоначальном написании документа. Обычные original-input
+и hash consumers отклоняют classified format readers.
+Signature layout проверяется сразу по framing/work-лимитам; ёмкость сохраняемой
+геометрии резервируется до роста, без лимита на число узлов документа.
+Динамический Core берёт trusted host clock после фактического TSA-ответа;
+финальная XML-проверка использует один поздний момент для всех signers.
+Прямые fixed-as-of API сохраняют прежнюю семантику и монотонные deadlines.
 
 Проверки: `cargo test -p oncl-xml --features testing`; runtime:
 `cargo run -p oncl-core --features xml --example sdk_probe -- --case X03 --out target/x03-smoke`.
@@ -633,6 +718,18 @@ Probe создаёт содержательный XML с двумя настоя
 `python crates/oncl-core/examples/sdk_probe/xml_oracle.py --out target/x03-smoke`
 (lxml/libxml2 и cryptography; exact C14N/digests и RSA math, не ГОСТ и не trust).
 Это не гейт содержательных 10 ГиБ/пикового RSS 1 ГиБ — он остаётся в V01.
+
+X04 выполняет настоящие sign/Add/LTA над содержательной ссылкой более 64 МиБ,
+проверяет content/evidence mutation и число private uses, а bounded matrix
+покрывает B/T/LT/LTA/renewal через Core. PKI — только явно закреплённый loopback:
+`cargo run -p oncl-core --features xml --release --example sdk_probe -- --case X04 --out target/x04-smoke`.
+Независимый oracle:
+`python crates/oncl-core/examples/sdk_probe/xml_xades_oracle.py --out target/x04-smoke`
+сравнивает точные canonical/archive bytes, RSA XML/CMS math, RFC3161 nonce,
+issuer-bound synthetic RSA status, порядок/покрытие и отрицательные контроли.
+Это bounded direct-root профиль, не универсальный PKIX/XAdES validator и не
+независимое доказательство ГОСТ, 10 ГиБ или RSS.
+
 
 
 Тестовые ключи в `fixtures/synthetic/` синтетические, пароль `Qwerty12`. Их можно использовать на демо-странице. По умолчанию демо отправляет `chain: []`, поэтому синтетические и тестовые ключи NCANode доступны. Вариант «синтетический тестовый корень» передаёт `root-gost2015`: ключи других корней и промежуточного CA становятся недоступны.

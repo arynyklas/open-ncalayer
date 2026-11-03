@@ -92,6 +92,48 @@ It emits only public synthetic RSA artifacts for all four levels, attached and
 detached content, multiple signers and altered archives for an independent
 oracle; it does not replace full 10-GiB/RSS or desktop-matrix acceptance.
 
+`oncl-server` is a standalone durable-audit library, not an HTTP-server scaffold.
+The host installs `DurableAuditGuard` through `EngineServices::with_keys` and
+binds the original `OperationContext` to its authenticated opaque principal and
+safe 16-byte key labels (`bind` / `AuditBinding`). BEGIN/FINAL retain the original
+Core zero-based `batch_item` (0–1023), not a private-use counter: hash/verify keep
+gaps, multiple signers of one item keep its ordinal, and non-batch calls have None.
+Some(0) has a distinct presence bit; guest item IDs never become principal/key labels.
+The journal never serializes
+document contents, paths, filenames, passwords, arbitrary `KeyId::Debug` values
+or raw errors. BEGIN is synchronized **before** private use; FINAL records actual
+Applied/NotApplied/Unknown. A failed FINAL cannot undo a signature: Core preserves
+Applied, withholds the result, and shared health blocks new uses across contexts.
+Already-admitted uses may finish; an unfinished BEGIN after restart means Unknown,
+never a claim that the private key was not used.
+
+The journal has an owner-only pinned root, exclusive cross-process ownership,
+160-byte checksummed frames and actual rotation/retention/quota enforcement.
+The format is **ONCLAU02** throughout identity/header/records. Old ONCLAU01 could
+not distinguish an unknown batch item from genuine None: open/read/recovery
+refuse it before mutation or a new BEGIN, leaving old bytes for the operator.
+There is no automatic header rewrite, inferred item or compatibility fallback;
+manual external migration is outside this library.
+Complete corrupt frames and foreign headers are never truncated. Every `open`,
+including a clean journal, requires explicit `recover()` and a durable probe
+before new uses. Recovery repairs only an incomplete own-journal tail; recorded
+boundaries describe the observed committed repair, not lost uncommitted history.
+Repeated recovery can rotate closed journals while health remains blocked.
+An interrupted durable probe is completed by newly synchronized FINALs without
+consuming an extra reserved slot; a new tail repair then belongs to the first
+recovered FINAL, never a rewritten older Recovery record. An incomplete non-final
+segment is corruption and is never repaired.
+Journal quota is at most 64 MiB, with at most 1024 registrations/closed tombstones
+until original deadlines and 32 mapped keys per registration. Binding drop releases
+admission unless FINAL is still pending; tombstones retain no documents, keys or
+operation leases. Windows uses a protected DACL, WRITE_THROUGH and file `sync_all`;
+unavailable directory-fsync is explicit `NamespaceSync::Unsupported`. Unix uses
+descriptor-relative nofollow I/O and directory-fsync. ACLs do not defend against a
+privileged host; checksums are not nonrepudiation. Run
+`cargo test -p oncl-server --test audit`, then the actual synthetic signing smoke:
+`cargo run -p oncl-server --example audit_smoke -- target/s01-smoke`.
+This enables no HTTP/auth/OTLP and does not replace Windows 7 platform acceptance.
+
 
 ### Certificate checking
 
@@ -516,27 +558,69 @@ and a separate later incremental update. The virtual xref-above-4-GiB test prove
 only arithmetic/seek handling, not meaningful 10-GiB PDF processing or a 1-GiB RSS
 ceiling: those remain V01 acceptance gates.
 
-The optional `oncl-core/xml` feature adds UTF-8 Source **verification** through
-`VerifyRequest::xml()` (standard C14N) or explicit `VerifyRequest::xml_kalkan()`
-byte compatibility. Configure host `ValidationServices` and `TemporaryStore`;
-requests cannot choose trust anchors or network policy. `oncl-xml::verify_source`
+The optional `oncl-core/xml` feature provides UTF-8 Source sign/Add/verify and
+keyless evidence extension through `SignRequest::xml/xades`,
+`VerifyRequest::xml/xades` and `ExtendRequest::xml`. Explicit
+`VerifyRequest::xml_kalkan()` selects old Kalkan byte compatibility. Configure
+host `ValidationServices`, `TemporaryStore` and shared `CadesConfiguration` TSA;
+requests cannot expand trust anchors or network policy. `oncl-xml::verify_source`
 checks every real SignedInfo, certificate, SignatureValue and Reference. Scoped
 per-signer facts retain the actual certificate SHA-256 and exact covered regions.
 One canonical writer serves bounded DOM and indexed raw-span inputs; large XML
-does not become a DOM or a canonical document buffer. Supported inputs include
+does not become a DOM or a whole-document RAM buffer. Canonical references may
+be retained in admitted TemporaryStore files before opening a key. Inputs include
 inclusive/exclusive C14N with comments variants, InclusiveNamespaces, ID/percent
 URIs, unique XPointer location paths, bounded recursive Manifests and the
 namespace-bound `not(ancestor-or-self::ds:Signature)` XPath filter. Enveloped
 excludes the current signature; excluding later signatures is explicit
 `KalkanLegacy` compatibility only. Ambiguous IDs/KeyInfo/X509Data and unsupported
 transforms fail; uncovered-node changes are not attributed to a signature.
-XAdES 1.3.2 SignatureTimeStamp binds the actual canonical source SignatureValue
-through a closed Base64 projection and F03/F04, including current TSA status.
-This is not an achieved-AdES-level claim: archive coverage, other XAdES versions
-and multiple independent SignatureTimeStamp proofs are explicitly unsupported.
-Large XML sign/Add and WSSE are not added. Existing bounded limits and CMS/PDF
-signing remain unchanged. Internal hashing/evidence intake spends no final-output
-quota; external `copy_entry` admits and charges every delivery before writing.
+XAdES B/T/LT/LTA uses F03/F04, not timestamp-element presence. SignatureTimeStamp
+1.3.2 covers the complete canonical SignatureValue. The chosen archive profile
+is EN 319 132-1 V1.2.1 section 5.5.2.2 non-distributed ArchiveTimeStamp 1.4.1:
+actual transformed References, SignedInfo/SignatureValue/KeyInfo, every prior
+unsigned property and other Objects, in normative order. Extend/renewal checks
+all old/current proofs without a KeyProvider or Sign guard. A verified minimum
+level requires Valid. The supported proof graph is one SignatureTimeStamp plus
+multiple ArchiveTimeStamp renewals, checking every present supported proof.
+Multiple independent SignatureTimeStamp proofs, other versions and distributed
+coverage are explicit unsupported errors, never a lower-level Valid result.
+New baseline signatures include signed DataObjectFormat/MimeType for every data
+Reference, binding ObjectReference to Reference@Id (not the target data ID).
+Historical bounded XAdES remains mathematically verifiable, but missing mandatory
+baseline properties never produces an achieved baseline level. Keyless LTA renewal
+can refresh stale public status only after validating every existing proof and
+before issuing an archive covering all current evidence; final protected-prefix
+validation is unchanged.
+`oncl-xml::sign_spec_source` exposes bounded XmlSignSpec through DigestSigner and
+the original ResourceScope, retaining selectors/placement/output/layout/limits
+and sharing the actual metadata/crypto builder and canonical writer. Source
+signing never constructs a large document DOM. Add preserves old signatures,
+but a standard whole-document reference may be invalidated by later Add.
+Large XML WSSE is not added. Internal hash/evidence replay spends no final-output
+quota; external `copy_entry` charges every delivery. OUTPUT-derived captures
+remain OUTPUT and a failed closed output transaction cannot publish after the
+host clears cancellation.
+Core `SignRequest::xml_legacy` retains the bounded XmlSignSpec wire contract
+through the original AuthorizedSigner; `SignRequest::xades_legacy` accepts
+bounded XadesSpec options and emits complete B/T/LT through the shared evidence
+kernel, not a raw-key escape. Its TSA must equal explicit host configuration.
+Both prepare selectors/canonical references before opening a key.
+The selected LT request chain and host public material are admitted together by
+encoded size/count before capture or key opening, without cloning/encoding first.
+B/T retain their compatibility semantics and do not serialize the request chain.
+`capture_signed_input` retains an immutable signed-wire SHA-256 and closed
+format-reader role for same-operation approval/replay. Signed intake charges
+actual wire progress irrevocably, separately classifying bounded real signature
+overhead; application Objects, fake metadata, whitespace and PIs remain document
+bytes. Only parser-recognized bounded declaration/BOM and signature-only empty
+parent expansion receive serialization credit, not an original-spelling claim.
+Generic original-input/hash consumers reject classified format readers.
+Signature layout is checked eagerly against framing/work limits; retained
+geometry capacity is admitted before growth, without a document-node cap.
+Dynamic Core time-stamp issuance samples the trusted host clock after the actual
+reply; final XML validation uses one late common instant for all signers. Direct
+fixed-as-of APIs keep their original semantics and monotonic deadlines.
 
 Run `cargo test -p oncl-xml --features testing`, then
 `cargo run -p oncl-core --features xml --example sdk_probe -- --case X03 --out target/x03-smoke`.
@@ -591,6 +675,18 @@ negative controls, use pyHanko 0.38+:
 `python crates/oncl-core/examples/sdk_probe/pades_oracle.py --out target/p03-smoke`.
 These synthetic-root checks are not qualified/NCA certification, an independent
 GOST matrix, or the meaningful 2/4/10-GiB PDF, RSS and platform V01 gates.
+
+X04 performs actual sign/Add/LTA over a substantive protected reference larger
+than 64 MiB, content/evidence mutations and private-use counts; its bounded Core
+matrix covers B/T/LT/LTA/renewal. PKI uses only explicitly pinned loopback:
+`cargo run -p oncl-core --features xml --release --example sdk_probe -- --case X04 --out target/x04-smoke`.
+Run the independent oracle:
+`python crates/oncl-core/examples/sdk_probe/xml_xades_oracle.py --out target/x04-smoke`.
+It compares exact canonical/archive bytes, RSA XML/CMS math, RFC3161 nonce,
+issuer-bound synthetic RSA status, normative order/coverage and negative controls.
+This is a bounded direct-root profile, not a general PKIX/XAdES validator or an
+independent GOST, 10-GiB or peak-RSS proof.
+
 
 
 

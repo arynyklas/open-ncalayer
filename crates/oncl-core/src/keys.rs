@@ -104,6 +104,11 @@ impl KeySelector {
             source: Source::Inline(Arc::new(Zeroizing::new(container)), alias),
         }
     }
+    /// Source classification only: no paths, PINs or container bytes escape.
+    /// Hosts must still authorize the exact selector identity before opening.
+    pub fn is_inline(&self) -> bool {
+        matches!(self.source, Source::Inline(..))
+    }
     pub fn named(id: KeyId) -> Self {
         Self {
             id,
@@ -433,6 +438,15 @@ pub struct KeyUseEvent {
     batch_item: Option<BatchItemOrdinal>,
 }
 impl KeyUseEvent {
+    /// Describe the original invocation/item. This grants no private-key authority.
+    pub fn new(ctx: &OperationContext, key_id: KeyId, action: Action) -> Self {
+        Self {
+            operation_id: ctx.id(),
+            key_id,
+            action,
+            batch_item: ctx.batch_item,
+        }
+    }
     pub fn batch_item(&self) -> Option<BatchItemOrdinal> {
         self.batch_item
     }
@@ -440,13 +454,28 @@ impl KeyUseEvent {
 /// Non-cloneable successful host receipt, returned to the same guard after use.
 pub struct KeyUseReceipt {
     event: KeyUseEvent,
+    correlation: Option<(u64, u64)>,
 }
 impl KeyUseReceipt {
     pub fn new(event: KeyUseEvent) -> Self {
-        Self { event }
+        Self {
+            event,
+            correlation: None,
+        }
     }
     pub fn event(&self) -> &KeyUseEvent {
         &self.event
+    }
+    /// Host guard correlation, carried unchanged through the actual private use.
+    /// This is not authority against a privileged host implementing this trait.
+    pub fn with_correlation(event: KeyUseEvent, guard_instance: u64, use_id: u64) -> Self {
+        Self {
+            event,
+            correlation: Some((guard_instance, use_id)),
+        }
+    }
+    pub fn correlation(&self) -> Option<(u64, u64)> {
+        self.correlation
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -597,12 +626,11 @@ impl AuthorizedSigner<'_> {
             validation.check_private(&self.ctx.leases[self.index].entry.cert, self.ctx)?;
         }
         self.ctx.network_status()?;
-        let event = KeyUseEvent {
-            operation_id: self.ctx.id(),
-            key_id: self.ctx.leases[self.index].id.clone(),
-            action: self.action,
-            batch_item: self.ctx.batch_item,
-        };
+        let event = KeyUseEvent::new(
+            self.ctx,
+            self.ctx.leases[self.index].id.clone(),
+            self.action,
+        );
         let receipt = self.guard.before_use(&event).inspect_err(|_| {
             self.ctx
                 .private_use_stopped

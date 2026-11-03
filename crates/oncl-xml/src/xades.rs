@@ -1,23 +1,22 @@
-//! XAdES-BASELINE signatures (ETSI EN 319 132-1, XAdES 1.3.2) of a whole XML document, at
-//! the levels plugins ask for:
+//! Source XAdES B/T/LT/LTA and explicit bounded legacy adapters.
 //!
-//! - **B**: an enveloped `ds:Signature` (as [`crate::sign_enveloped`] makes it, with an
-//!   `Id`) with `xades:QualifyingProperties` in a `ds:Object`; its `SignedProperties`
-//!   (`SigningTime`, `SigningCertificateV2` with the SHA-256 of the signer's certificate)
-//!   are signed by a second reference of the type `http://uri.etsi.org/01903#SignedProperties`;
-//! - **T**: and an unsigned `SignatureTimeStamp` over the `ds:SignatureValue` element,
-//!   canonicalized with Exclusive XML Canonicalization;
-//! - **LT**: and `CertificateValues` (the signer's path: its issuer, that issuer's issuer
-//!   and so on, taken from the certificates given) and `RevocationValues` (for the signer's
-//!   certificate and each certificate of the path other than a self-signed root: an OCSP
-//!   response from the responder of the certificate's AIA through [`ocsp::fetch`], or, for
-//!   a certificate naming no responder, the CRLs of its distribution points through
-//!   [`crl::fetch_for`]; a certificate with neither is an error).
+//! [`sign_source`] and [`sign_prepared`] implement EN 319 132-1 V1.2.1
+//! baseline properties, actual shared F03/F04 proofs and non-distributed v1.4.1
+//! archive coverage (§5.5.2.2). [`extend_source`] renews proof-only without a key.
+//! Every present proof is checked; one SignatureTimeStamp and multiple archive
+//! renewals are supported. Dynamic host services sample time after TSA replies;
+//! fixed-as-of services retain explicit validation-time semantics.
 //!
-//! The signature and algorithm URIs follow the signer's certificate as Kalkan's do (GOST
-//! 2015-512, GOST 2004, RSA-SHA256), unless the spec names them. Byte-for-byte equality
-//! with other XAdES signers is not a goal; the structure is B-LT's, and the signature passes
-//! [`crate::verify`].
+//! [`prepare_spec_source`] accepts bounded [`XadesSpec`] options through a
+//! DigestSigner, prepares before key opening and emits complete B/T/LT baseline
+//! properties using the same metadata/crypto and evidence kernels.
+//!
+//! [`sign`] remains the old bounded PrivateKey wire API: claimed SigningTime,
+//! SigningCertificateV2 and optional timestamp/status elements, preserving its
+//! historical certificate-derived default algorithm and XML layout. Its legacy
+//! shape lacks mandatory DataObjectFormat: successful mathematical verification
+//! alone must not report a complete EN baseline level. Use Source or the guarded
+//! prepared adapter for new baseline generation.
 
 use crate::{C14n, QualifyingObject, XmlError, XmlSignSpec};
 use base64::Engine;
@@ -32,6 +31,11 @@ use oncl_pki::tsp::{self, TsaSpec, TspError};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use time::OffsetDateTime;
+pub(crate) mod source;
+pub use source::{
+    XadesReport, XadesServices, XadesSourceSpec, extend_source, extend_staged, extend_transaction,
+    prepare_source, sign_prepared, sign_source, sign_staged,
+};
 
 /// The `DigestMethod` of `SigningCertificateV2`.
 const SHA256_URI: &str = "http://www.w3.org/2001/04/xmlenc#sha256";
@@ -196,6 +200,7 @@ pub fn sign(
         QualifyingObject {
             signed_properties: &signed_properties,
             signed_properties_id: &properties_id,
+            data_reference_id: None,
         },
     )?;
     let Some(tsa) = tsa else {
@@ -375,4 +380,293 @@ fn revocation_values(
         values.ocsp.push(fetched.response);
     }
     Ok(values)
+}
+
+/// Prepared bounded XadesSpec-compatible operation. Algorithms and public chain
+/// options remain explicit; TSA authority belongs to the supplied host services.
+/// Unlike the historical wire adapter, this generates the required baseline
+/// DataObjectFormat and uses the shared strict evidence implementation.
+pub struct PreparedXadesSpec<'a> {
+    prepared: crate::PreparedLegacySign<'a>,
+    id: String,
+    context: String,
+    level: oncl_pki::evidence::AdesLevel,
+    signing_time: OffsetDateTime,
+    chain: Vec<Certificate>,
+    _metadata: oncl_pki::resource::ResourceReservation,
+    _chain_metadata: oncl_pki::resource::ResourceReservation,
+}
+pub fn prepare_spec_source<'a>(
+    input: oncl_pki::io::Source<'_>,
+    spec: &XadesSpec<'a>,
+    now: OffsetDateTime,
+    services: &XadesServices<'_>,
+    scope: &mut oncl_pki::resource::ResourceScope,
+) -> Result<PreparedXadesSpec<'a>, crate::XmlSourceError> {
+    use oncl_pki::{evidence::AdesLevel, resource::ProcessingError};
+    let level = match spec.level {
+        XadesLevel::B => AdesLevel::B,
+        XadesLevel::T => AdesLevel::T,
+        XadesLevel::Lt => AdesLevel::Lt,
+    };
+    if level > AdesLevel::B && spec.tsa.as_ref() != services.tsa {
+        return Err(crate::XmlSourceError::Malformed(
+            "XadesSpec TSA must equal explicit host configuration",
+        ));
+    }
+    let profile = crate::XmlSignProfile::default();
+    // B/T do not serialize the request's chain. Preserve that compatibility
+    // contract instead of rejecting or copying ignored public material.
+    let selected_chain = if level >= AdesLevel::Lt {
+        spec.chain.as_slice()
+    } else {
+        &[]
+    };
+    // Inspect the actual material union without cloning/encoding it, before
+    // intake or key opening. The later union uses these same certificate slices.
+    services.preflight_with_certificates(level, &profile, selected_chain)?;
+    let chain_bytes =
+        selected_chain
+            .iter()
+            .try_fold(0u64, |n, cert| -> Result<u64, crate::XmlSourceError> {
+                let len = u32::from(cert.encoded_len().map_err(|_| {
+                    crate::XmlSourceError::Malformed("XadesSpec certificate DER length")
+                })?);
+                n.checked_add(u64::from(len))
+                    .ok_or(ProcessingError::MetadataLimit.into())
+            })?;
+    let chain_metadata = scope.reserve_metadata(
+        chain_bytes
+            .checked_mul(4)
+            .and_then(|n| {
+                n.checked_add(
+                    selected_chain.len() as u64 * std::mem::size_of::<Certificate>() as u64,
+                )
+            })
+            .ok_or(ProcessingError::MetadataLimit)?,
+    )?;
+    let metadata = scope.reserve_metadata(profile.max_metadata_bytes as u64 * 8)?;
+    // These are the XadesSpec's actual supported options, not a guessed ID selector.
+    let xml = XmlSignSpec {
+        signature_method: spec.signature_method,
+        digest_method: spec.digest_method,
+        signed_info_c14n: Some(C14n::Exclusive),
+        transforms: Some(vec![
+            crate::Transform::Enveloped,
+            crate::Transform::C14n(C14n::Exclusive),
+        ]),
+        strip_whitespace: false,
+        output: crate::XmlOutput::AsIs,
+        ..XmlSignSpec::kalkan(None, None)
+    };
+    let prepared = crate::prepare_legacy_source(input, &xml, services.temporary, scope)?;
+    let id = signature_id(prepared.bytes(), &[], now);
+    let doc = crate::parse::parse_admitted(prepared.bytes(), false, Some(scope))?;
+    for node in doc.descendants().filter(roxmltree::Node::is_element) {
+        if crate::is_ds(node, "Signature") {
+            return Err(crate::XmlSourceError::Malformed(
+                "bounded XadesSpec Create cannot replace an existing signature",
+            ));
+        }
+        if node.attribute("Id").is_some_and(|value| {
+            value == id
+                || value == format!("{id}-SignedProperties")
+                || value == format!("{id}-Reference-0")
+        }) {
+            return Err(crate::XmlSourceError::Malformed(
+                "bounded XAdES derived ID collision",
+            ));
+        }
+    }
+    let root = doc.root_element();
+    let mut context = String::from("<context");
+    for namespace in root.namespaces() {
+        if namespace.name() == Some("xml") {
+            continue;
+        }
+        let name = namespace
+            .name()
+            .map_or_else(|| "xmlns".to_owned(), |p| format!("xmlns:{p}"));
+        context.push_str(&format!(
+            " {name}=\"{}\"",
+            crate::escape_attribute(namespace.uri())
+        ));
+    }
+    for attribute in root
+        .attributes()
+        .filter(|a| a.namespace() == Some("http://www.w3.org/XML/1998/namespace"))
+    {
+        context.push_str(&format!(
+            " xml:{}=\"{}\"",
+            attribute.name(),
+            crate::escape_attribute(attribute.value())
+        ));
+    }
+    context.push_str(">\0");
+    context.push('0');
+    if context.len() > profile.max_metadata_bytes {
+        return Err(ProcessingError::MetadataLimit.into());
+    }
+    drop(doc);
+    Ok(PreparedXadesSpec {
+        prepared,
+        id,
+        context,
+        level,
+        signing_time: now,
+        chain: selected_chain.to_vec(),
+        _metadata: metadata,
+        _chain_metadata: chain_metadata,
+    })
+}
+impl PreparedXadesSpec<'_> {
+    pub fn sign_transaction(
+        self,
+        signer: &mut dyn oncl_pki::key::DigestSigner,
+        services: &XadesServices<'_>,
+        output: &mut oncl_pki::io::XmlSignatureOutput<'_>,
+        scope: &mut oncl_pki::resource::ResourceScope,
+    ) -> Result<XadesReport, crate::XmlSourceError> {
+        use oncl_pki::{evidence::SignerEvidence, resource::ProcessingError, validation::Verdict};
+        let spec = XadesSourceSpec {
+            xml: crate::XmlSignProfile {
+                signature_id: Some(&self.id),
+                canonicalization: crate::C14nProfile::KalkanLegacy,
+                strip_whitespace: false,
+                ..Default::default()
+            },
+            level: self.level,
+            signing_time: self.signing_time,
+        };
+        let (properties, properties_id, reference_id) =
+            source::properties(&spec, signer.certificate())?;
+        let mut signed = self.prepared.sign_bytes(
+            signer,
+            scope,
+            Some((
+                &self.id,
+                QualifyingObject {
+                    signed_properties: &properties,
+                    signed_properties_id: &properties_id,
+                    data_reference_id: Some(&reference_id),
+                },
+            )),
+        )?;
+        let (signature, digest, raw_value) = {
+            let doc = crate::parse::parse_admitted(&signed.bytes, false, Some(scope))?;
+            let signature = doc
+                .descendants()
+                .find(|n| crate::is_ds(*n, "Signature") && n.attribute("Id") == Some(&self.id))
+                .ok_or(crate::XmlSourceError::Malformed(
+                    "generated bounded Signature",
+                ))?;
+            let digest = crate::canonicalizer(C14n::Exclusive)
+                .hash(
+                    crate::ds_child(signature, "SignedInfo")?,
+                    signer.algorithm().hash_alg(),
+                )?
+                .0;
+            let encoded: String = crate::ds_child(signature, "SignatureValue")?
+                .text()
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| !c.is_ascii_whitespace())
+                .collect();
+            let raw = STANDARD
+                .decode(encoded)
+                .map_err(|_| crate::XmlSourceError::Malformed("generated SignatureValue Base64"))?;
+            (
+                std::str::from_utf8(&signed.bytes[signature.range()])
+                    .map_err(|_| crate::XmlSourceError::Malformed("generated Signature UTF8"))?
+                    .to_owned(),
+                digest,
+                raw,
+            )
+        };
+        let candidate_bytes = services.material.certificates.iter().try_fold(
+            (services.material.certificates.len() + self.chain.len()) as u64
+                * std::mem::size_of::<Certificate>() as u64,
+            |n, cert| -> Result<u64, crate::XmlSourceError> {
+                let len = u32::from(cert.encoded_len().map_err(|_| {
+                    crate::XmlSourceError::Malformed("XAdES service certificate length")
+                })?);
+                n.checked_add(u64::from(len) * 4)
+                    .ok_or(ProcessingError::MetadataLimit.into())
+            },
+        )?;
+        let _candidate_metadata = scope.reserve_metadata(candidate_bytes)?;
+        let mut certificates = services.material.certificates.to_vec();
+        certificates.extend(self.chain);
+        let effective = XadesServices {
+            validation: services.validation,
+            network: services.network,
+            temporary: services.temporary,
+            tsa: services.tsa,
+            material: oncl_pki::cms::ades::ValidationMaterial {
+                certificates: &certificates,
+                ocsp: services.material.ocsp,
+                crls: services.material.crls,
+            },
+            evidence_limits: services.evidence_limits,
+            host_clock: services.host_clock,
+        };
+        let mut work = crate::REFERENCE_WORK as u64;
+        let complete = source::complete_signature(
+            &mut signed.canonical,
+            &signature,
+            &self.context,
+            &SignerEvidence {
+                certificate: signer.certificate(),
+                algorithm: signer.algorithm(),
+                signed_digest: digest,
+                signature: &raw_value,
+                claimed_time: Some(self.signing_time),
+            },
+            &spec,
+            &effective,
+            scope,
+            &mut work,
+        )?;
+        if complete.len() > spec.xml.max_metadata_bytes {
+            return Err(ProcessingError::MetadataLimit.into());
+        }
+        let doc = crate::parse::parse_admitted(&signed.bytes, false, Some(scope))?;
+        let range = doc
+            .descendants()
+            .find(|n| crate::is_ds(*n, "Signature") && n.attribute("Id") == Some(&self.id))
+            .ok_or(crate::XmlSourceError::Malformed(
+                "generated bounded Signature",
+            ))?
+            .range();
+        drop(doc);
+        output.append(&signed.bytes[..range.start])?;
+        output.append(complete.as_bytes())?;
+        output.append(&signed.bytes[range.end..])?;
+        let profile = crate::XmlVerifyProfile {
+            canonicalization: crate::C14nProfile::KalkanLegacy,
+            required_level: Some(self.level),
+            evidence_limits: Some(effective.bounded_limits(&spec.xml)?),
+            ..Default::default()
+        };
+        let mut summary = signed.into_summary();
+        drop(complete);
+        drop(signature);
+        drop(raw_value);
+        drop(self.context);
+        drop(self._metadata);
+        let verification = effective.verify(output.source()?, &profile, scope)?;
+        if verification.validation.verdict == Verdict::Invalid
+            || (services.validation.policy == oncl_pki::validation::ValidationPolicy::StrictOnline
+                && verification.validation.verdict != Verdict::Valid)
+        {
+            return Err(crate::XmlSourceError::Malformed(
+                "final bounded XAdES validation failed",
+            ));
+        }
+        summary.bytes_out = output.len();
+        Ok(XadesReport {
+            summary,
+            verification,
+        })
+    }
 }

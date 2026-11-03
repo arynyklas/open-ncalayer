@@ -17,6 +17,11 @@ impl<'a> PdfSnapshot<'a> {
         input: &'a mut FrozenInput,
         scope: &ResourceScope,
     ) -> Result<Self, ProcessingError> {
+        if input.output_derived || input.pending_format || input.classification.is_some() {
+            return Err(ProcessingError::InvalidInput(
+                "PDF input snapshot requires original input provenance",
+            ));
+        }
         // Check through the original immutable owner; never replace its control.
         let extent = input.len();
         let mut reader = input.reader(
@@ -53,6 +58,27 @@ impl<'a> PdfSnapshot<'a> {
     }
     pub fn is_empty(&self) -> bool {
         self.extent == 0
+    }
+    fn is_output_derived(&self) -> bool {
+        match &self.backing {
+            Backing::Input(input) => input.is_output_derived(),
+            Backing::Output(_) => true,
+        }
+    }
+    fn output_failure(&self) -> Option<Arc<AtomicBool>> {
+        match &self.backing {
+            Backing::Input(input) => input.output_failure(),
+            Backing::Output(output) => output.output_failure.clone(),
+        }
+    }
+    fn invalidate_output(&mut self) {
+        match &mut self.backing {
+            Backing::Input(input) => input.invalidate_output(),
+            Backing::Output(output) => {
+                output.failed = true;
+                mark_output_failure(&output.output_failure);
+            }
+        }
     }
     fn check(&self, scope: &ResourceScope) -> Result<(), ProcessingError> {
         self.scope.checkpoint()?;
@@ -96,9 +122,19 @@ impl<'a> PdfSnapshot<'a> {
         }
         let identity = self.identity.clone();
         let owner = self.scope.retain();
-        super::frozen::decode_region(region, scope, &identity, &owner, encoding, |region, out| {
-            self.read_region(region, out)
-        })
+        let output_derived = self.is_output_derived();
+        super::frozen::decode_region(
+            region,
+            scope,
+            super::frozen::DecodeOrigin {
+                identity: &identity,
+                scope: &owner,
+                output_derived,
+                format_specific: false,
+            },
+            encoding,
+            |region, out| self.read_region(region, out),
+        )
     }
     pub(crate) fn binds(
         &self,
@@ -157,7 +193,8 @@ impl PdfSnapshotReader<'_, '_> {
     pub fn source(&mut self) -> Source<'_> {
         let len = Some(self.length);
         let admitted = Some(self.input.scope.retain());
-        let output = matches!(self.input.backing, Backing::Output(_));
+        let output = self.input.is_output_derived();
+        let output_failure = self.input.output_failure();
         Source {
             reader: if output {
                 Reader::OutputProjection(self)
@@ -166,6 +203,8 @@ impl PdfSnapshotReader<'_, '_> {
             },
             len,
             admitted,
+            output_failure,
+            classification: None,
         }
     }
     pub fn finish(&mut self) -> Result<(), ProcessingError> {
@@ -227,6 +266,9 @@ impl Seek for PdfSnapshotReader<'_, '_> {
 impl SnapshotReader for PdfSnapshotReader<'_, '_> {
     fn finish_snapshot(&mut self) -> Result<(), ProcessingError> {
         self.finish()
+    }
+    fn invalidate_snapshot(&mut self) {
+        self.input.invalidate_output();
     }
 }
 

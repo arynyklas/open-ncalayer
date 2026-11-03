@@ -24,6 +24,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use time::OffsetDateTime;
 mod signature_representation;
 pub use signature_representation::BoundSignatureRepresentation;
+mod archive_representation;
+pub use archive_representation::BoundArchiveRepresentation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AdesLevel {
@@ -135,6 +137,11 @@ pub struct EvidenceStore {
     bundle: EvidenceBundle,
 }
 impl EvidenceStore {
+    /// Continue the exact authentic owner, including counters and terminal
+    /// poison. This move never creates a new store, scope, limit or allowance.
+    pub fn resume(bundle: EvidenceBundle) -> Self {
+        Self { bundle }
+    }
     /// Internal public-evidence intake uses source-role scratch and container
     /// quotas, not final-output credit. Every external `copy_entry` delivery is
     /// separately admitted and charged, including repeat delivery.
@@ -280,38 +287,56 @@ impl EvidenceStore {
         ctx: &ValidationContext<'_>,
         network: &NetworkPolicy,
     ) -> Result<EvidenceId, EvidenceError> {
+        self.request_timestamp_impl(signer, coverage, spec, ctx, network, None)
+    }
+    /// Dynamic acquisition uses the original scope/deadline and a trusted host
+    /// clock after the real reply. It does not mint a trusted timestamp fact.
+    pub fn request_timestamp_with_clock(
+        &mut self,
+        signer: &SignerEvidence<'_>,
+        coverage: &[CoveragePart<'_>],
+        spec: &TsaSpec,
+        ctx: &ValidationContext<'_>,
+        network: &NetworkPolicy,
+        clock: &(dyn Fn() -> OffsetDateTime + Send + Sync),
+    ) -> Result<EvidenceId, EvidenceError> {
+        self.request_timestamp_impl(signer, coverage, spec, ctx, network, Some(clock))
+    }
+    fn request_timestamp_impl(
+        &mut self,
+        signer: &SignerEvidence<'_>,
+        coverage: &[CoveragePart<'_>],
+        spec: &TsaSpec,
+        ctx: &ValidationContext<'_>,
+        network: &NetworkPolicy,
+        clock: Option<&(dyn Fn() -> OffsetDateTime + Send + Sync)>,
+    ) -> Result<EvidenceId, EvidenceError> {
         self.bundle.checkpoint()?;
-        if !spec.require_tsa_eku
-            || !spec.cert_req
-            || spec.policy.is_none()
-            || spec.hash == HashAlg::Sha1
-            || spec.retries > 2
-            || spec.timeout.is_zero()
-            || spec.url.len() > 4096
-            || ctx.policy == ValidationPolicy::OfflineReport
-            || match &spec.nonce {
-                NonceSpec::None => true,
-                NonceSpec::Random(n) => *n == 0 || *n > 64,
-                NonceSpec::Value(value) => value.is_empty() || value.len() > 64,
-            }
-        {
-            return Err(EvidenceError::InvalidBinding);
-        }
+        validate_timestamp_configuration(spec, ctx.policy)?;
         // Reject impossible token intake before hashing or contacting a responder.
         if self.bundle.entries.len() == self.bundle.limits.max_items
             || self.bundle.intake_bytes >= self.bundle.limits.max_bytes
         {
             return Err(EvidenceError::Limit);
         }
+        if let [CoveragePart::BoundArchive(representation)] = coverage {
+            representation.check_issuance(signer, &self.bundle)?;
+        }
         let imprint = hash_coverage(&mut self.bundle, signer, coverage, spec.hash, None)?;
         // Covers bounded response/token/parser/nonce allocations before HTTP.
         let _scratch = self.bundle.scope.reserve_memory(MAX_RESPONSE_LEN * 20)?;
         let _metadata = self.bundle.scope.reserve_metadata(MAX_RESPONSE_LEN * 2)?;
         let http = DeadlineTransport::new(ctx.http, network, &self.bundle.scope);
-        let result = tsp::request_at(spec, imprint.as_bytes(), &http, ctx.now);
+        let result = if let Some(clock) = clock {
+            tsp::request_with_clock_scoped(spec, imprint.as_bytes(), &http, clock)
+        } else {
+            tsp::request_at_scoped(spec, imprint.as_bytes(), &http, ctx.now)
+                .map(|reply| (reply, ctx.now))
+        };
         http.finish()?;
-        let reply = result?;
-        if reply.tst.gen_time > ctx.now {
+        let (scoped_reply, checked_at) = result?;
+        let reply = &scoped_reply.reply;
+        if reply.tst.gen_time > checked_at {
             return Err(TspError::ClockSkew.into());
         }
         self.collect(
@@ -319,8 +344,85 @@ impl EvidenceStore {
             Source::sequential(&mut reply.token.as_slice(), Some(reply.token.len() as u64)),
             EvidenceOrigin::Fetched {
                 url: &spec.url,
-                obtained_at: ctx.now,
+                obtained_at: checked_at,
             },
+        )
+    }
+    /// Validate EVERY existing proof against proposed current LT material, then
+    /// request the new archive that actually covers ALL of that material. No
+    /// preflight ValidationReport/ProofTime/format-success token escapes.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Same F04 validator and TSA request require original proof, archive and host policy inputs"
+    )]
+    pub fn request_archive_timestamp_for_extension(
+        &mut self,
+        signer: &SignerEvidence<'_>,
+        old_proofs: &[TimestampBinding<'_>],
+        archive: &BoundArchiveRepresentation,
+        spec: &TsaSpec,
+        ctx: &ValidationContext<'_>,
+        network: &NetworkPolicy,
+        clock: Option<&(dyn Fn() -> OffsetDateTime + Send + Sync)>,
+    ) -> Result<EvidenceId, EvidenceError> {
+        self.bundle.checkpoint()?;
+        validate_timestamp_configuration(spec, ctx.policy)?;
+        archive.check_issuance(signer, &self.bundle)?;
+        let timestamp_count = self
+            .bundle
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EvidenceKind::Timestamp)
+            .count();
+        if timestamp_count != old_proofs.len() {
+            return Err(EvidenceError::InvalidBinding);
+        }
+        for (index, entry) in self.bundle.entries.iter().enumerate() {
+            if entry.kind == EvidenceKind::Timestamp
+                && old_proofs
+                    .iter()
+                    .filter(|proof| {
+                        proof.token
+                            == EvidenceId {
+                                owner: self.bundle.owner,
+                                index,
+                            }
+                    })
+                    .count()
+                    != 1
+            {
+                return Err(EvidenceError::InvalidBinding);
+            }
+        }
+        let resources = self.bundle.scope.retain();
+        let current = ValidationContext {
+            now: clock.map_or(ctx.now, |clock| clock()),
+            ..*ctx
+        };
+        let checked = validate_evidence_impl(
+            signer,
+            &mut self.bundle,
+            old_proofs,
+            AdesLevel::Lt,
+            &current,
+            network,
+            &resources,
+            None,
+            None,
+            None,
+            ValidationPurpose::ArchiveIssuance,
+        )?;
+        if checked.verdict != crate::validation::Verdict::Valid {
+            return Err(EvidenceError::InvalidBinding);
+        }
+        resources.checkpoint()?;
+        self.request_timestamp_impl(
+            signer,
+            &[CoveragePart::BoundArchive(archive)],
+            spec,
+            ctx,
+            network,
+            clock,
         )
     }
     /// Move the owner, including any poisoned state. No validation/publication is
@@ -345,6 +447,36 @@ impl EvidenceBundle {
     }
     fn checked_entry(&self, id: EvidenceId) -> Result<&EvidenceEntry, EvidenceError> {
         self.entry(id).ok_or(EvidenceError::InvalidBinding)
+    }
+    /// Internal bounded evidence replay for parsing/serialization. This is not
+    /// an external delivery claim; final serialized sinks must be accounted by
+    /// their format. `copy_entry` remains counted on EVERY external delivery.
+    pub fn read_entry(
+        &mut self,
+        id: EvidenceId,
+        offset: u64,
+        bytes: &mut [u8],
+    ) -> Result<usize, EvidenceError> {
+        self.checkpoint()?;
+        if bytes.len() > IO_CHUNK_BYTES {
+            return Err(EvidenceError::Limit);
+        }
+        let region = self.checked_entry(id)?.region;
+        if offset > region.len {
+            return Err(EvidenceError::InvalidBinding);
+        }
+        let n = self.staged.read_region(
+            Region {
+                offset: region
+                    .offset
+                    .checked_add(offset)
+                    .ok_or(EvidenceError::Limit)?,
+                len: region.len - offset,
+            },
+            bytes,
+        )?;
+        self.checkpoint()?;
+        Ok(n)
     }
     /// External, repeatable delivery is charged every time. Only internal
     /// Region replay is free of document output double-counting.
@@ -430,6 +562,9 @@ pub enum CoverageEncoding {
 pub enum CoveragePart<'a> {
     Signature,
     BoundSignature(&'a BoundSignatureRepresentation),
+    /// Actual ordered archive octets with current complete signature and prior
+    /// evidence inclusion checked; format semantics remain the adapter's job.
+    BoundArchive(&'a BoundArchiveRepresentation),
     Evidence {
         id: EvidenceId,
         encoding: CoverageEncoding,
@@ -517,6 +652,13 @@ fn coverage_size(
                     representation.check(signer, &bundle.scope)?;
                     representation.region.len
                 }
+                CoveragePart::BoundArchive(representation) => {
+                    if depth != 0 || parts.len() != 1 {
+                        return Err(EvidenceError::InvalidBinding);
+                    }
+                    representation.check(signer, bundle, &bundle.scope, None)?;
+                    representation.region.len
+                }
                 CoveragePart::Staged { artifact, region } => {
                     lock_staged(artifact)?.read_region(*region, &mut [])?;
                     region.len
@@ -593,6 +735,24 @@ impl CoverageHasher<'_, '_, '_> {
                             return Err(EvidenceError::InvalidBinding);
                         }
                         self.checkpoint()?;
+                        hash.update(&self.raw.bytes[..n]);
+                        region.offset = region
+                            .offset
+                            .checked_add(n as u64)
+                            .ok_or(EvidenceError::Limit)?;
+                        region.len -= n as u64;
+                    }
+                }
+                CoveragePart::BoundArchive(representation) => {
+                    representation.check(self.signer, self.bundle, &self.work, None)?;
+                    let mut source = lock_staged(&representation.artifact)?;
+                    let mut region = representation.region;
+                    while region.len != 0 {
+                        self.checkpoint()?;
+                        let n = source.read_region(region, &mut self.raw.bytes)?;
+                        if n == 0 {
+                            return Err(EvidenceError::InvalidBinding);
+                        }
                         hash.update(&self.raw.bytes[..n]);
                         region.offset = region
                             .offset
@@ -949,6 +1109,21 @@ fn binding_graph(
                 if !signature_seen {
                     return Err(EvidenceError::InvalidBinding);
                 }
+                if let [CoveragePart::BoundArchive(representation)] = proof.coverage {
+                    if selections.is_some() {
+                        return Err(EvidenceError::InvalidBinding);
+                    }
+                    representation.check(signer, bundle, &bundle.scope, Some(proof.token))?;
+                    // All prior timestamp entries must be actual earlier proofs.
+                    for (index, entry) in bundle.entries[..proof.token.index].iter().enumerate() {
+                        if entry.kind == EvidenceKind::Timestamp
+                            && !proofs[..position].iter().any(|p| p.token.index == index)
+                        {
+                            return Err(EvidenceError::InvalidBinding);
+                        }
+                    }
+                    continue;
+                }
                 let selected = selections
                     .and_then(|values| values.iter().find(|value| value.token == proof.token))
                     .map(|value| value.protected);
@@ -1071,7 +1246,17 @@ pub fn validate_evidence(
     resources: &ResourceScope,
 ) -> Result<ValidationReport, EvidenceError> {
     validate_evidence_impl(
-        signer, bundle, proofs, required, ctx, network, resources, None, None, None,
+        signer,
+        bundle,
+        proofs,
+        required,
+        ctx,
+        network,
+        resources,
+        None,
+        None,
+        None,
+        ValidationPurpose::Final,
     )
 }
 
@@ -1131,6 +1316,7 @@ pub(crate) fn validate_prepared_evidence(
         selections,
         Some(&prepared.parsed),
         None,
+        ValidationPurpose::Final,
     )
 }
 
@@ -1163,7 +1349,14 @@ pub(crate) fn validate_snapshot_evidence(
         None,
         Some(&prepared.parsed),
         Some(graph),
+        ValidationPurpose::Final,
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ValidationPurpose {
+    Final,
+    ArchiveIssuance,
 }
 
 #[allow(
@@ -1181,6 +1374,7 @@ fn validate_evidence_impl(
     selections: Option<&[ArchiveSelection<'_>]>,
     prepared: Option<&ParsedEvidence>,
     snapshot_graph: Option<&crate::cms::ades::pdf::SnapshotProofGraph<'_, '_>>,
+    purpose: ValidationPurpose,
 ) -> Result<ValidationReport, EvidenceError> {
     resources.checkpoint()?;
     bundle.checkpoint()?;
@@ -1220,20 +1414,32 @@ fn validate_evidence_impl(
     let selected = selections
         .and_then(|values| values.last())
         .map(|value| value.protected);
-    let included = |index: usize| {
-        selected.is_none_or(|ids| {
-            ids.contains(&EvidenceId {
-                owner: bundle.owner,
-                index,
-            })
+    // Only a closed ordered archive may have noncyclic CURRENT-TSA material
+    // after its token. Signer/earlier-proof LT checks use its protected prefix.
+    let closed_cutoff = if purpose == ValidationPurpose::Final {
+        proofs.last().and_then(|proof| {
+            (proof.kind == ProofKind::Archive
+                && matches!(proof.coverage, [CoveragePart::BoundArchive(_)]))
+            .then_some(proof.token.index)
         })
+    } else {
+        None
+    };
+    let included = |index: usize| {
+        closed_cutoff.is_none_or(|cutoff| index < cutoff)
+            && selected.is_none_or(|ids| {
+                ids.contains(&EvidenceId {
+                    owner: bundle.owner,
+                    index,
+                })
+            })
     };
     let candidates: Vec<&Certificate> = parsed
         .candidates
         .iter()
         .filter(|(id, _)| {
-            id.map_or(selected.is_none(), |id| {
-                selected.is_none_or(|ids| ids.contains(&id))
+            id.map_or(selected.is_none() && closed_cutoff.is_none(), |id| {
+                included(id.index)
             })
         })
         .map(|(_, cert)| cert)
@@ -1262,6 +1468,27 @@ fn validate_evidence_impl(
         .filter(|(index, item)| included(*index) && item.kind == EvidenceKind::Crl)
         .map(|(_, item)| item.bytes.as_slice())
         .collect();
+    // These borrowed views are used ONLY for the cryptographically checked
+    // current TSA, never to repair a missing earlier signer/status prefix.
+    let has_tail = closed_cutoff.is_some_and(|cutoff| cutoff + 1 < bundle.entries.len());
+    let current_candidates: Option<Vec<_>> =
+        has_tail.then(|| parsed.candidates.iter().map(|(_, cert)| cert).collect());
+    let current_responses: Option<Vec<_>> = has_tail.then(|| {
+        parsed
+            .raw
+            .iter()
+            .filter(|i| i.kind == EvidenceKind::Ocsp)
+            .map(|i| i.bytes.as_slice())
+            .collect()
+    });
+    let current_crls: Option<Vec<_>> = has_tail.then(|| {
+        parsed
+            .raw
+            .iter()
+            .filter(|i| i.kind == EvidenceKind::Crl)
+            .map(|i| i.bytes.as_slice())
+            .collect()
+    });
     let original = bundle.scope.retain();
     // The outer owner-A transport and inner current-B transport independently
     // clamp the same request: the actual pinned delegate sees min(A, B, request).
@@ -1329,10 +1556,14 @@ fn validate_evidence_impl(
             }
             resources.checkpoint()?;
             bundle.checkpoint()?;
+            let current_archive = closed_cutoff == Some(proof.token.index);
             let built = pkix::build_anchored_path_selected(
                 tsa,
                 ctx.anchors,
-                &candidates,
+                current_candidates
+                    .as_ref()
+                    .filter(|_| current_archive)
+                    .unwrap_or(&candidates),
                 info.gen_time,
                 bundle.limits.max_chain_len,
             );
@@ -1348,12 +1579,29 @@ fn validate_evidence_impl(
                     continue;
                 }
             };
+            if current_archive {
+                check_current_tsa_tail(
+                    parsed,
+                    proof.token.index,
+                    &path,
+                    info.gen_time,
+                    ctx.now,
+                    bundle,
+                    resources,
+                )?;
+            }
             let (status, revoked) = path_status(
                 &path,
                 info.gen_time,
                 &scoped,
-                &responses,
-                &crls,
+                current_responses
+                    .as_ref()
+                    .filter(|_| current_archive)
+                    .unwrap_or(&responses),
+                current_crls
+                    .as_ref()
+                    .filter(|_| current_archive)
+                    .unwrap_or(&crls),
                 required >= AdesLevel::Lt,
             );
             finish()?;
@@ -1396,7 +1644,9 @@ fn validate_evidence_impl(
             && (!archive_valid
                 || !proofs.last().is_some_and(|proof| {
                     (proof.kind == ProofKind::Archive
-                        && (selections.is_some() || proof.token.index + 1 == bundle.entries.len()))
+                        && (selections.is_some()
+                            || proof.token.index + 1 == bundle.entries.len()
+                            || matches!(proof.coverage, [CoveragePart::BoundArchive(_)])))
                         || (proof.kind == ProofKind::Document
                             && snapshot_graph.is_some_and(|graph| graph.is_archive(proof.token)))
                 }))
@@ -1515,4 +1765,102 @@ pub(crate) fn lock_snapshot<'a, 's>(
     input
         .try_lock()
         .map_err(|_| ProcessingError::InvalidInput("snapshot already borrowed"))
+}
+
+/// This checks actual certificate/status roles against the already verified,
+/// anchored CURRENT TSA path. XML separately checks TSVD grammar/URI/location;
+/// no caller-supplied role boolean can promote these cryptographic facts.
+fn check_current_tsa_tail(
+    parsed: &ParsedEvidence,
+    cutoff: usize,
+    path: &[Certificate],
+    _at: OffsetDateTime,
+    now: OffsetDateTime,
+    bundle: &EvidenceBundle,
+    resources: &ResourceScope,
+) -> Result<(), EvidenceError> {
+    let has_ocsp = parsed
+        .raw
+        .iter()
+        .skip(cutoff + 1)
+        .any(|item| item.kind == EvidenceKind::Ocsp);
+    let _role_metadata = if has_ocsp {
+        let bytes = path.iter().try_fold(0u64, |total, cert| {
+            cert.encoded_len()
+                .map_err(|_| EvidenceError::InvalidBinding)
+                .and_then(|n| {
+                    total
+                        .checked_add(u32::from(n) as u64)
+                        .ok_or(EvidenceError::Limit)
+                })
+        })?;
+        Some(resources.reserve_metadata(bytes.checked_mul(4).ok_or(EvidenceError::Limit)?)?)
+    } else {
+        None
+    };
+    let role_cas = has_ocsp.then(|| crate::pkix::CaSet::new(path.to_vec()));
+    for item in parsed.raw.iter().skip(cutoff + 1) {
+        resources.checkpoint()?;
+        bundle.checkpoint()?;
+        let relevant = match item.kind {
+            EvidenceKind::Certificate => {
+                cert::parse(&item.bytes).is_ok_and(|cert| path.contains(&cert))
+            }
+            // Role and freshness are separate facts: issuer/CertID/EKU/math
+            // precede these time-only errors in the existing strict checker.
+            // Current freshness is still checked by path_status below.
+            EvidenceKind::Ocsp => path.windows(2).any(|pair| {
+                matches!(
+                    crate::ocsp::check_embedded_issuer_bound(
+                        &item.bytes,
+                        &pair[0],
+                        &pair[1],
+                        role_cas.as_ref().expect("OCSP role path"),
+                        now
+                    ),
+                    Ok(_)
+                        | Err(
+                            crate::ocsp::OcspError::ThisUpdate | crate::ocsp::OcspError::NextUpdate
+                        )
+                )
+            }),
+            EvidenceKind::Crl => path.windows(2).any(|pair| {
+                matches!(
+                    crate::crl::verify_crl(&item.bytes, &pair[1], now),
+                    Ok(_) | Err(crate::crl::CrlError::NotYetValid | crate::crl::CrlError::Outdated)
+                )
+            }),
+            EvidenceKind::Timestamp => false,
+        };
+        resources.checkpoint()?;
+        bundle.checkpoint()?;
+        if !relevant {
+            return Err(EvidenceError::InvalidBinding);
+        }
+    }
+    Ok(())
+}
+
+/// Exact pure issuance-configuration gate, not a proof or trust decision.
+pub fn validate_timestamp_configuration(
+    spec: &TsaSpec,
+    policy: ValidationPolicy,
+) -> Result<(), EvidenceError> {
+    if !spec.require_tsa_eku
+        || !spec.cert_req
+        || spec.policy.is_none()
+        || spec.hash == HashAlg::Sha1
+        || spec.retries > 2
+        || spec.timeout.is_zero()
+        || spec.url.len() > 4096
+        || policy == ValidationPolicy::OfflineReport
+        || match &spec.nonce {
+            NonceSpec::None => true,
+            NonceSpec::Random(n) => *n == 0 || *n > 64,
+            NonceSpec::Value(value) => value.is_empty() || value.len() > 64,
+        }
+    {
+        return Err(EvidenceError::InvalidBinding);
+    }
+    Ok(())
 }

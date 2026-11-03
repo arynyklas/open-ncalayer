@@ -166,6 +166,14 @@ impl Canonicalizer<'_> {
         node: Node<'_, '_>,
         sink: &mut dyn std::io::Write,
     ) -> Result<usize, XmlError> {
+        self.write_to_profile(node, sink, C14nProfile::KalkanLegacy)
+    }
+    pub(crate) fn write_to_profile(
+        &self,
+        node: Node<'_, '_>,
+        sink: &mut dyn std::io::Write,
+        profile: C14nProfile,
+    ) -> Result<usize, XmlError> {
         fn visit<'a, 'i: 'a>(
             config: &Canonicalizer<'_>,
             out: &mut CanonicalWriter<'_, &'a str>,
@@ -310,14 +318,8 @@ impl Canonicalizer<'_> {
             .iter()
             .map(|s| (*s).to_owned())
             .collect();
-        let mut writer = CanonicalWriter::new(
-            sink,
-            method,
-            C14nProfile::KalkanLegacy,
-            &prefixes,
-            self.limit as u64,
-            None,
-        );
+        let mut writer =
+            CanonicalWriter::new(sink, method, profile, &prefixes, self.limit as u64, None);
         let target = if node.is_root() {
             0..node.document().input_text().len().saturating_add(1)
         } else {

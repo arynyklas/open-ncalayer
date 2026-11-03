@@ -490,6 +490,7 @@ pub(super) fn run(out: &std::path::Path) -> Result<(), Box<dyn std::error::Error
             ocsp: &ocsp_values,
             crls: &crls,
         },
+        host_clock: None,
     };
     let document = b"C03 public RSA baseline document, genuinely timestamped over loopback.\n";
     std::fs::write(out.join("document.bin"), document)?;

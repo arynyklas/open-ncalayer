@@ -3,7 +3,10 @@
 //! are ordered and checked using the complete normalized identity, not a digest.
 use crate::reader::{Reader, XmlEventKind, XmlEvents, invalid};
 use oncl_pki::{
-    io::{FrozenInput, Region, Source, StagedArtifact, TemporaryStore},
+    io::{
+        CapturedInput, FrozenInput, FrozenReader, ProvisionalInput, Region, Source, StagedArtifact,
+        TemporaryStore,
+    },
     resource::{
         IO_CHUNK_BYTES, OperationControl, ProcessingError, Progress, ResourceReservation,
         ResourceScope,
@@ -76,15 +79,46 @@ pub struct XmlNode {
     region: Region,
 }
 pub struct XmlDocument {
-    source: FrozenInput,
+    source: XmlInput,
     tokens: StagedArtifact,
     keys: StagedArtifact,
     runs: Vec<Option<StagedArtifact>>,
     limits: XmlLimits,
     owner: Arc<()>,
     control: Arc<dyn OperationControl>,
-    _memory: ResourceReservation,
+    prolog_bom: Option<Region>,
     _metadata: ResourceReservation,
+}
+enum XmlInput {
+    Original(FrozenInput),
+    Signed(ProvisionalInput),
+}
+impl XmlInput {
+    fn readable(&mut self) -> &mut dyn CapturedInput {
+        match self {
+            Self::Original(input) => input,
+            Self::Signed(input) => input,
+        }
+    }
+    fn len(&self) -> u64 {
+        match self {
+            Self::Original(input) => input.len(),
+            Self::Signed(input) => input.len(),
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn read_region(&mut self, region: Region, output: &mut [u8]) -> Result<usize> {
+        self.readable().read_region(region, output)
+    }
+    fn reader<'a>(
+        &'a mut self,
+        regions: &[Region],
+        scope: &ResourceScope,
+    ) -> Result<FrozenReader<'a>> {
+        self.readable().reader(regions, scope)
+    }
 }
 struct Buffered {
     file: StagedArtifact,
@@ -277,15 +311,23 @@ impl XmlDocument {
         scope: &mut ResourceScope,
     ) -> Result<Self> {
         let bound = limits.reservation()?;
-        let memory = scope.reserve_memory(bound)?;
         let metadata = scope.reserve_metadata(bound)?;
-        let mut frozen = FrozenInput::capture(source, store, scope)?;
+        let frozen = FrozenInput::capture(source, store, scope)?;
+        Self::build(XmlInput::Original(frozen), limits, store, scope, metadata)
+    }
+    fn build(
+        mut frozen: XmlInput,
+        limits: &XmlLimits,
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        metadata: ResourceReservation,
+    ) -> Result<Self> {
         let mut tokens = Buffered::new(store.stage_source(scope)?);
         let mut keys = store.stage_source(scope)?;
         let mut runs = Vec::with_capacity(64);
         let mut batch = Vec::with_capacity(1024);
         let owner = Arc::new(());
-        let mut reader = Reader::new(&mut frozen, limits, &owner);
+        let mut reader = Reader::new(frozen.readable(), limits, &owner);
         while let Some(event) = reader.next()? {
             scope.checkpoint()?;
             let mut record = [0; 24];
@@ -313,6 +355,7 @@ impl XmlDocument {
                 }
             }
         }
+        let prolog_bom = reader.bom_region();
         flush_batch(&mut batch, &mut runs, &mut keys, store, scope)?;
         // Runs are individually duplicate-free; fold all levels before exposing
         // the index to catch duplicates that straddle unequal final run sizes.
@@ -337,9 +380,49 @@ impl XmlDocument {
             limits: limits.clone(),
             owner,
             control: scope.operation_control(),
-            _memory: memory,
+            prolog_bom,
             _metadata: metadata,
         })
+    }
+    pub(crate) fn index_provisional(
+        source: ProvisionalInput,
+        limits: &XmlLimits,
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        metadata: ResourceReservation,
+    ) -> Result<Self> {
+        Self::build(XmlInput::Signed(source), limits, store, scope, metadata)
+    }
+    pub(crate) fn index_signed(
+        source: Source<'_>,
+        profile: &crate::XmlVerifyProfile,
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+    ) -> std::result::Result<Self, crate::XmlSourceError> {
+        crate::references::intake::index_signed(source, profile, store, scope)
+    }
+    pub(crate) fn bom_region(&self) -> Option<Region> {
+        self.prolog_bom
+    }
+    pub(crate) fn classify_signed(
+        &mut self,
+        regions: &[Region],
+        scope: &ResourceScope,
+    ) -> Result<()> {
+        match &mut self.source {
+            XmlInput::Signed(input) => input.classify(regions, scope),
+            XmlInput::Original(_) => Err(ProcessingError::InvalidInput(
+                "not a provisional XML source",
+            )),
+        }
+    }
+    pub(crate) fn into_signed(self) -> Result<ProvisionalInput> {
+        match self.source {
+            XmlInput::Signed(input) if input.is_classified() => Ok(input),
+            _ => Err(ProcessingError::InvalidInput(
+                "unclassified XML cannot escape",
+            )),
+        }
     }
     pub fn len(&self) -> u64 {
         self.source.len()
@@ -450,6 +533,9 @@ impl XmlDocument {
             output,
         )
     }
+    pub(crate) fn read_region(&mut self, region: Region, output: &mut [u8]) -> Result<usize> {
+        self.source.read_region(region, output)
+    }
     pub(crate) fn indexed_node(&self, region: Region) -> XmlNode {
         XmlNode {
             owner: Arc::downgrade(&self.owner),
@@ -464,11 +550,28 @@ impl XmlDocument {
         work: &mut u64,
     ) -> Result<oncl_pki::digest::DigestValue> {
         crate::canonical_stream::hash(
-            &mut self.source,
+            self.source.readable(),
             &self.limits,
             &self.owner,
             options,
             algorithm,
+            scope,
+            work,
+        )
+    }
+    pub(crate) fn canonical_append(
+        &mut self,
+        options: crate::canonical_stream::Options<'_>,
+        artifact: &mut StagedArtifact,
+        scope: &ResourceScope,
+        work: &mut u64,
+    ) -> Result<()> {
+        crate::canonical_stream::append(
+            self.source.readable(),
+            &self.limits,
+            &self.owner,
+            options,
+            artifact,
             scope,
             work,
         )
@@ -481,7 +584,7 @@ impl XmlDocument {
         work: &mut u64,
     ) -> Result<(StagedArtifact, Vec<Region>)> {
         crate::canonical_stream::stage(
-            &mut self.source,
+            self.source.readable(),
             &self.limits,
             &self.owner,
             options,
@@ -501,7 +604,7 @@ impl XmlDocument {
     ) -> Result<Vec<(String, String)>> {
         self.check_scope(scope)?;
         let region = self.node_region(node)?;
-        let mut reader = Reader::new(&mut self.source, &self.limits, &self.owner);
+        let mut reader = Reader::new(self.source.readable(), &self.limits, &self.owner);
         while let Some(mut event) = reader.next()? {
             scope.checkpoint()?;
             if event.kind == XmlEventKind::End && event.region == region {
@@ -540,7 +643,7 @@ impl XmlDocument {
     ) -> Result<()> {
         let target = node.map(|n| self.node_region(n)).transpose()?;
         crate::canonical_stream::run(
-            &mut self.source,
+            self.source.readable(),
             &self.limits,
             &self.owner,
             crate::canonical_stream::Options {
@@ -557,7 +660,7 @@ impl XmlDocument {
     }
     pub fn events(&mut self) -> XmlEvents<'_> {
         XmlEvents {
-            reader: Reader::new(&mut self.source, &self.limits, &self.owner),
+            reader: Reader::new(self.source.readable(), &self.limits, &self.owner),
             current: None,
             control: self.control.clone(),
         }
