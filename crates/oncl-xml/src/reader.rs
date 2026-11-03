@@ -2,7 +2,7 @@
 //! byte and represented by a Region, never accumulated in a String.
 use crate::index::XmlLimits;
 use oncl_pki::{
-    io::{Region, StagedArtifact},
+    io::{FrozenInput, Region},
     resource::{IO_CHUNK_BYTES, OperationControl, ProcessingError, Progress},
 };
 use std::collections::BTreeMap;
@@ -146,7 +146,7 @@ struct Frame {
     changes: Vec<(String, Option<String>)>,
 }
 pub(crate) struct Reader<'a> {
-    file: &'a mut StagedArtifact,
+    file: &'a mut FrozenInput,
     limits: &'a XmlLimits,
     buffer: Vec<u8>,
     at: usize,
@@ -162,11 +162,7 @@ pub(crate) struct Reader<'a> {
     owner: Weak<()>,
 }
 impl<'a> Reader<'a> {
-    pub(crate) fn new(
-        file: &'a mut StagedArtifact,
-        limits: &'a XmlLimits,
-        owner: &Arc<()>,
-    ) -> Self {
+    pub(crate) fn new(file: &'a mut FrozenInput, limits: &'a XmlLimits, owner: &Arc<()>) -> Self {
         Self {
             file,
             limits,

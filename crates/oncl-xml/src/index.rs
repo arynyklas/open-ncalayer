@@ -3,7 +3,7 @@
 //! are ordered and checked using the complete normalized identity, not a digest.
 use crate::reader::{Reader, XmlEventKind, XmlEvents, invalid};
 use oncl_pki::{
-    io::{Region, Source, StagedArtifact, TemporaryStore},
+    io::{FrozenInput, Region, Source, StagedArtifact, TemporaryStore},
     resource::{
         IO_CHUNK_BYTES, OperationControl, ProcessingError, Progress, ResourceReservation,
         ResourceScope,
@@ -12,7 +12,6 @@ use oncl_pki::{
 use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
-    io::Read,
     sync::{Arc, Weak},
 };
 type Result<T, E = ProcessingError> = std::result::Result<T, E>;
@@ -77,7 +76,7 @@ pub struct XmlNode {
     region: Region,
 }
 pub struct XmlDocument {
-    source: StagedArtifact,
+    source: FrozenInput,
     tokens: StagedArtifact,
     keys: StagedArtifact,
     runs: Vec<Option<StagedArtifact>>,
@@ -268,10 +267,11 @@ fn flush_batch(
 }
 impl XmlDocument {
     /// Freeze a known or unknown length source using the caller's explicit
-    /// owner-only store and original operation quota/control/Deadline. No temp
-    /// service is conjured from a filename, default path or a limits structure.
+    /// owner-only store and original operation quota/control/Deadline. Authentic
+    /// same-operation snapshots replay without charging the input quota twice.
+    /// No temp service is conjured from a filename or a limits structure.
     pub fn index(
-        mut source: Source<'_>,
+        source: Source<'_>,
         limits: &XmlLimits,
         store: &TemporaryStore,
         scope: &mut ResourceScope,
@@ -279,26 +279,7 @@ impl XmlDocument {
         let bound = limits.reservation()?;
         let memory = scope.reserve_memory(bound)?;
         let metadata = scope.reserve_metadata(bound)?;
-        let mut frozen = store.stage_source(scope)?;
-        let mut buffer = vec![0; IO_CHUNK_BYTES];
-        loop {
-            scope.checkpoint()?;
-            let request = scope
-                .input_remaining()
-                .saturating_add(1)
-                .min(IO_CHUNK_BYTES as u64) as usize;
-            let n = match source.read(&mut buffer[..request]) {
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                result => result?,
-            };
-            scope.account_input(n as u64)?;
-            scope.checkpoint()?;
-            if n == 0 {
-                break;
-            }
-            frozen.write_chunk(&buffer[..n])?;
-        }
-        drop(buffer);
+        let mut frozen = FrozenInput::capture(source, store, scope)?;
         let mut tokens = Buffered::new(store.stage_source(scope)?);
         let mut keys = store.stage_source(scope)?;
         let mut runs = Vec::with_capacity(64);
