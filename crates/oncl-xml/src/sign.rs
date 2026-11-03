@@ -1322,8 +1322,9 @@ impl Template<'_> {
             oncl_pki::key::HashAlg,
         ) -> Result<oncl_pki::digest::DigestValue, E>,
         sign: impl FnMut(&oncl_pki::digest::DigestValue) -> Result<Vec<u8>, E>,
+        admit: Option<&mut MetadataAdmission<'_, E>>,
     ) -> Result<PreparedSignature, E> {
-        self.signed_with(hash, sign, None, None)
+        self.signed_with(hash, sign, None, admit)
     }
     pub(crate) fn signed_with<E>(
         &self,
