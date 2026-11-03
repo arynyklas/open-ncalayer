@@ -1,0 +1,16 @@
+[
+  {
+    "change": "added",
+    "id": "bundle:onaidocs-sign-bundle"
+  },
+  {
+    "change": "modified",
+    "id": "bundle:kz.Simourg.SimBASE",
+    "reason": "manifest_hash"
+  },
+  {
+    "change": "modified",
+    "id": "manifest",
+    "reason": "content"
+  }
+]

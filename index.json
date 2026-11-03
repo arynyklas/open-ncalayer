@@ -80,6 +80,46 @@
         "notes": []
       },
       "issues": []
+    },
+    {
+      "id": "2026-11-03-1.4-306276d0",
+      "date": "2026-11-03",
+      "observed": "2026-11-03T07:01:21.9672379Z",
+      "version": "1.4",
+      "key8": "306276d0",
+      "path": "history/2026-11-03-1.4-306276d0/",
+      "kind": "change",
+      "summary": {
+        "core": [],
+        "plugins": [
+          {
+            "symname": "kz.Simourg.SimBASE",
+            "from": "2.2",
+            "to": "2.4",
+            "change": "changed"
+          },
+          {
+            "symname": "onaidocs-sign-bundle",
+            "from": null,
+            "to": "1.1.0",
+            "change": "added"
+          }
+        ],
+        "distributions": [],
+        "notes": []
+      },
+      "issues": [
+        {
+          "key": "plugin:kz.Simourg.SimBASE:2.4",
+          "number": 4,
+          "label": "upstream-plugin"
+        },
+        {
+          "key": "plugin:onaidocs-sign-bundle:1.1.0",
+          "number": 5,
+          "label": "upstream-plugin"
+        }
+      ]
     }
   ]
 }

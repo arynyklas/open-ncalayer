@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "manifest": {
-    "sha256": "765376a94dde29f4b075c7eacae359e652652c64bfd73464fcf3cba69f1fdefe",
-    "size": 33167,
+    "sha256": "44f4ab47f254cf8d123c7ff4daf772ebf59e72e8f6793e3c3cdef87cb2a1f74f",
+    "size": 33750,
     "version": "1.4",
     "info": " NCALayer жоспар бойынша жаңартылады.\nПлановое обновление сертификатов подписи NCALayer.",
     "updurl": "http://crl.pki.gov.kz/updates/ncalayer.der",
@@ -90,7 +90,7 @@
       "not_before": "2024-10-10T06:14:03Z",
       "not_after": "2027-10-10T06:14:03Z"
     },
-    "signing_time": "2026-10-28T06:54:54Z",
+    "signing_time": "2026-11-03T05:10:06Z",
     "extra": {}
   },
   "bundles": {
@@ -176,18 +176,18 @@
     },
     "kz.Simourg.SimBASE": {
       "name": "SimBASE",
-      "version": "2.2",
+      "version": "2.4",
       "required": false,
       "hidden": false,
       "banned": false,
-      "info": "Simourg",
-      "url": "https://simourg.com/sim/kz/ncalayer/SimbaseNcaLayerBundle-2.2.jar",
-      "hash": "8ce213920569de23411808dc411a080ff5559e6d052cb988749781e28d4e5e6f",
-      "csernum": "0c73c16775f50921919a9dc7d9b78b7c",
-      "chash": "bb86b1b11be5b21e10f5ddde0f615f272ad0fba298088728f7148ed37d66ccfd",
+      "info": "Simourg обновлен 03.11.2026",
+      "url": "https://simourg.com/sim/kz/ncalayer/SimbaseNcaLayerBundle-2.4.jar",
+      "hash": "93d4d25d7e1fe3754bb76bcf78a289db701a802c21c1e440a26fd9b36829e2ce",
+      "csernum": "04f07b6c25c0433a76a4049479cac6a0",
+      "chash": "315cc044a831825b985efd66ae3ea996e8a04c3ed10e765de83e2a1ccdbd433a",
       "extra": {},
       "fetch": "ok",
-      "jar": "8ce213920569de23411808dc411a080ff5559e6d052cb988749781e28d4e5e6f",
+      "jar": "93d4d25d7e1fe3754bb76bcf78a289db701a802c21c1e440a26fd9b36829e2ce",
       "signer_matches": false
     },
     "kz.acbank.business.api.ncalayer.module": {
@@ -797,6 +797,22 @@
       "fetch": "unreachable",
       "jar": null,
       "signer_matches": null
+    },
+    "onaidocs-sign-bundle": {
+      "name": "OnaiDocs Sign Bundle",
+      "version": "1.1.0",
+      "required": false,
+      "hidden": false,
+      "banned": false,
+      "info": "OnaiDocs Sign Bundle добавлен 02.11.2026",
+      "url": "https://onaidocs.kz/var/stories/onaidocs-sign-bundle-1.1.0.jar",
+      "hash": "6549a74d4ed8474d330c00873672148eece08a139422a8c49e26643e5cfd190a",
+      "csernum": "00ba744100f0adceb4",
+      "chash": "d9f1920c6a605ecba7c03c6acf1c26e21de799a9ba9a0d3145f68ec3288da635",
+      "extra": {},
+      "fetch": "ok",
+      "jar": "6549a74d4ed8474d330c00873672148eece08a139422a8c49e26643e5cfd190a",
+      "signer_matches": true
     },
     "org.skf.osgi.SKFModule": {
       "name": "Модуль EFIS.KZ",
@@ -574679,6 +574695,165 @@
       "keystores": {},
       "embedded_manifests": {}
     },
+    "6549a74d4ed8474d330c00873672148eece08a139422a8c49e26643e5cfd190a": {
+      "size": 906929,
+      "symname": "onaidocs-sign-bundle",
+      "version": "1.1.0",
+      "entries": 349,
+      "content_sha256": "90e8cef6b5c9ac47fd5e09d37d26c8e76d23ac336d43a3f1781c0450e42ecf96",
+      "manifest_mf": {
+        "Bundle-Activator": "kz.onaidocs.activator.Activator",
+        "Bundle-Name": "OnaiDocs Sign Bundle",
+        "Bundle-SymbolicName": "onaidocs-sign-bundle",
+        "Bundle-Version": "1.1.0",
+        "Export-Package": "kz.onaidocs.services;version=\"1.1.0\";uses:=\"kz.gov.pki.osgi.layer.api\"",
+        "Import-Package": "org.osgi.service.log;version=\"[0.0.0,2.0.0)\",javafx.application,javafx.collections,javafx.event,javafx.geometry,javafx.scene,javafx.scene.control,javafx.scene.image,javafx.scene.layout,javafx.scene.text,javafx.stage,kz.gov.pki.kalkan.asn1,kz.gov.pki.kalkan.asn1.cms,kz.gov.pki.kalkan.asn1.cryptopro,kz.gov.pki.kalkan.asn1.knca,kz.gov.pki.kalkan.asn1.pkcs,kz.gov.pki.kalkan.asn1.x509,kz.gov.pki.kalkan.jce.provider.cms,kz.gov.pki.kalkan.ocsp,kz.gov.pki.kalkan.util.encoders,kz.gov.pki.osgi.layer.api,kz.gov.pki.provider.utils,kz.gov.pki.provider.utils.model,kz.gov.pki.reference,org.osgi.framework;version=\"[1.7,2)\",org.osgi.util.tracker;version=\"[1.5,2)\""
+      },
+      "signers": {
+        "META-INF/ONAIDOCS.RSA": {
+          "serial": "00ba744100f0adceb4",
+          "sha256": "d9f1920c6a605ecba7c03c6acf1c26e21de799a9ba9a0d3145f68ec3288da635",
+          "subject": "CN=Barys Ivaniuk,OU=Onaidocs,O=Onaidocs,L=Almaty,ST=Almaty,C=KZ"
+        }
+      },
+      "api": {
+        "classes": {
+          "kz.onaidocs.activator.Activator": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [
+              "org.osgi.framework.BundleActivator"
+            ],
+            "methods": [
+              "<init>()V",
+              "start(Lorg/osgi/framework/BundleContext;)V",
+              "stop(Lorg/osgi/framework/BundleContext;)V"
+            ],
+            "fields": []
+          }
+        },
+        "ncalayer_methods": [],
+        "names": [
+          "kz.onaidocs.SignBundle"
+        ],
+        "error_codes": [],
+        "urls": [],
+        "ports": []
+      },
+      "libraries": {
+        "": 1,
+        "com.sun": 21,
+        "kz.onaidocs": 14,
+        "org.apache": 106,
+        "org.json": 21,
+        "org.slf4j": 34
+      },
+      "natives": {
+        "libdecora_sse.so": "7f84c10db028019b68e8d5c076f9ac0f6fbdd264e9bcab5f5f10bc6da313f42d",
+        "libglass.so": "cab81db1d95b11c7038bae66e8ecc1bb2dd4c569b8ea2eddd288c6c85b7a7665",
+        "libglassgtk3.so": "53d47eb69e705ded98d13951a119408a63a31fbfe3feaca24951ae44800f1e2e",
+        "libjavafx_font.so": "44aa01f19e302ea9d8fb8f0245d6daea21f5df8d7d3ee9c9767bb1ee8ecc4889",
+        "libjavafx_font_freetype.so": "813de94dd23a1f672d10afcb17b65bae1383003af78198316a76d5c2b5d95029",
+        "libjavafx_font_pango.so": "f310b95eeda139f487ad0f7c3ebb63ab910f3407abac17e7f741dc6985c65dc6",
+        "libjavafx_iio.so": "fd4c7fda68329382fa9eb3cd0b68930cd5ab0612e29ec91c890bee000076b8c0",
+        "libprism_common.so": "97bd8d0e7691c0c913bb4fefc1339e943d0fc055f12494e2e56521d2dace45c9",
+        "libprism_es2.so": "a4d9f6ca97f04e85dd4acf1c46838f70f501633427ee2356a6e0005ecc757dad",
+        "libprism_sw.so": "f98b04323bdfdbea9cbf40c056700ecb579635f0e231de2b858e50af5d3db6ab"
+      },
+      "keystores": {
+        "cacerts.jks": {
+          "trusted": {
+            "ncagost": {
+              "serial": "020acc875ac8a570b28fd14e324af054d3dc0c9c",
+              "sha256": "9a8d1309acd80cc9711c847e18d47fdcb7b014ed50e5dec514fc0662012a82c0",
+              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,ST=АСТАНА,L=АСТАНА,C=KZ"
+            },
+            "ncagost18": {
+              "serial": "46170a97a64bbaf7643c87d90c0fe24071595a8d",
+              "sha256": "908521d0531e5645e64b34d3588374a3a83582c860e5f7293a04c41217e8cc18",
+              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST),C=KZ"
+            },
+            "ncagost22": {
+              "serial": "7e30be9fc890633f1fff5a3c0cb0c85f4c6d1708",
+              "sha256": "32c7d233a42703a327f3025543a05b930e3f39a786c68dfa196baa86d5618524",
+              "subject": "C=KZ,CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) 2022"
+            },
+            "ncarsa": {
+              "serial": "126f33b221fdeb36d25be71b605cd42d2a65ef70",
+              "sha256": "aef2f2907554f12292cb3456d5110062e3581d0a05c0f03540f870f25d5b816c",
+              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA),O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,ST=АСТАНА,L=АСТАНА,C=KZ"
+            },
+            "ncarsa18": {
+              "serial": "3576f5b31b5a6821a16fefab1212c94d938dc7ee",
+              "sha256": "34d1b311a9873191ae3382805df51e0a5da23315c512a8deeb885668ceeb5834",
+              "subject": "CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA),C=KZ"
+            },
+            "ncarsa22": {
+              "serial": "5cae24d749b26480d2de37233c3ea4515db55ac7",
+              "sha256": "84fb799a66140950818c056a5d9730acc2a7622cdd4ef0d47113b132fb892905",
+              "subject": "C=KZ,CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA) 2022"
+            },
+            "rcagost": {
+              "serial": "561e7a76d760190e6ef8a096715076552413af2e",
+              "sha256": "9ab210e54e6b0343321131202d9edcc2598f598cfdd9ee4ec1056021ab2e9759",
+              "subject": "C=KZ,O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST)"
+            },
+            "rcagost22": {
+              "serial": "13b00cfba9629f0a3eb6192a2156a24867d0f3bd",
+              "sha256": "af77725f8328bb24f89d81da3acdf7cee4324248538b7ba2cd2a860517fb9dca",
+              "subject": "C=KZ,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) 2022"
+            },
+            "rcarsa": {
+              "serial": "54a51869ef8b3f15fdeaadbd47e094816b066a3b",
+              "sha256": "a7064abc5699827f370c67b09f1a1bfd7ad5e1514d471223df209c08300ea972",
+              "subject": "C=KZ,O=РМК «МЕМЛЕКЕТТІК ТЕХНИКАЛЫҚ ҚЫЗМЕТ»,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)"
+            },
+            "rcarsa20": {
+              "serial": "54b3b740d45b91707bed4a2be41b7b69f8f6ba50",
+              "sha256": "9ba06354b626641715182e4d07c9dbaa1777720fa795d03174ffc68876535dcd",
+              "subject": "C=KZ,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (RSA)"
+            }
+          },
+          "private": {}
+        },
+        "cacerts_test.jks": {
+          "trusted": {
+            "ncagosttest2018": {
+              "serial": "1236e8f1619123d1e96f00e56791f855e2dcb457",
+              "sha256": "0307e8bdf77cb708b7c9d9a5799facdc6de7154447cb394af9ac9b528c3d82c7",
+              "subject": "CN=ҰКО 3.0 (GOST TEST),C=KZ"
+            },
+            "ncagosttest2022": {
+              "serial": "7ad24b1ba3a0c961fe1ca8503e6aa2bb450db8a3",
+              "sha256": "beeffc0bdb77cd798c35983eb0715f6ef0051cccb71d7cd05505e8a4fb2c6f4d",
+              "subject": "C=KZ,CN=ҰЛТТЫҚ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) TEST 2022"
+            },
+            "ncarsatest2018": {
+              "serial": "452a6437611c183fbf1ec5a1ba4920dd72148a9b",
+              "sha256": "7e96a36409dc11e0fc99efae41f8c639e16a495d77c2f2278edb98580f997231",
+              "subject": "CN=ҰКО 3.0 (RSA TEST),C=KZ"
+            },
+            "rcagosttest2018": {
+              "serial": "02c7e4fa323a30dcfd902cd9761e232e28fd6680",
+              "sha256": "06021684f52054692a1859686d5af527eda779e6183c2f3cd4fc1278e4067beb",
+              "subject": "C=KZ,CN=НЕГІЗГІ КО TEST (GOST)"
+            },
+            "rcagosttest2022": {
+              "serial": "27d3ab7790372e5b698170dde60ccca38bc3a4b2",
+              "sha256": "b995e79e7c07429f8f79e185451e5599ce342ac720000f01b3854fdfa03031a6",
+              "subject": "C=KZ,CN=НЕГІЗГІ КУӘЛАНДЫРУШЫ ОРТАЛЫҚ (GOST) TEST 2022"
+            },
+            "rcarsatest2018": {
+              "serial": "53c77dffaca2f50ec163195baffe727757b23ce2",
+              "sha256": "4d05179bcb02180bfc37618372671357df7dd8b7865973eae77b83213cae717b",
+              "subject": "C=KZ,CN=НЕГІЗГІ КО TEST (RSA)"
+            }
+          },
+          "private": {}
+        }
+      },
+      "embedded_manifests": {}
+    },
     "66fff85d9496b25ac7f0ea67cb9b70661826db4479fd1928535b7effeb703fb7": {
       "size": 104165,
       "symname": "kz.gov.pki.osgi.layer.common",
@@ -589160,325 +589335,6 @@
       "keystores": {},
       "embedded_manifests": {}
     },
-    "8ce213920569de23411808dc411a080ff5559e6d052cb988749781e28d4e5e6f": {
-      "size": 141748,
-      "symname": "kz.Simourg.SimBASE",
-      "version": "2.2",
-      "entries": 43,
-      "content_sha256": "96e99762322a0c900daccb9f08b72197e9c849cd40d33501371c24f0f3149177",
-      "manifest_mf": {
-        "Bundle-Activator": "kz.simourg.simbase.nca.module.NLSimbaseActivator",
-        "Bundle-Name": "NLSimbaseModule",
-        "Bundle-SymbolicName": "kz.Simourg.SimBASE",
-        "Bundle-Version": "2.2",
-        "Implementation-Version": "2.2",
-        "Import-Package": "org.json,org.w3c.dom,kz.gov.pki.kalkan,kz.gov.pki.kalkan.asn1,kz.gov.pki.kalkan.asn1.x509,kz.gov.pki.kalkan.asn1.pkcs,kz.gov.pki.kalkan.asn1.cms,kz.gov.pki.kalkan.asn1.cryptopro,kz.gov.pki.kalkan.asn1.ess,kz.gov.pki.kalkan.asn1.knca,kz.gov.pki.kalkan.asn1.ocsp,kz.gov.pki.kalkan.exception,kz.gov.pki.kalkan.jce.provider,kz.gov.pki.kalkan.jce.provider.cms,kz.gov.pki.kalkan.tsp,kz.gov.pki.kalkan.xmldsig,kz.gov.pki.kalkan.pkix.checker,kz.gov.pki.kalkan.ocsp,kz.gov.pki.kalkan.util.encoders,kz.gov.pki.provider.exception,kz.gov.pki.provider.utils,kz.gov.pki.provider.utils.verifier,kz.gov.pki.provider.utils.model,kz.gov.pki.reference,javax.smartcardio,org.osgi.framework,org.osgi.service.log,kz.gov.pki.osgi.layer.api,org.osgi.util.tracker,javax.swing,javax.swing.border,javax.swing.filechooser,javax.security.auth.x500"
-      },
-      "signers": {
-        "META-INF/TOO__SIM.RSA": {
-          "serial": "059b1b579e8e2132e23907bda777755c",
-          "sha256": "552f7bdcf1a7af9e6ce672017f4f12abf77240c78e761ac203d1d9d20ac89988",
-          "subject": "CN=DigiCert Trusted Root G4,OU=www.digicert.com,O=DigiCert Inc,C=US"
-        }
-      },
-      "api": {
-        "classes": {
-          "kz.simourg.simbase.nca.module.ModuleServiceImpl": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [
-              "kz.gov.pki.osgi.layer.api.ModuleService"
-            ],
-            "methods": [
-              "process(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.NLSimbaseActivator": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [
-              "org.osgi.framework.BundleActivator"
-            ],
-            "methods": [
-              "<init>()V",
-              "start(Lorg/osgi/framework/BundleContext;)V",
-              "stop(Lorg/osgi/framework/BundleContext;)V"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.errors.ModuleException": {
-            "kind": "class",
-            "super_name": "java.lang.Exception",
-            "interfaces": [],
-            "methods": [
-              "<init>(Ljava/lang/String;)V"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.models.KeyData": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "<init>(Ljava/lang/String;)V",
-              "toJSONObject()Lorg/json/JSONObject;"
-            ],
-            "fields": [
-              "datefrom:Ljava/lang/String;",
-              "dateto:Ljava/lang/String;",
-              "issuerdn:Ljava/lang/String;",
-              "path:Ljava/lang/String;",
-              "serial:Ljava/lang/String;",
-              "subjectdn:Ljava/lang/String;",
-              "usage:Ljava/lang/String;"
-            ]
-          },
-          "kz.simourg.simbase.nca.module.models.OCSPWrapper": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "<init>(Z[BLjava/lang/String;)V",
-              "getReport()Ljava/lang/String;",
-              "getResponse()[B",
-              "isOk()Z",
-              "setOk(Z)V",
-              "setReport(Ljava/lang/String;)V",
-              "setResponse([B)V",
-              "toString()Ljava/lang/String;"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.models.Response": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "getCode()Ljava/lang/String;",
-              "getMessage()Ljava/lang/String;",
-              "getResponseObject()Ljava/lang/String;",
-              "newBuilder()Lkz/simourg/simbase/nca/module/models/Response$Builder;"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.models.Response$Builder": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "build()Lkz/simourg/simbase/nca/module/models/Response;",
-              "setCode(Ljava/lang/String;)Lkz/simourg/simbase/nca/module/models/Response$Builder;",
-              "setData(Ljava/lang/String;)Lkz/simourg/simbase/nca/module/models/Response$Builder;",
-              "setMessage(Ljava/lang/String;)Lkz/simourg/simbase/nca/module/models/Response$Builder;"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.models.StorageInfo": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>(Ljava/lang/String;Ljava/util/function/Function;Ljava/util/function/Function;)V",
-              "canEqual(Ljava/lang/Object;)Z",
-              "equals(Ljava/lang/Object;)Z",
-              "getAlias()Ljava/lang/String;",
-              "getContainer()Ljava/lang/String;",
-              "getContainers()Ljava/util/List;",
-              "getKeyStore()Ljava/security/KeyStore;",
-              "getPassword()[C",
-              "getStorage()Lkz/gov/pki/kalkan/Storage;",
-              "getStoredKeys()Ljava/util/LinkedList;",
-              "isNewkey()Z",
-              "setAlias(Ljava/lang/String;)V",
-              "setContainer(Ljava/lang/String;)V",
-              "setContainers(Ljava/util/List;)V",
-              "setKeyStore(Ljava/security/KeyStore;)V",
-              "setNewkey(Z)V",
-              "setPassword([C)V",
-              "setStorage(Lkz/gov/pki/kalkan/Storage;)V",
-              "setStoredKeys(Ljava/util/LinkedList;)V"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.services.SimbaseSignService": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "setKeyInfoServices(Ljava/util/function/Function;)V",
-              "setKeyInfoSetterService(Ljava/util/function/Function;)V",
-              "signAndAddTsp(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/String;",
-              "signForEsedo(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.ui.SignerDialog": {
-            "kind": "class",
-            "super_name": "javax.swing.JDialog",
-            "interfaces": [],
-            "methods": [
-              "<init>(Lkz/simourg/simbase/nca/module/models/StorageInfo;Lkz/gov/pki/reference/KNCACertificateType;Ljava/util/Map;)V",
-              "getChooseOtherKeys()Z",
-              "getDoSign()Z",
-              "getSelectedItem()Lkz/simourg/simbase/nca/module/ui/SignerDialog$KeyListEntry;",
-              "setMessage(Ljava/lang/String;)V"
-            ],
-            "fields": [
-              "contentPanel:Ljavax/swing/JPanel;"
-            ]
-          },
-          "kz.simourg.simbase.nca.module.ui.StorageDialog": {
-            "kind": "class",
-            "super_name": "javax.swing.JDialog",
-            "interfaces": [],
-            "methods": [
-              "<init>(Ljava/util/List;)V",
-              "getContainer()Ljava/lang/String;",
-              "isOpenfileChooser()Z"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.ui.files.FileChooser": {
-            "kind": "class",
-            "super_name": "javax.swing.JFileChooser",
-            "interfaces": [],
-            "methods": [
-              "<init>()V"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.ui.files.FileChooserDialog": {
-            "kind": "class",
-            "super_name": "javax.swing.JDialog",
-            "interfaces": [],
-            "methods": [
-              "<init>(Ljavax/swing/JFrame;Ljava/lang/String;)V",
-              "getSelectedFilePath()Ljava/lang/String;",
-              "setSelectedFilePath(Ljava/lang/String;)V"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.ui.files.FileChooserFilter": {
-            "kind": "class",
-            "super_name": "javax.swing.filechooser.FileFilter",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "accept(Ljava/io/File;)Z",
-              "addExtension(Ljava/lang/String;)V",
-              "clearExtension()V",
-              "getDescription()Ljava/lang/String;",
-              "getExtension(Ljava/io/File;)Ljava/lang/String;",
-              "isExtensionListInDescription()Z",
-              "setDescription(Ljava/lang/String;)V"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.utils.BundleLog": {
-            "kind": "enum",
-            "super_name": "java.lang.Enum",
-            "interfaces": [],
-            "methods": [
-              "debug(Ljava/lang/String;)V",
-              "discoverLogService()V",
-              "error(Ljava/lang/String;Ljava/lang/Throwable;)V",
-              "info(Ljava/lang/String;)V",
-              "log(ILjava/lang/String;)V",
-              "log(ILjava/lang/String;Ljava/lang/Throwable;)V",
-              "valueOf(Ljava/lang/String;)Lkz/simourg/simbase/nca/module/utils/BundleLog;",
-              "values()[Lkz/simourg/simbase/nca/module/utils/BundleLog;"
-            ],
-            "fields": [
-              "LOG:Lkz/simourg/simbase/nca/module/utils/BundleLog;"
-            ]
-          },
-          "kz.simourg.simbase.nca.module.utils.BundleProvider": {
-            "kind": "enum",
-            "super_name": "java.lang.Enum",
-            "interfaces": [],
-            "methods": [
-              "discoverProviderService()V",
-              "getProvider()Ljava/security/Provider;",
-              "valueOf(Ljava/lang/String;)Lkz/simourg/simbase/nca/module/utils/BundleProvider;",
-              "values()[Lkz/simourg/simbase/nca/module/utils/BundleProvider;"
-            ],
-            "fields": [
-              "KALKANCRYPT:Lkz/simourg/simbase/nca/module/utils/BundleProvider;"
-            ]
-          },
-          "kz.simourg.simbase.nca.module.utils.Constants": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>()V"
-            ],
-            "fields": [
-              "BLACK_FOREGROUND_COLOR:Ljava/awt/Color;",
-              "BUTTON_BACKGROUND_COLOR:Ljava/awt/Color;",
-              "BUTTON_FOREGROUND_COLOR:Ljava/awt/Color;",
-              "LABEL_FOREGROUND_COLOR:Ljava/awt/Color;",
-              "RED_BUTTON_BACKGROUND_COLOR:Ljava/awt/Color;"
-            ]
-          },
-          "kz.simourg.simbase.nca.module.utils.OcspUtils": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "getOCSP(Ljava/security/cert/Certificate;)Lkz/simourg/simbase/nca/module/models/OCSPWrapper;",
-              "getOcspTicket(Ljava/security/cert/Certificate;)[B"
-            ],
-            "fields": []
-          },
-          "kz.simourg.simbase.nca.module.utils.SimbaseCmsUtil": {
-            "kind": "class",
-            "super_name": "kz.gov.pki.provider.utils.CMSUtil",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "createCAdES(Lkz/gov/pki/provider/utils/model/SigningEntity;[BLjava/lang/String;ZLjava/security/Provider;)Lkz/gov/pki/kalkan/jce/provider/cms/CMSSignedData;",
-              "createCAdES(Lkz/gov/pki/provider/utils/model/SigningEntity;[BLjava/lang/String;ZZLjava/security/Provider;)Lkz/gov/pki/kalkan/jce/provider/cms/CMSSignedData;",
-              "createCadesEsedo(Lkz/gov/pki/provider/utils/model/SigningEntity;[BLjava/lang/String;Ljava/security/Provider;)Lkz/gov/pki/kalkan/jce/provider/cms/CMSSignedData;"
-            ],
-            "fields": [
-              "OID_TIMESTAMP:Ljava/lang/String;"
-            ]
-          },
-          "kz.simourg.simbase.nca.module.utils.TSPService": {
-            "kind": "class",
-            "super_name": "java.lang.Object",
-            "interfaces": [],
-            "methods": [
-              "<init>()V",
-              "getTST([BLjava/lang/String;)Lkz/gov/pki/kalkan/tsp/TimeStampToken;"
-            ],
-            "fields": []
-          }
-        },
-        "ncalayer_methods": [],
-        "names": [
-          "kz.Simourg.SimBASEModule"
-        ],
-        "error_codes": [],
-        "urls": [
-          "http://ocsp.pki.gov.kz/",
-          "http://ocsp.pki.gov.kz//",
-          "http://tsp.pki.gov.kz"
-        ],
-        "ports": []
-      },
-      "libraries": {},
-      "natives": {},
-      "keystores": {},
-      "embedded_manifests": {}
-    },
     "8dbee153823e89c4c6fca5446d72a5728448f6675f2e68df3bb998e20b566108": {
       "size": 3095393,
       "symname": null,
@@ -591287,6 +591143,325 @@
       "libraries": {
         "com.sun": 200
       },
+      "natives": {},
+      "keystores": {},
+      "embedded_manifests": {}
+    },
+    "93d4d25d7e1fe3754bb76bcf78a289db701a802c21c1e440a26fd9b36829e2ce": {
+      "size": 142938,
+      "symname": "kz.Simourg.SimBASE",
+      "version": "2.4",
+      "entries": 43,
+      "content_sha256": "59d5292a99b9de79bca3a4f08a9f2663c1bbd00a56fd1c85ea99dc034391b981",
+      "manifest_mf": {
+        "Bundle-Activator": "kz.simourg.simbase.nca.module.NLSimbaseActivator",
+        "Bundle-Name": "NLSimbaseModule",
+        "Bundle-SymbolicName": "kz.Simourg.SimBASE",
+        "Bundle-Version": "2.4",
+        "Implementation-Version": "2.4",
+        "Import-Package": "org.json,org.w3c.dom,kz.gov.pki.kalkan,kz.gov.pki.kalkan.asn1,kz.gov.pki.kalkan.asn1.x509,kz.gov.pki.kalkan.asn1.pkcs,kz.gov.pki.kalkan.asn1.cms,kz.gov.pki.kalkan.asn1.cryptopro,kz.gov.pki.kalkan.asn1.ess,kz.gov.pki.kalkan.asn1.knca,kz.gov.pki.kalkan.asn1.ocsp,kz.gov.pki.kalkan.exception,kz.gov.pki.kalkan.jce.provider,kz.gov.pki.kalkan.jce.provider.cms,kz.gov.pki.kalkan.tsp,kz.gov.pki.kalkan.xmldsig,kz.gov.pki.kalkan.pkix.checker,kz.gov.pki.kalkan.ocsp,kz.gov.pki.kalkan.util.encoders,kz.gov.pki.provider.exception,kz.gov.pki.provider.utils,kz.gov.pki.provider.utils.verifier,kz.gov.pki.provider.utils.model,kz.gov.pki.reference,javax.smartcardio,org.osgi.framework,org.osgi.service.log,kz.gov.pki.osgi.layer.api,org.osgi.util.tracker,javax.swing,javax.swing.border,javax.swing.filechooser,javax.security.auth.x500"
+      },
+      "signers": {
+        "META-INF/TOO__SIM.RSA": {
+          "serial": "059b1b579e8e2132e23907bda777755c",
+          "sha256": "552f7bdcf1a7af9e6ce672017f4f12abf77240c78e761ac203d1d9d20ac89988",
+          "subject": "CN=DigiCert Trusted Root G4,OU=www.digicert.com,O=DigiCert Inc,C=US"
+        }
+      },
+      "api": {
+        "classes": {
+          "kz.simourg.simbase.nca.module.ModuleServiceImpl": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [
+              "kz.gov.pki.osgi.layer.api.ModuleService"
+            ],
+            "methods": [
+              "process(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.NLSimbaseActivator": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [
+              "org.osgi.framework.BundleActivator"
+            ],
+            "methods": [
+              "<init>()V",
+              "start(Lorg/osgi/framework/BundleContext;)V",
+              "stop(Lorg/osgi/framework/BundleContext;)V"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.errors.ModuleException": {
+            "kind": "class",
+            "super_name": "java.lang.Exception",
+            "interfaces": [],
+            "methods": [
+              "<init>(Ljava/lang/String;)V"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.models.KeyData": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "<init>(Ljava/lang/String;)V",
+              "toJSONObject()Lorg/json/JSONObject;"
+            ],
+            "fields": [
+              "datefrom:Ljava/lang/String;",
+              "dateto:Ljava/lang/String;",
+              "issuerdn:Ljava/lang/String;",
+              "path:Ljava/lang/String;",
+              "serial:Ljava/lang/String;",
+              "subjectdn:Ljava/lang/String;",
+              "usage:Ljava/lang/String;"
+            ]
+          },
+          "kz.simourg.simbase.nca.module.models.OCSPWrapper": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "<init>(Z[BLjava/lang/String;)V",
+              "getReport()Ljava/lang/String;",
+              "getResponse()[B",
+              "isOk()Z",
+              "setOk(Z)V",
+              "setReport(Ljava/lang/String;)V",
+              "setResponse([B)V",
+              "toString()Ljava/lang/String;"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.models.Response": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "getCode()Ljava/lang/String;",
+              "getMessage()Ljava/lang/String;",
+              "getResponseObject()Ljava/lang/String;",
+              "newBuilder()Lkz/simourg/simbase/nca/module/models/Response$Builder;"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.models.Response$Builder": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "build()Lkz/simourg/simbase/nca/module/models/Response;",
+              "setCode(Ljava/lang/String;)Lkz/simourg/simbase/nca/module/models/Response$Builder;",
+              "setData(Ljava/lang/String;)Lkz/simourg/simbase/nca/module/models/Response$Builder;",
+              "setMessage(Ljava/lang/String;)Lkz/simourg/simbase/nca/module/models/Response$Builder;"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.models.StorageInfo": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>(Ljava/lang/String;Ljava/util/function/Function;Ljava/util/function/Function;)V",
+              "canEqual(Ljava/lang/Object;)Z",
+              "equals(Ljava/lang/Object;)Z",
+              "getAlias()Ljava/lang/String;",
+              "getContainer()Ljava/lang/String;",
+              "getContainers()Ljava/util/List;",
+              "getKeyStore()Ljava/security/KeyStore;",
+              "getPassword()[C",
+              "getStorage()Lkz/gov/pki/kalkan/Storage;",
+              "getStoredKeys()Ljava/util/LinkedList;",
+              "isNewkey()Z",
+              "setAlias(Ljava/lang/String;)V",
+              "setContainer(Ljava/lang/String;)V",
+              "setContainers(Ljava/util/List;)V",
+              "setKeyStore(Ljava/security/KeyStore;)V",
+              "setNewkey(Z)V",
+              "setPassword([C)V",
+              "setStorage(Lkz/gov/pki/kalkan/Storage;)V",
+              "setStoredKeys(Ljava/util/LinkedList;)V"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.services.SimbaseSignService": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "setKeyInfoServices(Ljava/util/function/Function;)V",
+              "setKeyInfoSetterService(Ljava/util/function/Function;)V",
+              "signAndAddTsp(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/String;",
+              "signForEsedo(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.ui.SignerDialog": {
+            "kind": "class",
+            "super_name": "javax.swing.JDialog",
+            "interfaces": [],
+            "methods": [
+              "<init>(Lkz/simourg/simbase/nca/module/models/StorageInfo;Lkz/gov/pki/reference/KNCACertificateType;Ljava/util/Map;)V",
+              "getChooseOtherKeys()Z",
+              "getDoSign()Z",
+              "getSelectedItem()Lkz/simourg/simbase/nca/module/ui/SignerDialog$KeyListEntry;",
+              "setMessage(Ljava/lang/String;)V"
+            ],
+            "fields": [
+              "contentPanel:Ljavax/swing/JPanel;"
+            ]
+          },
+          "kz.simourg.simbase.nca.module.ui.StorageDialog": {
+            "kind": "class",
+            "super_name": "javax.swing.JDialog",
+            "interfaces": [],
+            "methods": [
+              "<init>(Ljava/util/List;)V",
+              "getContainer()Ljava/lang/String;",
+              "isOpenfileChooser()Z"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.ui.files.FileChooser": {
+            "kind": "class",
+            "super_name": "javax.swing.JFileChooser",
+            "interfaces": [],
+            "methods": [
+              "<init>()V"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.ui.files.FileChooserDialog": {
+            "kind": "class",
+            "super_name": "javax.swing.JDialog",
+            "interfaces": [],
+            "methods": [
+              "<init>(Ljavax/swing/JFrame;Ljava/lang/String;)V",
+              "getSelectedFilePath()Ljava/lang/String;",
+              "setSelectedFilePath(Ljava/lang/String;)V"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.ui.files.FileChooserFilter": {
+            "kind": "class",
+            "super_name": "javax.swing.filechooser.FileFilter",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "accept(Ljava/io/File;)Z",
+              "addExtension(Ljava/lang/String;)V",
+              "clearExtension()V",
+              "getDescription()Ljava/lang/String;",
+              "getExtension(Ljava/io/File;)Ljava/lang/String;",
+              "isExtensionListInDescription()Z",
+              "setDescription(Ljava/lang/String;)V"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.utils.BundleLog": {
+            "kind": "enum",
+            "super_name": "java.lang.Enum",
+            "interfaces": [],
+            "methods": [
+              "debug(Ljava/lang/String;)V",
+              "discoverLogService()V",
+              "error(Ljava/lang/String;Ljava/lang/Throwable;)V",
+              "info(Ljava/lang/String;)V",
+              "log(ILjava/lang/String;)V",
+              "log(ILjava/lang/String;Ljava/lang/Throwable;)V",
+              "valueOf(Ljava/lang/String;)Lkz/simourg/simbase/nca/module/utils/BundleLog;",
+              "values()[Lkz/simourg/simbase/nca/module/utils/BundleLog;"
+            ],
+            "fields": [
+              "LOG:Lkz/simourg/simbase/nca/module/utils/BundleLog;"
+            ]
+          },
+          "kz.simourg.simbase.nca.module.utils.BundleProvider": {
+            "kind": "enum",
+            "super_name": "java.lang.Enum",
+            "interfaces": [],
+            "methods": [
+              "discoverProviderService()V",
+              "getProvider()Ljava/security/Provider;",
+              "valueOf(Ljava/lang/String;)Lkz/simourg/simbase/nca/module/utils/BundleProvider;",
+              "values()[Lkz/simourg/simbase/nca/module/utils/BundleProvider;"
+            ],
+            "fields": [
+              "KALKANCRYPT:Lkz/simourg/simbase/nca/module/utils/BundleProvider;"
+            ]
+          },
+          "kz.simourg.simbase.nca.module.utils.Constants": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>()V"
+            ],
+            "fields": [
+              "BLACK_FOREGROUND_COLOR:Ljava/awt/Color;",
+              "BUTTON_BACKGROUND_COLOR:Ljava/awt/Color;",
+              "BUTTON_FOREGROUND_COLOR:Ljava/awt/Color;",
+              "LABEL_FOREGROUND_COLOR:Ljava/awt/Color;",
+              "RED_BUTTON_BACKGROUND_COLOR:Ljava/awt/Color;"
+            ]
+          },
+          "kz.simourg.simbase.nca.module.utils.OcspUtils": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "getOCSP(Ljava/security/cert/Certificate;)Lkz/simourg/simbase/nca/module/models/OCSPWrapper;",
+              "getOcspTicket(Ljava/security/cert/Certificate;)[B"
+            ],
+            "fields": []
+          },
+          "kz.simourg.simbase.nca.module.utils.SimbaseCmsUtil": {
+            "kind": "class",
+            "super_name": "kz.gov.pki.provider.utils.CMSUtil",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "createCAdES(Lkz/gov/pki/provider/utils/model/SigningEntity;[BLjava/lang/String;ZLjava/security/Provider;)Lkz/gov/pki/kalkan/jce/provider/cms/CMSSignedData;",
+              "createCAdES(Lkz/gov/pki/provider/utils/model/SigningEntity;[BLjava/lang/String;ZZLjava/security/Provider;)Lkz/gov/pki/kalkan/jce/provider/cms/CMSSignedData;",
+              "createCadesEsedo(Lkz/gov/pki/provider/utils/model/SigningEntity;[BLjava/lang/String;Ljava/security/Provider;)Lkz/gov/pki/kalkan/jce/provider/cms/CMSSignedData;"
+            ],
+            "fields": [
+              "OID_TIMESTAMP:Ljava/lang/String;"
+            ]
+          },
+          "kz.simourg.simbase.nca.module.utils.TSPService": {
+            "kind": "class",
+            "super_name": "java.lang.Object",
+            "interfaces": [],
+            "methods": [
+              "<init>()V",
+              "getTST([BLjava/lang/String;)Lkz/gov/pki/kalkan/tsp/TimeStampToken;"
+            ],
+            "fields": []
+          }
+        },
+        "ncalayer_methods": [],
+        "names": [
+          "kz.Simourg.SimBASEModule"
+        ],
+        "error_codes": [],
+        "urls": [
+          "http://ocsp.pki.gov.kz/",
+          "http://ocsp.pki.gov.kz//",
+          "http://tsp.pki.gov.kz"
+        ],
+        "ports": []
+      },
+      "libraries": {},
       "natives": {},
       "keystores": {},
       "embedded_manifests": {}

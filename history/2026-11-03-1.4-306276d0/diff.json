@@ -1,0 +1,94 @@
+{
+  "baseline": false,
+  "manifest": {
+    "version": null,
+    "info": null,
+    "updurl": null,
+    "syspkgs": {
+      "added": [],
+      "removed": []
+    },
+    "disturls": [],
+    "signer": null,
+    "extra": {},
+    "resigned_only": false
+  },
+  "core": {},
+  "plugins": {
+    "kz.Simourg.SimBASE": {
+      "changed": {
+        "fields": {
+          "chash": {
+            "before": "bb86b1b11be5b21e10f5ddde0f615f272ad0fba298088728f7148ed37d66ccfd",
+            "after": "315cc044a831825b985efd66ae3ea996e8a04c3ed10e765de83e2a1ccdbd433a"
+          },
+          "csernum": {
+            "before": "0c73c16775f50921919a9dc7d9b78b7c",
+            "after": "04f07b6c25c0433a76a4049479cac6a0"
+          },
+          "hash": {
+            "before": "8ce213920569de23411808dc411a080ff5559e6d052cb988749781e28d4e5e6f",
+            "after": "93d4d25d7e1fe3754bb76bcf78a289db701a802c21c1e440a26fd9b36829e2ce"
+          },
+          "info": {
+            "before": "Simourg",
+            "after": "Simourg обновлен 03.11.2026"
+          },
+          "jar": {
+            "before": "8ce213920569de23411808dc411a080ff5559e6d052cb988749781e28d4e5e6f",
+            "after": "93d4d25d7e1fe3754bb76bcf78a289db701a802c21c1e440a26fd9b36829e2ce"
+          },
+          "url": {
+            "before": "https://simourg.com/sim/kz/ncalayer/SimbaseNcaLayerBundle-2.2.jar",
+            "after": "https://simourg.com/sim/kz/ncalayer/SimbaseNcaLayerBundle-2.4.jar"
+          },
+          "version": {
+            "before": "2.2",
+            "after": "2.4"
+          }
+        },
+        "api": null,
+        "jar": {
+          "libraries": {},
+          "natives": {
+            "added": [],
+            "removed": []
+          },
+          "keystores": {},
+          "signers": {},
+          "manifest_mf": {
+            "Bundle-Version": {
+              "before": "2.2",
+              "after": "2.4"
+            },
+            "Implementation-Version": {
+              "before": "2.2",
+              "after": "2.4"
+            }
+          }
+        },
+        "repack_only": false
+      }
+    },
+    "onaidocs-sign-bundle": {
+      "added": {
+        "name": "OnaiDocs Sign Bundle",
+        "version": "1.1.0",
+        "required": false,
+        "hidden": false,
+        "banned": false,
+        "info": "OnaiDocs Sign Bundle добавлен 02.11.2026",
+        "url": "https://onaidocs.kz/var/stories/onaidocs-sign-bundle-1.1.0.jar",
+        "hash": "6549a74d4ed8474d330c00873672148eece08a139422a8c49e26643e5cfd190a",
+        "csernum": "00ba744100f0adceb4",
+        "chash": "d9f1920c6a605ecba7c03c6acf1c26e21de799a9ba9a0d3145f68ec3288da635",
+        "extra": {},
+        "fetch": "ok",
+        "jar": "6549a74d4ed8474d330c00873672148eece08a139422a8c49e26643e5cfd190a",
+        "signer_matches": true
+      }
+    }
+  },
+  "distributions": {},
+  "notes": []
+}

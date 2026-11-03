@@ -57,13 +57,13 @@
       "status": "gone"
     },
     "bundle:kz.Simourg.SimBASE": {
-      "url": "https://simourg.com/sim/kz/ncalayer/SimbaseNcaLayerBundle-2.2.jar",
+      "url": "https://simourg.com/sim/kz/ncalayer/SimbaseNcaLayerBundle-2.4.jar",
       "size": null,
       "etag": null,
       "last_modified": null,
-      "sha256": "8ce213920569de23411808dc411a080ff5559e6d052cb988749781e28d4e5e6f",
+      "sha256": "93d4d25d7e1fe3754bb76bcf78a289db701a802c21c1e440a26fd9b36829e2ce",
       "published_sha1": null,
-      "manifest_hash": "8ce213920569de23411808dc411a080ff5559e6d052cb988749781e28d4e5e6f",
+      "manifest_hash": "93d4d25d7e1fe3754bb76bcf78a289db701a802c21c1e440a26fd9b36829e2ce",
       "failures": 0,
       "status": "ok"
     },
@@ -485,6 +485,17 @@
       "failures": 3,
       "status": "gone"
     },
+    "bundle:onaidocs-sign-bundle": {
+      "url": "https://onaidocs.kz/var/stories/onaidocs-sign-bundle-1.1.0.jar",
+      "size": null,
+      "etag": null,
+      "last_modified": null,
+      "sha256": "6549a74d4ed8474d330c00873672148eece08a139422a8c49e26643e5cfd190a",
+      "published_sha1": null,
+      "manifest_hash": "6549a74d4ed8474d330c00873672148eece08a139422a8c49e26643e5cfd190a",
+      "failures": 0,
+      "status": "ok"
+    },
     "bundle:org.skf.osgi.SKFModule": {
       "url": "https://portal.efis.kz/static/?fileName=SkfLayerBundle-1.6.2.jar",
       "size": null,
@@ -575,14 +586,14 @@
     },
     "manifest": {
       "url": "https://crl.pki.gov.kz/updates/ncalayer.der",
-      "size": 33167,
+      "size": 33750,
       "etag": null,
       "last_modified": null,
-      "sha256": "765376a94dde29f4b075c7eacae359e652652c64bfd73464fcf3cba69f1fdefe",
+      "sha256": "44f4ab47f254cf8d123c7ff4daf772ebf59e72e8f6793e3c3cdef87cb2a1f74f",
       "published_sha1": null,
       "manifest_hash": null,
-      "failures": 1,
-      "status": "failing"
+      "failures": 0,
+      "status": "ok"
     },
     "page:korporativnoy-seti": {
       "url": "https://ncl.pki.gov.kz/download.php",
