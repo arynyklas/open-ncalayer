@@ -34,7 +34,8 @@ oncl-ipc = { path = "crates/oncl-ipc" }
 oncl-pki = { path = "crates/oncl-pki" }
 oncl-pdf = { path = "crates/oncl-pdf" }
 oncl-pdk = { path = "crates/oncl-pdk" }
-oncl-plugin = { path = "crates/oncl-plugin" }
+# Explicit defaults also keep inherited no-default SDK dependencies valid outside this workspace.
+oncl-plugin = { path = "crates/oncl-plugin", default-features = false }
 oncl-protocol = { path = "crates/oncl-protocol" }
 oncl-registry = { path = "crates/oncl-registry" }
 oncl-testkit = { path = "crates/oncl-testkit" }
