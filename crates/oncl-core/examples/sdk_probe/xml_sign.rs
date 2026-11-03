@@ -197,6 +197,9 @@ fn serve(
     out: &Path,
     index: usize,
 ) -> Result<()> {
+    // Accepted WinSock sockets can inherit the listener's nonblocking mode.
+    // Only accept is polled; each actual bounded HTTP exchange is blocking.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut request = Vec::new();
     let mut chunk = [0; 4096];
@@ -349,6 +352,10 @@ fn begin(engine: &Engine, action: Action, key: Option<&KeySelector>) -> Result<O
     };
     Ok(engine.begin(grant, OperationPolicy::strict_online(), Arc::new(Control))?)
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Probe explicitly identifies its synthetic key, substantive input/output, level and shared store"
+)]
 fn sign(
     engine: &Engine,
     key: &KeySelector,

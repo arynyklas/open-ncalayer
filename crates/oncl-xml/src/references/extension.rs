@@ -2,9 +2,9 @@
 use super::*;
 use crate::xades::source::{self, XadesReport, XadesServices};
 use oncl_pki::{
-    io::{FrozenInput, StagedArtifact, XmlSignatureOutput},
+    io::{StagedArtifact, XmlSignatureOutput},
     key::HashAlg,
-    validation::{ValidationPolicy, Verdict},
+    validation::{CheckStatus, ValidationPolicy, Verdict},
 };
 fn leaf_bytes(document: &mut XmlDocument, bound: &BoundMetadata, max: usize) -> Result<Vec<u8>> {
     let xml = metadata(document, bound.0, &bound.1, max)?;
@@ -103,7 +103,7 @@ pub(crate) fn extend_transaction(
     level: AdesLevel,
     profile: &XmlVerifyProfile,
     services: &XadesServices<'_>,
-    mut output: &mut XmlSignatureOutput<'_>,
+    output: &mut XmlSignatureOutput<'_>,
     scope: &mut ResourceScope,
 ) -> Result<XadesReport> {
     let mut profile = profile.clone();
@@ -114,39 +114,44 @@ pub(crate) fn extend_transaction(
             .map_or(caller, |host| source::intersect_limits(caller, host)),
     );
     let profile = &profile;
-    if level > AdesLevel::B {
-        if let Some(tsa) = services.tsa {
-            validate_timestamp_configuration(tsa, services.validation.policy)?;
-        }
+    if level > AdesLevel::B
+        && let Some(tsa) = services.tsa
+    {
+        validate_timestamp_configuration(tsa, services.validation.policy)?;
     }
-    let mut frozen = FrozenInput::capture(input, services.temporary, scope)?;
+    let mut frozen = crate::capture_signed_input(input, profile, services.temporary, scope)?;
     let extent = frozen.len();
     let mut initial_profile = profile.clone();
     initial_profile.required_level = None;
     let levels;
+    let refresh;
     {
-        let mut reader = frozen.reader(
-            &[Region {
-                offset: 0,
-                len: extent,
-            }],
-            scope,
-        )?;
-        let initial = verify_source(
-            reader.source(),
-            &initial_profile,
-            services.temporary,
-            services.validation,
-            services.network,
-            scope,
-        )?;
+        let mut reader = frozen.reader(scope)?;
+        let initial = services.verify(reader.source(), &initial_profile, scope)?;
         reader.finish()?;
-        if initial.validation.verdict == Verdict::Invalid
-            || (services.validation.policy == ValidationPolicy::StrictOnline
-                && initial.validation.verdict != Verdict::Valid)
-        {
+        refresh = initial
+            .validation
+            .signers
+            .iter()
+            .map(|signer| {
+                signer.timestamp == CheckStatus::Unavailable
+                    || signer.revocation == CheckStatus::Unavailable
+            })
+            .collect::<Vec<_>>();
+        let refreshable = level >= AdesLevel::Lt
+            && initial.validation.signers.iter().all(|signer| {
+                signer.signature == CheckStatus::Passed
+                    && signer.chain != CheckStatus::Failed
+                    && signer.key_usage != CheckStatus::Failed
+                    && signer.timestamp != CheckStatus::Failed
+                    && (signer.revocation != CheckStatus::Failed
+                        || signer.timestamp == CheckStatus::Unavailable)
+                    && (signer.validity != CheckStatus::Failed
+                        || signer.timestamp == CheckStatus::Unavailable)
+            });
+        if initial.validation.verdict != Verdict::Valid && !refreshable {
             return Err(invalid(
-                "cannot extend an invalid or unresolved existing proof",
+                "cannot extend a failed signature, binding, trust path or present proof",
             ));
         }
         levels = initial
@@ -161,27 +166,16 @@ pub(crate) fn extend_transaction(
     let algorithm;
     {
         let count = levels.len() as u64;
-        let _memory = scope.reserve_memory(
-            count
-                * (profile.max_metadata_bytes as u64 * 24
-                    + profile.xml.max_namespace_bytes as u64 * 4
-                    + 8192),
-        )?;
+        let _memory = scope.reserve_memory(count * profile.max_metadata_bytes as u64 * 23)?;
         let _metadata = scope.reserve_metadata(
             count
                 * (profile.max_metadata_bytes as u64
                     + profile.xml.max_namespace_bytes as u64 * 4
                     + 8192),
         )?;
-        let mut reader = frozen.reader(
-            &[Region {
-                offset: 0,
-                len: extent,
-            }],
-            scope,
-        )?;
+        let mut reader = frozen.reader(scope)?;
         let mut document =
-            XmlDocument::index(reader.source(), &profile.xml, services.temporary, scope)?;
+            XmlDocument::index_signed(reader.source(), profile, services.temporary, scope)?;
         reader.finish()?;
         let signatures = scan(&mut document, profile, scope)?;
         if signatures.len() != levels.len() {
@@ -207,7 +201,7 @@ pub(crate) fn extend_transaction(
                 crate::signature_method(plain_algorithm(child(info, "SignatureMethod")?)?)
                     .ok_or(XmlSourceError::Unsupported("signature algorithm"))?;
             first_algorithm.get_or_insert(algorithm);
-            if levels[index] >= level && level != AdesLevel::Lta {
+            if levels[index] >= level && level != AdesLevel::Lta && !refresh[index] {
                 continue;
             }
             if level > AdesLevel::B && services.tsa.is_none() {
@@ -293,12 +287,11 @@ pub(crate) fn extend_transaction(
                     .tsa
                     .ok_or_else(|| invalid("signature timestamp TSA absent"))?;
                 let mut evidence = EvidenceStore::resume(bundle);
-                let id = evidence.request_timestamp(
+                let id = services.request_timestamp(
+                    &mut evidence,
                     &signer,
                     &[CoveragePart::BoundSignature(&bound)],
                     tsa,
-                    services.validation,
-                    services.network,
                 )?;
                 bundle = evidence.finish();
                 let token = source::read_token(&mut bundle, id, profile.max_metadata_bytes)?;
@@ -351,6 +344,7 @@ pub(crate) fn extend_transaction(
                 let (_, tsa_leaf) = oncl_pki::tsp::verify_token_imprint(&token, &imprint)
                     .map_err(EvidenceError::from)?;
                 let needs_material = levels[index] < AdesLevel::Lt
+                    || refresh[index]
                     || !services.material.certificates.is_empty()
                     || !services.material.ocsp.is_empty()
                     || !services.material.crls.is_empty();
@@ -434,6 +428,102 @@ pub(crate) fn extend_transaction(
                     return Err(invalid("reference changed before extension"));
                 }
                 let tsa = services.tsa.ok_or_else(|| invalid("archive TSA absent"))?;
+                let mut prior_values = Vec::with_capacity(carried.len());
+                for (_, _, _, method, prefixes) in &carried {
+                    let (stage, spans) = document.canonical_proof(
+                        Options {
+                            target: Some(signature.value.0),
+                            method: *method,
+                            profile: profile.canonicalization,
+                            prefixes,
+                            excluded: &[],
+                            metadata_limit: Some(profile.max_metadata_bytes as u64),
+                        },
+                        services.temporary,
+                        scope,
+                        &mut work,
+                    )?;
+                    let region = Region {
+                        offset: 0,
+                        len: stage.len(),
+                    };
+                    prior_values.push(BoundSignatureRepresentation::from_base64_projection(
+                        stage,
+                        region,
+                        &spans,
+                        &signer,
+                        &evidence_limits(profile)?,
+                        scope,
+                    )?);
+                }
+                let mut prior_archives = Vec::with_capacity(carried.len());
+                for (i, (token, kind, meta, method, prefixes)) in carried.iter().enumerate() {
+                    prior_archives.push(if *kind == ProofKind::Archive {
+                        Some(
+                            archive_representation(
+                                &mut document,
+                                signature,
+                                &mut references,
+                                &rows,
+                                meta.bound.0,
+                                *method,
+                                prefixes,
+                                &prior_values[i],
+                                &signer,
+                                &mut bundle,
+                                Some(*token),
+                                profile,
+                                services.temporary,
+                                scope,
+                                &mut work,
+                                None,
+                                None,
+                            )?
+                            .0,
+                        )
+                    } else {
+                        None
+                    });
+                }
+                let mut prior_coverages = carried
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, kind, _, _, _))| {
+                        if *kind == ProofKind::Archive {
+                            [CoveragePart::BoundArchive(
+                                prior_archives[i]
+                                    .as_ref()
+                                    .expect("reconstructed prior archive"),
+                            )]
+                        } else {
+                            [CoveragePart::BoundSignature(&prior_values[i])]
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let added_time = new_entries
+                    .iter()
+                    .filter(|(_, kind)| *kind == EvidenceKind::Timestamp)
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>();
+                for _ in &added_time {
+                    prior_coverages.push([CoveragePart::BoundSignature(&bound)]);
+                }
+                let mut old_proofs = carried
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (token, kind, _, _, _))| TimestampBinding {
+                        token: *token,
+                        kind: *kind,
+                        coverage: &prior_coverages[i],
+                    })
+                    .collect::<Vec<_>>();
+                for (i, token) in added_time.iter().enumerate() {
+                    old_proofs.push(TimestampBinding {
+                        token: *token,
+                        kind: ProofKind::Signature,
+                        coverage: &prior_coverages[carried.len() + i],
+                    });
+                }
                 let (archive, imprint) = archive_representation(
                     &mut document,
                     signature,
@@ -461,12 +551,14 @@ pub(crate) fn extend_transaction(
                     Some(tsa.hash),
                 )?;
                 let mut evidence = EvidenceStore::resume(bundle);
-                let id = evidence.request_timestamp(
+                let id = evidence.request_archive_timestamp_for_extension(
                     &signer,
-                    &[CoveragePart::BoundArchive(&archive)],
+                    &old_proofs,
+                    &archive,
                     tsa,
                     services.validation,
                     services.network,
+                    services.host_clock,
                 )?;
                 bundle = evidence.finish();
                 let token = source::read_token(&mut bundle, id, profile.max_metadata_bytes)?;
@@ -522,7 +614,7 @@ pub(crate) fn extend_transaction(
                     offset,
                     len: point.at - offset,
                 },
-                &mut output,
+                output,
                 scope,
                 &mut work,
             )?;
@@ -537,21 +629,14 @@ pub(crate) fn extend_transaction(
                 offset,
                 len: extent - offset,
             },
-            &mut output,
+            output,
             scope,
             &mut work,
         )?;
     }
     let mut final_profile = profile.clone();
     final_profile.required_level = Some(level);
-    let verification = verify_source(
-        output.source()?,
-        &final_profile,
-        services.temporary,
-        services.validation,
-        services.network,
-        scope,
-    )?;
+    let verification = services.verify(output.source()?, &final_profile, scope)?;
     if verification.validation.verdict == Verdict::Invalid
         || (services.validation.policy == ValidationPolicy::StrictOnline
             && verification.validation.verdict != Verdict::Valid)

@@ -107,6 +107,7 @@ fn source_baseline_b_binds_signing_certificate_and_properties_reference() {
             crls: &[],
         },
         evidence_limits: None,
+        host_clock: None,
     };
     let spec = XadesSourceSpec {
         xml: XmlSignProfile {
@@ -280,6 +281,7 @@ fn all_baseline_levels_check_crypto_evidence_and_document_not_presence() {
                     crls: &[],
                 },
                 evidence_limits: None,
+                host_clock: None,
             };
             let spec = XadesSourceSpec {
                 xml: XmlSignProfile {
@@ -392,6 +394,7 @@ fn proof_only_extension_and_renewal_preserve_all_old_proofs() {
             crls: &[],
         },
         evidence_limits: None,
+        host_clock: None,
     };
     let new_scope = || {
         let limits = ResourceLimits::default();
@@ -594,6 +597,7 @@ fn rotated_current_tsa_data_is_noncyclic_and_next_archive_protects_it() {
             crls: &[],
         },
         evidence_limits: None,
+        host_clock: None,
     };
     let new_scope = || {
         let cap = ResourceLimits::default();
@@ -742,6 +746,7 @@ fn host_evidence_limits_preflight_lta_and_restrict_carried_proofs() {
             crls: &[],
         },
         evidence_limits: Some(cap),
+        host_clock: None,
     };
     struct Count<'a> {
         key: &'a mut oncl_pki::pkcs12::KeyEntry,
@@ -861,6 +866,7 @@ fn recognized_archive_and_tsvd_require_exact_signature_location() {
             crls: &[],
         },
         evidence_limits: None,
+        host_clock: None,
     };
     let new_scope = || {
         let cap = ResourceLimits::default();
@@ -965,6 +971,7 @@ fn genuine_independent_signature_time_proofs_are_explicitly_unsupported() {
             crls: &[],
         },
         evidence_limits: None,
+        host_clock: None,
     };
     let new_scope = || {
         let cap = ResourceLimits::default();
@@ -1073,4 +1080,236 @@ fn genuine_independent_signature_time_proofs_are_explicitly_unsupported() {
             "multiple independent SignatureTimeStamp proofs"
         ))
     ));
+}
+
+#[test]
+fn baseline_data_object_format_binds_reference_and_legacy_has_no_false_level() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    use oncl_xml::xades::{XadesLevel, XadesServices, XadesSourceSpec, XadesSpec};
+    let mut pki = Pki::new("user-rsa-sign");
+    let now = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: None,
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+        host_clock: None,
+    };
+    let new_scope = || {
+        let cap = ResourceLimits::default();
+        Arc::new(SharedBudget::new(cap.clone()).unwrap())
+            .begin(cap, Arc::new(Control))
+            .unwrap()
+    };
+    let mut scope = new_scope();
+    let mut bytes = Vec::new();
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level: AdesLevel::B,
+        signing_time: now,
+    };
+    let report = oncl_xml::xades::sign_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><p Id='p'>protected</p><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &mut pki.signer,
+        &services,
+        &mut bytes,
+        &mut scope,
+    )
+    .unwrap();
+    assert_eq!(report.verification.minimum_level(), Some(AdesLevel::B));
+    drop(report);
+    drop(scope);
+    let text = std::str::from_utf8(&bytes).unwrap();
+    let parsed = roxmltree::Document::parse(text).unwrap();
+    let reference = parsed
+        .descendants()
+        .find(|n| {
+            n.tag_name().namespace() == Some("http://www.w3.org/2000/09/xmldsig#")
+                && n.tag_name().name() == "Reference"
+                && n.attribute("URI") == Some("#p")
+        })
+        .unwrap();
+    let id = reference
+        .attribute("Id")
+        .expect("baseline data Reference needs identity");
+    let format = parsed
+        .descendants()
+        .find(|n| {
+            n.tag_name().namespace() == Some("http://uri.etsi.org/01903/v1.3.2#")
+                && n.tag_name().name() == "DataObjectFormat"
+        })
+        .expect("EN319132-1 6.3k mandatory DataObjectFormat");
+    assert_eq!(
+        format.attribute("ObjectReference").unwrap(),
+        format!("#{id}")
+    );
+    assert_eq!(
+        format
+            .children()
+            .find(|n| n.tag_name().name() == "MimeType")
+            .unwrap()
+            .text(),
+        Some("application/xml")
+    );
+    let legacy = oncl_xml::xades::sign(
+        b"<r>legacy protected</r>",
+        &XadesSpec {
+            level: XadesLevel::B,
+            tsa: None,
+            chain: vec![],
+            signature_method: Some("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"),
+            digest_method: None,
+        },
+        &pki.signer.key,
+        &pki.signer.cert,
+        &pki.http,
+        now,
+    )
+    .unwrap();
+    let mut scope = new_scope();
+    let report = verify_source(
+        Source::sequential(&mut Cursor::new(&legacy), None),
+        &XmlVerifyProfile::default(),
+        &store,
+        &context,
+        &network,
+        &mut scope,
+    )
+    .unwrap();
+    assert_eq!(report.validation.verdict, Verdict::Valid);
+    assert_eq!(
+        report.minimum_level(),
+        None,
+        "legacy crypto shape without DataObjectFormat is not complete new baseline"
+    );
+    drop(report);
+    drop(scope);
+    let mut scope = new_scope();
+    assert!(
+        verify_source(
+            Source::sequential(&mut Cursor::new(legacy), None),
+            &XmlVerifyProfile {
+                required_level: Some(AdesLevel::B),
+                ..Default::default()
+            },
+            &store,
+            &context,
+            &network,
+            &mut scope
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn guarded_bounded_xades_spec_uses_shared_real_evidence_for_b_t_lt() {
+    use oncl_pki::{evidence::AdesLevel, validation::Verdict};
+    use oncl_xml::xades::{XadesLevel, XadesServices, XadesSpec};
+    for name in ["user-rsa-sign", "user-gost2004-sign", "user-gost2015-sign"] {
+        let mut pki = Pki::new(name);
+        for (level, expected) in [
+            (XadesLevel::B, AdesLevel::B),
+            (XadesLevel::T, AdesLevel::T),
+            (XadesLevel::Lt, AdesLevel::Lt),
+        ] {
+            let limits = ResourceLimits::default();
+            let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+            let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+            let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+            let now = time::macros::datetime!(2026-11-02 12:00 UTC);
+            let context = ValidationContext {
+                policy: ValidationPolicy::StrictOnline,
+                now,
+                anchors: &pki.anchors,
+                intermediates: &[],
+                http: &pki.http,
+            };
+            let network = NetworkPolicy::only_endpoints([
+                "http://tsa.synthetic.test",
+                "http://ocsp.synthetic.test",
+            ])
+            .unwrap();
+            let services = XadesServices {
+                validation: &context,
+                network: &network,
+                temporary: &store,
+                tsa: Some(&pki.tsa),
+                material: oncl_pki::cms::ades::ValidationMaterial {
+                    certificates: &[],
+                    ocsp: &[],
+                    crls: &[],
+                },
+                evidence_limits: None,
+                host_clock: None,
+            };
+            let spec = XadesSpec {
+                level,
+                tsa: Some(pki.tsa.clone()),
+                chain: vec![],
+                signature_method: Some(match name {
+                    "user-rsa-sign" => "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+                    "user-gost2004-sign" => {
+                        "http://www.w3.org/2001/04/xmldsig-more#gost34310-gost34311"
+                    }
+                    _ => {
+                        "urn:ietf:params:xml:ns:pkigovkz:xmlsec:algorithms:gostr34102015-gostr34112015-512"
+                    }
+                }),
+                digest_method: (name == "user-rsa-sign").then_some(
+                    "urn:ietf:params:xml:ns:pkigovkz:xmlsec:algorithms:gostr34112015-512",
+                ),
+            };
+            let mut stage = store.stage(&mut scope).unwrap();
+            let mut output = oncl_pki::io::XmlSignatureOutput::new(&mut stage, &scope).unwrap();
+            let prepared = oncl_xml::xades::prepare_spec_source(
+                Source::sequential(
+                    &mut Cursor::new(b"<r xml:lang='kk'><p>protected</p></r>"),
+                    None,
+                ),
+                &spec,
+                now,
+                &services,
+                &mut scope,
+            )
+            .unwrap();
+            let report = prepared
+                .sign_transaction(&mut pki.signer, &services, &mut output, &mut scope)
+                .unwrap_or_else(|e| panic!("{name}/{level:?}: {e:?}"));
+            assert_eq!(report.verification.validation.verdict, Verdict::Valid);
+            assert_eq!(report.verification.signatures()[0].level, Some(expected));
+            assert!(
+                report.verification.signatures()[0]
+                    .references()
+                    .iter()
+                    .all(|r| r.digest_matches)
+            );
+            output.finish(&scope).unwrap();
+        }
+    }
 }

@@ -3796,3 +3796,78 @@ fn timestamp_configuration_preflight_is_the_issuance_gate_without_private_or_htt
         Err(EvidenceError::InvalidBinding)
     ));
 }
+
+#[test]
+fn trusted_host_clock_samples_after_genuine_reply_without_relaxing_as_of_or_future_rules() {
+    use std::sync::atomic::AtomicI64;
+    struct Advance {
+        tsa: MockTsa,
+        clock: Arc<AtomicI64>,
+        after: OffsetDateTime,
+    }
+    impl HttpTransport for Advance {
+        fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
+            let reply = self.tsa.send(request)?;
+            self.clock
+                .store(self.after.unix_timestamp(), Ordering::SeqCst);
+            Ok(reply)
+        }
+    }
+    let fixture = Fixture::new();
+    for case in 0..5 {
+        let clock = Arc::new(AtomicI64::new(
+            (NOW + time::Duration::seconds(if case == 4 { 5 } else { 0 })).unix_timestamp(),
+        ));
+        let generated = NOW + time::Duration::seconds(if case == 1 { 4 } else { 2 });
+        let after = NOW + time::Duration::seconds(if case == 2 { -1 } else { 3 });
+        let http = Advance {
+            tsa: MockTsa::new(fixture.tsa.clone()).with_gen_time(generated),
+            clock: clock.clone(),
+            after,
+        };
+        let context = fixture.context(&http, ValidationPolicy::StrictOnline);
+        let network = NetworkPolicy::only_endpoints([TSA_URL]).unwrap();
+        let mut resources = scope();
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(dir.path()).unwrap();
+        let mut evidence = EvidenceStore::new(store, evidence_limits(), &mut resources).unwrap();
+        let host_clock =
+            || OffsetDateTime::from_unix_timestamp(clock.load(Ordering::SeqCst)).unwrap();
+        let monotonic_remaining = resources.deadline().remaining();
+        let result = if case == 3 {
+            evidence.request_timestamp(
+                &fixture.signer(),
+                &[CoveragePart::Signature],
+                &request_spec(),
+                &context,
+                &network,
+            )
+        } else {
+            evidence.request_timestamp_with_clock(
+                &fixture.signer(),
+                &[CoveragePart::Signature],
+                &request_spec(),
+                &context,
+                &network,
+                &host_clock,
+            )
+        };
+        if case == 0 {
+            let id = result.unwrap();
+            let bundle = evidence.finish();
+            assert_eq!(bundle.entry(id).unwrap().obtained_at(), Some(after));
+            assert!(
+                resources.deadline().remaining() <= monotonic_remaining,
+                "wall-clock advancement cannot refresh the original monotonic deadline"
+            );
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(EvidenceError::Timestamp(oncl_pki::tsp::TspError::ClockSkew))
+                ),
+                "case {case}"
+            );
+        }
+    }
+}

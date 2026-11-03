@@ -227,6 +227,7 @@ impl<'a> PdfSignatureOutput<'a> {
             len: Some(extent - gap.len),
             admitted: Some(scope.retain()),
             output_failure,
+            classification: None,
         };
         let outcome =
             stream::sign_pdf_contents(source, signer, services, &mut sink, capacity, scope);
@@ -508,6 +509,7 @@ mod tests {
             len: Some(6),
             admitted: Some(scope.retain()),
             output_failure,
+            classification: None,
         };
         assert!(!source.is_snapshot_for(&scope).unwrap());
         assert!(source.is_output_projection_for(&scope).unwrap());

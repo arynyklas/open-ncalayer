@@ -81,6 +81,10 @@ fn novel_material(
     }
     Ok(out)
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Current TSA-only tail is bound to the actual token, prior evidence, owner and unchanged host policy"
+)]
 pub(crate) fn current_tsa_validation(
     mut bundle: EvidenceBundle,
     token: &[u8],

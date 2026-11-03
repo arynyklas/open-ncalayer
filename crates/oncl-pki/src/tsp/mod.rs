@@ -561,7 +561,7 @@ pub fn request(
     imprint: &[u8],
     http: &dyn HttpTransport,
 ) -> Result<TspReply, TspError> {
-    request_clock(spec, imprint, http, None)
+    request_clock(spec, imprint, http, RequestTime::System).map(|(reply, _)| reply)
 }
 
 pub(crate) fn request_at(
@@ -570,20 +570,49 @@ pub(crate) fn request_at(
     http: &dyn HttpTransport,
     now: OffsetDateTime,
 ) -> Result<TspReply, TspError> {
-    request_clock(spec, imprint, http, Some(now))
+    request_clock(spec, imprint, http, RequestTime::AsOf(now)).map(|(reply, _)| reply)
 }
 
+/// Use a trusted host clock sampled after the actual reply. The returned
+/// acquisition time is ordinary host metadata, not ProofTime or a trust fact;
+/// callers still run the shared PKI/format validation. No wire clock is read.
+pub fn request_with_clock(
+    spec: &TsaSpec,
+    imprint: &[u8],
+    http: &dyn HttpTransport,
+    clock: &(dyn Fn() -> OffsetDateTime + Send + Sync),
+) -> Result<(TspReply, OffsetDateTime), TspError> {
+    request_clock(spec, imprint, http, RequestTime::Host(clock))
+}
+enum RequestTime<'a> {
+    System,
+    AsOf(OffsetDateTime),
+    Host(&'a (dyn Fn() -> OffsetDateTime + Send + Sync)),
+}
+impl RequestTime<'_> {
+    fn sample(&self) -> OffsetDateTime {
+        match self {
+            Self::System => OffsetDateTime::now_utc(),
+            Self::AsOf(now) => *now,
+            Self::Host(clock) => clock(),
+        }
+    }
+}
 fn request_clock(
     spec: &TsaSpec,
     imprint: &[u8],
     http: &dyn HttpTransport,
-    now: Option<OffsetDateTime>,
-) -> Result<TspReply, TspError> {
+    clock: RequestTime<'_>,
+) -> Result<(TspReply, OffsetDateTime), TspError> {
     let nonce = spec.nonce.draw();
     let request = request_spec_der(spec, imprint, nonce.as_deref());
     let opts = GetOptions {
         timeout: spec.timeout,
         ..GetOptions::default()
+    };
+    let host_start = match &clock {
+        RequestTime::Host(clock) => Some(clock()),
+        _ => None,
     };
     let mut attempt = 0;
     let body = loop {
@@ -612,17 +641,24 @@ fn request_clock(
     };
     let (token, tst, tsa_cert) = parse_response_signed(&body, spec.require_tsa_eku)?;
     check_answers(&tst, spec, imprint, nonce.as_deref())?;
+    let checked_at = clock.sample();
+    if host_start.is_some_and(|started| checked_at < started) {
+        return Err(TspError::ClockSkew);
+    }
     if let Some(skew) = spec.check_skew
-        && (tst.gen_time - now.unwrap_or_else(OffsetDateTime::now_utc)).unsigned_abs() > skew
+        && (tst.gen_time - checked_at).unsigned_abs() > skew
     {
         return Err(TspError::ClockSkew);
     }
-    Ok(TspReply {
-        response: body,
-        token,
-        tst,
-        tsa_cert,
-    })
+    Ok((
+        TspReply {
+            response: body,
+            token,
+            tst,
+            tsa_cert,
+        },
+        checked_at,
+    ))
 }
 
 /// Time-stamps the signers `signers` of a DER or BER `ContentInfo{SignedData}`: for each,

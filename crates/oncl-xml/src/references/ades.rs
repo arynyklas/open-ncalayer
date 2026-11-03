@@ -76,6 +76,10 @@ fn xchild<'a, 'i>(node: Node<'a, 'i>, name: &str) -> Result<Node<'a, 'i>> {
     }
     Ok(node)
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Original document, signer, proof sources and host validation remain explicit"
+)]
 pub(super) fn check_carried_evidence(
     document: &mut XmlDocument,
     signature: &Metadata,
@@ -138,6 +142,16 @@ pub(super) fn check_carried_evidence(
             != oncl_pki::key::HashAlg::Sha256.digest(&crate::cert_der(signer.certificate)?)
         {
             return Err(invalid("SigningCertificateV2 leaf binding"));
+        }
+        if !baseline_data_formats(properties_node, info, scope)? {
+            if profile.required_level.is_some() {
+                return Err(invalid(
+                    "required baseline DataObjectFormat/reference binding absent",
+                ));
+            }
+            // Old bounded wire remains verifiable as XML+evidence, not falsely
+            // reported as a complete EN319132-1 baseline signature.
+            level = None;
         }
     } else if profile.required_level.is_some() {
         return Err(invalid("requested XAdES baseline properties absent"));
@@ -232,24 +246,25 @@ pub(super) fn check_carried_evidence(
             coverage,
         })
         .collect();
-    if !proofs.is_empty() {
-        level = level.map(|_| AdesLevel::T)
-    }
-    if level == Some(AdesLevel::T)
+    let evidence_level = if proofs.iter().any(|proof| proof.kind == ProofKind::Archive) {
+        AdesLevel::Lta
+    } else if !proofs.is_empty()
         && signature
             .evidence
             .iter()
-            .any(|(k, _)| matches!(k, EvidenceKind::Ocsp | EvidenceKind::Crl))
+            .any(|(kind, _)| matches!(kind, EvidenceKind::Ocsp | EvidenceKind::Crl))
     {
-        level = Some(AdesLevel::Lt)
-    }
-    if proofs.iter().any(|p| p.kind == ProofKind::Archive) {
-        level = level.map(|_| AdesLevel::Lta)
-    }
+        AdesLevel::Lt
+    } else if !proofs.is_empty() {
+        AdesLevel::T
+    } else {
+        AdesLevel::B
+    };
+    level = level.map(|_| evidence_level);
     let required = profile
         .required_level
         .unwrap_or(AdesLevel::B)
-        .max(level.unwrap_or(AdesLevel::B));
+        .max(evidence_level);
     let report = validate_evidence(&signer, &mut bundle, &proofs, required, ctx, network, scope)?;
     Ok((report, level))
 }
@@ -280,6 +295,11 @@ fn copy_stage(
     }
     Ok(())
 }
+type AdditionalUnsigned<'a> = (&'a str, &'a str, &'a [(EvidenceId, EvidenceKind)]);
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Normative archive order is derived from original signer, cutoff, existing evidence and optional actual additions"
+)]
 fn archive_representation(
     document: &mut XmlDocument,
     signature: &Metadata,
@@ -296,7 +316,7 @@ fn archive_representation(
     store: &TemporaryStore,
     scope: &mut ResourceScope,
     work: &mut u64,
-    additional: Option<(&str, &str, &[(EvidenceId, EvidenceKind)])>,
+    additional: Option<AdditionalUnsigned<'_>>,
     issuance_hash: Option<oncl_pki::key::HashAlg>,
 ) -> Result<(
     BoundArchiveRepresentation,
@@ -665,4 +685,161 @@ fn validate_unsigned_layout(
         }
     }
     Ok(())
+}
+
+/// EN319132-1 V1.2.1 6.3k: one signed format descriptor for each current
+/// SignedInfo data Reference, never for the SignedProperties Reference.
+fn baseline_data_formats(
+    properties: Node<'_, '_>,
+    info: Node<'_, '_>,
+    scope: &ResourceScope,
+) -> Result<bool> {
+    let mut containers = properties.children().filter(|n| {
+        n.is_element()
+            && n.tag_name().namespace() == Some(crate::XADES_NS)
+            && n.tag_name().name() == "SignedDataObjectProperties"
+    });
+    let Some(container) = containers.next() else {
+        return Ok(false);
+    };
+    if containers.next().is_some() {
+        return Err(invalid("duplicate SignedDataObjectProperties"));
+    }
+    let mut references = std::collections::HashMap::new();
+    let mut missing_id = false;
+    for reference in info.children().filter(|n| {
+        crate::is_ds(*n, "Reference") && n.attribute("Type") != Some(crate::SIGNED_PROPERTIES_TYPE)
+    }) {
+        scope.checkpoint()?;
+        match reference.attribute("Id").filter(|id| !id.is_empty()) {
+            Some(id) => {
+                if references.insert(id, false).is_some() {
+                    return Err(invalid("duplicate data Reference Id"));
+                }
+            }
+            None => missing_id = true,
+        }
+    }
+    let mut count = 0;
+    for format in container.children().filter(|n| {
+        n.is_element()
+            && n.tag_name().namespace() == Some(crate::XADES_NS)
+            && n.tag_name().name() == "DataObjectFormat"
+    }) {
+        scope.checkpoint()?;
+        let id = decode_id(
+            format
+                .attribute("ObjectReference")
+                .ok_or_else(|| invalid("DataObjectFormat ObjectReference missing"))?,
+        )?;
+        let seen = references
+            .get_mut(id.as_str())
+            .ok_or_else(|| invalid("DataObjectFormat points outside current data References"))?;
+        if *seen {
+            return Err(invalid("duplicate DataObjectFormat for data Reference"));
+        }
+        *seen = true;
+        let mime = xchild(format, "MimeType")?;
+        if mime.children().any(|n| n.is_element())
+            || mime.text().is_none_or(|text| text.trim().is_empty())
+        {
+            return Err(invalid("DataObjectFormat MimeType missing or malformed"));
+        }
+        count += 1;
+    }
+    Ok(!missing_id && count == references.len() && references.values().all(|seen| *seen))
+}
+
+#[cfg(test)]
+mod data_object_format_tests {
+    use super::*;
+    use oncl_pki::resource::{
+        OperationControl, ProcessingError, Progress, ResourceLimits, SharedBudget,
+    };
+    use std::sync::Arc;
+    struct Control;
+    impl OperationControl for Control {
+        fn checkpoint(&self, _: Progress) -> std::result::Result<(), ProcessingError> {
+            Ok(())
+        }
+    }
+    fn check(references: &str, formats: &str) -> Result<bool> {
+        let limits = ResourceLimits::default();
+        let scope =
+            Arc::new(SharedBudget::new(limits.clone())?).begin(limits, Arc::new(Control))?;
+        let xml = format!(
+            "<r xmlns:ds='{}' xmlns:x='{}'><ds:SignedInfo>{references}<ds:Reference Type='{}' URI='#properties'/></ds:SignedInfo><x:SignedProperties><x:SignedDataObjectProperties>{formats}</x:SignedDataObjectProperties></x:SignedProperties></r>",
+            crate::DSIG_NS,
+            crate::XADES_NS,
+            crate::SIGNED_PROPERTIES_TYPE
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        baseline_data_formats(
+            doc.descendants()
+                .find(|n| n.tag_name().name() == "SignedProperties")
+                .unwrap(),
+            doc.descendants()
+                .find(|n| crate::is_ds(*n, "SignedInfo"))
+                .unwrap(),
+            &scope,
+        )
+    }
+    #[test]
+    fn every_data_reference_has_one_own_descriptor_and_signed_properties_are_exempt() {
+        let references =
+            "<ds:Reference Id='data' URI='#p'/><ds:Reference Id='object' URI='#other-object'/>";
+        let data = "<x:DataObjectFormat ObjectReference='#data'><x:MimeType>application/xml</x:MimeType></x:DataObjectFormat>";
+        let object = "<x:DataObjectFormat ObjectReference='#object'><x:MimeType>application/octet-stream</x:MimeType></x:DataObjectFormat>";
+        assert!(check(references, &format!("{data}{object}")).unwrap());
+        assert!(!check(references, data).unwrap());
+        assert!(check(references, &format!("{data}{data}{object}")).is_err());
+        for bad in [
+            "#p",
+            "#foreign",
+            "#properties",
+            "https://example.test/#data",
+        ] {
+            assert!(
+                check(
+                    references,
+                    &format!("{}{}", data.replace("#data", bad), object)
+                )
+                .is_err()
+            );
+        }
+        assert!(check("<ds:Reference Id='data'/><ds:Reference Id='data'/>", data).is_err());
+        assert!(!check("<ds:Reference/>", "").unwrap());
+        assert!(
+            check(
+                references,
+                &format!(
+                    "{}{}",
+                    data.replace("<x:MimeType>application/xml</x:MimeType>", ""),
+                    object
+                )
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                references,
+                &format!("{}{}", data.replace("application/xml", " "), object)
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                references,
+                &format!(
+                    "{}{}",
+                    data.replace("x:MimeType", "foreign:MimeType").replace(
+                        "<x:DataObjectFormat ",
+                        "<x:DataObjectFormat xmlns:foreign='urn:foreign' "
+                    ),
+                    object
+                )
+            )
+            .is_err()
+        );
+    }
 }

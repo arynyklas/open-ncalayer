@@ -30,6 +30,10 @@ impl BoundArchiveRepresentation {
     /// group's text projections must strictly decode to that store's actual DER.
     /// `before=None` binds all entries for issuance; verification must bind the
     /// prefix before the current token. The validator rechecks that exact cutoff.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit original-scope signature, evidence owner and cutoff bindings"
+    )]
     pub fn from_base64_projections(
         mut artifact: StagedArtifact,
         signature: &BoundSignatureRepresentation,

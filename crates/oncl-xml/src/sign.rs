@@ -10,7 +10,7 @@ use crate::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use oncl_pki::key::PrivateKey;
 use oncl_pki::{
-    io::{Region, Source, TemporaryStore},
+    io::{Region, Source, StagedArtifact, TemporaryStore, XmlSignatureOutput},
     key::{DigestSigner, SigAlg},
     resource::{IO_CHUNK_BYTES, ProcessingError, ResourceScope},
 };
@@ -87,7 +87,6 @@ pub struct PreparedXmlSign<'a> {
     has_signatures: bool,
     output_plan: OutputPlan,
     store: TemporaryStore,
-    _memory: oncl_pki::resource::ResourceReservation,
     _metadata: oncl_pki::resource::ResourceReservation,
 }
 impl<'a> PreparedXmlSign<'a> {
@@ -99,6 +98,24 @@ impl<'a> PreparedXmlSign<'a> {
         validation: &oncl_pki::validation::ValidationContext<'_>,
         network: &oncl_pki::validation::NetworkPolicy,
         scope: &mut ResourceScope,
+    ) -> Result<()> {
+        self.verify_existing_timed(validation, network, scope, None)
+    }
+    pub fn verify_existing_with_clock(
+        &mut self,
+        validation: &oncl_pki::validation::ValidationContext<'_>,
+        network: &oncl_pki::validation::NetworkPolicy,
+        clock: &(dyn Fn() -> time::OffsetDateTime + Send + Sync),
+        scope: &mut ResourceScope,
+    ) -> Result<()> {
+        self.verify_existing_timed(validation, network, scope, Some(clock))
+    }
+    fn verify_existing_timed(
+        &mut self,
+        validation: &oncl_pki::validation::ValidationContext<'_>,
+        network: &oncl_pki::validation::NetworkPolicy,
+        scope: &mut ResourceScope,
+        clock: Option<&(dyn Fn() -> time::OffsetDateTime + Send + Sync)>,
     ) -> Result<()> {
         self.document.check_scope(scope)?;
         if !self.has_signatures {
@@ -113,13 +130,14 @@ impl<'a> PreparedXmlSign<'a> {
             evidence_limits: self.profile.evidence_limits,
             ..Default::default()
         };
-        let report = crate::references::verify_document(
+        let report = crate::references::verify_document_timed(
             &mut self.document,
             &profile,
             &self.store,
             validation,
             network,
             scope,
+            clock,
         )?;
         if report.validation.verdict == oncl_pki::validation::Verdict::Invalid
             || (validation.policy == oncl_pki::validation::ValidationPolicy::StrictOnline
@@ -369,6 +387,36 @@ pub fn sign_prepared(
     output: &mut oncl_pki::io::XmlSignatureOutput<'_>,
     scope: &mut ResourceScope,
 ) -> Result<crate::xades::XadesReport> {
+    sign_prepared_timed(prepared, signer, validation, network, output, scope, None)
+}
+pub fn sign_prepared_with_clock(
+    prepared: PreparedXmlSign<'_>,
+    signer: &mut dyn DigestSigner,
+    validation: &oncl_pki::validation::ValidationContext<'_>,
+    network: &oncl_pki::validation::NetworkPolicy,
+    clock: &(dyn Fn() -> time::OffsetDateTime + Send + Sync),
+    output: &mut oncl_pki::io::XmlSignatureOutput<'_>,
+    scope: &mut ResourceScope,
+) -> Result<crate::xades::XadesReport> {
+    sign_prepared_timed(
+        prepared,
+        signer,
+        validation,
+        network,
+        output,
+        scope,
+        Some(clock),
+    )
+}
+fn sign_prepared_timed(
+    prepared: PreparedXmlSign<'_>,
+    signer: &mut dyn DigestSigner,
+    validation: &oncl_pki::validation::ValidationContext<'_>,
+    network: &oncl_pki::validation::NetworkPolicy,
+    output: &mut oncl_pki::io::XmlSignatureOutput<'_>,
+    scope: &mut ResourceScope,
+    clock: Option<&(dyn Fn() -> time::OffsetDateTime + Send + Sync)>,
+) -> Result<crate::xades::XadesReport> {
     let profile = prepared.profile.clone();
     let store = prepared.store.clone();
     let summary = prepared.finish(signer, &mut StageWriter(output), scope, None, None)?;
@@ -381,14 +429,26 @@ pub fn sign_prepared(
         evidence_limits: profile.evidence_limits,
         ..Default::default()
     };
-    let verification = crate::verify_source(
-        output.source()?,
-        &verify,
-        &store,
-        validation,
-        network,
-        scope,
-    )?;
+    let verification = if let Some(clock) = clock {
+        crate::verify_source_with_clock(
+            output.source()?,
+            &verify,
+            &store,
+            validation,
+            network,
+            clock,
+            scope,
+        )?
+    } else {
+        crate::verify_source(
+            output.source()?,
+            &verify,
+            &store,
+            validation,
+            network,
+            scope,
+        )?
+    };
     if verification.validation.verdict == oncl_pki::validation::Verdict::Invalid
         || (validation.policy == oncl_pki::validation::ValidationPolicy::StrictOnline
             && verification.validation.verdict != oncl_pki::validation::Verdict::Valid)
@@ -421,9 +481,25 @@ pub fn prepare_source<'a>(
     {
         return Err(XmlSourceError::AlgorithmDenied);
     }
-    let memory = scope.reserve_memory(profile.max_metadata_bytes as u64 * 4)?;
     let metadata = scope.reserve_metadata(profile.max_metadata_bytes as u64)?;
-    let mut document = XmlDocument::index(input, &profile.xml, store, scope)?;
+    let mut document = if profile.mode == XmlSignMode::Add {
+        XmlDocument::index_signed(
+            input,
+            &crate::XmlVerifyProfile {
+                xml: profile.xml.clone(),
+                canonicalization: profile.canonicalization,
+                allowed_signature_algorithms: profile.allowed_signature_algorithms,
+                max_metadata_bytes: profile.max_metadata_bytes,
+                max_work: profile.max_work,
+                evidence_limits: profile.evidence_limits,
+                ..Default::default()
+            },
+            store,
+            scope,
+        )?
+    } else {
+        XmlDocument::index(input, &profile.xml, store, scope)?
+    };
     let mut signature_count = 0;
     {
         let mut events = document.events();
@@ -509,7 +585,6 @@ pub fn prepare_source<'a>(
         output_plan,
         has_signatures: signature_count != 0,
         store: store.clone(),
-        _memory: memory,
         _metadata: metadata,
     })
 }
@@ -532,7 +607,6 @@ impl PreparedXmlSign<'_> {
             work_remaining: mut work,
             place,
             output_plan,
-            _memory,
             _metadata,
             ..
         } = self;
@@ -545,12 +619,17 @@ impl PreparedXmlSign<'_> {
         let (signature_uri, digest_uri) =
             crate::signing_uris(algorithm).ok_or(XmlSourceError::AlgorithmDenied)?;
         let _working =
-            scope.reserve_memory(profile.max_metadata_bytes as u64 * 12 + IO_CHUNK_BYTES as u64)?;
+            scope.reserve_memory(profile.max_metadata_bytes as u64 * 5 + IO_CHUNK_BYTES as u64)?;
         let _working_metadata = scope.reserve_metadata(profile.max_metadata_bytes as u64 * 7)?;
         if let Some(q) = qualifying
             && document.lookup_id(q.signed_properties_id)?.is_some()
         {
             return Err(invalid("signed properties ID collision"));
+        }
+        if let Some(id) = qualifying.and_then(|q| q.data_reference_id)
+            && document.lookup_id(id)?.is_some()
+        {
+            return Err(invalid("data Reference ID collision"));
         }
         let digest = crate::xades::source::hash_stage(
             &mut canonical_reference,
@@ -810,7 +889,7 @@ fn output_plan(
         declaration: declaration.then_some(standalone_no),
     })
 }
-fn percent_id(id: &str) -> String {
+pub(crate) fn percent_id(id: &str) -> String {
     let mut text = String::new();
     for b in id.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
@@ -927,13 +1006,17 @@ impl Template<'_> {
         kind: Option<&str>,
         transforms: &[&str],
         digest: &[u8],
+        id: Option<&str>,
     ) {
         let n = self.separator;
         let kind = kind
             .map(|kind| format!(" Type=\"{}\"", escape_attribute(kind)))
             .unwrap_or_default();
+        let id = id
+            .map(|id| format!(" Id=\"{}\"", escape_attribute(id)))
+            .unwrap_or_default();
         s.push_str(&format!(
-            "<ds:Reference URI=\"{}\"{kind}>{n}<ds:Transforms>{n}",
+            "<ds:Reference{id} URI=\"{}\"{kind}>{n}<ds:Transforms>{n}",
             escape_attribute(uri)
         ));
         for transform in transforms {
@@ -962,17 +1045,36 @@ impl Template<'_> {
             self.method.uri(),
             escape_attribute(self.algorithms.signature_uri),
         );
-        self.reference(&mut s, self.uri, None, self.transforms, &self.digest);
+        let data_reference_id = match &self.object {
+            Some(ObjectTemplate::Qualifying(q)) => q.data_reference_id,
+            _ => None,
+        };
+        self.reference(
+            &mut s,
+            self.uri,
+            None,
+            self.transforms,
+            &self.digest,
+            data_reference_id,
+        );
         if let Some((id, kind, transforms, _)) =
             self.object.as_ref().and_then(|o| o.reference(self))
         {
-            let uri = format!("#{id}");
+            let uri = format!(
+                "#{}",
+                if data_reference_id.is_some() {
+                    percent_id(id)
+                } else {
+                    id.to_owned()
+                }
+            );
             self.reference(
                 &mut s,
                 &uri,
                 kind,
                 &transforms,
                 object_digest.unwrap_or_default(),
+                None,
             );
         }
         s.push_str(&format!("</ds:SignedInfo>{n}<ds:SignatureValue>"));
@@ -1018,7 +1120,11 @@ impl Template<'_> {
             Some(ObjectTemplate::Qualifying(q)) => s.push_str(&format!(
                 "<ds:Object>{n}<xades:QualifyingProperties xmlns:xades=\"{XADES_NS}\" \
                  Target=\"#{}\">{n}{}{n}</xades:QualifyingProperties>{n}</ds:Object>{n}",
-                escape_attribute(self.id.unwrap_or_default()),
+                escape_attribute(&if q.data_reference_id.is_some() {
+                    percent_id(self.id.unwrap_or_default())
+                } else {
+                    self.id.unwrap_or_default().to_owned()
+                }),
                 q.signed_properties,
             )),
             None => {}
@@ -1200,7 +1306,25 @@ pub fn sign_spec_source(
     output: &mut dyn Write,
     scope: &mut ResourceScope,
 ) -> Result<XmlSignSummary> {
-    let algorithm = signer.algorithm();
+    prepare_legacy_source(input, spec, store, scope)?.sign(signer, output, scope)
+}
+/// Opaque bounded document/selector/canonical material prepared BEFORE key open.
+/// No raw bytes, private key, digest or authorization permit can be detached.
+pub struct PreparedLegacySign<'a> {
+    frozen: oncl_pki::io::FrozenInput,
+    bytes: Vec<u8>,
+    spec: crate::XmlSignSpec<'a>,
+    canonical: oncl_pki::io::StagedArtifact,
+    plan: crate::BoundedPlan<'a>,
+    _memory: oncl_pki::resource::ResourceReservation,
+    _metadata: oncl_pki::resource::ResourceReservation,
+}
+pub fn prepare_legacy_source<'a>(
+    input: Source<'_>,
+    spec: &crate::XmlSignSpec<'a>,
+    store: &TemporaryStore,
+    scope: &mut ResourceScope,
+) -> Result<PreparedLegacySign<'a>> {
     input.is_snapshot_for(scope)?;
     if input
         .known_len()
@@ -1211,6 +1335,16 @@ pub fn sign_spec_source(
     }
     if let Some(transforms) = &spec.transforms {
         crate::check_transforms(transforms)?;
+    }
+    if let Some(uri) = spec.signature_method
+        && crate::signature_method(uri).is_none_or(|algorithm| algorithm == SigAlg::RsaSha1)
+    {
+        return Err(XmlError::UnsupportedAlgorithm(uri.to_owned()).into());
+    }
+    if let Some(uri) = spec.digest_method
+        && crate::digest_method(uri).is_none()
+    {
+        return Err(XmlError::UnsupportedAlgorithm(uri.to_owned()).into());
     }
     let mut frozen =
         oncl_pki::io::FrozenInput::capture_bounded(input, store, scope, crate::MAX_INPUT as u64)?;
@@ -1247,6 +1381,12 @@ pub fn sign_spec_source(
     let spec_metadata = scope.reserve_metadata(
         metadata
             .checked_mul(6)
+            .and_then(|n| {
+                n.checked_add(
+                    (spec.namespaces.len() as u64)
+                        .checked_mul(std::mem::size_of::<(&str, &str)>() as u64)?,
+                )
+            })
             .and_then(|n| n.checked_add(8192))
             .ok_or(ProcessingError::MetadataLimit)?,
     )?;
@@ -1276,20 +1416,136 @@ pub fn sign_spec_source(
         }
         at += n;
     }
-    let signed = crate::sign_with_backend(
-        &bytes,
-        spec,
-        &mut BoundedSigner::Guarded { signer, scope },
-        None,
-        Some(scope),
-    )?;
-    scope.checkpoint()?;
-    let mut written = 0;
-    write(&signed, &mut ExternalWriter(output), scope, &mut written)?;
-    drop(spec_metadata);
-    Ok(XmlSignSummary {
-        bytes_in: frozen.len(),
-        bytes_out: written,
-        algorithm,
+    struct Sink<'a> {
+        stage: &'a mut oncl_pki::io::StagedArtifact,
+        error: Option<ProcessingError>,
+    }
+    impl Write for Sink<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Err(error) = self.stage.write_chunk(bytes) {
+                self.error = Some(error);
+                return Err(std::io::Error::other("bounded canonical stage"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut canonical = store.stage_source(scope)?;
+    let mut sink = Sink {
+        stage: &mut canonical,
+        error: None,
+    };
+    let plan = crate::bounded_plan(&bytes, spec, None, Some(scope), Some(&mut sink));
+    if let Some(error) = sink.error {
+        return Err(error.into());
+    }
+    let plan = plan?;
+    Ok(PreparedLegacySign {
+        frozen,
+        bytes,
+        spec: spec.clone(),
+        canonical,
+        plan,
+        _memory,
+        _metadata: spec_metadata,
     })
+}
+pub(crate) struct BoundedSigned {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) summary: XmlSignSummary,
+    pub(crate) canonical: StagedArtifact,
+    _memory: oncl_pki::resource::ResourceReservation,
+    _metadata: oncl_pki::resource::ResourceReservation,
+}
+impl BoundedSigned {
+    pub(crate) fn into_summary(self) -> XmlSignSummary {
+        self.summary
+    }
+}
+impl<'a> PreparedLegacySign<'a> {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub(crate) fn sign_bytes<'b>(
+        mut self,
+        signer: &mut dyn DigestSigner,
+        scope: &mut ResourceScope,
+        qualified: Option<(&'b str, crate::QualifyingObject<'b>)>,
+    ) -> Result<BoundedSigned>
+    where
+        'a: 'b,
+    {
+        {
+            let mut reader = self.frozen.reader(&[], scope)?;
+            if !reader.source().is_snapshot_for(scope)? {
+                return Err(ProcessingError::InvalidInput("legacy source owner/role").into());
+            }
+        }
+        let algorithm = signer.algorithm();
+        let mut spec: crate::XmlSignSpec<'b> = self.spec.clone();
+        if let Some((id, _)) = qualified {
+            spec.signature_id = Some(id);
+        }
+        let algorithms = BoundedSigner::Guarded { signer, scope }.algorithms(&spec)?;
+        let mut work = crate::REFERENCE_WORK as u64;
+        let digest = crate::xades::source::hash_stage(
+            &mut self.canonical,
+            algorithms.digest,
+            scope,
+            &mut work,
+        )?;
+        let mut plan: crate::BoundedPlan<'b> = self.plan;
+        plan.algorithms = Some(algorithms);
+        plan.digest = Some(digest.as_bytes().to_vec());
+        let mut backend = BoundedSigner::Guarded { signer, scope };
+        let bytes = crate::finish_bounded_plan(
+            &self.bytes,
+            &spec,
+            &mut backend,
+            qualified.map(|(_, q)| q),
+            Some(scope),
+            plan,
+        )?;
+        let summary = XmlSignSummary {
+            bytes_in: self.frozen.len(),
+            bytes_out: bytes.len() as u64,
+            algorithm,
+        };
+        Ok(BoundedSigned {
+            bytes,
+            summary,
+            canonical: self.canonical,
+            _memory: self._memory,
+            _metadata: self._metadata,
+        })
+    }
+    pub fn sign(
+        self,
+        signer: &mut dyn DigestSigner,
+        output: &mut dyn Write,
+        scope: &mut ResourceScope,
+    ) -> Result<XmlSignSummary> {
+        let signed = self.sign_bytes(signer, scope, None)?;
+        let mut written = 0;
+        write(
+            &signed.bytes,
+            &mut ExternalWriter(output),
+            scope,
+            &mut written,
+        )?;
+        Ok(signed.summary)
+    }
+    pub fn sign_transaction(
+        self,
+        signer: &mut dyn DigestSigner,
+        output: &mut XmlSignatureOutput<'_>,
+        scope: &mut ResourceScope,
+    ) -> Result<XmlSignSummary> {
+        let signed = self.sign_bytes(signer, scope, None)?;
+        let mut written = 0;
+        write(&signed.bytes, &mut StageWriter(output), scope, &mut written)?;
+        Ok(signed.summary)
+    }
 }

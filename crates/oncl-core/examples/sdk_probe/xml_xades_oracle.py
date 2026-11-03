@@ -194,7 +194,37 @@ def signer_material(tree):
     cert = x509.load_der_x509_certificate(decode(signature.find(f"{{{DS}}}KeyInfo/{{{DS}}}X509Data/{{{DS}}}X509Certificate").text))
     value = signature.find(f"{{{DS}}}SignatureValue")
     cert.public_key().verify(decode("".join(value.itertext())), canonical(info), padding.PKCS1v15(), hashes.SHA256())
+    baseline_bindings(signature, info)
     return signature, info, value, cert
+
+def baseline_bindings(signature, info):
+    """EN319132-1 6.3k: ObjectReference binds Reference@Id, not URI's target."""
+    data = [r for r in info.findall(f"{{{DS}}}Reference")
+            if r.get("Type") != "http://uri.etsi.org/01903#SignedProperties"]
+    identities = [r.get("Id") for r in data]
+    if any(not identity for identity in identities) or len(set(identities)) != len(identities):
+        raise ValueError("baseline data Reference identity missing/duplicate")
+    properties = signature.findall(f"{{{DS}}}Object/{{{XA}}}QualifyingProperties/{{{XA}}}SignedProperties")
+    if len(properties) != 1:
+        raise ValueError("one signed baseline properties node required")
+    containers = properties[0].findall(f"{{{XA}}}SignedDataObjectProperties")
+    if len(containers) != 1:
+        raise ValueError("one SignedDataObjectProperties required")
+    seen = set()
+    for descriptor in containers[0].findall(f"{{{XA}}}DataObjectFormat"):
+        reference = descriptor.get("ObjectReference", "")
+        if not reference.startswith("#"):
+            raise ValueError("same-signature data Reference ObjectReference required")
+        identity = unquote_to_bytes(reference[1:]).decode("utf-8", errors="strict")
+        if identity not in identities or identity in seen:
+            raise ValueError("foreign/target/duplicate DataObjectFormat binding")
+        mime = descriptor.findall(f"{{{XA}}}MimeType")
+        if len(mime) != 1 or len(mime[0]) or not (mime[0].text or "").strip():
+            raise ValueError("one actual nonempty MIME type required")
+        seen.add(identity)
+    if seen != set(identities):
+        raise ValueError("every data Reference requires its own descriptor")
+
 
 def reference_bytes(tree, info):
     parts = []
@@ -321,6 +351,22 @@ def run(out: Path):
     tree = parse(out / "bounded-LTA.xml")
     signature, info, value, _ = signer_material(tree)
     props = unsigned(signature)
+    descriptor = signature.find(f"{{{DS}}}Object/{{{XA}}}QualifyingProperties/{{{XA}}}SignedProperties/{{{XA}}}SignedDataObjectProperties/{{{XA}}}DataObjectFormat")
+    original_reference = descriptor.get("ObjectReference")
+    for bad in ["#payload", "#foreign", "#sig-SignedProperties", "https://example.test/#payload"]:
+        descriptor.set("ObjectReference", bad)
+        expected_failure(f"baseline-reference-binding:{bad}", lambda: baseline_bindings(signature, info), lines)
+    descriptor.set("ObjectReference", original_reference)
+    mime = descriptor.find(f"{{{XA}}}MimeType")
+    original_mime = mime.text
+    mime.text = " "
+    expected_failure("baseline-empty-MimeType", lambda: baseline_bindings(signature, info), lines)
+    mime.text = original_mime
+    descriptors = descriptor.getparent()
+    duplicate = copy.deepcopy(descriptor)
+    descriptors.append(duplicate)
+    expected_failure("baseline-duplicate-descriptor", lambda: baseline_bindings(signature, info), lines)
+    descriptors.remove(duplicate)
     current = props.find(f"{{{X4}}}ArchiveTimeStamp")
     parts = archive_parts(tree, signature, info, value, current)
     names = ["reference-payload", "reference-properties", "SignedInfo", "SignatureValue", "KeyInfo", "SignatureTimeStamp", "TimeStampValidationData", "RevocationValues"]

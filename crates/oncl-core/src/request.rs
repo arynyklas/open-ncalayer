@@ -140,8 +140,29 @@ pub(crate) enum SignMode<'a> {
         oncl_xml::XmlSignProfile<'a>,
         Option<oncl_pki::evidence::AdesLevel>,
     ),
+    #[cfg(feature = "xml")]
+    XmlLegacy(crate::keys::KeyRequest<'a>, oncl_xml::XmlSignSpec<'a>),
+    #[cfg(feature = "xml")]
+    XadesLegacy(crate::keys::KeyRequest<'a>, oncl_xml::xades::XadesSpec<'a>),
 }
 impl<'a> SignRequest<'a> {
+    /// Bounded compatibility signing with the original selector, placement and
+    /// wire-layout contract, through the same authorized key and canonical writer.
+    #[cfg(feature = "xml")]
+    pub fn xml_legacy(key: crate::keys::KeyRequest<'a>, spec: oncl_xml::XmlSignSpec<'a>) -> Self {
+        Self {
+            mode: SignMode::XmlLegacy(key, spec),
+        }
+    }
+    #[cfg(feature = "xml")]
+    pub fn xades_legacy(
+        key: crate::keys::KeyRequest<'a>,
+        spec: oncl_xml::xades::XadesSpec<'a>,
+    ) -> Self {
+        Self {
+            mode: SignMode::XadesLegacy(key, spec),
+        }
+    }
     #[cfg(feature = "xml")]
     pub fn xml(key: crate::keys::KeyRequest<'a>, profile: oncl_xml::XmlSignProfile<'a>) -> Self {
         Self {
@@ -238,9 +259,15 @@ impl<'a> SignRequest<'a> {
             #[cfg(feature = "pdf")]
             SignMode::Pades(_, _, level, _, _) => SignProfile::Pades(level),
             #[cfg(feature = "xml")]
-            SignMode::Xml(_, _, None) => SignProfile::Xml,
+            SignMode::Xml(_, _, None) | SignMode::XmlLegacy(..) => SignProfile::Xml,
             #[cfg(feature = "xml")]
             SignMode::Xml(_, _, Some(level)) => SignProfile::Xades(level),
+            #[cfg(feature = "xml")]
+            SignMode::XadesLegacy(_, ref spec) => SignProfile::Xades(match spec.level {
+                oncl_xml::xades::XadesLevel::B => oncl_pki::evidence::AdesLevel::B,
+                oncl_xml::xades::XadesLevel::T => oncl_pki::evidence::AdesLevel::T,
+                oncl_xml::xades::XadesLevel::Lt => oncl_pki::evidence::AdesLevel::Lt,
+            }),
         }
     }
 }

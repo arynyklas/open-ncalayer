@@ -34,6 +34,7 @@ pub struct XadesServices<'a> {
     pub tsa: Option<&'a TsaSpec>,
     pub material: ValidationMaterial<'a>,
     pub evidence_limits: Option<EvidenceLimits>,
+    pub host_clock: Option<&'a (dyn Fn() -> time::OffsetDateTime + Send + Sync)>,
 }
 #[derive(Debug)]
 pub struct XadesReport {
@@ -50,12 +51,16 @@ pub(crate) fn limits(profile: &XmlSignProfile<'_>) -> Result<EvidenceLimits> {
         profile.evidence_limits,
     )
 }
-fn properties(spec: &XadesSourceSpec<'_>, cert: &Certificate) -> Result<(String, String)> {
+pub(crate) fn properties(
+    spec: &XadesSourceSpec<'_>,
+    cert: &Certificate,
+) -> Result<(String, String, String)> {
     let id = spec
         .xml
         .signature_id
         .ok_or_else(|| invalid("XAdES needs explicit unique signature Id"))?;
     let properties_id = format!("{id}-SignedProperties");
+    let reference_id = format!("{id}-Reference-0");
     let time = spec
         .signing_time
         .to_offset(time::UtcOffset::UTC)
@@ -64,10 +69,12 @@ fn properties(spec: &XadesSourceSpec<'_>, cert: &Certificate) -> Result<(String,
     let digest = STANDARD.encode(HashAlg::Sha256.digest(&crate::cert_der(cert)?));
     Ok((
         format!(
-            "<xades:SignedProperties Id=\"{}\"><xades:SignedSignatureProperties><xades:SigningTime>{time}</xades:SigningTime><xades:SigningCertificateV2><xades:Cert><xades:CertDigest><ds:DigestMethod Algorithm=\"http://www.w3.org/2001/04/xmlenc#sha256\"/><ds:DigestValue>{digest}</ds:DigestValue></xades:CertDigest></xades:Cert></xades:SigningCertificateV2></xades:SignedSignatureProperties></xades:SignedProperties>",
-            crate::escape_attribute(&properties_id)
+            "<xades:SignedProperties Id=\"{}\"><xades:SignedSignatureProperties><xades:SigningTime>{time}</xades:SigningTime><xades:SigningCertificateV2><xades:Cert><xades:CertDigest><ds:DigestMethod Algorithm=\"http://www.w3.org/2001/04/xmlenc#sha256\"/><ds:DigestValue>{digest}</ds:DigestValue></xades:CertDigest></xades:Cert></xades:SigningCertificateV2></xades:SignedSignatureProperties><xades:SignedDataObjectProperties><xades:DataObjectFormat ObjectReference=\"#{}\"><xades:MimeType>application/xml</xades:MimeType></xades:DataObjectFormat></xades:SignedDataObjectProperties></xades:SignedProperties>",
+            crate::escape_attribute(&properties_id),
+            crate::escape_attribute(&crate::sign::percent_id(&reference_id)),
         ),
         properties_id,
+        reference_id,
     ))
 }
 /// Write only after actual final indexed XML verification. No issuance
@@ -96,7 +103,7 @@ pub fn sign_staged(
     let mut transaction = XmlSignatureOutput::new(stage, scope)?;
     services.preflight(spec.level, &spec.xml)?;
     let mut prepared = prepare_source(input, spec, services.temporary, scope)?;
-    prepared.verify_existing(services.validation, services.network, scope)?;
+    services.verify_existing(&mut prepared, scope)?;
     let report = sign_prepared(
         prepared,
         spec.level,
@@ -126,6 +133,7 @@ pub fn prepare_source<'a>(
         .ok_or_else(|| invalid("XAdES needs explicit unique signature Id"))?;
     let mut prepared = crate::prepare_source(input, &spec.xml, store, scope)?;
     prepared.check_id(&format!("{id}-SignedProperties"), scope)?;
+    prepared.check_id(&format!("{id}-Reference-0"), scope)?;
     Ok(prepared)
 }
 pub fn sign_prepared(
@@ -143,7 +151,7 @@ pub fn sign_prepared(
         signing_time,
     };
     services.preflight(level, &spec.xml)?;
-    let (signed_properties, properties_id) = properties(&spec, signer.certificate())?;
+    let (signed_properties, properties_id, reference_id) = properties(&spec, signer.certificate())?;
     let summary = prepared.finish(
         signer,
         &mut crate::sign::StageWriter(transaction),
@@ -151,6 +159,7 @@ pub fn sign_prepared(
         Some(crate::QualifyingObject {
             signed_properties: &signed_properties,
             signed_properties_id: &properties_id,
+            data_reference_id: Some(&reference_id),
         }),
         Some((&spec, services)),
     )?;
@@ -164,14 +173,7 @@ pub fn sign_prepared(
         evidence_limits: Some(services.bounded_limits(&spec.xml)?),
         ..Default::default()
     };
-    let verification = crate::verify_source(
-        transaction.source()?,
-        &profile,
-        services.temporary,
-        services.validation,
-        services.network,
-        scope,
-    )?;
+    let verification = services.verify(transaction.source()?, &profile, scope)?;
     if verification.validation.verdict == Verdict::Invalid
         || (services.validation.policy == ValidationPolicy::StrictOnline
             && verification.validation.verdict != Verdict::Valid)
@@ -311,8 +313,9 @@ pub(crate) fn acquire(
     services: &XadesServices<'_>,
     scope: &ResourceScope,
 ) -> Result<Vec<(EvidenceKind, Vec<u8>)>> {
-    let _response_memory = scope.reserve_memory(oncl_pki::http::MAX_RESPONSE_LEN * 18)?;
+    let _response_memory = scope.reserve_memory(oncl_pki::http::MAX_RESPONSE_LEN * 16)?;
     let _response_metadata = scope.reserve_metadata(oncl_pki::http::MAX_RESPONSE_LEN * 2)?;
+    let current_context = services.validation_context();
     let candidates: Vec<_> = services
         .validation
         .intermediates
@@ -322,9 +325,9 @@ pub(crate) fn acquire(
         .collect();
     let path = oncl_pki::pkix::build_anchored_path(
         leaf,
-        services.validation.anchors,
+        current_context.anchors,
         &candidates,
-        oncl_pki::pkix::validation_time(leaf, services.validation.now),
+        oncl_pki::pkix::validation_time(leaf, current_context.now),
     )
     .map_err(|_| invalid("XAdES evidence issuer path"))?;
     let transport = DeadlineTransport::new(services.validation.http, services.network, scope);
@@ -360,7 +363,7 @@ pub(crate) fn acquire(
                     issuer,
                     &transport,
                     std::time::Duration::from_secs(30),
-                    services.validation.now,
+                    current_context.now,
                 )
                 .map_err(|e| XmlSourceError::Acquisition(e.to_string()))?;
                 values.extend(crls.into_iter().map(|bytes| (EvidenceKind::Crl, bytes)));
@@ -439,6 +442,10 @@ pub(crate) fn material_xml(
     }
     Ok(out)
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "One metadata completion kernel retains source references, actual signature and host services explicitly"
+)]
 pub(crate) fn complete_signature(
     canonical_reference: &mut StagedArtifact,
     signature: &str,
@@ -460,12 +467,11 @@ pub(crate) fn complete_signature(
         services.bounded_limits(&spec.xml)?,
         scope,
     )?;
-    let token_id = evidence.request_timestamp(
+    let token_id = services.request_timestamp(
+        &mut evidence,
         signer,
         &[CoveragePart::BoundSignature(&bound)],
         tsa,
-        services.validation,
-        services.network,
     )?;
     let mut bundle = evidence.finish();
     let token = read_token(&mut bundle, token_id, spec.xml.max_metadata_bytes)?;
@@ -594,12 +600,11 @@ pub(crate) fn complete_signature(
             scope,
         )?;
         let mut evidence = EvidenceStore::resume(bundle);
-        let archive_id = evidence.request_timestamp(
+        let archive_id = services.request_timestamp(
+            &mut evidence,
             signer,
             &[CoveragePart::BoundArchive(&archive)],
             tsa,
-            services.validation,
-            services.network,
         )?;
         bundle = evidence.finish();
         let token = read_token(&mut bundle, archive_id, spec.xml.max_metadata_bytes)?;
@@ -693,6 +698,71 @@ pub(crate) fn effective_limits(
     Ok(limits)
 }
 impl XadesServices<'_> {
+    pub(crate) fn verify_existing(
+        &self,
+        prepared: &mut crate::PreparedXmlSign<'_>,
+        scope: &mut ResourceScope,
+    ) -> Result<()> {
+        if let Some(clock) = self.host_clock {
+            prepared.verify_existing_with_clock(self.validation, self.network, clock, scope)
+        } else {
+            prepared.verify_existing(self.validation, self.network, scope)
+        }
+    }
+    pub(crate) fn validation_context(&self) -> ValidationContext<'_> {
+        ValidationContext {
+            now: self.host_clock.map_or(self.validation.now, |clock| clock()),
+            ..*self.validation
+        }
+    }
+    pub(crate) fn request_timestamp(
+        &self,
+        store: &mut EvidenceStore,
+        signer: &SignerEvidence<'_>,
+        coverage: &[CoveragePart<'_>],
+        spec: &TsaSpec,
+    ) -> Result<EvidenceId> {
+        let result = if let Some(clock) = self.host_clock {
+            store.request_timestamp_with_clock(
+                signer,
+                coverage,
+                spec,
+                self.validation,
+                self.network,
+                clock,
+            )
+        } else {
+            store.request_timestamp(signer, coverage, spec, self.validation, self.network)
+        };
+        Ok(result?)
+    }
+    pub(crate) fn verify(
+        &self,
+        input: Source<'_>,
+        profile: &XmlVerifyProfile,
+        scope: &mut ResourceScope,
+    ) -> Result<XmlVerification> {
+        if let Some(clock) = self.host_clock {
+            crate::verify_source_with_clock(
+                input,
+                profile,
+                self.temporary,
+                self.validation,
+                self.network,
+                clock,
+                scope,
+            )
+        } else {
+            crate::verify_source(
+                input,
+                profile,
+                self.temporary,
+                self.validation,
+                self.network,
+                scope,
+            )
+        }
+    }
     pub fn bounded_limits(&self, profile: &XmlSignProfile<'_>) -> Result<EvidenceLimits> {
         let limits = limits(profile)?;
         let limits = self

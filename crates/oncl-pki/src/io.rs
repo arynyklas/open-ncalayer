@@ -40,6 +40,27 @@ pub use pdf_snapshot::{PdfSnapshot, PdfSnapshotCoverage, PdfSnapshotReader};
 #[path = "io/xml_output.rs"]
 mod xml_output;
 pub use xml_output::XmlSignatureOutput;
+#[path = "io/provisional.rs"]
+mod provisional;
+pub use provisional::ProvisionalInput;
+
+mod captured_private {
+    pub trait Sealed {}
+}
+/// Sealed immutable captured-byte lending for format parsers. A view does not
+/// grant original-input provenance, publication or a validated format fact.
+pub trait CapturedInput: captured_private::Sealed + Send {
+    fn len(&self) -> u64;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn read_region(&mut self, region: Region, output: &mut [u8]) -> Result<usize, ProcessingError>;
+    fn reader<'a>(
+        &'a mut self,
+        regions: &[Region],
+        scope: &ResourceScope,
+    ) -> Result<FrozenReader<'a>, ProcessingError>;
+}
 
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek + ?Sized> ReadSeek for T {}
@@ -55,6 +76,7 @@ enum Reader<'a> {
     // Minted only while a closed output signing transaction owns the stage.
     // It is OUTPUT-admitted, never original frozen-input provenance.
     OutputProjection(&'a mut dyn SnapshotReader),
+    FormatSnapshot(&'a mut dyn SnapshotReader),
 }
 /// A source starts at the reader's current position; length is an optional
 /// admission hint, never a substitute for counting bytes actually consumed.
@@ -63,6 +85,7 @@ pub struct Source<'a> {
     len: Option<u64>,
     admitted: Option<ResourceScope>,
     output_failure: Option<Arc<AtomicBool>>,
+    classification: Option<Arc<provisional::FormatClassification>>,
 }
 impl<'a> Source<'a> {
     pub fn sequential(reader: &'a mut dyn Read, len: Option<u64>) -> Self {
@@ -71,6 +94,7 @@ impl<'a> Source<'a> {
             len,
             admitted: None,
             output_failure: None,
+            classification: None,
         }
     }
     pub fn seekable(reader: &'a mut dyn ReadSeek, len: Option<u64>) -> Self {
@@ -79,6 +103,7 @@ impl<'a> Source<'a> {
             len,
             admitted: None,
             output_failure: None,
+            classification: None,
         }
     }
     pub fn known_len(&self) -> Option<u64> {
@@ -89,6 +114,9 @@ impl<'a> Source<'a> {
         match &self.admitted {
             Some(original) if !original.same_operation(scope) => Err(
                 ProcessingError::InvalidInput("snapshot belongs to another operation"),
+            ),
+            Some(_) if matches!(self.reader, Reader::FormatSnapshot(_)) => Err(
+                ProcessingError::InvalidInput("format-specific snapshot requires its classifier"),
             ),
             Some(_) => Ok(matches!(self.reader, Reader::Snapshot(_))),
             None => Ok(false),
@@ -105,7 +133,9 @@ impl<'a> Source<'a> {
     }
     pub(crate) fn finish_snapshot(&mut self) -> Result<(), ProcessingError> {
         match &mut self.reader {
-            Reader::Snapshot(reader) | Reader::OutputProjection(reader) => reader.finish_snapshot(),
+            Reader::Snapshot(reader)
+            | Reader::OutputProjection(reader)
+            | Reader::FormatSnapshot(reader) => reader.finish_snapshot(),
             _ => Ok(()),
         }
     }
@@ -119,7 +149,9 @@ impl<'a> Source<'a> {
         match &mut self.reader {
             Reader::Sequential(_) => None,
             Reader::Seekable(reader) => Some(&mut **reader),
-            Reader::Snapshot(reader) | Reader::OutputProjection(reader) => Some(&mut **reader),
+            Reader::Snapshot(reader)
+            | Reader::OutputProjection(reader)
+            | Reader::FormatSnapshot(reader) => Some(&mut **reader),
         }
     }
 }
@@ -128,7 +160,9 @@ impl Read for Source<'_> {
         match &mut self.reader {
             Reader::Sequential(reader) => reader.read(buffer),
             Reader::Seekable(reader) => reader.read(buffer),
-            Reader::Snapshot(reader) | Reader::OutputProjection(reader) => reader.read(buffer),
+            Reader::Snapshot(reader)
+            | Reader::OutputProjection(reader)
+            | Reader::FormatSnapshot(reader) => reader.read(buffer),
         }
     }
 }

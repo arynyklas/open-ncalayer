@@ -215,6 +215,26 @@ impl Engine {
         if let SignMode::Xml(key, profile, level) = request.mode {
             return self.sign_xml_operation(key, profile, level, input, output, ctx);
         }
+        #[cfg(feature = "xml")]
+        if let SignMode::XmlLegacy(key, spec) = request.mode {
+            return self.sign_xml_legacy_operation(
+                key,
+                crate::xml::LegacySpec::Xml(spec),
+                input,
+                output,
+                ctx,
+            );
+        }
+        #[cfg(feature = "xml")]
+        if let SignMode::XadesLegacy(key, spec) = request.mode {
+            return self.sign_xml_legacy_operation(
+                key,
+                crate::xml::LegacySpec::Xades(spec),
+                input,
+                output,
+                ctx,
+            );
+        }
         #[cfg(feature = "pdf")]
         if matches!(request.mode, SignMode::Pdf(..) | SignMode::Pades(..))
             && let Output::Staged(stage) = &output
@@ -246,7 +266,9 @@ impl Engine {
                 SignProvenance::Document,
             ),
             #[cfg(feature = "xml")]
-            SignMode::Xml(key, _, _) => (
+            SignMode::Xml(key, _, _)
+            | SignMode::XmlLegacy(key, _)
+            | SignMode::XadesLegacy(key, _) => (
                 std::slice::from_ref(key),
                 Action::Sign,
                 SignProvenance::Document,
@@ -433,6 +455,26 @@ impl Engine {
             SignMode::Xml(key, profile, level) => {
                 return self.sign_xml_operation(key, profile, level, input, output, ctx);
             }
+            #[cfg(feature = "xml")]
+            SignMode::XmlLegacy(key, spec) => {
+                return self.sign_xml_legacy_operation(
+                    key,
+                    crate::xml::LegacySpec::Xml(spec),
+                    input,
+                    output,
+                    ctx,
+                );
+            }
+            #[cfg(feature = "xml")]
+            SignMode::XadesLegacy(key, spec) => {
+                return self.sign_xml_legacy_operation(
+                    key,
+                    crate::xml::LegacySpec::Xades(spec),
+                    input,
+                    output,
+                    ctx,
+                );
+            }
         };
         let transport_result = transport.finish();
         if let Err(error) = transport_result {
@@ -494,6 +536,7 @@ fn cades_sign(
             .as_ref()
             .map(|configuration| &configuration.tsa),
         material,
+        host_clock: Some(host.clock.as_ref()),
     };
     match output {
         Output::Writer(writer) => oncl_pki::cms::ades::sign(

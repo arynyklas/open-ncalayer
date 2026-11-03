@@ -169,16 +169,7 @@ impl Engine {
                     ProcessingError::InvalidInput("XML does not accept detached input").into(),
                 );
             }
-            return self.extend_xml_operation(
-                request.level,
-                profile,
-                &request.material,
-                request.limits,
-                input,
-                output,
-                staged,
-                ctx,
-            );
+            return self.extend_xml_operation(request, profile, input, output, staged, ctx);
         }
         let validation = self.validation_context(ctx, Action::Extend)?;
         let temporary = self
@@ -216,6 +207,7 @@ impl Engine {
             limits,
             tsa: acquisition.map(|configuration| &configuration.tsa),
             material: material(&request.material),
+            host_clock: Some(validation.clock.as_ref()),
         };
         let result = match (output, staged) {
             (Some(output), None) => ades::extend(
@@ -291,6 +283,7 @@ impl Engine {
                 ocsp: &[],
                 crls: &[],
             },
+            host_clock: Some(validation.clock.as_ref()),
         };
         let result = ades::verify(
             required,

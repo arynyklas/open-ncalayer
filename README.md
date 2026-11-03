@@ -672,6 +672,13 @@ unsigned properties и прочие Objects в установленном пор
 SignatureTimeStamp и несколько ArchiveTimeStamp renewal; каждый proof проверяется.
 Независимые повторные SignatureTimeStamp, другие версии и распределённое archive
 coverage отклоняются явно, а не превращаются в lower-level Valid.
+Новые baseline-подписи содержат подписанный DataObjectFormat/MimeType для каждой
+data Reference; ObjectReference связан с Reference@Id, а не ID подписанных данных.
+Прежний bounded XAdES остаётся математически проверяемым, но без обязательных
+baseline-свойств не получает достигнутый baseline-уровень. Keyless LTA renewal
+обновляет устаревшие публичные статусы только после проверки всех прежних proofs
+и до выпуска архива, покрывающего весь текущий evidence; финальная проверка
+защищённого archive prefix не ослаблена.
 `oncl-xml::sign_spec_source` даёт bounded `XmlSignSpec` через DigestSigner и
 исходный ResourceScope; старые XPath/placement/output/layout/лимиты сохранены,
 builder и canonical writer общие. Source sign не строит DOM большого документа;
@@ -681,6 +688,22 @@ Add сохраняет прежние подписи, но стандартна�
 `copy_entry` списывает каждую доставку. OUTPUT-derived captures остаются OUTPUT,
 а отмена/ошибка закрытого output transaction запрещает публикацию после очистки
 сигнала отмены.
+Core `SignRequest::xml_legacy` сохраняет bounded wire-контракт XmlSignSpec через
+исходный AuthorizedSigner. `SignRequest::xades_legacy` принимает bounded XadesSpec
+и создаёт полный B/T/LT общим evidence kernel, не раскрывая raw key; TSA должен
+совпадать с явной host-конфигурацией. Селекторы и канонические References
+подготавливаются до открытия ключа.
+`capture_signed_input` сохраняет SHA-256 неизменяемого signed wire и закрытую
+роль format-reader для approval/replay в той же операции. Signed intake
+необратимо считает фактический wire progress, отдельно классифицируя ограниченный
+реальный signature overhead. Прикладные Objects, fake metadata, whitespace и PI
+остаются document bytes. Кредит сериализации получают только распознанные parser
+bounded declaration/BOM и раскрытие пустого parent, содержащего лишь подписи;
+это не утверждение о первоначальном написании документа. Обычные original-input
+и hash consumers отклоняют classified format readers.
+Динамический Core берёт trusted host clock после фактического TSA-ответа;
+финальная XML-проверка использует один поздний момент для всех signers.
+Прямые fixed-as-of API сохраняют прежнюю семантику и монотонные deadlines.
 
 Проверки: `cargo test -p oncl-xml --features testing`; runtime:
 `cargo run -p oncl-core --features xml --example sdk_probe -- --case X03 --out target/x03-smoke`.

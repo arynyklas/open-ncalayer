@@ -15,6 +15,7 @@ use roxmltree::Node;
 type Result<T, E = XmlSourceError> = std::result::Result<T, E>;
 #[path = "references/ades.rs"]
 pub(crate) mod ades;
+pub(crate) mod intake;
 #[derive(Debug, thiserror::Error)]
 pub enum XmlSourceError {
     #[error(transparent)]
@@ -105,7 +106,6 @@ pub struct XmlVerification {
 /// ```
 pub struct XmlVerificationFacts {
     signatures: Vec<XmlSignerResult>,
-    _memory: ResourceReservation,
     _metadata: ResourceReservation,
 }
 impl XmlVerification {
@@ -140,7 +140,6 @@ impl std::fmt::Debug for XmlVerificationFacts {
 type BoundMetadata = (Region, Vec<(String, String)>);
 struct ExtraMetadata {
     bound: BoundMetadata,
-    _memory: ResourceReservation,
     _metadata: ResourceReservation,
 }
 struct Metadata {
@@ -199,7 +198,6 @@ fn extra(
         .map(|(p, u)| p.len() + u.len() + 96)
         .sum::<usize>() as u64
         + 256;
-    let memory = scope.reserve_memory(bytes)?;
     let metadata = scope.reserve_metadata(bytes)?;
     Ok(ExtraMetadata {
         bound: (
@@ -209,7 +207,6 @@ fn extra(
                 .map(|(p, u)| (p.to_owned(), u.to_owned()))
                 .collect(),
         ),
-        _memory: memory,
         _metadata: metadata,
     })
 }
@@ -221,6 +218,17 @@ fn suffix(path: &[(u8, String)], expected: &[(u8, &str)]) -> bool {
             .all(|((kind, name), (k, n))| kind == k && name == n)
 }
 fn scan(
+    document: &mut XmlDocument,
+    profile: &XmlVerifyProfile,
+    scope: &ResourceScope,
+) -> Result<Vec<Metadata>> {
+    let signatures = scan_optional(document, profile, scope)?;
+    if signatures.is_empty() {
+        return Err(XmlError::NoSignature.into());
+    }
+    Ok(signatures)
+}
+fn scan_optional(
     document: &mut XmlDocument,
     profile: &XmlVerifyProfile,
     scope: &ResourceScope,
@@ -574,9 +582,6 @@ fn scan(
             path.pop().ok_or_else(|| invalid("signature path"))?;
         }
     }
-    if signatures.is_empty() {
-        return Err(XmlError::NoSignature.into());
-    }
     Ok(signatures)
 }
 fn metadata(
@@ -618,14 +623,11 @@ fn metadata(
     wrapped.push_str("</__oncl_metadata>");
     Ok(wrapped)
 }
-fn parse_guards(
-    scope: &ResourceScope,
-    bytes: usize,
-) -> Result<(ResourceReservation, ResourceReservation)> {
+fn parse_guards(scope: &ResourceScope, bytes: usize) -> Result<ResourceReservation> {
     let bound = (bytes as u64)
         .checked_mul(64)
         .ok_or(ProcessingError::MetadataLimit)?;
-    Ok((scope.reserve_memory(bound)?, scope.reserve_metadata(bound)?))
+    Ok(scope.reserve_metadata(bound)?)
 }
 fn base64(node: Node<'_, '_>) -> Result<Vec<u8>> {
     if node.children().any(|n| n.is_element()) {
@@ -1088,16 +1090,61 @@ pub fn verify_source(
     network: &NetworkPolicy,
     scope: &mut ResourceScope,
 ) -> Result<XmlVerification> {
-    let mut document = XmlDocument::index(input, &profile.xml, store, scope)?;
+    let mut document = XmlDocument::index_signed(input, profile, store, scope)?;
     verify_document(&mut document, profile, store, ctx, network, scope)
 }
+/// Dynamic hosts sample ONE current validation time only after all document
+/// canonical/reference work. This callback is a trusted service, never wire data.
+pub fn verify_source_with_clock(
+    input: Source<'_>,
+    profile: &XmlVerifyProfile,
+    store: &TemporaryStore,
+    ctx: &ValidationContext<'_>,
+    network: &NetworkPolicy,
+    clock: &(dyn Fn() -> time::OffsetDateTime + Send + Sync),
+    scope: &mut ResourceScope,
+) -> Result<XmlVerification> {
+    let mut document = XmlDocument::index_signed(input, profile, store, scope)?;
+    verify_document_timed(
+        &mut document,
+        profile,
+        store,
+        ctx,
+        network,
+        scope,
+        Some(clock),
+    )
+}
+struct PendingSigner {
+    certificate: cert::Certificate,
+    value: Vec<u8>,
+    digest: oncl_pki::digest::DigestValue,
+    algorithm: oncl_pki::key::SigAlg,
+    info_xml: String,
+    certificate_sha256: [u8; 32],
+    references: Vec<XmlReferenceResult>,
+    failures: Vec<FormatFailure>,
+    archive_references: Option<oncl_pki::io::StagedArtifact>,
+    _metadata: ResourceReservation,
+}
 pub(crate) fn verify_document(
-    mut document: &mut XmlDocument,
+    document: &mut XmlDocument,
     profile: &XmlVerifyProfile,
     store: &TemporaryStore,
     ctx: &ValidationContext<'_>,
     network: &NetworkPolicy,
     scope: &mut ResourceScope,
+) -> Result<XmlVerification> {
+    verify_document_timed(document, profile, store, ctx, network, scope, None)
+}
+pub(crate) fn verify_document_timed(
+    document: &mut XmlDocument,
+    profile: &XmlVerifyProfile,
+    store: &TemporaryStore,
+    ctx: &ValidationContext<'_>,
+    network: &NetworkPolicy,
+    scope: &mut ResourceScope,
+    clock: Option<&(dyn Fn() -> time::OffsetDateTime + Send + Sync)>,
 ) -> Result<XmlVerification> {
     document.check_scope(scope)?;
     profile.xml.reservation()?;
@@ -1117,25 +1164,35 @@ pub(crate) fn verify_document(
             + 4096)
         + (profile.max_references as u64) * 256
         + profile.xml.max_depth as u64 * (profile.xml.max_name_bytes as u64 + 128);
-    let memory = scope.reserve_memory(retained)?;
     let metadata_guard = scope.reserve_metadata(retained)?;
-    let signatures = scan(&mut document, profile, scope)?;
+    let signatures = scan(document, profile, scope)?;
     let scratch =
         (profile.max_metadata_bytes as u64) * 10 + profile.xml.max_namespace_bytes as u64 * 4;
-    let _scratch_memory = scope.reserve_memory(scratch)?;
     let _scratch_metadata = scope.reserve_metadata(scratch)?;
     let mut work = profile.max_work;
     let mut count = 0usize;
-    let mut combined: Option<ValidationReport> = None;
-    let mut records = Vec::with_capacity(signatures.len());
+    let mut pending = Vec::with_capacity(signatures.len());
     for (signer_index, signature) in signatures.iter().enumerate() {
         scope.checkpoint()?;
         let info_xml = metadata(
-            &mut document,
+            document,
             signature.info,
             &signature.info_namespaces,
             profile.max_metadata_bytes,
         )?;
+        let retained_size = (info_xml.len() as u64)
+            .checked_add(signature.value.0.len)
+            .and_then(|n| {
+                signature
+                    .certificate
+                    .0
+                    .len
+                    .checked_mul(4)
+                    .and_then(|c| n.checked_add(c))
+            })
+            .and_then(|n| n.checked_add(std::mem::size_of::<PendingSigner>() as u64))
+            .ok_or(ProcessingError::MetadataLimit)?;
+        let retained_metadata = scope.reserve_metadata(retained_size)?;
         let _info_parse = parse_guards(scope, info_xml.len())?;
         let info_doc =
             roxmltree::Document::parse(&info_xml).map_err(|_| invalid("SignedInfo metadata"))?;
@@ -1163,7 +1220,7 @@ pub(crate) fn verify_document(
             return Err(XmlSourceError::AlgorithmDenied);
         }
         let value_xml = metadata(
-            &mut document,
+            document,
             signature.value.0,
             &signature.value.1,
             profile.max_metadata_bytes,
@@ -1178,7 +1235,7 @@ pub(crate) fn verify_document(
                 .ok_or_else(|| invalid("SignatureValue"))?,
         )?;
         let cert_xml = metadata(
-            &mut document,
+            document,
             signature.certificate.0,
             &signature.certificate.1,
             profile.max_metadata_bytes,
@@ -1212,7 +1269,7 @@ pub(crate) fn verify_document(
             &mut work,
         )?;
         for target in &signature.targets {
-            let target = attribute_value(&mut document, *target, profile.max_metadata_bytes)?;
+            let target = attribute_value(document, *target, profile.max_metadata_bytes)?;
             let node = document
                 .lookup_id(&decode_id(&target)?)?
                 .ok_or_else(|| invalid("qualifying properties target"))?;
@@ -1220,13 +1277,6 @@ pub(crate) fn verify_document(
                 return Err(invalid("qualifying properties bound to another signature"));
             }
         }
-        let signer = SignerEvidence {
-            certificate: &certificate,
-            algorithm: signature_algorithm,
-            signed_digest: digest,
-            signature: &value,
-            claimed_time: None,
-        };
         let mut references = Vec::new();
         let mut failures = Vec::new();
         let mut archive_references = if signature
@@ -1239,7 +1289,7 @@ pub(crate) fn verify_document(
             None
         };
         ReferenceVerifier {
-            document: &mut document,
+            document,
             profile,
             signatures: &signatures,
             signer_index,
@@ -1251,30 +1301,68 @@ pub(crate) fn verify_document(
             results: &mut references,
         }
         .verify_all(info, 0, &mut Vec::new())?;
+        drop(info_doc);
+        drop(_info_parse);
+        pending.push(PendingSigner {
+            certificate,
+            value,
+            digest,
+            algorithm: signature_algorithm,
+            info_xml,
+            certificate_sha256,
+            references,
+            failures,
+            archive_references,
+            _metadata: retained_metadata,
+        });
+    }
+    scope.checkpoint()?;
+    let final_context = ValidationContext {
+        now: clock.map_or(ctx.now, |clock| clock()),
+        ..*ctx
+    };
+    scope.checkpoint()?;
+    let mut combined: Option<ValidationReport> = None;
+    let mut records = Vec::with_capacity(signatures.len());
+    for (signature, mut prepared) in signatures.iter().zip(pending) {
+        let _info_parse = parse_guards(scope, prepared.info_xml.len())?;
+        let parsed = roxmltree::Document::parse(&prepared.info_xml)
+            .map_err(|_| invalid("prepared SignedInfo metadata"))?;
+        let info = parsed
+            .root_element()
+            .first_element_child()
+            .ok_or_else(|| invalid("prepared SignedInfo"))?;
+        let signer = SignerEvidence {
+            certificate: &prepared.certificate,
+            algorithm: prepared.algorithm,
+            signed_digest: prepared.digest,
+            signature: &prepared.value,
+            claimed_time: None,
+        };
         let (mut checked, level) = ades::check_carried_evidence(
-            &mut document,
+            document,
             signature,
             info,
             signer,
             profile,
             store,
-            archive_references.as_mut(),
-            ctx,
+            prepared.archive_references.as_mut(),
+            &final_context,
             network,
             scope,
             &mut work,
         )?;
-        for failure in failures {
+        for failure in prepared.failures {
             checked.invalidate_signer(0, failure, scope)?;
         }
         records.push(XmlSignerResult {
             signature: signature.signature,
             signed_info: signature.info,
             signature_value: signature.value.0,
-            algorithm: signature_algorithm,
-            certificate_sha256,
+            algorithm: prepared.algorithm,
+            certificate_sha256: prepared.certificate_sha256,
             level,
-            references,
+            references: prepared.references,
         });
         if let Some(report) = combined.as_mut() {
             if checked.verdict == oncl_pki::validation::Verdict::Invalid
@@ -1292,7 +1380,6 @@ pub(crate) fn verify_document(
         validation: combined.ok_or(XmlError::NoSignature)?,
         facts: XmlVerificationFacts {
             signatures: records,
-            _memory: memory,
             _metadata: metadata_guard,
         },
     })

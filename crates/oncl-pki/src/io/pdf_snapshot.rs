@@ -17,6 +17,11 @@ impl<'a> PdfSnapshot<'a> {
         input: &'a mut FrozenInput,
         scope: &ResourceScope,
     ) -> Result<Self, ProcessingError> {
+        if input.output_derived || input.pending_format || input.classification.is_some() {
+            return Err(ProcessingError::InvalidInput(
+                "PDF input snapshot requires original input provenance",
+            ));
+        }
         // Check through the original immutable owner; never replace its control.
         let extent = input.len();
         let mut reader = input.reader(
@@ -125,6 +130,7 @@ impl<'a> PdfSnapshot<'a> {
             &owner,
             encoding,
             output_derived,
+            false,
             |region, out| self.read_region(region, out),
         )
     }
@@ -196,6 +202,7 @@ impl PdfSnapshotReader<'_, '_> {
             len,
             admitted,
             output_failure,
+            classification: None,
         }
     }
     pub fn finish(&mut self) -> Result<(), ProcessingError> {

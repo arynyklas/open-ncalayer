@@ -4,7 +4,7 @@ use crate::{
     reader::{Reader, XmlEventKind},
 };
 use oncl_pki::{
-    io::{FrozenInput, Region},
+    io::{CapturedInput, Region},
     resource::{IO_CHUNK_BYTES, ProcessingError, ResourceScope},
 };
 use std::{io::Write, sync::Arc};
@@ -44,7 +44,7 @@ struct RenderOutput<'a> {
     projections: Option<&'a mut Vec<Region>>,
 }
 pub(crate) fn run(
-    source: &mut FrozenInput,
+    source: &mut dyn CapturedInput,
     limits: &XmlLimits,
     owner: &Arc<()>,
     options: Options<'_>,
@@ -75,7 +75,7 @@ pub(crate) fn run(
     }
 }
 pub(crate) fn hash(
-    source: &mut FrozenInput,
+    source: &mut dyn CapturedInput,
     limits: &XmlLimits,
     owner: &Arc<()>,
     options: Options<'_>,
@@ -128,7 +128,7 @@ pub(crate) fn hash(
     Ok(sink.state.finish())
 }
 pub(crate) fn append(
-    source: &mut FrozenInput,
+    source: &mut dyn CapturedInput,
     limits: &XmlLimits,
     owner: &Arc<()>,
     options: Options<'_>,
@@ -171,7 +171,7 @@ pub(crate) fn append(
     sink.error.map_or(result, Err)
 }
 pub(crate) fn stage(
-    source: &mut FrozenInput,
+    source: &mut dyn CapturedInput,
     limits: &XmlLimits,
     owner: &Arc<()>,
     options: Options<'_>,
@@ -271,7 +271,7 @@ impl Decoder {
     }
     fn write<V: Clone>(
         &mut self,
-        source: &mut FrozenInput,
+        source: &mut dyn CapturedInput,
         region: Region,
         out: &mut CanonicalWriter<'_, V>,
         attribute: bool,
@@ -355,7 +355,7 @@ impl Decoder {
     }
 }
 fn render(
-    source: &mut FrozenInput,
+    source: &mut dyn CapturedInput,
     limits: &XmlLimits,
     owner: &Arc<()>,
     options: Options<'_>,
@@ -380,7 +380,7 @@ fn render(
         .ok_or(ProcessingError::InvalidInput("canonical work limit"))?;
     // Authenticate scope without exporting a permit or cloned scope.
     drop(source.reader(&[], scope)?);
-    let _memory = scope.reserve_memory(2 * IO_CHUNK_BYTES as u64 + 512 * 1024)?;
+    let _memory = scope.reserve_memory(2 * IO_CHUNK_BYTES as u64)?;
     let _metadata = scope.reserve_metadata(512 * 1024)?;
     let mut out = CanonicalWriter::<Region>::new(
         sink,

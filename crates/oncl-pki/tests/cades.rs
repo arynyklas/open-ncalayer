@@ -255,6 +255,7 @@ mod cades {
                 ocsp: &[],
                 crls,
             },
+            host_clock: None,
         }
     }
     fn run(

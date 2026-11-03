@@ -342,7 +342,7 @@ impl Engine {
                     },
                     ..oncl_xml::XmlVerifyProfile::default()
                 };
-                match oncl_xml::verify_source(
+                match oncl_xml::verify_source_with_clock(
                     input,
                     &profile,
                     self.temporary
@@ -356,6 +356,7 @@ impl Engine {
                         http: &transport,
                     },
                     &services.network,
+                    services.clock.as_ref(),
                     &mut ctx.scope,
                 ) {
                     Ok(report) => {

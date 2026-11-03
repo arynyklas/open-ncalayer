@@ -92,14 +92,16 @@ mod references;
 mod sign;
 pub use index::{XmlDocument, XmlLimits, XmlNode};
 pub use reader::{XmlAttribute, XmlAttributeSpan, XmlEvent, XmlEventKind, XmlEvents, XmlName};
+pub use references::intake::{SignedXmlInput, SignedXmlReader, capture_signed_input};
 pub use references::{
     XmlReferenceResult, XmlSignerResult, XmlSourceError, XmlVerification, XmlVerificationFacts,
-    XmlVerifyProfile, verify_source,
+    XmlVerifyProfile, verify_source, verify_source_with_clock,
 };
 use sign::{BoundedSigner, ObjectTemplate, Template};
 pub use sign::{
-    PreparedXmlSign, XmlSignMode, XmlSignProfile, XmlSignSummary, prepare_source, sign_prepared,
-    sign_source, sign_spec_source,
+    PreparedLegacySign, PreparedXmlSign, XmlSignMode, XmlSignProfile, XmlSignSummary,
+    prepare_legacy_source, prepare_source, sign_prepared, sign_prepared_with_clock, sign_source,
+    sign_spec_source,
 };
 pub mod xades;
 mod xpath;
@@ -134,6 +136,8 @@ pub(crate) struct QualifyingObject<'a> {
     pub(crate) signed_properties: &'a str,
     /// Its `Id`.
     pub(crate) signed_properties_id: &'a str,
+    /// New baseline data Reference identity; None preserves old bounded wire.
+    pub(crate) data_reference_id: Option<&'a str>,
 }
 
 /// Bound on the references of a document times its size, the bytes [`verify`] may
@@ -492,6 +496,25 @@ fn sign_with_backend(
     qualifying: Option<QualifyingObject<'_>>,
     scope: Option<&oncl_pki::resource::ResourceScope>,
 ) -> Result<Vec<u8>, XmlError> {
+    let plan = bounded_plan(xml, spec, Some(backend), scope, None)?;
+    finish_bounded_plan(xml, spec, backend, qualifying, scope, plan)
+}
+struct BoundedPlan<'a> {
+    algorithms: Option<Algorithms<'a>>,
+    digest: Option<Vec<u8>>,
+    point: SplicePoint,
+    uri: String,
+    default_namespace: bool,
+    reference_c14n: C14n,
+    transforms: Vec<Transform>,
+}
+fn bounded_plan<'a>(
+    xml: &[u8],
+    spec: &XmlSignSpec<'a>,
+    backend: Option<&BoundedSigner<'_>>,
+    scope: Option<&oncl_pki::resource::ResourceScope>,
+    canonical: Option<&mut dyn std::io::Write>,
+) -> Result<BoundedPlan<'a>, XmlError> {
     let transforms = spec
         .transforms
         .clone()
@@ -513,7 +536,9 @@ fn sign_with_backend(
     let (algorithms, digest, point, uri, default_namespace) = {
         let doc = parse::parse_admitted(xml, false, scope)?;
         // Kalkan parses, then checks the certificate algorithm, then evaluates the XPaths.
-        let algorithms = backend.algorithms(spec)?;
+        let algorithms = backend
+            .map(|backend| backend.algorithms(spec))
+            .transpose()?;
         let ns = (!spec.namespaces.is_empty() || spec.other_prefix_uri.is_some()).then_some(
             xpath::Namespaces {
                 bindings: &spec.namespaces,
@@ -587,20 +612,62 @@ fn sign_with_backend(
         // The new signature is the only node the enveloped transform drops, so the digest
         // is that of the target as it is now; comments are out (a same-document reference).
         let target = tbs.unwrap_or_else(|| doc.root());
-        let (digest, _) = canonicalizer(reference_c14n).hash(target, algorithms.digest)?;
+        let digest = if let Some(algorithms) = &algorithms {
+            Some(
+                canonicalizer(reference_c14n)
+                    .hash(target, algorithms.digest)?
+                    .0
+                    .as_bytes()
+                    .to_vec(),
+            )
+        } else {
+            canonicalizer(reference_c14n).write_to_profile(
+                target,
+                canonical.ok_or_else(|| {
+                    XmlError::Constraint("canonical reference sink missing".into())
+                })?,
+                C14nProfile::KalkanLegacy,
+            )?;
+            None
+        };
         let point = SplicePoint::of(xml, parent)?;
         let default_namespace = parent
             .lookup_namespace_uri(None)
             .is_some_and(|uri| !uri.is_empty());
         drop(doc);
-        (
-            algorithms,
-            digest.as_bytes().to_vec(),
-            point,
-            uri,
-            default_namespace,
-        )
+        (algorithms, digest, point, uri, default_namespace)
     };
+    Ok(BoundedPlan {
+        algorithms,
+        digest,
+        point,
+        uri,
+        default_namespace,
+        reference_c14n,
+        transforms,
+    })
+}
+fn finish_bounded_plan(
+    xml: &[u8],
+    spec: &XmlSignSpec<'_>,
+    backend: &mut BoundedSigner<'_>,
+    qualifying: Option<QualifyingObject<'_>>,
+    scope: Option<&oncl_pki::resource::ResourceScope>,
+    plan: BoundedPlan<'_>,
+) -> Result<Vec<u8>, XmlError> {
+    let BoundedPlan {
+        algorithms,
+        digest,
+        point,
+        uri,
+        default_namespace,
+        reference_c14n,
+        transforms,
+    } = plan;
+    let algorithms =
+        algorithms.ok_or_else(|| XmlError::Constraint("unresolved signature algorithms".into()))?;
+    let digest =
+        digest.ok_or_else(|| XmlError::Constraint("unresolved reference digest".into()))?;
     let method = spec.signed_info_c14n.unwrap_or(if spec.element.is_some() {
         C14n::Exclusive
     } else {

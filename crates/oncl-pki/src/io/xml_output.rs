@@ -71,6 +71,7 @@ impl<'a> XmlSignatureOutput<'a> {
             len: Some(length),
             admitted: Some(scope),
             output_failure,
+            classification: None,
         })
     }
     fn check(&self) -> Result<(), ProcessingError> {

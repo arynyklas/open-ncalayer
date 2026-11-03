@@ -287,6 +287,30 @@ impl EvidenceStore {
         ctx: &ValidationContext<'_>,
         network: &NetworkPolicy,
     ) -> Result<EvidenceId, EvidenceError> {
+        self.request_timestamp_impl(signer, coverage, spec, ctx, network, None)
+    }
+    /// Dynamic acquisition uses the original scope/deadline and a trusted host
+    /// clock after the real reply. It does not mint a trusted timestamp fact.
+    pub fn request_timestamp_with_clock(
+        &mut self,
+        signer: &SignerEvidence<'_>,
+        coverage: &[CoveragePart<'_>],
+        spec: &TsaSpec,
+        ctx: &ValidationContext<'_>,
+        network: &NetworkPolicy,
+        clock: &(dyn Fn() -> OffsetDateTime + Send + Sync),
+    ) -> Result<EvidenceId, EvidenceError> {
+        self.request_timestamp_impl(signer, coverage, spec, ctx, network, Some(clock))
+    }
+    fn request_timestamp_impl(
+        &mut self,
+        signer: &SignerEvidence<'_>,
+        coverage: &[CoveragePart<'_>],
+        spec: &TsaSpec,
+        ctx: &ValidationContext<'_>,
+        network: &NetworkPolicy,
+        clock: Option<&(dyn Fn() -> OffsetDateTime + Send + Sync)>,
+    ) -> Result<EvidenceId, EvidenceError> {
         self.bundle.checkpoint()?;
         validate_timestamp_configuration(spec, ctx.policy)?;
         // Reject impossible token intake before hashing or contacting a responder.
@@ -303,10 +327,14 @@ impl EvidenceStore {
         let _scratch = self.bundle.scope.reserve_memory(MAX_RESPONSE_LEN * 20)?;
         let _metadata = self.bundle.scope.reserve_metadata(MAX_RESPONSE_LEN * 2)?;
         let http = DeadlineTransport::new(ctx.http, network, &self.bundle.scope);
-        let result = tsp::request_at(spec, imprint.as_bytes(), &http, ctx.now);
+        let result = if let Some(clock) = clock {
+            tsp::request_with_clock(spec, imprint.as_bytes(), &http, clock)
+        } else {
+            tsp::request_at(spec, imprint.as_bytes(), &http, ctx.now).map(|reply| (reply, ctx.now))
+        };
         http.finish()?;
-        let reply = result?;
-        if reply.tst.gen_time > ctx.now {
+        let (reply, checked_at) = result?;
+        if reply.tst.gen_time > checked_at {
             return Err(TspError::ClockSkew.into());
         }
         self.collect(
@@ -314,8 +342,85 @@ impl EvidenceStore {
             Source::sequential(&mut reply.token.as_slice(), Some(reply.token.len() as u64)),
             EvidenceOrigin::Fetched {
                 url: &spec.url,
-                obtained_at: ctx.now,
+                obtained_at: checked_at,
             },
+        )
+    }
+    /// Validate EVERY existing proof against proposed current LT material, then
+    /// request the new archive that actually covers ALL of that material. No
+    /// preflight ValidationReport/ProofTime/format-success token escapes.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Same F04 validator and TSA request require original proof, archive and host policy inputs"
+    )]
+    pub fn request_archive_timestamp_for_extension(
+        &mut self,
+        signer: &SignerEvidence<'_>,
+        old_proofs: &[TimestampBinding<'_>],
+        archive: &BoundArchiveRepresentation,
+        spec: &TsaSpec,
+        ctx: &ValidationContext<'_>,
+        network: &NetworkPolicy,
+        clock: Option<&(dyn Fn() -> OffsetDateTime + Send + Sync)>,
+    ) -> Result<EvidenceId, EvidenceError> {
+        self.bundle.checkpoint()?;
+        validate_timestamp_configuration(spec, ctx.policy)?;
+        archive.check_issuance(signer, &self.bundle)?;
+        let timestamp_count = self
+            .bundle
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EvidenceKind::Timestamp)
+            .count();
+        if timestamp_count != old_proofs.len() {
+            return Err(EvidenceError::InvalidBinding);
+        }
+        for (index, entry) in self.bundle.entries.iter().enumerate() {
+            if entry.kind == EvidenceKind::Timestamp
+                && old_proofs
+                    .iter()
+                    .filter(|proof| {
+                        proof.token
+                            == EvidenceId {
+                                owner: self.bundle.owner,
+                                index,
+                            }
+                    })
+                    .count()
+                    != 1
+            {
+                return Err(EvidenceError::InvalidBinding);
+            }
+        }
+        let resources = self.bundle.scope.retain();
+        let current = ValidationContext {
+            now: clock.map_or(ctx.now, |clock| clock()),
+            ..*ctx
+        };
+        let checked = validate_evidence_impl(
+            signer,
+            &mut self.bundle,
+            old_proofs,
+            AdesLevel::Lt,
+            &current,
+            network,
+            &resources,
+            None,
+            None,
+            None,
+            ValidationPurpose::ArchiveIssuance,
+        )?;
+        if checked.verdict != crate::validation::Verdict::Valid {
+            return Err(EvidenceError::InvalidBinding);
+        }
+        resources.checkpoint()?;
+        self.request_timestamp_impl(
+            signer,
+            &[CoveragePart::BoundArchive(archive)],
+            spec,
+            ctx,
+            network,
+            clock,
         )
     }
     /// Move the owner, including any poisoned state. No validation/publication is
@@ -1139,7 +1244,17 @@ pub fn validate_evidence(
     resources: &ResourceScope,
 ) -> Result<ValidationReport, EvidenceError> {
     validate_evidence_impl(
-        signer, bundle, proofs, required, ctx, network, resources, None, None, None,
+        signer,
+        bundle,
+        proofs,
+        required,
+        ctx,
+        network,
+        resources,
+        None,
+        None,
+        None,
+        ValidationPurpose::Final,
     )
 }
 
@@ -1199,6 +1314,7 @@ pub(crate) fn validate_prepared_evidence(
         selections,
         Some(&prepared.parsed),
         None,
+        ValidationPurpose::Final,
     )
 }
 
@@ -1231,7 +1347,14 @@ pub(crate) fn validate_snapshot_evidence(
         None,
         Some(&prepared.parsed),
         Some(graph),
+        ValidationPurpose::Final,
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ValidationPurpose {
+    Final,
+    ArchiveIssuance,
 }
 
 #[allow(
@@ -1249,6 +1372,7 @@ fn validate_evidence_impl(
     selections: Option<&[ArchiveSelection<'_>]>,
     prepared: Option<&ParsedEvidence>,
     snapshot_graph: Option<&crate::cms::ades::pdf::SnapshotProofGraph<'_, '_>>,
+    purpose: ValidationPurpose,
 ) -> Result<ValidationReport, EvidenceError> {
     resources.checkpoint()?;
     bundle.checkpoint()?;
@@ -1290,11 +1414,15 @@ fn validate_evidence_impl(
         .map(|value| value.protected);
     // Only a closed ordered archive may have noncyclic CURRENT-TSA material
     // after its token. Signer/earlier-proof LT checks use its protected prefix.
-    let closed_cutoff = proofs.last().and_then(|proof| {
-        (proof.kind == ProofKind::Archive
-            && matches!(proof.coverage, [CoveragePart::BoundArchive(_)]))
-        .then_some(proof.token.index)
-    });
+    let closed_cutoff = if purpose == ValidationPurpose::Final {
+        proofs.last().and_then(|proof| {
+            (proof.kind == ProofKind::Archive
+                && matches!(proof.coverage, [CoveragePart::BoundArchive(_)]))
+            .then_some(proof.token.index)
+        })
+    } else {
+        None
+    };
     let included = |index: usize| {
         closed_cutoff.is_none_or(|cutoff| index < cutoff)
             && selected.is_none_or(|ids| {
@@ -1644,11 +1772,31 @@ fn check_current_tsa_tail(
     parsed: &ParsedEvidence,
     cutoff: usize,
     path: &[Certificate],
-    at: OffsetDateTime,
+    _at: OffsetDateTime,
     now: OffsetDateTime,
     bundle: &EvidenceBundle,
     resources: &ResourceScope,
 ) -> Result<(), EvidenceError> {
+    let has_ocsp = parsed
+        .raw
+        .iter()
+        .skip(cutoff + 1)
+        .any(|item| item.kind == EvidenceKind::Ocsp);
+    let _role_metadata = if has_ocsp {
+        let bytes = path.iter().try_fold(0u64, |total, cert| {
+            cert.encoded_len()
+                .map_err(|_| EvidenceError::InvalidBinding)
+                .and_then(|n| {
+                    total
+                        .checked_add(u32::from(n) as u64)
+                        .ok_or(EvidenceError::Limit)
+                })
+        })?;
+        Some(resources.reserve_metadata(bytes.checked_mul(4).ok_or(EvidenceError::Limit)?)?)
+    } else {
+        None
+    };
+    let role_cas = has_ocsp.then(|| crate::pkix::CaSet::new(path.to_vec()));
     for item in parsed.raw.iter().skip(cutoff + 1) {
         resources.checkpoint()?;
         bundle.checkpoint()?;
@@ -1656,25 +1804,29 @@ fn check_current_tsa_tail(
             EvidenceKind::Certificate => {
                 cert::parse(&item.bytes).is_ok_and(|cert| path.contains(&cert))
             }
+            // Role and freshness are separate facts: issuer/CertID/EKU/math
+            // precede these time-only errors in the existing strict checker.
+            // Current freshness is still checked by path_status below.
             EvidenceKind::Ocsp => path.windows(2).any(|pair| {
-                validation::offline_revocation(
-                    pair,
-                    std::iter::once(item.bytes.as_slice()),
-                    &[],
-                    at,
-                    now,
+                matches!(
+                    crate::ocsp::check_embedded_issuer_bound(
+                        &item.bytes,
+                        &pair[0],
+                        &pair[1],
+                        role_cas.as_ref().expect("OCSP role path"),
+                        now
+                    ),
+                    Ok(_)
+                        | Err(
+                            crate::ocsp::OcspError::ThisUpdate | crate::ocsp::OcspError::NextUpdate
+                        )
                 )
-                .0 != CheckStatus::Unavailable
             }),
             EvidenceKind::Crl => path.windows(2).any(|pair| {
-                validation::offline_revocation(
-                    pair,
-                    std::iter::empty(),
-                    &[item.bytes.as_slice()],
-                    at,
-                    now,
+                matches!(
+                    crate::crl::verify_crl(&item.bytes, &pair[1], now),
+                    Ok(_) | Err(crate::crl::CrlError::NotYetValid | crate::crl::CrlError::Outdated)
                 )
-                .0 != CheckStatus::Unavailable
             }),
             EvidenceKind::Timestamp => false,
         };

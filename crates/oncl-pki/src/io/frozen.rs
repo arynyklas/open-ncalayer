@@ -7,9 +7,13 @@ use std::{
 };
 
 pub struct FrozenInput {
-    stage: StagedArtifact,
-    identity: Arc<()>,
-    output_derived: bool,
+    pub(super) stage: StagedArtifact,
+    pub(super) identity: Arc<()>,
+    pub(super) output_derived: bool,
+    pub(super) pending_format: bool,
+    pub(super) pending_accounting: bool,
+    pub(super) classification: Option<Arc<super::provisional::FormatClassification>>,
+    pub(super) wire_digest: Option<crate::digest::DigestValue>,
 }
 pub struct FrozenReader<'a> {
     input: &'a mut FrozenInput,
@@ -34,6 +38,7 @@ pub struct DerivedInput {
     region: Region,
     encoding: SnapshotEncoding,
     output_derived: bool,
+    format_specific: bool,
     _memory: ResourceReservation,
     _metadata: ResourceReservation,
 }
@@ -48,7 +53,7 @@ impl FrozenInput {
         store: &TemporaryStore,
         scope: &mut ResourceScope,
     ) -> Result<Self, ProcessingError> {
-        Self::capture_limited(source, store, scope, None)
+        Self::capture_limited(source, store, scope, None, None)
     }
     /// Narrow the existing input/output role limit; never grant fresh input
     /// credit or convert an authenticated output projection to original input.
@@ -58,21 +63,75 @@ impl FrozenInput {
         scope: &mut ResourceScope,
         maximum: u64,
     ) -> Result<Self, ProcessingError> {
-        Self::capture_limited(source, store, scope, Some(maximum))
+        Self::capture_limited(source, store, scope, Some(maximum), None)
+    }
+    pub(super) fn capture_format(
+        source: Source<'_>,
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        maximum_overhead: u64,
+    ) -> Result<Self, ProcessingError> {
+        Self::capture_limited(source, store, scope, None, Some(maximum_overhead))
     }
     fn capture_limited(
         mut source: Source<'_>,
         store: &TemporaryStore,
         scope: &mut ResourceScope,
         maximum: Option<u64>,
+        format_overhead: Option<u64>,
     ) -> Result<Self, ProcessingError> {
-        // Identity/role are checked BEFORE retaining/invalidation of an output.
-        let replay = source.is_snapshot_for(scope)?;
+        // Authentic roles/foreign identities are checked BEFORE any debit,
+        // pending ownership or originating-output invalidation.
+        let format = matches!(source.reader, super::Reader::FormatSnapshot(_));
+        let prior = if format {
+            if format_overhead.is_none() {
+                return Err(ProcessingError::InvalidInput(
+                    "format-specific source requires classification",
+                ));
+            }
+            if source
+                .admitted
+                .as_ref()
+                .is_none_or(|original| !original.same_operation(scope))
+            {
+                return Err(ProcessingError::InvalidInput("foreign format snapshot"));
+            }
+            Some(
+                source
+                    .classification
+                    .clone()
+                    .ok_or(ProcessingError::InvalidInput(
+                        "unclassified source cannot replay",
+                    ))?,
+            )
+        } else {
+            None
+        };
+        let replay = if format {
+            true
+        } else {
+            source.is_snapshot_for(scope)?
+        };
         let output_derived = source.is_output_projection_for(scope)?;
         let failure = source.output_failure.clone();
+        let pending = format_overhead.is_some() && !replay && !output_derived;
+        let identity = prior
+            .as_ref()
+            .map_or_else(|| Arc::new(()), |ledger| ledger.identity.clone());
+        let mut ticket: Option<PendingCapture> = None;
         let result = (|| {
             let resource_limit = if output_derived {
                 scope.limits().output_bytes
+            } else if let Some(ledger) = &prior {
+                ledger.extent
+            } else if pending {
+                (u128::from(scope.input_remaining())
+                    + u128::from(
+                        scope
+                            .container_remaining()
+                            .min(format_overhead.expect("pending overhead")),
+                    ))
+                .min(u128::from(u64::MAX)) as u64
             } else {
                 scope.limits().input_bytes
             };
@@ -95,7 +154,9 @@ impl FrozenInput {
             {
                 return Err(ProcessingError::InvalidInput("failed output projection"));
             }
-            if maximum.is_some() && source.known_len().is_some_and(|n| n > extent_limit) {
+            if (maximum.is_some() || pending || format)
+                && source.known_len().is_some_and(|n| n > extent_limit)
+            {
                 return Err(limit_error());
             }
             if let Some(reader) = source.as_seekable() {
@@ -105,12 +166,27 @@ impl FrozenInput {
                 let size = end
                     .checked_sub(start)
                     .ok_or(ProcessingError::InvalidInput("source extent"))?;
+                if format && (start != 0 || size != prior.as_ref().expect("format ledger").extent) {
+                    return Err(ProcessingError::InvalidInput(
+                        "classified replay must be a complete fixed view",
+                    ));
+                }
                 if size > extent_limit
-                    || (!replay && !output_derived && size > scope.input_remaining())
+                    || (!replay && !output_derived && !pending && size > scope.input_remaining())
                 {
                     return Err(limit_error());
                 }
             }
+            if pending {
+                scope.begin_signed_input(&identity)?;
+                ticket = Some(PendingCapture {
+                    scope: scope.retain(),
+                    identity: identity.clone(),
+                    active: true,
+                });
+            }
+            let mut hash = (format_overhead.is_some() && prior.is_none())
+                .then(|| crate::digest::HashState::new(crate::key::HashAlg::Sha256));
             let capacity = if maximum.is_some() {
                 extent_limit
                     .saturating_add(1)
@@ -129,7 +205,13 @@ impl FrozenInput {
                     .saturating_sub(stage.len())
                     .saturating_add(1)
                     .min(buffer.len() as u64) as usize;
-                let request = if replay || output_derived {
+                let request = if pending {
+                    scope.signed_input_request(
+                        &identity,
+                        format_overhead.expect("pending overhead"),
+                        offered,
+                    )?
+                } else if replay || output_derived {
                     offered
                 } else {
                     scope.input_request(offered)?
@@ -145,7 +227,13 @@ impl FrozenInput {
                 if count > request {
                     return Err(ProcessingError::InvalidInput("reader exceeded buffer"));
                 }
-                if !replay && !output_derived {
+                if pending {
+                    scope.consumed_signed_input(
+                        &identity,
+                        format_overhead.expect("pending overhead"),
+                        count as u64,
+                    )?;
+                } else if !replay && !output_derived {
                     scope.consumed_input(count as u64)?;
                 }
                 if stage
@@ -162,15 +250,30 @@ impl FrozenInput {
                 if count == 0 {
                     break;
                 }
+                if let Some(hash) = &mut hash {
+                    hash.update(&buffer[..count]);
+                }
                 stage.write_chunk(&buffer[..count])?;
             }
             source.finish_snapshot()?;
             Ok(Self {
                 stage,
-                identity: Arc::new(()),
+                identity: identity.clone(),
                 output_derived,
+                pending_format: format_overhead.is_some() && !output_derived && prior.is_none(),
+                pending_accounting: pending,
+                wire_digest: prior
+                    .as_ref()
+                    .map(|ledger| ledger.digest)
+                    .or_else(|| hash.map(crate::digest::HashState::finish)),
+                classification: prior.clone(),
             })
         })();
+        if result.is_ok()
+            && let Some(ticket) = &mut ticket
+        {
+            ticket.active = false;
+        }
         if result.is_err() && output_derived {
             source.invalidate_output_projection();
             super::mark_output_failure(&failure);
@@ -261,6 +364,8 @@ impl FrozenInput {
         }
         let extent_limit = if self.output_derived {
             scope.limits().output_bytes
+        } else if self.pending_format || self.classification.is_some() {
+            self.len()
         } else {
             scope.limits().input_bytes
         };
@@ -334,6 +439,7 @@ impl FrozenInput {
             &self.stage.scope.retain(),
             encoding,
             self.output_derived,
+            self.pending_format || self.classification.is_some(),
             |region, out| self.stage.read_region(region, out),
         )
     }
@@ -345,6 +451,9 @@ impl FrozenInput {
         self.check(scope)?;
         if self.output_derived
             || derived.output_derived
+            || self.pending_format
+            || self.classification.is_some()
+            || derived.format_specific
             || !Arc::ptr_eq(&self.identity, &derived.parent)
             || !derived.scope.same_operation(scope)
         {
@@ -363,6 +472,7 @@ pub(super) fn decode_region(
     owner: &ResourceScope,
     encoding: SnapshotEncoding,
     output_derived: bool,
+    format_specific: bool,
     mut read: impl FnMut(Region, &mut [u8]) -> Result<usize, ProcessingError>,
 ) -> Result<DerivedInput, ProcessingError> {
     owner.checkpoint()?;
@@ -414,6 +524,7 @@ pub(super) fn decode_region(
         region,
         encoding,
         output_derived,
+        format_specific,
         _memory: memory,
         _metadata: metadata,
     })
@@ -449,15 +560,20 @@ impl FrozenReader<'_> {
         let admitted = self.input.stage.scope.retain();
         let output_derived = self.input.output_derived;
         let output_failure = self.input.stage.output_failure.clone();
+        let format = self.input.pending_format || self.input.classification.is_some();
+        let classification = self.input.classification.clone();
         Source {
             reader: if output_derived {
                 super::Reader::OutputProjection(self)
+            } else if format {
+                super::Reader::FormatSnapshot(self)
             } else {
                 super::Reader::Snapshot(self)
             },
             len: Some(length),
             admitted: Some(admitted),
             output_failure,
+            classification,
         }
     }
     pub fn finish(&mut self) -> Result<(), ProcessingError> {
@@ -532,5 +648,34 @@ impl super::SnapshotReader for FrozenReader<'_> {
         if self.input.output_derived {
             self.input.stage.fail_sign_output();
         }
+    }
+}
+
+struct PendingCapture {
+    scope: ResourceScope,
+    identity: Arc<()>,
+    active: bool,
+}
+impl Drop for PendingCapture {
+    fn drop(&mut self) {
+        if self.active {
+            self.scope.abandon_signed_input(&self.identity);
+        }
+    }
+}
+impl super::captured_private::Sealed for FrozenInput {}
+impl super::CapturedInput for FrozenInput {
+    fn len(&self) -> u64 {
+        self.len()
+    }
+    fn read_region(&mut self, region: Region, output: &mut [u8]) -> Result<usize, ProcessingError> {
+        self.read_region(region, output)
+    }
+    fn reader<'a>(
+        &'a mut self,
+        regions: &[Region],
+        scope: &ResourceScope,
+    ) -> Result<FrozenReader<'a>, ProcessingError> {
+        self.reader(regions, scope)
     }
 }

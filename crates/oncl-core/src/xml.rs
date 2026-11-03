@@ -82,7 +82,159 @@ fn after(error: OperationError, applied: AppliedState) -> OperationError {
         }
     }
 }
+pub(crate) enum LegacySpec<'a> {
+    Xml(oncl_xml::XmlSignSpec<'a>),
+    Xades(oncl_xml::xades::XadesSpec<'a>),
+}
+enum LegacyPrepared<'a> {
+    Xml(oncl_xml::PreparedLegacySign<'a>),
+    Xades(oncl_xml::xades::PreparedXadesSpec<'a>),
+}
 impl Engine {
+    pub(crate) fn sign_xml_legacy_operation(
+        &self,
+        key: KeyRequest<'_>,
+        spec: LegacySpec<'_>,
+        input: Source<'_>,
+        output: Output<'_>,
+        ctx: &mut OperationContext,
+    ) -> Result<OperationReport, OperationError> {
+        match output {
+            Output::Staged(stage) => self.sign_xml_legacy_staged(key, spec, input, stage, ctx),
+            Output::Writer(writer) => {
+                let store = self
+                    .temporary
+                    .as_ref()
+                    .ok_or(OperationError::MissingTemporaryStore)?;
+                let mut stage = store.stage(&mut ctx.scope)?;
+                let report = self.sign_xml_legacy_staged(key, spec, input, &mut stage, ctx)?;
+                stage
+                    .copy_to(writer)
+                    .map_err(|e| after(e.into(), report.applied))?;
+                Ok(report)
+            }
+        }
+    }
+    fn sign_xml_legacy_staged(
+        &self,
+        key: KeyRequest<'_>,
+        spec: LegacySpec<'_>,
+        input: Source<'_>,
+        stage: &mut StagedArtifact,
+        ctx: &mut OperationContext,
+    ) -> Result<OperationReport, OperationError> {
+        let mut output = XmlSignatureOutput::new(stage, &ctx.scope)?;
+        let validation = self.validation_context(ctx, Action::Sign)?;
+        let store = self
+            .temporary
+            .as_ref()
+            .ok_or(OperationError::MissingTemporaryStore)?;
+        let transport =
+            DeadlineTransport::new(validation.http.as_ref(), &validation.network, &ctx.scope);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: (validation.clock)(),
+            anchors: &validation.anchors,
+            intermediates: &validation.intermediates,
+            http: &transport,
+        };
+        let services = oncl_xml::xades::XadesServices {
+            validation: &context,
+            network: &validation.network,
+            temporary: store,
+            tsa: self.cades.as_ref().map(|c| &c.tsa),
+            material: ValidationMaterial {
+                certificates: &[],
+                ocsp: &[],
+                crls: &[],
+            },
+            evidence_limits: self.cades.as_ref().map(|c| c.evidence_limits),
+            host_clock: Some(validation.clock.as_ref()),
+        };
+        let (prepared, report_profile) = match spec {
+            LegacySpec::Xml(spec) => (
+                LegacyPrepared::Xml(
+                    oncl_xml::prepare_legacy_source(input, &spec, store, &mut ctx.scope)
+                        .map_err(error)?,
+                ),
+                SignProfile::Xml,
+            ),
+            LegacySpec::Xades(spec) => {
+                let level = match spec.level {
+                    oncl_xml::xades::XadesLevel::B => AdesLevel::B,
+                    oncl_xml::xades::XadesLevel::T => AdesLevel::T,
+                    oncl_xml::xades::XadesLevel::Lt => AdesLevel::Lt,
+                };
+                if level > AdesLevel::B && self.cades.is_none() {
+                    return Err(OperationError::MissingCadesConfiguration);
+                }
+                (
+                    LegacyPrepared::Xades(
+                        oncl_xml::xades::prepare_spec_source(
+                            input,
+                            &spec,
+                            context.now,
+                            &services,
+                            &mut ctx.scope,
+                        )
+                        .map_err(error)?,
+                    ),
+                    SignProfile::Xades(level),
+                )
+            }
+        };
+        let index = self.prepare_sign_keys(std::slice::from_ref(&key), ctx, Action::Sign)?[0];
+        let mut signer = self.operation_signer(index, ctx, Action::Sign)?;
+        let mut tracked = TrackedSigner {
+            signer: &mut signer,
+            applied: AppliedState::NotApplied,
+        };
+        let mut resources = ctx.scope.shared_view();
+        let result = match prepared {
+            LegacyPrepared::Xades(prepared) => {
+                prepared.sign_transaction(&mut tracked, &services, &mut output, &mut resources)
+            }
+            LegacyPrepared::Xml(prepared) => (|| {
+                let summary =
+                    prepared.sign_transaction(&mut tracked, &mut output, &mut resources)?;
+                let profile = XmlVerifyProfile {
+                    canonicalization: oncl_xml::C14nProfile::KalkanLegacy,
+                    allowed_signature_algorithms: ctx.policy.allowed_signature_algorithms,
+                    evidence_limits: self.cades.as_ref().map(|c| c.evidence_limits),
+                    ..Default::default()
+                };
+                let verification = oncl_xml::verify_source_with_clock(
+                    output.source()?,
+                    &profile,
+                    store,
+                    &context,
+                    &validation.network,
+                    validation.clock.as_ref(),
+                    &mut resources,
+                )?;
+                Ok(oncl_xml::xades::XadesReport {
+                    summary,
+                    verification,
+                })
+            })(),
+        };
+        let applied = tracked.applied;
+        let report = result.map_err(|e| after(error(e), applied))?;
+        transport.finish().map_err(|e| after(e.into(), applied))?;
+        if report.verification.validation.verdict != oncl_pki::validation::Verdict::Valid {
+            return Err(after(OperationError::ValidationRequired, applied));
+        }
+        output
+            .finish(&resources)
+            .map_err(|e| after(e.into(), applied))?;
+        Ok(OperationReport::xml_operation(
+            ctx.id,
+            report_profile,
+            SignProvenance::Document,
+            applied,
+            report,
+        ))
+    }
     pub(crate) fn sign_xml_operation(
         &self,
         key: KeyRequest<'_>,
@@ -161,6 +313,7 @@ impl Engine {
                 crls: &[],
             },
             evidence_limits: self.cades.as_ref().map(|c| c.evidence_limits),
+            host_clock: Some(validation.clock.as_ref()),
         };
         if let Some(level) = level {
             xml_services.preflight(level, &profile).map_err(error)?;
@@ -184,7 +337,12 @@ impl Engine {
         }
         .map_err(error)?;
         prepared
-            .verify_existing(&context, &validation.network, &mut ctx.scope)
+            .verify_existing_with_clock(
+                &context,
+                &validation.network,
+                validation.clock.as_ref(),
+                &mut ctx.scope,
+            )
             .map_err(error)?;
         transport.finish()?;
         let index = self.prepare_sign_keys(std::slice::from_ref(&key), ctx, Action::Sign)?[0];
@@ -205,11 +363,12 @@ impl Engine {
                 &mut resources,
             )
         } else {
-            oncl_xml::sign_prepared(
+            oncl_xml::sign_prepared_with_clock(
                 prepared,
                 &mut tracked,
                 &context,
                 &validation.network,
+                validation.clock.as_ref(),
                 &mut output,
                 &mut resources,
             )
@@ -233,19 +392,15 @@ impl Engine {
     }
     pub(crate) fn extend_xml_operation(
         &self,
-        level: AdesLevel,
+        request: &crate::ExtendRequest<'_>,
         profile: &XmlVerifyProfile,
-        material: &ValidationMaterial<'_>,
-        reader_limits: Option<oncl_pki::evidence::EvidenceLimits>,
         input: Source<'_>,
         output: Option<&mut dyn Write>,
         staged: Option<&mut StagedArtifact>,
         ctx: &mut OperationContext,
     ) -> Result<OperationReport, OperationError> {
         match (output, staged) {
-            (None, Some(stage)) => {
-                self.extend_xml_staged(level, profile, material, reader_limits, input, stage, ctx)
-            }
+            (None, Some(stage)) => self.extend_xml_staged(request, profile, input, stage, ctx),
             (Some(writer), None) => {
                 self.validation_context(ctx, Action::Extend)?;
                 let store = self
@@ -253,15 +408,7 @@ impl Engine {
                     .as_ref()
                     .ok_or(OperationError::MissingTemporaryStore)?;
                 let mut stage = store.stage(&mut ctx.scope)?;
-                let report = self.extend_xml_staged(
-                    level,
-                    profile,
-                    material,
-                    reader_limits,
-                    input,
-                    &mut stage,
-                    ctx,
-                )?;
+                let report = self.extend_xml_staged(request, profile, input, &mut stage, ctx)?;
                 stage.copy_to(writer)?;
                 Ok(report)
             }
@@ -270,14 +417,13 @@ impl Engine {
     }
     fn extend_xml_staged(
         &self,
-        level: AdesLevel,
+        request: &crate::ExtendRequest<'_>,
         profile: &XmlVerifyProfile,
-        material: &ValidationMaterial<'_>,
-        reader_limits: Option<oncl_pki::evidence::EvidenceLimits>,
         input: Source<'_>,
         stage: &mut StagedArtifact,
         ctx: &mut OperationContext,
     ) -> Result<OperationReport, OperationError> {
+        let level = request.level;
         let mut output = XmlSignatureOutput::new(stage, &ctx.scope)?;
         let validation = self.validation_context(ctx, Action::Extend)?;
         let store = self
@@ -301,11 +447,13 @@ impl Engine {
             network: &validation.network,
             temporary: store,
             tsa: self.cades.as_ref().map(|c| &c.tsa),
-            material: crate::cades::material(material),
+            material: crate::cades::material(&request.material),
             evidence_limits: self.cades.as_ref().map(|c| c.evidence_limits),
+            host_clock: Some(validation.clock.as_ref()),
         };
         let mut profile = profile.clone();
-        profile.evidence_limits = intersect_evidence_limits(reader_limits, profile.evidence_limits);
+        profile.evidence_limits =
+            intersect_evidence_limits(request.limits, profile.evidence_limits);
         profile.allowed_signature_algorithms = intersect(
             profile.allowed_signature_algorithms,
             ctx.policy.allowed_signature_algorithms,

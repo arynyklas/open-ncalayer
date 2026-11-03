@@ -585,6 +585,13 @@ level requires Valid. The supported proof graph is one SignatureTimeStamp plus
 multiple ArchiveTimeStamp renewals, checking every present supported proof.
 Multiple independent SignatureTimeStamp proofs, other versions and distributed
 coverage are explicit unsupported errors, never a lower-level Valid result.
+New baseline signatures include signed DataObjectFormat/MimeType for every data
+Reference, binding ObjectReference to Reference@Id (not the target data ID).
+Historical bounded XAdES remains mathematically verifiable, but missing mandatory
+baseline properties never produces an achieved baseline level. Keyless LTA renewal
+can refresh stale public status only after validating every existing proof and
+before issuing an archive covering all current evidence; final protected-prefix
+validation is unchanged.
 `oncl-xml::sign_spec_source` exposes bounded XmlSignSpec through DigestSigner and
 the original ResourceScope, retaining selectors/placement/output/layout/limits
 and sharing the actual metadata/crypto builder and canonical writer. Source
@@ -594,6 +601,21 @@ Large XML WSSE is not added. Internal hash/evidence replay spends no final-outpu
 quota; external `copy_entry` charges every delivery. OUTPUT-derived captures
 remain OUTPUT and a failed closed output transaction cannot publish after the
 host clears cancellation.
+Core `SignRequest::xml_legacy` retains the bounded XmlSignSpec wire contract
+through the original AuthorizedSigner; `SignRequest::xades_legacy` accepts
+bounded XadesSpec options and emits complete B/T/LT through the shared evidence
+kernel, not a raw-key escape. Its TSA must equal explicit host configuration.
+Both prepare selectors/canonical references before opening a key.
+`capture_signed_input` retains an immutable signed-wire SHA-256 and closed
+format-reader role for same-operation approval/replay. Signed intake charges
+actual wire progress irrevocably, separately classifying bounded real signature
+overhead; application Objects, fake metadata, whitespace and PIs remain document
+bytes. Only parser-recognized bounded declaration/BOM and signature-only empty
+parent expansion receive serialization credit, not an original-spelling claim.
+Generic original-input/hash consumers reject classified format readers.
+Dynamic Core time-stamp issuance samples the trusted host clock after the actual
+reply; final XML validation uses one late common instant for all signers. Direct
+fixed-as-of APIs keep their original semantics and monotonic deadlines.
 
 Run `cargo test -p oncl-xml --features testing`, then
 `cargo run -p oncl-core --features xml --example sdk_probe -- --case X03 --out target/x03-smoke`.

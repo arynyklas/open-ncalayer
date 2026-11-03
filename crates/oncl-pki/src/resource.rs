@@ -8,7 +8,7 @@
 //! own interruptible I/O: checkpoints cannot preempt an arbitrary synchronous syscall.
 
 use std::io;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 /// Maximum document I/O buffer size, independent of document length.
@@ -138,6 +138,9 @@ struct Usage {
     container: u64,
     framing: u64,
     output: u64,
+    wire_input: u64,
+    pending_wire: u64,
+    pending_owner: Option<Weak<()>>,
 }
 
 // No user code runs under these locks. Recovery also keeps Drop non-panicking if
@@ -266,7 +269,7 @@ impl ResourceScope {
     pub fn progress(&self) -> Progress {
         let usage = lock(&self.state.usage);
         Progress {
-            bytes_in: usage.input,
+            bytes_in: usage.wire_input,
             bytes_out: usage.output,
         }
     }
@@ -317,10 +320,23 @@ impl ResourceScope {
             .min(self.state.limits.memory_bytes - local.memory)
     }
     pub fn input_remaining(&self) -> u64 {
+        let usage = lock(&self.state.usage);
         self.state
             .limits
             .input_bytes
-            .saturating_sub(lock(&self.state.usage).input)
+            .saturating_sub(usage.input)
+            .saturating_sub(usage.pending_wire)
+    }
+    /// Remaining container consumption, including capacity needed by pending
+    /// wire. This read-only value never grants or resets an allowance.
+    pub fn container_remaining(&self) -> u64 {
+        let usage = lock(&self.state.usage);
+        let document = self.state.limits.input_bytes.saturating_sub(usage.input);
+        self.state
+            .limits
+            .container_bytes
+            .saturating_sub(usage.container)
+            .saturating_sub(usage.pending_wire.saturating_sub(document))
     }
     pub(crate) fn check_input(&self) -> Result<(), ProcessingError> {
         if lock(&self.state.usage).input_terminal {
@@ -335,7 +351,7 @@ impl ResourceScope {
             return Err(ProcessingError::InputLimit);
         }
         // Never consume a byte that the public u64 progress cannot represent.
-        let representable = u64::MAX - usage.input;
+        let representable = u64::MAX - usage.wire_input;
         if representable == 0 {
             return Err(ProcessingError::InputLimit);
         }
@@ -344,6 +360,7 @@ impl ResourceScope {
             .limits
             .input_bytes
             .saturating_sub(usage.input)
+            .saturating_sub(usage.pending_wire)
             .saturating_add(1)
             .min(representable)
             .min(capacity as u64) as usize)
@@ -362,7 +379,16 @@ impl ResourceScope {
             return Err(ProcessingError::InputLimit);
         };
         usage.input = next;
-        if next > self.state.limits.input_bytes {
+        usage.wire_input = match usage.wire_input.checked_add(bytes) {
+            Some(next) => next,
+            None => {
+                usage.input_terminal = true;
+                return Err(ProcessingError::InputLimit);
+            }
+        };
+        if u128::from(next) + u128::from(usage.pending_wire)
+            > u128::from(self.state.limits.input_bytes)
+        {
             usage.input_terminal = true;
         }
         if usage.input_terminal {
@@ -394,39 +420,191 @@ impl ResourceScope {
     pub fn account_output(&self, bytes: u64) -> Result<(), ProcessingError> {
         self.account(Count::Output, bytes)
     }
+    pub(crate) fn begin_signed_input(&self, owner: &Arc<()>) -> Result<(), ProcessingError> {
+        self.checkpoint()?;
+        let mut usage = lock(&self.state.usage);
+        if usage.input_terminal {
+            return Err(ProcessingError::InputLimit);
+        }
+        if usage.pending_owner.is_some() {
+            return Err(ProcessingError::CapacityExceeded);
+        }
+        if usage.pending_wire != 0 {
+            return Err(ProcessingError::InvalidInput("unresolved wire intake"));
+        }
+        usage.pending_owner = Some(Arc::downgrade(owner));
+        Ok(())
+    }
+    fn signed_owner(usage: &Usage, owner: &Arc<()>) -> bool {
+        usage
+            .pending_owner
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|expected| Arc::ptr_eq(&expected, owner))
+    }
+    fn signed_remaining(&self, usage: &Usage, maximum: u64) -> u128 {
+        let document = self.state.limits.input_bytes.saturating_sub(usage.input);
+        let container = self
+            .state
+            .limits
+            .container_bytes
+            .saturating_sub(usage.container)
+            .min(maximum);
+        (u128::from(document) + u128::from(container))
+            .saturating_sub(u128::from(usage.pending_wire))
+    }
+    pub(crate) fn signed_input_request(
+        &self,
+        owner: &Arc<()>,
+        maximum: u64,
+        capacity: usize,
+    ) -> Result<usize, ProcessingError> {
+        let mut usage = lock(&self.state.usage);
+        if usage.input_terminal {
+            return Err(ProcessingError::InputLimit);
+        }
+        if !Self::signed_owner(&usage, owner) {
+            return Err(ProcessingError::InvalidInput("foreign pending intake"));
+        }
+        let representable = u64::MAX - usage.wire_input;
+        if representable == 0 {
+            usage.input_terminal = true;
+            return Err(ProcessingError::InputLimit);
+        }
+        Ok((self.signed_remaining(&usage, maximum) + 1)
+            .min(u128::from(representable))
+            .min(capacity.max(1) as u128) as usize)
+    }
+    pub(crate) fn consumed_signed_input(
+        &self,
+        owner: &Arc<()>,
+        maximum: u64,
+        bytes: u64,
+    ) -> Result<(), ProcessingError> {
+        let mut usage = lock(&self.state.usage);
+        if usage.input_terminal {
+            return Err(ProcessingError::InputLimit);
+        }
+        if !Self::signed_owner(&usage, owner) {
+            return Err(ProcessingError::InvalidInput("foreign pending intake"));
+        }
+        let remaining = self.signed_remaining(&usage, maximum);
+        let wire = usage.wire_input.checked_add(bytes);
+        let pending = usage.pending_wire.checked_add(bytes);
+        let (Some(wire), Some(pending)) = (wire, pending) else {
+            usage.input_terminal = true;
+            return Err(ProcessingError::InputLimit);
+        };
+        usage.wire_input = wire;
+        usage.pending_wire = pending;
+        if u128::from(bytes) > remaining {
+            usage.input_terminal = true;
+            return Err(ProcessingError::InputLimit);
+        }
+        Ok(())
+    }
+    pub(crate) fn classify_signed_input(
+        &self,
+        owner: &Arc<()>,
+        wire: u64,
+        document: u64,
+        container: u64,
+    ) -> Result<(), ProcessingError> {
+        self.checkpoint()?;
+        let mut usage = lock(&self.state.usage);
+        if usage.input_terminal {
+            return Err(ProcessingError::InputLimit);
+        }
+        if !Self::signed_owner(&usage, owner)
+            || usage.pending_wire != wire
+            || document.checked_add(container) != Some(wire)
+        {
+            usage.input_terminal = true;
+            return Err(ProcessingError::InvalidInput(
+                "pending classification extent/owner",
+            ));
+        }
+        let next_document = usage
+            .input
+            .checked_add(document)
+            .filter(|n| *n <= self.state.limits.input_bytes);
+        let next_container = usage
+            .container
+            .checked_add(container)
+            .filter(|n| *n <= self.state.limits.container_bytes);
+        let Some(next_document) = next_document else {
+            usage.input_terminal = true;
+            return Err(ProcessingError::InputLimit);
+        };
+        let Some(next_container) = next_container else {
+            usage.input_terminal = true;
+            return Err(ProcessingError::ContainerLimit);
+        };
+        usage.input = next_document;
+        usage.container = next_container;
+        // Transfer unassigned capacity, never refund historical wire or input.
+        usage.pending_wire = 0;
+        usage.pending_owner = None;
+        Ok(())
+    }
+    pub(crate) fn abandon_signed_input(&self, owner: &Arc<()>) {
+        let mut usage = lock(&self.state.usage);
+        if Self::signed_owner(&usage, owner) {
+            usage.input_terminal = true;
+        }
+    }
     fn account(&self, count: Count, bytes: u64) -> Result<(), ProcessingError> {
         self.checkpoint()?;
         let mut usage = lock(&self.state.usage);
-        if matches!(count, Count::Input) && usage.input_terminal {
-            return Err(ProcessingError::InputLimit);
+        match count {
+            Count::Input => {
+                if usage.input_terminal {
+                    return Err(ProcessingError::InputLimit);
+                }
+                let next = usage
+                    .input
+                    .checked_add(bytes)
+                    .filter(|n| {
+                        u128::from(*n) + u128::from(usage.pending_wire)
+                            <= u128::from(self.state.limits.input_bytes)
+                    })
+                    .ok_or(ProcessingError::InputLimit)?;
+                let wire = usage
+                    .wire_input
+                    .checked_add(bytes)
+                    .ok_or(ProcessingError::InputLimit)?;
+                usage.input = next;
+                usage.wire_input = wire;
+            }
+            Count::Container => {
+                let document = self.state.limits.input_bytes.saturating_sub(usage.input);
+                let next = usage
+                    .container
+                    .checked_add(bytes)
+                    .filter(|n| *n <= self.state.limits.container_bytes)
+                    .filter(|n| {
+                        u128::from(usage.pending_wire)
+                            <= u128::from(document)
+                                + u128::from(self.state.limits.container_bytes - *n)
+                    })
+                    .ok_or(ProcessingError::ContainerLimit)?;
+                usage.container = next;
+            }
+            Count::Framing => {
+                usage.framing = usage
+                    .framing
+                    .checked_add(bytes)
+                    .filter(|n| *n <= self.state.limits.framing_bytes)
+                    .ok_or(ProcessingError::FramingLimit)?
+            }
+            Count::Output => {
+                usage.output = usage
+                    .output
+                    .checked_add(bytes)
+                    .filter(|n| *n <= self.state.limits.output_bytes)
+                    .ok_or(ProcessingError::OutputLimit)?
+            }
         }
-        let (value, limit, error) = match count {
-            Count::Input => (
-                &mut usage.input,
-                self.state.limits.input_bytes,
-                ProcessingError::InputLimit,
-            ),
-            Count::Container => (
-                &mut usage.container,
-                self.state.limits.container_bytes,
-                ProcessingError::ContainerLimit,
-            ),
-            Count::Framing => (
-                &mut usage.framing,
-                self.state.limits.framing_bytes,
-                ProcessingError::FramingLimit,
-            ),
-            Count::Output => (
-                &mut usage.output,
-                self.state.limits.output_bytes,
-                ProcessingError::OutputLimit,
-            ),
-        };
-        let next = value
-            .checked_add(bytes)
-            .filter(|n| *n <= limit)
-            .ok_or(error)?;
-        *value = next;
         Ok(())
     }
 }
