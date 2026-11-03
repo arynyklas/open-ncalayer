@@ -1,0 +1,23 @@
+[package]
+name = "oncl-server"
+description = "Durable local private-key audit guard for OpenNCALayer hosts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+oncl-core.workspace = true
+oncl-pki.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+oncl-pki = { workspace = true, features = ["testing"] }
+oncl-testkit.workspace = true
+tempfile.workspace = true
+rsa.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
