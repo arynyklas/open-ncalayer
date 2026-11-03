@@ -654,7 +654,8 @@ Kalkan. Нужны host-настройки `ValidationServices` и `TemporarySto
 `oncl-xml::verify_source` проверяет каждый SignedInfo, сертификат, SignatureValue
 и Reference; отчёт хранит scoped per-signer факты, SHA-256 реального сертификата
 и точные диапазоны покрытых узлов. Один canonical writer обслуживает bounded DOM
-и индексированный raw-span Source; полного DOM/канонического буфера большого XML нет.
+и индексированный raw-span Source; большого DOM/RAM-буфера нет. Канонические
+References могут храниться в учтённом TemporaryStore до открытия ключа.
 Поддерживаются inclusive/exclusive C14N с вариантами comments, InclusiveNamespaces,
 ID/percent-URI, однозначные XPointer location paths, ограниченные Manifest и
 namespace-bound XPath-фильтр `not(ancestor-or-self::ds:Signature)`. Enveloped
@@ -667,9 +668,10 @@ SignatureTimeStamp 1.3.2 покрывает целый канонический 
 все преобразованные References, SignedInfo/SignatureValue/KeyInfo, предыдущие
 unsigned properties и прочие Objects в установленном порядке. Extend/renewal
 проверяет все старые и новые proofs и не требует KeyProvider или Sign guard.
-Минимальный проверенный уровень возвращается только при Valid; unsupported
-версии/распределённое archive coverage/независимые повторные SignatureTimeStamp
-не превращаются в lower-level Valid.
+Минимальный проверенный уровень возвращается только при Valid. Поддержан один
+SignatureTimeStamp и несколько ArchiveTimeStamp renewal; каждый proof проверяется.
+Независимые повторные SignatureTimeStamp, другие версии и распределённое archive
+coverage отклоняются явно, а не превращаются в lower-level Valid.
 `oncl-xml::sign_spec_source` даёт bounded `XmlSignSpec` через DigestSigner и
 исходный ResourceScope; старые XPath/placement/output/layout/лимиты сохранены,
 builder и canonical writer общие. Source sign не строит DOM большого документа;

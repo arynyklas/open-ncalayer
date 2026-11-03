@@ -567,7 +567,8 @@ requests cannot expand trust anchors or network policy. `oncl-xml::verify_source
 checks every real SignedInfo, certificate, SignatureValue and Reference. Scoped
 per-signer facts retain the actual certificate SHA-256 and exact covered regions.
 One canonical writer serves bounded DOM and indexed raw-span inputs; large XML
-does not become a DOM or a canonical document buffer. Supported inputs include
+does not become a DOM or a whole-document RAM buffer. Canonical references may
+be retained in admitted TemporaryStore files before opening a key. Inputs include
 inclusive/exclusive C14N with comments variants, InclusiveNamespaces, ID/percent
 URIs, unique XPointer location paths, bounded recursive Manifests and the
 namespace-bound `not(ancestor-or-self::ds:Signature)` XPath filter. Enveloped
@@ -580,8 +581,10 @@ is EN 319 132-1 V1.2.1 section 5.5.2.2 non-distributed ArchiveTimeStamp 1.4.1:
 actual transformed References, SignedInfo/SignatureValue/KeyInfo, every prior
 unsigned property and other Objects, in normative order. Extend/renewal checks
 all old/current proofs without a KeyProvider or Sign guard. A verified minimum
-level requires Valid; unsupported versions/distributed archive coverage/multiple
-independent signature-time proofs never become a lower-level Valid result.
+level requires Valid. The supported proof graph is one SignatureTimeStamp plus
+multiple ArchiveTimeStamp renewals, checking every present supported proof.
+Multiple independent SignatureTimeStamp proofs, other versions and distributed
+coverage are explicit unsupported errors, never a lower-level Valid result.
 `oncl-xml::sign_spec_source` exposes bounded XmlSignSpec through DigestSigner and
 the original ResourceScope, retaining selectors/placement/output/layout/limits
 and sharing the actual metadata/crypto builder and canonical writer. Source

@@ -1922,9 +1922,56 @@ fn xml_core_source_guard_reports_and_keyless_lta_renewal() {
         .unwrap();
     assert_eq!(report.ades_level, Some(AdesLevel::Lta));
     assert_eq!(
-        report.xml.unwrap().signatures()[0].level,
+        report.xml.as_ref().unwrap().signatures()[0].level,
         Some(AdesLevel::Lta)
     );
+    drop(report);
+    drop(ctx);
+    let limited = Engine::new(
+        EngineServices::hash_only(ResourceLimits::default())
+            .with_validation(validation())
+            .with_temporary_store(TemporaryStore::new(dir.path()).unwrap())
+            .with_cades(CadesConfiguration::new(
+                EvidenceLimits {
+                    max_items: 24,
+                    max_bytes: 6291456,
+                    max_item_bytes: 262144,
+                    max_chain_len: 16,
+                    max_proofs: 1,
+                    max_coverage_parts: 256,
+                    max_coverage_bytes: 1 << 40,
+                },
+                TsaSpec::from(TsaProfile::kalkan_default()),
+            )),
+    )
+    .unwrap();
+    for request in [
+        VerifyRequest::xml(),
+        VerifyRequest::xml_kalkan(),
+        VerifyRequest::xades(AdesLevel::Lta),
+    ] {
+        let mut ctx = limited
+            .begin(
+                ExecutionGrant::new([Action::Verify]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control::default()),
+            )
+            .unwrap();
+        let error = limited
+            .verify(
+                &request,
+                Source::sequential(&mut Cursor::new(&bytes), None),
+                None,
+                &mut ctx,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            ErrorCode::MetadataLimit,
+            "every XML route must apply the configured one-proof host cap"
+        );
+    }
+    assert_eq!(guard.events.lock().unwrap().len(), 1);
 }
 
 #[cfg(feature = "xml")]
@@ -2035,5 +2082,86 @@ fn xml_tsa_preflight_rejects_configuration_before_intake_key_open_and_guard() {
         assert_eq!(opens.load(Ordering::SeqCst), 0);
         assert!(guard.events.lock().unwrap().is_empty());
         assert!(out.is_empty());
+    }
+}
+
+#[cfg(feature = "xml")]
+#[test]
+fn xml_reference_work_and_empty_algorithm_intersection_fail_before_key_open() {
+    use oncl_core::keys::{KeyLease, KeyProvider};
+    struct Provider {
+        opens: Arc<AtomicUsize>,
+        inner: KeySources,
+    }
+    impl KeyProvider for Provider {
+        fn open(
+            &self,
+            r: &KeyRequest<'_>,
+            ctx: &mut OperationContext,
+        ) -> Result<KeyLease, OperationError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            self.inner.open(r, ctx)
+        }
+    }
+    let key = selector("user-rsa-sign");
+    let dir = tempfile::tempdir().unwrap();
+    let xml = b"<r><p Id='p'>protected</p><s Id='s'/></r>";
+    for denied in [false, true] {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let guard = Arc::new(Guard::default());
+        let engine = Engine::new(
+            EngineServices::hash_only(ResourceLimits::default())
+                .with_validation(validation())
+                .with_temporary_store(TemporaryStore::new(dir.path()).unwrap())
+                .with_keys(
+                    Arc::new(Provider {
+                        opens: opens.clone(),
+                        inner: KeySources::new(),
+                    }),
+                    guard.clone(),
+                ),
+        )
+        .unwrap();
+        let mut policy = OperationPolicy::strict_online();
+        policy.allowed_signature_algorithms = &[SigAlg::RsaSha256];
+        let mut ctx = begin(
+            &engine,
+            &key,
+            &[Action::Sign],
+            policy,
+            Arc::new(Control::default()),
+        );
+        let mut profile = oncl_xml::XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            ..Default::default()
+        };
+        if denied {
+            profile.allowed_signature_algorithms = &[SigAlg::Gost2004];
+        } else {
+            profile.max_work = 1;
+        }
+        let mut out = Vec::new();
+        let error = engine
+            .sign(
+                SignRequest::xml(KeyRequest::new(&key, Some("C02 synthetic")), profile),
+                Source::sequential(&mut Cursor::new(xml), Some(xml.len() as u64)),
+                &mut out,
+                &mut ctx,
+            )
+            .unwrap_err();
+        assert_eq!(error.applied_state(), AppliedState::NotApplied);
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            0,
+            "key-independent work or denied set must not prompt/open a provider"
+        );
+        assert!(guard.events.lock().unwrap().is_empty());
+        assert!(out.is_empty());
+        if denied {
+            assert_eq!(error.code(), ErrorCode::UnsupportedAlgorithm);
+        } else {
+            assert_eq!(error.code(), ErrorCode::InvalidInput);
+        }
     }
 }

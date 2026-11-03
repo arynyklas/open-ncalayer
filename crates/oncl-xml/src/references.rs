@@ -243,8 +243,8 @@ fn scan(
             .ok_or_else(|| invalid("missing XML name"))?;
         let ds = name.namespace() == Some(crate::DSIG_NS);
         let xades = name.namespace() == Some(crate::XADES_NS);
-        let archive = name.namespace() == Some("http://uri.etsi.org/01903/v1.4.1#")
-            && name.local() == "ArchiveTimeStamp";
+        let xades14 = name.namespace() == Some("http://uri.etsi.org/01903/v1.4.1#");
+        let archive = xades14 && name.local() == "ArchiveTimeStamp";
         if matches!(
             name.namespace(),
             Some(
@@ -258,6 +258,26 @@ fn scan(
             return Err(XmlSourceError::Unsupported("XAdES namespace/version"));
         }
         if event.kind == XmlEventKind::Start {
+            if xades14 {
+                let pending = current
+                    .as_ref()
+                    .ok_or_else(|| invalid("unbound XAdES 1.4.1 evidence"))?;
+                if event.depth != pending.depth + 5
+                    || !suffix(
+                        &path,
+                        &[
+                            (1, "Object"),
+                            (2, "QualifyingProperties"),
+                            (2, "UnsignedProperties"),
+                            (2, "UnsignedSignatureProperties"),
+                        ],
+                    )
+                {
+                    return Err(invalid(
+                        "XAdES 1.4.1 evidence requires a direct unsigned-property location",
+                    ));
+                }
+            }
             if ds && name.local() == "Signature" {
                 if current.is_some() {
                     return Err(invalid("nested XML signature"));
@@ -335,7 +355,7 @@ fn scan(
                     1
                 } else if xades {
                     2
-                } else if archive {
+                } else if xades14 {
                     3
                 } else {
                     0
@@ -414,6 +434,16 @@ fn scan(
                         ],
                     ) {
                         return Err(invalid("signature timestamp location"));
+                    }
+                    if !archive
+                        && pending
+                            .proofs
+                            .iter()
+                            .any(|(kind, _)| *kind == oncl_pki::evidence::ProofKind::Signature)
+                    {
+                        return Err(XmlSourceError::Unsupported(
+                            "multiple independent SignatureTimeStamp proofs",
+                        ));
                     }
                     proof_count += 1;
                     if proof_count > 8 {
@@ -538,7 +568,7 @@ fn scan(
                         unsigned_container: pending.unsigned_container,
                     });
                 }
-            } else if xades {
+            } else if xades || xades14 {
                 return Err(invalid("unbound XAdES evidence"));
             }
             path.pop().ok_or_else(|| invalid("signature path"))?;

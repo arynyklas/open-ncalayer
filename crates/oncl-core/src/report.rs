@@ -330,6 +330,12 @@ impl Engine {
                         oncl_xml::C14nProfile::Standard
                     },
                     allowed_signature_algorithms: ctx.policy.allowed_signature_algorithms,
+                    evidence_limits: crate::xml::intersect_evidence_limits(
+                        self.cades
+                            .as_ref()
+                            .map(|configuration| configuration.evidence_limits),
+                        request.evidence_limits(),
+                    ),
                     required_level: match request.profile() {
                         crate::VerifyProfile::Xades(level) => Some(level),
                         _ => None,

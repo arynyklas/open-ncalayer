@@ -1,7 +1,6 @@
 //! XAdES baseline B/T/LT/LTA, EN 319 132-1 V1.2.1 non-distributed §5.5.2.2.
 use crate::{
-    C14n, XmlDocument, XmlSignProfile, XmlSignSummary, XmlSourceError, XmlVerification,
-    XmlVerifyProfile, canonical_stream::Options,
+    C14n, XmlSignProfile, XmlSignSummary, XmlSourceError, XmlVerification, XmlVerifyProfile,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use der::Encode;
@@ -441,11 +440,9 @@ pub(crate) fn material_xml(
     Ok(out)
 }
 pub(crate) fn complete_signature(
-    document: &mut XmlDocument,
+    canonical_reference: &mut StagedArtifact,
     signature: &str,
     context: &str,
-    target: Option<Region>,
-    reference_method: C14n,
     signer: &SignerEvidence<'_>,
     spec: &XadesSourceSpec<'_>,
     services: &XadesServices<'_>,
@@ -521,19 +518,7 @@ pub(crate) fn complete_signature(
         }
         let parsed = crate::parse::parse_signed(xml.as_bytes())?;
         let mut coverage = services.temporary.stage_source(scope)?;
-        document.canonical_append(
-            Options {
-                target,
-                method: reference_method,
-                profile: spec.xml.canonicalization,
-                prefixes: &[],
-                excluded: &[],
-                metadata_limit: None,
-            },
-            &mut coverage,
-            scope,
-            work,
-        )?;
+        copy_reference(canonical_reference, &mut coverage, scope, work)?;
         coverage.write_chunk(&canonical(
             signature,
             context,
@@ -762,4 +747,36 @@ impl XadesServices<'_> {
         }
         Ok(())
     }
+}
+
+fn copy_reference(
+    source: &mut StagedArtifact,
+    target: &mut StagedArtifact,
+    scope: &ResourceScope,
+    work: &mut u64,
+) -> Result<()> {
+    *work = work
+        .checked_sub(source.len())
+        .ok_or(ProcessingError::InvalidInput(
+            "archive reference replay work",
+        ))?;
+    let _memory = scope.reserve_memory(IO_CHUNK_BYTES as u64)?;
+    let mut buffer = vec![0; IO_CHUNK_BYTES];
+    let mut offset = 0;
+    while offset < source.len() {
+        scope.checkpoint()?;
+        let n = source.read_region(
+            Region {
+                offset,
+                len: source.len() - offset,
+            },
+            &mut buffer,
+        )?;
+        if n == 0 {
+            return Err(invalid("canonical reference extent"));
+        }
+        target.write_chunk(&buffer[..n])?;
+        offset += n as u64;
+    }
+    Ok(())
 }

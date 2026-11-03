@@ -23,7 +23,6 @@ pub struct BoundArchiveRepresentation {
     prior: usize,
     signature_len: u64,
     signature_hash: DigestValue,
-    _memory: ResourceReservation,
     _metadata: ResourceReservation,
 }
 impl BoundArchiveRepresentation {
@@ -108,7 +107,6 @@ impl BoundArchiveRepresentation {
         {
             return Err(EvidenceError::Limit);
         }
-        let memory = scope.reserve_memory(std::mem::size_of::<Self>() as u64)?;
         let metadata = scope.reserve_metadata(std::mem::size_of::<Self>() as u64)?;
         let _working = scope.reserve_memory(3 * IO_CHUNK_BYTES as u64)?;
         let mut input = vec![0; IO_CHUNK_BYTES];
@@ -230,7 +228,6 @@ impl BoundArchiveRepresentation {
             prior,
             signature_len: signer.signature.len() as u64,
             signature_hash: hash.finish(),
-            _memory: memory,
             _metadata: metadata,
         })
     }
@@ -304,4 +301,106 @@ fn compare(
     *matched += n as u64;
     decoded.clear();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        evidence::{EvidenceLimits, EvidenceStore},
+        key::SigAlg,
+        resource::{OperationControl, ProcessingError, Progress, ResourceLimits, SharedBudget},
+    };
+    use std::sync::Arc;
+    struct Control;
+    impl OperationControl for Control {
+        fn checkpoint(&self, _: Progress) -> std::result::Result<(), ProcessingError> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn one_metadata_header_and_three_real_buffers_fit_exact_headroom() {
+        let fixture = oncl_testkit::synthetic("user-rsa-sign");
+        let key = crate::pkcs12::load(&oncl_testkit::read(fixture.path), &fixture.password)
+            .unwrap()
+            .remove(0);
+        let data = b"actual public document for archive admission";
+        let signature = key.key.sign(SigAlg::RsaSha256, data).unwrap();
+        let mut state = HashState::new(HashAlg::Sha256);
+        state.update(data);
+        let signer = SignerEvidence {
+            certificate: &key.cert,
+            algorithm: SigAlg::RsaSha256,
+            signed_digest: state.finish(),
+            signature: &signature,
+            claimed_time: None,
+        };
+        for short in [false, true] {
+            let limits = ResourceLimits::default();
+            let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+            let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let store = crate::io::TemporaryStore::new(dir.path()).unwrap();
+            let evidence_limits = EvidenceLimits {
+                max_items: 4,
+                max_bytes: 1 << 20,
+                max_item_bytes: 1 << 20,
+                max_chain_len: 4,
+                max_proofs: 2,
+                max_coverage_parts: 16,
+                max_coverage_bytes: 1 << 20,
+            };
+            let bytes = format!("<v>{}</v>", STANDARD.encode(&signature)).into_bytes();
+            let mut value_stage = store.stage_source(&mut scope).unwrap();
+            value_stage.write_chunk(&bytes).unwrap();
+            let bound = BoundSignatureRepresentation::from_base64_projection(
+                value_stage,
+                Region {
+                    offset: 0,
+                    len: bytes.len() as u64,
+                },
+                &[Region {
+                    offset: 3,
+                    len: bytes.len() as u64 - 7,
+                }],
+                &signer,
+                &evidence_limits,
+                &scope,
+            )
+            .unwrap();
+            let mut bundle = EvidenceStore::new(store.clone(), evidence_limits, &mut scope)
+                .unwrap()
+                .finish();
+            let mut archive = store.stage_source(&mut scope).unwrap();
+            archive.write_chunk(&bytes).unwrap();
+            let required = std::mem::size_of::<BoundArchiveRepresentation>() as u64
+                + 3 * IO_CHUNK_BYTES as u64;
+            let _ballast = scope
+                .reserve_memory(scope.available_memory() - required + u64::from(short))
+                .unwrap();
+            let result = BoundArchiveRepresentation::from_base64_projections(
+                archive,
+                &bound,
+                Region {
+                    offset: 0,
+                    len: bytes.len() as u64,
+                },
+                &[],
+                &signer,
+                &mut bundle,
+                None,
+                &scope,
+            );
+            if short {
+                assert!(matches!(
+                    result,
+                    Err(EvidenceError::Processing(ProcessingError::MemoryLimit))
+                ));
+            } else {
+                let _bound =
+                    result.expect("one metadata header plus all three actual buffers must fit");
+                assert_eq!(scope.available_memory(), 3 * IO_CHUNK_BYTES as u64);
+            }
+        }
+    }
 }

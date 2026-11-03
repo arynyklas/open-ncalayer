@@ -40,8 +40,9 @@
 //!
 //! [`XmlDocument::canonicalize`] writes external canonical bytes under the output
 //! quota. The indexed/lending raw-span adapter and bounded DOM input adapter use
-//! one canonical writer; signature/reference hashing does not materialize canonical
-//! documents or debit final output. [`C14nProfile::Standard`] uses nearest inherited
+//! one canonical writer. Canonical references may be retained in admitted
+//! temporary files before key opening, never as large RAM buffers or final
+//! output. [`C14nProfile::Standard`] uses nearest inherited
 //! xml:* values and the current enveloped signature only; explicit
 //! [`C14nProfile::KalkanLegacy`] preserves outermost xml:* and cascading-signature
 //! compatibility. The old bounded convenience APIs retain their existing limits.
@@ -65,9 +66,11 @@
 //! SignatureValue. EN 319 132-1 V1.2.1 section 5.5.2.2 non-distributed v1.4.1
 //! ArchiveTimeStamp covers actual transformed references (including properties),
 //! SignedInfo/SignatureValue/KeyInfo, every prior unsigned property and other
-//! Objects, in normative order. Every old/current proof is checked on renewal.
-//! Other archive versions/distributed coverage and multiple independent
-//! signature-time proofs are explicit errors, never a lower-level Valid claim.
+//! Objects, in normative order. The supported proof graph is one optional
+//! SignatureTimeStamp followed by multiple ArchiveTimeStamp renewals; every
+//! present supported proof is checked. Multiple independent SignatureTimeStamp
+//! proofs, other archive versions and distributed coverage are explicit
+//! unsupported errors, never a lower-level Valid claim.
 //! Large XML WSSE and actual 10-GiB/1-GiB-RSS acceptance are not claimed here.
 
 mod c14n;

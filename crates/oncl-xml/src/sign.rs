@@ -81,7 +81,8 @@ pub struct XmlSignSummary {
 pub struct PreparedXmlSign<'a> {
     document: XmlDocument,
     profile: XmlSignProfile<'a>,
-    target: Option<Region>,
+    canonical_reference: oncl_pki::io::StagedArtifact,
+    work_remaining: u64,
     place: Placement,
     has_signatures: bool,
     output_plan: OutputPlan,
@@ -413,6 +414,13 @@ pub fn prepare_source<'a>(
     {
         return Err(ProcessingError::InvalidLimits.into());
     }
+    if !profile
+        .allowed_signature_algorithms
+        .iter()
+        .any(|algorithm| crate::signing_uris(*algorithm).is_some())
+    {
+        return Err(XmlSourceError::AlgorithmDenied);
+    }
     let memory = scope.reserve_memory(profile.max_metadata_bytes as u64 * 4)?;
     let metadata = scope.reserve_metadata(profile.max_metadata_bytes as u64)?;
     let mut document = XmlDocument::index(input, &profile.xml, store, scope)?;
@@ -467,10 +475,36 @@ pub fn prepare_source<'a>(
     }
     let place = placement(&mut document, parent, profile.max_metadata_bytes, scope)?;
     let output_plan = output_plan(&mut document, profile.output, scope)?;
+    // Canonicalization and its actual octet work are key-independent. Retain
+    // admitted source-role bytes, not a detached digest or a trusted flag.
+    let mut canonical_reference = store.stage_source(scope)?;
+    let mut work = profile.max_work;
+    let method = if profile.reference_c14n.is_exclusive() {
+        C14n::Exclusive
+    } else {
+        C14n::Inclusive
+    };
+    document.canonical_append(
+        Options {
+            target,
+            method,
+            profile: profile.canonicalization,
+            prefixes: &[],
+            excluded: &[],
+            metadata_limit: None,
+        },
+        &mut canonical_reference,
+        scope,
+        &mut work,
+    )?;
+    // The key-selected hash must also fit BEFORE a provider can be opened.
+    work.checked_sub(canonical_reference.len())
+        .ok_or(ProcessingError::InvalidInput("reference hash work limit"))?;
     Ok(PreparedXmlSign {
         document,
         profile: profile.clone(),
-        target,
+        canonical_reference,
+        work_remaining: work,
         place,
         output_plan,
         has_signatures: signature_count != 0,
@@ -494,7 +528,8 @@ impl PreparedXmlSign<'_> {
         let Self {
             mut document,
             profile,
-            target,
+            mut canonical_reference,
+            work_remaining: mut work,
             place,
             output_plan,
             _memory,
@@ -517,22 +552,8 @@ impl PreparedXmlSign<'_> {
         {
             return Err(invalid("signed properties ID collision"));
         }
-        let mut work = profile.max_work;
-        // Same-document URI references omit comments even if a transform requests them.
-        let method = if profile.reference_c14n.is_exclusive() {
-            C14n::Exclusive
-        } else {
-            C14n::Inclusive
-        };
-        let digest = document.canonical_digest(
-            Options {
-                target,
-                method,
-                profile: profile.canonicalization,
-                prefixes: &[],
-                excluded: &[],
-                metadata_limit: None,
-            },
+        let digest = crate::xades::source::hash_stage(
+            &mut canonical_reference,
             algorithm.hash_alg(),
             scope,
             &mut work,
@@ -603,11 +624,9 @@ impl PreparedXmlSign<'_> {
         let signature = prepared.xml;
         let signature = if let Some((spec, services)) = ades {
             crate::xades::source::complete_signature(
-                &mut document,
+                &mut canonical_reference,
                 &signature,
                 &place.context,
-                target,
-                method,
                 &oncl_pki::evidence::SignerEvidence {
                     certificate: signer.certificate(),
                     algorithm,

@@ -832,3 +832,245 @@ fn host_evidence_limits_preflight_lta_and_restrict_carried_proofs() {
         Err(oncl_xml::XmlSourceError::Evidence(EvidenceError::Limit))
     ));
 }
+
+#[test]
+fn recognized_archive_and_tsvd_require_exact_signature_location() {
+    use oncl_pki::evidence::AdesLevel;
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    let mut pki = Pki::new("user-rsa-sign");
+    let now = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: None,
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+    };
+    let new_scope = || {
+        let cap = ResourceLimits::default();
+        Arc::new(SharedBudget::new(cap.clone()).unwrap())
+            .begin(cap, Arc::new(Control))
+            .unwrap()
+    };
+    let mut scope = new_scope();
+    let mut bytes = Vec::new();
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level: AdesLevel::B,
+        signing_time: now,
+    };
+    let report = oncl_xml::xades::sign_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><p Id='p'>protected</p><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &mut pki.signer,
+        &services,
+        &mut bytes,
+        &mut scope,
+    )
+    .unwrap();
+    drop(report);
+    drop(scope);
+    let text = String::from_utf8(bytes).unwrap();
+    let archive = "<a:ArchiveTimeStamp xmlns:a='http://uri.etsi.org/01903/v1.4.1#'/>";
+    let tsvd = "<a:TimeStampValidationData xmlns:a='http://uri.etsi.org/01903/v1.4.1#'/>";
+    for (name, mutation) in [
+        (
+            "sibling archive",
+            text.replace("</r>", &format!("{archive}</r>")),
+        ),
+        ("sibling TSVD", text.replace("</r>", &format!("{tsvd}</r>"))),
+        (
+            "Signature TSVD",
+            text.replacen("<ds:Object>", &format!("{tsvd}<ds:Object>"), 1),
+        ),
+        (
+            "Object TSVD",
+            text.replacen("<ds:Object>", &format!("<ds:Object>{tsvd}"), 1),
+        ),
+        (
+            "Object archive",
+            text.replacen("<ds:Object>", &format!("<ds:Object>{archive}"), 1),
+        ),
+    ] {
+        assert!(
+            oncl_xml::verify(mutation.as_bytes()).is_ok(),
+            "stable signed targets must remain cryptographically unchanged: {name}"
+        );
+        let mut scope = new_scope();
+        assert!(
+            verify_source(
+                Source::sequential(&mut Cursor::new(mutation), None),
+                &XmlVerifyProfile::default(),
+                &store,
+                &context,
+                &network,
+                &mut scope
+            )
+            .is_err(),
+            "recognized material was silently ignored: {name}"
+        );
+    }
+}
+
+#[test]
+fn genuine_independent_signature_time_proofs_are_explicitly_unsupported() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use oncl_pki::{digest::HashState, evidence::AdesLevel};
+    use oncl_xml::xades::{XadesServices, XadesSourceSpec};
+    let mut pki = Pki::new("user-rsa-sign");
+    let now = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let services = XadesServices {
+        validation: &context,
+        network: &network,
+        temporary: &store,
+        tsa: Some(&pki.tsa),
+        material: oncl_pki::cms::ades::ValidationMaterial {
+            certificates: &[],
+            ocsp: &[],
+            crls: &[],
+        },
+        evidence_limits: None,
+    };
+    let new_scope = || {
+        let cap = ResourceLimits::default();
+        Arc::new(SharedBudget::new(cap.clone()).unwrap())
+            .begin(cap, Arc::new(Control))
+            .unwrap()
+    };
+    let mut scope = new_scope();
+    let mut bytes = Vec::new();
+    let spec = XadesSourceSpec {
+        xml: XmlSignProfile {
+            target: Some("p"),
+            parent: Some("s"),
+            signature_id: Some("sig"),
+            ..Default::default()
+        },
+        level: AdesLevel::T,
+        signing_time: now,
+    };
+    let report = oncl_xml::xades::sign_source(
+        Source::sequential(
+            &mut Cursor::new(b"<r><p Id='p'>protected</p><s Id='s'/></r>"),
+            None,
+        ),
+        &spec,
+        &mut pki.signer,
+        &services,
+        &mut bytes,
+        &mut scope,
+    )
+    .unwrap();
+    drop(report);
+    drop(scope);
+    let mut scope = new_scope();
+    let mut document = oncl_xml::XmlDocument::index(
+        Source::sequential(&mut Cursor::new(&bytes), None),
+        &oncl_xml::XmlLimits::default(),
+        &store,
+        &mut scope,
+    )
+    .unwrap();
+    let value = document
+        .select_xpath(
+            "//ds:SignatureValue",
+            &[("ds", "http://www.w3.org/2000/09/xmldsig#")],
+            &mut scope,
+        )
+        .unwrap()
+        .unwrap();
+    let mut canonical = Vec::new();
+    document
+        .canonicalize(
+            Some(&value),
+            oncl_xml::C14n::Exclusive,
+            oncl_xml::C14nProfile::Standard,
+            &mut canonical,
+            &mut scope,
+        )
+        .unwrap();
+    drop(document);
+    drop(scope);
+    let mut hash = HashState::new(pki.tsa.hash);
+    hash.update(&canonical);
+    let imprint = hash.finish();
+    let text = String::from_utf8(bytes).unwrap();
+    let parsed = roxmltree::Document::parse(&text).unwrap();
+    let first = STANDARD
+        .decode(
+            parsed
+                .descendants()
+                .find(|n| n.tag_name().name() == "EncapsulatedTimeStamp")
+                .unwrap()
+                .text()
+                .unwrap(),
+        )
+        .unwrap();
+    oncl_pki::tsp::verify_token_imprint(&first, &imprint).unwrap();
+    let second = oncl_pki::tsp::request(&pki.tsa, imprint.as_bytes(), &pki.http)
+        .unwrap()
+        .token;
+    oncl_pki::tsp::verify_token_imprint(&second, &imprint).unwrap();
+    assert_ne!(
+        first, second,
+        "independent genuine requests must not be a duplicated token"
+    );
+    let extra = format!(
+        "<xades:SignatureTimeStamp Id='independent-T-2'><ds:CanonicalizationMethod Algorithm='{}'/><xades:EncapsulatedTimeStamp>{}</xades:EncapsulatedTimeStamp></xades:SignatureTimeStamp>",
+        oncl_xml::C14n::Exclusive.uri(),
+        STANDARD.encode(second)
+    );
+    let mutation = text.replace(
+        "</xades:UnsignedSignatureProperties>",
+        &format!("{extra}</xades:UnsignedSignatureProperties>"),
+    );
+    let mut scope = new_scope();
+    assert!(matches!(
+        verify_source(
+            Source::sequential(&mut Cursor::new(mutation), None),
+            &XmlVerifyProfile::default(),
+            &store,
+            &context,
+            &network,
+            &mut scope
+        ),
+        Err(oncl_xml::XmlSourceError::Unsupported(
+            "multiple independent SignatureTimeStamp proofs"
+        ))
+    ));
+}
