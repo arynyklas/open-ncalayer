@@ -258,7 +258,7 @@ impl BatchRig {
             .capture_batch(
                 [
                     BatchItem::new(
-                        "drive_C:/guest/secret-name",
+                        "guest-private-document.pdf",
                         BatchOperation::Sign {
                             request: SignRequest::raw_message(KeyRequest::new(
                                 &self.selectors[0],

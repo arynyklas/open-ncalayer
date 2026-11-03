@@ -1138,8 +1138,8 @@ fn real_mixed_batch_persists_original_zero_gaps_multi_key_and_nonbatch_ordinals(
     }
     assert!(
         !bytes
-            .windows(b"drive_C:/guest/secret-name".len())
-            .any(|window| window == b"drive_C:/guest/secret-name")
+            .windows(b"guest-private-document.pdf".len())
+            .any(|window| window == b"guest-private-document.pdf")
     );
 }
 
