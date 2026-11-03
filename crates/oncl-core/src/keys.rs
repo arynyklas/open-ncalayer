@@ -104,6 +104,11 @@ impl KeySelector {
             source: Source::Inline(Arc::new(Zeroizing::new(container)), alias),
         }
     }
+    /// Source classification only: no paths, PINs or container bytes escape.
+    /// Hosts must still authorize the exact selector identity before opening.
+    pub fn is_inline(&self) -> bool {
+        matches!(self.source, Source::Inline(..))
+    }
     pub fn named(id: KeyId) -> Self {
         Self {
             id,

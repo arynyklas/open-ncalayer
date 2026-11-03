@@ -1,6 +1,6 @@
 [package]
 name = "oncl-server"
-description = "Durable local private-key audit guard for OpenNCALayer hosts"
+description = "Explicitly enabled bounded standalone OpenNCALayer service"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,9 +9,24 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-oncl-core.workspace = true
 oncl-pki.workspace = true
 getrandom.workspace = true
+oncl-api = { path = "../oncl-api", features = ["server"] }
+oncl-core = { workspace = true, features = ["tokens"] }
+oncl-token.workspace = true
+axum.workspace = true
+hyper = { version = "=1.12.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio", "service"] }
+http-body-util = { version = "=0.1.5", default-features = false }
+tokio = { workspace = true, features = ["sync", "macros", "signal"] }
+tokio-rustls.workspace = true
+rustls.workspace = true
+ring.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 oncl-pki = { workspace = true, features = ["testing"] }
@@ -19,6 +34,9 @@ oncl-testkit.workspace = true
 tempfile.workspace = true
 rsa.workspace = true
 time = { workspace = true, features = ["macros"] }
+oncl-token = { workspace = true, features = ["emulator"] }
+rcgen.workspace = true
+hyper = { version = "=1.12.0", default-features = false, features = ["client", "http1"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }

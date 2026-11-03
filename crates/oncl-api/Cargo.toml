@@ -1,0 +1,17 @@
+[package]
+name = "oncl-api"
+description = "OpenNCALayer HTTP hash DTO and optional server transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+server = ["dep:axum"]
+
+[dependencies]
+serde.workspace = true
+axum = { workspace = true, optional = true }
