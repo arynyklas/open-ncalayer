@@ -86,11 +86,148 @@ pub(crate) enum LegacySpec<'a> {
     Xml(oncl_xml::XmlSignSpec<'a>),
     Xades(oncl_xml::xades::XadesSpec<'a>),
 }
+enum LegacySpecRef<'spec, 'data> {
+    Xml(&'spec oncl_xml::XmlSignSpec<'data>),
+    Xades(&'spec oncl_xml::xades::XadesSpec<'data>),
+}
 enum LegacyPrepared<'a> {
     Xml(oncl_xml::PreparedLegacySign<'a>),
     Xades(oncl_xml::xades::PreparedXadesSpec<'a>),
 }
+// Direct signing and batch admission share actual opaque preparation. Batch
+// drops transient indexes instead of retaining a workspace for every item.
+fn prepare_xml<'a>(
+    input: Source<'_>,
+    mut profile: XmlSignProfile<'a>,
+    level: Option<AdesLevel>,
+    services: &oncl_xml::xades::XadesServices<'_>,
+    scope: &mut oncl_pki::resource::ResourceScope,
+) -> Result<oncl_xml::PreparedXmlSign<'a>, OperationError> {
+    if let Some(level) = level {
+        services.preflight(level, &profile).map_err(error)?;
+        profile.evidence_limits = Some(services.bounded_limits(&profile).map_err(error)?);
+    }
+    let mut prepared = if let Some(level) = level {
+        oncl_xml::xades::prepare_source(
+            input,
+            &oncl_xml::xades::XadesSourceSpec {
+                xml: profile,
+                level,
+                signing_time: services.validation.now,
+            },
+            services.temporary,
+            scope,
+        )
+    } else {
+        oncl_xml::prepare_source(input, &profile, services.temporary, scope)
+    }
+    .map_err(error)?;
+    if let Some(clock) = services.host_clock {
+        prepared.verify_existing_with_clock(services.validation, services.network, clock, scope)
+    } else {
+        prepared.verify_existing(services.validation, services.network, scope)
+    }
+    .map_err(error)?;
+    Ok(prepared)
+}
+fn prepare_legacy<'a>(
+    input: Source<'_>,
+    spec: LegacySpecRef<'_, 'a>,
+    services: &oncl_xml::xades::XadesServices<'_>,
+    scope: &mut oncl_pki::resource::ResourceScope,
+) -> Result<(LegacyPrepared<'a>, SignProfile), OperationError> {
+    match spec {
+        LegacySpecRef::Xml(spec) => Ok((
+            LegacyPrepared::Xml(
+                oncl_xml::prepare_legacy_source(input, spec, services.temporary, scope)
+                    .map_err(error)?,
+            ),
+            SignProfile::Xml,
+        )),
+        LegacySpecRef::Xades(spec) => {
+            let level = match spec.level {
+                oncl_xml::xades::XadesLevel::B => AdesLevel::B,
+                oncl_xml::xades::XadesLevel::T => AdesLevel::T,
+                oncl_xml::xades::XadesLevel::Lt => AdesLevel::Lt,
+            };
+            if level > AdesLevel::B && services.tsa.is_none() {
+                return Err(OperationError::MissingCadesConfiguration);
+            }
+            Ok((
+                LegacyPrepared::Xades(
+                    oncl_xml::xades::prepare_spec_source(
+                        input,
+                        spec,
+                        services.validation.now,
+                        services,
+                        scope,
+                    )
+                    .map_err(error)?,
+                ),
+                SignProfile::Xades(level),
+            ))
+        }
+    }
+}
 impl Engine {
+    /// Admit actual captured XML before provider resolution. No prepared index,
+    /// cached verdict, signing authority or output escapes this extra pass.
+    pub(crate) fn preflight_batch_xml(
+        &self,
+        request: &crate::SignRequest<'_>,
+        input: Source<'_>,
+        ctx: &mut OperationContext,
+    ) -> Result<(), OperationError> {
+        let validation = self.validation_context(ctx, Action::Sign)?;
+        let store = self
+            .temporary
+            .as_ref()
+            .ok_or(OperationError::MissingTemporaryStore)?;
+        let scoped_http = ctx.http(validation.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &validation.network, &ctx.scope);
+        let context = ValidationContext {
+            policy: ValidationPolicy::StrictOnline,
+            now: (validation.clock)(),
+            anchors: &validation.anchors,
+            intermediates: &validation.intermediates,
+            http: &transport,
+        };
+        let services = oncl_xml::xades::XadesServices {
+            validation: &context,
+            network: &validation.network,
+            temporary: store,
+            tsa: self.cades.as_ref().map(|c| &c.tsa),
+            material: ValidationMaterial {
+                certificates: &[],
+                ocsp: &[],
+                crls: &[],
+            },
+            evidence_limits: self.cades.as_ref().map(|c| c.evidence_limits),
+            host_clock: Some(validation.clock.as_ref()),
+        };
+        use crate::request::SignMode;
+        let result = match &request.mode {
+            SignMode::Xml(_, profile, level) => {
+                let mut profile = profile.clone();
+                profile.allowed_signature_algorithms = intersect(
+                    profile.allowed_signature_algorithms,
+                    ctx.policy.allowed_signature_algorithms,
+                );
+                prepare_xml(input, profile, *level, &services, &mut ctx.scope).map(drop)
+            }
+            SignMode::XmlLegacy(_, spec) => {
+                prepare_legacy(input, LegacySpecRef::Xml(spec), &services, &mut ctx.scope).map(drop)
+            }
+            SignMode::XadesLegacy(_, spec) => {
+                prepare_legacy(input, LegacySpecRef::Xades(spec), &services, &mut ctx.scope)
+                    .map(drop)
+            }
+            _ => Err(ProcessingError::InvalidInput("XML batch preparation mode").into()),
+        };
+        transport.finish()?;
+        ctx.scope.checkpoint()?;
+        result
+    }
     pub(crate) fn sign_xml_legacy_operation(
         &self,
         key: KeyRequest<'_>,
@@ -129,8 +266,8 @@ impl Engine {
             .temporary
             .as_ref()
             .ok_or(OperationError::MissingTemporaryStore)?;
-        let transport =
-            DeadlineTransport::new(validation.http.as_ref(), &validation.network, &ctx.scope);
+        let scoped_http = ctx.http(validation.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &validation.network, &ctx.scope);
         let context = ValidationContext {
             policy: ValidationPolicy::StrictOnline,
             now: (validation.clock)(),
@@ -151,38 +288,12 @@ impl Engine {
             evidence_limits: self.cades.as_ref().map(|c| c.evidence_limits),
             host_clock: Some(validation.clock.as_ref()),
         };
-        let (prepared, report_profile) = match spec {
-            LegacySpec::Xml(spec) => (
-                LegacyPrepared::Xml(
-                    oncl_xml::prepare_legacy_source(input, &spec, store, &mut ctx.scope)
-                        .map_err(error)?,
-                ),
-                SignProfile::Xml,
-            ),
-            LegacySpec::Xades(spec) => {
-                let level = match spec.level {
-                    oncl_xml::xades::XadesLevel::B => AdesLevel::B,
-                    oncl_xml::xades::XadesLevel::T => AdesLevel::T,
-                    oncl_xml::xades::XadesLevel::Lt => AdesLevel::Lt,
-                };
-                if level > AdesLevel::B && self.cades.is_none() {
-                    return Err(OperationError::MissingCadesConfiguration);
-                }
-                (
-                    LegacyPrepared::Xades(
-                        oncl_xml::xades::prepare_spec_source(
-                            input,
-                            &spec,
-                            context.now,
-                            &services,
-                            &mut ctx.scope,
-                        )
-                        .map_err(error)?,
-                    ),
-                    SignProfile::Xades(level),
-                )
-            }
+        let borrowed = match &spec {
+            LegacySpec::Xml(spec) => LegacySpecRef::Xml(spec),
+            LegacySpec::Xades(spec) => LegacySpecRef::Xades(spec),
         };
+        let (prepared, report_profile) =
+            prepare_legacy(input, borrowed, &services, &mut ctx.scope)?;
         let index = self.prepare_sign_keys(std::slice::from_ref(&key), ctx, Action::Sign)?[0];
         let mut signer = self.operation_signer(index, ctx, Action::Sign)?;
         let mut tracked = TrackedSigner {
@@ -293,8 +404,8 @@ impl Engine {
             profile.allowed_signature_algorithms,
             ctx.policy.allowed_signature_algorithms,
         );
-        let transport =
-            DeadlineTransport::new(validation.http.as_ref(), &validation.network, &ctx.scope);
+        let scoped_http = ctx.http(validation.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &validation.network, &ctx.scope);
         let context = ValidationContext {
             policy: ValidationPolicy::StrictOnline,
             now: (validation.clock)(),
@@ -315,35 +426,9 @@ impl Engine {
             evidence_limits: self.cades.as_ref().map(|c| c.evidence_limits),
             host_clock: Some(validation.clock.as_ref()),
         };
-        if let Some(level) = level {
-            xml_services.preflight(level, &profile).map_err(error)?;
-            profile.evidence_limits = Some(xml_services.bounded_limits(&profile).map_err(error)?);
-        }
-        // Parse unique IDs/placement/transforms and every existing signer BEFORE
-        // opening a key. The opaque prepared source owns the exact frozen bytes.
-        let mut prepared = if let Some(level) = level {
-            oncl_xml::xades::prepare_source(
-                input,
-                &oncl_xml::xades::XadesSourceSpec {
-                    xml: profile,
-                    level,
-                    signing_time: context.now,
-                },
-                store,
-                &mut ctx.scope,
-            )
-        } else {
-            oncl_xml::prepare_source(input, &profile, store, &mut ctx.scope)
-        }
-        .map_err(error)?;
-        prepared
-            .verify_existing_with_clock(
-                &context,
-                &validation.network,
-                validation.clock.as_ref(),
-                &mut ctx.scope,
-            )
-            .map_err(error)?;
+        // The same actual preparation admits batch sources before provider
+        // resolution. Dispatch deliberately repeats it without a verdict cache.
+        let prepared = prepare_xml(input, profile, level, &xml_services, &mut ctx.scope)?;
         transport.finish()?;
         let index = self.prepare_sign_keys(std::slice::from_ref(&key), ctx, Action::Sign)?[0];
         let mut signer = self.operation_signer(index, ctx, Action::Sign)?;
@@ -433,8 +518,8 @@ impl Engine {
         if level > AdesLevel::B && self.cades.is_none() {
             return Err(OperationError::MissingCadesConfiguration);
         }
-        let transport =
-            DeadlineTransport::new(validation.http.as_ref(), &validation.network, &ctx.scope);
+        let scoped_http = ctx.http(validation.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &validation.network, &ctx.scope);
         let context = ValidationContext {
             policy: ValidationPolicy::StrictOnline,
             now: (validation.clock)(),

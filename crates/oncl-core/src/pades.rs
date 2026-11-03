@@ -59,6 +59,7 @@ impl Engine {
         };
         let services = AdesServices {
             validation: &validation,
+            host_clock: Some(host.clock.as_ref()),
             network: &host.network,
             temporary,
             limits,
@@ -128,6 +129,7 @@ impl Engine {
         };
         let services = AdesServices {
             validation: &validation,
+            host_clock: Some(host.clock.as_ref()),
             network: &host.network,
             temporary,
             limits,

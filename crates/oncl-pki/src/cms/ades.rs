@@ -952,7 +952,7 @@ fn verify_frozen_impl(
     let mut reports = Vec::with_capacity(signer_bytes.len());
     let mut minimum = AdesLevel::Lta;
     // Data/source digests and issuance precede one shared final policy instant.
-    let final_context = services.validation_context();
+    let mut final_context = services.validation_context();
     for (index, encoded) in signer_bytes.iter().enumerate() {
         scope.checkpoint()?;
         let raw = RawSigner::new(encoded)?;
@@ -1024,12 +1024,10 @@ fn verify_frozen_impl(
         minimum = minimum.min(level);
         let signature_coverage = [CoveragePart::Signature];
         if prepared_evidence.is_none() {
-            *prepared_evidence = Some(prepare_evidence(
-                &evidence,
-                bundle,
-                &final_context,
-                scope,
-            )?);
+            *prepared_evidence = Some(prepare_evidence(&evidence, bundle, &final_context, scope)?);
+        }
+        if let Some(pdf) = pdf {
+            final_context = pdf.validation_context(services)?;
         }
         if required_certificates.iter().any(|id| {
             !prepared_evidence
@@ -1351,9 +1349,9 @@ pub(crate) fn request_imprint(
     let metadata = scope.reserve_metadata(crate::http::MAX_RESPONSE_LEN * 16)?;
     let http = DeadlineTransport::new(services.validation.http, services.network, scope);
     let result = if let Some(clock) = services.host_clock {
-        crate::tsp::request_with_clock(spec, imprint.as_bytes(), &http, clock).and_then(
+        crate::tsp::request_with_clock_scoped(spec, imprint.as_bytes(), &http, clock).and_then(
             |(reply, checked_at)| {
-                if reply.tst.gen_time > checked_at {
+                if reply.reply.tst.gen_time > checked_at {
                     Err(crate::tsp::TspError::ClockSkew)
                 } else {
                     Ok(reply)
@@ -1361,11 +1359,12 @@ pub(crate) fn request_imprint(
             },
         )
     } else {
-        crate::tsp::request_at(spec, imprint.as_bytes(), &http, services.validation.now)
+        crate::tsp::request_at_scoped(spec, imprint.as_bytes(), &http, services.validation.now)
     };
     http.finish()?;
+    let reply = result?;
     Ok(ScopedToken {
-        bytes: result?.token,
+        bytes: reply.reply.token.clone(),
         _memory: memory,
         _metadata: metadata,
     })

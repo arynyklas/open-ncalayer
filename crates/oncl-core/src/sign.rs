@@ -634,6 +634,7 @@ fn pades_sign(
         limits,
         tsa: engine.cades.as_ref().map(|c| &c.tsa),
         material,
+        host_clock: Some(host.clock.as_ref()),
     };
     match output {
         Output::Staged(stage) => {

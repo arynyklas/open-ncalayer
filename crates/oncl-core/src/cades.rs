@@ -38,21 +38,29 @@ pub struct ExtendRequest<'a> {
     pub(crate) detached: RefCell<Option<Source<'a>>>,
     pub(crate) detached_requested: bool,
     pub(crate) limits: Option<EvidenceLimits>,
+    pub(crate) format: ExtendFormat,
+}
+pub(crate) enum ExtendFormat {
+    Cms,
     #[cfg(feature = "pdf")]
-    pub(crate) pdf_limits: Option<oncl_pdf::PdfLimits>,
+    Pdf(oncl_pdf::PdfLimits),
     #[cfg(feature = "xml")]
-    pub(crate) xml: Option<oncl_xml::XmlVerifyProfile>,
+    Xml(oncl_xml::XmlVerifyProfile),
 }
 impl<'a> ExtendRequest<'a> {
     #[cfg(feature = "xml")]
     pub fn xml(level: AdesLevel) -> Self {
         let mut request = Self::cms(level);
-        request.xml = Some(oncl_xml::XmlVerifyProfile::default());
+        request.format = ExtendFormat::Xml(oncl_xml::XmlVerifyProfile::default());
         request
     }
     #[cfg(feature = "xml")]
     pub fn with_xml_profile(mut self, profile: oncl_xml::XmlVerifyProfile) -> Self {
-        self.xml = Some(profile);
+        #[cfg(feature = "pdf")]
+        if matches!(self.format, ExtendFormat::Pdf(_)) {
+            return self;
+        }
+        self.format = ExtendFormat::Xml(profile);
         self
     }
     pub fn cms(level: AdesLevel) -> Self {
@@ -66,16 +74,13 @@ impl<'a> ExtendRequest<'a> {
             detached: RefCell::new(None),
             detached_requested: false,
             limits: None,
-            #[cfg(feature = "pdf")]
-            pdf_limits: None,
-            #[cfg(feature = "xml")]
-            xml: None,
+            format: ExtendFormat::Cms,
         }
     }
     #[cfg(feature = "pdf")]
     pub fn pdf(level: AdesLevel, limits: oncl_pdf::PdfLimits) -> Self {
         Self {
-            pdf_limits: Some(limits),
+            format: ExtendFormat::Pdf(limits),
             ..Self::cms(level)
         }
     }
@@ -154,7 +159,7 @@ impl Engine {
         ctx: &mut OperationContext,
     ) -> Result<OperationReport, OperationError> {
         #[cfg(feature = "pdf")]
-        if let Some(limits) = &request.pdf_limits {
+        if let ExtendFormat::Pdf(limits) = &request.format {
             if request.detached_requested {
                 return Err(
                     ProcessingError::InvalidInput("PAdES does not accept detached input").into(),
@@ -163,7 +168,7 @@ impl Engine {
             return self.extend_pades(request, limits, input, output, staged, ctx);
         }
         #[cfg(feature = "xml")]
-        if let Some(profile) = &request.xml {
+        if let ExtendFormat::Xml(profile) = &request.format {
             if request.detached_requested {
                 return Err(
                     ProcessingError::InvalidInput("XML does not accept detached input").into(),

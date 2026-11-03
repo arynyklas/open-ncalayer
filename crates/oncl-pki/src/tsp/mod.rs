@@ -18,7 +18,9 @@ mod document;
 #[cfg(feature = "testing")]
 mod mock;
 pub use document::{
-    DocumentImprint, DocumentTimestamp, acquire_document_timestamp, validate_document_token,
+    DocumentImprint, DocumentTimestamp, acquire_document_timestamp,
+    acquire_document_timestamp_with_clock, validate_document_token,
+    validate_document_token_with_clock,
 };
 
 #[cfg(feature = "testing")]
@@ -31,7 +33,7 @@ use crate::cms::asn1::{
     Attribute, ContentInfo, RawSet, SignedContentInfo, SignedData, SignerInfo, der_set_contents,
 };
 use crate::cms::{self, CmsError};
-use crate::http::{GetOptions, HttpError, HttpTransport, NetKind, NonceSpec, PkiMethod, pki_send};
+use crate::http::{GetOptions, HttpError, HttpTransport, NetKind, NonceSpec, PkiMethod};
 use crate::info::cert_info;
 use crate::key::{HashAlg, SigAlg};
 use crate::oid;
@@ -225,6 +227,22 @@ pub struct TspReply {
     pub tst: TstInfo,
     /// The certificate that signed the token.
     pub tsa_cert: Certificate,
+}
+
+pub(crate) struct ScopedTspReply<'a> {
+    pub(crate) reply: TspReply,
+    _answer: crate::http::ScopedHttpReply<'a>,
+    _decode: Option<crate::http::DecodeGuard<'a>>,
+}
+impl ScopedTspReply<'_> {
+    fn into_legacy(mut self) -> Result<TspReply, TspError> {
+        self.reply.response = if self._decode.is_none() {
+            self._answer.into_unscoped().map_err(TspError::from)?.body
+        } else {
+            self._answer.body().to_vec()
+        };
+        Ok(self.reply)
+    }
 }
 
 impl TspHash {
@@ -564,15 +582,6 @@ pub fn request(
     request_clock(spec, imprint, http, RequestTime::System).map(|(reply, _)| reply)
 }
 
-pub(crate) fn request_at(
-    spec: &TsaSpec,
-    imprint: &[u8],
-    http: &dyn HttpTransport,
-    now: OffsetDateTime,
-) -> Result<TspReply, TspError> {
-    request_clock(spec, imprint, http, RequestTime::AsOf(now)).map(|(reply, _)| reply)
-}
-
 /// Use a trusted host clock sampled after the actual reply. The returned
 /// acquisition time is ordinary host metadata, not ProofTime or a trust fact;
 /// callers still run the shared PKI/format validation. No wire clock is read.
@@ -598,12 +607,38 @@ impl RequestTime<'_> {
         }
     }
 }
+
+pub(crate) fn request_with_clock_scoped<'a>(
+    spec: &TsaSpec,
+    imprint: &[u8],
+    http: &'a dyn HttpTransport,
+    clock: &(dyn Fn() -> OffsetDateTime + Send + Sync),
+) -> Result<(ScopedTspReply<'a>, OffsetDateTime), TspError> {
+    request_clock_scoped(spec, imprint, http, RequestTime::Host(clock))
+}
+pub(crate) fn request_at_scoped<'a>(
+    spec: &TsaSpec,
+    imprint: &[u8],
+    http: &'a dyn HttpTransport,
+    now: OffsetDateTime,
+) -> Result<ScopedTspReply<'a>, TspError> {
+    request_clock_scoped(spec, imprint, http, RequestTime::AsOf(now)).map(|(reply, _)| reply)
+}
 fn request_clock(
     spec: &TsaSpec,
     imprint: &[u8],
     http: &dyn HttpTransport,
     clock: RequestTime<'_>,
 ) -> Result<(TspReply, OffsetDateTime), TspError> {
+    request_clock_scoped(spec, imprint, http, clock)
+        .and_then(|(reply, checked_at)| reply.into_legacy().map(|reply| (reply, checked_at)))
+}
+fn request_clock_scoped<'a>(
+    spec: &TsaSpec,
+    imprint: &[u8],
+    http: &'a dyn HttpTransport,
+    clock: RequestTime<'_>,
+) -> Result<(ScopedTspReply<'a>, OffsetDateTime), TspError> {
     let nonce = spec.nonce.draw();
     let request = request_spec_der(spec, imprint, nonce.as_deref());
     let opts = GetOptions {
@@ -615,8 +650,8 @@ fn request_clock(
         _ => None,
     };
     let mut attempt = 0;
-    let body = loop {
-        let answer = pki_send(
+    let answer = loop {
+        let answer = crate::http::pki_send_scoped(
             http,
             &spec.method,
             &spec.url,
@@ -626,20 +661,23 @@ fn request_clock(
         )
         .map_err(TspError::from)
         .and_then(|reply| {
-            if reply.status != 200 {
-                return Err(TspError::Status(reply.status));
+            if reply.status() != 200 {
+                return Err(TspError::Status(reply.status()));
             }
-            if !is_timestamp_reply(reply.content_type.as_deref()) {
-                return Err(TspError::ContentType(reply.content_type));
+            if !is_timestamp_reply(reply.content_type()) {
+                return Err(TspError::ContentType(
+                    reply.content_type().map(str::to_owned),
+                ));
             }
-            Ok(reply.body)
+            Ok(reply)
         });
         match answer {
             Err(_) if attempt < spec.retries => attempt += 1,
             answer => break answer?,
         }
     };
-    let (token, tst, tsa_cert) = parse_response_signed(&body, spec.require_tsa_eku)?;
+    let decode = answer.reserve_decode().map_err(TspError::from)?;
+    let (token, tst, tsa_cert) = parse_response_signed(answer.body(), spec.require_tsa_eku)?;
     check_answers(&tst, spec, imprint, nonce.as_deref())?;
     let checked_at = clock.sample();
     if host_start.is_some_and(|started| checked_at < started) {
@@ -651,11 +689,15 @@ fn request_clock(
         return Err(TspError::ClockSkew);
     }
     Ok((
-        TspReply {
-            response: body,
-            token,
-            tst,
-            tsa_cert,
+        ScopedTspReply {
+            reply: TspReply {
+                response: Vec::new(),
+                token,
+                tst,
+                tsa_cert,
+            },
+            _answer: answer,
+            _decode: decode,
         },
         checked_at,
     ))

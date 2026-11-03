@@ -328,12 +328,14 @@ impl EvidenceStore {
         let _metadata = self.bundle.scope.reserve_metadata(MAX_RESPONSE_LEN * 2)?;
         let http = DeadlineTransport::new(ctx.http, network, &self.bundle.scope);
         let result = if let Some(clock) = clock {
-            tsp::request_with_clock(spec, imprint.as_bytes(), &http, clock)
+            tsp::request_with_clock_scoped(spec, imprint.as_bytes(), &http, clock)
         } else {
-            tsp::request_at(spec, imprint.as_bytes(), &http, ctx.now).map(|reply| (reply, ctx.now))
+            tsp::request_at_scoped(spec, imprint.as_bytes(), &http, ctx.now)
+                .map(|reply| (reply, ctx.now))
         };
         http.finish()?;
-        let (reply, checked_at) = result?;
+        let (scoped_reply, checked_at) = result?;
+        let reply = &scoped_reply.reply;
         if reply.tst.gen_time > checked_at {
             return Err(TspError::ClockSkew.into());
         }

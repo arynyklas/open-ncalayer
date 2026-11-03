@@ -435,11 +435,13 @@ impl FrozenInput {
         decode_region(
             region,
             scope,
-            &self.identity,
-            &self.stage.scope.retain(),
+            DecodeOrigin {
+                identity: &self.identity,
+                scope: &self.stage.scope.retain(),
+                output_derived: self.output_derived,
+                format_specific: self.pending_format || self.classification.is_some(),
+            },
             encoding,
-            self.output_derived,
-            self.pending_format || self.classification.is_some(),
             |region, out| self.stage.read_region(region, out),
         )
     }
@@ -465,16 +467,26 @@ impl FrozenInput {
     }
 }
 
+pub(super) struct DecodeOrigin<'a> {
+    pub identity: &'a Arc<()>,
+    pub scope: &'a ResourceScope,
+    pub output_derived: bool,
+    pub format_specific: bool,
+}
+
 pub(super) fn decode_region(
     region: Region,
     scope: &ResourceScope,
-    identity: &Arc<()>,
-    owner: &ResourceScope,
+    origin: DecodeOrigin<'_>,
     encoding: SnapshotEncoding,
-    output_derived: bool,
-    format_specific: bool,
     mut read: impl FnMut(Region, &mut [u8]) -> Result<usize, ProcessingError>,
 ) -> Result<DerivedInput, ProcessingError> {
+    let DecodeOrigin {
+        identity,
+        scope: owner,
+        output_derived,
+        format_specific,
+    } = origin;
     owner.checkpoint()?;
     scope.checkpoint()?;
     scope.account_container(region.len)?;

@@ -126,11 +126,13 @@ impl<'a> PdfSnapshot<'a> {
         super::frozen::decode_region(
             region,
             scope,
-            &identity,
-            &owner,
+            super::frozen::DecodeOrigin {
+                identity: &identity,
+                scope: &owner,
+                output_derived,
+                format_specific: false,
+            },
             encoding,
-            output_derived,
-            false,
             |region, out| self.read_region(region, out),
         )
     }
