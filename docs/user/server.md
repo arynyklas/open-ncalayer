@@ -1,4 +1,4 @@
-# Standalone HTTP hash service
+# Standalone HTTP service
 
 `oncl-server` is independent of desktop settings, dialogs, OS vaults, trust-store
 installation and autostart. Starting it without a subcommand does not open a
@@ -81,8 +81,8 @@ stopped; persistent audit files are retained, not deleted at shutdown.
 Only these routes exist:
 
 * `POST /v1/hash`: raw binary request body, SHA-256, authenticated hash ACL.
-* `POST /v1/operations`: typed JSON-small or metadata-first multipart hashing;
-  see [the HTTP request contract](http-api.md).
+* `POST /v1/operations`: typed JSON-small or metadata-first multipart hashing and
+  verification; see [the HTTP request contract](http-api.md).
 * `GET /health`: authenticated hash ACL; reports the actual local audit health.
 
 Send `Authorization: Bearer <token-file-content>`, the configured `Host`, and the
@@ -178,8 +178,9 @@ its authenticated principal to the original operation before private use. The
 durable guard synchronizes BEGIN before the actual key call. A FINAL failure after
 private use remains Applied/Unknown and blocks further private work; output is not
 published as success. No allow-all guard or second audit journal is installed.
-Strict server policy remains strict; this hash-only binary does not pretend to
-configure missing private-operation validation services.
+Strict server policy remains strict. Public verification defaults to an empty
+trust set and denied PKI network, not a fabricated trusted verdict. Private HTTP
+routes are not advertised by these public operations.
 
 A newly created journal starts healthy. An existing journal requires an explicit
 operator `recover_audit = true` restart; recovery rejects complete corruption,

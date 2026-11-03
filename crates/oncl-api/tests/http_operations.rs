@@ -282,3 +282,145 @@ async fn oversized_epilogue_is_rejected_without_waiting_for_declared_tail() {
     );
     service.stop().await;
 }
+
+fn signed_cms(data: &[u8]) -> Vec<u8> {
+    use oncl_pki::cms::{self, AttrSpec, CertSpec, CoSign, Content, SignSpec};
+    let fixture = oncl_testkit::synthetic("user-rsa-sign");
+    let key = oncl_pki::pkcs12::load(&oncl_testkit::read(&fixture.path), &fixture.password)
+        .unwrap()
+        .remove(0);
+    cms::sign_spec(
+        &key,
+        &[],
+        &SignSpec {
+            content: Content::Data(data),
+            encapsulate: true,
+            cosign: CoSign::Never,
+            econtent_type: None,
+            digest: None,
+            attrs: AttrSpec {
+                content_type: true,
+                message_digest: true,
+                signing_certificate_v2: true,
+                signing_time: None,
+                extra: vec![],
+            },
+            certificates: CertSpec::Chain,
+        },
+    )
+    .unwrap()
+}
+fn verification_multipart(cms: &[u8]) -> Vec<u8> {
+    let metadata = r#"{"items":[{"id":"verification","operation":{"kind":"verify","profile":"cms","input":"signature"}}],"parts":[{"name":"signature","item_id":"verification","role":"document"}]}"#;
+    let mut body=format!("--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--b\r\nContent-Disposition: form-data; name=\"signature\"\r\n\r\n").into_bytes();
+    body.extend_from_slice(cms);
+    body.extend_from_slice(b"\r\n--b--\r\n");
+    body
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn json_bad_signature_is_completed_report() {
+    let service = Running::start_with(|c| {
+        c.tokens[0].actions.push(Permission::Verify);
+        c.metadata_bytes = 67_108_864;
+    })
+    .await;
+    let data = b"actual HTTP verification original bytes";
+    let mut cms = signed_cms(data);
+    let offset = cms.windows(data.len()).position(|w| w == data).unwrap();
+    cms[offset] ^= 1;
+    let (status, response) = service.chunked(&verification_multipart(&cms), 3).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.contains("\"status\":\"completed\""), "{text}");
+    assert!(text.contains("\"verdict\":\"Invalid\""), "{text}");
+    assert!(text.contains("\"signature\":\"Failed\""), "{text}");
+    service.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_verify_action_is_authorized_before_document_intake() {
+    let service = Running::start().await;
+    let cms = signed_cms(b"unprivileged verification");
+    let (status, response) = service.chunked(&verification_multipart(&cms), 65536).await;
+    assert_eq!(status, 403, "{}", String::from_utf8_lossy(&response));
+    service.stop().await;
+}
+
+async fn unsent_tail(service: &Running, prefix: &[u8]) -> String {
+    let mut stream = tokio::net::TcpStream::connect(service.address)
+        .await
+        .unwrap();
+    let headers = format!(
+        "POST /v1/operations HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        service.address,
+        service.token.as_str(),
+        prefix.len() + 10000
+    );
+    stream.write_all(headers.as_bytes()).await.unwrap();
+    stream.write_all(prefix).await.unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    String::from_utf8(response).unwrap()
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proven_overlimit_part_headers_refuse_before_waiting_for_document() {
+    let service = Running::start_with(|c| {
+        c.framing_bytes = 512;
+        c.operation_timeout_ms = 500;
+        c.header_timeout_ms = 100;
+        c.admission_wait_ms = 100;
+    })
+    .await;
+    let metadata = r#"{"items":[{"id":"x","operation":{"kind":"hash","algorithm":"sha256","input":"doc"}}],"parts":[{"name":"doc","item_id":"x","role":"document"}]}"#;
+    for ending in ["", "\r\n\r\n"] {
+        let prefix = format!(
+            "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--b\r\nContent-Disposition: form-data; name=\"doc\"\r\nX-Padding: {}{ending}",
+            "x".repeat(1024)
+        );
+        let response = unsent_tail(&service, prefix.as_bytes()).await;
+        assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+        assert!(response.contains("\"code\":\"FramingLimit\""), "{response}");
+    }
+    service.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exhausted_header_credit_is_typed_resource_not_malformed_request() {
+    let service = Running::start_with(|c| {
+        c.operation_timeout_ms = 500;
+        c.header_timeout_ms = 100;
+        c.admission_wait_ms = 100;
+    })
+    .await;
+    let prefix = format!(
+        "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\nX-Padding: {}",
+        "x".repeat(9000)
+    );
+    let response = unsent_tail(&service, prefix.as_bytes()).await;
+    assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+    assert!(
+        response.contains("\"code\":\"MetadataLimit\""),
+        "{response}"
+    );
+    service.stop().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_wire_overflow_inside_metadata_keeps_original_limit() {
+    let service = Running::start_with(|c| {
+        c.input_bytes = 1;
+        c.framing_bytes = 512;
+        c.metadata_bytes = 67_108_864;
+    })
+    .await;
+    let metadata = r#"{"items":[{"id":"x","operation":{"kind":"hash","algorithm":"sha256","input":"doc"}}],"parts":[{"name":"doc","item_id":"x","role":"document"}]}"#;
+    let metadata = format!("{}{}", " ".repeat(65520 - metadata.len()), metadata);
+    let body = format!(
+        "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--b\r\nContent-Disposition: form-data; name=\"doc\"\r\n\r\n{}\r\n--b--\r\n",
+        "x".repeat(2048)
+    );
+    let (status, response) = service.chunked(body.as_bytes(), 65536).await;
+    assert_eq!(status, 413, "{}", String::from_utf8_lossy(&response));
+    assert!(String::from_utf8_lossy(&response).contains("\"code\":\"FramingLimit\""));
+    service.stop().await;
+}

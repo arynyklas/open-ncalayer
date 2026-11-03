@@ -12,7 +12,7 @@ publish.workspace = true
 oncl-pki.workspace = true
 getrandom.workspace = true
 oncl-api = { path = "../oncl-api", features = ["server"] }
-oncl-core = { workspace = true, features = ["tokens"] }
+oncl-core = { workspace = true, features = ["tokens", "xml", "pdf", "jose", "plugins"] }
 oncl-token.workspace = true
 axum.workspace = true
 hyper = { version = "=1.12.0", default-features = false, features = ["http1", "server"] }
@@ -28,7 +28,8 @@ serde_json.workspace = true
 toml.workspace = true
 zeroize.workspace = true
 futures-util.workspace = true
-multer = { version = "=3.1.0", default-features = false }
+multer.workspace = true
+time.workspace = true
 
 [dev-dependencies]
 oncl-pki = { workspace = true, features = ["testing"] }

@@ -28,10 +28,25 @@ errors. Item and part identifiers contain 1–128 ASCII letters, digits, `_` or 
 }
 ```
 
-The implemented typed operation is `hash`. Its explicit algorithm is one of
+The typed `hash` operation's explicit algorithm is one of
 `sha1`, `sha256`, `sha512`, `gost34311`, `streebog256`, `streebog512`; an algorithm
 is not inferred from a filename or document contents. A hash request needs the
 `hash` action and cannot select a key. Hashing SHA-1 is not signing permission.
+
+`verify` requires the distinct `verify` token action before document intake. Its
+metadata is `{"kind":"verify","profile":"cms","input":"signature"}`; optional
+`detached` names a second declared public document. Available SDK profiles are
+`cms`, `cades_b`, `cades_t`, `cades_lt`, `cades_lta`, `pdf`, `pades_b`, `pades_t`,
+`pades_lt`, `pades_lta`, `xml`, and `xml_kalkan`. These select the actual verifier,
+not a filename guess. No wire roots, validation mode or network privileges are
+accepted. The service's default trust set is empty and PKI network is denied;
+this does not promote a valid cryptographic signature to trusted validity.
+
+A cryptographically invalid signature is a completed HTTP 200 result with
+`kind:"verification"` and `verdict:"Invalid"`, not HTTP 500. Results carry actual
+per-signer signature, chain, validity, revocation, timestamp and key-usage checks,
+the host policy, checked time and time basis. Diagnostic reasons are explanatory
+text, not additional authorization or a replacement for the typed check fields.
 
 ## Metadata-first multipart
 
@@ -74,6 +89,14 @@ Document bytes and framing overhead have separate quotas. Closing-delimiter
 read-ahead and remaining HTTP entity bytes are also counted, so an oversized
 epilogue cannot borrow an unused document allowance or wait out an advertised
 tail before being refused.
+Raw framing is now observed at the pinned parser's existing byte-consumption
+transitions, including proven partial headers and preambles, before further body
+waiting or header-map allocation. An over-budget complete or partial part header
+is `FramingLimit`/413 even when its document body is never sent. Exhausting the
+separate header admission cap is `MetadataLimit`/413; malformed/truncated framing
+remains `InvalidRequest`/400. The first owned transport/resource/control cause is
+retained through parser and synchronous field-reader boundaries, never inferred
+from error text or replaced by a later cancellation.
 
 The implementation uses pinned `multer` 3.1.0 for multipart parsing. Its feeder
 admits at most 8,192 new bytes while parsing unknown-role headers/preamble, in
@@ -97,8 +120,8 @@ A completed typed hash response has `Content-Type: application/json`:
 The operation ID varies; item IDs echo the validated metadata. Item `bytes_in`
 counts the actual document bytes, including immutable uploaded snapshots; replay
 does not debit the original input quota a second time. Only a complete terminal
-result is success. This typed hash transport does not advertise an unused
-progress stream or binary-artifact protocol.
+result is success. This transport does not advertise an unused progress stream
+or binary-artifact protocol.
 
 Before a completed response, execution failures use the stable `code` and
 `applied` envelope from the raw service: 403 PermissionDenied, 400 InvalidRequest,
@@ -111,7 +134,7 @@ the original deadline and shared budgets. Dropping a response does not make a
 still-running worker free, and retaining/cloning response bytes retains their
 original reservation/root until the actual final drop.
 
-The full Task24 private/signature/verification/timestamp/plugin/artifact/batch
-HTTP acceptance is not asserted by this hash transport. Encryption additionally
+The full Task24 private/signature/timestamp/plugin/artifact/batch HTTP acceptance
+is not asserted by these public operations. Encryption additionally
 requires the real external GOST backend contract; there are no fabricated
 `encrypt`/`decrypt` routes returning generic Unsupported success.

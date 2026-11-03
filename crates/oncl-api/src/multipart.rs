@@ -14,9 +14,20 @@ const FEED_BYTES: usize = 4096;
 const HEADER_CREDIT: usize = 8192;
 const MAX_PARTS: usize = 128;
 
+#[derive(Clone, Copy)]
+pub enum AdmissionLimit {
+    Header,
+    WholeStream,
+}
+/// Trusted host bookkeeping only; it cannot modify bytes, fields or authority.
+pub trait IntakeObserver: multer::FramingObserver {
+    fn admission_limit(&self, limit: AdmissionLimit);
+}
+
 #[derive(Default)]
 struct Admission {
     header_credit: Option<usize>,
+    observer: Option<Arc<dyn IntakeObserver>>,
 }
 struct Feeder<S> {
     input: Pin<Box<S>>,
@@ -57,10 +68,16 @@ where
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if this.remaining < count as u64 {
+            if let Some(observer) = &state.observer {
+                observer.admission_limit(AdmissionLimit::WholeStream);
+            }
             return Poll::Ready(Some(Err(io::Error::other("multipart framing limit"))));
         }
         if let Some(credit) = state.header_credit.as_mut() {
             if *credit < count {
+                if let Some(observer) = &state.observer {
+                    observer.admission_limit(AdmissionLimit::Header);
+                }
                 return Poll::Ready(Some(Err(io::Error::other("multipart header limit"))));
             }
             *credit -= count;
@@ -92,6 +109,32 @@ impl<'a> BoundedMultipart<'a> {
         S: Stream<Item = Result<Bytes, E>> + Send + 'a,
         E: Into<Box<dyn std::error::Error + Send + Sync>> + 'a,
     {
+        Self::create(input, boundary, framing_bytes, allowed, None)
+    }
+    pub fn new_observed<S, E>(
+        input: S,
+        boundary: &str,
+        framing_bytes: u64,
+        allowed: &[&str],
+        observer: Arc<dyn IntakeObserver>,
+    ) -> io::Result<Self>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Send + 'a,
+        E: Into<Box<dyn std::error::Error + Send + Sync>> + 'a,
+    {
+        Self::create(input, boundary, framing_bytes, allowed, Some(observer))
+    }
+    fn create<S, E>(
+        input: S,
+        boundary: &str,
+        framing_bytes: u64,
+        allowed: &[&str],
+        observer: Option<Arc<dyn IntakeObserver>>,
+    ) -> io::Result<Self>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Send + 'a,
+        E: Into<Box<dyn std::error::Error + Send + Sync>> + 'a,
+    {
         if boundary.is_empty()
             || boundary.len() > 70
             || !boundary
@@ -106,6 +149,7 @@ impl<'a> BoundedMultipart<'a> {
         }
         let admission = Arc::new(Mutex::new(Admission {
             header_credit: Some(HEADER_CREDIT),
+            observer: observer.clone(),
         }));
         let feeder = Feeder {
             input: Box::pin(input),
@@ -114,8 +158,12 @@ impl<'a> BoundedMultipart<'a> {
             remaining: framing_bytes,
             admission: admission.clone(),
         };
-        let constraints = multer::Constraints::new()
+        let mut constraints = multer::Constraints::new()
             .size_limit(multer::SizeLimit::new().whole_stream(framing_bytes));
+        if let Some(observer) = observer {
+            let framing: Arc<dyn multer::FramingObserver> = observer;
+            constraints = constraints.framing_observer(framing);
+        }
         Ok(Self {
             parser: multer::Multipart::with_constraints(feeder, boundary, constraints),
             admission,

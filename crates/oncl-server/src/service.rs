@@ -140,7 +140,16 @@ impl ServiceHost {
         };
         let mut services = EngineServices::hash_only(config.limits())
             .with_shared_budget(budget)
-            .with_keys(keys.clone(), Arc::new(audit.clone()));
+            .with_keys(keys.clone(), Arc::new(audit.clone()))
+            .with_validation(oncl_core::ValidationServices::new(
+                oncl_pki::pkix::CaSet::new(Vec::new()),
+                Vec::new(),
+                Arc::new(oncl_pki::http::UreqTransport::with_proxy(
+                    oncl_pki::http::ProxySetting::None,
+                )),
+                oncl_pki::validation::NetworkPolicy::deny_all(),
+                Arc::new(time::OffsetDateTime::now_utc),
+            ));
         if let Some(store) = &store {
             services = services.with_temporary_store(store.clone());
         }
@@ -244,9 +253,8 @@ fn processing_error(error: ProcessingError) -> ApiError {
         ProcessingError::CapacityExceeded => ErrorCode::CapacityExceeded,
         ProcessingError::DeadlineExceeded => ErrorCode::DeadlineExceeded,
         ProcessingError::Cancelled => ErrorCode::Cancelled,
-        ProcessingError::InputLimit
-        | ProcessingError::ContainerLimit
-        | ProcessingError::FramingLimit => ErrorCode::InputLimit,
+        ProcessingError::InputLimit | ProcessingError::ContainerLimit => ErrorCode::InputLimit,
+        ProcessingError::FramingLimit => ErrorCode::FramingLimit,
         ProcessingError::MemoryLimit => ErrorCode::MemoryLimit,
         ProcessingError::TempLimit => ErrorCode::TempLimit,
         ProcessingError::MetadataLimit => ErrorCode::MetadataLimit,

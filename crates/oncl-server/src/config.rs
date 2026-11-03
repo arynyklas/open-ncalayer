@@ -74,6 +74,7 @@ pub enum Permission {
     Hash,
     Sign,
     SignDigest,
+    Verify,
 }
 impl Permission {
     fn action(self) -> Action {
@@ -81,6 +82,7 @@ impl Permission {
             Self::Hash => Action::Hash,
             Self::Sign => Action::Sign,
             Self::SignDigest => Action::SignDigest,
+            Self::Verify => Action::Verify,
         }
     }
 }

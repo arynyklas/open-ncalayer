@@ -34,7 +34,7 @@ oncl-ipc = { path = "crates/oncl-ipc" }
 oncl-pki = { path = "crates/oncl-pki" }
 oncl-pdf = { path = "crates/oncl-pdf" }
 oncl-pdk = { path = "crates/oncl-pdk" }
-oncl-plugin = { path = "crates/oncl-plugin" }
+oncl-plugin = { path = "crates/oncl-plugin", default-features = false }
 oncl-protocol = { path = "crates/oncl-protocol" }
 oncl-registry = { path = "crates/oncl-registry" }
 oncl-testkit = { path = "crates/oncl-testkit" }
@@ -90,6 +90,9 @@ lopdf = { version = "0.45.0", default-features = false }
 minisign = "0.10.0"
 # Verification of the update index signatures (`oncl-update`): no dependencies of its own.
 minisign-verify = "0.3.0"
+# Pinned proven multipart parser with an additive raw-framing observer; path is
+# explicit so independent API/server consumers receive the same required seam.
+multer = { version = "=3.1.0", path = "vendor/multer", default-features = false }
 # PE and ELF reading only: in xtask (`check-imports`, the glibc floor of the Linux packages)
 # and oncl-testkit (export tables of the Windows 7 app-local DLLs).
 object = { version = "0.40.0", default-features = false, features = ["read_core", "pe", "elf", "std"] }

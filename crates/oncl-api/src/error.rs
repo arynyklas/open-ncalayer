@@ -8,6 +8,7 @@ pub enum ErrorCode {
     DeadlineExceeded,
     Cancelled,
     InputLimit,
+    FramingLimit,
     MemoryLimit,
     TempLimit,
     MetadataLimit,
@@ -46,6 +47,7 @@ impl axum::response::IntoResponse for ApiError {
             ErrorCode::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
             ErrorCode::Cancelled => StatusCode::REQUEST_TIMEOUT,
             ErrorCode::InputLimit
+            | ErrorCode::FramingLimit
             | ErrorCode::MemoryLimit
             | ErrorCode::TempLimit
             | ErrorCode::MetadataLimit

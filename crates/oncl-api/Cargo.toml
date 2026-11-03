@@ -15,7 +15,7 @@ server = ["dep:axum", "dep:multer", "dep:futures-util"]
 [dependencies]
 serde.workspace = true
 axum = { workspace = true, optional = true }
-multer = { version = "=3.1.0", default-features = false, optional = true }
+multer = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -24,3 +24,5 @@ oncl-server = { path = "../oncl-server" }
 tempfile.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
+oncl-pki.workspace = true
+oncl-testkit.workspace = true

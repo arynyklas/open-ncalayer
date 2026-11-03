@@ -32,6 +32,12 @@ pub enum Operation {
         algorithm: HashAlgorithm,
         input: String,
     },
+    Verify {
+        profile: VerifyProfile,
+        input: String,
+        #[serde(default)]
+        detached: Option<String>,
+    },
 }
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +48,22 @@ pub enum HashAlgorithm {
     Gost34311,
     Streebog256,
     Streebog512,
+}
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyProfile {
+    Cms,
+    CadesB,
+    CadesT,
+    CadesLt,
+    CadesLta,
+    Pdf,
+    PadesB,
+    PadesT,
+    PadesLt,
+    PadesLta,
+    Xml,
+    XmlKalkan,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,4 +106,26 @@ pub enum OperationResult {
         digest: String,
         bytes_in: u64,
     },
+    Verification {
+        profile: VerifyProfile,
+        verdict: &'static str,
+        policy: &'static str,
+        checked_at_unix: i64,
+        signers: Vec<SignerChecks>,
+    },
+}
+
+#[derive(Serialize)]
+pub struct SignerChecks {
+    pub signature: &'static str,
+    pub chain: &'static str,
+    pub validity: &'static str,
+    pub revocation: &'static str,
+    pub timestamp: &'static str,
+    pub key_usage: &'static str,
+    pub time_basis: &'static str,
+    pub time_basis_unix: i64,
+    pub claimed_signing_time_unix: Option<i64>,
+    pub ades_level: Option<&'static str>,
+    pub reasons: Vec<String>,
 }

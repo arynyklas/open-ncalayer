@@ -1,0 +1,110 @@
+{
+  "crate": "multer",
+  "version": "3.1.0",
+  "source": "https://static.crates.io/crates/multer/multer-3.1.0.crate",
+  "crate_sha256": "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b",
+  "license": "MIT",
+  "upstream_files": [
+    {
+      "path": ".cargo_vcs_info.json",
+      "upstream_sha256": "e8e0c2dc8668e80340c7a21e672fe785aa107b47c34045f82d6ec622c9ade9d7"
+    },
+    {
+      "path": "Cargo.toml",
+      "upstream_sha256": "54362b27700eb234521466d829661a3226b01cda9897317cd2f63de2c91a082b"
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "upstream_sha256": "6eee7aea006df91a0dd199693e0c6fc681f77fbcabe72fe062eb1b04ceeaa800"
+    },
+    {
+      "path": "LICENSE",
+      "upstream_sha256": "cfb47b4c5832e5a204d86140ba385e683309e3c82f670e65dfaf491b13c5e2c4"
+    },
+    {
+      "path": "README.md",
+      "upstream_sha256": "bcc4d5d50d95e763d73fac836df4a700fe1fbdde4e8ae6e3f7f20e8a4bc7766f"
+    },
+    {
+      "path": "build.rs",
+      "upstream_sha256": "42c12800b13ac5ad41021f04a1bdb94de9d782d853ff5f54d8734bef1491e9d1"
+    },
+    {
+      "path": "examples/hyper_server_example.rs",
+      "upstream_sha256": "c5c816b64af8e20d58377c163246a92f3b215fc129360b495ba0edcf015aeacb"
+    },
+    {
+      "path": "examples/parse_async_read.rs",
+      "upstream_sha256": "8f2d39cc748ac2608a741506ca661eacdf6cd25632775294dccd569f06361ab9"
+    },
+    {
+      "path": "examples/prevent_dos_attack.rs",
+      "upstream_sha256": "e38d0f3db03da8dfcf736672b60d97dc3d0b67a029273566fbfd34cc47782122"
+    },
+    {
+      "path": "examples/simple_example.rs",
+      "upstream_sha256": "74dbac36d56bac96109ef0fb9d4d5067b34aee1a2eabbebfa56205748fa79864"
+    },
+    {
+      "path": "src/buffer.rs",
+      "upstream_sha256": "9d8132335332b0c455c7f307eaa5f35ab4a0398337524134a521f7cbd7485bca"
+    },
+    {
+      "path": "src/constants.rs",
+      "upstream_sha256": "bb86ea1467bd49dd47d322366a415424486c36f6309c4e5c7db702ff3d745113"
+    },
+    {
+      "path": "src/constraints.rs",
+      "upstream_sha256": "21c9e36163841827447286588256ea515f0489e028fd7f9f9f5daec837c01311"
+    },
+    {
+      "path": "src/content_disposition.rs",
+      "upstream_sha256": "f5bf172bc25b208e247b0978217625ead0c7151b3b2bc2bda6421ac81845da55"
+    },
+    {
+      "path": "src/error.rs",
+      "upstream_sha256": "64d725abc9833dfad5665febf911d082b5120160057b8dc08ff2bb432cc09f99"
+    },
+    {
+      "path": "src/field.rs",
+      "upstream_sha256": "ba15610b3e181c1030ab3edeecd1832f5400a0a56b7926b2d6c554a523cb3b0f"
+    },
+    {
+      "path": "src/helpers.rs",
+      "upstream_sha256": "c517d8bab90708e610d2309f5eb1f8caf07e2d164e59f6eb360d9a5fe9e656fd"
+    },
+    {
+      "path": "src/lib.rs",
+      "upstream_sha256": "9e84ce43e0245073b440a72ab1bc83fcb6512df77d9eabd8b27d1ca1e22c462d"
+    },
+    {
+      "path": "src/multipart.rs",
+      "upstream_sha256": "1969c4e4d6dde5e08c4451b1ebdeba22394b9c5b6750075d418af42cc79eede7"
+    },
+    {
+      "path": "src/size_limit.rs",
+      "upstream_sha256": "791ac65506349102ab0561a1d5668c1da64344d2cf6b0d9e60a108e2ab40d659"
+    },
+    {
+      "path": "tests/integration.rs",
+      "upstream_sha256": "5601dcb55621c376b49d806e4c4d802c79bcb1c0ba1609cf1fcd7768fdc61150"
+    }
+  ],
+  "local_changes": {
+    "purpose": "Optional trusted raw-framing admission observer; existing parser remains sole framing parser and default observer is None",
+    "modified_upstream_files": [
+      "Cargo.toml",
+      "build.rs",
+      "src/buffer.rs",
+      "src/constants.rs",
+      "src/constraints.rs",
+      "src/lib.rs",
+      "src/multipart.rs"
+    ],
+    "compiler_compatibility": "Register existing cfg(nightly); use equivalent u64::MAX associated constants on the pinned compiler",
+    "manifest_isolation": "Standalone upstream regression workspace and explicit additive observer test registration",
+    "additional_tests": [
+      "tests/framing_observer.rs"
+    ]
+  }
+}

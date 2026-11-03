@@ -1,3 +1,4 @@
+mod dispatch;
 mod intake;
 
 use super::*;
@@ -57,18 +58,23 @@ fn validate_metadata(metadata: &OperationMetadata) -> Result<(), ApiError> {
     }
     let mut ids = BTreeSet::new();
     let mut names = BTreeSet::new();
+    let mut used = BTreeSet::new();
     for item in &metadata.items {
         if !identifier(&item.id) || !ids.insert(item.id.as_str()) {
             return Err(invalid_request());
         }
-        let Operation::Hash { input, .. } = &item.operation;
-        let part = metadata
-            .parts
-            .iter()
-            .find(|p| p.name == *input)
-            .ok_or_else(invalid_request)?;
-        if part.item_id != item.id || part.role != PartRole::Document {
-            return Err(invalid_request());
+        for input in dispatch::inputs(&item.operation) {
+            if !used.insert(input) {
+                return Err(invalid_request());
+            }
+            let part = metadata
+                .parts
+                .iter()
+                .find(|p| p.name == input)
+                .ok_or_else(invalid_request)?;
+            if part.item_id != item.id || part.role != PartRole::Document {
+                return Err(invalid_request());
+            }
         }
     }
     for part in &metadata.parts {
@@ -78,7 +84,9 @@ fn validate_metadata(metadata: &OperationMetadata) -> Result<(), ApiError> {
         {
             return Err(invalid_request());
         }
-        if !metadata.items.iter().any(|i|matches!(&i.operation,Operation::Hash{input,..} if *input==part.name && i.id==part.item_id)) {return Err(invalid_request());}
+        if !used.contains(part.name.as_str()) {
+            return Err(invalid_request());
+        }
     }
     Ok(())
 }
@@ -131,9 +139,16 @@ impl ServiceHost {
                 intake::prepare(&metadata, body, &mut admission, deadline, cancel.clone()).await?;
             // Recheck the actual Principal generation and each resolved operation
             // after bounded metadata intake, before the first SDK dispatch.
-            let grant = policy
-                .authorize(&principal, Action::Hash, None, None)
-                .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?;
+            let mut actions = Vec::with_capacity(prepared.metadata.items.len());
+            for item in &prepared.metadata.items {
+                let action = dispatch::action(&item.operation);
+                policy
+                    .authorize(&principal, action, None, None)
+                    .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?;
+                actions.push(action);
+            }
+            let grant = oncl_core::ExecutionGrant::new(actions);
+            let failure = prepared.failure.clone();
             let ctx = engine
                 .begin_admitted(admission, grant, OperationPolicy::strict_online())
                 .map_err(core_error)?;
@@ -148,56 +163,22 @@ impl ServiceHost {
                             .payload
                             .capture(&request, store.as_ref(), ctx, runtime)?;
                     let mut results = Vec::with_capacity(request.items.len());
+                    let mut result_reservations = Vec::with_capacity(request.items.len());
                     for item in request.items {
-                        let Operation::Hash {
-                            algorithm: hash,
-                            input,
-                        } = item.operation;
-                        let (report, bytes_in) = match &mut documents {
-                            intake::Documents::Text(documents) => {
-                                let document = documents
-                                    .get(&input)
-                                    .ok_or(ProcessingError::InvalidInput("missing document"))?;
-                                engine
-                                    .hash(
-                                        algorithm(hash),
-                                        Source::sequential(
-                                            &mut document.as_bytes(),
-                                            Some(document.len() as u64),
-                                        ),
-                                        ctx,
-                                    )
-                                    .map(|r| (r, document.len() as u64))
-                            }
-                            intake::Documents::Frozen(documents) => {
-                                let document = documents
-                                    .get_mut(&input)
-                                    .ok_or(ProcessingError::InvalidInput("missing document"))?;
-                                let length = document.len();
-                                let mut reader = document.reader(
-                                    &[oncl_pki::io::Region {
-                                        offset: 0,
-                                        len: length,
-                                    }],
-                                    ctx.resources(),
-                                )?;
-                                let result = engine.hash(algorithm(hash), reader.source(), ctx);
-                                reader.finish()?;
-                                result.map(|r| (r, length))
-                            }
-                        }
-                        .map_err(|e| match e {
-                            OperationError::Processing(e) => e,
-                            _ => ProcessingError::InvalidInput("operation failed"),
-                        })?;
+                        let (result, reservation) =
+                            dispatch::run(item.operation, &mut documents, &engine, ctx).map_err(
+                                |error| match error {
+                                    OperationError::Processing(error) => error,
+                                    _ => {
+                                        ProcessingError::InvalidInput("operation execution failed")
+                                    }
+                                },
+                            )?;
+                        result_reservations.push(reservation);
                         results.push(ItemResult {
                             item_id: item.id,
                             applied: oncl_api::error::AppliedState::NotApplied,
-                            result: OperationResult::Hash {
-                                algorithm: hash,
-                                digest: crate::auth::encode(report.digest.as_bytes()),
-                                bytes_in,
-                            },
+                            result,
                         });
                     }
                     let reservation = ctx.resources().reserve_metadata(JSON_BYTES)?;
@@ -215,11 +196,11 @@ impl ServiceHost {
                     Ok((bytes, reservation))
                 })
                 .await
-                .map_err(processing_error)?;
+                .map_err(|error| processing_error(failure.recover(error)))?;
             let output = tokio::time::timeout(deadline.remaining(), work.wait())
                 .await
-                .map_err(|_| ApiError::not_applied(ErrorCode::DeadlineExceeded))?
-                .map_err(processing_error)?;
+                .map_err(|_| processing_error(failure.recover(ProcessingError::DeadlineExceeded)))?
+                .map_err(|error| processing_error(failure.recover(error)))?;
             let ((bytes, reservation), mut ctx) = (output.value, output.context);
             let delivery = ResponseDelivery {
                 deadline,
