@@ -97,6 +97,8 @@ pub struct VerificationReport {
     pub pdf: Option<oncl_pdf::PdfRevisionFacts>,
     /// Minimum actually verified CAdES level; legacy CMS reports have none.
     pub ades_level: Option<oncl_pki::evidence::AdesLevel>,
+    #[cfg(feature = "xml")]
+    pub xml: Option<oncl_xml::XmlVerificationFacts>,
 }
 
 /// Raw structural extraction, not a signature/validation verdict. Arbitrary
@@ -192,6 +194,8 @@ impl Engine {
             #[cfg(feature = "pdf")]
             pdf: None,
             ades_level: None,
+            #[cfg(feature = "xml")]
+            xml: None,
         })
     }
     /// Host PKI-only bounded fetch using this operation's authorization and
@@ -230,6 +234,8 @@ impl Engine {
             DeadlineTransport::new(services.http.as_ref(), &services.network, &ctx.scope);
         #[cfg(feature = "pdf")]
         let mut pdf = None;
+        #[cfg(feature = "xml")]
+        let mut xml = None;
         let result = match request.profile() {
             // CAdES is dispatched before constructing the generic transport above.
             // Keep the real handler here as well so the profile match stays exhaustive.
@@ -294,6 +300,57 @@ impl Engine {
                     .into()),
                 }
             }
+            #[cfg(feature = "xml")]
+            crate::VerifyProfile::Xml | crate::VerifyProfile::XmlKalkan => {
+                if detached.is_some() {
+                    return Err(OperationError::Processing(
+                        oncl_pki::resource::ProcessingError::InvalidInput(
+                            "XML does not accept detached input",
+                        ),
+                    ));
+                }
+                let profile = oncl_xml::XmlVerifyProfile {
+                    canonicalization: if request.profile() == crate::VerifyProfile::XmlKalkan {
+                        oncl_xml::C14nProfile::KalkanLegacy
+                    } else {
+                        oncl_xml::C14nProfile::Standard
+                    },
+                    allowed_signature_algorithms: ctx.policy.allowed_signature_algorithms,
+                    ..oncl_xml::XmlVerifyProfile::default()
+                };
+                match oncl_xml::verify_source(
+                    input,
+                    &profile,
+                    self.temporary
+                        .as_ref()
+                        .ok_or(OperationError::MissingTemporaryStore)?,
+                    &ValidationContext {
+                        policy: ctx.policy.validation,
+                        now,
+                        anchors: &services.anchors,
+                        intermediates: &services.intermediates,
+                        http: &transport,
+                    },
+                    &services.network,
+                    &mut ctx.scope,
+                ) {
+                    Ok(report) => {
+                        xml = Some(report.facts);
+                        Ok(report.validation)
+                    }
+                    Err(oncl_xml::XmlSourceError::Processing(error))
+                    | Err(oncl_xml::XmlSourceError::Evidence(
+                        oncl_pki::evidence::EvidenceError::Processing(error),
+                    )) => Err(error.into()),
+                    Err(oncl_xml::XmlSourceError::Evidence(
+                        oncl_pki::evidence::EvidenceError::Limit,
+                    )) => Err(oncl_pki::resource::ProcessingError::MetadataLimit.into()),
+                    Err(_) => Err(oncl_pki::resource::ProcessingError::InvalidInput(
+                        "unsupported, denied or malformed XML signature",
+                    )
+                    .into()),
+                }
+            }
         };
         transport.finish()?;
         ctx.scope.checkpoint()?;
@@ -307,6 +364,8 @@ impl Engine {
             #[cfg(feature = "pdf")]
             pdf,
             ades_level: None,
+            #[cfg(feature = "xml")]
+            xml,
         })
     }
 

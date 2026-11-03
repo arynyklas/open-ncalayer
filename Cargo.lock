@@ -4396,6 +4396,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "x509-cert",
 ]
 
 [[package]]

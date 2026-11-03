@@ -22,6 +22,8 @@ use der::Encode;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use time::OffsetDateTime;
+mod signature_representation;
+pub use signature_representation::BoundSignatureRepresentation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AdesLevel {
@@ -133,6 +135,9 @@ pub struct EvidenceStore {
     bundle: EvidenceBundle,
 }
 impl EvidenceStore {
+    /// Internal public-evidence intake uses source-role scratch and container
+    /// quotas, not final-output credit. Every external `copy_entry` delivery is
+    /// separately admitted and charged, including repeat delivery.
     pub fn new(
         store: TemporaryStore,
         limits: EvidenceLimits,
@@ -424,6 +429,7 @@ pub enum CoverageEncoding {
 }
 pub enum CoveragePart<'a> {
     Signature,
+    BoundSignature(&'a BoundSignatureRepresentation),
     Evidence {
         id: EvidenceId,
         encoding: CoverageEncoding,
@@ -498,6 +504,10 @@ fn coverage_size(
             let length = match part {
                 CoveragePart::Signature => signer.signature.len() as u64,
                 CoveragePart::Bytes(bytes) => bytes.len() as u64,
+                CoveragePart::BoundSignature(representation) => {
+                    representation.check(signer, &bundle.scope)?;
+                    representation.region.len
+                }
                 CoveragePart::Staged { artifact, region } => {
                     lock_staged(artifact)?.read_region(*region, &mut [])?;
                     region.len
@@ -556,6 +566,26 @@ impl CoverageHasher<'_, '_, '_> {
                     for bytes in self.signer.signature.chunks(IO_CHUNK_BYTES) {
                         self.checkpoint()?;
                         hash.update(bytes);
+                    }
+                }
+                CoveragePart::BoundSignature(representation) => {
+                    representation.check(self.signer, &self.bundle.scope)?;
+                    representation.check(self.signer, &self.work)?;
+                    let mut source = lock_staged(&representation.artifact)?;
+                    let mut region = representation.region;
+                    while region.len != 0 {
+                        self.checkpoint()?;
+                        let n = source.read_region(region, &mut self.raw.bytes)?;
+                        if n == 0 {
+                            return Err(EvidenceError::InvalidBinding);
+                        }
+                        self.checkpoint()?;
+                        hash.update(&self.raw.bytes[..n]);
+                        region.offset = region
+                            .offset
+                            .checked_add(n as u64)
+                            .ok_or(EvidenceError::Limit)?;
+                        region.len -= n as u64;
                     }
                 }
                 CoveragePart::Bytes(bytes) => {
@@ -851,7 +881,10 @@ fn binding_graph(
             ProofKind::Signature => {
                 if signature_seen
                     || position != 0
-                    || !matches!(proof.coverage, [CoveragePart::Signature])
+                    || !matches!(
+                        proof.coverage,
+                        [CoveragePart::Signature] | [CoveragePart::BoundSignature(_)]
+                    )
                 {
                     return Err(EvidenceError::InvalidBinding);
                 }

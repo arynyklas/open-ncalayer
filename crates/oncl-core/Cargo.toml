@@ -32,6 +32,7 @@ oncl-pki = { workspace = true, features = ["testing"] }
 oncl-testkit.workspace = true
 oncl-token = { workspace = true, features = ["emulator"] }
 der.workspace = true
+base64.workspace = true
 time = { workspace = true, features = ["macros"] }
 lopdf.workspace = true
 

@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let case = args.next().ok_or("missing probe case")?;
         if !matches!(
             case.as_str(),
-            "F04" | "C01" | "C02" | "C03" | "X01" | "P01" | "P02" | "J01"
+            "F04" | "C01" | "C02" | "C03" | "X01" | "X03" | "P01" | "P02" | "J01"
         ) {
             return Err("unsupported probe case".into());
         }
@@ -80,6 +80,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "C03" => cades_probe::run(std::path::Path::new(&out)),
+            "X03" => {
+                #[cfg(feature = "xml")]
+                {
+                    xml_probe::run_streaming(std::path::Path::new(&out))
+                }
+                #[cfg(not(feature = "xml"))]
+                {
+                    Err("X03 probe requires the xml feature".into())
+                }
+            }
             "X01" => {
                 #[cfg(feature = "xml")]
                 {
@@ -111,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command.as_deref() != Some("hash") {
         return Err(
-            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|P01|P02|J01> --out <directory>".into(),
+            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|X03|P01|P02|J01> --out <directory>".into(),
         );
     }
     let mut algorithm = None;

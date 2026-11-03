@@ -31,6 +31,7 @@ fn xml_character(c: char) -> bool {
 pub struct XmlName {
     namespace: Option<String>,
     local: String,
+    pub(crate) qname: String,
 }
 impl XmlName {
     pub fn namespace(&self) -> Option<&str> {
@@ -39,12 +40,16 @@ impl XmlName {
     pub fn local(&self) -> &str {
         &self.local
     }
+    pub(crate) fn into_parts(self) -> (Option<String>, String, String) {
+        (self.namespace, self.local, self.qname)
+    }
     // Only the bounded active frame/event pair needs an owning copy. It stays
     // inside the reader and is covered by the document's existing reservation.
     fn copy_for_frame(&self) -> Self {
         Self {
             namespace: self.namespace.clone(),
             local: self.local.clone(),
+            qname: self.qname.clone(),
         }
     }
 }
@@ -137,6 +142,9 @@ impl XmlEvent {
             .iter()
             .map(|(prefix, uri)| (prefix.as_str(), uri.as_str()))
     }
+    pub(crate) fn take_namespaces(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.namespaces)
+    }
 }
 struct Frame {
     qname: String,
@@ -146,7 +154,7 @@ struct Frame {
     changes: Vec<(String, Option<String>)>,
 }
 pub(crate) struct Reader<'a> {
-    file: &'a mut FrozenInput,
+    pub(crate) file: &'a mut FrozenInput,
     limits: &'a XmlLimits,
     buffer: Vec<u8>,
     at: usize,
@@ -618,6 +626,7 @@ impl<'a> Reader<'a> {
                 .filter(|ns| !ns.is_empty())
                 .map(str::to_owned),
             local: node.tag_name().name().to_owned(),
+            qname: qname.clone(),
         };
         let mut attributes = Vec::new();
         let mut ids = Vec::new();
@@ -649,6 +658,7 @@ impl<'a> Reader<'a> {
                 name: XmlName {
                     namespace: a.namespace().filter(|ns| !ns.is_empty()).map(str::to_owned),
                     local: a.name().to_owned(),
+                    qname: wrapped[a.range_qname()].to_owned(),
                 },
                 value: *spans.get(i).ok_or_else(invalid)?,
                 owner: self.owner.clone(),

@@ -24,6 +24,7 @@ time = { workspace = true, features = ["formatting"] }
 oncl-testkit.workspace = true
 tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
+x509-cert.workspace = true
 
 [[test]]
 name = "xades"

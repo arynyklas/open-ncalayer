@@ -43,7 +43,7 @@ impl Default for XmlLimits {
     }
 }
 impl XmlLimits {
-    fn reservation(&self) -> Result<u64> {
+    pub(crate) fn reservation(&self) -> Result<u64> {
         // Explicit implementation bounds keep arithmetic and parser allocation
         // estimates finite even if a hostile host supplies absurd settings.
         if self.max_depth == 0
@@ -448,6 +448,111 @@ impl XmlDocument {
                 len: region.len - offset,
             },
             output,
+        )
+    }
+    pub(crate) fn indexed_node(&self, region: Region) -> XmlNode {
+        XmlNode {
+            owner: Arc::downgrade(&self.owner),
+            region,
+        }
+    }
+    pub(crate) fn canonical_digest(
+        &mut self,
+        options: crate::canonical_stream::Options<'_>,
+        algorithm: oncl_pki::key::HashAlg,
+        scope: &ResourceScope,
+        work: &mut u64,
+    ) -> Result<oncl_pki::digest::DigestValue> {
+        crate::canonical_stream::hash(
+            &mut self.source,
+            &self.limits,
+            &self.owner,
+            options,
+            algorithm,
+            scope,
+            work,
+        )
+    }
+    pub(crate) fn canonical_proof(
+        &mut self,
+        options: crate::canonical_stream::Options<'_>,
+        store: &TemporaryStore,
+        scope: &mut ResourceScope,
+        work: &mut u64,
+    ) -> Result<(StagedArtifact, Vec<Region>)> {
+        crate::canonical_stream::stage(
+            &mut self.source,
+            &self.limits,
+            &self.owner,
+            options,
+            store,
+            scope,
+            work,
+        )
+    }
+    pub(crate) fn check_scope(&mut self, scope: &ResourceScope) -> Result<()> {
+        drop(self.source.reader(&[], scope)?);
+        Ok(())
+    }
+    pub(crate) fn node_namespaces(
+        &mut self,
+        node: &XmlNode,
+        scope: &ResourceScope,
+    ) -> Result<Vec<(String, String)>> {
+        self.check_scope(scope)?;
+        let region = self.node_region(node)?;
+        let mut reader = Reader::new(&mut self.source, &self.limits, &self.owner);
+        while let Some(mut event) = reader.next()? {
+            scope.checkpoint()?;
+            if event.kind == XmlEventKind::End && event.region == region {
+                return Ok(event.take_namespaces());
+            }
+        }
+        Err(invalid())
+    }
+    /// Select the first real indexed element using the existing bounded
+    /// absolute child/descendant XPath subset (at most 32 steps).
+    pub fn select_xpath(
+        &mut self,
+        expression: &str,
+        namespaces: &[(&str, &str)],
+        scope: &mut ResourceScope,
+    ) -> Result<Option<XmlNode>, crate::XmlSourceError> {
+        crate::xpath::select_indexed(self, expression, namespaces, scope)
+    }
+    pub(crate) fn select_xpath_unique(
+        &mut self,
+        expression: &str,
+        namespaces: &[(&str, &str)],
+        scope: &ResourceScope,
+    ) -> Result<Option<XmlNode>, crate::XmlSourceError> {
+        crate::xpath::select_indexed_unique(self, expression, namespaces, scope)
+    }
+    /// Stream canonical UTF-8 bytes to an external output under the original
+    /// operation's output quota. `None` selects the document including outer PIs.
+    pub fn canonicalize(
+        &mut self,
+        node: Option<&XmlNode>,
+        method: crate::C14n,
+        profile: crate::C14nProfile,
+        output: &mut dyn std::io::Write,
+        scope: &mut ResourceScope,
+    ) -> Result<()> {
+        let target = node.map(|n| self.node_region(n)).transpose()?;
+        crate::canonical_stream::run(
+            &mut self.source,
+            &self.limits,
+            &self.owner,
+            crate::canonical_stream::Options {
+                target,
+                method,
+                profile,
+                prefixes: &[],
+                excluded: &[],
+                metadata_limit: None,
+            },
+            output,
+            scope,
         )
     }
     pub fn events(&mut self) -> XmlEvents<'_> {

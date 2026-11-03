@@ -2191,9 +2191,8 @@ fn repeated_external_evidence_delivery_cannot_bypass_output_quota() {
     let fixture = Fixture::new();
     let bytes = fixture.root.cert.to_der().unwrap();
     let mut cap = limits();
-    // Internal evidence storage is source-role; exactly one external delivery
-    // fits the output allowance and another must fail before calling the writer.
-    cap.output_bytes = bytes.len() as u64;
+    // Intake is internal; exactly two external deliveries fit.
+    cap.output_bytes = 2 * bytes.len() as u64;
     let budget = Arc::new(SharedBudget::new(cap.clone()).unwrap());
     let mut resources = budget.begin(cap, Arc::new(Control)).unwrap();
     let parent = tempfile::tempdir().unwrap();
@@ -2210,6 +2209,12 @@ fn repeated_external_evidence_delivery_cannot_bypass_output_quota() {
         bundle.copy_entry(id, &mut io::sink()).unwrap(),
         bytes.len() as u64
     );
+    assert_eq!(resources.progress().bytes_out, bytes.len() as u64);
+    assert_eq!(
+        bundle.copy_entry(id, &mut io::sink()).unwrap(),
+        bytes.len() as u64
+    );
+    assert_eq!(resources.progress().bytes_out, 2 * bytes.len() as u64);
     struct RejectWrite;
     impl Write for RejectWrite {
         fn write(&mut self, _: &[u8]) -> io::Result<usize> {
@@ -3058,4 +3063,305 @@ fn nested_standard_hash_index_reuses_one_scoped_work_buffer() {
     assert_eq!(report.verdict, Verdict::Valid);
     assert_proven(&report, case.signature_token);
     assert_eq!(http.0.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn format_failure_is_monotonic_and_original_scope_bound() {
+    let fixture = Fixture::new();
+    let mut resources = scope();
+    let parent = tempfile::tempdir().unwrap();
+    let mut bundle = EvidenceStore::new(
+        TemporaryStore::new(parent.path()).unwrap(),
+        evidence_limits(),
+        &mut resources,
+    )
+    .unwrap()
+    .finish();
+    let http = Offline::new();
+    let mut report = validate_evidence(
+        &fixture.signer(),
+        &mut bundle,
+        &[],
+        AdesLevel::B,
+        &fixture.context(&http, ValidationPolicy::OfflineReport),
+        &NetworkPolicy::deny_all(),
+        &resources,
+    )
+    .unwrap();
+    let before = report.signers[0].reasons.len();
+    assert_eq!(report.signers[0].signature, CheckStatus::Passed);
+    let foreign = scope();
+    assert!(
+        report
+            .invalidate_signer(
+                0,
+                oncl_pki::validation::FormatFailure::ReferenceDigestMismatch,
+                &foreign,
+            )
+            .is_err()
+    );
+    assert_eq!(report.signers[0].reasons.len(), before);
+    report
+        .invalidate_signer(
+            0,
+            oncl_pki::validation::FormatFailure::ReferenceDigestMismatch,
+            &resources,
+        )
+        .unwrap();
+    assert_eq!(report.verdict, Verdict::Invalid);
+    assert_eq!(report.signers[0].signature, CheckStatus::Failed);
+    assert_eq!(report.signers[0].reasons.len(), before + 1);
+    assert!(
+        report
+            .invalidate_signer(
+                1,
+                oncl_pki::validation::FormatFailure::ReferenceDigestMismatch,
+                &resources,
+            )
+            .is_err()
+    );
+    assert_eq!(report.signers[0].signature, CheckStatus::Failed);
+}
+
+#[test]
+fn closed_signature_representation_checks_source_scope_projection_and_raw_value() {
+    use oncl_pki::evidence::BoundSignatureRepresentation;
+    let fixture = Fixture::new();
+    let encoded = STANDARD.encode(&fixture.signature);
+    let bytes = format!("<v>{encoded}</v>").into_bytes();
+    let region = Region {
+        offset: 0,
+        len: bytes.len() as u64,
+    };
+    let spans = [Region {
+        offset: 3,
+        len: encoded.len() as u64,
+    }];
+    let mut resources = scope();
+    let parent = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(parent.path()).unwrap();
+    for case in 0..4 {
+        let mut artifact = if case == 0 {
+            store.stage(&mut resources).unwrap()
+        } else {
+            store.stage_source(&mut resources).unwrap()
+        };
+        artifact.write_chunk(&bytes).unwrap();
+        let foreign = scope();
+        let mut wrong = fixture.signature.clone();
+        wrong[0] ^= 1;
+        let mut signer = fixture.signer();
+        if case == 2 {
+            signer.signature = &wrong;
+        }
+        let projection = if case == 3 {
+            &[Region {
+                offset: 2,
+                len: encoded.len() as u64,
+            }][..]
+        } else {
+            &spans
+        };
+        assert!(
+            BoundSignatureRepresentation::from_base64_projection(
+                artifact,
+                region,
+                projection,
+                &signer,
+                &evidence_limits(),
+                if case == 1 { &foreign } else { &resources },
+            )
+            .is_err(),
+            "case {case}"
+        );
+    }
+}
+
+#[test]
+fn bound_signature_representation_timestamp_checks_whole_layout_and_current_signature() {
+    use oncl_pki::evidence::BoundSignatureRepresentation;
+    let fixture = Fixture::new();
+    let encoded = STANDARD.encode(&fixture.signature);
+    let split = encoded.len() / 2;
+    let prefix = "<v>";
+    let middle = "<!--layout-->";
+    let whitespace = "&#xD;\n";
+    let bytes = format!(
+        "{prefix}{}{middle}{whitespace}{}</v>",
+        &encoded[..split],
+        &encoded[split..]
+    )
+    .into_bytes();
+    let spans = [
+        Region {
+            offset: prefix.len() as u64,
+            len: split as u64,
+        },
+        Region {
+            offset: (prefix.len() + split + middle.len()) as u64,
+            len: (whitespace.len() + encoded.len() - split) as u64,
+        },
+    ];
+    for correct in [false, true] {
+        let mut resources = scope();
+        let parent = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(parent.path()).unwrap();
+        let mut artifact = store.stage_source(&mut resources).unwrap();
+        artifact.write_chunk(&bytes).unwrap();
+        let bound = BoundSignatureRepresentation::from_base64_projection(
+            artifact,
+            Region {
+                offset: 0,
+                len: bytes.len() as u64,
+            },
+            &spans,
+            &fixture.signer(),
+            &evidence_limits(),
+            &resources,
+        )
+        .unwrap();
+        let mut evidence = EvidenceStore::new(store, evidence_limits(), &mut resources).unwrap();
+        for (kind, bytes) in fixture.payloads(Status::Good, Status::Good) {
+            collect(&mut evidence, kind, &bytes);
+        }
+        let token = fixture.token(if correct { &bytes } else { &fixture.signature }, PROVEN);
+        let token = collect(&mut evidence, EvidenceKind::Timestamp, &token);
+        let mut bundle = evidence.finish();
+        let coverage = [CoveragePart::BoundSignature(&bound)];
+        let proofs = [TimestampBinding {
+            token,
+            kind: ProofKind::Signature,
+            coverage: &coverage,
+        }];
+        let http = Offline::new();
+        let report = validate_evidence(
+            &fixture.signer(),
+            &mut bundle,
+            &proofs,
+            AdesLevel::T,
+            &fixture.context(&http, ValidationPolicy::OfflineReport),
+            &NetworkPolicy::deny_all(),
+            &resources,
+        )
+        .unwrap();
+        if correct {
+            assert_proven(&report, token);
+        } else {
+            assert!(report.signers[0].proof_time.is_none());
+            assert_eq!(report.signers[0].timestamp, CheckStatus::Failed);
+        }
+        let mut wrong = fixture.signature.clone();
+        wrong[0] ^= 1;
+        let mut signer = fixture.signer();
+        signer.signature = &wrong;
+        assert!(matches!(
+            validate_evidence(
+                &signer,
+                &mut bundle,
+                &proofs,
+                AdesLevel::T,
+                &fixture.context(&http, ValidationPolicy::OfflineReport),
+                &NetworkPolicy::deny_all(),
+                &resources
+            ),
+            Err(EvidenceError::InvalidBinding)
+        ));
+    }
+}
+
+#[test]
+fn evidence_intake_zero_output_and_external_delivery_admission() {
+    let mut cap = limits();
+    cap.output_bytes = 0;
+    let budget = Arc::new(SharedBudget::new(cap.clone()).unwrap());
+    let mut resources = budget.begin(cap, Arc::new(Control)).unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let mut store = EvidenceStore::new(
+        TemporaryStore::new(parent.path()).unwrap(),
+        evidence_limits(),
+        &mut resources,
+    )
+    .unwrap();
+    let id = collect(
+        &mut store,
+        EvidenceKind::Certificate,
+        b"internal public evidence",
+    );
+    assert_eq!(resources.progress().bytes_out, 0);
+    let mut bundle = store.finish();
+    struct MustNotWrite;
+    impl Write for MustNotWrite {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            panic!("external evidence output not admitted")
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    assert!(matches!(
+        bundle.copy_entry(id, &mut MustNotWrite),
+        Err(EvidenceError::Processing(ProcessingError::OutputLimit))
+    ));
+    assert_eq!(resources.progress().bytes_out, 0);
+}
+
+#[test]
+fn bound_signature_representation_retains_admission_and_rejects_foreign_bundle() {
+    use oncl_pki::evidence::BoundSignatureRepresentation;
+    let fixture = Fixture::new();
+    let encoded = STANDARD.encode(&fixture.signature);
+    let bytes = format!("<v>{encoded}</v>").into_bytes();
+    let cap = limits();
+    let budget = Arc::new(SharedBudget::new(cap.clone()).unwrap());
+    let mut resources = budget.begin(cap.clone(), Arc::new(Control)).unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(parent.path()).unwrap();
+    let mut artifact = store.stage_source(&mut resources).unwrap();
+    artifact.write_chunk(&bytes).unwrap();
+    let bound = BoundSignatureRepresentation::from_base64_projection(
+        artifact,
+        Region {
+            offset: 0,
+            len: bytes.len() as u64,
+        },
+        &[Region {
+            offset: 3,
+            len: encoded.len() as u64,
+        }],
+        &fixture.signer(),
+        &evidence_limits(),
+        &resources,
+    )
+    .unwrap();
+    drop(resources);
+    assert!(budget.begin(cap.clone(), Arc::new(Control)).is_err());
+    let mut foreign = scope();
+    let mut evidence = EvidenceStore::new(store, evidence_limits(), &mut foreign).unwrap();
+    let token = collect(
+        &mut evidence,
+        EvidenceKind::Timestamp,
+        &fixture.token(&bytes, PROVEN),
+    );
+    let mut bundle = evidence.finish();
+    let coverage = [CoveragePart::BoundSignature(&bound)];
+    let proofs = [TimestampBinding {
+        token,
+        kind: ProofKind::Signature,
+        coverage: &coverage,
+    }];
+    let http = Offline::new();
+    assert!(matches!(
+        validate_evidence(
+            &fixture.signer(),
+            &mut bundle,
+            &proofs,
+            AdesLevel::T,
+            &fixture.context(&http, ValidationPolicy::OfflineReport),
+            &NetworkPolicy::deny_all(),
+            &foreign,
+        ),
+        Err(EvidenceError::Processing(ProcessingError::InvalidInput(_)))
+    ));
+    drop(bound);
+    assert!(budget.begin(cap, Arc::new(Control)).is_ok());
 }
