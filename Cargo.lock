@@ -4018,12 +4018,15 @@ dependencies = [
 name = "oncl-core"
 version = "0.1.0-alpha.6"
 dependencies = [
+ "base64",
  "der 0.8.2",
  "oncl-pdf",
  "oncl-pki",
  "oncl-testkit",
  "oncl-token",
  "oncl-xml",
+ "serde",
+ "serde_json",
  "tempfile",
  "time",
  "zeroize",

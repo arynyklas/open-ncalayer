@@ -6,6 +6,9 @@ use std::{fs::File, io, sync::Arc};
 
 #[path = "sdk_probe/cades.rs"]
 mod cades_probe;
+#[cfg(feature = "jose")]
+#[path = "sdk_probe/jose.rs"]
+mod jose_probe;
 #[cfg(feature = "pdf")]
 #[path = "sdk_probe/pdf.rs"]
 mod pdf_probe;
@@ -24,7 +27,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = args.next();
     if command.as_deref() == Some("--case") {
         let case = args.next().ok_or("missing probe case")?;
-        if !matches!(case.as_str(), "F04" | "C01" | "C02" | "C03" | "X01" | "P01") {
+        if !matches!(
+            case.as_str(),
+            "F04" | "C01" | "C02" | "C03" | "X01" | "P01" | "J01"
+        ) {
             return Err("unsupported probe case".into());
         }
         if args.next().as_deref() != Some("--out") {
@@ -40,6 +46,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return match case.as_str() {
             "C01" => cms_probe(std::path::Path::new(&out)),
             "C02" => cms_sign_probe(std::path::Path::new(&out)),
+            "J01" => {
+                #[cfg(feature = "jose")]
+                {
+                    jose_probe::run(std::path::Path::new(&out))
+                }
+                #[cfg(not(feature = "jose"))]
+                {
+                    Err("J01 probe requires the jose feature".into())
+                }
+            }
             "P01" => {
                 #[cfg(feature = "pdf")]
                 {
@@ -82,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command.as_deref() != Some("hash") {
         return Err(
-            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|P01> --out <directory>".into(),
+            "usage: sdk_probe hash --algorithm <name> --input <path|-> | keys | validation | --case <F04|C01|C02|C03|X01|P01|J01> --out <directory>".into(),
         );
     }
     let mut algorithm = None;

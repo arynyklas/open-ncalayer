@@ -133,11 +133,38 @@
 //! runs a bounded synthetic loopback TSA/OCSP/CRL exercise and emits only public
 //! RSA B/T/LT/LTA, detached/multisigner, extension/Add and negative artifacts.
 //! This is not a full 10-GiB/RSS or platform-matrix acceptance run.
+//!
+//! # Bounded JOSE (`jose` feature)
+//!
+//! `Engine::jws_create`, `jws_add`, and `jws_verify` accept explicit
+//! `jose::JoseProfile` serialization/detachment and bounded borrowed bytes.
+//! Compact, flattened/general JSON and detached base64url payloads use RS256 or
+//! the pinned `ECGOST3410-2015-512` profile. Add verifies every old signature and
+//! host trust before opening new keys; private work uses `Action::Sign`, never a
+//! prehashed privilege. Legacy AcBank wire formatting is unchanged.
+//!
+//! `jwt_encode`, `jwt_decode_unverified`, and `jwt_verify` are distinct operations.
+//! Decode needs `Action::Extract` and never reports verification. Verify needs
+//! `Action::Verify` plus a trusted `jose::JwtValidationPolicy::new(fixed_now)`:
+//! exp is required, leeway is zero, `now == exp` is invalid, `now == nbf` is valid.
+//! Expected issuer/audience, clock, roots, algorithm/key authority and network
+//! policy come only from the host. Crypto, certificate trust and claims are
+//! reported separately; valid crypto cannot hide invalid claims/unknown status.
+//!
+//! Payload/header/claims/container bounds and unsupported extensions are
+//! documented in `jose`. Parsed/reported buffers remain inseparable from their
+//! original quota/root guards. These bounded token APIs do not claim large
+//! XML/PDF or whole-platform acceptance.
+//! `cargo run -p oncl-core --features jose --example sdk_probe -- --case J01 --out <directory>`
+//! emits public standard JWS/JWT/Add/detached artifacts and runs independent
+//! OpenSSL RS256 positive/negative controls (OpenSSL must be on PATH).
 
 mod cades;
 mod context;
 mod engine;
 mod error;
+#[cfg(feature = "jose")]
+pub mod jose;
 pub mod keys;
 mod policy;
 mod report;
