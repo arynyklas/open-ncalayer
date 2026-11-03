@@ -285,6 +285,12 @@ impl ResourceScope {
             state: self.state.clone(),
         }
     }
+    /// Another handle to this exact operation, sharing all cumulative quotas,
+    /// cancellation, deadline and root lifetime. Never grants fresh capacity.
+    /// Aliases belong to one invocation, not a pool for unrelated requests.
+    pub fn shared_view(&self) -> Self {
+        self.retain()
+    }
     pub fn reserve_memory(&self, bytes: u64) -> Result<ResourceReservation, ProcessingError> {
         self.reserve(Kind::Memory, bytes)
     }

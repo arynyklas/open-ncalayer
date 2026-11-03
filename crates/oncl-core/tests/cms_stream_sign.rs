@@ -1352,3 +1352,409 @@ fn issuer_serial_signers_allow_same_ski_renewal_with_a_distinct_serial() {
     assert!(old_signers.iter().all(|old| signers.contains(old)));
     assert_eq!(guard.events.lock().unwrap().len(), 2);
 }
+
+#[cfg(feature = "pdf")]
+fn unsigned_pdf() -> Vec<u8> {
+    use lopdf::{Document, Object, dictionary};
+    let mut doc = Document::with_version("1.7");
+    let pages = doc.new_object_id();
+    let page = doc.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),612.into(),792.into()]});
+    doc.objects.insert(
+        pages,
+        dictionary! {"Type"=>"Pages","Kids"=>vec![Object::Reference(page)],"Count"=>1}.into(),
+    );
+    let root = doc.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages});
+    doc.trailer.set("Root", root);
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+#[cfg(feature = "pdf")]
+#[test]
+fn pdf_sign_and_add_use_sign_authority_and_preserve_both_keys() {
+    let parent = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(parent.path()).unwrap();
+    let guard = Arc::new(Guard::default());
+    let engine = engine(guard.clone(), KeySources::new(), Some(store.clone()), true);
+    let input = unsigned_pdf();
+    let mut previous = input;
+    for name in ["user-rsa-sign", "user-gost2015-sign"] {
+        let key = selector(name);
+        let mut ctx = begin(
+            &engine,
+            &key,
+            &[Action::Sign],
+            OperationPolicy::strict_online(),
+            Arc::new(Control::default()),
+        );
+        let mut stage = store.stage(ctx.resources()).unwrap();
+        let report = engine
+            .sign_staged(
+                SignRequest::pdf(
+                    KeyRequest::new(&key, Some("C02 synthetic")),
+                    oncl_pdf::PdfSignProfile::default(),
+                ),
+                Source::sequential(&mut Cursor::new(&previous), None),
+                &mut stage,
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(report.applied, AppliedState::Applied);
+        assert_eq!(report.bytes_in, previous.len() as u64);
+        assert_eq!(report.bytes_out, stage.len());
+        let mut output = Vec::new();
+        stage.copy_to(&mut output).unwrap();
+        assert!(output.starts_with(&previous));
+        previous = output;
+    }
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Verify]),
+            OperationPolicy::strict_online(),
+            Arc::new(Control::default()),
+        )
+        .unwrap();
+    let report = engine
+        .verify(
+            &oncl_core::VerifyRequest::pdf(),
+            Source::sequential(&mut Cursor::new(&previous), None),
+            None,
+            &mut ctx,
+        )
+        .unwrap();
+    assert_eq!(report.verdict, oncl_pki::validation::Verdict::Valid);
+    assert_eq!(report.signers.len(), 2);
+    assert!(
+        report
+            .signers
+            .iter()
+            .all(|s| s.signature == oncl_pki::validation::CheckStatus::Passed)
+    );
+    assert_eq!(guard.events.lock().unwrap().len(), 2);
+    assert!(
+        guard
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| e.action == Action::Sign)
+    );
+}
+
+#[cfg(feature = "pdf")]
+fn pdf_once(engine: &Engine, key: &KeySelector, input: &[u8]) -> Result<Vec<u8>, OperationError> {
+    let mut ctx = begin(
+        engine,
+        key,
+        &[Action::Sign],
+        OperationPolicy::strict_online(),
+        Arc::new(Control::default()),
+    );
+    let mut output = Vec::new();
+    engine.sign(
+        SignRequest::pdf(
+            KeyRequest::new(key, Some("C02 synthetic")),
+            oncl_pdf::PdfSignProfile::default(),
+        ),
+        Source::sequential(&mut Cursor::new(input), None),
+        &mut output,
+        &mut ctx,
+    )?;
+    Ok(output)
+}
+
+#[cfg(feature = "pdf")]
+#[test]
+fn pdf_reservation_overflow_is_applied_and_poisoned_not_partial_success() {
+    let parent = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(parent.path()).unwrap();
+    let guard = Arc::new(Guard::default());
+    let engine = engine(guard.clone(), KeySources::new(), Some(store.clone()), true);
+    let key = selector("user-rsa-sign");
+    let mut ctx = begin(
+        &engine,
+        &key,
+        &[Action::Sign],
+        OperationPolicy::strict_online(),
+        Arc::new(Control::default()),
+    );
+    let mut stage = store.stage(ctx.resources()).unwrap();
+    let error = engine
+        .sign_staged(
+            SignRequest::pdf(
+                KeyRequest::new(&key, Some("C02 synthetic")),
+                oncl_pdf::PdfSignProfile::new(8).unwrap(),
+            ),
+            Source::sequential(&mut Cursor::new(unsigned_pdf()), None),
+            &mut stage,
+            &mut ctx,
+        )
+        .unwrap_err();
+    assert_eq!(error.applied_state(), AppliedState::Applied);
+    assert_eq!(guard.events.lock().unwrap().len(), 1);
+    assert_eq!(guard.outcomes.lock().unwrap().len(), 1);
+    let mut bytes = Vec::new();
+    assert!(stage.copy_to(&mut bytes).is_err());
+    assert!(bytes.is_empty());
+}
+
+#[cfg(feature = "pdf")]
+#[test]
+fn pdf_invalid_and_unsigned_latest_revisions_cannot_be_laundered_by_add() {
+    let parent = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(parent.path()).unwrap();
+    let guard = Arc::new(Guard::default());
+    let engine = engine(guard.clone(), KeySources::new(), Some(store), true);
+    let key = selector("user-rsa-sign");
+    let signed = pdf_once(&engine, &key, &unsigned_pdf()).unwrap();
+    let mut modified = signed.clone();
+    let at = modified.windows(3).position(|w| w == b"612").unwrap();
+    modified[at + 2] = b'1';
+    assert_eq!(
+        pdf_once(&engine, &key, &modified)
+            .unwrap_err()
+            .applied_state(),
+        AppliedState::NotApplied
+    );
+    // Independently construct an actual unsigned /Info incremental revision.
+    let parsed = lopdf::Document::load_mem(&signed).unwrap();
+    let root = parsed.trailer.get(b"Root").unwrap().as_reference().unwrap();
+    let next = parsed.max_id + 1;
+    let marker = signed.windows(9).rposition(|w| w == b"startxref").unwrap() + 9;
+    let previous: u64 = std::str::from_utf8(&signed[marker..])
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut later = signed.clone();
+    later.push(b'\n');
+    let offset = later.len();
+    later.extend_from_slice(
+        format!("{next} 0 obj\n<< /Title (Unsigned later change) >>\nendobj\n").as_bytes(),
+    );
+    let xref = later.len();
+    later.extend_from_slice(format!("xref\n{next} 1\n{offset:010} 00000 n \ntrailer\n<< /Size {} /Root {} {} R /Info {next} 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n", next+1,root.0,root.1).as_bytes());
+    assert!(later.starts_with(&signed));
+    assert!(lopdf::Document::load_mem(&later).is_ok());
+    assert_eq!(
+        pdf_once(&engine, &key, &later).unwrap_err().applied_state(),
+        AppliedState::NotApplied
+    );
+    assert_eq!(guard.events.lock().unwrap().len(), 1);
+}
+
+#[cfg(feature = "pdf")]
+#[test]
+fn pdf_post_use_audit_and_cancel_errors_remain_applied() {
+    for cancel in [false, true] {
+        let parent = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(parent.path()).unwrap();
+        let guard = Arc::new(Guard::default());
+        let engine = engine(guard.clone(), KeySources::new(), Some(store.clone()), true);
+        let control = Arc::new(Control::default());
+        if cancel {
+            *guard.cancel_after.lock().unwrap() = Some(control.clone());
+        } else {
+            guard.finish_fail.store(true, Ordering::SeqCst);
+        }
+        let key = selector("user-rsa-sign");
+        let mut ctx = begin(
+            &engine,
+            &key,
+            &[Action::Sign],
+            OperationPolicy::strict_online(),
+            control,
+        );
+        let mut stage = store.stage(ctx.resources()).unwrap();
+        let error = engine
+            .sign_staged(
+                SignRequest::pdf(
+                    KeyRequest::new(&key, Some("C02 synthetic")),
+                    oncl_pdf::PdfSignProfile::default(),
+                ),
+                Source::sequential(&mut Cursor::new(unsigned_pdf()), None),
+                &mut stage,
+                &mut ctx,
+            )
+            .unwrap_err();
+        assert_eq!(error.applied_state(), AppliedState::Applied);
+        assert_eq!(guard.events.lock().unwrap().len(), 1);
+        let mut bytes = Vec::new();
+        assert!(stage.copy_to(&mut bytes).is_err());
+        assert!(bytes.is_empty());
+    }
+}
+
+#[cfg(feature = "pdf")]
+#[test]
+fn pdf_sign_digest_authority_does_not_authorize_pdf_sign() {
+    let parent = tempfile::tempdir().unwrap();
+    let guard = Arc::new(Guard::default());
+    let engine = engine(
+        guard.clone(),
+        KeySources::new(),
+        Some(TemporaryStore::new(parent.path()).unwrap()),
+        true,
+    );
+    let key = selector("user-rsa-sign");
+    let mut policy = OperationPolicy::strict_online();
+    policy.allow_prehashed = true;
+    let mut ctx = begin(
+        &engine,
+        &key,
+        &[Action::SignDigest],
+        policy,
+        Arc::new(Control::default()),
+    );
+    let mut output = Vec::new();
+    let error = engine
+        .sign(
+            SignRequest::pdf(
+                KeyRequest::new(&key, Some("C02 synthetic")),
+                oncl_pdf::PdfSignProfile::default(),
+            ),
+            Source::sequential(&mut Cursor::new(unsigned_pdf()), None),
+            &mut output,
+            &mut ctx,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::PermissionDenied);
+    assert!(output.is_empty());
+    assert!(guard.events.lock().unwrap().is_empty());
+}
+
+#[cfg(feature = "pdf")]
+#[test]
+fn pdf_staged_precheck_rejects_nonempty_and_foreign_before_intake() {
+    struct NeverRead;
+    impl io::Read for NeverRead {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            panic!("invalid PDF output admitted input")
+        }
+    }
+    let parent = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(parent.path()).unwrap();
+    let guard = Arc::new(Guard::default());
+    let engine = Engine::new(
+        EngineServices::hash_only(ResourceLimits {
+            max_in_flight: 2,
+            ..ResourceLimits::default()
+        })
+        .with_keys(Arc::new(KeySources::new()), guard.clone())
+        .with_validation(validation())
+        .with_temporary_store(store.clone()),
+    )
+    .unwrap();
+    let key = selector("user-rsa-sign");
+    let mut first = begin(
+        &engine,
+        &key,
+        &[Action::Sign],
+        OperationPolicy::strict_online(),
+        Arc::new(Control::default()),
+    );
+    let mut second = begin(
+        &engine,
+        &key,
+        &[Action::Sign],
+        OperationPolicy::strict_online(),
+        Arc::new(Control::default()),
+    );
+    let mut foreign = store.stage(second.resources()).unwrap();
+    let error = engine
+        .sign_staged(
+            SignRequest::pdf(
+                KeyRequest::new(&key, Some("C02 synthetic")),
+                oncl_pdf::PdfSignProfile::default(),
+            ),
+            Source::sequential(&mut NeverRead, None),
+            &mut foreign,
+            &mut first,
+        )
+        .unwrap_err();
+    assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    assert_eq!(foreign.len(), 0);
+    let mut nonempty = store.stage(first.resources()).unwrap();
+    nonempty.write_chunk(b"old artifact").unwrap();
+    let error = engine
+        .sign_staged(
+            SignRequest::pdf(
+                KeyRequest::new(&key, Some("C02 synthetic")),
+                oncl_pdf::PdfSignProfile::default(),
+            ),
+            Source::sequential(&mut NeverRead, None),
+            &mut nonempty,
+            &mut first,
+        )
+        .unwrap_err();
+    assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    assert_eq!(nonempty.len(), 12);
+    assert_eq!(first.resources().progress().bytes_in, 0);
+    assert!(guard.events.lock().unwrap().is_empty());
+}
+
+#[cfg(all(feature = "tokens", feature = "pdf"))]
+#[test]
+fn pdf_token_backends_verify_real_rsa_and_gost_signatures() {
+    use oncl_token::{
+        TokenKind, Tokens,
+        emulator::{CardSpec, EmuKey, EmulatorBackend, card},
+        execution::{TokenDeviceId, TokenGateRegistry},
+    };
+    for name in ["user-rsa-sign", "user-gost2004-sign", "user-gost2015-sign"] {
+        let entry = issued(name);
+        let alias = entry.alias.clone();
+        let emu = Arc::new(EmulatorBackend::new());
+        emu.add_reader("P02 reader");
+        let mut spec = CardSpec::new(TokenKind::Kaztoken, "C02 synthetic", vec![EmuKey { entry }]);
+        spec.fixed_k = Some(vec![1; 16]);
+        emu.insert("P02 reader", card(spec));
+        let key = KeySelector::token(
+            TokenDeviceId::new("P02 reader").unwrap(),
+            TokenKind::Kaztoken,
+            alias,
+        );
+        let provider = KeySources::new().with_tokens(
+            Tokens::new(emu.clone(), true),
+            Arc::new(TokenGateRegistry::new(1, 1).unwrap()),
+        );
+        let parent = tempfile::tempdir().unwrap();
+        let store = TemporaryStore::new(parent.path()).unwrap();
+        let guard = Arc::new(Guard::default());
+        let engine = engine(guard.clone(), provider, Some(store), true);
+        let input = include_bytes!("../../oncl-pdf/tests/fixtures/external-multipage.pdf");
+        let output = pdf_once(&engine, &key, input).unwrap();
+        assert!(output.starts_with(input));
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Verify]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control::default()),
+            )
+            .unwrap();
+        let checked = engine
+            .verify(
+                &oncl_core::VerifyRequest::pdf(),
+                Source::sequential(&mut Cursor::new(&output), None),
+                None,
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(checked.verdict, oncl_pki::validation::Verdict::Valid);
+        assert_eq!(checked.signers.len(), 1);
+        assert_eq!(
+            checked.signers[0].signature,
+            oncl_pki::validation::CheckStatus::Passed
+        );
+        assert!(
+            emu.exchanges("P02 reader")
+                .iter()
+                .any(|e| e.command.starts_with(&[0x00, 0x2a, 0x9e, 0x9a]))
+        );
+        assert_eq!(guard.events.lock().unwrap().len(), 1);
+        assert_eq!(guard.events.lock().unwrap()[0].action, Action::Sign);
+    }
+}

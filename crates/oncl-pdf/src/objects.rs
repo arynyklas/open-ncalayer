@@ -9,9 +9,30 @@ pub(crate) enum Value {
     Array(Vec<Value>),
     Dict(BTreeMap<Vec<u8>, Value>),
     Ref(u32, u16),
+    Scalar(Vec<u8>),
     Other,
 }
 impl Value {
+    pub(crate) fn retained_bytes(&self) -> Result<u64> {
+        let extra = match self {
+            Self::Name(bytes) | Self::Bytes(bytes, _) | Self::Scalar(bytes) => bytes.len() as u64,
+            Self::Array(values) => values.iter().try_fold(0u64, |n, value| {
+                n.checked_add(value.retained_bytes()?)
+                    .ok_or(PdfError::Limit("metadata size"))
+            })?,
+            Self::Dict(values) => values.iter().try_fold(2048u64, |n, (key, value)| {
+                let value = value.retained_bytes()?;
+                n.checked_add(key.len() as u64)
+                    .and_then(|n| n.checked_add(256))
+                    .and_then(|n| n.checked_add(value))
+                    .ok_or(PdfError::Limit("metadata size"))
+            })?,
+            _ => 0,
+        };
+        extra
+            .checked_add(256)
+            .ok_or(PdfError::Limit("metadata size"))
+    }
     pub fn int(&self) -> Result<u64> {
         if let Self::Int(n) = self {
             Ok(*n)
@@ -193,7 +214,7 @@ impl<'a> Parser<'a> {
                     return Err(PdfError::Malformed("PDF number"));
                 }
                 if body.contains(&b'.') || token.first() == Some(&b'-') {
-                    return Ok(Value::Other);
+                    return Ok(Value::Scalar(token.to_vec()));
                 }
                 let n = number(body)?;
                 let after = self.pos;
@@ -213,7 +234,7 @@ impl<'a> Parser<'a> {
                 }
             }
             _ => match self.word()? {
-                b"true" | b"false" | b"null" => Ok(Value::Other),
+                token @ (b"true" | b"false" | b"null") => Ok(Value::Scalar(token.to_vec())),
                 _ => Err(PdfError::Unsupported("PDF scalar token")),
             },
         }

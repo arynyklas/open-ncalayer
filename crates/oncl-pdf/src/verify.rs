@@ -11,11 +11,22 @@ use oncl_pki::{
 };
 use std::collections::BTreeSet;
 
+/// Exact extent for the newest revision; historical endpoints may precede an
+/// appended separator only at the complete EOF token or an actual EOL prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdfEndpointScope {
+    CurrentExtent,
+    HistoricalEof,
+    HistoricalLineEnding,
+}
 #[derive(Debug)]
 pub struct PdfSignature {
     pub byte_range: ByteRange,
     pub revision: usize,
     pub revision_end: u64,
+    /// Parser endpoint including the one physically present optional line ending.
+    pub parser_revision_end: u64,
+    pub endpoint_scope: PdfEndpointScope,
     pub later_changes: bool,
     pub validation: ValidationReport,
 }
@@ -59,6 +70,8 @@ pub struct PdfSignatureFacts {
     pub byte_range: ByteRange,
     pub revision: usize,
     pub revision_end: u64,
+    pub parser_revision_end: u64,
+    pub endpoint_scope: PdfEndpointScope,
     pub later_changes: bool,
     /// Index range into the aggregate validation report's scoped signers.
     pub signers: std::ops::Range<usize>,
@@ -96,6 +109,8 @@ impl PdfVerification {
             byte_range: first.byte_range,
             revision: first.revision,
             revision_end: first.revision_end,
+            parser_revision_end: first.parser_revision_end,
+            endpoint_scope: first.endpoint_scope,
             later_changes: first.later_changes,
             signers: 0..aggregate.signers.len(),
         });
@@ -106,6 +121,8 @@ impl PdfVerification {
                 byte_range: report.byte_range,
                 revision: report.revision,
                 revision_end: report.revision_end,
+                parser_revision_end: report.parser_revision_end,
+                endpoint_scope: report.endpoint_scope,
                 later_changes: report.later_changes,
                 signers: start..aggregate.signers.len(),
             });
@@ -127,8 +144,30 @@ impl PdfVerification {
 struct Candidate {
     range: ByteRange,
     contents: oncl_pki::io::Region,
+    permission_transform: bool,
+    parser_revision_end: u64,
+    endpoint_scope: PdfEndpointScope,
 }
 impl PdfDocument<'_, '_> {
+    pub(crate) fn has_signatures(&mut self) -> Result<bool> {
+        let mut found = false;
+        let mut known = BTreeSet::new();
+        for revision in 0..self.revisions.len() {
+            for candidate in self.signature_candidates(revision, &known)? {
+                if candidate.permission_transform {
+                    return Err(PdfError::Unsupported(
+                        "signature field lock or permission transform",
+                    ));
+                }
+                known.insert(candidate.range.values());
+                found = true;
+            }
+        }
+        if known.len() >= self.limits.max_signatures {
+            return Err(PdfError::Limit("signature count after Add"));
+        }
+        Ok(found)
+    }
     fn signature_candidates(
         &mut self,
         revision: usize,
@@ -221,7 +260,12 @@ impl PdfDocument<'_, '_> {
             }
             // The signature must be reachable in the revision it actually protects.
             // Historical copies in later revisions are not new signatures.
-            if range.signed_end() != self.revisions[revision].end {
+            let historical = revision + 1 < self.revisions.len();
+            let revision_facts = &self.revisions[revision];
+            let historical_endpoint = historical
+                && (revision_facts.eof_token_end..=revision_facts.end)
+                    .contains(&range.signed_end());
+            if range.signed_end() != revision_facts.end && !historical_endpoint {
                 if known.contains(&range.values()) {
                     continue;
                 }
@@ -247,6 +291,16 @@ impl PdfDocument<'_, '_> {
             }
             result.push(Candidate {
                 range,
+                parser_revision_end: revision_facts.end,
+                endpoint_scope: if !historical {
+                    PdfEndpointScope::CurrentExtent
+                } else if range.signed_end() == revision_facts.eof_token_end {
+                    PdfEndpointScope::HistoricalEof
+                } else {
+                    PdfEndpointScope::HistoricalLineEnding
+                },
+                permission_transform: field.contains_key(b"Lock".as_slice())
+                    || dict.contains_key(b"Reference".as_slice()),
                 contents: oncl_pki::io::Region {
                     offset: span.start,
                     len: span.end - span.start,
@@ -264,13 +318,23 @@ pub fn verify_source(
     allowed: &[SigAlg],
     scope: &mut ResourceScope,
 ) -> Result<PdfVerification> {
-    use oncl_pki::io::{FrozenInput, Region};
+    let mut snapshot = oncl_pki::io::FrozenInput::capture(input, store, scope)?;
+    verify_snapshot(&mut snapshot, limits, validation, allowed, scope)
+}
+pub(crate) fn verify_snapshot(
+    snapshot: &mut oncl_pki::io::FrozenInput,
+    limits: &PdfLimits,
+    validation: &ValidationContext<'_>,
+    allowed: &[SigAlg],
+    scope: &mut ResourceScope,
+) -> Result<PdfVerification> {
+    use oncl_pki::io::Region;
     let report_bytes = (limits.max_signatures.max(4) as u64)
         .checked_mul(1024)
         .ok_or(oncl_pki::resource::ProcessingError::MetadataLimit)?;
     let memory = scope.reserve_memory(report_bytes)?;
     let metadata = scope.reserve_metadata(report_bytes)?;
-    let mut snapshot = FrozenInput::capture(input, store, scope)?;
+    // The immutable snapshot is shared with incremental signing, never copied.
     let extent = snapshot.len();
     let mut reader = snapshot.reader(
         &[Region {
@@ -308,7 +372,7 @@ pub fn verify_source(
         let [offset, len, second, last] = candidate.range.values();
         let report = oncl_pki::cms::stream::verify_snapshot_detached(
             &decoded,
-            &mut snapshot,
+            snapshot,
             &[
                 Region { offset, len },
                 Region {
@@ -324,6 +388,8 @@ pub fn verify_source(
             byte_range: candidate.range,
             revision,
             revision_end: candidate.range.signed_end(),
+            parser_revision_end: candidate.parser_revision_end,
+            endpoint_scope: candidate.endpoint_scope,
             later_changes: candidate.range.signed_end() < extent,
             validation: report,
         });

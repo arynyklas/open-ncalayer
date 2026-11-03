@@ -26,6 +26,9 @@ pub use byte_string::{decode_pdf_byte_string, padded_der_sequence};
 #[path = "io/frozen.rs"]
 mod frozen;
 pub use frozen::{DerivedInput, FrozenInput, FrozenReader, SnapshotEncoding};
+#[path = "io/pdf_output.rs"]
+mod pdf_output;
+pub use pdf_output::PdfSignatureOutput;
 
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek + ?Sized> ReadSeek for T {}
@@ -37,6 +40,9 @@ enum Reader<'a> {
     Sequential(&'a mut dyn Read),
     Seekable(&'a mut dyn ReadSeek),
     Snapshot(&'a mut dyn SnapshotReader),
+    // Minted only while a closed output signing transaction owns the stage.
+    // It is OUTPUT-admitted, never original frozen-input provenance.
+    OutputProjection(&'a mut dyn SnapshotReader),
 }
 /// A source starts at the reader's current position; length is an optional
 /// admission hint, never a substitute for counting bytes actually consumed.
@@ -69,13 +75,25 @@ impl<'a> Source<'a> {
             Some(original) if !original.same_operation(scope) => Err(
                 ProcessingError::InvalidInput("snapshot belongs to another operation"),
             ),
-            Some(_) => Ok(true),
+            Some(_) => Ok(matches!(self.reader, Reader::Snapshot(_))),
+            None => Ok(false),
+        }
+    }
+    pub(crate) fn is_output_projection_for(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<bool, ProcessingError> {
+        match &self.admitted {
+            Some(original) if !original.same_operation(scope) => Err(
+                ProcessingError::InvalidInput("output projection belongs to another operation"),
+            ),
+            Some(_) => Ok(matches!(self.reader, Reader::OutputProjection(_))),
             None => Ok(false),
         }
     }
     pub(crate) fn finish_snapshot(&mut self) -> Result<(), ProcessingError> {
         match &mut self.reader {
-            Reader::Snapshot(reader) => reader.finish_snapshot(),
+            Reader::Snapshot(reader) | Reader::OutputProjection(reader) => reader.finish_snapshot(),
             _ => Ok(()),
         }
     }
@@ -83,7 +101,7 @@ impl<'a> Source<'a> {
         match &mut self.reader {
             Reader::Sequential(_) => None,
             Reader::Seekable(reader) => Some(&mut **reader),
-            Reader::Snapshot(reader) => Some(&mut **reader),
+            Reader::Snapshot(reader) | Reader::OutputProjection(reader) => Some(&mut **reader),
         }
     }
 }
@@ -92,7 +110,7 @@ impl Read for Source<'_> {
         match &mut self.reader {
             Reader::Sequential(reader) => reader.read(buffer),
             Reader::Seekable(reader) => reader.read(buffer),
-            Reader::Snapshot(reader) => reader.read(buffer),
+            Reader::Snapshot(reader) | Reader::OutputProjection(reader) => reader.read(buffer),
         }
     }
 }
