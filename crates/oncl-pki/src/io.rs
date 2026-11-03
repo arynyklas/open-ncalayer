@@ -29,10 +29,14 @@ pub use frozen::{DerivedInput, FrozenInput, FrozenReader, SnapshotEncoding};
 
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek + ?Sized> ReadSeek for T {}
+trait SnapshotReader: ReadSeek {
+    fn finish_snapshot(&mut self) -> Result<(), ProcessingError>;
+}
 
 enum Reader<'a> {
     Sequential(&'a mut dyn Read),
     Seekable(&'a mut dyn ReadSeek),
+    Snapshot(&'a mut dyn SnapshotReader),
 }
 /// A source starts at the reader's current position; length is an optional
 /// admission hint, never a substitute for counting bytes actually consumed.
@@ -69,10 +73,17 @@ impl<'a> Source<'a> {
             None => Ok(false),
         }
     }
+    pub(crate) fn finish_snapshot(&mut self) -> Result<(), ProcessingError> {
+        match &mut self.reader {
+            Reader::Snapshot(reader) => reader.finish_snapshot(),
+            _ => Ok(()),
+        }
+    }
     pub fn as_seekable(&mut self) -> Option<&mut dyn ReadSeek> {
         match &mut self.reader {
             Reader::Sequential(_) => None,
             Reader::Seekable(reader) => Some(&mut **reader),
+            Reader::Snapshot(reader) => Some(&mut **reader),
         }
     }
 }
@@ -81,6 +92,7 @@ impl Read for Source<'_> {
         match &mut self.reader {
             Reader::Sequential(reader) => reader.read(buffer),
             Reader::Seekable(reader) => reader.read(buffer),
+            Reader::Snapshot(reader) => reader.read(buffer),
         }
     }
 }

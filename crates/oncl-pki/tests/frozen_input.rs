@@ -456,3 +456,207 @@ fn recapture_keeps_original_cancellation_after_successful_copy_drop() {
     }
     assert_eq!(scope.progress().bytes_in, 3);
 }
+
+#[test]
+fn authentic_hash_replay_preserves_exact_intake_and_literal_sha256() {
+    use oncl_pki::{digest::hash_source, key::HashAlg};
+    let temp = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(temp.path()).unwrap();
+    let mut scope = scope(ResourceLimits {
+        input_bytes: 3,
+        ..ResourceLimits::default()
+    });
+    let mut input = Cursor::new(b"abc");
+    let mut captured =
+        FrozenInput::capture(Source::sequential(&mut input, None), &store, &mut scope).unwrap();
+    let mut reader = captured
+        .reader(&[Region { offset: 0, len: 3 }], &scope)
+        .unwrap();
+    let digest = hash_source(reader.source(), HashAlg::Sha256, &mut scope).unwrap();
+    reader.finish().unwrap();
+    assert_eq!(
+        digest.as_bytes(),
+        &[
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+            0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+            0xf2, 0x00, 0x15, 0xad
+        ]
+    );
+    assert_eq!(scope.progress().bytes_in, 3);
+}
+
+#[test]
+fn hash_replay_rejects_foreign_scope_before_original_read() {
+    use oncl_pki::{digest::hash_source, key::HashAlg};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Armed(Arc<AtomicBool>);
+    impl OperationControl for Armed {
+        fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+            assert!(
+                !self.0.load(Ordering::SeqCst),
+                "foreign hash touched original reader"
+            );
+            Ok(())
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(temp.path()).unwrap();
+    let limits = ResourceLimits::default();
+    let armed = Arc::new(AtomicBool::new(false));
+    let mut original = Arc::new(SharedBudget::new(limits.clone()).unwrap())
+        .begin(limits, Arc::new(Armed(armed.clone())))
+        .unwrap();
+    let mut input = Cursor::new(b"abc");
+    let mut captured =
+        FrozenInput::capture(Source::sequential(&mut input, None), &store, &mut original).unwrap();
+    let mut reader = captured
+        .reader(&[Region { offset: 0, len: 3 }], &original)
+        .unwrap();
+    armed.store(true, Ordering::SeqCst);
+    let mut foreign = scope(ResourceLimits::default());
+    assert!(matches!(
+        hash_source(reader.source(), HashAlg::Sha256, &mut foreign),
+        Err(ProcessingError::InvalidInput(
+            "snapshot belongs to another operation"
+        ))
+    ));
+}
+
+#[test]
+fn hash_replay_preserves_one_shot_typed_read_cancellation() {
+    use oncl_pki::{digest::hash_source, key::HashAlg};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Once(Arc<AtomicUsize>);
+    impl OperationControl for Once {
+        fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+            let at = self.0.fetch_add(1, Ordering::SeqCst);
+            if at == 4 {
+                Err(ProcessingError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(temp.path()).unwrap();
+    let limits = ResourceLimits::default();
+    let calls = Arc::new(AtomicUsize::new(100));
+    let mut scope = Arc::new(SharedBudget::new(limits.clone()).unwrap())
+        .begin(limits, Arc::new(Once(calls.clone())))
+        .unwrap();
+    let mut input = Cursor::new(b"abc");
+    let mut captured =
+        FrozenInput::capture(Source::sequential(&mut input, None), &store, &mut scope).unwrap();
+    let mut reader = captured
+        .reader(&[Region { offset: 0, len: 3 }], &scope)
+        .unwrap();
+    calls.store(0, Ordering::SeqCst);
+    assert!(matches!(
+        hash_source(reader.source(), HashAlg::Sha256, &mut scope),
+        Err(ProcessingError::Cancelled)
+    ));
+    reader.finish().unwrap();
+}
+
+#[test]
+fn original_bound_region_reads_are_chunked_checked_and_hash_compatible() {
+    use oncl_pki::{digest::hash_source, key::HashAlg, resource::IO_CHUNK_BYTES};
+    let temp = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(temp.path()).unwrap();
+    let mut scope = scope(ResourceLimits::default());
+    let data = vec![0x5a; IO_CHUNK_BYTES + 17];
+    let mut source = Cursor::new(data.as_slice());
+    let mut frozen =
+        FrozenInput::capture(Source::sequential(&mut source, None), &store, &mut scope).unwrap();
+    let mut output = vec![0; data.len()];
+    assert_eq!(
+        frozen
+            .read_region(
+                Region {
+                    offset: 0,
+                    len: data.len() as u64
+                },
+                &mut output
+            )
+            .unwrap(),
+        IO_CHUNK_BYTES
+    );
+    assert_eq!(&output[..IO_CHUNK_BYTES], &data[..IO_CHUNK_BYTES]);
+    assert!(matches!(
+        frozen.read_region(
+            Region {
+                offset: u64::MAX,
+                len: 1
+            },
+            &mut []
+        ),
+        Err(ProcessingError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        frozen.read_region(
+            Region {
+                offset: 0,
+                len: data.len() as u64 + 1
+            },
+            &mut []
+        ),
+        Err(ProcessingError::InvalidInput(_))
+    ));
+    let mut source = Cursor::new(b"abc");
+    let mut frozen =
+        FrozenInput::capture(Source::sequential(&mut source, None), &store, &mut scope).unwrap();
+    let mut part = [0; 2];
+    assert_eq!(
+        frozen
+            .read_region(Region { offset: 1, len: 2 }, &mut part)
+            .unwrap(),
+        2
+    );
+    assert_eq!(&part, b"bc");
+    let before = scope.progress().bytes_in;
+    let mut reader = frozen
+        .reader(&[Region { offset: 0, len: 3 }], &scope)
+        .unwrap();
+    let digest = hash_source(reader.source(), HashAlg::Sha256, &mut scope).unwrap();
+    reader.finish().unwrap();
+    assert_eq!(
+        digest.as_bytes(),
+        &[
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+            0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+            0xf2, 0x00, 0x15, 0xad
+        ]
+    );
+    assert_eq!(scope.progress().bytes_in, before);
+}
+
+#[test]
+fn original_bound_region_read_checks_control_even_for_empty_output() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Cancel(Arc<AtomicBool>);
+    impl OperationControl for Cancel {
+        fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+            if self.0.load(Ordering::SeqCst) {
+                Err(ProcessingError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(temp.path()).unwrap();
+    let limits = ResourceLimits::default();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut scope = Arc::new(SharedBudget::new(limits.clone()).unwrap())
+        .begin(limits, Arc::new(Cancel(cancelled.clone())))
+        .unwrap();
+    let mut source = Cursor::new(b"abc");
+    let mut frozen =
+        FrozenInput::capture(Source::sequential(&mut source, None), &store, &mut scope).unwrap();
+    cancelled.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        frozen.read_region(Region { offset: 0, len: 0 }, &mut []),
+        Err(ProcessingError::Cancelled)
+    ));
+    assert_eq!(scope.progress().bytes_in, 3);
+}

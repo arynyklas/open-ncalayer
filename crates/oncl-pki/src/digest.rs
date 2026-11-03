@@ -96,16 +96,29 @@ impl HashState {
 /// extra byte is probed to distinguish exact EOF from an oversized stream.
 /// Every read is at most 256 KiB; cancellation/deadline is checked before and
 /// after I/O, before hashing, and before returning a result.
+/// Authentic frozen views must belong to this exact operation; their bounded
+/// bytes are replay, not fresh intake. They retain the original control/deadline
+/// and typed one-shot snapshot read errors. Ordinary Sources keep N+1 accounting.
 pub fn hash_source(
     mut source: Source<'_>,
     algorithm: HashAlg,
     scope: &mut ResourceScope,
 ) -> Result<DigestValue, ProcessingError> {
+    let replay = source.is_snapshot_for(scope)?;
+    let replay_limit = if replay {
+        source
+            .known_len()
+            .ok_or(ProcessingError::InvalidInput("snapshot extent absent"))?
+            .min(scope.limits().input_bytes)
+    } else {
+        0
+    };
     scope.checkpoint()?;
     scope.check_input()?;
-    if source
-        .known_len()
-        .is_some_and(|len| len > scope.input_remaining())
+    if !replay
+        && source
+            .known_len()
+            .is_some_and(|len| len > scope.input_remaining())
     {
         return Err(ProcessingError::InputLimit);
     }
@@ -123,25 +136,45 @@ pub fn hash_source(
         .map_err(|_| ProcessingError::MemoryLimit)?;
     buffer.resize(capacity, 0);
     let mut state = HashState::new(algorithm);
+    let mut replayed = 0u64;
     loop {
         scope.checkpoint()?;
-        let request = scope.input_request(capacity)?;
+        let request = if replay {
+            capacity
+        } else {
+            scope.input_request(capacity)?
+        };
         let n = match source.read(&mut buffer[..request]) {
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            result => result?,
+            Err(error) => {
+                source.finish_snapshot()?;
+                scope.checkpoint()?;
+                return Err(error.into());
+            }
+            Ok(count) => count,
         };
         if n > request {
             return Err(ProcessingError::InvalidInput(
                 "reader exceeded its supplied buffer",
             ));
         }
-        scope.consumed_input(n as u64)?;
+        if replay {
+            replayed = replayed
+                .checked_add(n as u64)
+                .ok_or(ProcessingError::InputLimit)?;
+            if replayed > replay_limit {
+                return Err(ProcessingError::InputLimit);
+            }
+        } else {
+            scope.consumed_input(n as u64)?;
+        }
         scope.checkpoint()?;
         if n == 0 {
             break;
         }
         state.update(&buffer[..n]);
     }
+    source.finish_snapshot()?;
     scope.checkpoint()?;
     let digest = state.finish();
     scope.checkpoint()?;
