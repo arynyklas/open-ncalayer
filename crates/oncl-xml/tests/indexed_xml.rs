@@ -639,3 +639,133 @@ fn retained_attribute_span_releases_document_metadata_and_admission() {
     .unwrap();
     assert!(other.read_attribute(&span, 0, &mut bytes).is_err());
 }
+
+#[test]
+fn consumed_overflow_is_retained_and_terminal() {
+    let limits = ResourceLimits {
+        input_bytes: 3,
+        ..ResourceLimits::default()
+    };
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    assert!(matches!(
+        XmlDocument::index(
+            Source::sequential(&mut Cursor::new(b"<r/>"), None),
+            &XmlLimits::default(),
+            &store,
+            &mut scope,
+        ),
+        Err(ProcessingError::InputLimit)
+    ));
+    assert_eq!(scope.progress().bytes_in, 4);
+    struct MustNotRead;
+    impl Read for MustNotRead {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("terminal operation must not consume more input")
+        }
+    }
+    assert!(matches!(
+        XmlDocument::index(
+            Source::sequential(&mut MustNotRead, None),
+            &XmlLimits::default(),
+            &store,
+            &mut scope,
+        ),
+        Err(ProcessingError::InputLimit)
+    ));
+}
+
+#[test]
+fn authentic_snapshot_index_does_not_double_charge() {
+    use oncl_pki::io::{FrozenInput, Region};
+    let xml = b"<r/>";
+    let limits = ResourceLimits {
+        input_bytes: xml.len() as u64,
+        ..ResourceLimits::default()
+    };
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits, Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let mut frozen = FrozenInput::capture(
+        Source::sequential(&mut Cursor::new(xml), None),
+        &store,
+        &mut scope,
+    )
+    .unwrap();
+    let mut reader = frozen
+        .reader(
+            &[Region {
+                offset: 0,
+                len: xml.len() as u64,
+            }],
+            &scope,
+        )
+        .unwrap();
+    let doc =
+        XmlDocument::index(reader.source(), &XmlLimits::default(), &store, &mut scope).unwrap();
+    assert_eq!(doc.len(), xml.len() as u64);
+    assert_eq!(scope.progress().bytes_in, xml.len() as u64);
+}
+
+#[test]
+fn cancelled_read_retains_consumption() {
+    struct CancelRead(Arc<AtomicBool>);
+    impl Read for CancelRead {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            out[..4].copy_from_slice(b"<r/>");
+            self.0.store(true, Ordering::Relaxed);
+            Ok(4)
+        }
+    }
+    let flag = Arc::new(AtomicBool::new(false));
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget
+        .begin(limits, Arc::new(Cancel(flag.clone())))
+        .unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    assert!(matches!(
+        XmlDocument::index(
+            Source::sequential(&mut CancelRead(flag), None),
+            &XmlLimits::default(),
+            &store,
+            &mut scope,
+        ),
+        Err(ProcessingError::Cancelled)
+    ));
+    assert_eq!(scope.progress().bytes_in, 4);
+}
+
+#[test]
+fn foreign_snapshot_rejected_before_source_io() {
+    use oncl_pki::io::{FrozenInput, Region};
+    let limits = ResourceLimits::default();
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut scope = budget.begin(limits.clone(), Arc::new(Control)).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let mut frozen = FrozenInput::capture(
+        Source::sequential(&mut Cursor::new(b"<r/>"), None),
+        &store,
+        &mut scope,
+    )
+    .unwrap();
+    let mut reader = frozen
+        .reader(&[Region { offset: 0, len: 4 }], &scope)
+        .unwrap();
+    let other_budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut other_scope = other_budget.begin(limits, Arc::new(Control)).unwrap();
+    assert!(matches!(
+        XmlDocument::index(
+            reader.source(),
+            &XmlLimits::default(),
+            &store,
+            &mut other_scope,
+        ),
+        Err(ProcessingError::InvalidInput(_))
+    ));
+    assert_eq!(other_scope.progress().bytes_in, 0);
+    let mut bytes = [0; 4];
+    reader.read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"<r/>");
+}

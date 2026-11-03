@@ -5,6 +5,10 @@ pub enum VerifyProfile {
     #[cfg(feature = "pdf")]
     Pdf,
     Cades(oncl_pki::evidence::AdesLevel),
+    #[cfg(feature = "xml")]
+    Xml,
+    #[cfg(feature = "xml")]
+    XmlKalkan,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,6 +17,20 @@ pub struct VerifyRequest {
     limits: Option<oncl_pki::evidence::EvidenceLimits>,
 }
 impl VerifyRequest {
+    #[cfg(feature = "xml")]
+    pub const fn xml() -> Self {
+        Self {
+            profile: VerifyProfile::Xml,
+            limits: None,
+        }
+    }
+    #[cfg(feature = "xml")]
+    pub const fn xml_kalkan() -> Self {
+        Self {
+            profile: VerifyProfile::XmlKalkan,
+            limits: None,
+        }
+    }
     #[cfg(feature = "pdf")]
     pub const fn pdf() -> Self {
         Self {

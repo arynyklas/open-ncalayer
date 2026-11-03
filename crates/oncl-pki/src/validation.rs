@@ -229,9 +229,16 @@ pub enum TimeBasis {
     VerifiedTimestamp(OffsetDateTime),
     ClaimedSigningTime(OffsetDateTime),
 }
+/// Format checks can only invalidate already checked cryptographic evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormatFailure {
+    ReferenceDigestMismatch,
+    ReferenceTargetMissing,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValidationReason {
     Signature(cms::Problem),
+    Format(FormatFailure),
     CertificateValidity,
     UntrustedChain,
     KeyUsage,
@@ -281,6 +288,62 @@ pub struct ValidationReport {
     pub policy: ValidationPolicy,
     pub checked_at: OffsetDateTime,
     pub signers: ScopedSigners,
+}
+impl ValidationReport {
+    /// Attach an actual format failure under the report's original operation.
+    /// This surface cannot mark checks passed, remove reasons or detach owners.
+    pub fn invalidate_signer(
+        &mut self,
+        index: usize,
+        failure: FormatFailure,
+        scope: &ResourceScope,
+    ) -> Result<(), ProcessingError> {
+        scope.checkpoint()?;
+        if !self.signers._memory.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "report belongs to another operation",
+            ));
+        }
+        let signer = self
+            .signers
+            .values
+            .get_mut(index)
+            .ok_or(ProcessingError::InvalidInput("signer index"))?;
+        if signer.reasons.len() == signer.reasons.capacity() {
+            // Reserve the old and new allocations while reallocation is live.
+            let capacity = signer
+                .reasons
+                .capacity()
+                .max(1)
+                .checked_mul(2)
+                .ok_or(ProcessingError::MetadataLimit)?;
+            let old =
+                signer.reasons.capacity() as u64 * std::mem::size_of::<ValidationReason>() as u64;
+            let next = (capacity as u64)
+                .checked_mul(std::mem::size_of::<ValidationReason>() as u64)
+                .ok_or(ProcessingError::MetadataLimit)?;
+            self.signers._memory.memory.grow(next)?;
+            if let Err(error) = self.signers._memory.metadata.grow(next) {
+                self.signers._memory.memory.shrink(next)?;
+                return Err(error);
+            }
+            if signer
+                .reasons
+                .try_reserve_exact(capacity - signer.reasons.len())
+                .is_err()
+            {
+                self.signers._memory.memory.shrink(next)?;
+                self.signers._memory.metadata.shrink(next)?;
+                return Err(ProcessingError::MemoryLimit);
+            }
+            self.signers._memory.memory.shrink(old)?;
+            self.signers._memory.metadata.shrink(old)?;
+        }
+        signer.reasons.push(ValidationReason::Format(failure));
+        signer.signature = CheckStatus::Failed;
+        self.verdict = Verdict::Invalid;
+        scope.checkpoint()
+    }
 }
 pub struct ValidationContext<'a> {
     pub policy: ValidationPolicy,

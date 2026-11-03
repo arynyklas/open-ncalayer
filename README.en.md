@@ -497,6 +497,38 @@ and a separate later incremental update. The virtual xref-above-4-GiB test prove
 only arithmetic/seek handling, not meaningful 10-GiB PDF processing or a 1-GiB RSS
 ceiling: those remain V01 acceptance gates.
 
+The optional `oncl-core/xml` feature adds UTF-8 Source **verification** through
+`VerifyRequest::xml()` (standard C14N) or explicit `VerifyRequest::xml_kalkan()`
+byte compatibility. Configure host `ValidationServices` and `TemporaryStore`;
+requests cannot choose trust anchors or network policy. `oncl-xml::verify_source`
+checks every real SignedInfo, certificate, SignatureValue and Reference. Scoped
+per-signer facts retain the actual certificate SHA-256 and exact covered regions.
+One canonical writer serves bounded DOM and indexed raw-span inputs; large XML
+does not become a DOM or a canonical document buffer. Supported inputs include
+inclusive/exclusive C14N with comments variants, InclusiveNamespaces, ID/percent
+URIs, unique XPointer location paths, bounded recursive Manifests and the
+namespace-bound `not(ancestor-or-self::ds:Signature)` XPath filter. Enveloped
+excludes the current signature; excluding later signatures is explicit
+`KalkanLegacy` compatibility only. Ambiguous IDs/KeyInfo/X509Data and unsupported
+transforms fail; uncovered-node changes are not attributed to a signature.
+XAdES 1.3.2 SignatureTimeStamp binds the actual canonical source SignatureValue
+through a closed Base64 projection and F03/F04, including current TSA status.
+This is not an achieved-AdES-level claim: archive coverage, other XAdES versions
+and multiple independent SignatureTimeStamp proofs are explicitly unsupported.
+Large XML sign/Add and WSSE are not added. Existing bounded limits and CMS/PDF
+signing remain unchanged. Internal hashing/evidence intake spends no final-output
+quota; external `copy_entry` admits and charges every delivery before writing.
+
+Run `cargo test -p oncl-xml --features testing`, then
+`cargo run -p oncl-core --features xml --example sdk_probe -- --case X03 --out target/x03-smoke`.
+The probe creates substantive XML with two real signatures and a protected
+reference larger than 64 MiB, a far mutation, an uncovered positive control and
+separate per-signer artifacts. Run the bounded independent oracle with
+`python crates/oncl-core/examples/sdk_probe/xml_oracle.py --out target/x03-smoke`
+(lxml/libxml2 and cryptography: exact C14N/digests and RSA math, not GOST or trust).
+Meaningful 10-GiB processing and the 1-GiB peak-RSS gate remain V01 work.
+
+
 
 The test keys in `fixtures/synthetic/` are synthetic, password `Qwerty12`. They work on the demo page. By default the demo sends `chain: []`, so synthetic and NCANode test keys are available. The «synthetic test root» choice sends `root-gost2015`: keys of the other roots and of the intermediate CA become unavailable.
 

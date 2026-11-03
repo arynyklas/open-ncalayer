@@ -89,6 +89,16 @@
 //! caps network waits to the original operation deadline; it cannot forcibly
 //! preempt arbitrary host HttpTransport code that ignores synchronous limits.
 //!
+//! With the optional `xml` feature, `VerifyRequest::xml()` verifies an immutable
+//! UTF-8 Source through indexed streaming C14N and every signer/reference, using
+//! the same host validation services and original scope. Configure an explicit
+//! TemporaryStore. `VerifyRequest::xml_kalkan()` selects existing Kalkan byte
+//! compatibility explicitly; neither request chooses trust anchors or URL policy.
+//! `VerificationReport::xml` owns immutable certificate/region/reference facts and
+//! their reservations. Canonical hash work and evidence intake do not debit final
+//! output; external evidence delivery and canonical writes do. This adds verify
+//! only: default CMS behavior and SignRequest families remain unchanged.
+//!
 //! # Source-bound signing
 //! `SignRequest` is consumed by `Engine::sign`: CMS Create/Add and raw message
 //! signing require `Action::Sign`, not prehash permission. Explicit raw digests

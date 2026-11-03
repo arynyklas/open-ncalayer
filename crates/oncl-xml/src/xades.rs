@@ -202,8 +202,8 @@ pub fn sign(
         return Ok(signed);
     };
 
-    let value = crate::signature_value_c14n(&signed, &id)?;
-    let stamp = tsp::request(tsa, &tsa.hash.digest(&value), http)?;
+    let imprint = crate::signature_value_digest(&signed, &id, tsa.hash)?;
+    let stamp = tsp::request(tsa, imprint.as_bytes(), http)?;
     let mut unsigned = format!(
         "<xades:UnsignedProperties><xades:UnsignedSignatureProperties>\
          <xades:SignatureTimeStamp Id=\"{id}-SignatureTimeStamp\">\

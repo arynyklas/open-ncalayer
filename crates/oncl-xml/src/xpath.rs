@@ -288,6 +288,151 @@ pub(crate) fn select_first_in<'a, 'i, 'q>(
     Ok(first(doc, &context, last, ns))
 }
 
+/// Streaming adapter for the same compiled XPath subset, with bounded ancestor
+/// automaton state rather than node sets proportional to document cardinality.
+pub(crate) fn select_indexed(
+    document: &mut crate::XmlDocument,
+    expression: &str,
+    namespaces: &[(&str, &str)],
+    scope: &oncl_pki::resource::ResourceScope,
+) -> Result<Option<crate::XmlNode>, crate::XmlSourceError> {
+    select_indexed_mode(document, expression, namespaces, scope, false)
+}
+pub(crate) fn select_indexed_unique(
+    document: &mut crate::XmlDocument,
+    expression: &str,
+    namespaces: &[(&str, &str)],
+    scope: &oncl_pki::resource::ResourceScope,
+) -> Result<Option<crate::XmlNode>, crate::XmlSourceError> {
+    select_indexed_mode(document, expression, namespaces, scope, true)
+}
+fn select_indexed_mode(
+    document: &mut crate::XmlDocument,
+    expression: &str,
+    namespaces: &[(&str, &str)],
+    scope: &oncl_pki::resource::ResourceScope,
+    unique: bool,
+) -> Result<Option<crate::XmlNode>, crate::XmlSourceError> {
+    use crate::XmlEventKind;
+    use oncl_pki::resource::ProcessingError;
+    document.check_scope(scope)?;
+    if expression.len() > 65536
+        || expression.bytes().filter(|b| *b == b'/').count() > 2 * MAX_STEPS
+        || namespaces.len() > 128
+    {
+        return Err(crate::XmlSourceError::Unsupported("indexed XPath limits"));
+    }
+    let steps = parse(expression)
+        .map_err(|_| crate::XmlSourceError::Unsupported("indexed XPath expression"))?;
+    if steps.len() > MAX_STEPS {
+        return Err(crate::XmlSourceError::Unsupported("indexed XPath steps"));
+    }
+    let ns = Namespaces {
+        bindings: namespaces,
+        other: None,
+    };
+    for step in &steps {
+        if let Some((prefix, _)) = step.name.split_once(':')
+            && ns.uri(prefix).is_none()
+        {
+            return Err(crate::XmlSourceError::Unsupported(
+                "unbound indexed XPath prefix",
+            ));
+        }
+    }
+    struct Frame {
+        active: [bool; MAX_STEPS],
+        children: [usize; MAX_STEPS],
+    }
+    let bytes = (257 * std::mem::size_of::<Frame>()) as u64;
+    let _memory = scope.reserve_memory(bytes)?;
+    let _metadata = scope.reserve_metadata(bytes)?;
+    let mut frames = Vec::with_capacity(257);
+    frames.push(Frame {
+        active: [false; MAX_STEPS],
+        children: [0; MAX_STEPS],
+    });
+    let mut ancestors = [0usize; MAX_STEPS];
+    let mut first = None;
+    let mut selected = None;
+    {
+        let mut events = document.events();
+        while let Some(event) = events.next_event()? {
+            scope.checkpoint()?;
+            match event.kind {
+                XmlEventKind::Start => {
+                    let name = event
+                        .name
+                        .as_ref()
+                        .ok_or(ProcessingError::InvalidInput("XPath name"))?;
+                    let mut active = [false; MAX_STEPS];
+                    let parent = frames
+                        .last_mut()
+                        .ok_or(ProcessingError::InvalidInput("XPath parent"))?;
+                    for (i, step) in steps.iter().enumerate() {
+                        let (uri, local) = match step.name.split_once(':') {
+                            Some((prefix, local)) => (ns.uri(prefix), local),
+                            None => (None, step.name),
+                        };
+                        let matches = name.namespace() == uri && name.local() == local;
+                        if matches {
+                            parent.children[i] = parent.children[i]
+                                .checked_add(1)
+                                .ok_or(ProcessingError::MetadataLimit)?;
+                        }
+                        let context = if i == 0 {
+                            step.axis == Axis::Descendant || event.depth == 0
+                        } else {
+                            match step.axis {
+                                Axis::Child => parent.active[i - 1],
+                                Axis::Descendant => ancestors[i - 1] != 0,
+                            }
+                        };
+                        active[i] = matches
+                            && context
+                            && step.position.is_none_or(|n| n == parent.children[i]);
+                    }
+                    if active[steps.len() - 1] {
+                        if first.is_none() {
+                            first = Some(event.region.offset);
+                        } else if unique {
+                            return Err(crate::XmlSourceError::Unsupported(
+                                "multi-node XPointer location path",
+                            ));
+                        }
+                    }
+                    for (i, on) in active.iter().enumerate() {
+                        if *on {
+                            ancestors[i] += 1;
+                        }
+                    }
+                    frames.push(Frame {
+                        active,
+                        children: [0; MAX_STEPS],
+                    });
+                }
+                XmlEventKind::End => {
+                    if first == Some(event.region.offset) {
+                        selected = Some(event.region);
+                        if !unique {
+                            break;
+                        }
+                    }
+                    let frame = frames
+                        .pop()
+                        .ok_or(ProcessingError::InvalidInput("XPath frame"))?;
+                    for (i, on) in frame.active.iter().enumerate() {
+                        if *on {
+                            ancestors[i] -= 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(selected.map(|region| document.indexed_node(region)))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

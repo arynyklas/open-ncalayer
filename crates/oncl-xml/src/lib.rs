@@ -32,22 +32,57 @@
 //! of at most [`MAX_CANONICAL`] bytes, at most [`REFERENCE_WORK`] bytes canonicalized by
 //! [`verify`], and XPaths of at most 32 steps. Signing holds one parse tree at a time.
 //!
-//! [`XmlDocument::index`] separately freezes a streaming UTF-8 source into the
-//! host's explicit [`oncl_pki::io::TemporaryStore`], with file-backed token and
-//! duplicate-safe ID indexes and stable u64 regions. It does not change the
-//! bounded signature APIs above or implement large-document canonicalization.
-//! Its lending event cursor restores namespace contexts at element boundaries;
-//! consumers maintain that scope for non-element tokens. Ordinary attributes
-//! and text remain validated lexical spans, not accumulated values; namespace
-//! declarations and recognized IDs are normalized under explicit small limits.
-//! Documents retain the original operation's quota, cancellation and Deadline.
+//! [`XmlDocument::index`] freezes a streaming UTF-8 source using the host's
+//! explicit [`oncl_pki::io::TemporaryStore`] and the original operation scope.
+//! Token/duplicate-safe full-ID indexes and all document positions are file-backed
+//! u64 regions. Authentic same-operation snapshot replay is not charged twice.
+//! Unlike the legacy string parser, a byte Source rejects non-UTF-8 declarations.
+//!
+//! [`XmlDocument::canonicalize`] writes external canonical bytes under the output
+//! quota. The indexed/lending raw-span adapter and bounded DOM input adapter use
+//! one canonical writer; signature/reference hashing does not materialize canonical
+//! documents or debit final output. [`C14nProfile::Standard`] uses nearest inherited
+//! xml:* values and the current enveloped signature only; explicit
+//! [`C14nProfile::KalkanLegacy`] preserves outermost xml:* and cascading-signature
+//! compatibility. The old bounded convenience APIs retain their existing limits.
+//!
+//! [`verify_source`] checks every real SignedInfo, SignatureValue, certificate and
+//! Reference, then uses shared host-selected F03/F04 validation. Scoped facts bind
+//! each signer to actual source regions, certificate SHA-256 and checked targets.
+//! Supported references are whole-document, percent-decoded IDs, single-ID/unique
+//! location-path XPointer, bounded recursive Manifest, and the explicit namespace-
+//! bound `not(ancestor-or-self::ds:Signature)` XPath filter. General XPath node sets,
+//! XSLT, external document references and DTDs are not accepted.
+//!
+//! Recognized XAdES 1.3.2 SignatureTimeStamp proofs cover the actual canonical
+//! source SignatureValue through a sealed reversible Base64 projection; raw
+//! signature bytes, TSA trust/status and time binding are checked, not assumed.
+//! Archive coverage, other XAdES versions and multiple independent signature-time
+//! proofs are explicitly unsupported, not silently promoted to trusted AdES levels.
+//! No new large XML signing/Add/WSSE operation is declared here.
 
 mod c14n;
+mod canonical_stream;
+mod canonical_writer;
+
+/// Explicit inherited xml:* semantics for canonical subtree roots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum C14nProfile {
+    /// Canonical XML 1.0: nearest omitted ancestor wins.
+    Standard,
+    /// Existing Kalkan/Santuario protocol bytes: outermost ancestor wins.
+    KalkanLegacy,
+}
 mod index;
 mod parse;
 mod reader;
+mod references;
 pub use index::{XmlDocument, XmlLimits, XmlNode};
 pub use reader::{XmlAttribute, XmlAttributeSpan, XmlEvent, XmlEventKind, XmlEvents, XmlName};
+pub use references::{
+    XmlReferenceResult, XmlSignerResult, XmlSourceError, XmlVerification, XmlVerificationFacts,
+    XmlVerifyProfile, verify_source,
+};
 pub mod xades;
 mod xpath;
 
@@ -524,7 +559,7 @@ fn sign_with(
         // The new signature is the only node the enveloped transform drops, so the digest
         // is that of the target as it is now; comments are out (a same-document reference).
         let target = tbs.unwrap_or_else(|| doc.root());
-        let canonical = canonicalizer(reference_c14n).run(target)?;
+        let (digest, _) = canonicalizer(reference_c14n).hash(target, algorithms.digest)?;
         let point = SplicePoint::of(xml, parent)?;
         let default_namespace = parent
             .lookup_namespace_uri(None)
@@ -532,7 +567,7 @@ fn sign_with(
         drop(doc);
         (
             algorithms,
-            algorithms.digest.digest(&canonical),
+            digest.as_bytes().to_vec(),
             point,
             uri,
             default_namespace,
@@ -1011,17 +1046,19 @@ impl Template<'_> {
                     .expect("the object's signed element");
                 // The enveloped-signature transform does not drop it: a document-order
                 // filter of a subtree inside the signature never meets the signature.
-                let canonical = canonicalizer(c14n).run(target)?;
-                Ok(self.algorithms.digest.digest(&canonical))
+                let (digest, _) = canonicalizer(c14n).hash(target, self.algorithms.digest)?;
+                Ok(digest.as_bytes().to_vec())
             })?),
             None => None,
         };
         let tbs = self.in_place(xml, point, object_digest.as_deref(), |signature| {
             let signed_info = signature.first_element_child().expect("SignedInfo");
-            canonicalizer(self.method).run(signed_info)
+            Ok(canonicalizer(self.method)
+                .hash(signed_info, self.algorithms.signature.hash_alg())?
+                .0)
         })?;
         let value = key
-            .sign(self.algorithms.signature, &tbs)
+            .sign_digest(self.algorithms.signature, &tbs)
             .map_err(XmlError::Key)?;
         Ok(point.splice(xml, &self.render(Some(&value), object_digest.as_deref())))
     }
@@ -1089,13 +1126,17 @@ fn signature_by_id<'a, 'i>(doc: &'a Document<'i>, id: &str) -> Result<Node<'a, '
         .ok_or_else(|| malformed(&format!("no signature with Id {id:?}")))
 }
 
-/// The `ds:SignatureValue` of the signature `id` in `signed` (a document [`sign_qualified`]
-/// made), canonicalized in place with Exclusive XML Canonicalization: what a XAdES
-/// `SignatureTimeStamp` stamps.
-pub(crate) fn signature_value_c14n(signed: &[u8], id: &str) -> Result<Vec<u8>, XmlError> {
+/// Digest the actual `ds:SignatureValue` of signature `id` in `signed`, using
+/// Exclusive C14N through the bounded adapter and shared writer. This is the
+/// imprint of the bytes a legacy XAdES `SignatureTimeStamp` stamps.
+pub(crate) fn signature_value_digest(
+    signed: &[u8],
+    id: &str,
+    algorithm: HashAlg,
+) -> Result<oncl_pki::digest::DigestValue, XmlError> {
     let doc = parse::parse_signed(signed)?;
     let value = ds_child(signature_by_id(&doc, id)?, "SignatureValue")?;
-    canonicalizer(C14n::Exclusive).run(value)
+    Ok(canonicalizer(C14n::Exclusive).hash(value, algorithm)?.0)
 }
 
 /// `signed` (a document [`sign_qualified`] made) with `properties` spliced in as the last
@@ -1154,7 +1195,7 @@ fn verify_signature(
         .map_err(XmlError::Key)?;
 
     let prefixes = inclusive_prefixes(method_element);
-    let tbs = run_within(
+    let tbs = hash_within(
         Canonicalizer {
             exclusive: method.is_exclusive(),
             comments: method.with_comments(),
@@ -1163,12 +1204,15 @@ fn verify_signature(
             limit: 0,
         },
         signed_info,
+        alg.hash_alg(),
         budget,
     )?;
-    public.verify(alg, &tbs, &value).map_err(|e| match e {
-        KeyError::BadSignature => XmlError::BadSignature,
-        e => XmlError::Key(e),
-    })?;
+    public
+        .verify_digest(alg, &tbs, &value)
+        .map_err(|e| match e {
+            KeyError::BadSignature => XmlError::BadSignature,
+            e => XmlError::Key(e),
+        })?;
 
     let mut references = signed_info
         .children()
@@ -1184,15 +1228,16 @@ fn verify_signature(
 }
 
 /// Runs `canonicalizer` on `node` within what is left of the verification budget.
-fn run_within(
+fn hash_within(
     mut canonicalizer: Canonicalizer<'_>,
     node: Node<'_, '_>,
+    algorithm: HashAlg,
     budget: &mut usize,
-) -> Result<Vec<u8>, XmlError> {
+) -> Result<oncl_pki::digest::DigestValue, XmlError> {
     canonicalizer.limit = MAX_CANONICAL.min(*budget);
-    let out = canonicalizer.run(node)?;
-    *budget -= out.len();
-    Ok(out)
+    let (digest, count) = canonicalizer.hash(node, algorithm)?;
+    *budget -= count;
+    Ok(digest)
 }
 
 fn verify_reference(
@@ -1238,7 +1283,10 @@ fn verify_reference(
         .into_iter()
         .chain(later.iter().copied())
         .collect();
-    let data = run_within(
+    let digest_uri = algorithm(ds_child(reference, "DigestMethod")?)?;
+    let digest_alg = digest_method(digest_uri)
+        .ok_or_else(|| XmlError::UnsupportedAlgorithm(digest_uri.to_owned()))?;
+    let data = hash_within(
         Canonicalizer {
             exclusive: method.is_exclusive(),
             // Same-document references drop comments.
@@ -1248,13 +1296,11 @@ fn verify_reference(
             limit: 0,
         },
         target,
+        digest_alg.hash_alg(),
         budget,
     )?;
 
-    let digest_uri = algorithm(ds_child(reference, "DigestMethod")?)?;
-    let digest_alg = digest_method(digest_uri)
-        .ok_or_else(|| XmlError::UnsupportedAlgorithm(digest_uri.to_owned()))?;
-    if digest_alg.digest(&data) != base64_content(ds_child(reference, "DigestValue")?)? {
+    if data.as_bytes() != base64_content(ds_child(reference, "DigestValue")?)? {
         return Err(XmlError::BadDigest);
     }
     Ok(())
