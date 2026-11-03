@@ -1199,3 +1199,303 @@ fn host_certificate_pin_and_bounded_signer_count_are_enforced() {
     }
     assert_eq!(guard.calls.load(Ordering::SeqCst), before);
 }
+
+#[test]
+fn signed_negative_numericdates_follow_host_exp_nbf_not_an_invented_epoch_floor() {
+    let engine = engine(
+        Arc::new(Guard::default()),
+        ResourceLimits::default(),
+        true,
+        true,
+    );
+    let key = selector("user-rsa-sign");
+    for (claims, now, expected, failure) in [
+        (r#"{"exp":11,"nbf":-1,"iat":-1}"#, 10, Verdict::Valid, None),
+        (
+            r#"{"exp":-1}"#,
+            0,
+            Verdict::Invalid,
+            Some(ClaimsFailure::Expired),
+        ),
+        (
+            r#"{"exp":-1,"nbf":-3,"iat":-100}"#,
+            -2,
+            Verdict::Valid,
+            None,
+        ),
+        (
+            r#"{"exp":-1,"nbf":-3}"#,
+            -1,
+            Verdict::Invalid,
+            Some(ClaimsFailure::Expired),
+        ),
+        (r#"{"exp":0,"nbf":-1,"iat":-2}"#, -1, Verdict::Valid, None),
+        (
+            r#"{"exp":0,"nbf":0}"#,
+            -1,
+            Verdict::Invalid,
+            Some(ClaimsFailure::NotYetValid),
+        ),
+        // RFC iat is a date claim, not an implicitly configured freshness rule.
+        (
+            r#"{"exp":11,"nbf":-1,"iat":9999}"#,
+            10,
+            Verdict::Valid,
+            None,
+        ),
+    ] {
+        let token = jwt(&engine, &key, claims.as_bytes());
+        let report = engine
+            .jwt_verify(
+                None,
+                &token,
+                &JwtValidationPolicy::new(now),
+                &mut begin(&engine, &[], &[Action::Verify]),
+            )
+            .unwrap();
+        assert_eq!(report.jws().verdict(), Verdict::Valid);
+        assert_eq!(report.claims().verdict(), expected, "{claims} now={now}");
+        assert_eq!(report.verdict(), expected);
+        if let Some(failure) = failure {
+            assert!(report.claims().failures().contains(&failure));
+        }
+    }
+}
+
+#[test]
+fn incoming_eight_nine_signature_and_x5c_boundaries_precede_add_guard() {
+    let guard = Arc::new(Guard::default());
+    let engine = engine(guard.clone(), ResourceLimits::default(), true, true);
+    let key = selector("user-rsa-sign");
+    let compact = create(
+        &engine,
+        &[&key],
+        profile(JwsSerialization::Compact, false),
+        DATA,
+    );
+    let parts: Vec<_> = std::str::from_utf8(&compact).unwrap().split('.').collect();
+    let signature = serde_json::json!({"protected":parts[0],"signature":parts[2]});
+    let p = profile(JwsSerialization::General, false);
+    let eight = serde_json::to_vec(
+        &serde_json::json!({"payload":parts[1],"signatures":vec![signature.clone();8]}),
+    )
+    .unwrap();
+    let report = verify(&engine, &eight, p, None);
+    assert_eq!(report.verdict(), Verdict::Valid);
+    assert_eq!(report.signers().len(), 8);
+    drop(report);
+    let before = guard.calls.load(Ordering::SeqCst);
+    for input in [
+        eight,
+        serde_json::to_vec(
+            &serde_json::json!({"payload":parts[1],"signatures":vec![signature.clone();9]}),
+        )
+        .unwrap(),
+        serde_json::to_vec(
+            &serde_json::json!({"payload":parts[1],"signatures":vec![signature;1000]}),
+        )
+        .unwrap(),
+    ] {
+        let mut output = Vec::new();
+        let error = engine
+            .jws_add(
+                JwsVerifyRequest::new(p),
+                vec![KeyRequest::new(&key, Some("J01 synthetic"))],
+                &input,
+                None,
+                &mut output,
+                &mut begin(&engine, &[&key], &[Action::Sign]),
+            )
+            .unwrap_err();
+        assert_eq!(error.applied_state(), AppliedState::NotApplied);
+        assert!(output.is_empty());
+    }
+    let entry = issued("user-rsa-sign");
+    let encoded_cert = STANDARD.encode(entry.cert.to_der().unwrap());
+    for count in [8, 9] {
+        let header = serde_json::to_vec(
+            &serde_json::json!({"alg":"RS256","x5c":vec![encoded_cert.clone();count]}),
+        )
+        .unwrap();
+        assert!(header.len() <= oncl_core::jose::MAX_HEADER_BYTES);
+        let signing_input = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(header),
+            URL_SAFE_NO_PAD.encode(DATA)
+        );
+        let signature = entry
+            .key
+            .sign(oncl_pki::key::SigAlg::RsaSha256, signing_input.as_bytes())
+            .unwrap();
+        let wire = format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature));
+        let p = profile(JwsSerialization::Compact, false);
+        if count == 8 {
+            assert_eq!(
+                verify(&engine, wire.as_bytes(), p, None).verdict(),
+                Verdict::Valid
+            );
+        } else {
+            let mut output = Vec::new();
+            let error = engine
+                .jws_add(
+                    JwsVerifyRequest::new(p),
+                    vec![KeyRequest::new(&key, Some("J01 synthetic"))],
+                    wire.as_bytes(),
+                    None,
+                    &mut output,
+                    &mut begin(&engine, &[&key], &[Action::Sign]),
+                )
+                .unwrap_err();
+            assert_eq!(error.applied_state(), AppliedState::NotApplied);
+            assert!(output.is_empty());
+        }
+    }
+    assert_eq!(guard.calls.load(Ordering::SeqCst), before);
+}
+
+fn renewed_public_root(serial: u32, extension_bytes: usize) -> oncl_pki::cert::Certificate {
+    use der::asn1::{ObjectIdentifier, OctetString};
+    let root = raw("root-gost2015.key");
+    let mut spec = oncl_pki::testing::TestCertSpec::from_cert(&root.cert);
+    spec.serial = serial.to_be_bytes().to_vec();
+    if extension_bytes != 0 {
+        let mut extension = spec.extensions[0].clone();
+        extension.extn_id = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.55555.18.1");
+        extension.critical = false;
+        // Real signed CA with an opaque noncritical extension, not a claim of
+        // large-document/RSS acceptance or a replacement certificate parser.
+        let public = OctetString::new(vec![0x5a; extension_bytes])
+            .unwrap()
+            .to_der()
+            .unwrap();
+        extension.extn_value = OctetString::new(public).unwrap();
+        spec.extensions.push(extension);
+    }
+    oncl_pki::testing::issue_cert(&root, spec)
+}
+fn configured_root_engine(
+    anchors: Vec<oncl_pki::cert::Certificate>,
+    limits: ResourceLimits,
+) -> Engine {
+    Engine::new(
+        EngineServices::hash_only(limits).with_validation(validation_with_anchors(anchors, true)),
+    )
+    .unwrap()
+}
+
+#[test]
+fn many_host_roots_are_borrowed_and_oversized_selected_ca_obeys_global_quotas() {
+    let producer = engine(
+        Arc::new(Guard::default()),
+        ResourceLimits::default(),
+        true,
+        true,
+    );
+    let key = selector("user-rsa-sign");
+    let token = jwt(&producer, &key, br#"{"exp":11}"#);
+    let mut roots = vec![raw("root-gost2015.key").cert];
+    for serial in 1..=16 {
+        roots.push(renewed_public_root(0x1800_0000 + serial, 32 * 1024));
+    }
+    let limits = ResourceLimits {
+        memory_bytes: 24 * 1024 * 1024,
+        metadata_bytes: 12 * 1024 * 1024,
+        ..ResourceLimits::default()
+    };
+    let many = configured_root_engine(roots, limits);
+    assert_eq!(
+        many.jwt_verify(
+            None,
+            &token,
+            &JwtValidationPolicy::new(10),
+            &mut begin(&many, &[], &[Action::Verify])
+        )
+        .unwrap()
+        .verdict(),
+        Verdict::Valid
+    );
+    // A selected root may legitimately be much larger than an untrusted x5c
+    // entry. Only its actual selected-path copy is charged by admitted PKIX.
+    let large = renewed_public_root(0x1801_0000, 256 * 1024);
+    assert!(large.to_der().unwrap().len() > 8192);
+    let roomy = configured_root_engine(
+        vec![large.clone()],
+        ResourceLimits {
+            memory_bytes: 64 * 1024 * 1024,
+            metadata_bytes: 32 * 1024 * 1024,
+            ..ResourceLimits::default()
+        },
+    );
+    assert_eq!(
+        roomy
+            .jwt_verify(
+                None,
+                &token,
+                &JwtValidationPolicy::new(10),
+                &mut begin(&roomy, &[], &[Action::Verify])
+            )
+            .unwrap()
+            .verdict(),
+        Verdict::Valid
+    );
+    for (memory, metadata, expected) in [
+        (
+            24 * 1024 * 1024,
+            32 * 1024 * 1024,
+            oncl_core::ErrorCode::MemoryLimit,
+        ),
+        (
+            64 * 1024 * 1024,
+            12 * 1024 * 1024,
+            oncl_core::ErrorCode::MetadataLimit,
+        ),
+    ] {
+        let limited = configured_root_engine(
+            vec![large.clone()],
+            ResourceLimits {
+                memory_bytes: memory,
+                metadata_bytes: metadata,
+                ..ResourceLimits::default()
+            },
+        );
+        let error = limited
+            .jwt_verify(
+                None,
+                &token,
+                &JwtValidationPolicy::new(10),
+                &mut begin(&limited, &[], &[Action::Verify]),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), expected);
+        assert_eq!(error.applied_state(), AppliedState::NotApplied);
+    }
+}
+
+#[test]
+fn many_host_roots_keep_original_operation_deadline() {
+    let producer = engine(
+        Arc::new(Guard::default()),
+        ResourceLimits::default(),
+        true,
+        true,
+    );
+    let key = selector("user-rsa-sign");
+    let token = jwt(&producer, &key, br#"{"exp":11}"#);
+    let mut roots = vec![raw("root-gost2015.key").cert];
+    for serial in 1..=16 {
+        roots.push(renewed_public_root(0x1802_0000 + serial, 0));
+    }
+    let verifier = configured_root_engine(
+        roots,
+        ResourceLimits {
+            operation_timeout: std::time::Duration::from_millis(100),
+            ..ResourceLimits::default()
+        },
+    );
+    let mut ctx = begin(&verifier, &[], &[Action::Verify]);
+    std::thread::sleep(std::time::Duration::from_millis(125));
+    let error = verifier
+        .jwt_verify(None, &token, &JwtValidationPolicy::new(10), &mut ctx)
+        .unwrap_err();
+    assert_eq!(error.code(), oncl_core::ErrorCode::DeadlineExceeded);
+}

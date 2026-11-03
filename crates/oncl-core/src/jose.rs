@@ -10,7 +10,12 @@
 //!
 //! Inputs are borrowed bounded byte slices: no stream is secretly materialized.
 //! Payload <= 256 KiB, claims <= 64 KiB, protected header <= 16 KiB, encoded
-//! container <= 1 MiB, <= 8 signatures/certificates, DER certificate <= 8 KiB.
+//! container <= 1 MiB. Signature and x5c sequences reject the ninth entry before
+//! parsing/copying it or growing their collection. Leaf/x5c/host-intermediate
+//! certificates are <= 8 KiB DER; host intermediates are <= 8 candidates.
+//! The host root store is NOT capped at eight roots or 8-KiB root certificates:
+//! it remains borrowed by the accepted admitted PKIX builder, with public-key
+//! scratch/selected-path copies under original global memory/metadata/deadline.
 //! Container/header sizes are checked before decoding/JSON allocation. Workspace,
 //! parsed data, certificate facts and output reports retain the original root
 //! admission and memory/metadata reservations; only borrowed views escape.
@@ -32,7 +37,7 @@ use oncl_pki::{
 };
 use serde::{
     Deserialize, Serialize,
-    de::{self, MapAccess, Visitor},
+    de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::value::RawValue;
 use std::{collections::BTreeMap, fmt, io::Write, sync::Arc};
@@ -162,7 +167,11 @@ struct Header {
     typ: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cty: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "bounded_sequence"
+    )]
     x5c: Vec<String>,
 }
 #[derive(Serialize, Debug)]
@@ -201,7 +210,7 @@ struct WireInput<'a> {
 struct GeneralInput<'a> {
     #[serde(borrow, default, deserialize_with = "present_payload")]
     payload: Option<&'a serde_json::value::RawValue>,
-    #[serde(borrow)]
+    #[serde(borrow, deserialize_with = "bounded_sequence")]
     signatures: Vec<WireInput<'a>>,
 }
 #[derive(Deserialize)]
@@ -213,6 +222,42 @@ struct FlattenedInput<'a> {
     protected: &'a serde_json::value::RawValue,
     #[serde(borrow)]
     signature: &'a serde_json::value::RawValue,
+}
+/// Collection admission precedes even the ninth element's deserializer. Using
+/// IgnoredAny here would still traverse an arbitrarily costly excess entry.
+fn bounded_sequence<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: de::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Bounded<T>(std::marker::PhantomData<T>);
+    struct RejectExcess<T>(std::marker::PhantomData<T>);
+    impl<'de, T> DeserializeSeed<'de> for RejectExcess<T> {
+        type Value = T;
+        fn deserialize<D: de::Deserializer<'de>>(self, _: D) -> Result<T, D::Error> {
+            Err(de::Error::custom("JOSE sequence exceeds eight entries"))
+        }
+    }
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for Bounded<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a JOSE sequence of at most eight entries")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Vec<T>, A::Error> {
+            let mut values = Vec::new();
+            while values.len() < MAX_SIGNERS {
+                match sequence.next_element()? {
+                    Some(value) => values.push(value),
+                    None => return Ok(values),
+                }
+            }
+            // SeqAccess checks for ']' first. A present ninth item fails before
+            // parsing/copying that item or growing the eight-element Vec.
+            sequence.next_element_seed(RejectExcess::<T>(std::marker::PhantomData))?;
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_seq(Bounded::<T>(std::marker::PhantomData))
 }
 fn present_payload<'de, D: de::Deserializer<'de>>(
     d: D,
@@ -314,7 +359,7 @@ fn parse(
         JwsSerialization::General => {
             let g: GeneralInput<'_> =
                 serde_json::from_slice(input).map_err(|_| invalid("invalid general JWS JSON"))?;
-            if g.signatures.is_empty() || g.signatures.len() > MAX_SIGNERS {
+            if g.signatures.is_empty() {
                 return Err(invalid("JWS signer count outside profile"));
             }
             (
@@ -328,9 +373,6 @@ fn parse(
             )
         }
     };
-    if signatures.is_empty() || signatures.len() > MAX_SIGNERS {
-        return Err(invalid("JWS signer count outside profile"));
-    }
     let (payload, encoded_payload) = if let Some(detached) = detached {
         if encoded.is_some() {
             return Err(invalid("detached JSON must omit payload"));
@@ -358,9 +400,6 @@ fn header(wire: &WireSignature) -> Result<(Header, JoseAlgorithm), OperationErro
     let header: Header = serde_json::from_slice(&bytes)
         .map_err(|_| invalid("unsupported, duplicate or malformed protected header"))?;
     let algorithm = JoseAlgorithm::from_name(&header.alg)?;
-    if header.x5c.len() > MAX_SIGNERS {
-        return Err(invalid("x5c chain exceeds profile"));
-    }
     Ok((header, algorithm))
 }
 fn digest(algorithm: JoseAlgorithm, protected: &str, payload: &str) -> DigestValue {
@@ -822,7 +861,11 @@ fn emit(
 /// Trusted host-owned policy, never deserialized from a token. `new` fixes the
 /// clock explicitly; default rules require exp and grant zero seconds leeway.
 /// NumericDates in this bounded profile are integral RFC 3339-representable UTC
-/// seconds. Fractional, overflowing, nonnumeric, null dates fail claims, not crypto.
+/// seconds, INCLUDING negative epochs. Fractional, overflowing, nonnumeric and
+/// null dates fail claims, not crypto. Negative exp/nbf and negative trusted now
+/// follow the same host expiration/not-before boundaries as positive epochs.
+/// `iat` must be a representable integer but does not imply freshness/max-age
+/// checks: no such host policy is inferred from the token.
 #[derive(Debug)]
 pub struct JwtValidationPolicy {
     now: i64,
@@ -1156,4 +1199,70 @@ fn unique_nested(raw: &RawValue, depth: u8) -> Result<(), OperationError> {
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod sequence_admission_tests {
+    use super::{GeneralInput, Header};
+    use serde_json::error::Category;
+
+    #[test]
+    fn signature_sequence_rejects_ninth_before_parsing_its_representation() {
+        let entry = r#"{"protected":"","signature":""}"#;
+        let eight = std::iter::repeat_n(entry, 8).collect::<Vec<_>>().join(",");
+        let valid = format!(r#"{{"payload":"","signatures":[{eight}]}}"#);
+        assert_eq!(
+            serde_json::from_str::<GeneralInput<'_>>(&valid)
+                .unwrap()
+                .signatures
+                .len(),
+            8
+        );
+        for suffix in [
+            format!("{entry}]}}"),
+            std::iter::repeat_n(entry, 10_000)
+                .collect::<Vec<_>>()
+                .join(","),
+            format!(r#"{{"protected":"{}"#, "A".repeat(20_000)),
+        ] {
+            let prefix = format!(r#"{{"payload":"","signatures":[{eight},"#);
+            let input = format!("{prefix}{suffix}");
+            let error = serde_json::from_str::<GeneralInput<'_>>(&input)
+                .err()
+                .expect("ninth entry must be refused");
+            assert_eq!(error.classify(), Category::Data);
+            assert!(
+                error.column() <= prefix.len() + 1,
+                "parsed excess signature at column {}",
+                error.column()
+            );
+        }
+    }
+
+    #[test]
+    fn x5c_sequence_rejects_ninth_before_string_allocation_or_parse() {
+        let eight = std::iter::repeat_n(r#""""#, 8)
+            .collect::<Vec<_>>()
+            .join(",");
+        let valid = format!(r#"{{"alg":"RS256","x5c":[{eight}]}}"#);
+        assert_eq!(serde_json::from_str::<Header>(&valid).unwrap().x5c.len(), 8);
+        for suffix in [
+            r#"""]}"#.to_owned(),
+            std::iter::repeat_n(r#""""#, 1000)
+                .collect::<Vec<_>>()
+                .join(","),
+            format!("\"{}", "A".repeat(8192)),
+        ] {
+            let prefix = format!(r#"{{"alg":"RS256","x5c":[{eight},"#);
+            let input = format!("{prefix}{suffix}");
+            let error = serde_json::from_str::<Header>(&input)
+                .expect_err("ninth certificate must be refused");
+            assert_eq!(error.classify(), Category::Data);
+            assert!(
+                error.column() <= prefix.len() + 1,
+                "parsed excess certificate at column {}",
+                error.column()
+            );
+        }
+    }
 }

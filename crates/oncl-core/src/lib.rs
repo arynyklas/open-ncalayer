@@ -147,13 +147,18 @@
 //! Decode needs `Action::Extract` and never reports verification. Verify needs
 //! `Action::Verify` plus a trusted `jose::JwtValidationPolicy::new(fixed_now)`:
 //! exp is required, leeway is zero, `now == exp` is invalid, `now == nbf` is valid.
+//! Representable negative NumericDates/clocks follow those same boundaries;
+//! iat is type/range-checked, not an inferred freshness policy.
 //! Expected issuer/audience, clock, roots, algorithm/key authority and network
 //! policy come only from the host. Crypto, certificate trust and claims are
 //! reported separately; valid crypto cannot hide invalid claims/unknown status.
 //!
 //! Payload/header/claims/container bounds and unsupported extensions are
-//! documented in `jose`. Parsed/reported buffers remain inseparable from their
-//! original quota/root guards. These bounded token APIs do not claim large
+//! documented in `jose`. Parsed/reported buffers retain original quota/root guards.
+//! Signature/x5c collection admission rejects the ninth entry before parsing it.
+//! Token candidate limits do not cap the host root store: admitted PKIX borrows
+//! configured roots and charges actual key scratch/selected copies to the scope.
+//! These bounded token APIs do not claim large
 //! XML/PDF or whole-platform acceptance.
 //! `cargo run -p oncl-core --features jose --example sdk_probe -- --case J01 --out <directory>`
 //! emits public standard JWS/JWT/Add/detached artifacts and runs independent

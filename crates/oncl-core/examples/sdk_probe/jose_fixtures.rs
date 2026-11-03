@@ -60,6 +60,19 @@ pub fn selector(name: &str) -> KeySelector {
     KeySelector::inline(bytes, None)
 }
 pub fn validation(trusted: bool, statuses: bool) -> ValidationServices {
+    validation_with_anchors(
+        if trusted {
+            vec![raw("root-gost2015.key").cert]
+        } else {
+            vec![]
+        },
+        statuses,
+    )
+}
+pub fn validation_with_anchors(
+    anchors: Vec<oncl_pki::cert::Certificate>,
+    statuses: bool,
+) -> ValidationServices {
     use oncl_pki::{
         crl::MockCrl,
         http::{HttpTransport, RouteTransport},
@@ -79,11 +92,7 @@ pub fn validation(trusted: bool, statuses: bool) -> ValidationServices {
             .next_update(Some(NOW + time::Duration::HOUR)),
     );
     ValidationServices::new(
-        CaSet::new(if trusted {
-            vec![raw("root-gost2015.key").cert]
-        } else {
-            vec![]
-        }),
+        CaSet::new(anchors),
         vec![raw("inter-gost2015.key").cert],
         Arc::new(RouteTransport::new(if statuses {
             vec![
