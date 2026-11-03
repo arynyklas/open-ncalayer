@@ -62,7 +62,7 @@ async fn start(steps: Vec<Step>, shorts: &[&str]) -> Srv {
             .swap_remove(0),
     ));
     let tokens = oncl_token::Tokens::disabled();
-    let services = HostServices::new(
+    let services = HostServices::interactive(
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         tsa,

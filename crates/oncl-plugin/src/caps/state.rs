@@ -26,11 +26,21 @@ fn settings_file(state: &HostState) -> HostResult<PathBuf> {
 /// the file is not a JSON object of strings.
 pub(crate) fn settings_get(state: &mut HostState) -> HostResult<BTreeMap<String, String>> {
     let path = settings_file(state)?;
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
+    settings_read(&path)
+}
+
+pub(crate) fn settings_read(path: &std::path::Path) -> HostResult<BTreeMap<String, String>> {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file.take(MAX_SETTINGS as u64 + 1),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
         Err(e) => return Err(failed(format!("{}: {e}", path.display()))),
     };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(failed)?;
+    if bytes.len() > MAX_SETTINGS {
+        return Err(limit("settings file exceeds limit"));
+    }
     Ok(serde_json::from_slice(&bytes).unwrap_or_else(|e| {
         tracing::warn!(path = %path.display(), error = %e, "plugin settings are corrupt; read as empty");
         BTreeMap::new()
@@ -43,6 +53,13 @@ pub(crate) fn settings_put(
     state: &mut HostState,
     settings: BTreeMap<String, String>,
 ) -> HostResult<()> {
+    settings_write(&settings_file(state)?, settings)
+}
+
+pub(crate) fn settings_write(
+    path: &std::path::Path,
+    settings: BTreeMap<String, String>,
+) -> HostResult<()> {
     if settings.len() > MAX_SETTINGS_KEYS {
         return Err(limit(format!("more than {MAX_SETTINGS_KEYS} settings")));
     }
@@ -50,11 +67,10 @@ pub(crate) fn settings_put(
     if json.len() > MAX_SETTINGS {
         return Err(limit(format!("the settings are over {MAX_SETTINGS} bytes")));
     }
-    let path = settings_file(state)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| failed(format!("{}: {e}", dir.display())))?;
     }
-    write_atomically(&path, &json, Access::Private)
+    write_atomically(path, &json, Access::Private)
         .map_err(|e| failed(format!("{}: {e}", path.display())))
 }
 
@@ -89,15 +105,23 @@ fn now_ms(state: &HostState) -> i128 {
 
 /// `shared_get`: the value of `key`, if set and not expired.
 pub(crate) fn shared_get(state: &mut HostState, args: SharedKey) -> HostResult<Option<Bytes>> {
-    let now = now_ms(state);
-    let values = state.session.shared.live(now);
+    shared_get_from(&state.session.shared, args, now_ms(state))
+}
+pub(crate) fn shared_get_from(
+    shared: &SharedState,
+    args: SharedKey,
+    now: i128,
+) -> HostResult<Option<Bytes>> {
+    let values = shared.live(now);
     Ok(values.get(&args.key).map(|v| Bytes::from(v.value.clone())))
 }
 
 /// `shared_put`: sets `key` (for `ttl_ms` if given), or removes it.
 pub(crate) fn shared_put(state: &mut HostState, args: SharedPut) -> HostResult<()> {
-    let now = now_ms(state);
-    let mut values = state.session.shared.live(now);
+    shared_put_into(&state.session.shared, args, now_ms(state))
+}
+pub(crate) fn shared_put_into(shared: &SharedState, args: SharedPut, now: i128) -> HostResult<()> {
+    let mut values = shared.live(now);
     let Some(value) = args.value else {
         values.remove(&args.key);
         return Ok(());

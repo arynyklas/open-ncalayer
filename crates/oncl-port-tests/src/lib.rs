@@ -209,7 +209,7 @@ impl Harness {
             cas: Arc::new(synthetic_cas()),
             pki_hosts: Arc::clone(&self.pki_hosts),
             settings_dir: self.settings_dir.clone(),
-            ..HostServices::new(
+            ..HostServices::interactive(
                 Arc::clone(&self.prompter) as _,
                 Arc::new(MemoryRecentPath::new(None)),
                 Arc::clone(&self.http) as _,

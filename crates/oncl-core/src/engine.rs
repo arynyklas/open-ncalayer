@@ -23,6 +23,8 @@ pub struct EngineServices {
     cades: Option<crate::CadesConfiguration>,
     metadata: Option<Arc<dyn crate::ReadMetadataProvider>>,
     inspection_limits: oncl_pki::info::InspectionLimits,
+    #[cfg(feature = "plugins")]
+    plugins: Option<crate::plugins::PluginRegistry>,
 }
 impl EngineServices {
     pub fn hash_only(limits: ResourceLimits) -> Self {
@@ -35,6 +37,8 @@ impl EngineServices {
             cades: None,
             metadata: None,
             inspection_limits: oncl_pki::info::InspectionLimits::default(),
+            #[cfg(feature = "plugins")]
+            plugins: None,
         }
     }
     pub fn with_shared_budget(mut self, budget: Arc<SharedBudget>) -> Self {
@@ -75,6 +79,11 @@ impl EngineServices {
         self.inspection_limits = limits;
         self
     }
+    #[cfg(feature = "plugins")]
+    pub fn with_plugins(mut self, plugins: crate::plugins::PluginRegistry) -> Self {
+        self.plugins = Some(plugins);
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -88,6 +97,8 @@ pub struct Engine {
     pub(crate) cades: Option<crate::CadesConfiguration>,
     pub(crate) metadata: Option<Arc<dyn crate::ReadMetadataProvider>>,
     pub(crate) inspection_limits: oncl_pki::info::InspectionLimits,
+    #[cfg(feature = "plugins")]
+    pub(crate) plugins: Option<crate::plugins::PluginRegistry>,
 }
 
 /// One original invocation root admitted for bounded metadata intake, without
@@ -135,6 +146,8 @@ impl Engine {
             cades: services.cades,
             metadata: services.metadata,
             inspection_limits: services.inspection_limits,
+            #[cfg(feature = "plugins")]
+            plugins: services.plugins,
         })
     }
     pub fn begin(
@@ -201,6 +214,12 @@ impl Engine {
             private_use_stopped: std::sync::atomic::AtomicBool::new(false),
             batch_item: None,
             borrowed_replay: None,
+            #[cfg(feature = "plugins")]
+            plugin_network: None,
+            #[cfg(feature = "plugins")]
+            plugin_network_budget: None,
+            #[cfg(feature = "plugins")]
+            plugin_pki: None,
         }
     }
     pub fn hash(

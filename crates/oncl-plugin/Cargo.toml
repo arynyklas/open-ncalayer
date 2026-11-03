@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+distribution = ["dep:oncl-update", "dep:zip"]
+
 [dependencies]
 oncl-xml.workspace = true
 # `keystore_new_key`: the DER of a new key's PEM request.
@@ -27,7 +31,7 @@ oncl-protocol.workspace = true
 # `Tokens`: the hardware tokens the `keys` capability's storage dialog offers.
 oncl-token.workspace = true
 # `Store`: the catalog (the signed update index) kept and verified again, the package sums.
-oncl-update.workspace = true
+oncl-update = { workspace = true, optional = true }
 semver.workspace = true
 serde.workspace = true
 # `Store`: `state.json`.
@@ -41,7 +45,7 @@ tracing.workspace = true
 # `HttpPrefix`: the URLs a plugin may reach.
 url.workspace = true
 wasmi.workspace = true
-zip.workspace = true
+zip = { workspace = true, optional = true }
 # The passwords of `dialog_password`, wiped when dropped.
 zeroize.workspace = true
 
@@ -68,3 +72,52 @@ tracing-subscriber.workspace = true
 wat.workspace = true
 # Requests read and certificates issued in the key file tests.
 x509-cert.workspace = true
+
+[[test]]
+name = "builtins"
+required-features = ["distribution"]
+[[test]]
+name = "caps"
+required-features = ["distribution"]
+[[test]]
+name = "caps_crypto"
+required-features = ["distribution"]
+[[test]]
+name = "caps_files"
+required-features = ["distribution"]
+[[test]]
+name = "caps_flows"
+required-features = ["distribution"]
+[[test]]
+name = "caps_keys"
+required-features = ["distribution"]
+[[test]]
+name = "caps_keystore"
+required-features = ["distribution"]
+[[test]]
+name = "caps_net"
+required-features = ["distribution"]
+[[test]]
+name = "caps_state"
+required-features = ["distribution"]
+[[test]]
+name = "caps_tokens"
+required-features = ["distribution"]
+[[test]]
+name = "caps_verify"
+required-features = ["distribution"]
+[[test]]
+name = "example"
+required-features = ["distribution"]
+[[test]]
+name = "modules"
+required-features = ["distribution"]
+[[test]]
+name = "package"
+required-features = ["distribution"]
+[[test]]
+name = "runtime"
+required-features = ["distribution"]
+[[test]]
+name = "store"
+required-features = ["distribution"]

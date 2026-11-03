@@ -209,7 +209,7 @@ pub struct BuiltinStats {
     pub max_fuel: u64,
 }
 
-/// The built-in modules and their instances; see the [module](self).
+/// The built-in modules and their instances, managed by the shared ABI runtime.
 pub struct Builtins {
     /// By module name.
     modules: HashMap<String, Arc<Pool>>,
@@ -271,7 +271,7 @@ impl Builtins {
         sources: &[BuiltinSource<'_>],
     ) -> Result<Vec<BuiltinInfo>, LoadError> {
         too_many(sources)?;
-        let services = HostServices::new(
+        let services = HostServices::interactive(
             Arc::new(Inert),
             Arc::new(Inert),
             Arc::new(Inert),

@@ -247,8 +247,8 @@ impl Engine {
         for index in indices {
             signers.push(self.operation_signer(index, ctx, action)?);
         }
-        let transport =
-            DeadlineTransport::new(services.http.as_ref(), &services.network, &ctx.scope);
+        let scoped_http = ctx.http(services.http.as_ref());
+        let transport = DeadlineTransport::new(&scoped_http, &services.network, &ctx.scope);
         let mut checked: Vec<_> = signers
             .iter_mut()
             .map(|signer| StatusCheckedSigner {

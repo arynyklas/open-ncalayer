@@ -625,6 +625,7 @@ impl AuthorizedSigner<'_> {
                 .ok_or(OperationError::MissingValidationServices)?;
             validation.check_private(&self.ctx.leases[self.index].entry.cert, self.ctx)?;
         }
+        self.ctx.network_status()?;
         let event = KeyUseEvent::new(
             self.ctx,
             self.ctx.leases[self.index].id.clone(),

@@ -214,31 +214,6 @@ fn cms_lengths(fields: &[u64; 6], oid_len: u64, flags: [bool; 3]) -> Result<[u64
     Ok([body, signed, root, size(root, flags[0])?])
 }
 
-fn fixed_signature_len(
-    certificate: &crate::cert::Certificate,
-    alg: SigAlg,
-) -> Result<u64, StreamError> {
-    match alg {
-        SigAlg::Gost2004 => Ok(64),
-        SigAlg::Gost2015_512 => Ok(128),
-        SigAlg::RsaSha256 | SigAlg::RsaSha1 => {
-            #[derive(der::Sequence)]
-            struct RsaPublic<'a> {
-                modulus: der::asn1::UintRef<'a>,
-                exponent: der::asn1::UintRef<'a>,
-            }
-            let bits = certificate
-                .tbs_certificate()
-                .subject_public_key_info()
-                .subject_public_key
-                .as_bytes()
-                .ok_or_else(|| malformed("RSA subject public key bit string"))?;
-            let public = RsaPublic::from_der(bits)?;
-            let _ = public.exponent;
-            Ok(public.modulus.as_bytes().len() as u64)
-        }
-    }
-}
 pub(super) struct StageReader<'a> {
     pub(super) stage: &'a mut StagedArtifact,
     pub(super) position: u64,
@@ -699,7 +674,10 @@ fn sign_impl(
                 let signer_len = size(
                     sum(&[
                         fixed,
-                        size(fixed_signature_len(signer.certificate(), alg)?, false)?,
+                        size(
+                            crate::cms::sign::fixed_signature_len(signer.certificate(), alg)?,
+                            false,
+                        )?,
                     ])?,
                     false,
                 )?;

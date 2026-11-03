@@ -62,7 +62,7 @@ fn basics_services(calls: usize) -> HostServices {
         .collect();
     let tsa = synthetic("tsa-gost2015");
     let tsa = load(&read(&tsa.path), &tsa.password).unwrap().remove(0);
-    let mut services = HostServices::new(
+    let mut services = HostServices::interactive(
         Arc::new(ScriptedPrompter::new(steps)),
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(MockTsa::new(tsa)),
@@ -519,7 +519,7 @@ fn calls_without_windows_do_not_wait_for_another_pages_window() {
         Step::Wait(Arc::clone(&release)),
         Step::CancelStorage,
     ]));
-    let services = HostServices::new(
+    let services = HostServices::interactive(
         prompter,
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(oncl_pki::tsp::MockTsa::new(

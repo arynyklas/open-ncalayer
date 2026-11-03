@@ -129,7 +129,7 @@ async fn start_with(
     let reports = Arc::new(SelftestReports::new());
     let prompter = Arc::new(ScriptedPrompter::new(steps));
     let tsa = Arc::new(MockTsa::new(entry("tsa-gost2015")));
-    let services = oncl_plugin::HostServices::new(
+    let services = oncl_plugin::HostServices::interactive(
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         tsa.clone(),

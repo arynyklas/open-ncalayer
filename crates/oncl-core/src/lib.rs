@@ -303,6 +303,8 @@ pub mod jose;
 pub mod keys;
 #[cfg(feature = "pdf")]
 mod pades;
+#[cfg(feature = "plugins")]
+pub mod plugins;
 mod policy;
 mod report;
 mod request;

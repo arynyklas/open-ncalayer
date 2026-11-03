@@ -50,7 +50,7 @@ pub struct HostServices {
     /// on a plugin's behalf: the NCA's ([`crate::nca_pki_hosts`]).
     pub pki_hosts: Arc<[String]>,
     /// The folder of the plugins' settings files (`<data>/plugins/settings`,
-    /// [`crate::Store::settings_dir`]); `None`: `settings_*` fail.
+    /// `Store::settings_dir` in distribution builds); `None`: `settings_*` fail.
     pub settings_dir: Option<PathBuf>,
     /// The hardware tokens of `keys_choose`, `keys_terminals` and `keys_open`, while their
     /// support is on.
@@ -66,7 +66,7 @@ impl HostServices {
     /// the rest as the daemon has it by default: the basics TSA profile, the system clock,
     /// Russian windows, the NCA's CAs and PKI hosts, no settings folder and an empty OCSP
     /// memory.
-    pub fn new(
+    pub fn interactive(
         prompter: Arc<dyn Prompter>,
         recent: Arc<dyn RecentPathStore>,
         http: Arc<dyn HttpTransport>,
@@ -252,14 +252,64 @@ pub(crate) fn write_guest(data: &mut [u8], ptr: i32, bytes: &[u8]) -> Result<(),
     Ok(())
 }
 
+/// State contract shared by interactive and invocation-scoped capability hosts.
+pub(crate) trait AbiState {
+    fn limits(&mut self) -> &mut StoreLimits;
+    fn phase(&self) -> Phase;
+    fn set_phase(&mut self, phase: Phase);
+    fn guest(&self) -> Option<(Memory, TypedFunc<i32, i32>)>;
+    fn attach(&mut self, memory: Memory, alloc: TypedFunc<i32, i32>);
+    fn max_transfer(&self) -> usize;
+    fn dispatch(&mut self, import: Import, args: &[u8]) -> Result<Vec<u8>, wasmi::Error>;
+    fn fuel_bank(&mut self) -> Option<&mut FuelBank> {
+        None
+    }
+    fn checkpoint(&mut self) -> Result<(), wasmi::Error> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct FuelBank {
+    remaining: u64,
+    depth: usize,
+}
+
+impl AbiState for HostState {
+    fn limits(&mut self) -> &mut StoreLimits {
+        &mut self.limits
+    }
+    fn phase(&self) -> Phase {
+        self.phase
+    }
+    fn set_phase(&mut self, phase: Phase) {
+        self.phase = phase;
+    }
+    fn guest(&self) -> Option<(Memory, TypedFunc<i32, i32>)> {
+        self.guest
+    }
+    fn attach(&mut self, memory: Memory, alloc: TypedFunc<i32, i32>) {
+        self.attach(memory, alloc);
+    }
+    fn max_transfer(&self) -> usize {
+        self.max_transfer
+    }
+    fn dispatch(&mut self, import: Import, args: &[u8]) -> Result<Vec<u8>, wasmi::Error> {
+        Ok(dispatch(self, import, args))
+    }
+}
+
 /// Defines the host function `import` in `linker`. A panic of the host function (a
 /// prompter's, a capability's) traps: it cannot unwind through the interpreter, which
 /// would abort the process, so the call fails as on any other trap.
-pub(crate) fn define(linker: &mut Linker<HostState>, import: Import) -> Result<(), wasmi::Error> {
+pub(crate) fn define<T: AbiState>(
+    linker: &mut Linker<T>,
+    import: Import,
+) -> Result<(), wasmi::Error> {
     linker.func_wrap(
         IMPORT_MODULE,
         import.name(),
-        move |caller: Caller<'_, HostState>, ptr: i32, len: i32| {
+        move |caller: Caller<'_, T>, ptr: i32, len: i32| {
             panic::catch_unwind(AssertUnwindSafe(|| call(caller, import, ptr, len))).unwrap_or_else(
                 |payload| {
                     let message = payload
@@ -281,24 +331,24 @@ pub(crate) fn define(linker: &mut Linker<HostState>, import: Import) -> Result<(
 /// Runs the host function `import` on the argument at `ptr`/`len`: its result goes into a
 /// buffer of the guest's `oncl_alloc`, returned packed. Only while the guest's
 /// `oncl_process` runs; anything else traps.
-fn call(
-    mut caller: Caller<'_, HostState>,
+fn call<T: AbiState>(
+    mut caller: Caller<'_, T>,
     import: Import,
     ptr: i32,
     len: i32,
 ) -> Result<i64, wasmi::Error> {
-    if caller.data().phase != Phase::Guest {
+    if caller.data().phase() != Phase::Guest {
         return Err(trap(format!(
             "the host function {} was called while the host was running",
             import.name()
         )));
     }
-    let Some((memory, alloc)) = caller.data().guest else {
+    let Some((memory, alloc)) = caller.data().guest() else {
         return Err(trap("the instance is not set up"));
     };
-    caller.data_mut().phase = Phase::Host;
+    caller.data_mut().set_phase(Phase::Host);
     let (ptr, len) = (ptr as u32, len as u32);
-    let max = caller.data().max_transfer;
+    let max = caller.data().max_transfer();
     if len as usize > max {
         return Err(trap(format!(
             "the argument of {} is over {max} bytes",
@@ -306,7 +356,7 @@ fn call(
         )));
     }
     let args = read_guest(memory.data(&caller), ptr, len)?.to_vec();
-    let reply = dispatch(caller.data_mut(), import, &args);
+    let reply = caller.data_mut().dispatch(import, &args)?;
     if reply.len() > max {
         return Err(trap(format!(
             "the result of {} is over {max} bytes",
@@ -315,9 +365,9 @@ fn call(
     }
     // Within the limit, which fits an i32.
     let reply_len = reply.len() as i32;
-    let reply_ptr = alloc.call(&mut caller, reply_len)?;
+    let reply_ptr = call_guest(alloc, &mut caller, reply_len)?;
     write_guest(memory.data_mut(&mut caller), reply_ptr, &reply)?;
-    caller.data_mut().phase = Phase::Guest;
+    caller.data_mut().set_phase(Phase::Guest);
     Ok(abi::pack(reply_ptr as u32, reply_len as u32))
 }
 
@@ -422,7 +472,7 @@ fn call_locale(state: &mut HostState, args: LocaleArgs) -> HostResult<()> {
 }
 
 /// `platform`: the operating system and its line separator.
-fn platform() -> Platform {
+pub(crate) fn platform() -> Platform {
     let os = if cfg!(windows) {
         Os::Windows
     } else if cfg!(target_os = "macos") {
@@ -444,7 +494,7 @@ pub(crate) fn line_separator() -> &'static str {
 /// The offset from UTC of the system's time zone at `unix_ms`, in seconds; `0` if the
 /// system cannot say.
 #[cfg(windows)]
-fn local_offset_seconds(unix_ms: i64) -> i32 {
+pub(crate) fn local_offset_seconds(unix_ms: i64) -> i32 {
     use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
     use windows_sys::Win32::System::Time::{
         FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime,
@@ -487,7 +537,7 @@ fn local_offset_seconds(unix_ms: i64) -> i32 {
 /// The offset from UTC of the system's time zone at `unix_ms`, in seconds; `0` if the
 /// system cannot say.
 #[cfg(unix)]
-fn local_offset_seconds(unix_ms: i64) -> i32 {
+pub(crate) fn local_offset_seconds(unix_ms: i64) -> i32 {
     let seconds = unix_ms.div_euclid(1000) as libc::time_t;
     // SAFETY: `tm` is plain data; `localtime_r` writes it and reads `seconds` only.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -496,7 +546,7 @@ fn local_offset_seconds(unix_ms: i64) -> i32 {
 }
 
 /// `f` on `args` decoded, its result encoded.
-fn run<A: DeserializeOwned, R: Serialize>(
+pub(crate) fn run<A: DeserializeOwned, R: Serialize>(
     args: &[u8],
     f: impl FnOnce(A) -> HostResult<R>,
 ) -> Vec<u8> {
@@ -534,7 +584,7 @@ pub(crate) fn unix_ms(t: OffsetDateTime) -> i64 {
 }
 
 /// `random`: at most [`MAX_RANDOM`] bytes of the system's generator.
-fn random(args: RandomArgs) -> HostResult<abi::Bytes> {
+pub(crate) fn random(args: RandomArgs) -> HostResult<abi::Bytes> {
     if args.len > MAX_RANDOM {
         return Err(HostError::new(
             ErrorCode::Limit,
@@ -548,7 +598,7 @@ fn random(args: RandomArgs) -> HostResult<abi::Bytes> {
 }
 
 /// `cert_info`: the certificate's details, as the key dialog reads them.
-fn cert_info(args: CertArgs) -> HostResult<CertInfo> {
+pub(crate) fn cert_info(args: CertArgs) -> HostResult<CertInfo> {
     let cert = oncl_pki::cert::parse(&args.der)
         .map_err(|e| HostError::new(ErrorCode::Invalid, format!("not a certificate: {e}")))?;
     Ok(abi_cert_info(&cert, &args.der))
@@ -578,6 +628,88 @@ pub(crate) fn abi_cert_info(cert: &oncl_pki::cert::Certificate, der: &[u8]) -> C
     }
 }
 
+/// One metered typed call path for every ABI export, including guest allocators
+/// called by host functions. Scoped hosts check control between fuel slices;
+/// interactive instances retain their exact existing total-fuel semantics.
+pub(crate) fn call_guest<T: AbiState, P: wasmi::WasmParams, R: wasmi::WasmResults>(
+    function: TypedFunc<P, R>,
+    ctx: &mut impl wasmi::AsContextMut<Data = T>,
+    params: P,
+) -> Result<R, wasmi::Error> {
+    use wasmi::TypedResumableCall;
+    let available = ctx.as_context().get_fuel()?;
+    let top = {
+        let mut context = ctx.as_context_mut();
+        let Some(bank) = context.data_mut().fuel_bank() else {
+            return function.call(ctx, params);
+        };
+        let top = bank.depth == 0;
+        if top {
+            bank.remaining = available;
+        }
+        bank.depth += 1;
+        top
+    };
+    if top {
+        let first = available.min(100_000);
+        ctx.as_context_mut()
+            .data_mut()
+            .fuel_bank()
+            .unwrap()
+            .remaining -= first;
+        ctx.as_context_mut().set_fuel(first)?;
+    }
+    let mut execution = function.call_resumable(&mut *ctx, params)?;
+    loop {
+        match execution {
+            TypedResumableCall::Finished(value) => {
+                let unused = ctx.as_context().get_fuel()?;
+                let remaining = {
+                    let mut context = ctx.as_context_mut();
+                    let bank = context.data_mut().fuel_bank().unwrap();
+                    bank.depth -= 1;
+                    bank.remaining
+                };
+                if top {
+                    ctx.as_context_mut().set_fuel(
+                        remaining
+                            .checked_add(unused)
+                            .ok_or_else(|| trap("fuel counter overflow"))?,
+                    )?;
+                }
+                return Ok(value);
+            }
+            TypedResumableCall::HostTrap(error) => {
+                return Err(match error.host_error().as_trap_code() {
+                    Some(code) => wasmi::Error::from(code),
+                    None => trap(error.host_error().to_string()),
+                });
+            }
+            TypedResumableCall::OutOfFuel(invocation) => {
+                ctx.as_context_mut().data_mut().checkpoint()?;
+                let unused = ctx.as_context().get_fuel()?;
+                let next = {
+                    let mut context = ctx.as_context_mut();
+                    let bank = context.data_mut().fuel_bank().unwrap();
+                    bank.remaining = bank
+                        .remaining
+                        .checked_add(unused)
+                        .ok_or_else(|| trap("fuel counter overflow"))?;
+                    if bank.remaining < invocation.required_fuel() || bank.remaining == 0 {
+                        return Err(wasmi::Error::from(wasmi::TrapCode::OutOfFuel));
+                    }
+                    let next = bank
+                        .remaining
+                        .min(100_000_u64.max(invocation.required_fuel()));
+                    bank.remaining -= next;
+                    next
+                };
+                ctx.as_context_mut().set_fuel(next)?;
+                execution = invocation.resume(&mut *ctx)?;
+            }
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,7 +719,7 @@ mod tests {
 
     /// The state of an instance with `capabilities`, keeping at most `max_kept` bytes.
     fn state(capabilities: Capabilities, max_kept: usize) -> HostState {
-        let services = HostServices::new(
+        let services = HostServices::interactive(
             Arc::new(Inert),
             Arc::new(Inert),
             Arc::new(Inert),

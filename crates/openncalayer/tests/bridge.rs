@@ -121,7 +121,7 @@ async fn start_ipc(registry: Arc<Registry>) -> (TempDir, Endpoint) {
 /// The daemon's registry answering dialogs with `steps`.
 fn scripted_registry(steps: Vec<Step>) -> (Arc<Registry>, Arc<ScriptedPrompter>) {
     let prompter = Arc::new(ScriptedPrompter::new(steps));
-    let services = oncl_plugin::HostServices::new(
+    let services = oncl_plugin::HostServices::interactive(
         prompter.clone(),
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(MockTsa::new(entry("tsa-gost2015"))),
@@ -485,7 +485,7 @@ async fn large_reply_is_chunked_and_reassembles() {
         storage("user-rsa-sign"),
         Step::Key(0),
     ]));
-    let mut services = oncl_plugin::HostServices::new(
+    let mut services = oncl_plugin::HostServices::interactive(
         prompter,
         Arc::new(MemoryRecentPath::new(None)),
         Arc::new(MockTsa::new(entry("tsa-gost2015"))),

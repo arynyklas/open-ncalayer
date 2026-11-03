@@ -172,6 +172,31 @@ impl<'a> HttpRequest<'a> {
     }
 }
 
+/// Restrictive transport policy: middleware may forbid, never grant redirects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RedirectPolicy {
+    HostDefault,
+    Never,
+}
+
+/// Borrowed protocol provenance, minted only by this crate's actual request
+/// encoder. No public constructor/Clone/Deserialize or owned proof can escape.
+pub struct ProtocolTarget<'a> {
+    base: &'a str,
+    actual: &'a str,
+    method: HttpMethod,
+    generated_get: bool,
+}
+impl ProtocolTarget<'_> {
+    pub fn matches(&self, request: &HttpRequest<'_>) -> bool {
+        self.actual == request.url && self.method == request.method
+    }
+    pub fn generated_get_base(&self, request: &HttpRequest<'_>) -> Option<&str> {
+        (self.generated_get && self.method == HttpMethod::Get && self.matches(request))
+            .then_some(self.base)
+    }
+}
+
 /// Sends HTTP requests. Any status code is a reply, not an error.
 ///
 /// A transport implements [`HttpTransport::send`] with the request's [`GetOptions`]: every
@@ -250,6 +275,48 @@ pub trait HttpTransport: Send + Sync {
     /// from a network error's text. Default is used only by unscoped host code.
     fn resource_failure(&self, _error: crate::resource::ProcessingError) -> HttpError {
         HttpError::other("PKI resource admission failed")
+    }
+    fn redirect_policy(&self) -> RedirectPolicy {
+        RedirectPolicy::HostDefault
+    }
+    fn send_protocol(
+        &self,
+        request: &HttpRequest<'_>,
+        _target: &ProtocolTarget<'_>,
+    ) -> Result<HttpReply, HttpError> {
+        self.send(request)
+    }
+    fn send_pinned_protocol(
+        &self,
+        request: &HttpRequest<'_>,
+        _target: &ProtocolTarget<'_>,
+        pins: &[std::net::SocketAddr],
+    ) -> Result<HttpReply, HttpError> {
+        self.send_pinned(request, pins)
+    }
+    fn send_protocol_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        _target: &ProtocolTarget<'_>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        self.send_scoped(request)
+    }
+    fn send_protocol_scoped_with<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        _target: &ProtocolTarget<'_>,
+        budget: ResponseBudget<'a>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        self.send_scoped_with(request, budget)
+    }
+    fn send_pinned_protocol_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        _target: &ProtocolTarget<'_>,
+        pins: &[std::net::SocketAddr],
+        budget: ResponseBudget<'a>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        self.send_pinned_scoped(request, pins, budget)
     }
 
     /// `GET url` within `opts`.
@@ -908,8 +975,8 @@ pub fn pki_send(
     request: &[u8],
     opts: GetOptions,
 ) -> Result<HttpReply, HttpError> {
-    pki_send_with(method, url, media_type, request, opts, |request| {
-        http.send(request)
+    pki_send_with(method, url, media_type, request, opts, |request, target| {
+        http.send_protocol(request, target)
     })
 }
 /// Same standard PKI binding with inseparable scoped body/decode admission.
@@ -921,8 +988,8 @@ pub fn pki_send_scoped<'a>(
     request: &[u8],
     opts: GetOptions,
 ) -> Result<ScopedHttpReply<'a>, HttpError> {
-    pki_send_with(method, url, media_type, request, opts, |request| {
-        http.send_scoped(request)
+    pki_send_with(method, url, media_type, request, opts, |request, target| {
+        http.send_protocol_scoped(request, target)
     })
 }
 fn pki_send_with<T>(
@@ -931,34 +998,49 @@ fn pki_send_with<T>(
     media_type: &str,
     request: &[u8],
     opts: GetOptions,
-    mut send: impl FnMut(&HttpRequest<'_>) -> Result<T, HttpError>,
+    mut send: impl FnMut(&HttpRequest<'_>, &ProtocolTarget<'_>) -> Result<T, HttpError>,
 ) -> Result<T, HttpError> {
+    let mut emit = |actual: &HttpRequest<'_>, generated_get: bool| {
+        send(
+            actual,
+            &ProtocolTarget {
+                base: url,
+                actual: actual.url,
+                method: actual.method,
+                generated_get,
+            },
+        )
+    };
     match method {
         PkiMethod::Get => {
             let base = url.strip_suffix('/').unwrap_or(url);
             let url = format!("{base}/{}", STANDARD.encode(request));
-            send(&HttpRequest::get(&url, opts))
+            emit(&HttpRequest::get(&url, opts), true)
         }
-        PkiMethod::GetUrlEncoded => send(&HttpRequest::get(&nca_get_url(url, request), opts)),
-        PkiMethod::Post { content_type } => send(&HttpRequest::post(
-            url,
-            Some(content_type.as_deref().unwrap_or(media_type)),
-            request,
-            opts,
-        )),
-        PkiMethod::PostWithPath => send(&HttpRequest::post(
-            &nca_get_url(url, request),
-            Some(media_type),
-            request,
-            opts,
-        )),
+        PkiMethod::GetUrlEncoded => emit(&HttpRequest::get(&nca_get_url(url, request), opts), true),
+        PkiMethod::Post { content_type } => emit(
+            &HttpRequest::post(
+                url,
+                Some(content_type.as_deref().unwrap_or(media_type)),
+                request,
+                opts,
+            ),
+            false,
+        ),
+        PkiMethod::PostWithPath => emit(
+            &HttpRequest::post(&nca_get_url(url, request), Some(media_type), request, opts),
+            false,
+        ),
         PkiMethod::GetUnder(limit) => {
             let get = nca_get_url(url, request);
             let encoded = get.len() - url.strip_suffix('/').unwrap_or(url).len() - 1;
             if encoded < usize::from(*limit) {
-                send(&HttpRequest::get(&get, opts))
+                emit(&HttpRequest::get(&get, opts), true)
             } else {
-                send(&HttpRequest::post(url, Some(media_type), request, opts))
+                emit(
+                    &HttpRequest::post(url, Some(media_type), request, opts),
+                    false,
+                )
             }
         }
     }
@@ -1953,6 +2035,9 @@ impl<'a> ScopedHttpReply<'a> {
     pub fn content_type(&self) -> Option<&str> {
         self.reply.content_type.as_deref()
     }
+    pub fn location(&self) -> Option<&str> {
+        self.reply.location.as_deref()
+    }
     pub fn body(&self) -> &[u8] {
         &self.reply.body
     }
@@ -2022,6 +2107,60 @@ impl<'a> ResourceTransport<'a> {
 impl HttpTransport for ResourceTransport<'_> {
     fn send(&self, request: &HttpRequest<'_>) -> Result<HttpReply, HttpError> {
         self.inner.send(request)
+    }
+    fn redirect_policy(&self) -> RedirectPolicy {
+        self.inner.redirect_policy()
+    }
+    fn send_protocol(
+        &self,
+        request: &HttpRequest<'_>,
+        target: &ProtocolTarget<'_>,
+    ) -> Result<HttpReply, HttpError> {
+        self.inner.send_protocol(request, target)
+    }
+    fn send_pinned_protocol(
+        &self,
+        request: &HttpRequest<'_>,
+        target: &ProtocolTarget<'_>,
+        pins: &[std::net::SocketAddr],
+    ) -> Result<HttpReply, HttpError> {
+        self.inner.send_pinned_protocol(request, target, pins)
+    }
+    fn send_protocol_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        target: &ProtocolTarget<'_>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        self.finish()
+            .map_err(|error| self.resource_failure(error))?;
+        self.inner.send_protocol_scoped_with(
+            request,
+            target,
+            ResponseBudget::new(&self.scope, self),
+        )
+    }
+    fn send_protocol_scoped_with<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        target: &ProtocolTarget<'_>,
+        budget: ResponseBudget<'a>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        self.inner
+            .send_protocol_scoped_with(request, target, budget.with_scope(&self.scope, self)?)
+    }
+    fn send_pinned_protocol_scoped<'a>(
+        &'a self,
+        request: &HttpRequest<'_>,
+        target: &ProtocolTarget<'_>,
+        pins: &[std::net::SocketAddr],
+        budget: ResponseBudget<'a>,
+    ) -> Result<ScopedHttpReply<'a>, HttpError> {
+        self.inner.send_pinned_protocol_scoped(
+            request,
+            target,
+            pins,
+            budget.with_scope(&self.scope, self)?,
+        )
     }
     fn send_scoped<'a>(
         &'a self,
