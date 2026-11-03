@@ -1,5 +1,4 @@
 //! Synthetic-only actual WASM calls shared by L01 acceptance and its runtime probe.
-#![allow(dead_code)]
 pub(crate) use crate::plugin_crypto as crypto;
 use oncl_core::keys::{KeyRequest, KeySelector};
 use oncl_core::{
