@@ -1,6 +1,7 @@
-//! Seekable, bounded PDF signature inspection. Never renders or executes PDF actions.
+//! Bounded PDF signature inspection and incremental signing; never renders or executes actions.
 mod byte_range;
 mod objects;
+mod sign;
 mod source;
 mod verify;
 mod xref;
@@ -9,9 +10,10 @@ use oncl_pki::{
     io::Source,
     resource::{ProcessingError, ResourceReservation, ResourceScope},
 };
+pub use sign::{PdfOperationReport, PdfSignProfile, sign_source};
 pub use verify::{
-    PdfRevisionFacts, PdfSignature, PdfSignatureFacts, PdfVerification, ScopedPdfRows,
-    verify_source,
+    PdfEndpointScope, PdfRevisionFacts, PdfSignature, PdfSignatureFacts, PdfVerification,
+    ScopedPdfRows, verify_source,
 };
 
 #[derive(Debug, thiserror::Error)]

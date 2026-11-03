@@ -10,7 +10,7 @@ use crate::{
     key::{AppliedState, DigestSigner, SigAlg},
     resource::{IO_CHUNK_BYTES, ProcessingError, ResourceReservation, ResourceScope},
 };
-use der::{Decode, Encode, Tagged};
+use der::{Decode, Encode, EncodeValue, Tagged};
 use std::io::{self, Read, Write};
 
 /// Only implemented CMS operations; Add preserves existing attachment/encoding.
@@ -71,6 +71,12 @@ impl<'a> CmsSignServices<'a> {
             temporary,
         }
     }
+    pub fn validation(&self) -> Option<&crate::validation::ValidationContext<'_>> {
+        self.validation
+    }
+    pub fn temporary(&self) -> Option<&TemporaryStore> {
+        self.temporary
+    }
 }
 
 /// Owned completion facts retain their exact original resource admission.
@@ -105,6 +111,7 @@ fn applied(error: StreamError, state: AppliedState) -> StreamError {
 pub(super) enum Output<'a> {
     Writer(&'a mut dyn Write),
     Staged(&'a mut StagedArtifact),
+    Internal(&'a mut dyn Write, u64),
 }
 impl Output<'_> {
     pub(super) fn write(
@@ -115,6 +122,10 @@ impl Output<'_> {
         match self {
             Self::Staged(stage) => {
                 stage.write_chunk(bytes)?;
+            }
+            Self::Internal(writer, _) => {
+                scope.checkpoint()?;
+                writer.write_all(bytes).map_err(ProcessingError::from)?;
             }
             Self::Writer(writer) => {
                 scope.account_output(bytes.len() as u64)?;
@@ -192,6 +203,41 @@ pub(super) fn sum(values: &[u64]) -> Result<u64, StreamError> {
         n.checked_add(*v)
             .ok_or_else(|| malformed("CMS output length overflow"))
     })
+}
+
+// Shared with final emission, including BER framing for ordinary CMS Add.
+fn cms_lengths(fields: &[u64; 6], oid_len: u64, flags: [bool; 3]) -> Result<[u64; 4], StreamError> {
+    let body = sum(fields)?;
+    let signed = size(body, flags[2])?;
+    let explicit = size(signed, flags[1])?;
+    let root = sum(&[oid_len, explicit])?;
+    Ok([body, signed, root, size(root, flags[0])?])
+}
+
+fn fixed_signature_len(
+    certificate: &crate::cert::Certificate,
+    alg: SigAlg,
+) -> Result<u64, StreamError> {
+    match alg {
+        SigAlg::Gost2004 => Ok(64),
+        SigAlg::Gost2015_512 => Ok(128),
+        SigAlg::RsaSha256 | SigAlg::RsaSha1 => {
+            #[derive(der::Sequence)]
+            struct RsaPublic<'a> {
+                modulus: der::asn1::UintRef<'a>,
+                exponent: der::asn1::UintRef<'a>,
+            }
+            let bits = certificate
+                .tbs_certificate()
+                .subject_public_key_info()
+                .subject_public_key
+                .as_bytes()
+                .ok_or_else(|| malformed("RSA subject public key bit string"))?;
+            let public = RsaPublic::from_der(bits)?;
+            let _ = public.exponent;
+            Ok(public.modulus.as_bytes().len() as u64)
+        }
+    }
 }
 pub(super) struct StageReader<'a> {
     pub(super) stage: &'a mut StagedArtifact,
@@ -638,6 +684,46 @@ fn sign_impl(
             let signed = RawSet(&attrs).to_der()?;
             let mut hash = HashState::new(alg.hash_alg());
             hash.update(&signed);
+            let prepared =
+                crate::cms::sign::PreparedSignerInfo::new(signer.certificate(), alg, Some(&attrs))?;
+            if let Output::Internal(_, capacity) = output {
+                // PDF has one detached fresh SignerInfo. Size the SAME borrowed
+                // ASN.1 value that will be emitted, substituting only the
+                // supported backend's known fixed signature length.
+                let info = prepared.value(&[])?;
+                let value_len: u32 = info.value_len()?.into();
+                let empty_signature_len: u32 = info.signature.encoded_len()?.into();
+                let fixed = u64::from(value_len)
+                    .checked_sub(u64::from(empty_signature_len))
+                    .ok_or_else(|| malformed("invalid signer-info size"))?;
+                let signer_len = size(
+                    sum(&[
+                        fixed,
+                        size(fixed_signature_len(signer.certificate(), alg)?, false)?,
+                    ])?,
+                    false,
+                )?;
+                let type_len: u32 = content_type.encoded_len()?.into();
+                let version_len: u32 = 1u8.encoded_len()?.into();
+                let oid_len: u32 = crate::oid::SIGNED_DATA.encoded_len()?.into();
+                let total = cms_lengths(
+                    &[
+                        u64::from(version_len),
+                        size(algorithms.as_bytes().len() as u64, false)?,
+                        size(u64::from(type_len), false)?,
+                        size(certificates.as_bytes().len() as u64, false)?,
+                        0,
+                        size(signer_len, false)?,
+                    ],
+                    u64::from(oid_len),
+                    [false; 3],
+                )?[3];
+                if total > *capacity {
+                    return Err(malformed(
+                        "CMS exceeds reserved PDF signature space before private use",
+                    ));
+                }
+            }
             let signature = match signer.sign_digest(&hash.finish()) {
                 Ok(value) => {
                     applied_state = applied_state.combine(AppliedState::Applied);
@@ -649,12 +735,7 @@ fn sign_impl(
                 }
             };
             scope.checkpoint()?;
-            signer_infos.append(&crate::cms::sign::encode_signer_info(
-                signer.certificate(),
-                alg,
-                Some(&attrs),
-                &signature,
-            )?)?;
+            signer_infos.append(&prepared.value(&signature)?.to_der()?)?;
         }
         algorithms = sorted_set(algorithms, scope, old_layout.is_some())?;
         certificates = sorted_set(certificates, scope, old_layout.is_some())?;
@@ -683,22 +764,23 @@ fn sign_impl(
         };
         let status_len = old_layout.and_then(|l| l.status).map_or(0, |r| r.len);
         let flags = old_layout.map_or([false; 3], |l| l.indefinite);
-        let body_len = sum(&[
-            version.as_bytes().len() as u64,
-            size(algorithms.as_bytes().len() as u64, false)?,
-            encap_len,
-            size(certificates.as_bytes().len() as u64, false)?,
-            status_len,
-            size(signer_infos.as_bytes().len() as u64, false)?,
-        ])?;
-        let signed_len = size(body_len, flags[2])?;
-        let explicit_len = size(signed_len, flags[1])?;
-        let root_len = sum(&[oid.len() as u64, explicit_len])?;
+        let [body_len, signed_len, root_len, total_len] = cms_lengths(
+            &[
+                version.as_bytes().len() as u64,
+                size(algorithms.as_bytes().len() as u64, false)?,
+                encap_len,
+                size(certificates.as_bytes().len() as u64, false)?,
+                status_len,
+                size(signer_infos.as_bytes().len() as u64, false)?,
+            ],
+            oid.len() as u64,
+            flags,
+        )?;
         // Only bytes actually embedded in the output are excluded from its
         // container overhead. Detached document intake is not output payload.
         let encapsulated_payload = if attached { content_len } else { 0 };
         scope.account_container(
-            size(root_len, flags[0])?
+            total_len
                 .checked_sub(encapsulated_payload)
                 .ok_or_else(|| malformed("invalid content/output length"))?,
         )?;
@@ -753,6 +835,27 @@ fn sign_impl(
         result_memory,
         result_metadata,
     ))
+}
+
+/// Internal, closed output-role replay: only PDF assembly can mint its source.
+pub(crate) fn sign_pdf_contents(
+    input: Source<'_>,
+    signer: &mut dyn DigestSigner,
+    services: &CmsSignServices<'_>,
+    output: &mut dyn Write,
+    capacity: usize,
+    scope: &ResourceScope,
+) -> Result<SignSummary, StreamError> {
+    sign_impl(
+        &CmsSignRequest::create(false),
+        Some(input),
+        None,
+        &mut [signer],
+        services,
+        &mut Output::Internal(output, capacity as u64),
+        scope,
+        None,
+    )
 }
 /// Raw document signing hashes the source once and applies the prehash backend.
 pub fn sign_raw(

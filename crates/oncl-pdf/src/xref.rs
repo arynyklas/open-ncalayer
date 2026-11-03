@@ -13,12 +13,15 @@ pub(crate) enum Entry {
     Direct(u64, u16),
     Compressed(u32, u32),
 }
-#[derive(Debug)]
 pub(crate) struct Revision {
     pub xref: u64,
     pub end: u64,
+    pub eof_token_end: u64,
     pub entries: BTreeMap<u32, Entry>,
     pub root: Value,
+    pub trailer: BTreeMap<Vec<u8>, Value>,
+    _trailer_memory: oncl_pki::resource::ResourceReservation,
+    _trailer_metadata: oncl_pki::resource::ResourceReservation,
 }
 pub(crate) struct Indirect {
     pub value: Value,
@@ -155,7 +158,7 @@ impl PdfDocument<'_, '_> {
         let tail_size = self.input.extent.min(65536) as usize;
         let tail_offset = self.input.extent - tail_size as u64;
         let tail = self.input.read_at(tail_offset, tail_size, self.scope)?;
-        let (mut offset, end) = tail_marker(&tail, tail_offset)?;
+        let (mut offset, end, _) = tail_marker(&tail, tail_offset)?;
         if end != self.input.extent {
             return Err(PdfError::Malformed("trailing bytes after EOF"));
         }
@@ -187,7 +190,7 @@ impl PdfDocument<'_, '_> {
                 }
             }
             let marker = self.input.read_at(object_end, 4096, self.scope)?;
-            let (declared, revision_end) = head_marker(&marker, object_end)?;
+            let (declared, revision_end, eof_token_end) = head_marker(&marker, object_end)?;
             if declared != offset {
                 return Err(PdfError::Malformed("revision startxref mismatch"));
             }
@@ -202,11 +205,31 @@ impl PdfDocument<'_, '_> {
             {
                 return Err(PdfError::Malformed("xref entry outside its revision"));
             }
+            // Retain only trailer metadata required by incremental updates;
+            // admit each actual clone before its storage outlives this parser.
+            let mut retained_bytes = 256u64;
+            for key in [b"Size".as_slice(), b"Info".as_slice(), b"ID".as_slice()] {
+                if let Some(value) = dict.get(key) {
+                    retained_bytes = retained_bytes
+                        .checked_add(value.retained_bytes()?)
+                        .ok_or(PdfError::Limit("trailer metadata size"))?;
+                }
+            }
+            let trailer_memory = self.scope.reserve_memory(retained_bytes)?;
+            let trailer_metadata = self.scope.reserve_metadata(retained_bytes)?;
+            let trailer = [b"Size".as_slice(), b"Info".as_slice(), b"ID".as_slice()]
+                .into_iter()
+                .filter_map(|key| dict.get(key).map(|value| (key.to_vec(), value.clone())))
+                .collect();
             self.revisions.push(Revision {
                 xref: offset,
                 end: revision_end,
+                eof_token_end,
                 entries,
                 root,
+                trailer,
+                _trailer_memory: trailer_memory,
+                _trailer_metadata: trailer_metadata,
             });
             match dict.get(b"Prev".as_slice()) {
                 Some(prev) => {
@@ -497,7 +520,7 @@ impl PdfDocument<'_, '_> {
         }
     }
 }
-fn head_marker(bytes: &[u8], base: u64) -> Result<(u64, u64)> {
+fn head_marker(bytes: &[u8], base: u64) -> Result<(u64, u64, u64)> {
     let mut p = Parser::new(bytes, base, 16, 4);
     p.expect(b"startxref")?;
     let offset = p.integer()?;
@@ -508,6 +531,13 @@ fn head_marker(bytes: &[u8], base: u64) -> Result<(u64, u64)> {
         return Err(PdfError::Malformed("revision EOF"));
     }
     p.pos += 5;
+    let eof_token_end = base + p.pos as u64;
+    if p.bytes
+        .get(p.pos)
+        .is_some_and(|b| !matches!(b, b'\r' | b'\n'))
+    {
+        return Err(PdfError::Malformed("revision EOF token boundary"));
+    }
     // Include one PDF line ending. Other bytes belong to the next revision.
     if p.bytes.get(p.pos) == Some(&b'\r') {
         p.pos += 1;
@@ -517,9 +547,9 @@ fn head_marker(bytes: &[u8], base: u64) -> Result<(u64, u64)> {
     } else if p.bytes.get(p.pos) == Some(&b'\n') {
         p.pos += 1;
     }
-    Ok((offset, base + p.pos as u64))
+    Ok((offset, base + p.pos as u64, eof_token_end))
 }
-fn tail_marker(bytes: &[u8], base: u64) -> Result<(u64, u64)> {
+fn tail_marker(bytes: &[u8], base: u64) -> Result<(u64, u64, u64)> {
     let start = bytes
         .windows(9)
         .rposition(|w| w == b"startxref")

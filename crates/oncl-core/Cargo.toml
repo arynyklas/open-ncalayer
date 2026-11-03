@@ -33,6 +33,7 @@ oncl-testkit.workspace = true
 oncl-token = { workspace = true, features = ["emulator"] }
 der.workspace = true
 time = { workspace = true, features = ["macros"] }
+lopdf.workspace = true
 
 [[test]]
 name = "key_sources"

@@ -135,6 +135,12 @@ impl Engine {
         if !Arc::ptr_eq(&ctx.owner, &self.identity) {
             return Err(OperationError::InvalidContext);
         }
+        #[cfg(feature = "pdf")]
+        if matches!(request.mode, SignMode::Pdf(..))
+            && let Output::Staged(stage) = &output
+        {
+            oncl_pki::io::PdfSignatureOutput::check_output(stage, &ctx.scope)?;
+        }
         let profile = request.profile();
         let (requests, action, provenance) = match &request.mode {
             SignMode::RawMessage(key) => (
@@ -153,6 +159,12 @@ impl Engine {
             | SignMode::CadesAdd(keys, _, _, _, _) => {
                 (keys.as_slice(), Action::Sign, SignProvenance::Document)
             }
+            #[cfg(feature = "pdf")]
+            SignMode::Pdf(key, _) => (
+                std::slice::from_ref(key),
+                Action::Sign,
+                SignProvenance::Document,
+            ),
         };
         if !ctx.grant.allows(action) {
             return Err(OperationError::PermissionDenied);
@@ -209,6 +221,16 @@ impl Engine {
         };
         let cms_services = CmsSignServices::new(Some(&validation), self.temporary.as_ref());
         let result = match request.mode {
+            #[cfg(feature = "pdf")]
+            SignMode::Pdf(_, profile) => sign_pdf(
+                input,
+                &profile.with_allowed_algorithms(ctx.policy.allowed_signature_algorithms),
+                refs[0],
+                &cms_services,
+                output,
+                &ctx.scope,
+            )
+            .map_err(crate::report::stream_error),
             SignMode::RawMessage(_) => match output {
                 Output::Writer(writer) => stream::sign_raw(input, refs[0], writer, &ctx.scope),
                 Output::Staged(stage) => stream::sign_raw_staged(input, refs[0], stage, &ctx.scope),
@@ -388,4 +410,44 @@ fn cades_sign(
         ),
     }
     .map_err(crate::cades::error)
+}
+
+#[cfg(feature = "pdf")]
+fn sign_pdf(
+    input: Source<'_>,
+    profile: &oncl_pdf::PdfSignProfile,
+    signer: &mut dyn DigestSigner,
+    services: &CmsSignServices<'_>,
+    output: Output<'_>,
+    scope: &oncl_pki::resource::ResourceScope,
+) -> Result<SignSummary, stream::StreamError> {
+    fn error(error: oncl_pdf::PdfError) -> stream::StreamError {
+        match error {
+            oncl_pdf::PdfError::Cms(e) => e,
+            oncl_pdf::PdfError::Processing(e) => e.into(),
+            oncl_pdf::PdfError::Io(e) => ProcessingError::Io(e).into(),
+            oncl_pdf::PdfError::Limit(_) => ProcessingError::MetadataLimit.into(),
+            _ => ProcessingError::InvalidInput("unsupported or malformed PDF").into(),
+        }
+    }
+    match output {
+        Output::Staged(stage) => {
+            oncl_pdf::sign_source(input, profile, signer, services, stage, scope).map_err(error)
+        }
+        Output::Writer(writer) => {
+            let store = services
+                .temporary()
+                .ok_or(stream::StreamError::MissingTemporaryStore)?;
+            let mut stage = store.stage(&mut scope.shared_view())?;
+            let report = oncl_pdf::sign_source(input, profile, signer, services, &mut stage, scope)
+                .map_err(error)?;
+            stage
+                .copy_to(writer)
+                .map_err(|e| stream::StreamError::AfterKeyUse {
+                    source: Box::new(e.into()),
+                    applied: report.applied,
+                })?;
+            Ok(report)
+        }
+    }
 }

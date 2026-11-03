@@ -10,6 +10,7 @@ pub mod ades;
 mod reader;
 mod sign;
 mod verify;
+pub(crate) use sign::sign_pdf_contents;
 pub use sign::{
     CmsSignRequest, CmsSignServices, SignSummary, sign, sign_raw, sign_raw_digest,
     sign_raw_digest_staged, sign_raw_staged, sign_staged,

@@ -482,7 +482,9 @@ cargo test --workspace --all-features
 `cargo xtask fetch-fixtures` скачивает тестовые файлы [NCANode](https://github.com/ncanode-kz/NCANode) с закреплённого коммита и проверяет их sha256. Эти файлы не коммитятся. Повторный запуск ничего не качает, если файлы на месте.
 
 Низкоуровневый `oncl-pdf` и опциональная фича `oncl-core/pdf` проверяют существующие
-подписи PDF (`VerifyRequest::pdf()`), но не создают PDF/PAdES. Для проверки нужен
+подписи PDF (`VerifyRequest::pdf()`) и добавляют невидимую detached CMS-подпись
+в настоящую incremental PDF-ревизию (`SignRequest::pdf(key, PdfSignProfile)`).
+PAdES timestamps/долгосрочные уровни пока не реализованы. Для операций нужен
 явно настроенный `TemporaryStore`: исходные байты один раз копируются в закрытый
 source-role snapshot, а xref, object streams, incremental `/Prev` и подписанные
 ByteRange читаются с ограниченными буферами. Snapshot учитывает фактический ввод,
@@ -503,6 +505,38 @@ Smoke использует настоящий RSA-PDF, подписанный в
 подписанной ревизии и отдельное последующее обновление — отрицательные контроли.
 Виртуальный тест xref выше 4 ГиБ проверяет только арифметику/seek, а не готовность
 содержательных 10-ГиБ PDF или предел RSS 1 ГиБ: эти измерения остаются гейтом V01.
+P02 сохраняет весь исходный байтовый префикс, страницы, поля формы и цепочку
+`/Prev`; новые xref streams используют 8-байтовые offsets, в том числе за пределом
+десяти десятичных цифр. Перед Add проверяются все предыдущие подписи и покрытие
+последней ревизии: unsigned последующее обновление нельзя «узаконить» новой
+подписью. Сертификационные/field-lock permission transforms и XFA честно
+отклоняются, а не обходятся. `PdfSignProfile::new(bytes)` задаёт конечный reservation
+CMS (по умолчанию 16 КиБ). Перед private use тот же ASN.1 encoder вычисляет точный
+DER-размер с фактическими сертификатом/атрибутами и фиксированной длиной RSA/ГОСТ
+подписи: заведомо малая ёмкость отклоняется NotApplied, без guard/private use.
+Неожиданно oversized ответ backend после настоящего применения ключа остаётся
+Applied-ошибкой с непубликуемым staging, без скрытого повтора.
+Core требует обычное `Action::Sign`, текущую strict validation и guard;
+`SignDigest`/`allow_prehashed` не дают права подписи PDF.
+Для исторического bare `%%EOF`/CR `revision_end` остаётся точным концом подписанного
+ByteRange; отдельные `parser_revision_end` и `PdfEndpointScope` показывают
+физически прочитанный EOL и допустимую историческую границу. Последняя подпись
+по-прежнему обязана покрывать точный текущий extent; произвольный whitespace,
+`%%EOFX` и неполный EOF не становятся допустимыми signed endpoints.
+Закрытый `PdfSignatureOutput` работает только с пустым live OUTPUT staging той же
+операции: append учитывает output/temp один раз, ByteRange фиксируется до хеша,
+затем изменяется только зарегистрированный hex `Contents`. Он не открывает
+`File`, произвольный seek/patch или mutable доступ к FrozenInput. `shared_view()`
+ResourceScope — ещё один handle той же операции, со всеми общими счётчиками,
+deadline/control и admission lease, а не новая квота для другого запроса.
+Проверка P02: `cargo test -p oncl-pdf --features testing --test sign`; smoke:
+`cargo run -p oncl-core --features pdf --example sdk_probe -- --case P02 --out target/p02-smoke`.
+Smoke публикует только source/once/twice-signed PDF, публичные сертификаты и отчёт:
+четыре внешне созданные страницы, содержательный RGB XObject больше 3 МиБ, два
+разных RSA-ключа, проверка обеих подписей и отрицательный контроль covered mutation.
+Независимые pyHanko/OpenSSL/poppler и полный 10-ГиБ/RSS/платформенный стенд —
+разные гейты; этот smoke не подменяет последние.
+
 
 Тестовые ключи в `fixtures/synthetic/` синтетические, пароль `Qwerty12`. Их можно использовать на демо-странице. По умолчанию демо отправляет `chain: []`, поэтому синтетические и тестовые ключи NCANode доступны. Вариант «синтетический тестовый корень» передаёт `root-gost2015`: ключи других корней и промежуточного CA становятся недоступны.
 

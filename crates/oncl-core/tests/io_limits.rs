@@ -497,3 +497,80 @@ fn cleanup_does_not_follow_external_directory_link() {
     assert_eq!(std::fs::read(&marker).unwrap(), b"external data");
     assert!(link.exists());
 }
+
+#[test]
+fn shared_views_aggregate_quotas_and_retain_last_admission() {
+    let limits = ResourceLimits {
+        memory_bytes: 9,
+        temp_bytes: 7,
+        ..ResourceLimits::default()
+    };
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let scope = budget
+        .begin(limits.clone(), Arc::new(Control::default()))
+        .unwrap();
+    let a = scope.shared_view();
+    let b = a.shared_view();
+    let memory = scope.reserve_memory(6).unwrap();
+    assert!(matches!(
+        a.reserve_memory(4),
+        Err(ProcessingError::MemoryLimit)
+    ));
+    let temp = a.reserve_temp(5).unwrap();
+    assert!(matches!(b.reserve_temp(3), Err(ProcessingError::TempLimit)));
+    drop(scope);
+    drop(a);
+    drop(memory);
+    drop(temp);
+    assert!(
+        budget
+            .begin(limits.clone(), Arc::new(Control::default()))
+            .is_err()
+    );
+    drop(b);
+    assert!(budget.begin(limits, Arc::new(Control::default())).is_ok());
+}
+
+#[test]
+fn shared_views_keep_input_terminal_cancel_and_original_deadline() {
+    let limits = ResourceLimits {
+        input_bytes: 2,
+        ..ResourceLimits::default()
+    };
+    let control = Arc::new(Control::default());
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let scope = budget.begin(limits, control.clone()).unwrap();
+    let mut view = scope.shared_view();
+    assert!(
+        oncl_pki::digest::hash_source(
+            Source::sequential(&mut &b"abc"[..], None),
+            HashAlg::Sha256,
+            &mut view
+        )
+        .is_err()
+    );
+    assert_eq!(scope.progress().bytes_in, 3);
+    let mut other = scope.shared_view();
+    assert!(
+        oncl_pki::digest::hash_source(
+            Source::sequential(&mut &b""[..], None),
+            HashAlg::Sha256,
+            &mut other
+        )
+        .is_err()
+    );
+    control.cancelled.store(true, Ordering::SeqCst);
+    assert!(matches!(view.checkpoint(), Err(ProcessingError::Cancelled)));
+    let limits = ResourceLimits {
+        operation_timeout: Duration::from_millis(20),
+        ..ResourceLimits::default()
+    };
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let scope = budget.begin(limits, Arc::new(Control::default())).unwrap();
+    std::thread::sleep(Duration::from_millis(25));
+    let view = scope.shared_view();
+    assert!(matches!(
+        view.checkpoint(),
+        Err(ProcessingError::DeadlineExceeded)
+    ));
+}
