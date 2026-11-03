@@ -3,6 +3,8 @@
 //! Archive timestamps use archiveTimestampV3 and ATSHashIndexV3, not the
 //! deprecated RFC 5126 archiveTimestampV2. Document bytes remain in the original
 //! source-role temporary artifact; only bounded format metadata is decoded.
+#[path = "ades/pdf.rs"]
+pub(crate) mod pdf;
 use super::reader::{Metadata, Reader, malformed};
 use super::sign::{Output, StageReader, copy_region, metadata_region, size, snapshot, sum};
 use super::{ALGORITHMS, CmsSignRequest, CmsSignServices, Parsed, StreamError, parse_with};
@@ -25,6 +27,7 @@ use crate::tsp::{self, TsaSpec};
 use crate::validation::{ValidationContext, ValidationReason, ValidationReport, Verdict};
 use der::asn1::{AnyRef, ObjectIdentifier, OctetString};
 use der::{Decode, Encode, Sequence};
+pub use pdf::{SnapshotDocumentTimestamp, SnapshotMaterial, verify_snapshot_pades};
 use std::io::{self, Cursor, Read, Write};
 use time::OffsetDateTime;
 
@@ -817,6 +820,16 @@ fn verify_frozen(
     allowed: &[SigAlg],
     scope: &ResourceScope,
 ) -> Result<AdesReport, AdesError> {
+    verify_frozen_impl(required, frozen, services, allowed, scope, None)
+}
+fn verify_frozen_impl(
+    required: AdesLevel,
+    frozen: &Frozen,
+    services: &AdesServices<'_>,
+    allowed: &[SigAlg],
+    scope: &ResourceScope,
+    pdf: Option<&pdf::PdfContext<'_, '_>>,
+) -> Result<AdesReport, AdesError> {
     scope.checkpoint()?;
     let encoded_size = frozen.parsed.metadata.as_bytes().len() as u64;
     let _working = scope.reserve_memory(
@@ -857,6 +870,10 @@ fn verify_frozen(
         }
         token_ids.push(tokens);
     }
+    let document_ids = pdf
+        .map(|pdf| pdf.collect_tokens(&mut store))
+        .transpose()?
+        .unwrap_or_default();
     let mut bundle = store.finish();
     let prepared = PreparedCms::from_digests(frozen.parsed.metadata.as_bytes(), frozen.values);
     let data = prepared.signed_data()?;
@@ -906,7 +923,8 @@ fn verify_frozen(
         } else if seen.ess_matches == Some(false) {
             Some(crate::cms::Problem::EssCertIdMismatch)
         } else if data.encap_content_info.e_content_type != crate::oid::DATA
-            || seen.signing_time.is_none()
+            || (pdf.is_none() && seen.signing_time.is_none())
+            || (pdf.is_some() && seen.signing_time.is_some())
             || seen.ess_matches.is_none()
         {
             Some(crate::cms::Problem::Malformed)
@@ -928,7 +946,9 @@ fn verify_frozen(
             .iter()
             .filter(|(oid, _, _)| *oid == SIGNATURE_TIMESTAMP)
             .collect();
-        let achieved = if token_ids[index]
+        let achieved = if let Some(pdf) = pdf {
+            pdf.achieved(!signatures.is_empty())
+        } else if token_ids[index]
             .iter()
             .any(|(oid, _, _)| *oid == ARCHIVE_TIMESTAMP)
         {
@@ -952,6 +972,26 @@ fn verify_frozen(
             )?);
         }
         let checked = (|| -> Result<ValidationReport, AdesError> {
+            if let Some(pdf) = pdf {
+                if token_ids[index]
+                    .iter()
+                    .any(|(oid, _, _)| *oid == ARCHIVE_TIMESTAMP)
+                {
+                    return Err(invalid(
+                        "CMS archive timestamps are not PDF document timestamps",
+                    ));
+                }
+                return pdf.validate(
+                    &evidence,
+                    &mut bundle,
+                    &signatures,
+                    &document_ids,
+                    level,
+                    services,
+                    scope,
+                    prepared_evidence.as_ref().expect("prepared above"),
+                );
+            }
             if signatures.len() > 1 {
                 return Err(invalid("duplicate signature timestamp"));
             }
@@ -1220,12 +1260,12 @@ fn verify_frozen(
     })
 }
 
-struct ScopedToken {
-    bytes: Vec<u8>,
+pub(crate) struct ScopedToken {
+    pub(crate) bytes: Vec<u8>,
     _memory: ResourceReservation,
     _metadata: ResourceReservation,
 }
-fn request_imprint(
+pub(crate) fn request_imprint(
     imprint: &DigestValue,
     services: &AdesServices<'_>,
     scope: &ResourceScope,

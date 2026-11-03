@@ -49,9 +49,9 @@ impl std::fmt::Debug for PdfVerification {
 }
 /// Owning immutable rows; storage cannot be separated from its operation guards.
 pub struct ScopedPdfRows<T> {
-    values: Vec<T>,
-    _memory: ResourceReservation,
-    _metadata: ResourceReservation,
+    pub(crate) values: Vec<T>,
+    pub(crate) _memory: ResourceReservation,
+    pub(crate) _metadata: ResourceReservation,
 }
 impl<T> std::ops::Deref for ScopedPdfRows<T> {
     type Target = [T];
@@ -141,19 +141,20 @@ impl PdfVerification {
         ))
     }
 }
-struct Candidate {
-    range: ByteRange,
-    contents: oncl_pki::io::Region,
-    permission_transform: bool,
-    parser_revision_end: u64,
-    endpoint_scope: PdfEndpointScope,
+pub(crate) struct Candidate {
+    pub(crate) range: ByteRange,
+    pub(crate) contents: oncl_pki::io::Region,
+    pub(crate) permission_transform: bool,
+    pub(crate) parser_revision_end: u64,
+    pub(crate) endpoint_scope: PdfEndpointScope,
+    pub(crate) document_timestamp: bool,
 }
 impl PdfDocument<'_, '_> {
-    pub(crate) fn has_signatures(&mut self) -> Result<bool> {
+    pub(crate) fn has_signatures_mode(&mut self, pades: bool) -> Result<bool> {
         let mut found = false;
         let mut known = BTreeSet::new();
         for revision in 0..self.revisions.len() {
-            for candidate in self.signature_candidates(revision, &known)? {
+            for candidate in self.signature_candidates(revision, &known, pades)? {
                 if candidate.permission_transform {
                     return Err(PdfError::Unsupported(
                         "signature field lock or permission transform",
@@ -168,16 +169,20 @@ impl PdfDocument<'_, '_> {
         }
         Ok(found)
     }
-    fn signature_candidates(
+    pub(crate) fn signature_candidates(
         &mut self,
         revision: usize,
         known: &BTreeSet<[u64; 4]>,
+        pades: bool,
     ) -> Result<Vec<Candidate>> {
         let root = self.revisions[revision].root.clone();
         let catalog = self.resolve(revision, &root)?;
         let dict = catalog.dict()?;
         if !get(dict, b"Type")?.name(b"Catalog") {
             return Err(PdfError::Malformed("catalog type"));
+        }
+        if pades && dict.contains_key(b"Perms".as_slice()) {
+            return Err(PdfError::Unsupported("certification signature permissions"));
         }
         let Some(form) = dict.get(b"AcroForm".as_slice()) else {
             return Ok(Vec::new());
@@ -227,15 +232,38 @@ impl PdfDocument<'_, '_> {
             };
             let signature = self.resolve(revision, value)?;
             let dict = signature.dict()?;
-            if dict
-                .get(b"Type".as_slice())
-                .is_some_and(|v| !v.name(b"Sig"))
-            {
-                return Err(PdfError::Malformed("signature dictionary type"));
-            }
-            let subfilter = get(dict, b"SubFilter")?;
-            if !subfilter.name(b"adbe.pkcs7.detached") && !subfilter.name(b"ETSI.CAdES.detached") {
-                return Err(PdfError::Unsupported("signature SubFilter"));
+            let document_timestamp = get(dict, b"SubFilter")?.name(b"ETSI.RFC3161");
+            if document_timestamp && pades {
+                if !get(dict, b"Type")?.name(b"DocTimeStamp")
+                    || [
+                        b"Cert".as_slice(),
+                        b"Reference",
+                        b"Changes",
+                        b"R",
+                        b"Prop_AuthTime",
+                        b"Prop_AuthType",
+                    ]
+                    .iter()
+                    .any(|key| dict.contains_key(*key))
+                {
+                    return Err(PdfError::Malformed("document timestamp dictionary"));
+                }
+            } else {
+                if dict
+                    .get(b"Type".as_slice())
+                    .is_some_and(|v| !v.name(b"Sig"))
+                {
+                    return Err(PdfError::Malformed("signature dictionary type"));
+                }
+                let subfilter = get(dict, b"SubFilter")?;
+                if !subfilter.name(b"ETSI.CAdES.detached")
+                    && (!subfilter.name(b"adbe.pkcs7.detached") || pades)
+                {
+                    return Err(PdfError::Unsupported("signature SubFilter"));
+                }
+                if pades && !matches!(dict.get(b"M".as_slice()), Some(Value::Bytes(_, _))) {
+                    return Err(PdfError::Malformed("PAdES claimed PDF signing date"));
+                }
             }
             let numbers = get(dict, b"ByteRange")?.array()?;
             if numbers.len() != 4 {
@@ -291,6 +319,7 @@ impl PdfDocument<'_, '_> {
             }
             result.push(Candidate {
                 range,
+                document_timestamp,
                 parser_revision_end: revision_facts.end,
                 endpoint_scope: if !historical {
                     PdfEndpointScope::CurrentExtent
@@ -348,7 +377,7 @@ pub(crate) fn verify_snapshot(
         let mut candidates = Vec::new();
         let mut seen = BTreeSet::new();
         for revision in 0..doc.revisions.len() {
-            for candidate in doc.signature_candidates(revision, &seen)? {
+            for candidate in doc.signature_candidates(revision, &seen, false)? {
                 if !seen.insert(candidate.range.values()) {
                     continue;
                 }

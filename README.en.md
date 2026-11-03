@@ -476,8 +476,9 @@ cargo test --workspace --all-features
 `cargo xtask fetch-fixtures` downloads [NCANode](https://github.com/ncanode-kz/NCANode) test files from a pinned commit and verifies their sha256. These files are never committed. A repeated run downloads nothing when the files are already in place.
 
 The low-level `oncl-pdf` crate and optional `oncl-core/pdf` feature verify existing
-PDF signatures (`VerifyRequest::pdf()`); they do not create PDF/PAdES signatures.
-Verification requires an explicitly configured `TemporaryStore`: actual input is
+PDF signatures (`VerifyRequest::pdf()`) and create invisible incremental detached
+CMS signatures (`SignRequest::pdf(key, PdfSignProfile)`). Operations require an
+explicitly configured `TemporaryStore`: actual input is
 captured once into a private source-role snapshot. Bounded readers handle xref
 tables/streams, object streams, incremental `/Prev` chains and signed ByteRanges.
 The snapshot ignores length hints and prevents file changes between parsing and
@@ -527,6 +528,45 @@ separate per-signer artifacts. Run the bounded independent oracle with
 `python crates/oncl-core/examples/sdk_probe/xml_oracle.py --out target/x03-smoke`
 (lxml/libxml2 and cryptography: exact C14N/digests and RSA math, not GOST or trust).
 Meaningful 10-GiB processing and the 1-GiB peak-RSS gate remain V01 work.
+
+P03 adds explicit `SignRequest::pades(key, profile, level, material, evidence_limits)`,
+`VerifyRequest::pades(required, evidence_limits)` and
+`ExtendRequest::pdf(level, pdf_limits).with_evidence_limits(evidence_limits)`.
+They implement real B/T/LT/LTA using `ETSI.CAdES.detached`, CMS SignatureTimeStamp,
+shared DSS/VRI material and RFC3161 DocumentTimeStamp, following
+[EN 319 142-1 V1.2.1, 5.4.2/5.4.3 and 6.3 n), q), r)–y)](https://www.etsi.org/deliver/etsi_en/319100_319199/31914201/01.02.01_60/en_31914201v010201p.pdf).
+New T signatures timestamp their actual CMS signatureValue. Evidence-only B→T
+timestamps the actual immutable PDF ByteRanges without changing old Contents or
+the byte prefix. LTA requires a later verified document timestamp covering DSS
+and all preceding proofs. The reported level is the verified minimum across
+signers, never the requested enum or token presence. Only the shared F04 checks
+of imprint, TSA crypto/EKU, anchored host trust and current TSA-path status mint
+historical proof time; PDF `/M` is only a claim.
+
+Extension requires `Action::Extend` and never opens a KeyProvider, prompts for
+secrets or applies a local private key. New signing still requires strict
+`Action::Sign` authorization and its guard. The existing host `CadesConfiguration`
+also configures AdES timestamp acquisition; B and carried-proof verification do
+not require TSA issuance configuration. Trust, clocks, pins and network policy
+are never read from the PDF. After the first signature, only explicitly checked
+DSS/VRI/status/certificate and signature/timestamp-field additions are allowed:
+page/content, original-object alias, permission and unrelated catalog/trailer
+changes cannot be laundered by a newer revision or timestamp. Existing DSS/VRI
+entries remain intact. DSS supports direct unfiltered DER streams; other
+encodings and unsupported permission transforms fail explicitly. Output renewal
+can patch only the current append epoch; final-validation failure permanently
+poisons publication. Internal replay never counts original input or final output
+twice.
+
+Run `cargo test -p oncl-pdf --features testing --test ades`, then
+`cargo run -p oncl-core --features pdf --example sdk_probe -- --case P03 --out target/p03-smoke`.
+The runtime case exercises actual RSA/GOST-2004/GOST-2015-512 backends, loopback
+TSA/OCSP/CRL, all four levels, renewal, B→T, multiple signers and tampered evidence.
+For independent fresh RSA-PDF verification, including archival validation and
+negative controls, use pyHanko 0.38+:
+`python crates/oncl-core/examples/sdk_probe/pades_oracle.py --out target/p03-smoke`.
+These synthetic-root checks are not qualified/NCA certification, an independent
+GOST matrix, or the meaningful 2/4/10-GiB PDF, RSS and platform V01 gates.
 
 
 

@@ -484,8 +484,8 @@ cargo test --workspace --all-features
 Низкоуровневый `oncl-pdf` и опциональная фича `oncl-core/pdf` проверяют существующие
 подписи PDF (`VerifyRequest::pdf()`) и добавляют невидимую detached CMS-подпись
 в настоящую incremental PDF-ревизию (`SignRequest::pdf(key, PdfSignProfile)`).
-PAdES timestamps/долгосрочные уровни пока не реализованы. Для операций нужен
-явно настроенный `TemporaryStore`: исходные байты один раз копируются в закрытый
+PAdES B/T/LT/LTA доступны отдельным явным профилем, описанным ниже. Для операций
+нужен явно настроенный `TemporaryStore`: исходные байты один раз копируются в закрытый
 source-role snapshot, а xref, object streams, incremental `/Prev` и подписанные
 ByteRange читаются с ограниченными буферами. Snapshot учитывает фактический ввод,
 не доверяет подсказке длины и исключает подмену файла между разбором и хешированием.
@@ -536,6 +536,47 @@ Smoke публикует только source/once/twice-signed PDF, публич
 разных RSA-ключа, проверка обеих подписей и отрицательный контроль covered mutation.
 Независимые pyHanko/OpenSSL/poppler и полный 10-ГиБ/RSS/платформенный стенд —
 разные гейты; этот smoke не подменяет последние.
+
+P03: `SignRequest::pades(key, profile, level, material, evidence_limits)`,
+`VerifyRequest::pades(required, evidence_limits)` и
+`ExtendRequest::pdf(level, pdf_limits).with_evidence_limits(evidence_limits)`
+используют настоящие `ETSI.CAdES.detached`, CMS SignatureTimeStamp, общие DSS/VRI
+и RFC3161 DocumentTimeStamp. Профиль соответствует
+[EN 319 142-1 V1.2.1, 5.4.2/5.4.3 и 6.3 n), q), r)–y)](https://www.etsi.org/deliver/etsi_en/319100_319199/31914201/01.02.01_60/en_31914201v010201p.pdf).
+Новая T-подпись получает CMS timestamp над реальным signatureValue; достройка
+ранее выпущенной B использует document timestamp над фактическими ByteRange,
+не меняя старый `Contents` или исходный байтовый префикс. LTA требует последующего
+проверенного timestamp, покрывающего DSS и предыдущие доказательства. Уровень —
+проверенный минимум всех подписантов, а не запрошенное значение или наличие токена.
+Историческое время выдаёт только общий F04 после проверки imprint, TSA crypto/EKU,
+host trust и актуального статуса цепочки TSA; PDF `/M` не даёт proof of existence.
+
+Extend требует отдельное `Action::Extend`; его Core-путь вообще не открывает
+KeyProvider, не запрашивает секреты и не выполняет local private use. Новая подпись
+по-прежнему требует `Action::Sign`, strict validation и guard. Для получения
+новых timestamps используется явно заданная host `CadesConfiguration` как общий
+AdES acquisition config; B и проверка уже перенесённых доказательств не требуют
+TSA issuance config. Корни, часы, pins и сетевая политика не берутся из PDF.
+После первой подписи проверяется конечная whitelist изменений: только DSS/VRI,
+сертификаты/статусы и добавление signature/timestamp fields; изменение страниц,
+контента, исходных объектов, permissions или посторонних catalog/trailer данных
+не становится допустимым от новой ревизии или timestamp. Старые DSS/VRI сохраняются.
+Поддерживаемый DSS использует прямые ссылки на DER streams без фильтров;
+другие кодировки и неподдерживаемые permission transforms явно отклоняются.
+OUTPUT renewal — только append в новом transaction epoch, без старых patch slots;
+ошибка финальной проверки навсегда запрещает публикацию. Счётчики исходного ввода
+и конечного вывода не дебетуют повторно внутренние replay/проверки.
+
+Проверка P03: `cargo test -p oncl-pdf --features testing --test ades`; smoke:
+`cargo run -p oncl-core --features pdf --example sdk_probe -- --case P03 --out target/p03-smoke`.
+Он выполняет настоящие RSA/ГОСТ-2004/ГОСТ-2015-512 операции с loopback TSA/OCSP/CRL,
+все четыре уровня, renewal, B→T, несколько подписантов и отрицательные DSS/token
+контроли. Независимая проверка новых RSA-PDF (включая archive validation и tamper)
+в окружении с pyHanko 0.38+:
+`python crates/oncl-core/examples/sdk_probe/pades_oracle.py --out target/p03-smoke`.
+Это не квалифицированная/NCA-сертификация, независимая ГОСТ-матрица или замена
+содержательным 2/4/10-ГиБ PDF, RSS и платформенным гейтам V01.
+
 
 
 Опциональная фича `oncl-core/xml` добавляет **проверку** UTF-8 Source:

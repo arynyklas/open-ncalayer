@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 pub struct PdfSignProfile {
     pub limits: PdfLimits,
     reserved_cms_bytes: usize,
-    allowed: &'static [oncl_pki::key::SigAlg],
+    pub(crate) allowed: &'static [oncl_pki::key::SigAlg],
 }
 impl Default for PdfSignProfile {
     fn default() -> Self {
@@ -54,16 +54,16 @@ impl PdfSignProfile {
     }
 }
 pub type PdfOperationReport = SignSummary;
-struct Plan {
-    root: (u32, u16),
-    catalog: Value,
-    form: Value,
-    next: u32,
-    previous: u64,
-    extras: BTreeMap<Vec<u8>, Value>,
-    signed: bool,
+pub(crate) struct Plan {
+    pub(crate) root: (u32, u16),
+    pub(crate) catalog: Value,
+    pub(crate) form: Value,
+    pub(crate) next: u32,
+    pub(crate) previous: u64,
+    pub(crate) extras: BTreeMap<Vec<u8>, Value>,
+    pub(crate) signed: bool,
 }
-fn plan(doc: &mut PdfDocument<'_, '_>) -> Result<Plan> {
+pub(crate) fn plan(doc: &mut PdfDocument<'_, '_>, pades: bool) -> Result<Plan> {
     let revision = doc.revisions.len() - 1;
     if doc.revisions.len() >= doc.limits.max_revisions {
         return Err(PdfError::Limit("revision count"));
@@ -153,7 +153,7 @@ fn plan(doc: &mut PdfDocument<'_, '_>) -> Result<Plan> {
         }
     }
     let previous = doc.revisions[revision].xref;
-    let signed = doc.has_signatures()?;
+    let signed = doc.has_signatures_mode(pades)?;
     Ok(Plan {
         root: (id, generation),
         catalog,
@@ -164,7 +164,7 @@ fn plan(doc: &mut PdfDocument<'_, '_>) -> Result<Plan> {
         signed,
     })
 }
-fn name(bytes: &[u8], out: &mut Vec<u8>) {
+pub(crate) fn name(bytes: &[u8], out: &mut Vec<u8>) {
     out.push(b'/');
     for b in bytes {
         out.push(b'#');
@@ -172,7 +172,7 @@ fn name(bytes: &[u8], out: &mut Vec<u8>) {
         out.push(b"0123456789ABCDEF"[(b & 15) as usize]);
     }
 }
-fn encode(v: &Value, out: &mut Vec<u8>) -> Result<()> {
+pub(crate) fn encode(v: &Value, out: &mut Vec<u8>) -> Result<()> {
     match v {
         Value::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
         Value::Ref(n, g) => out.extend_from_slice(format!("{n} {g} R").as_bytes()),
@@ -208,7 +208,7 @@ fn encode(v: &Value, out: &mut Vec<u8>) -> Result<()> {
     }
     Ok(())
 }
-fn object(
+pub(crate) fn object(
     output: &mut PdfSignatureOutput<'_>,
     id: u32,
     generation: u16,
@@ -236,6 +236,40 @@ pub fn sign_source(
     services: &CmsSignServices<'_>,
     staged_output: &mut StagedArtifact,
     scope: &ResourceScope,
+) -> Result<PdfOperationReport> {
+    sign_impl(input, profile, signer, services, staged_output, scope, None)
+}
+pub(crate) fn sign_pades_source(
+    level: oncl_pki::evidence::AdesLevel,
+    input: Source<'_>,
+    profile: &PdfSignProfile,
+    signer: &mut dyn DigestSigner,
+    services: &oncl_pki::cms::ades::AdesServices<'_>,
+    staged_output: &mut StagedArtifact,
+    scope: &ResourceScope,
+) -> Result<PdfOperationReport> {
+    let cms = CmsSignServices::new(Some(services.validation), Some(services.temporary));
+    sign_impl(
+        input,
+        profile,
+        signer,
+        &cms,
+        staged_output,
+        scope,
+        Some((level, services)),
+    )
+}
+fn sign_impl(
+    input: Source<'_>,
+    profile: &PdfSignProfile,
+    signer: &mut dyn DigestSigner,
+    services: &CmsSignServices<'_>,
+    staged_output: &mut StagedArtifact,
+    scope: &ResourceScope,
+    pades: Option<(
+        oncl_pki::evidence::AdesLevel,
+        &oncl_pki::cms::ades::AdesServices<'_>,
+    )>,
 ) -> Result<PdfOperationReport> {
     // This precheck and poisoning borrow precede intake and private key use.
     let mut output = PdfSignatureOutput::new(staged_output, scope)?;
@@ -277,7 +311,7 @@ pub fn sign_source(
     )?;
     let result = (|| {
         let mut doc = PdfDocument::open(reader.source(), &profile.limits, &mut operation)?;
-        plan(&mut doc)
+        plan(&mut doc, pades.is_some())
     })();
     reader.finish()?;
     drop(reader);
@@ -286,14 +320,27 @@ pub fn sign_source(
         let validation = services.validation().ok_or(PdfError::Unsupported(
             "Add requires host validation services",
         ))?;
-        let report = crate::verify::verify_snapshot(
-            &mut snapshot,
-            &profile.limits,
-            validation,
-            profile.allowed,
-            &mut operation,
-        )?;
-        if report.verdict != Verdict::Valid {
+        let verdict = if let Some((_, ades)) = pades {
+            crate::ades::verify_frozen(
+                oncl_pki::evidence::AdesLevel::B,
+                &mut snapshot,
+                &profile.limits,
+                ades,
+                profile.allowed,
+                &mut operation,
+            )?
+            .verdict
+        } else {
+            crate::verify::verify_snapshot(
+                &mut snapshot,
+                &profile.limits,
+                validation,
+                profile.allowed,
+                &mut operation,
+            )?
+            .verdict
+        };
+        if verdict != Verdict::Valid {
             return Err(PdfError::Unsupported(
                 "all existing signatures and latest revision must validate before Add",
             ));
@@ -375,7 +422,12 @@ pub fn sign_source(
         )?,
     );
     offsets.insert((signature_id, 0), output.len());
-    output.append(format!("{signature_id} 0 obj\n<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached").as_bytes())?;
+    if let Some((_, services)) = pades {
+        let at = services.validation.now;
+        output.append(format!("{signature_id} 0 obj\n<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /ETSI.CAdES.detached /M (D:{:04}{:02}{:02}{:02}{:02}{:02}Z)", at.year(), u8::from(at.month()), at.day(), at.hour(), at.minute(), at.second()).as_bytes())?;
+    } else {
+        output.append(format!("{signature_id} 0 obj\n<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached").as_bytes())?;
+    }
     output.reserve_contents(profile.reserved_cms_bytes)?;
     output.append(b" >>\nendobj\n")?;
     // Always use an 8-byte xref offset field: valid past ten decimal digits.
@@ -407,12 +459,17 @@ pub fn sign_source(
     output.append(b">>\nstream\n")?;
     output.append(&rows)?;
     output.append(format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes())?;
-    let mut report = output.finish(signer, services, scope)?;
+    let mut report = match pades {
+        Some((level, ades)) if level >= oncl_pki::evidence::AdesLevel::T => {
+            output.finish_pades(signer, services, ades, scope)?
+        }
+        _ => output.finish(signer, services, scope)?,
+    };
     report.bytes_in = scope.progress().bytes_in - before.bytes_in;
     Ok(report)
 }
 
-fn xref_entry(offset: u64, generation: u16) -> [u8; 11] {
+pub(crate) fn xref_entry(offset: u64, generation: u16) -> [u8; 11] {
     let mut row = [0; 11];
     row[0] = 1;
     row[1..9].copy_from_slice(&offset.to_be_bytes());

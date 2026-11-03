@@ -19,7 +19,7 @@ impl<'a> Input<'a> {
         let extent = end
             .checked_sub(base)
             .ok_or(PdfError::Malformed("source extent"))?;
-        if !source.is_snapshot_for(scope)? {
+        if !source.is_snapshot_for(scope)? && !source.is_output_projection_for(scope)? {
             scope.account_input(extent)?;
         }
         Ok(Self {

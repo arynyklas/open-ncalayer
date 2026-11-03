@@ -13,10 +13,12 @@ testing = ["oncl-pki/testing"]
 oncl-pki.workspace = true
 flate2.workspace = true
 thiserror.workspace = true
+der.workspace = true
 
 [dev-dependencies]
 oncl-pki = { workspace = true, features = ["testing"] }
 oncl-testkit.workspace = true
 lopdf.workspace = true
-time.workspace = true
+time = { workspace = true, features = ["macros"] }
 tempfile.workspace = true
+x509-cert.workspace = true
