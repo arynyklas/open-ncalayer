@@ -521,11 +521,17 @@ are never read from the PDF. After the first signature, only explicitly checked
 DSS/VRI/status/certificate and signature/timestamp-field additions are allowed:
 page/content, original-object alias, permission and unrelated catalog/trailer
 changes cannot be laundered by a newer revision or timestamp. Existing DSS/VRI
-entries remain intact. DSS supports direct unfiltered DER streams; other
-encodings and unsupported permission transforms fail explicitly. Output renewal
-can patch only the current append epoch; final-validation failure permanently
-poisons publication. Internal replay never counts original input or final output
-twice.
+entries remain intact. The complete PDF verification batch owns one common
+evidence store and one F04 PreparedEvidence cache, rather than copying DSS and
+decoding tokens again per signer. Each source CMS retains its actual digest,
+SID/ESS and exact inclusion graph; imprint, time, host trust and current TSA-path
+status are still checked for every proof. DSS supports direct unfiltered DER
+streams; other encodings and unsupported permission transforms fail explicitly.
+Output renewal can patch only the current append epoch. Every terminal failure,
+including cancellation on initial resume/sealed-snapshot entry, permanently
+poisons publication even if the host clears cancellation; foreign/SOURCE
+artifacts are untouched. Internal replay never counts original input or final
+output twice.
 
 Run `cargo test -p oncl-pdf --features testing --test ades`, then
 `cargo run -p oncl-core --features pdf --example sdk_probe -- --case P03 --out target/p03-smoke`.

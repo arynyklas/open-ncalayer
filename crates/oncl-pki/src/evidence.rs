@@ -739,9 +739,13 @@ struct RawEvidence {
     kind: EvidenceKind,
     bytes: Vec<u8>,
 }
+// Immutable syntax/signature math only, never a cached host verdict. Allocate
+// these records only for actual tokens, not for each certificate/status entry.
+type DecodedTimestamp = (usize, Result<(tsp::TstInfo, Certificate), tsp::TspError>);
 struct ParsedEvidence {
     raw: Vec<RawEvidence>,
     candidates: Vec<(Option<EvidenceId>, Certificate)>,
+    timestamps: Vec<DecodedTimestamp>,
     _memory: ResourceReservation,
     _metadata: ResourceReservation,
 }
@@ -773,6 +777,11 @@ impl ParsedEvidence {
         }
         // Charge retained raw evidence ONCE and concurrent parser/certificate/path
         // scratch before any decoder allocations. Never load an archive stream.
+        let timestamp_count = bundle
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EvidenceKind::Timestamp)
+            .count();
         let headers = bundle
             .entries
             .len()
@@ -781,6 +790,11 @@ impl ParsedEvidence {
                 n.checked_mul(
                     std::mem::size_of::<RawEvidence>() + std::mem::size_of::<Certificate>() + 32,
                 )
+            })
+            .and_then(|n| {
+                timestamp_count
+                    .checked_mul(std::mem::size_of::<DecodedTimestamp>())
+                    .and_then(|timestamps| n.checked_add(timestamps))
             })
             .ok_or(EvidenceError::Limit)? as u64;
         resources.checkpoint()?;
@@ -799,6 +813,7 @@ impl ParsedEvidence {
         )?;
         let mut raw = Vec::with_capacity(bundle.entries.len());
         let mut candidates = Vec::with_capacity(bundle.entries.len() + ctx.intermediates.len());
+        let mut timestamps = Vec::with_capacity(timestamp_count);
         candidates.extend(ctx.intermediates.iter().cloned().map(|cert| (None, cert)));
         for (index, entry) in bundle.entries.iter().enumerate() {
             resources.checkpoint()?;
@@ -834,6 +849,11 @@ impl ParsedEvidence {
             }
             resources.checkpoint()?;
             bundle.scope.checkpoint()?;
+            if entry.kind == EvidenceKind::Timestamp {
+                timestamps.push((index, tsp::verify_token_signed(&value, true)));
+            }
+            resources.checkpoint()?;
+            bundle.scope.checkpoint()?;
             raw.push(RawEvidence {
                 kind: entry.kind,
                 bytes: value,
@@ -844,6 +864,7 @@ impl ParsedEvidence {
         Ok(Self {
             raw,
             candidates,
+            timestamps,
             _memory: memory,
             _metadata: metadata,
         })
@@ -1026,6 +1047,16 @@ pub fn validate_evidence(
 pub(crate) struct PreparedEvidence {
     owner: u64,
     parsed: ParsedEvidence,
+}
+impl PreparedEvidence {
+    pub(crate) fn has_certificate(&self, id: EvidenceId) -> bool {
+        id.owner == self.owner
+            && self
+                .parsed
+                .candidates
+                .iter()
+                .any(|(candidate, _)| *candidate == Some(id))
+    }
 }
 pub(crate) fn prepare_evidence(
     signer: &SignerEvidence<'_>,
@@ -1225,8 +1256,12 @@ fn validate_evidence_impl(
         for proof in proofs {
             resources.checkpoint()?;
             bundle.checkpoint()?;
-            let token = &parsed.raw[proof.token.index].bytes;
-            let verified = tsp::verify_token_signed(token, true);
+            let verified = parsed
+                .timestamps
+                .iter()
+                .find(|(index, _)| *index == proof.token.index)
+                .map(|(_, value)| value)
+                .ok_or(EvidenceError::InvalidBinding)?;
             resources.checkpoint()?;
             bundle.checkpoint()?;
             let (info, tsa) = match verified {
@@ -1252,7 +1287,7 @@ fn validate_evidence_impl(
             }
             let imprint =
                 hash_coverage(bundle, signer, proof.coverage, algorithm, Some(resources))?;
-            if tsp::check_imprint(&info, &imprint).is_err()
+            if tsp::check_imprint(info, &imprint).is_err()
                 || info.gen_time > ctx.now
                 || previous_time.is_some_and(|at| info.gen_time < at)
             {
@@ -1262,7 +1297,7 @@ fn validate_evidence_impl(
             resources.checkpoint()?;
             bundle.checkpoint()?;
             let built = pkix::build_anchored_path_selected(
-                &tsa,
+                tsa,
                 ctx.anchors,
                 &candidates,
                 info.gen_time,

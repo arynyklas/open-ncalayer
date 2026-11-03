@@ -561,11 +561,17 @@ TSA issuance config. Корни, часы, pins и сетевая политик
 сертификаты/статусы и добавление signature/timestamp fields; изменение страниц,
 контента, исходных объектов, permissions или посторонних catalog/trailer данных
 не становится допустимым от новой ревизии или timestamp. Старые DSS/VRI сохраняются.
+Верификация всех подписей PDF использует один operation-owned набор общего
+DSS/timestamp evidence и один F04 PreparedEvidence: общие сертификаты и декодирование
+токенов не копируются заново для каждого подписанта. Каждая source CMS сохраняет
+свою проверку фактического digest/SID/ESS и inclusion graph; imprint, время, trust
+и актуальный статус цепочки TSA проверяются для каждого доказательства.
 Поддерживаемый DSS использует прямые ссылки на DER streams без фильтров;
 другие кодировки и неподдерживаемые permission transforms явно отклоняются.
 OUTPUT renewal — только append в новом transaction epoch, без старых patch slots;
-ошибка финальной проверки навсегда запрещает публикацию. Счётчики исходного ввода
-и конечного вывода не дебетуют повторно внутренние replay/проверки.
+ошибка, включая отмену при самом входе в resume/sealed snapshot, навсегда запрещает
+публикацию даже после снятия host-флага отмены. Чужие/SOURCE artifacts не портятся.
+Счётчики исходного ввода и конечного вывода не дебетуют повторно внутренние replay/проверки.
 
 Проверка P03: `cargo test -p oncl-pdf --features testing --test ades`; smoke:
 `cargo run -p oncl-core --features pdf --example sdk_probe -- --case P03 --out target/p03-smoke`.

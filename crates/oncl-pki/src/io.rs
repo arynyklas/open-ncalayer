@@ -222,15 +222,28 @@ impl StagedArtifact {
     pub(crate) fn fail_sign_output(&mut self) {
         self.failed = true;
     }
-    fn check_pdf_live_output(&self, scope: &ResourceScope) -> Result<(), ProcessingError> {
-        scope.checkpoint()?;
-        self.scope.checkpoint()?;
-        if !self.scope.same_operation(scope) || self.source || self.failed || self.file.is_none() {
+    fn check_pdf_live_output(&mut self, scope: &ResourceScope) -> Result<(), ProcessingError> {
+        // Foreign/SOURCE artifacts are not ours to poison. Once the immutable
+        // role/operation check admits this OUTPUT, every failure is terminal,
+        // including a checkpoint returned before a transaction can be created.
+        if self.source || !self.scope.same_operation(scope) {
             return Err(ProcessingError::InvalidInput(
                 "PDF requires live same-operation OUTPUT",
             ));
         }
-        Ok(())
+        let result = if self.failed || self.file.is_none() {
+            Err(ProcessingError::InvalidInput(
+                "PDF output is failed or closed",
+            ))
+        } else {
+            let current = scope.checkpoint();
+            let original = self.scope.checkpoint();
+            current.and(original)
+        };
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
     }
     pub fn len(&self) -> u64 {
         self.temp.bytes()
