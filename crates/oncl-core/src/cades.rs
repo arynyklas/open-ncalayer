@@ -35,8 +35,8 @@ impl CadesConfiguration {
 pub struct ExtendRequest<'a> {
     pub(crate) level: AdesLevel,
     pub(crate) material: ValidationMaterial<'a>,
-    detached: RefCell<Option<Source<'a>>>,
-    detached_requested: bool,
+    pub(crate) detached: RefCell<Option<Source<'a>>>,
+    pub(crate) detached_requested: bool,
     pub(crate) limits: Option<EvidenceLimits>,
 }
 impl<'a> ExtendRequest<'a> {
