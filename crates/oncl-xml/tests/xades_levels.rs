@@ -1313,3 +1313,124 @@ fn guarded_bounded_xades_spec_uses_shared_real_evidence_for_b_t_lt() {
         }
     }
 }
+
+#[test]
+fn bounded_spec_preflights_combined_host_and_request_material_without_encoding_copy() {
+    use der::Encode;
+    use oncl_pki::{
+        cms::ades::ValidationMaterial,
+        evidence::{EvidenceError, EvidenceLimits},
+    };
+    use oncl_xml::xades::{XadesLevel, XadesServices, XadesSpec};
+    let pki = Pki::new("user-rsa-sign");
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let now = time::macros::datetime!(2026-11-02 12:00 UTC);
+    let context = ValidationContext {
+        policy: ValidationPolicy::StrictOnline,
+        now,
+        anchors: &pki.anchors,
+        intermediates: &[],
+        http: &pki.http,
+    };
+    let network =
+        NetworkPolicy::only_endpoints(["http://tsa.synthetic.test", "http://ocsp.synthetic.test"])
+            .unwrap();
+    let root = pki.anchors.certs()[0].clone();
+    let size = u64::from(u32::from(root.encoded_len().unwrap()));
+    for count_limit in [true, false] {
+        let cap = ResourceLimits::default();
+        let mut scope = Arc::new(SharedBudget::new(cap.clone()).unwrap())
+            .begin(cap, Arc::new(Control))
+            .unwrap();
+        let certificates = [root.clone()];
+        let services = XadesServices {
+            validation: &context,
+            network: &network,
+            temporary: &store,
+            tsa: Some(&pki.tsa),
+            material: ValidationMaterial {
+                certificates: &certificates,
+                ocsp: &[],
+                crls: &[],
+            },
+            evidence_limits: Some(EvidenceLimits {
+                max_items: if count_limit { 2 } else { 24 },
+                max_bytes: if count_limit { 6291456 } else { size * 2 - 1 },
+                max_item_bytes: size,
+                max_chain_len: 16,
+                max_proofs: 1,
+                max_coverage_parts: 256,
+                max_coverage_bytes: 1 << 40,
+            }),
+            host_clock: None,
+        };
+        let spec = XadesSpec {
+            level: XadesLevel::Lt,
+            tsa: Some(pki.tsa.clone()),
+            chain: vec![root.clone()],
+            signature_method: Some("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"),
+            digest_method: None,
+        };
+        let error = oncl_xml::xades::prepare_spec_source(
+            Source::sequential(&mut Cursor::new(b"<r/>"), None),
+            &spec,
+            now,
+            &services,
+            &mut scope,
+        )
+        .err()
+        .expect("combined material must be admitted before capture");
+        assert!(matches!(
+            error,
+            oncl_xml::XmlSourceError::Evidence(EvidenceError::Limit)
+        ));
+        assert_eq!(scope.progress().bytes_in, 0);
+    }
+    // Compatibility B/T never serialize this request chain, so its otherwise
+    // excessive item size must not become a new preflight rejection.
+    for level in [XadesLevel::B, XadesLevel::T] {
+        let cap = ResourceLimits::default();
+        let mut scope = Arc::new(SharedBudget::new(cap.clone()).unwrap())
+            .begin(cap, Arc::new(Control))
+            .unwrap();
+        let services = XadesServices {
+            validation: &context,
+            network: &network,
+            temporary: &store,
+            tsa: Some(&pki.tsa),
+            material: ValidationMaterial {
+                certificates: &[],
+                ocsp: &[],
+                crls: &[],
+            },
+            evidence_limits: Some(EvidenceLimits {
+                max_items: 24,
+                max_bytes: 6291456,
+                max_item_bytes: size - 1,
+                max_chain_len: 16,
+                max_proofs: 1,
+                max_coverage_parts: 256,
+                max_coverage_bytes: 1 << 40,
+            }),
+            host_clock: None,
+        };
+        let spec = XadesSpec {
+            level,
+            tsa: Some(pki.tsa.clone()),
+            chain: vec![root.clone()],
+            signature_method: Some("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"),
+            digest_method: None,
+        };
+        let prepared = oncl_xml::xades::prepare_spec_source(
+            Source::sequential(&mut Cursor::new(b"<r/>"), None),
+            &spec,
+            now,
+            &services,
+            &mut scope,
+        );
+        assert!(
+            prepared.is_ok(),
+            "ignored B/T chain must preserve compatibility"
+        );
+    }
+}

@@ -415,9 +415,18 @@ pub fn prepare_spec_source<'a>(
         ));
     }
     let profile = crate::XmlSignProfile::default();
-    services.preflight(level, &profile)?;
+    // B/T do not serialize the request's chain. Preserve that compatibility
+    // contract instead of rejecting or copying ignored public material.
+    let selected_chain = if level >= AdesLevel::Lt {
+        spec.chain.as_slice()
+    } else {
+        &[]
+    };
+    // Inspect the actual material union without cloning/encoding it, before
+    // intake or key opening. The later union uses these same certificate slices.
+    services.preflight_with_certificates(level, &profile, selected_chain)?;
     let chain_bytes =
-        spec.chain
+        selected_chain
             .iter()
             .try_fold(0u64, |n, cert| -> Result<u64, crate::XmlSourceError> {
                 let len = u32::from(cert.encoded_len().map_err(|_| {
@@ -430,7 +439,9 @@ pub fn prepare_spec_source<'a>(
         chain_bytes
             .checked_mul(4)
             .and_then(|n| {
-                n.checked_add(spec.chain.len() as u64 * std::mem::size_of::<Certificate>() as u64)
+                n.checked_add(
+                    selected_chain.len() as u64 * std::mem::size_of::<Certificate>() as u64,
+                )
             })
             .ok_or(ProcessingError::MetadataLimit)?,
     )?;
@@ -503,7 +514,7 @@ pub fn prepare_spec_source<'a>(
         context,
         level,
         signing_time: now,
-        chain: spec.chain.clone(),
+        chain: selected_chain.to_vec(),
         _metadata: metadata,
         _chain_metadata: chain_metadata,
     })

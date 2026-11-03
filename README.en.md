@@ -606,6 +606,9 @@ through the original AuthorizedSigner; `SignRequest::xades_legacy` accepts
 bounded XadesSpec options and emits complete B/T/LT through the shared evidence
 kernel, not a raw-key escape. Its TSA must equal explicit host configuration.
 Both prepare selectors/canonical references before opening a key.
+The selected LT request chain and host public material are admitted together by
+encoded size/count before capture or key opening, without cloning/encoding first.
+B/T retain their compatibility semantics and do not serialize the request chain.
 `capture_signed_input` retains an immutable signed-wire SHA-256 and closed
 format-reader role for same-operation approval/replay. Signed intake charges
 actual wire progress irrevocably, separately classifying bounded real signature
@@ -613,6 +616,8 @@ overhead; application Objects, fake metadata, whitespace and PIs remain document
 bytes. Only parser-recognized bounded declaration/BOM and signature-only empty
 parent expansion receive serialization credit, not an original-spelling claim.
 Generic original-input/hash consumers reject classified format readers.
+Signature layout is checked eagerly against framing/work limits; retained
+geometry capacity is admitted before growth, without a document-node cap.
 Dynamic Core time-stamp issuance samples the trusted host clock after the actual
 reply; final XML validation uses one late common instant for all signers. Direct
 fixed-as-of APIs keep their original semantics and monotonic deadlines.

@@ -14,6 +14,160 @@ use oncl_xml::{
     verify_source,
 };
 use std::{io::Cursor, sync::Arc};
+
+struct AllocationWitness;
+thread_local! {
+    static WATCH_ALLOCATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LARGEST_ALLOCATION: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+fn record_allocation(size: usize) {
+    if WATCH_ALLOCATIONS
+        .try_with(|watch| watch.get())
+        .unwrap_or(false)
+    {
+        let _ = LARGEST_ALLOCATION.try_with(|largest| largest.set(largest.get().max(size)));
+    }
+}
+// Forward the real allocator, recording only this test thread's enabled window.
+// No allocation is replaced, suppressed, failed or mocked.
+unsafe impl std::alloc::GlobalAlloc for AllocationWitness {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        record_allocation(layout.size());
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        record_allocation(layout.size());
+        unsafe { std::alloc::System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        record_allocation(size);
+        unsafe { std::alloc::System.realloc(ptr, layout, size) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+#[global_allocator]
+static ALLOCATION_WITNESS: AllocationWitness = AllocationWitness;
+
+#[test]
+fn genuine_signature_layout_fails_before_cardinality_sized_allocation() {
+    let key = key();
+    let unsigned = b"<r><d Id='d'>protected</d><s/></r>";
+    let signed = String::from_utf8(
+        oncl_xml::sign_element(unsigned, "/r/d", Some("/r/s"), &key.key, &key.cert).unwrap(),
+    )
+    .unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    for repetitions in [8, 40_000] {
+        let wire = signed.replace(
+            "</ds:Signature>",
+            &format!(
+                "{}</ds:Signature>",
+                " <!--application comment-->".repeat(repetitions)
+            ),
+        );
+        oncl_xml::verify(wire.as_bytes()).unwrap();
+        let limits = ResourceLimits {
+            input_bytes: wire.len() as u64,
+            metadata_bytes: 20 * 1024 * 1024,
+            memory_bytes: 24 * 1024 * 1024,
+            ..Default::default()
+        };
+        let mut quota = Arc::new(SharedBudget::new(limits.clone()).unwrap())
+            .begin(limits, Arc::new(Control))
+            .unwrap();
+        let profile = XmlVerifyProfile {
+            xml: oncl_xml::XmlLimits {
+                max_depth: 16,
+                ..Default::default()
+            },
+            max_signers: 1,
+            max_metadata_bytes: 4096,
+            max_work: 1 << 20,
+            ..Default::default()
+        };
+        LARGEST_ALLOCATION.with(|value| value.set(0));
+        WATCH_ALLOCATIONS.with(|value| value.set(true));
+        let result = capture_signed_input(
+            Source::sequential(&mut Cursor::new(&wire), None),
+            &profile,
+            &store,
+            &mut quota,
+        );
+        WATCH_ALLOCATIONS.with(|value| value.set(false));
+        let largest = LARGEST_ALLOCATION.with(|value| value.get());
+        if repetitions == 8 {
+            assert!(result.is_ok());
+        } else {
+            assert!(matches!(
+                result,
+                Err(XmlSourceError::Processing(ProcessingError::MetadataLimit))
+            ));
+        }
+        assert!(
+            largest <= oncl_pki::resource::IO_CHUNK_BYTES,
+            "bounded markup/metadata/capture need no cardinality-sized allocation: observed {largest}"
+        );
+        if repetitions == 40_000 {
+            let limits = ResourceLimits {
+                input_bytes: wire.len() as u64,
+                metadata_bytes: 20 * 1024 * 1024,
+                memory_bytes: 24 * 1024 * 1024,
+                ..Default::default()
+            };
+            let mut quota = Arc::new(SharedBudget::new(limits.clone()).unwrap())
+                .begin(limits, Arc::new(Control))
+                .unwrap();
+            let error = capture_signed_input(
+                Source::sequential(&mut Cursor::new(&wire), None),
+                &XmlVerifyProfile {
+                    max_work: 64,
+                    ..profile.clone()
+                },
+                &store,
+                &mut quota,
+            )
+            .err()
+            .expect("geometry work must be admitted");
+            assert!(matches!(
+                error,
+                XmlSourceError::Processing(ProcessingError::InvalidInput(
+                    "signed XML geometry work limit"
+                ))
+            ));
+            let limits = ResourceLimits {
+                input_bytes: wire.len() as u64,
+                metadata_bytes: 20 * 1024 * 1024,
+                memory_bytes: 24 * 1024 * 1024,
+                ..Default::default()
+            };
+            let mut quota = Arc::new(SharedBudget::new(limits.clone()).unwrap())
+                .begin(limits, Arc::new(Control))
+                .unwrap();
+            let roots = anchors();
+            let ctx = context(&roots);
+            LARGEST_ALLOCATION.with(|value| value.set(0));
+            WATCH_ALLOCATIONS.with(|value| value.set(true));
+            let result = verify_source(
+                Source::sequential(&mut Cursor::new(&wire), None),
+                &profile,
+                &store,
+                &ctx,
+                &NetworkPolicy::deny_all(),
+                &mut quota,
+            );
+            WATCH_ALLOCATIONS.with(|value| value.set(false));
+            assert!(matches!(
+                result,
+                Err(XmlSourceError::Processing(ProcessingError::MetadataLimit))
+            ));
+            assert!(
+                LARGEST_ALLOCATION.with(|value| value.get()) <= oncl_pki::resource::IO_CHUNK_BYTES
+            );
+        }
+    }
+}
 struct Control;
 impl OperationControl for Control {
     fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
@@ -689,4 +843,69 @@ fn malformed_output_derived_signed_intake_permanently_poison_its_original_output
         "a failed format capture must poison its originating output"
     );
     assert!(stage.copy_to(&mut Vec::new()).is_err());
+}
+
+#[test]
+fn fragmented_application_object_stays_document_without_a_layout_heap_ledger() {
+    let key = key();
+    let unsigned = b"<r><d Id='d'>protected</d><s/></r>";
+    let signed = String::from_utf8(
+        oncl_xml::sign_element(unsigned, "/r/d", Some("/r/s"), &key.key, &key.cert).unwrap(),
+    )
+    .unwrap();
+    let parsed = roxmltree::Document::parse(&signed).unwrap();
+    let signature_len = parsed
+        .descendants()
+        .find(|n| {
+            n.tag_name().namespace() == Some("http://www.w3.org/2000/09/xmldsig#")
+                && n.tag_name().name() == "Signature"
+        })
+        .unwrap()
+        .range()
+        .len() as u64;
+    let wire = signed.replace(
+        "</ds:Signature>",
+        &format!(
+            "<ds:Object Id='application'>{}</ds:Object></ds:Signature>",
+            " <!--ordinary application comment-->".repeat(40_000)
+        ),
+    );
+    oncl_xml::verify(wire.as_bytes()).unwrap();
+    let store = TemporaryStore::new(&std::env::temp_dir()).unwrap();
+    let limits = ResourceLimits {
+        input_bytes: wire.len() as u64,
+        metadata_bytes: 20 * 1024 * 1024,
+        memory_bytes: 24 * 1024 * 1024,
+        ..Default::default()
+    };
+    let mut quota = Arc::new(SharedBudget::new(limits.clone()).unwrap())
+        .begin(limits, Arc::new(Control))
+        .unwrap();
+    let profile = XmlVerifyProfile {
+        xml: oncl_xml::XmlLimits {
+            max_depth: 16,
+            ..Default::default()
+        },
+        max_signers: 1,
+        max_metadata_bytes: 4096,
+        max_work: 1 << 20,
+        ..Default::default()
+    };
+    LARGEST_ALLOCATION.with(|value| value.set(0));
+    WATCH_ALLOCATIONS.with(|value| value.set(true));
+    let result = capture_signed_input(
+        Source::sequential(&mut Cursor::new(&wire), None),
+        &profile,
+        &store,
+        &mut quota,
+    );
+    WATCH_ALLOCATIONS.with(|value| value.set(false));
+    let captured = result.unwrap();
+    assert_eq!(
+        captured.container_bytes(),
+        signature_len,
+        "application Object is not metadata and prevents empty-parent expansion credit"
+    );
+    assert_eq!(captured.document_bytes(), wire.len() as u64 - signature_len);
+    assert!(LARGEST_ALLOCATION.with(|value| value.get()) <= oncl_pki::resource::IO_CHUNK_BYTES);
 }

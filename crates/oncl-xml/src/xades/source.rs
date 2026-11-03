@@ -772,6 +772,14 @@ impl XadesServices<'_> {
         Ok(limits)
     }
     pub fn preflight(&self, level: AdesLevel, profile: &XmlSignProfile<'_>) -> Result<()> {
+        self.preflight_with_certificates(level, profile, &[])
+    }
+    pub(crate) fn preflight_with_certificates(
+        &self,
+        level: AdesLevel,
+        profile: &XmlSignProfile<'_>,
+        additional_certificates: &[Certificate],
+    ) -> Result<()> {
         let limits = self.bounded_limits(profile)?;
         if level > AdesLevel::B {
             let tsa = self
@@ -787,13 +795,19 @@ impl XadesServices<'_> {
                 .certificates
                 .len()
                 .checked_add(self.material.ocsp.len())
+                .and_then(|n| n.checked_add(additional_certificates.len()))
                 .and_then(|n| n.checked_add(self.material.crls.len()))
                 .ok_or(EvidenceError::Limit)?;
             if count > limits.max_items - minimum {
                 return Err(EvidenceError::Limit.into());
             }
             let mut bytes = 0u64;
-            for cert in self.material.certificates {
+            for cert in self
+                .material
+                .certificates
+                .iter()
+                .chain(additional_certificates)
+            {
                 let len = u32::from(
                     cert.encoded_len()
                         .map_err(|_| invalid("public certificate encoding"))?,

@@ -115,7 +115,7 @@ pub(crate) fn index_signed(
         metadata_shape(&mut document, signature, profile, scope)?;
     }
     let regions = geometry(&mut document, &signatures, profile, scope)?;
-    document.classify_signed(&regions, scope)?;
+    document.classify_signed(&regions.entries, scope)?;
     drop(framing);
     Ok(document)
 }
@@ -219,16 +219,14 @@ struct Frame {
     is_signature: bool,
     wrapper: Wrapper,
     only_signatures: bool,
-    direct_signatures: Vec<Region>,
+    has_direct_signatures: bool,
     only_qualifying: bool,
-    layout: Vec<Region>,
     attributes_allowed: bool,
 }
 struct Parent {
     start: Region,
     closing: Region,
     qname_bytes: usize,
-    signatures: Vec<Region>,
 }
 fn contains(a: Region, b: Region) -> Result<bool> {
     Ok(b.offset >= a.offset && b.end()? <= a.end()?)
@@ -241,29 +239,76 @@ fn known_unsigned(namespace: Option<&str>, name: &str) -> bool {
         ))
         || (namespace == Some(X4) && matches!(name, "ArchiveTimeStamp" | "TimeStampValidationData"))
 }
-fn normalize(mut regions: Vec<Region>) -> Result<Vec<Region>> {
-    regions.sort_unstable_by_key(|r| r.offset);
-    let mut merged: Vec<Region> = Vec::with_capacity(regions.len());
-    for region in regions {
-        if region.len == 0 {
-            continue;
-        }
-        if let Some(previous) = merged.last_mut() {
-            let end = previous.end()?;
-            if region.offset < end {
-                return Err(invalid("overlapping XML metadata geometry"));
-            }
-            if region.offset == end {
-                previous.len = previous
-                    .len
-                    .checked_add(region.len)
-                    .ok_or(ProcessingError::ContainerLimit)?;
-                continue;
-            }
-        }
-        merged.push(region);
+struct GeometryRegions {
+    entries: Vec<Region>,
+    metadata: oncl_pki::resource::ResourceReservation,
+}
+impl GeometryRegions {
+    fn new(scope: &ResourceScope) -> Result<Self> {
+        Ok(Self {
+            entries: Vec::new(),
+            metadata: scope.reserve_metadata(0)?,
+        })
     }
-    Ok(merged)
+    fn push(&mut self, region: Region) -> Result<()> {
+        region.end()?;
+        if region.len == 0 {
+            return Ok(());
+        }
+        if let Some(last) = self.entries.last_mut()
+            && last.end()? == region.offset
+        {
+            last.len = last
+                .len
+                .checked_add(region.len)
+                .ok_or(ProcessingError::ContainerLimit)?;
+            return Ok(());
+        }
+        if self.entries.len() == self.entries.capacity() {
+            let capacity = self
+                .entries
+                .capacity()
+                .max(4)
+                .checked_mul(2)
+                .ok_or(ProcessingError::MetadataLimit)?;
+            let additional = (capacity - self.entries.capacity())
+                .checked_mul(std::mem::size_of::<Region>())
+                .ok_or(ProcessingError::MetadataLimit)?;
+            // Metadata is live RAM. Admit before the actual Vec growth, retaining
+            // its owner through sort/normalization and the classification copy.
+            self.metadata.grow(additional as u64)?;
+            self.entries
+                .try_reserve_exact(capacity - self.entries.len())
+                .map_err(|_| ProcessingError::MemoryLimit)?;
+        }
+        self.entries.push(region);
+        Ok(())
+    }
+    fn normalize(&mut self) -> Result<()> {
+        self.entries.sort_unstable_by_key(|r| r.offset);
+        let mut retained = 0;
+        for index in 0..self.entries.len() {
+            let region = self.entries[index];
+            if retained > 0 {
+                let previous = &mut self.entries[retained - 1];
+                let end = previous.end()?;
+                if region.offset < end {
+                    return Err(invalid("overlapping XML metadata geometry"));
+                }
+                if region.offset == end {
+                    previous.len = previous
+                        .len
+                        .checked_add(region.len)
+                        .ok_or(ProcessingError::ContainerLimit)?;
+                    continue;
+                }
+            }
+            self.entries[retained] = region;
+            retained += 1;
+        }
+        self.entries.truncate(retained);
+        Ok(())
+    }
 }
 fn covers(regions: &[Region], whole: Region) -> Result<bool> {
     let mut at = whole.offset;
@@ -281,7 +326,11 @@ fn covers(regions: &[Region], whole: Region) -> Result<bool> {
     }
     Ok(false)
 }
-fn whitespace(document: &mut XmlDocument, region: Region, scope: &ResourceScope) -> Result<bool> {
+fn whitespace(
+    document: &mut dyn oncl_pki::io::CapturedInput,
+    region: Region,
+    scope: &ResourceScope,
+) -> Result<bool> {
     let mut bytes = [0; 4096];
     let mut at = 0;
     while at < region.len {
@@ -307,7 +356,7 @@ fn whitespace(document: &mut XmlDocument, region: Region, scope: &ResourceScope)
     Ok(true)
 }
 fn add_framing(
-    regions: &mut Vec<Region>,
+    regions: &mut GeometryRegions,
     totals: &mut [u64],
     signature: usize,
     region: Region,
@@ -320,7 +369,7 @@ fn add_framing(
         return Err(ProcessingError::MetadataLimit.into());
     }
     totals[signature] = total;
-    regions.push(region);
+    regions.push(region)?;
     Ok(())
 }
 fn geometry(
@@ -328,29 +377,36 @@ fn geometry(
     signatures: &[Metadata],
     profile: &XmlVerifyProfile,
     scope: &ResourceScope,
-) -> Result<Vec<Region>> {
-    let mut regions = Vec::new();
+) -> Result<GeometryRegions> {
+    let mut regions = GeometryRegions::new(scope)?;
     for signature in signatures {
-        regions.extend([signature.info, signature.value.0]);
+        regions.push(signature.info)?;
+        regions.push(signature.value.0)?;
         if let Some(key) = &signature.key_info {
-            regions.push(key.bound.0)
+            regions.push(key.bound.0)?;
         }
         if let Some(properties) = &signature.signed_properties {
-            regions.push(properties.bound.0)
+            regions.push(properties.bound.0)?;
         }
     }
-    let whole = regions.clone();
     let mut frames: Vec<Frame> = Vec::with_capacity(profile.xml.max_depth);
-    let mut parents = Vec::new();
-    let mut layouts = Vec::new();
-    let mut declarations = Vec::new();
+    // Both arrays are bounded by already admitted depth/signer cardinality,
+    // never by document nodes or text events.
+    let mut parents = Vec::with_capacity(signatures.len());
+    let mut declaration = None;
     let mut totals = vec![0; signatures.len()];
+    let mut work = profile.max_work;
     {
         let mut events = document.events();
         while let Some(event) = events.next_event()? {
             scope.checkpoint()?;
+            work = work.checked_sub(1).ok_or(ProcessingError::InvalidInput(
+                "signed XML geometry work limit",
+            ))?;
             if event.xml_declaration {
-                declarations.push(event.region);
+                if declaration.replace(event.region).is_some() {
+                    return Err(invalid("duplicate serialization declaration"));
+                }
                 continue;
             }
             if event.kind == XmlEventKind::Start {
@@ -360,8 +416,8 @@ fn geometry(
                     .position(|s| s.signature.offset == event.region.offset);
                 let signature = own.or_else(|| frames.last().and_then(|f| f.signature));
                 if let Some(parent) = frames.last_mut() {
-                    if let Some(own) = own {
-                        parent.direct_signatures.push(signatures[own].signature);
+                    if own.is_some() {
+                        parent.has_direct_signatures = true;
                     } else {
                         parent.only_signatures = false;
                     }
@@ -420,7 +476,7 @@ fn geometry(
                         .iter()
                         .find(|m| m.bound.0.offset == event.region.offset)
                 {
-                    regions.push(property.bound.0);
+                    regions.push(property.bound.0)?;
                 }
                 let attributes_allowed = event.attributes.iter().all(|a| {
                     a.name.namespace() == Some("http://www.w3.org/XML/1998/namespace")
@@ -444,12 +500,12 @@ fn geometry(
                     is_signature: own.is_some(),
                     wrapper,
                     only_signatures: true,
-                    direct_signatures: Vec::new(),
+                    has_direct_signatures: false,
                     only_qualifying: true,
-                    layout: Vec::new(),
                     attributes_allowed,
                 });
             } else if event.kind == XmlEventKind::End {
+                let closing_tag = event.closing_tag;
                 let frame = frames.pop().ok_or_else(|| invalid("XML frame"))?;
                 let mut wrapper = frame.wrapper;
                 if wrapper == Wrapper::Object
@@ -467,10 +523,20 @@ fn geometry(
                         ));
                     }
                     let index = frame.signature.ok_or_else(|| invalid("wrapper signer"))?;
-                    if !whole
-                        .iter()
-                        .any(|r| contains(*r, frame.start).unwrap_or(false))
-                    {
+                    if !signatures.iter().any(|signature| {
+                        [
+                            Some(signature.info),
+                            Some(signature.value.0),
+                            signature.key_info.as_ref().map(|key| key.bound.0),
+                            signature
+                                .signed_properties
+                                .as_ref()
+                                .map(|properties| properties.bound.0),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .any(|region| contains(region, frame.start).unwrap_or(false))
+                    }) {
                         add_framing(
                             &mut regions,
                             &mut totals,
@@ -478,7 +544,7 @@ fn geometry(
                             frame.start,
                             profile.max_metadata_bytes,
                         )?;
-                        if let Some(closing) = event.closing_tag {
+                        if let Some(closing) = closing_tag {
                             add_framing(
                                 &mut regions,
                                 &mut totals,
@@ -488,88 +554,178 @@ fn geometry(
                             )?;
                         }
                     }
-                    if wrapper != Wrapper::Object || frame.only_qualifying {
-                        for layout in frame.layout {
-                            layouts.push((index, layout, wrapper == Wrapper::Object));
+                    if wrapper == Wrapper::Object
+                        && frame.only_qualifying
+                        && let Some(qualifying) = signatures[index].qualifying
+                        && let Some(closing) = closing_tag
+                    {
+                        // With no other direct child/comment/PI/CDATA, layout
+                        // can only be the two contiguous spans around the known
+                        // qualifying subtree. Application text is never free.
+                        for region in [
+                            Region {
+                                offset: frame.start.end()?,
+                                len: qualifying.offset - frame.start.end()?,
+                            },
+                            Region {
+                                offset: qualifying.end()?,
+                                len: closing.offset - qualifying.end()?,
+                            },
+                        ] {
+                            if region.len <= profile.max_metadata_bytes as u64
+                                && whitespace(events.reader.file, region, scope)?
+                            {
+                                add_framing(
+                                    &mut regions,
+                                    &mut totals,
+                                    index,
+                                    region,
+                                    profile.max_metadata_bytes,
+                                )?;
+                            }
                         }
                     }
                 }
                 if frame.only_signatures
-                    && !frame.direct_signatures.is_empty()
-                    && let Some(closing) = event.closing_tag
+                    && frame.has_direct_signatures
+                    && let Some(closing) = closing_tag
                 {
                     parents.push(Parent {
                         start: frame.start,
                         closing,
                         qname_bytes: frame.qname_bytes,
-                        signatures: frame.direct_signatures,
                     });
                 }
             } else if let Some(frame) = frames.last_mut() {
                 frame.only_signatures = false;
-                if event.kind == XmlEventKind::Text && frame.wrapper != Wrapper::None {
-                    frame.layout.push(event.region);
-                } else if frame.wrapper == Wrapper::Object {
+                let kind = event.kind;
+                let region = event.region;
+                if kind == XmlEventKind::Text
+                    && !matches!(frame.wrapper, Wrapper::None | Wrapper::Object)
+                {
+                    let index = frame.signature.ok_or_else(|| invalid("wrapper signer"))?;
+                    // Bound bytes BEFORE retaining any per-event extent. Read
+                    // whitespace now, not after an input-sized layout collection.
+                    if region.len > profile.max_metadata_bytes as u64
+                        || totals[index]
+                            .checked_add(region.len)
+                            .is_none_or(|n| n > profile.max_metadata_bytes as u64)
+                    {
+                        return Err(ProcessingError::MetadataLimit.into());
+                    }
+                    if !whitespace(events.reader.file, region, scope)? {
+                        return Err(XmlSourceError::Unsupported(
+                            "non-layout text in signature metadata wrapper",
+                        ));
+                    }
+                    add_framing(
+                        &mut regions,
+                        &mut totals,
+                        index,
+                        region,
+                        profile.max_metadata_bytes,
+                    )?;
+                } else if kind != XmlEventKind::Text && frame.wrapper == Wrapper::Object {
                     frame.only_qualifying = false;
                 }
             }
         }
     }
-    for (index, region, object) in layouts {
-        if region.len > profile.max_metadata_bytes as u64 {
-            if object {
-                continue;
-            } else {
-                return Err(ProcessingError::MetadataLimit.into());
-            }
-        }
-        if whitespace(document, region, scope)? {
-            add_framing(
-                &mut regions,
-                &mut totals,
-                index,
-                region,
-                profile.max_metadata_bytes,
-            )?;
-        } else if !object {
-            return Err(XmlSourceError::Unsupported(
-                "non-layout text in signature metadata wrapper",
-            ));
-        }
-    }
-    let mut regions = normalize(regions)?;
+    regions.normalize()?;
     for parent in parents {
         if parent.closing.len != parent.qname_bytes as u64 + 3 {
             continue;
         }
         let mut at = parent.start.end()?;
         let mut valid = true;
-        for signature in parent.signatures {
-            if signature.offset != at || !covers(&regions, signature)? {
+        for signature in signatures.iter().filter(|signature| {
+            signature.signature.offset >= parent.start.end().unwrap_or(u64::MAX)
+                && signature
+                    .signature
+                    .end()
+                    .is_ok_and(|end| end <= parent.closing.offset)
+        }) {
+            if signature.signature.offset != at || !covers(&regions.entries, signature.signature)? {
                 valid = false;
                 break;
             }
-            at = signature.end()?;
+            at = signature.signature.end()?;
         }
         if valid && at == parent.closing.offset {
             regions.push(Region {
                 offset: parent.closing.offset,
                 len: parent.closing.len - 1,
-            });
+            })?;
         }
     }
     if !signatures.is_empty() {
         if let Some(bom) = document.bom_region() {
-            regions.push(bom)
+            regions.push(bom)?;
         }
-        if declarations.len() > 1 {
-            return Err(invalid("duplicate serialization declaration"));
+        if let Some(declaration) = declaration
+            && declaration.len <= SERIALIZATION_PROLOG_CAP
+        {
+            regions.push(declaration)?;
         }
-        for declaration in declarations {
-            if declaration.len <= SERIALIZATION_PROLOG_CAP {
-                regions.push(declaration)
+    }
+    regions.normalize()?;
+    Ok(regions)
+}
+
+#[cfg(test)]
+mod geometry_admission_tests {
+    use super::*;
+    use oncl_pki::resource::{OperationControl, Progress, ResourceLimits, SharedBudget};
+    use std::sync::Arc;
+    struct Control;
+    impl OperationControl for Control {
+        fn checkpoint(&self, _: Progress) -> std::result::Result<(), ProcessingError> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn region_capacity_is_admitted_exactly_before_any_growth() {
+        let bytes = 8 * std::mem::size_of::<Region>() as u64;
+        for short in [false, true] {
+            let limits = ResourceLimits {
+                metadata_bytes: bytes,
+                memory_bytes: bytes - u64::from(short),
+                ..Default::default()
+            };
+            let scope = Arc::new(SharedBudget::new(limits.clone()).unwrap())
+                .begin(limits, Arc::new(Control))
+                .unwrap();
+            let mut regions = GeometryRegions::new(&scope).unwrap();
+            let first = regions.push(Region { offset: 0, len: 1 });
+            if short {
+                assert!(matches!(
+                    first,
+                    Err(XmlSourceError::Processing(
+                        ProcessingError::MetadataLimit | ProcessingError::MemoryLimit
+                    ))
+                ));
+                assert_eq!(
+                    regions.entries.capacity(),
+                    0,
+                    "no allocation precedes admission"
+                );
+            } else {
+                first.unwrap();
+                for offset in [2, 4, 6, 8, 10, 12, 14] {
+                    regions.push(Region { offset, len: 1 }).unwrap();
+                }
+                assert_eq!(regions.metadata.bytes(), bytes);
+                assert_eq!(regions.entries.capacity(), 8);
+                assert!(matches!(
+                    regions.push(Region { offset: 16, len: 1 }),
+                    Err(XmlSourceError::Processing(
+                        ProcessingError::MetadataLimit | ProcessingError::MemoryLimit
+                    ))
+                ));
+                assert_eq!(regions.entries.len(), 8);
+                assert_eq!(regions.entries.capacity(), 8);
+                assert_eq!(regions.metadata.bytes(), bytes);
             }
         }
     }
-    normalize(regions)
 }

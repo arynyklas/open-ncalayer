@@ -693,6 +693,9 @@ Core `SignRequest::xml_legacy` сохраняет bounded wire-контракт 
 и создаёт полный B/T/LT общим evidence kernel, не раскрывая raw key; TSA должен
 совпадать с явной host-конфигурацией. Селекторы и канонические References
 подготавливаются до открытия ключа.
+Выбранные LT request chain и публичный host material совместно проверяются по
+encoded размеру/числу до capture и ключа, без предварительного копирования/DER.
+B/T сохраняют совместимость и не сериализуют request chain.
 `capture_signed_input` сохраняет SHA-256 неизменяемого signed wire и закрытую
 роль format-reader для approval/replay в той же операции. Signed intake
 необратимо считает фактический wire progress, отдельно классифицируя ограниченный
@@ -701,6 +704,8 @@ Core `SignRequest::xml_legacy` сохраняет bounded wire-контракт 
 bounded declaration/BOM и раскрытие пустого parent, содержащего лишь подписи;
 это не утверждение о первоначальном написании документа. Обычные original-input
 и hash consumers отклоняют classified format readers.
+Signature layout проверяется сразу по framing/work-лимитам; ёмкость сохраняемой
+геометрии резервируется до роста, без лимита на число узлов документа.
 Динамический Core берёт trusted host clock после фактического TSA-ответа;
 финальная XML-проверка использует один поздний момент для всех signers.
 Прямые fixed-as-of API сохраняют прежнюю семантику и монотонные deadlines.
