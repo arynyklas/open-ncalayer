@@ -229,7 +229,8 @@ fn real_process_hash_auth_and_unknown_length() {
     socket.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 413"));
     assert!(response.contains("\"code\":\"InputLimit\""));
-    // Malformed and truncated declared lengths are not successful hashes.
+    // These are malformed framing and known-oversize header preflight controls,
+    // not evidence of an admitted truncation (covered separately below).
     for length in ["not-a-length", "4"] {
         let mut socket = std::net::TcpStream::connect(process.address).unwrap();
         socket
@@ -239,7 +240,15 @@ fn real_process_hash_auth_and_unknown_length() {
         socket.shutdown(std::net::Shutdown::Write).unwrap();
         let mut response = String::new();
         socket.read_to_string(&mut response).unwrap();
-        assert!(!response.starts_with("HTTP/1.1 200"));
+        if length == "4" {
+            assert!(response.starts_with("HTTP/1.1 413"));
+            let error: oncl_api::error::ApiError =
+                serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(error.code, oncl_api::error::ErrorCode::InputLimit);
+            assert_eq!(error.applied, oncl_api::error::AppliedState::NotApplied);
+        } else {
+            assert!(response.starts_with("HTTP/1.1 400"));
+        }
     }
     eprintln!(
         "standalone: authenticated abc SHA256/3 correct, bad token refused, unknown N+1 refused, malformed length no success"
@@ -662,4 +671,285 @@ fn foreign_policy_principal_cannot_mint_authority() {
             .authorize(&foreign, Action::Hash, None, None)
             .is_err()
     );
+}
+
+fn raw_request(
+    process: &server_support::Process,
+    method: &str,
+    target: &str,
+    host: &str,
+    headers: &str,
+    body: Option<&[u8]>,
+) -> String {
+    use std::io::{Read, Write};
+    let mut socket = std::net::TcpStream::connect(process.address).unwrap();
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .unwrap();
+    write!(socket,"{method} {target} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {}\r\nContent-Length: 3\r\n{headers}\r\n",*process.token).unwrap();
+    if let Some(body) = body {
+        socket.write_all(body).unwrap();
+    }
+    let mut response = String::new();
+    socket.read_to_string(&mut response).unwrap();
+    response
+}
+
+#[test]
+fn origin_form_boundary_refuses_absolute_authorities_before_admission_or_body() {
+    let process = server_support::Process::start("max_in_flight = 1");
+    let host = process.address.to_string();
+    for target in [
+        format!("http://{host}/v1/hash"),
+        "http://foreign.invalid/v1/hash".into(),
+        format!(
+            "http://127.0.0.1:{}/v1/hash",
+            process.address.port().wrapping_add(1)
+        ),
+    ] {
+        let response = raw_request(&process, "POST", &target, &host, "", Some(b"abc"));
+        assert!(
+            response.starts_with("HTTP/1.1 400"),
+            "absolute target was accepted"
+        );
+        let response = raw_request(&process, "POST", &target, &host, "", None);
+        assert!(
+            response.starts_with("HTTP/1.1 400"),
+            "invalid target waited for body"
+        );
+    }
+    for target in ["/v1/hash", "/v1/hash/", "//v1/hash", "/v1/%68ash"] {
+        let response = raw_request(&process, "POST", target, "foreign.invalid", "", None);
+        assert!(!response.starts_with("HTTP/1.1 200"));
+    }
+    let response = raw_request(
+        &process,
+        "POST",
+        "/v1/hash",
+        &host,
+        "X-Http-Method-Override: GET\r\n",
+        None,
+    );
+    assert!(response.starts_with("HTTP/1.1 400"));
+    server_support::runtime().block_on(async {
+        let (status, bytes) = server_support::request(
+            process.address,
+            &process.token,
+            "/v1/hash",
+            b"abc",
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        let report: oncl_api::dto::HashResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            report.operation_id, 1,
+            "rejected targets admitted an operation"
+        );
+        assert_eq!(report.bytes_in, 3);
+        assert_eq!(
+            server_support::request(process.address, &process.token, "/health", b"", &[], None)
+                .await
+                .0,
+            200
+        );
+    });
+    process.stop();
+}
+
+#[test]
+fn exact_health_method_does_not_inherit_head_alias() {
+    let process = server_support::Process::start("");
+    let response = raw_request(
+        &process,
+        "HEAD",
+        "/health",
+        &process.address.to_string(),
+        "",
+        None,
+    );
+    assert!(response.starts_with("HTTP/1.1 405"));
+    assert!(response.to_ascii_lowercase().contains("\r\nallow: get\r\n"));
+    process.stop();
+}
+
+#[test]
+fn application_method_and_path_rejections_have_typed_envelopes() {
+    let process = server_support::Process::start("");
+    for (method, path, status) in [
+        ("GET", "/v1/hash", 405),
+        ("POST", "/health", 405),
+        ("POST", "/v1/hash/", 404),
+        ("POST", "/v1/%68ash", 404),
+        ("POST", "//v1/hash", 404),
+        ("POST", "/missing", 404),
+    ] {
+        let response = raw_request(
+            &process,
+            method,
+            path,
+            &process.address.to_string(),
+            "",
+            None,
+        );
+        assert!(response.starts_with(&format!("HTTP/1.1 {status}")));
+        if status == 405 {
+            let allowed = if path == "/health" { "get" } else { "post" };
+            assert!(
+                response
+                    .to_ascii_lowercase()
+                    .contains(&format!("\r\nallow: {allowed}\r\n"))
+            );
+        }
+        let (_, body) = response.split_once("\r\n\r\n").unwrap();
+        let error: oncl_api::error::ApiError = serde_json::from_str(body).unwrap();
+        assert_eq!(error.code, oncl_api::error::ErrorCode::InvalidRequest);
+        assert_eq!(error.applied, oncl_api::error::AppliedState::NotApplied);
+    }
+    process.stop();
+}
+
+#[test]
+fn actual_dual_stack_proxy_peers_normalize_only_ipv4_mapped_addresses() {
+    server_support::runtime().block_on(async {
+        for (configured, connect, expected) in [
+            ("127.0.0.1", "127.0.0.1", 200),
+            ("::ffff:127.0.0.1", "127.0.0.1", 200),
+            ("::1", "::1", 200),
+            ("::1", "127.0.0.1", 403),
+            ("127.0.0.2", "127.0.0.1", 403),
+            ("::127.0.0.1", "127.0.0.1", 403),
+        ] {
+            let socket = socket2::Socket::new(
+                socket2::Domain::IPV6,
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            )
+            .unwrap();
+            socket.set_only_v6(false).unwrap();
+            socket
+                .bind(&"[::]:0".parse::<std::net::SocketAddr>().unwrap().into())
+                .unwrap();
+            socket.listen(8).unwrap();
+            socket.set_nonblocking(true).unwrap();
+            let listener =
+                tokio::net::TcpListener::from_std(std::net::TcpListener::from(socket)).unwrap();
+            let local = listener.local_addr().unwrap();
+            let address = std::net::SocketAddr::new(connect.parse().unwrap(), local.port());
+            let directory = server_support::sandbox();
+            let token = TokenSecret::generate().unwrap();
+            let mut config = ServerConfig::default();
+            config.bind = local;
+            config.hosts = vec!["service.test".into()];
+            config.audit_directory = directory.path().join("audit");
+            config.exposure = oncl_server::config::Exposure::TrustedProxy {
+                peers: vec![configured.parse().unwrap()],
+            };
+            config.tokens = vec![oncl_server::config::TokenConfig {
+                id: "actor".into(),
+                verifier: token.verifier().encoded(),
+                actions: vec![oncl_server::config::Permission::Hash],
+                keys: Vec::new(),
+                inline_pkcs12: false,
+            }];
+            let host = oncl_server::service::ServiceHost::new(config).unwrap();
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(oncl_server::service::serve(listener, host, None, async {
+                let _ = stopped.await;
+            }));
+            let (status, _) = server_support::request(
+                address,
+                &token.bearer(),
+                "/v1/hash",
+                b"abc",
+                &[
+                    ("host", "service.test"),
+                    ("forwarded", "for=\"[::1]\";by=\"[::1]\""),
+                    ("x-forwarded-for", configured),
+                ],
+                None,
+            )
+            .await;
+            stop.send(()).unwrap();
+            server.await.unwrap().unwrap();
+            assert_eq!(
+                status, expected,
+                "actual dual-stack peer versus configured {configured}"
+            );
+        }
+    });
+    let mut config = ServerConfig::default();
+    config.exposure = oncl_server::config::Exposure::TrustedProxy {
+        peers: vec!["::ffff:0.0.0.0".parse().unwrap()],
+    };
+    assert!(
+        config.validate().is_err(),
+        "mapped unspecified peer is not an allowlist entry"
+    );
+}
+
+#[test]
+fn admitted_truncated_declared_body_is_typed_and_releases_actual_worker() {
+    use std::io::{Read, Write};
+    let process =
+        server_support::Process::start("max_in_flight = 1\nblocking_workers = 1\ninput_bytes = 4");
+    let mut socket = std::net::TcpStream::connect(process.address).unwrap();
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    write!(socket,"POST /v1/hash HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n",process.address,*process.token).unwrap();
+    let mut interim = Vec::new();
+    while !interim.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        socket.read_exact(&mut byte).unwrap();
+        interim.push(byte[0]);
+        assert!(interim.len() < 4096);
+    }
+    assert!(
+        interim.starts_with(b"HTTP/1.1 100"),
+        "100 Continue proves the admitted worker actually polled Incoming"
+    );
+    socket.write_all(b"abc").unwrap();
+    server_support::runtime().block_on(async {
+        let (status, body) = server_support::request(
+            process.address,
+            &process.token,
+            "/v1/hash",
+            b"abc",
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(status, 503);
+        let error: oncl_api::error::ApiError = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, oncl_api::error::ErrorCode::CapacityExceeded);
+    });
+    socket.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "admitted truncation must produce InvalidRequest, not a header preflight rejection"
+    );
+    let error: oncl_api::error::ApiError =
+        serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(error.code, oncl_api::error::ErrorCode::InvalidRequest);
+    assert_eq!(error.applied, oncl_api::error::AppliedState::NotApplied);
+    server_support::runtime().block_on(async {
+        let (status, body) = server_support::request(
+            process.address,
+            &process.token,
+            "/v1/hash",
+            b"abc",
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        let report: oncl_api::dto::HashResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report.operation_id, 2);
+        assert_eq!(report.bytes_in, 3);
+    });
+    process.stop();
 }

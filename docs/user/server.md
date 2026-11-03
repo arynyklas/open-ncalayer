@@ -93,6 +93,13 @@ No document-sized body collection or spool is used for hashing. Malformed or
 truncated framing never yields a successful hash. Query parameters, key selectors,
 method-override headers, mismatched `X-Oncl-Operation` and request trailers are
 rejected; the route never dispatches another operation named by a payload.
+Request targets must be exact origin-form paths, without a URI scheme or
+authority. Absolute-form URLs are rejected even when their authority matches the
+Host header. Methods are exact: POST for hash and GET for health; HEAD is not a
+GET alias. Application path/method rejections retain HTTP 404/405 and use the
+`InvalidRequest`/`NotApplied` envelope. HTTP syntax that Hyper cannot parse may
+be rejected at the transport layer without an application JSON envelope.
+
 
 Errors contain a stable `code` and `applied`. This hash endpoint always reports
 `NotApplied` (no private key is used): bad authorization is HTTP 403, malformed
@@ -129,6 +136,11 @@ Only an allowlisted **actual socket peer IP** can use that backend listener.
 proxy trust or replace the individual API token. Protect the proxy-to-service
 network with host/network policy; trusted-proxy mode is not TLS on that hop. A
 nonallowlisted peer is refused even if it supplies a forged forwarding chain.
+Configured and actual IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) normalize to
+the same IPv4 peer. Native and IPv4-compatible IPv6 remain distinct; normalization
+does not widen a loopback bind or trust a nearby address. Unspecified peers,
+including mapped unspecified IPv4, cannot be allowlist entries.
+
 
 ## Named operator keys and audit
 
@@ -194,6 +206,15 @@ Disconnect/cancel stops waiting and cooperative intake, but a native call's slot
 and resources remain owned until that actual call returns. Response bytes retain
 the original context/reservation until their network ownership ends. The whole
 operation has one finite deadline, not a new timeout at each stage.
+The same original early deadline/control and disconnect owner continue through
+the real response body and transport. Deferred first polling refuses expired
+success bytes; an original-deadline timer aborts pending transport output, and
+actual write/flush checkpoints also refuse expired bytes already buffered by
+Hyper. Accept/header bounds may shorten, never extend, the operation deadline.
+After headers have been sent, expiry is a transport abort, not a promised new
+JSON error/status. Timers do not make retained Bytes clones/slices or a running
+native operation free: their actual final owners must still release them.
+
 
 There are also finite pre-auth connection/header/TLS-handshake limits. HTTP/1
 header count is capped at 64 and a connection's parser buffer at 32 KiB. These

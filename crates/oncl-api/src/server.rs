@@ -5,9 +5,10 @@ use axum::{
     Router,
     body::Body,
     extract::{ConnectInfo, State},
-    http::{HeaderMap, Request},
-    response::Response,
-    routing::{get, post},
+    http::{HeaderMap, Method, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{MethodFilter, on, post},
 };
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 
@@ -24,8 +25,46 @@ pub trait HashHost: Send + Sync + 'static {
 pub fn router(host: Arc<dyn HashHost>) -> Router {
     Router::new()
         .route("/v1/hash", post(hash))
-        .route("/health", get(health))
+        .route("/health", on(MethodFilter::GET, health))
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(middleware::from_fn(target_boundary))
         .with_state(host)
+}
+fn rejected(status: StatusCode) -> Response {
+    let mut response = ApiError::not_applied(ErrorCode::InvalidRequest).into_response();
+    *response.status_mut() = status;
+    response
+}
+async fn not_found() -> Response {
+    rejected(StatusCode::NOT_FOUND)
+}
+async fn method_not_allowed() -> Response {
+    rejected(StatusCode::METHOD_NOT_ALLOWED)
+}
+async fn target_boundary(request: Request<Body>, next: Next) -> Response {
+    if request.uri().scheme().is_some()
+        || request.uri().authority().is_some()
+        || !request.uri().path().starts_with('/')
+    {
+        return rejected(StatusCode::BAD_REQUEST);
+    }
+    let expected = match request.uri().path() {
+        "/v1/hash" => Some((Method::POST, "POST")),
+        "/health" => Some((Method::GET, "GET")),
+        _ => None,
+    };
+    if let Some((method, allowed)) = expected
+        && request.method() != method
+    {
+        let mut response = rejected(StatusCode::METHOD_NOT_ALLOWED);
+        response.headers_mut().insert(
+            axum::http::header::ALLOW,
+            axum::http::HeaderValue::from_static(allowed),
+        );
+        return response;
+    }
+    next.run(request).await
 }
 fn metadata(
     peer: SocketAddr,
