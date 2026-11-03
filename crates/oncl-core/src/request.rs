@@ -32,6 +32,8 @@ impl VerifyRequest {
 pub enum SignProfile {
     Cms,
     Raw,
+    #[cfg(feature = "pdf")]
+    Pdf,
 }
 /// A one-shot request: detached Add sources and secrets are borrowed, not
 /// cloned, serialized or included in Debug output.
@@ -46,8 +48,18 @@ pub(crate) enum SignMode<'a> {
         Vec<crate::keys::KeyRequest<'a>>,
         Option<oncl_pki::io::Source<'a>>,
     ),
+    #[cfg(feature = "pdf")]
+    Pdf(crate::keys::KeyRequest<'a>, oncl_pdf::PdfSignProfile),
 }
 impl<'a> SignRequest<'a> {
+    /// Incrementally sign an existing PDF, validating every existing signature
+    /// before Add. One explicit key application per invocation; Action::Sign.
+    #[cfg(feature = "pdf")]
+    pub fn pdf(key: crate::keys::KeyRequest<'a>, profile: oncl_pdf::PdfSignProfile) -> Self {
+        Self {
+            mode: SignMode::Pdf(key, profile),
+        }
+    }
     pub fn raw_message(key: crate::keys::KeyRequest<'a>) -> Self {
         Self {
             mode: SignMode::RawMessage(key),
@@ -78,6 +90,8 @@ impl<'a> SignRequest<'a> {
         match self.mode {
             SignMode::RawMessage(_) | SignMode::RawDigest(..) => SignProfile::Raw,
             SignMode::CmsCreate(..) | SignMode::CmsAdd(..) => SignProfile::Cms,
+            #[cfg(feature = "pdf")]
+            SignMode::Pdf(..) => SignProfile::Pdf,
         }
     }
 }

@@ -123,7 +123,7 @@ pub(super) struct Reader<'a, 's> {
 }
 impl<'a, 's> Reader<'a, 's> {
     pub fn new(source: Source<'a>, scope: &'s mut ResourceScope) -> Result<Self, StreamError> {
-        let replay = source.is_snapshot_for(scope)?;
+        let replay = source.is_snapshot_for(scope)? || source.is_output_projection_for(scope)?;
         Self::new_mode(source, scope, replay)
     }
     pub(super) fn new_replay(

@@ -660,3 +660,49 @@ fn original_bound_region_read_checks_control_even_for_empty_output() {
     ));
     assert_eq!(scope.progress().bytes_in, 3);
 }
+
+#[test]
+fn shared_view_keeps_frozen_identity_but_foreign_same_budget_does_not() {
+    let limits = ResourceLimits {
+        max_in_flight: 2,
+        ..ResourceLimits::default()
+    };
+    let budget = Arc::new(SharedBudget::new(limits.clone()).unwrap());
+    let mut original = budget.begin(limits.clone(), Arc::new(Control)).unwrap();
+    let view = original.shared_view();
+    let foreign = budget.begin(limits, Arc::new(Control)).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let store = TemporaryStore::new(temp.path()).unwrap();
+    let mut frozen = FrozenInput::capture(
+        Source::sequential(&mut Cursor::new(b"abc"), None),
+        &store,
+        &mut original,
+    )
+    .unwrap();
+    let mut reader = frozen
+        .reader(&[Region { offset: 0, len: 3 }], &view)
+        .unwrap();
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).unwrap();
+    reader.finish().unwrap();
+    drop(reader);
+    assert_eq!(bytes, b"abc");
+    assert!(
+        frozen
+            .reader(&[Region { offset: 0, len: 3 }], &foreign)
+            .is_err()
+    );
+    let mut stage = store.stage(&mut original).unwrap();
+    assert!(oncl_pki::io::PdfSignatureOutput::check_output(&stage, &foreign).is_err());
+    assert!(oncl_pki::io::PdfSignatureOutput::check_output(&stage, &view).is_ok());
+    {
+        let mut output = oncl_pki::io::PdfSignatureOutput::new(&mut stage, &view).unwrap();
+        output.append(b"registered output").unwrap();
+        output.reserve_contents(1024).unwrap();
+        // A caller ignoring a framing failure cannot later publish success.
+        assert!(output.reserve_contents(1024).is_err());
+        assert!(output.append(b"ignored failure").is_err());
+    }
+    assert!(stage.copy_to(&mut Vec::new()).is_err());
+    assert_eq!(original.progress().bytes_in, 3);
+}

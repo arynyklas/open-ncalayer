@@ -54,6 +54,12 @@ impl<'a> CmsSignServices<'a> {
             temporary,
         }
     }
+    pub fn validation(&self) -> Option<&crate::validation::ValidationContext<'_>> {
+        self.validation
+    }
+    pub fn temporary(&self) -> Option<&TemporaryStore> {
+        self.temporary
+    }
 }
 
 /// Owned completion facts retain their exact original resource admission.
@@ -88,12 +94,17 @@ fn applied(error: StreamError, state: AppliedState) -> StreamError {
 enum Output<'a> {
     Writer(&'a mut dyn Write),
     Staged(&'a mut StagedArtifact),
+    Internal(&'a mut dyn Write),
 }
 impl Output<'_> {
     fn write(&mut self, mut bytes: &[u8], scope: &ResourceScope) -> Result<(), StreamError> {
         match self {
             Self::Staged(stage) => {
                 stage.write_chunk(bytes)?;
+            }
+            Self::Internal(writer) => {
+                scope.checkpoint()?;
+                writer.write_all(bytes).map_err(ProcessingError::from)?;
             }
             Self::Writer(writer) => {
                 scope.account_output(bytes.len() as u64)?;
@@ -660,6 +671,25 @@ fn sign_impl(
         result_memory,
         result_metadata,
     ))
+}
+
+/// Internal, closed output-role replay: only PDF assembly can mint its source.
+pub(crate) fn sign_pdf_contents(
+    input: Source<'_>,
+    signer: &mut dyn DigestSigner,
+    services: &CmsSignServices<'_>,
+    output: &mut dyn Write,
+    scope: &ResourceScope,
+) -> Result<SignSummary, StreamError> {
+    sign_impl(
+        &CmsSignRequest::create(false),
+        input,
+        None,
+        &mut [signer],
+        services,
+        &mut Output::Internal(output),
+        scope,
+    )
 }
 /// Raw document signing hashes the source once and applies the prehash backend.
 pub fn sign_raw(

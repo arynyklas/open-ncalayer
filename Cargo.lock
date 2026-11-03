@@ -4019,6 +4019,7 @@ name = "oncl-core"
 version = "0.1.0-alpha.6"
 dependencies = [
  "der 0.8.2",
+ "lopdf",
  "oncl-pdf",
  "oncl-pki",
  "oncl-testkit",
@@ -4105,6 +4106,7 @@ dependencies = [
  "flate2",
  "lopdf",
  "oncl-pki",
+ "oncl-testkit",
  "tempfile",
  "thiserror 2.0.21",
  "time",
