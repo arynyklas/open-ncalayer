@@ -42,8 +42,11 @@ export component KeyDialog inherits Window {
     callback sign();
     callback cancel();
 
-    // Whether OK may be pressed: the selected key is enabled.
-    out property <bool> can-sign: root.selected >= 0 && root.keys[root.selected].enabled;
+    // The dialog has been shown for a quiet moment: a burst of clicks on its opening cannot
+    // reach the button.
+    in property <bool> armed;
+    // Whether the button may be pressed: the selected key is enabled and the dialog is armed.
+    out property <bool> can-sign: root.armed && root.selected >= 0 && root.keys[root.selected].enabled;
 
     VerticalBox {
         Text {
@@ -86,11 +89,9 @@ export component KeyDialog inherits Window {
                     clicked => {
                         root.selected = i;
                     }
+                    // A double-click selects, like a click: only the button agrees.
                     double-clicked => {
                         root.selected = i;
-                        if (root.can-sign) {
-                            root.sign();
-                        }
                     }
                 }
 

@@ -184,7 +184,7 @@ pub(super) fn render(open: &Rc<Workspace>) {
             None => String::new(),
             Some(Unsuitable::Expired) => format!(" — {}", t.expired),
             Some(Unsuitable::NotYetValid) => format!(" — {}", t.not_yet),
-            Some(Unsuitable::NotForSigning) => format!(" — {}", t.not_for_signing),
+            Some(_) => format!(" — {}", t.not_for_signing),
         };
         format!("{star}{} ({}){why}", cand.subject, cand.alias)
     })));
@@ -414,7 +414,7 @@ fn cert_chosen(open: &Rc<Workspace>, i: i32) {
         let text = match r {
             Refusal::UnsuitableCertificate(Unsuitable::Expired) => t.expired_refusal,
             Refusal::UnsuitableCertificate(Unsuitable::NotYetValid) => t.not_yet_refusal,
-            Refusal::UnsuitableCertificate(Unsuitable::NotForSigning) => t.not_for_signing_refusal,
+            Refusal::UnsuitableCertificate(_) => t.not_for_signing_refusal,
             _ => return,
         };
         return error(open, text);

@@ -314,3 +314,60 @@ fn back_disarms_the_confirmation() {
     c.dispatch(Event::CertificateChosen(1));
     assert!(!c.armed() && !c.frozen_ready());
 }
+
+/// A site's request goes through the same contract: the origin the host verified, what the page
+/// asked for and the key chosen are bound; nothing is applied without the armed button; the
+/// origin survives an unsuitable key, going back and trying again; the next request starts over.
+#[test]
+fn a_site_request_origin_survives_back_and_error_and_binds_the_consent() {
+    let origin = "https://idp.egov.kz";
+    for action in [
+        ActionKind::Sign,
+        ActionKind::Authenticate,
+        ActionKind::KeyInfo,
+    ] {
+        let keys = vec![
+            candidate("old", 5, Some(Unsuitable::Expired)),
+            candidate("checking", 6, Some(Unsuitable::Pending)),
+            candidate("good", 7, None),
+        ];
+        let mut c = Controller::for_request(origin, action, keys.clone());
+        assert_eq!(c.step(), Step::Unlock);
+        for bad in [0, 1] {
+            assert!(matches!(
+                c.dispatch(Event::CertificateChosen(bad)),
+                Effect::Refused(Refusal::UnsuitableCertificate(_))
+            ));
+            assert_eq!((c.caller(), c.action()), (origin, action));
+        }
+        assert_eq!(c.dispatch(Event::CertificateChosen(2)), Effect::None);
+        assert_eq!(c.dispatch(Event::Back), Effect::None);
+        assert_eq!(
+            (c.caller(), c.action(), c.step()),
+            (origin, action, Step::Unlock)
+        );
+        assert_eq!(c.dispatch(Event::CertificateChosen(2)), Effect::None);
+        assert_eq!(
+            c.dispatch(Event::Confirm { frozen: &[] }),
+            Effect::Refused(Refusal::NotFrozen)
+        );
+        c.dispatch(Event::Frozen(&[]));
+        assert_eq!(
+            c.dispatch(Event::Confirm { frozen: &[] }),
+            Effect::Refused(Refusal::NotArmed)
+        );
+        assert!(c.take_approved().is_none());
+        c.dispatch(Event::Arm);
+        assert_eq!(c.dispatch(Event::Confirm { frozen: &[] }), Effect::None);
+        let approved = c.take_approved().expect("the button, armed");
+        assert_eq!(approved.consent.caller(), origin);
+        assert_eq!(approved.consent.action(), action);
+        assert_eq!(approved.consent.alias(), "good");
+        assert!(approved.consent.items().is_empty());
+        // The next independent request is a new controller and starts at the choice again.
+        c.dispatch(Event::Finished);
+        assert!(c.take_approved().is_none());
+        let next = Controller::for_request(origin, action, keys);
+        assert!(next.chosen().is_none() && next.step() == Step::Unlock);
+    }
+}

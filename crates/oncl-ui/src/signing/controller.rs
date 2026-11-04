@@ -44,6 +44,12 @@ pub enum Unsuitable {
     Expired,
     NotYetValid,
     NotForSigning,
+    /// Its revocation check is still running (a site request's key dialog).
+    Pending,
+    /// Its certificate is revoked.
+    Revoked,
+    /// It fails the request's own conditions (a site request's key dialog).
+    Disabled,
 }
 
 /// A certificate of the unlocked key store, as the page shows it.
@@ -174,6 +180,10 @@ pub struct Controller {
     unlock_failed: bool,
     frozen_ready: bool,
     armed: bool,
+    /// A site request: the key store was opened by the host's own dialogs and the data to sign
+    /// is the page's, handled by the module after the key is chosen. There are no documents
+    /// to freeze, but the caller, the action and the certificate are bound all the same.
+    request: bool,
     unlock_pending: bool,
     id: u64,
     approved: Option<Approved>,
@@ -197,10 +207,27 @@ impl Controller {
             unlock_failed: false,
             frozen_ready: false,
             armed: false,
+            request: false,
             unlock_pending: false,
             id: NEXT_OPERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             approved: None,
         }
+    }
+
+    /// A site's request: `caller` is the page's origin as the host verified it, `action` what
+    /// the page asked for, `candidates` the keys of the store the host's dialogs opened. The
+    /// operation starts at the certificate choice.
+    pub fn for_request(
+        caller: impl Into<String>,
+        action: ActionKind,
+        candidates: Vec<Candidate>,
+    ) -> Controller {
+        let mut c = Controller::new(caller, action);
+        c.request = true;
+        c.step = Step::Unlock;
+        c.key_store = Some(String::new());
+        c.candidates = candidates;
+        c
     }
 
     pub fn step(&self) -> Step {
@@ -362,8 +389,11 @@ impl Controller {
             return self.void_consent(frozen);
         }
         // The password stays with the worker that froze the documents; the controller only
-        // checks that this operation was unlocked, and lets go of its copy.
-        let (Some(chosen), Some(_secret)) = (self.chosen().cloned(), self.secret.take()) else {
+        // checks that this operation was unlocked, and lets go of its copy. A site request has
+        // no password here: the host's dialogs unlocked the store.
+        let secret = self.secret.take();
+        let (Some(chosen), true) = (self.chosen().cloned(), secret.is_some() || self.request)
+        else {
             self.step = Step::Unlock;
             return Effect::Refused(Refusal::WrongStep);
         };
