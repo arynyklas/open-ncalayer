@@ -273,6 +273,56 @@ per observed change, never queued per checkpoint); each frame is charged as outp
 and metadata under the original scope, so a long operation cannot create unbounded
 progress traffic.
 
+## Resource and material profiles (refused before any key use)
+
+- `cades_lt/lta` and `pades_lt/lta` (sign and `extend`) need caller-acquired status
+  material: `evidence` with at least one `ocsp` or `crl` part, otherwise 400 before any
+  secret, key or document is touched. `xades_lt/lta` signing is not offered: the SDK XML
+  sign facade takes no status material (verify accepts `xades_*`).
+- `pades_lt/lta` need `memory_per_operation` of at least 336x `PdfLimits::max_object_bytes`
+  (336 MiB at the 1 MiB default; the update plan's reservation, independent of the
+  document). The default 256 MiB profile is refused with 413 `MemoryLimit`,
+  `NotApplied`, before the audit BEGIN. Shared-budget exhaustion at runtime can still
+  fail after use and is then reported `Applied`.
+- `xades_t` / `xades_legacy_t` need a host TSA with a policy OID (`[pki.tsa] policy`),
+  because the SDK binds the TSA policy for XAdES T/LT/LTA; without it: 503
+  `MissingConfiguration`, `NotApplied`, no BEGIN. CAdES/PAdES T accept a TSA without
+  policy.
+
+Authorization is re-run after the whole body has been taken and immediately before
+private use: a token revoked, a key right removed or a policy generation changed during
+a long upload gets 403 without BEGIN or key use.
+
+## Plugin configuration reference
+
+```toml
+[[plugins]]
+id = "vendor.example"            # must equal the manifest id
+manifest = "/private/plugins/vendor.example.toml"   # <= 64 KiB
+wasm = "/private/plugins/vendor.example.wasm"       # <= 16 MiB
+max_memory = 1048576             # <= oncl-plugin MAX_MEMORY
+max_transfer = 262144            # <= oncl-plugin MAX_TRANSFER
+
+[[plugins.permissions]]          # one per (token, operation); duplicates are refused
+token = "accounting-service"     # the caller identity: a configured token id
+operation = "run"
+imports = ["hash", "keys_sign_raw"]   # exact host imports (Import::name())
+keys = ["ops-key"]                    # operator-named keys, also in the token's keys
+pki_endpoints = ["http://pki.example/ocsp"]   # exact GET URLs for nested validation
+```
+
+Plugin outputs (`take_output` staged files) and bound input files are **not exposed** by
+HTTP: the SDK supports them through the original context, but no request-to-file
+binding contract has been designed or reviewed, so `file_*` imports are never granted.
+Dialog imports always fail with `InteractionRequired`.
+
+## Containers
+
+Inline and named key containers are exercised as PKCS#12 only. JKS containers are
+read-only in this project (no JKS writer exists), so a JKS container chained to a
+loopback CA with status endpoints cannot be produced for a strict-validation signing
+test; JKS signing over HTTP is therefore not evidenced.
+
 ## Terminal records for streamed responses
 
 `final` has `status` `completed` or `failed`. A `failed` record carries

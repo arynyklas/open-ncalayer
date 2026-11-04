@@ -1827,7 +1827,29 @@ async fn pades_levels_over_http_validate_in_pyhanko() {
         assert_eq!(signatures[0]["intact"], true, "{level}: {report}");
         assert_eq!(signatures[0]["valid"], true, "{level}: {report}");
         assert_eq!(report["dss"].is_object(), expect_dss, "{level}: {report}");
+        let first = &signatures[0];
+        assert_eq!(
+            first["has_timestamp_token"],
+            level != "pades_b",
+            "{level}: {report}"
+        );
+        assert_eq!(
+            first["full_validation"],
+            level == "pades_b",
+            "{level}: {report}"
+        );
+        assert!(
+            first["coverage"]
+                .as_str()
+                .unwrap()
+                .contains("ENTIRE_REVISION")
+                || first["coverage"].as_str().unwrap().contains("ENTIRE_FILE")
+                || level != "pades_b",
+            "{level}: {report}"
+        );
         if level == "pades_lta" {
+            let last = signatures.last().unwrap();
+            assert_eq!(last["doc_timestamp"], true, "{level}: {report}");
             assert!(
                 signatures.len() >= 2,
                 "LTA adds a document timestamp: {report}"
@@ -1835,15 +1857,18 @@ async fn pades_levels_over_http_validate_in_pyhanko() {
         }
         // Tamper control: a flipped covered byte breaks pyHanko's integrity check.
         let mut altered = signed.to_vec();
-        altered[20] ^= 1;
+        // Change page text inside the signed original body: still a valid PDF, so
+        // only a real digest/integrity break can be detected (not a parse failure).
+        let at = pdf.windows(8).position(|w| w == b"preserve").unwrap();
+        altered[at] = b'P';
         let broken = pyhanko(&altered, &leaf_der, dir.path());
         assert!(
             broken["signatures"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|s| s["intact"] == false),
-            "{level}: {broken}"
+                .any(|s| s["intact"] == false && s.get("integrity_exception").is_none()),
+            "{level}: tamper must be a real integrity failure, not an exception: {broken}"
         );
     }
     service.stop().await;
@@ -1964,8 +1989,7 @@ async fn spool_watcher_has_a_positive_control_and_sees_the_held_document_spool()
     std::fs::remove_file(&planted).unwrap();
     // The real run: the TSA holds native work so the document snapshot stays on
     // disk for >1s while the watcher scans it; secrets must never be in it.
-    pki.tsa_delay_ms
-        .store(1500, std::sync::atomic::Ordering::SeqCst);
+    pki.tsa_gate.hold();
     let document = b"document bytes that DO belong in the spool".to_vec();
     let watch = SpoolWatch::start(
         service.scratch(),
@@ -1975,8 +1999,21 @@ async fn spool_watcher_has_a_positive_control_and_sees_the_held_document_spool()
             document.clone(),
         ],
     );
-    let (_, parts) = sign_inline(&service, &p12, "cades_t", "", &document).await;
+    let service = Arc::new(service);
+    let task = {
+        let (service, p12, document) = (service.clone(), p12.clone(), document.clone());
+        tokio::spawn(async move { sign_inline(&service, &p12, "cades_t", "", &document).await })
+    };
+    // Native work is provably inside the TSA call (document snapshot on disk): scan, then release.
+    wait_for("native work inside the TSA", || pki.tsa_gate.entered() >= 1).await;
+    wait_for("watcher scanned the held spool", || {
+        watch.scanned.load(std::sync::atomic::Ordering::SeqCst) > 0
+    })
+    .await;
+    pki.tsa_gate.release();
+    let (_, parts) = task.await.unwrap();
     assert_eq!(final_event(&parts)["status"], "completed");
+    let service = Arc::try_unwrap(service).ok().unwrap();
     let scanned = watch.scanned.load(std::sync::atomic::Ordering::SeqCst);
     let saw_document_or_secret = watch.finish();
     assert!(
@@ -2011,9 +2048,6 @@ async fn later_item_abort_after_an_applied_item_is_a_failed_final_with_applied_r
     .await;
     let small = vec![5u8; 20_000];
     let large = vec![6u8; 120_000];
-    let metadata = r#"{"items":[{"id":"a","operation":{"kind":"sign","profile":"cms","input":"d1","attached":true,"keys":[{"source":"inline","container":"p12","password":"pw"}]}},{"id":"b","operation":{"kind":"sign","profile":"cms","input":"d2","attached":true,"keys":[{"source":"inline","container":"p12","password":"pw"}]}}],"parts":[{"name":"p12","item_id":"a","role":"secret"},{"name":"pw","item_id":"a","role":"secret"},{"name":"d1","item_id":"a","role":"document"},{"name":"d2","item_id":"b","role":"document"}]}"#;
-    // Item b has no keys of its own declared parts: reuse is refused; build properly instead.
-    let _ = metadata;
     let metadata = r#"{"items":[{"id":"a","operation":{"kind":"sign","profile":"cms","input":"d1","attached":true,"keys":[{"source":"inline","container":"p12","password":"pw"}]}},{"id":"b","operation":{"kind":"sign","profile":"cms","input":"d2","attached":true,"keys":[{"source":"inline","container":"q12","password":"qw"}]}}],"parts":[{"name":"p12","item_id":"a","role":"secret"},{"name":"pw","item_id":"a","role":"secret"},{"name":"q12","item_id":"b","role":"secret"},{"name":"qw","item_id":"b","role":"secret"},{"name":"d1","item_id":"a","role":"document"},{"name":"d2","item_id":"b","role":"document"}]}"#;
     let (status, parts, response) = operate(
         &service,
@@ -2085,8 +2119,7 @@ async fn deadline_after_signing_is_audited_applied_and_disconnect_holds_the_work
         config.queue_capacity = 1;
     }))
     .await;
-    pki.tsa_delay_ms
-        .store(1500, std::sync::atomic::Ordering::SeqCst);
+    pki.tsa_gate.hold();
     let body = multipart(
         &sign_metadata("cades_t", ""),
         &[
@@ -2119,7 +2152,8 @@ async fn deadline_after_signing_is_audited_applied_and_disconnect_holds_the_work
     stream.write_all(head.as_bytes()).await.unwrap();
     stream.write_all(&body).await.unwrap();
     wait_for("private use to begin", || begins(&service) == 1).await;
-    wait_for("native worker", || service.host.executor.running() == 1).await;
+    wait_for("native work inside the TSA", || pki.tsa_gate.entered() == 1).await;
+    assert_eq!(service.host.executor.running(), 1);
     drop(stream); // client disconnects during private use
     // The original root is held until native work returns, whatever the socket does.
     assert!(
@@ -2130,6 +2164,7 @@ async fn deadline_after_signing_is_audited_applied_and_disconnect_holds_the_work
             .is_err(),
         "disconnect must not free the original root while native work runs"
     );
+    pki.tsa_gate.release(); // native work may now return
     wait_for("native return", || service.host.executor.running() == 0).await;
     wait_for("durable FINAL", || {
         service
@@ -2180,8 +2215,7 @@ async fn max_in_flight_private_requests_hold_slots_and_overflow_is_a_not_applied
         }))
         .await,
     );
-    pki.tsa_delay_ms
-        .store(1500, std::sync::atomic::Ordering::SeqCst);
+    pki.tsa_gate.hold();
     let mut held = Vec::new();
     for round in 0..2 {
         let service = service.clone();
@@ -2210,7 +2244,11 @@ async fn max_in_flight_private_requests_hold_slots_and_overflow_is_a_not_applied
             service.post(FORM, body).await.0
         }));
     }
-    wait_for("both slots held", || service.host.executor.running() == 2).await;
+    wait_for("both native workers inside the TSA", || {
+        pki.tsa_gate.entered() == 2
+    })
+    .await;
+    assert_eq!(service.host.executor.running(), 2);
     let body = multipart(
         &sign_metadata("cms", ""),
         &[
@@ -2236,6 +2274,7 @@ async fn max_in_flight_private_requests_hold_slots_and_overflow_is_a_not_applied
     let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
     assert_eq!(error["code"], "CapacityExceeded");
     assert_eq!(error["applied"], "NotApplied");
+    pki.tsa_gate.release();
     for task in held {
         assert_eq!(task.await.unwrap(), 200);
     }
@@ -2327,6 +2366,78 @@ async fn extract_and_hash_responses_match_the_schema_and_unimplemented_routes_st
             assert!(!path.contains(forbidden), "{path}");
         }
     }
+    let mut kinds: Vec<String> = document["components"]["schemas"]["Operation"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r["$ref"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    kinds.sort();
+    let mut expected: Vec<String> = [
+        "Hash",
+        "Verify",
+        "Extract",
+        "Sign",
+        "Extend",
+        "Inspect",
+        "Stamp",
+        "VerifyStamp",
+        "JwsSign",
+        "JwsAdd",
+        "JwsVerify",
+        "JwtEncode",
+        "JwtDecode",
+        "JwtVerify",
+        "Plugin",
+    ]
+    .iter()
+    .map(|k| format!("{k}Operation"))
+    .collect();
+    expected.sort();
+    assert_eq!(
+        kinds, expected,
+        "the published operation kinds are exactly the implemented ones"
+    );
+    let mut profiles: Vec<&str> = document["components"]["schemas"]["SignOperation"]["properties"]
+        ["profile"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    profiles.sort();
+    let mut implemented = vec![
+        "cms",
+        "cades_b",
+        "cades_t",
+        "cades_lt",
+        "cades_lta",
+        "pdf",
+        "pades_b",
+        "pades_t",
+        "pades_lt",
+        "pades_lta",
+        "xml",
+        "xades_b",
+        "xades_t",
+        "wsse",
+        "xml_legacy",
+        "xades_legacy_b",
+        "xades_legacy_t",
+    ];
+    implemented.sort();
+    assert_eq!(
+        profiles, implemented,
+        "sign profiles are exactly the implemented ones"
+    );
     let text = document.to_string().to_lowercase();
     assert!(
         !text.contains("\"kind\":{\"const\":\"encrypt\"")
@@ -2605,6 +2716,8 @@ async fn token_key_signs_over_http_serializes_per_device_and_fails_closed_withou
         &[("reader-a", Some(leaf.clone())), ("empty-reader", None)],
         150,
     );
+    let card_gate = probe.private_gate.clone();
+    *probe.when.lock().unwrap() = Some(Arc::new(|| true));
     let service = Arc::new(
         start_with_cards(
             &pki,
@@ -2624,6 +2737,7 @@ async fn token_key_signs_over_http_serializes_per_device_and_fails_closed_withou
         .await,
     );
     let dir = tempfile::tempdir().unwrap();
+    card_gate.hold();
     // Four concurrent requests on one reader: all sign, never two open card transactions.
     let mut tasks = Vec::new();
     for round in 0..4 {
@@ -2647,6 +2761,13 @@ async fn token_key_signs_over_http_serializes_per_device_and_fails_closed_withou
             (round, mixed(&ct, response).await)
         }));
     }
+    // All four requests are simultaneously admitted (native workers running) while
+    // the first card transaction is held: the serialization is the device's, not admission's.
+    wait_for("four admitted native workers", || {
+        service.host.executor.running() == 4
+    })
+    .await;
+    card_gate.release();
     for task in tasks {
         let (round, parts) = task.await.unwrap();
         assert_eq!(final_event(&parts)["status"], "completed");
@@ -2687,17 +2808,15 @@ async fn token_key_signs_over_http_serializes_per_device_and_fails_closed_withou
                 ),
             )
             .await;
-        if ct.starts_with("multipart/mixed") {
-            let parts = mixed(&ct, response).await;
-            let done = final_event(&parts);
-            assert_eq!(done["status"], "failed", "{name}: {done}");
-            assert_eq!(done["error"]["applied"], "NotApplied");
-            assert!(parts.iter().all(|(n, _, _)| n != "artifact"));
-        } else {
-            assert!(status >= 400, "{name}: {status}");
-            let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
-            assert_eq!(error["applied"], "NotApplied");
-        }
+        // ONE response shape: a typed failed final in a multipart stream.
+        assert_eq!(status, 200, "{name}");
+        assert!(ct.starts_with("multipart/mixed"), "{name}: {ct}");
+        let parts = mixed(&ct, response.clone()).await;
+        let done = final_event(&parts);
+        assert_eq!(done["status"], "failed", "{name}: {done}");
+        assert_eq!(done["error"]["applied"], "NotApplied");
+        assert!(parts.iter().all(|(n, _, _)| n != "artifact"));
+        assert!(!String::from_utf8_lossy(&response).contains(private_support::cards::PIN));
     }
     assert_eq!(begins(&service), 4, "refused token use never wrote a BEGIN");
     let service = Arc::try_unwrap(service).ok().unwrap();
@@ -3093,5 +3212,487 @@ async fn lt_levels_need_status_material_and_the_pades_memory_profile_before_any_
         )
         .await;
     assert_eq!(status, 400);
+    service.stop().await;
+}
+
+/// Send `body` in two halves with `middle` executed between them (body held open).
+async fn split_request(service: &Running, body: &[u8], middle: impl FnOnce()) -> (u16, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(service.address)
+        .await
+        .unwrap();
+    let head = format!(
+        "POST /v1/operations HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: {FORM}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        service.address,
+        service.token.as_str(),
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let cut = body.len() - 40;
+    stream.write_all(&body[..cut]).await.unwrap();
+    stream.flush().await.unwrap();
+    // The authorized native worker is provably inside intake, blocked on the unsent tail.
+    wait_for("worker blocked on the unsent body", || {
+        service.host.executor.running() == 1
+    })
+    .await;
+    middle();
+    stream.write_all(&body[cut..]).await.unwrap();
+    let mut response = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stream.read_to_end(&mut response),
+    )
+    .await;
+    let text = String::from_utf8_lossy(&response).into_owned();
+    let status: u16 = text[9..12].parse().unwrap();
+    let end = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    (status, response[end..].to_vec())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authority_revoked_during_the_upload_never_runs_the_key_or_the_plugin() {
+    use oncl_pdk::abi::{self, Import};
+    use oncl_server::config::{PluginConfig, PluginGrant};
+    let pki = Pki::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, wasm) = (dir.path().join("p.toml"), dir.path().join("p.wasm"));
+    std::fs::write(&manifest, private_support::plugin::manifest("test.sign")).unwrap();
+    std::fs::write(
+        &wasm,
+        private_support::plugin::wasm(&[(
+            Import::KeysSignRaw,
+            abi::encode(&abi::SignRawArgs {
+                handle: 1,
+                data: b"m".to_vec().into(),
+            }),
+        )]),
+    )
+    .unwrap();
+    let plugin = PluginConfig {
+        id: "test.sign".into(),
+        manifest,
+        wasm,
+        max_memory: 1 << 20,
+        max_transfer: 1 << 18,
+        permissions: vec![PluginGrant {
+            token: "test".into(),
+            operation: "run".into(),
+            imports: vec!["keys_sign_raw".into()],
+            keys: vec!["ops-key".into()],
+            pki_endpoints: vec![
+                format!("{}/ocsp", pki.origin),
+                format!("{}/root.crl", pki.origin),
+                format!("{}/inter.crl", pki.origin),
+            ],
+        }],
+    };
+    for case in ["named_sign_streaming", "keyed_plugin_then_slow_document"] {
+        let plugin = plugin.clone();
+        let service = Running::start_with(|config, dir| {
+            config.pki = pki.config(dir);
+            named_key(config, dir, &pki, "ops-key", "user-rsa-sign");
+            config.tokens[0].actions = vec![Permission::Sign, Permission::Hash];
+            config.tokens[0].keys = vec!["ops-key".into()];
+            config.plugins = vec![plugin];
+        })
+        .await;
+        let (metadata, document) = if case == "named_sign_streaming" {
+            (r#"{"items":[{"id":"s","operation":{"kind":"sign","profile":"cms","input":"doc","keys":[{"source":"named","name":"ops-key"}]}}],"parts":[{"name":"doc","item_id":"s","role":"document"}]}"#.to_string(),
+             vec![b'd'; 50_000])
+        } else {
+            (r#"{"items":[{"id":"p","operation":{"kind":"plugin","plugin":"test.sign","operation":"run","args":"{}","keys":[{"handle":1,"name":"ops-key"}]}},{"id":"h","operation":{"kind":"hash","algorithm":"sha256","input":"doc"}}],"parts":[{"name":"doc","item_id":"h","role":"document"}]}"#.to_string(),
+             vec![b'd'; 50_000])
+        };
+        let body = multipart(
+            &metadata,
+            &[Part {
+                name: "doc",
+                filename: None,
+                bytes: &document,
+            }],
+        );
+        let host = service.host.clone();
+        let (status, response) =
+            split_request(&service, &body, || host.policy.revoke("test").unwrap()).await;
+        assert_eq!(
+            status,
+            403,
+            "{case}: {}",
+            String::from_utf8_lossy(&response)
+        );
+        assert_eq!(begins(&service), 0, "{case}: no BEGIN after revocation");
+        service.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_streaming_multi_item_failure_after_an_applied_plugin_item_keeps_its_applied_state() {
+    use oncl_pdk::abi::{self, Import};
+    use oncl_server::config::{PluginConfig, PluginGrant};
+    let pki = Pki::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, wasm) = (dir.path().join("p.toml"), dir.path().join("p.wasm"));
+    std::fs::write(&manifest, private_support::plugin::manifest("test.sign")).unwrap();
+    std::fs::write(
+        &wasm,
+        private_support::plugin::wasm(&[(
+            Import::KeysSignRaw,
+            abi::encode(&abi::SignRawArgs {
+                handle: 1,
+                data: b"m".to_vec().into(),
+            }),
+        )]),
+    )
+    .unwrap();
+    let plugin = PluginConfig {
+        id: "test.sign".into(),
+        manifest,
+        wasm,
+        max_memory: 1 << 20,
+        max_transfer: 1 << 18,
+        permissions: vec![PluginGrant {
+            token: "test".into(),
+            operation: "run".into(),
+            imports: vec!["keys_sign_raw".into()],
+            keys: vec!["ops-key".into()],
+            pki_endpoints: vec![
+                format!("{}/ocsp", pki.origin),
+                format!("{}/root.crl", pki.origin),
+                format!("{}/inter.crl", pki.origin),
+            ],
+        }],
+    };
+    let service = Running::start_with(|config, dir| {
+        config.pki = pki.config(dir);
+        named_key(config, dir, &pki, "ops-key", "user-rsa-sign");
+        config.tokens[0].actions = vec![Permission::Sign, Permission::Inspect];
+        config.tokens[0].keys = vec!["ops-key".into()];
+        config.plugins = vec![plugin];
+    })
+    .await;
+    let metadata = r#"{"items":[{"id":"p","operation":{"kind":"plugin","plugin":"test.sign","operation":"run","args":"{}","keys":[{"handle":1,"name":"ops-key"}]}},{"id":"bad","operation":{"kind":"inspect","target":{"type":"certificate","input":"c"}}}],"parts":[{"name":"c","item_id":"bad","role":"document"}]}"#;
+    let (status, _, response) = service
+        .post(
+            FORM,
+            multipart(
+                metadata,
+                &[Part {
+                    name: "c",
+                    filename: None,
+                    bytes: b"not a certificate",
+                }],
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    let done: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_matches_schema("FinalEvent", &done);
+    assert_eq!(done["status"], "failed", "{done}");
+    assert_eq!(done["results"][0]["item_id"], "p");
+    assert_eq!(
+        done["results"][0]["applied"], "Applied",
+        "earlier item's key use must survive: {done}"
+    );
+    assert_eq!(begins(&service), 1);
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_final_audit_write_after_card_use_is_applied_withholds_the_artifact_and_blocks_further_use()
+ {
+    let pki = Pki::start();
+    let leaf = pki.leaf("user-rsa-sign");
+    let alias = leaf.alias.clone();
+    let (probe, _) = private_support::cards::backend(&[("reader-a", Some(leaf))], 0);
+    let gate = probe.private_gate.clone();
+    let when = probe.when.clone();
+    let service =
+        Arc::new(start_with_cards(&pki, probe, &[("card-a", "reader-a", &alias)], |_| {}).await);
+    {
+        let host = service.host.clone();
+        *when.lock().unwrap() = Some(Arc::new(move || {
+            host.audit
+                .records()
+                .map(|r| r.iter().any(|e| e.kind == RecordKind::Begin))
+                .unwrap_or(false)
+        }));
+    }
+    gate.hold();
+    let task = {
+        let service = service.clone();
+        tokio::spawn(async move {
+            let (metadata, doc) = named_sign("card-a", "final write fails");
+            service
+                .post(
+                    FORM,
+                    multipart(
+                        &metadata,
+                        &[Part {
+                            name: "doc",
+                            filename: None,
+                            bytes: &doc,
+                        }],
+                    ),
+                )
+                .await
+        })
+    };
+    // BEGIN is durable and the card is inside the private operation.
+    wait_for("card inside the private operation", || gate.entered() == 1).await;
+    assert_eq!(begins(&service), 1);
+    service
+        .host
+        .audit
+        .inject_fault(oncl_server::audit::FaultPoint::BeforeWrite);
+    gate.release();
+    let (status, ct, response) = task.await.unwrap();
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    let parts = mixed(&ct, response).await;
+    let done = final_event(&parts);
+    assert_eq!(done["status"], "failed", "{done}");
+    assert_ne!(
+        done["error"]["applied"], "NotApplied",
+        "the card signed: {done}"
+    );
+    assert!(
+        parts.iter().all(|(n, _, _)| n != "artifact"),
+        "artifact withheld"
+    );
+    // Health policy: a failed FINAL poisons the journal; no further private use.
+    assert_ne!(
+        service.host.audit.health(),
+        oncl_server::audit::AuditHealth::Healthy
+    );
+    let (metadata, doc) = named_sign("card-a", "second");
+    let (status, _, response) = service
+        .post(
+            FORM,
+            multipart(
+                &metadata,
+                &[Part {
+                    name: "doc",
+                    filename: None,
+                    bytes: &doc,
+                }],
+            ),
+        )
+        .await;
+    assert_eq!(status, 503, "{}", String::from_utf8_lossy(&response));
+    let service = Arc::try_unwrap(service).ok().unwrap();
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deadline_after_card_use_keeps_a_durable_applied_final_and_no_artifact() {
+    let pki = Pki::start();
+    let leaf = pki.leaf("user-rsa-sign");
+    let alias = leaf.alias.clone();
+    let (probe, _) = private_support::cards::backend(&[("reader-a", Some(leaf))], 0);
+    let gate = probe.private_gate.clone();
+    let when = probe.when.clone();
+    probe
+        .at_end
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let service = Arc::new(
+        start_with_cards(&pki, probe, &[("card-a", "reader-a", &alias)], |config| {
+            config.operation_timeout_ms = 3000;
+            config.admission_wait_ms = 1000;
+            config.header_timeout_ms = 1000;
+        })
+        .await,
+    );
+    {
+        let host = service.host.clone();
+        *when.lock().unwrap() = Some(Arc::new(move || {
+            host.audit
+                .records()
+                .map(|r| r.iter().any(|e| e.kind == RecordKind::Begin))
+                .unwrap_or(false)
+        }));
+    }
+    gate.hold();
+    let task = {
+        let service = service.clone();
+        tokio::spawn(async move {
+            let (metadata, doc) = named_sign("card-a", "deadline after use");
+            service
+                .post(
+                    FORM,
+                    multipart(
+                        &metadata,
+                        &[Part {
+                            name: "doc",
+                            filename: None,
+                            bytes: &doc,
+                        }],
+                    ),
+                )
+                .await
+        })
+    };
+    wait_for("card inside the private operation", || gate.entered() == 1).await;
+    // The original deadline (the semantics under test) expires while the card is busy.
+    tokio::time::sleep(std::time::Duration::from_millis(3200)).await;
+    gate.release();
+    let (_, _, response) = task.await.unwrap();
+    assert!(!String::from_utf8_lossy(&response).contains("\"status\":\"completed\""));
+    wait_for("durable FINAL", || {
+        service
+            .host
+            .audit
+            .records()
+            .unwrap()
+            .iter()
+            .any(|r| r.kind == RecordKind::Final)
+    })
+    .await;
+    let records = service.host.audit.records().unwrap();
+    let last = records
+        .iter()
+        .rev()
+        .find(|r| r.kind == RecordKind::Final)
+        .unwrap();
+    assert_ne!(
+        format!("{:?}", last.applied),
+        "NotApplied",
+        "card was used: never reported NotApplied"
+    );
+    wait_for("worker returned", || service.host.executor.running() == 0).await;
+    assert!(
+        spool_files(&service.scratch()).is_empty(),
+        "no artifact survives"
+    );
+    assert_eq!(
+        service.host.audit.health(),
+        oncl_server::audit::AuditHealth::Healthy
+    );
+    let service = Arc::try_unwrap(service).ok().unwrap();
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn request_queued_behind_max_in_flight_expires_before_native_work_without_begin() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let service = Arc::new(
+        Running::start_with(running_with_tsa(&pki, |config| {
+            config.max_in_flight = 2;
+            config.blocking_workers = 1;
+            config.queue_capacity = 1;
+            config.admission_wait_ms = 1500;
+            config.operation_timeout_ms = 2000;
+            config.header_timeout_ms = 1000;
+        }))
+        .await,
+    );
+    pki.tsa_gate.hold();
+    let post = |profile: &'static str, doc: &'static str| {
+        let (service, p12) = (service.clone(), p12.clone());
+        tokio::spawn(async move {
+            let body = multipart(
+                &sign_metadata(profile, ""),
+                &[
+                    Part {
+                        name: "p12",
+                        filename: None,
+                        bytes: &p12,
+                    },
+                    Part {
+                        name: "pw",
+                        filename: None,
+                        bytes: PASSWORD.as_bytes(),
+                    },
+                    Part {
+                        name: "doc",
+                        filename: None,
+                        bytes: doc.as_bytes(),
+                    },
+                ],
+            );
+            service.post(FORM, body).await
+        })
+    };
+    let first = post("cades_t", "holds the only native worker");
+    wait_for("worker held inside the TSA", || pki.tsa_gate.entered() == 1).await;
+    let queued = post("cms", "queued behind it");
+    wait_for("second request queued", || {
+        service.host.executor.queued() == 1
+    })
+    .await;
+    // Its original 2 s deadline expires while it is still queued.
+    let (status, _, response) = queued.await.unwrap();
+    assert!(
+        status == 504 || status == 503,
+        "{status}: {}",
+        String::from_utf8_lossy(&response)
+    );
+    let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(error["applied"], "NotApplied");
+    assert_eq!(
+        begins(&service),
+        1,
+        "only the running request wrote a BEGIN"
+    );
+    pki.tsa_gate.release();
+    let _ = first.await.unwrap();
+    assert_eq!(
+        begins(&service),
+        1,
+        "the expired queued request never reached the key"
+    );
+    let service = Arc::try_unwrap(service).ok().unwrap();
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_missing_right_is_refused_before_intake_with_nothing_held() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    // Global inline switch OFF although the token has the inline right.
+    let service = Running::start_with(|config, dir| {
+        config.inline_pkcs12 = false;
+        config.tokens[0].inline_pkcs12 = true;
+        config.pki = pki.config(dir);
+        named_key(config, dir, &pki, "ops-key", "user-rsa-sign");
+        config.tokens[0].actions = vec![Permission::Sign];
+        config.tokens[0].keys = vec![]; // no right to the named key either
+    })
+    .await;
+    type Case<'a> = (&'a str, String, Vec<(&'a str, Vec<u8>)>);
+    let cases: Vec<Case<'_>> = vec![
+        ("global inline switch off", sign_metadata("cms", ""), vec![("p12", p12.clone()), ("pw", PASSWORD.as_bytes().to_vec()), ("doc", b"x".to_vec())]),
+        ("named key without right", r#"{"items":[{"id":"n","operation":{"kind":"sign","profile":"cms","input":"doc","keys":[{"source":"named","name":"ops-key"}]}}],"parts":[{"name":"doc","item_id":"n","role":"document"}]}"#.into(), vec![("doc", b"x".to_vec())]),
+        ("inspect named without right", r#"{"items":[{"id":"n","operation":{"kind":"inspect","target":{"type":"named","name":"ops-key"}}}],"parts":[]}"#.into(), vec![]),
+        ("inspect container without action", r#"{"items":[{"id":"c","operation":{"kind":"inspect","target":{"type":"container","container":"p12","password":"pw"}}}],"parts":[{"name":"p12","item_id":"c","role":"secret"},{"name":"pw","item_id":"c","role":"secret"}]}"#.into(), vec![("p12", p12.clone()), ("pw", PASSWORD.as_bytes().to_vec())]),
+    ];
+    for (name, metadata, parts) in cases {
+        let parts: Vec<Part<'_>> = parts
+            .iter()
+            .map(|(n, b)| Part {
+                name: n,
+                filename: None,
+                bytes: b,
+            })
+            .collect();
+        let (status, _, response) = service.post(FORM, multipart(&metadata, &parts)).await;
+        assert_eq!(
+            status,
+            403,
+            "{name}: {}",
+            String::from_utf8_lossy(&response)
+        );
+        assert_eq!(begins(&service), 0, "{name}");
+        assert!(spool_files(&service.scratch()).is_empty(), "{name}");
+        // Nothing stays reserved by the refused request.
+        assert!(
+            service
+                .host
+                .engine
+                .admit(Arc::new(oncl_server::executor::Cancellation::new()))
+                .is_ok(),
+            "{name}"
+        );
+    }
     service.stop().await;
 }

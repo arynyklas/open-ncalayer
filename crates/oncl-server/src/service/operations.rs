@@ -168,7 +168,7 @@ impl ServiceHost {
         let host_policy = self.host_policy.clone();
         Box::pin(async move {
             let deadline = deadline?;
-            let principal = principal?;
+            let principal = std::sync::Arc::new(principal?);
             let disconnect = Arc::new(CancelOnDrop(cancel.clone()));
             let (progress_hub, progress_receiver) = progress::ProgressHub::channel();
             let mut admission = engine
@@ -206,6 +206,10 @@ impl ServiceHost {
                 let action = dispatch::action(&item.operation);
                 // Key-bearing actions are authorized per exact key in resolve_keys;
                 // plugin items only by their exact operator grant.
+                // Plugin items are authorized only by their exact operator grant. The
+                // grant's `Action::Hash` (pushed below via `action()`) merely lets the
+                // guest's own `hash` import run through the Engine; it is scoped by the
+                // per-import permission, grants no token action and no key.
                 if matches!(item.operation, Operation::Plugin { .. }) {
                 } else if !matches!(action, Action::Sign) {
                     policy
@@ -309,15 +313,24 @@ impl ServiceHost {
                         selectors: resolved.selectors,
                         reservations: resolved.reservations,
                         binding,
-                        host: host_policy,
+                        host: host_policy.clone(),
                         caller: oncl_core::plugins::CallerContext::ServiceClient(
                             principal.id().to_owned(),
                         ),
+                        recheck: {
+                            let (policy, principal, host) =
+                                (policy.clone(), principal.clone(), host_policy.clone());
+                            Box::new(move |m| {
+                                dispatch::precheck(m, &policy, &principal, inline_enabled, &host)
+                            })
+                        },
                     },
                 )
                 .await;
             }
             let runtime = tokio::runtime::Handle::current();
+            let (worker_policy, worker_principal, worker_host) =
+                (policy.clone(), principal.clone(), host_policy.clone());
             let caller =
                 oncl_core::plugins::CallerContext::ServiceClient(principal.id().to_owned());
             let work = executor
@@ -329,6 +342,17 @@ impl ServiceHost {
                         prepared
                             .payload
                             .capture(&request, store.as_ref(), ctx, runtime)?;
+                    // The whole body has been taken: authority may have changed
+                    // (revocation, key right removal, policy generation) since intake.
+                    if let Err(api) = dispatch::precheck(
+                        &request,
+                        &worker_policy,
+                        &worker_principal,
+                        inline_enabled,
+                        &worker_host,
+                    ) {
+                        return Ok(Err(api));
+                    }
                     let mut results = Vec::with_capacity(request.items.len());
                     let mut result_reservations = Vec::with_capacity(request.items.len());
                     let secrets = prepared.secrets;
@@ -344,14 +368,41 @@ impl ServiceHost {
                         host: &host_policy,
                         caller: &caller,
                     };
+                    let mut applied_any = false;
                     for item in request.items {
                         let (result, reservation, _) =
                             match dispatch::run(item.operation, &item.id, &mut env, ctx, None) {
                                 Ok(done) => done,
-                                Err(OperationError::Processing(error)) => return Err(error),
-                                // Typed refusal/failure with its honest Applied state.
-                                Err(error) => return Ok(Err(operation_failure(&error))),
+                                Err(error) => match dispatch::classify(error, applied_any) {
+                                    dispatch::Failure::Abort(error) => return Err(error),
+                                    // Nothing applied earlier: a typed HTTP error.
+                                    dispatch::Failure::Typed(api) if !applied_any => {
+                                        return Ok(Err(api));
+                                    }
+                                    // Earlier items applied a key: a terminal failed
+                                    // record keeps their honest per-item state.
+                                    dispatch::Failure::Typed(api) => {
+                                        let reservation =
+                                            ctx.resources().reserve_metadata(JSON_BYTES)?;
+                                        let bytes = serde_json::to_vec(&ResponseEvent::Final {
+                                            operation_id: ctx.id().get(),
+                                            status: FinalStatus::Failed,
+                                            results,
+                                            error: Some(api),
+                                        })
+                                        .map_err(|_| {
+                                            ProcessingError::InvalidInput("response serialization")
+                                        })?;
+                                        if bytes.len() as u64 > JSON_BYTES {
+                                            return Err(ProcessingError::MetadataLimit);
+                                        }
+                                        ctx.resources().account_output(bytes.len() as u64)?;
+                                        return Ok(Ok((bytes, reservation)));
+                                    }
+                                },
                             };
+                        applied_any |= dispatch::applied_of(&result)
+                            != oncl_api::error::AppliedState::NotApplied;
                         result_reservations.push(reservation);
                         results.push(ItemResult {
                             item_id: item.id,

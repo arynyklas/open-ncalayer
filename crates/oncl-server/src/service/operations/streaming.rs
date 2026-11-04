@@ -19,12 +19,16 @@ pub(super) struct StreamRuntime {
     pub receiver: watch::Receiver<Progress>,
     pub failure: Arc<intake::Failure>,
 }
+pub(super) type Recheck = Box<dyn Fn(&OperationMetadata) -> Result<(), ApiError> + Send + Sync>;
 pub(super) struct PrivateState {
     pub selectors: std::collections::HashMap<String, Vec<oncl_core::keys::KeySelector>>,
     pub reservations: Vec<ResourceReservation>,
     pub binding: Option<crate::audit::AuditBinding>,
     pub host: Arc<super::HostPolicy>,
     pub caller: oncl_core::plugins::CallerContext,
+    /// Re-runs principal/generation, per-key and per-(token,plugin,operation)
+    /// authorization after the body is fully taken, before any private use.
+    pub recheck: Recheck,
 }
 struct StreamFinal {
     event: Bytes,
@@ -91,6 +95,10 @@ pub(super) async fn response(
                     );
                 }
             };
+            if let Err(api) = (private.recheck)(&metadata) {
+                let _ = native_ready.send(Err(api));
+                return Err(ProcessingError::InvalidInput("authorization changed"));
+            }
             let _ = native_ready.send(Ok(root.clone()));
             let secrets = prepared.secrets;
             let PrivateState {
@@ -99,6 +107,7 @@ pub(super) async fn response(
                 binding,
                 host,
                 caller,
+                recheck: _,
             } = private;
             let result = {
                 let mut env = dispatch::Env {
@@ -200,23 +209,10 @@ fn execute(
         let (result, reservation, artifact) = match outcome {
             Ok(done) => done,
             Err(error) => {
-                let failure = operation_failure(&error);
-                let applied = failure.applied != oncl_api::error::AppliedState::NotApplied;
-                // Resource/deadline/cancel failures that never applied a key stay a
-                // transport abort (the original first-fatal cause); anything that
-                // may have used a private key, and every typed SDK refusal, gets a
-                // terminal failed record carrying the honest Applied state.
-                let abort = matches!(
-                    &error,
-                    OperationError::Processing(e)
-                        if !matches!(intake::first_cause(e), ProcessingError::InvalidInput(_))
-                );
-                if abort && !applied && !applied_any {
-                    return Err(match error {
-                        OperationError::Processing(error) => error,
-                        _ => unreachable!("matched processing"),
-                    });
-                }
+                let failure = match dispatch::classify(error, applied_any) {
+                    dispatch::Failure::Abort(error) => return Err(error),
+                    dispatch::Failure::Typed(failure) => failure,
+                };
                 // Artifacts of this request are withheld: no partial success, and
                 // no Content-ID of undelivered output remains in the results.
                 drop(artifacts);

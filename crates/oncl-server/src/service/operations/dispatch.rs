@@ -181,7 +181,7 @@ pub(super) fn precheck(
                 ..
             }
         );
-        if pades_high && host.memory_per_operation < PADES_LT_MEMORY {
+        if pades_high && host.memory_per_operation < pades_lt_memory() {
             // A predictable resource need is refused before any private use.
             return Err(ApiError::not_applied(ErrorCode::MemoryLimit));
         }
@@ -287,6 +287,9 @@ pub(super) fn resolve_keys(
     scope: &ResourceScope,
 ) -> Result<Resolved, ApiError> {
     let denied = || ApiError::not_applied(ErrorCode::PermissionDenied);
+    // One authorization function for rights: resolve_keys only adds what needs the
+    // received bytes (the exact immutable InlineID) on top of `precheck`.
+    precheck(metadata, policy, principal, inline_enabled, host)?;
     let mut resolved = Resolved {
         selectors: HashMap::new(),
         keys: Vec::new(),
@@ -325,9 +328,6 @@ pub(super) fn resolve_keys(
             target: InspectTarget::Named { name },
         } = &item.operation
         {
-            policy
-                .authorize(principal, Action::Inspect, Some(name), None)
-                .map_err(|_| denied())?;
             let id = KeyId::new(name).map_err(|_| invalid_request())?;
             if !resolved.keys.contains(&id) {
                 resolved.keys.push(id);
@@ -337,9 +337,6 @@ pub(super) fn resolve_keys(
         for key in keys {
             let selector = match key {
                 KeyRef::Named { name } => {
-                    policy
-                        .authorize(principal, Action::Sign, Some(name), None)
-                        .map_err(|_| denied())?;
                     KeySelector::named(KeyId::new(name).map_err(|_| invalid_request())?)
                 }
                 KeyRef::Inline {
@@ -482,19 +479,54 @@ fn timestamp_facts(report: &oncl_core::TimestampReport) -> TimestampFacts {
         expectations: check_name(facts.expectations()),
     }
 }
+/// Single shared failure policy for streaming and non-streaming execution.
+/// Resource/deadline/cancel failures that never applied a key, with no earlier
+/// applied item, stay a first-fatal abort; everything else is a typed failure
+/// carrying the honest Applied state.
+pub(super) enum Failure {
+    Abort(ProcessingError),
+    Typed(ApiError),
+}
+pub(super) fn classify(error: OperationError, applied_any: bool) -> Failure {
+    let failure = crate::service::operation_failure(&error);
+    let applied = failure.applied != oncl_api::error::AppliedState::NotApplied;
+    match error {
+        OperationError::Processing(e)
+            if !matches!(intake::first_cause(&e), ProcessingError::InvalidInput(_))
+                && !applied
+                && !applied_any =>
+        {
+            Failure::Abort(e)
+        }
+        _ => Failure::Typed(failure),
+    }
+}
 /// Item-level key application derived from the real per-signer/report state.
 pub(super) fn applied_of(result: &OperationResult) -> oncl_api::error::AppliedState {
     use oncl_api::error::AppliedState as A;
+    let fold = |signers: &[A]| {
+        signers.iter().fold(A::NotApplied, |a, s| match (a, *s) {
+            (A::Unknown, _) | (_, A::Unknown) => A::Unknown,
+            (A::Applied, _) | (_, A::Applied) => A::Applied,
+            _ => A::NotApplied,
+        })
+    };
+    // Exhaustive: a new result family must decide its key-application state.
     match result {
         OperationResult::Plugin { applied, .. } => *applied,
         OperationResult::Signing { signers, .. } | OperationResult::Jws { signers, .. } => {
-            signers.iter().fold(A::NotApplied, |a, s| match (a, *s) {
-                (A::Unknown, _) | (_, A::Unknown) => A::Unknown,
-                (A::Applied, _) | (_, A::Applied) => A::Applied,
-                _ => A::NotApplied,
-            })
+            fold(signers)
         }
-        _ => A::NotApplied,
+        OperationResult::Hash { .. }
+        | OperationResult::Verification { .. }
+        | OperationResult::Extraction { .. }
+        | OperationResult::Extension { .. }
+        | OperationResult::Inspection { .. }
+        | OperationResult::Stamping { .. }
+        | OperationResult::StampVerification { .. }
+        | OperationResult::JwsVerification { .. }
+        | OperationResult::JwtDecoded { .. }
+        | OperationResult::JwtVerification { .. } => A::NotApplied,
     }
 }
 pub(super) struct ArtifactSink<'a> {
@@ -656,7 +688,15 @@ fn has_status_material(evidence: &[oncl_api::dto::EvidenceRef]) -> bool {
 }
 /// Minimum `memory_per_operation` for PAdES LT/LTA signing/extension, measured on
 /// this build (a 256 MiB profile fails after key use, 350 MiB succeeds) with margin.
-pub(super) const PADES_LT_MEMORY: u64 = 352 << 20;
+///
+/// The need is the PDF update plan's reservation, which scales with
+/// `PdfLimits::max_object_bytes` (128x for the plan, measured total below 350 MiB at
+/// the 1 MiB default), independent of the document. Proposed exact seam for Core/PDF
+/// to replace this host estimate: `oncl_pdf::ades::plan_memory(&PdfLimits) -> u64`,
+/// called by `Engine::sign`/`extend` BEFORE the first key application.
+pub(super) fn pades_lt_memory() -> u64 {
+    oncl_pdf::PdfLimits::default().max_object_bytes as u64 * 336
+}
 fn is_xml(kind: SignKind) -> bool {
     matches!(kind, SignKind::Xml | SignKind::XadesB | SignKind::XadesT)
 }

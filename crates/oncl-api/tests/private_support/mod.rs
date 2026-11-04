@@ -119,13 +119,45 @@ pub fn container(entry: &KeyEntry, password: &str) -> Vec<u8> {
     .unwrap()
 }
 
+/// Releases only when the test says so: no sleep decides any semantics.
+#[derive(Default)]
+pub struct TsaGate {
+    held: std::sync::Mutex<bool>,
+    changed: std::sync::Condvar,
+    entered: AtomicUsize,
+}
+impl TsaGate {
+    pub fn pass(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let mut held = self.held.lock().unwrap();
+        let started = std::time::Instant::now();
+        // 60 s is only a leak guard for a failed test, never a semantic delay.
+        while *held && started.elapsed() < Duration::from_secs(60) {
+            held = self
+                .changed
+                .wait_timeout(held, Duration::from_millis(200))
+                .unwrap()
+                .0;
+        }
+    }
+    pub fn hold(&self) {
+        *self.held.lock().unwrap() = true;
+    }
+    pub fn release(&self) {
+        *self.held.lock().unwrap() = false;
+        self.changed.notify_all();
+    }
+    pub fn entered(&self) -> usize {
+        self.entered.load(Ordering::SeqCst)
+    }
+}
 pub struct Pki {
     pub address: std::net::SocketAddr,
     pub origin: String,
     pub inter: KeyEntry,
     pub crls: Vec<Vec<u8>>,
-    /// Milliseconds the loopback TSA waits before answering (holds native work).
-    pub tsa_delay_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Gate that holds native work inside the TSA request until released.
+    pub tsa_gate: Arc<TsaGate>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
     pub requests: Arc<AtomicUsize>,
@@ -143,23 +175,30 @@ impl Pki {
             &origin,
             "root",
         );
-        let ocsp = MockOcsp::new(raw("ocsp-gost2015")).with_now(now);
-        let tsa = oncl_pki::tsp::MockTsa::new(with_status_locations(
-            &raw("tsa-gost2015"),
-            &raw("root-gost2015.key"),
-            &origin,
-            "root",
-        ))
-        .with_gen_time(now);
-        let root = MockCrl::new(raw("root-gost2015.key"))
-            .with_this_update(now - time::Duration::MINUTE)
-            .next_update(Some(now + time::Duration::days(1)));
-        let inter_crl = MockCrl::new(inter.clone())
-            .with_this_update(now - time::Duration::MINUTE)
-            .next_update(Some(now + time::Duration::days(1)));
+        let ocsp = Arc::new(MockOcsp::new(raw("ocsp-gost2015")).with_now(now));
+        let tsa = Arc::new(
+            oncl_pki::tsp::MockTsa::new(with_status_locations(
+                &raw("tsa-gost2015"),
+                &raw("root-gost2015.key"),
+                &origin,
+                "root",
+            ))
+            .with_gen_time(now),
+        );
+        let root = Arc::new(
+            MockCrl::new(raw("root-gost2015.key"))
+                .with_this_update(now - time::Duration::MINUTE)
+                .next_update(Some(now + time::Duration::days(1))),
+        );
+        let inter_crl = Arc::new(
+            MockCrl::new(inter.clone())
+                .with_this_update(now - time::Duration::MINUTE)
+                .next_update(Some(now + time::Duration::days(1))),
+        );
         let crls = vec![root.der(), inter_crl.der()];
-        let tsa_delay_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let delay = tsa_delay_ms.clone();
+        let tsa_gate = Arc::new(TsaGate::default());
+        let gate = tsa_gate.clone();
+        let delay = ();
         let stop = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(AtomicUsize::new(0));
         let (stopped, counted) = (stop.clone(), requests.clone());
@@ -173,80 +212,87 @@ impl Pki {
                         continue;
                     }
                 };
-                socket.set_nonblocking(false).unwrap();
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                let mut bytes = Vec::new();
-                let mut chunk = [0; 4096];
-                let end = loop {
-                    let n = socket.read(&mut chunk).unwrap_or(0);
-                    if n == 0 {
-                        break None;
+                let (ocsp, root, inter_crl, tsa) =
+                    (ocsp.clone(), root.clone(), inter_crl.clone(), tsa.clone());
+                let (url_origin, counted, delay, gate) =
+                    (url_origin.clone(), counted.clone(), delay, gate.clone());
+                std::thread::spawn(move || {
+                    socket.set_nonblocking(false).unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    let mut chunk = [0; 4096];
+                    let end = loop {
+                        let n = socket.read(&mut chunk).unwrap_or(0);
+                        if n == 0 {
+                            break None;
+                        }
+                        bytes.extend_from_slice(&chunk[..n]);
+                        if let Some(p) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break Some(p + 4);
+                        }
+                    };
+                    let Some(end) = end else { return };
+                    let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
+                    let length = head
+                        .lines()
+                        .filter_map(|l| l.split_once(':'))
+                        .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+                        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    while bytes.len() < end + length {
+                        let n = socket.read(&mut chunk).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        bytes.extend_from_slice(&chunk[..n]);
                     }
-                    bytes.extend_from_slice(&chunk[..n]);
-                    if let Some(p) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                        break Some(p + 4);
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    let mut first = head.lines().next().unwrap().split_whitespace();
+                    let method = first.next().unwrap();
+                    let path = first.next().unwrap();
+                    let url = format!("{url_origin}{path}");
+                    let content_type = head
+                        .lines()
+                        .filter_map(|l| l.split_once(':'))
+                        .find(|(n, _)| n.eq_ignore_ascii_case("content-type"))
+                        .map(|(_, v)| v.trim().to_owned());
+                    let reply = if method == "POST" && path == "/tsa" {
+                        let () = delay;
+                        gate.pass();
+                        tsa.send(&HttpRequest::post(
+                            &url,
+                            content_type.as_deref(),
+                            &bytes[end..end + length],
+                            GetOptions::default(),
+                        ))
+                    } else if method == "POST" {
+                        ocsp.send(&HttpRequest::post(
+                            &url,
+                            content_type.as_deref(),
+                            &bytes[end..end + length],
+                            GetOptions::default(),
+                        ))
+                    } else if path.contains("root") {
+                        root.send(&HttpRequest::get(&url, GetOptions::default()))
+                    } else {
+                        inter_crl.send(&HttpRequest::get(&url, GetOptions::default()))
+                    };
+                    if let Ok(reply) = reply {
+                        let _ = write!(
+                            socket,
+                            "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            reply.status,
+                            reply
+                                .content_type
+                                .as_deref()
+                                .unwrap_or("application/octet-stream"),
+                            reply.body.len()
+                        );
+                        let _ = socket.write_all(&reply.body);
                     }
-                };
-                let Some(end) = end else { continue };
-                let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
-                let length = head
-                    .lines()
-                    .filter_map(|l| l.split_once(':'))
-                    .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
-                    .and_then(|(_, v)| v.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                while bytes.len() < end + length {
-                    let n = socket.read(&mut chunk).unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    bytes.extend_from_slice(&chunk[..n]);
-                }
-                counted.fetch_add(1, Ordering::SeqCst);
-                let mut first = head.lines().next().unwrap().split_whitespace();
-                let method = first.next().unwrap();
-                let path = first.next().unwrap();
-                let url = format!("{url_origin}{path}");
-                let content_type = head
-                    .lines()
-                    .filter_map(|l| l.split_once(':'))
-                    .find(|(n, _)| n.eq_ignore_ascii_case("content-type"))
-                    .map(|(_, v)| v.trim().to_owned());
-                let reply = if method == "POST" && path == "/tsa" {
-                    std::thread::sleep(Duration::from_millis(delay.load(Ordering::SeqCst)));
-                    tsa.send(&HttpRequest::post(
-                        &url,
-                        content_type.as_deref(),
-                        &bytes[end..end + length],
-                        GetOptions::default(),
-                    ))
-                } else if method == "POST" {
-                    ocsp.send(&HttpRequest::post(
-                        &url,
-                        content_type.as_deref(),
-                        &bytes[end..end + length],
-                        GetOptions::default(),
-                    ))
-                } else if path.contains("root") {
-                    root.send(&HttpRequest::get(&url, GetOptions::default()))
-                } else {
-                    inter_crl.send(&HttpRequest::get(&url, GetOptions::default()))
-                };
-                if let Ok(reply) = reply {
-                    let _ = write!(
-                        socket,
-                        "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        reply.status,
-                        reply
-                            .content_type
-                            .as_deref()
-                            .unwrap_or("application/octet-stream"),
-                        reply.body.len()
-                    );
-                    let _ = socket.write_all(&reply.body);
-                }
+                });
             }
         });
         Self {
@@ -254,7 +300,7 @@ impl Pki {
             origin,
             inter,
             crls,
-            tsa_delay_ms,
+            tsa_gate,
             stop,
             thread: Some(thread),
             requests,
@@ -402,6 +448,12 @@ impl Running {
             .await
             .map(|b| b.to_bytes())
             .unwrap_or_default();
+        if status != 200 && content_type.starts_with("application/json") {
+            assert_matches_schema(
+                "ApiError",
+                &serde_json::from_slice(&bytes).expect("typed error body"),
+            );
+        }
         (status, content_type, bytes.to_vec())
     }
 }
@@ -726,6 +778,7 @@ pub mod cards {
         collections::HashMap,
         sync::{Arc, Mutex},
     };
+    pub type When = Arc<Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>>;
     pub const PIN: &str = "654321";
     #[derive(Default)]
     pub struct Witness {
@@ -737,6 +790,12 @@ pub mod cards {
         pub emu: Arc<EmulatorBackend>,
         pub witness: Arc<Witness>,
         pub hold_ms: u64,
+        /// Holds the card inside a private operation (after audit BEGIN).
+        pub private_gate: Arc<super::TsaGate>,
+        /// The gate only holds APDUs once this condition is true (e.g. audit BEGIN written).
+        pub when: When,
+        /// Hold at the end of the card transaction (after the APDUs, i.e. after use).
+        pub at_end: Arc<std::sync::atomic::AtomicBool>,
     }
     struct ProbeConnection {
         inner: Box<dyn Connection>,
@@ -744,6 +803,9 @@ pub mod cards {
         witness: Arc<Witness>,
         hold_ms: u64,
         open: bool,
+        private_gate: Arc<super::TsaGate>,
+        when: When,
+        at_end: Arc<std::sync::atomic::AtomicBool>,
     }
     impl Backend for Probe {
         fn readers(&self) -> Result<Vec<ReaderState>, BackendError> {
@@ -756,6 +818,9 @@ pub mod cards {
                 witness: self.witness.clone(),
                 hold_ms: self.hold_ms,
                 open: false,
+                private_gate: self.private_gate.clone(),
+                when: self.when.clone(),
+                at_end: self.at_end.clone(),
             }))
         }
     }
@@ -789,6 +854,12 @@ pub mod cards {
             Ok(())
         }
         fn end_transaction(&mut self) -> Result<(), BackendError> {
+            let condition = self.when.lock().unwrap().clone();
+            if self.at_end.load(std::sync::atomic::Ordering::SeqCst)
+                && condition.is_some_and(|c| c())
+            {
+                self.private_gate.pass();
+            }
             if self.open {
                 self.open = false;
                 *self
@@ -802,6 +873,12 @@ pub mod cards {
             self.inner.end_transaction()
         }
         fn transmit(&mut self, apdu: &[u8]) -> Result<Vec<u8>, BackendError> {
+            let condition = self.when.lock().unwrap().clone();
+            if !self.at_end.load(std::sync::atomic::Ordering::SeqCst)
+                && condition.is_some_and(|c| c())
+            {
+                self.private_gate.pass();
+            }
             self.inner.transmit(apdu)
         }
         fn reset_on_disconnect(&mut self) {
@@ -848,6 +925,9 @@ pub mod cards {
                 emu,
                 witness: witness.clone(),
                 hold_ms,
+                private_gate: Arc::new(super::TsaGate::default()),
+                when: Arc::new(Mutex::new(None)),
+                at_end: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
             witness,
         )

@@ -421,7 +421,29 @@ impl ServerConfig {
             || self.tokens.len() > 256
             || self.keys.len() > 64
             || self.plugins.len() > 16
-            || self.plugins.iter().any(|p| p.permissions.len() > 256)
+            || self.plugins.iter().any(|p| {
+                p.id.is_empty()
+                    || p.id.len() > 128
+                    || p.max_memory == 0
+                    || p.max_memory > oncl_plugin::MAX_MEMORY
+                    || p.max_transfer == 0
+                    || p.max_transfer > oncl_plugin::MAX_TRANSFER
+                    || p.permissions.len() > 256
+                    || p.permissions.iter().any(|g| {
+                        g.token.len() > 128
+                            || g.operation.is_empty()
+                            || g.operation.len() > 128
+                            || g.imports.len() > 72
+                            || g.keys.len() > 8
+                            || g.pki_endpoints.len() > 16
+                            || g.pki_endpoints.iter().any(|u| u.len() > 2048)
+                    })
+                    || p.permissions.iter().enumerate().any(|(i, g)| {
+                        p.permissions[..i]
+                            .iter()
+                            .any(|o| o.token == g.token && o.operation == g.operation)
+                    })
+            })
             || self.hosts.len() > 32
             || self
                 .hosts
