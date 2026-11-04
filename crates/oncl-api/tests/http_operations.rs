@@ -680,3 +680,101 @@ async fn actual_sdk_extraction_streams_binary_artifact_and_mandatory_final() {
     assert_eq!(final_result["results"][0]["result"]["kind"], "extraction");
     service.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_multipart_pending_progress_and_final_frames_recheck_original_deadline() {
+    use http_body_util::BodyExt;
+    use oncl_api::server::{HashHost, RequestMetadata};
+    for final_queue in [false, true] {
+        let service = Running::start_with(|config| {
+            config.tokens[0].actions.push(Permission::Extract);
+            config.max_in_flight = 1;
+            config.operation_timeout_ms = 500;
+            config.header_timeout_ms = 100;
+            config.admission_wait_ms = 100;
+        })
+        .await;
+        let cms = signed_cms(b"real deferred multipart");
+        let metadata = r#"{"items":[{"id":"x","operation":{"kind":"extract","input":"c"}}],"parts":[{"name":"c","item_id":"x","role":"document"}]}"#;
+        let mut bytes = format!("--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--b\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\n").into_bytes();
+        bytes.extend_from_slice(&cms);
+        bytes.extend_from_slice(b"\r\n--b--\r\n");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("host", service.address.to_string().parse().unwrap());
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", service.token.as_str())
+                .parse()
+                .unwrap(),
+        );
+        headers.insert(
+            "content-type",
+            "multipart/form-data; boundary=b".parse().unwrap(),
+        );
+        let response = service
+            .host
+            .operations(
+                RequestMetadata {
+                    peer: "127.0.0.1:45678".parse().unwrap(),
+                    headers,
+                    content_length: Some(bytes.len() as u64),
+                },
+                axum::body::Body::from(bytes),
+            )
+            .await
+            .unwrap();
+        let deadline = response
+            .extensions()
+            .get::<oncl_server::service::ResponseDelivery>()
+            .unwrap()
+            .deadline();
+        let mut body = response.into_body();
+        let held = loop {
+            let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+            let name = if final_queue {
+                "name=\"final\""
+            } else {
+                "name=\"progress\""
+            };
+            if frame
+                .windows(name.len())
+                .any(|value| value == name.as_bytes())
+            {
+                break frame;
+            }
+        };
+        let slice = held.slice(0..1);
+        drop(held);
+        tokio::time::sleep(deadline.remaining()).await;
+        let next = body.frame().await;
+        match next {
+            Some(Err(error)) => {
+                let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+                let mut typed = false;
+                while let Some(current) = source {
+                    if matches!(
+                        current.downcast_ref::<oncl_pki::resource::ProcessingError>(),
+                        Some(oncl_pki::resource::ProcessingError::DeadlineExceeded)
+                    ) {
+                        typed = true;
+                        break;
+                    }
+                    source = current.source();
+                }
+                assert!(typed, "typed original deadline lost: {error:?}");
+            }
+            _ => panic!("queued multipart data must not escape original deadline"),
+        }
+        drop(body);
+        assert!(
+            service
+                .host
+                .engine
+                .admit(Arc::new(oncl_server::executor::Cancellation::new()))
+                .is_err(),
+            "a retained real multipart slice must keep its original root"
+        );
+        drop(slice);
+        service.stop().await;
+    }
+}

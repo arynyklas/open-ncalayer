@@ -42,7 +42,7 @@ fn scratch_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 #[cfg(windows)]
 fn assert_owner_only_file(path: &std::path::Path) {
-    let script = r#"$a=Get-Acl -LiteralPath '__PATH__';$t=[System.Security.Principal.SecurityIdentifier];[pscustomobject]@{owner=$a.GetOwner($t).Value;current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;rules=@($a.GetAccessRules($true,$true,$t)|ForEach-Object{[pscustomobject]@{sid=$_.IdentityReference.Value;kind=$_.AccessControlType.ToString()}})}|ConvertTo-Json -Depth 4 -Compress"#;
+    let script = r#"$a=Get-Acl -LiteralPath '__PATH__';$t=[System.Security.Principal.SecurityIdentifier];[pscustomobject]@{owner=$a.GetOwner($t).Value;current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;protected=$a.AreAccessRulesProtected;rules=@($a.GetAccessRules($true,$true,$t)|ForEach-Object{[pscustomobject]@{sid=$_.IdentityReference.Value;kind=$_.AccessControlType.ToString()}})}|ConvertTo-Json -Depth 4 -Compress"#;
     let script = script.replace("__PATH__", &path.to_string_lossy().replace('\'', "''"));
     let output = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -52,6 +52,10 @@ fn assert_owner_only_file(path: &std::path::Path) {
     let acl: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(acl["owner"], acl["current"]);
     let rules = acl["rules"].as_array().unwrap();
+    assert_eq!(
+        acl["protected"], true,
+        "actual child scratch file DACL must be protected"
+    );
     assert!(!rules.is_empty());
     for rule in rules {
         assert_eq!(rule["sid"], acl["current"]);

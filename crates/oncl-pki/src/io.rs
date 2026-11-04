@@ -756,13 +756,16 @@ mod platform {
     use crate::private_fs::windows_security::{owner_descriptor, verify_private_directory};
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::path::PathBuf;
-    use windows_sys::Win32::Foundation::FALSE;
+    use windows_sys::Win32::Foundation::{
+        FALSE, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateDirectoryW, DELETE, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL,
+        FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         FileDispositionInfo, SetFileInformationByHandle,
     };
 
@@ -813,13 +816,33 @@ mod platform {
         pub(super) fn create_file(&self, name: &str) -> io::Result<File> {
             // The root handle denies delete sharing: the private directory cannot
             // be renamed/replaced by a link while artifacts use its child paths.
-            // Files inherit only the explicitly protected root's owner-only ACE.
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .open(self.path.join(name))
+            // Give the file its own protected owner-only DACL. Merely inheriting
+            // the root's ACE does not set SE_DACL_PROTECTED on the new file.
+            let descriptor = owner_descriptor()?;
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor.0,
+                bInheritHandle: FALSE,
+            };
+            let path = wide(&self.path.join(name))?;
+            // SAFETY: internally generated component and pinned nonreplaceable
+            // root; path/descriptor live through exclusive non-reparse creation.
+            let handle = unsafe {
+                CreateFileW(
+                    path.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    &attributes,
+                    CREATE_NEW,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: successful CreateFileW returns exactly one owned handle.
+            Ok(unsafe { File::from_raw_handle(handle) })
         }
         pub(super) fn remove_file(&self, name: &str) {
             let _ = fs::remove_file(self.path.join(name));

@@ -238,10 +238,10 @@ impl StreamState {
     }
     async fn next(&mut self) -> Result<Option<Bytes>, ProcessingError> {
         loop {
+            self.root.delivery().checkpoint()?;
             if let Some(bytes) = self.pending.pop_front() {
                 return Ok(Some(bytes));
             }
-            self.root.delivery().checkpoint()?;
             match self.phase {
                 Phase::Initial => {
                     self.progress_part()?;

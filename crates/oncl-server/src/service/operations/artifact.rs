@@ -241,13 +241,6 @@ impl ArtifactWriter {
 }
 impl Write for ArtifactWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.is_empty() {
-            return Ok(0);
-        }
-        self.state
-            .scope
-            .checkpoint()
-            .map_err(|error| self.state.io_error(error))?;
         let mut phase = self
             .state
             .phase
@@ -261,6 +254,13 @@ impl Write for ArtifactWriter {
                     .io_error(ProcessingError::InvalidInput("closed output writer")));
             }
         };
+        if let Err(error) = self.state.scope.checkpoint() {
+            body.failed = true;
+            return Err(self.state.io_error(error));
+        }
+        if bytes.is_empty() {
+            return Ok(0);
+        }
         let wanted = bytes.len().min(IO_CHUNK_BYTES);
         if let Err(error) = body.temp.grow(wanted as u64) {
             body.failed = true;
@@ -301,22 +301,25 @@ impl Write for ArtifactWriter {
         }
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.state
-            .scope
-            .checkpoint()
-            .map_err(|error| self.state.io_error(error))?;
         let mut phase = self
             .state
             .phase
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &mut *phase {
-            ArtifactPhase::Writing(body) if !body.failed => body
-                .file
-                .as_mut()
-                .expect("live artifact")
-                .flush()
-                .map_err(|error| self.state.io_error(error.into())),
+            ArtifactPhase::Writing(body) if !body.failed => {
+                let result = self.state.scope.checkpoint().and_then(|()| {
+                    body.file
+                        .as_mut()
+                        .expect("live artifact")
+                        .flush()
+                        .map_err(ProcessingError::Io)
+                });
+                result.map_err(|error| {
+                    body.failed = true;
+                    self.state.io_error(error)
+                })
+            }
             _ => Err(self
                 .state
                 .io_error(ProcessingError::InvalidInput("closed output flush"))),
@@ -433,6 +436,19 @@ mod tests {
         super::super::ownership::ContextGuard,
         Arc<ArtifactStore>,
     ) {
+        fixture_control(output, temp, None)
+    }
+    fn fixture_control(
+        output: u64,
+        temp: u64,
+        control: Option<Arc<dyn oncl_pki::resource::OperationControl>>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<Engine>,
+        Arc<OperationOutput>,
+        super::super::ownership::ContextGuard,
+        Arc<ArtifactStore>,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let scratch = directory.path().join("scratch");
         drop(oncl_pki::private_fs::PrivateDirectory::create(&scratch).unwrap());
@@ -456,7 +472,7 @@ mod tests {
             .begin(
                 ExecutionGrant::new([Action::Extract]),
                 OperationPolicy::strict_online(),
-                cancel.clone(),
+                control.unwrap_or_else(|| cancel.clone()),
             )
             .unwrap();
         let delivery = ResponseDelivery {
@@ -666,5 +682,40 @@ mod tests {
         drop(slice);
         assert!(other.resources().reserve_temp(1).is_ok());
         executor.idle().await;
+    }
+    #[test]
+    fn failed_flush_permanently_seals_actual_writing_body_after_control_recovers() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct FlushControl(AtomicBool);
+        impl oncl_pki::resource::OperationControl for FlushControl {
+            fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+                if self.0.load(Ordering::SeqCst) {
+                    Err(ProcessingError::Io(io::Error::from_raw_os_error(5)))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let control = Arc::new(FlushControl(AtomicBool::new(false)));
+        let (_directory, _engine, root, mut guard, store) =
+            fixture_control(16, 10_000, Some(control.clone()));
+        let mut writer = ArtifactWriter::new(store.clone(), root.clone(), guard.context()).unwrap();
+        guard.context().resources().account_output(3).unwrap();
+        writer.write_all(b"abc").unwrap();
+        control.0.store(true, Ordering::SeqCst);
+        assert!(writer.flush().is_err());
+        control.0.store(false, Ordering::SeqCst);
+        assert!(
+            writer.write(b"later").is_err(),
+            "a later successful control checkpoint must not unpoison output"
+        );
+        assert!(writer.flush().is_err());
+        assert!(writer.finish(3).is_err());
+        assert!(store.directory().names().unwrap().is_empty());
+        let recovered = root.failure().recover(ProcessingError::DeadlineExceeded);
+        match intake::first_cause(&recovered) {
+            ProcessingError::Io(original) => assert_eq!(original.raw_os_error(), Some(5)),
+            _ => panic!("first owned flush cause was lost"),
+        }
     }
 }
