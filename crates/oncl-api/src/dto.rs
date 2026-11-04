@@ -13,19 +13,19 @@ pub struct HashResponse {
 
 /// Authority-free wire metadata. The trusted host resolves every operation and
 /// part role before consuming any document or secret field.
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperationMetadata {
     pub items: Vec<ItemMetadata>,
     pub parts: Vec<PartMetadata>,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemMetadata {
     pub id: String,
     pub operation: Operation,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     Hash {
@@ -169,7 +169,7 @@ pub enum Operation {
 }
 /// Inspection inputs. `container`/`password` name `secret` parts (memory only);
 /// certificate and CMS inputs are ordinary public documents.
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InspectTarget {
     Certificate {
@@ -188,7 +188,7 @@ pub enum InspectTarget {
         name: String,
     },
 }
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignKind {
     Cms,
@@ -217,7 +217,7 @@ pub enum SoapKind {
     Soap11,
     Soap12,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JwsFormat {
     Compact,
@@ -231,27 +231,27 @@ pub enum SignWriteMode {
     Create,
     Add,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginKeyRef {
     pub handle: u32,
     pub name: String,
 }
 /// A public `document` part carrying DER evidence.
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceRef {
     pub kind: EvidenceKind,
     pub input: String,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceKind {
     Certificate,
     Ocsp,
     Crl,
 }
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtendKind {
     CadesT,
@@ -266,7 +266,7 @@ pub enum ExtendKind {
 }
 /// Key reference. `container`/`password` name `secret` parts of the same item;
 /// no client path, token reader or certificate fingerprint is accepted.
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum KeyRef {
     Named {
@@ -280,7 +280,7 @@ pub enum KeyRef {
         alias: Option<String>,
     },
 }
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HashAlgorithm {
     Sha1,
@@ -290,7 +290,7 @@ pub enum HashAlgorithm {
     Streebog256,
     Streebog512,
 }
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifyProfile {
     Cms,
@@ -311,14 +311,14 @@ pub enum VerifyProfile {
     XadesLta,
     Wsse,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PartMetadata {
     pub name: String,
     pub item_id: String,
     pub role: PartRole,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartRole {
     Document,
@@ -351,7 +351,7 @@ pub enum ResponseEvent {
         error: Option<crate::error::ApiError>,
     },
 }
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchStatus {
     /// Every item completed (a completed verification may still report Invalid).
@@ -361,14 +361,14 @@ pub enum BatchStatus {
     /// The batch was refused or aborted before any item could run.
     Failed,
 }
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchItemOutcome {
     Completed,
     Failed,
     NotRun,
 }
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchStopKind {
     /// Cancellation, deadline or a lost shared resource before the next item.
@@ -407,7 +407,7 @@ pub struct BatchItemRecord {
     pub result: Option<OperationResult>,
     pub sources: Vec<SourceIdentity>,
 }
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinalStatus {
     Completed,

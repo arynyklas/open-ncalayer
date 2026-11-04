@@ -1,6 +1,6 @@
 [package]
 name = "oncl-api"
-description = "OpenNCALayer HTTP hash DTO and optional server transport"
+description = "OpenNCALayer HTTP DTOs, optional server transport and optional streaming client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,8 @@ publish.workspace = true
 
 [features]
 default = []
+# Streaming HTTP client of the typed contract: ureq (rustls) only, never Tokio/axum/hyper.
+client = ["dep:ureq", "dep:serde_json", "dep:zeroize", "dep:getrandom"]
 server = ["dep:axum", "dep:multer", "dep:futures-util", "dep:serde_json"]
 
 [dependencies]
@@ -18,8 +20,13 @@ axum = { workspace = true, optional = true }
 multer = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+ureq = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Enables the optional client in this package's own tests.
+oncl-api = { path = ".", features = ["client", "server"] }
 tokio = { workspace = true, features = ["macros"] }
 oncl-server = { path = "../oncl-server", features = ["test-support"] }
 tempfile.workspace = true

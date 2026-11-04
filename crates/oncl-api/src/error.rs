@@ -23,7 +23,7 @@ pub enum ErrorCode {
     OperationFailed,
     Internal,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ApiError {
     pub code: ErrorCode,

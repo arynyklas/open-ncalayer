@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MANIFEST_BYTES: usize = 1 << 20;
+pub(crate) const MANIFEST_BYTES: usize = 1 << 20;
 const MAX_ITEMS: usize = 256;
 
 #[derive(Subcommand)]
@@ -31,7 +31,7 @@ pub struct BatchArgs {
     #[arg(long, requires = "key")]
     pub alias: Option<String>,
     /// Operator-configured key by name (see `--key-config`); no container path on the command line.
-    #[arg(long, requires = "key_config", conflicts_with_all = ["key", "alias"])]
+    #[arg(long, conflicts_with_all = ["key", "alias"])]
     pub key_name: Option<String>,
     #[arg(long, requires = "key_name")]
     pub key_config: Option<PathBuf>,
@@ -45,7 +45,7 @@ pub struct BatchArgs {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum Algorithm {
+pub(crate) enum Algorithm {
     Sha256,
     Gost2004,
     #[serde(rename = "gost2015-512")]
@@ -53,14 +53,14 @@ enum Algorithm {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum SignProfile {
+pub(crate) enum SignProfile {
     Cms,
     CmsDetached,
     Raw,
 }
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", deny_unknown_fields)]
-enum Item {
+pub(crate) enum Item {
     Hash {
         id: String,
         algorithm: Algorithm,
@@ -85,11 +85,11 @@ enum Item {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Manifest {
-    items: Vec<Item>,
+pub(crate) struct Manifest {
+    pub(crate) items: Vec<Item>,
 }
 impl Item {
-    fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         match self {
             Self::Hash { id, .. }
             | Self::Sign { id, .. }
@@ -97,13 +97,13 @@ impl Item {
             | Self::Extract { id, .. } => id,
         }
     }
-    fn output(&self) -> Option<&Path> {
+    pub(crate) fn output(&self) -> Option<&Path> {
         match self {
             Self::Sign { output, .. } | Self::Extract { output, .. } => Some(output),
             _ => None,
         }
     }
-    fn inputs(&self) -> Vec<&Path> {
+    pub(crate) fn inputs(&self) -> Vec<&Path> {
         match self {
             Self::Hash { input, .. } | Self::Sign { input, .. } | Self::Extract { input, .. } => {
                 vec![input]
@@ -158,7 +158,7 @@ impl BatchCommand {
     }
 }
 /// Complete admission of the host manifest before any source or key I/O.
-fn parse(bytes: &[u8], has_key: bool) -> Result<Manifest, &'static str> {
+pub(crate) fn parse(bytes: &[u8], has_key: bool) -> Result<Manifest, &'static str> {
     let manifest: Manifest = serde_json::from_slice(bytes).map_err(|_| "InvalidManifest")?;
     if manifest.items.is_empty() || manifest.items.len() > MAX_ITEMS {
         return Err("ManifestLimit");
@@ -197,33 +197,33 @@ fn parse(bytes: &[u8], has_key: bool) -> Result<Manifest, &'static str> {
     Ok(manifest)
 }
 #[derive(Serialize)]
-struct Row {
-    id: String,
-    status: &'static str,
-    code: String,
-    applied: String,
+pub(crate) struct Row {
+    pub(crate) id: String,
+    pub(crate) status: &'static str,
+    pub(crate) code: String,
+    pub(crate) applied: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    verdict: Option<&'static str>,
+    pub(crate) verdict: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    published: Option<bool>,
+    pub(crate) published: Option<bool>,
     /// Hash items: algorithm and lowercase hex digest of the exact captured bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
-    digest: Option<Digest>,
+    pub(crate) digest: Option<Digest>,
 }
 #[derive(Serialize)]
-struct Digest {
-    algorithm: &'static str,
-    hex: String,
+pub(crate) struct Digest {
+    pub(crate) algorithm: &'static str,
+    pub(crate) hex: String,
 }
 #[derive(Serialize)]
-struct Report {
-    operation_id: u64,
-    code: &'static str,
-    attempted: usize,
-    completed: usize,
-    total: usize,
-    stop: Option<String>,
-    items: Vec<Row>,
+pub(crate) struct Report {
+    pub(crate) operation_id: u64,
+    pub(crate) code: &'static str,
+    pub(crate) attempted: usize,
+    pub(crate) completed: usize,
+    pub(crate) total: usize,
+    pub(crate) stop: Option<String>,
+    pub(crate) items: Vec<Row>,
 }
 fn verdict_rank(verdict: Verdict) -> (&'static str, i32) {
     crate::reports::verdict(verdict)
@@ -458,25 +458,7 @@ pub fn run(
         stop,
         items: rows,
     };
-    let mut human = format!("{}/{} items completed", summary.completed, summary.total);
-    for row in &report.items {
-        human.push_str(&format!("\n{}: {}", row.id, row.status));
-        if row.status == "Failed" {
-            human.push_str(&format!(" ({})", row.code));
-        }
-        if let Some(verdict) = row.verdict {
-            human.push_str(&format!(" {verdict}"));
-        }
-        if let Some(digest) = &row.digest {
-            human.push_str(&format!(" {} {}", digest.algorithm, digest.hex));
-        }
-        if row.applied != "NotApplied" {
-            human.push_str(&format!(" applied={}", row.applied));
-        }
-        if row.published == Some(true) {
-            human.push_str(" published");
-        }
-    }
+    let human = human(&report);
     if ctx.resources().checkpoint().is_err() {
         // The stop outcome (130/4) wins: a report that cannot be delivered is
         // diagnosed, never allowed to replace the exit decision.
@@ -497,7 +479,30 @@ pub fn run(
         worst
     })
 }
-fn worst_verdict(current: i32, next: i32) -> i32 {
+/// The text form of a batch report (one line per item), shared by local and remote runs.
+pub(crate) fn human(report: &Report) -> String {
+    let mut human = format!("{}/{} items completed", report.completed, report.total);
+    for row in &report.items {
+        human.push_str(&format!("\n{}: {}", row.id, row.status));
+        if row.status == "Failed" {
+            human.push_str(&format!(" ({})", row.code));
+        }
+        if let Some(verdict) = row.verdict {
+            human.push_str(&format!(" {verdict}"));
+        }
+        if let Some(digest) = &row.digest {
+            human.push_str(&format!(" {} {}", digest.algorithm, digest.hex));
+        }
+        if row.applied != "NotApplied" {
+            human.push_str(&format!(" applied={}", row.applied));
+        }
+        if row.published == Some(true) {
+            human.push_str(" published");
+        }
+    }
+    human
+}
+pub(crate) fn worst_verdict(current: i32, next: i32) -> i32 {
     // Invalid (2) outranks Indeterminate (3), which outranks Valid (0).
     let rank = |code: i32| match code {
         2 => 2,

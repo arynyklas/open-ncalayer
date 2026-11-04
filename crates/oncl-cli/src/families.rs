@@ -10,7 +10,7 @@ pub struct InspectArgs {
     #[arg(long)]
     pub alias: Vec<String>,
     /// `named-key`: operator-configured key to read public metadata of.
-    #[arg(long, requires = "key_config")]
+    #[arg(long)]
     pub key_name: Option<String>,
     #[arg(long, requires = "key_name")]
     pub key_config: Option<PathBuf>,
@@ -72,7 +72,7 @@ pub enum TimestampCommand {
         #[arg(long)]
         output: String,
         #[arg(long)]
-        tsa: String,
+        tsa: Option<String>,
         #[arg(long, value_enum, default_value = "sha256")]
         algorithm: crate::args::Algorithm,
     },
