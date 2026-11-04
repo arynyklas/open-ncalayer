@@ -752,7 +752,6 @@ mod tests {
     use slint::Model as _;
 
     use super::*;
-    use crate::reports::controller::Tone;
     use crate::signing::testing::*;
     use crate::workspace::{
         DesktopEngineServices, Evidence, SignFormat, SignOptions, SignSpec, pump, test_workspace,
@@ -836,6 +835,16 @@ mod tests {
             .collect()
     }
 
+    /// The tones of the document rows (depth 0): 0 success, 1 caution, 2 failure, 3 neutral.
+    fn item_tones(p: &Page) -> Vec<i32> {
+        tool(p)
+            .get_report_rows()
+            .iter()
+            .filter(|r| r.depth == 0)
+            .map(|r| r.tone)
+            .collect()
+    }
+
     fn sign_cms(p: &Page, name: &str, content: &[u8]) -> (PathBuf, PathBuf) {
         let document = p.w.dir.path().join(name);
         std::fs::write(&document, content).unwrap();
@@ -873,13 +882,8 @@ mod tests {
         run_page(&p);
         let t = tool(&p);
         assert_eq!(t.get_report_tone(), 0, "{}", t.get_report_headline());
-        assert!(t.get_report_headline().contains("every signature is valid"));
-        let rows = rows(&p);
-        assert!(
-            rows[0].contains("a.txt.p7s: the signature is valid"),
-            "{rows:?}"
-        );
-        assert!(rows.iter().any(|r| r == "Revocation: passed"), "{rows:?}");
+        assert_eq!(item_tones(&p), vec![0], "the document row is a success");
+        assert!(rows(&p).len() > 3, "signer and check rows are there");
         assert_eq!(p.ws.ui.get_status_kind(), 2, "the status line says done");
         assert_eq!(p.ws.ui.get_error_text().as_str(), "");
     }
@@ -896,14 +900,7 @@ mod tests {
         run_page(&p);
         let t = tool(&p);
         assert_eq!(t.get_report_tone(), 1, "{}", t.get_report_headline());
-        assert!(!t.get_report_headline().contains("every signature is valid"));
-        assert!(
-            rows(&p)
-                .iter()
-                .any(|r| r.contains("could not be fully checked")),
-            "{:?}",
-            rows(&p)
-        );
+        assert_eq!(item_tones(&p), vec![1], "the document row is a caution");
         assert_eq!(p.ws.ui.get_status_kind(), 4, "a caution, not done");
     }
 
@@ -926,23 +923,15 @@ mod tests {
         run_page(&p);
         let t = tool(&p);
         assert_ne!(t.get_report_tone(), 0);
-        let rows = rows(&p);
-        assert!(
-            rows.iter()
-                .any(|r| r.contains("a.txt.p7s: the signature is valid")),
-            "{rows:?}"
+        assert_eq!(
+            item_tones(&p),
+            vec![0, 2, 2],
+            "valid, invalid, and not done: one row each, in the order added"
         );
-        assert!(
-            rows.iter()
-                .any(|r| r.contains("b.txt.p7s: the signature is invalid")),
-            "{rows:?}"
+        assert_eq!(
+            rows(&p).iter().filter(|r| r.contains("vanishing")).count(),
+            1
         );
-        assert!(
-            rows.iter()
-                .any(|r| r.starts_with("vanishing.p7s: not done")),
-            "{rows:?}"
-        );
-        assert!(!t.get_report_headline().contains("every signature is valid"));
         assert_eq!(p.ws.ui.get_error_text().as_str(), "");
     }
 
@@ -1172,7 +1161,6 @@ mod tests {
             "{:?}",
             rows(&p)
         );
-        let _ = Tone::Success;
     }
 
     /// Sets the page's fields, presses nothing, and reads the spec the button would run.

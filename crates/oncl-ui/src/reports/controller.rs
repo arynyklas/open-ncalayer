@@ -236,6 +236,14 @@ pub struct BatchView {
 }
 
 impl Detail {
+    /// Whether this result is a file the item was to write.
+    pub fn needs_output(&self) -> bool {
+        matches!(
+            self,
+            Detail::Written { .. } | Detail::Extracted { .. } | Detail::Stamped(_)
+        )
+    }
+
     /// `published`: the file this item was to write is there. A result whose file is not
     /// there is not a success, whatever the engine made.
     fn tone(&self, published: bool) -> Tone {
@@ -304,16 +312,6 @@ pub fn key_use(applied: AppliedState) -> KeyUse {
     }
 }
 
-/// A worker that was lost (it broke off, or its answer never came) after the consent that lets
-/// the key be applied: the key may have been applied, and nobody can say. Never «not used».
-pub fn key_use_after_loss(consented: bool) -> KeyUse {
-    if consented {
-        KeyUse::Unknown
-    } else {
-        KeyUse::NotUsed
-    }
-}
-
 /// The verdict of several reports of one item: the worst of them. A `Valid` never covers an
 /// `Indeterminate` or an `Invalid` one, and no report at all is not `Valid`.
 pub fn combine_verdicts(verdicts: impl IntoIterator<Item = Verdict>) -> Verdict {
@@ -341,6 +339,8 @@ pub struct Counts {
     pub unchecked: usize,
     pub failed: usize,
     pub not_run: usize,
+    /// Made but not written: not completed, and not a failed verification.
+    pub unwritten: usize,
 }
 
 /// What the page says first about a batch.
@@ -382,7 +382,13 @@ impl BatchView {
         };
         for item in &self.items {
             match &item.outcome {
-                Outcome::Completed(_) => {
+                Outcome::Completed(detail) => {
+                    // A result whose file was to be written and is not there did not complete:
+                    // it is not «invalid», it is not written.
+                    if detail.needs_output() && item.output.is_none() {
+                        counts.unwritten += 1;
+                        continue;
+                    }
                     counts.completed += 1;
                     match item.tone() {
                         Tone::Success => counts.succeeded += 1,
@@ -703,8 +709,6 @@ mod tests {
         assert_eq!(key_use(AppliedState::NotApplied), KeyUse::NotUsed);
         assert_eq!(key_use(AppliedState::Applied), KeyUse::Used);
         assert_eq!(key_use(AppliedState::Unknown), KeyUse::Unknown);
-        assert_eq!(key_use_after_loss(true), KeyUse::Unknown);
-        assert_eq!(key_use_after_loss(false), KeyUse::NotUsed);
         // A failure after the key was applied is not «not used»; one the engine could not
         // place is not either.
         for (applied, expected) in [

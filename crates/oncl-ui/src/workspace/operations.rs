@@ -41,7 +41,7 @@ use oncl_core::{
 use oncl_pdf::{PdfLimits, PdfSignProfile};
 use oncl_pki::cms::ades::ValidationMaterial;
 use oncl_pki::evidence::{AdesLevel, EvidenceLimits};
-use oncl_pki::http::{NonceSpec, PkiMethod};
+use oncl_pki::http::NonceSpec;
 use oncl_pki::io::{Source, StagedArtifact, TemporaryStore};
 use oncl_pki::key::{AppliedState, HashAlg};
 use oncl_pki::tsp::{TsaProfile, TsaSpec};
@@ -677,7 +677,6 @@ struct Opened {
     second: Option<(File, u64)>,
     /// The bytes of a small document, for the formats that work on bytes in memory.
     payload: Option<Vec<u8>>,
-    second_payload: Option<Vec<u8>>,
 }
 
 /// JOSE reads the whole token: its container is bounded, so is what is read.
@@ -862,25 +861,16 @@ fn open_document(
 ) -> Result<Opened, JobError> {
     let (file, len) = open_regular(&document.path)?;
     let second = document.second.as_deref().map(open_regular).transpose()?;
-    let (payload, second_payload) = if words_in_memory {
-        let limit = jose_limit(format);
-        (
-            Some(read_limited(&document.path, limit)?),
-            document
-                .second
-                .as_deref()
-                .map(|p| read_limited(p, limit))
-                .transpose()?,
-        )
+    let payload = if words_in_memory {
+        Some(read_limited(&document.path, jose_limit(format))?)
     } else {
-        (None, None)
+        None
     };
     Ok(Opened {
         file,
         len,
         second,
         payload,
-        second_payload,
     })
 }
 
@@ -896,7 +886,6 @@ fn tool_operation<'a>(
         len,
         second,
         payload,
-        second_payload,
     } = opened;
     let input = Source::seekable(file, Some(*len));
     let second = second
@@ -931,7 +920,6 @@ fn tool_operation<'a>(
                     VerifyFormat::Pades(l) => VerifyRequest::pades(l.sdk(), evidence_limits()),
                     VerifyFormat::Jws | VerifyFormat::Jwt => unreachable!("matched above"),
                 };
-                let _ = second_payload;
                 BatchOperation::Verify {
                     request,
                     input,
@@ -2440,7 +2428,7 @@ mod tests {
         };
         assert_eq!(
             revision(1).text,
-            "Revision 1 (1 signature(s)): the file was changed after signing"
+            "Revision 1 (1 signature(s)): later revisions exist after this signature (another signature or an allowed change)"
         );
         assert_eq!(revision(1).tone, Tone::Caution);
         assert_eq!(

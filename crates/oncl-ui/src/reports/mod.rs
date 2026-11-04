@@ -47,12 +47,26 @@ pub(crate) fn tone_number(tone: Tone) -> i32 {
     }
 }
 
+/// The most rows a report shows (the rest is counted in one last row).
+const MAX_ROWS: usize = 200;
+
 /// The report of `view`, in `locale`.
 pub(crate) fn render(locale: Locale, view: &BatchView) -> Rendered {
     let t = Texts::of(locale);
     let mut rows = Vec::new();
     for item in &view.items {
         item_rows(t, view.family, view.network, item, &mut rows);
+    }
+    // A page is not built of thousands of elements: the rest is counted, not shown.
+    if rows.len() > MAX_ROWS {
+        let more = rows.len() - MAX_ROWS;
+        rows.truncate(MAX_ROWS);
+        rows.push(Row {
+            depth: 0,
+            tone: Tone::Neutral,
+            text: t.more_rows.replace("{0}", &more.to_string()),
+            detail: String::new(),
+        });
     }
     let mut headline = headline_text(t, view);
     if view.family.uses_key() {
@@ -139,6 +153,15 @@ fn key_clause(t: &Texts, item: &ItemView) -> &'static str {
         KeyUse::NotUsed => t.key_not_used,
         KeyUse::Used => t.key_used,
         KeyUse::Unknown => t.key_unknown,
+    }
+}
+
+/// The verdict of a time stamp token, in its own words (it is not «a signature»).
+fn stamp_word(t: &Texts, verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Valid => t.stamp_valid,
+        Verdict::Invalid => t.stamp_invalid,
+        Verdict::Indeterminate => t.verdict_indeterminate,
     }
 }
 
@@ -233,12 +256,12 @@ fn item_rows(t: &Texts, family: Family, network: bool, item: &ItemView, rows: &m
                 let text = if acquired && item.output.is_some() {
                     t.stamp_acquired
                         .replace("{0}", &item.name)
-                        .replace("{1}", verdict_word(t, s.verdict))
+                        .replace("{1}", stamp_word(t, s.verdict))
                         .replace("{2}", &output)
                 } else if acquired {
                     t.stamp_not_written.replace("{0}", &item.name)
                 } else {
-                    format!("{}: {}", item.name, verdict_word(t, s.verdict))
+                    format!("{}: {}", item.name, stamp_word(t, s.verdict))
                 };
                 rows.push(Row {
                     depth: 0,
@@ -646,6 +669,8 @@ fn code_text(t: &Texts, code: ErrorCode, network: bool) -> &'static str {
 
 struct Texts {
     nothing: &'static str,
+    /// `{0}` rows that are not shown.
+    more_rows: &'static str,
     /// Per family: sign, verify, extend, extract, stamp, stamp check. `{0}` count.
     all_succeeded: [&'static str; 6],
     /// `{0}` count, `{1}` what was found.
@@ -688,6 +713,8 @@ struct Texts {
     claims_ok: &'static str,
     claims_bad: &'static str,
     claims_unsure: &'static str,
+    stamp_valid: &'static str,
+    stamp_invalid: &'static str,
     token_claims_failed: &'static str,
     basis_current: &'static str,
     basis_timestamp: &'static str,
@@ -770,6 +797,7 @@ impl Texts {
 
 static RU: Texts = Texts {
     nothing: "Нечего показать.",
+    more_rows: "…и ещё строк: {0} (не показаны)",
     all_succeeded: [
         "Подписано документов: {0}.",
         "Проверено документов: {0}; все подписи действительны.",
@@ -815,6 +843,8 @@ static RU: Texts = Texts {
     claims_ok: "выполняются",
     claims_bad: "не выполняются",
     claims_unsure: "не удалось полностью проверить",
+    stamp_valid: "метка времени действительна",
+    stamp_invalid: "метка времени недействительна",
     token_claims_failed: "{0}: подпись действительна, но утверждения токена не выполняются",
     basis_current: "время проверки: сейчас ({0})",
     basis_timestamp: "время: по подтверждённой метке ({0})",
@@ -830,7 +860,7 @@ static RU: Texts = Texts {
     reference_matches: "дайджест совпадает",
     reference_differs: "дайджест не совпадает",
     pdf_revision: "Редакция {0} ({1} подп.): {2}",
-    pdf_changed_after: "после подписи файл изменялся",
+    pdf_changed_after: "после этой подписи есть более поздние редакции (другая подпись или допустимое изменение)",
     pdf_unchanged_after: "после подписи файл не изменялся",
     pdf_extent: "Размер PDF: {0} байт",
     claim_no_exp: "нет срока действия (exp)",
@@ -887,6 +917,7 @@ static RU: Texts = Texts {
 
 static KK: Texts = Texts {
     nothing: "Көрсетерлік ештеңе жоқ.",
+    more_rows: "…және тағы {0} жол (көрсетілмеген)",
     all_succeeded: [
         "Қол қойылған құжаттар: {0}.",
         "Тексерілген құжаттар: {0}; барлық қолтаңбалар жарамды.",
@@ -932,6 +963,8 @@ static KK: Texts = Texts {
     claims_ok: "орындалады",
     claims_bad: "орындалмайды",
     claims_unsure: "толық тексеру мүмкін болмады",
+    stamp_valid: "уақыт белгісі жарамды",
+    stamp_invalid: "уақыт белгісі жарамсыз",
     token_claims_failed: "{0}: қолтаңба жарамды, бірақ токен мәлімдемелері орындалмайды",
     basis_current: "тексеру уақыты: қазір ({0})",
     basis_timestamp: "уақыты: расталған белгі бойынша ({0})",
@@ -947,7 +980,7 @@ static KK: Texts = Texts {
     reference_matches: "дайджест сәйкес",
     reference_differs: "дайджест сәйкес емес",
     pdf_revision: "Түзету {0} ({1} қолт.): {2}",
-    pdf_changed_after: "қол қойылғаннан кейін файл өзгерген",
+    pdf_changed_after: "осы қолтаңбадан кейін кейінгі түзетулер бар (басқа қолтаңба немесе рұқсат етілген өзгеріс)",
     pdf_unchanged_after: "қол қойылғаннан кейін файл өзгермеген",
     pdf_extent: "PDF өлшемі: {0} байт",
     claim_no_exp: "жарамдылық мерзімі (exp) жоқ",
@@ -1004,6 +1037,7 @@ static KK: Texts = Texts {
 
 static EN: Texts = Texts {
     nothing: "Nothing to show.",
+    more_rows: "…and {0} more rows (not shown)",
     all_succeeded: [
         "Signed documents: {0}.",
         "Checked documents: {0}; every signature is valid.",
@@ -1049,6 +1083,8 @@ static EN: Texts = Texts {
     claims_ok: "hold",
     claims_bad: "do not hold",
     claims_unsure: "could not be fully checked",
+    stamp_valid: "the timestamp is valid",
+    stamp_invalid: "the timestamp is invalid",
     token_claims_failed: "{0}: the signature is valid, but the token's claims do not hold",
     basis_current: "time of the check: now ({0})",
     basis_timestamp: "time: by a verified timestamp ({0})",
@@ -1064,7 +1100,7 @@ static EN: Texts = Texts {
     reference_matches: "digest matches",
     reference_differs: "digest does not match",
     pdf_revision: "Revision {0} ({1} signature(s)): {2}",
-    pdf_changed_after: "the file was changed after signing",
+    pdf_changed_after: "later revisions exist after this signature (another signature or an allowed change)",
     pdf_unchanged_after: "the file was not changed after signing",
     pdf_extent: "PDF size: {0} bytes",
     claim_no_exp: "no expiration (exp)",
@@ -1297,6 +1333,30 @@ mod tests {
             let r = render(locale, &view);
             assert_eq!(r.tone, Tone::Neutral);
             assert!(r.rows[0].text.contains(word), "{locale:?}: {r:?}");
+        }
+    }
+
+    /// A big batch is capped: 200 rows and one that says how many are not shown, in every
+    /// language; the headline still counts every document.
+    #[test]
+    fn a_big_report_is_capped_and_says_how_many_rows_are_not_shown() {
+        let items: Vec<ItemView> = (0..60)
+            .map(|_| verified(Verdict::Valid, CheckStatus::Passed))
+            .collect();
+        let view = batch(items);
+        for locale in LOCALES {
+            let r = render(locale, &view);
+            assert_eq!(r.rows.len(), MAX_ROWS + 1, "{locale:?}");
+            let last = r.rows.last().unwrap();
+            assert_eq!((last.depth, last.tone), (0, Tone::Neutral));
+            assert!(
+                last.text.contains(&format!("{}", 60 * 6 - MAX_ROWS)) || last.text.contains('…')
+            );
+            assert!(
+                r.headline.contains("60"),
+                "the headline counts every document: {}",
+                r.headline
+            );
         }
     }
 }

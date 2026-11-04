@@ -150,6 +150,9 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
     sign::connect(&ui);
     tools::connect(&ui);
     ui.window().on_close_requested(|| {
+        if closing_is_blocked() {
+            return CloseRequestResponse::KeepWindowShown;
+        }
         close();
         CloseRequestResponse::HideWindow
     });
@@ -346,11 +349,7 @@ fn start(
     + 'static,
 ) {
     let started = match open.controller.borrow_mut().begin(job, |stamp| {
-        JobControl::reporting(Reporter::with_delivery(
-            stamp,
-            apply_progress,
-            deliver_boxed,
-        ))
+        JobControl::reporting(Reporter::new(stamp, apply_progress))
     }) {
         Ok(started) => started,
         Err(Busy) => return,
@@ -407,9 +406,24 @@ fn start(
     }
 }
 
-/// How a worker's word reaches the event loop.
-fn deliver_boxed(f: Box<dyn FnOnce() + Send>) {
+/// The way a worker's closure reaches the event loop, for the progress handoff: whether it was
+/// handed over. The same function serves the application and the integration test on a real
+/// event loop; the unit tests of the windows have none and pump their queue instead.
+#[cfg(not(test))]
+fn deliver_boxed(f: Box<dyn FnOnce() + Send>) -> bool {
+    match slint::invoke_from_event_loop(f) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!(error = %e, "a worker's word or outcome is lost: the event loop is gone");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+fn deliver_boxed(f: Box<dyn FnOnce() + Send>) -> bool {
     deliver(f);
+    true
 }
 
 /// Hands `f` from a worker to the event loop. Tests have no loop: they pump the queue.
@@ -557,14 +571,59 @@ fn describe(t: &Texts, update: Update) -> (f32, String) {
     }
 }
 
+/// A signing that the user confirmed is running: the window stays, and says why.
+fn closing_is_blocked() -> bool {
+    current().is_some_and(|open| {
+        if sign::is_running(&open) {
+            open.ui.set_status_kind(4);
+            open.ui
+                .set_status_text(Texts::of(open.locale.get()).signing_running.into());
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// What an outcome says, for the log when it cannot be shown: for a signing, the key use of each
+/// item by number (never a document's name).
+fn lost_summary(result: &Result<Output, JobError>) -> String {
+    match result {
+        Ok(Output::Sign(sign::SignOutput::Signed(crate::signing::runner::Outcome::Done(view)))) => {
+            let items: Vec<String> = view
+                .items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| format!("#{i} {:?}", item.applied))
+                .collect();
+            format!("a signing finished, key use per item: {}", items.join(", "))
+        }
+        Ok(_) => "a result".to_owned(),
+        Err(e) => format!("a failure: {e:?}"),
+    }
+}
+
 /// The outcome of the action `stamp` into the window; a result that is not the running
 /// action's of the open window (its window was closed and another opened) changes nothing.
 fn settle(stamp: Stamp, result: Result<Output, JobError>) {
+    let summary = lost_summary(&result);
     let Some(open) = current() else {
+        tracing::error!(
+            window = stamp.window,
+            generation = stamp.generation,
+            outcome = %summary,
+            "an outcome arrived with no window open and is dropped"
+        );
         return;
     };
     let settled = open.controller.borrow_mut().finish(stamp, result);
     let Some(settled) = settled else {
+        tracing::error!(
+            window = stamp.window,
+            generation = stamp.generation,
+            outcome = %summary,
+            "the outcome of an operation that was left or whose window was closed is dropped"
+        );
         return;
     };
     let ui = &open.ui;
@@ -714,6 +773,7 @@ struct Texts {
     no_aliases: &'static str,
     no_folder: &'static str,
     no_evidence: &'static str,
+    signing_running: &'static str,
     duplicate_output: &'static str,
     not_found: &'static str,
     access_denied: &'static str,
@@ -790,6 +850,7 @@ static RU: Texts = Texts {
     no_aliases: "Укажите имена ключей, которые показать.",
     no_folder: "Укажите папку для результатов.",
     no_evidence: "Для уровней LT и LTA нужны данные проверки: сертификаты цепочки и хотя бы один ответ OCSP или список отзыва (CRL). Укажите файлы; ничего не выполнялось, ключ не применялся.",
+    signing_running: "Идёт подпись: ключ мог быть уже применён. Дождитесь результата или нажмите «Отмена»; окно не закрывается, чтобы вы узнали, чем всё кончилось.",
     duplicate_output: "Два документа дали бы один и тот же файл результата. Уберите один из них или выберите другое назначение; ничего не выполнялось.",
     not_found: "Файл не найден.",
     access_denied: "Нет доступа к файлу.",
@@ -855,6 +916,7 @@ static KK: Texts = Texts {
     no_aliases: "Көрсетілетін кілт атауларын жазыңыз.",
     no_folder: "Нәтижелерге арналған қалтаны көрсетіңіз.",
     no_evidence: "LT және LTA деңгейлеріне тексеру деректері қажет: тізбек сертификаттары және кемінде бір OCSP жауабы немесе күшін жою тізімі (CRL). Файлдарды көрсетіңіз; ештеңе орындалмады, кілт қолданылмады.",
+    signing_running: "Қол қою жүріп жатыр: кілт қолданылған болуы мүмкін. Нәтижені күтіңіз немесе «Бас тарту» басыңыз; немен аяқталғанын білуіңіз үшін терезе жабылмайды.",
     duplicate_output: "Екі құжат бір нәтиже файлын берер еді. Біреуін алыңыз немесе басқа тағайындауды таңдаңыз; ештеңе орындалмады.",
     not_found: "Файл табылмады.",
     access_denied: "Файлға қол жеткізу жоқ.",
@@ -920,6 +982,7 @@ static EN: Texts = Texts {
     no_aliases: "Enter the names of the keys to show.",
     no_folder: "Enter the folder for the results.",
     no_evidence: "Levels LT and LTA need validation data: the certificates of the chain and at least one OCSP response or CRL. Name the files; nothing was done and no key was used.",
+    signing_running: "A signing is running: the key may be applied already. Wait for the result or press Cancel; the window stays open so that you learn how it ended.",
     duplicate_output: "Two documents would give the same result file. Remove one of them or choose another destination; nothing was done.",
     not_found: "The file was not found.",
     access_denied: "No access to the file.",

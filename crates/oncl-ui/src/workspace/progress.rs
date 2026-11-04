@@ -126,13 +126,7 @@ impl Default for Lifecycle {
 }
 
 /// How a closure gets to the event loop.
-pub type Deliver = fn(Box<dyn FnOnce() + Send>);
-
-fn invoke_from_event_loop(f: Box<dyn FnOnce() + Send>) {
-    if let Err(e) = slint::invoke_from_event_loop(f) {
-        tracing::warn!(error = %e, "a worker's word is lost: the event loop is gone");
-    }
-}
+pub type Deliver = fn(Box<dyn FnOnce() + Send>) -> bool;
 
 struct Shared {
     stamp: Stamp,
@@ -140,6 +134,7 @@ struct Shared {
     wake_pending: AtomicBool,
     coalesced: AtomicU64,
     wakes: AtomicU64,
+    lost: AtomicU64,
     /// Shows one word; runs on the event loop.
     apply: fn(Stamp, Update),
     deliver: Deliver,
@@ -180,7 +175,7 @@ impl std::fmt::Debug for Reporter {
 impl Reporter {
     /// A reporter for the operation `stamp`; `apply` runs on the event loop for every word.
     pub fn new(stamp: Stamp, apply: fn(Stamp, Update)) -> Reporter {
-        Reporter::with_delivery(stamp, apply, invoke_from_event_loop)
+        Reporter::with_delivery(stamp, apply, super::deliver_boxed)
     }
 
     /// As [`Reporter::new`], with another way to reach the event loop (the tests of the
@@ -197,6 +192,7 @@ impl Reporter {
                 wake_pending: AtomicBool::new(false),
                 coalesced: AtomicU64::new(0),
                 wakes: AtomicU64::new(0),
+                lost: AtomicU64::new(0),
                 apply,
                 deliver,
             }),
@@ -223,7 +219,11 @@ impl Reporter {
         if !shared.wake_pending.swap(true, Ordering::SeqCst) {
             shared.wakes.fetch_add(1, Ordering::Relaxed);
             let shared = Arc::clone(shared);
-            (self.shared.deliver)(Box::new(move || shared.drain()));
+            if !(self.shared.deliver)(Box::new(move || shared.drain())) {
+                // Nobody will read the queue: the next word asks again, and the loss is counted.
+                self.shared.wake_pending.store(false, Ordering::SeqCst);
+                self.shared.lost.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -232,10 +232,17 @@ impl Reporter {
     /// dropped: the outcome says more than they do.
     pub fn finish<T: Send + 'static>(&self, outcome: T, settle: fn(Stamp, T)) {
         let shared = Arc::clone(&self.shared);
-        (self.shared.deliver)(Box::new(move || {
+        if !(self.shared.deliver)(Box::new(move || {
             shared.lock().clear();
             settle(shared.stamp, outcome);
-        }));
+        })) {
+            self.shared.lost.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                window = self.shared.stamp.window,
+                generation = self.shared.stamp.generation,
+                "the outcome of an operation could not be delivered: the event loop is gone"
+            );
+        }
     }
 
     /// How many words were replaced by a newer one because the queue was full.
@@ -246,6 +253,11 @@ impl Reporter {
     /// How many times the event loop was asked to read the queue.
     pub fn wakes(&self) -> u64 {
         self.shared.wakes.load(Ordering::Relaxed)
+    }
+
+    /// How many deliveries (words or the outcome) found the event loop gone.
+    pub fn lost(&self) -> u64 {
+        self.shared.lost.load(Ordering::Relaxed)
     }
 
     /// How many words wait now.
@@ -269,8 +281,13 @@ mod tests {
     type Held = Mutex<Vec<Box<dyn FnOnce() + Send>>>;
     static HELD: Held = Mutex::new(Vec::new());
 
-    fn hold(f: Box<dyn FnOnce() + Send>) {
+    fn hold(f: Box<dyn FnOnce() + Send>) -> bool {
         HELD.lock().unwrap().push(f);
+        true
+    }
+
+    fn gone(_: Box<dyn FnOnce() + Send>) -> bool {
+        false
     }
 
     fn at(n: u64) -> Update {
@@ -341,5 +358,21 @@ mod tests {
         // After a read the next word asks again.
         reporter.report(at(1001));
         assert_eq!(reporter.wakes(), 2);
+    }
+
+    /// The event loop is gone (the application is quitting): neither a word nor the outcome
+    /// panics, each is counted as lost, and the queue can be asked for again.
+    #[test]
+    fn delivery_after_the_loop_is_gone_is_counted_and_does_not_panic() {
+        let stamp = Stamp {
+            window: 2,
+            generation: 3,
+        };
+        let reporter = Reporter::with_delivery(stamp, seen, gone);
+        reporter.report(at(1));
+        reporter.report(at(2));
+        assert_eq!(reporter.lost(), 2, "each word asked again and was lost");
+        reporter.finish((), |_, ()| panic!("never settled: the loop is gone"));
+        assert_eq!(reporter.lost(), 3, "the outcome is counted too");
     }
 }

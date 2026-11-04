@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use super::controller::{Job, JobControl, JobError, MissingField};
 use super::{DesktopEngineServices, Output, Workspace, start, with_open};
 use super::{Destination, Level, SignFormat, SignOptions, SignSpec};
-use crate::reports::controller::{BatchView, KeyUse, key_use_after_loss};
+use crate::reports::controller::BatchView;
 use crate::signing::controller::{
     ActionKind, Candidate, Controller, Effect, Event, Item, Refusal, Step, Unsuitable,
 };
@@ -762,6 +762,12 @@ pub(super) fn cancel(open: &Rc<Workspace>) {
     finish(open);
 }
 
+/// Whether a confirmed signing is running: the key may be applied already, so the window is not
+/// closed under it (the user waits or cancels, and is told how it ended).
+pub(super) fn is_running(open: &Rc<Workspace>) -> bool {
+    open.sign.borrow().controller.step() == Step::Running
+}
+
 /// A new operation from the documents: no key store, password, certificate or permission of
 /// the last one is kept.
 fn finish(open: &Rc<Workspace>) {
@@ -891,10 +897,7 @@ pub(super) fn settled(open: &Rc<Workspace>, result: Result<SignOutput, JobError>
             if step == Step::Running && matches!(e, JobError::Worker) {
                 // The worker was lost after the user's confirmation: the key may have been
                 // applied, and nobody can say. It is never reported as unused.
-                let note = match key_use_after_loss(true) {
-                    KeyUse::NotUsed => t.no_key_used,
-                    KeyUse::Used | KeyUse::Unknown => t.lost_key_unknown,
-                };
+                let note = t.lost_key_unknown;
                 end_with(open, &format!("{text}\n{note}"));
             } else {
                 // The page stays where it is; the error says what could not be done.
