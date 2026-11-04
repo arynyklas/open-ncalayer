@@ -279,6 +279,20 @@ impl Read for Upload<'_> {
     }
 }
 
+impl Upload<'_> {
+    /// Mirror "the whole body was handed to the transport" to another thread, so a caller
+    /// that stops waiting can still apply the exact applied-state rule.
+    pub(super) fn share_complete(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.shared = Some(flag);
+    }
+    fn mark_complete(&mut self) {
+        self.complete = true;
+        if let Some(flag) = &self.shared {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,19 +409,5 @@ mod tests {
         assert!(!upload.complete());
         assert_eq!(upload.handed(), 0);
         assert_eq!(upload.failure(), Some(UploadFailure::Stop(Stop::Cancelled)));
-    }
-}
-
-impl Upload<'_> {
-    /// Mirror "the whole body was handed to the transport" to another thread, so a caller
-    /// that stops waiting can still apply the exact applied-state rule.
-    pub(super) fn share_complete(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-        self.shared = Some(flag);
-    }
-    fn mark_complete(&mut self) {
-        self.complete = true;
-        if let Some(flag) = &self.shared {
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
     }
 }
