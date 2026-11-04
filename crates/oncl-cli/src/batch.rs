@@ -428,9 +428,26 @@ pub fn run(
             })
         );
     let incomplete = summary.completed != summary.total;
+    let deadline = matches!(&summary.stop, Some(BatchStop::Control(error)) if error.code() == oncl_core::ErrorCode::DeadlineExceeded)
+        || matches!(
+            &summary.stop,
+            Some(BatchStop::Item {
+                code: oncl_core::ErrorCode::DeadlineExceeded,
+                ..
+            })
+        );
+    // The top-level code states the outcome; per-item rows carry the details.
     let report = Report {
         operation_id: ctx.id().get(),
-        code: "Completed",
+        code: if cancelled {
+            "Cancelled"
+        } else if deadline {
+            "DeadlineExceeded"
+        } else if incomplete {
+            "Partial"
+        } else {
+            "Completed"
+        },
         attempted: summary.attempted,
         completed: summary.completed,
         total: summary.total,
@@ -457,7 +474,14 @@ pub fn run(
         }
     }
     if ctx.resources().checkpoint().is_err() {
-        output::terminal(cli, &report, &human)?;
+        // The stop outcome (130/4) wins: a report that cannot be delivered is
+        // diagnosed, never allowed to replace the exit decision.
+        if let Err(error) = output::terminal(cli, &report, &human) {
+            crate::diagnostic(format_args!(
+                "oncl: report_delivery_failed_after_stop; code={:?}",
+                error.code()
+            ));
+        }
     } else {
         output::report(cli, &report, &human, ctx)?;
     }

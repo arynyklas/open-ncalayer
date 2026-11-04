@@ -37,6 +37,7 @@ struct Scenario {
 }
 fn run_stalled(
     extra: &[&str],
+    readonly_stdout: bool,
     stop: impl FnOnce(&mut std::process::Child, &World, Instant),
 ) -> Scenario {
     let w = world();
@@ -114,16 +115,26 @@ fn run_stalled(
     ];
     args.extend(extra);
     let start = Instant::now();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_oncl"))
+    let readonly = w.dir.path().join("readonly.out");
+    std::fs::write(&readonly, b"").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_oncl"));
+    command
         .args(&args)
         .creation_flags(0x0000_0200) // CREATE_NEW_PROCESS_GROUP: owned child group only
         .env_remove("DISPLAY")
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    if readonly_stdout {
+        // Every stdout write fails: an injected report-delivery failure.
+        command.stdout(Stdio::from(std::fs::File::open(&readonly).unwrap()));
+    } else {
+        command.stdout(Stdio::piped());
+    }
+    let mut child = command.spawn().unwrap();
     wait_for(&mut child, &sig_a);
+    // Barrier, not a sleep: the held OCSP request of item 2 has reached the
+    // responder, so the batch is provably inside item 2 and item 3 cannot run.
+    w.server.wait_arrival(30);
     stop(&mut child, &w, start);
     let output = child.wait_with_output().unwrap();
     let report = serde_json::from_slice(&output.stdout).unwrap_or(serde_json::Value::Null);
@@ -136,7 +147,7 @@ fn run_stalled(
         world: w,
     }
 }
-fn assert_terminal_report(s: &Scenario) {
+fn assert_terminal_report(s: &Scenario, interrupted_code: &str, top_code: &str) {
     let items = s.report["items"]
         .as_array()
         .unwrap_or_else(|| panic!("no terminal batch report: {:?}", s.output));
@@ -144,12 +155,23 @@ fn assert_terminal_report(s: &Scenario) {
     assert_eq!(by("first")["status"], "Completed", "{}", s.report);
     assert_eq!(by("first")["applied"], "Applied");
     assert_eq!(by("first")["published"], true);
+    let stalled = by("stalled");
+    assert_eq!(stalled["status"], "Failed", "{}", s.report);
+    assert_eq!(stalled["code"], interrupted_code, "{}", s.report);
+    assert_eq!(stalled["applied"], "NotApplied", "{}", s.report);
     assert_eq!(by("third")["status"], "NotRun", "{}", s.report);
     assert_eq!(by("third")["applied"], "NotApplied");
     assert_eq!(by("third")["published"], false);
-    assert_ne!(by("stalled")["status"], "Completed", "{}", s.report);
+    assert_eq!(s.report["attempted"], 2);
     assert_eq!(s.report["completed"], 1);
     assert_eq!(s.report["total"], 3);
+    assert_eq!(s.report["code"], top_code, "{}", s.report);
+    assert_eq!(
+        s.report["stop"],
+        format!("item 1: {interrupted_code}: NotApplied"),
+        "{}",
+        s.report
+    );
     // Item 1's file is intact and independently verifiable; item 3 never ran.
     let verify = run(
         &[
@@ -179,48 +201,59 @@ fn assert_terminal_report(s: &Scenario) {
     );
     assert!(!stderr.contains(PASSWORD));
 }
-#[test]
-fn real_ctrl_break_after_item_one_exits_130_with_a_terminal_report_and_kept_output() {
+fn ctrl_break(child: &std::process::Child) {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GenerateConsoleCtrlEvent(event: u32, group: u32) -> i32;
     }
-    let s = run_stalled(&[], |child, w, _| {
-        // SAFETY: targets only the owned child's fresh process group id (its pid).
-        let sent = unsafe { GenerateConsoleCtrlEvent(1, child.id()) };
-        assert_ne!(
-            sent, 0,
-            "CTRL_BREAK delivery failed (no console in this harness?)"
-        );
-        std::thread::sleep(Duration::from_millis(300));
-        w.server.release();
-    });
-    assert_eq!(s.output.status.code(), Some(130), "{:?}", s.output);
-    assert_terminal_report(&s);
-    assert!(
-        s.report["stop"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Cancelled"),
-        "{}",
-        s.report
+    // SAFETY: targets only the owned child's fresh process group id (its pid).
+    let sent = unsafe { GenerateConsoleCtrlEvent(1, child.id()) };
+    assert_ne!(
+        sent, 0,
+        "CTRL_BREAK delivery failed (no console in this harness?)"
     );
+}
+// The held OCSP response is released only after the process has ended on its
+// own: item 2's request cannot complete, so the batch can only stop through the
+// real cancellation or the real deadline (no sleep decides the semantics).
+#[test]
+fn real_ctrl_break_after_item_one_exits_130_with_a_terminal_report_and_kept_output() {
+    let s = run_stalled(&[], false, |child, _, _| ctrl_break(child));
+    assert_eq!(s.output.status.code(), Some(130), "{:?}", s.output);
+    assert_terminal_report(&s, "Cancelled", "Cancelled");
 }
 #[test]
 fn deadline_after_item_one_exits_4_with_a_terminal_report_and_kept_output() {
-    let s = run_stalled(&["--timeout-seconds", "5"], |_, w, start| {
-        let until = Duration::from_millis(5600);
-        std::thread::sleep(until.saturating_sub(start.elapsed()));
-        w.server.release();
-    });
+    let s = run_stalled(&["--timeout-seconds", "4"], false, |_, _, _| {});
     assert_eq!(s.output.status.code(), Some(4), "{:?}", s.output);
-    assert_terminal_report(&s);
+    assert_terminal_report(&s, "DeadlineExceeded", "DeadlineExceeded");
+}
+#[test]
+fn a_failed_terminal_report_never_changes_the_stop_exit_code() {
+    // stdout is unwritable: the report cannot be delivered, the stop still wins.
+    let s = run_stalled(&[], true, |child, _, _| ctrl_break(child));
+    assert_eq!(s.output.status.code(), Some(130), "{:?}", s.output);
+    let stderr = String::from_utf8_lossy(&s.output.stderr);
     assert!(
-        s.report["stop"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Deadline"),
-        "{}",
-        s.report
+        stderr.contains("report_delivery_failed_after_stop"),
+        "{stderr}"
     );
+    assert!(!s.b.exists());
+    // The unwritable report destination (missing directory) after a deadline.
+    let missing = std::env::temp_dir()
+        .join("oncl-no-such-dir")
+        .join("report.json");
+    let missing = missing.to_str().unwrap().to_owned();
+    let s = run_stalled(
+        &["--timeout-seconds", "4", "--report", &missing],
+        false,
+        |_, _, _| {},
+    );
+    assert_eq!(s.output.status.code(), Some(4), "{:?}", s.output);
+    let stderr = String::from_utf8_lossy(&s.output.stderr);
+    assert!(
+        stderr.contains("report_delivery_failed_after_stop"),
+        "{stderr}"
+    );
+    assert!(!std::path::Path::new(&missing).exists());
 }

@@ -575,3 +575,33 @@ fn a_realistic_large_trust_store_fits_the_default_limits() {
         );
     }
 }
+#[test]
+fn non_batch_deadline_is_an_execution_failure_exit_one_not_four() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_oncl"))
+        .args([
+            "hash",
+            "--algorithm",
+            "sha256",
+            "--input",
+            "-",
+            "--timeout-seconds",
+            "1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    // The read is cooperative: the deadline is observed once the pipe delivers or closes.
+    std::thread::sleep(std::time::Duration::from_millis(1600));
+    let _ = stdin.write_all(b"late");
+    drop(stdin);
+    let result = child.wait_with_output().unwrap();
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(result.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr).trim(),
+        "oncl: DeadlineExceeded; applied=NotApplied"
+    );
+}

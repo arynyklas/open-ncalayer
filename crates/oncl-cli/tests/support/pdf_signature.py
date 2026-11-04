@@ -14,7 +14,7 @@ if not matches:
     sys.exit("no ByteRange")
 a, b, c, d = (int(x) for x in matches[-1].groups())
 assert a == 0, "ByteRange must start at 0"
-assert c == a + b + (c - b), "sanity"
+assert b <= c <= len(data), "gap inside the file"
 assert c + d == len(data), "ByteRange must end at end of file (%d != %d)" % (c + d, len(data))
 gap = data[b:c]
 assert gap[:1] == b"<" and gap[-1:] == b">", "gap must be exactly the hex <Contents>"

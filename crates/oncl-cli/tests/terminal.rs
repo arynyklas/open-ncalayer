@@ -191,15 +191,36 @@ impl Pty {
             "child did not exit; screen: {:?}",
             String::from_utf8_lossy(&self.screen())
         );
+        self.process = 0 as HANDLE;
         // SAFETY: closes the pseudoconsole exactly once; the output pipe then reaches EOF.
         unsafe { ClosePseudoConsole(self.pseudo) };
+        self.pseudo = 0;
         self.reader.take().unwrap().join().unwrap();
         (code, String::from_utf8_lossy(&self.screen()).into_owned())
     }
 }
 
-fn private_world() -> World {
-    world()
+impl Drop for Pty {
+    /// Cleans up on any early panic: terminate the child, close the handles,
+    /// close the pseudoconsole (which ends the reader thread) and join it.
+    fn drop(&mut self) {
+        if self.process != 0 as HANDLE {
+            // SAFETY: owned, still-open process handle (finish() zeroes it).
+            unsafe {
+                TerminateProcess(self.process, 99);
+                CloseHandle(self.process);
+            }
+            self.process = 0 as HANDLE;
+        }
+        if self.pseudo != 0 {
+            // SAFETY: owned pseudoconsole closed exactly once.
+            unsafe { ClosePseudoConsole(self.pseudo) };
+            self.pseudo = 0;
+        }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
 }
 fn inspect_command(w: &World) -> String {
     format!(
@@ -223,11 +244,12 @@ fn control_a_terminal_program_that_echoes_shows_typed_characters_in_the_harness(
 }
 #[test]
 fn interactive_secret_is_read_without_echo_and_the_console_mode_is_restored() {
-    if Command::new("python").arg("--version").output().is_err() {
-        eprintln!("python unavailable: the console-mode probe cannot run; test not exercised");
-        return;
-    }
-    let w = private_world();
+    // The console-mode probe needs Python; its absence is a failure, not a skip.
+    assert!(
+        Command::new("python").arg("--version").output().is_ok(),
+        "python is required for the console-mode probe"
+    );
+    let w = world();
     // The probe prints the console input mode before and after; oncl runs between.
     let probe = "python -c \"import ctypes;m=ctypes.c_uint32();ctypes.windll.kernel32.GetConsoleMode(ctypes.windll.kernel32.GetStdHandle(-10),ctypes.byref(m));print('MODE=%x'%m.value)\"";
     let line = format!(
@@ -265,6 +287,7 @@ fn interactive_secret_is_read_without_echo_and_the_console_mode_is_restored() {
         modes[0], modes[1],
         "console mode restored exactly: {screen:?}"
     );
+    eprintln!("CONSOLE_MODE before={} after={}", modes[0], modes[1]);
     let mode = u32::from_str_radix(modes[0].trim_start_matches("MODE="), 16).unwrap();
     assert_ne!(
         mode & 0x4,
@@ -274,7 +297,7 @@ fn interactive_secret_is_read_without_echo_and_the_console_mode_is_restored() {
 }
 #[test]
 fn wrong_interactive_secret_and_ctrl_c_fail_closed_and_stay_silent() {
-    let w = private_world();
+    let w = world();
     // A wrong password fails closed (exit 1) and is never shown.
     let pty = Pty::start(&inspect_command(&w));
     pty.wait_for("input hidden", 60);

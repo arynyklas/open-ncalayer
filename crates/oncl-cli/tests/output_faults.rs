@@ -6,7 +6,7 @@
 //! the same `io::Error` on the same write/publish paths.
 mod support;
 use std::{
-    io::{Read, Write},
+    io::Read,
     process::{Command, Stdio},
     time::Duration,
 };
@@ -201,8 +201,20 @@ mod acl {
     /// Restores the ACL even if an assertion fails, so the tempdir can be removed.
     struct Restore(std::path::PathBuf);
     impl Drop for Restore {
+        /// Never panics (a panic in Drop during unwinding aborts the process).
         fn drop(&mut self) {
-            allow_again(&self.0);
+            for _ in 0..2 {
+                let restored = Command::new("icacls")
+                    .arg(&self.0)
+                    .args(["/remove:d", &user()])
+                    .stdout(Stdio::null())
+                    .creation_flags(0x0800_0000)
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if restored {
+                    break;
+                }
+            }
         }
     }
     #[test]
@@ -344,6 +356,5 @@ mod acl {
             b"",
         );
         assert_eq!(verify.status.code(), Some(0), "{verify:?}");
-        let _ = Write::flush(&mut std::io::sink());
     }
 }

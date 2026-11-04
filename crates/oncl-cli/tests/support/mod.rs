@@ -176,6 +176,9 @@ pub fn pki(origin: &str) -> Pki {
 pub struct Gate {
     state: std::sync::Mutex<(Option<Vec<u8>>, bool)>,
     cv: std::sync::Condvar,
+    /// Number of held requests that actually reached the responder.
+    arrived: std::sync::Mutex<usize>,
+    arrival: std::sync::Condvar,
 }
 impl Gate {
     fn wait(&self, body: &[u8]) {
@@ -186,6 +189,10 @@ impl Gate {
                 .as_ref()
                 .is_some_and(|p| body.windows(p.len()).any(|w| w == p))
         };
+        if held(&state) {
+            *self.arrived.lock().unwrap() += 1;
+            self.arrival.notify_all();
+        }
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while held(&state) && std::time::Instant::now() < deadline {
             state = self
@@ -206,6 +213,18 @@ impl Server {
     /// From now on, requests whose body contains `pattern` wait for `release`.
     pub fn hold(&self, pattern: &[u8]) {
         *self.gate.state.lock().unwrap() = (Some(pattern.to_vec()), false);
+    }
+    /// Blocks until a held request has reached the responder (a real barrier,
+    /// not a sleep); panics after `seconds`.
+    pub fn wait_arrival(&self, seconds: u64) {
+        let mut arrived = self.gate.arrived.lock().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+        while *arrived == 0 {
+            let left = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .expect("no held request ever arrived");
+            arrived = self.gate.arrival.wait_timeout(arrived, left).unwrap().0;
+        }
     }
     pub fn release(&self) {
         self.gate.state.lock().unwrap().1 = true;

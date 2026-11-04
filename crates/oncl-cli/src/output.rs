@@ -62,7 +62,7 @@ impl Write for Capped {
 /// stop, so this path touches none: serialization is capped inside the memory
 /// reserved before the work started, a `--report` file is created no-clobber
 /// directly (not staged, so a crash mid-write can leave a partial report) and
-/// synchronized, and nothing here can change the exit decision.
+/// synchronized. It reports failure to its caller, which must keep the stop exit code.
 pub fn terminal<T: Serialize>(cli: &Cli, value: &T, human: &str) -> Result<(), OperationError> {
     let mut buffer = Capped(Vec::new());
     if cli.json || cli.report.is_some() {
