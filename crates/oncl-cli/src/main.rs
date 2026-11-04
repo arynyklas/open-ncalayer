@@ -11,6 +11,7 @@ mod reports;
 mod secrets;
 mod sign;
 mod terminal;
+mod wsse;
 use clap::{CommandFactory, Parser};
 fn diagnostic(arguments: std::fmt::Arguments<'_>) {
     use std::io::Write;

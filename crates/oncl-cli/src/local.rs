@@ -264,11 +264,12 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
             profile,
             input,
             detached,
+            wsse,
         } => {
             let mut source = Input::open(input)?;
             let mut detached = detached.as_deref().map(Input::open).transpose()?;
             let result = engine.verify(
-                &profile.sdk(),
+                &profile.sdk(wsse),
                 source.source(),
                 detached.as_mut().map(Input::source),
                 &mut ctx,

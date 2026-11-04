@@ -49,6 +49,8 @@ pub enum Command {
         input: String,
         #[arg(long)]
         detached: Option<String>,
+        #[command(flatten)]
+        wsse: crate::wsse::WsseOptions,
     },
     Extract {
         #[arg(long)]
@@ -108,14 +110,14 @@ pub enum VerifyProfile {
     PadesLta,
 }
 impl VerifyProfile {
-    pub fn sdk(self) -> oncl_core::VerifyRequest {
+    pub fn sdk(self, wsse: &crate::wsse::WsseOptions) -> oncl_core::VerifyRequest {
         use oncl_core::VerifyRequest as R;
         use oncl_pki::evidence::AdesLevel as L;
         match self {
             Self::Cms => R::cms(),
             Self::Xml => R::xml(),
             Self::XmlKalkan => R::xml_kalkan(),
-            Self::Wsse => R::wsse(oncl_xml::wsse::WsseVerifyProfile::default()),
+            Self::Wsse => R::wsse(wsse.verify_profile()),
             Self::Pdf => R::pdf(),
             Self::CadesB => R::cades(L::B, evidence_limits()),
             Self::CadesT => R::cades(L::T, evidence_limits()),
@@ -168,6 +170,8 @@ pub struct SignArgs {
     pub parent_id: Option<String>,
     #[arg(long)]
     pub signature_id: Option<String>,
+    #[command(flatten)]
+    pub wsse: crate::wsse::WsseOptions,
 }
 #[derive(Clone, Copy, ValueEnum)]
 pub enum SignProfile {
@@ -276,6 +280,17 @@ impl Cli {
             {
                 return Err("InvalidCombination");
             }
+            if args.wsse.any() && !matches!(args.profile, SignProfile::Wsse) {
+                return Err("InvalidCombination");
+            }
+            if matches!(args.profile, SignProfile::Wsse)
+                && (args.target_id.is_some()
+                    || args.parent_id.is_some()
+                    || args.signature_id.is_some())
+            {
+                return Err("InvalidCombination");
+            }
+            args.wsse.preflight(true)?;
             if args.key_options.secret_interactive
                 && (args.input == "-" || args.detached_input.as_deref() == Some("-"))
             {
@@ -289,6 +304,12 @@ impl Cli {
             Command::Verify {
                 input, detached, ..
             } if input == "-" && detached.as_deref() == Some("-") => Err("StdinConflict"),
+            Command::Verify { profile, wsse, .. }
+                if wsse.any() && !matches!(profile, VerifyProfile::Wsse) =>
+            {
+                Err("InvalidCombination")
+            }
+            Command::Verify { wsse, .. } => wsse.preflight(false),
             Command::Extract { output, .. }
                 if output == "-" && self.json && self.report.is_none() =>
             {
