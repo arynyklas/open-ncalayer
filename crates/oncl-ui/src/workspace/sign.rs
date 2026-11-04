@@ -1071,6 +1071,30 @@ fn profile_line(t: &SignTexts, spec: &SignSpec, destination: &Destination) -> St
     if spec.options.add {
         parts.push(t.p_add.to_owned());
     }
+    let o = &spec.options;
+    for (text, value) in [
+        (t.p_target, &o.target),
+        (t.p_parent, &o.parent),
+        (t.p_signature_id, &o.signature_id),
+    ] {
+        if !value.is_empty() {
+            parts.push(text.replace("{0}", value));
+        }
+    }
+    if spec.needs_material() {
+        parts.push(
+            t.p_evidence
+                .replace("{0}", &o.evidence.certificates.len().to_string())
+                .replace("{1}", &o.evidence.ocsp.len().to_string())
+                .replace("{2}", &o.evidence.crls.len().to_string()),
+        );
+    }
+    if spec.uses_network() {
+        parts.push(
+            t.p_timestamp
+                .replace("{0}", &oncl_pki::tsp::TsaProfile::kalkan_default().url),
+        );
+    }
     parts.push(match destination {
         Destination::Beside => t.p_beside.to_owned(),
         Destination::Folder(folder) => t.p_folder.replace("{0}", &folder.display().to_string()),
@@ -1148,6 +1172,14 @@ struct SignTexts {
     p_beside: &'static str,
     /// `{0}` the folder.
     p_folder: &'static str,
+    /// `{0}` the XML ID.
+    p_target: &'static str,
+    p_parent: &'static str,
+    p_signature_id: &'static str,
+    /// `{0}` certificates, `{1}` OCSP responses, `{2}` CRLs.
+    p_evidence: &'static str,
+    /// `{0}` the time stamp service's address.
+    p_timestamp: &'static str,
     lost_key_unknown: &'static str,
 }
 
@@ -1207,6 +1239,11 @@ static RU: SignTexts = SignTexts {
     p_add: "добавляется к уже подписанному документу",
     p_beside: "результаты рядом с документами",
     p_folder: "результаты в папку {0}",
+    p_target: "подписывается элемент {0}",
+    p_parent: "подпись помещается в элемент {0}",
+    p_signature_id: "идентификатор подписи {0}",
+    p_evidence: "данные проверки: сертификатов {0}, ответов OCSP {1}, CRL {2}",
+    p_timestamp: "метка времени запрашивается у {0}",
     lost_key_unknown: "Применялся ли ключ, неизвестно: проверьте файлы результата.",
 };
 
@@ -1256,6 +1293,11 @@ static KK: SignTexts = SignTexts {
     p_add: "қол қойылған құжатқа қосылады",
     p_beside: "нәтиже құжаттардың жанында",
     p_folder: "нәтиже {0} қалтасына",
+    p_target: "{0} элементіне қол қойылады",
+    p_parent: "қолтаңба {0} элементіне салынады",
+    p_signature_id: "қолтаңба идентификаторы {0}",
+    p_evidence: "тексеру деректері: сертификаттар {0}, OCSP жауаптары {1}, CRL {2}",
+    p_timestamp: "уақыт белгісі {0} қызметінен сұратылады",
     lost_key_unknown: "Кілттің қолданылғаны белгісіз: нәтиже файлдарын тексеріңіз.",
 };
 
@@ -1305,6 +1347,11 @@ static EN: SignTexts = SignTexts {
     p_add: "added to a document that is signed already",
     p_beside: "results next to the documents",
     p_folder: "results to the folder {0}",
+    p_target: "element {0} is signed",
+    p_parent: "the signature goes into element {0}",
+    p_signature_id: "signature id {0}",
+    p_evidence: "validation data: {0} certificate(s), {1} OCSP response(s), {2} CRL(s)",
+    p_timestamp: "a time stamp is requested from {0}",
     lost_key_unknown: "Whether the key was applied is unknown: check the result files.",
 };
 
@@ -1825,5 +1872,86 @@ mod tests {
             destination,
             Destination::Folder(PathBuf::from("drive_C:\\results"))
         );
+    }
+
+    /// The confirmation line names every option the consent binds, in all three languages: the
+    /// XML element, parent and signature id, the evidence counts for LT/LTA, the time stamp
+    /// service for T/LT/LTA, attached/add, and the destination.
+    #[test]
+    fn the_confirmation_line_shows_every_option_the_consent_binds() {
+        let evidence = crate::workspace::Evidence::from_fields(
+            "a.der;b.der",
+            "o.ocsp",
+            "r1.crl;r2.crl;r3.crl",
+        );
+        let options = SignOptions {
+            attached: true,
+            add: true,
+            target: "the-target".into(),
+            parent: "the-parent".into(),
+            signature_id: "the-sig".into(),
+            evidence,
+        };
+        let national = oncl_pki::tsp::TsaProfile::kalkan_default().url;
+        // (format, what its line must contain)
+        let cases: Vec<(SignFormat, Vec<&str>)> = vec![
+            (
+                SignFormat::Xades(Level::T),
+                vec!["the-target", "the-parent", "the-sig", &national],
+            ),
+            (SignFormat::Cades(Level::Lt), vec!["2", "1", "3", &national]),
+            (
+                SignFormat::Pades(Level::Lta),
+                vec!["2", "1", "3", &national],
+            ),
+            (SignFormat::Cades(Level::B), vec![]),
+        ];
+        for locale in [Locale::Ru, Locale::Kk, Locale::En] {
+            let t = SignTexts::of(locale);
+            for (format, needles) in &cases {
+                let spec = SignSpec {
+                    format: *format,
+                    options: options.clone(),
+                };
+                let line = profile_line(t, &spec, &Destination::Beside);
+                for needle in needles {
+                    assert!(
+                        line.contains(needle),
+                        "{locale:?} {format:?}: {needle} not in {line}"
+                    );
+                }
+                if matches!(format, SignFormat::Cades(Level::B)) {
+                    assert!(
+                        !line.contains(&national),
+                        "B asks for no time stamp: {line}"
+                    );
+                    assert!(!line.contains("the-target") || spec.options.add, "{line}");
+                }
+            }
+            // The evidence line is the localized template filled with the three counts.
+            let line = profile_line(
+                t,
+                &SignSpec {
+                    format: SignFormat::Cades(Level::Lt),
+                    options: options.clone(),
+                },
+                &Destination::Beside,
+            );
+            assert!(
+                line.contains(
+                    &t.p_evidence
+                        .replace("{0}", "2")
+                        .replace("{1}", "1")
+                        .replace("{2}", "3")
+                ),
+                "{line}"
+            );
+            assert!(
+                line.contains(&t.p_timestamp.replace("{0}", &national)),
+                "{line}"
+            );
+            assert!(line.contains(t.p_add), "{line}");
+            assert!(line.contains(t.p_attached), "{line}");
+        }
     }
 }

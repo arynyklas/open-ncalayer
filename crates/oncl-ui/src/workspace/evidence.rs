@@ -48,12 +48,30 @@ impl Evidence {
         self.certificates.is_empty() && self.ocsp.is_empty() && self.crls.is_empty()
     }
 
-    /// The material as one label, which the consent binds.
+    /// The material as one label, which the consent binds: each path and the SHA-256 of what is
+    /// in it now, so that a file swapped between the user's confirmation and the run is not
+    /// the material that was agreed to (the runner compares the label again before the key).
     pub(crate) fn label(&self) -> String {
         let join = |paths: &[PathBuf]| {
             paths
                 .iter()
-                .map(|p| p.display().to_string())
+                .map(|p| {
+                    let digest = read_limited(
+                        p,
+                        usize::try_from(evidence_limits().max_item_bytes).unwrap_or(usize::MAX),
+                    )
+                    .map_or_else(
+                        |_| "unreadable".to_owned(),
+                        |bytes| {
+                            oncl_pki::key::HashAlg::Sha256
+                                .digest(&bytes)
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect()
+                        },
+                    );
+                    format!("{}#{digest}", p.display())
+                })
                 .collect::<Vec<_>>()
                 .join("|")
         };
@@ -179,5 +197,24 @@ mod tests {
             unparsable.load(),
             Err(JobError::Operation(oncl_core::ErrorCode::InvalidInput))
         ));
+    }
+
+    /// The consent label binds what is IN the evidence files: changing a byte, or a file
+    /// that cannot be read, changes it.
+    #[test]
+    fn the_label_binds_the_contents_of_the_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("c.der");
+        std::fs::write(&file, b"one").unwrap();
+        let evidence = Evidence {
+            certificates: vec![file.clone()],
+            ..Evidence::default()
+        };
+        let before = evidence.label();
+        assert_eq!(before, evidence.label());
+        std::fs::write(&file, b"two").unwrap();
+        assert_ne!(before, evidence.label(), "another content is another label");
+        std::fs::remove_file(&file).unwrap();
+        assert!(evidence.label().contains("#unreadable"));
     }
 }
