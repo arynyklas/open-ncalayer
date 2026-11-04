@@ -349,3 +349,66 @@ msgstr "Сайттар қосылған тасымалдағыштарды жә�
 
 msgid "Allow the update"
 msgstr "Жаңартуға рұқсат беру"
+
+msgid "OpenNCALayer tools"
+msgstr "OpenNCALayer құралдары"
+
+msgid "Overview"
+msgstr "Шолу"
+
+msgid "Hash"
+msgstr "Хеш"
+
+msgid "Inspect"
+msgstr "Мәліметтер"
+
+msgid "Tools"
+msgstr "Құралдар"
+
+msgid "This window opens when you ask for it: from the tray menu or with «openncalayer tools». Sites that ask for a signature get their own window and do not open this one."
+msgstr "Бұл терезе сіздің сұрауыңыз бойынша ашылады: хабарландыру аймағының мәзірінен немесе «openncalayer tools» пәрмені арқылы. Қолтаңба сұрайтын сайттарға өз терезесі ашылады, бұл терезе ашылмайды."
+
+msgid "Hash: the digest of a file of any size, read in pieces. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Neither uses a private key."
+msgstr "Хеш: кез келген өлшемді файлдың хеші, бөлшектеп оқылады. Мәліметтер: сертификаттың, қолтаңба файлының, кілттер қоймасының немесе қосылған тасымалдағыштардың ашық деректері. Екеуінде де құпия кілт қолданылмайды."
+
+msgid "Hash a file"
+msgstr "Файл хеші"
+
+msgid "File"
+msgstr "Файл"
+
+msgid "Path to the file"
+msgstr "Файлға апаратын жол"
+
+msgid "Algorithm"
+msgstr "Алгоритм"
+
+msgid "Compute the hash"
+msgstr "Хешті есептеу"
+
+msgid "Digest"
+msgstr "Хеш мәні"
+
+msgid "What to inspect"
+msgstr "Нені көрсету"
+
+msgid "Certificate"
+msgstr "Сертификат"
+
+msgid "Signature file"
+msgstr "Қолтаңба файлы"
+
+msgid "Key store (PKCS#12, JKS)"
+msgstr "Кілттер қоймасы (PKCS#12, JKS)"
+
+msgid "Tokens and ID cards"
+msgstr "Тасымалдағыштар мен жеке куәліктер"
+
+msgid "Key names to show (separated by commas)"
+msgstr "Көрсетілетін кілт атаулары (үтірмен бөлінген)"
+
+msgid "Show details"
+msgstr "Мәліметтерді көрсету"
+
+msgid "Details"
+msgstr "Мәліметтер"

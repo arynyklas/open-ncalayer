@@ -16,6 +16,7 @@ P1 provides:
 - attached and detached signatures, co-signing, NCA timestamps (TSP);
 - storage and key selection dialogs (Russian, Kazakh, English);
 - a command-line TLS wizard: `openncalayer tls init|import|status` ([guide, in Russian](docs/user/tls.md));
+- a tools window (the hash of a file; the public details of a certificate, a signature file, a key store and the tokens plugged in): «Tools…» in the tray menu or `openncalayer tools`, which asks the running copy to show it and starts the program if none runs; a site's request and the login do not open it;
 - signature checking: `openncalayer cms-verify` — signatures, timestamps, certificate chains up to the NCA roots, validity periods and revocation (OCSP, CRL);
 - a self-test page at `https://127.0.0.1:13579/` and a demo page at `https://127.0.0.1:13579/demo/`.
 

@@ -4524,10 +4524,12 @@ name = "oncl-ui"
 version = "0.1.0-alpha.6"
 dependencies = [
  "ksni",
+ "oncl-core",
  "oncl-desktop",
  "oncl-flows",
  "oncl-pki",
  "oncl-tls",
+ "oncl-token",
  "oncl-trust",
  "png",
  "raw-window-handle",
@@ -4610,6 +4612,7 @@ dependencies = [
  "minisign",
  "oncl-builtin-accessory",
  "oncl-builtins-build",
+ "oncl-core",
  "oncl-desktop",
  "oncl-flows",
  "oncl-ipc",

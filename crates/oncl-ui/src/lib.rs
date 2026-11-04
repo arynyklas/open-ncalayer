@@ -30,6 +30,7 @@ mod tray;
 pub mod view;
 mod windows;
 mod worker;
+mod workspace;
 
 pub use about_view::AboutInfo;
 pub use install_plugin::{
@@ -47,6 +48,7 @@ pub use tray::{
 pub use windows::{
     DesktopWindow, DesktopWindows, any_window_open, open_window, set_desktop_windows,
 };
+pub use workspace::{DesktopEngineServices, open_workspace};
 
 mod ui {
     slint::include_modules!();

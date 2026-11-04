@@ -349,3 +349,66 @@ msgstr "Сайты смогут видеть подключённые носит
 
 msgid "Allow the update"
 msgstr "Разрешить обновление"
+
+msgid "OpenNCALayer tools"
+msgstr "Инструменты OpenNCALayer"
+
+msgid "Overview"
+msgstr "Обзор"
+
+msgid "Hash"
+msgstr "Хеш"
+
+msgid "Inspect"
+msgstr "Сведения"
+
+msgid "Tools"
+msgstr "Инструменты"
+
+msgid "This window opens when you ask for it: from the tray menu or with «openncalayer tools». Sites that ask for a signature get their own window and do not open this one."
+msgstr "Это окно открывается по вашей просьбе: из меню в области уведомлений или командой «openncalayer tools». Сайты, которые просят подпись, получают своё окно и это не открывают."
+
+msgid "Hash: the digest of a file of any size, read in pieces. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Neither uses a private key."
+msgstr "Хеш: файла любого размера, читаемого по частям. Сведения: открытые данные сертификата, файла подписи, хранилища ключей или подключённых токенов. Закрытый ключ не используется ни там, ни там."
+
+msgid "Hash a file"
+msgstr "Хеш файла"
+
+msgid "File"
+msgstr "Файл"
+
+msgid "Path to the file"
+msgstr "Путь к файлу"
+
+msgid "Algorithm"
+msgstr "Алгоритм"
+
+msgid "Compute the hash"
+msgstr "Вычислить хеш"
+
+msgid "Digest"
+msgstr "Значение хеша"
+
+msgid "What to inspect"
+msgstr "Что показать"
+
+msgid "Certificate"
+msgstr "Сертификат"
+
+msgid "Signature file"
+msgstr "Файл подписи"
+
+msgid "Key store (PKCS#12, JKS)"
+msgstr "Хранилище ключей (PKCS#12, JKS)"
+
+msgid "Tokens and ID cards"
+msgstr "Токены и ID-карты"
+
+msgid "Key names to show (separated by commas)"
+msgstr "Имена ключей, которые показать (через запятую)"
+
+msgid "Show details"
+msgstr "Показать сведения"
+
+msgid "Details"
+msgstr "Сведения"

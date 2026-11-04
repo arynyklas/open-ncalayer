@@ -1,0 +1,352 @@
+// The tools window (the workspace): a sidebar of sections, one page at a time, and one status
+// line under all of them that shows what runs, how far it is, and how it ended. The pages' texts
+// of results and errors are composed in Rust.
+
+import { Button, ComboBox, LineEdit, Palette, ProgressIndicator, ScrollView, StandardListView, TextEdit } from "std-widgets.slint";
+
+// A label above a field.
+component FieldLabel inherits Text {
+    font-weight: 600;
+}
+
+// The error of the page's last action, next to the fields it concerns.
+component PageError inherits Text {
+    color: #c62828;
+    wrap: word-wrap;
+}
+
+export component WorkspaceWindow inherits Window {
+    title: @tr("OpenNCALayer tools");
+    min-width: 720px;
+    min-height: 480px;
+    preferred-width: 900px;
+    preferred-height: 580px;
+
+    // 0: overview, 1: hash, 2: inspect.
+    in-out property <int> section;
+
+    in-out property <string> hash-path;
+    // 0: SHA-256, 1: GOST R 34.11-94, 2: GOST R 34.11-2012 (512 bits).
+    in-out property <int> hash-algorithm;
+    in property <string> hash-digest;
+    in property <string> hash-summary;
+
+    // 0: certificate, 1: signature file, 2: key store, 3: tokens.
+    in-out property <int> inspect-kind;
+    in-out property <string> inspect-path;
+    in-out property <string> inspect-password;
+    in-out property <string> inspect-aliases;
+    in property <string> inspect-report;
+
+    // An operation runs: its page's fields wait, and it can be cancelled.
+    in property <bool> busy;
+    // 0: nothing yet, 1: running, 2: done, 3: failed, 4: cancelled.
+    in property <int> status-kind;
+    in property <string> status-text;
+    // 0..1 while the size is known; below 0: it is not.
+    in property <float> progress: -1;
+    in property <string> error-text;
+    // The page the error belongs to.
+    in property <int> error-section;
+
+    callback start-hash();
+    callback start-inspect();
+    callback browse();
+    callback cancel();
+
+    // Escape anywhere that does not use it cancels what runs; the Cancel button is on the Tab
+    // ring too.
+    forward-focus: keys;
+    keys := FocusScope {
+        forward-focus: sidebar;
+        key-pressed(event) => {
+            if event.text == Key.Escape && root.busy {
+                root.cancel();
+                return accept;
+            }
+            reject
+        }
+        VerticalLayout {
+            HorizontalLayout {
+                vertical-stretch: 1;
+                Rectangle {
+                    width: 200px;
+                    background: Palette.alternate-background;
+                    sidebar := StandardListView {
+                        x: 8px;
+                        y: 8px;
+                        width: parent.width - 16px;
+                        height: 3 * 40px + 8px;
+                        model: [{ text: @tr("Overview") }, { text: @tr("Hash") }, { text: @tr("Inspect") }];
+                        current-item <=> root.section;
+                    }
+                }
+
+                Rectangle {
+                    width: 1px;
+                    background: Palette.border;
+                }
+
+                ScrollView {
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 12px;
+                        alignment: start;
+                        if root.section == 0: VerticalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: @tr("Tools");
+                                font-size: 22px;
+                                font-weight: 700;
+                            }
+
+                            Text {
+                                text: @tr("This window opens when you ask for it: from the tray menu or with «openncalayer tools». Sites that ask for a signature get their own window and do not open this one.");
+                                wrap: word-wrap;
+                            }
+
+                            Text {
+                                text: @tr("Hash: the digest of a file of any size, read in pieces. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Neither uses a private key.");
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                Button {
+                                    text: @tr("Hash a file");
+                                    primary: true;
+                                    clicked => {
+                                        root.section = 1;
+                                    }
+                                }
+
+                                Button {
+                                    text: @tr("Inspect");
+                                    clicked => {
+                                        root.section = 2;
+                                    }
+                                }
+                            }
+                        }
+                        if root.section == 1: VerticalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: @tr("Hash a file");
+                                font-size: 22px;
+                                font-weight: 700;
+                            }
+
+                            FieldLabel {
+                                text: @tr("File");
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                LineEdit {
+                                    horizontal-stretch: 1;
+                                    enabled: !root.busy;
+                                    text <=> root.hash-path;
+                                    placeholder-text: @tr("Path to the file");
+                                    accepted => {
+                                        root.start-hash();
+                                    }
+                                }
+
+                                Button {
+                                    text: @tr("Browse…");
+                                    enabled: !root.busy;
+                                    clicked => {
+                                        root.browse();
+                                    }
+                                }
+                            }
+
+                            FieldLabel {
+                                text: @tr("Algorithm");
+                            }
+
+                            ComboBox {
+                                enabled: !root.busy;
+                                model: ["SHA-256", "ГОСТ Р 34.11-94", "ГОСТ Р 34.11-2012 (512)"];
+                                current-index <=> root.hash-algorithm;
+                            }
+
+                            if root.error-section == 1 && root.error-text != "": PageError {
+                                text: root.error-text;
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                Button {
+                                    text: @tr("Compute the hash");
+                                    primary: true;
+                                    enabled: !root.busy;
+                                    clicked => {
+                                        root.start-hash();
+                                    }
+                                }
+                            }
+
+                            if root.hash-digest != "": VerticalLayout {
+                                spacing: 4px;
+                                FieldLabel {
+                                    text: @tr("Digest");
+                                }
+
+                                LineEdit {
+                                    read-only: true;
+                                    text: root.hash-digest;
+                                    accessible-label: @tr("Digest");
+                                }
+
+                                Text {
+                                    text: root.hash-summary;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                        if root.section == 2: VerticalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: @tr("Inspect");
+                                font-size: 22px;
+                                font-weight: 700;
+                            }
+
+                            FieldLabel {
+                                text: @tr("What to inspect");
+                            }
+
+                            ComboBox {
+                                enabled: !root.busy;
+                                model: [@tr("Certificate"), @tr("Signature file"), @tr("Key store (PKCS#12, JKS)"), @tr("Tokens and ID cards")];
+                                current-index <=> root.inspect-kind;
+                            }
+
+                            if root.inspect-kind != 3: VerticalLayout {
+                                spacing: 8px;
+                                FieldLabel {
+                                    text: @tr("File");
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    LineEdit {
+                                        horizontal-stretch: 1;
+                                        enabled: !root.busy;
+                                        text <=> root.inspect-path;
+                                        placeholder-text: @tr("Path to the file");
+                                        accepted => {
+                                            root.start-inspect();
+                                        }
+                                    }
+
+                                    Button {
+                                        text: @tr("Browse…");
+                                        enabled: !root.busy;
+                                        clicked => {
+                                            root.browse();
+                                        }
+                                    }
+                                }
+                            }
+                            if root.inspect-kind == 2: VerticalLayout {
+                                spacing: 8px;
+                                FieldLabel {
+                                    text: @tr("Password");
+                                }
+
+                                LineEdit {
+                                    enabled: !root.busy;
+                                    input-type: password;
+                                    text <=> root.inspect-password;
+                                    accepted => {
+                                        root.start-inspect();
+                                    }
+                                }
+
+                                FieldLabel {
+                                    text: @tr("Key names to show (separated by commas)");
+                                }
+
+                                LineEdit {
+                                    enabled: !root.busy;
+                                    text <=> root.inspect-aliases;
+                                    accepted => {
+                                        root.start-inspect();
+                                    }
+                                }
+                            }
+                            if root.error-section == 2 && root.error-text != "": PageError {
+                                text: root.error-text;
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                Button {
+                                    text: @tr("Show details");
+                                    primary: true;
+                                    enabled: !root.busy;
+                                    clicked => {
+                                        root.start-inspect();
+                                    }
+                                }
+                            }
+
+                            if root.inspect-report != "": VerticalLayout {
+                                spacing: 4px;
+                                FieldLabel {
+                                    text: @tr("Details");
+                                }
+
+                                TextEdit {
+                                    read-only: true;
+                                    wrap: word-wrap;
+                                    min-height: 200px;
+                                    text: root.inspect-report;
+                                    accessible-label: @tr("Details");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Palette.border;
+            }
+
+            Rectangle {
+                height: 44px;
+                background: Palette.alternate-background;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    padding-top: 6px;
+                    padding-bottom: 6px;
+                    spacing: 12px;
+                    Text {
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        text: root.status-text;
+                        color: root.status-kind == 3 ? #c62828 : root.status-kind == 4 ? #a15c00 : Palette.foreground;
+                    }
+
+                    if root.busy: ProgressIndicator {
+                        width: 200px;
+                        indeterminate: root.progress < 0;
+                        progress: root.progress < 0 ? 0 : root.progress;
+                    }
+                    if root.busy: Button {
+                        text: @tr("Cancel");
+                        clicked => {
+                            root.cancel();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -9,10 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+oncl-core.workspace = true
 oncl-flows.workspace = true
 oncl-desktop.workspace = true
 oncl-pki.workspace = true
 oncl-tls.workspace = true
+oncl-token.workspace = true
 oncl-trust.workspace = true
 png.workspace = true
 rfd.workspace = true

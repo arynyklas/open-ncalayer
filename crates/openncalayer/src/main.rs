@@ -39,9 +39,9 @@ use openncalayer::update::{
 };
 use openncalayer::wss::{Listening, PortState, WATCH_EVERY, Watcher, Wss};
 use openncalayer::{
-    JsonSettings, LiveProxyTransport, NoPlugins, Paths, Plugins, ServerConfig, about_bundles,
-    build_registry_from, builtin_modules, builtins, desktop, hold_requests, listen_port,
-    load_settings, release_requests, requests_idle, serve, serve_ipc,
+    JsonSettings, LiveProxyTransport, NoPlugins, Paths, Plugins, ServerConfig, WorkspaceOpener,
+    about_bundles, build_registry_from, builtin_modules, builtins, desktop, hold_requests,
+    listen_port, load_settings, release_requests, requests_idle, serve, serve_ipc,
 };
 use time::OffsetDateTime;
 use tokio::runtime::Runtime;
@@ -171,7 +171,8 @@ fn main() -> ExitCode {
         Command::Run {
             allow_no_wss,
             no_tray,
-        } => run(allow_no_wss, !no_tray),
+        } => run(allow_no_wss, !no_tray, false),
+        Command::Tools => tools(),
         Command::Tls { command } => cli::tls(command),
         Command::CmsVerify {
             file,
@@ -184,6 +185,18 @@ fn main() -> ExitCode {
         Command::Integration { command } => cli::integration(command),
         #[cfg(feature = "e2e-prompter")]
         Command::E2e { command } => cli::e2e(command),
+    }
+}
+
+/// `openncalayer tools`: the tools window of the copy that runs for this user and data
+/// directory, or, if none does, of a copy started now with a tray, as `run --allow-no-wss` (no
+/// certificate or a busy port does not stop it; it opens no listener the user did not
+/// already set up).
+fn tools() -> ExitCode {
+    match cli::ask_running_for_tools() {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => run(true, true, true),
+        Err(code) => code,
     }
 }
 
@@ -225,7 +238,7 @@ fn velopack_app<'a>() -> velopack::VelopackApp<'a> {
 /// The built-in modules embedded are checked once the updater has looked at the start
 /// ([`cli::prepare_run`]): a module that does not load ends the run with code 1, logged,
 /// and the updater's health check rolls a new version back.
-fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
+fn run(allow_no_wss: bool, with_tray: bool, show_tools: bool) -> ExitCode {
     let sources = builtins::SOURCES;
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -271,6 +284,19 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         Err(code) => return code,
     };
     tracing::info!("{}", cli::token_state(&tokens));
+    let workspace = match oncl_core::Engine::new(oncl_core::EngineServices::hash_only(
+        oncl_pki::resource::ResourceLimits::default(),
+    )) {
+        Ok(engine) => oncl_ui::DesktopEngineServices {
+            engine: Arc::new(engine),
+            tokens: Arc::clone(&tokens),
+        },
+        Err(e) => {
+            tracing::error!(error = %e, "the engine of the tools window does not start");
+            eprintln!("Не удалось подготовить окно инструментов: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let prompter: Arc<dyn Prompter> = scripted.unwrap_or_else(|| Arc::new(SlintPrompter::new()));
     let recent: Arc<dyn RecentPathStore> = Arc::new(JsonSettings::new(daemon.paths.settings()));
     let services = host_services(&daemon.paths, prompter, recent, &http, &tokens);
@@ -312,6 +338,7 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             Arc::clone(&stop),
             Arc::clone(&wss),
             checks.clone(),
+            workspace.clone(),
             waits_for_tray.is_some(),
         )
         .map(Rc::new)
@@ -366,6 +393,11 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
             Box::new(WindowServices(plugins)),
             about,
         ));
+        if show_tools {
+            // Asked for by `openncalayer tools`, not by a login or a site.
+            let workspace = workspace.clone();
+            oncl_ui::when_event_loop_runs(move || oncl_ui::open_workspace(workspace));
+        }
         if wss.off().is_some() {
             let watched = Arc::clone(&wss);
             let notify = tray.is_some() && !allow_no_wss;
@@ -395,7 +427,17 @@ fn run(allow_no_wss: bool, with_tray: bool) -> ExitCode {
         // Asked to stop (the tray's «Выход», an update applied): a clean end, recorded
         // while this process still holds the single-instance endpoint.
         let on_stop = move || ended_cleanly(&at_stop);
-        let served = serve_all(ipc, listeners, Arc::new(registry), reports, stop, on_stop);
+        let on_workspace: openncalayer::WorkspaceOpener =
+            Arc::new(move || oncl_ui::open_workspace(workspace.clone()));
+        let served = serve_all(
+            ipc,
+            listeners,
+            Arc::new(registry),
+            reports,
+            stop,
+            on_workspace,
+            on_stop,
+        );
         let result = runtime.block_on(served);
         if let Err(e) = &result {
             tracing::error!(error = %e, "server stopped");
@@ -726,10 +768,12 @@ fn tokens_saved(tokens: &Tokens, settings: &Settings) {
 
 /// The tray in `locale` showing `state`, or `None` (logged) if it cannot be shown. Its
 /// commands run on the event loop: «Выход» notifies `stop`, «Журнал» opens `logs`,
-/// «Настройки…», «Сертификат для браузера…» and «О программе» open their windows,
+/// «Инструменты…», «Настройки…», «Сертификат для браузера…» and «О программе» open their
+/// windows,
 /// «Остановить оригинал…» asks before stopping the original that keeps `wss` off,
 /// «Проверить обновления» has the `updates` check and notifies what they found. With
 /// `needed`, `run` cannot go on without it (wss waits for the tray).
+#[allow(clippy::too_many_arguments)]
 fn start_tray(
     locale: Locale,
     logs: PathBuf,
@@ -737,6 +781,7 @@ fn start_tray(
     stop: Arc<Notify>,
     wss: Arc<Wss>,
     updates: Checks,
+    workspace: oncl_ui::DesktopEngineServices,
     needed: bool,
 ) -> Option<TrayHandle> {
     let tray = oncl_ui::start_tray(locale, move |command| match command {
@@ -745,6 +790,7 @@ fn start_tray(
             stop.notify_one();
         }
         TrayCommand::OpenLogs => open_folder(&logs),
+        TrayCommand::Tools => oncl_ui::open_workspace(workspace.clone()),
         TrayCommand::Settings => oncl_ui::open_window(DesktopWindow::Settings),
         TrayCommand::About => oncl_ui::open_window(DesktopWindow::About),
         TrayCommand::TlsWizard => oncl_ui::open_window(DesktopWindow::TlsWizard),
@@ -1020,9 +1066,10 @@ async fn serve_all(
     registry: Arc<Registry>,
     reports: Arc<SelftestReports>,
     stop: Arc<Notify>,
+    on_workspace: WorkspaceOpener,
     on_stop: impl FnOnce(),
 ) -> io::Result<()> {
-    let bridge = serve_ipc(ipc, Arc::clone(&registry));
+    let bridge = serve_ipc(ipc, Arc::clone(&registry), on_workspace);
     let stopped = stop.notified();
     tokio::pin!(bridge, stopped);
     let mut servers = tokio::task::JoinSet::new();
@@ -1144,6 +1191,7 @@ mod tests {
                 Arc::new(Registry::default()),
                 Arc::new(SelftestReports::new()),
                 stop,
+                Arc::new(|| {}),
                 || told = true,
             ),
         )
@@ -1173,6 +1221,7 @@ mod tests {
                 Arc::new(Registry::default()),
                 Arc::new(SelftestReports::new()),
                 Arc::clone(&stop),
+                Arc::new(|| {}),
                 || {},
             ));
             tokio::time::sleep(Duration::from_millis(100)).await;

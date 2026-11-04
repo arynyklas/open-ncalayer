@@ -86,6 +86,10 @@ pub enum Command {
         #[arg(long, help = "Не проверять отзыв: без запросов OCSP и CRL")]
         offline: bool,
     },
+    #[command(
+        about = "Открыть окно инструментов (хеш файла, сведения о сертификатах): в запущенной копии или, если её нет, запустив программу"
+    )]
+    Tools,
     #[command(about = "Хост native messaging для расширения браузера")]
     Nm {
         #[command(subcommand)]
@@ -178,6 +182,55 @@ pub enum IntegrationCommand {
     Uninstall,
     #[command(about = "Показать, как программа встроена")]
     Status,
+}
+
+/// Asks the running OpenNCALayer of this user and data directory to show the tools window, over
+/// the bridge's endpoint. `Ok(true)`: asked; `Ok(false)`: none is running. On failure the
+/// message is already printed and exit code 1 returned.
+pub fn ask_running_for_tools() -> Result<bool, ExitCode> {
+    use oncl_ipc::{connect, endpoint, read_frame, write_frame};
+    let paths = data_paths()?;
+    let endpoint = endpoint(&paths.data).map_err(|e| {
+        eprintln!("Не удалось определить канал запущенной копии: {e}");
+        ExitCode::FAILURE
+    })?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| {
+            eprintln!("Не удалось запустить обмен с запущенной копией: {e}");
+            ExitCode::FAILURE
+        })?;
+    runtime.block_on(async {
+        let mut stream = match connect(&endpoint).await {
+            Ok(stream) => stream,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(e) => {
+                eprintln!("Не удалось связаться с запущенной копией {endpoint}: {e}");
+                return Err(ExitCode::FAILURE);
+            }
+        };
+        // The running copy greets first; then it takes the request.
+        let asked = match read_frame(&mut stream).await {
+            Ok(Some(_)) => write_frame(&mut stream, br#"{"t":"workspace"}"#).await,
+            Ok(None) => Err(io::ErrorKind::UnexpectedEof.into()),
+            Err(e) => Err(e),
+        };
+        match asked {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                eprintln!("Запущенная копия не приняла запрос: {e}");
+                Err(ExitCode::FAILURE)
+            }
+        }
+    })
 }
 
 /// Everything `run` sets up before the servers start: data paths, logging, the bound IPC
