@@ -64,6 +64,8 @@ oncl-testkit.workspace = true
 oncl-pki = { workspace = true, features = ["testing"] }
 # A fake mkcert CA in the TLS wizard's tests.
 rcgen.workspace = true
+# The command line's JSON reports, read by the parity tests.
+serde_json.workspace = true
 tempfile.workspace = true
 time = { workspace = true, features = ["macros"] }
 x509-cert.workspace = true

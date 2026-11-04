@@ -421,6 +421,9 @@ pub(crate) fn deliver(f: impl FnOnce() + Send + 'static) {
 }
 
 #[cfg(test)]
+mod parity;
+
+#[cfg(test)]
 type Delivery = Box<dyn FnOnce() + Send>;
 
 /// Deliveries by the thread they are for: tests run in parallel, each with its own page.

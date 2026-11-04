@@ -76,12 +76,21 @@ pub(crate) struct World {
     /// The time stamp service's certificate and the OCSP responder, for the evidence files.
     pub(crate) tsa_cert: oncl_pki::cert::Certificate,
     pub(crate) responder: KeyEntry,
+    /// Where the world's responder and time service are reached: AIA URLs of its certificates.
+    pub(crate) origin: String,
+    pub(crate) ocsp: Arc<MockOcsp>,
+    pub(crate) tsa: Arc<MockTsa>,
     /// What the engine reaches: the responder at `/ocsp` and the time service at `/tsa`.
     pub(crate) http: Arc<dyn HttpTransport>,
     pub(crate) store: PathBuf,
 }
 
 pub(crate) fn world() -> World {
+    world_at(ORIGIN)
+}
+
+/// The world whose certificates point at `origin` (for the services to be reached there).
+pub(crate) fn world_at(origin: &str) -> World {
     let mut root = fixture("user-rsa-sign");
     root.key = keygen::generate(KeySpec::RsaSha256(2048)).unwrap();
     let mut spec = TestCertSpec::from_cert(
@@ -103,7 +112,7 @@ pub(crate) fn world() -> World {
     let mut spec = TestCertSpec::from_cert(&leaf.cert);
     strip(&mut spec);
     spec.serial = vec![0x71, 4, 10];
-    spec.extensions.push(aia(&format!("{ORIGIN}/ocsp")));
+    spec.extensions.push(aia(&format!("{origin}/ocsp")));
     leaf.cert = issue_cert(&root, spec);
     let mut tsa = fixture("tsa-gost2015");
     tsa.key = keygen::generate(KeySpec::RsaSha256(2048)).unwrap();
@@ -111,7 +120,7 @@ pub(crate) fn world() -> World {
     strip(&mut spec);
     spec.public_key = tsa.key.public_key().to_spki();
     spec.serial = vec![0x71, 4, 20];
-    spec.extensions.push(aia(&format!("{ORIGIN}/ocsp")));
+    spec.extensions.push(aia(&format!("{origin}/ocsp")));
     tsa.cert = issue_cert(&root, spec);
     let dir = tempfile::tempdir().unwrap();
     let bytes = pkcs12::write(
@@ -132,8 +141,8 @@ pub(crate) fn world() -> World {
     let tsa_cert = tsa.cert.clone();
     let tsa = Arc::new(MockTsa::new(tsa).with_gen_time(now()));
     let http: Arc<dyn HttpTransport> = Arc::new(RouteTransport::new(vec![
-        (format!("{ORIGIN}/ocsp"), ocsp.clone()),
-        (format!("{ORIGIN}/tsa"), tsa.clone()),
+        (format!("{origin}/ocsp"), ocsp.clone()),
+        (format!("{origin}/tsa"), tsa.clone()),
     ]));
     World {
         dir,
@@ -142,6 +151,9 @@ pub(crate) fn world() -> World {
         root: root.cert,
         tsa_cert,
         responder,
+        origin: origin.to_owned(),
+        ocsp,
+        tsa,
         http,
         store,
     }
@@ -155,7 +167,7 @@ pub(crate) fn ocsp_response_for(w: &World, cert: &oncl_pki::cert::Certificate) -
     let request = oncl_pki::ocsp::request_der(cert, &w.root);
     responder
         .send(&HttpRequest::post(
-            &format!("{ORIGIN}/ocsp"),
+            &format!("{}/ocsp", w.origin),
             Some("application/ocsp-request"),
             &request,
             GetOptions::default(),
@@ -192,13 +204,139 @@ pub(crate) fn engine(w: &World) -> (Engine, Arc<ConsentGuard>) {
         w.http.clone(),
         ExtraTrust {
             anchors: vec![w.root.clone()],
-            origins: vec![ORIGIN.to_owned()],
-            tsa: Some(format!("{ORIGIN}/tsa")),
+            origins: vec![w.origin.clone()],
+            tsa: Some(format!("{}/tsa", w.origin)),
         },
         &w.dir.path().join("spool"),
         Arc::new(now),
     )
     .unwrap()
+}
+
+/// The world's services on a loopback socket, for tools that run in another process (the
+/// command line): `POST /ocsp` and `POST /tsa` are answered by the world's own mocks. Stops
+/// when dropped.
+pub(crate) struct Loopback {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Loopback {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// A world reachable over HTTP: the listener is bound first so that the certificates can point
+/// at it, then the server answers from the world's mocks.
+pub(crate) fn served_world() -> (World, Loopback) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let w = world_at(&origin);
+    let stop = Arc::new(AtomicBool::new(false));
+    let routes: Vec<(String, Arc<dyn HttpTransport>)> = vec![
+        (format!("{origin}/ocsp"), w.ocsp.clone()),
+        (format!("{origin}/tsa"), w.tsa.clone()),
+    ];
+    let flag = stop.clone();
+    let thread = std::thread::spawn(move || {
+        while !flag.load(Ordering::SeqCst) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let (head, body_start) = loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break (String::new(), 0);
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+                if let Some(at) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break (String::from_utf8_lossy(&buffer[..at]).into_owned(), at + 4);
+                }
+            };
+            let mut lines = head.lines();
+            let request_line = lines.next().unwrap_or_default();
+            let method = request_line
+                .split_whitespace()
+                .next()
+                .unwrap_or("GET")
+                .to_owned();
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .to_owned();
+            let header = |name: &str| {
+                lines.clone().find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+                })
+            };
+            let length: usize = header("content-length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let content_type = header("content-type");
+            while buffer.len() < body_start + length {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+            }
+            let body = buffer.get(body_start..).unwrap_or(&[]).to_vec();
+            let url = format!("{}{path}", routes[0].0.trim_end_matches("/ocsp"));
+            let route = routes.iter().find(|(prefix, _)| url.starts_with(prefix));
+            let reply = route.map(|(_, transport)| {
+                if method == "GET" {
+                    transport.send(&oncl_pki::http::HttpRequest::get(
+                        &url,
+                        oncl_pki::http::GetOptions::default(),
+                    ))
+                } else {
+                    transport.send(&oncl_pki::http::HttpRequest::post(
+                        &url,
+                        content_type.as_deref(),
+                        &body,
+                        oncl_pki::http::GetOptions::default(),
+                    ))
+                }
+            });
+            let (status, content_type, body) = match reply {
+                Some(Ok(r)) => (r.status, r.content_type, r.body),
+                _ => (404, None, Vec::new()),
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nContent-Type: {}\r\nConnection: close\r\n\r\n",
+                body.len(),
+                content_type
+                    .as_deref()
+                    .unwrap_or("application/octet-stream")
+            );
+            let _ = stream.write_all(&body);
+        }
+    });
+    (
+        w,
+        Loopback {
+            stop,
+            thread: Some(thread),
+        },
+    )
 }
 
 /// Signs `paths` as `spec` says, the user confirming exactly what the engine froze (the page's
