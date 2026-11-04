@@ -254,7 +254,8 @@ consume the bounded binding table.
 (at most 64 public DER parts of up to 1 MiB each). LT/LTA levels need caller-acquired
 OCSP/CRL material (`PAdES extension requires acquired status material` is a typed
 `InvalidRequest` failure otherwise); evidence is never a trust anchor. PAdES-LT/LTA
-and large evidence need more than the default per-operation memory and metadata budgets;
+and large evidence need a larger per-operation memory budget than the default (the
+default metadata budget is 64 MiB);
 that need is refused before the audit BEGIN (see "Resource and material profiles").
 
 Rights are checked in this order: token action, then (before any secret byte is

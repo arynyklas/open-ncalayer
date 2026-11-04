@@ -8334,6 +8334,7 @@ dependencies = [
  "clap",
  "der 0.8.2",
  "flate2",
+ "getrandom 0.4.3",
  "libc",
  "minisign",
  "object",

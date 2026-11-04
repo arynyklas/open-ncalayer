@@ -35,6 +35,8 @@ anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
 der.workspace = true
+# `package platform`: the random salts of the smoke test's PKCS#12 container.
+getrandom.workspace = true
 # `upstream`: the gzip stream inside the Windows lite dropper.
 flate2.workspace = true
 # `sign`: the update index key pair and signatures.
@@ -56,8 +58,9 @@ spki.workspace = true
 # `ext-e2e`: the browsers' short TMPDIR.
 tempfile.workspace = true
 time.workspace = true
-# `licenses`: the accepted licences of `deny.toml`.
-toml.workspace = true
+# `licenses`: the accepted licences of `deny.toml`; `package platform`: the smoke test's
+# configuration, written from the shipped example.
+toml = { workspace = true, features = ["display"] }
 tungstenite.workspace = true
 ureq.workspace = true
 x509-cert.workspace = true

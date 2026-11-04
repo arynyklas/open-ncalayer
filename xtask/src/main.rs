@@ -436,6 +436,73 @@ enum PackageCommand {
         #[arg(long)]
         out: PathBuf,
     },
+    /// The standalone SDK programs as archives of their own, not mixed with the desktop
+    /// packages: `oncl-<version>-<flavor>` (the command line) and
+    /// `oncl-server-<version>-<flavor>` (the HTTP service, whose API stays disabled until
+    /// the operator enables it), `.zip` on Windows and `.tar.gz` elsewhere, each with its
+    /// licences, documentation and, for the server, the example configuration (Linux: the
+    /// Dockerfile and systemd unit). The programs of `--bin` pass the flavor's gate first
+    /// (static CRT, the Windows 7 import deny-list, glibc 2.28, universal macOS); then, on a
+    /// host that can start them, the archives are UNPACKED and the unpacked programs run: hash,
+    /// verify, the disabled server (no listener), a signature through the server enabled on
+    /// loopback, a clean stop. Nothing is signed, uploaded or published.
+    Platform {
+        /// `win-x64`, `win-x86`, `win7-x64`, `win7-x86`, `linux-x64` or `osx`.
+        #[arg(long)]
+        flavor: String,
+        /// The directory of the built `oncl` and `oncl-server` (`.exe` on Windows).
+        #[arg(long)]
+        bin: PathBuf,
+        /// The version of the release: that of the workspace, which the programs print.
+        #[arg(long, value_parser = parse_version)]
+        version: Version,
+        /// Where the archives are copied.
+        #[arg(long, default_value = "dist")]
+        dist: PathBuf,
+        /// Only pack and gate: do not unpack and start the archives.
+        #[arg(long)]
+        no_smoke: bool,
+    },
+    /// Only the behaviour smoke of `platform`, on archives already in `--dist`: they are
+    /// unpacked into a fresh directory and the unpacked programs are started (hash, verify,
+    /// the disabled server without a listener, a signature through the opted-in loopback
+    /// server, a clean stop). Fails when this host cannot start the flavor's programs.
+    PlatformSmoke {
+        /// `win-x64`, `win-x86`, `win7-x64`, `win7-x86`, `linux-x64` or `osx`.
+        #[arg(long)]
+        flavor: String,
+        /// The version of the archives.
+        #[arg(long, value_parser = parse_version)]
+        version: Version,
+        /// The directory of the archives.
+        #[arg(long, default_value = "dist")]
+        dist: PathBuf,
+    },
+    /// Build `oncl` and `oncl-server` for the flavors that need more than `cargo build
+    /// --release -p oncl-cli -p oncl-server`: Windows 7 (the pinned nightly, `-Zbuild-std`,
+    /// static CRT) into `<out>/<arch>/`, Linux in the glibc 2.28 container (Docker) into
+    /// `target/platform/linux-x64/`. With `--dist` the Linux container also runs `platform`
+    /// on them, smoke included. Prints the directory for `platform --bin`.
+    PlatformBuild {
+        /// `win7-x64`, `win7-x86` or `linux-x64`.
+        #[arg(long)]
+        flavor: String,
+        /// Windows 7: the output directory [default: target/platform/win7].
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Windows 7: cargo's target directory for the build.
+        #[arg(long)]
+        target_dir: Option<PathBuf>,
+        /// Linux: the version of the release.
+        #[arg(long, value_parser = parse_version)]
+        version: Option<Version>,
+        /// Linux: a Docker volume keeping the toolchain and cargo's files between runs.
+        #[arg(long)]
+        cache_volume: Option<String>,
+        /// Linux: a directory in the workspace for the archives made inside the container.
+        #[arg(long)]
+        dist: Option<PathBuf>,
+    },
 }
 
 fn parse_version(text: &str) -> Result<Version, String> {
@@ -451,7 +518,7 @@ fn print_published(files: &[PathBuf]) {
 
 /// `cargo xtask package …`.
 fn package(command: PackageCommand) -> anyhow::Result<()> {
-    use xtask::package::{aur, linux, macos, windows};
+    use xtask::package::{aur, linux, macos, platform, windows};
     let root = oncl_testkit::workspace_root();
     match command {
         PackageCommand::Windows { flavor, bin, args } => {
@@ -512,6 +579,66 @@ fn package(command: PackageCommand) -> anyhow::Result<()> {
             for file in aur::Package::new(version, pkgrel, &sha256)?.write(&out)? {
                 println!("{}", file.display());
             }
+        }
+        PackageCommand::Platform {
+            flavor,
+            bin,
+            version,
+            dist,
+            no_smoke,
+        } => {
+            let flavor = platform::flavor(&flavor)?;
+            print_published(&platform::package(
+                &root, &flavor, &bin, &version, &dist, !no_smoke,
+            )?);
+        }
+        PackageCommand::PlatformSmoke {
+            flavor,
+            version,
+            dist,
+        } => {
+            let flavor = platform::flavor(&flavor)?;
+            anyhow::ensure!(
+                xtask::package::platform_smoke::runnable(&flavor),
+                "this host cannot start {} programs",
+                flavor.name
+            );
+            platform::smoke(&root, &flavor, &version, &dist)?;
+        }
+        PackageCommand::PlatformBuild {
+            flavor,
+            out,
+            target_dir,
+            version,
+            cache_volume,
+            dist,
+        } => {
+            let flavor = platform::flavor(&flavor)?;
+            let dir = match flavor.name {
+                "win7-x64" | "win7-x86" => {
+                    let arch = if flavor.name == "win7-x64" {
+                        xtask::win7::Arch::X64
+                    } else {
+                        xtask::win7::Arch::X86
+                    };
+                    let out = out.unwrap_or_else(|| root.join("target/platform/win7"));
+                    platform::build_win7(&root, arch, &out, target_dir.as_deref())?
+                }
+                "linux-x64" => {
+                    let version = version.context("--version is required for linux-x64")?;
+                    let dist = dist.map(std::path::absolute).transpose()?;
+                    platform::build_linux(
+                        &root,
+                        &version,
+                        cache_volume.as_deref(),
+                        dist.as_deref(),
+                    )?
+                }
+                other => bail!(
+                    "{other} is built with `cargo build --locked --release -p oncl-cli -p oncl-server`"
+                ),
+            };
+            println!("{}", dir.display());
         }
     }
     Ok(())

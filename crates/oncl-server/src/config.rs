@@ -380,7 +380,7 @@ impl Default for ServerConfig {
             temp_per_operation: 34_359_738_368,
             input_bytes: 10_737_418_240,
             framing_bytes: 67_108_864,
-            metadata_bytes: 1_048_576,
+            metadata_bytes: 67_108_864,
             blocking_workers: 2,
             queue_capacity: 2,
             admission_wait_ms: 1000,

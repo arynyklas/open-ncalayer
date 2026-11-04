@@ -38,6 +38,16 @@ enum Command {
         #[arg(long)]
         name: String,
     },
+    /// Put operator material (server.toml, key container, password, TLS key) into a private
+    /// directory, from stdin or --input; never overwrites, never echoes the bytes.
+    InstallFile {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        input: Option<PathBuf>,
+    },
 }
 fn main() -> std::process::ExitCode {
     match run() {
@@ -65,6 +75,20 @@ fn run() -> io::Result<()> {
             file.sync_all()?;
             directory.sync()?;
             println!("verifier={}", token.verifier().encoded());
+            Ok(())
+        }
+        Some(Command::InstallFile {
+            directory,
+            name,
+            input,
+        }) => {
+            let bytes = oncl_server::install::install(
+                &directory,
+                &name,
+                input.as_deref(),
+                &mut io::stdin().lock(),
+            )?;
+            println!("installed {name} ({bytes} bytes)");
             Ok(())
         }
         Some(Command::Serve {

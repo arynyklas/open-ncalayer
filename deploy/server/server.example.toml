@@ -1,0 +1,101 @@
+# oncl-server: example configuration. Every value below is the product default or a
+# placeholder; nothing here opens a socket. The HTTP API is OFF: `enabled = false`, and
+# `oncl-server serve` then prints "disabled: no listener" and exits without touching the
+# audit journal, a key, a TLS file or the network.
+#
+# To use it: copy this file to the private operator directory (an owner-only directory;
+# see docs/server.md, "Private operator namespace and tokens"), edit the paths, create a
+# token (`oncl-server token-create`), add it under [[tokens]] and ENABLE the API
+# explicitly: set `enabled = true` here, or start with `oncl-server serve --config <file>
+# --enable-api`. Paths below are for a Linux service account; use absolute paths.
+#
+# No secret belongs in this file: a token appears only as its verifier (a hash), keys and
+# passwords only as references to files in a private directory.
+
+enabled = false
+
+# Loopback only unless an `exposure` is configured (below). A non-loopback bind also
+# needs `hosts`, the exact HTTP authorities clients use.
+bind = "127.0.0.1:13579"
+
+# The durable audit journal. The server creates this private directory at its first start
+# (do not create it yourself). Every private key use is recorded here BEFORE the key is
+# applied; a failure to record refuses the operation. A journal that already exists is
+# reopened only with `recover_audit = true` (measured: after a clean stop, a restart with
+# `false` is refused). Recovery rejects a corrupt or foreign journal and never repairs
+# one silently, so a service that restarts keeps `true` once the API is enabled.
+audit_directory = "/var/lib/oncl-server/audit"
+recover_audit = false
+
+# Transient public-document snapshots (multipart uploads), created by the server as a
+# private directory if absent. Bounded by `temp_*` below; secrets from requests never go
+# there.
+scratch_directory = "/var/lib/oncl-server/scratch"
+
+# Budgets. `total_memory` is the sum of the working memory of all admitted operations
+# (not the process RSS: the HTTP stack, runtime threads and framing are extra, so keep
+# the container/systemd memory limit about twice `total_memory`). The temp limits bound
+# the scratch directory: size its filesystem to `total_temp` or lower these values.
+max_in_flight = 2
+blocking_workers = 2
+queue_capacity = 2
+admission_wait_ms = 1000
+operation_timeout_ms = 300000
+max_connections = 32
+header_timeout_ms = 5000
+input_bytes = 10737418240
+memory_per_operation = 268435456
+total_memory = 536870912
+temp_per_operation = 34359738368
+total_temp = 68719476736
+framing_bytes = 67108864
+inline_pkcs12 = false
+
+# One entry per API client; the verifier is printed by `oncl-server token-create`.
+# Actions: "hash", "verify", "extract", "inspect", "extend", "stamp", "verify_stamp",
+# "sign", "sign_digest", and "batch" (the separate right for POST /v1/batch). `keys` are
+# the names of the operator keys (below) this client may use; empty means none.
+#
+# [[tokens]]
+# id = "accounting-service"
+# verifier = "<64 lowercase hexadecimal verifier characters>"
+# actions = ["hash", "verify"]
+# keys = []
+
+# A named operator key: a PKCS#12 or JKS container in the private directory and the file
+# holding its password. Clients refer to the name only, never to the path.
+#
+# [[keys]]
+# source = "file"
+# name = "corporate-signing"
+# path = "/etc/oncl-server/corporate.p12"
+# secret = { directory = "/etc/oncl-server", name = "corporate.password" }
+
+# Explicit trust for document verification and signer validation. There is no implicit
+# trust store and PKI network access is denied unless an origin is pinned.
+#
+# [pki]
+# anchors = ["/etc/oncl-server/roots/root.der"]
+# intermediates = ["/etc/oncl-server/roots/intermediate.der"]
+#
+# [[pki.endpoints]]
+# origin = "https://ca.example:443"
+# addresses = ["203.0.113.10:443"]
+
+# LAN exposure is a deliberate choice: real TLS with an operator PEM chain and key ...
+#
+# bind = "0.0.0.0:13579"
+# hosts = ["signing.internal:13579"]
+# exposure = { mode = "tls", certificate = "/etc/oncl-server/tls/server.crt", private_key = { directory = "/etc/oncl-server/tls", name = "server.key" } }
+#
+# ... or a TLS-terminating reverse proxy on a protected backend network:
+#
+# bind = "0.0.0.0:13579"
+# hosts = ["signing.internal"]
+# exposure = { mode = "trusted_proxy", peers = ["192.0.2.10"] }
+
+# Optional OTLP metrics and traces (off by default; no thread or connection when off).
+#
+# [telemetry]
+# enabled = true
+# endpoint = "http://127.0.0.1:4318"

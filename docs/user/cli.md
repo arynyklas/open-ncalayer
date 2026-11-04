@@ -4,6 +4,18 @@
 
 **Task25 is not complete.** Open items are listed at the end. Encryption/decryption additionally require the genuine G01/G02 SDK backend; no `encrypt`/`decrypt` command and no RSA-only substitute exists.
 
+## Package (no installer)
+
+`oncl` is published as an archive of its own, `oncl-<version>-<flavor>.zip` (Windows: `win-x64`, `win-x86`, and `win7-x64`/`win7-x86` for Windows 7 SP1) or `oncl-<version>-<flavor>.tar.gz` (`linux-x64`, built against glibc 2.28; `osx`, universal). It is **not** part of the OpenNCALayer desktop package: no installer, no update channel, no autostart, nothing written outside the paths you name. The archive holds the program, `README.md`, `docs/cli.md`, `THIRD-PARTY.txt` (the licences of exactly the third-party code of that flavor, AWS-LC included on Linux/macOS only), `LICENSE` and `NOTICE`; it holds no certificate, key, token or test file. Updating means unpacking a newer archive.
+
+```sh
+tar -xzf oncl-<version>-linux-x64.tar.gz
+./oncl-<version>-linux-x64/oncl --version
+printf abc | ./oncl-<version>-linux-x64/oncl hash --algorithm sha256 --input -
+```
+
+On Windows unpack the `.zip` (Explorer or `tar -xf oncl-<version>-win-x64.zip`) and run `oncl.exe` from that folder; the program needs no Visual C++ redistributable. The maintainer's command that builds, checks and smoke-tests the archives is `cargo xtask package platform` (`cargo xtask package platform --help`).
+
 ## Commands
 
 | Command | What it does |
