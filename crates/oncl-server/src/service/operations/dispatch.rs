@@ -677,40 +677,81 @@ fn has_status_material(evidence: &[oncl_api::dto::EvidenceRef]) -> bool {
         .iter()
         .any(|e| matches!(e.kind, EvidenceKind::Ocsp | EvidenceKind::Crl))
 }
-/// Host-side working reservations made after the preflight (output staging, frame
-/// buffers, evidence parts, response metadata): a fixed margin on top of the PDF plan.
-const HOST_WORKING_MEMORY: u64 = 16 << 20;
-/// Refuse a predictable PAdES LT/LTA memory need BEFORE any private key use.
-/// The need comes from the SAME code the PDF layer reserves with
-/// (`oncl_pdf::budget::plan_memory`, one implementation); it is probed against the
-/// ORIGINAL scope's remaining memory (operation and shared budgets) and released.
+/// Host-side reservations made AFTER the preflight, from named quantities (not fitted):
+/// the document/evidence/frame/output chunk buffers (`IO_CHUNK_BYTES` each) and a
+/// bounded metadata projection; the request's evidence is additionally copied once by
+/// `read_bytes`.
+const HOST_CHUNK_BUFFERS: u64 = 4;
+const HOST_METADATA_BYTES: u64 = 64 << 10;
+/// Refuse a predictable PAdES LT/LTA memory need BEFORE any private key use, from
+/// inputs known before the key opens: the PDF's existing signature contents (read from
+/// the document), the request's evidence sizes and the operator trust set. The need
+/// comes from `oncl_pdf::budget::plan_memory` (the reservation formulas the PDF layer
+/// itself uses) and is probed against the ORIGINAL scope and released.
 pub(super) fn memory_preflight(
     metadata: &OperationMetadata,
-    scope: &ResourceScope,
+    documents: &mut intake::Documents,
+    host: &super::HostPolicy,
+    scope: &mut ResourceScope,
 ) -> Result<(), ApiError> {
-    let high = metadata.items.iter().any(|item| {
-        matches!(
-            &item.operation,
+    let refuse = || ApiError::not_applied(ErrorCode::MemoryLimit);
+    let limits = oncl_pdf::PdfLimits::default();
+    for item in &metadata.items {
+        let (input, evidence) = match &item.operation {
             Operation::Sign {
                 profile: SignKind::PadesLt | SignKind::PadesLta,
-                ..
-            } | Operation::Extend {
-                profile: ExtendKind::PadesLt | ExtendKind::PadesLta,
+                input,
+                evidence,
                 ..
             }
-        )
-    });
-    if !high {
-        return Ok(());
+            | Operation::Extend {
+                profile: ExtendKind::PadesLt | ExtendKind::PadesLta,
+                input,
+                evidence,
+                ..
+            } => (input, evidence),
+            _ => continue,
+        };
+        let mut evidence_bytes = 0u64;
+        for reference in evidence {
+            evidence_bytes += documents
+                .get_mut(&reference.input)
+                .map(|d| d.len())
+                .ok_or_else(invalid_request)?;
+        }
+        let (sum, largest) = {
+            let mut document = documents.get_mut(input).ok_or_else(invalid_request)?;
+            let mut reader = document.reader(scope).map_err(|_| refuse())?;
+            oncl_pdf::budget::prior_signature_contents(reader.source(), &limits, scope)
+                // A document the PDF layer cannot even open is not a memory matter:
+                // the operation itself reports the malformed input later.
+                .unwrap_or((0, 0))
+        };
+        let inputs = oncl_pdf::budget::PlanInputs {
+            prior_contents_sum: sum,
+            prior_contents_max: largest,
+            evidence_bytes,
+            trust_bytes: host.trust_bytes,
+        };
+        let need = oncl_pdf::budget::plan_memory(&limits, &inputs)
+            .ok()
+            .and_then(|n| {
+                n.checked_add(HOST_CHUNK_BUFFERS * oncl_pki::resource::IO_CHUNK_BYTES as u64)
+            })
+            .and_then(|n| n.checked_add(HOST_METADATA_BYTES))
+            .and_then(|n| n.checked_add(evidence_bytes))
+            .ok_or_else(refuse)?;
+        let need_metadata = oncl_pdf::budget::plan_metadata(&limits, &inputs)
+            .ok()
+            .and_then(|n| n.checked_add(HOST_METADATA_BYTES))
+            .ok_or_else(|| ApiError::not_applied(ErrorCode::MetadataLimit))?;
+        scope
+            .reserve_metadata(need_metadata)
+            .map(drop)
+            .map_err(|_| ApiError::not_applied(ErrorCode::MetadataLimit))?;
+        scope.reserve_memory(need).map(drop).map_err(|_| refuse())?;
     }
-    let need = oncl_pdf::budget::plan_memory(&oncl_pdf::PdfLimits::default())
-        .ok()
-        .and_then(|n| n.checked_add(HOST_WORKING_MEMORY))
-        .ok_or_else(|| ApiError::not_applied(ErrorCode::MemoryLimit))?;
-    scope
-        .reserve_memory(need)
-        .map(drop)
-        .map_err(|_| ApiError::not_applied(ErrorCode::MemoryLimit))
+    Ok(())
 }
 fn is_xml(kind: SignKind) -> bool {
     matches!(kind, SignKind::Xml | SignKind::XadesB | SignKind::XadesT)

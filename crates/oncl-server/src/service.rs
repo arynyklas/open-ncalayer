@@ -195,6 +195,7 @@ impl ServiceHost {
             jwt_issuer: config.pki.jwt.expected_issuer.clone(),
             jwt_audience: config.pki.jwt.expected_audience.clone(),
             plugin_grants,
+            trust_bytes: config.pki.trust_bytes()?,
         });
         Ok(Arc::new(Self {
             engine,

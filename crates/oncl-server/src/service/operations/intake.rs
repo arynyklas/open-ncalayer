@@ -45,11 +45,45 @@ pub(super) enum Document {
     Text(String),
     Frozen(FrozenInput),
 }
+pub(super) enum DocumentMut<'a> {
+    Text(&'a String),
+    Frozen(&'a mut FrozenInput),
+}
+impl DocumentMut<'_> {
+    pub(super) fn len(&self) -> u64 {
+        match self {
+            Self::Text(t) => t.len() as u64,
+            Self::Frozen(f) => f.len(),
+        }
+    }
+    pub(super) fn reader(
+        &mut self,
+        scope: &ResourceScope,
+    ) -> Result<DocumentReader<'_>, ProcessingError> {
+        match self {
+            Self::Text(t) => Ok(DocumentReader::Text(std::io::Cursor::new(t.as_bytes()))),
+            Self::Frozen(input) => {
+                let len = input.len();
+                Ok(DocumentReader::Frozen(input.reader(
+                    &[oncl_pki::io::Region { offset: 0, len }],
+                    scope,
+                )?))
+            }
+        }
+    }
+}
 pub(super) enum DocumentReader<'a> {
     Text(std::io::Cursor<&'a [u8]>),
     Frozen(oncl_pki::io::FrozenReader<'a>),
 }
 impl Documents {
+    /// Borrow a declared document without consuming it (for pre-key sizing).
+    pub(super) fn get_mut(&mut self, name: &str) -> Option<DocumentMut<'_>> {
+        match self {
+            Self::Text(values) => values.get(name).map(DocumentMut::Text),
+            Self::Frozen(values) => values.get_mut(name).map(DocumentMut::Frozen),
+        }
+    }
     pub(super) fn take(&mut self, name: &str) -> Result<Document, OperationError> {
         match self {
             Self::Text(values) => values.remove(name).map(Document::Text),

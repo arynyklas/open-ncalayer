@@ -247,6 +247,16 @@ pub struct PkiEndpoint {
     pub addresses: Vec<SocketAddr>,
 }
 impl PkiConfig {
+    /// DER-sized bytes of the operator trust set (file lengths; PEM overestimates).
+    pub(crate) fn trust_bytes(&self) -> io::Result<u64> {
+        let mut total = 0u64;
+        for path in self.anchors.iter().chain(&self.intermediates) {
+            total = total
+                .checked_add(std::fs::metadata(path)?.len())
+                .ok_or_else(invalid)?;
+        }
+        Ok(total)
+    }
     fn validate_limits(&self) -> io::Result<()> {
         if self.anchors.len() > 256
             || self.intermediates.len() > 256

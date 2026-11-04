@@ -21,6 +21,8 @@ pub(crate) struct HostPolicy {
     pub jwt_issuer: Option<String>,
     pub jwt_audience: Option<String>,
     pub plugin_grants: Vec<PluginGrantRuntime>,
+    /// DER bytes of the operator anchors + intermediates (sizes the PAdES plan).
+    pub trust_bytes: u64,
 }
 /// One exact operator grant: (token, plugin, operation) with its key names and
 /// the SDK permission built from them. Installed code alone grants nothing.
@@ -234,7 +236,6 @@ impl ServiceHost {
                 &host_policy,
                 admission.resources(),
             )?;
-            dispatch::memory_preflight(&prepared.metadata, admission.resources())?;
             if private && audit.health() != AuditHealth::Healthy {
                 return Err(ApiError::not_applied(ErrorCode::AuditUnavailable));
             }
@@ -350,6 +351,14 @@ impl ServiceHost {
                         &worker_principal,
                         inline_enabled,
                         &worker_host,
+                    ) {
+                        return Ok(Err(api));
+                    }
+                    if let Err(api) = dispatch::memory_preflight(
+                        &request,
+                        &mut documents,
+                        &worker_host,
+                        ctx.resources(),
                     ) {
                         return Ok(Err(api));
                     }

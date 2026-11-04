@@ -164,6 +164,10 @@ pub struct Pki {
 }
 impl Pki {
     pub fn start() -> Self {
+        Self::start_with_revoked(0)
+    }
+    /// A loopback PKI whose intermediate CRL lists `revoked` unrelated serials (big evidence).
+    pub fn start_with_revoked(revoked: usize) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -190,11 +194,14 @@ impl Pki {
                 .with_this_update(now - time::Duration::MINUTE)
                 .next_update(Some(now + time::Duration::days(1))),
         );
-        let inter_crl = Arc::new(
-            MockCrl::new(inter.clone())
-                .with_this_update(now - time::Duration::MINUTE)
-                .next_update(Some(now + time::Duration::days(1))),
-        );
+        let mut inter_builder = MockCrl::new(inter.clone())
+            .with_this_update(now - time::Duration::MINUTE)
+            .next_update(Some(now + time::Duration::days(1)));
+        for n in 0..revoked {
+            let serial = (n as u64 + 1_000_000).to_be_bytes();
+            inter_builder = inter_builder.revoke(&serial, now - time::Duration::HOUR);
+        }
+        let inter_crl = Arc::new(inter_builder);
         let crls = vec![root.der(), inter_crl.der()];
         let tsa_gate = Arc::new(TsaGate::default());
         let gate = tsa_gate.clone();
@@ -699,7 +706,18 @@ impl SpoolWatch {
         let thread = std::thread::spawn(move || {
             while !s.load(Ordering::SeqCst) {
                 for file in spool_files(&root) {
-                    match std::fs::read(&file) {
+                    // A file is briefly unreadable while the service creates/protects or
+                    // deletes it (delete-pending, DACL being applied): retry; a file that
+                    // stays unreadable while it still exists is a real failure.
+                    let mut attempt = std::fs::read(&file);
+                    for _ in 0..40 {
+                        if attempt.is_ok() || !file.exists() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                        attempt = std::fs::read(&file);
+                    }
+                    match attempt {
                         Ok(bytes) => {
                             scanned_thread.fetch_add(1, Ordering::SeqCst);
                             for needle in &needles {

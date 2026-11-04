@@ -99,6 +99,15 @@ pub(super) async fn response(
                 let _ = native_ready.send(Err(api));
                 return Err(ProcessingError::InvalidInput("authorization changed"));
             }
+            if let Err(api) = dispatch::memory_preflight(
+                &metadata,
+                &mut documents,
+                &private.host,
+                guard.context().resources(),
+            ) {
+                let _ = native_ready.send(Err(api));
+                return Err(ProcessingError::InvalidInput("memory preflight refused"));
+            }
             let _ = native_ready.send(Ok(root.clone()));
             let secrets = prepared.secrets;
             let PrivateState {

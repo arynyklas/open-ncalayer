@@ -502,6 +502,29 @@ struct Parsed {
     _vri_memory: Option<oncl_pki::resource::ResourceReservation>,
     _vri_metadata: Option<oncl_pki::resource::ResourceReservation>,
 }
+pub(crate) fn prior_signature_contents(
+    source: oncl_pki::io::Source<'_>,
+    limits: &PdfLimits,
+    scope: &mut ResourceScope,
+) -> Result<(u64, u64)> {
+    let mut doc = PdfDocument::open(source, limits, scope)?;
+    let mut seen = BTreeSet::new();
+    let (mut sum, mut largest) = (0u64, 0u64);
+    for revision in 0..doc.revisions.len() {
+        for candidate in doc.signature_candidates(revision, &seen, true)? {
+            if seen.insert(candidate.range.values()) {
+                sum = sum
+                    .checked_add(candidate.contents.len)
+                    .ok_or(ProcessingError::MetadataLimit)?;
+                largest = largest.max(candidate.contents.len);
+            }
+            if seen.len() > limits.max_signatures {
+                return Err(PdfError::Limit("signature count"));
+            }
+        }
+    }
+    Ok((sum, largest))
+}
 fn parse(
     snapshot: &mut PdfSnapshot<'_>,
     limits: &PdfLimits,
@@ -908,11 +931,7 @@ fn update_plan(
     scope: &ResourceScope,
 ) -> Result<UpdatePlan> {
     let memory = scope.reserve_memory(crate::budget::plan_reservation(limits)?)?;
-    let metadata = scope.reserve_metadata(
-        (limits.max_object_bytes as u64)
-            .checked_mul(16)
-            .ok_or(ProcessingError::MetadataLimit)?,
-    )?;
+    let metadata = scope.reserve_metadata(crate::budget::plan_metadata_reservation(limits)?)?;
     let mut operation = scope.shared_view();
     PdfSignatureOutput::with_snapshot(output, scope, |mut view| {
         let parsed = parse(&mut view, limits, &mut operation)?;

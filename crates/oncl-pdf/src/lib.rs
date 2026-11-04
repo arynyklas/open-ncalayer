@@ -76,14 +76,115 @@ pub mod budget {
             .and_then(|n| n.checked_add(limits.max_objects as u64 * 256))
             .ok_or(ProcessingError::MetadataLimit)
     }
-    /// Upper bound of the fixed memory a PAdES update (LT/LTA sign or extend) holds
-    /// at once: the plan, its nested reader and the signer. Document-independent.
-    pub fn plan_memory(limits: &PdfLimits) -> Result<u64, ProcessingError> {
-        plan_reservation(limits)?
-            .checked_add(reader(limits)?.1)
-            .and_then(|n| n.checked_add(sign_reservation(limits).ok()?))
-            .and_then(|n| n.checked_add(verify_reservation(limits).ok()?))
+    /// Peak memory per evidence/trust byte of a PAdES update (see [`plan_memory`]).
+    pub const EVIDENCE_MEMORY_FACTOR: u64 = 64;
+    /// Inputs known BEFORE key use that size the update's reservations.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct PlanInputs {
+        /// Sum of the existing signatures' `/Contents` bytes (`update_plan` reserves 4x).
+        pub prior_contents_sum: u64,
+        /// Largest single `/Contents` (decoded with a 128x working reservation).
+        pub prior_contents_max: u64,
+        /// Request-supplied evidence DER bytes (certificates, OCSP, CRLs; `append_dss` 4x).
+        pub evidence_bytes: u64,
+        /// Operator trust set DER bytes (anchors + intermediates; `append_dss` 4x).
+        pub trust_bytes: u64,
+    }
+    /// Existing DSS/VRI retention and xref trailer retention are bounded by one
+    /// object's limit each (3x for the VRI copy, 1x for the trailer).
+    fn retained_bound(limits: &PdfLimits) -> Result<u64, ProcessingError> {
+        (limits.max_object_bytes as u64)
+            .checked_mul(4)
             .ok_or(ProcessingError::MemoryLimit)
+    }
+    /// Upper bound of the memory a PAdES update (LT/LTA sign or extend) holds, from
+    /// the same reservation formulas the reader, update plan, DSS append and signer
+    /// use: the plan, its nested reader, the signer, the verify view, the largest status transfer, the existing
+    /// signatures (4x contents + 128x working for the largest), the new evidence and
+    /// trust set (4x) and the retained-object bound.
+    pub fn plan_memory(limits: &PdfLimits, inputs: &PlanInputs) -> Result<u64, ProcessingError> {
+        let mut total = plan_reservation(limits)?;
+        for term in [
+            reader(limits)?.1,
+            sign_reservation(limits)?,
+            verify_reservation(limits)?,
+            retained_bound(limits)?,
+            // Revocation status fetched while the update is held reserves its
+            // maximum CRL size (the largest transfer buffer of the status path).
+            oncl_pki::crl::MAX_CRL_LEN,
+            inputs
+                .prior_contents_sum
+                .checked_mul(4)
+                .ok_or(ProcessingError::MemoryLimit)?,
+            inputs
+                .prior_contents_max
+                .checked_mul(128)
+                .ok_or(ProcessingError::MemoryLimit)?,
+            // New evidence/trust bytes are held in several derived forms at once
+            // (`append_dss` 4x, parsed validation material, the embedded copies). The
+            // coefficient is the measured peak per evidence byte (about 54x for several
+            // MiB of CRLs on this build) rounded up; the sweep tests guard it.
+            inputs
+                .evidence_bytes
+                .checked_add(inputs.trust_bytes)
+                .and_then(|n| n.checked_mul(EVIDENCE_MEMORY_FACTOR))
+                .ok_or(ProcessingError::MemoryLimit)?,
+        ] {
+            total = total
+                .checked_add(term)
+                .ok_or(ProcessingError::MemoryLimit)?;
+        }
+        Ok(total)
+    }
+    /// Metadata reserved by the incremental signer's node table.
+    pub fn sign_metadata(limits: &PdfLimits) -> Result<u64, ProcessingError> {
+        (limits.max_nodes as u64)
+            .checked_mul(512)
+            .and_then(|n| n.checked_add((limits.max_object_bytes as u64).checked_mul(8)?))
+            .ok_or(ProcessingError::MetadataLimit)
+    }
+    /// Metadata reserved by the update plan itself (before its nested reader).
+    pub fn plan_metadata_reservation(limits: &PdfLimits) -> Result<u64, ProcessingError> {
+        (limits.max_object_bytes as u64)
+            .checked_mul(16)
+            .ok_or(ProcessingError::MetadataLimit)
+    }
+    /// Peak METADATA of a PAdES update. The plan phase (plan + nested reader + verify
+    /// view) and the signing phase (signer + its reader) do not overlap, so the peak is
+    /// the larger phase, plus the existing-signature and new-evidence/trust accounting
+    /// (`append_dss` 4x, per-signature 4x + 16x working for the largest).
+    pub fn plan_metadata(limits: &PdfLimits, inputs: &PlanInputs) -> Result<u64, ProcessingError> {
+        let plan_phase = plan_metadata_reservation(limits)?
+            .checked_add(reader(limits)?.0)
+            .and_then(|n| n.checked_add(verify_reservation(limits).ok()?))
+            .ok_or(ProcessingError::MetadataLimit)?;
+        let sign_phase = sign_metadata(limits)?
+            .checked_add(reader(limits)?.0)
+            .ok_or(ProcessingError::MetadataLimit)?;
+        let extras = [
+            inputs.prior_contents_sum.checked_mul(4),
+            inputs.prior_contents_max.checked_mul(16),
+            inputs
+                .evidence_bytes
+                .checked_add(inputs.trust_bytes)
+                .and_then(|n| n.checked_mul(4)),
+        ]
+        .into_iter()
+        .try_fold(0u64, |sum, term| sum.checked_add(term?))
+        .ok_or(ProcessingError::MetadataLimit)?;
+        plan_phase
+            .max(sign_phase)
+            .checked_add(extras)
+            .ok_or(ProcessingError::MetadataLimit)
+    }
+    /// `(sum, largest)` of the existing signatures' `/Contents` of a document, read
+    /// from the document itself BEFORE any key is applied.
+    pub fn prior_signature_contents(
+        source: oncl_pki::io::Source<'_>,
+        limits: &PdfLimits,
+        scope: &mut oncl_pki::resource::ResourceScope,
+    ) -> Result<(u64, u64), crate::PdfError> {
+        crate::ades::prior_signature_contents(source, limits, scope)
     }
 }
 pub type Result<T, E = PdfError> = std::result::Result<T, E>;

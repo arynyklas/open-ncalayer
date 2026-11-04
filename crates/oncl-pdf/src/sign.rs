@@ -7,7 +7,7 @@ use oncl_pki::{
     cms::stream::{CmsSignServices, SignSummary},
     io::{FrozenInput, PdfSignatureOutput, Region, Source, StagedArtifact},
     key::DigestSigner,
-    resource::{IO_CHUNK_BYTES, ProcessingError, ResourceScope},
+    resource::{IO_CHUNK_BYTES, ResourceScope},
     validation::Verdict,
 };
 use std::collections::BTreeMap;
@@ -289,10 +289,7 @@ fn sign_impl(
     let before = scope.progress();
     let mut operation = scope.shared_view();
     let size = crate::budget::sign_reservation(&profile.limits)?;
-    let metadata = (profile.limits.max_nodes as u64)
-        .checked_mul(512)
-        .and_then(|n| n.checked_add((profile.limits.max_object_bytes as u64).checked_mul(8)?))
-        .ok_or(ProcessingError::MetadataLimit)?;
+    let metadata = crate::budget::sign_metadata(&profile.limits)?;
     let _memory = scope.reserve_memory(size)?;
     let _metadata = scope.reserve_metadata(metadata)?;
     let store = services
