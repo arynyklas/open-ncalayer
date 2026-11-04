@@ -26,6 +26,8 @@ pub struct OperationContext {
     pub(crate) grant: ExecutionGrant,
     pub(crate) policy: OperationPolicy,
     pub(crate) scope: ResourceScope,
+    /// Counts the operation in the host's activity gate until the context ends.
+    pub(crate) _activity: Option<crate::activity::ActivityLease>,
     pub(crate) leases: Vec<crate::keys::KeyLease>,
     pub(crate) private_use_stopped: std::sync::atomic::AtomicBool,
     pub(crate) batch_item: Option<crate::keys::BatchItemOrdinal>,

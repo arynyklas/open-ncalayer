@@ -304,6 +304,7 @@
 //! and altered-negative OpenSSL controls. It is not large-file/platform or NCA
 //! trust acceptance.
 //!
+pub mod activity;
 pub mod batch;
 mod cades;
 mod context;

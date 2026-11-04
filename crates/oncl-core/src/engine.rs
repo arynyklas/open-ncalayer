@@ -99,6 +99,7 @@ pub struct Engine {
     pub(crate) inspection_limits: oncl_pki::info::InspectionLimits,
     #[cfg(feature = "plugins")]
     pub(crate) plugins: Option<crate::plugins::PluginRegistry>,
+    activity: Option<Arc<crate::activity::ActivityGate>>,
 }
 
 /// One original invocation root admitted for bounded metadata intake, without
@@ -108,6 +109,7 @@ pub struct OperationAdmission {
     owner: Arc<()>,
     scope: oncl_pki::resource::ResourceScope,
     original_scope: oncl_pki::resource::ResourceScope,
+    activity: Option<crate::activity::ActivityLease>,
 }
 impl OperationAdmission {
     pub fn id(&self) -> OperationId {
@@ -148,7 +150,16 @@ impl Engine {
             inspection_limits: services.inspection_limits,
             #[cfg(feature = "plugins")]
             plugins: services.plugins,
+            activity: None,
         })
+    }
+    /// Counts every operation of this engine in `gate` from its admission to the end of its
+    /// context, so a maintainer holding the gate sees it and a held gate makes a new one
+    /// wait (see [`crate::activity`]). Without a gate operations are never held back.
+    #[must_use]
+    pub fn with_activity(mut self, gate: Arc<crate::activity::ActivityGate>) -> Self {
+        self.activity = Some(gate);
+        self
     }
     pub fn begin(
         &self,
@@ -167,6 +178,12 @@ impl Engine {
         &self,
         control: Arc<dyn OperationControl>,
     ) -> Result<OperationAdmission, OperationError> {
+        // Waits first if a maintainer holds the gate: the operation does not exist yet, so it
+        // holds no resource while it waits.
+        let activity = self
+            .activity
+            .as_ref()
+            .map(crate::activity::ActivityGate::begin);
         let scope = self.budget.begin(self.limits.clone(), control)?;
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID
@@ -177,6 +194,7 @@ impl Engine {
             owner: self.identity.clone(),
             original_scope: scope.shared_view(),
             scope,
+            activity,
         })
     }
     /// Consume the original intake state only after host authorization. Scope
@@ -210,6 +228,7 @@ impl Engine {
             grant,
             policy,
             scope: admission.scope,
+            _activity: admission.activity,
             leases: Vec::new(),
             private_use_stopped: std::sync::atomic::AtomicBool::new(false),
             batch_item: None,

@@ -47,6 +47,19 @@ pub fn endpoint(data_dir: &Path) -> io::Result<Endpoint> {
     sys::endpoint(&data_dir).map(Endpoint)
 }
 
+/// The management endpoint of the current user, session and data directory, spelled as
+/// [`endpoint`] spells the relay's: `\\.\pipe\OpenNCALayer-maintenance-<hex16>` (the hash is
+/// of `<user SID>|<session id>|maintenance|<data_dir>`), `openncalayer-maintenance-<hex16>.sock`
+/// or `<data_dir>/maintenance.sock` on Unix. It never equals the relay's endpoint.
+///
+/// # Errors
+///
+/// As [`endpoint`].
+pub(crate) fn management(data_dir: &Path) -> io::Result<Endpoint> {
+    let data_dir = normalize(&std::path::absolute(data_dir)?);
+    sys::management_endpoint(&data_dir).map(Endpoint)
+}
+
 /// `path` rebuilt from its components, with verbatim Windows prefixes made plain.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
