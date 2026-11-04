@@ -1575,3 +1575,132 @@ fn final_pades_host_clock_must_not_move_backwards_from_initial_host_context() {
         ));
     });
 }
+
+/// Sign a NEW signature at `level` onto a PDF that already carries a signature at
+/// `prior` (a different signer certificate). Returns the signer call count and result.
+fn sign_onto(
+    f: &Fixture,
+    prior: AdesLevel,
+    level: AdesLevel,
+) -> (
+    usize,
+    Result<(Vec<u8>, ades::PadesReport), oncl_pdf::PdfError>,
+) {
+    let (old, _) = f.run(None, prior);
+    let mut second = f.doc.clone();
+    let mut spec = TestCertSpec::from_cert(&f.doc.cert);
+    spec.serial = vec![0x63, 0x17, 9];
+    second.cert = issue_cert(&f.root, spec);
+    let mut signer = CountSigner {
+        key: second,
+        calls: 0,
+    };
+    let result = with_tsa(f, NOW, NOW, |services| {
+        let mut s = scope();
+        let mut output = services.temporary.stage(&mut s).unwrap();
+        ades::sign(
+            level,
+            Source::sequential(&mut Cursor::new(&old), None),
+            &PdfSignProfile::default(),
+            &mut signer,
+            services,
+            &mut output,
+            &s,
+        )?;
+        let mut bytes = Vec::new();
+        output.copy_to(&mut bytes).unwrap();
+        assert!(bytes.starts_with(&old), "previous revisions are untouched");
+        let report = ades::verify(
+            AdesLevel::B,
+            Source::sequential(&mut Cursor::new(&bytes), None),
+            &PdfLimits::default(),
+            services,
+            &[SigAlg::RsaSha256],
+            &mut s,
+        )?;
+        Ok((bytes, report))
+    });
+    (signer.calls, result)
+}
+#[test]
+fn signing_onto_an_already_signed_pdf_succeeds_at_every_level() {
+    let f = Fixture::new();
+    for prior in [AdesLevel::B, AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta] {
+        for level in [AdesLevel::B, AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta] {
+            let (calls, result) = sign_onto(&f, prior, level);
+            let (_, report) = result.unwrap_or_else(|e| panic!("{prior:?} then {level:?}: {e:?}"));
+            assert_eq!(calls, 1, "{prior:?} then {level:?}");
+            assert_eq!(report.signatures().len(), 2, "{prior:?} then {level:?}");
+            assert_eq!(report.verdict, Verdict::Valid, "{prior:?} then {level:?}");
+            // Honest per-signer levels: the new signature reaches the request; an old
+            // signature is only elevated by the evidence appended for LT/LTA (DSS and
+            // document timestamps), never relabelled, and the aggregate is the minimum.
+            let old_expected = match level {
+                AdesLevel::B | AdesLevel::T => prior,
+                AdesLevel::Lt => AdesLevel::Lt,
+                AdesLevel::Lta => AdesLevel::Lta,
+            };
+            let levels = report.signature_levels();
+            // A new T signature in a file that already holds DSS material is honestly
+            // proven against it, so it reports LT there; never below the request.
+            let new_expected = if level == AdesLevel::T && prior >= AdesLevel::Lt {
+                AdesLevel::Lt
+            } else {
+                level
+            };
+            assert_eq!(
+                levels,
+                [Some(old_expected), Some(new_expected)],
+                "{prior:?} then {level:?}"
+            );
+            assert_eq!(
+                report.level(),
+                Some(old_expected.min(new_expected)),
+                "{prior:?} then {level:?}"
+            );
+        }
+    }
+}
+#[test]
+fn a_bad_present_signature_blocks_signing_before_any_key_use() {
+    let mut f = Fixture::new();
+    let (old, _) = f.run(None, AdesLevel::B);
+    // The first signer's certificate is revoked before the document was signed.
+    f.crl = MockCrl::new(f.root.clone())
+        .with_this_update(NOW - time::Duration::MINUTE)
+        .next_update(Some(NOW + time::Duration::HOUR))
+        .revoke(
+            f.doc.cert.tbs_certificate().serial_number().as_bytes(),
+            NOW - time::Duration::HOUR,
+        )
+        .der();
+    let mut second = f.doc.clone();
+    let mut spec = TestCertSpec::from_cert(&f.doc.cert);
+    spec.serial = vec![0x63, 0x17, 9];
+    second.cert = issue_cert(&f.root, spec);
+    for level in [AdesLevel::B, AdesLevel::T, AdesLevel::Lt, AdesLevel::Lta] {
+        let mut signer = CountSigner {
+            key: second.clone(),
+            calls: 0,
+        };
+        with_tsa(&f, NOW, NOW, |services| {
+            let mut s = scope();
+            let mut output = services.temporary.stage(&mut s).unwrap();
+            assert!(
+                ades::sign(
+                    level,
+                    Source::sequential(&mut Cursor::new(&old), None),
+                    &PdfSignProfile::default(),
+                    &mut signer,
+                    services,
+                    &mut output,
+                    &s,
+                )
+                .is_err(),
+                "{level:?}"
+            );
+            assert!(output.copy_to(&mut Vec::new()).is_err());
+        });
+        assert_eq!(signer.calls, 0, "{level:?}: refused before private use");
+    }
+}

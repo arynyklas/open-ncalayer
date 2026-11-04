@@ -497,6 +497,31 @@ pub(super) fn run(out: &std::path::Path) -> Result<(), Box<dyn std::error::Error
     }
     std::fs::write(out.join("rsa-Multiple-Lta.pdf"), &two)?;
     drop(report);
+    // A NEW signature at a higher level onto a PDF that already carries a plain B
+    // signature: the old revisions stay byte-identical, both signers validate, the
+    // new one reaches the request, and LT/LTA evidence also elevates the old signer.
+    let b_then_t = sign(&signer, &keys[1], &rsa_b, AdesLevel::T, material())?;
+    let report = verify(&evidence, &b_then_t, AdesLevel::B)?;
+    if report.verdict != Verdict::Valid
+        || report.signers.len() != 2
+        || report.ades_level != Some(AdesLevel::B)
+        || !b_then_t.starts_with(&rsa_b)
+    {
+        return Err("P03 B-then-T onto signed PDF failed".into());
+    }
+    std::fs::write(out.join("rsa-B-Then-T.pdf"), &b_then_t)?;
+    drop(report);
+    let b_then_lta = sign(&signer, &keys[1], &rsa_b, AdesLevel::Lta, material())?;
+    let report = verify(&evidence, &b_then_lta, AdesLevel::Lta)?;
+    if report.verdict != Verdict::Valid
+        || report.signers.len() != 2
+        || report.ades_level != Some(AdesLevel::Lta)
+        || !b_then_lta.starts_with(&rsa_b)
+    {
+        return Err("P03 B-then-LTA onto signed PDF failed".into());
+    }
+    std::fs::write(out.join("rsa-B-Then-Lta.pdf"), &b_then_lta)?;
+    drop(report);
     let before = guard.calls.load(Ordering::SeqCst);
     let mut dss = rsa_lta.clone();
     let at = dss
@@ -541,7 +566,7 @@ pub(super) fn run(out: &std::path::Path) -> Result<(), Box<dyn std::error::Error
         std::fs::write(out.join(name), bytes)?;
         summary.push_str(&format!("{name}=Rejected B-and-renewal\n"));
     }
-    if guard.calls.load(Ordering::SeqCst) != before || before != 7 {
+    if guard.calls.load(Ordering::SeqCst) != before || before != 9 {
         return Err(format!("P03 unexpected private operations {before}").into());
     }
     summary.push_str(&format!("user_private_applications={before}\nextend_key_provider=absent\nloopback_http_requests={}\ninput_source_bytes={}\n",calls.load(Ordering::SeqCst),source.len()));

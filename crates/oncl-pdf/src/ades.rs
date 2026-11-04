@@ -34,11 +34,19 @@ use std::{
 pub struct PadesReport {
     pub verdict: Verdict,
     level: Option<AdesLevel>,
+    /// Level each signature reached on its own, in `signatures()` order.
+    signature_levels: Vec<Option<AdesLevel>>,
     verification: PdfVerification,
 }
 impl PadesReport {
+    /// The minimum level over all signatures, only when every signature validated.
     pub fn level(&self) -> Option<AdesLevel> {
         self.level
+    }
+    /// The honest level each signature reached, parallel to [`Self::signatures`]:
+    /// `None` for a signature that did not validate.
+    pub fn signature_levels(&self) -> &[Option<AdesLevel>] {
+        &self.signature_levels
     }
     pub fn signatures(&self) -> &[PdfSignature] {
         &self.verification.signatures
@@ -52,6 +60,7 @@ impl std::fmt::Debug for PadesReport {
         f.debug_struct("PadesReport")
             .field("verdict", &self.verdict)
             .field("level", &self.level)
+            .field("signature_levels", &self.signature_levels)
             .field("verification", &self.verification)
             .finish()
     }
@@ -646,6 +655,7 @@ fn verify_view(
     let extent = view.len();
     let snapshot = Mutex::new(view);
     let mut signatures = Vec::new();
+    let mut signature_levels = Vec::new();
     let mut minimum = AdesLevel::Lta;
     let sources: Vec<_> = parsed
         .candidates
@@ -674,6 +684,7 @@ fn verify_view(
         if let Some(level) = report.level() {
             minimum = minimum.min(level);
         }
+        signature_levels.push(report.level());
         signatures.push(PdfSignature {
             byte_range: candidate.range,
             revision: *revision,
@@ -700,6 +711,7 @@ fn verify_view(
     Ok(PadesReport {
         verdict,
         level: (verdict == Verdict::Valid).then_some(minimum),
+        signature_levels,
         verification: PdfVerification {
             verdict,
             extent,
@@ -758,6 +770,32 @@ fn verify_output(
         Ok(report)
     })
 }
+/// Final check after appending ONE new signature to a possibly already signed PDF:
+/// every signature must validate at its own honest level (a present signature is never
+/// upgraded or ignored), and the newly appended signature, the last one in file order,
+/// must itself reach `required`. Earlier signatures are not demanded to reach it.
+fn verify_new_signature(
+    required: AdesLevel,
+    output: &mut StagedArtifact,
+    limits: &PdfLimits,
+    services: &AdesServices<'_>,
+    allowed: &[SigAlg],
+    scope: &ResourceScope,
+) -> Result<PadesReport> {
+    let report = verify_output(AdesLevel::B, output, limits, services, allowed, scope)?;
+    let newest = report
+        .signatures()
+        .iter()
+        .zip(report.signature_levels())
+        .max_by_key(|(signature, _)| signature.revision_end)
+        .and_then(|(_, level)| *level);
+    if newest.is_none_or(|level| level < required) {
+        return Err(PdfError::Unsupported(
+            "new PAdES signature did not reach the requested level",
+        ));
+    }
+    Ok(report)
+}
 fn acquisition(level: AdesLevel, services: &AdesServices<'_>) -> Result<()> {
     services.limits.validate().map_err(ades::AdesError::from)?;
     if level >= AdesLevel::T {
@@ -806,7 +844,7 @@ pub fn sign(
         scope,
     )?;
     let result = (|| {
-        verify_output(
+        verify_new_signature(
             level.min(AdesLevel::T),
             output,
             &profile.limits,
@@ -824,14 +862,26 @@ pub fn sign(
                 scope,
             )?;
         }
-        verify_output(
-            level,
-            output,
-            &profile.limits,
-            services,
-            profile.allowed,
-            scope,
-        )?;
+        if level >= AdesLevel::Lt {
+            // The evidence steps above cover every signature, so all must reach it.
+            verify_output(
+                level,
+                output,
+                &profile.limits,
+                services,
+                profile.allowed,
+                scope,
+            )?;
+        } else {
+            verify_new_signature(
+                level,
+                output,
+                &profile.limits,
+                services,
+                profile.allowed,
+                scope,
+            )?;
+        }
         Ok::<_, PdfError>(())
     })();
     if let Err(error) = result {

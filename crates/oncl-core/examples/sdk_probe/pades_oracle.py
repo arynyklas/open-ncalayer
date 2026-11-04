@@ -72,6 +72,7 @@ def oracle(directory):
         ('rsa-B.pdf', 'B'), ('rsa-T.pdf', 'T'), ('rsa-Lt.pdf', 'LT'),
         ('rsa-Lta.pdf', 'LTA'), ('rsa-Renewed-Lta.pdf', 'LTA'),
         ('rsa-B-Extended-T.pdf', 'T'), ('rsa-Multiple-Lta.pdf', 'LTA'),
+        ('rsa-B-Then-T.pdf', 'B'), ('rsa-B-Then-Lta.pdf', 'LTA'),
     ]
     failures = []
     for filename, required in cases:
@@ -120,7 +121,22 @@ def oracle(directory):
             failures.append(filename + ': no verified trusted time indication')
         lta = []
         if required == 'LTA':
-            for signature in regular:
+            for signature, row in zip(regular, rows):
+                if row['signature_timestamp'] is None:
+                    # pyHanko's ades_lta_validation unconditionally demands a CMS
+                    # signature-timestamp attribute ("No signature timestamp present").
+                    # A signature that was B before this extension (an earlier B signature
+                    # on a PDF that later gained DSS + covering document timestamps,
+                    # EN 319 142-1 6.3) is instead judged by the regular-signature check
+                    # above plus the validated, covering document timestamps and DSS.
+                    if (not timestamps or not all(t['bottom_line'] for t in timestamps)
+                            or not timestamps[-1]['coverage'].endswith('ENTIRE_FILE')
+                            or dss is None):
+                        failures.append(filename + ': ' + str(row['field']) +
+                                        ': no CMS timestamp and no valid covering document timestamp/DSS')
+                    lta.append({'field': row['field'], 'ades_lta_validation': 'not applicable (no CMS signature timestamp)',
+                                'document_timestamps_valid': bool(documents)})
+                    continue
                 result = asyncio.run(ades_lta_validation(
                     signature, spec, ValidationTimingInfo(NOW, NOW, True)))
                 lta.append({'subindication': str(result.ades_subindic),
