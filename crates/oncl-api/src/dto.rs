@@ -137,6 +137,17 @@ pub enum Operation {
         #[serde(default)]
         certificate: Option<String>,
     },
+    /// Invoke an operator-installed plugin operation. The caller identity, the
+    /// permitted host imports and key names come from operator grants, not here.
+    Plugin {
+        plugin: String,
+        operation: String,
+        /// Plugin arguments (JSON text, bounded by the plugin's transfer limit).
+        args: String,
+        /// Invocation-local handles bound to operator-named keys.
+        #[serde(default)]
+        keys: Vec<PluginKeyRef>,
+    },
     /// Public structural inspection; never signs and never exports a key.
     Inspect {
         target: InspectTarget,
@@ -171,6 +182,10 @@ pub enum InspectTarget {
         container: String,
         #[serde(default)]
         password: Option<String>,
+    },
+    /// Public metadata of an operator-named key slot (token needs that key right).
+    Named {
+        name: String,
     },
 }
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -216,6 +231,12 @@ pub enum SignWriteMode {
     #[default]
     Create,
     Add,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginKeyRef {
+    pub handle: u32,
+    pub name: String,
 }
 /// A public `document` part carrying DER evidence.
 #[derive(Deserialize)]
@@ -381,6 +402,10 @@ pub enum OperationResult {
         checked_at_unix: i64,
         signers: Vec<JwsSignerFacts>,
         claims: String,
+    },
+    Plugin {
+        response: String,
+        applied: crate::error::AppliedState,
     },
     Inspection {
         target: &'static str,

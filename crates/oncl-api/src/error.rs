@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ErrorCode {
     PermissionDenied,
+    /// The operation would need an interactive confirmation; headless refuses.
+    InteractionRequired,
     InvalidRequest,
     CapacityExceeded,
     DeadlineExceeded,
@@ -46,7 +48,7 @@ impl axum::response::IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
         let status = match self.code {
-            ErrorCode::PermissionDenied => StatusCode::FORBIDDEN,
+            ErrorCode::PermissionDenied | ErrorCode::InteractionRequired => StatusCode::FORBIDDEN,
             ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
             ErrorCode::CapacityExceeded => StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,

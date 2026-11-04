@@ -21,6 +21,7 @@ const EXTRACT_EXAMPLE: &str = r#"{"items":[{"id":"x1","operation":{"kind":"extra
 const JWS_EXAMPLE: &str = r#"{"items":[{"id":"j1","operation":{"kind":"jws_sign","serialization":"compact","input":"payload","keys":[{"source":"named","name":"operator-key"}]}}],"parts":[{"name":"payload","item_id":"j1","role":"document"}]}"#;
 const JWT_EXAMPLE: &str = r#"{"items":[{"id":"t1","operation":{"kind":"jwt_verify","input":"token"}}],"parts":[{"name":"token","item_id":"t1","role":"document"}]}"#;
 const INSPECT_EXAMPLE: &str = r#"{"items":[{"id":"i1","operation":{"kind":"inspect","target":{"type":"container","container":"p12","password":"pin"}}}],"parts":[{"name":"p12","item_id":"i1","role":"secret"},{"name":"pin","item_id":"i1","role":"secret"}]}"#;
+const PLUGIN_EXAMPLE: &str = r#"{"items":[{"id":"p1","operation":{"kind":"plugin","plugin":"vendor.example","operation":"run","args":"{}","keys":[{"handle":1,"name":"operator-key"}]}}],"parts":[]}"#;
 const STAMP_EXAMPLE: &str = r#"{"items":[{"id":"t2","operation":{"kind":"stamp","input":"doc"}}],"parts":[{"name":"doc","item_id":"t2","role":"document"}]}"#;
 const VERIFY_STAMP_EXAMPLE: &str = r#"{"items":[{"id":"t3","operation":{"kind":"verify_stamp","token":"token","data":"doc","algorithm":"sha256","max_age_seconds":3600}}],"parts":[{"name":"token","item_id":"t3","role":"document"},{"name":"doc","item_id":"t3","role":"document"}]}"#;
 
@@ -129,7 +130,7 @@ fn schemas() -> Value {
     };
     json!({
         "ApiError": object(&["code","applied"], json!({"code": ref_("ErrorCode"), "applied": ref_("AppliedState")})),
-        "ErrorCode": enumeration(&["PermissionDenied","InvalidRequest","CapacityExceeded","DeadlineExceeded","Cancelled","InputLimit","FramingLimit","MissingTemporaryStore","MemoryLimit","TempLimit","MetadataLimit","OutputLimit","AuditUnavailable","MissingConfiguration","KeyNotFound","ValidationFailed","OperationFailed","Internal"]),
+        "ErrorCode": enumeration(&["PermissionDenied","InteractionRequired","InvalidRequest","CapacityExceeded","DeadlineExceeded","Cancelled","InputLimit","FramingLimit","MissingTemporaryStore","MemoryLimit","TempLimit","MetadataLimit","OutputLimit","AuditUnavailable","MissingConfiguration","KeyNotFound","ValidationFailed","OperationFailed","Internal"]),
         "AppliedState": {"enum":["NotApplied","Applied","Unknown"],"description":"Whether a private key was used. `Unknown` after a post-use failure; no rollback or exactly-once is promised."},
         "OperationMetadata": object(&["items","parts"], json!({
             "items":{"type":"array","minItems":1,"maxItems":1024,"items":ref_("Item")},
@@ -144,7 +145,7 @@ fn schemas() -> Value {
             ref_("HashOperation"), ref_("VerifyOperation"), ref_("ExtractOperation"), ref_("SignOperation"),
             ref_("ExtendOperation"), ref_("InspectOperation"), ref_("StampOperation"), ref_("VerifyStampOperation"),
             ref_("JwsSignOperation"), ref_("JwsAddOperation"), ref_("JwsVerifyOperation"),
-            ref_("JwtEncodeOperation"), ref_("JwtDecodeOperation"), ref_("JwtVerifyOperation")],
+            ref_("JwtEncodeOperation"), ref_("JwtDecodeOperation"), ref_("JwtVerifyOperation"), ref_("PluginOperation")],
             "discriminator":{"propertyName":"kind"}},
         "HashOperation": op("hash", &["algorithm","input"], json!({"algorithm":enumeration(&["sha1","sha256","sha512","gost34311","streebog256","streebog512"]),"input":doc})),
         "VerifyOperation": op("verify", &["profile","input"], json!({"profile":enumeration(&["cms","cades_b","cades_t","cades_lt","cades_lta","pdf","pades_b","pades_t","pades_lt","pades_lta","xml","xml_kalkan","xades_b","xades_t","xades_lt","xades_lta","wsse"]),"input":doc,"detached":optional_doc,"soap":enumeration(&["soap11","soap12"])})),
@@ -154,7 +155,8 @@ fn schemas() -> Value {
         "InspectOperation": op("inspect", &["target"], json!({"target":{"oneOf":[
             object(&["type","input"], json!({"type":{"const":"certificate"},"input":doc})),
             object(&["type","input"], json!({"type":{"const":"cms"},"input":doc})),
-            object(&["type","container"], json!({"type":{"const":"container"},"container":{"type":"string"},"password":{"type":"string"}}))]}})),
+            object(&["type","container"], json!({"type":{"const":"container"},"container":{"type":"string"},"password":{"type":"string"}})),
+            object(&["type","name"], json!({"type":{"const":"named"},"name":{"type":"string"}}))]}})),
         "StampOperation": op("stamp", &["input"], json!({"input":doc})),
         "VerifyStampOperation": op("verify_stamp", &["token"], json!({"token":doc,"data":doc,"algorithm":enumeration(&["sha1","sha256","sha512","gost34311","streebog256","streebog512"]),"max_age_seconds":{"type":"integer","minimum":0}})),
         "JwsSignOperation": op("jws_sign", &["serialization","input","keys"], json!({"serialization":enumeration(&["compact","flattened","general"]),"detached":{"type":"boolean"},"input":doc,"keys":{"type":"array","items":ref_("KeyRef")}})),
@@ -162,6 +164,8 @@ fn schemas() -> Value {
         "JwsVerifyOperation": op("jws_verify", &["serialization","input"], json!({"serialization":enumeration(&["compact","flattened","general"]),"input":doc,"detached":doc,"certificate":doc})),
         "JwtEncodeOperation": op("jwt_encode", &["input","key"], json!({"input":doc,"key":ref_("KeyRef")})),
         "JwtDecodeOperation": op("jwt_decode", &["input"], json!({"input":doc})),
+        "PluginOperation": op("plugin", &["plugin","operation","args"], json!({"plugin":{"type":"string"},"operation":{"type":"string"},"args":{"type":"string","description":"JSON text for the plugin"},"keys":{"type":"array","items":object(&["handle","name"], json!({"handle":{"type":"integer"},"name":{"type":"string","description":"operator-named key granted to this token and plugin operation"}}))}})),
+        "PluginResult": res("plugin", &["response","applied"], json!({"response":{"type":"string"},"applied":ref_("AppliedState")})),
         "JwtVerifyOperation": op("jwt_verify", &["input"], json!({"input":doc,"certificate":doc})),
         "FinalEvent": object(&["type","operation_id","status","results"], json!({
             "type":{"const":"final"},
@@ -170,7 +174,7 @@ fn schemas() -> Value {
             "results":{"type":"array","items":ref_("ItemResult")},
             "error":ref_("ApiError")})),
         "ItemResult": object(&["item_id","applied","result"], json!({"item_id":{"type":"string"},"applied":ref_("AppliedState"),"result":ref_("OperationResult")})),
-        "OperationResult": {"oneOf":[ref_("HashResult"),ref_("VerificationResult"),ref_("ExtractionResult"),ref_("SigningResult"),ref_("ExtensionResult"),ref_("InspectionResult"),ref_("StampingResult"),ref_("StampVerificationResult"),ref_("JwsResult"),ref_("JwsVerificationResult"),ref_("JwtDecodedResult"),ref_("JwtVerificationResult")],"discriminator":{"propertyName":"kind"},"description":"Typed by `kind`. Artifact-producing results carry `artifact`, the Content-ID of a binary part; a failed final omits it (artifacts are withheld)."},
+        "OperationResult": {"oneOf":[ref_("HashResult"),ref_("VerificationResult"),ref_("ExtractionResult"),ref_("SigningResult"),ref_("ExtensionResult"),ref_("InspectionResult"),ref_("StampingResult"),ref_("StampVerificationResult"),ref_("JwsResult"),ref_("JwsVerificationResult"),ref_("JwtDecodedResult"),ref_("JwtVerificationResult"),ref_("PluginResult")],"discriminator":{"propertyName":"kind"},"description":"Typed by `kind`. Artifact-producing results carry `artifact`, the Content-ID of a binary part; a failed final omits it (artifacts are withheld)."},
         "HashResult": res("hash", &["algorithm","digest","bytes_in"], json!({"algorithm":{"type":"string"},"digest":{"type":"string"},"bytes_in":{"type":"integer"}})),
         "VerificationResult": res("verification", &["profile","verdict","policy","checked_at_unix","signers"], json!({"profile":{"type":"string"},"verdict":verdict(),"policy":{"type":"string"},"checked_at_unix":{"type":"integer"},"signers":{"type":"array","items":ref_("SignerChecks")}})),
         "ExtractionResult": res("extraction", &["bytes_written"], json!({"artifact":{"type":"string"},"bytes_written":{"type":"integer"}})),
@@ -205,6 +209,7 @@ fn request_body() -> Value {
                 "jws":{"summary":"Compact JWS","value":parsed(JWS_EXAMPLE)},
                 "jwt_verify":{"summary":"JWT with host-owned issuer/audience policy","value":parsed(JWT_EXAMPLE)},
                 "inspect":{"summary":"Container metadata for host-granted aliases","value":parsed(INSPECT_EXAMPLE)},
+                "plugin":{"summary":"Operator-granted plugin call (imports/keys come from operator grants)","value":parsed(PLUGIN_EXAMPLE)},
                 "stamp":{"summary":"Timestamp from the operator-configured TSA","value":parsed(STAMP_EXAMPLE)},
                 "verify_stamp":{"summary":"Verify a token against its data","value":parsed(VERIFY_STAMP_EXAMPLE)}}},
         "application/json":{

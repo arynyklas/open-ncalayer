@@ -19,6 +19,8 @@ pub(super) fn action(operation: &Operation) -> Action {
         Operation::Extract { .. } => Action::Extract,
         Operation::Sign { .. } => Action::Sign,
         Operation::Extend { .. } => Action::Extend,
+        // Plugins are authorized only by their exact operator grant (no action right).
+        Operation::Plugin { .. } => Action::Hash,
         Operation::JwsSign { .. } | Operation::JwsAdd { .. } | Operation::JwtEncode { .. } => {
             Action::Sign
         }
@@ -76,6 +78,7 @@ pub(super) fn inputs(operation: &Operation) -> std::vec::IntoIter<&str> {
             names.extend(evidence.iter().map(|e| e.input.as_str()));
             return names.into_iter();
         }
+        Operation::Plugin { .. } => [None, None],
         Operation::Stamp { input }
         | Operation::JwsSign { input, .. }
         | Operation::JwtEncode { input, .. }
@@ -100,7 +103,7 @@ pub(super) fn inputs(operation: &Operation) -> std::vec::IntoIter<&str> {
             InspectTarget::Certificate { input } | InspectTarget::Cms { input } => {
                 [Some(input.as_str()), None]
             }
-            InspectTarget::Container { .. } => [None, None],
+            InspectTarget::Container { .. } | InspectTarget::Named { .. } => [None, None],
         },
     };
     names.into_iter().flatten().collect::<Vec<_>>().into_iter()
@@ -163,10 +166,32 @@ pub(super) fn precheck(
     policy: &AccessPolicy,
     principal: &Principal,
     inline_enabled: bool,
+    host: &super::HostPolicy,
 ) -> Result<(), ApiError> {
     let denied = || ApiError::not_applied(ErrorCode::PermissionDenied);
     for item in &metadata.items {
         let act = action(&item.operation);
+        if let Operation::Plugin {
+            plugin,
+            operation,
+            keys,
+            ..
+        } = &item.operation
+        {
+            let grant = plugin_grant(host, principal, plugin, operation).ok_or_else(denied)?;
+            if keys.len() > MAX_KEYS_PER_ITEM {
+                return Err(invalid_request());
+            }
+            for key in keys {
+                if !grant.keys.contains(&key.name) {
+                    return Err(denied());
+                }
+                policy
+                    .authorize(principal, Action::Sign, Some(&key.name), None)
+                    .map_err(|_| denied())?;
+            }
+            continue;
+        }
         if act != Action::Sign {
             policy
                 .authorize(principal, act, None, None)
@@ -194,6 +219,14 @@ pub(super) fn precheck(
             }
         }
         if let Operation::Inspect {
+            target: InspectTarget::Named { name },
+        } = &item.operation
+        {
+            policy
+                .authorize(principal, Action::Inspect, Some(name), None)
+                .map_err(|_| denied())?;
+        }
+        if let Operation::Inspect {
             target: InspectTarget::Container { password, .. },
         } = &item.operation
         {
@@ -210,6 +243,16 @@ pub(super) fn precheck(
     }
     Ok(())
 }
+fn plugin_grant<'h>(
+    host: &'h super::HostPolicy,
+    principal: &Principal,
+    plugin: &str,
+    operation: &str,
+) -> Option<&'h super::PluginGrantRuntime> {
+    host.plugin_grants
+        .iter()
+        .find(|g| g.token == principal.id() && g.plugin == plugin && g.operation == operation)
+}
 pub(super) const MAX_KEYS_PER_ITEM: usize = 8;
 /// Host authorization of every key named by an item, performed after bounded
 /// metadata/secret intake and BEFORE any document/provider/private work.
@@ -218,6 +261,7 @@ pub(super) struct Resolved {
     pub keys: Vec<KeyId>,
     pub inline: HashMap<KeyId, ()>,
     pub reservations: Vec<oncl_pki::resource::ResourceReservation>,
+    pub plugins: Vec<oncl_core::plugins::PluginPermission>,
 }
 pub(super) fn resolve_keys(
     metadata: &OperationMetadata,
@@ -225,6 +269,7 @@ pub(super) fn resolve_keys(
     policy: &AccessPolicy,
     principal: &Principal,
     inline_enabled: bool,
+    host: &super::HostPolicy,
     scope: &ResourceScope,
 ) -> Result<Resolved, ApiError> {
     let denied = || ApiError::not_applied(ErrorCode::PermissionDenied);
@@ -233,13 +278,46 @@ pub(super) fn resolve_keys(
         keys: Vec::new(),
         inline: HashMap::new(),
         reservations: Vec::new(),
+        plugins: Vec::new(),
     };
     for item in &metadata.items {
+        if let Operation::Plugin {
+            plugin,
+            operation,
+            keys,
+            ..
+        } = &item.operation
+        {
+            let grant = plugin_grant(host, principal, plugin, operation).ok_or_else(denied)?;
+            let mut selectors = Vec::new();
+            for key in keys {
+                let id = KeyId::new(&key.name).map_err(|_| invalid_request())?;
+                if !resolved.keys.contains(&id) {
+                    resolved.keys.push(id.clone());
+                }
+                selectors.push(KeySelector::named(id));
+            }
+            resolved.plugins.push(grant.permission.clone());
+            resolved.selectors.insert(item.id.clone(), selectors);
+            continue;
+        }
         let keys = key_refs(&item.operation);
         if action(&item.operation) == Action::Sign
             && (keys.is_empty() || keys.len() > MAX_KEYS_PER_ITEM)
         {
             return Err(invalid_request());
+        }
+        if let Operation::Inspect {
+            target: InspectTarget::Named { name },
+        } = &item.operation
+        {
+            policy
+                .authorize(principal, Action::Inspect, Some(name), None)
+                .map_err(|_| denied())?;
+            let id = KeyId::new(name).map_err(|_| invalid_request())?;
+            if !resolved.keys.contains(&id) {
+                resolved.keys.push(id);
+            }
         }
         let mut selectors = Vec::with_capacity(keys.len());
         for key in keys {
@@ -394,6 +472,7 @@ fn timestamp_facts(report: &oncl_core::TimestampReport) -> TimestampFacts {
 pub(super) fn applied_of(result: &OperationResult) -> oncl_api::error::AppliedState {
     use oncl_api::error::AppliedState as A;
     match result {
+        OperationResult::Plugin { applied, .. } => *applied,
         OperationResult::Signing { signers, .. } | OperationResult::Jws { signers, .. } => {
             signers.iter().fold(A::NotApplied, |a, s| match (a, *s) {
                 (A::Unknown, _) | (_, A::Unknown) => A::Unknown,
@@ -416,6 +495,7 @@ pub(super) struct Env<'a> {
     pub selectors: &'a HashMap<String, Vec<KeySelector>>,
     pub staging: Option<&'a oncl_pki::io::TemporaryStore>,
     pub host: &'a super::HostPolicy,
+    pub caller: &'a oncl_core::plugins::CallerContext,
 }
 fn applied(value: oncl_pki::key::AppliedState) -> oncl_api::error::AppliedState {
     match value {
@@ -1078,6 +1158,15 @@ pub(super) fn run(
                     reader.finish()?;
                     report
                 }
+                InspectTarget::Named { name } => {
+                    request_label = "named_key";
+                    let selector = KeySelector::named(
+                        KeyId::new(name).map_err(|_| ProcessingError::InvalidInput("key name"))?,
+                    );
+                    let key = KeyRequest::new(&selector, None);
+                    env.engine
+                        .inspect(&oncl_core::InspectRequest::named_key(&key), None, ctx)?
+                }
                 InspectTarget::Container {
                     container,
                     password,
@@ -1444,6 +1533,50 @@ pub(super) fn run(
                     checked_at_unix: report.claims().checked_at(),
                     signers,
                     claims,
+                },
+                projection,
+                None,
+            ))
+        }
+        Operation::Plugin {
+            plugin,
+            operation,
+            args,
+            keys,
+        } => {
+            let selectors = env
+                .selectors
+                .get(item_id)
+                .ok_or(ProcessingError::InvalidInput("unresolved plugin keys"))?;
+            let bindings: Vec<_> = keys
+                .iter()
+                .zip(selectors)
+                .map(|(key, selector)| {
+                    oncl_core::plugins::PluginKeyBinding::new(
+                        key.handle,
+                        KeyRequest::new(selector, None),
+                    )
+                })
+                .collect();
+            let call = oncl_core::plugins::PluginCall {
+                plugin_id: &plugin,
+                operation: &operation,
+                args: &args,
+            };
+            let bound = oncl_core::plugins::PluginBindings::new(env.caller, &bindings);
+            // The ORIGINAL admitted context: no new budget, grant or deadline.
+            let result = env.engine.plugin_call(&call, &bound, ctx)?;
+            let state = result.applied_state();
+            let response = result.response().to_owned();
+            let projection = after_use(
+                state,
+                ctx.resources()
+                    .reserve_metadata(512 + response.len() as u64),
+            )?;
+            Ok((
+                OperationResult::Plugin {
+                    response,
+                    applied: applied(state),
                 },
                 projection,
                 None,

@@ -2493,3 +2493,437 @@ async fn xades_legacy_b_is_signed_over_http_and_checked_by_lxml() {
     }
     service.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_key_inspection_reads_public_metadata_for_the_exact_granted_slot_only() {
+    let pki = Pki::start();
+    let leaf = pki.leaf("user-rsa-sign");
+    let alias = leaf.alias.clone();
+    let service = Running::start_with(|config, dir| {
+        config.pki = pki.config(dir);
+        named_key(config, dir, &pki, "ops-key", "user-rsa-sign");
+        named_key(config, dir, &pki, "other-key", "user-rsa-sign");
+        config.tokens[0].actions = vec![Permission::Inspect];
+        config.tokens[0].keys = vec!["ops-key".into()];
+    })
+    .await;
+    let metadata = |name: &str| {
+        format!(
+            r#"{{"items":[{{"id":"n","operation":{{"kind":"inspect","target":{{"type":"named","name":"{name}"}}}}}}],"parts":[]}}"#
+        )
+    };
+    let (status, _, response) = service
+        .post(FORM, multipart(&metadata("ops-key"), &[]))
+        .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    assert_matches_schema("FinalEvent", &serde_json::from_slice(&response).unwrap());
+    let done: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(done["results"][0]["result"]["target"], "named_key");
+    assert_eq!(
+        done["results"][0]["result"]["entries"][0]["alias"],
+        alias.as_str()
+    );
+    assert!(!String::from_utf8_lossy(&response).contains("operator-held-password"));
+    for name in ["other-key", "missing-key"] {
+        let (status, _, _) = service.post(FORM, multipart(&metadata(name), &[])).await;
+        assert_eq!(status, 403, "{name}");
+    }
+    assert_eq!(begins(&service), 0, "inspection never uses a private key");
+    service.stop().await;
+}
+
+async fn start_with_cards(
+    pki: &Pki,
+    probe: Arc<private_support::cards::Probe>,
+    keys: &[(&str, &str, &str)],
+    tune: impl FnOnce(&mut oncl_server::config::ServerConfig),
+) -> Running {
+    use oncl_server::{
+        auth::TokenSecret,
+        config::{ServerConfig, TokenConfig},
+        service::{ServiceHost, serve},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let secret = TokenSecret::generate().unwrap();
+    let mut config = ServerConfig {
+        enabled: true,
+        audit_directory: directory.path().join("audit"),
+        scratch_directory: directory.path().join("scratch"),
+        metadata_bytes: 67_108_864,
+        ..ServerConfig::default()
+    };
+    config.pki = pki.config(directory.path());
+    for (name, reader, alias) in keys {
+        token_key(&mut config, directory.path(), name, reader, alias);
+    }
+    config.tokens.push(TokenConfig {
+        id: "test".into(),
+        verifier: secret.verifier().encoded(),
+        actions: vec![Permission::Sign, Permission::Inspect],
+        keys: keys.iter().map(|k| k.0.to_owned()).collect(),
+        inline_pkcs12: false,
+        metadata_aliases: vec![],
+    });
+    tune(&mut config);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let host = ServiceHost::with_token_backend(config, probe)
+        .unwrap()
+        .for_listener(address)
+        .unwrap();
+    let (shutdown, stop) = tokio::sync::oneshot::channel();
+    let h = host.clone();
+    let task = tokio::spawn(async move {
+        serve(listener, h, None, async {
+            let _ = stop.await;
+        })
+        .await
+    });
+    Running::from_parts(address, secret.bearer(), task, shutdown, directory, host)
+}
+
+fn named_sign(name: &str, doc: &str) -> (String, Vec<u8>) {
+    (
+        format!(
+            r#"{{"items":[{{"id":"t","operation":{{"kind":"sign","profile":"cms","input":"doc","attached":true,"keys":[{{"source":"named","name":"{name}"}}]}}}}],"parts":[{{"name":"doc","item_id":"t","role":"document"}}]}}"#
+        ),
+        doc.as_bytes().to_vec(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn token_key_signs_over_http_serializes_per_device_and_fails_closed_without_a_card() {
+    let pki = Pki::start();
+    let leaf = pki.leaf("user-rsa-sign");
+    let alias = leaf.alias.clone();
+    let (probe, witness) = private_support::cards::backend(
+        &[("reader-a", Some(leaf.clone())), ("empty-reader", None)],
+        150,
+    );
+    let service = Arc::new(
+        start_with_cards(
+            &pki,
+            probe,
+            &[
+                ("card-a", "reader-a", &alias),
+                ("no-card", "empty-reader", &alias),
+                ("no-reader", "missing-reader", &alias),
+            ],
+            |config| {
+                config.max_in_flight = 4;
+                config.blocking_workers = 4;
+                config.queue_capacity = 4;
+                config.admission_wait_ms = 5000;
+            },
+        )
+        .await,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    // Four concurrent requests on one reader: all sign, never two open card transactions.
+    let mut tasks = Vec::new();
+    for round in 0..4 {
+        let service = service.clone();
+        tasks.push(tokio::spawn(async move {
+            let (metadata, doc) = named_sign("card-a", &format!("token payload {round}"));
+            let (status, ct, response) = service
+                .post(
+                    FORM,
+                    multipart(
+                        &metadata,
+                        &[Part {
+                            name: "doc",
+                            filename: None,
+                            bytes: &doc,
+                        }],
+                    ),
+                )
+                .await;
+            assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+            (round, mixed(&ct, response).await)
+        }));
+    }
+    for task in tasks {
+        let (round, parts) = task.await.unwrap();
+        assert_eq!(final_event(&parts)["status"], "completed");
+        let content = format!("token payload {round}");
+        assert_eq!(
+            openssl_cms_verify(artifact(&parts, "artifact-0"), None, dir.path()).as_deref(),
+            Some(content.as_bytes())
+        );
+    }
+    assert_eq!(
+        *witness.max.lock().unwrap().get("reader-a").unwrap(),
+        1,
+        "card transactions on one device never overlap"
+    );
+    assert!(
+        *witness
+            .transactions
+            .lock()
+            .unwrap()
+            .get("reader-a")
+            .unwrap()
+            >= 4
+    );
+    assert_eq!(begins(&service), 4);
+    // Fail closed: a reader without a card / a missing reader never reaches Begin and is NotApplied.
+    for name in ["no-card", "no-reader"] {
+        let (metadata, doc) = named_sign(name, "x");
+        let (status, ct, response) = service
+            .post(
+                FORM,
+                multipart(
+                    &metadata,
+                    &[Part {
+                        name: "doc",
+                        filename: None,
+                        bytes: &doc,
+                    }],
+                ),
+            )
+            .await;
+        if ct.starts_with("multipart/mixed") {
+            let parts = mixed(&ct, response).await;
+            let done = final_event(&parts);
+            assert_eq!(done["status"], "failed", "{name}: {done}");
+            assert_eq!(done["error"]["applied"], "NotApplied");
+            assert!(parts.iter().all(|(n, _, _)| n != "artifact"));
+        } else {
+            assert!(status >= 400, "{name}: {status}");
+            let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
+            assert_eq!(error["applied"], "NotApplied");
+        }
+    }
+    assert_eq!(begins(&service), 4, "refused token use never wrote a BEGIN");
+    let service = Arc::try_unwrap(service).ok().unwrap();
+    // The PIN is never in the audit journal directory.
+    let journal = spool_files(&service.directory.path().join("audit"));
+    for file in journal {
+        // The journal identity lock file is exclusively locked by the live service.
+        let Ok(bytes) = std::fs::read(&file) else {
+            continue;
+        };
+        assert!(
+            !bytes
+                .windows(private_support::cards::PIN.len())
+                .any(|w| w == private_support::cards::PIN.as_bytes())
+        );
+    }
+    service.stop().await;
+}
+
+const MESSAGE: &[u8] = b"plugin raw signing over HTTP";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_route_uses_operator_grants_the_original_context_and_typed_refusals() {
+    use oncl_pdk::abi::{self, Import};
+    use oncl_server::config::{PluginConfig, PluginGrant};
+    let pki = Pki::start();
+    let leaf = pki.leaf("user-rsa-sign");
+    let dir = tempfile::tempdir().unwrap();
+    let write_plugin = |id: &str, calls: &[(Import, Vec<u8>)]| {
+        let manifest = dir.path().join(format!("{id}.toml"));
+        let wasm = dir.path().join(format!("{id}.wasm"));
+        std::fs::write(&manifest, private_support::plugin::manifest(id)).unwrap();
+        std::fs::write(&wasm, private_support::plugin::wasm(calls)).unwrap();
+        (manifest, wasm)
+    };
+    let sign_raw = |handle: u32| {
+        (
+            Import::KeysSignRaw,
+            abi::encode(&abi::SignRawArgs {
+                handle,
+                data: MESSAGE.to_vec().into(),
+            }),
+        )
+    };
+    let hash = (
+        Import::Hash,
+        abi::encode(&abi::HashArgs {
+            alg: abi::HashAlg::Sha256,
+            data: b"abc".to_vec().into(),
+        }),
+    );
+    let confirm = (
+        Import::DialogConfirm,
+        abi::encode(&abi::ConfirmArgs {
+            text: "Mandatory consent".into(),
+        }),
+    );
+    type Spec<'a> = (&'a str, Vec<(Import, Vec<u8>)>, Vec<&'a str>, Vec<&'a str>);
+    let specs: Vec<Spec<'_>> = vec![
+        ("test.hash", vec![hash.clone()], vec!["hash"], vec![]),
+        (
+            "test.sign",
+            vec![sign_raw(1)],
+            vec!["keys_sign_raw"],
+            vec!["ops-key"],
+        ),
+        (
+            "test.nested",
+            vec![hash.clone(), sign_raw(1)],
+            vec!["hash"],
+            vec!["ops-key"],
+        ),
+        (
+            "test.dialog",
+            vec![confirm, sign_raw(1)],
+            vec!["dialog_confirm", "keys_sign_raw"],
+            vec!["ops-key"],
+        ),
+        ("test.ungranted", vec![hash.clone()], vec![], vec![]),
+    ];
+    let mut plugins = Vec::new();
+    for (id, calls, imports, keys) in &specs {
+        let (manifest, wasm) = write_plugin(id, calls);
+        let permissions = if *id == "test.ungranted" {
+            vec![]
+        } else {
+            vec![PluginGrant {
+                token: "test".into(),
+                operation: "run".into(),
+                imports: imports.iter().map(|s| s.to_string()).collect(),
+                keys: keys.iter().map(|s| s.to_string()).collect(),
+                pki_endpoints: vec![
+                    format!("{}/ocsp", pki.origin),
+                    format!("{}/root.crl", pki.origin),
+                    format!("{}/inter.crl", pki.origin),
+                ],
+            }]
+        };
+        plugins.push(PluginConfig {
+            id: id.to_string(),
+            manifest,
+            wasm,
+            max_memory: 1 << 20,
+            max_transfer: 1 << 18,
+            permissions,
+        });
+    }
+    let service = Running::start_with(|config, dir| {
+        config.pki = pki.config(dir);
+        named_key(config, dir, &pki, "ops-key", "user-rsa-sign");
+        config.tokens[0].actions = vec![Permission::Sign];
+        config.tokens[0].keys = vec!["ops-key".into()];
+        config.plugins = plugins;
+    })
+    .await;
+    let call = |plugin: &str, keys: &str, args: &str| {
+        format!(
+            r#"{{"items":[{{"id":"p","operation":{{"kind":"plugin","plugin":"{plugin}","operation":"run","args":{args},"keys":[{keys}]}}}}],"parts":[]}}"#
+        )
+    };
+    let key1 = r#"{"handle":1,"name":"ops-key"}"#;
+    // Granted hash plugin: independent digest check.
+    let (status, _, response) = service
+        .post(FORM, multipart(&call("test.hash", "", "\"{}\""), &[]))
+        .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    assert_matches_schema("FinalEvent", &serde_json::from_slice(&response).unwrap());
+    let done: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(done["results"][0]["result"]["kind"], "plugin");
+    assert_eq!(done["results"][0]["result"]["applied"], "NotApplied");
+    let digest = private_support::plugin::reply_bytes(
+        done["results"][0]["result"]["response"].as_str().unwrap(),
+    );
+    assert_eq!(digest, hex(&sha256(b"abc")));
+    // Granted key plugin signs through the original context + durable audit.
+    let (status, _, response) = service
+        .post(FORM, multipart(&call("test.sign", key1, "\"{}\""), &[]))
+        .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    let done: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(done["status"], "completed", "{done}");
+    assert_eq!(done["results"][0]["applied"], "Applied");
+    let signature = private_support::plugin::reply_bytes(
+        done["results"][0]["result"]["response"].as_str().unwrap(),
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let pem = run_openssl(
+        &["x509", "-inform", "DER", "-pubkey", "-noout", "-in"],
+        &{
+            use der::Encode;
+            leaf.cert.to_der().unwrap()
+        },
+        tmp.path(),
+    );
+    std::fs::write(tmp.path().join("k.pub"), pem).unwrap();
+    std::fs::write(tmp.path().join("s.sig"), &signature).unwrap();
+    std::fs::write(tmp.path().join("m.bin"), MESSAGE).unwrap();
+    let verified = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-verify"])
+        .arg(tmp.path().join("k.pub"))
+        .arg("-signature")
+        .arg(tmp.path().join("s.sig"))
+        .arg(tmp.path().join("m.bin"))
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "OpenSSL verifies the plugin-produced RSA signature"
+    );
+    assert_eq!(begins(&service), 1);
+    // Payload Origin/caller fields are inert data: authority comes from the token grant.
+    let (status, _, _) = service
+        .post(
+            FORM,
+            multipart(
+                &call(
+                    "test.hash",
+                    "",
+                    r#""{\"origin\":\"https://trusted.example\"}""#,
+                ),
+                &[],
+            ),
+        )
+        .await;
+    assert_eq!(status, 200);
+    // Installed but not granted: 403 before anything runs.
+    let (status, _, _) = service
+        .post(FORM, multipart(&call("test.ungranted", "", "\"{}\""), &[]))
+        .await;
+    assert_eq!(status, 403);
+    // A key not in the plugin grant is refused before the key opens.
+    let (status, _, _) = service
+        .post(FORM, multipart(&call("test.hash", key1, "\"{}\""), &[]))
+        .await;
+    assert_eq!(status, 403);
+    // Forbidden nested import: sign import is not granted to test.nested.
+    let (status, _, response) = service
+        .post(FORM, multipart(&call("test.nested", key1, "\"{}\""), &[]))
+        .await;
+    assert_eq!(status, 403, "{}", String::from_utf8_lossy(&response));
+    let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(error["code"], "PermissionDenied");
+    assert_eq!(error["applied"], "NotApplied");
+    assert_eq!(
+        begins(&service),
+        1,
+        "no nested private use after the denied import"
+    );
+    // Mandatory dialog: typed InteractionRequired (headless never auto-answers), key never applied.
+    let (status, _, response) = service
+        .post(FORM, multipart(&call("test.dialog", key1, "\"{}\""), &[]))
+        .await;
+    assert_eq!(status, 403, "{}", String::from_utf8_lossy(&response));
+    let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(error["code"], "InteractionRequired");
+    assert_eq!(error["applied"], "NotApplied");
+    assert_eq!(begins(&service), 1);
+    service.stop().await;
+}
+fn sha256(bytes: &[u8]) -> Vec<u8> {
+    let out = std::process::Command::new("openssl")
+        .args(["dgst", "-sha256", "-binary"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    let mut child = out;
+    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    child.wait_with_output().unwrap().stdout
+}
+fn hex(bytes: &[u8]) -> Vec<u8> {
+    bytes.to_vec()
+}

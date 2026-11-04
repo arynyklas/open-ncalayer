@@ -344,6 +344,23 @@ impl Running {
             host,
         }
     }
+    pub fn from_parts(
+        address: std::net::SocketAddr,
+        token: zeroize::Zeroizing<String>,
+        task: tokio::task::JoinHandle<std::io::Result<()>>,
+        shutdown: tokio::sync::oneshot::Sender<()>,
+        directory: tempfile::TempDir,
+        host: Arc<ServiceHost>,
+    ) -> Self {
+        Self {
+            address,
+            token,
+            task,
+            shutdown,
+            directory,
+            host,
+        }
+    }
     pub async fn stop(self) {
         let _ = self.shutdown.send(());
         self.task.await.unwrap().unwrap();
@@ -686,4 +703,267 @@ pub fn named_key(
             name: format!("{name}.pw"),
         },
     });
+}
+
+/// Card backend wrapper that records the maximum number of concurrently open
+/// transactions per reader (per-device serialization witness).
+pub mod cards {
+    use oncl_token::{
+        TokenKind,
+        backend::{Backend, BackendError, Connection, Protocol, ReaderState},
+        emulator::{CardSpec, EmuKey, EmulatorBackend, card},
+    };
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
+    pub const PIN: &str = "654321";
+    #[derive(Default)]
+    pub struct Witness {
+        active: Mutex<HashMap<String, usize>>,
+        pub max: Mutex<HashMap<String, usize>>,
+        pub transactions: Mutex<HashMap<String, usize>>,
+    }
+    pub struct Probe {
+        pub emu: Arc<EmulatorBackend>,
+        pub witness: Arc<Witness>,
+        pub hold_ms: u64,
+    }
+    struct ProbeConnection {
+        inner: Box<dyn Connection>,
+        reader: String,
+        witness: Arc<Witness>,
+        hold_ms: u64,
+        open: bool,
+    }
+    impl Backend for Probe {
+        fn readers(&self) -> Result<Vec<ReaderState>, BackendError> {
+            self.emu.readers()
+        }
+        fn connect(&self, reader: &str) -> Result<Box<dyn Connection>, BackendError> {
+            Ok(Box::new(ProbeConnection {
+                inner: self.emu.connect(reader)?,
+                reader: reader.into(),
+                witness: self.witness.clone(),
+                hold_ms: self.hold_ms,
+                open: false,
+            }))
+        }
+    }
+    impl Connection for ProbeConnection {
+        fn protocol(&self) -> Protocol {
+            self.inner.protocol()
+        }
+        fn atr(&self) -> &[u8] {
+            self.inner.atr()
+        }
+        fn begin_transaction(&mut self) -> Result<(), BackendError> {
+            self.inner.begin_transaction()?;
+            let now = {
+                let mut active = self.witness.active.lock().unwrap();
+                let count = active.entry(self.reader.clone()).or_default();
+                *count += 1;
+                *count
+            };
+            let mut max = self.witness.max.lock().unwrap();
+            let entry = max.entry(self.reader.clone()).or_default();
+            *entry = (*entry).max(now);
+            *self
+                .witness
+                .transactions
+                .lock()
+                .unwrap()
+                .entry(self.reader.clone())
+                .or_default() += 1;
+            self.open = true;
+            std::thread::sleep(std::time::Duration::from_millis(self.hold_ms));
+            Ok(())
+        }
+        fn end_transaction(&mut self) -> Result<(), BackendError> {
+            if self.open {
+                self.open = false;
+                *self
+                    .witness
+                    .active
+                    .lock()
+                    .unwrap()
+                    .entry(self.reader.clone())
+                    .or_default() -= 1;
+            }
+            self.inner.end_transaction()
+        }
+        fn transmit(&mut self, apdu: &[u8]) -> Result<Vec<u8>, BackendError> {
+            self.inner.transmit(apdu)
+        }
+        fn reset_on_disconnect(&mut self) {
+            self.inner.reset_on_disconnect()
+        }
+        fn begin_private_operation(&mut self) {
+            self.inner.begin_private_operation()
+        }
+    }
+    impl Drop for ProbeConnection {
+        fn drop(&mut self) {
+            if self.open {
+                *self
+                    .witness
+                    .active
+                    .lock()
+                    .unwrap()
+                    .entry(self.reader.clone())
+                    .or_default() -= 1;
+            }
+        }
+    }
+    pub fn backend(
+        readers: &[(&str, Option<oncl_pki::pkcs12::KeyEntry>)],
+        hold_ms: u64,
+    ) -> (Arc<Probe>, Arc<Witness>) {
+        let emu = Arc::new(EmulatorBackend::new());
+        for (reader, entry) in readers {
+            emu.add_reader(reader);
+            if let Some(entry) = entry {
+                let spec = CardSpec::new(
+                    TokenKind::Kaztoken,
+                    PIN,
+                    vec![EmuKey {
+                        entry: entry.clone(),
+                    }],
+                );
+                emu.insert(reader, card(spec));
+            }
+        }
+        let witness = Arc::new(Witness::default());
+        (
+            Arc::new(Probe {
+                emu,
+                witness: witness.clone(),
+                hold_ms,
+            }),
+            witness,
+        )
+    }
+}
+pub fn token_key(
+    config: &mut ServerConfig,
+    directory: &Path,
+    name: &str,
+    reader: &str,
+    alias: &str,
+) {
+    let operator = directory.join("operator");
+    let private = if operator.exists() {
+        oncl_pki::private_fs::PrivateDirectory::open(&operator).unwrap()
+    } else {
+        oncl_pki::private_fs::PrivateDirectory::create(&operator).unwrap()
+    };
+    private
+        .create_file(&format!("{name}.pin"))
+        .unwrap()
+        .write_all(cards::PIN.as_bytes())
+        .unwrap();
+    config.keys.push(KeyConfig::Token {
+        name: name.into(),
+        reader: reader.into(),
+        kind: oncl_token::TokenKind::Kaztoken.storage_name().into(),
+        alias: alias.into(),
+        secret: SecretMount {
+            directory: operator,
+            name: format!("{name}.pin"),
+        },
+    });
+}
+
+pub mod plugin {
+    use oncl_pdk::abi::Import;
+    /// Synthetic WASM guest (same shape as the Core L01 fixture): calls the listed
+    /// host imports with fixed args and returns the hex of the last reply.
+    pub fn wasm(calls: &[(Import, Vec<u8>)]) -> Vec<u8> {
+        let mut imports = String::new();
+        let mut data = String::new();
+        let mut body = String::new();
+        let mut seen = Vec::new();
+        let mut at = 1024;
+        for (import, args) in calls {
+            if !seen.contains(import) {
+                seen.push(*import);
+                imports.push_str(&format!(
+                    "(import \"oncl\" \"{0}\" (func ${0} (param i32 i32) (result i64)))",
+                    import.name()
+                ));
+            }
+            let escaped: String = args.iter().map(|b| format!("\\{b:02x}")).collect();
+            data.push_str(&format!("(data (i32.const {at}) \"{escaped}\")"));
+            body.push_str(&format!(
+                "(local.set $r (call ${} (i32.const {at}) (i32.const {})))",
+                import.name(),
+                args.len()
+            ));
+            at += args.len();
+        }
+        let heap = at.div_ceil(65536).max(1) * 65536;
+        wat::parse_str(format!(
+            r#"(module {imports}
+      (memory (export "memory") 16 16)
+      (global $heap (mut i32) (i32.const {heap}))
+      (func (export "oncl_abi_version") (result i32) (i32.const 1))
+      (func (export "oncl_alloc") (param $n i32) (result i32) (local $p i32)
+        (local.set $p (global.get $heap))
+        (global.set $heap (i32.add (local.get $p) (local.get $n))) (local.get $p))
+      (func (export "oncl_free") (param i32 i32))
+      {data} (data (i32.const 512) "0123456789abcdef")
+      (func (export "oncl_process") (param i32 i32) (result i64)
+        (local $r i64) (local $src i32) (local $len i32) (local $i i32) (local $b i32) (local $out i32) (local $hex i32)
+        {body}
+        (local.set $src (i32.wrap_i64 (i64.shr_u (local.get $r) (i64.const 32))))
+        (local.set $len (i32.wrap_i64 (local.get $r)))
+        (local.set $out (global.get $heap))
+        (i32.store8 (local.get $out) (i32.const 0xa1))
+        (i32.store8 offset=1 (local.get $out) (i32.const 0x68))
+        (i64.store offset=2 (local.get $out) (i64.const 0x65736e6f70736572))
+        (i32.store8 offset=10 (local.get $out) (i32.const 0x7a))
+        (local.set $hex (i32.shl (local.get $len) (i32.const 1)))
+        (i32.store8 offset=11 (local.get $out) (i32.shr_u (local.get $hex) (i32.const 24)))
+        (i32.store8 offset=12 (local.get $out) (i32.shr_u (local.get $hex) (i32.const 16)))
+        (i32.store8 offset=13 (local.get $out) (i32.shr_u (local.get $hex) (i32.const 8)))
+        (i32.store8 offset=14 (local.get $out) (local.get $hex))
+        (block $done (loop $next
+          (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+          (local.set $b (i32.load8_u (i32.add (local.get $src) (local.get $i))))
+          (i32.store8 offset=15 (i32.add (local.get $out) (i32.shl (local.get $i) (i32.const 1)))
+            (i32.load8_u offset=512 (i32.shr_u (local.get $b) (i32.const 4))))
+          (i32.store8 offset=16 (i32.add (local.get $out) (i32.shl (local.get $i) (i32.const 1)))
+            (i32.load8_u offset=512 (i32.and (local.get $b) (i32.const 15))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
+        (i64.or (i64.shl (i64.extend_i32_u (local.get $out)) (i64.const 32))
+          (i64.extend_i32_u (i32.add (local.get $hex) (i32.const 15))))))"#
+        ))
+        .unwrap()
+    }
+    pub fn manifest(id: &str) -> String {
+        format!(
+            r#"id = "{id}"
+name.ru = "synthetic"
+name.kk = "synthetic"
+name.en = "synthetic"
+version = "1.0.0"
+min_core = "0.1.0"
+modules = ["{id}.module"]
+[capabilities]
+keys = true
+dialogs = true
+"#
+        )
+    }
+    /// Hex reply -> decoded host result bytes (signature or digest).
+    pub fn reply_bytes(response: &str) -> Vec<u8> {
+        let bytes: Vec<u8> = (0..response.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&response[i..i + 2], 16).unwrap())
+            .collect();
+        oncl_pdk::abi::decode::<oncl_pdk::abi::HostResult<oncl_pdk::abi::Bytes>>(&bytes)
+            .unwrap()
+            .unwrap()
+            .into_vec()
+    }
 }

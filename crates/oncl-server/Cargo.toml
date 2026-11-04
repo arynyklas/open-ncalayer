@@ -33,6 +33,8 @@ time.workspace = true
 der.workspace = true
 oncl-pdf.workspace = true
 oncl-xml.workspace = true
+oncl-plugin.workspace = true
+oncl-pdk.workspace = true
 
 [dev-dependencies]
 oncl-pki = { workspace = true, features = ["testing"] }

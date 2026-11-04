@@ -188,16 +188,33 @@ serialized by the real DTOs. Each token needs the matching action:
 | `jws_sign`, `jws_add`, `jwt_encode` | `sign` plus per-key right | `multipart/mixed` artifact |
 | `jws_verify`, `jwt_verify` | `verify` | JSON; signature, host trust and claims reported separately |
 | `jwt_decode` | `extract` | JSON; `verified` is always `false` |
-| `inspect` (`certificate`, `cms`, `container`) | `inspect` | JSON |
+| `inspect` (`certificate`, `cms`, `container`, `named`) | `inspect` (`named` also needs that key right) | JSON |
+| `plugin` | exact operator grant only | JSON |
 | `stamp` | `stamp` | `multipart/mixed` token artifact |
 | `verify_stamp` | `verify_stamp` | JSON |
 
 Multiple items execute sequentially under one original deadline and budget. There
 are no encryption/decryption routes: the applicable GOST envelope backend is an
 external prerequisite and is not replaced by an RSA-only or generic Unsupported
-route. WS-Security signing, SDK closed-batch capture/approval (`run_batch`, which
-would add per-item audit ordinals; items here run sequentially in one request
-without it) and the plugin route are not exposed by this HTTP contract yet.
+route. SDK closed-batch capture/approval (`run_batch`, which would add per-item
+audit ordinals) is not exposed yet; items here run sequentially without it.
+
+`sign` profiles also include `wsse` (SOAP Body signature, `soap` = `soap11`/`soap12`,
+optional `body_id`), `xml_legacy` (Kalkan wire layout; `element`/`xpath_parent` XPaths,
+`signature_method`/`digest_method` URIs, which must fit the key; the Kalkan default
+follows the certificate's *signature* algorithm) and `xades_legacy_b`. `verify` accepts
+`wsse`. Unsupported field/profile combinations are refused from metadata alone (400)
+before any key, secret or document is touched. `xades_legacy_t` is not available.
+
+`plugin` calls an operator-installed plugin operation through `Engine::plugin_call`
+with the original admitted context. Installation is not authority: each
+(token, plugin, operation) needs an operator `[[plugins.permissions]]` entry listing
+the allowed host imports, named keys and exact GET PKI status URLs; the caller identity
+is the token, never a request or payload `origin`. Mandatory dialogs fail with
+`InteractionRequired` (403), a denied nested import is `PermissionDenied`, key use is
+audited and reported `Applied`/`Unknown`. Token (PC/SC) keys are operator named keys;
+they fail closed (NotApplied, no BEGIN) without a reader/card and card transactions
+on one device never overlap.
 
 ## Keys and secret roles
 

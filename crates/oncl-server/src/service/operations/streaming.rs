@@ -24,6 +24,7 @@ pub(super) struct PrivateState {
     pub reservations: Vec<ResourceReservation>,
     pub binding: Option<crate::audit::AuditBinding>,
     pub host: Arc<super::HostPolicy>,
+    pub caller: oncl_core::plugins::CallerContext,
 }
 struct StreamFinal {
     event: Bytes,
@@ -97,6 +98,7 @@ pub(super) async fn response(
                 reservations,
                 binding,
                 host,
+                caller,
             } = private;
             let result = {
                 let mut env = dispatch::Env {
@@ -106,6 +108,7 @@ pub(super) async fn response(
                     selectors: &selectors,
                     staging: runtime.source_store.as_ref(),
                     host: &host,
+                    caller: &caller,
                 };
                 execute(&root, &runtime.output_store, &mut guard, metadata, &mut env)
             };

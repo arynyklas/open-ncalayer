@@ -139,6 +139,43 @@ pub enum KeyConfig {
         secret: SecretMount,
     },
 }
+/// An operator-installed plugin: code availability only. Authority is the
+/// separate per-token `permissions` below, never the installation itself.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginConfig {
+    pub id: String,
+    /// `plugin.toml` text file (at most 64 KiB).
+    pub manifest: PathBuf,
+    /// The module bytes (at most 16 MiB).
+    pub wasm: PathBuf,
+    #[serde(default = "default_plugin_memory")]
+    pub max_memory: usize,
+    #[serde(default = "default_plugin_transfer")]
+    pub max_transfer: usize,
+    #[serde(default)]
+    pub permissions: Vec<PluginGrant>,
+}
+fn default_plugin_memory() -> usize {
+    1 << 20
+}
+fn default_plugin_transfer() -> usize {
+    1 << 18
+}
+/// One exact (token, operation) grant: the allowed host imports and operator
+/// key names. The caller identity is the token, never a request field/Origin.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginGrant {
+    pub token: String,
+    pub operation: String,
+    pub imports: Vec<String>,
+    #[serde(default)]
+    pub keys: Vec<String>,
+    /// Exact GET PKI status URLs the plugin's nested validation may reach.
+    #[serde(default)]
+    pub pki_endpoints: Vec<String>,
+}
 /// Immutable operator trust/network configuration, never request metadata.
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -307,6 +344,7 @@ pub struct ServerConfig {
     pub tokens: Vec<TokenConfig>,
     pub keys: Vec<KeyConfig>,
     pub pki: PkiConfig,
+    pub plugins: Vec<PluginConfig>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -338,6 +376,7 @@ impl Default for ServerConfig {
             tokens: Vec::new(),
             keys: Vec::new(),
             pki: PkiConfig::default(),
+            plugins: Vec::new(),
         }
     }
 }
@@ -381,6 +420,8 @@ impl ServerConfig {
             || self.total_temp < self.temp_per_operation
             || self.tokens.len() > 256
             || self.keys.len() > 64
+            || self.plugins.len() > 16
+            || self.plugins.iter().any(|p| p.permissions.len() > 256)
             || self.hosts.len() > 32
             || self
                 .hosts

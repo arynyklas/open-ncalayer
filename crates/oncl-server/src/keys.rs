@@ -178,3 +178,23 @@ pub fn inline_label(id: &KeyId) -> AuditLabel {
     let digest = hash.finish();
     AuditLabel::new(digest.as_ref()[..16].try_into().expect("digest length"))
 }
+
+/// Public metadata of an operator-named slot, using the operator-held secret.
+/// The client names only the slot; the grant, not the wire, decides access.
+impl oncl_core::ReadMetadataProvider for OperatorKeys {
+    fn inspect(
+        &self,
+        request: &KeyRequest<'_>,
+        limits: &oncl_pki::info::InspectionLimits,
+        ctx: &mut OperationContext,
+    ) -> Result<oncl_pki::info::PublicMetadata, OperationError> {
+        let id = request.selector().key_id();
+        let (secret, _) = self.bindings.get(&id).ok_or(OperationError::KeyNotFound)?;
+        oncl_core::ReadMetadataProvider::inspect(
+            &self.sources,
+            &KeyRequest::new(request.selector(), Some(secret)),
+            limits,
+            ctx,
+        )
+    }
+}

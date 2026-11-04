@@ -73,7 +73,15 @@ impl OperationControl for InvocationControl {
 impl ServiceHost {
     /// Synchronous startup only, before the network runtime/listener. Configuration
     /// owns all mounts and the journal; an existing journal requires explicit recovery.
-    pub fn new(mut config: ServerConfig) -> io::Result<Arc<Self>> {
+    pub fn new(config: ServerConfig) -> io::Result<Arc<Self>> {
+        Self::with_token_backend(config, Arc::new(PcscBackend::new()))
+    }
+    /// Startup with an explicit card backend (the system PC/SC service by default;
+    /// the emulator in tests). Token keys fail closed when no reader/card answers.
+    pub fn with_token_backend(
+        mut config: ServerConfig,
+        backend: Arc<dyn oncl_token::backend::Backend>,
+    ) -> io::Result<Arc<Self>> {
         config.validate()?;
         if let Exposure::TrustedProxy { peers } = &mut config.exposure {
             for peer in peers {
@@ -97,7 +105,7 @@ impl ServiceHost {
             .iter()
             .any(|k| matches!(k, crate::config::KeyConfig::Token { .. }))
         {
-            let tokens = Tokens::new(Arc::new(PcscBackend::new()), true);
+            let tokens = Tokens::new(backend, true);
             tokens.set_trace(false);
             Some((
                 tokens,
@@ -145,10 +153,15 @@ impl ServiceHost {
                     .map_err(|_| invalid())?,
             )
         };
+        let (registry, plugin_grants) = install_plugins(&config)?;
         let mut services = EngineServices::hash_only(config.limits())
             .with_shared_budget(budget)
             .with_keys(keys.clone(), Arc::new(audit.clone()))
+            .with_metadata_provider(keys.clone())
             .with_validation(config.pki.services()?);
+        if !config.plugins.is_empty() {
+            services = services.with_plugins(registry);
+        }
         if let Some(tsa) = &config.pki.tsa {
             services = services.with_cades(oncl_core::CadesConfiguration::new(
                 operations::evidence_limits(&config.limits()),
@@ -172,6 +185,7 @@ impl ServiceHost {
             tsa: config.pki.tsa.as_ref().map(|t| t.spec()).transpose()?,
             jwt_issuer: config.pki.jwt.expected_issuer.clone(),
             jwt_audience: config.pki.jwt.expected_audience.clone(),
+            plugin_grants,
         });
         Ok(Arc::new(Self {
             engine,
@@ -268,6 +282,102 @@ impl ServiceHost {
         Ok(Arc::new(this))
     }
 }
+/// Operator-only plugin installation: code availability, never authority. The
+/// per-(token, operation) permission lists exact host imports and key names and
+/// binds the caller identity to the token, not to any request field.
+fn install_plugins(
+    config: &ServerConfig,
+) -> io::Result<(
+    oncl_core::plugins::PluginRegistry,
+    Vec<operations::PluginGrantRuntime>,
+)> {
+    use oncl_core::plugins::{CallerContext, PluginPermission, PluginRegistry};
+    let mut registry = PluginRegistry::new();
+    let mut grants = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    for plugin in &config.plugins {
+        if !ids.insert(plugin.id.as_str()) {
+            return Err(invalid());
+        }
+        let read = |path: &std::path::Path, limit: u64| -> io::Result<Vec<u8>> {
+            use std::io::Read;
+            let mut file = std::fs::File::open(path)?;
+            if file.metadata()?.len() > limit {
+                return Err(invalid());
+            }
+            let mut bytes = Vec::new();
+            file.by_ref().take(limit + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > limit {
+                return Err(invalid());
+            }
+            Ok(bytes)
+        };
+        let manifest_text =
+            String::from_utf8(read(&plugin.manifest, 64 << 10)?).map_err(|_| invalid())?;
+        let manifest = oncl_plugin::Manifest::from_toml(&manifest_text).map_err(|_| invalid())?;
+        if manifest.id != plugin.id {
+            return Err(invalid());
+        }
+        let wasm = read(&plugin.wasm, 16 << 20)?;
+        let mut permissions = Vec::new();
+        for grant in &plugin.permissions {
+            if !config.tokens.iter().any(|t| t.id == grant.token) {
+                return Err(invalid());
+            }
+            let imports = grant
+                .imports
+                .iter()
+                .map(|name| {
+                    oncl_pdk::abi::Import::ALL
+                        .iter()
+                        .copied()
+                        .find(|i| i.name() == name)
+                        .ok_or_else(invalid)
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            let keys = grant
+                .keys
+                .iter()
+                .map(|k| oncl_core::keys::KeyId::new(k).map_err(|_| invalid()))
+                .collect::<io::Result<Vec<_>>>()?;
+            let permission = PluginPermission::new(
+                &plugin.id,
+                &grant.operation,
+                CallerContext::ServiceClient(grant.token.clone()),
+                imports,
+            )
+            .with_keys(keys)
+            .with_pki_endpoints(
+                grant
+                    .pki_endpoints
+                    .iter()
+                    .map(|url| (oncl_pki::http::HttpMethod::Get, url.as_str())),
+            )
+            .map_err(|_| invalid())?;
+            grants.push(operations::PluginGrantRuntime {
+                token: grant.token.clone(),
+                plugin: plugin.id.clone(),
+                operation: grant.operation.clone(),
+                keys: grant.keys.clone(),
+                permission: permission.clone(),
+            });
+            permissions.push(permission);
+        }
+        registry
+            .install(
+                manifest,
+                &wasm,
+                oncl_plugin::InstanceLimits {
+                    max_memory: plugin.max_memory,
+                    max_transfer: plugin.max_transfer,
+                    ..oncl_plugin::InstanceLimits::default()
+                },
+                permissions,
+            )
+            .map_err(|_| invalid())?;
+    }
+    Ok((registry, grants))
+}
 fn processing_error(error: ProcessingError) -> ApiError {
     let code = match operations::intake::first_cause(&error) {
         ProcessingError::CapacityExceeded => ErrorCode::CapacityExceeded,
@@ -297,7 +407,8 @@ pub(crate) fn api_applied(value: oncl_pki::key::AppliedState) -> oncl_api::error
 pub(crate) fn operation_failure(error: &OperationError) -> ApiError {
     use oncl_core::ErrorCode as Core;
     let code = match error.code() {
-        Core::PermissionDenied | Core::InteractionRequired => ErrorCode::PermissionDenied,
+        Core::PermissionDenied => ErrorCode::PermissionDenied,
+        Core::InteractionRequired => ErrorCode::InteractionRequired,
         Core::InvalidInput | Core::SecretRequired => ErrorCode::InvalidRequest,
         Core::Cancelled => ErrorCode::Cancelled,
         Core::DeadlineExceeded => ErrorCode::DeadlineExceeded,

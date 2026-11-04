@@ -156,6 +156,10 @@ pub struct Principal {
     owner: Arc<()>,
 }
 impl Principal {
+    /// The authenticated token id (host-assigned, not a request field).
+    pub fn id(&self) -> &str {
+        &self.id
+    }
     pub fn audit_label(&self) -> AuditLabel {
         self.label
     }

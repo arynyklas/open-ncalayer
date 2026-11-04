@@ -20,6 +20,16 @@ pub(crate) struct HostPolicy {
     pub tsa: Option<oncl_pki::tsp::TsaSpec>,
     pub jwt_issuer: Option<String>,
     pub jwt_audience: Option<String>,
+    pub plugin_grants: Vec<PluginGrantRuntime>,
+}
+/// One exact operator grant: (token, plugin, operation) with its key names and
+/// the SDK permission built from them. Installed code alone grants nothing.
+pub(crate) struct PluginGrantRuntime {
+    pub token: String,
+    pub plugin: String,
+    pub operation: String,
+    pub keys: Vec<String>,
+    pub permission: oncl_core::plugins::PluginPermission,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -184,7 +194,7 @@ impl ServiceHost {
                 &mut admission,
                 deadline,
                 cancel.clone(),
-                &|m| dispatch::precheck(m, &policy, &principal, inline_enabled),
+                &|m| dispatch::precheck(m, &policy, &principal, inline_enabled, &host_policy),
             )
             .await?;
             // Recheck the actual Principal generation and each resolved operation
@@ -193,13 +203,21 @@ impl ServiceHost {
             let mut private = false;
             for item in &prepared.metadata.items {
                 let action = dispatch::action(&item.operation);
-                // Key-bearing actions are authorized per exact key in resolve_keys.
-                if !matches!(action, Action::Sign) {
+                // Key-bearing actions are authorized per exact key in resolve_keys;
+                // plugin items only by their exact operator grant.
+                if matches!(item.operation, Operation::Plugin { .. }) {
+                } else if !matches!(action, Action::Sign) {
                     policy
                         .authorize(&principal, action, None, None)
                         .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?;
                 } else {
                     private = true;
+                }
+                if let Operation::Plugin { keys, .. } = &item.operation
+                    && !keys.is_empty()
+                {
+                    private = true;
+                    actions.push(Action::Sign);
                 }
                 actions.push(action);
             }
@@ -209,13 +227,15 @@ impl ServiceHost {
                 &policy,
                 &principal,
                 inline_enabled,
+                &host_policy,
                 admission.resources(),
             )?;
             if private && audit.health() != AuditHealth::Healthy {
                 return Err(ApiError::not_applied(ErrorCode::AuditUnavailable));
             }
-            let mut grant =
-                oncl_core::ExecutionGrant::new(actions).with_keys(resolved.keys.clone());
+            let mut grant = oncl_core::ExecutionGrant::new(actions)
+                .with_keys(resolved.keys.clone())
+                .with_plugins(resolved.plugins.clone());
             if prepared.metadata.items.iter().any(|i| {
                 matches!(
                     i.operation,
@@ -289,11 +309,16 @@ impl ServiceHost {
                         reservations: resolved.reservations,
                         binding,
                         host: host_policy,
+                        caller: oncl_core::plugins::CallerContext::ServiceClient(
+                            principal.id().to_owned(),
+                        ),
                     },
                 )
                 .await;
             }
             let runtime = tokio::runtime::Handle::current();
+            let caller =
+                oncl_core::plugins::CallerContext::ServiceClient(principal.id().to_owned());
             let work = executor
                 .submit(ctx, move |ctx| {
                     let _headers = headers;
@@ -316,17 +341,16 @@ impl ServiceHost {
                         selectors: &selectors,
                         staging: None,
                         host: &host_policy,
+                        caller: &caller,
                     };
                     for item in request.items {
                         let (result, reservation, _) =
-                            dispatch::run(item.operation, &item.id, &mut env, ctx, None).map_err(
-                                |error| match error {
-                                    OperationError::Processing(error) => error,
-                                    _ => {
-                                        ProcessingError::InvalidInput("operation execution failed")
-                                    }
-                                },
-                            )?;
+                            match dispatch::run(item.operation, &item.id, &mut env, ctx, None) {
+                                Ok(done) => done,
+                                Err(OperationError::Processing(error)) => return Err(error),
+                                // Typed refusal/failure with its honest Applied state.
+                                Err(error) => return Ok(Err(operation_failure(&error))),
+                            };
                         result_reservations.push(reservation);
                         results.push(ItemResult {
                             item_id: item.id,
@@ -347,12 +371,13 @@ impl ServiceHost {
                         return Err(ProcessingError::MetadataLimit);
                     }
                     ctx.resources().account_output(bytes.len() as u64)?;
-                    Ok((bytes, reservation))
+                    Ok(Ok((bytes, reservation)))
                 })
                 .await
                 .map_err(|error| processing_error(failure.recover(error)))?;
             let output = await_worker(work, deadline, &failure).await?;
-            let ((bytes, reservation), mut ctx) = (output.value, output.context);
+            let (typed, mut ctx) = (output.value, output.context);
+            let (bytes, reservation) = typed?;
             let delivery = ResponseDelivery {
                 deadline,
                 cancel,
