@@ -43,7 +43,11 @@ const UNSIGNED: &[u8] = include_bytes!("fixtures/external-multipage.pdf");
 #[test]
 fn prior_signature_contents_reads_real_signed_fixtures() {
     let none = prior(UNSIGNED).unwrap();
-    assert_eq!(none, PriorSignatures::default(), "an unsigned PDF has no prior signatures");
+    assert_eq!(
+        none,
+        PriorSignatures::default(),
+        "an unsigned PDF has no prior signatures"
+    );
     let one = prior(SIGNED).unwrap();
     assert_eq!(one.count, 1);
     assert!(one.contents_sum > 0 && one.contents_max > 0, "{one:?}");
@@ -69,8 +73,14 @@ fn plan_memory_and_metadata_are_pinned_and_monotonic_in_every_input() {
     // default limits is a conscious update of the HTTP profile documentation.
     let memory = budget::plan_memory(&limits, &none).unwrap();
     let metadata = budget::plan_metadata(&limits, &none).unwrap();
-    assert_eq!(memory, 397_541_376, "plan_memory with no inputs (default limits)");
-    assert_eq!(metadata, 57_802_752, "plan_metadata with no inputs (default limits)");
+    assert_eq!(
+        memory, 397_541_376,
+        "plan_memory with no inputs (default limits)"
+    );
+    assert_eq!(
+        metadata, 57_802_752,
+        "plan_metadata with no inputs (default limits)"
+    );
     // Components are the documented reservation functions.
     let (reader_metadata, reader_memory) = budget::reader(&limits).unwrap();
     assert!(memory >= budget::plan_reservation(&limits).unwrap() + reader_memory);
@@ -78,21 +88,57 @@ fn plan_memory_and_metadata_are_pinned_and_monotonic_in_every_input() {
     assert!(metadata >= budget::sign_metadata(&limits).unwrap() + reader_metadata);
     // Every input only grows the need.
     let grow = |inputs: PlanInputs| {
-        (budget::plan_memory(&limits, &inputs).unwrap(), budget::plan_metadata(&limits, &inputs).unwrap())
+        (
+            budget::plan_memory(&limits, &inputs).unwrap(),
+            budget::plan_metadata(&limits, &inputs).unwrap(),
+        )
     };
     for inputs in [
-        PlanInputs { prior_contents_sum: 1 << 20, ..none },
-        PlanInputs { prior_contents_max: 1 << 20, ..none },
-        PlanInputs { evidence_bytes: 1 << 20, ..none },
-        PlanInputs { trust_bytes: 1 << 20, ..none },
+        PlanInputs {
+            prior_contents_sum: 1 << 20,
+            ..none
+        },
+        PlanInputs {
+            prior_contents_max: 1 << 20,
+            ..none
+        },
+        PlanInputs {
+            evidence_bytes: 1 << 20,
+            ..none
+        },
+        PlanInputs {
+            trust_bytes: 1 << 20,
+            ..none
+        },
     ] {
         let (m, md) = grow(inputs);
         assert!(m > memory && md > metadata, "{inputs:?}: {m} {md}");
     }
     // Evidence costs the documented factor per byte (the measured coefficient).
-    let (m, _) = grow(PlanInputs { evidence_bytes: 1 << 20, ..none });
+    let (m, _) = grow(PlanInputs {
+        evidence_bytes: 1 << 20,
+        ..none
+    });
     assert_eq!(m - memory, (1 << 20) * budget::EVIDENCE_MEMORY_FACTOR);
     // Overflowing inputs are an error, never a wrapped small number.
-    assert!(budget::plan_memory(&limits, &PlanInputs { evidence_bytes: u64::MAX, ..none }).is_err());
-    assert!(budget::plan_metadata(&limits, &PlanInputs { prior_contents_sum: u64::MAX, ..none }).is_err());
+    assert!(
+        budget::plan_memory(
+            &limits,
+            &PlanInputs {
+                evidence_bytes: u64::MAX,
+                ..none
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        budget::plan_metadata(
+            &limits,
+            &PlanInputs {
+                prior_contents_sum: u64::MAX,
+                ..none
+            }
+        )
+        .is_err()
+    );
 }

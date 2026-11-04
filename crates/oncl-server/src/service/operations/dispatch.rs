@@ -195,18 +195,6 @@ pub(super) fn precheck(
             }
             continue;
         }
-        // XAdES timestamp levels bind the TSA policy OID (SDK contract): a host TSA
-        // without one is a configuration refusal BEFORE any secret or body is read.
-        if matches!(
-            &item.operation,
-            Operation::Sign {
-                profile: SignKind::XadesT | SignKind::XadesLegacyT,
-                ..
-            }
-        ) && host.tsa.as_ref().is_none_or(|t| t.policy.is_none())
-        {
-            return Err(ApiError::not_applied(ErrorCode::MissingConfiguration));
-        }
         if act != Action::Sign {
             policy
                 .authorize(principal, act, None, None)
@@ -254,6 +242,20 @@ pub(super) fn precheck(
             {
                 return Err(denied());
             }
+        }
+        // XAdES timestamp levels bind the TSA policy OID (SDK contract): a host TSA
+        // without one is a configuration refusal BEFORE any secret or body is read,
+        // but only after this item's own rights passed (a token without the right
+        // gets 403 and learns nothing about host configuration).
+        if matches!(
+            &item.operation,
+            Operation::Sign {
+                profile: SignKind::XadesT | SignKind::XadesLegacyT,
+                ..
+            }
+        ) && host.tsa.as_ref().is_none_or(|t| t.policy.is_none())
+        {
+            return Err(ApiError::not_applied(ErrorCode::MissingConfiguration));
         }
     }
     Ok(())
@@ -753,10 +755,7 @@ pub(super) fn memory_preflight(
             oncl_pdf::budget::prior_signature_contents(reader.source(), &limits, scope)
                 .map_err(refuse_pdf)?
         };
-        // The new signature must itself fit the signature-count limit.
-        if prior.count.saturating_add(1) > limits.max_signatures as u64 {
-            return Err(ApiError::not_applied(ErrorCode::InputLimit));
-        }
+        signature_count_fits(prior.count, limits.max_signatures)?;
         let inputs = oncl_pdf::budget::PlanInputs {
             prior_contents_sum: prior.contents_sum,
             prior_contents_max: prior.contents_max,
@@ -785,6 +784,14 @@ pub(super) fn memory_preflight(
             .reserve_memory(need)
             .map(drop)
             .map_err(refuse_processing)?;
+    }
+    Ok(())
+}
+/// The new signature must itself fit the PDF signature-count limit (a document that
+/// already carries `max_signatures` signatures fails after key use otherwise).
+fn signature_count_fits(prior: u64, maximum: usize) -> Result<(), ApiError> {
+    if prior.saturating_add(1) > maximum as u64 {
+        return Err(ApiError::not_applied(ErrorCode::InputLimit));
     }
     Ok(())
 }
@@ -1848,6 +1855,79 @@ mod tests {
             ErrorCode::MissingConfiguration,
             "a TSA without a policy OID is still refused"
         );
+    }
+    #[test]
+    fn the_new_signature_must_fit_the_signature_count_limit() {
+        let maximum = oncl_pdf::PdfLimits::default().max_signatures;
+        assert!(signature_count_fits(maximum as u64 - 1, maximum).is_ok());
+        let error = signature_count_fits(maximum as u64, maximum).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InputLimit);
+        assert_eq!(error.applied, oncl_api::error::AppliedState::NotApplied);
+        assert_eq!(
+            signature_count_fits(u64::MAX, maximum).unwrap_err().code,
+            ErrorCode::InputLimit
+        );
+    }
+    /// Control that can be flipped to a latched cancel/deadline stop after `begin`.
+    struct Latch(std::sync::atomic::AtomicU8);
+    impl oncl_pki::resource::OperationControl for Latch {
+        fn checkpoint(
+            &self,
+            _: oncl_pki::resource::Progress,
+        ) -> Result<(), oncl_pki::resource::ProcessingError> {
+            match self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                1 => Err(ProcessingError::Cancelled),
+                2 => Err(ProcessingError::DeadlineExceeded),
+                _ => Ok(()),
+            }
+        }
+    }
+    #[test]
+    fn preflight_keeps_cancel_and_deadline_typing_and_never_reports_a_memory_limit() {
+        for (state, expected) in [
+            (1u8, ErrorCode::Cancelled),
+            (2u8, ErrorCode::DeadlineExceeded),
+        ] {
+            let engine = Engine::new(oncl_core::EngineServices::hash_only(
+                oncl_pki::resource::ResourceLimits::default(),
+            ))
+            .unwrap();
+            let latch = Arc::new(Latch(std::sync::atomic::AtomicU8::new(0)));
+            let mut ctx = engine
+                .begin(
+                    oncl_core::ExecutionGrant::new([Action::Sign]),
+                    oncl_core::OperationPolicy::strict_online(),
+                    latch.clone(),
+                )
+                .unwrap();
+            let metadata: OperationMetadata = serde_json::from_str(r#"{"items":[{"id":"s","operation":{"kind":"sign","profile":"pades_lt","input":"d","evidence":[{"kind":"ocsp","input":"e"}],"keys":[{"source":"named","name":"k"}]}}],"parts":[{"name":"d","item_id":"s","role":"document"},{"name":"e","item_id":"s","role":"document"}]}"#).unwrap();
+            let mut documents = intake::Documents::Text(
+                [("d".to_owned(), "%PDF".to_owned()), ("e".to_owned(), "ocsp".to_owned())]
+                    .into_iter()
+                    .collect(),
+            );
+            let host = host_with_grant("tok");
+            latch.0.store(state, std::sync::atomic::Ordering::SeqCst);
+            let error =
+                memory_preflight(&metadata, &mut documents, &host, ctx.resources()).unwrap_err();
+            assert_eq!(error.code, expected);
+            assert_eq!(error.applied, oncl_api::error::AppliedState::NotApplied);
+        }
+    }
+    #[test]
+    fn rights_are_decided_before_the_host_tsa_configuration_is_revealed() {
+        let (policy, principal, _secret) = live_policy("tok");
+        let host = host_with_grant("tok");
+        for profile in ["xades_t", "xades_legacy_t"] {
+            // The token holds the sign right only for key "k": "other" is not granted.
+            let metadata: OperationMetadata = serde_json::from_str(&format!(r#"{{"items":[{{"id":"s","operation":{{"kind":"sign","profile":"{profile}","input":"d","keys":[{{"source":"named","name":"other"}}]}}}}],"parts":[{{"name":"d","item_id":"s","role":"document"}}]}}"#)).unwrap();
+            let error = precheck(&metadata, &policy, &principal, false, &host).unwrap_err();
+            assert_eq!(error.code, ErrorCode::PermissionDenied, "{profile}");
+            // With the right the configuration refusal appears.
+            let granted: OperationMetadata = serde_json::from_str(&format!(r#"{{"items":[{{"id":"s","operation":{{"kind":"sign","profile":"{profile}","input":"d","keys":[{{"source":"named","name":"k"}}]}}}}],"parts":[{{"name":"d","item_id":"s","role":"document"}}]}}"#)).unwrap();
+            let error = precheck(&granted, &policy, &principal, false, &host).unwrap_err();
+            assert_eq!(error.code, ErrorCode::MissingConfiguration, "{profile}");
+        }
     }
     #[test]
     fn host_failure_after_key_use_keeps_the_real_applied_state() {

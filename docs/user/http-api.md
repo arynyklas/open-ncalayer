@@ -183,8 +183,8 @@ serialized by the real DTOs. Each token needs the matching action:
 | `hash` | `hash` | JSON |
 | `verify` (`cms`, `cades_*`, `pdf`, `pades_*`, `xml`, `xml_kalkan`, `xades_*`) | `verify` | JSON; Invalid is a completed HTTP 200 report |
 | `extract` | `extract` | `multipart/mixed` artifact |
-| `sign` (`cms`, `cades_b/t/lt/lta`, `pdf`, `pades_b/t/lt/lta`, `xml`, `xades_b/t/lt/lta`; `mode` `create`/`add` for CMS/CAdES; XML takes optional `target`/`parent`/`signature_id` element IDs) | `sign` plus per-key right | `multipart/mixed` artifact |
-| `extend` (`cades_t/lt/lta`, `pades_t/lt/lta`) | `extend` (keyless; no provider/audit use) | `multipart/mixed` artifact |
+| `sign` (`cms`, `cades_b/t/lt/lta`, `pdf`, `pades_b/t/lt/lta`, `xml`, `xades_b/t`, `wsse`, `xml_legacy`, `xades_legacy_b/t`; there is no `xades_lt/lta` sign profile; `mode` `create`/`add` for CMS/CAdES; XML takes optional `target`/`parent`/`signature_id` element IDs) | `sign` plus per-key right | `multipart/mixed` artifact |
+| `extend` (`cades_t/lt/lta`, `pades_t/lt/lta`, `xades_lt/lta`) | `extend` (keyless; no provider/audit use) | `multipart/mixed` artifact |
 | `jws_sign`, `jws_add`, `jwt_encode` | `sign` plus per-key right | `multipart/mixed` artifact |
 | `jws_verify`, `jwt_verify` | `verify` | JSON; signature, host trust and claims reported separately |
 | `jwt_decode` | `extract` | JSON; `verified` is always `false` |
