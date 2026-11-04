@@ -143,6 +143,7 @@ pub(crate) fn world_at(origin: &str) -> World {
     let http: Arc<dyn HttpTransport> = Arc::new(RouteTransport::new(vec![
         (format!("{origin}/ocsp"), ocsp.clone()),
         (format!("{origin}/tsa"), tsa.clone()),
+        ("http://tsp.pki.gov.kz".to_owned(), tsa.clone()),
     ]));
     World {
         dir,
@@ -205,9 +206,28 @@ pub(crate) fn engine(w: &World) -> (Engine, Arc<ConsentGuard>) {
         ExtraTrust {
             anchors: vec![w.root.clone()],
             origins: vec![w.origin.clone()],
-            tsa: Some(format!("{}/tsa", w.origin)),
         },
         &w.dir.path().join("spool"),
+        Arc::new(now),
+    )
+    .unwrap()
+}
+
+/// The world's engine with the revocation responder reachable but no time stamp service: the
+/// national authority's address does not answer.
+pub(crate) fn engine_without_tsa(w: &World) -> (Engine, Arc<ConsentGuard>) {
+    let http: Arc<dyn HttpTransport> = Arc::new(RouteTransport::new(vec![(
+        format!("{}/ocsp", w.origin),
+        w.ocsp.clone(),
+    )]));
+    desktop_engine(
+        ResourceLimits::default(),
+        http,
+        ExtraTrust {
+            anchors: vec![w.root.clone()],
+            origins: vec![w.origin.clone()],
+        },
+        &w.dir.path().join("spool-no-tsa"),
         Arc::new(now),
     )
     .unwrap()

@@ -230,6 +230,9 @@ pub struct BatchView {
     pub family: Family,
     pub items: Vec<ItemView>,
     pub stop: Option<Stop>,
+    /// Whether the operation reaches a network service (a time stamp service, revocation
+    /// status): a failure to read or write is then more likely the network's than a file's.
+    pub network: bool,
 }
 
 impl Detail {
@@ -533,6 +536,7 @@ mod tests {
             family,
             items,
             stop,
+            network: false,
         }
     }
 

@@ -53,10 +53,6 @@ pub const NCA_ORIGINS: [&str; 5] = [
 pub struct ExtraTrust {
     pub anchors: Vec<oncl_pki::cert::Certificate>,
     pub origins: Vec<String>,
-    /// The time stamp service the T, LT and LTA levels ask; none: the national authority's
-    /// ([`NCA_TSA`](crate::workspace)). It must be reachable under `origins` or the national
-    /// origins, or the levels that need a time stamp fail before any key is applied.
-    pub tsa: Option<String>,
 }
 
 struct Grant {
@@ -165,12 +161,8 @@ pub fn desktop_engine(
         .map_err(|_| oncl_pki::resource::ProcessingError::InvalidInput("PKI endpoint"))?;
 
     let store = TemporaryStore::new(spool)?;
-    let tsa = crate::workspace::tsa_spec(
-        extra.tsa.as_deref().unwrap_or_default(),
-        HashAlg::Sha256,
-        Some(crate::workspace::NCA_TSA_POLICY),
-    )
-    .map_err(|_| oncl_pki::resource::ProcessingError::InvalidInput("TSA"))?;
+    let tsa = crate::workspace::tsa_spec(HashAlg::Sha256, Some(crate::workspace::NCA_TSA_POLICY))
+        .map_err(|_| oncl_pki::resource::ProcessingError::InvalidInput("TSA"))?;
     let services = EngineServices::hash_only(limits)
         .with_keys(Arc::new(KeySources::new()), guard.clone())
         .with_validation(ValidationServices::new(
@@ -534,7 +526,7 @@ fn sign_inner(
     let names: Vec<String> = captured.iter().map(|c| c.name.clone()).collect();
     let position: Vec<usize> = (0..documents.len()).collect();
     let paths: Vec<Option<PathBuf>> = destinations.into_iter().map(Some).collect();
-    Ok(Outcome::Done(view_of_summary(
+    let mut view = view_of_summary(
         Family::Sign,
         &names,
         &position,
@@ -543,7 +535,9 @@ fn sign_inner(
         &published,
         spec.format_name(),
         &summary,
-    )))
+    );
+    view.network = spec.uses_network();
+    Ok(Outcome::Done(view))
 }
 
 /// What the engine froze and where the signatures will go.

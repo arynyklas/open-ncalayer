@@ -52,7 +52,7 @@ pub(crate) fn render(locale: Locale, view: &BatchView) -> Rendered {
     let t = Texts::of(locale);
     let mut rows = Vec::new();
     for item in &view.items {
-        item_rows(t, view.family, item, &mut rows);
+        item_rows(t, view.family, view.network, item, &mut rows);
     }
     let mut headline = headline_text(t, view);
     if view.family.uses_key() {
@@ -150,7 +150,7 @@ fn verdict_word(t: &Texts, verdict: Verdict) -> &'static str {
     }
 }
 
-fn item_rows(t: &Texts, family: Family, item: &ItemView, rows: &mut Vec<Row>) {
+fn item_rows(t: &Texts, family: Family, network: bool, item: &ItemView, rows: &mut Vec<Row>) {
     let tone = item.tone();
     let output = item
         .output
@@ -253,7 +253,7 @@ fn item_rows(t: &Texts, family: Family, item: &ItemView, rows: &mut Vec<Row>) {
             let mut text = t
                 .failed
                 .replace("{0}", &item.name)
-                .replace("{1}", code_text(t, *code));
+                .replace("{1}", failure_text(t, *code, network, item.applied));
             if family.uses_key() {
                 text.push_str(" (");
                 text.push_str(key_clause(t, item));
@@ -602,13 +602,31 @@ fn stamp_check_name(t: &Texts, check: StampCheck) -> &'static str {
     }
 }
 
+/// As [`code_text`], but a validation failure AFTER the key was applied (the certificate was
+/// checked before) can only be the time stamp's or the evidence's: it is worded as the service.
+fn failure_text(
+    t: &Texts,
+    code: ErrorCode,
+    network: bool,
+    applied: oncl_pki::key::AppliedState,
+) -> &'static str {
+    if network
+        && code == ErrorCode::ValidationRequired
+        && applied != oncl_pki::key::AppliedState::NotApplied
+    {
+        return t.e_network;
+    }
+    code_text(t, code, network)
+}
+
 /// Why an item failed, in words that do not claim more than the engine's code.
-fn code_text(t: &Texts, code: ErrorCode) -> &'static str {
+fn code_text(t: &Texts, code: ErrorCode, network: bool) -> &'static str {
     match code {
         ErrorCode::Cancelled => t.e_cancelled,
         ErrorCode::PermissionDenied => t.e_denied,
         ErrorCode::ValidationRequired | ErrorCode::MissingValidationServices => t.e_validation,
         ErrorCode::KeyFailure | ErrorCode::KeyNotFound | ErrorCode::SecretRequired => t.e_key,
+        ErrorCode::Io if network => t.e_network,
         ErrorCode::Io => t.e_io,
         ErrorCode::InvalidInput | ErrorCode::UnsupportedAlgorithm => t.e_invalid,
         ErrorCode::InputLimit
@@ -731,6 +749,7 @@ struct Texts {
     e_validation: &'static str,
     e_key: &'static str,
     e_io: &'static str,
+    e_network: &'static str,
     e_invalid: &'static str,
     e_limit: &'static str,
     e_deadline: &'static str,
@@ -857,6 +876,7 @@ static RU: Texts = Texts {
     e_validation: "сертификат не прошёл проверку (цепочка, срок или отзыв)",
     e_key: "ключ недоступен",
     e_io: "файл не удалось прочитать или записать",
+    e_network: "служба не ответила: нет сети, адрес не разрешён или служба отказала",
     e_invalid: "файл не распознан или не подходит для этого действия",
     e_limit: "превышены допустимые пределы",
     e_deadline: "время операции истекло",
@@ -973,6 +993,7 @@ static KK: Texts = Texts {
     e_validation: "сертификат тексеруден өтпеді (тізбек, мерзім немесе күшін жою)",
     e_key: "кілт қолжетімсіз",
     e_io: "файлды оқу немесе жазу мүмкін болмады",
+    e_network: "қызмет жауап бермеді: желі жоқ, мекенжайға рұқсат жоқ немесе қызмет бас тартты",
     e_invalid: "файл танылмады немесе бұл әрекетке жарамсыз",
     e_limit: "рұқсат етілген шектен асты",
     e_deadline: "операция уақыты аяқталды",
@@ -1089,6 +1110,7 @@ static EN: Texts = Texts {
     e_validation: "the certificate failed its checks (chain, validity or revocation)",
     e_key: "the key is not available",
     e_io: "the file could not be read or written",
+    e_network: "a service did not answer: no network, the address is not allowed, or the service refused",
     e_invalid: "the file is not recognised or does not fit this action",
     e_limit: "over the permitted limits",
     e_deadline: "the operation timed out",
@@ -1151,6 +1173,7 @@ mod tests {
             family: Family::Verify,
             items,
             stop: None,
+            network: false,
         }
     }
 
@@ -1226,6 +1249,7 @@ mod tests {
             family: Family::Sign,
             items: vec![written, failed],
             stop: None,
+            network: false,
         };
         let r = render(Locale::En, &view);
         assert_eq!(r.tone, Tone::Caution);
@@ -1263,6 +1287,7 @@ mod tests {
                 output: Some(PathBuf::from("a")),
             }],
             stop: None,
+            network: false,
         };
         for (locale, word) in [
             (Locale::En, "not checked"),

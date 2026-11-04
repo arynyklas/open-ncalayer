@@ -160,6 +160,16 @@ impl SignSpec {
         )
     }
 
+    /// Whether signing in this format reaches a network service: the levels with a time stamp
+    /// (T, LT, LTA).
+    pub(crate) fn uses_network(&self) -> bool {
+        matches!(
+            self.format,
+            SignFormat::Cades(Level::T | Level::Lt | Level::Lta)
+                | SignFormat::Xades(Level::T | Level::Lt | Level::Lta)
+                | SignFormat::Pades(Level::T | Level::Lt | Level::Lta)
+        )
+    }
     /// Whether the format needs evidence material from the user: the LT and LTA levels of CAdES
     /// and PAdES (XAdES fetches its own).
     pub(crate) fn needs_material(&self) -> bool {
@@ -271,8 +281,6 @@ impl ExtendFormat {
 /// The rarely needed choices of a timestamp.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StampOptions {
-    /// The TSA to ask; empty: the national authority's.
-    pub(crate) tsa_url: String,
     pub(crate) algorithm: HashAlg,
     /// Checking a token: the policy OID it must carry and the oldest age it may have, in
     /// seconds; empty or zero: not checked.
@@ -283,7 +291,6 @@ pub(crate) struct StampOptions {
 impl Default for StampOptions {
     fn default() -> Self {
         StampOptions {
-            tsa_url: String::new(),
             algorithm: HashAlg::Sha256,
             policy: String::new(),
             max_age: 0,
@@ -302,6 +309,16 @@ pub(crate) enum ToolSpec {
 }
 
 impl ToolSpec {
+    /// Whether the tool reaches a network service: a time stamp service, or revocation status
+    /// (an online verification, an extension, a time stamp check).
+    pub(crate) fn uses_network(&self) -> bool {
+        match self {
+            ToolSpec::Verify(_, options) => !options.offline,
+            ToolSpec::Extract => false,
+            ToolSpec::Extend(..) | ToolSpec::Stamp(_) | ToolSpec::StampCheck(_) => true,
+        }
+    }
+
     pub(crate) fn family(&self) -> Family {
         match self {
             ToolSpec::Verify(..) => Family::Verify,
@@ -439,36 +456,17 @@ pub(crate) fn evidence_limits() -> EvidenceLimits {
 /// of which service made it), so the signing configuration always carries one.
 pub(crate) const NCA_TSA_POLICY: &str = "1.2.398.3.3.2.6.2";
 
-/// The TSA the desktop asks. Without a URL it is the national authority's, asked as the
-/// authority's own clients do (its GET binding and its policy); with one, a plain POST. No
-/// retries, a thirty second timeout, a random nonce, the token's signer must be a timestamp
-/// authority. `policy` is the policy the token must carry (none: any, for a custom TSA).
-pub(crate) fn tsa_spec(
-    url: &str,
-    hash: HashAlg,
-    policy: Option<&str>,
-) -> Result<TsaSpec, JobError> {
+/// The TSA the desktop asks: the national authority's, as its own clients ask it (its GET
+/// binding and its policy). There is no other: the desktop adds no network address of its own.
+/// No retries, a thirty second timeout, a random nonce, the token's signer must be a timestamp
+/// authority. `policy` overrides the policy the token must carry.
+pub(crate) fn tsa_spec(hash: HashAlg, policy: Option<&str>) -> Result<TsaSpec, JobError> {
     let policy = policy
         .filter(|p| !p.trim().is_empty())
         .map(|p| p.trim().parse())
         .transpose()
         .map_err(|_| JobError::Operation(ErrorCode::InvalidInput))?;
-    let mut spec = if url.trim().is_empty() {
-        TsaSpec::from(TsaProfile::kalkan_default())
-    } else {
-        TsaSpec {
-            url: url.trim().to_owned(),
-            method: PkiMethod::Post { content_type: None },
-            hash,
-            policy: None,
-            nonce: NonceSpec::Random(16),
-            cert_req: true,
-            retries: 0,
-            timeout: Duration::from_secs(30),
-            check_skew: Some(Duration::from_secs(300)),
-            require_tsa_eku: true,
-        }
-    };
+    let mut spec = TsaSpec::from(TsaProfile::kalkan_default());
     spec.hash = hash;
     spec.nonce = NonceSpec::Random(16);
     spec.timeout = Duration::from_secs(30);
@@ -843,7 +841,7 @@ pub(crate) fn run_tool(
         },
     );
     let summary = summary.map_err(|e| JobError::from(batch_operation_error(e)))?;
-    Ok(view_of_summary(
+    let mut view = view_of_summary(
         spec.family(),
         &names,
         &position,
@@ -852,7 +850,9 @@ pub(crate) fn run_tool(
         &published,
         spec.format_name(),
         &summary,
-    ))
+    );
+    view.network = spec.uses_network();
+    Ok(view)
 }
 
 fn open_document(
@@ -962,7 +962,7 @@ fn tool_operation<'a>(
             output: output.ok_or_else(invalid)?,
         },
         ToolSpec::Stamp(options) => BatchOperation::Stamp {
-            request: StampRequest::new(tsa_spec(&options.tsa_url, options.algorithm, None)?),
+            request: StampRequest::new(tsa_spec(options.algorithm, None)?),
             input,
             output: output.ok_or_else(invalid)?,
         },
@@ -1053,6 +1053,7 @@ pub(crate) fn view_of_summary(
         family,
         items,
         stop: summary.stop.as_ref().map(stop_of),
+        network: false,
     }
 }
 
@@ -1813,7 +1814,6 @@ mod tests {
         let got = verify(
             &w,
             &ToolSpec::Stamp(StampOptions {
-                tsa_url: format!("{ORIGIN}/tsa"),
                 ..StampOptions::default()
             }),
             &[Document {
@@ -2520,5 +2520,81 @@ mod tests {
             .label();
             assert!(seen.insert(label.clone()), "{label}");
         }
+    }
+
+    /// A time stamp service that does not answer is a network failure, not a file one: a T-level
+    /// signature fails AFTER the key was applied, says so (the key was applied) and names the
+    /// service in all three languages; a signature without a time stamp keeps the file wording
+    /// for a file failure.
+    #[test]
+    fn an_unreachable_time_service_is_worded_as_the_network_after_key_use() {
+        let w = world();
+        let text = write(&w, "doc.txt", b"the document");
+        let (engine, guard) = engine_without_tsa(&w);
+        let outcome = sign_confirmed(
+            &engine,
+            &guard,
+            &w,
+            std::slice::from_ref(&text),
+            &spec(SignFormat::Cades(Level::T)),
+            &Destination::Beside,
+        );
+        let SignOutcome::Done(view) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert!(view.network, "T-level signing reaches the network");
+        assert!(
+            matches!(
+                view.items[0].outcome,
+                Outcome::Failed(ErrorCode::ValidationRequired)
+            ),
+            "{view:?}"
+        );
+        assert_eq!(
+            view.items[0].applied,
+            AppliedState::Applied,
+            "the key was applied"
+        );
+        assert_eq!(view.tone(), Tone::Failure);
+        for (locale, network, file, applied) in [
+            (
+                oncl_flows::Locale::En,
+                "a service did not answer",
+                "could not be read or written",
+                "the key was applied",
+            ),
+            (
+                oncl_flows::Locale::Ru,
+                "служба не ответила",
+                "не удалось прочитать",
+                "ключ был применён",
+            ),
+            (
+                oncl_flows::Locale::Kk,
+                "қызмет жауап бермеді",
+                "оқу немесе жазу",
+                "кілт қолданылды",
+            ),
+        ] {
+            let row = crate::reports::render(locale, &view).rows[0].text.clone();
+            assert!(
+                row.contains(network) && row.contains(applied),
+                "{locale:?}: {row}"
+            );
+            assert!(!row.contains(file), "{locale:?}: {row}");
+            // The same Io failure of a pure-file family keeps the file wording.
+            let mut local = view.clone();
+            local.network = false;
+            local.items[0].outcome = Outcome::Failed(ErrorCode::Io);
+            assert!(
+                crate::reports::render(locale, &local).rows[0]
+                    .text
+                    .contains(file)
+            );
+        }
+        assert!(!ToolSpec::Extract.uses_network());
+        assert!(spec(SignFormat::Cades(Level::T)).uses_network());
+        assert!(!spec(SignFormat::Cades(Level::B)).uses_network());
+        assert!(!spec(SignFormat::Cms).uses_network());
     }
 }

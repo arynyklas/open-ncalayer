@@ -199,8 +199,6 @@ pub(super) fn render(open: &Rc<Workspace>) {
             ui.set_has_advanced(true);
             if format == 0 {
                 ui.set_show_destination(true);
-                ui.set_show_opt1(true);
-                ui.set_opt1_label(t.tsa_url.into());
             } else {
                 ui.set_show_second(true);
                 ui.set_second_label(t.stamp_data.into());
@@ -424,7 +422,6 @@ fn read_choice(open: &Rc<Workspace>) -> Result<(ToolSpec, Destination), JobError
             };
             if format == 0 {
                 ToolSpec::Stamp(StampOptions {
-                    tsa_url: ui.get_opt1().trim().to_owned(),
                     algorithm,
                     ..StampOptions::default()
                 })
@@ -531,7 +528,6 @@ struct ToolTexts {
     timestamp_required: &'static str,
     issuer: &'static str,
     audience: &'static str,
-    tsa_url: &'static str,
     policy: &'static str,
     max_age: &'static str,
     act_verify: &'static str,
@@ -607,7 +603,6 @@ static RU: ToolTexts = ToolTexts {
     timestamp_required: "Метка времени в сообщении обязательна",
     issuer: "Ожидаемый издатель (iss)",
     audience: "Ожидаемый адресат (aud)",
-    tsa_url: "Служба времени (пусто: национальная)",
     policy: "Политика метки (OID), если она обязательна",
     max_age: "Наибольший возраст метки, секунд (пусто: не проверять)",
     act_verify: "Проверить",
@@ -673,7 +668,6 @@ static KK: ToolTexts = ToolTexts {
     timestamp_required: "Хабарламада уақыт белгісі міндетті",
     issuer: "Күтілетін шығарушы (iss)",
     audience: "Күтілетін алушы (aud)",
-    tsa_url: "Уақыт қызметі (бос: ұлттық)",
     policy: "Белгі саясаты (OID), міндетті болса",
     max_age: "Белгінің ең үлкен жасы, секунд (бос: тексермеу)",
     act_verify: "Тексеру",
@@ -739,7 +733,6 @@ static EN: ToolTexts = ToolTexts {
     timestamp_required: "A timestamp in the message is required",
     issuer: "Expected issuer (iss)",
     audience: "Expected audience (aud)",
-    tsa_url: "Time service (empty: the national one)",
     policy: "Time stamp policy (OID), if it is required",
     max_age: "Oldest age of the time stamp, seconds (empty: not checked)",
     act_verify: "Verify",
@@ -1374,13 +1367,11 @@ mod tests {
             let (spec, _) = spec_of(&p, TIMESTAMP, |t| {
                 t.set_format_index(0);
                 t.set_level_index(level);
-                t.set_opt1(" http://tsa.example/ts ".into());
             })
             .unwrap();
             assert_eq!(
                 spec,
                 ToolSpec::Stamp(StampOptions {
-                    tsa_url: "http://tsa.example/ts".into(),
                     algorithm,
                     ..StampOptions::default()
                 })
@@ -1408,5 +1399,34 @@ mod tests {
             bad_age.err(),
             Some(JobError::Operation(oncl_core::ErrorCode::InvalidInput))
         );
+    }
+
+    /// The Timestamp page with no answer from the time service: the report says a service did
+    /// not answer (not that a file could not be read), as a failure; no file was written.
+    #[test]
+    fn the_timestamp_page_words_an_unreachable_service_as_the_network() {
+        let w = world();
+        let (engine, guard) = engine_without_tsa(&w);
+        let services = DesktopEngineServices {
+            engine: std::sync::Arc::new(engine),
+            guard,
+            tokens: Tokens::disabled(),
+            clock: std::sync::Arc::new(now),
+            settings_path: w.dir.path().join("settings.json"),
+        };
+        let p = Page {
+            ws: test_workspace(services),
+            w,
+        };
+        let text = p.w.dir.path().join("doc.txt");
+        std::fs::write(&text, b"stamp me").unwrap();
+        select(&p, TIMESTAMP);
+        add(&p, &text, None);
+        run_page(&p);
+        assert_eq!(tool(&p).get_report_tone(), 2, "a failure");
+        let rows = rows(&p);
+        assert!(rows[0].contains("a service did not answer"), "{rows:?}");
+        assert!(!rows[0].contains("read or written"), "{rows:?}");
+        assert!(!p.w.dir.path().join("doc.txt.tst").exists());
     }
 }

@@ -1339,6 +1339,7 @@ mod tests {
                 output: output.map(PathBuf::from),
             }],
             stop: None,
+            network: false,
         }
     }
 
