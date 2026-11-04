@@ -691,7 +691,10 @@ pub fn spool_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
-            let kind = entry.file_type().unwrap();
+            // An entry removed between listing and typing is simply gone.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             if kind.is_file() {
                 files.push(entry.path());
             } else if kind.is_dir() {
@@ -701,38 +704,197 @@ pub fn spool_files(root: &Path) -> Vec<PathBuf> {
     }
     files
 }
+
+/// How long a file may stay unreadable-while-present before the watcher fails.
+/// Only a hang guard: every documented transient state is classified explicitly.
+const UNREADABLE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Why a present file could not be read, as far as the OS can tell.
+enum Unreadable {
+    /// The name no longer resolves: removed between listing and reading.
+    Gone,
+    /// The service marked it for deletion (`FileDispositionInfo`) while another
+    /// handle is still open. Windows answers every new open of such a file with
+    /// ERROR_ACCESS_DENIED (5) while `Path::exists`/`metadata` (attribute-only
+    /// opens) still succeed. No new reader can ever open it, so it cannot leak
+    /// to any reader; it is counted, not hidden.
+    DeletePending,
+    /// Present and not delete-pending: a real failure once the deadline passes.
+    Present(String),
+}
+
+#[cfg(windows)]
+fn open_shared(file: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE: the watcher never
+    // blocks the service (create, write, rename, delete) and is never blocked by it.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2 | 0x4)
+        .open(file)
+}
+#[cfg(not(windows))]
+fn open_shared(file: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(file)
+}
+
+fn read_shared(file: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    open_shared(file)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn classify_unreadable(file: &Path) -> Unreadable {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    #[repr(C)]
+    #[derive(Default)]
+    struct StandardInfo {
+        allocation_size: i64,
+        end_of_file: i64,
+        number_of_links: u32,
+        delete_pending: u8,
+        directory: u8,
+    }
+    unsafe extern "system" {
+        fn GetFileInformationByHandleEx(
+            handle: *mut core::ffi::c_void,
+            class: i32,
+            info: *mut StandardInfo,
+            size: u32,
+        ) -> i32;
+    }
+    // Windows refuses EVERY new open of a delete-pending file (even attribute-only)
+    // with ERROR_ACCESS_DENIED, while `metadata` (directory-entry lookup) still works.
+    // READ_CONTROL is implicitly granted to the file's owner, so a READ_CONTROL open
+    // that succeeds proves the denial is NOT delete-pending; one that is denied while
+    // the entry still exists is the delete-pending signature.
+    const READ_CONTROL: u32 = 0x0002_0000;
+    let probe = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .share_mode(0x1 | 0x2 | 0x4)
+        .open(file);
+    match probe {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Unreadable::Gone,
+        Err(error) if error.raw_os_error() == Some(5) => {
+            if std::fs::metadata(file).is_ok() {
+                Unreadable::DeletePending
+            } else {
+                Unreadable::Gone
+            }
+        }
+        Err(error) => Unreadable::Present(format!("probe failed: {error}")),
+        Ok(handle) => {
+            let mut info = StandardInfo::default();
+            // SAFETY: valid owned handle and a correctly sized FILE_STANDARD_INFO
+            // (class 1 = FileStandardInfo) for the duration of the call.
+            let ok = unsafe {
+                GetFileInformationByHandleEx(
+                    handle.as_raw_handle().cast(),
+                    1,
+                    &mut info,
+                    std::mem::size_of::<StandardInfo>() as u32,
+                )
+            };
+            if ok != 0 && info.delete_pending != 0 {
+                Unreadable::DeletePending
+            } else if ok == 0 {
+                Unreadable::Present(format!(
+                    "readable security descriptor, standard-info query failed: {}",
+                    std::io::Error::last_os_error()
+                ))
+            } else {
+                Unreadable::Present(format!(
+                    "open for READ_CONTROL succeeds, not delete-pending, links={}, size={}",
+                    info.number_of_links, info.end_of_file
+                ))
+            }
+        }
+    }
+}
+#[cfg(not(windows))]
+fn classify_unreadable(file: &Path) -> Unreadable {
+    if file.exists() {
+        Unreadable::Present("present".into())
+    } else {
+        Unreadable::Gone
+    }
+}
+
 /// Watch every scratch file while an operation runs; true if `needle` ever hit.
 pub struct SpoolWatch {
     stop: Arc<AtomicBool>,
     hit: Arc<AtomicBool>,
     pub scanned: Arc<AtomicUsize>,
+    /// Files that were delete-pending (unopenable by anyone) when scanned.
+    pub delete_pending: Arc<AtomicUsize>,
     failure: Arc<std::sync::Mutex<Option<String>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl SpoolWatch {
     pub fn start(root: PathBuf, needles: Vec<Vec<u8>>) -> Self {
+        Self::start_with(root, needles, true)
+    }
+    /// Mutation for the positive control: a watcher that lists but never reads.
+    pub fn start_mutant_that_never_scans(root: PathBuf, needles: Vec<Vec<u8>>) -> Self {
+        Self::start_with(root, needles, false)
+    }
+    fn start_with(root: PathBuf, needles: Vec<Vec<u8>>, scanning: bool) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let hit = Arc::new(AtomicBool::new(false));
         let scanned = Arc::new(AtomicUsize::new(0));
+        let delete_pending = Arc::new(AtomicUsize::new(0));
         let failure = Arc::new(std::sync::Mutex::new(None::<String>));
-        let (s, h, scanned_thread, failure_thread) =
-            (stop.clone(), hit.clone(), scanned.clone(), failure.clone());
+        let (s, h, scanned_thread, pending_thread, failure_thread) = (
+            stop.clone(),
+            hit.clone(),
+            scanned.clone(),
+            delete_pending.clone(),
+            failure.clone(),
+        );
         let thread = std::thread::spawn(move || {
             while !s.load(Ordering::SeqCst) {
                 for file in spool_files(&root) {
-                    // A file is briefly unreadable while the service creates/protects or
-                    // deletes it (delete-pending, DACL being applied): retry; a file that
-                    // stays unreadable while it still exists is a real failure.
-                    let mut attempt = std::fs::read(&file);
-                    for _ in 0..40 {
-                        if attempt.is_ok() || !file.exists() {
-                            break;
+                    if !scanning {
+                        continue;
+                    }
+                    let started = std::time::Instant::now();
+                    let mut attempts = 0u32;
+                    let outcome = loop {
+                        attempts += 1;
+                        match read_shared(&file) {
+                            Ok(bytes) => break Ok(Some(bytes)),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                break Ok(None);
+                            }
+                            Err(error) => match classify_unreadable(&file) {
+                                Unreadable::Gone => break Ok(None),
+                                Unreadable::DeletePending => {
+                                    pending_thread.fetch_add(1, Ordering::SeqCst);
+                                    break Ok(None);
+                                }
+                                Unreadable::Present(detail) => {
+                                    if started.elapsed() >= UNREADABLE_DEADLINE {
+                                        let relative = file
+                                            .strip_prefix(&root)
+                                            .unwrap_or(&file)
+                                            .display()
+                                            .to_string();
+                                        break Err(format!(
+                                            "{error} (raw os error {:?}, kind {:?}) on scratch file `{relative}` ({detail}) after {attempts} attempts over {:?}",
+                                            error.raw_os_error(),
+                                            error.kind(),
+                                            started.elapsed()
+                                        ));
+                                    }
+                                }
+                            },
                         }
                         std::thread::sleep(Duration::from_millis(5));
-                        attempt = std::fs::read(&file);
-                    }
-                    match attempt {
-                        Ok(bytes) => {
+                    };
+                    match outcome {
+                        Ok(Some(bytes)) => {
                             scanned_thread.fetch_add(1, Ordering::SeqCst);
                             for needle in &needles {
                                 if bytes.windows(needle.len()).any(|w| w == needle.as_slice()) {
@@ -740,12 +902,9 @@ impl SpoolWatch {
                                 }
                             }
                         }
-                        // A file removed between listing and reading is normal.
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        // Windows reports a delete-pending file as access denied.
-                        Err(_) if !file.exists() => {}
-                        Err(error) => {
-                            *failure_thread.lock().unwrap() = Some(error.to_string());
+                        Ok(None) => {}
+                        Err(message) => {
+                            *failure_thread.lock().unwrap() = Some(message);
                         }
                     }
                 }
@@ -756,9 +915,14 @@ impl SpoolWatch {
             stop,
             hit,
             scanned,
+            delete_pending,
             failure,
             thread: Some(thread),
         }
+    }
+    /// True once a needle has been seen (without stopping the watcher).
+    pub fn seen(&self) -> bool {
+        self.hit.load(Ordering::SeqCst)
     }
     /// True if a needle was ever seen. Panics if any scan hit a read error.
     pub fn finish(mut self) -> bool {
@@ -766,6 +930,12 @@ impl SpoolWatch {
         self.thread.take().unwrap().join().unwrap();
         if let Some(error) = self.failure.lock().unwrap().take() {
             panic!("spool watcher read error: {error}");
+        }
+        let pending = self.delete_pending.load(Ordering::SeqCst);
+        if pending > 0 {
+            eprintln!(
+                "spool watcher: {pending} delete-pending scratch file(s) were unopenable (no reader can open them)"
+            );
         }
         self.hit.load(Ordering::SeqCst)
     }

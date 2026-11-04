@@ -191,7 +191,9 @@ async fn multipart_document_bytes_are_not_framing_but_epilogue_is_bounded() {
 async fn original_admission_holds_global_quota_during_first_metadata_and_deadline() {
     let service = Running::start_with(|c| {
         c.max_in_flight = 1;
-        c.operation_timeout_ms = 250;
+        // Must outlast the first 503 probe on a loaded machine: the deadline is the
+        // only thing that releases the held admission, so it is not a speed bound.
+        c.operation_timeout_ms = 6_000;
         c.header_timeout_ms = 100;
         c.admission_wait_ms = 100;
     })
@@ -216,7 +218,10 @@ async fn original_admission_holds_global_quota_during_first_metadata_and_deadlin
     // not a timing assertion about cryptographic throughput.
     let body=br#"{"metadata":{"items":[{"id":"x","operation":{"kind":"hash","algorithm":"sha256","input":"d"}}],"parts":[{"name":"d","item_id":"x","role":"document"}]},"documents":{"d":"abc"}}"#;
     let mut capacity = false;
-    for _ in 0..20 {
+    // The server admits the slow first request asynchronously: probe until it owns the
+    // root (first 503) instead of guessing how many quick attempts that takes.
+    let probing = std::time::Instant::now();
+    while probing.elapsed() < Duration::from_secs(4) {
         let (status, _) = service
             .request("application/json", body, &service.token)
             .await;
@@ -224,14 +229,14 @@ async fn original_admission_holds_global_quota_during_first_metadata_and_deadlin
             capacity = true;
             break;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert!(
         capacity,
         "slow first metadata must own the only original admission"
     );
     let mut response = Vec::new();
-    tokio::time::timeout(Duration::from_secs(2), first.read_to_end(&mut response))
+    tokio::time::timeout(Duration::from_secs(30), first.read_to_end(&mut response))
         .await
         .unwrap()
         .unwrap();

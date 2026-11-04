@@ -1901,7 +1901,7 @@ async fn wait_for(what: &str, mut condition: impl FnMut() -> bool) {
     let started = std::time::Instant::now();
     while !condition() {
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(15),
+            started.elapsed() < std::time::Duration::from_secs(60),
             "timed out waiting for {what}"
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1976,6 +1976,92 @@ async fn missing_rights_refuse_before_a_secret_byte_is_read() {
     service.stop().await;
 }
 
+/// Root cause of `spool watcher read error: Access is denied. (os error 5)`: a file the
+/// service marked for deletion (FileDispositionInfo) while another handle is open is
+/// unopenable (ERROR_ACCESS_DENIED) yet still "exists" to attribute-only probes.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watcher_classifies_a_delete_pending_file_instead_of_failing() {
+    use std::io::Write;
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    #[repr(C)]
+    struct Disposition {
+        delete_file: u8,
+    }
+    unsafe extern "system" {
+        fn SetFileInformationByHandle(
+            handle: *mut core::ffi::c_void,
+            class: i32,
+            info: *const Disposition,
+            size: u32,
+        ) -> i32;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pending.bin");
+    let mut holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .access_mode(0x1F01FF)
+        .share_mode(0x7)
+        .open(&path)
+        .unwrap();
+    holder.write_all(b"xx PLANTED-NEEDLE xx").unwrap();
+    // SAFETY: valid handle opened with DELETE access; class 4 = FileDispositionInfo.
+    let marked = unsafe {
+        SetFileInformationByHandle(
+            holder.as_raw_handle().cast(),
+            4,
+            &Disposition { delete_file: 1 },
+            1,
+        )
+    };
+    assert_eq!(marked, 1);
+    assert!(
+        path.exists(),
+        "attribute probes still see a delete-pending file"
+    );
+    assert_eq!(std::fs::read(&path).unwrap_err().raw_os_error(), Some(5));
+    let watch = SpoolWatch::start(dir.path().to_path_buf(), vec![b"PLANTED-NEEDLE".to_vec()]);
+    wait_for("the watcher to classify the delete-pending file", || {
+        watch
+            .delete_pending
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+    })
+    .await;
+    assert!(
+        !watch.finish(),
+        "an unopenable file leaks nothing to a reader"
+    );
+    drop(holder);
+}
+
+/// Mutation proof for the positive control: the same planted needle, but a watcher
+/// that lists files and never reads them. It must NOT report the needle, so the
+/// control above (which requires a hit) fails whenever the watcher stops scanning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn positive_control_fails_when_the_watcher_stops_scanning() {
+    let pki = Pki::start();
+    let service = Running::start_with(inline_service_config(&pki)).await;
+    let planted = service.scratch().join("planted.bin");
+    std::fs::write(&planted, b"xx PLANTED-NEEDLE xx").unwrap();
+    let mutant = SpoolWatch::start_mutant_that_never_scans(
+        service.scratch(),
+        vec![b"PLANTED-NEEDLE".to_vec()],
+    );
+    let real = SpoolWatch::start(service.scratch(), vec![b"PLANTED-NEEDLE".to_vec()]);
+    wait_for("the real watcher to see the needle", || real.seen()).await;
+    assert!(real.finish(), "the real watcher detects the planted needle");
+    assert_eq!(mutant.scanned.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(
+        !mutant.finish(),
+        "a watcher that never scans cannot satisfy the positive control"
+    );
+    std::fs::remove_file(&planted).unwrap();
+    service.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn spool_watcher_has_a_positive_control_and_sees_the_held_document_spool() {
     let pki = Pki::start();
@@ -1985,7 +2071,7 @@ async fn spool_watcher_has_a_positive_control_and_sees_the_held_document_spool()
     let planted = service.scratch().join("planted.bin");
     let watch = SpoolWatch::start(service.scratch(), vec![b"PLANTED-NEEDLE".to_vec()]);
     std::fs::write(&planted, b"xx PLANTED-NEEDLE xx").unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    wait_for("watcher to see the planted needle", || watch.seen()).await;
     assert!(
         watch.finish(),
         "positive control: watcher must detect a needle"
