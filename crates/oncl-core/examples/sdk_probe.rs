@@ -36,6 +36,12 @@ mod xml_probe;
 #[cfg(feature = "xml")]
 #[path = "sdk_probe/xml_sign.rs"]
 mod xml_sign_probe;
+#[cfg(all(feature = "xml", feature = "pdf", feature = "jose"))]
+#[path = "sdk_probe/large.rs"]
+mod large_probe;
+#[cfg(all(feature = "xml", feature = "pdf", feature = "jose"))]
+#[path = "sdk_probe/large_pki.rs"]
+mod large_pki;
 
 struct Control;
 impl OperationControl for Control {
@@ -180,6 +186,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => evidence_probe(std::path::Path::new(&out)),
         };
+    }
+    #[cfg(all(feature = "xml", feature = "pdf", feature = "jose"))]
+    if command.as_deref() == Some("large") {
+        return large_probe::run(args.collect());
+    }
+    #[cfg(all(feature = "xml", feature = "pdf", feature = "jose"))]
+    if command.as_deref() == Some("pki-serve") {
+        if args.next().as_deref() != Some("--out") {
+            return Err("usage: sdk_probe pki-serve --out <directory>".into());
+        }
+        let out = args.next().ok_or("missing output directory")?;
+        return large_pki::serve(std::path::Path::new(&out));
     }
     if command.as_deref() == Some("keys") {
         if args.next().is_some() {

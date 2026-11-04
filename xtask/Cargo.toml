@@ -26,6 +26,9 @@ oncl-pki = { workspace = true, features = ["testing"] }
 # `plugin pack` and `index add-plugin`: the package format and the ABI check the daemon uses.
 oncl-plugin = { workspace = true, features = ["distribution"] }
 oncl-protocol.workspace = true
+# `platform-proof`: reads the durable audit journal of the measured oncl-server for the
+# key-application counts of the HTTP cases.
+oncl-server = { path = "../crates/oncl-server", features = ["test-support"] }
 oncl-testkit.workspace = true
 # `token-emu`: an emulated token served to vpcd (the PC/SC test of CI).
 oncl-token = { workspace = true, features = ["emulator"] }
@@ -52,6 +55,8 @@ rpassword.workspace = true
 # `registry`: the schema of the ports' `registry.toml`; `upstream`: the facts and state schemas.
 serde.workspace = true
 serde_json.workspace = true
+# `platform-token-host`: the runtime of the hosted service library.
+tokio.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 spki.workspace = true
@@ -71,3 +76,17 @@ zeroize.workspace = true
 [target.'cfg(unix)'.dependencies]
 # `ext-e2e`: signal handling and killing process groups.
 libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# `platform-proof`: the operating system's peak working set / private bytes of a measured
+# process, its job object, CTRL_BREAK delivery and the drive preflight.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
