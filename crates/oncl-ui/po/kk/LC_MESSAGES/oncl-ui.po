@@ -455,14 +455,101 @@ msgstr "Растауды көрсету"
 msgid "Documents (names are as given, not checked)"
 msgstr "Құжаттар (атаулар берілгендей, тексерілмеген)"
 
-msgid "Result"
-msgstr "Нәтиже"
-
 msgid "New signing"
 msgstr "Жаңа қол қою"
 
-msgid "Sign: sign documents with a key store file; you see exactly what is signed and with which certificate, then confirm. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no practical time limit (24 h), Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Hash and Inspect use no private key."
-msgstr "Қол қою: құжаттарға кілттер қоймасының файлымен қол қою; нені және қай сертификатпен қол қоятыныңызды көресіз, содан кейін растайсыз. Хеш: 10 ГиБ дейінгі файлдың хеші, бөлшектеп оқылады; практикалық уақыт шектеуі жоқ (24 сағ), «Бас тарту» түймесімен тоқтатуға болады. Мәліметтер: сертификаттың, қолтаңба файлының, кілттер қоймасының немесе қосылған тасымалдағыштардың ашық деректері. Хеш пен мәліметтер құпия кілтті қолданбайды."
-
 msgid "Recent key stores"
 msgstr "Соңғы қоймалар"
+
+msgid "Add a signature to a document that is already signed"
+msgstr "Қол қойылған құжатқа қолтаңба қосу"
+
+msgid "B: basic"
+msgstr "B: негізгі"
+
+msgid "CMS / CAdES (signature file)"
+msgstr "CMS / CAdES (қолтаңба файлы)"
+
+msgid "Documents"
+msgstr "Құжаттар"
+
+msgid "Element that gets the signature (XML ID)"
+msgstr "Қолтаңба салынатын элемент (XML ID)"
+
+msgid "Element to sign (XML ID)"
+msgstr "Қол қойылатын элемент (XML ID)"
+
+msgid "Extend"
+msgstr "Ұзарту"
+
+msgid "Extract"
+msgstr "Шығару"
+
+msgid "Folder for the results"
+msgstr "Нәтижелер қалтасы"
+
+msgid "Format of the signature"
+msgstr "Қолтаңба пішімі"
+
+msgid "Identity of the signature (XML ID)"
+msgstr "Қолтаңба идентификаторы (XML ID)"
+
+msgid "In one folder"
+msgstr "Бір қалтаға"
+
+msgid "JWS (JSON Web Signature)"
+msgstr "JWS (JSON Web Signature)"
+
+msgid "JWT (signed token)"
+msgstr "JWT (қол қойылған токен)"
+
+msgid "LT: with validation data"
+msgstr "LT: тексеру деректерімен"
+
+msgid "LTA: for long-term archival"
+msgstr "LTA: ұзақ сақтауға"
+
+msgid "Level of the signature"
+msgstr "Қолтаңба деңгейі"
+
+msgid "Next to each document"
+msgstr "Әр құжаттың жанына"
+
+msgid "PDF (PAdES)"
+msgstr "PDF (PAdES)"
+
+msgid "Path to the folder"
+msgstr "Қалта жолы"
+
+msgid "Plain, no level"
+msgstr "Қарапайым, деңгейсіз"
+
+msgid "Put the content inside the signature (attached)"
+msgstr "Мазмұнды қолтаңба ішіне салу"
+
+msgid "SOAP message (WS-Security)"
+msgstr "SOAP хабарламасы (WS-Security)"
+
+msgid "Show the options that are rarely needed"
+msgstr "Сирек қажет параметрлерді көрсету"
+
+msgid "Sign: sign documents with a key store file as CMS, CAdES, XML, XAdES, SOAP, PDF, PAdES, JWS or JWT; you see exactly what is signed, in which format and with which certificate, then confirm. Verify: check signatures of any of these formats; the report says what was proven, what could not be checked and why. Extend: add time and validation evidence to CAdES, XAdES and PAdES. Extract: take the content out of a signature container, without checking it. Timestamp: get or check a time stamp. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no practical time limit (24 h), Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Only Sign uses a private key."
+msgstr "Қол қою: құжаттарға кілт қоймасы файлымен CMS, CAdES, XML, XAdES, SOAP, PDF, PAdES, JWS немесе JWT ретінде қол қою; нақты неге, қандай пішімде және қандай сертификатпен қол қойылатынын көресіз, содан кейін растайсыз. Тексеру: осы пішімдердің кез келгенінің қолтаңбаларын тексеру; есеп нені дәлелдегенін, нені тексеру мүмкін болмағанын және неге екенін айтады. Ұзарту: CAdES, XAdES және PAdES-ке уақыт пен тексеру дәлелдерін қосу. Шығару: қолтаңба контейнерінен мазмұнды тексермей алу. Уақыт белгісі: уақыт белгісін алу немесе тексеру. Хэш: бөліктеп оқылатын 10 ГиБ-қа дейінгі файлдың дайджесті; уақытқа практикалық шектеу жоқ (24 сағ), «Бас тарту» тоқтатады. Қарау: сертификаттың, қолтаңба файлының, кілт қоймасының немесе қосылған токендердің ашық мәліметтері. Жеке кілтті тек «Қол қою» қолданады."
+
+msgid "T: with a time stamp"
+msgstr "T: уақыт белгісімен"
+
+msgid "Timestamp"
+msgstr "Уақыт белгісі"
+
+msgid "Verify"
+msgstr "Тексеру"
+
+msgid "Verify signatures"
+msgstr "Қолтаңбаларды тексеру"
+
+msgid "Where the results are written"
+msgstr "Нәтижелер қайда жазылады"
+
+msgid "XML (XMLDSig / XAdES)"
+msgstr "XML (XMLDSig / XAdES)"

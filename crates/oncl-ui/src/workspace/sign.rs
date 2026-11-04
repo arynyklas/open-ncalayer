@@ -9,21 +9,21 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
-use oncl_core::ErrorCode;
 use oncl_desktop::Remembered;
 use oncl_flows::Locale;
-use oncl_pki::key::AppliedState;
 use slint::{
     ComponentHandle, ModelRc, SharedString, StandardListViewItem, Timer, TimerMode, VecModel,
 };
 use zeroize::Zeroizing;
 
-use super::controller::{Job, JobControl, JobError};
+use super::controller::{Job, JobControl, JobError, MissingField};
 use super::{DesktopEngineServices, Output, Workspace, start, with_open};
+use super::{Destination, Level, SignFormat, SignOptions, SignSpec};
+use crate::reports::controller::{BatchView, KeyUse, key_use_after_loss};
 use crate::signing::controller::{
     ActionKind, Candidate, Controller, Effect, Event, Item, Refusal, Step, Unsuitable,
 };
-use crate::signing::runner::{Decision, OpenError, Outcome, Signed, freeze, open_key_store, sign};
+use crate::signing::runner::{Decision, OpenError, Outcome, freeze, open_key_store, sign};
 use crate::ui::SigningState;
 
 /// The confirmation cannot be pressed for this long after it is shown.
@@ -65,6 +65,10 @@ pub(super) struct State {
     decision: Option<Sender<Decision>>,
     last_click: Option<(i32, Instant)>,
     remembered: Remembered,
+    /// What is made of the documents and where the results go, as the user chose them when
+    /// they moved on from the documents. The consent binds the spec's label.
+    spec: SignSpec,
+    destination: Destination,
 }
 
 impl State {
@@ -85,6 +89,11 @@ impl State {
             decision: None,
             last_click: None,
             remembered,
+            spec: SignSpec {
+                format: SignFormat::Cms,
+                options: SignOptions::default(),
+            },
+            destination: Destination::Beside,
         }
     }
 }
@@ -121,6 +130,7 @@ pub(super) fn connect(ui: &crate::ui::WorkspaceWindow) {
     s.on_back(|| with_open(back));
     s.on_cancel(|| with_open(cancel));
     s.on_finish(|| with_open(finish));
+    s.on_browse_folder(|| with_open(browse_folder));
 }
 
 fn locale(open: &Rc<Workspace>) -> &'static SignTexts {
@@ -253,6 +263,7 @@ pub(super) fn render(open: &Rc<Workspace>) {
                 .into(),
         );
     }
+    ui.set_profile_line(profile_line(t, &st.spec, &st.destination).into());
     ui.set_confirm_label(
         t.confirm
             .replace("{0}", &c.items().len().to_string())
@@ -350,6 +361,7 @@ fn to_unlock(open: &Rc<Workspace>) {
     let t = locale(open);
     let ui = open.ui.global::<SigningState>();
     let store = super::typed_path(ui.get_store_path());
+    let choice = read_choice(open);
     {
         let mut st = state(open);
         let items: Vec<Item> = st.documents.iter().map(|(_, i)| i.clone()).collect();
@@ -358,10 +370,23 @@ fn to_unlock(open: &Rc<Workspace>) {
             drop(st);
             return error(open, t.no_documents);
         }
+        let (spec, destination) = match choice {
+            Ok(choice) => choice,
+            Err(e) => {
+                drop(st);
+                return error(
+                    open,
+                    super::error_text(super::Texts::of(open.locale.get()), &e, 0),
+                );
+            }
+        };
         if store.is_empty() {
             drop(st);
             return error(open, t.no_key_store);
         }
+        st.controller.dispatch(Event::Profile(spec.label()));
+        st.spec = spec;
+        st.destination = destination;
         st.controller.dispatch(Event::KeyStore(store));
     }
     ui.set_error("".into());
@@ -448,7 +473,7 @@ fn cert_chosen(open: &Rc<Workspace>, i: i32) {
         return error(open, text);
     }
     open.ui.global::<SigningState>().set_error("".into());
-    let (store, alias, password, paths) = {
+    let (store, alias, password, paths, spec, destination) = {
         let st = open.sign.borrow();
         let store = super::typed_path(open.ui.global::<SigningState>().get_store_path());
         let alias = st
@@ -464,6 +489,8 @@ fn cert_chosen(open: &Rc<Workspace>, i: i32) {
                 .iter()
                 .map(|(p, _)| p.clone())
                 .collect::<Vec<_>>(),
+            st.spec.clone(),
+            st.destination.clone(),
         )
     };
     let Some(password) = password else {
@@ -482,6 +509,8 @@ fn cert_chosen(open: &Rc<Workspace>, i: i32) {
             &alias,
             &password,
             &paths,
+            &spec,
+            &destination,
             control,
             rx,
         );
@@ -498,6 +527,8 @@ fn run_signing(
     alias: &str,
     password: &Zeroizing<String>,
     paths: &[PathBuf],
+    spec: &SignSpec,
+    destination: &Destination,
     control: &Arc<JobControl>,
     rx: Receiver<Decision>,
 ) -> Outcome {
@@ -509,6 +540,8 @@ fn run_signing(
         alias,
         password,
         paths,
+        spec,
+        destination,
         control,
         move |frozen| {
             let (shown, outputs) = (frozen.items.clone(), frozen.outputs.clone());
@@ -747,6 +780,7 @@ fn finish(open: &Rc<Workspace>) {
     ui.set_password("".into());
     ui.set_error("".into());
     ui.set_result("".into());
+    clear_report(&ui);
     ui.set_cert_index(-1);
     render(open);
 }
@@ -852,10 +886,21 @@ pub(super) fn settled(open: &Rc<Workspace>, result: Result<SignOutput, JobError>
             }
         }
         Err(e) => {
-            // The page stays where it is; the error says what could not be done.
             let text = super::error_text(super::Texts::of(open.locale.get()), &e, 0);
-            error(open, text);
-            render(open);
+            let step = open.sign.borrow().controller.step();
+            if step == Step::Running && matches!(e, JobError::Worker) {
+                // The worker was lost after the user's confirmation: the key may have been
+                // applied, and nobody can say. It is never reported as unused.
+                let note = match key_use_after_loss(true) {
+                    KeyUse::NotUsed => t.no_key_used,
+                    KeyUse::Used | KeyUse::Unknown => t.lost_key_unknown,
+                };
+                end_with(open, &format!("{text}\n{note}"));
+            } else {
+                // The page stays where it is; the error says what could not be done.
+                error(open, text);
+                render(open);
+            }
         }
     }
     // Whatever the answer did, the page shows the state of a job that has ended.
@@ -888,7 +933,7 @@ fn signed(open: &Rc<Workspace>, outcome: Outcome) {
                     tracing::warn!(error = %e, "cannot save the recent files");
                 }
             }
-            end_with(open, &result_text(t, &done));
+            end_with_report(open, &done);
         }
         Outcome::DocumentsChanged(items) => {
             {
@@ -925,50 +970,124 @@ fn end_with(open: &Rc<Workspace>, text: &str) {
         st.controller.dispatch(Event::Finished);
         st.decision = None;
     }
-    open.ui.global::<SigningState>().set_result(text.into());
+    let ui = open.ui.global::<SigningState>();
+    clear_report(&ui);
+    ui.set_result(text.into());
     render(open);
 }
 
-fn result_text(t: &SignTexts, done: &[Signed]) -> String {
-    let mut text = String::new();
-    for item in done {
-        let line = match (&item.output, item.error) {
-            (Some(output), None) => t
-                .signed_line
-                .replace("{0}", &item.name)
-                .replace("{1}", &output.display().to_string()),
-            (_, Some(code)) => t
-                .failed_line
-                .replace("{0}", &item.name)
-                .replace("{1}", code_text(t, code))
-                .replace(
-                    "{2}",
-                    match item.applied {
-                        AppliedState::NotApplied => t.key_not_used,
-                        AppliedState::Applied => t.key_used,
-                        _ => t.key_unknown,
-                    },
-                ),
-            (None, None) => t
-                .failed_line
-                .replace("{0}", &item.name)
-                .replace("{1}", "?")
-                .replace("{2}", ""),
-        };
-        text.push_str(&line);
-        text.push('\n');
+/// Ends the operation with the engine's report of each document: what completed, what was
+/// written, whether the key was applied. A real outcome replaces any notice.
+fn end_with_report(open: &Rc<Workspace>, view: &BatchView) {
+    {
+        let mut st = state(open);
+        st.controller.dispatch(Event::Finished);
+        st.decision = None;
     }
-    text
+    let rendered = crate::reports::render(open.locale.get(), view);
+    let ui = open.ui.global::<SigningState>();
+    ui.set_result("".into());
+    ui.set_report_headline(rendered.headline.into());
+    ui.set_report_tone(crate::reports::tone_number(rendered.tone));
+    ui.set_report_rows(super::report_rows(&rendered.rows));
+    render(open);
 }
 
-fn code_text(t: &SignTexts, code: ErrorCode) -> &'static str {
-    match code {
-        ErrorCode::Cancelled => t.code_cancelled,
-        ErrorCode::PermissionDenied => t.code_denied,
-        ErrorCode::ValidationRequired | ErrorCode::MissingValidationServices => t.code_validation,
-        ErrorCode::KeyFailure | ErrorCode::KeyNotFound => t.code_key,
-        ErrorCode::Io => t.code_io,
-        _ => t.code_other,
+fn clear_report(ui: &SigningState<'_>) {
+    ui.set_report_headline("".into());
+    ui.set_report_tone(3);
+    ui.set_report_rows(ModelRc::default());
+}
+
+/// What the user chose in the page's fields: the format with its options, and where the results
+/// go. The options of a format other than the chosen one are not taken, whatever the hidden
+/// fields hold.
+fn read_choice(open: &Rc<Workspace>) -> Result<(SignSpec, Destination), JobError> {
+    let ui = open.ui.global::<SigningState>();
+    let level = match ui.get_level_index() {
+        1 => Some(Level::B),
+        2 => Some(Level::T),
+        3 => Some(Level::Lt),
+        4 => Some(Level::Lta),
+        _ => None,
+    };
+    let family = ui.get_format_index();
+    let format = match family {
+        0 => level.map_or(SignFormat::Cms, SignFormat::Cades),
+        1 => level.map_or(SignFormat::Xml, SignFormat::Xades),
+        2 => SignFormat::Wsse,
+        3 => level.map_or(SignFormat::Pdf, SignFormat::Pades),
+        4 => SignFormat::Jws,
+        _ => SignFormat::Jwt,
+    };
+    let own = |wanted: bool, text: slint::SharedString| {
+        if wanted {
+            text.trim().to_owned()
+        } else {
+            String::new()
+        }
+    };
+    let options = SignOptions {
+        attached: family == 0 && ui.get_attached(),
+        add: matches!(family, 1 | 2) && ui.get_add_signature(),
+        target: own(family == 1, ui.get_xml_target()),
+        parent: own(family == 1, ui.get_xml_parent()),
+        signature_id: own(family == 1, ui.get_signature_id()),
+    };
+    let destination = if ui.get_destination_index() == 1 {
+        let folder = super::typed_path(ui.get_destination_path());
+        if folder.is_empty() {
+            return Err(JobError::Input(MissingField::Folder));
+        }
+        Destination::Folder(PathBuf::from(folder))
+    } else {
+        Destination::Beside
+    };
+    Ok((SignSpec { format, options }, destination))
+}
+
+/// «Format … · options … · results …»: what is made and where it goes, for the confirmation.
+fn profile_line(t: &SignTexts, spec: &SignSpec, destination: &Destination) -> String {
+    let mut parts = vec![t.profile.replace("{0}", &spec.format_name())];
+    if matches!(spec.format, SignFormat::Cms | SignFormat::Cades(_)) {
+        parts.push(
+            if spec.options.attached {
+                t.p_attached
+            } else {
+                t.p_detached
+            }
+            .to_owned(),
+        );
+    }
+    if spec.options.add {
+        parts.push(t.p_add.to_owned());
+    }
+    parts.push(match destination {
+        Destination::Beside => t.p_beside.to_owned(),
+        Destination::Folder(folder) => t.p_folder.replace("{0}", &folder.display().to_string()),
+    });
+    parts.join(" · ")
+}
+
+/// «Обзор…» for the folder of the results.
+fn browse_folder(open: &Rc<Workspace>) {
+    let t = super::Texts::of(open.locale.get());
+    let dialog = rfd::AsyncFileDialog::new()
+        .set_title(t.pick_folder_title)
+        .set_parent(&open.ui.window().window_handle());
+    let picked = slint::spawn_local(async move {
+        let Some(folder) = dialog.pick_folder().await else {
+            return;
+        };
+        let path = folder.path().display().to_string();
+        with_open(|open| {
+            open.ui
+                .global::<SigningState>()
+                .set_destination_path(path.into());
+        });
+    });
+    if let Err(e) = picked {
+        tracing::warn!(error = %e, "cannot open the folder dialog");
     }
 }
 
@@ -1012,17 +1131,15 @@ struct SignTexts {
     cancel_slow: &'static str,
     cancelled_applied_unknown: &'static str,
     no_key_used: &'static str,
-    signed_line: &'static str,
-    failed_line: &'static str,
-    key_not_used: &'static str,
-    key_used: &'static str,
-    key_unknown: &'static str,
-    code_cancelled: &'static str,
-    code_denied: &'static str,
-    code_validation: &'static str,
-    code_key: &'static str,
-    code_io: &'static str,
-    code_other: &'static str,
+    /// `{0}` the format.
+    profile: &'static str,
+    p_attached: &'static str,
+    p_detached: &'static str,
+    p_add: &'static str,
+    p_beside: &'static str,
+    /// `{0}` the folder.
+    p_folder: &'static str,
+    lost_key_unknown: &'static str,
 }
 
 impl SignTexts {
@@ -1045,7 +1162,7 @@ static RU: SignTexts = SignTexts {
     ],
     trust: "Запрос: {0} · Действие: {1}",
     manual: "вы сами, в этом окне",
-    action_sign: "подписать документы (файлы подписи CMS .p7s рядом с документами)",
+    action_sign: "подписать документы (в выбранном формате; файлы результата в выбранном месте)",
     action_auth: "аутентификация",
     action_info: "сведения о ключе",
     expired: "срок действия истёк",
@@ -1068,24 +1185,20 @@ static RU: SignTexts = SignTexts {
     busy: "Предыдущее действие ещё выполняется. Подождите.",
     idle: "Подтверждение закрыто: оно простояло без действий. Ничего не подписано, ключ не применялся.",
     no_password: "Введите пароль.",
-    outputs: "Файлы подписи будут записаны:\n{0}",
+    outputs: "Файлы результата будут записаны:\n{0}",
     waiting: "Документы зафиксированы. Ключ не применяется, пока вы не подтвердите.",
     signing: "Идёт подпись. Отмена остановит остальные документы, уже применённый ключ вернуть нельзя.",
-    cancel_slow: "Отмена запрошена, но подпись ещё не остановилась: она остановится на ближайшей проверке. Часть документов могла быть подписана, проверьте файлы .p7s.",
+    cancel_slow: "Отмена запрошена, но подпись ещё не остановилась: она остановится на ближайшей проверке. Часть документов могла быть подписана, проверьте файлы результата.",
     cancelled_before: "Отменено до применения ключа. Ключ не применялся.",
-    cancelled_applied_unknown: "Отменено. Часть документов могла быть подписана: проверьте файлы .p7s.",
+    cancelled_applied_unknown: "Отменено. Часть документов могла быть подписана: проверьте файлы результата.",
     no_key_used: "Ключ не применялся.",
-    signed_line: "Подписан: {0} → {1}",
-    failed_line: "Не подписан: {0} — {1} ({2})",
-    key_not_used: "ключ не применялся",
-    key_used: "ключ был применён",
-    key_unknown: "применён ли ключ, неизвестно",
-    code_cancelled: "отменено",
-    code_denied: "действие не разрешено",
-    code_validation: "сертификат не прошёл проверку (цепочка, срок или отзыв)",
-    code_key: "ключ недоступен",
-    code_io: "не удалось записать файл подписи: возможно, он уже появился (существующие файлы не заменяются)",
-    code_other: "не удалось выполнить",
+    profile: "Формат: {0}",
+    p_attached: "содержимое внутри подписи",
+    p_detached: "подпись отдельным файлом",
+    p_add: "добавляется к уже подписанному документу",
+    p_beside: "результаты рядом с документами",
+    p_folder: "результаты в папку {0}",
+    lost_key_unknown: "Применялся ли ключ, неизвестно: проверьте файлы результата.",
 };
 
 static KK: SignTexts = SignTexts {
@@ -1098,7 +1211,7 @@ static KK: SignTexts = SignTexts {
     ],
     trust: "Сұрау: {0} · Әрекет: {1}",
     manual: "өзіңіз, осы терезеде",
-    action_sign: "құжаттарға қол қою (құжаттың жанында CMS .p7s файлдары)",
+    action_sign: "құжаттарға қол қою (таңдалған пішімде; нәтиже файлдары таңдалған жерде)",
     action_auth: "аутентификация",
     action_info: "кілт туралы мәліметтер",
     expired: "жарамдылық мерзімі өткен",
@@ -1121,24 +1234,20 @@ static KK: SignTexts = SignTexts {
     busy: "Алдыңғы әрекет әлі орындалуда. Күте тұрыңыз.",
     idle: "Растау әрекетсіз тұрғандықтан жабылды. Ештеңеге қол қойылмады, кілт қолданылмады.",
     no_password: "Құпиясөзді енгізіңіз.",
-    outputs: "Қолтаңба файлдары жазылады:\n{0}",
+    outputs: "Нәтиже файлдары жазылады:\n{0}",
     waiting: "Құжаттар бекітілді. Растағанша кілт қолданылмайды.",
     signing: "Қол қойылуда. Бас тарту қалған құжаттарды тоқтатады; қолданылған кілтті қайтаруға болмайды.",
-    cancel_slow: "Тоқтату сұралды, бірақ қол қою әлі тоқтамады: ол келесі тексеруде тоқтайды. Кейбір құжаттарға қол қойылған болуы мүмкін: .p7s файлдарын тексеріңіз.",
+    cancel_slow: "Тоқтату сұралды, бірақ қол қою әлі тоқтамады: ол келесі тексеруде тоқтайды. Кейбір құжаттарға қол қойылған болуы мүмкін: нәтиже файлдарын тексеріңіз.",
     cancelled_before: "Кілт қолданылмай тұрып тоқтатылды. Кілт қолданылмады.",
-    cancelled_applied_unknown: "Тоқтатылды. Кейбір құжаттарға қол қойылған болуы мүмкін: .p7s файлдарын тексеріңіз.",
+    cancelled_applied_unknown: "Тоқтатылды. Кейбір құжаттарға қол қойылған болуы мүмкін: нәтиже файлдарын тексеріңіз.",
     no_key_used: "Кілт қолданылмады.",
-    signed_line: "Қол қойылды: {0} → {1}",
-    failed_line: "Қол қойылмады: {0} — {1} ({2})",
-    key_not_used: "кілт қолданылмады",
-    key_used: "кілт қолданылды",
-    key_unknown: "кілттің қолданылғаны белгісіз",
-    code_cancelled: "тоқтатылды",
-    code_denied: "әрекетке рұқсат жоқ",
-    code_validation: "сертификат тексеруден өтпеді (тізбек, мерзім немесе қайтарып алу)",
-    code_key: "кілт қолжетімсіз",
-    code_io: "қолтаңба файлын жазу мүмкін болмады: ол пайда болған болуы мүмкін (бар файлдар ауыстырылмайды)",
-    code_other: "орындау мүмкін болмады",
+    profile: "Пішім: {0}",
+    p_attached: "мазмұны қолтаңба ішінде",
+    p_detached: "қолтаңба бөлек файлда",
+    p_add: "қол қойылған құжатқа қосылады",
+    p_beside: "нәтиже құжаттардың жанында",
+    p_folder: "нәтиже {0} қалтасына",
+    lost_key_unknown: "Кілттің қолданылғаны белгісіз: нәтиже файлдарын тексеріңіз.",
 };
 
 static EN: SignTexts = SignTexts {
@@ -1151,7 +1260,7 @@ static EN: SignTexts = SignTexts {
     ],
     trust: "Request: {0} · Action: {1}",
     manual: "you, in this window",
-    action_sign: "sign documents (CMS .p7s signature files next to the documents)",
+    action_sign: "sign documents (in the chosen format; result files where you chose)",
     action_auth: "authenticate",
     action_info: "key details",
     expired: "expired",
@@ -1174,24 +1283,20 @@ static EN: SignTexts = SignTexts {
     busy: "The previous action is still running. Please wait.",
     idle: "The confirmation was closed after sitting idle. Nothing was signed and no key was used.",
     no_password: "Enter the password.",
-    outputs: "The signature files will be written to:\n{0}",
+    outputs: "The result files will be written to:\n{0}",
     waiting: "The documents are frozen. The key is not used until you confirm.",
     signing: "Signing. Cancel stops the remaining documents; a key already applied cannot be taken back.",
-    cancel_slow: "Cancel was requested but the signing has not stopped yet: it stops at its next checkpoint. Some documents may be signed: check the .p7s files.",
+    cancel_slow: "Cancel was requested but the signing has not stopped yet: it stops at its next checkpoint. Some documents may be signed: check the result files.",
     cancelled_before: "Cancelled before the key was applied. No key was used.",
-    cancelled_applied_unknown: "Cancelled. Some documents may be signed: check the .p7s files.",
+    cancelled_applied_unknown: "Cancelled. Some documents may be signed: check the result files.",
     no_key_used: "No key was used.",
-    signed_line: "Signed: {0} → {1}",
-    failed_line: "Not signed: {0} — {1} ({2})",
-    key_not_used: "the key was not used",
-    key_used: "the key was applied",
-    key_unknown: "whether the key was applied is unknown",
-    code_cancelled: "cancelled",
-    code_denied: "the action is not allowed",
-    code_validation: "the certificate failed its checks (chain, validity or revocation)",
-    code_key: "the key is not available",
-    code_io: "the signature file could not be written; it may have appeared meanwhile (existing files are never replaced)",
-    code_other: "it could not be done",
+    profile: "Format: {0}",
+    p_attached: "content inside the signature",
+    p_detached: "signature as a separate file",
+    p_add: "added to a document that is signed already",
+    p_beside: "results next to the documents",
+    p_folder: "results to the folder {0}",
+    lost_key_unknown: "Whether the key was applied is unknown: check the result files.",
 };
 
 /// The page as the user meets it: the real Slint page, its real wiring, a real engine over a
@@ -1204,8 +1309,29 @@ mod tests {
     use oncl_token::Tokens;
 
     use super::*;
+    use crate::reports::controller::{Detail, Family, ItemView, Outcome as ItemOutcome};
     use crate::signing::testing::*;
     use crate::workspace::{pump, test_workspace};
+    use oncl_pki::key::AppliedState;
+    use slint::Model as _;
+
+    /// A report of one document `a.txt`, as the engine would give it.
+    fn one_document(
+        outcome: ItemOutcome,
+        applied: AppliedState,
+        output: Option<&str>,
+    ) -> BatchView {
+        BatchView {
+            family: Family::Sign,
+            items: vec![ItemView {
+                name: "a.txt".into(),
+                outcome,
+                applied,
+                output: output.map(PathBuf::from),
+            }],
+            stop: None,
+        }
+    }
 
     struct Page {
         w: World,
@@ -1372,12 +1498,16 @@ mod tests {
         p.ws.sign.borrow_mut().pending_op = Some(old);
         settled(
             &p.ws,
-            Ok(SignOutput::Signed(Outcome::Done(vec![Signed {
-                name: "a.txt".into(),
-                output: None,
-                error: None,
-                applied: AppliedState::Applied,
-            }]))),
+            Ok(SignOutput::Signed(Outcome::Done(one_document(
+                ItemOutcome::Completed(Detail::Written {
+                    profile: "CMS".into(),
+                    signers: 1,
+                    bytes_out: 5,
+                    check: None,
+                }),
+                AppliedState::Applied,
+                Some("a.txt.p7s"),
+            )))),
         );
         assert_eq!(step(&p), Step::Source);
         assert!(!ui(&p).get_busy(), "a dropped answer still frees the page");
@@ -1431,12 +1561,11 @@ mod tests {
                 Some("Cancelled before the key was applied. No key was used."),
             ),
             (
-                Outcome::Done(vec![Signed {
-                    name: "a.txt".into(),
-                    output: None,
-                    error: Some(oncl_core::ErrorCode::Cancelled),
-                    applied: AppliedState::NotApplied,
-                }]),
+                Outcome::Done(one_document(
+                    ItemOutcome::Failed(oncl_core::ErrorCode::Cancelled),
+                    AppliedState::NotApplied,
+                    None,
+                )),
                 None,
             ),
         ] {
@@ -1463,7 +1592,22 @@ mod tests {
             assert!(!text.contains("stops at its next checkpoint"), "{text}");
             match exact {
                 Some(exact) => assert_eq!(text, exact),
-                None => assert!(text.contains("Not signed: a.txt"), "{text}"),
+                None => {
+                    // The engine's own per-document outcome replaces the notice: the report
+                    // says that document was not done and that the key was not used.
+                    assert_eq!(text, "");
+                    let rows: Vec<String> = ui(&p)
+                        .get_report_rows()
+                        .iter()
+                        .map(|r| r.text.to_string())
+                        .collect();
+                    assert!(
+                        rows.iter()
+                            .any(|r| r.contains("a.txt: not done")
+                                && r.contains("the key was not used")),
+                        "{rows:?}"
+                    );
+                }
             }
             // The worker's own answer arrives at last: dropped as already shown, and the page is
             // not left disabled by the ended job.

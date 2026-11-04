@@ -24,6 +24,8 @@ pub(crate) enum Job {
     Inspect,
     /// A step of the signing page: freezing a document, opening a key store, signing.
     Sign,
+    /// A run of one of the tools that use no private key: verify, extend, extract, timestamp.
+    Tool,
 }
 
 /// Why an operation did not complete.
@@ -39,6 +41,8 @@ pub(crate) enum JobError {
     DestinationExists,
     /// The folder of a document cannot publish a signature file (no hard links).
     NoLinks,
+    /// Two documents would be written to the same file: nothing is done.
+    DuplicateOutput,
     /// The key store changed after the certificate was shown: no key is used.
     StoreChanged,
     /// The SDK refused or failed it.
@@ -55,6 +59,8 @@ pub(crate) enum MissingField {
     Path,
     Password,
     Aliases,
+    /// The folder the results are to be written to.
+    Folder,
 }
 
 impl From<OperationError> for JobError {

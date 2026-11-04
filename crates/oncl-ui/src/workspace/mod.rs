@@ -14,12 +14,20 @@
 
 mod controller;
 mod jobs;
+mod operations;
 pub mod progress;
 mod sign;
+mod tools;
 
 pub use self::controller::JobControl;
 pub(crate) use self::controller::JobError;
 pub(crate) use self::jobs::hash_file;
+pub(crate) use self::operations::{
+    Destination, Document, ExtendFormat, Level, PlannedOutput, SignFormat, SignInput, SignOptions,
+    SignSpec, StampOptions, ToolSpec, VerifyFormat, VerifyOptions, batch_operation_error,
+    evidence_limits, open_regular, plan_output, read_limited, run_tool, sign_operation, tsa_spec,
+    view_of_summary,
+};
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -40,7 +48,8 @@ use self::jobs::{Entry, HashOutput, Inspect, InspectOutput};
 use self::progress::{Reporter, Stamp, Update};
 use crate::foreground;
 use crate::prompter::select_desktop_language;
-use crate::ui::WorkspaceWindow;
+use crate::reports::controller::BatchView;
+use crate::ui::{ReportRow, WorkspaceWindow};
 use crate::windows;
 
 /// What the tools window works with: the engine of this program and its hardware tokens.
@@ -60,8 +69,8 @@ pub struct DesktopEngineServices {
 
 /// The pages of the window, as the sidebar numbers them.
 const SECTION_SIGN: i32 = 1;
-const SECTION_HASH: i32 = 2;
-const SECTION_INSPECT: i32 = 3;
+const SECTION_HASH: i32 = 6;
+const SECTION_INSPECT: i32 = 7;
 
 /// What an action gives back to its page.
 enum Output {
@@ -69,6 +78,8 @@ enum Output {
     Hash(HashOutput, i32),
     Inspect(InspectOutput),
     Sign(sign::SignOutput),
+    /// The report of a run of a tool that uses no key.
+    Tool(BatchView),
 }
 
 struct Workspace {
@@ -80,6 +91,7 @@ struct Workspace {
     /// What the page was asked to inspect by the action that runs or ran last.
     inspect_kind: Cell<i32>,
     sign: RefCell<sign::State>,
+    tools: RefCell<tools::State>,
 }
 
 thread_local! {
@@ -134,6 +146,7 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
     ui.on_browse(|| with_open(browse));
     ui.on_cancel(|| with_open(cancel));
     sign::connect(&ui);
+    tools::connect(&ui);
     ui.window().on_close_requested(|| {
         close();
         CloseRequestResponse::HideWindow
@@ -147,6 +160,7 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
         sign: RefCell::new(sign::State::new(
             oncl_desktop::Remembered::load(&settings_path).unwrap_or_default(),
         )),
+        tools: RefCell::default(),
     });
     OPEN.set(Some(Rc::clone(&workspace)));
     sign::render(&workspace);
@@ -172,6 +186,7 @@ fn test_workspace(services: DesktopEngineServices) -> Rc<Workspace> {
     ui.on_browse(|| with_open(browse));
     ui.on_cancel(|| with_open(cancel));
     sign::connect(&ui);
+    tools::connect(&ui);
     let settings_path = services.settings_path.clone();
     let workspace = Rc::new(Workspace {
         ui,
@@ -182,6 +197,7 @@ fn test_workspace(services: DesktopEngineServices) -> Rc<Workspace> {
         sign: RefCell::new(sign::State::new(
             oncl_desktop::Remembered::load(&settings_path).unwrap_or_default(),
         )),
+        tools: RefCell::default(),
     });
     OPEN.set(Some(Rc::clone(&workspace)));
     sign::render(&workspace);
@@ -248,6 +264,20 @@ pub fn desktop_limits() -> oncl_pki::resource::ResourceLimits {
 /// A path as typed or pasted: Explorer's «Copy as path» wraps it in quotes.
 fn typed_path(text: slint::SharedString) -> String {
     text.trim().trim_matches('"').trim().to_owned()
+}
+
+/// The rows of a report as the page's model.
+fn report_rows(rows: &[crate::reports::Row]) -> slint::ModelRc<ReportRow> {
+    slint::ModelRc::new(slint::VecModel::from(
+        rows.iter()
+            .map(|row| ReportRow {
+                depth: row.depth,
+                tone: crate::reports::tone_number(row.tone),
+                text: row.text.as_str().into(),
+                detail: row.detail.as_str().into(),
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
 fn start_hash(open: &Rc<Workspace>) {
@@ -333,7 +363,7 @@ fn start(
         match job {
             Job::Hash => t.hashing,
             Job::Inspect => t.inspecting,
-            Job::Sign => t.working,
+            Job::Sign | Job::Tool => t.working,
         }
         .into(),
     );
@@ -556,6 +586,24 @@ fn settle(stamp: Stamp, result: Result<Output, JobError>) {
             sign::settled(&open, Ok(out));
             done(ui, t.ready);
         }
+        Settled::Done(_, Output::Tool(view)) => {
+            use crate::reports::controller::Tone;
+            let (tone, headline) = tools::settled(&open, &view);
+            match tone {
+                Tone::Success => done(ui, &headline),
+                // Not proven either way, or partial: not styled as done.
+                Tone::Caution | Tone::Neutral => {
+                    ui.set_status_kind(4);
+                    ui.set_status_text(headline.into());
+                    ui.set_progress(-1.0);
+                }
+                Tone::Failure => {
+                    ui.set_status_kind(3);
+                    ui.set_status_text(headline.into());
+                    ui.set_progress(-1.0);
+                }
+            }
+        }
         Settled::Cancelled(Job::Sign) => {
             sign::settled(&open, Err(JobError::Cancelled));
             done(ui, t.ready);
@@ -574,6 +622,8 @@ fn settle(stamp: Stamp, result: Result<Output, JobError>) {
                 Job::Hash => SECTION_HASH,
                 Job::Inspect => SECTION_INSPECT,
                 Job::Sign => SECTION_SIGN,
+                // The error goes next to the fields of the page the tool runs on.
+                Job::Tool => open.ui.get_section(),
             };
             reject(&open, section, &error);
         }
@@ -642,6 +692,7 @@ struct Texts {
     /// `{0}` human size, `{1}` bytes, `{2}` algorithm.
     hash_summary: &'static str,
     pick_title: &'static str,
+    pick_folder_title: &'static str,
     gost2004: &'static str,
     gost2015: &'static str,
     alias: &'static str,
@@ -656,6 +707,8 @@ struct Texts {
     no_path: &'static str,
     no_password: &'static str,
     no_aliases: &'static str,
+    no_folder: &'static str,
+    duplicate_output: &'static str,
     not_found: &'static str,
     access_denied: &'static str,
     unreadable: &'static str,
@@ -714,6 +767,7 @@ static RU: Texts = Texts {
     document: "Документ {0} из {1}, обработано {2}",
     hash_summary: "{0} ({1} байт), алгоритм {2}",
     pick_title: "Выберите файл",
+    pick_folder_title: "Выберите папку",
     gost2004: "ГОСТ Р 34.11-94",
     gost2015: "ГОСТ Р 34.11-2012 (512)",
     alias: "Имя ключа",
@@ -721,13 +775,15 @@ static RU: Texts = Texts {
     busy_engine: "Предыдущая операция ещё завершается. Повторите через несколько секунд.",
     not_regular: "Это не обычный файл (канал или устройство): его нельзя прочитать.",
     no_such_key: "В хранилище нет ключа с таким именем.",
-    dest_exists: "Файл подписи (.p7s) рядом с документом уже есть: он не будет заменён. Переименуйте или уберите его; ключ не применялся.",
-    no_links: "В папке документа нельзя создать файл подписи надёжно (нужны жёсткие ссылки: FAT, exFAT и часть сетевых папок их не дают). Скопируйте документ на другой диск; ключ не применялся.",
+    dest_exists: "Файл с именем результата уже есть в папке назначения: он не будет заменён. Переименуйте или уберите его; ничего не выполнялось, ключ не применялся.",
+    no_links: "В папке назначения нельзя создать файл результата надёжно (нужны жёсткие ссылки: FAT, exFAT и часть сетевых папок их не дают). Выберите другую папку или диск; ничего не выполнялось, ключ не применялся.",
     store_changed: "Файл хранилища ключей изменился после показа сертификата. Откройте его заново; ключ не применялся.",
     units: ["Б", "КиБ", "МиБ", "ГиБ"],
     no_path: "Укажите путь к файлу.",
     no_password: "Введите пароль.",
     no_aliases: "Укажите имена ключей, которые показать.",
+    no_folder: "Укажите папку для результатов.",
+    duplicate_output: "Два документа дали бы один и тот же файл результата. Уберите один из них или выберите другое назначение; ничего не выполнялось.",
     not_found: "Файл не найден.",
     access_denied: "Нет доступа к файлу.",
     unreadable: "Файл не удалось прочитать.",
@@ -775,6 +831,7 @@ static KK: Texts = Texts {
     document: "Құжат {0}/{1}: {2} өңделді",
     hash_summary: "{0} ({1} байт), алгоритм {2}",
     pick_title: "Файлды таңдаңыз",
+    pick_folder_title: "Қалтаны таңдаңыз",
     gost2004: "ГОСТ Р 34.11-94",
     gost2015: "ГОСТ Р 34.11-2012 (512)",
     alias: "Кілт атауы",
@@ -782,13 +839,15 @@ static KK: Texts = Texts {
     busy_engine: "Алдыңғы операция әлі аяқталуда. Бірнеше секундтан кейін қайталаңыз.",
     not_regular: "Бұл қарапайым файл емес (арна немесе құрылғы): оны оқуға болмайды.",
     no_such_key: "Қоймада мұндай атты кілт жоқ.",
-    dest_exists: "Құжаттың жанында қолтаңба файлы (.p7s) бар: ол ауыстырылмайды. Атын өзгертіңіз немесе алыңыз; кілт қолданылмады.",
-    no_links: "Құжат қалтасында қолтаңба файлын сенімді жасау мүмкін емес (қатты сілтемелер керек: FAT, exFAT және кейбір желілік қалталарда жоқ). Құжатты басқа дискіге көшіріңіз; кілт қолданылмады.",
+    dest_exists: "Нәтиже файлының аты бар файл тағайындалған қалтада бұрыннан бар: ол ауыстырылмайды. Атын өзгертіңіз немесе алыңыз; ештеңе орындалмады, кілт қолданылмады.",
+    no_links: "Тағайындалған қалтада нәтиже файлын сенімді жасау мүмкін емес (қатты сілтемелер керек: FAT, exFAT және кейбір желілік қалталарда жоқ). Басқа қалта немесе диск таңдаңыз; ештеңе орындалмады, кілт қолданылмады.",
     store_changed: "Сертификат көрсетілгеннен кейін кілттер қоймасының файлы өзгерген. Оны қайта ашыңыз; кілт қолданылмады.",
     units: ["Б", "КиБ", "МиБ", "ГиБ"],
     no_path: "Файлға жолды көрсетіңіз.",
     no_password: "Құпиясөзді енгізіңіз.",
     no_aliases: "Көрсетілетін кілт атауларын жазыңыз.",
+    no_folder: "Нәтижелерге арналған қалтаны көрсетіңіз.",
+    duplicate_output: "Екі құжат бір нәтиже файлын берер еді. Біреуін алыңыз немесе басқа тағайындауды таңдаңыз; ештеңе орындалмады.",
     not_found: "Файл табылмады.",
     access_denied: "Файлға қол жеткізу жоқ.",
     unreadable: "Файлды оқу мүмкін болмады.",
@@ -836,6 +895,7 @@ static EN: Texts = Texts {
     document: "Document {0} of {1}, {2} processed",
     hash_summary: "{0} ({1} bytes), algorithm {2}",
     pick_title: "Choose a file",
+    pick_folder_title: "Choose a folder",
     gost2004: "GOST R 34.11-94",
     gost2015: "GOST R 34.11-2012 (512)",
     alias: "Key name",
@@ -843,13 +903,15 @@ static EN: Texts = Texts {
     busy_engine: "The previous operation is still finishing. Try again in a few seconds.",
     not_regular: "This is not a regular file (a pipe or a device): it cannot be read.",
     no_such_key: "The key store has no key with that name.",
-    dest_exists: "A signature file (.p7s) already exists next to the document and will not be replaced. Rename or remove it; no key was used.",
-    no_links: "The document's folder cannot publish a signature file safely (it needs hard links, which FAT, exFAT and some network shares lack). Copy the document to another drive; no key was used.",
+    dest_exists: "A file with the result's name already exists in the destination and will not be replaced. Rename or remove it; nothing was done and no key was used.",
+    no_links: "The destination folder cannot publish a result file safely (it needs hard links, which FAT, exFAT and some network shares lack). Choose another folder or drive; nothing was done and no key was used.",
     store_changed: "The key store file changed after the certificate was shown. Open it again; no key was used.",
     units: ["B", "KiB", "MiB", "GiB"],
     no_path: "Enter the path to a file.",
     no_password: "Enter the password.",
     no_aliases: "Enter the names of the keys to show.",
+    no_folder: "Enter the folder for the results.",
+    duplicate_output: "Two documents would give the same result file. Remove one of them or choose another destination; nothing was done.",
     not_found: "The file was not found.",
     access_denied: "No access to the file.",
     unreadable: "The file could not be read.",
@@ -904,6 +966,8 @@ fn error_text(t: &Texts, error: &JobError, inspect_kind: i32) -> &'static str {
         JobError::Input(MissingField::Path) => t.no_path,
         JobError::Input(MissingField::Password) => t.no_password,
         JobError::Input(MissingField::Aliases) => t.no_aliases,
+        JobError::Input(MissingField::Folder) => t.no_folder,
+        JobError::DuplicateOutput => t.duplicate_output,
         JobError::Worker => t.worker,
         JobError::NotRegular => t.not_regular,
         JobError::DestinationExists => t.dest_exists,
