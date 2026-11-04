@@ -275,15 +275,22 @@ progress traffic.
 
 ## Resource and material profiles (refused before any key use)
 
-- `cades_lt/lta` and `pades_lt/lta` (sign and `extend`) need caller-acquired status
-  material: `evidence` with at least one `ocsp` or `crl` part, otherwise 400 before any
-  secret, key or document is touched. `xades_lt/lta` signing is not offered: the SDK XML
-  sign facade takes no status material (verify accepts `xades_*`).
-- `pades_lt/lta` need `memory_per_operation` of at least 336x `PdfLimits::max_object_bytes`
-  (336 MiB at the 1 MiB default; the update plan's reservation, independent of the
-  document). The default 256 MiB profile is refused with 413 `MemoryLimit`,
-  `NotApplied`, before the audit BEGIN. Shared-budget exhaustion at runtime can still
-  fail after use and is then reported `Applied`.
+- `cades_lt/lta` and `pades_lt/lta` (sign and `extend`) and `xades_lt/lta` (extend) need
+  caller-acquired status material: `evidence` with at least one `ocsp` or `crl` part,
+  otherwise 400 before any secret, key or document is touched.
+- XAdES LT/LTA are produced as **sign `xades_t`, then keyless `extend` to `xades_lt`, then
+  `xades_lta`** (the SDK XML sign request carries no status material, so there is no
+  `xades_lt/lta` sign profile). The chain is exercised over HTTP with the lxml oracle;
+  extension never uses a key.
+- `pades_lt/lta` need the update plan's memory. The need is computed by
+  `oncl_pdf::budget::plan_memory` (the same functions the PDF reader, update plan and
+  signer reserve with, plus a fixed host working margin) and probed against the request's
+  ORIGINAL scope after secret intake; if it does not fit: 413 `MemoryLimit`,
+  `NotApplied`, before the audit BEGIN. At the default 1 MiB object limit this is about
+  330 MiB, so the default 256 MiB `memory_per_operation` refuses PAdES LT/LTA. A sweep
+  over memory profiles shows requests are either refused up front or complete; none
+  writes a BEGIN and then fails for memory. Shared-budget exhaustion by other requests at
+  runtime can still fail after use and is then reported `Applied`.
 - `xades_t` / `xades_legacy_t` need a host TSA with a policy OID (`[pki.tsa] policy`),
   because the SDK binds the TSA policy for XAdES T/LT/LTA; without it: 503
   `MissingConfiguration`, `NotApplied`, no BEGIN. CAdES/PAdES T accept a TSA without

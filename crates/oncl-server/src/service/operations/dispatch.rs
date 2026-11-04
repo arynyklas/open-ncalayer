@@ -171,20 +171,6 @@ pub(super) fn precheck(
     let denied = || ApiError::not_applied(ErrorCode::PermissionDenied);
     for item in &metadata.items {
         let act = action(&item.operation);
-        let pades_high = matches!(
-            &item.operation,
-            Operation::Sign {
-                profile: SignKind::PadesLt | SignKind::PadesLta,
-                ..
-            } | Operation::Extend {
-                profile: ExtendKind::PadesLt | ExtendKind::PadesLta,
-                ..
-            }
-        );
-        if pades_high && host.memory_per_operation < pades_lt_memory() {
-            // A predictable resource need is refused before any private use.
-            return Err(ApiError::not_applied(ErrorCode::MemoryLimit));
-        }
         if let Operation::Plugin {
             plugin,
             operation,
@@ -667,7 +653,12 @@ pub(super) fn validate_shape(operation: &Operation) -> Result<(), ApiError> {
             profile, evidence, ..
         } if matches!(
             profile,
-            ExtendKind::CadesLt | ExtendKind::CadesLta | ExtendKind::PadesLt | ExtendKind::PadesLta
+            ExtendKind::CadesLt
+                | ExtendKind::CadesLta
+                | ExtendKind::PadesLt
+                | ExtendKind::PadesLta
+                | ExtendKind::XadesLt
+                | ExtendKind::XadesLta
         ) && !has_status_material(evidence) =>
         {
             Err(invalid_request())
@@ -686,16 +677,40 @@ fn has_status_material(evidence: &[oncl_api::dto::EvidenceRef]) -> bool {
         .iter()
         .any(|e| matches!(e.kind, EvidenceKind::Ocsp | EvidenceKind::Crl))
 }
-/// Minimum `memory_per_operation` for PAdES LT/LTA signing/extension, measured on
-/// this build (a 256 MiB profile fails after key use, 350 MiB succeeds) with margin.
-///
-/// The need is the PDF update plan's reservation, which scales with
-/// `PdfLimits::max_object_bytes` (128x for the plan, measured total below 350 MiB at
-/// the 1 MiB default), independent of the document. Proposed exact seam for Core/PDF
-/// to replace this host estimate: `oncl_pdf::ades::plan_memory(&PdfLimits) -> u64`,
-/// called by `Engine::sign`/`extend` BEFORE the first key application.
-pub(super) fn pades_lt_memory() -> u64 {
-    oncl_pdf::PdfLimits::default().max_object_bytes as u64 * 336
+/// Host-side working reservations made after the preflight (output staging, frame
+/// buffers, evidence parts, response metadata): a fixed margin on top of the PDF plan.
+const HOST_WORKING_MEMORY: u64 = 16 << 20;
+/// Refuse a predictable PAdES LT/LTA memory need BEFORE any private key use.
+/// The need comes from the SAME code the PDF layer reserves with
+/// (`oncl_pdf::budget::plan_memory`, one implementation); it is probed against the
+/// ORIGINAL scope's remaining memory (operation and shared budgets) and released.
+pub(super) fn memory_preflight(
+    metadata: &OperationMetadata,
+    scope: &ResourceScope,
+) -> Result<(), ApiError> {
+    let high = metadata.items.iter().any(|item| {
+        matches!(
+            &item.operation,
+            Operation::Sign {
+                profile: SignKind::PadesLt | SignKind::PadesLta,
+                ..
+            } | Operation::Extend {
+                profile: ExtendKind::PadesLt | ExtendKind::PadesLta,
+                ..
+            }
+        )
+    });
+    if !high {
+        return Ok(());
+    }
+    let need = oncl_pdf::budget::plan_memory(&oncl_pdf::PdfLimits::default())
+        .ok()
+        .and_then(|n| n.checked_add(HOST_WORKING_MEMORY))
+        .ok_or_else(|| ApiError::not_applied(ErrorCode::MemoryLimit))?;
+    scope
+        .reserve_memory(need)
+        .map(drop)
+        .map_err(|_| ApiError::not_applied(ErrorCode::MemoryLimit))
 }
 fn is_xml(kind: SignKind) -> bool {
     matches!(kind, SignKind::Xml | SignKind::XadesB | SignKind::XadesT)
@@ -710,15 +725,23 @@ fn is_pdf(kind: SignKind) -> bool {
             | SignKind::PadesLta
     )
 }
-fn extend_level(kind: ExtendKind) -> (AdesLevel, bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Format {
+    Cms,
+    Pdf,
+    Xml,
+}
+fn extend_level(kind: ExtendKind) -> (AdesLevel, Format) {
     use ExtendKind::*;
     match kind {
-        CadesT => (AdesLevel::T, false),
-        CadesLt => (AdesLevel::Lt, false),
-        CadesLta => (AdesLevel::Lta, false),
-        PadesT => (AdesLevel::T, true),
-        PadesLt => (AdesLevel::Lt, true),
-        PadesLta => (AdesLevel::Lta, true),
+        CadesT => (AdesLevel::T, Format::Cms),
+        CadesLt => (AdesLevel::Lt, Format::Cms),
+        CadesLta => (AdesLevel::Lta, Format::Cms),
+        PadesT => (AdesLevel::T, Format::Pdf),
+        PadesLt => (AdesLevel::Lt, Format::Pdf),
+        PadesLta => (AdesLevel::Lta, Format::Pdf),
+        XadesLt => (AdesLevel::Lt, Format::Xml),
+        XadesLta => (AdesLevel::Lta, Format::Xml),
     }
 }
 /// The sign/extend result is always a new SDK-staged artifact; the engine
@@ -1166,7 +1189,7 @@ pub(super) fn run(
             evidence,
         } => {
             let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
-            let (level, pdf) = extend_level(profile);
+            let (level, format) = extend_level(profile);
             let limits = evidence_limits(ctx.resources().limits());
             let evidence = load_evidence(env, &evidence, ctx)?;
             let (ocsp, crls) = evidence.slices();
@@ -1178,13 +1201,13 @@ pub(super) fn run(
                 .as_mut()
                 .map(|input| input.reader(ctx.resources()))
                 .transpose()?;
-            let mut request = if pdf {
-                if detached_reader.is_some() {
-                    return Err(ProcessingError::InvalidInput("PDF has no detached input").into());
+            let mut request = match format {
+                Format::Pdf | Format::Xml if detached_reader.is_some() => {
+                    return Err(ProcessingError::InvalidInput("no detached input").into());
                 }
-                oncl_core::ExtendRequest::pdf(level, oncl_pdf::PdfLimits::default())
-            } else {
-                oncl_core::ExtendRequest::cms(level)
+                Format::Pdf => oncl_core::ExtendRequest::pdf(level, oncl_pdf::PdfLimits::default()),
+                Format::Xml => oncl_core::ExtendRequest::xml(level),
+                Format::Cms => oncl_core::ExtendRequest::cms(level),
             }
             .with_evidence_limits(limits)
             .with_material(ValidationMaterial {

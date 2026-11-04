@@ -416,6 +416,14 @@ impl Running {
     }
     /// One real HTTP/1.1 request; returns status, content type and full body.
     pub async fn post(&self, content_type: &str, body: Vec<u8>) -> (u16, String, Vec<u8>) {
+        self.post_as(self.token.as_str(), content_type, body).await
+    }
+    pub async fn post_as(
+        &self,
+        token: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (u16, String, Vec<u8>) {
         use http_body_util::{BodyExt, Full};
         let stream = tokio::net::TcpStream::connect(self.address).await.unwrap();
         let (mut sender, connection) =
@@ -429,7 +437,7 @@ impl Running {
             .method("POST")
             .uri("/v1/operations")
             .header("host", self.address.to_string())
-            .header("authorization", format!("Bearer {}", self.token.as_str()))
+            .header("authorization", format!("Bearer {token}"))
             .header("content-type", content_type)
             .body(Full::new(axum::body::Bytes::from(body)))
             .unwrap();
@@ -1029,6 +1037,43 @@ pub mod plugin {
         ))
         .unwrap()
     }
+    /// Guest that returns the hex of its own ARGS (reads what the caller sent).
+    pub fn echo_wasm() -> Vec<u8> {
+        wat::parse_str(
+            r#"(module
+      (memory (export "memory") 16 16)
+      (global $heap (mut i32) (i32.const 65536))
+      (func (export "oncl_abi_version") (result i32) (i32.const 1))
+      (func (export "oncl_alloc") (param $n i32) (result i32) (local $p i32)
+        (local.set $p (global.get $heap))
+        (global.set $heap (i32.add (local.get $p) (local.get $n))) (local.get $p))
+      (func (export "oncl_free") (param i32 i32))
+      (data (i32.const 512) "0123456789abcdef")
+      (func (export "oncl_process") (param $src i32) (param $len i32) (result i64)
+        (local $i i32) (local $b i32) (local $out i32) (local $hex i32)
+        (local.set $out (global.get $heap))
+        (i32.store8 (local.get $out) (i32.const 0xa1))
+        (i32.store8 offset=1 (local.get $out) (i32.const 0x68))
+        (i64.store offset=2 (local.get $out) (i64.const 0x65736e6f70736572))
+        (i32.store8 offset=10 (local.get $out) (i32.const 0x7a))
+        (local.set $hex (i32.shl (local.get $len) (i32.const 1)))
+        (i32.store8 offset=11 (local.get $out) (i32.shr_u (local.get $hex) (i32.const 24)))
+        (i32.store8 offset=12 (local.get $out) (i32.shr_u (local.get $hex) (i32.const 16)))
+        (i32.store8 offset=13 (local.get $out) (i32.shr_u (local.get $hex) (i32.const 8)))
+        (i32.store8 offset=14 (local.get $out) (local.get $hex))
+        (block $done (loop $next
+          (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+          (local.set $b (i32.load8_u (i32.add (local.get $src) (local.get $i))))
+          (i32.store8 offset=15 (i32.add (local.get $out) (i32.shl (local.get $i) (i32.const 1)))
+            (i32.load8_u offset=512 (i32.shr_u (local.get $b) (i32.const 4))))
+          (i32.store8 offset=16 (i32.add (local.get $out) (i32.shl (local.get $i) (i32.const 1)))
+            (i32.load8_u offset=512 (i32.and (local.get $b) (i32.const 15))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
+        (i64.or (i64.shl (i64.extend_i32_u (local.get $out)) (i64.const 32))
+          (i64.extend_i32_u (i32.add (local.get $hex) (i32.const 15))))))"#,
+        )
+        .unwrap()
+    }
     pub fn manifest(id: &str) -> String {
         format!(
             r#"id = "{id}"
@@ -1043,6 +1088,13 @@ keys = true
 dialogs = true
 "#
         )
+    }
+    /// Hex reply of the echo guest -> its raw bytes (a CBOR-free `response` string).
+    pub fn reply_bytes_raw(response: &str) -> Vec<u8> {
+        (0..response.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&response[i..i + 2], 16).unwrap())
+            .collect()
     }
     /// Hex reply -> decoded host result bytes (signature or digest).
     pub fn reply_bytes(response: &str) -> Vec<u8> {

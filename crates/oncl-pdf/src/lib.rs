@@ -34,6 +34,58 @@ pub enum PdfError {
     #[error(transparent)]
     Ades(#[from] oncl_pki::cms::ades::AdesError),
 }
+/// Memory/metadata the PDF layer reserves, computed in ONE place. The reader,
+/// the update plan and the signer reserve through these functions, and hosts call
+/// [`budget::plan_memory`] to refuse a predictable need before any private key use.
+pub mod budget {
+    use super::PdfLimits;
+    use oncl_pki::resource::ProcessingError;
+    /// `(metadata, memory)` reserved by one document reader.
+    pub fn reader(limits: &PdfLimits) -> Result<(u64, u64), ProcessingError> {
+        let metadata = (limits.max_objects as u64)
+            .checked_mul(limits.max_revisions as u64)
+            .and_then(|n| n.checked_mul(96))
+            .and_then(|n| n.checked_add((limits.max_object_bytes as u64).checked_mul(32)?))
+            .ok_or(ProcessingError::MetadataLimit)?;
+        let memory = metadata
+            .checked_add(
+                (limits.max_decoded_bytes as u64)
+                    .checked_mul(4)
+                    .ok_or(ProcessingError::MemoryLimit)?,
+            )
+            .and_then(|n| n.checked_add((limits.max_object_bytes as u64).checked_mul(96)?))
+            .ok_or(ProcessingError::MemoryLimit)?;
+        Ok((metadata, memory))
+    }
+    /// Memory reserved by the PAdES update plan itself (before its nested reader).
+    pub fn plan_reservation(limits: &PdfLimits) -> Result<u64, ProcessingError> {
+        (limits.max_object_bytes as u64)
+            .checked_mul(128)
+            .ok_or(ProcessingError::MemoryLimit)
+    }
+    /// Memory reserved by the incremental signer.
+    pub fn sign_reservation(limits: &PdfLimits) -> Result<u64, ProcessingError> {
+        (limits.max_object_bytes as u64)
+            .checked_mul(32)
+            .ok_or(ProcessingError::MemoryLimit)
+    }
+    /// Memory reserved by the signature-verification view of an update.
+    pub fn verify_reservation(limits: &PdfLimits) -> Result<u64, ProcessingError> {
+        (limits.max_signatures as u64)
+            .checked_mul(2048)
+            .and_then(|n| n.checked_add(limits.max_objects as u64 * 256))
+            .ok_or(ProcessingError::MetadataLimit)
+    }
+    /// Upper bound of the fixed memory a PAdES update (LT/LTA sign or extend) holds
+    /// at once: the plan, its nested reader and the signer. Document-independent.
+    pub fn plan_memory(limits: &PdfLimits) -> Result<u64, ProcessingError> {
+        plan_reservation(limits)?
+            .checked_add(reader(limits)?.1)
+            .and_then(|n| n.checked_add(sign_reservation(limits).ok()?))
+            .and_then(|n| n.checked_add(verify_reservation(limits).ok()?))
+            .ok_or(ProcessingError::MemoryLimit)
+    }
+}
 pub type Result<T, E = PdfError> = std::result::Result<T, E>;
 #[derive(Debug, Clone)]
 pub struct PdfLimits {
@@ -94,19 +146,7 @@ impl<'a, 's> PdfDocument<'a, 's> {
         }
         // Admission covers transient window/parser trees and all xref revisions;
         // there is intentionally no unbounded object cache.
-        let metadata = (limits.max_objects as u64)
-            .checked_mul(limits.max_revisions as u64)
-            .and_then(|n| n.checked_mul(96))
-            .and_then(|n| n.checked_add((limits.max_object_bytes as u64).checked_mul(32)?))
-            .ok_or(ProcessingError::MetadataLimit)?;
-        let memory = metadata
-            .checked_add(
-                (limits.max_decoded_bytes as u64)
-                    .checked_mul(4)
-                    .ok_or(ProcessingError::MemoryLimit)?,
-            )
-            .and_then(|n| n.checked_add((limits.max_object_bytes as u64).checked_mul(96)?))
-            .ok_or(ProcessingError::MemoryLimit)?;
+        let (metadata, memory) = budget::reader(limits)?;
         let metadata_reservation = scope.reserve_metadata(metadata)?;
         let memory_reservation = scope.reserve_memory(memory)?;
         let input = source::Input::new(source, scope)?;

@@ -21,7 +21,6 @@ pub(crate) struct HostPolicy {
     pub jwt_issuer: Option<String>,
     pub jwt_audience: Option<String>,
     pub plugin_grants: Vec<PluginGrantRuntime>,
-    pub memory_per_operation: u64,
 }
 /// One exact operator grant: (token, plugin, operation) with its key names and
 /// the SDK permission built from them. Installed code alone grants nothing.
@@ -235,6 +234,7 @@ impl ServiceHost {
                 &host_policy,
                 admission.resources(),
             )?;
+            dispatch::memory_preflight(&prepared.metadata, admission.resources())?;
             if private && audit.health() != AuditHealth::Healthy {
                 return Err(ApiError::not_applied(ErrorCode::AuditUnavailable));
             }

@@ -3696,3 +3696,294 @@ async fn every_missing_right_is_refused_before_intake_with_nothing_held() {
     }
     service.stop().await;
 }
+
+/// The preflight (`oncl_pdf::budget::plan_memory`) can never under-refuse: sweeping the
+/// per-operation memory profile, a PAdES-LTA request is either refused BEFORE any key
+/// use (413, NotApplied, no BEGIN) or it completes. It never writes a BEGIN and then
+/// fails for memory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pades_preflight_never_under_refuses_across_memory_profiles() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let inter = {
+        use der::Encode;
+        pki.inter.cert.to_der().unwrap()
+    };
+    let pdf = include_bytes!("../../oncl-pdf/tests/fixtures/external-multipage.pdf");
+    let metadata = r#"{"items":[{"id":"s1","operation":{"kind":"sign","profile":"pades_lta","input":"doc","evidence":[{"kind":"certificate","input":"ev0"},{"kind":"crl","input":"ev1"},{"kind":"crl","input":"ev2"}],"keys":[{"source":"inline","container":"p12","password":"pw"}]}}],"parts":[{"name":"p12","item_id":"s1","role":"secret"},{"name":"pw","item_id":"s1","role":"secret"},{"name":"doc","item_id":"s1","role":"document"},{"name":"ev0","item_id":"s1","role":"document"},{"name":"ev1","item_id":"s1","role":"document"},{"name":"ev2","item_id":"s1","role":"document"}]}"#;
+    let need = oncl_pdf::budget::plan_memory(&oncl_pdf::PdfLimits::default()).unwrap();
+    let mut outcomes = Vec::new();
+    for mib in (240u64..=440).step_by(10) {
+        let service = Running::start_with(|config, dir| {
+            inline_service_config(&pki)(config, dir);
+            config.memory_per_operation = mib << 20;
+            config.total_memory = 2 << 30;
+        })
+        .await;
+        let parts = [
+            Part {
+                name: "p12",
+                filename: None,
+                bytes: &p12,
+            },
+            Part {
+                name: "pw",
+                filename: None,
+                bytes: PASSWORD.as_bytes(),
+            },
+            Part {
+                name: "doc",
+                filename: None,
+                bytes: pdf,
+            },
+            Part {
+                name: "ev0",
+                filename: None,
+                bytes: &inter,
+            },
+            Part {
+                name: "ev1",
+                filename: None,
+                bytes: &pki.crls[0],
+            },
+            Part {
+                name: "ev2",
+                filename: None,
+                bytes: &pki.crls[1],
+            },
+        ];
+        let (status, _, response) = service.post(FORM, multipart(metadata, &parts)).await;
+        let completed = String::from_utf8_lossy(&response).contains("\"status\":\"completed\"");
+        let refused = status == 413;
+        assert!(
+            refused || completed,
+            "{mib} MiB: neither refused nor completed ({status}): used the key and failed"
+        );
+        if refused {
+            assert_eq!(
+                begins(&service),
+                0,
+                "{mib} MiB: refused requests never write BEGIN"
+            );
+        }
+        // Every profile below the preflight number is refused.
+        if (mib << 20) < need + (16 << 20) {
+            assert!(refused, "{mib} MiB < plan_memory {need}: must be refused");
+        }
+        outcomes.push((mib, completed));
+        service.stop().await;
+    }
+    // Monotonic: once a profile completes, every larger one does too.
+    let first = outcomes
+        .iter()
+        .position(|(_, c)| *c)
+        .expect("a sufficient profile signs");
+    assert!(outcomes[first..].iter().all(|(_, c)| *c), "{outcomes:?}");
+    assert!(!outcomes[..first].iter().any(|(_, c)| *c));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xades_lt_and_lta_are_sign_t_then_keyless_extend_and_stay_valid_in_lxml() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let inter = {
+        use der::Encode;
+        pki.inter.cert.to_der().unwrap()
+    };
+    let service = Running::start_with(inline_service_config(&pki)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let xml = br#"<root><item Id="p">chain</item><holder Id="s"></holder></root>"#;
+    let (_, parts) = sign_inline(
+        &service,
+        &p12,
+        "xades_t",
+        r#""target":"p","parent":"s","signature_id":"sig1","#,
+        xml,
+    )
+    .await;
+    assert_eq!(final_event(&parts)["status"], "completed");
+    let mut current = artifact(&parts, "artifact-0").to_vec();
+    let begins_after_sign = begins(&service);
+    for level in ["xades_lt", "xades_lta"] {
+        let metadata = format!(
+            r#"{{"items":[{{"id":"e","operation":{{"kind":"extend","profile":"{level}","input":"sig","evidence":[{{"kind":"certificate","input":"ev0"}},{{"kind":"crl","input":"ev1"}},{{"kind":"crl","input":"ev2"}}]}}}}],"parts":[{{"name":"sig","item_id":"e","role":"document"}},{{"name":"ev0","item_id":"e","role":"document"}},{{"name":"ev1","item_id":"e","role":"document"}},{{"name":"ev2","item_id":"e","role":"document"}}]}}"#
+        );
+        let (status, parts, response) = operate(
+            &service,
+            &metadata,
+            &[
+                Part {
+                    name: "sig",
+                    filename: None,
+                    bytes: &current,
+                },
+                Part {
+                    name: "ev0",
+                    filename: None,
+                    bytes: &inter,
+                },
+                Part {
+                    name: "ev1",
+                    filename: None,
+                    bytes: &pki.crls[0],
+                },
+                Part {
+                    name: "ev2",
+                    filename: None,
+                    bytes: &pki.crls[1],
+                },
+            ],
+        )
+        .await;
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+        let done = final_event(&parts);
+        assert_eq!(done["status"], "completed", "{level}: {done}");
+        assert_eq!(
+            done["results"][0]["applied"], "NotApplied",
+            "extension is keyless"
+        );
+        current = artifact(&parts, "artifact-0").to_vec();
+        let verdict = xml_oracle(&current, dir.path());
+        assert_eq!(verdict["checked"], true, "{level}: {verdict}");
+        assert_eq!(
+            verdict["signatures"][0]["signature_valid"], true,
+            "{level}: {verdict}"
+        );
+        assert!(
+            verdict["signatures"][0]["references"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["match"] == true),
+            "{level}: {verdict}"
+        );
+        let text = String::from_utf8_lossy(&current).into_owned();
+        assert!(
+            text.contains("CertificateValues") || text.contains("RevocationValues"),
+            "{level}"
+        );
+        if level == "xades_lta" {
+            assert!(text.contains("ArchiveTimeStamp"), "{level}");
+        }
+    }
+    assert_eq!(
+        begins(&service),
+        begins_after_sign,
+        "extension never used a key"
+    );
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_permission_matrix_is_per_token_and_per_operation_and_payload_origin_is_inert() {
+    use oncl_server::{
+        auth::TokenSecret,
+        config::{PluginConfig, PluginGrant, TokenConfig},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, wasm) = (dir.path().join("echo.toml"), dir.path().join("echo.wasm"));
+    std::fs::write(&manifest, private_support::plugin::manifest("test.echo")).unwrap();
+    std::fs::write(&wasm, private_support::plugin::echo_wasm()).unwrap();
+    let other = TokenSecret::generate().unwrap();
+    let third = TokenSecret::generate().unwrap();
+    let (other_verifier, third_verifier) = (other.verifier().encoded(), third.verifier().encoded());
+    let grant = |token: &str, operation: &str| PluginGrant {
+        token: token.into(),
+        operation: operation.into(),
+        imports: vec![],
+        keys: vec![],
+        pki_endpoints: vec![],
+    };
+    let service = Running::start_with(|config, _| {
+        config.tokens[0].actions = vec![Permission::Hash];
+        for (id, verifier) in [
+            ("other", other_verifier.clone()),
+            ("third", third_verifier.clone()),
+        ] {
+            config.tokens.push(TokenConfig {
+                id: id.into(),
+                verifier,
+                actions: vec![Permission::Hash],
+                keys: vec![],
+                inline_pkcs12: false,
+                metadata_aliases: vec![],
+            });
+        }
+        config.plugins = vec![PluginConfig {
+            id: "test.echo".into(),
+            manifest: manifest.clone(),
+            wasm: wasm.clone(),
+            max_memory: 1 << 20,
+            max_transfer: 1 << 18,
+            // test: ops "alpha"+"beta"; other: only "beta"; third: nothing.
+            permissions: vec![
+                grant("test", "alpha"),
+                grant("test", "beta"),
+                grant("other", "beta"),
+            ],
+        }];
+    })
+    .await;
+    let call = |operation: &str, args: &str| {
+        let args = serde_json::to_string(args).unwrap();
+        format!(
+            r#"{{"items":[{{"id":"p","operation":{{"kind":"plugin","plugin":"test.echo","operation":"{operation}","args":{args},"keys":[]}}}}],"parts":[]}}"#
+        )
+    };
+    let claims_origin = r#"{"origin":"https://trusted.example","caller":"test"}"#;
+    let echoed = |response: &[u8]| -> Vec<u8> {
+        let done: serde_json::Value = serde_json::from_slice(response).unwrap();
+        private_support::plugin::reply_bytes_raw(
+            done["results"][0]["result"]["response"].as_str().unwrap(),
+        )
+    };
+    let contains =
+        |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
+    // (token, operation) -> allowed?
+    let matrix: [(&str, &str, bool); 6] = [
+        ("test", "alpha", true),
+        ("test", "beta", true),
+        ("test", "gamma", false),
+        ("other", "alpha", false),
+        ("other", "beta", true),
+        ("third", "beta", false),
+    ];
+    for (who, operation, allowed) in matrix {
+        let token = match who {
+            "test" => service.token.to_string(),
+            "other" => other.bearer().to_string(),
+            _ => third.bearer().to_string(),
+        };
+        let (status, _, response) = service
+            .post_as(
+                &token,
+                FORM,
+                multipart(&call(operation, claims_origin), &[]),
+            )
+            .await;
+        if allowed {
+            assert_eq!(
+                status,
+                200,
+                "{who}/{operation}: {}",
+                String::from_utf8_lossy(&response)
+            );
+            // The guest really read the payload (origin and caller claims are visible
+            // to it as data) yet authority came only from the token grant.
+            let seen = echoed(&response);
+            assert!(
+                contains(&seen, claims_origin.as_bytes()),
+                "guest sees the payload as data"
+            );
+            // The host-supplied `origin` field of the request is CBOR null (0xf6):
+            // a service client has no browser origin, whatever the payload claims.
+            assert!(
+                contains(&seen, b"origin\xf6"),
+                "host origin must be null: {seen:?}"
+            );
+        } else {
+            assert_eq!(status, 403, "{who}/{operation}");
+        }
+    }
+    service.stop().await;
+}

@@ -585,10 +585,7 @@ fn verify_view(
     allowed: &[SigAlg],
     scope: &mut ResourceScope,
 ) -> Result<PadesReport> {
-    let bytes = (limits.max_signatures as u64)
-        .checked_mul(2048)
-        .and_then(|n| n.checked_add(limits.max_objects as u64 * 256))
-        .ok_or(ProcessingError::MetadataLimit)?;
+    let bytes = crate::budget::verify_reservation(limits)?;
     let memory = scope.reserve_memory(bytes)?;
     let metadata = scope.reserve_metadata(bytes)?;
     let parsed = parse(&mut view, limits, scope)?;
@@ -910,10 +907,7 @@ fn update_plan(
     limits: &PdfLimits,
     scope: &ResourceScope,
 ) -> Result<UpdatePlan> {
-    let size = (limits.max_object_bytes as u64)
-        .checked_mul(128)
-        .ok_or(ProcessingError::MemoryLimit)?;
-    let memory = scope.reserve_memory(size)?;
+    let memory = scope.reserve_memory(crate::budget::plan_reservation(limits)?)?;
     let metadata = scope.reserve_metadata(
         (limits.max_object_bytes as u64)
             .checked_mul(16)

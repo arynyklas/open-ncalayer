@@ -288,9 +288,7 @@ fn sign_impl(
     }
     let before = scope.progress();
     let mut operation = scope.shared_view();
-    let size = (profile.limits.max_object_bytes as u64)
-        .checked_mul(32)
-        .ok_or(ProcessingError::MemoryLimit)?;
+    let size = crate::budget::sign_reservation(&profile.limits)?;
     let metadata = (profile.limits.max_nodes as u64)
         .checked_mul(512)
         .and_then(|n| n.checked_add((profile.limits.max_object_bytes as u64).checked_mul(8)?))

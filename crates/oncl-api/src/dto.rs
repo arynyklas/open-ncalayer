@@ -260,6 +260,9 @@ pub enum ExtendKind {
     PadesT,
     PadesLt,
     PadesLta,
+    /// XAdES evidence extension of an existing XAdES signature (sign `xades_t` first).
+    XadesLt,
+    XadesLta,
 }
 /// Key reference. `container`/`password` name `secret` parts of the same item;
 /// no client path, token reader or certificate fingerprint is accepted.

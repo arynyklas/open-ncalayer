@@ -74,11 +74,20 @@ impl ServiceHost {
     /// Synchronous startup only, before the network runtime/listener. Configuration
     /// owns all mounts and the journal; an existing journal requires explicit recovery.
     pub fn new(config: ServerConfig) -> io::Result<Arc<Self>> {
-        Self::with_token_backend(config, Arc::new(PcscBackend::new()))
+        Self::build(config, Arc::new(PcscBackend::new()))
     }
-    /// Startup with an explicit card backend (the system PC/SC service by default;
-    /// the emulator in tests). Token keys fail closed when no reader/card answers.
+    /// Startup with an explicit card backend (emulator in tests). Test-support only:
+    /// production always uses the system PC/SC service through [`Self::new`].
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn with_token_backend(
+        config: ServerConfig,
+        backend: Arc<dyn oncl_token::backend::Backend>,
+    ) -> io::Result<Arc<Self>> {
+        Self::build(config, backend)
+    }
+    /// Token keys fail closed when no reader/card answers.
+    fn build(
         mut config: ServerConfig,
         backend: Arc<dyn oncl_token::backend::Backend>,
     ) -> io::Result<Arc<Self>> {
@@ -186,7 +195,6 @@ impl ServiceHost {
             jwt_issuer: config.pki.jwt.expected_issuer.clone(),
             jwt_audience: config.pki.jwt.expected_audience.clone(),
             plugin_grants,
-            memory_per_operation: config.memory_per_operation,
         });
         Ok(Arc::new(Self {
             engine,
