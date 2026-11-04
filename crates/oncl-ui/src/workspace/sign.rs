@@ -1692,6 +1692,13 @@ mod tests {
         ui(&p).invoke_confirm();
         assert_eq!(step(&p), Step::Running);
         let held = crate::workspace::Held::take_mine();
+        // The worker runs concurrently: wait until it has passed its key gate.
+        until("the worker passes its key gate", || {
+            p.ws.controller
+                .borrow()
+                .running()
+                .is_some_and(|(_, c)| c.key_gate_passed())
+        });
         // Running: closing is refused and says why.
         assert!(closing_is_blocked_for(&p.ws));
         assert!(p.ws.ui.get_status_text().contains("A signing is running"));
