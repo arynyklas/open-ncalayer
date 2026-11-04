@@ -437,7 +437,6 @@ fn read_choice(open: &Rc<Workspace>) -> Result<(ToolSpec, Destination), JobError
                     algorithm,
                     policy: ui.get_opt1().trim().to_owned(),
                     max_age,
-                    ..StampOptions::default()
                 })
             }
         }
