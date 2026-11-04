@@ -654,6 +654,8 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_flows::testing::Step>, String> {
         },
         Reader(String),
         CancelReader,
+        /// Blocks the dialog until this file exists (a signing that is slow on purpose).
+        WaitFile(PathBuf),
     }
 
     let specs: Vec<StepSpec> = serde_json::from_str(text).map_err(|e| e.to_string())?;
@@ -696,6 +698,17 @@ fn parse_steps(text: &str) -> Result<Vec<oncl_flows::testing::Step>, String> {
                 },
                 StepSpec::Reader(reader) => Step::Reader(reader),
                 StepSpec::CancelReader => Step::CancelReader,
+                StepSpec::WaitFile(path) => {
+                    let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+                    let opened = std::sync::Arc::clone(&gate);
+                    std::thread::spawn(move || {
+                        while !path.exists() {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        opened.wait();
+                    });
+                    Step::Wait(gate)
+                }
             })
         })
         .collect()

@@ -4650,6 +4650,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-winget-setup"
+version = "0.1.0-alpha.7"
+dependencies = [
+ "oncl-core",
+ "oncl-ipc",
+ "oncl-registry",
+ "semver",
+ "sha2 0.11.1",
+ "tempfile",
+ "tokio",
+ "velopack",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "oncl-xml"
 version = "0.1.0-alpha.7"
 dependencies = [
@@ -4692,9 +4707,11 @@ dependencies = [
  "oncl-token",
  "oncl-ui",
  "oncl-update",
+ "oncl-winget-setup",
  "oncl-xml",
  "rcgen",
  "rustls",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -4708,6 +4725,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "velopack",
+ "windows-sys 0.61.2",
  "x509-cert",
  "zeroize",
  "zip",
@@ -8353,6 +8371,7 @@ dependencies = [
  "oncl-testkit",
  "oncl-token",
  "oncl-update",
+ "oncl-winget-setup",
  "oncl-xml",
  "pkcs8 0.11.0",
  "rand_chacha 0.3.1",

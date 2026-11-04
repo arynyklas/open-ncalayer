@@ -206,6 +206,7 @@ impl SharedBudget {
                 root: OperationLease(Arc::new(LeaseInner {
                     budget: self.clone(),
                     deadline,
+                    guard: std::sync::OnceLock::new(),
                 })),
                 limits,
                 deadline,
@@ -284,6 +285,8 @@ impl Drop for ConfigurationReservation {
 struct LeaseInner {
     budget: Arc<SharedBudget>,
     deadline: Deadline,
+    /// Dropped with the lease, i.e. when the last owner of the operation lets go.
+    guard: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
 }
 impl Drop for LeaseInner {
     fn drop(&mut self) {
@@ -301,6 +304,14 @@ pub struct OperationLease(Arc<LeaseInner>);
 impl OperationLease {
     pub fn deadline(&self) -> Deadline {
         self.0.deadline
+    }
+    /// Ties `guard` to the operation: it is dropped when the last owner of this lease (the
+    /// context, a worker that outlives it, a pending response or artifact) lets go, not
+    /// earlier. A host uses it to count the operation as running until native work has really
+    /// returned. Only the first guard is kept; `false` (and `guard` dropped at once) if one
+    /// is set already. Without a guard nothing changes.
+    pub fn attach_guard(&self, guard: Box<dyn std::any::Any + Send + Sync>) -> bool {
+        self.0.guard.set(guard).is_ok()
     }
     /// Non-owning identity probe. It keeps no permit, buffer or authority alive
     /// and cannot be upgraded back into a lease.
@@ -849,5 +860,38 @@ impl ResourceReservation {
 impl Drop for ResourceReservation {
     fn drop(&mut self) {
         let _ = self.shrink(self.bytes);
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Flag(Arc<AtomicBool>);
+    impl Drop for Flag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_guard_lives_until_the_last_owner_of_the_lease_lets_go() {
+        let budget = Arc::new(SharedBudget::new(ResourceLimits::default()).unwrap());
+        struct C;
+        impl OperationControl for C {
+            fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+                Ok(())
+            }
+        }
+        let scope = budget.begin(ResourceLimits::default(), Arc::new(C)).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let lease = scope.lease();
+        assert!(lease.attach_guard(Box::new(Flag(Arc::clone(&dropped)))));
+        assert!(!lease.attach_guard(Box::new(())), "only the first guard is kept");
+        drop(scope);
+        assert!(!dropped.load(Ordering::SeqCst), "a worker still owns the lease");
+        drop(lease);
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

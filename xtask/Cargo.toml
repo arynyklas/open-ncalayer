@@ -30,6 +30,8 @@ oncl-testkit.workspace = true
 # `token-emu`: an emulated token served to vpcd (the PC/SC test of CI).
 oncl-token = { workspace = true, features = ["emulator"] }
 oncl-update.workspace = true
+# `package winget-setup`: the payload format of the WinGet installer entry.
+oncl-winget-setup.workspace = true
 
 anyhow.workspace = true
 base64.workspace = true

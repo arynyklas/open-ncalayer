@@ -43,27 +43,76 @@ enum SocketDir {
 
 /// The address of the current user for the absolute, normalized `data_dir`.
 pub(crate) fn endpoint(data_dir: &Path) -> io::Result<Address> {
-    // macOS has no XDG runtime directory: the socket always goes to the data directory.
-    let runtime_dir = if cfg!(target_os = "macos") {
+    Ok(address(data_dir, runtime_dir().as_deref(), current_uid()))
+}
+
+/// The management address of the current user for the absolute, normalized `data_dir`.
+pub(crate) fn management_endpoint(data_dir: &Path) -> io::Result<Address> {
+    Ok(management_address(
+        data_dir,
+        runtime_dir().as_deref(),
+        current_uid(),
+    ))
+}
+
+/// The XDG runtime directory; macOS has none: the socket always goes to the data directory.
+fn runtime_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
         None
     } else {
         std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
-    };
-    Ok(address(data_dir, runtime_dir.as_deref(), current_uid()))
+    }
 }
+
+/// What an address is for: its name in the hash, in the runtime directory and the data
+/// directory.
+struct Purpose {
+    hash: &'static str,
+    runtime_name: &'static str,
+    data_name: &'static str,
+    fallback_prefix: &'static str,
+}
+
+const RELAY: Purpose = Purpose {
+    hash: "",
+    runtime_name: "openncalayer-",
+    data_name: "daemon.sock",
+    fallback_prefix: "",
+};
+
+const MANAGEMENT: Purpose = Purpose {
+    hash: "maintenance|",
+    runtime_name: "openncalayer-maintenance-",
+    data_name: "maintenance.sock",
+    fallback_prefix: "maintenance-",
+};
 
 /// The address for `data_dir`, the runtime directory and `uid`, without looking at the
 /// environment. A relative or empty runtime directory is ignored (XDG requires an absolute
 /// path).
 fn address(data_dir: &Path, runtime_dir: Option<&Path>, uid: u32) -> Address {
-    let hex = hex16(&format!("{uid}|"), data_dir);
+    address_for(&RELAY, data_dir, runtime_dir, uid)
+}
+
+/// [`address`] of the management endpoint.
+fn management_address(data_dir: &Path, runtime_dir: Option<&Path>, uid: u32) -> Address {
+    address_for(&MANAGEMENT, data_dir, runtime_dir, uid)
+}
+
+fn address_for(
+    purpose: &Purpose,
+    data_dir: &Path,
+    runtime_dir: Option<&Path>,
+    uid: u32,
+) -> Address {
+    let hex = hex16(&format!("{uid}|{}", purpose.hash), data_dir);
     let preferred = match runtime_dir.filter(|dir| dir.is_absolute()) {
         Some(dir) => Address {
-            path: dir.join(format!("openncalayer-{hex}.sock")),
+            path: dir.join(format!("{}{hex}.sock", purpose.runtime_name)),
             dir: SocketDir::Runtime,
         },
         None => Address {
-            path: data_dir.join("daemon.sock"),
+            path: data_dir.join(purpose.data_name),
             dir: SocketDir::Data,
         },
     };
@@ -71,7 +120,10 @@ fn address(data_dir: &Path, runtime_dir: Option<&Path>, uid: u32) -> Address {
         return preferred;
     }
     Address {
-        path: PathBuf::from(format!("/tmp/openncalayer-{uid}/{hex}.sock")),
+        path: PathBuf::from(format!(
+            "/tmp/openncalayer-{uid}/{}{hex}.sock",
+            purpose.fallback_prefix
+        )),
         dir: SocketDir::Fallback,
     }
 }
