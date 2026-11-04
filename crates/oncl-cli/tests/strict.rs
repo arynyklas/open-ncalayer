@@ -5,16 +5,7 @@ use std::{path::Path, process::Command};
 use support::*;
 
 fn openssl() -> Option<String> {
-    for candidate in ["openssl", r"drive_C:\Program Files\Git\usr\bin\openssl.exe"] {
-        if Command::new(candidate)
-            .arg("version")
-            .output()
-            .is_ok_and(|o| o.status.success())
-        {
-            return Some(candidate.to_owned());
-        }
-    }
-    None
+    Some(openssl_command())
 }
 fn common(w: &World) -> Vec<&str> {
     vec![

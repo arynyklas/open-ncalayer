@@ -115,18 +115,10 @@ fn strict_jks_sign_then_valid_zero_with_openssl_and_wrong_password_refused() {
         (Some("Valid"), Some("StrictOnline"))
     );
     // Independent oracle: OpenSSL verifies the produced CMS against the loopback root.
-    let openssl = ["openssl", r"drive_C:\\Program Files\\Git\\usr\\bin\\openssl.exe"]
-        .into_iter()
-        .find(|c| {
-            Command::new(c)
-                .arg("version")
-                .output()
-                .is_ok_and(|o| o.status.success())
-        })
-        .expect("OpenSSL oracle");
+    let openssl = openssl_command();
     let root_pem = w.dir.path().join("root.pem");
     assert!(
-        Command::new(openssl)
+        Command::new(&openssl)
             .args([
                 "x509",
                 "-inform",
@@ -141,7 +133,7 @@ fn strict_jks_sign_then_valid_zero_with_openssl_and_wrong_password_refused() {
             .success()
     );
     let check = |content: &std::path::Path| {
-        Command::new(openssl)
+        Command::new(&openssl)
             .args([
                 "cms",
                 "-verify",

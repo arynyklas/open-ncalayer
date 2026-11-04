@@ -33,7 +33,7 @@ prints `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`. `--in
 
 ```text
 oncl sign --profile cms --detached --input document.bin --output signature.der \
-  --key signer.p12 --secret-file drive_C:\private\key.secret --authorize \
+  --key signer.p12 --secret-file secrets/signer.secret --authorize \
   --root operator-root.der --pki-endpoint https://pki.example.test
 ```
 
@@ -110,3 +110,10 @@ Each host certificate file is charged `CERTIFICATE_METADATA_FACTOR = 16` metadat
 * **JKS** signing is proven strictly (Valid, exit 0; OpenSSL oracle) for a JKS written by Java `keytool` and for one written by a test-only Python writer (`tests/support/jks_write.py`) whose output `keytool` lists and converts (an independent reader of the Sun key protector). GOST has no independent math oracle on this machine (OpenSSL and Python lack GOST R 34.10/34.11; the XML oracle only checks GOST structure): SDK sign + SDK verify with negative contrast. The guarded legacy XML facade refuses a GOST-2015 signer (`InvalidInput`, before private use; baseline XML with GOST works).
 * The symlink secret case needs a privilege the test user lacks. Publication needs a same-volume hard-link-capable destination (FAT/exFAT/SMB fail after private use). Plugin WASM memory is hard-capped at 1 MiB. `--pki-pin` is a DNS *address* pin, not a PIN secret.
 * `inspect --profile container` needs `--alias`. G01/G02 encryption/decryption is an external prerequisite; no command exists.
+
+## Oracle environments for the tests
+
+The CLI tests use independent oracles and fail (they never skip) when one is missing:
+
+* `ONCL_OPENSSL` — path to an OpenSSL executable. Default search: `openssl` on `PATH`, then (Windows) `Git/usr/bin/openssl.exe` under `ProgramFiles` / `ProgramW6432`.
+* `ONCL_PYHANKO_PYTHON` — path to a Python interpreter with `pyhanko` and `pyhanko-certvalidator` installed. There is no default; create one with `python -m venv oracle-env` and `oracle-env/bin/pip install pyhanko pyhanko-certvalidator` (`Scripts/` on Windows), then point the variable at its `python`.

@@ -16,16 +16,7 @@ fn trust(w: &World) -> Vec<&str> {
     ]
 }
 fn openssl() -> String {
-    ["openssl", r"drive_C:\Program Files\Git\usr\bin\openssl.exe"]
-        .into_iter()
-        .find(|c| {
-            Command::new(c)
-                .arg("version")
-                .output()
-                .is_ok_and(|o| o.status.success())
-        })
-        .expect("OpenSSL oracle")
-        .to_owned()
+    openssl_command()
 }
 fn python() -> &'static str {
     ["python", "python3", "py"]

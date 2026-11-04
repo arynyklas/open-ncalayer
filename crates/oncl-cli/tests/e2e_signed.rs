@@ -97,20 +97,12 @@ fn jws_and_jwt_sign_end_to_end_with_independent_rs256_oracle() {
                     &sig,
                 )
                 .unwrap();
-            let openssl = ["openssl", r"drive_C:\Program Files\Git\usr\bin\openssl.exe"]
-                .into_iter()
-                .find(|c| {
-                    std::process::Command::new(c)
-                        .arg("version")
-                        .output()
-                        .is_ok_and(|o| o.status.success())
-                })
-                .expect("OpenSSL oracle");
+            let openssl = openssl_command();
             use der::Encode;
             let cert = w.dir.path().join("leaf.der");
             std::fs::write(&cert, w.pki.rsa.cert.to_der().unwrap()).unwrap();
             let pubkey = w.dir.path().join("leaf.pub");
-            let extract = std::process::Command::new(openssl)
+            let extract = std::process::Command::new(&openssl)
                 .args([
                     "x509",
                     "-inform",
@@ -131,7 +123,7 @@ fn jws_and_jwt_sign_end_to_end_with_independent_rs256_oracle() {
             );
             std::fs::write(&signing, signing_input).unwrap();
             std::fs::write(&signature, &sig).unwrap();
-            let check = std::process::Command::new(openssl)
+            let check = std::process::Command::new(&openssl)
                 .args([
                     "dgst",
                     "-sha256",

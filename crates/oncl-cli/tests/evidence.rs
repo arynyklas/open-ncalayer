@@ -85,18 +85,10 @@ fn tsa_args(tsa: &str) -> Vec<&str> {
     vec!["--tsa-url", tsa, "--tsa-policy", POLICY]
 }
 fn openssl_verify(w: &World, signature: &Path, content: &Path) -> bool {
-    let openssl = ["openssl", r"drive_C:\Program Files\Git\usr\bin\openssl.exe"]
-        .into_iter()
-        .find(|c| {
-            Command::new(c)
-                .arg("version")
-                .output()
-                .is_ok_and(|o| o.status.success())
-        })
-        .expect("OpenSSL oracle");
+    let openssl = openssl_command();
     let root_pem = w.dir.path().join("root.pem");
     assert!(
-        Command::new(openssl)
+        Command::new(&openssl)
             .args([
                 "x509",
                 "-inform",
@@ -110,7 +102,7 @@ fn openssl_verify(w: &World, signature: &Path, content: &Path) -> bool {
             .unwrap()
             .success()
     );
-    Command::new(openssl)
+    Command::new(&openssl)
         .args([
             "cms",
             "-verify",
@@ -395,13 +387,13 @@ fn pdf_fixture() -> PathBuf {
     oncl_testkit::workspace_root().join("crates/oncl-pdf/tests/fixtures/external-multipage.pdf")
 }
 fn pyhanko(w: &World, pdf: &Path) -> (bool, serde_json::Value, String) {
-    // Set ONCL_PYHANKO_PYTHON to a Python with pyHanko; the default is the
-    // documented p03 oracle environment of the sibling PDF worktree.
-    let python = std::env::var("ONCL_PYHANKO_PYTHON").unwrap_or_else(|_| "org-87/open-ncalayer/.worktrees/feat-platform-pdf/target/p03-oracle-env/Scripts/python.exe".into());
+    // ONCL_PYHANKO_PYTHON must name a Python with pyHanko installed (see
+    // docs/user/cli.md, "Oracle environments"); there is no default.
+    let python = std::env::var("ONCL_PYHANKO_PYTHON").unwrap_or_default();
     let python = python.as_str();
     assert!(
-        Path::new(python).exists(),
-        "pyHanko oracle interpreter not found at {python}: set ONCL_PYHANKO_PYTHON"
+        !python.is_empty() && Path::new(python).exists(),
+        "pyHanko oracle interpreter unavailable (ONCL_PYHANKO_PYTHON={python:?}): create a virtualenv with `python -m venv <dir>` and `<dir>/bin/pip install pyhanko pyhanko-certvalidator` (Scripts/ on Windows), then set ONCL_PYHANKO_PYTHON to its python executable"
     );
     let script = w.dir.path().join("pyhanko_oracle.py");
     std::fs::write(&script, include_str!("support/pyhanko_oracle.py")).unwrap();

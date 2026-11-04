@@ -529,3 +529,31 @@ fn world_with(host: Option<&str>, gost_root: bool) -> World {
 pub fn path(path: &Path) -> &str {
     path.to_str().unwrap()
 }
+
+/// Locates an OpenSSL binary for independent oracles: `ONCL_OPENSSL`, then
+/// `openssl` on `PATH`, then Git for Windows' bundled copy found through the
+/// `ProgramFiles` / `ProgramW6432` environment variables.
+pub fn openssl_command() -> String {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(explicit) = std::env::var("ONCL_OPENSSL") {
+        candidates.push(explicit);
+    }
+    candidates.push("openssl".to_owned());
+    if cfg!(windows) {
+        for var in ["ProgramFiles", "ProgramW6432"] {
+            if let Some(base) = std::env::var_os(var) {
+                let git = std::path::Path::new(&base).join("Git/usr/bin/openssl.exe");
+                candidates.push(git.to_string_lossy().into_owned());
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|c| {
+            std::process::Command::new(c)
+                .arg("version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+        .expect("OpenSSL oracle unavailable: install OpenSSL or set ONCL_OPENSSL to its executable")
+}
