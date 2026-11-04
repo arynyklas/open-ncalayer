@@ -2032,7 +2032,7 @@ async fn watcher_classifies_a_delete_pending_file_instead_of_failing() {
     .await;
     assert!(
         !watch.finish(),
-        "an unopenable file leaks nothing to a reader"
+        "no needle in any file the watcher could open (a delete-pending file is not scanned)"
     );
     drop(holder);
 }

@@ -716,8 +716,11 @@ enum Unreadable {
     /// The service marked it for deletion (`FileDispositionInfo`) while another
     /// handle is still open. Windows answers every new open of such a file with
     /// ERROR_ACCESS_DENIED (5) while `Path::exists`/`metadata` (attribute-only
-    /// opens) still succeed. No new reader can ever open it, so it cannot leak
-    /// to any reader; it is counted, not hidden.
+    /// opens) still succeed. Such a file is NOT scanned: its content cannot be
+    /// opened by the watcher. Limitation: a file created, filled and marked
+    /// delete-pending between two polls is never seen at all. The guarantee is
+    /// therefore "no needle in any file the watcher could open"; delete-pending
+    /// files are counted, not hidden.
     DeletePending,
     /// Present and not delete-pending: a real failure once the deadline passes.
     Present(String),
@@ -778,10 +781,20 @@ fn classify_unreadable(file: &Path) -> Unreadable {
     match probe {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Unreadable::Gone,
         Err(error) if error.raw_os_error() == Some(5) => {
-            if std::fs::metadata(file).is_ok() {
-                Unreadable::DeletePending
-            } else {
+            // Delete-pending only if the entry still resolves AND a fresh read-open
+            // after the probe is still denied with os error 5; otherwise it is not
+            // hidden: gone, or readable again (retried by the caller).
+            if std::fs::metadata(file).is_err() {
                 Unreadable::Gone
+            } else {
+                match open_shared(file) {
+                    Err(second) if second.raw_os_error() == Some(5) => Unreadable::DeletePending,
+                    Err(second) if second.kind() == std::io::ErrorKind::NotFound => {
+                        Unreadable::Gone
+                    }
+                    Err(second) => Unreadable::Present(format!("re-open failed: {second}")),
+                    Ok(_) => Unreadable::Present("became readable after the probe".into()),
+                }
             }
         }
         Err(error) => Unreadable::Present(format!("probe failed: {error}")),
@@ -827,7 +840,7 @@ pub struct SpoolWatch {
     stop: Arc<AtomicBool>,
     hit: Arc<AtomicBool>,
     pub scanned: Arc<AtomicUsize>,
-    /// Files that were delete-pending (unopenable by anyone) when scanned.
+    /// Files that were delete-pending (unopenable, hence NOT scanned) when seen.
     pub delete_pending: Arc<AtomicUsize>,
     failure: Arc<std::sync::Mutex<Option<String>>>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -934,7 +947,7 @@ impl SpoolWatch {
         let pending = self.delete_pending.load(Ordering::SeqCst);
         if pending > 0 {
             eprintln!(
-                "spool watcher: {pending} delete-pending scratch file(s) were unopenable (no reader can open them)"
+                "spool watcher: {pending} delete-pending scratch file(s) were unopenable and therefore NOT scanned"
             );
         }
         self.hit.load(Ordering::SeqCst)
