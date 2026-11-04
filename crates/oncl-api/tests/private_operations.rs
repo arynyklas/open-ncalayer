@@ -3087,16 +3087,36 @@ async fn xades_timestamp_levels_need_a_host_tsa_policy_refused_before_the_key_op
         let body = multipart(
             &sign_metadata(profile, extra),
             &[
-                Part { name: "p12", filename: None, bytes: &p12 },
-                Part { name: "pw", filename: None, bytes: PASSWORD.as_bytes() },
-                Part { name: "doc", filename: None, bytes: xml },
+                Part {
+                    name: "p12",
+                    filename: None,
+                    bytes: &p12,
+                },
+                Part {
+                    name: "pw",
+                    filename: None,
+                    bytes: PASSWORD.as_bytes(),
+                },
+                Part {
+                    name: "doc",
+                    filename: None,
+                    bytes: xml,
+                },
             ],
         );
         let (status, ct, response) = service.post(FORM, body).await;
-        assert_eq!(status, 503, "{profile}: {}", String::from_utf8_lossy(&response));
+        assert_eq!(
+            status,
+            503,
+            "{profile}: {}",
+            String::from_utf8_lossy(&response)
+        );
         assert!(ct.starts_with("application/json"), "{profile}: {ct}");
         let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
-        assert_eq!((error["code"].as_str(), error["applied"].as_str()), (Some("MissingConfiguration"), Some("NotApplied")));
+        assert_eq!(
+            (error["code"].as_str(), error["applied"].as_str()),
+            (Some("MissingConfiguration"), Some("NotApplied"))
+        );
     }
     assert_eq!(begins(&service), 0);
     service.stop().await;
@@ -3796,6 +3816,38 @@ async fn memory_sweep(
     }
     outcomes
 }
+/// Coarse sweep, then a 1 MiB sweep over the whole band below the first completion:
+/// under-refusal can only live between the preflight threshold and the real one.
+async fn fine_sweep(
+    pki: &Pki,
+    p12: &[u8],
+    pdf: &[u8],
+    evidence: &[Vec<u8>],
+    coarse: std::ops::RangeInclusive<u64>,
+    step: u64,
+    tune: &dyn Fn(&mut oncl_server::config::ServerConfig, u64),
+) -> Vec<(u64, bool)> {
+    let mut outcomes = memory_sweep(
+        pki,
+        p12,
+        pdf,
+        evidence,
+        coarse.clone().step_by(step as usize),
+        tune,
+    )
+    .await;
+    let first = outcomes
+        .iter()
+        .find(|(_, c)| *c)
+        .expect("a sufficient profile completes")
+        .0;
+    let lower = first.saturating_sub(step).max(*coarse.start());
+    let fine = memory_sweep(pki, p12, pdf, evidence, lower..=first, tune).await;
+    outcomes.extend(fine);
+    outcomes.sort_by_key(|(mib, _)| *mib);
+    outcomes.dedup_by_key(|(mib, _)| *mib);
+    outcomes
+}
 fn assert_monotonic(outcomes: &[(u64, bool)]) {
     if let Some(first) = outcomes.iter().position(|(_, c)| *c) {
         let flips: Vec<_> = outcomes[first..].iter().filter(|(_, c)| !*c).collect();
@@ -3860,12 +3912,13 @@ async fn pades_preflight_accounts_for_prior_signatures_and_large_evidence() {
     let total: usize = evidence.iter().map(Vec::len).sum();
     assert!(total > 3 << 20, "evidence is several MiB ({total})");
     // Memory profile with ample metadata budget.
-    let outcomes = memory_sweep(
+    let outcomes = fine_sweep(
         &pki,
         &p12,
         pdf,
         &evidence,
-        (520u64..=640).step_by(8),
+        400u64..=640,
+        8,
         &|config, mib| {
             config.memory_per_operation = mib << 20;
             config.total_memory = 2 << 30;
@@ -3890,7 +3943,9 @@ async fn pades_preflight_accounts_for_prior_signatures_and_large_evidence() {
         "{meta:?}"
     );
     assert_monotonic(&meta);
-    // A document that already carries a signature (the real output of pades_b).
+    // A document that already carries a signature (the real pades_b output of the SAME
+    // PKI): the prior-contents accounting is exercised and LTA onto it must complete
+    // (the new signature and the old signer both reach LTA).
     let plain = Pki::start();
     let plain_p12 = container(&plain.leaf("user-rsa-sign"), PASSWORD);
     let service = Running::start_with(inline_service_config(&plain)).await;
@@ -3905,14 +3960,13 @@ async fn pades_preflight_accounts_for_prior_signatures_and_large_evidence() {
         plain.crls[0].clone(),
         plain.crls[1].clone(),
     ];
-    // A document that already carries a signature exercises the prior-contents
-    // accounting (sum/largest > 0), validated against the SAME PKI that signed it.
-    let outcomes = memory_sweep(
+    let outcomes = fine_sweep(
         &plain,
         &plain_p12,
         &signed,
         &small,
-        330u64..=440,
+        380u64..=460,
+        8,
         &|config, mib| {
             config.memory_per_operation = mib << 20;
             config.total_memory = 2 << 30;
@@ -3920,10 +3974,194 @@ async fn pades_preflight_accounts_for_prior_signatures_and_large_evidence() {
         },
     )
     .await;
-    // Resource failures after a BEGIN are asserted inside the sweep. Signing an LTA
-    // onto an already-signed PDF itself fails with InvalidRequest AFTER key use on this
-    // build (not a resource matter), so completion is not asserted here.
-    let _ = outcomes;
+    assert!(
+        outcomes.iter().any(|(_, c)| *c) && outcomes.iter().any(|(_, c)| !*c),
+        "{outcomes:?}"
+    );
+    assert_monotonic(&outcomes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unreadable_pdf_for_a_pades_high_level_is_refused_before_any_key_use() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let inter = {
+        use der::Encode;
+        pki.inter.cert.to_der().unwrap()
+    };
+    let service = Running::start_with(|config, dir| {
+        inline_service_config(&pki)(config, dir);
+        config.memory_per_operation = 1 << 30;
+        config.total_memory = 2 << 30;
+        config.metadata_bytes = 256 << 20;
+    })
+    .await;
+    for (name, bytes) in [
+        ("not a pdf", b"this is not a pdf".to_vec()),
+        (
+            "truncated",
+            include_bytes!("../../oncl-pdf/tests/fixtures/external-multipage.pdf")[..400].to_vec(),
+        ),
+    ] {
+        let metadata = r#"{"items":[{"id":"s1","operation":{"kind":"sign","profile":"pades_lt","input":"doc","evidence":[{"kind":"certificate","input":"ev0"},{"kind":"crl","input":"ev1"}],"keys":[{"source":"inline","container":"p12","password":"pw"}]}}],"parts":[{"name":"p12","item_id":"s1","role":"secret"},{"name":"pw","item_id":"s1","role":"secret"},{"name":"doc","item_id":"s1","role":"document"},{"name":"ev0","item_id":"s1","role":"document"},{"name":"ev1","item_id":"s1","role":"document"}]}"#;
+        let parts = [
+            Part {
+                name: "p12",
+                filename: None,
+                bytes: &p12,
+            },
+            Part {
+                name: "pw",
+                filename: None,
+                bytes: PASSWORD.as_bytes(),
+            },
+            Part {
+                name: "doc",
+                filename: None,
+                bytes: &bytes,
+            },
+            Part {
+                name: "ev0",
+                filename: None,
+                bytes: &inter,
+            },
+            Part {
+                name: "ev1",
+                filename: None,
+                bytes: &pki.crls[0],
+            },
+        ];
+        let (status, _, response) = service.post(FORM, multipart(metadata, &parts)).await;
+        assert_eq!(
+            status,
+            400,
+            "{name}: {}",
+            String::from_utf8_lossy(&response)
+        );
+        let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(
+            (error["code"].as_str(), error["applied"].as_str()),
+            (Some("InvalidRequest"), Some("NotApplied")),
+            "{name}"
+        );
+        assert_eq!(begins(&service), 0, "{name}");
+    }
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_grant_key_must_also_be_a_token_key_and_plugin_config_is_bounded() {
+    use oncl_pdk::abi::{self, Import};
+    use oncl_server::{
+        config::{PluginConfig, PluginGrant, ServerConfig},
+        service::ServiceHost,
+    };
+    let pki = Pki::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, wasm) = (dir.path().join("p.toml"), dir.path().join("p.wasm"));
+    std::fs::write(&manifest, private_support::plugin::manifest("test.sign")).unwrap();
+    std::fs::write(
+        &wasm,
+        private_support::plugin::wasm(&[(
+            Import::KeysSignRaw,
+            abi::encode(&abi::SignRawArgs {
+                handle: 1,
+                data: b"m".to_vec().into(),
+            }),
+        )]),
+    )
+    .unwrap();
+    let grant = |token: &str, operation: &str| PluginGrant {
+        token: token.into(),
+        operation: operation.into(),
+        imports: vec!["keys_sign_raw".into()],
+        keys: vec!["ops-key".into()],
+        pki_endpoints: vec![],
+    };
+    let plugin = |permissions: Vec<PluginGrant>| PluginConfig {
+        id: "test.sign".into(),
+        manifest: manifest.clone(),
+        wasm: wasm.clone(),
+        max_memory: 1 << 20,
+        max_transfer: 1 << 18,
+        permissions,
+    };
+    // A key listed in the plugin grant but NOT in the token's own key rights: 403.
+    let service = Running::start_with(|config, dir| {
+        config.pki = pki.config(dir);
+        named_key(config, dir, &pki, "ops-key", "user-rsa-sign");
+        config.tokens[0].actions = vec![Permission::Sign];
+        config.tokens[0].keys = vec![]; // no right to ops-key
+        config.plugins = vec![plugin(vec![grant("test", "run")])];
+    })
+    .await;
+    let call = r#"{"items":[{"id":"p","operation":{"kind":"plugin","plugin":"test.sign","operation":"run","args":"{}","keys":[{"handle":1,"name":"ops-key"}]}}],"parts":[]}"#;
+    let (status, _, _) = service.post(FORM, multipart(call, &[])).await;
+    assert_eq!(status, 403);
+    assert_eq!(begins(&service), 0);
+    service.stop().await;
+    // Configuration bounds and duplicates are refused at startup.
+    let base = |mutate: &dyn Fn(&mut ServerConfig)| -> bool {
+        let secret = oncl_server::auth::TokenSecret::generate().unwrap();
+        let mut config = ServerConfig {
+            enabled: true,
+            audit_directory: dir.path().join("a"),
+            scratch_directory: dir.path().join("s"),
+            ..ServerConfig::default()
+        };
+        config.tokens.push(oncl_server::config::TokenConfig {
+            id: "test".into(),
+            verifier: secret.verifier().encoded(),
+            actions: vec![Permission::Hash],
+            keys: vec![],
+            inline_pkcs12: false,
+            metadata_aliases: vec![],
+        });
+        mutate(&mut config);
+        ServiceHost::new(config).is_ok()
+    };
+    assert!(
+        base(&|c| c.plugins = vec![plugin(vec![grant("test", "run")])]),
+        "valid config starts"
+    );
+    assert!(
+        !base(&|c| c.plugins = vec![plugin(vec![grant("test", "run"), grant("test", "run")])]),
+        "duplicate (token, operation)"
+    );
+    assert!(
+        !base(&|c| c.plugins = vec![plugin(vec![grant("nobody", "run")])]),
+        "unknown token"
+    );
+    assert!(
+        !base(&|c| {
+            let mut p = plugin(vec![]);
+            p.max_memory = 0;
+            c.plugins = vec![p];
+        }),
+        "zero memory"
+    );
+    assert!(
+        !base(&|c| {
+            let mut p = plugin(vec![]);
+            p.max_transfer = usize::MAX;
+            c.plugins = vec![p];
+        }),
+        "transfer over the SDK bound"
+    );
+    assert!(
+        !base(&|c| c.plugins = vec![plugin(vec![PluginGrant {
+            imports: vec!["no_such_import".into()],
+            ..grant("test", "run")
+        }])]),
+        "unknown import"
+    );
+    assert!(
+        !base(&|c| c.plugins = vec![plugin(vec![PluginGrant {
+            keys: (0..9).map(|n| format!("k{n}")).collect(),
+            ..grant("test", "run")
+        }])]),
+        "too many keys"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4138,33 +4376,42 @@ async fn plugin_permission_matrix_is_per_token_and_per_operation_and_payload_ori
 /// `plugin_items_need_a_live_principal_with_and_without_keys`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revoked_during_upload_refuses_plain_actions_with_no_execution() {
-    use oncl_pdk::abi::{self, Import};
-    use oncl_server::config::{PluginConfig, PluginGrant};
-    let pki = Pki::start();
-    let dir = tempfile::tempdir().unwrap();
-    let (manifest, wasm) = (dir.path().join("h.toml"), dir.path().join("h.wasm"));
-    std::fs::write(&manifest, private_support::plugin::manifest("test.hash")).unwrap();
-    std::fs::write(&wasm, private_support::plugin::wasm(&[(Import::Hash, abi::encode(&abi::HashArgs { alg: abi::HashAlg::Sha256, data: b"abc".to_vec().into() }))])).unwrap();
-    let plugin = PluginConfig {
-        id: "test.hash".into(), manifest, wasm, max_memory: 1 << 20, max_transfer: 1 << 18,
-        permissions: vec![PluginGrant { token: "test".into(), operation: "run".into(), imports: vec!["hash".into()], keys: vec![], pki_endpoints: vec![] }],
-    };
     let cases = [
-        ("plain verify", r#"{"items":[{"id":"v","operation":{"kind":"verify","profile":"cms","input":"doc"}}],"parts":[{"name":"doc","item_id":"v","role":"document"}]}"#),
-        ("plain hash", r#"{"items":[{"id":"h","operation":{"kind":"hash","algorithm":"sha256","input":"doc"}}],"parts":[{"name":"doc","item_id":"h","role":"document"}]}"#),
+        (
+            "plain verify",
+            r#"{"items":[{"id":"v","operation":{"kind":"verify","profile":"cms","input":"doc"}}],"parts":[{"name":"doc","item_id":"v","role":"document"}]}"#,
+        ),
+        (
+            "plain hash",
+            r#"{"items":[{"id":"h","operation":{"kind":"hash","algorithm":"sha256","input":"doc"}}],"parts":[{"name":"doc","item_id":"h","role":"document"}]}"#,
+        ),
     ];
     for (name, metadata) in cases {
-        let plugin = plugin.clone();
         let service = Running::start_with(|config, _| {
             config.tokens[0].actions = vec![Permission::Hash, Permission::Verify];
-            config.plugins = vec![plugin];
         })
         .await;
-        let body = multipart(metadata, &[Part { name: "doc", filename: None, bytes: &vec![b'd'; 50_000] }]);
+        let body = multipart(
+            metadata,
+            &[Part {
+                name: "doc",
+                filename: None,
+                bytes: &vec![b'd'; 50_000],
+            }],
+        );
         let host = service.host.clone();
-        let (status, response) = split_request(&service, &body, || host.policy.revoke("test").unwrap()).await;
-        assert_eq!(status, 403, "{name}: {}", String::from_utf8_lossy(&response));
-        assert!(!String::from_utf8_lossy(&response).contains("\"status\":\"completed\""), "{name}");
+        let (status, response) =
+            split_request(&service, &body, || host.policy.revoke("test").unwrap()).await;
+        assert_eq!(
+            status,
+            403,
+            "{name}: {}",
+            String::from_utf8_lossy(&response)
+        );
+        assert!(
+            !String::from_utf8_lossy(&response).contains("\"status\":\"completed\""),
+            "{name}"
+        );
         assert_eq!(begins(&service), 0, "{name}");
         service.stop().await;
     }

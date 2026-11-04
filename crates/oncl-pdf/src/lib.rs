@@ -177,13 +177,25 @@ pub mod budget {
             .checked_add(extras)
             .ok_or(ProcessingError::MetadataLimit)
     }
-    /// `(sum, largest)` of the existing signatures' `/Contents` of a document, read
-    /// from the document itself BEFORE any key is applied.
+    /// What the existing signatures of a document cost the update, read from the
+    /// document itself before any key is applied.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct PriorSignatures {
+        /// Number of distinct existing signatures (a new one must still fit
+        /// `PdfLimits::max_signatures`: `count + 1 <= max_signatures`).
+        pub count: u64,
+        /// Sum of their `/Contents` lengths.
+        pub contents_sum: u64,
+        /// The largest single `/Contents` length.
+        pub contents_max: u64,
+    }
+    /// Read [`PriorSignatures`] from `source`. An unreadable/malformed PDF is an error
+    /// the caller must surface (a predictable refusal), never a zero default.
     pub fn prior_signature_contents(
         source: oncl_pki::io::Source<'_>,
         limits: &PdfLimits,
         scope: &mut oncl_pki::resource::ResourceScope,
-    ) -> Result<(u64, u64), crate::PdfError> {
+    ) -> Result<PriorSignatures, crate::PdfError> {
         crate::ades::prior_signature_contents(source, limits, scope)
     }
 }

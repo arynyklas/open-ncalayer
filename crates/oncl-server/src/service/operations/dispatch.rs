@@ -698,6 +698,19 @@ fn has_status_material(evidence: &[oncl_api::dto::EvidenceRef]) -> bool {
 /// `read_bytes`.
 const HOST_CHUNK_BUFFERS: u64 = 4;
 const HOST_METADATA_BYTES: u64 = 64 << 10;
+fn refuse_processing(error: ProcessingError) -> ApiError {
+    crate::service::processing_error(error)
+}
+/// A PDF the layer cannot read is a predictable refusal (never a zero default):
+/// limits keep their typed code, resource/deadline/cancel keep theirs, the rest is
+/// an invalid request, all before any key use.
+fn refuse_pdf(error: oncl_pdf::PdfError) -> ApiError {
+    match error {
+        oncl_pdf::PdfError::Processing(error) => crate::service::processing_error(error),
+        oncl_pdf::PdfError::Limit(_) => ApiError::not_applied(ErrorCode::InputLimit),
+        _ => invalid_request(),
+    }
+}
 /// Refuse a predictable PAdES LT/LTA memory need BEFORE any private key use, from
 /// inputs known before the key opens: the PDF's existing signature contents (read from
 /// the document), the request's evidence sizes and the operator trust set. The need
@@ -734,17 +747,19 @@ pub(super) fn memory_preflight(
                 .map(|d| d.len())
                 .ok_or_else(invalid_request)?;
         }
-        let (sum, largest) = {
+        let prior = {
             let mut document = documents.get_mut(input).ok_or_else(invalid_request)?;
-            let mut reader = document.reader(scope).map_err(|_| refuse())?;
+            let mut reader = document.reader(scope).map_err(refuse_processing)?;
             oncl_pdf::budget::prior_signature_contents(reader.source(), &limits, scope)
-                // A document the PDF layer cannot even open is not a memory matter:
-                // the operation itself reports the malformed input later.
-                .unwrap_or((0, 0))
+                .map_err(refuse_pdf)?
         };
+        // The new signature must itself fit the signature-count limit.
+        if prior.count.saturating_add(1) > limits.max_signatures as u64 {
+            return Err(ApiError::not_applied(ErrorCode::InputLimit));
+        }
         let inputs = oncl_pdf::budget::PlanInputs {
-            prior_contents_sum: sum,
-            prior_contents_max: largest,
+            prior_contents_sum: prior.contents_sum,
+            prior_contents_max: prior.contents_max,
             evidence_bytes,
             trust_bytes: host.trust_bytes,
         };
@@ -760,11 +775,16 @@ pub(super) fn memory_preflight(
             .ok()
             .and_then(|n| n.checked_add(HOST_METADATA_BYTES))
             .ok_or_else(|| ApiError::not_applied(ErrorCode::MetadataLimit))?;
+        // Deadline, cancellation and capacity keep their own typed codes; only a real
+        // memory/metadata shortfall is MemoryLimit/MetadataLimit.
         scope
             .reserve_metadata(need_metadata)
             .map(drop)
-            .map_err(|_| ApiError::not_applied(ErrorCode::MetadataLimit))?;
-        scope.reserve_memory(need).map(drop).map_err(|_| refuse())?;
+            .map_err(refuse_processing)?;
+        scope
+            .reserve_memory(need)
+            .map(drop)
+            .map_err(refuse_processing)?;
     }
     Ok(())
 }
@@ -1755,7 +1775,13 @@ mod tests {
     }
     fn live_policy(token: &str) -> (AccessPolicy, Principal, crate::auth::TokenSecret) {
         let secret = crate::auth::TokenSecret::generate().unwrap();
-        let record = crate::auth::TokenRecord::new(token, secret.verifier(), vec![Action::Hash, Action::Sign], vec!["k".into()]).unwrap();
+        let record = crate::auth::TokenRecord::new(
+            token,
+            secret.verifier(),
+            vec![Action::Hash, Action::Sign],
+            vec!["k".into()],
+        )
+        .unwrap();
         let policy = AccessPolicy::new(vec![record]).unwrap();
         let principal = policy.authenticate(secret.bearer().as_bytes()).unwrap();
         (policy, principal, secret)
@@ -1786,7 +1812,10 @@ mod tests {
             let (policy, principal, _secret) = live_policy("tok");
             let host = host_with_grant("tok");
             let metadata = plugin_metadata(keys);
-            assert!(precheck(&metadata, &policy, &principal, false, &host).is_ok(), "{keys}");
+            assert!(
+                precheck(&metadata, &policy, &principal, false, &host).is_ok(),
+                "{keys}"
+            );
             policy.revoke("tok").unwrap();
             let error = precheck(&metadata, &policy, &principal, false, &host).unwrap_err();
             assert_eq!(error.code, ErrorCode::PermissionDenied, "{keys}");
@@ -1800,22 +1829,22 @@ mod tests {
         let error = precheck(&metadata, &policy, &principal, false, &host).unwrap_err();
         assert_eq!(error.code, ErrorCode::MissingConfiguration);
         assert_eq!(error.applied, oncl_api::error::AppliedState::NotApplied);
-        host.tsa = Some(
-            oncl_pki::tsp::TsaSpec {
-                url: "http://tsa.example/".into(),
-                method: oncl_pki::http::PkiMethod::Post { content_type: None },
-                hash: oncl_pki::key::HashAlg::Sha256,
-                policy: None,
-                nonce: oncl_pki::http::NonceSpec::Random(8),
-                cert_req: true,
-                retries: 0,
-                timeout: std::time::Duration::from_secs(1),
-                check_skew: None,
-                require_tsa_eku: true,
-            },
-        );
+        host.tsa = Some(oncl_pki::tsp::TsaSpec {
+            url: "http://tsa.example/".into(),
+            method: oncl_pki::http::PkiMethod::Post { content_type: None },
+            hash: oncl_pki::key::HashAlg::Sha256,
+            policy: None,
+            nonce: oncl_pki::http::NonceSpec::Random(8),
+            cert_req: true,
+            retries: 0,
+            timeout: std::time::Duration::from_secs(1),
+            check_skew: None,
+            require_tsa_eku: true,
+        });
         assert_eq!(
-            precheck(&metadata, &policy, &principal, false, &host).unwrap_err().code,
+            precheck(&metadata, &policy, &principal, false, &host)
+                .unwrap_err()
+                .code,
             ErrorCode::MissingConfiguration,
             "a TSA without a policy OID is still refused"
         );

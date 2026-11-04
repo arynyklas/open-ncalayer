@@ -388,7 +388,7 @@ fn install_plugins(
     }
     Ok((registry, grants))
 }
-fn processing_error(error: ProcessingError) -> ApiError {
+pub(crate) fn processing_error(error: ProcessingError) -> ApiError {
     let code = match operations::intake::first_cause(&error) {
         ProcessingError::CapacityExceeded => ErrorCode::CapacityExceeded,
         ProcessingError::DeadlineExceeded => ErrorCode::DeadlineExceeded,

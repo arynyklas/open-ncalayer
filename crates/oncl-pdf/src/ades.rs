@@ -521,7 +521,7 @@ pub(crate) fn prior_signature_contents(
     source: oncl_pki::io::Source<'_>,
     limits: &PdfLimits,
     scope: &mut ResourceScope,
-) -> Result<(u64, u64)> {
+) -> Result<crate::budget::PriorSignatures> {
     let mut doc = PdfDocument::open(source, limits, scope)?;
     let mut seen = BTreeSet::new();
     let (mut sum, mut largest) = (0u64, 0u64);
@@ -538,7 +538,11 @@ pub(crate) fn prior_signature_contents(
             }
         }
     }
-    Ok((sum, largest))
+    Ok(crate::budget::PriorSignatures {
+        count: seen.len() as u64,
+        contents_sum: sum,
+        contents_max: largest,
+    })
 }
 fn parse(
     snapshot: &mut PdfSnapshot<'_>,
