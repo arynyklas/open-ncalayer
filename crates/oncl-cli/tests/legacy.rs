@@ -838,7 +838,7 @@ fn legacy_base64_line_break_option_changes_the_signature_layout() {
         let text = std::fs::read_to_string(&out).unwrap().replace("\r\n", "\n");
         let start = text.find("<ds:SignatureValue>").unwrap() + "<ds:SignatureValue>".len();
         let value = &text[start..text[start..].find("</ds:SignatureValue>").unwrap() + start];
-        let lines: Vec<&str> = value.split('\n').collect();
+        let lines: Vec<&str> = value.trim_start_matches('\n').split("&#13;\n").collect();
         if wrapped {
             assert!(lines.len() > 1, "{value}");
             assert!(
