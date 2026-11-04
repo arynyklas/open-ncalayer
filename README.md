@@ -782,7 +782,7 @@ Probe покрывает содержательный SOAP Body более 64 М
 алгоритма на bounded случаях, настоящий pinned loopback PKI и mutation/wrapping.
 Независимый bounded oracle (жёсткий DOM cap 1 МиБ):
 `python crates/oncl-core/examples/sdk_probe/wsse_oracle.py target/x05-smoke`;
-сначала скопируйте `crates/oncl-xml/tests/support/wsse-ncanode.xml` в output как
+сначала скопируйте `target/fixtures/ncanode/wsse-ncanode.xml` (после `cargo xtask fetch-fixtures`) в output как
 `pinned-ncanode.xml`. Он независимо сверяет libxml2 exclusive C14N, SHA-256 и RSA
 math внешнего pinned fixture и нового RSA fixture. GOST canonical decomposition
 не является независимой проверкой GOST math, просроченный внешний fixture —

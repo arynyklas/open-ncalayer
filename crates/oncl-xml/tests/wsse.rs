@@ -297,9 +297,10 @@ fn mathematically_valid_x509data_is_not_a_wsse_token_binding() {
 }
 
 #[test]
+#[ignore = "needs cargo xtask fetch-fixtures"]
 fn pinned_external_ncanode_fixture_math_is_valid_but_expired_pki_is_not_trust() {
     let report = check(
-        include_bytes!("support/wsse-ncanode.xml"),
+        &oncl_testkit::read(oncl_testkit::ncanode("wsse-ncanode.xml")),
         &WsseVerifyProfile::default(),
     )
     .unwrap();

@@ -685,7 +685,7 @@ It exercises a substantive protected SOAP Body over 64 MiB, RSA and GOST Add,
 all three bounded algorithms, real pinned loopback PKI and mutation/wrapping
 controls. The bounded independent oracle (hard DOM cap 1 MiB) is
 `python crates/oncl-core/examples/sdk_probe/wsse_oracle.py target/x05-smoke`;
-copy `crates/oncl-xml/tests/support/wsse-ncanode.xml` to the output directory as
+copy `target/fixtures/ncanode/wsse-ncanode.xml` (after `cargo xtask fetch-fixtures`) to the output directory as
 `pinned-ncanode.xml` first. It independently checks libxml2 exclusive C14N,
 SHA-256 and RSA signature math against the external pinned fixture and generated
 RSA fixture. GOST canonical decomposition is not independent GOST signature
