@@ -93,6 +93,15 @@ impl State {
 fn manual() -> Controller {
     Controller::new("manual", ActionKind::Sign)
 }
+/// Whether the signing page shows how far its worker is: not while it waits for the user's
+/// confirmation (its own status stays), and a late word of a worker that has been left alone
+/// at the result changes nothing.
+pub(super) fn shows_progress(open: &Rc<Workspace>) -> bool {
+    matches!(
+        open.sign.borrow().controller.step(),
+        Step::Source | Step::Unlock | Step::Running
+    )
+}
 
 pub(super) fn connect(ui: &crate::ui::WorkspaceWindow) {
     let s = ui.global::<SigningState>();

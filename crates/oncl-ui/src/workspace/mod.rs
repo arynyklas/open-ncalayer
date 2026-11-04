@@ -14,9 +14,11 @@
 
 mod controller;
 mod jobs;
+pub mod progress;
 mod sign;
 
-pub(crate) use self::controller::{JobControl, JobError};
+pub use self::controller::JobControl;
+pub(crate) use self::controller::JobError;
 pub(crate) use self::jobs::hash_file;
 
 use std::cell::{Cell, RefCell};
@@ -29,12 +31,13 @@ use oncl_core::{Engine, ErrorCode};
 use oncl_flows::Locale;
 use oncl_pki::key::HashAlg;
 use oncl_token::{ScanProblem, TokenKind, Tokens};
-use slint::{CloseRequestResponse, ComponentHandle, PlatformError, Timer, TimerMode};
+use slint::{CloseRequestResponse, ComponentHandle, PlatformError};
 use time::OffsetDateTime;
 use zeroize::Zeroizing;
 
 use self::controller::{Busy, Controller, Job, MissingField, Settled};
 use self::jobs::{Entry, HashOutput, Inspect, InspectOutput};
+use self::progress::{Reporter, Stamp, Update};
 use crate::foreground;
 use crate::prompter::select_desktop_language;
 use crate::ui::WorkspaceWindow;
@@ -60,9 +63,6 @@ const SECTION_SIGN: i32 = 1;
 const SECTION_HASH: i32 = 2;
 const SECTION_INSPECT: i32 = 3;
 
-/// How often the progress of a running action is read.
-const POLL: Duration = Duration::from_millis(100);
-
 /// What an action gives back to its page.
 enum Output {
     /// The digest and the index of the algorithm in the page's list.
@@ -75,8 +75,6 @@ struct Workspace {
     ui: WorkspaceWindow,
     services: DesktopEngineServices,
     controller: RefCell<Controller>,
-    /// Reads the running action's progress.
-    poll: Timer,
     /// The language the texts were composed in.
     locale: Cell<Locale>,
     /// What the page was asked to inspect by the action that runs or ran last.
@@ -144,7 +142,6 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
         ui: ui.clone_strong(),
         services,
         controller: RefCell::new(Controller::default()),
-        poll: Timer::default(),
         locale: Cell::new(locale),
         inspect_kind: Cell::new(0),
         sign: RefCell::new(sign::State::new(
@@ -180,7 +177,6 @@ fn test_workspace(services: DesktopEngineServices) -> Rc<Workspace> {
         ui,
         services,
         controller: RefCell::new(Controller::default()),
-        poll: Timer::default(),
         locale: Cell::new(Locale::En),
         inspect_kind: Cell::new(0),
         sign: RefCell::new(sign::State::new(
@@ -204,8 +200,7 @@ fn close() {
     let Some(open) = OPEN.take() else {
         return;
     };
-    open.controller.borrow_mut().cancel();
-    open.poll.stop();
+    open.controller.borrow_mut().close();
     if let Err(e) = open.ui.hide() {
         tracing::warn!(error = %e, "cannot hide the tools window");
     }
@@ -308,7 +303,9 @@ fn start_inspect(open: &Rc<Workspace>) {
     });
 }
 
-/// Starts `work` on a worker thread; its result comes back to [`settle`].
+/// Starts `work` on a worker thread; its result comes back to [`settle`], and how far it is to
+/// [`apply_progress`], both on the event loop and both only if the window and the operation
+/// they were started by are still the current ones ([`progress`]).
 fn start(
     open: &Rc<Workspace>,
     job: Job,
@@ -316,7 +313,13 @@ fn start(
     + Send
     + 'static,
 ) {
-    let started = match open.controller.borrow_mut().begin(job) {
+    let started = match open.controller.borrow_mut().begin(job, |stamp| {
+        JobControl::reporting(Reporter::with_delivery(
+            stamp,
+            apply_progress,
+            deliver_boxed,
+        ))
+    }) {
         Ok(started) => started,
         Err(Busy) => return,
     };
@@ -337,12 +340,17 @@ fn start(
     if job == Job::Sign {
         sign::render(open);
     }
-    open.poll
-        .start(TimerMode::Repeated, POLL, || with_open(show_progress));
-    let (id, control) = (started.id, started.control);
+    let (stamp, control) = (started.stamp, started.control);
     let services = open.services.clone();
     #[cfg(test)]
     let ui_thread = std::thread::current().id();
+    let Some(reporter) = control.reporter().cloned() else {
+        // The control was made above with its reporter: a missing one is a bug, said as a
+        // failure to start, never as silence.
+        tracing::error!("an operation without a reporter");
+        settle(stamp, Err(JobError::Worker));
+        return;
+    };
     let spawned = std::thread::Builder::new()
         .name("workspace".into())
         .spawn(move || {
@@ -358,12 +366,18 @@ fn start(
                 );
                 Err(JobError::Worker)
             });
-            deliver(move || settle(id, result));
+            // On its own path: a full progress queue cannot lose the outcome.
+            reporter.finish(result, settle);
         });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "cannot start a worker thread");
-        settle(id, Err(JobError::Worker));
+        settle(stamp, Err(JobError::Worker));
     }
+}
+
+/// How a worker's word reaches the event loop.
+fn deliver_boxed(f: Box<dyn FnOnce() + Send>) {
+    deliver(f);
 }
 
 /// Hands `f` from a worker to the event loop. Tests have no loop: they pump the queue.
@@ -450,44 +464,74 @@ pub(crate) fn pump() -> usize {
     n
 }
 
-/// The progress of the running action into the window.
-fn show_progress(open: &Rc<Workspace>) {
-    let controller = open.controller.borrow();
-    let Some((job, control)) = controller.running() else {
-        return;
-    };
-    // The signing page tells its own state; its documents are small and the user's pace rules.
-    if control.is_cancelled() || job == Job::Sign {
-        return;
-    }
-    let t = Texts::of(open.locale.get());
-    let (done, total) = control.progress();
-    match (job, total) {
-        (_, Some(total)) => {
-            open.ui
-                .set_progress((done as f64 / total as f64).min(1.0) as f32);
-            open.ui.set_status_text(
-                t.progress
-                    .replace("{0}", &size(t, done))
-                    .replace("{1}", &size(t, total))
-                    .into(),
+/// A word of a running action reaches the event loop: shown only if the window and the
+/// operation it names are still the current ones.
+fn apply_progress(stamp: Stamp, update: Update) {
+    with_open(|open| {
+        let controller = open.controller.borrow();
+        if !controller.accepts(stamp) {
+            return;
+        }
+        let Some((job, control)) = controller.running() else {
+            return;
+        };
+        // «Cancelling…» stays until the action ends; the signing page tells its own state
+        // while it waits for the user's confirmation.
+        if control.is_cancelled() || (job == Job::Sign && !sign::shows_progress(open)) {
+            return;
+        }
+        let (fraction, text) = describe(Texts::of(open.locale.get()), update);
+        open.ui.set_progress(fraction);
+        open.ui.set_status_text(text.into());
+    });
+}
+
+/// How far the action is, for the status line: the fraction of the bar (below 0: not known)
+/// and the words. A batch counts documents: the bytes of each pass over each document are not
+/// known beforehand, so they are told as they are and never turned into a percentage.
+fn describe(t: &Texts, update: Update) -> (f32, String) {
+    if update.items > 0 {
+        if update.started == 0 {
+            return (
+                -1.0,
+                t.preparing
+                    .replace("{0}", &update.items.to_string())
+                    .replace("{1}", &size(t, update.bytes_in)),
             );
         }
-        (_, None) => open.ui.set_progress(-1.0),
+        let before = (update.started - 1).min(update.items);
+        return (
+            before as f32 / update.items as f32,
+            t.document
+                .replace("{0}", &update.started.to_string())
+                .replace("{1}", &update.items.to_string())
+                .replace("{2}", &size(t, update.bytes_in)),
+        );
+    }
+    match update.total {
+        Some(total) => (
+            (update.bytes_in as f64 / total as f64).min(1.0) as f32,
+            t.progress
+                .replace("{0}", &size(t, update.bytes_in))
+                .replace("{1}", &size(t, total)),
+        ),
+        None => (
+            -1.0,
+            t.progress_unknown.replace("{0}", &size(t, update.bytes_in)),
+        ),
     }
 }
 
-/// The outcome of action `id` into the window; a result that is not the running action's
-/// (its window was closed and another opened) changes nothing.
-fn settle(id: u64, result: Result<Output, JobError>) {
+/// The outcome of the action `stamp` into the window; a result that is not the running
+/// action's of the open window (its window was closed and another opened) changes nothing.
+fn settle(stamp: Stamp, result: Result<Output, JobError>) {
     let Some(open) = current() else {
         return;
     };
-    let settled = open.controller.borrow_mut().finish(id, result);
+    let settled = open.controller.borrow_mut().finish(stamp, result);
     let Some(settled) = settled else {
         return;
     };
-    open.poll.stop();
     let ui = &open.ui;
     ui.set_busy(false);
     let t = Texts::of(open.locale.get());
@@ -589,6 +633,12 @@ struct Texts {
     inspect_done: &'static str,
     /// `{0}` of `{1}`.
     progress: &'static str,
+    /// `{0}` read so far; the size is not known.
+    progress_unknown: &'static str,
+    /// A batch being prepared: `{0}` documents, `{1}` read so far.
+    preparing: &'static str,
+    /// A batch at work: document `{0}` of `{1}`, `{2}` processed so far.
+    document: &'static str,
     /// `{0}` human size, `{1}` bytes, `{2}` algorithm.
     hash_summary: &'static str,
     pick_title: &'static str,
@@ -659,6 +709,9 @@ static RU: Texts = Texts {
     hash_done: "Хеш вычислен",
     inspect_done: "Сведения получены",
     progress: "Прочитано {0} из {1}",
+    progress_unknown: "Прочитано {0} (размер неизвестен)",
+    preparing: "Подготовка документов: {0}, прочитано {1}",
+    document: "Документ {0} из {1}, обработано {2}",
     hash_summary: "{0} ({1} байт), алгоритм {2}",
     pick_title: "Выберите файл",
     gost2004: "ГОСТ Р 34.11-94",
@@ -717,6 +770,9 @@ static KK: Texts = Texts {
     hash_done: "Хеш есептелді",
     inspect_done: "Мәліметтер алынды",
     progress: "{1} ішінен {0} оқылды",
+    progress_unknown: "{0} оқылды (көлемі белгісіз)",
+    preparing: "Құжаттарды дайындау: {0}, {1} оқылды",
+    document: "Құжат {0}/{1}: {2} өңделді",
     hash_summary: "{0} ({1} байт), алгоритм {2}",
     pick_title: "Файлды таңдаңыз",
     gost2004: "ГОСТ Р 34.11-94",
@@ -775,6 +831,9 @@ static EN: Texts = Texts {
     hash_done: "Hash computed",
     inspect_done: "Details read",
     progress: "Read {0} of {1}",
+    progress_unknown: "Read {0} (the size is not known)",
+    preparing: "Preparing {0} document(s): read {1}",
+    document: "Document {0} of {1}, {2} processed",
     hash_summary: "{0} ({1} bytes), algorithm {2}",
     pick_title: "Choose a file",
     gost2004: "GOST R 34.11-94",
