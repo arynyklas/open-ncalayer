@@ -5,3 +5,4 @@ pub mod config;
 pub mod executor;
 pub mod keys;
 pub mod service;
+pub mod telemetry;

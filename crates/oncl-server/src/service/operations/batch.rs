@@ -369,6 +369,25 @@ fn record(
         ),
         BatchOutcome::NotRun => (BatchItemOutcome::NotRun, None, None, None),
     };
+    {
+        use crate::telemetry::{ItemResult, ItemTimer, Observer, operation_kind};
+        let observer = Observer::worker();
+        if observer.enabled() {
+            let (kind, family) = operation_kind(&item.operation);
+            match (&outcome, &error) {
+                (BatchItemOutcome::Completed, _) => {
+                    observer.item_end(ItemTimer::none(), kind, family, ItemResult::Ok(applied));
+                }
+                (BatchItemOutcome::Failed, Some(failure)) => observer.item_end(
+                    ItemTimer::none(),
+                    kind,
+                    family,
+                    ItemResult::Failed(failure.code, failure.applied),
+                ),
+                _ => {}
+            }
+        }
+    }
     Ok(BatchItemRecord {
         item_id: item.id.clone(),
         index,

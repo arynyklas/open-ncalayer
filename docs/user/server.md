@@ -255,3 +255,127 @@ repinned to another IP/port. The SDK's actual network policy validates these pin
 No incoming URL, certificate-carried root or JSON policy flag installs trust.
 TLS listener certificates and document-validation roots are separate settings.
 The service does not install certificates in the OS/browser trust stores.
+
+## Optional OTLP telemetry
+
+The service can export operational **metrics and traces** to an operator-chosen OTLP
+collector. It is **off by default**: with no `[telemetry]` table, or with
+`enabled = false`, the process starts no export thread, builds no exporter and opens
+no connection to any collector. OTLP **logs are not implemented**; local technical
+logs and the audit journal stay separate mechanisms. The SDK crates, the CLI and the
+desktop application never contain this code or its dependencies.
+
+```toml
+[telemetry]
+enabled = true
+endpoint = "http://127.0.0.1:4318"   # OTLP/HTTP base URL; /v1/traces and /v1/metrics are appended
+service_name = "oncl-server"         # `service.name` resource attribute (operator value)
+metrics = true
+traces = true
+trace_sample_ratio = 1.0             # traces only; metrics are never sampled
+export_interval_ms = 10000           # metric interval and span batch delay (100 .. 3 600 000)
+export_timeout_ms = 3000             # hard bound of one export HTTP call (100 .. 60 000)
+connect_timeout_ms = 1000            # <= export_timeout_ms
+queue_size = 2048                    # queued, not yet exported spans (16 .. 65 536)
+batch_size = 512                     # <= queue_size
+shutdown_timeout_ms = 5000           # bound of the final flush (100 .. 60 000)
+# headers = { authorization = "Bearer <collector credential>" }   # at most 8, operator secret; https or loopback only
+# ca_file = "/private/oncl-operator/collector-ca.pem"             # https only: the collector's CA (PEM)
+```
+
+An enabled configuration is validated at startup (`http`/`https` URL without user
+info, query or fragment; at least one of `metrics`/`traces`; header names are tokens,
+never `host`/`content-*`/`connection`/…, values are printable ASCII). **`headers`
+(a collector credential) are refused unless the endpoint is `https` or its host is
+loopback (`localhost`, `127.0.0.0/8`, `::1`)**, so a credential never crosses the
+network in cleartext. `ca_file` requires `https`. An invalid configuration refuses to
+start the service, with a generic error that never echoes header values. Unknown
+keys are rejected.
+
+### Transport and boundedness
+
+* **OTLP/HTTP with protobuf bodies**, one POST per export, no gRPC, no compression, no
+  redirects, no environment proxy. The client is the workspace `ureq` (rustls with
+  ring). `https` verifies the collector against the built-in web PKI roots, or, with
+  `ca_file`, only against the PEM CA certificates (at most 8, 1 MiB) in that file;
+  the operator PKI trust set above is not used for it. `OTEL_*` and proxy environment
+  variables are not configuration: the endpoint and timeout come from this table, any
+  header the environment would add is dropped by the transport, and compression
+  requests (`OTEL_EXPORTER_OTLP_*COMPRESSION`) are ignored (payloads stay plain
+  protobuf). The collector endpoint is operator-trusted egress and is **not** subject
+  to the `[[pki.endpoints]]` pinning.
+* **Two named threads, no more:** `oncl-otlp-traces` (span worker) and
+  `OpenTelemetry.Metrics.PeriodicReader` (metric reader), one per enabled signal. A
+  short-lived `oncl-otlp-shutdown` thread exists only during shutdown. No operation
+  thread ever touches the network: producers `try_send` into a fixed-size queue
+  (`queue_size`) and never wait.
+* **Drop accounting, not blocking.** A full queue, a failed export or a post-failure
+  back-off drops the affected spans and counts them. The count is visible in
+  `Telemetry::stats()` and, once a collector answers again, as the metric
+  `oncl.telemetry.dropped{oncl.signal=spans|metrics}`. Metric points are aggregated in
+  place (closed dimensions below), so only their *export* can fail, never their memory.
+* **No retry storms.** One attempt per batch; after a failure the worker backs off
+  (`export_interval_ms · 2^n`, at most 30 s) and discards what it would have sent.
+  A hanging collector blocks only the export thread, for at most `export_timeout_ms`.
+* **Bounded shutdown.** `serve` ends with a flush limited to `shutdown_timeout_ms`;
+  a dead or hanging collector cannot keep the process open longer. An export still
+  inside its (hard-timeout) HTTP call at the deadline is abandoned, not waited for.
+* **Audit is separate and untouched.** Trace sampling (`trace_sample_ratio`), drops,
+  a down collector or a failed exporter cannot remove, delay or replace a mandatory
+  audit record, and OTLP is never evidence that audit was written. Audit health stays
+  its own guard and `/health` signal.
+
+### Safe vocabulary (what can leave the process)
+
+Every attribute is a value of a small closed type (`SafeAttr`); there is no constructor
+from a string, path, identifier or error text, no automatic body/header
+instrumentation, no request/client/key/token identifier, and no metric label with
+unbounded cardinality. Resource attributes are only `service.name` and `service.version`;
+the instrumentation scope is `oncl-server`; spans carry no events, links or exemplars.
+
+| Attribute | Values |
+|---|---|
+| `oncl.route` | `hash`, `operations`, `batch` |
+| `oncl.operation.kind` | `hash`, `verify`, `extract`, `sign`, `extend`, `jws_sign`, `jws_add`, `jws_verify`, `jwt_encode`, `jwt_decode`, `jwt_verify`, `plugin`, `inspect`, `stamp`, `verify_stamp` |
+| `oncl.operation.family` | (sign only) `cms`, `cades`, `pdf`, `pades`, `xml`, `xades`, `wsse`, `xml_legacy`, `xades_legacy` |
+| `oncl.outcome` | `ok`, `rejected` (refused before work), `failed`, `aborted` |
+| `oncl.error.code` | the stable public error codes (`permission_denied`, `invalid_request`, `capacity_exceeded`, `deadline_exceeded`, `audit_unavailable`, `validation_failed`, `operation_failed`, …) |
+| `oncl.key.applied` | `not_applied`, `applied`, `unknown` |
+| `http.response.status_code` | the status of the response head (`200`, `400`, `403`, `404`, `408`, `413`, `422`, `500`, `503`, `504`) |
+| `oncl.delivery` | `complete`, `aborted` |
+| `oncl.stage` | `wait`, `run` |
+| `oncl.signal` | `spans`, `metrics` |
+
+Spans (`oncl.request` is the root; the others are its children in the same trace):
+`oncl.request` (route, outcome, error code, status, delivery), `oncl.admission`
+(request start to executor hand-off), `oncl.executor.wait`, `oncl.executor.run`,
+`oncl.operation` (one per executed item: kind, family, outcome, error code, key
+applied state), `oncl.delivery` (response body delivery).
+
+Metrics: counters `oncl.requests`, `oncl.operations`, `oncl.key.uses` (counts of
+operations that applied or may have applied a private key; **no key identity**),
+`oncl.executor.rejected`, `oncl.telemetry.dropped`; histograms in seconds
+`oncl.request.duration`, `oncl.admission.duration`, `oncl.executor.duration`,
+`oncl.operation.duration`, `oncl.delivery.duration`, and `oncl.response.size` (bytes);
+gauges `oncl.requests.in_flight`, `oncl.executor.running`, `oncl.executor.queued`.
+
+### Limits of the guarantees
+
+* Health and OpenAPI requests and transport-level failures before a request reaches a
+  route (malformed HTTP, connection limits) are not observed.
+* A streamed response's head status is `200` even if a later item fails; the per-item
+  outcomes are the `oncl.operation` spans and the `oncl.operations` counter, and the
+  request outcome becomes `failed` when any item failed. Items of `/v1/batch` have no
+  per-item duration (the SDK runs the closed batch as a unit), so they appear only in
+  the `oncl.operations`/`oncl.key.uses` counters and the request outcome, not as spans.
+* Durations, response sizes and the timing of requests are exported and can reveal
+  coarse activity patterns to the collector operator; trace/span ids are random and
+  not derived from any request value. Treat the collector as part of the service's
+  trust boundary and protect `headers`.
+* Drops under a slow or down collector are expected and counted; telemetry is not a
+  delivery guarantee and is never an audit record.
+* TLS to the collector verifies the certificate always (never skipped). The default
+  trust is the built-in web roots; `ca_file` replaces it with the operator's own CA.
+  Revocation checking and client certificates (mTLS) are not supported.
+* An incoming `traceparent`/`tracestate` header is ignored: every request starts its
+  own trace, so a client can neither join, force nor suppress sampling of a trace.

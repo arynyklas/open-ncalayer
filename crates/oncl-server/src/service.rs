@@ -6,6 +6,7 @@ use crate::{
     config::{Exposure, ServerConfig, invalid, normalized_peer},
     executor::{BoundedExecutor, CancelOnDrop, Cancellation},
     keys::{KeyBinding, OperatorKeys},
+    telemetry::{Route as ObservedRoute, Telemetry},
 };
 use axum::{
     body::{Body, Bytes},
@@ -51,6 +52,8 @@ pub struct ServiceHost {
     pub keys: Arc<OperatorKeys>,
     pub audit: DurableAuditGuard,
     config: ServerConfig,
+    /// Opt-in OTLP export handle; `Telemetry::disabled()` unless configured.
+    pub telemetry: Telemetry,
     store: Option<oncl_pki::io::TemporaryStore>,
     output_store: Option<Arc<operations::artifact::ArtifactStore>>,
     host_policy: Arc<operations::HostPolicy>,
@@ -190,6 +193,8 @@ impl ServiceHost {
             None
         };
         let executor = BoundedExecutor::new(config.executor()).map_err(|_| invalid())?;
+        let telemetry = Telemetry::start(&config.telemetry)?;
+        telemetry.register_load(executor.load_probe());
         let host_policy = Arc::new(operations::HostPolicy {
             tsa: config.pki.tsa.as_ref().map(|t| t.spec()).transpose()?,
             jwt_issuer: config.pki.jwt.expected_issuer.clone(),
@@ -204,6 +209,7 @@ impl ServiceHost {
             keys,
             audit,
             config,
+            telemetry,
             store,
             output_store,
             host_policy,
@@ -388,8 +394,9 @@ fn install_plugins(
     }
     Ok((registry, grants))
 }
-pub(crate) fn processing_error(error: ProcessingError) -> ApiError {
-    let code = match operations::intake::first_cause(&error) {
+/// Stable wire code of a processing failure (never its message).
+pub(crate) fn processing_code(error: &ProcessingError) -> ErrorCode {
+    match operations::intake::first_cause(error) {
         ProcessingError::CapacityExceeded => ErrorCode::CapacityExceeded,
         ProcessingError::DeadlineExceeded => ErrorCode::DeadlineExceeded,
         ProcessingError::Cancelled => ErrorCode::Cancelled,
@@ -401,8 +408,10 @@ pub(crate) fn processing_error(error: ProcessingError) -> ApiError {
         ProcessingError::OutputLimit => ErrorCode::OutputLimit,
         ProcessingError::Io(_) | ProcessingError::InvalidInput(_) => ErrorCode::InvalidRequest,
         ProcessingError::InvalidLimits => ErrorCode::Internal,
-    };
-    ApiError::not_applied(code)
+    }
+}
+pub(crate) fn processing_error(error: ProcessingError) -> ApiError {
+    ApiError::not_applied(processing_code(&error))
 }
 pub(crate) fn api_applied(value: oncl_pki::key::AppliedState) -> oncl_api::error::AppliedState {
     use oncl_api::error::AppliedState as Api;
@@ -454,8 +463,8 @@ fn core_error(error: OperationError) -> ApiError {
         _ => ApiError::not_applied(ErrorCode::Internal),
     }
 }
-impl HashHost for ServiceHost {
-    fn hash(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture {
+impl ServiceHost {
+    fn hash_unobserved(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture {
         let engine = self.engine.clone();
         let executor = self.executor.clone();
         let deadline = Deadline::after(Duration::from_millis(self.config.operation_timeout_ms));
@@ -571,11 +580,22 @@ impl HashHost for ServiceHost {
             Ok(response)
         })
     }
+}
+impl HashHost for ServiceHost {
+    fn hash(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture {
+        self.telemetry
+            .begin(ObservedRoute::Hash)
+            .observe(self.hash_unobserved(metadata, body))
+    }
     fn operations(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture {
-        self.dispatch_operations(metadata, body, operations::Route::Operations)
+        self.telemetry
+            .begin(ObservedRoute::Operations)
+            .observe(self.dispatch_operations(metadata, body, operations::Route::Operations))
     }
     fn batch(&self, metadata: RequestMetadata, body: Body) -> ResponseFuture {
-        self.dispatch_operations(metadata, body, operations::Route::Batch)
+        self.telemetry
+            .begin(ObservedRoute::Batch)
+            .observe(self.dispatch_operations(metadata, body, operations::Route::Batch))
     }
     fn openapi(&self, metadata: RequestMetadata) -> ResponseFuture {
         let result = self.principal(&metadata).map(|_| {
@@ -990,5 +1010,9 @@ pub async fn serve<F: Future<Output = ()>>(
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
     host.executor.idle().await;
+    // Final bounded flush on a blocking thread: never longer than the configured
+    // deadline, and a dead collector cannot hold the process open past it.
+    let telemetry = host.telemetry.clone();
+    let _ = tokio::task::spawn_blocking(move || telemetry.shutdown()).await;
     Ok(())
 }

@@ -1,6 +1,7 @@
 use crate::{
     auth::{TokenRecord, TokenVerifier},
     executor::ExecutorConfig,
+    telemetry::TelemetryConfig,
 };
 use oncl_core::Action;
 use oncl_pki::{private_fs::PrivateDirectory, resource::ResourceLimits};
@@ -360,6 +361,8 @@ pub struct ServerConfig {
     pub keys: Vec<KeyConfig>,
     pub pki: PkiConfig,
     pub plugins: Vec<PluginConfig>,
+    /// Opt-in OTLP metrics/traces. Disabled by default: no thread, no connection.
+    pub telemetry: TelemetryConfig,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -392,6 +395,7 @@ impl Default for ServerConfig {
             keys: Vec::new(),
             pki: PkiConfig::default(),
             plugins: Vec::new(),
+            telemetry: TelemetryConfig::default(),
         }
     }
 }
@@ -416,6 +420,7 @@ impl ServerConfig {
     }
     pub fn validate(&self) -> io::Result<()> {
         self.pki.validate_limits()?;
+        self.telemetry.validate()?;
         if self.max_in_flight == 0
             || self.max_in_flight > 256
             || self.blocking_workers == 0

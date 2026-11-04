@@ -1,13 +1,14 @@
 //! Admission is finite BEFORE spawn_blocking. Cancellation drops the receiver,
 //! not a running native closure or its worker/resource permits.
+use crate::telemetry::{Observer, Stage};
 use oncl_core::{OperationAdmission, OperationContext};
 use oncl_pki::resource::{OperationControl, ProcessingError, Progress, ResourceScope};
 use std::{
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::{Notify, Semaphore, oneshot};
 
@@ -129,7 +130,24 @@ impl Drop for Waiting {
         self.0.waiting.fetch_sub(1, Ordering::AcqRel);
     }
 }
+/// Non-owning load view: never keeps the executor (or its permits) alive.
+#[derive(Clone)]
+pub(crate) struct LoadProbe(Weak<Shared>);
+impl LoadProbe {
+    /// `(running, queued)` while the executor exists.
+    pub(crate) fn load(&self) -> Option<(usize, usize)> {
+        let shared = self.0.upgrade()?;
+        Some((
+            shared.running.load(Ordering::Acquire),
+            shared.waiting.load(Ordering::Acquire),
+        ))
+    }
+}
 impl BoundedExecutor {
+    /// Weak view of the executor load for the optional busy/queued gauges.
+    pub(crate) fn load_probe(&self) -> LoadProbe {
+        LoadProbe(Arc::downgrade(&self.shared))
+    }
     pub fn new(config: ExecutorConfig) -> Result<Self, ProcessingError> {
         config.validate()?;
         Ok(Self {
@@ -230,13 +248,14 @@ impl BoundedExecutor {
         T: Send + 'static,
         F: FnOnce() -> Result<T, ProcessingError> + Send + 'static,
     {
+        // Admission of this request ends here: the first hand-off to the executor.
+        let observer = Observer::current();
+        observer.mark_admitted();
         scope.checkpoint()?;
-        let slot = self
-            .shared
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ProcessingError::CapacityExceeded)?;
+        let slot = self.shared.slots.clone().try_acquire_owned().map_err(|_| {
+            observer.executor_rejected();
+            ProcessingError::CapacityExceeded
+        })?;
         let active = Active {
             shared: self.shared.clone(),
             slot: Some(slot),
@@ -246,6 +265,7 @@ impl BoundedExecutor {
             let previous = self.shared.waiting.fetch_add(1, Ordering::AcqRel);
             if previous >= self.shared.config.queue_capacity {
                 self.shared.waiting.fetch_sub(1, Ordering::AcqRel);
+                observer.executor_rejected();
                 return Err(ProcessingError::CapacityExceeded);
             }
             Some(Waiting(self.shared.clone()))
@@ -257,6 +277,7 @@ impl BoundedExecutor {
         let stop = abandoned.clone();
         let deadline = scope.deadline();
         let shared = self.shared.clone();
+        let (queued, queued_time) = (Instant::now(), SystemTime::now());
         tokio::spawn(async move {
             let worker = match immediate {
                 Some(permit) => permit,
@@ -274,6 +295,9 @@ impl BoundedExecutor {
                     match result {
                         Ok(permit) => permit,
                         Err(error) => {
+                            if matches!(error, ProcessingError::CapacityExceeded) {
+                                observer.executor_rejected();
+                            }
                             drop(waiting);
                             drop(work);
                             drop(scope);
@@ -285,6 +309,7 @@ impl BoundedExecutor {
                 }
             };
             drop(waiting);
+            observer.executor_stage(Stage::Wait, queued, queued_time, None);
             if let Err(error) = scope
                 .checkpoint()
                 .and_then(|_| stop.checkpoint(Progress::default()))
@@ -305,7 +330,15 @@ impl BoundedExecutor {
                 let _active = active;
                 let _worker = worker;
                 let _running = running;
+                let _entered = observer.enter_worker();
+                let (run, run_time) = (Instant::now(), SystemTime::now());
                 let result = work();
+                observer.executor_stage(
+                    Stage::Run,
+                    run,
+                    run_time,
+                    result.as_ref().err().map(crate::service::processing_code),
+                );
                 let _ = sender.send(result);
             });
         });
