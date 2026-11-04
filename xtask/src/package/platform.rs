@@ -711,6 +711,11 @@ fn read_tar_gz(archive: &Path) -> anyhow::Result<Vec<Entry>> {
     let file = fs::File::open(archive).with_context(|| format!("opening {}", archive.display()))?;
     let mut tar = Vec::new();
     flate2::read::GzDecoder::new(file).read_to_end(&mut tar)?;
+    parse_tar(&tar)
+}
+
+/// The entries of an uncompressed ustar stream; an unreadable mode or size is an error.
+fn parse_tar(tar: &[u8]) -> anyhow::Result<Vec<Entry>> {
     let mut entries = Vec::new();
     let mut at = 0;
     while at + 512 <= tar.len() && tar[at..at + 512].iter().any(|b| *b != 0) {
@@ -726,7 +731,10 @@ fn read_tar_gz(archive: &Path) -> anyhow::Result<Vec<Entry>> {
         if !prefix.is_empty() {
             name = format!("{prefix}/{name}");
         }
-        let mode = u32::from_str_radix(&text(100, 108), 8).ok();
+        let mode = Some(
+            u32::from_str_radix(&text(100, 108), 8)
+                .with_context(|| format!("the mode field of {name}"))?,
+        );
         let size = usize::from_str_radix(&text(124, 136), 8).context("a tar size")?;
         let kind = match header[156] {
             b'0' | 0 => Kind::File,
@@ -875,32 +883,53 @@ pub fn check_layout(
 /// The entries of `archive` with modes and kinds.
 fn entries(archive: &Path, os: Os) -> anyhow::Result<Vec<Entry>> {
     match os {
-        Os::Windows => {
-            let file = fs::File::open(archive)
-                .with_context(|| format!("opening {}", archive.display()))?;
-            let mut zip = ZipArchive::new(file)?;
-            let mut found = Vec::new();
-            for i in 0..zip.len() {
-                let entry = zip.by_index(i)?;
-                // Zip modes are not meaningful on Windows: only the entry kind is checked.
-                let _ = entry.unix_mode();
-                let kind = if entry.is_dir() {
-                    Kind::Directory
-                } else if entry.is_symlink() {
-                    Kind::Other
-                } else {
-                    Kind::File
-                };
-                found.push(Entry {
-                    name: entry.name()?.into_owned(),
-                    mode: None,
-                    kind,
-                });
-            }
-            Ok(found)
-        }
+        Os::Windows => parse_zip_directory(&fs::read(archive)?),
         Os::Linux | Os::Macos => read_tar_gz(archive),
     }
+}
+
+/// The central directory of a zip: name and Unix mode (external attributes) of each entry.
+fn parse_zip_directory(bytes: &[u8]) -> anyhow::Result<Vec<Entry>> {
+    let le32 = |at: usize| -> anyhow::Result<u32> {
+        let raw = bytes.get(at..at + 4).context("a cut zip")?;
+        Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+    };
+    let le16 = |at: usize| -> anyhow::Result<usize> {
+        let raw = bytes.get(at..at + 2).context("a cut zip")?;
+        Ok(usize::from(u16::from_le_bytes([raw[0], raw[1]])))
+    };
+    let end = bytes
+        .windows(4)
+        .rposition(|w| w == [0x50, 0x4b, 0x05, 0x06])
+        .context("no end of central directory")?;
+    let count = le16(end + 10)?;
+    let mut at = usize::try_from(le32(end + 16)?)?;
+    let mut found = Vec::new();
+    for _ in 0..count {
+        anyhow::ensure!(le32(at)? == 0x0201_4b50, "a bad central directory entry");
+        let attributes = le32(at + 38)?;
+        let (name_length, extra, comment) = (le16(at + 28)?, le16(at + 30)?, le16(at + 32)?);
+        let name = String::from_utf8(
+            bytes
+                .get(at + 46..at + 46 + name_length)
+                .context("a cut zip")?
+                .to_vec(),
+        )?;
+        let mode = attributes >> 16;
+        let kind = match mode & 0o170_000 {
+            0o120_000 => Kind::Other,
+            0o040_000 => Kind::Directory,
+            _ if name.ends_with('/') => Kind::Directory,
+            _ => Kind::File,
+        };
+        found.push(Entry {
+            name,
+            mode: Some(mode & 0o7777),
+            kind,
+        });
+        at += 46 + name_length + extra + comment;
+    }
+    Ok(found)
 }
 
 /// [`check_layout`] on the files, and: only regular files and directories (no symlink, hard
@@ -1072,6 +1101,52 @@ mod tests {
             .unwrap()
             .kind = Kind::Other;
         assert!(check_entries(&link, Product::Server, &version(), &flavor).is_err());
+    }
+
+    #[test]
+    fn an_unreadable_tar_mode_is_an_error() {
+        let mut tar = tar_header("t/x", 0o644, 0, false).unwrap().to_vec();
+        tar.extend([0_u8; 1024]);
+        assert!(parse_tar(&tar).is_ok());
+        tar[100..107].copy_from_slice(b"zzzzzzz");
+        assert!(parse_tar(&tar).is_err());
+    }
+
+    #[test]
+    fn a_zip_records_fixed_modes_and_mutations_are_refused() {
+        let flavor = flavor("win-x64").unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let top = dir_name(Product::Cli, &version(), &flavor);
+        let stage = temporary.path().join(&top);
+        for file in expected_files(Product::Cli, &flavor) {
+            let path = stage.join(&file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+        let archive = temporary.path().join("a.zip");
+        pack(&stage, &top, &archive, Os::Windows).unwrap();
+        let found = parse_zip_directory(&fs::read(&archive).unwrap()).unwrap();
+        check_entries(&found, Product::Cli, &version(), &flavor).unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .find(|e| e.name.ends_with("oncl.exe"))
+                .unwrap()
+                .mode,
+            Some(0o755)
+        );
+        for bad in [Some(0o664), Some(0o777), Some(0o4755)] {
+            let mut changed = found.clone();
+            changed
+                .iter_mut()
+                .find(|e| e.name.ends_with("NOTICE"))
+                .unwrap()
+                .mode = bad;
+            assert!(check_entries(&changed, Product::Cli, &version(), &flavor).is_err());
+        }
+        let mut link = found.clone();
+        link[0].kind = Kind::Other;
+        assert!(check_entries(&link, Product::Cli, &version(), &flavor).is_err());
     }
 
     #[test]

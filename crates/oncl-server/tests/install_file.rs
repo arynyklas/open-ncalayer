@@ -89,6 +89,13 @@ fn unsafe_names_are_refused_and_create_nothing() {
         "trailing.",
         "",
         "a b",
+        "aux.txt",
+        "trailing ",
+        "\\\\server\\share\\x",
+        "x/..",
+        "PROGRA~1",
+        "\\\\?\\\x43:\\x",
+        "name\u{e9}",
     ] {
         let out = install(&directory, name, b"SECRET-MATERIAL");
         assert!(!out.status.success(), "{name:?} was accepted");
@@ -96,10 +103,8 @@ fn unsafe_names_are_refused_and_create_nothing() {
             + &String::from_utf8_lossy(&out.stderr);
         assert!(!text.contains("SECRET-MATERIAL"), "{name:?}: {text}");
     }
-    let left = std::fs::read_dir(&directory)
-        .map(|d| d.count())
-        .unwrap_or(0);
-    assert_eq!(left, 0);
+    // Nothing is created, not even the directory.
+    assert!(!directory.exists());
     assert!(!temporary.path().join("x").exists());
 }
 
@@ -132,4 +137,13 @@ fn an_input_file_is_read_like_stdin() {
         std::fs::read(directory.join("k.p12")).unwrap(),
         b"from a file"
     );
+}
+
+#[test]
+fn a_refusal_never_removes_or_changes_an_existing_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("operator");
+    assert!(install(&directory, "keep.p12", b"kept").status.success());
+    assert!(!install(&directory, "a b", b"x").status.success());
+    assert_eq!(std::fs::read(directory.join("keep.p12")).unwrap(), b"kept");
 }

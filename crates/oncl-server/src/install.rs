@@ -24,7 +24,16 @@ pub fn validate_name(name: &str) -> io::Result<()> {
         || ((stem.starts_with("COM") || stem.starts_with("LPT"))
             && stem.len() == 4
             && stem.as_bytes()[3].is_ascii_digit());
-    if reserved || name.ends_with('.') || name.contains(['/', '\\', ':']) {
+    // The private-file allow-list too, so a name it would refuse is refused before anything
+    // (a directory) is created.
+    let plain = !name.is_empty()
+        && name.len() <= 64
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+    if reserved || !plain || name.ends_with('.') {
         return Err(refused("invalid file name"));
     }
     Ok(())
@@ -51,12 +60,23 @@ pub fn install(
     if read > MAX_INSTALL_BYTES {
         return Err(refused("input too large"));
     }
-    let private = if directory.exists() {
-        PrivateDirectory::open(directory)?
-    } else {
+    let created = !directory.exists();
+    let private = if created {
         PrivateDirectory::create(directory)?
+    } else {
+        PrivateDirectory::open(directory)?
     };
-    let mut file = private.create_file(name)?;
+    let mut file = match private.create_file(name) {
+        Ok(file) => file,
+        Err(error) => {
+            // A directory this command made is not left behind; an existing one never is touched.
+            if created {
+                drop(private);
+                let _ = std::fs::remove_dir(directory);
+            }
+            return Err(error);
+        }
+    };
     let written = file.write_all(&bytes).and_then(|()| file.sync_all());
     drop(file);
     if let Err(error) = written {
