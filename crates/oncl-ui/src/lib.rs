@@ -21,6 +21,7 @@ mod install_plugin;
 mod offscreen;
 pub mod plugins_view;
 mod prompter;
+mod reports;
 #[cfg(test)]
 mod screenshots;
 pub mod settings_view;
