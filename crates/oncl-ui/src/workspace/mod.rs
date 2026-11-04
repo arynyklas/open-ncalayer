@@ -14,6 +14,10 @@
 
 mod controller;
 mod jobs;
+mod sign;
+
+pub(crate) use self::controller::{JobControl, JobError};
+pub(crate) use self::jobs::hash_file;
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -29,7 +33,7 @@ use slint::{CloseRequestResponse, ComponentHandle, PlatformError, Timer, TimerMo
 use time::OffsetDateTime;
 use zeroize::Zeroizing;
 
-use self::controller::{Busy, Controller, Job, JobControl, JobError, MissingField, Settled};
+use self::controller::{Busy, Controller, Job, MissingField, Settled};
 use self::jobs::{Entry, HashOutput, Inspect, InspectOutput};
 use crate::foreground;
 use crate::prompter::select_desktop_language;
@@ -42,8 +46,19 @@ use crate::windows;
 #[derive(Clone)]
 pub struct DesktopEngineServices {
     pub engine: Arc<Engine>,
+    /// Lets the engine apply the key only for the user's confirmation; built with the engine.
+    pub guard: Arc<crate::signing::runner::ConsentGuard>,
     pub tokens: Arc<Tokens>,
+    /// The time the certificates are judged by (the system clock; tests set their own).
+    pub clock: Arc<dyn Fn() -> OffsetDateTime + Send + Sync>,
+    /// `settings.json`: where the recent files and favourite certificates are kept.
+    pub settings_path: PathBuf,
 }
+
+/// The pages of the window, as the sidebar numbers them.
+const SECTION_SIGN: i32 = 1;
+const SECTION_HASH: i32 = 2;
+const SECTION_INSPECT: i32 = 3;
 
 /// How often the progress of a running action is read.
 const POLL: Duration = Duration::from_millis(100);
@@ -53,6 +68,7 @@ enum Output {
     /// The digest and the index of the algorithm in the page's list.
     Hash(HashOutput, i32),
     Inspect(InspectOutput),
+    Sign(sign::SignOutput),
 }
 
 struct Workspace {
@@ -65,6 +81,7 @@ struct Workspace {
     locale: Cell<Locale>,
     /// What the page was asked to inspect by the action that runs or ran last.
     inspect_kind: Cell<i32>,
+    sign: RefCell<sign::State>,
 }
 
 thread_local! {
@@ -108,6 +125,7 @@ fn open_now(services: DesktopEngineServices) {
 
 fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
     let ui = WorkspaceWindow::new()?;
+    let settings_path = services.settings_path.clone();
     let locale = desktop_locale();
     // After the window exists: the bundled translations come with it.
     select_desktop_language(locale);
@@ -117,6 +135,7 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
     ui.on_start_inspect(|| with_open(start_inspect));
     ui.on_browse(|| with_open(browse));
     ui.on_cancel(|| with_open(cancel));
+    sign::connect(&ui);
     ui.window().on_close_requested(|| {
         close();
         CloseRequestResponse::HideWindow
@@ -128,8 +147,12 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
         poll: Timer::default(),
         locale: Cell::new(locale),
         inspect_kind: Cell::new(0),
+        sign: RefCell::new(sign::State::new(
+            oncl_desktop::Remembered::load(&settings_path).unwrap_or_default(),
+        )),
     });
-    OPEN.set(Some(workspace));
+    OPEN.set(Some(Rc::clone(&workspace)));
+    sign::render(&workspace);
     if let Err(e) = ui.show() {
         OPEN.set(None);
         return Err(e);
@@ -200,7 +223,7 @@ fn typed_path(text: slint::SharedString) -> String {
 fn start_hash(open: &Rc<Workspace>) {
     let path = typed_path(open.ui.get_hash_path());
     if path.is_empty() {
-        return reject(open, 1, &JobError::Input(MissingField::Path));
+        return reject(open, SECTION_HASH, &JobError::Input(MissingField::Path));
     }
     let index = open.ui.get_hash_algorithm();
     let alg = algorithm(index);
@@ -226,7 +249,7 @@ fn start_inspect(open: &Rc<Workspace>) {
         _ => None,
     };
     if let Some(problem) = problem {
-        return reject(open, 2, &JobError::Input(problem));
+        return reject(open, SECTION_INSPECT, &JobError::Input(problem));
     }
     let what = match kind {
         0 => Inspect::Certificate(path.into()),
@@ -272,6 +295,7 @@ fn start(
         match job {
             Job::Hash => t.hashing,
             Job::Inspect => t.inspecting,
+            Job::Sign => t.working,
         }
         .into(),
     );
@@ -308,7 +332,8 @@ fn show_progress(open: &Rc<Workspace>) {
     let Some((job, control)) = controller.running() else {
         return;
     };
-    if control.is_cancelled() {
+    // The signing page tells its own state; its documents are small and the user's pace rules.
+    if control.is_cancelled() || job == Job::Sign {
         return;
     }
     let t = Texts::of(open.locale.get());
@@ -359,6 +384,18 @@ fn settle(id: u64, result: Result<Output, JobError>) {
             ui.set_inspect_report(report(t, &out).into());
             done(ui, t.inspect_done);
         }
+        Settled::Done(_, Output::Sign(out)) => {
+            sign::settled(&open, Ok(out));
+            done(ui, t.ready);
+        }
+        Settled::Cancelled(Job::Sign) => {
+            sign::settled(&open, Err(JobError::Cancelled));
+            done(ui, t.ready);
+        }
+        Settled::Failed(Job::Sign, error) => {
+            sign::settled(&open, Err(error));
+            done(ui, t.ready);
+        }
         Settled::Cancelled(_) => {
             ui.set_status_kind(4);
             ui.set_status_text(t.cancelled.into());
@@ -366,8 +403,9 @@ fn settle(id: u64, result: Result<Output, JobError>) {
         }
         Settled::Failed(job, error) => {
             let section = match job {
-                Job::Hash => 1,
-                Job::Inspect => 2,
+                Job::Hash => SECTION_HASH,
+                Job::Inspect => SECTION_INSPECT,
+                Job::Sign => SECTION_SIGN,
             };
             reject(&open, section, &error);
         }
@@ -404,7 +442,7 @@ fn browse(open: &Rc<Workspace>) {
         };
         let path = file.path().display().to_string();
         with_open(|open| match section {
-            1 => open.ui.set_hash_path(path.into()),
+            SECTION_HASH => open.ui.set_hash_path(path.into()),
             _ => open.ui.set_inspect_path(path.into()),
         });
     });
@@ -420,6 +458,7 @@ struct Texts {
     ready: &'static str,
     hashing: &'static str,
     inspecting: &'static str,
+    working: &'static str,
     cancelling: &'static str,
     cancelled: &'static str,
     hash_done: &'static str,
@@ -486,6 +525,7 @@ static RU: Texts = Texts {
     ready: "Готово к работе",
     hashing: "Вычисление хеша…",
     inspecting: "Чтение…",
+    working: "Выполняется…",
     cancelling: "Отмена…",
     cancelled: "Отменено",
     hash_done: "Хеш вычислен",
@@ -539,6 +579,7 @@ static KK: Texts = Texts {
     ready: "Жұмысқа дайын",
     hashing: "Хешті есептеу…",
     inspecting: "Оқу…",
+    working: "Орындалуда…",
     cancelling: "Бас тарту…",
     cancelled: "Тоқтатылды",
     hash_done: "Хеш есептелді",
@@ -592,6 +633,7 @@ static EN: Texts = Texts {
     ready: "Ready",
     hashing: "Hashing…",
     inspecting: "Reading…",
+    working: "Working…",
     cancelling: "Cancelling…",
     cancelled: "Cancelled",
     hash_done: "Hash computed",

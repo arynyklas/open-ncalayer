@@ -188,6 +188,45 @@ fn main() -> ExitCode {
     }
 }
 
+/// What the signing checks trust besides the national authority, and their clock. Releases trust
+/// the national authority only and use the system clock; a test build (feature `e2e-prompter`)
+/// reads `ONCL_E2E_SIGNING_TRUST=<root certificate file>|<PKI origin>|<unix time>` for a synthetic
+/// authority on loopback.
+fn signing_trust() -> (
+    oncl_ui::ExtraTrust,
+    Arc<dyn Fn() -> OffsetDateTime + Send + Sync>,
+) {
+    #[cfg(feature = "e2e-prompter")]
+    if let Ok(spec) = std::env::var("ONCL_E2E_SIGNING_TRUST") {
+        let parts: Vec<&str> = spec.splitn(3, '|').collect();
+        if let [root, origin, at] = parts[..] {
+            let anchors = std::fs::read(root)
+                .ok()
+                .and_then(|der| oncl_pki::cert::parse(&der).ok())
+                .into_iter()
+                .collect();
+            let now = at
+                .parse()
+                .ok()
+                .and_then(|t| OffsetDateTime::from_unix_timestamp(t).ok());
+            if let Some(now) = now {
+                return (
+                    oncl_ui::ExtraTrust {
+                        anchors,
+                        origins: vec![origin.to_owned()],
+                    },
+                    Arc::new(move || now),
+                );
+            }
+        }
+        tracing::warn!("ONCL_E2E_SIGNING_TRUST is not usable; the national authority only");
+    }
+    (
+        oncl_ui::ExtraTrust::default(),
+        Arc::new(OffsetDateTime::now_utc),
+    )
+}
+
 /// `openncalayer tools`: the tools window of the copy that runs for this user and data
 /// directory, or, if none does, of a copy started now with a tray, as `run --allow-no-wss` (no
 /// certificate or a busy port does not stop it; it opens no listener the user did not
@@ -284,12 +323,20 @@ fn run(allow_no_wss: bool, with_tray: bool, show_tools: bool) -> ExitCode {
         Err(code) => return code,
     };
     tracing::info!("{}", cli::token_state(&tokens));
-    let workspace = match oncl_core::Engine::new(oncl_core::EngineServices::hash_only(
+    let (extra_trust, clock) = signing_trust();
+    let workspace = match oncl_ui::desktop_engine(
         oncl_ui::desktop_limits(),
-    )) {
-        Ok(engine) => oncl_ui::DesktopEngineServices {
+        Arc::clone(&http) as _,
+        extra_trust,
+        &daemon.paths.data.join("spool"),
+        Arc::clone(&clock),
+    ) {
+        Ok((engine, guard)) => oncl_ui::DesktopEngineServices {
             engine: Arc::new(engine),
+            guard,
             tokens: Arc::clone(&tokens),
+            clock,
+            settings_path: daemon.paths.settings(),
         },
         Err(e) => {
             tracing::error!(error = %e, "the engine of the tools window does not start");

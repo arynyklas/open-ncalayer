@@ -24,6 +24,7 @@ mod prompter;
 #[cfg(test)]
 mod screenshots;
 pub mod settings_view;
+pub mod signing;
 mod stop_original;
 pub mod tls_wizard;
 mod tray;
@@ -39,6 +40,7 @@ pub use install_plugin::{
 pub use plugins_view::{PluginActionError, PluginsServices, PluginsView, refresh_plugins_window};
 pub use prompter::{SlintPrompter, quit, run_event_loop, run_on_event_loop, when_event_loop_runs};
 pub use settings_view::SettingsServices;
+pub use signing::runner::{ConsentGuard, ExtraTrust, desktop_engine};
 pub use stop_original::{StopOriginal, Stopped, ask_stop_original};
 pub use tls_wizard::TlsWizardServices;
 pub use tray::{

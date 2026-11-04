@@ -389,6 +389,193 @@ pub fn set_autostart(path: &Path, on: bool) -> io::Result<()> {
     })
 }
 
+/// The most recent paths kept.
+pub const RECENT_FILES: usize = 10;
+/// The most favourite certificates kept.
+pub const FAVORITES: usize = 20;
+
+const RECENT_FILES_KEY: &str = "recentFiles";
+const FAVORITES_KEY: &str = "favoriteCertificates";
+
+/// What the signing window remembers for convenience: paths of recent documents and key
+/// stores, and certificates the user marked, each by the SHA-256 of its DER with a label.
+/// No password, PIN, key or document byte is ever part of it; a path or a certificate is
+/// checked again when used, the entry proves nothing about the file or the certificate.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Remembered {
+    /// Most recent first.
+    pub files: Vec<String>,
+    /// `(sha256 hex of the certificate, label)`, in the order they were marked.
+    pub favorites: Vec<(String, String)>,
+}
+
+impl Remembered {
+    /// The remembered entries of the settings file `path`; an entry not understood is
+    /// dropped, nothing is invented.
+    ///
+    /// # Errors
+    ///
+    /// As [`read`].
+    pub fn load(path: &Path) -> io::Result<Remembered> {
+        Ok(read(path)?
+            .map(|o| Remembered::from_object(&o))
+            .unwrap_or_default())
+    }
+
+    fn from_object(object: &Map<String, Value>) -> Remembered {
+        let files = object
+            .get(RECENT_FILES_KEY)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .take(RECENT_FILES)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let favorites = object
+            .get(FAVORITES_KEY)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| {
+                        let fingerprint = v.get("sha256")?.as_str()?;
+                        let valid = fingerprint.len() == 64
+                            && fingerprint.bytes().all(|b| b.is_ascii_hexdigit());
+                        let label = v.get("label")?.as_str()?;
+                        valid.then(|| (fingerprint.to_ascii_lowercase(), label.to_owned()))
+                    })
+                    .take(FAVORITES)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Remembered { files, favorites }
+    }
+
+    fn store(&self, object: &mut Map<String, Value>) {
+        if self.files.is_empty() {
+            object.remove(RECENT_FILES_KEY);
+        } else {
+            object.insert(
+                RECENT_FILES_KEY.to_owned(),
+                Value::Array(self.files.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        if self.favorites.is_empty() {
+            object.remove(FAVORITES_KEY);
+        } else {
+            object.insert(
+                FAVORITES_KEY.to_owned(),
+                Value::Array(
+                    self.favorites
+                        .iter()
+                        .map(|(sha256, label)| {
+                            serde_json::json!({ "sha256": sha256, "label": label })
+                        })
+                        .collect(),
+                ),
+            );
+        }
+    }
+
+    /// Puts `file` first, once, and keeps [`RECENT_FILES`].
+    pub fn remember_file(&mut self, file: &str) {
+        self.files.retain(|f| f != file);
+        self.files.insert(0, file.to_owned());
+        self.files.truncate(RECENT_FILES);
+    }
+
+    /// Marks the certificate `sha256` (hex) with `label`, or unmarks it if it is marked;
+    /// whether it is marked now. A full list refuses a new mark (`None`).
+    pub fn toggle_favorite(&mut self, sha256: &str, label: &str) -> Option<bool> {
+        let sha256 = sha256.to_ascii_lowercase();
+        if let Some(at) = self.favorites.iter().position(|(f, _)| *f == sha256) {
+            self.favorites.remove(at);
+            return Some(false);
+        }
+        if self.favorites.len() >= FAVORITES {
+            return None;
+        }
+        self.favorites.push((sha256, label.to_owned()));
+        Some(true)
+    }
+
+    /// Whether the certificate `sha256` (hex) is marked.
+    pub fn is_favorite(&self, sha256: &str) -> bool {
+        self.favorites
+            .iter()
+            .any(|(f, _)| f.eq_ignore_ascii_case(sha256))
+    }
+
+    /// Writes the entries into the file `path`, keeping every other key ([`update`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`update`].
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        update(path, |object| self.store(object))
+    }
+
+    /// Forgets every remembered file and favourite in the file `path`; other keys stay.
+    ///
+    /// # Errors
+    ///
+    /// As [`update`].
+    pub fn clear(path: &Path) -> io::Result<()> {
+        Remembered::default().save(path)
+    }
+}
+
+#[cfg(test)]
+mod remembered_tests {
+    use super::*;
+
+    #[test]
+    fn remembered_entries_keep_unknown_keys_and_clear_removes_only_themselves() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("settings.json");
+        std::fs::write(&f, r#"{"recentPath":"k.p12","future":{"a":[1]}}"#).unwrap();
+        let mut r = Remembered::load(&f).unwrap();
+        r.remember_file("a.pdf");
+        r.remember_file("b.pdf");
+        r.remember_file("a.pdf");
+        assert_eq!(r.toggle_favorite(&"AB".repeat(32), "My key"), Some(true));
+        r.save(&f).unwrap();
+        let back = Remembered::load(&f).unwrap();
+        assert_eq!(back.files, ["a.pdf", "b.pdf"]);
+        assert!(back.is_favorite(&"ab".repeat(32)));
+        let raw: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+        assert_eq!(raw["recentPath"], "k.p12");
+        assert_eq!(raw["future"]["a"][0], 1);
+        Remembered::clear(&f).unwrap();
+        let raw: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+        assert!(raw.get(RECENT_FILES_KEY).is_none() && raw.get(FAVORITES_KEY).is_none());
+        assert_eq!(raw["recentPath"], "k.p12");
+        assert_eq!(raw["future"]["a"][0], 1);
+    }
+
+    #[test]
+    fn the_lists_are_bounded_and_garbage_entries_are_dropped() {
+        let mut r = Remembered::default();
+        for i in 0..(RECENT_FILES + 5) {
+            r.remember_file(&format!("f{i}"));
+        }
+        assert_eq!(r.files.len(), RECENT_FILES);
+        assert_eq!(r.files[0], format!("f{}", RECENT_FILES + 4));
+        for i in 0..FAVORITES {
+            assert_eq!(r.toggle_favorite(&format!("{i:064x}"), "x"), Some(true));
+        }
+        assert_eq!(r.toggle_favorite(&"f".repeat(64), "x"), None);
+        let object: Map<String, Value> = serde_json::from_str(
+            r#"{"favoriteCertificates":[{"sha256":"zz","label":"bad"},{"sha256":"00","label":"short"},5],"recentFiles":[1,"ok"]}"#,
+        )
+        .unwrap();
+        let loaded = Remembered::from_object(&object);
+        assert!(loaded.favorites.is_empty());
+        assert_eq!(loaded.files, ["ok"]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,6 +2,7 @@
 // line under all of them that shows what runs, how far it is, and how it ended. The pages' texts
 // of results and errors are composed in Rust.
 
+import { SigningPage } from "signing.slint";
 import { Button, ComboBox, LineEdit, Palette, ProgressIndicator, ScrollView, StandardListView, TextEdit } from "std-widgets.slint";
 
 // A label above a field.
@@ -22,7 +23,7 @@ export component WorkspaceWindow inherits Window {
     preferred-width: 900px;
     preferred-height: 580px;
 
-    // 0: overview, 1: hash, 2: inspect.
+    // 0: overview, 1: sign, 2: hash, 3: inspect.
     in-out property <int> section;
 
     in-out property <string> hash-path;
@@ -76,8 +77,8 @@ export component WorkspaceWindow inherits Window {
                         x: 8px;
                         y: 8px;
                         width: parent.width - 16px;
-                        height: 3 * 40px + 8px;
-                        model: [{ text: @tr("Overview") }, { text: @tr("Hash") }, { text: @tr("Inspect") }];
+                        height: 4 * 40px + 8px;
+                        model: [{ text: @tr("Overview") }, { text: @tr("Sign") }, { text: @tr("Hash") }, { text: @tr("Inspect") }];
                         current-item <=> root.section;
                     }
                 }
@@ -107,7 +108,7 @@ export component WorkspaceWindow inherits Window {
                             }
 
                             Text {
-                                text: @tr("Hash: the digest of a file of up to 10 GiB, read in pieces; there is no time limit, Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Neither uses a private key.");
+                                text: @tr("Sign: sign documents with a key store file; you see exactly what is signed and with which certificate, then confirm. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no time limit, Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Hash and Inspect use no private key.");
                                 wrap: word-wrap;
                             }
 
@@ -115,7 +116,7 @@ export component WorkspaceWindow inherits Window {
                                 spacing: 8px;
                                 alignment: start;
                                 Button {
-                                    text: @tr("Hash a file");
+                                    text: @tr("Sign documents");
                                     primary: true;
                                     clicked => {
                                         root.section = 1;
@@ -123,14 +124,22 @@ export component WorkspaceWindow inherits Window {
                                 }
 
                                 Button {
-                                    text: @tr("Inspect");
+                                    text: @tr("Hash a file");
                                     clicked => {
                                         root.section = 2;
                                     }
                                 }
+
+                                Button {
+                                    text: @tr("Inspect");
+                                    clicked => {
+                                        root.section = 3;
+                                    }
+                                }
                             }
                         }
-                        if root.section == 1: VerticalLayout {
+                        if root.section == 1: SigningPage { }
+                        if root.section == 2: VerticalLayout {
                             spacing: 8px;
                             Text {
                                 text: @tr("Hash a file");
@@ -174,7 +183,7 @@ export component WorkspaceWindow inherits Window {
                                 current-index <=> root.hash-algorithm;
                             }
 
-                            if root.error-section == 1 && root.error-text != "": PageError {
+                            if root.error-section == 2 && root.error-text != "": PageError {
                                 text: root.error-text;
                             }
                             HorizontalLayout {
@@ -207,7 +216,7 @@ export component WorkspaceWindow inherits Window {
                                 }
                             }
                         }
-                        if root.section == 2: VerticalLayout {
+                        if root.section == 3: VerticalLayout {
                             spacing: 8px;
                             Text {
                                 text: @tr("Inspect");
@@ -280,7 +289,7 @@ export component WorkspaceWindow inherits Window {
                                     }
                                 }
                             }
-                            if root.error-section == 2 && root.error-text != "": PageError {
+                            if root.error-section == 3 && root.error-text != "": PageError {
                                 text: root.error-text;
                             }
                             HorizontalLayout {

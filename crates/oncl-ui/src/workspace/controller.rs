@@ -18,6 +18,8 @@ use oncl_pki::resource::{OperationControl, ProcessingError, Progress};
 pub(crate) enum Job {
     Hash,
     Inspect,
+    /// A step of the signing page: freezing a document, opening a key store, signing.
+    Sign,
 }
 
 /// Why an operation did not complete.

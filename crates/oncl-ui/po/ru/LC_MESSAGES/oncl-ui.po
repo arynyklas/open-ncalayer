@@ -368,9 +368,6 @@ msgstr "Инструменты"
 msgid "This window opens when you ask for it: from the tray menu or with «openncalayer tools». Sites that ask for a signature get their own window and do not open this one."
 msgstr "Это окно открывается по вашей просьбе: из меню в области уведомлений или командой «openncalayer tools». Сайты, которые просят подпись, получают своё окно и это не открывают."
 
-msgid "Hash: the digest of a file of up to 10 GiB, read in pieces; there is no time limit, Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Neither uses a private key."
-msgstr "Хеш: значение хеша файла размером до 10 ГиБ, читаемого по частям; ограничения по времени нет, остановить можно кнопкой «Отмена». Сведения: открытые данные сертификата, файла подписи, хранилища ключей или подключённых токенов. Закрытый ключ не используется ни там, ни там."
-
 msgid "Hash a file"
 msgstr "Хеш файла"
 
@@ -418,3 +415,51 @@ msgstr "ГОСТ Р 34.11-94"
 
 msgid "GOST R 34.11-2012 (512)"
 msgstr "ГОСТ Р 34.11-2012 (512)"
+
+msgid "Sign documents"
+msgstr "Подписать документы"
+
+msgid "Documents to sign"
+msgstr "Документы для подписи"
+
+msgid "Add"
+msgstr "Добавить"
+
+msgid "Recent"
+msgstr "Недавние"
+
+msgid "Forget recent"
+msgstr "Забыть недавние"
+
+msgid "Continue"
+msgstr "Далее"
+
+msgid "Clear documents"
+msgstr "Очистить документы"
+
+msgid "Password of the key store"
+msgstr "Пароль хранилища ключей"
+
+msgid "Open key store"
+msgstr "Открыть хранилище"
+
+msgid "Back"
+msgstr "Назад"
+
+msgid "Choose the certificate"
+msgstr "Выберите сертификат"
+
+msgid "Show the confirmation"
+msgstr "Показать подтверждение"
+
+msgid "Documents (names are as given, not checked)"
+msgstr "Документы (имена как заданы, не проверялись)"
+
+msgid "Result"
+msgstr "Результат"
+
+msgid "New signing"
+msgstr "Новая подпись"
+
+msgid "Sign: sign documents with a key store file; you see exactly what is signed and with which certificate, then confirm. Hash: the digest of a file of up to 10 GiB, read in pieces; there is no time limit, Cancel stops it. Inspect: the public details of a certificate, a signature file, a key store or the tokens plugged in. Hash and Inspect use no private key."
+msgstr "Подпись: подписать документы файлом хранилища ключей; вы видите, что именно подписывается и каким сертификатом, и затем подтверждаете. Хеш: значение хеша файла размером до 10 ГиБ, читаемого по частям; ограничения по времени нет, остановить можно кнопкой «Отмена». Сведения: открытые данные сертификата, файла подписи, хранилища ключей или подключённых токенов. Хеш и сведения не используют закрытый ключ."
