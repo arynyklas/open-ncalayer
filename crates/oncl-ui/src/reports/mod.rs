@@ -196,10 +196,22 @@ fn item_rows(t: &Texts, family: Family, item: &ItemView, rows: &mut Vec<Row>) {
                 }
             }
             Detail::Verified(v) => {
+                // A token whose signature is good but whose claims fail is not «a bad
+                // signature»: it says which of the two it is.
+                let claims_only = v.verdict == Verdict::Invalid
+                    && v.claims
+                        .as_ref()
+                        .is_some_and(|c| c.verdict != Verdict::Valid)
+                    && !v.signers.is_empty()
+                    && v.signers.iter().all(|s| s.verdict == Verdict::Valid);
                 rows.push(Row {
                     depth: 0,
                     tone,
-                    text: format!("{}: {}", item.name, verdict_word(t, v.verdict)),
+                    text: if claims_only {
+                        t.token_claims_failed.replace("{0}", &item.name)
+                    } else {
+                        format!("{}: {}", item.name, verdict_word(t, v.verdict))
+                    },
                     detail: policy_line(t, v.policy, v.checked_at, v.level),
                 });
                 verification_rows(t, v, rows);
@@ -311,7 +323,7 @@ fn verification_rows(t: &Texts, v: &VerificationView, rows: &mut Vec<Row>) {
         rows.push(Row {
             depth: 1,
             tone: verdict_tone(claims.verdict),
-            text: t.claims.replace("{0}", verdict_word(t, claims.verdict)),
+            text: t.claims.replace("{0}", claims_word(t, claims.verdict)),
             detail: String::new(),
         });
         for failure in &claims.failures {
@@ -483,6 +495,14 @@ fn note_text(t: &Texts, note: &Note) -> String {
     }
 }
 
+fn claims_word(t: &Texts, verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Valid => t.claims_ok,
+        Verdict::Invalid => t.claims_bad,
+        Verdict::Indeterminate => t.claims_unsure,
+    }
+}
+
 fn claims_failure(t: &Texts, failure: ClaimsFailure) -> &'static str {
     match failure {
         ClaimsFailure::MissingExpiration => t.claim_no_exp,
@@ -647,6 +667,10 @@ struct Texts {
     algorithm: &'static str,
     signer: &'static str,
     claims: &'static str,
+    claims_ok: &'static str,
+    claims_bad: &'static str,
+    claims_unsure: &'static str,
+    token_claims_failed: &'static str,
     basis_current: &'static str,
     basis_timestamp: &'static str,
     basis_claimed: &'static str,
@@ -769,6 +793,10 @@ static RU: Texts = Texts {
     algorithm: "алгоритм {0}",
     signer: "Подписант {0}: {1}",
     claims: "Утверждения JWT: {0}",
+    claims_ok: "выполняются",
+    claims_bad: "не выполняются",
+    claims_unsure: "не удалось полностью проверить",
+    token_claims_failed: "{0}: подпись действительна, но утверждения токена не выполняются",
     basis_current: "время проверки: сейчас ({0})",
     basis_timestamp: "время: по подтверждённой метке ({0})",
     basis_claimed: "время: только заявленное подписантом ({0}), не доказано",
@@ -881,6 +909,10 @@ static KK: Texts = Texts {
     algorithm: "алгоритм {0}",
     signer: "Қол қоюшы {0}: {1}",
     claims: "JWT мәлімдемелері: {0}",
+    claims_ok: "орындалады",
+    claims_bad: "орындалмайды",
+    claims_unsure: "толық тексеру мүмкін болмады",
+    token_claims_failed: "{0}: қолтаңба жарамды, бірақ токен мәлімдемелері орындалмайды",
     basis_current: "тексеру уақыты: қазір ({0})",
     basis_timestamp: "уақыты: расталған белгі бойынша ({0})",
     basis_claimed: "уақыты: тек қол қоюшы мәлімдеген ({0}), дәлелденбеген",
@@ -993,6 +1025,10 @@ static EN: Texts = Texts {
     algorithm: "algorithm {0}",
     signer: "Signer {0}: {1}",
     claims: "JWT claims: {0}",
+    claims_ok: "hold",
+    claims_bad: "do not hold",
+    claims_unsure: "could not be fully checked",
+    token_claims_failed: "{0}: the signature is valid, but the token's claims do not hold",
     basis_current: "time of the check: now ({0})",
     basis_timestamp: "time: by a verified timestamp ({0})",
     basis_claimed: "time: only as claimed by the signer ({0}), not proven",

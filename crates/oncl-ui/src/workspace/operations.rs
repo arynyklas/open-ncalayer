@@ -2180,4 +2180,345 @@ mod tests {
         assert_eq!(guard.applications(), 1, "the key was applied once");
         assert!(out.is_empty(), "nothing was produced");
     }
+
+    fn render_en(view: &BatchView) -> crate::reports::Rendered {
+        crate::reports::render(oncl_flows::Locale::En, view)
+    }
+
+    fn sign_one(name: &str, w: &World, spec: &SignSpec, path: &Path) {
+        let (view, applications) = signed(name, w, spec, std::slice::from_ref(&path.to_owned()));
+        assert_eq!(applications, 1, "{name}");
+        assert_eq!(
+            view.headline(),
+            Headline::AllSucceeded { total: 1 },
+            "{name}"
+        );
+    }
+
+    /// JWT claims through the report: a token whose signature is good but whose claims fail
+    /// (the wrong issuer, the wrong audience, an expired token) is Invalid, styled as a
+    /// failure, and says WHICH of the two it is; the signature itself is not called invalid.
+    #[test]
+    fn jwt_claim_failures_are_shown_as_claims_not_as_a_bad_signature() {
+        let w = world();
+        let claims = write(
+            &w,
+            "claims.json",
+            b"{\"iss\":\"issuer\",\"aud\":\"audience\",\"exp\":1893456000}",
+        );
+        sign_one("jwt", &w, &spec(SignFormat::Jwt), &claims);
+        let token = w.dir.path().join("claims.json.jwt");
+        let check = |issuer: &str, audience: &str, path: &Path| {
+            verify(
+                &w,
+                &ToolSpec::Verify(
+                    VerifyFormat::Jwt,
+                    VerifyOptions {
+                        issuer: issuer.into(),
+                        audience: audience.into(),
+                        ..VerifyOptions::default()
+                    },
+                ),
+                &[Document {
+                    path: path.to_owned(),
+                    second: None,
+                }],
+            )
+            .unwrap()
+        };
+        let ok = check("issuer", "audience", &token);
+        assert_eq!(verdicts(&ok), vec![Verdict::Valid]);
+        assert!(
+            render_en(&ok)
+                .rows
+                .iter()
+                .any(|r| r.text == "JWT claims: hold")
+        );
+        for (issuer, audience, reason) in [
+            ("other", "audience", "the issuer is not the expected one"),
+            ("issuer", "other", "the audience is not the expected one"),
+        ] {
+            let view = check(issuer, audience, &token);
+            assert_eq!(
+                verdicts(&view),
+                vec![Verdict::Invalid],
+                "{issuer}/{audience}"
+            );
+            assert_eq!(view.tone(), Tone::Failure);
+            let rendered = render_en(&view);
+            let texts: Vec<&str> = rendered.rows.iter().map(|r| r.text.as_str()).collect();
+            assert!(
+                texts[0].contains("signature is valid, but the token's claims do not hold"),
+                "{texts:?}"
+            );
+            assert!(!texts[0].contains("signature is invalid"), "{texts:?}");
+            assert!(texts.contains(&"JWT claims: do not hold"), "{texts:?}");
+            assert!(texts.contains(&reason), "{texts:?}");
+            assert!(
+                texts
+                    .iter()
+                    .any(|t| t.starts_with("Signer 1: the signature is valid"))
+            );
+        }
+        let expired = write(
+            &w,
+            "old.json",
+            b"{\"iss\":\"issuer\",\"aud\":\"audience\",\"exp\":1700000000}",
+        );
+        sign_one("jwt-expired", &w, &spec(SignFormat::Jwt), &expired);
+        let view = check("issuer", "audience", &w.dir.path().join("old.json.jwt"));
+        assert_eq!(verdicts(&view), vec![Verdict::Invalid]);
+        assert!(
+            render_en(&view)
+                .rows
+                .iter()
+                .any(|r| r.text == "the token has expired")
+        );
+        // The same words in the other two languages (the claim failure is not left in English).
+        for locale in [oncl_flows::Locale::Ru, oncl_flows::Locale::Kk] {
+            let rendered = crate::reports::render(locale, &view);
+            assert!(
+                rendered
+                    .rows
+                    .iter()
+                    .all(|r| !r.text.contains("the token has expired")),
+                "{locale:?}"
+            );
+        }
+    }
+
+    /// WS-Security with «a timestamp is required»: a message signed without one is not Valid
+    /// (the SDK refuses it as an unfit file, which the page shows as a failure, never as
+    /// success), while the same message without the requirement is Valid.
+    #[test]
+    fn a_required_wsse_timestamp_that_is_missing_is_never_success() {
+        let w = world();
+        let soap = write(&w, "s.xml", SOAP);
+        sign_one("wsse", &w, &spec(SignFormat::Wsse), &soap);
+        let signed_message = w.dir.path().join("s.signed.xml");
+        let document = Document {
+            path: signed_message,
+            second: None,
+        };
+        let plain = verify(
+            &w,
+            &ToolSpec::Verify(VerifyFormat::Wsse, VerifyOptions::default()),
+            std::slice::from_ref(&document),
+        )
+        .unwrap();
+        assert_eq!(verdicts(&plain), vec![Verdict::Valid]);
+        let required = verify(
+            &w,
+            &ToolSpec::Verify(
+                VerifyFormat::Wsse,
+                VerifyOptions {
+                    timestamp_required: true,
+                    ..VerifyOptions::default()
+                },
+            ),
+            &[document],
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                required.items[0].outcome,
+                Outcome::Failed(ErrorCode::InvalidInput)
+            ),
+            "{:?}",
+            required.items[0]
+        );
+        assert_ne!(required.tone(), Tone::Success);
+        assert!(matches!(
+            required.headline(),
+            Headline::Partial {
+                completed: 0,
+                total: 1
+            }
+        ));
+    }
+
+    /// XML in Kalkan mode: the document the engine signed verifies in both modes, each with its
+    /// own request, and a tampered document is Invalid in Kalkan mode too.
+    #[test]
+    fn xml_kalkan_mode_verifies_and_still_catches_tampering() {
+        let w = world();
+        let xml = write(&w, "x.xml", XML);
+        sign_one(
+            "xml",
+            &w,
+            &SignSpec {
+                format: SignFormat::Xml,
+                options: xml_ids(),
+            },
+            &xml,
+        );
+        let path = w.dir.path().join("x.signed.xml");
+        for format in [VerifyFormat::Xml, VerifyFormat::XmlKalkan] {
+            let view = verify(
+                &w,
+                &ToolSpec::Verify(format, VerifyOptions::default()),
+                &[Document {
+                    path: path.clone(),
+                    second: None,
+                }],
+            )
+            .unwrap();
+            assert_eq!(verdicts(&view), vec![Verdict::Valid], "{format:?}");
+        }
+        let tampered = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("protected", "changed!!");
+        let tampered_path = w.dir.path().join("t.signed.xml");
+        std::fs::write(&tampered_path, tampered).unwrap();
+        let view = verify(
+            &w,
+            &ToolSpec::Verify(VerifyFormat::XmlKalkan, VerifyOptions::default()),
+            &[Document {
+                path: tampered_path,
+                second: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(verdicts(&view), vec![Verdict::Invalid]);
+        assert_eq!(view.tone(), Tone::Failure);
+        assert!(
+            render_en(&view)
+                .rows
+                .iter()
+                .any(|r| r.text.contains("digest does not match")),
+            "{:?}",
+            render_en(&view).rows
+        );
+    }
+
+    /// PDF: a document signed twice shows both signatures and, for the first revision, the note
+    /// that the file was changed after it (a caution), and for the last that it was not; a file
+    /// with bytes appended after the signature is not recognised (never a quiet success).
+    #[test]
+    fn a_pdf_signed_twice_says_the_first_revision_was_changed_after_signing() {
+        let w = world();
+        let pdf = pdf(&w);
+        sign_one("pdf", &w, &spec(SignFormat::Pdf), &pdf);
+        let once = w.dir.path().join("doc.signed.pdf");
+        let single = verify(
+            &w,
+            &ToolSpec::Verify(VerifyFormat::Pdf, VerifyOptions::default()),
+            &[Document {
+                path: once.clone(),
+                second: None,
+            }],
+        )
+        .unwrap();
+        assert!(
+            render_en(&single)
+                .rows
+                .iter()
+                .any(|r| r.text
+                    == "Revision 1 (1 signature(s)): the file was not changed after signing"),
+            "{:?}",
+            render_en(&single).rows
+        );
+        sign_one("pdf-2", &w, &spec(SignFormat::Pdf), &once);
+        let twice = w.dir.path().join("doc.signed.signed.pdf");
+        let view = verify(
+            &w,
+            &ToolSpec::Verify(VerifyFormat::Pdf, VerifyOptions::default()),
+            &[Document {
+                path: twice,
+                second: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(verdicts(&view), vec![Verdict::Valid]);
+        let rendered = render_en(&view);
+        let revision = |n: u32| {
+            rendered
+                .rows
+                .iter()
+                .find(|r| r.text.starts_with(&format!("Revision {n} ")))
+                .unwrap_or_else(|| panic!("revision {n}: {:?}", rendered.rows))
+        };
+        assert_eq!(
+            revision(1).text,
+            "Revision 1 (1 signature(s)): the file was changed after signing"
+        );
+        assert_eq!(revision(1).tone, Tone::Caution);
+        assert_eq!(
+            revision(2).text,
+            "Revision 2 (1 signature(s)): the file was not changed after signing"
+        );
+        assert!(
+            rendered
+                .rows
+                .iter()
+                .any(|r| r.text == "Signer 2: the signature is valid")
+        );
+        let mut bytes = std::fs::read(&once).unwrap();
+        bytes.extend_from_slice(b"\n% appended after signing\n");
+        let appended = w.dir.path().join("appended.pdf");
+        std::fs::write(&appended, bytes).unwrap();
+        let refused = verify(
+            &w,
+            &ToolSpec::Verify(VerifyFormat::Pdf, VerifyOptions::default()),
+            &[Document {
+                path: appended,
+                second: None,
+            }],
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                refused.items[0].outcome,
+                Outcome::Failed(ErrorCode::InvalidInput)
+            ),
+            "{:?}",
+            refused.items[0]
+        );
+        assert_ne!(refused.tone(), Tone::Success);
+    }
+
+    /// The consent binds what is made: every option, and the evidence files, change the label
+    /// the consent is bound to, and equal choices give equal labels.
+    #[test]
+    fn the_consent_label_binds_every_option_and_the_evidence_files() {
+        let base = SignSpec {
+            format: SignFormat::Cades(Level::Lt),
+            options: SignOptions::default(),
+        };
+        let with = |f: &dyn Fn(&mut SignOptions)| {
+            let mut spec = base.clone();
+            f(&mut spec.options);
+            spec.label()
+        };
+        assert_eq!(base.label(), base.clone().label());
+        let variants = [
+            with(&|o| o.attached = true),
+            with(&|o| o.add = true),
+            with(&|o| o.target = "t".into()),
+            with(&|o| o.parent = "p".into()),
+            with(&|o| o.signature_id = "i".into()),
+            with(&|o| o.evidence.certificates = vec![PathBuf::from("c.der")]),
+            with(&|o| o.evidence.ocsp = vec![PathBuf::from("o.ocsp")]),
+            with(&|o| o.evidence.crls = vec![PathBuf::from("r.crl")]),
+        ];
+        let mut seen = std::collections::BTreeSet::from([base.label()]);
+        for label in variants {
+            assert!(
+                seen.insert(label.clone()),
+                "two choices share the label {label}"
+            );
+        }
+        for other in [
+            SignFormat::Cades(Level::Lta),
+            SignFormat::Cms,
+            SignFormat::Pades(Level::Lt),
+        ] {
+            let label = SignSpec {
+                format: other,
+                options: SignOptions::default(),
+            }
+            .label();
+            assert!(seen.insert(label.clone()), "{label}");
+        }
+    }
 }

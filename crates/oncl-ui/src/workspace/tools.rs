@@ -49,7 +49,9 @@ impl Tool {
 /// The pages' state on the event loop: the documents of each tool.
 #[derive(Default)]
 pub(super) struct State {
-    docs: [Vec<Document>; 4],
+    /// One list per tool (verify, extend, extract, timestamp) and one for checking time stamps,
+    /// which takes tokens and not the documents getting one.
+    docs: [Vec<Document>; 5],
     /// The tool whose page is shown.
     tool: Option<usize>,
 }
@@ -72,6 +74,16 @@ fn texts(open: &Rc<Workspace>) -> &'static ToolTexts {
 
 fn current(open: &Rc<Workspace>) -> Option<Tool> {
     Tool::of_section(open.ui.get_section())
+}
+
+/// Which list of documents the page works on: the tool's own; checking a time stamp has its own,
+/// so that the files to be stamped are not checked as tokens.
+fn slot(open: &Rc<Workspace>) -> usize {
+    match current(open) {
+        Some(Tool::Timestamp) if open.ui.global::<ToolState>().get_format_index() == 1 => 4,
+        Some(tool) => tool as usize,
+        None => 0,
+    }
 }
 
 /// The sidebar picked a page: if it is one of these, its fields start from their defaults and
@@ -217,7 +229,7 @@ pub(super) fn render(open: &Rc<Workspace>) {
         }
         .into(),
     );
-    let docs = &open.tools.borrow().docs[i];
+    let docs = &open.tools.borrow().docs[slot(open)];
     ui.set_docs(ModelRc::new(VecModel::from(
         docs.iter()
             .map(|d| StandardListViewItem::from(doc_line(open.locale.get(), d).as_str()))
@@ -241,9 +253,9 @@ fn error(open: &Rc<Workspace>, error: &JobError) {
 }
 
 fn add_doc(open: &Rc<Workspace>) {
-    let Some(tool) = current(open) else {
+    if current(open).is_none() {
         return;
-    };
+    }
     if open.ui.get_busy() {
         return;
     }
@@ -267,7 +279,7 @@ fn add_doc(open: &Rc<Workspace>) {
     }
     {
         let mut state = open.tools.borrow_mut();
-        let docs = &mut state.docs[tool as usize];
+        let docs = &mut state.docs[slot(open)];
         if docs.len() >= MAX_DOCUMENTS {
             drop(state);
             return error(open, &JobError::Operation(oncl_core::ErrorCode::InputLimit));
@@ -286,8 +298,9 @@ fn clear_docs(open: &Rc<Workspace>) {
     if open.ui.get_busy() {
         return;
     }
-    if let Some(tool) = current(open) {
-        open.tools.borrow_mut().docs[tool as usize].clear();
+    if current(open).is_some() {
+        let at = slot(open);
+        open.tools.borrow_mut().docs[at].clear();
     }
     clear_report(open);
     render(open);
@@ -449,9 +462,9 @@ fn read_choice(open: &Rc<Workspace>) -> Result<(ToolSpec, Destination), JobError
 }
 
 fn run(open: &Rc<Workspace>) {
-    let Some(tool) = current(open) else {
+    if current(open).is_none() {
         return;
-    };
+    }
     if open.ui.get_busy() {
         return;
     }
@@ -459,7 +472,7 @@ fn run(open: &Rc<Workspace>) {
         Ok(choice) => choice,
         Err(e) => return error(open, &e),
     };
-    let documents = open.tools.borrow().docs[tool as usize].clone();
+    let documents = open.tools.borrow().docs[slot(open)].clone();
     if documents.is_empty() {
         return error(open, &JobError::Input(MissingField::Path));
     }
@@ -735,3 +748,665 @@ static EN: ToolTexts = ToolTexts {
     act_stamp: "Get a time stamp",
     act_stamp_check: "Check the time stamp",
 };
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use std::path::Path;
+
+    use oncl_token::Tokens;
+    use slint::Model as _;
+
+    use super::*;
+    use crate::reports::controller::Tone;
+    use crate::signing::testing::*;
+    use crate::workspace::{
+        DesktopEngineServices, Evidence, SignFormat, SignOptions, SignSpec, pump, test_workspace,
+    };
+
+    /// The sections of the sidebar, as the page's callback gets them.
+    const VERIFY: i32 = 2;
+    const EXTEND: i32 = 3;
+    const EXTRACT: i32 = 4;
+    const TIMESTAMP: i32 = 5;
+
+    struct Page {
+        w: World,
+        ws: Rc<Workspace>,
+    }
+
+    fn page() -> Page {
+        let w = world();
+        let (engine, guard) = engine(&w);
+        let services = DesktopEngineServices {
+            engine: std::sync::Arc::new(engine),
+            guard,
+            tokens: Tokens::disabled(),
+            clock: std::sync::Arc::new(now),
+            settings_path: w.dir.path().join("settings.json"),
+        };
+        Page {
+            ws: test_workspace(services),
+            w,
+        }
+    }
+
+    fn tool(p: &Page) -> ToolState<'_> {
+        p.ws.ui.global::<ToolState>()
+    }
+
+    /// The sidebar picks `section`: the window's own property and callback, then the page's
+    /// fields start from their defaults.
+    fn select(p: &Page, section: i32) {
+        p.ws.ui.set_section(section);
+        p.ws.ui.invoke_section_changed(section);
+    }
+
+    fn until(what: &str, mut ready: impl FnMut() -> bool) {
+        let start = Instant::now();
+        loop {
+            pump();
+            if ready() {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "timed out: {what}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Adds a document through the page's own fields and button.
+    fn add(p: &Page, path: &Path, second: Option<&Path>) {
+        let t = tool(p);
+        t.set_doc_path(path.display().to_string().into());
+        if let Some(second) = second {
+            assert!(t.get_show_second(), "the page asks for the second file");
+            t.set_second_path(second.display().to_string().into());
+        }
+        t.invoke_add_doc();
+    }
+
+    /// Presses the action button and waits for the run to end.
+    fn run_page(p: &Page) {
+        tool(p).invoke_run();
+        until("the run ends", || !p.ws.ui.get_busy());
+    }
+
+    fn rows(p: &Page) -> Vec<String> {
+        tool(p)
+            .get_report_rows()
+            .iter()
+            .map(|r| r.text.to_string())
+            .collect()
+    }
+
+    fn sign_cms(p: &Page, name: &str, content: &[u8]) -> (PathBuf, PathBuf) {
+        let document = p.w.dir.path().join(name);
+        std::fs::write(&document, content).unwrap();
+        let (engine, guard) = engine(&p.w);
+        let outcome = sign_confirmed(
+            &engine,
+            &guard,
+            &p.w,
+            std::slice::from_ref(&document),
+            &SignSpec {
+                format: SignFormat::Cms,
+                options: SignOptions::default(),
+            },
+            &Destination::Beside,
+        );
+        assert!(matches!(outcome, crate::signing::runner::Outcome::Done(_)));
+        let signature = p.w.dir.path().join(format!("{name}.p7s"));
+        (document, signature)
+    }
+
+    /// The verify page, driven by its callbacks: a valid detached CMS is a success report, the
+    /// banner, the document row and every check are there, the status line says done.
+    #[test]
+    fn the_verify_page_reports_a_valid_signature_as_success() {
+        let p = page();
+        let (document, signature) = sign_cms(&p, "a.txt", b"the document");
+        select(&p, VERIFY);
+        assert_eq!(tool(&p).get_title().as_str(), "Verify signatures");
+        assert!(
+            tool(&p).get_show_second(),
+            "CMS verification takes the signed data"
+        );
+        add(&p, &signature, Some(&document));
+        assert_eq!(tool(&p).get_docs().row_count(), 1);
+        run_page(&p);
+        let t = tool(&p);
+        assert_eq!(t.get_report_tone(), 0, "{}", t.get_report_headline());
+        assert!(t.get_report_headline().contains("every signature is valid"));
+        let rows = rows(&p);
+        assert!(
+            rows[0].contains("a.txt.p7s: the signature is valid"),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|r| r == "Revocation: passed"), "{rows:?}");
+        assert_eq!(p.ws.ui.get_status_kind(), 2, "the status line says done");
+        assert_eq!(p.ws.ui.get_error_text().as_str(), "");
+    }
+
+    /// Without the network the verdict is only «not fully checked»: the page styles it as a
+    /// caution, never as done, and says why.
+    #[test]
+    fn an_offline_verification_is_a_caution_on_the_page_not_a_success() {
+        let p = page();
+        let (document, signature) = sign_cms(&p, "a.txt", b"the document");
+        select(&p, VERIFY);
+        add(&p, &signature, Some(&document));
+        tool(&p).set_flag1(true);
+        run_page(&p);
+        let t = tool(&p);
+        assert_eq!(t.get_report_tone(), 1, "{}", t.get_report_headline());
+        assert!(!t.get_report_headline().contains("every signature is valid"));
+        assert!(
+            rows(&p)
+                .iter()
+                .any(|r| r.contains("could not be fully checked")),
+            "{:?}",
+            rows(&p)
+        );
+        assert_eq!(p.ws.ui.get_status_kind(), 4, "a caution, not done");
+    }
+
+    /// A batch of three documents: a valid one, one verified against the wrong data, and one
+    /// that disappears before the run. Each document has its own row, the banner is not «all
+    /// valid», and the run itself worked (no error line).
+    #[test]
+    fn a_batch_with_bad_documents_shows_each_result_and_is_not_all_valid() {
+        let p = page();
+        let (document, signature) = sign_cms(&p, "a.txt", b"the document");
+        let (_, other_signature) = sign_cms(&p, "b.txt", b"another document");
+        let vanishing = p.w.dir.path().join("vanishing.p7s");
+        std::fs::copy(&signature, &vanishing).unwrap();
+        select(&p, VERIFY);
+        add(&p, &signature, Some(&document));
+        add(&p, &other_signature, Some(&document));
+        add(&p, &vanishing, Some(&document));
+        assert_eq!(tool(&p).get_docs().row_count(), 3);
+        std::fs::remove_file(&vanishing).unwrap();
+        run_page(&p);
+        let t = tool(&p);
+        assert_ne!(t.get_report_tone(), 0);
+        let rows = rows(&p);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("a.txt.p7s: the signature is valid")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("b.txt.p7s: the signature is invalid")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with("vanishing.p7s: not done")),
+            "{rows:?}"
+        );
+        assert!(!t.get_report_headline().contains("every signature is valid"));
+        assert_eq!(p.ws.ui.get_error_text().as_str(), "");
+    }
+
+    /// Clearing empties the list and the report; running an empty list says what is missing
+    /// and runs nothing.
+    #[test]
+    fn running_without_documents_is_refused_and_clear_empties_the_page() {
+        let p = page();
+        let (document, signature) = sign_cms(&p, "a.txt", b"the document");
+        select(&p, VERIFY);
+        tool(&p).invoke_run();
+        pump();
+        assert!(!p.ws.ui.get_busy(), "nothing was started");
+        assert!(!p.ws.ui.get_error_text().is_empty());
+        assert_eq!(p.ws.ui.get_error_section(), VERIFY);
+        add(&p, &signature, Some(&document));
+        run_page(&p);
+        assert!(!tool(&p).get_report_headline().is_empty());
+        tool(&p).invoke_clear_docs();
+        assert_eq!(tool(&p).get_docs().row_count(), 0);
+        assert_eq!(tool(&p).get_report_headline().as_str(), "");
+        assert_eq!(tool(&p).get_report_rows().row_count(), 0);
+    }
+
+    /// The fields of the page follow the choice: the second file only for CMS, the level list
+    /// only where levels exist, evidence only for CAdES/PAdES LT and LTA, and the labels of the
+    /// action change with the tool.
+    #[test]
+    fn the_fields_of_the_page_follow_the_format_and_the_level() {
+        let p = page();
+        select(&p, VERIFY);
+        let t = tool(&p);
+        for (format, level, second, level_list) in [
+            (0, 0, true, true),
+            (1, 0, false, true),
+            (2, 0, false, false),
+            (3, 0, false, true),
+            (4, 0, false, false),
+            (5, 0, false, false),
+        ] {
+            t.set_format_index(format);
+            t.set_level_index(level);
+            t.invoke_changed();
+            assert_eq!(t.get_show_second(), second, "format {format}");
+            assert_eq!(t.get_show_level(), level_list, "format {format}");
+        }
+        t.set_format_index(5);
+        t.invoke_changed();
+        assert!(
+            t.get_show_opt1() && t.get_show_opt2(),
+            "JWT asks for issuer and audience"
+        );
+        select(&p, EXTEND);
+        let t = tool(&p);
+        assert_eq!(t.get_action_label().as_str(), "Extend");
+        for (format, level, evidence) in [
+            (0, 0, false),
+            (0, 1, true),
+            (0, 2, true),
+            (1, 1, false),
+            (1, 2, false),
+            (2, 1, true),
+            (2, 2, true),
+        ] {
+            t.set_format_index(format);
+            t.set_level_index(level);
+            t.invoke_changed();
+            assert_eq!(
+                t.get_show_evidence(),
+                evidence,
+                "format {format} level {level}"
+            );
+        }
+        select(&p, TIMESTAMP);
+        let t = tool(&p);
+        assert_eq!(t.get_action_label().as_str(), "Get a time stamp");
+        t.set_format_index(1);
+        t.invoke_changed();
+        assert_eq!(t.get_action_label().as_str(), "Check the time stamp");
+        assert!(t.get_show_second(), "checking asks for the data");
+        select(&p, EXTRACT);
+        assert_eq!(tool(&p).get_action_label().as_str(), "Extract the content");
+    }
+
+    /// Extending to LT through the page: without the evidence files the page says what is
+    /// missing and writes nothing; with them it extends and the result verifies at LT.
+    #[test]
+    fn the_extend_page_needs_evidence_for_lt_and_then_extends() {
+        let p = page();
+        let text = p.w.dir.path().join("doc.txt");
+        std::fs::write(&text, b"the document").unwrap();
+        let (engine, guard) = engine(&p.w);
+        let b = sign_confirmed(
+            &engine,
+            &guard,
+            &p.w,
+            std::slice::from_ref(&text),
+            &SignSpec {
+                format: SignFormat::Cades(Level::B),
+                options: SignOptions::default(),
+            },
+            &Destination::Beside,
+        );
+        assert!(matches!(b, crate::signing::runner::Outcome::Done(_)));
+        let signature = p.w.dir.path().join("doc.txt.p7s");
+        select(&p, EXTEND);
+        let t = tool(&p);
+        t.set_format_index(0);
+        t.set_level_index(1);
+        t.invoke_changed();
+        add(&p, &signature, Some(&text));
+        run_page(&p);
+        assert!(
+            p.ws.ui.get_error_text().contains("validation data"),
+            "{}",
+            p.ws.ui.get_error_text()
+        );
+        assert!(!p.w.dir.path().join("doc.txt.extended.p7s").exists());
+        let evidence = evidence_files(&p.w);
+        let join = |files: &[PathBuf]| {
+            files
+                .iter()
+                .map(|f| f.display().to_string())
+                .collect::<Vec<_>>()
+                .join(";")
+        };
+        t.set_evidence_certificates(join(&evidence.certificates).into());
+        t.set_evidence_ocsp(join(&evidence.ocsp).into());
+        run_page(&p);
+        assert_eq!(t.get_report_tone(), 0, "{}", t.get_report_headline());
+        assert!(p.w.dir.path().join("doc.txt.extended.p7s").exists());
+    }
+
+    /// The destination: «one folder» with no folder named is refused, with one the result goes
+    /// there and not beside the document.
+    #[test]
+    fn the_destination_folder_of_the_extract_page_is_honoured() {
+        let p = page();
+        let text = p.w.dir.path().join("doc.txt");
+        std::fs::write(&text, b"the exact content").unwrap();
+        let (engine, guard) = engine(&p.w);
+        let attached = sign_confirmed(
+            &engine,
+            &guard,
+            &p.w,
+            std::slice::from_ref(&text),
+            &SignSpec {
+                format: SignFormat::Cms,
+                options: SignOptions {
+                    attached: true,
+                    ..SignOptions::default()
+                },
+            },
+            &Destination::Beside,
+        );
+        assert!(matches!(attached, crate::signing::runner::Outcome::Done(_)));
+        std::fs::remove_file(&text).unwrap();
+        let out = p.w.dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        select(&p, EXTRACT);
+        add(&p, &p.w.dir.path().join("doc.txt.p7m"), None);
+        tool(&p).set_destination_index(1);
+        tool(&p).invoke_run();
+        pump();
+        assert!(!p.ws.ui.get_busy(), "no folder: nothing started");
+        assert!(
+            p.ws.ui.get_error_text().contains("folder"),
+            "{}",
+            p.ws.ui.get_error_text()
+        );
+        tool(&p).set_destination_path(out.display().to_string().into());
+        run_page(&p);
+        assert_eq!(
+            std::fs::read(out.join("doc.txt")).unwrap(),
+            b"the exact content"
+        );
+        assert!(!text.exists(), "not beside the container");
+        assert_eq!(
+            tool(&p).get_report_tone(),
+            3,
+            "an extraction is neutral, never success"
+        );
+    }
+
+    /// The time stamp page: get a token from the world's time service, then check it with its
+    /// data (valid) and without (not a proof of any document).
+    #[test]
+    fn the_timestamp_page_gets_and_checks_a_token() {
+        let p = page();
+        let text = p.w.dir.path().join("doc.txt");
+        std::fs::write(&text, b"stamp me").unwrap();
+        select(&p, TIMESTAMP);
+        add(&p, &text, None);
+        tool(&p).set_opt1(format!("{ORIGIN}/tsa").into());
+        run_page(&p);
+        assert_eq!(
+            tool(&p).get_report_tone(),
+            0,
+            "{}",
+            tool(&p).get_report_headline()
+        );
+        let token = p.w.dir.path().join("doc.txt.tst");
+        assert!(token.exists());
+        select(&p, TIMESTAMP);
+        tool(&p).set_format_index(1);
+        tool(&p).invoke_changed();
+        add(&p, &token, Some(&text));
+        run_page(&p);
+        assert_eq!(
+            tool(&p).get_report_tone(),
+            0,
+            "{}",
+            tool(&p).get_report_headline()
+        );
+        tool(&p).invoke_clear_docs();
+        add(&p, &token, None);
+        run_page(&p);
+        assert_eq!(
+            tool(&p).get_report_tone(),
+            1,
+            "no data: only not fully checked"
+        );
+        assert!(
+            rows(&p)
+                .iter()
+                .any(|r| r.contains("tie to a document was not checked")),
+            "{:?}",
+            rows(&p)
+        );
+        let _ = Tone::Success;
+    }
+
+    /// Sets the page's fields, presses nothing, and reads the spec the button would run.
+    fn spec_of(
+        p: &Page,
+        section: i32,
+        set: impl FnOnce(&ToolState<'_>),
+    ) -> Result<(ToolSpec, Destination), JobError> {
+        select(p, section);
+        set(&tool(p));
+        read_choice(&p.ws)
+    }
+
+    /// What the page's fields mean to the SDK: every format and level of every tool maps to its
+    /// spec, and a field that belongs to another format never leaks into it.
+    #[test]
+    fn the_fields_of_the_page_map_to_the_spec_the_sdk_is_asked() {
+        let p = page();
+        let verify = |format: i32, level: i32, flag1: bool, flag2: bool, o1: &str, o2: &str| {
+            spec_of(&p, VERIFY, |t| {
+                t.set_format_index(format);
+                t.set_level_index(level);
+                t.set_flag1(flag1);
+                t.set_flag2(flag2);
+                t.set_opt1(o1.into());
+                t.set_opt2(o2.into());
+            })
+            .unwrap()
+            .0
+        };
+        let plain = VerifyOptions::default();
+        for (format, level, expected) in [
+            (0, 0, VerifyFormat::Cms),
+            (0, 1, VerifyFormat::Cades(Level::B)),
+            (0, 2, VerifyFormat::Cades(Level::T)),
+            (0, 3, VerifyFormat::Cades(Level::Lt)),
+            (0, 4, VerifyFormat::Cades(Level::Lta)),
+            (1, 0, VerifyFormat::Xml),
+            (1, 1, VerifyFormat::Xades(Level::B)),
+            (1, 4, VerifyFormat::Xades(Level::Lta)),
+            (2, 0, VerifyFormat::Wsse),
+            (3, 0, VerifyFormat::Pdf),
+            (3, 2, VerifyFormat::Pades(Level::T)),
+            (3, 4, VerifyFormat::Pades(Level::Lta)),
+            (4, 0, VerifyFormat::Jws),
+        ] {
+            assert_eq!(
+                verify(format, level, false, false, "ignored", "ignored"),
+                ToolSpec::Verify(expected, plain.clone()),
+                "format {format} level {level}: hidden fields do not leak"
+            );
+        }
+        // The fields that do belong to a format are taken.
+        assert_eq!(
+            verify(1, 0, false, true, "", ""),
+            ToolSpec::Verify(VerifyFormat::XmlKalkan, plain.clone())
+        );
+        assert_eq!(
+            verify(1, 2, false, true, "", ""),
+            ToolSpec::Verify(VerifyFormat::Xades(Level::T), plain.clone()),
+            "Kalkan mode is only for plain XML"
+        );
+        assert_eq!(
+            verify(2, 0, false, true, "", ""),
+            ToolSpec::Verify(
+                VerifyFormat::Wsse,
+                VerifyOptions {
+                    timestamp_required: true,
+                    ..plain.clone()
+                }
+            )
+        );
+        assert_eq!(
+            verify(0, 0, true, false, "", ""),
+            ToolSpec::Verify(
+                VerifyFormat::Cms,
+                VerifyOptions {
+                    offline: true,
+                    ..plain.clone()
+                }
+            )
+        );
+        assert_eq!(
+            verify(5, 0, false, false, " the-issuer ", "the-audience"),
+            ToolSpec::Verify(
+                VerifyFormat::Jwt,
+                VerifyOptions {
+                    issuer: "the-issuer".into(),
+                    audience: "the-audience".into(),
+                    ..plain.clone()
+                }
+            )
+        );
+        // Extend: the target level and the evidence, which only LT and LTA of CAdES and PAdES take.
+        let extend = |format: i32, level: i32, evidence: bool, destination: i32, folder: &str| {
+            spec_of(&p, EXTEND, |t| {
+                t.set_format_index(format);
+                t.set_level_index(level);
+                if evidence {
+                    t.set_evidence_certificates("c1.der; c2.der".into());
+                    t.set_evidence_ocsp("o.ocsp".into());
+                    t.set_evidence_crls("r.crl".into());
+                }
+                t.set_destination_index(destination);
+                t.set_destination_path(folder.into());
+            })
+        };
+        let files = Evidence::from_fields("c1.der; c2.der", "o.ocsp", "r.crl");
+        for (format, level, expected) in [
+            (
+                0,
+                0,
+                ToolSpec::Extend(ExtendFormat::Cms(Level::T), Evidence::default()),
+            ),
+            (
+                0,
+                1,
+                ToolSpec::Extend(ExtendFormat::Cms(Level::Lt), files.clone()),
+            ),
+            (
+                0,
+                2,
+                ToolSpec::Extend(ExtendFormat::Cms(Level::Lta), files.clone()),
+            ),
+            (
+                1,
+                0,
+                ToolSpec::Extend(ExtendFormat::Xml(Level::T), Evidence::default()),
+            ),
+            (
+                1,
+                1,
+                ToolSpec::Extend(ExtendFormat::Xml(Level::Lt), Evidence::default()),
+            ),
+            (
+                1,
+                2,
+                ToolSpec::Extend(ExtendFormat::Xml(Level::Lta), Evidence::default()),
+            ),
+            (
+                2,
+                0,
+                ToolSpec::Extend(ExtendFormat::Pdf(Level::T), Evidence::default()),
+            ),
+            (
+                2,
+                1,
+                ToolSpec::Extend(ExtendFormat::Pdf(Level::Lt), files.clone()),
+            ),
+            (
+                2,
+                2,
+                ToolSpec::Extend(ExtendFormat::Pdf(Level::Lta), files.clone()),
+            ),
+        ] {
+            let (spec, destination) = extend(format, level, true, 0, "").unwrap();
+            assert_eq!(spec, expected, "extend {format}/{level}");
+            assert_eq!(destination, Destination::Beside);
+        }
+        assert_eq!(
+            extend(0, 0, false, 1, "out").unwrap().1,
+            Destination::Folder(PathBuf::from("out"))
+        );
+        assert_eq!(
+            extend(0, 0, false, 1, "  ").err(),
+            Some(JobError::Input(MissingField::Folder)),
+            "«one folder» with no folder named"
+        );
+        // Extract and the destination; a tool that writes nothing ignores it.
+        let (spec, destination) = spec_of(&p, EXTRACT, |t| {
+            t.set_destination_index(1);
+            t.set_destination_path("\"drive_C:\\out dir\"".into());
+        })
+        .unwrap();
+        assert_eq!(spec, ToolSpec::Extract);
+        assert_eq!(
+            destination,
+            Destination::Folder(PathBuf::from("drive_C:\\out dir"))
+        );
+        let (_, destination) = spec_of(&p, VERIFY, |t| {
+            t.set_destination_index(1);
+            t.set_destination_path("ignored".into());
+        })
+        .unwrap();
+        assert_eq!(destination, Destination::Beside);
+        // Timestamp: get, and check with a policy and an age.
+        for (level, algorithm) in [
+            (0, HashAlg::Sha256),
+            (1, HashAlg::Gost34311),
+            (2, HashAlg::Streebog512),
+        ] {
+            let (spec, _) = spec_of(&p, TIMESTAMP, |t| {
+                t.set_format_index(0);
+                t.set_level_index(level);
+                t.set_opt1(" http://tsa.example/ts ".into());
+            })
+            .unwrap();
+            assert_eq!(
+                spec,
+                ToolSpec::Stamp(StampOptions {
+                    tsa_url: "http://tsa.example/ts".into(),
+                    algorithm,
+                    ..StampOptions::default()
+                })
+            );
+        }
+        let (spec, _) = spec_of(&p, TIMESTAMP, |t| {
+            t.set_format_index(1);
+            t.set_opt1("1.2.3".into());
+            t.set_opt2(" 300 ".into());
+        })
+        .unwrap();
+        assert_eq!(
+            spec,
+            ToolSpec::StampCheck(StampOptions {
+                policy: "1.2.3".into(),
+                max_age: 300,
+                ..StampOptions::default()
+            })
+        );
+        let bad_age = spec_of(&p, TIMESTAMP, |t| {
+            t.set_format_index(1);
+            t.set_opt2("soon".into());
+        });
+        assert_eq!(
+            bad_age.err(),
+            Some(JobError::Operation(oncl_core::ErrorCode::InvalidInput))
+        );
+    }
+}

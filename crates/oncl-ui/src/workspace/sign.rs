@@ -1626,4 +1626,203 @@ mod tests {
             assert_eq!(ui(&p).get_result(), text, "the shown outcome stays");
         }
     }
+
+    /// What the sign page's fields mean to the SDK: every format and level maps to its spec;
+    /// a field that belongs to another format never leaks into it; the evidence files are only
+    /// taken for CAdES and PAdES LT and LTA; «one folder» needs a folder.
+    #[test]
+    fn the_fields_of_the_sign_page_map_to_the_spec_the_sdk_is_asked() {
+        let p = page();
+        let choose = |format: i32, level: i32, set: &dyn Fn(&crate::ui::SigningState<'_>)| {
+            let s = ui(&p);
+            s.set_format_index(format);
+            s.set_level_index(level);
+            s.set_attached(false);
+            s.set_add_signature(false);
+            s.set_xml_target("".into());
+            s.set_xml_parent("".into());
+            s.set_signature_id("".into());
+            s.set_evidence_certificates("".into());
+            s.set_evidence_ocsp("".into());
+            s.set_evidence_crls("".into());
+            s.set_destination_index(0);
+            s.set_destination_path("".into());
+            set(&s);
+            read_choice(&p.ws)
+        };
+        let dirty = |s: &crate::ui::SigningState<'_>| {
+            // Everything set, whatever the format: only what belongs to it may be taken.
+            s.set_attached(true);
+            s.set_add_signature(true);
+            s.set_xml_target("t".into());
+            s.set_xml_parent("p".into());
+            s.set_signature_id("i".into());
+            s.set_evidence_certificates("c.der".into());
+            s.set_evidence_ocsp("o.ocsp".into());
+        };
+        let spec = |format: SignFormat, options: SignOptions| SignSpec { format, options };
+        let evidence = crate::workspace::Evidence::from_fields("c.der", "o.ocsp", "");
+        let none = SignOptions::default();
+        let cases: Vec<(i32, i32, SignSpec)> = vec![
+            (
+                0,
+                0,
+                spec(
+                    SignFormat::Cms,
+                    SignOptions {
+                        attached: true,
+                        ..none.clone()
+                    },
+                ),
+            ),
+            (
+                0,
+                1,
+                spec(
+                    SignFormat::Cades(Level::B),
+                    SignOptions {
+                        attached: true,
+                        ..none.clone()
+                    },
+                ),
+            ),
+            (
+                0,
+                2,
+                spec(
+                    SignFormat::Cades(Level::T),
+                    SignOptions {
+                        attached: true,
+                        ..none.clone()
+                    },
+                ),
+            ),
+            (
+                0,
+                3,
+                spec(
+                    SignFormat::Cades(Level::Lt),
+                    SignOptions {
+                        attached: true,
+                        evidence: evidence.clone(),
+                        ..none.clone()
+                    },
+                ),
+            ),
+            (
+                0,
+                4,
+                spec(
+                    SignFormat::Cades(Level::Lta),
+                    SignOptions {
+                        attached: true,
+                        evidence: evidence.clone(),
+                        ..none.clone()
+                    },
+                ),
+            ),
+            (
+                1,
+                0,
+                spec(
+                    SignFormat::Xml,
+                    SignOptions {
+                        add: true,
+                        target: "t".into(),
+                        parent: "p".into(),
+                        signature_id: "i".into(),
+                        ..none.clone()
+                    },
+                ),
+            ),
+            (
+                1,
+                2,
+                spec(
+                    SignFormat::Xades(Level::T),
+                    SignOptions {
+                        add: true,
+                        target: "t".into(),
+                        parent: "p".into(),
+                        signature_id: "i".into(),
+                        ..none.clone()
+                    },
+                ),
+            ),
+            (
+                1,
+                4,
+                spec(
+                    SignFormat::Xades(Level::Lta),
+                    SignOptions {
+                        add: true,
+                        target: "t".into(),
+                        parent: "p".into(),
+                        signature_id: "i".into(),
+                        ..none.clone()
+                    },
+                ),
+            ),
+            (
+                2,
+                0,
+                spec(
+                    SignFormat::Wsse,
+                    SignOptions {
+                        add: true,
+                        ..none.clone()
+                    },
+                ),
+            ),
+            (3, 0, spec(SignFormat::Pdf, none.clone())),
+            (3, 1, spec(SignFormat::Pades(Level::B), none.clone())),
+            (
+                3,
+                3,
+                spec(
+                    SignFormat::Pades(Level::Lt),
+                    SignOptions {
+                        evidence: evidence.clone(),
+                        ..none.clone()
+                    },
+                ),
+            ),
+            (
+                3,
+                4,
+                spec(
+                    SignFormat::Pades(Level::Lta),
+                    SignOptions {
+                        evidence: evidence.clone(),
+                        ..none.clone()
+                    },
+                ),
+            ),
+            (4, 0, spec(SignFormat::Jws, none.clone())),
+            (5, 0, spec(SignFormat::Jwt, none.clone())),
+        ];
+        for (format, level, expected) in cases {
+            let (got, destination) = choose(format, level, &dirty).unwrap();
+            assert_eq!(got, expected, "format {format} level {level}");
+            assert_eq!(destination, Destination::Beside);
+        }
+        // «one folder»: needs a folder; the path is taken without its quotes.
+        let folder = |s: &crate::ui::SigningState<'_>| {
+            s.set_destination_index(1);
+            s.set_destination_path("  ".into());
+        };
+        assert_eq!(
+            choose(0, 0, &folder).err(),
+            Some(JobError::Input(MissingField::Folder))
+        );
+        let (_, destination) = choose(0, 0, &|s| {
+            s.set_destination_index(1);
+            s.set_destination_path("\"drive_C:\\results\"".into());
+        })
+        .unwrap();
+        assert_eq!(
+            destination,
+            Destination::Folder(PathBuf::from("drive_C:\\results"))
+        );
+    }
 }
