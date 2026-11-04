@@ -30,6 +30,8 @@ zeroize.workspace = true
 futures-util.workspace = true
 multer.workspace = true
 time.workspace = true
+der.workspace = true
+oncl-pdf.workspace = true
 
 [dev-dependencies]
 oncl-pki = { workspace = true, features = ["testing"] }

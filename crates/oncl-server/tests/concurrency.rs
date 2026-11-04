@@ -196,6 +196,7 @@ fn cpu_work_does_not_block_event_loop() {
             actions: vec![oncl_server::config::Permission::Hash],
             keys: Vec::new(),
             inline_pkcs12: false,
+            metadata_aliases: vec![],
         }];
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -389,6 +390,7 @@ fn real_hash_output_owns_original_root_until_bytes_are_released() {
             actions: vec![oncl_server::config::Permission::Hash],
             keys: Vec::new(),
             inline_pkcs12: false,
+            metadata_aliases: vec![],
         }];
         let host = oncl_server::service::ServiceHost::new(config).unwrap();
         let mut headers = axum::http::HeaderMap::new();
@@ -573,6 +575,7 @@ fn delivery_fixture() -> (
         actions: vec![oncl_server::config::Permission::Hash],
         keys: Vec::new(),
         inline_pkcs12: false,
+        metadata_aliases: vec![],
     }];
     let host = oncl_server::service::ServiceHost::new(config).unwrap();
     let mut headers = axum::http::HeaderMap::new();

@@ -4083,6 +4083,7 @@ name = "oncl-api"
 version = "0.1.0-alpha.6"
 dependencies = [
  "axum",
+ "der 0.8.2",
  "futures-util",
  "http-body-util",
  "hyper",
@@ -4095,6 +4096,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "time",
  "tokio",
  "zeroize",
 ]
@@ -4423,6 +4425,7 @@ version = "0.1.0-alpha.6"
 dependencies = [
  "axum",
  "clap",
+ "der 0.8.2",
  "futures-util",
  "getrandom 0.4.3",
  "http-body-util",
@@ -4431,6 +4434,7 @@ dependencies = [
  "multer",
  "oncl-api",
  "oncl-core",
+ "oncl-pdf",
  "oncl-pki",
  "oncl-testkit",
  "oncl-token",

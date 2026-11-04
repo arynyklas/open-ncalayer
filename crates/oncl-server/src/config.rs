@@ -76,6 +76,10 @@ pub enum Permission {
     SignDigest,
     Verify,
     Extract,
+    Extend,
+    Inspect,
+    Stamp,
+    VerifyStamp,
 }
 impl Permission {
     fn action(self) -> Action {
@@ -85,6 +89,10 @@ impl Permission {
             Self::SignDigest => Action::SignDigest,
             Self::Verify => Action::Verify,
             Self::Extract => Action::Extract,
+            Self::Extend => Action::Extend,
+            Self::Inspect => Action::Inspect,
+            Self::Stamp => Action::Stamp,
+            Self::VerifyStamp => Action::VerifyStamp,
         }
     }
 }
@@ -98,6 +106,9 @@ pub struct TokenConfig {
     pub keys: Vec<String>,
     #[serde(default)]
     pub inline_pkcs12: bool,
+    /// Exact container aliases this token may inspect (public metadata only).
+    #[serde(default)]
+    pub metadata_aliases: Vec<String>,
 }
 impl TokenConfig {
     pub fn record(&self) -> io::Result<TokenRecord> {
@@ -107,7 +118,8 @@ impl TokenConfig {
             self.actions.iter().map(|p| p.action()).collect(),
             self.keys.clone(),
         )?
-        .with_inline_pkcs12(self.inline_pkcs12))
+        .with_inline_pkcs12(self.inline_pkcs12)
+        .with_metadata_aliases(self.metadata_aliases.clone()))
     }
 }
 #[derive(Clone, Deserialize)]
@@ -134,6 +146,62 @@ pub struct PkiConfig {
     pub anchors: Vec<PathBuf>,
     pub intermediates: Vec<PathBuf>,
     pub endpoints: Vec<PkiEndpoint>,
+    /// Operator-selected TSA for CAdES/PAdES T/LT/LTA and standalone stamps.
+    pub tsa: Option<TsaConfig>,
+    /// Host JWT claims policy; never read from a token or request.
+    pub jwt: JwtConfig,
+}
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JwtConfig {
+    pub expected_issuer: Option<String>,
+    pub expected_audience: Option<String>,
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TsaConfig {
+    pub url: String,
+    #[serde(default)]
+    pub policy: Option<String>,
+    #[serde(default = "default_tsa_timeout")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_tsa_skew")]
+    pub skew_ms: u64,
+}
+fn default_tsa_timeout() -> u64 {
+    10_000
+}
+fn default_tsa_skew() -> u64 {
+    300_000
+}
+impl TsaConfig {
+    pub(crate) fn spec(&self) -> io::Result<oncl_pki::tsp::TsaSpec> {
+        if self.url.is_empty()
+            || self.url.len() > 2048
+            || self.timeout_ms == 0
+            || self.timeout_ms > 120_000
+        {
+            return Err(invalid());
+        }
+        let policy = self
+            .policy
+            .as_deref()
+            .map(|p| p.parse::<der::asn1::ObjectIdentifier>())
+            .transpose()
+            .map_err(|_| invalid())?;
+        Ok(oncl_pki::tsp::TsaSpec {
+            url: self.url.clone(),
+            method: oncl_pki::http::PkiMethod::Post { content_type: None },
+            hash: oncl_pki::key::HashAlg::Sha256,
+            policy,
+            nonce: oncl_pki::http::NonceSpec::Random(8),
+            cert_req: true,
+            retries: 0,
+            timeout: Duration::from_millis(self.timeout_ms),
+            check_skew: Some(Duration::from_millis(self.skew_ms)),
+            require_tsa_eku: true,
+        })
+    }
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

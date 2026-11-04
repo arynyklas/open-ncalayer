@@ -90,6 +90,8 @@ impl Drop for FileBody {
 enum ArtifactPhase {
     Writing(FileBody),
     Finished(FileBody),
+    /// Complete SDK-staged output; the SDK charged it once and owns its spool.
+    Staged(oncl_pki::io::StagedArtifact),
     Aborted,
 }
 pub(super) struct ArtifactState {
@@ -273,13 +275,20 @@ impl Write for ArtifactWriter {
             .write(&bytes[..wanted])
         {
             Ok(written) => {
-                body.temp
-                    .shrink((wanted - written) as u64)
-                    .map_err(|error| self.state.io_error(error))?;
-                body.length = body
-                    .length
-                    .checked_add(written as u64)
-                    .ok_or_else(|| self.state.io_error(ProcessingError::OutputLimit))?;
+                let accounted = body.temp.shrink((wanted - written) as u64).and_then(|()| {
+                    body.length
+                        .checked_add(written as u64)
+                        .ok_or(ProcessingError::OutputLimit)
+                });
+                match accounted {
+                    Ok(length) => body.length = length,
+                    Err(error) => {
+                        // Bytes reached the file but accounting is ambiguous: the
+                        // body can never be finished or read as complete output.
+                        body.failed = true;
+                        return Err(self.state.io_error(error));
+                    }
+                }
                 Ok(written)
             }
             Err(error) => {
@@ -348,6 +357,25 @@ pub(crate) struct OutputReadResult {
     pub(crate) next: u64,
 }
 impl FinishedArtifact {
+    /// Adopt a completed `sign_staged`/`extend_staged` artifact. The staged value
+    /// keeps its original operation lease, temp reservation and spool cleanup
+    /// until the last network slice drops; no second output charge is made.
+    pub(super) fn from_staged(
+        owner: &Arc<OperationOutput>,
+        staged: oncl_pki::io::StagedArtifact,
+    ) -> Result<Self, ProcessingError> {
+        owner.delivery().checkpoint()?;
+        let length = staged.len();
+        let state = Arc::new(ArtifactState {
+            operation: owner.id(),
+            identity: owner.identity().clone(),
+            scope: owner.scope().shared_view(),
+            failure: owner.failure().clone(),
+            phase: Mutex::new(ArtifactPhase::Staged(staged)),
+        });
+        owner.register_artifact(state.clone())?;
+        Ok(Self { state, length })
+    }
     pub(super) fn len(&self) -> u64 {
         self.length
     }
@@ -392,6 +420,23 @@ impl OutputReadTask {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let body = match &mut *phase {
             ArtifactPhase::Finished(body) => body,
+            ArtifactPhase::Staged(staged) => {
+                let read = staged.read_region(
+                    oncl_pki::io::Region {
+                        offset: self.offset,
+                        len: length as u64,
+                    },
+                    bytes.as_mut(),
+                )?;
+                if read != length {
+                    return Err(ProcessingError::InvalidInput("short staged artifact read"));
+                }
+                self.owner.delivery().checkpoint()?;
+                return Ok(OutputReadResult {
+                    bytes: bytes.freeze(),
+                    next: self.offset + length as u64,
+                });
+            }
             _ => return Err(ProcessingError::InvalidInput("unpublished artifact")),
         };
         let position = (HEADER_BYTES as u64)
@@ -526,6 +571,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
         {
             ArtifactPhase::Writing(body) | ArtifactPhase::Finished(body) => body.length,
+            ArtifactPhase::Staged(staged) => staged.len(),
             ArtifactPhase::Aborted => 0,
         }
     }

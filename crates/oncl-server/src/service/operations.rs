@@ -6,6 +6,7 @@ pub(super) mod progress;
 mod streaming;
 
 use super::*;
+use crate::audit::AuditHealth;
 use oncl_api::dto::{
     FinalStatus, HashAlgorithm, ItemResult, Operation, OperationMetadata, OperationResult,
     PartRole, ResponseEvent,
@@ -14,6 +15,12 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 const JSON_BYTES: u64 = 65_536;
+/// Immutable operator policy shared by every operation (never client-supplied).
+pub(crate) struct HostPolicy {
+    pub tsa: Option<oncl_pki::tsp::TsaSpec>,
+    pub jwt_issuer: Option<String>,
+    pub jwt_audience: Option<String>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SmallRequest {
@@ -67,7 +74,11 @@ fn validate_metadata(metadata: &OperationMetadata) -> Result<(), ApiError> {
         if !identifier(&item.id) || !ids.insert(item.id.as_str()) {
             return Err(invalid_request());
         }
-        for input in dispatch::inputs(&item.operation) {
+        let documents = dispatch::inputs(&item.operation).map(|n| (n, PartRole::Document));
+        let secrets = dispatch::secret_refs(&item.operation)
+            .into_iter()
+            .map(|(n, _)| (n, PartRole::Secret));
+        for (input, role) in documents.chain(secrets) {
             if !used.insert(input) {
                 return Err(invalid_request());
             }
@@ -76,20 +87,25 @@ fn validate_metadata(metadata: &OperationMetadata) -> Result<(), ApiError> {
                 .iter()
                 .find(|p| p.name == input)
                 .ok_or_else(invalid_request)?;
-            if part.item_id != item.id || part.role != PartRole::Document {
+            if part.item_id != item.id || part.role != role {
                 return Err(invalid_request());
             }
         }
     }
+    let mut seen_document = false;
     for part in &metadata.parts {
-        if !identifier(&part.name)
-            || !names.insert(part.name.as_str())
-            || part.role != PartRole::Document
-        {
+        if !identifier(&part.name) || !names.insert(part.name.as_str()) {
             return Err(invalid_request());
         }
         if !used.contains(part.name.as_str()) {
             return Err(invalid_request());
+        }
+        // Secrets precede documents so every key is authorized before any
+        // document byte is consumed.
+        match part.role {
+            PartRole::Document => seen_document = true,
+            PartRole::Secret if seen_document => return Err(invalid_request()),
+            PartRole::Secret => {}
         }
     }
     Ok(())
@@ -103,6 +119,11 @@ fn algorithm(value: HashAlgorithm) -> HashAlg {
         HashAlgorithm::Streebog256 => HashAlg::Streebog256,
         HashAlgorithm::Streebog512 => HashAlg::Streebog512,
     }
+}
+pub(super) fn evidence_limits(
+    limits: &oncl_pki::resource::ResourceLimits,
+) -> oncl_pki::evidence::EvidenceLimits {
+    dispatch::evidence_limits(limits)
 }
 async fn await_worker<T>(
     work: crate::executor::WorkHandle<T>,
@@ -129,6 +150,10 @@ impl ServiceHost {
         let executor = self.executor.clone();
         let store = self.store.clone();
         let output_store = self.output_store.clone();
+        let audit = self.audit.clone();
+        let keys = self.keys.clone();
+        let inline_enabled = self.config.inline_pkcs12;
+        let host_policy = self.host_policy.clone();
         Box::pin(async move {
             let deadline = deadline?;
             let principal = principal?;
@@ -157,23 +182,77 @@ impl ServiceHost {
             // Recheck the actual Principal generation and each resolved operation
             // after bounded metadata intake, before the first SDK dispatch.
             let mut actions = Vec::with_capacity(prepared.metadata.items.len());
+            let mut private = false;
             for item in &prepared.metadata.items {
                 let action = dispatch::action(&item.operation);
-                policy
-                    .authorize(&principal, action, None, None)
-                    .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?;
+                // Key-bearing actions are authorized per exact key in resolve_keys.
+                if !matches!(action, Action::Sign) {
+                    policy
+                        .authorize(&principal, action, None, None)
+                        .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?;
+                } else {
+                    private = true;
+                }
                 actions.push(action);
             }
-            let grant = oncl_core::ExecutionGrant::new(actions);
+            let resolved = dispatch::resolve_keys(
+                &prepared.metadata,
+                &prepared.secrets,
+                &policy,
+                &principal,
+                inline_enabled,
+                admission.resources(),
+            )?;
+            if private && audit.health() != AuditHealth::Healthy {
+                return Err(ApiError::not_applied(ErrorCode::AuditUnavailable));
+            }
+            let mut grant =
+                oncl_core::ExecutionGrant::new(actions).with_keys(resolved.keys.clone());
+            if prepared.metadata.items.iter().any(|i| {
+                matches!(
+                    i.operation,
+                    Operation::Inspect {
+                        target: oncl_api::dto::InspectTarget::Container { .. }
+                    }
+                )
+            }) {
+                // Exact host-granted aliases; a client cannot widen them.
+                grant = grant.with_metadata_aliases(
+                    policy
+                        .metadata_aliases(&principal)
+                        .map_err(|_| ApiError::not_applied(ErrorCode::PermissionDenied))?,
+                );
+            }
             let failure = prepared.failure.clone();
             let mut ctx = engine
                 .begin_admitted(admission, grant, OperationPolicy::strict_online())
                 .map_err(core_error)?;
+            // Durable audit binding: actor and key labels belong to this exact
+            // original operation; no private key opens without it.
+            let binding = if private {
+                let mut labels: Vec<_> = keys
+                    .labels()
+                    .filter(|(id, _)| ctx.grant().allows_key(id))
+                    .collect();
+                labels.extend(
+                    resolved
+                        .inline
+                        .keys()
+                        .map(|id| (id.clone(), crate::keys::inline_label(id))),
+                );
+                Some(
+                    audit
+                        .bind(&ctx, principal.audit_label(), labels)
+                        .map_err(|_| ApiError::not_applied(ErrorCode::AuditUnavailable))?,
+                )
+            } else {
+                None
+            };
             if prepared
                 .metadata
                 .items
                 .iter()
-                .any(|item| matches!(item.operation, Operation::Extract { .. }))
+                .any(|item| dispatch::has_output(&item.operation))
             {
                 let output_store = output_store
                     .ok_or_else(|| ApiError::not_applied(ErrorCode::MissingTemporaryStore))?;
@@ -197,6 +276,12 @@ impl ServiceHost {
                     },
                     ctx,
                     prepared,
+                    streaming::PrivateState {
+                        selectors: resolved.selectors,
+                        reservations: resolved.reservations,
+                        binding,
+                        host: host_policy,
+                    },
                 )
                 .await;
             }
@@ -212,15 +297,28 @@ impl ServiceHost {
                             .capture(&request, store.as_ref(), ctx, runtime)?;
                     let mut results = Vec::with_capacity(request.items.len());
                     let mut result_reservations = Vec::with_capacity(request.items.len());
+                    let secrets = prepared.secrets;
+                    let selectors = resolved.selectors;
+                    let _binding = binding;
+                    let _keys = resolved.reservations;
+                    let mut env = dispatch::Env {
+                        engine: &engine,
+                        documents: &mut documents,
+                        secrets: &secrets,
+                        selectors: &selectors,
+                        staging: None,
+                        host: &host_policy,
+                    };
                     for item in request.items {
                         let (result, reservation, _) =
-                            dispatch::run(item.operation, &mut documents, &engine, ctx, None)
-                                .map_err(|error| match error {
+                            dispatch::run(item.operation, &item.id, &mut env, ctx, None).map_err(
+                                |error| match error {
                                     OperationError::Processing(error) => error,
                                     _ => {
                                         ProcessingError::InvalidInput("operation execution failed")
                                     }
-                                })?;
+                                },
+                            )?;
                         result_reservations.push(reservation);
                         results.push(ItemResult {
                             item_id: item.id,
@@ -233,6 +331,7 @@ impl ServiceHost {
                         operation_id: ctx.id().get(),
                         status: FinalStatus::Completed,
                         results,
+                        error: None,
                     };
                     let bytes = serde_json::to_vec(&event)
                         .map_err(|_| ProcessingError::InvalidInput("response serialization"))?;

@@ -1,26 +1,215 @@
 use super::*;
-use oncl_api::dto::{SignerChecks, VerifyProfile};
+use crate::auth::{AccessPolicy, Principal};
+use oncl_api::dto::{
+    ExtendKind, InspectTarget, InspectedCms, InspectedEntry, JwsSignerFacts, KeyRef, SignKind,
+    SignWriteMode, SignerChecks, TimestampFacts, VerifyProfile,
+};
+use oncl_core::keys::{KeyId, KeyRequest, KeySelector};
+use oncl_pki::{cms::ades::ValidationMaterial, resource::ResourceScope};
 use oncl_pki::{
     evidence::{AdesLevel, EvidenceLimits},
     validation::{CheckStatus, TimeBasis, ValidationPolicy, Verdict},
 };
+use std::collections::HashMap;
 
 pub(super) fn action(operation: &Operation) -> Action {
     match operation {
         Operation::Hash { .. } => Action::Hash,
         Operation::Verify { .. } => Action::Verify,
         Operation::Extract { .. } => Action::Extract,
+        Operation::Sign { .. } => Action::Sign,
+        Operation::Extend { .. } => Action::Extend,
+        Operation::JwsSign { .. } | Operation::JwsAdd { .. } | Operation::JwtEncode { .. } => {
+            Action::Sign
+        }
+        Operation::JwsVerify { .. } | Operation::JwtVerify { .. } => Action::Verify,
+        Operation::JwtDecode { .. } => Action::Extract,
+        Operation::Inspect { .. } => Action::Inspect,
+        Operation::Stamp { .. } => Action::Stamp,
+        Operation::VerifyStamp { .. } => Action::VerifyStamp,
     }
 }
-pub(super) fn inputs(operation: &Operation) -> impl Iterator<Item = &str> {
+/// Operations whose result is a binary artifact stream, not only JSON.
+pub(super) fn has_output(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::Extract { .. }
+            | Operation::Sign { .. }
+            | Operation::Extend { .. }
+            | Operation::Stamp { .. }
+            | Operation::JwsSign { .. }
+            | Operation::JwsAdd { .. }
+            | Operation::JwtEncode { .. }
+    )
+}
+fn jose_inputs<'a>(
+    input: &'a str,
+    detached: Option<&'a str>,
+    certificate: Option<&'a str>,
+) -> std::vec::IntoIter<&'a str> {
+    let mut names = vec![input];
+    names.extend(detached);
+    names.extend(certificate);
+    names.into_iter()
+}
+pub(super) fn inputs(operation: &Operation) -> std::vec::IntoIter<&str> {
     let names = match operation {
         Operation::Hash { input, .. } => [Some(input.as_str()), None],
         Operation::Extract { input } => [Some(input.as_str()), None],
         Operation::Verify {
             input, detached, ..
+        }
+        | Operation::Sign {
+            input, detached, ..
+        }
+        | Operation::Extend {
+            input, detached, ..
         } => [Some(input.as_str()), detached.as_deref()],
+        Operation::Stamp { input }
+        | Operation::JwsSign { input, .. }
+        | Operation::JwtEncode { input, .. }
+        | Operation::JwtDecode { input } => [Some(input.as_str()), None],
+        Operation::JwsAdd {
+            input,
+            detached,
+            certificate,
+            ..
+        }
+        | Operation::JwsVerify {
+            input,
+            detached,
+            certificate,
+            ..
+        } => return jose_inputs(input, detached.as_deref(), certificate.as_deref()),
+        Operation::JwtVerify { input, certificate } => {
+            return jose_inputs(input, None, certificate.as_deref());
+        }
+        Operation::VerifyStamp { token, data, .. } => [Some(token.as_str()), data.as_deref()],
+        Operation::Inspect { target } => match target {
+            InspectTarget::Certificate { input } | InspectTarget::Cms { input } => {
+                [Some(input.as_str()), None]
+            }
+            InspectTarget::Container { .. } => [None, None],
+        },
     };
-    names.into_iter().flatten()
+    names.into_iter().flatten().collect::<Vec<_>>().into_iter()
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SecretKind {
+    Container,
+    Password,
+}
+fn key_refs(operation: &Operation) -> &[KeyRef] {
+    match operation {
+        Operation::Sign { keys, .. }
+        | Operation::JwsSign { keys, .. }
+        | Operation::JwsAdd { keys, .. } => keys,
+        Operation::JwtEncode { key, .. } => std::slice::from_ref(key),
+        _ => &[],
+    }
+}
+/// Secret parts referenced by an item (container, optional password).
+pub(super) fn secret_refs(operation: &Operation) -> Vec<(&str, SecretKind)> {
+    let mut refs = Vec::new();
+    if let Operation::Inspect {
+        target: InspectTarget::Container {
+            container,
+            password,
+        },
+    } = operation
+    {
+        refs.push((container.as_str(), SecretKind::Container));
+        if let Some(password) = password {
+            refs.push((password.as_str(), SecretKind::Password));
+        }
+    }
+    for key in key_refs(operation) {
+        if let KeyRef::Inline {
+            container,
+            password,
+            ..
+        } = key
+        {
+            refs.push((container.as_str(), SecretKind::Container));
+            if let Some(password) = password {
+                refs.push((password.as_str(), SecretKind::Password));
+            }
+        }
+    }
+    refs
+}
+pub(super) fn secret_kinds(metadata: &OperationMetadata) -> HashMap<&str, SecretKind> {
+    metadata
+        .items
+        .iter()
+        .flat_map(|item| secret_refs(&item.operation))
+        .collect()
+}
+pub(super) const MAX_KEYS_PER_ITEM: usize = 8;
+/// Host authorization of every key named by an item, performed after bounded
+/// metadata/secret intake and BEFORE any document/provider/private work.
+pub(super) struct Resolved {
+    pub selectors: HashMap<String, Vec<KeySelector>>,
+    pub keys: Vec<KeyId>,
+    pub inline: HashMap<KeyId, ()>,
+    pub reservations: Vec<oncl_pki::resource::ResourceReservation>,
+}
+pub(super) fn resolve_keys(
+    metadata: &OperationMetadata,
+    secrets: &intake::Secrets,
+    policy: &AccessPolicy,
+    principal: &Principal,
+    inline_enabled: bool,
+    scope: &ResourceScope,
+) -> Result<Resolved, ApiError> {
+    let denied = || ApiError::not_applied(ErrorCode::PermissionDenied);
+    let mut resolved = Resolved {
+        selectors: HashMap::new(),
+        keys: Vec::new(),
+        inline: HashMap::new(),
+        reservations: Vec::new(),
+    };
+    for item in &metadata.items {
+        let keys = key_refs(&item.operation);
+        if action(&item.operation) == Action::Sign
+            && (keys.is_empty() || keys.len() > MAX_KEYS_PER_ITEM)
+        {
+            return Err(invalid_request());
+        }
+        let mut selectors = Vec::with_capacity(keys.len());
+        for key in keys {
+            let selector = match key {
+                KeyRef::Named { name } => {
+                    policy
+                        .authorize(principal, Action::Sign, Some(name), None)
+                        .map_err(|_| denied())?;
+                    KeySelector::named(KeyId::new(name).map_err(|_| invalid_request())?)
+                }
+                KeyRef::Inline {
+                    container, alias, ..
+                } => {
+                    let bytes = secrets.bytes(container).map_err(processing_error)?;
+                    resolved.reservations.push(
+                        scope
+                            .reserve_memory(bytes.len() as u64)
+                            .map_err(processing_error)?,
+                    );
+                    let selector = KeySelector::inline(bytes.to_vec(), alias.clone());
+                    policy
+                        .authorize_inline(principal, Action::Sign, &selector, inline_enabled)
+                        .map_err(|_| denied())?;
+                    resolved.inline.insert(selector.key_id(), ());
+                    selector
+                }
+            };
+            if !resolved.keys.contains(&selector.key_id()) {
+                resolved.keys.push(selector.key_id());
+            }
+            selectors.push(selector);
+        }
+        resolved.selectors.insert(item.id.clone(), selectors);
+    }
+    Ok(resolved)
 }
 pub(super) fn evidence_limits(limits: &oncl_pki::resource::ResourceLimits) -> EvidenceLimits {
     EvidenceLimits {
@@ -93,15 +282,187 @@ pub(super) fn signer(value: &oncl_pki::validation::SignerValidation) -> SignerCh
         reasons: value.reasons.iter().map(|r| format!("{r:?}")).collect(),
     }
 }
+fn policy_name(value: ValidationPolicy) -> &'static str {
+    match value {
+        ValidationPolicy::StrictOnline => "StrictOnline",
+        ValidationPolicy::OfflineReport => "OfflineReport",
+        ValidationPolicy::NcalayerCompatibility => "NcalayerCompatibility",
+    }
+}
+fn check_name(value: CheckStatus) -> &'static str {
+    check(value)
+}
+fn timestamp_facts(report: &oncl_core::TimestampReport) -> TimestampFacts {
+    let facts = report.facts();
+    TimestampFacts {
+        verdict: verdict(report.verdict()),
+        gen_time_unix: facts.gen_time().unix_timestamp(),
+        checked_at_unix: facts.checked_at().unix_timestamp(),
+        policy: match facts.validation_policy() {
+            ValidationPolicy::StrictOnline => "StrictOnline",
+            ValidationPolicy::OfflineReport => "OfflineReport",
+            ValidationPolicy::NcalayerCompatibility => "NcalayerCompatibility",
+        },
+        algorithm: facts.algorithm().map(|a| format!("{a:?}")),
+        imprint: format!("{:?}", facts.imprint()),
+        signature: check_name(facts.signature()),
+        eku: check_name(facts.eku()),
+        chain: check_name(facts.chain()),
+        validity: check_name(facts.validity()),
+        revocation: check_name(facts.revocation()),
+        expectations: check_name(facts.expectations()),
+    }
+}
 pub(super) struct ArtifactSink<'a> {
     pub store: &'a Arc<super::artifact::ArtifactStore>,
     pub owner: &'a Arc<super::ownership::OperationOutput>,
     pub id: String,
 }
+pub(super) struct Env<'a> {
+    pub engine: &'a Engine,
+    pub documents: &'a mut intake::Documents,
+    pub secrets: &'a intake::Secrets,
+    pub selectors: &'a HashMap<String, Vec<KeySelector>>,
+    pub staging: Option<&'a oncl_pki::io::TemporaryStore>,
+    pub host: &'a super::HostPolicy,
+}
+fn applied(value: oncl_pki::key::AppliedState) -> oncl_api::error::AppliedState {
+    match value {
+        oncl_pki::key::AppliedState::NotApplied => oncl_api::error::AppliedState::NotApplied,
+        oncl_pki::key::AppliedState::Applied => oncl_api::error::AppliedState::Applied,
+        oncl_pki::key::AppliedState::Unknown => oncl_api::error::AppliedState::Unknown,
+    }
+}
+fn ades_level(kind: SignKind) -> Option<AdesLevel> {
+    use SignKind::*;
+    match kind {
+        Cms | Pdf => None,
+        CadesB | PadesB => Some(AdesLevel::B),
+        CadesT | PadesT => Some(AdesLevel::T),
+        CadesLt | PadesLt => Some(AdesLevel::Lt),
+        CadesLta | PadesLta => Some(AdesLevel::Lta),
+    }
+}
+fn is_pdf(kind: SignKind) -> bool {
+    matches!(
+        kind,
+        SignKind::Pdf
+            | SignKind::PadesB
+            | SignKind::PadesT
+            | SignKind::PadesLt
+            | SignKind::PadesLta
+    )
+}
+fn extend_level(kind: ExtendKind) -> (AdesLevel, bool) {
+    use ExtendKind::*;
+    match kind {
+        CadesT => (AdesLevel::T, false),
+        CadesLt => (AdesLevel::Lt, false),
+        CadesLta => (AdesLevel::Lta, false),
+        PadesT => (AdesLevel::T, true),
+        PadesLt => (AdesLevel::Lt, true),
+        PadesLta => (AdesLevel::Lta, true),
+    }
+}
+/// The sign/extend result is always a new SDK-staged artifact; the engine
+/// charges its output once and a failed operation poisons it.
+fn staged_output(
+    env: &Env<'_>,
+    ctx: &mut OperationContext,
+) -> Result<oncl_pki::io::StagedArtifact, OperationError> {
+    env.staging
+        .ok_or(OperationError::MissingTemporaryStore)?
+        .stage(ctx.resources())
+        .map_err(Into::into)
+}
+fn key_requests<'a>(
+    keys: &[KeyRef],
+    selectors: &'a [KeySelector],
+    secrets: &'a intake::Secrets,
+) -> Result<Vec<KeyRequest<'a>>, OperationError> {
+    let mut requests = Vec::with_capacity(keys.len());
+    for (key, selector) in keys.iter().zip(selectors) {
+        let password = match key {
+            KeyRef::Named { .. } => None,
+            KeyRef::Inline { password, .. } => password
+                .as_deref()
+                .map(|name| secrets.text(name))
+                .transpose()?,
+        };
+        requests.push(KeyRequest::new(selector, password));
+    }
+    if requests.len() != keys.len() {
+        return Err(ProcessingError::InvalidInput("unresolved signing keys").into());
+    }
+    Ok(requests)
+}
+/// Bounded in-memory copy of a public document (JOSE APIs borrow slices).
+fn read_bytes(
+    document: &mut intake::Document,
+    ctx: &mut OperationContext,
+    maximum: usize,
+) -> Result<(Vec<u8>, ResourceReservation), OperationError> {
+    use std::io::Read;
+    let length = usize::try_from(document.len()).map_err(|_| ProcessingError::InputLimit)?;
+    if length > maximum {
+        return Err(ProcessingError::InputLimit.into());
+    }
+    let reservation = ctx.resources().reserve_memory(length as u64)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| ProcessingError::MemoryLimit)?;
+    let mut reader = document.reader(ctx.resources())?;
+    reader
+        .source()
+        .take(length as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(ProcessingError::from)?;
+    reader.finish()?;
+    if bytes.len() != length {
+        return Err(ProcessingError::InvalidInput("document length changed").into());
+    }
+    Ok((bytes, reservation))
+}
+fn jose_profile(format: oncl_api::dto::JwsFormat, detached: bool) -> oncl_core::jose::JoseProfile {
+    use oncl_core::jose::JwsSerialization as S;
+    oncl_core::jose::JoseProfile::new(
+        match format {
+            oncl_api::dto::JwsFormat::Compact => S::Compact,
+            oncl_api::dto::JwsFormat::Flattened => S::Flattened,
+            oncl_api::dto::JwsFormat::General => S::General,
+        },
+        detached,
+    )
+}
+fn jws_signers(report: &oncl_core::jose::JwsVerificationReport) -> Vec<JwsSignerFacts> {
+    report
+        .signers()
+        .iter()
+        .map(|s| JwsSignerFacts {
+            algorithm: s.algorithm().name(),
+            crypto: check(s.crypto()),
+            verdict: verdict(s.verdict()),
+            trust: signer(s.trust()),
+        })
+        .collect()
+}
+fn certificate(
+    env: &mut Env<'_>,
+    name: Option<String>,
+    ctx: &mut OperationContext,
+) -> Result<Option<oncl_pki::cert::Certificate>, OperationError> {
+    let Some(name) = name else { return Ok(None) };
+    let mut document = env.documents.take(&name)?;
+    let (bytes, _reservation) = read_bytes(&mut document, ctx, 1 << 20)?;
+    oncl_pki::cert::parse(&bytes)
+        .map(Some)
+        .map_err(|_| ProcessingError::InvalidInput("invalid public certificate").into())
+}
 pub(super) fn run(
     operation: Operation,
-    documents: &mut intake::Documents,
-    engine: &Engine,
+    item_id: &str,
+    env: &mut Env<'_>,
     ctx: &mut OperationContext,
     output: Option<ArtifactSink<'_>>,
 ) -> Result<
@@ -117,10 +478,10 @@ pub(super) fn run(
             algorithm: hash,
             input,
         } => {
-            let mut document = documents.take(&input)?;
+            let mut document = env.documents.take(&input)?;
             let bytes_in = document.len();
             let mut reader = document.reader(ctx.resources())?;
-            let report = engine.hash(algorithm(hash), reader.source(), ctx)?;
+            let report = env.engine.hash(algorithm(hash), reader.source(), ctx)?;
             reader.finish()?;
             let projection = ctx.resources().reserve_metadata(512)?;
             Ok((
@@ -138,15 +499,15 @@ pub(super) fn run(
             input,
             detached,
         } => {
-            let mut document = documents.take(&input)?;
-            let mut detached = detached.map(|name| documents.take(&name)).transpose()?;
+            let mut document = env.documents.take(&input)?;
+            let mut detached = detached.map(|name| env.documents.take(&name)).transpose()?;
             let mut reader = document.reader(ctx.resources())?;
             let mut detached_reader = detached
                 .as_mut()
                 .map(|input| input.reader(ctx.resources()))
                 .transpose()?;
             let request = verify_request(profile, evidence_limits(ctx.resources().limits()));
-            let report = engine.verify(
+            let report = env.engine.verify(
                 &request,
                 reader.source(),
                 detached_reader.as_mut().map(intake::DocumentReader::source),
@@ -182,14 +543,14 @@ pub(super) fn run(
         }
         Operation::Extract { input } => {
             let output = output.ok_or(OperationError::MissingTemporaryStore)?;
-            let mut document = documents.take(&input)?;
+            let mut document = env.documents.take(&input)?;
             let mut reader = document.reader(ctx.resources())?;
             let mut writer = super::artifact::ArtifactWriter::new(
                 output.store.clone(),
                 output.owner.clone(),
                 ctx,
             )?;
-            let report = engine.extract(reader.source(), &mut writer, ctx)?;
+            let report = env.engine.extract(reader.source(), &mut writer, ctx)?;
             reader.finish()?;
             let artifact = writer.finish(report.bytes_written)?;
             let projection = ctx.resources().reserve_metadata(512)?;
@@ -200,6 +561,566 @@ pub(super) fn run(
                 },
                 projection,
                 Some(artifact),
+            ))
+        }
+        Operation::Sign {
+            profile,
+            input,
+            detached,
+            mode,
+            attached,
+            keys,
+        } => {
+            let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
+            let selectors = env
+                .selectors
+                .get(item_id)
+                .ok_or(ProcessingError::InvalidInput("unresolved signing keys"))?;
+            let mut passwords = Vec::with_capacity(keys.len());
+            for key in &keys {
+                passwords.push(match key {
+                    KeyRef::Named { .. } => None,
+                    KeyRef::Inline { password, .. } => password
+                        .as_deref()
+                        .map(|name| env.secrets.text(name))
+                        .transpose()?,
+                });
+            }
+            let mut requests: Vec<KeyRequest<'_>> = selectors
+                .iter()
+                .zip(passwords)
+                .map(|(selector, password)| KeyRequest::new(selector, password))
+                .collect();
+            let limits = evidence_limits(ctx.resources().limits());
+            let material = ValidationMaterial {
+                certificates: &[],
+                ocsp: &[],
+                crls: &[],
+            };
+            let mut document = env.documents.take(&input)?;
+            let mut detached = detached.map(|name| env.documents.take(&name)).transpose()?;
+            let mut staged = staged_output(env, ctx)?;
+            let mut reader = document.reader(ctx.resources())?;
+            let mut detached_reader = detached
+                .as_mut()
+                .map(|input| input.reader(ctx.resources()))
+                .transpose()?;
+            let level = ades_level(profile);
+            let request = if is_pdf(profile) {
+                if mode != SignWriteMode::Create || detached_reader.is_some() || attached {
+                    return Err(ProcessingError::InvalidInput("PDF signing is incremental").into());
+                }
+                if requests.len() != 1 {
+                    return Err(ProcessingError::InvalidInput("PDF signing takes one key").into());
+                }
+                let key = requests.remove(0);
+                let pdf = oncl_pdf::PdfSignProfile::default();
+                match level {
+                    None => oncl_core::SignRequest::pdf(key, pdf),
+                    Some(level) => oncl_core::SignRequest::pades(key, pdf, level, material, limits),
+                }
+            } else {
+                let detached_source = detached_reader.as_mut().map(intake::DocumentReader::source);
+                match (level, mode) {
+                    (None, SignWriteMode::Create) => {
+                        if detached_source.is_some() {
+                            return Err(ProcessingError::InvalidInput(
+                                "create takes no detached input",
+                            )
+                            .into());
+                        }
+                        oncl_core::SignRequest::cms_create(requests, attached)
+                    }
+                    (None, SignWriteMode::Add) => {
+                        oncl_core::SignRequest::cms_add(requests, detached_source)
+                    }
+                    (Some(level), SignWriteMode::Create) => {
+                        if detached_source.is_some() {
+                            return Err(ProcessingError::InvalidInput(
+                                "create takes no detached input",
+                            )
+                            .into());
+                        }
+                        oncl_core::SignRequest::cades_create(
+                            requests, attached, level, material, limits,
+                        )
+                    }
+                    (Some(level), SignWriteMode::Add) => oncl_core::SignRequest::cades_add(
+                        requests,
+                        detached_source,
+                        level,
+                        material,
+                        limits,
+                    ),
+                }
+            };
+            let report = env
+                .engine
+                .sign_staged(request, reader.source(), &mut staged, ctx)?;
+            reader.finish()?;
+            if let Some(reader) = &mut detached_reader {
+                reader.finish()?;
+            }
+            let signers: Vec<_> = report.signer_states().map(applied).collect();
+            let projection = ctx.resources().reserve_metadata(
+                (signers.len() as u64 * 16)
+                    .checked_add(512)
+                    .ok_or(ProcessingError::MetadataLimit)?,
+            )?;
+            let artifact = super::artifact::FinishedArtifact::from_staged(sink.owner, staged)?;
+            Ok((
+                OperationResult::Signing {
+                    profile,
+                    artifact: sink.id,
+                    bytes_in: report.bytes_in,
+                    bytes_out: report.bytes_out,
+                    signers,
+                },
+                projection,
+                Some(artifact),
+            ))
+        }
+        Operation::Extend {
+            profile,
+            input,
+            detached,
+        } => {
+            let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
+            let (level, pdf) = extend_level(profile);
+            let limits = evidence_limits(ctx.resources().limits());
+            let mut document = env.documents.take(&input)?;
+            let mut detached = detached.map(|name| env.documents.take(&name)).transpose()?;
+            let mut staged = staged_output(env, ctx)?;
+            let mut reader = document.reader(ctx.resources())?;
+            let mut detached_reader = detached
+                .as_mut()
+                .map(|input| input.reader(ctx.resources()))
+                .transpose()?;
+            let mut request = if pdf {
+                if detached_reader.is_some() {
+                    return Err(ProcessingError::InvalidInput("PDF has no detached input").into());
+                }
+                oncl_core::ExtendRequest::pdf(level, oncl_pdf::PdfLimits::default())
+            } else {
+                oncl_core::ExtendRequest::cms(level)
+            }
+            .with_evidence_limits(limits);
+            if let Some(reader) = &mut detached_reader {
+                request = request.with_detached(reader.source());
+            }
+            let report = env
+                .engine
+                .extend_staged(&request, reader.source(), &mut staged, ctx)?;
+            reader.finish()?;
+            drop(request);
+            if let Some(reader) = &mut detached_reader {
+                reader.finish()?;
+            }
+            let verdicts: Vec<&'static str> = report
+                .validation_reports()
+                .map(|reports| reports.iter().map(|r| verdict(r.verdict)).collect())
+                .unwrap_or_default();
+            let projection = ctx.resources().reserve_metadata(
+                (verdicts.len() as u64 * 16)
+                    .checked_add(512)
+                    .ok_or(ProcessingError::MetadataLimit)?,
+            )?;
+            let artifact = super::artifact::FinishedArtifact::from_staged(sink.owner, staged)?;
+            Ok((
+                OperationResult::Extension {
+                    profile,
+                    artifact: sink.id,
+                    bytes_in: report.bytes_in,
+                    bytes_out: report.bytes_out,
+                    verdicts,
+                },
+                projection,
+                Some(artifact),
+            ))
+        }
+        Operation::Inspect { target } => {
+            let request_label;
+            let mut cursor;
+            let mut document;
+            let mut reader;
+            let report = match &target {
+                InspectTarget::Certificate { input } | InspectTarget::Cms { input } => {
+                    document = env.documents.take(input)?;
+                    reader = document.reader(ctx.resources())?;
+                    let certificate = matches!(target, InspectTarget::Certificate { .. });
+                    request_label = if certificate { "certificate" } else { "cms" };
+                    let request = if certificate {
+                        oncl_core::InspectRequest::certificate()
+                    } else {
+                        oncl_core::InspectRequest::cms_metadata()
+                    };
+                    let report = env.engine.inspect(&request, Some(reader.source()), ctx)?;
+                    reader.finish()?;
+                    report
+                }
+                InspectTarget::Container {
+                    container,
+                    password,
+                } => {
+                    request_label = "container";
+                    let bytes = env.secrets.bytes(container)?;
+                    cursor = std::io::Cursor::new(bytes);
+                    let password = password
+                        .as_deref()
+                        .map(|name| env.secrets.text(name))
+                        .transpose()?;
+                    let request = oncl_core::InspectRequest::container(password);
+                    env.engine.inspect(
+                        &request,
+                        Some(Source::sequential(&mut cursor, Some(bytes.len() as u64))),
+                        ctx,
+                    )?
+                }
+            };
+            let entries: Vec<InspectedEntry> = report
+                .entries()
+                .iter()
+                .map(|entry| InspectedEntry {
+                    alias: entry.alias().map(str::to_owned),
+                    subject_cn: entry.subject_cn().map(str::to_owned),
+                    serial_hex: entry.serial_hex().map(str::to_owned),
+                    sha256: entry
+                        .fingerprint()
+                        .map(|value| crate::auth::encode(value.as_bytes())),
+                    signature_algorithm_oid: entry.signature_algorithm_oid().map(str::to_owned),
+                    public_key_algorithm_oid: entry.public_key_algorithm_oid().map(str::to_owned),
+                    not_before_unix: entry.not_before().map(|t| t.unix_timestamp()),
+                    not_after_unix: entry.not_after().map(|t| t.unix_timestamp()),
+                })
+                .collect();
+            let cms = report.cms().map(|facts| InspectedCms {
+                detached: facts.detached(),
+                content_len: facts.content_len(),
+                signer_count: facts.signer_count(),
+            });
+            let projection = ctx.resources().reserve_metadata(
+                (entries.len() as u64)
+                    .checked_mul(1024)
+                    .and_then(|n| n.checked_add(512))
+                    .ok_or(ProcessingError::MetadataLimit)?,
+            )?;
+            Ok((
+                OperationResult::Inspection {
+                    target: request_label,
+                    bytes_in: report.bytes_in(),
+                    integrity: report.container_integrity().map(|i| format!("{i:?}")),
+                    entries,
+                    cms,
+                },
+                projection,
+                None,
+            ))
+        }
+        Operation::Stamp { input } => {
+            let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
+            let spec = env
+                .host
+                .tsa
+                .clone()
+                .ok_or(OperationError::MissingCadesConfiguration)?;
+            let mut document = env.documents.take(&input)?;
+            let mut reader = document.reader(ctx.resources())?;
+            let mut writer =
+                super::artifact::ArtifactWriter::new(sink.store.clone(), sink.owner.clone(), ctx)?;
+            let report = env.engine.stamp(
+                &oncl_core::StampRequest::new(spec),
+                reader.source(),
+                &mut writer,
+                ctx,
+            )?;
+            reader.finish()?;
+            let token_len = report.facts().token().len() as u64;
+            let artifact = writer.finish(token_len)?;
+            let projection = ctx.resources().reserve_metadata(1024)?;
+            Ok((
+                OperationResult::Stamping {
+                    artifact: sink.id,
+                    bytes_in: report.bytes_in(),
+                    bytes_out: token_len,
+                    timestamp: timestamp_facts(&report),
+                },
+                projection,
+                Some(artifact),
+            ))
+        }
+        Operation::VerifyStamp {
+            token,
+            data,
+            algorithm: expected,
+            max_age_seconds,
+        } => {
+            let mut token = env.documents.take(&token)?;
+            let mut data = data.map(|name| env.documents.take(&name)).transpose()?;
+            let mut token_reader = token.reader(ctx.resources())?;
+            let mut data_reader = data
+                .as_mut()
+                .map(|input| input.reader(ctx.resources()))
+                .transpose()?;
+            let mut request = oncl_core::StampVerifyRequest::new();
+            if let Some(algorithm) = expected {
+                request = request.with_algorithm(super::algorithm(algorithm));
+            }
+            if let Some(seconds) = max_age_seconds {
+                request = request.with_maximum_age(std::time::Duration::from_secs(seconds));
+            }
+            let report = env.engine.verify_stamp(
+                &request,
+                token_reader.source(),
+                data_reader.as_mut().map(intake::DocumentReader::source),
+                ctx,
+            )?;
+            token_reader.finish()?;
+            if let Some(reader) = &mut data_reader {
+                reader.finish()?;
+            }
+            let projection = ctx.resources().reserve_metadata(1024)?;
+            Ok((
+                OperationResult::StampVerification {
+                    bytes_in: report.bytes_in(),
+                    timestamp: timestamp_facts(&report),
+                },
+                projection,
+                None,
+            ))
+        }
+        Operation::JwsSign {
+            serialization,
+            detached,
+            input,
+            keys,
+        } => {
+            let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
+            let selectors = env
+                .selectors
+                .get(item_id)
+                .ok_or(ProcessingError::InvalidInput("unresolved signing keys"))?;
+            let requests = key_requests(&keys, selectors, env.secrets)?;
+            let mut document = env.documents.take(&input)?;
+            let (payload, _payload) =
+                read_bytes(&mut document, ctx, oncl_core::jose::MAX_PAYLOAD_BYTES)?;
+            let mut writer =
+                super::artifact::ArtifactWriter::new(sink.store.clone(), sink.owner.clone(), ctx)?;
+            let report = env.engine.jws_create(
+                jose_profile(serialization, detached),
+                requests,
+                &payload,
+                &mut writer,
+                ctx,
+            )?;
+            let artifact = writer.finish(report.bytes_out)?;
+            let signers = vec![applied(report.applied); report.signer_count];
+            let projection = ctx
+                .resources()
+                .reserve_metadata(512 + signers.len() as u64 * 16)?;
+            Ok((
+                OperationResult::Jws {
+                    serialization,
+                    artifact: sink.id,
+                    bytes_in: report.bytes_in,
+                    bytes_out: report.bytes_out,
+                    signers,
+                },
+                projection,
+                Some(artifact),
+            ))
+        }
+        Operation::JwsAdd {
+            serialization,
+            input,
+            detached,
+            certificate: certificate_name,
+            keys,
+        } => {
+            let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
+            let selectors = env
+                .selectors
+                .get(item_id)
+                .ok_or(ProcessingError::InvalidInput("unresolved signing keys"))?;
+            let requests = key_requests(&keys, selectors, env.secrets)?;
+            let certificate = certificate(env, certificate_name, ctx)?;
+            let mut document = env.documents.take(&input)?;
+            let (existing, _existing) =
+                read_bytes(&mut document, ctx, oncl_core::jose::MAX_PAYLOAD_BYTES * 2)?;
+            let mut payload_document = detached
+                .as_ref()
+                .map(|name| env.documents.take(name))
+                .transpose()?;
+            let payload = payload_document
+                .as_mut()
+                .map(|d| read_bytes(d, ctx, oncl_core::jose::MAX_PAYLOAD_BYTES))
+                .transpose()?;
+            let mut writer =
+                super::artifact::ArtifactWriter::new(sink.store.clone(), sink.owner.clone(), ctx)?;
+            let mut request = oncl_core::jose::JwsVerifyRequest::new(jose_profile(
+                serialization,
+                payload.is_some(),
+            ));
+            request.certificate = certificate.as_ref();
+            let report = env.engine.jws_add(
+                request,
+                requests,
+                &existing,
+                payload.as_ref().map(|(b, _)| b.as_slice()),
+                &mut writer,
+                ctx,
+            )?;
+            let artifact = writer.finish(report.bytes_out)?;
+            let signers = vec![applied(report.applied); report.signer_count];
+            let projection = ctx
+                .resources()
+                .reserve_metadata(512 + signers.len() as u64 * 16)?;
+            Ok((
+                OperationResult::Jws {
+                    serialization,
+                    artifact: sink.id,
+                    bytes_in: report.bytes_in,
+                    bytes_out: report.bytes_out,
+                    signers,
+                },
+                projection,
+                Some(artifact),
+            ))
+        }
+        Operation::JwtEncode { input, key } => {
+            let sink = output.ok_or(OperationError::MissingTemporaryStore)?;
+            let selectors = env
+                .selectors
+                .get(item_id)
+                .ok_or(ProcessingError::InvalidInput("unresolved signing keys"))?;
+            let mut requests = key_requests(std::slice::from_ref(&key), selectors, env.secrets)?;
+            let mut document = env.documents.take(&input)?;
+            let (claims, _claims) =
+                read_bytes(&mut document, ctx, oncl_core::jose::MAX_CLAIMS_BYTES)?;
+            let mut writer =
+                super::artifact::ArtifactWriter::new(sink.store.clone(), sink.owner.clone(), ctx)?;
+            let report = env
+                .engine
+                .jwt_encode(requests.remove(0), &claims, &mut writer, ctx)?;
+            let artifact = writer.finish(report.bytes_out)?;
+            let signers = vec![applied(report.applied); report.signer_count];
+            let projection = ctx
+                .resources()
+                .reserve_metadata(512 + signers.len() as u64 * 16)?;
+            Ok((
+                OperationResult::Jws {
+                    serialization: oncl_api::dto::JwsFormat::Compact,
+                    artifact: sink.id,
+                    bytes_in: report.bytes_in,
+                    bytes_out: report.bytes_out,
+                    signers,
+                },
+                projection,
+                Some(artifact),
+            ))
+        }
+        Operation::JwsVerify {
+            serialization,
+            input,
+            detached,
+            certificate: certificate_name,
+        } => {
+            let certificate = certificate(env, certificate_name, ctx)?;
+            let mut document = env.documents.take(&input)?;
+            let (token, _token) =
+                read_bytes(&mut document, ctx, oncl_core::jose::MAX_PAYLOAD_BYTES * 2)?;
+            let mut payload_document = detached
+                .as_ref()
+                .map(|name| env.documents.take(name))
+                .transpose()?;
+            let payload = payload_document
+                .as_mut()
+                .map(|d| read_bytes(d, ctx, oncl_core::jose::MAX_PAYLOAD_BYTES))
+                .transpose()?;
+            let mut request = oncl_core::jose::JwsVerifyRequest::new(jose_profile(
+                serialization,
+                payload.is_some(),
+            ));
+            request.certificate = certificate.as_ref();
+            let report = env.engine.jws_verify(
+                request,
+                &token,
+                payload.as_ref().map(|(b, _)| b.as_slice()),
+                ctx,
+            )?;
+            let signers = jws_signers(&report);
+            let projection = ctx
+                .resources()
+                .reserve_metadata(512 + signers.len() as u64 * 8192)?;
+            Ok((
+                OperationResult::JwsVerification {
+                    verdict: verdict(report.verdict()),
+                    policy: policy_name(report.policy()),
+                    checked_at_unix: report.checked_at().unix_timestamp(),
+                    signers,
+                },
+                projection,
+                None,
+            ))
+        }
+        Operation::JwtDecode { input } => {
+            let mut document = env.documents.take(&input)?;
+            let (token, _token) =
+                read_bytes(&mut document, ctx, oncl_core::jose::MAX_CLAIMS_BYTES)?;
+            let decoded = env.engine.jwt_decode_unverified(&token, ctx)?;
+            let claims = String::from_utf8_lossy(decoded.payload()).into_owned();
+            let projection = ctx
+                .resources()
+                .reserve_metadata(512 + claims.len() as u64)?;
+            Ok((
+                OperationResult::JwtDecoded {
+                    verified: decoded.is_verified(),
+                    issuer: decoded.issuer().map(str::to_owned),
+                    audience: decoded.audience().map(str::to_owned).collect(),
+                    expiration_unix: decoded.expiration(),
+                    claims,
+                },
+                projection,
+                None,
+            ))
+        }
+        Operation::JwtVerify {
+            input,
+            certificate: certificate_name,
+        } => {
+            let certificate = certificate(env, certificate_name, ctx)?;
+            let mut document = env.documents.take(&input)?;
+            let (token, _token) =
+                read_bytes(&mut document, ctx, oncl_core::jose::MAX_CLAIMS_BYTES)?;
+            let mut policy = oncl_core::jose::JwtValidationPolicy::new(
+                time::OffsetDateTime::now_utc().unix_timestamp(),
+            );
+            policy.expected_issuer = env.host.jwt_issuer.clone();
+            policy.expected_audience = env.host.jwt_audience.clone();
+            let report = env
+                .engine
+                .jwt_verify(certificate.as_ref(), &token, &policy, ctx)?;
+            let signers = jws_signers(report.jws());
+            let claims = String::from_utf8_lossy(report.jws().payload()).into_owned();
+            let projection = ctx
+                .resources()
+                .reserve_metadata(512 + claims.len() as u64 + signers.len() as u64 * 8192)?;
+            Ok((
+                OperationResult::JwtVerification {
+                    verdict: verdict(report.verdict()),
+                    signature_verdict: verdict(report.jws().verdict()),
+                    claims_verdict: verdict(report.claims().verdict()),
+                    claim_failures: report
+                        .claims()
+                        .failures()
+                        .iter()
+                        .map(|f| format!("{f:?}"))
+                        .collect(),
+                    checked_at_unix: report.claims().checked_at(),
+                    signers,
+                    claims,
+                },
+                projection,
+                None,
             ))
         }
     }

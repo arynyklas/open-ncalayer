@@ -481,6 +481,7 @@ fn live_revocation_refuses_new_http_requests_not_original_grant() {
             actions: vec![oncl_server::config::Permission::Hash],
             keys: Vec::new(),
             inline_pkcs12: false,
+            metadata_aliases: vec![],
         }];
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -593,6 +594,7 @@ fn named_operator_bindings_use_only_authorized_audit_labels() {
         actions: vec![oncl_server::config::Permission::Sign],
         keys: vec!["key-39".into()],
         inline_pkcs12: false,
+        metadata_aliases: vec![],
     }];
     config.keys = (0..40)
         .map(|n| oncl_server::config::KeyConfig::File {
@@ -852,6 +854,7 @@ fn actual_dual_stack_proxy_peers_normalize_only_ipv4_mapped_addresses() {
                 actions: vec![oncl_server::config::Permission::Hash],
                 keys: Vec::new(),
                 inline_pkcs12: false,
+                metadata_aliases: vec![],
             }];
             let host = oncl_server::service::ServiceHost::new(config).unwrap();
             let (stop, stopped) = tokio::sync::oneshot::channel();

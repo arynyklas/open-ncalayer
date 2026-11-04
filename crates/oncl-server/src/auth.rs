@@ -99,6 +99,7 @@ pub struct TokenRecord {
     keys: Vec<String>,
     label: AuditLabel,
     inline_pkcs12: bool,
+    metadata_aliases: Vec<String>,
 }
 impl TokenRecord {
     pub fn new(
@@ -125,7 +126,12 @@ impl TokenRecord {
             keys,
             label: AuditLabel::new(hash.as_ref()[..16].try_into().expect("digest length")),
             inline_pkcs12: false,
+            metadata_aliases: Vec::new(),
         })
+    }
+    pub fn with_metadata_aliases(mut self, aliases: Vec<String>) -> Self {
+        self.metadata_aliases = aliases;
+        self
     }
     pub fn with_inline_pkcs12(mut self, allowed: bool) -> Self {
         self.inline_pkcs12 = allowed;
@@ -254,6 +260,17 @@ impl AccessPolicy {
             return Err(denied());
         }
         Ok(ExecutionGrant::new([action]).with_keys([selector.key_id()]))
+    }
+    /// Exact container aliases the host granted to this principal's inspection.
+    pub fn metadata_aliases(&self, principal: &Principal) -> io::Result<Vec<String>> {
+        let state = self.state.read().map_err(|_| denied())?;
+        if !Arc::ptr_eq(&principal.owner, &self.identity)
+            || principal.generation != state.generation
+        {
+            return Err(denied());
+        }
+        let record = state.records.get(&principal.id).ok_or_else(denied)?;
+        Ok(record.metadata_aliases.clone())
     }
     /// Atomic trusted-host ACL replacement; no request DTO can call this method.
     /// Validation completes before publication; every old Principal becomes stale.

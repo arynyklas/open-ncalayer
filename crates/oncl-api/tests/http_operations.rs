@@ -34,6 +34,7 @@ impl Running {
             actions: vec![Permission::Hash],
             keys: vec![],
             inline_pkcs12: false,
+            metadata_aliases: vec![],
         });
         configure(&mut config);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -504,6 +505,7 @@ fn operator_pki_address_pins_are_applied_not_ignored_or_resolved_from_wire() {
                 actions: vec![Permission::Verify],
                 keys: vec![],
                 inline_pkcs12: false,
+                metadata_aliases: vec![],
             }],
             pki: PkiConfig {
                 endpoints: vec![PkiEndpoint {

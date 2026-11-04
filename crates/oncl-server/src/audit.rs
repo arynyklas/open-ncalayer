@@ -19,7 +19,7 @@ pub const FRAME_BYTES: u64 = 160;
 // v01's zero reserved item bits are unknowable, not authoritative non-batch.
 const MAGIC: &[u8; 8] = b"ONCLAU02";
 const IDENTITY: &str = "oncl-audit.identity";
-const MAX_BINDINGS: usize = 1024;
+pub(crate) const MAX_BINDINGS: usize = 1024;
 const MAX_KEYS_PER_OPERATION: usize = 32;
 const MAX_BATCH_ITEMS: u16 = 1024;
 

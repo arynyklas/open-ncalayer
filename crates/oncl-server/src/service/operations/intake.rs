@@ -10,8 +10,32 @@ use oncl_pki::{
 pub(super) struct Prepared {
     pub metadata: OperationMetadata,
     pub payload: Payload,
+    pub secrets: Secrets,
     pub reservations: Vec<ResourceReservation>,
     pub failure: Arc<Failure>,
+}
+/// Bounded, fixed-capacity memory-only secret role. It is never given to a
+/// TemporaryStore or a spool and its owned bytes are wiped on drop. (Transient
+/// network/parser read buffers outside this owner are not under its control.)
+pub(super) struct Secret {
+    bytes: zeroize::Zeroizing<Vec<u8>>,
+    _reservation: ResourceReservation,
+}
+#[derive(Default)]
+pub(super) struct Secrets(BTreeMap<String, Secret>);
+const CONTAINER_SECRET_BYTES: usize = 4 << 20;
+const PASSWORD_SECRET_BYTES: usize = 4096;
+impl Secrets {
+    pub(super) fn bytes(&self, name: &str) -> Result<&[u8], ProcessingError> {
+        self.0
+            .get(name)
+            .map(|s| s.bytes.as_slice())
+            .ok_or(ProcessingError::InvalidInput("missing declared secret"))
+    }
+    pub(super) fn text(&self, name: &str) -> Result<&str, ProcessingError> {
+        std::str::from_utf8(self.bytes(name)?)
+            .map_err(|_| ProcessingError::InvalidInput("secret is not UTF-8"))
+    }
 }
 pub(super) enum Documents {
     Text(BTreeMap<String, String>),
@@ -292,6 +316,15 @@ pub(super) async fn prepare(
         let request: SmallRequest =
             serde_json::from_slice(&bytes).map_err(|_| invalid_request())?;
         validate_metadata(&request.metadata)?;
+        if request
+            .metadata
+            .parts
+            .iter()
+            .any(|p| p.role == PartRole::Secret)
+        {
+            // Secrets never travel in the JSON body: it is a decoded String map.
+            return Err(invalid_request());
+        }
         for part in &request.metadata.parts {
             if !request.documents.contains_key(&part.name) {
                 return Err(invalid_request());
@@ -303,6 +336,7 @@ pub(super) async fn prepare(
         return Ok(Prepared {
             metadata: request.metadata,
             payload: Payload::Text(request.documents),
+            secrets: Secrets::default(),
             reservations: vec![transport, parsed, metadata_reservation],
             failure: failure.clone(),
         });
@@ -390,13 +424,59 @@ pub(super) async fn prepare(
             request.parts.len(),
         )
         .map_err(|_| invalid_request())?;
+    let mut secrets = Secrets::default();
+    let mut secret_total = 0u64;
+    let secret_kinds = super::dispatch::secret_kinds(&request);
+    for part in request.parts.iter().filter(|p| p.role == PartRole::Secret) {
+        // Role comes from host-validated metadata; filename/Content-Type are ignored.
+        let mut field = parser
+            .next_field()
+            .await
+            .map_err(|_| parse_error(&failure))?
+            .ok_or_else(invalid_request)?;
+        if field.name() != Some(part.name.as_str()) {
+            return Err(invalid_request());
+        }
+        parser.admit_data();
+        let capacity = match secret_kinds.get(part.name.as_str()) {
+            Some(super::dispatch::SecretKind::Password) => PASSWORD_SECRET_BYTES,
+            Some(super::dispatch::SecretKind::Container) => CONTAINER_SECRET_BYTES,
+            None => return Err(invalid_request()),
+        };
+        let reservation = scope
+            .reserve_memory(capacity as u64)
+            .map_err(processing_error)?;
+        let mut secret = zeroize::Zeroizing::new(Vec::new());
+        secret
+            .try_reserve_exact(capacity)
+            .map_err(|_| ApiError::not_applied(ErrorCode::MemoryLimit))?;
+        while let Some(chunk) = field.chunk().await.map_err(|_| parse_error(&failure))? {
+            scope
+                .checkpoint()
+                .map_err(|error| processing_error(failure.recover(error)))?;
+            if secret.len() + chunk.len() > capacity {
+                return Err(ApiError::not_applied(ErrorCode::MetadataLimit));
+            }
+            secret.extend_from_slice(&chunk);
+        }
+        drop(field);
+        secret_total += secret.len() as u64;
+        secrets.0.insert(
+            part.name.clone(),
+            Secret {
+                bytes: secret,
+                _reservation: reservation,
+            },
+        );
+    }
     Ok(Prepared {
         metadata: request,
+        secrets,
         failure: failure.clone(),
         payload: Payload::Multipart {
             parser,
             wire,
-            metadata_bytes: bytes.len() as u64,
+            metadata_bytes: bytes.len() as u64 + secret_total,
             content_length: metadata.content_length,
             deadline,
             cancel,
@@ -483,6 +563,11 @@ impl Payload {
                 let mut seen = BTreeSet::new();
                 let mut documents = BTreeMap::new();
                 let mut payload = metadata_bytes;
+                let mut declared = metadata
+                    .parts
+                    .iter()
+                    .filter(|p| p.role == PartRole::Document);
+                let documents_expected = declared.clone().count();
                 while let Some(field) = runtime.block_on(parser.next_field()).map_err(|_| {
                     failure.recover(ProcessingError::InvalidInput("invalid multipart framing"))
                 })? {
@@ -500,6 +585,10 @@ impl Payload {
                         .iter()
                         .find(|p| p.name == name)
                         .ok_or(ProcessingError::InvalidInput("unknown multipart role"))?;
+                    // Wire order is the declared order: secrets first, then documents.
+                    if declared.next().map(|p| p.name.as_str()) != Some(name.as_str()) {
+                        return Err(ProcessingError::InvalidInput("multipart order mismatch"));
+                    }
                     if part.role != PartRole::Document || !seen.insert(name.clone()) {
                         return Err(ProcessingError::InvalidInput(
                             "duplicate or invalid multipart role",
@@ -547,8 +636,7 @@ impl Payload {
                     .is_some()
                 {}
                 let total = runtime.block_on(async { wire.lock().await.total });
-                if content_length.is_some_and(|n| n != total) || seen.len() != metadata.parts.len()
-                {
+                if content_length.is_some_and(|n| n != total) || seen.len() != documents_expected {
                     return Err(ProcessingError::InvalidInput(
                         "multipart length or field mismatch",
                     ));

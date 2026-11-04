@@ -53,6 +53,7 @@ pub struct ServiceHost {
     config: ServerConfig,
     store: Option<oncl_pki::io::TemporaryStore>,
     output_store: Option<Arc<operations::artifact::ArtifactStore>>,
+    host_policy: Arc<operations::HostPolicy>,
 }
 struct InvocationControl {
     cancel: Arc<Cancellation>,
@@ -114,7 +115,10 @@ impl ServiceHost {
             config.audit_segment_bytes,
             config.audit_quota_bytes,
             32,
-            config.max_in_flight as usize,
+            // Closed bindings stay as tombstones until their original deadline
+            // (S01 contract), so the table, not max_in_flight, bounds private
+            // requests per operation_timeout window.
+            crate::audit::MAX_BINDINGS,
         )?;
         let audit = if config.audit_directory.exists() {
             DurableAuditGuard::open(audit_config)?
@@ -148,6 +152,12 @@ impl ServiceHost {
             .with_shared_budget(budget)
             .with_keys(keys.clone(), Arc::new(audit.clone()))
             .with_validation(config.pki.services()?);
+        if let Some(tsa) = &config.pki.tsa {
+            services = services.with_cades(oncl_core::CadesConfiguration::new(
+                operations::evidence_limits(&config.limits()),
+                tsa.spec()?,
+            ));
+        }
         if let Some(store) = &store {
             services = services.with_temporary_store(store.clone());
         }
@@ -161,6 +171,11 @@ impl ServiceHost {
             None
         };
         let executor = BoundedExecutor::new(config.executor()).map_err(|_| invalid())?;
+        let host_policy = Arc::new(operations::HostPolicy {
+            tsa: config.pki.tsa.as_ref().map(|t| t.spec()).transpose()?,
+            jwt_issuer: config.pki.jwt.expected_issuer.clone(),
+            jwt_audience: config.pki.jwt.expected_audience.clone(),
+        });
         Ok(Arc::new(Self {
             engine,
             policy,
@@ -170,6 +185,7 @@ impl ServiceHost {
             config,
             store,
             output_store,
+            host_policy,
         }))
     }
     fn principal(&self, metadata: &RequestMetadata) -> Result<Principal, ApiError> {
@@ -270,6 +286,45 @@ fn processing_error(error: ProcessingError) -> ApiError {
         ProcessingError::InvalidLimits => ErrorCode::Internal,
     };
     ApiError::not_applied(code)
+}
+pub(crate) fn api_applied(value: oncl_pki::key::AppliedState) -> oncl_api::error::AppliedState {
+    use oncl_api::error::AppliedState as Api;
+    match value {
+        oncl_pki::key::AppliedState::NotApplied => Api::NotApplied,
+        oncl_pki::key::AppliedState::Applied => Api::Applied,
+        oncl_pki::key::AppliedState::Unknown => Api::Unknown,
+    }
+}
+/// Stable terminal error + honest key-application state from the typed SDK
+/// error, never reconstructed from a message.
+pub(crate) fn operation_failure(error: &OperationError) -> ApiError {
+    use oncl_core::ErrorCode as Core;
+    let code = match error.code() {
+        Core::PermissionDenied | Core::InteractionRequired => ErrorCode::PermissionDenied,
+        Core::InvalidInput | Core::SecretRequired => ErrorCode::InvalidRequest,
+        Core::Cancelled => ErrorCode::Cancelled,
+        Core::DeadlineExceeded => ErrorCode::DeadlineExceeded,
+        Core::CapacityExceeded => ErrorCode::CapacityExceeded,
+        Core::InputLimit | Core::ContainerLimit => ErrorCode::InputLimit,
+        Core::FramingLimit => ErrorCode::FramingLimit,
+        Core::OutputLimit => ErrorCode::OutputLimit,
+        Core::MemoryLimit => ErrorCode::MemoryLimit,
+        Core::TempLimit => ErrorCode::TempLimit,
+        Core::MetadataLimit => ErrorCode::MetadataLimit,
+        Core::Io | Core::UnsupportedAlgorithm | Core::KeyFailure => ErrorCode::OperationFailed,
+        Core::MissingKeyProvider
+        | Core::MissingMetadataProvider
+        | Core::MissingValidationServices
+        | Core::MissingCadesConfiguration => ErrorCode::MissingConfiguration,
+        Core::MissingTemporaryStore => ErrorCode::MissingTemporaryStore,
+        Core::KeyNotFound => ErrorCode::KeyNotFound,
+        Core::AuditFailed => ErrorCode::AuditUnavailable,
+        Core::ValidationRequired => ErrorCode::ValidationFailed,
+    };
+    ApiError {
+        code,
+        applied: api_applied(error.applied_state()),
+    }
 }
 fn core_error(error: OperationError) -> ApiError {
     match error {

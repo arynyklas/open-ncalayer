@@ -168,3 +168,13 @@ impl KeyProvider for OperatorKeys {
         Err(OperationError::PermissionDenied)
     }
 }
+
+/// Audit label for an exact immutable inline source identity. Derived from the
+/// host-computed InlineID, never from a client-asserted name or fingerprint.
+pub fn inline_label(id: &KeyId) -> AuditLabel {
+    let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
+    hash.update(b"oncl-audit-inline-v1\0");
+    hash.update(format!("{id:?}").as_bytes());
+    let digest = hash.finish();
+    AuditLabel::new(digest.as_ref()[..16].try_into().expect("digest length"))
+}

@@ -19,6 +19,12 @@ pub(super) struct StreamRuntime {
     pub receiver: watch::Receiver<Progress>,
     pub failure: Arc<intake::Failure>,
 }
+pub(super) struct PrivateState {
+    pub selectors: std::collections::HashMap<String, Vec<oncl_core::keys::KeySelector>>,
+    pub reservations: Vec<ResourceReservation>,
+    pub binding: Option<crate::audit::AuditBinding>,
+    pub host: Arc<super::HostPolicy>,
+}
 struct StreamFinal {
     event: Bytes,
     artifacts: Vec<(String, FinishedArtifact)>,
@@ -29,6 +35,7 @@ pub(super) async fn response(
     runtime: StreamRuntime,
     ctx: OperationContext,
     prepared: intake::Prepared,
+    private: PrivateState,
 ) -> Result<Response, ApiError> {
     let deadline = runtime.delivery.deadline;
     let failure = runtime.failure.clone();
@@ -47,7 +54,7 @@ pub(super) async fn response(
                 .metadata
                 .items
                 .iter()
-                .filter(|item| matches!(item.operation, Operation::Extract { .. }))
+                .filter(|item| dispatch::has_output(&item.operation))
                 .count();
             let (root, mut guard) = match OperationOutput::new(
                 worker_engine.clone(),
@@ -84,14 +91,29 @@ pub(super) async fn response(
                 }
             };
             let _ = native_ready.send(Ok(root.clone()));
-            let result = execute(
-                &root,
-                &worker_engine,
-                &runtime.output_store,
-                &mut guard,
-                metadata,
-                &mut documents,
-            );
+            let secrets = prepared.secrets;
+            let PrivateState {
+                selectors,
+                reservations,
+                binding,
+                host,
+            } = private;
+            let result = {
+                let mut env = dispatch::Env {
+                    engine: &worker_engine,
+                    documents: &mut documents,
+                    secrets: &secrets,
+                    selectors: &selectors,
+                    staging: runtime.source_store.as_ref(),
+                    host: &host,
+                };
+                execute(&root, &runtime.output_store, &mut guard, metadata, &mut env)
+            };
+            // Secrets, selector copies and the audit binding end with native work.
+            drop(secrets);
+            drop(selectors);
+            drop(reservations);
+            drop(binding);
             drop(native);
             guard.complete()?;
             result
@@ -150,39 +172,79 @@ pub(super) async fn response(
 }
 fn execute(
     root: &Arc<OperationOutput>,
-    engine: &Engine,
     store: &Arc<ArtifactStore>,
     guard: &mut ContextGuard,
     metadata: OperationMetadata,
-    documents: &mut intake::Documents,
+    env: &mut dispatch::Env<'_>,
 ) -> Result<StreamFinal, ProcessingError> {
     let mut results = Vec::with_capacity(metadata.items.len());
     let mut reservations = Vec::with_capacity(metadata.items.len());
     let mut artifacts = Vec::new();
+    let mut applied_any = false;
     for item in metadata.items {
         let id = format!("artifact-{}", artifacts.len());
-        let (result, reservation, artifact) = dispatch::run(
+        let outcome = dispatch::run(
             item.operation,
-            documents,
-            engine,
+            &item.id,
+            env,
             guard.context(),
             Some(dispatch::ArtifactSink {
                 store,
                 owner: root,
                 id: id.clone(),
             }),
-        )
-        .map_err(|error| match error {
-            OperationError::Processing(error) => error,
-            _ => ProcessingError::InvalidInput("operation failed"),
-        })?;
+        );
+        let (result, reservation, artifact) = match outcome {
+            Ok(done) => done,
+            Err(error) => {
+                let failure = operation_failure(&error);
+                let applied = failure.applied != oncl_api::error::AppliedState::NotApplied;
+                // Resource/deadline/cancel failures that never applied a key stay a
+                // transport abort (the original first-fatal cause); anything that
+                // may have used a private key, and every typed SDK refusal, gets a
+                // terminal failed record carrying the honest Applied state.
+                if matches!(error, OperationError::Processing(_)) && !applied && !applied_any {
+                    return Err(match error {
+                        OperationError::Processing(error) => error,
+                        _ => unreachable!("matched processing"),
+                    });
+                }
+                // Artifacts of this request are withheld: no partial success.
+                drop(artifacts);
+                drop(reservations);
+                let event = root.json_event(&ResponseEvent::Final {
+                    operation_id: root.id().get(),
+                    status: FinalStatus::Failed,
+                    results,
+                    error: Some(failure),
+                })?;
+                return Ok(StreamFinal {
+                    event,
+                    artifacts: Vec::new(),
+                });
+            }
+        };
         reservations.push(reservation);
+        let item_applied = match &result {
+            OperationResult::Signing { signers, .. } => {
+                if signers
+                    .iter()
+                    .any(|s| *s != oncl_api::error::AppliedState::NotApplied)
+                {
+                    oncl_api::error::AppliedState::Applied
+                } else {
+                    oncl_api::error::AppliedState::NotApplied
+                }
+            }
+            _ => oncl_api::error::AppliedState::NotApplied,
+        };
+        applied_any |= item_applied != oncl_api::error::AppliedState::NotApplied;
         if let Some(artifact) = artifact {
             artifacts.push((id, artifact));
         }
         results.push(ItemResult {
             item_id: item.id,
-            applied: oncl_api::error::AppliedState::NotApplied,
+            applied: item_applied,
             result,
         });
     }
@@ -190,6 +252,7 @@ fn execute(
         operation_id: root.id().get(),
         status: FinalStatus::Completed,
         results,
+        error: None,
     })?;
     Ok(StreamFinal { event, artifacts })
 }

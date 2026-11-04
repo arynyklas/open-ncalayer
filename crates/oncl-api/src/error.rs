@@ -15,6 +15,10 @@ pub enum ErrorCode {
     MetadataLimit,
     OutputLimit,
     AuditUnavailable,
+    MissingConfiguration,
+    KeyNotFound,
+    ValidationFailed,
+    OperationFailed,
     Internal,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,8 +57,12 @@ impl axum::response::IntoResponse for ApiError {
             | ErrorCode::TempLimit
             | ErrorCode::MetadataLimit
             | ErrorCode::OutputLimit => StatusCode::PAYLOAD_TOO_LARGE,
-            ErrorCode::AuditUnavailable | ErrorCode::MissingTemporaryStore => {
-                StatusCode::SERVICE_UNAVAILABLE
+            ErrorCode::AuditUnavailable
+            | ErrorCode::MissingTemporaryStore
+            | ErrorCode::MissingConfiguration => StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::KeyNotFound => StatusCode::NOT_FOUND,
+            ErrorCode::ValidationFailed | ErrorCode::OperationFailed => {
+                StatusCode::UNPROCESSABLE_ENTITY
             }
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
