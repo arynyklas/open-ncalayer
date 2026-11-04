@@ -591,25 +591,38 @@ fn closing_is_blocked_for(open: &Rc<Workspace>) -> bool {
     }
 }
 
-/// The window is closed while a signing worker has not answered (a hung worker after the cancel
-/// notice): the key may have been applied, which is recorded as UNKNOWN in the log with the
-/// operation's stamp; the worker is left to finish in the background (it holds no UI handle:
-/// its words and its outcome are refused by the closed window's lifecycle and logged).
-/// Returns the stamp of the abandoned signing.
-fn abandon_signing(open: &Rc<Workspace>) -> Option<Stamp> {
+/// The window is closed while a signing worker is alive. Whether the key could have been applied
+/// is read from the operation's own control, which the runner marks when it lets the key be
+/// applied (never from the UI step): before that gate (the worker waits for the decision) the key
+/// was never used and the worker is aborted: logged quietly with `key_use="none"`; after it the
+/// answer is only the engine's, so it is `key_use="unknown"` at error level. The worker is left
+/// to finish in the background (it holds no UI handle: its words and outcome are refused by the
+/// closed window's lifecycle and logged). Returns the stamp and whether the key may have been
+/// applied.
+fn abandon_signing(open: &Rc<Workspace>) -> Option<(Stamp, bool)> {
     let controller = open.controller.borrow();
-    let (job, _) = controller.running()?;
+    let (job, control) = controller.running()?;
     if job != Job::Sign {
         return None;
     }
     let stamp = controller.running_stamp()?;
-    tracing::error!(
-        window = stamp.window,
-        generation = stamp.generation,
-        key_use = "unknown",
-        "the window was closed while a signing had not answered: whether the key was applied is unknown; the worker finishes in the background"
-    );
-    Some(stamp)
+    let may_have_applied = control.key_gate_passed();
+    if may_have_applied {
+        tracing::error!(
+            window = stamp.window,
+            generation = stamp.generation,
+            key_use = "unknown",
+            "the window was closed while a signing had not answered: whether the key was applied is unknown; the worker finishes in the background"
+        );
+    } else {
+        tracing::info!(
+            window = stamp.window,
+            generation = stamp.generation,
+            key_use = "none",
+            "the window was closed before the key could be used; the waiting worker is aborted"
+        );
+    }
+    Some((stamp, may_have_applied))
 }
 
 /// What an outcome says, for the log when it cannot be shown: for a signing, the key use of each

@@ -1712,11 +1712,51 @@ mod tests {
         // Closing abandons the still-running signing, and says which one.
         let running = p.ws.controller.borrow().running_stamp();
         assert!(running.is_some());
-        assert_eq!(abandon_signing(&p.ws), running);
+        assert_eq!(abandon_signing(&p.ws), running.map(|s| (s, true)));
         // The worker then finishes in the background; the closed window refuses its outcome.
         p.ws.controller.borrow_mut().close();
         drop(held);
         assert!(p.ws.controller.borrow().running_stamp().is_none());
+    }
+
+    /// Closing before the key could be used is not a claim about the key: at Unlock no worker
+    /// exists, and at Confirm the worker only waits for the decision (the runner has not passed
+    /// its key gate): `abandon_signing` says «key may have been applied = false» and nothing was
+    /// applied. After the approval (the Running test above) it says true.
+    #[test]
+    fn closing_before_the_key_gate_never_claims_the_key_may_have_been_used() {
+        use crate::workspace::abandon_signing;
+        // Unlock: documents frozen, key store chosen, no worker.
+        let p = page();
+        let s = ui(&p);
+        s.set_doc_path(p.paths[0].display().to_string().into());
+        s.invoke_add_doc();
+        until("frozen", || {
+            !p.ws.ui.get_busy() && !p.ws.sign.borrow().documents.is_empty()
+        });
+        s.set_store_path(p.w.store.display().to_string().into());
+        s.invoke_to_unlock();
+        assert_eq!(step(&p), Step::Unlock);
+        assert_eq!(abandon_signing(&p.ws), None, "no worker, nothing to claim");
+        assert_eq!(p.guard.applications(), 0);
+        // Confirm: the worker waits for the decision.
+        let p = page();
+        to_confirmation(&p);
+        arm(&p);
+        assert_eq!(step(&p), Step::Confirm);
+        let running = p.ws.controller.borrow().running_stamp();
+        if running.is_some() {
+            assert_eq!(abandon_signing(&p.ws), running.map(|s| (s, false)));
+        }
+        assert!(
+            !p.ws
+                .controller
+                .borrow()
+                .running()
+                .is_some_and(|(_, c)| c.key_gate_passed()),
+            "the gate is not passed before the approval"
+        );
+        assert_eq!(p.guard.applications(), 0);
     }
 
     /// What the sign page's fields mean to the SDK: every format and level maps to its spec;

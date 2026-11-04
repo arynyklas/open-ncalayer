@@ -507,6 +507,9 @@ fn sign_inner(
     let approval = plan
         .authorize(&ctx)
         .map_err(|e| JobError::from(batch_operation_error(e)))?;
+    // From here the key may be applied: the window's close path reads this to tell «never
+    // used» from «unknown».
+    control.mark_key_gate_passed();
     guard.allow(ctx.id().get(), key_id, Action::Sign, documents.len());
     let mut published = vec![false; documents.len()];
     let summary = engine.run_batch_with_outputs(

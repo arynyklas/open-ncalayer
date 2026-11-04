@@ -88,6 +88,9 @@ const REPORT_EVERY: Duration = Duration::from_millis(50);
 #[derive(Debug)]
 pub struct JobControl {
     cancelled: AtomicBool,
+    /// Set by the signing runner when the consent was accepted and the key was allowed to be
+    /// applied: from then on whether it was applied is only known from the engine's answer.
+    key_gate_passed: AtomicBool,
     bytes_in: AtomicU64,
     total: AtomicU64,
     items: AtomicUsize,
@@ -102,6 +105,7 @@ impl Default for JobControl {
     fn default() -> Self {
         JobControl {
             cancelled: AtomicBool::new(false),
+            key_gate_passed: AtomicBool::new(false),
             bytes_in: AtomicU64::new(0),
             total: AtomicU64::new(0),
             items: AtomicUsize::new(0),
@@ -126,6 +130,16 @@ impl JobControl {
     /// too ([`Reporter::finish`]).
     pub fn reporter(&self) -> Option<&Reporter> {
         self.reporter.as_ref()
+    }
+
+    /// The runner has let the key be applied for this operation.
+    pub(crate) fn mark_key_gate_passed(&self) {
+        self.key_gate_passed.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the key could have been applied by this operation (the gate was passed).
+    pub(crate) fn key_gate_passed(&self) -> bool {
+        self.key_gate_passed.load(Ordering::SeqCst)
     }
 
     /// Asks the operation to stop at its next checkpoint.
