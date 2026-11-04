@@ -374,6 +374,26 @@ enum PackageCommand {
         #[command(flatten)]
         args: PackageArgs,
     },
+    /// The WinGet installer entry of `win-x64` or `win-x86`: the built `oncl-winget-setup`
+    /// carrying the final `Setup.exe` (`openncalayer-<version>-<flavor>-winget-setup.exe`,
+    /// unsigned: sign it after this, then publish those bytes).
+    WingetSetup {
+        /// `win-x64` or `win-x86`.
+        #[arg(long)]
+        flavor: String,
+        /// The built `oncl-winget-setup.exe` (without a payload) of the flavor's target.
+        #[arg(long)]
+        entry: PathBuf,
+        /// The published (and signed, if signing is on) `Setup.exe` of the flavor.
+        #[arg(long)]
+        setup: PathBuf,
+        /// The version of the release.
+        #[arg(long, value_parser = parse_version)]
+        version: Version,
+        /// Where the entry is written.
+        #[arg(long, default_value = "dist")]
+        dist: PathBuf,
+    },
     /// The universal macOS `.app` as `.zip` and `.pkg`, and the update packages (macOS).
     Macos {
         /// The universal programs.
@@ -531,6 +551,18 @@ fn package(command: PackageCommand) -> anyhow::Result<()> {
                 &args.packages,
                 &args.dist,
             )?);
+        }
+        PackageCommand::WingetSetup {
+            flavor,
+            entry,
+            setup,
+            version,
+            dist,
+        } => {
+            let flavor = windows::flavor(&flavor)?;
+            let made = windows::winget_setup(&entry, &setup, &version, &flavor, &dist)?;
+            print_published(&[made]);
+            println!("the installer entry is not signed: sign it (Authenticode) before it is published");
         }
         PackageCommand::Macos {
             bin,

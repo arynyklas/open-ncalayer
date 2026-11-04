@@ -8365,6 +8365,7 @@ dependencies = [
  "oncl-testkit",
  "oncl-token",
  "oncl-update",
+ "oncl-winget-setup",
  "oncl-xml",
  "pkcs8 0.11.0",
  "rand_chacha 0.3.1",
