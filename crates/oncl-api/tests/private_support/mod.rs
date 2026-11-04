@@ -276,7 +276,7 @@ impl Pki {
             }],
             tsa: Some(oncl_server::config::TsaConfig {
                 url: format!("{}/tsa", self.origin),
-                policy: None,
+                policy: Some("1.2.3.4.5".into()),
                 timeout_ms: 10_000,
                 skew_ms: 300_000,
             }),
@@ -394,7 +394,14 @@ impl Running {
             .get("content-type")
             .map(|v| v.to_str().unwrap().to_owned())
             .unwrap_or_default();
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        // A transport abort after headers (first-fatal) yields an empty body; every
+        // caller then fails its own parse/assert instead of panicking here.
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .map(|b| b.to_bytes())
+            .unwrap_or_default();
         (status, content_type, bytes.to_vec())
     }
 }
@@ -643,6 +650,8 @@ impl SpoolWatch {
                         }
                         // A file removed between listing and reading is normal.
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        // Windows reports a delete-pending file as access denied.
+                        Err(_) if !file.exists() => {}
                         Err(error) => {
                             *failure_thread.lock().unwrap() = Some(error.to_string());
                         }

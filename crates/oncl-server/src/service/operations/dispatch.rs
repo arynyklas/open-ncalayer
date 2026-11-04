@@ -171,6 +171,20 @@ pub(super) fn precheck(
     let denied = || ApiError::not_applied(ErrorCode::PermissionDenied);
     for item in &metadata.items {
         let act = action(&item.operation);
+        let pades_high = matches!(
+            &item.operation,
+            Operation::Sign {
+                profile: SignKind::PadesLt | SignKind::PadesLta,
+                ..
+            } | Operation::Extend {
+                profile: ExtendKind::PadesLt | ExtendKind::PadesLta,
+                ..
+            }
+        );
+        if pades_high && host.memory_per_operation < PADES_LT_MEMORY {
+            // A predictable resource need is refused before any private use.
+            return Err(ApiError::not_applied(ErrorCode::MemoryLimit));
+        }
         if let Operation::Plugin {
             plugin,
             operation,
@@ -507,11 +521,11 @@ fn applied(value: oncl_pki::key::AppliedState) -> oncl_api::error::AppliedState 
 fn ades_level(kind: SignKind) -> Option<AdesLevel> {
     use SignKind::*;
     match kind {
-        Cms | Pdf | Xml | Wsse | XmlLegacy | XadesLegacyB => None,
+        Cms | Pdf | Xml | Wsse | XmlLegacy | XadesLegacyB | XadesLegacyT => None,
         CadesB | PadesB | XadesB => Some(AdesLevel::B),
         CadesT | PadesT | XadesT => Some(AdesLevel::T),
-        CadesLt | PadesLt | XadesLt => Some(AdesLevel::Lt),
-        CadesLta | PadesLta | XadesLta => Some(AdesLevel::Lta),
+        CadesLt | PadesLt => Some(AdesLevel::Lt),
+        CadesLta | PadesLta => Some(AdesLevel::Lta),
     }
 }
 /// Caller-acquired public status/chain evidence. It is never a trust anchor.
@@ -588,12 +602,14 @@ pub(super) fn validate_shape(operation: &Operation) -> Result<(), ApiError> {
         } => {
             use SignKind::*;
             let cms_like = matches!(profile, Cms | CadesB | CadesT | CadesLt | CadesLta);
-            let xml_ids = matches!(profile, Xml | XadesB | XadesT | XadesLt | XadesLta);
-            let legacy = matches!(profile, XmlLegacy | XadesLegacyB);
-            let high = matches!(
-                profile,
-                CadesLt | CadesLta | PadesLt | PadesLta | XadesLt | XadesLta
-            );
+            let xml_ids = matches!(profile, Xml | XadesB | XadesT);
+            let legacy = matches!(profile, XmlLegacy | XadesLegacyB | XadesLegacyT);
+            let high = matches!(profile, CadesLt | CadesLta | PadesLt | PadesLta);
+            // LT/LTA need caller-acquired OCSP/CRL material: predictable, so refused
+            // before any secret/key/document is touched (not after key use).
+            if high && !has_status_material(evidence) {
+                return Err(invalid_request());
+            }
             let bad = (!cms_like
                 && (*mode == SignWriteMode::Add || *attached || detached.is_some()))
                 || (*mode == SignWriteMode::Create && detached.is_some())
@@ -606,11 +622,23 @@ pub(super) fn validate_shape(operation: &Operation) -> Result<(), ApiError> {
                         || digest_method.is_some()))
                 || (!high
                     && !evidence.is_empty()
-                    && !matches!(profile, CadesT | PadesT | XadesT | XadesLegacyB));
+                    && !matches!(
+                        profile,
+                        CadesT | PadesT | XadesT | XadesLegacyB | XadesLegacyT
+                    ));
             if bad {
                 return Err(invalid_request());
             }
             Ok(())
+        }
+        Operation::Extend {
+            profile, evidence, ..
+        } if matches!(
+            profile,
+            ExtendKind::CadesLt | ExtendKind::CadesLta | ExtendKind::PadesLt | ExtendKind::PadesLta
+        ) && !has_status_material(evidence) =>
+        {
+            Err(invalid_request())
         }
         Operation::Verify { profile, soap, .. }
             if soap.is_some() && !matches!(profile, VerifyProfile::Wsse) =>
@@ -620,15 +648,17 @@ pub(super) fn validate_shape(operation: &Operation) -> Result<(), ApiError> {
         _ => Ok(()),
     }
 }
+fn has_status_material(evidence: &[oncl_api::dto::EvidenceRef]) -> bool {
+    use oncl_api::dto::EvidenceKind;
+    evidence
+        .iter()
+        .any(|e| matches!(e.kind, EvidenceKind::Ocsp | EvidenceKind::Crl))
+}
+/// Minimum `memory_per_operation` for PAdES LT/LTA signing/extension, measured on
+/// this build (a 256 MiB profile fails after key use, 350 MiB succeeds) with margin.
+pub(super) const PADES_LT_MEMORY: u64 = 352 << 20;
 fn is_xml(kind: SignKind) -> bool {
-    matches!(
-        kind,
-        SignKind::Xml
-            | SignKind::XadesB
-            | SignKind::XadesT
-            | SignKind::XadesLt
-            | SignKind::XadesLta
-    )
+    matches!(kind, SignKind::Xml | SignKind::XadesB | SignKind::XadesT)
 }
 fn is_pdf(kind: SignKind) -> bool {
     matches!(
@@ -936,6 +966,14 @@ pub(super) fn run(
                 .map(|input| input.reader(ctx.resources()))
                 .transpose()?;
             let level = ades_level(profile);
+            // XAdES timestamp levels bind the TSA policy OID (SDK contract). A host
+            // TSA without one is refused BEFORE any key is opened, as a typed
+            // configuration error rather than a malformed-input failure.
+            if matches!(profile, SignKind::XadesT | SignKind::XadesLegacyT)
+                && env.host.tsa.as_ref().is_none_or(|t| t.policy.is_none())
+            {
+                return Err(OperationError::MissingCadesConfiguration);
+            }
             let request = if matches!(profile, SignKind::Wsse) {
                 if requests.len() != 1 {
                     return Err(ProcessingError::InvalidInput("WSSE signing takes one key").into());
@@ -957,14 +995,23 @@ pub(super) fn run(
                 spec.signature_method = signature_method.as_deref();
                 spec.digest_method = digest_method.as_deref();
                 oncl_core::SignRequest::xml_legacy(key, spec)
-            } else if matches!(profile, SignKind::XadesLegacyB) {
+            } else if matches!(profile, SignKind::XadesLegacyB | SignKind::XadesLegacyT) {
                 if requests.len() != 1 {
                     return Err(ProcessingError::InvalidInput("XML signing takes one key").into());
                 }
                 let key = requests.remove(0);
+                let timestamped = matches!(profile, SignKind::XadesLegacyT);
                 let spec = oncl_xml::xades::XadesSpec {
-                    level: oncl_xml::xades::XadesLevel::B,
-                    tsa: None,
+                    level: if timestamped {
+                        oncl_xml::xades::XadesLevel::T
+                    } else {
+                        oncl_xml::xades::XadesLevel::B
+                    },
+                    tsa: if timestamped {
+                        env.host.tsa.clone()
+                    } else {
+                        None
+                    },
                     chain: evidence.certificates.clone(),
                     signature_method: signature_method.as_deref(),
                     digest_method: digest_method.as_deref(),

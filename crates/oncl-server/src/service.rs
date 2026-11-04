@@ -186,6 +186,7 @@ impl ServiceHost {
             jwt_issuer: config.pki.jwt.expected_issuer.clone(),
             jwt_audience: config.pki.jwt.expected_audience.clone(),
             plugin_grants,
+            memory_per_operation: config.memory_per_operation,
         });
         Ok(Arc::new(Self {
             engine,

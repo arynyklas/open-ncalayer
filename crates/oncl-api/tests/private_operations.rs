@@ -2463,13 +2463,13 @@ async fn legacy_xml_and_wsse_sign_verify_with_independent_lxml_oracle_and_shape_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn xades_legacy_b_is_signed_over_http_and_checked_by_lxml() {
+async fn xades_legacy_b_and_t_are_signed_over_http_and_checked_by_lxml() {
     let pki = Pki::start();
     let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
     let service = Running::start_with(inline_service_config(&pki)).await;
     let dir = tempfile::tempdir().unwrap();
     let xml = br#"<root><data Id="d">xades legacy</data></root>"#;
-    for profile in ["xades_legacy_b"] {
+    for profile in ["xades_legacy_b", "xades_legacy_t"] {
         let extra = r#""element":"//data","signature_method":"http://www.w3.org/2001/04/xmldsig-more#rsa-sha256","digest_method":"http://www.w3.org/2001/04/xmlenc#sha256","#;
         let (_, parts) = sign_inline(&service, &p12, profile, extra, xml).await;
         let done = final_event(&parts);
@@ -2490,6 +2490,11 @@ async fn xades_legacy_b_is_signed_over_http_and_checked_by_lxml() {
         }
         let text = String::from_utf8_lossy(signed);
         assert!(text.contains("SignedProperties"), "{profile}");
+        assert_eq!(
+            profile.ends_with('t'),
+            text.contains("SignatureTimeStamp"),
+            "{profile}"
+        );
     }
     service.stop().await;
 }
@@ -2926,4 +2931,167 @@ fn sha256(bytes: &[u8]) -> Vec<u8> {
 }
 fn hex(bytes: &[u8]) -> Vec<u8> {
     bytes.to_vec()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xades_timestamp_levels_need_a_host_tsa_policy_refused_before_the_key_opens() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let dir = tempfile::tempdir().unwrap();
+    let xml = br#"<root><item Id="p">t</item><holder Id="s"></holder></root>"#;
+    let shape = r#""target":"p","parent":"s","signature_id":"sig1","#;
+    // With the policy OID the host TSA is acceptable to XAdES T.
+    let service = Running::start_with(inline_service_config(&pki)).await;
+    let (_, parts) = sign_inline(&service, &p12, "xades_t", shape, xml).await;
+    assert_eq!(final_event(&parts)["status"], "completed");
+    let verdict = xml_oracle(artifact(&parts, "artifact-0"), dir.path());
+    assert_eq!(
+        verdict["signatures"][0]["signature_valid"], true,
+        "{verdict}"
+    );
+    service.stop().await;
+    // Without it (the SDK binds the TSA policy for XAdES T/LT/LTA): typed
+    // MissingConfiguration, NotApplied, and no BEGIN.
+    let service = Running::start_with(|config, dir| {
+        inline_service_config(&pki)(config, dir);
+        config.pki.tsa.as_mut().unwrap().policy = None;
+    })
+    .await;
+    for profile in ["xades_t", "xades_legacy_t"] {
+        let extra = if profile == "xades_t" {
+            shape
+        } else {
+            r#""element":"//item","signature_method":"http://www.w3.org/2001/04/xmldsig-more#rsa-sha256","digest_method":"http://www.w3.org/2001/04/xmlenc#sha256","#
+        };
+        let (_, parts) = sign_inline(&service, &p12, profile, extra, xml).await;
+        let done = final_event(&parts);
+        assert_eq!(done["status"], "failed", "{profile}: {done}");
+        assert_eq!(done["error"]["code"], "MissingConfiguration");
+        assert_eq!(done["error"]["applied"], "NotApplied");
+    }
+    assert_eq!(begins(&service), 0);
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lt_levels_need_status_material_and_the_pades_memory_profile_before_any_key_use() {
+    let pki = Pki::start();
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let inter = {
+        use der::Encode;
+        pki.inter.cert.to_der().unwrap()
+    };
+    let pdf = include_bytes!("../../oncl-pdf/tests/fixtures/external-multipage.pdf");
+    let service = Running::start_with(|config, dir| {
+        inline_service_config(&pki)(config, dir);
+        config.memory_per_operation = 256 << 20; // below the PAdES LT/LTA profile
+        config.total_memory = 2 << 30;
+    })
+    .await;
+    let sign = |profile: &str, evidence: bool| {
+        let (ev, parts) = if evidence {
+            (
+                r#""evidence":[{"kind":"certificate","input":"ev0"},{"kind":"crl","input":"ev1"},{"kind":"crl","input":"ev2"}],"#,
+                r#",{"name":"ev0","item_id":"s1","role":"document"},{"name":"ev1","item_id":"s1","role":"document"},{"name":"ev2","item_id":"s1","role":"document"}"#,
+            )
+        } else {
+            ("", "")
+        };
+        format!(
+            r#"{{"items":[{{"id":"s1","operation":{{"kind":"sign","profile":"{profile}","input":"doc",{ev}"keys":[{{"source":"inline","container":"p12","password":"pw"}}]}}}}],"parts":[{{"name":"p12","item_id":"s1","role":"secret"}},{{"name":"pw","item_id":"s1","role":"secret"}},{{"name":"doc","item_id":"s1","role":"document"}}{parts}]}}"#
+        )
+    };
+    let request = |profile: &str, evidence: bool, doc: &[u8]| {
+        let mut parts = vec![
+            Part {
+                name: "p12",
+                filename: None,
+                bytes: &p12,
+            },
+            Part {
+                name: "pw",
+                filename: None,
+                bytes: PASSWORD.as_bytes(),
+            },
+            Part {
+                name: "doc",
+                filename: None,
+                bytes: doc,
+            },
+        ];
+        if evidence {
+            parts.push(Part {
+                name: "ev0",
+                filename: None,
+                bytes: &inter,
+            });
+            parts.push(Part {
+                name: "ev1",
+                filename: None,
+                bytes: &pki.crls[0],
+            });
+            parts.push(Part {
+                name: "ev2",
+                filename: None,
+                bytes: &pki.crls[1],
+            });
+        }
+        multipart(&sign(profile, evidence), &parts)
+    };
+    // Missing material: 400 before any secret/key/document, never "Applied then failed".
+    for profile in ["cades_lt", "cades_lta", "pades_lt", "pades_lta"] {
+        let (status, _, response) = service.post(FORM, request(profile, false, pdf)).await;
+        assert_eq!(
+            status,
+            400,
+            "{profile}: {}",
+            String::from_utf8_lossy(&response)
+        );
+    }
+    // xades_lt/lta signing is not offered at all (the SDK XML sign facade takes no material).
+    let (status, _, _) = service.post(FORM, request("xades_lt", true, b"<a/>")).await;
+    assert_eq!(status, 400);
+    // PAdES LT/LTA below the memory profile: typed 413 MemoryLimit, NotApplied, no BEGIN.
+    let (status, _, response) = service.post(FORM, request("pades_lt", true, pdf)).await;
+    assert_eq!(status, 413, "{}", String::from_utf8_lossy(&response));
+    let error: serde_json::Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(
+        (error["code"].as_str(), error["applied"].as_str()),
+        (Some("MemoryLimit"), Some("NotApplied"))
+    );
+    assert_eq!(begins(&service), 0);
+    // CAdES LT with material succeeds and verifies in OpenSSL.
+    let (status, ct, response) = service
+        .post(FORM, request("cades_lt", true, b"lt payload"))
+        .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+    let parts = mixed(&ct, response).await;
+    assert_eq!(final_event(&parts)["status"], "completed");
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        openssl_cms_verify(
+            artifact(&parts, "artifact-0"),
+            Some(b"lt payload"),
+            dir.path()
+        )
+        .is_some()
+    );
+    assert_eq!(begins(&service), 1);
+    // Extend LT without material is refused up front as well.
+    let extend = r#"{"items":[{"id":"e","operation":{"kind":"extend","profile":"cades_lt","input":"sig"}}],"parts":[{"name":"sig","item_id":"e","role":"document"}]}"#;
+    let (status, _, _) = service
+        .post(
+            FORM,
+            multipart(
+                extend,
+                &[Part {
+                    name: "sig",
+                    filename: None,
+                    bytes: b"x",
+                }],
+            ),
+        )
+        .await;
+    assert_eq!(status, 400);
+    service.stop().await;
 }

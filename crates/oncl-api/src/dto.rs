@@ -204,13 +204,12 @@ pub enum SignKind {
     Xml,
     XadesB,
     XadesT,
-    XadesLt,
-    XadesLta,
     /// SOAP WS-Security Body signature with the host verification profile.
     Wsse,
     /// Kalkan-compatible XMLDSig (XPath element/parent; NCALayer wire layout).
     XmlLegacy,
     XadesLegacyB,
+    XadesLegacyT,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
