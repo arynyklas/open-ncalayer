@@ -412,6 +412,37 @@ mod tests {
     }
 
     #[test]
+    fn an_abort_that_wins_the_gate_refuses_the_last_byte_and_never_reports_complete() {
+        let gate = std::sync::Arc::new(std::sync::Mutex::new(Gate::default()));
+        let parts = vec![(
+            "doc".to_owned(),
+            true,
+            Source::Memory(Zeroizing::new(b"x".to_vec())),
+        )];
+        let mut upload = Upload::new("B", b"{}", parts, &control);
+        upload.share_complete(gate.clone());
+        gate.lock().unwrap().abort = true;
+        let error = read_all(&mut upload).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(!upload.complete());
+        assert!(!gate.lock().unwrap().complete);
+    }
+
+    #[test]
+    fn complete_before_abort_is_reported_complete() {
+        let gate = std::sync::Arc::new(std::sync::Mutex::new(Gate::default()));
+        let parts = vec![(
+            "doc".to_owned(),
+            true,
+            Source::Memory(Zeroizing::new(b"x".to_vec())),
+        )];
+        let mut upload = Upload::new("B", b"{}", parts, &control);
+        upload.share_complete(gate.clone());
+        read_all(&mut upload).unwrap();
+        assert!(gate.lock().unwrap().complete);
+    }
+
+    #[test]
     fn control_stop_aborts_before_the_body_is_complete() {
         let stop = || Err(Stop::Cancelled);
         let parts = vec![(

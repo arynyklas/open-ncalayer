@@ -332,3 +332,73 @@ fn ctrl_break_during_an_artifact_download_is_130_and_publishes_nothing() {
         "{left:?}"
     );
 }
+
+#[cfg(windows)]
+mod keyful {
+    use super::ctrl_break;
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        time::{Duration, Instant},
+    };
+
+    /// Reads the headers, grants `100 Continue`, then stops reading: the upload stalls mid-body.
+    fn stalls_mid_body(mut stream: TcpStream) {
+        let mut buffer = [0u8; 8192];
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let _ = stream.read(&mut buffer);
+        let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+        let end = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn sign_args(dir: &std::path::Path, big: bool) -> Vec<String> {
+        if big {
+            std::fs::write(dir.join("doc.bin"), vec![7u8; 96 * 1024 * 1024]).unwrap();
+        }
+        [
+            "sign",
+            "--profile",
+            "cms",
+            "--key-name",
+            "ops-key",
+            "--authorize",
+            "--input",
+            dir.join("doc.bin").to_str().unwrap(),
+            "--output",
+            dir.join("out.p7s").to_str().unwrap(),
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+    }
+
+    /// Cancelled while the body is still being sent: the service cannot have started the
+    /// private operation, so the honest state is `NotApplied`.
+    #[test]
+    fn ctrl_break_during_a_sign_upload_is_130_with_applied_not_applied() {
+        let run = ctrl_break::run(stalls_mid_body, Duration::from_millis(2000), |_, dir| {
+            sign_args(dir, true)
+        });
+        assert_eq!(run.code, Some(130), "{}", run.stderr);
+        assert!(run.stderr.contains("applied=NotApplied"), "{}", run.stderr);
+        assert!(!run.dir.path().join("out.p7s").exists());
+    }
+
+    /// Cancelled while the signature artifact downloads: the key may have been applied.
+    #[test]
+    fn ctrl_break_during_a_sign_artifact_download_is_130_with_applied_unknown() {
+        let run = ctrl_break::run(
+            ctrl_break::streaming,
+            Duration::from_millis(2000),
+            |_, dir| sign_args(dir, false),
+        );
+        assert_eq!(run.code, Some(130), "{}", run.stderr);
+        assert!(run.stderr.contains("applied=Unknown"), "{}", run.stderr);
+        assert!(!run.dir.path().join("out.p7s").exists());
+    }
+}

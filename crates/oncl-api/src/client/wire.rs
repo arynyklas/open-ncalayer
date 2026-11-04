@@ -284,8 +284,10 @@ impl ResultRecord {
     /// (`ArtifactWriter::finish(expected)`, oncl-server artifact.rs:190, fails on a mismatch):
     /// extraction `bytes_written` (dispatch.rs:1053), the timestamp token length
     /// (dispatch.rs:1263) and JWS/JWT creation `bytes_out` (dispatch.rs:1326, 1371, 1391).
+    /// BATCH items are never compared: the server finishes batch artifacts with the staged length (batch.rs:806), so the
+    /// per-item `bytes_out`/`bytes_written` is not an enforced contract there (identity and count only).
     /// CMS/CAdES/XML/PDF signing and extension take the artifact length from the staged output
-    /// (dispatch.rs:1144-1148) and report an SDK counter in `bytes_out` (measured 8250 for a
+    /// (dispatch.rs:1144-1148 sign, 1190 extend) and report an SDK counter in `bytes_out` (measured 8250 for a
     /// 1561-byte CMS), so those are not compared.
     pub fn artifact_len(&self) -> Option<u64> {
         match self {
@@ -306,7 +308,12 @@ impl FinalRecord {
             Self::Final { results, .. } => results.iter().filter_map(|r| of(&r.result)).collect(),
             Self::BatchFinal { items, .. } => items
                 .iter()
-                .filter_map(|i| i.result.as_ref().and_then(|r| of(r)))
+                .filter_map(|i| {
+                    i.result
+                        .as_ref()
+                        .and_then(ResultRecord::artifact)
+                        .map(|id| (id, None))
+                })
                 .collect(),
         }
     }
