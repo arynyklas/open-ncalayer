@@ -280,36 +280,12 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         services = services.with_validation(validation);
     }
     if let Some(authority) = &authority {
-        let mut sources = oncl_core::keys::KeySources::new();
         let plan = plan.as_ref().ok_or(OperationError::InvalidKeySource)?;
-        if let Some((id, selector)) = &plan.binding {
-            sources = sources.with_named(id.clone(), selector.clone())?;
-        }
-        if plan.token {
-            let gates = oncl_token::execution::TokenGateRegistry::new(1, 4)
-                .map_err(|_| ProcessingError::InvalidInput("token gate"))?;
-            sources = sources.with_tokens(
-                oncl_token::Tokens::new(Arc::new(oncl_token::PcscBackend::new()), true),
-                Arc::new(gates),
-            );
-        }
-        services = services.with_keys(Arc::new(sources), authority.clone());
+        services = services.with_keys(Arc::new(crate::keysrc::sources(plan)?), authority.clone());
     } else if let (Some(plan), false) = (&plan, private) {
         // Public metadata of a named source: a read-only provider, no guard and
         // no private-use capability.
-        let mut sources = oncl_core::keys::KeySources::new();
-        if let Some((id, selector)) = &plan.binding {
-            sources = sources.with_named(id.clone(), selector.clone())?;
-        }
-        if plan.token {
-            let gates = oncl_token::execution::TokenGateRegistry::new(1, 4)
-                .map_err(|_| ProcessingError::InvalidInput("token gate"))?;
-            sources = sources.with_tokens(
-                oncl_token::Tokens::new(Arc::new(oncl_token::PcscBackend::new()), true),
-                Arc::new(gates),
-            );
-        }
-        services = services.with_metadata_provider(Arc::new(sources));
+        services = services.with_metadata_provider(Arc::new(crate::keysrc::sources(plan)?));
     }
     if let Some(store) = &store {
         services = services.with_temporary_store(store.clone());

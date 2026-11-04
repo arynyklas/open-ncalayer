@@ -12,6 +12,14 @@ publish.workspace = true
 name = "oncl"
 path = "src/main.rs"
 
+[features]
+# Software tokens read from `ONCL_TOKEN_EMULATOR=<config.toml>`: tests only, never released.
+token-emulator = ["oncl-token/emulator"]
+
+[[test]]
+name = "token"
+required-features = ["token-emulator"]
+
 [dependencies]
 oncl-core = { workspace = true, features = ["xml", "pdf", "jose", "plugins", "tokens"] }
 oncl-pki.workspace = true

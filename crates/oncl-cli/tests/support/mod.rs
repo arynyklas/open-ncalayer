@@ -37,8 +37,12 @@ pub fn now() -> time::OffsetDateTime {
 pub const PASSWORD: &str = "synthetic loopback password";
 
 pub fn run(args: &[&str], input: &[u8]) -> Output {
+    run_env(args, input, &[])
+}
+pub fn run_env(args: &[&str], input: &[u8], env: &[(&str, &str)]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_oncl"))
         .args(args)
+        .envs(env.iter().copied())
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .stdin(Stdio::piped())

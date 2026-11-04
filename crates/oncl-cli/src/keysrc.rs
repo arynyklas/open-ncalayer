@@ -138,6 +138,43 @@ pub fn resolve(config: &Path, name: &str) -> Result<Plan, OperationError> {
         token,
     })
 }
+/// The operator-configured provider for this invocation: the named binding and,
+/// only for a token source, the hardware (or, with the test-only
+/// `token-emulator` feature, emulated) token service.
+pub fn sources(plan: &Plan) -> Result<oncl_core::keys::KeySources, OperationError> {
+    let mut sources = oncl_core::keys::KeySources::new();
+    if let Some((id, selector)) = &plan.binding {
+        sources = sources.with_named(id.clone(), selector.clone())?;
+    }
+    if plan.token {
+        let gates = oncl_token::execution::TokenGateRegistry::new(1, 4)
+            .map_err(|_| ProcessingError::InvalidInput("token gate"))?;
+        sources = sources.with_tokens(token_service()?, std::sync::Arc::new(gates));
+    }
+    Ok(sources)
+}
+/// With feature `token-emulator` (tests and demonstrations only, never a
+/// release build) and `ONCL_TOKEN_EMULATOR=<config.toml>` set, software cards
+/// of that file replace the system smart-card service; an unreadable file is a
+/// refusal, never a fallback to the real service.
+fn token_service() -> Result<std::sync::Arc<oncl_token::Tokens>, OperationError> {
+    #[cfg(feature = "token-emulator")]
+    if let Some(path) = std::env::var_os("ONCL_TOKEN_EMULATOR") {
+        let path = PathBuf::from(path);
+        let base = path.parent().unwrap_or(Path::new(""));
+        let backend = std::fs::read_to_string(&path)
+            .map_err(|_| ())
+            .and_then(|text| {
+                oncl_token::emulator::EmulatorBackend::from_config(&text, base).map_err(|_| ())
+            })
+            .map_err(|()| ProcessingError::InvalidInput("token emulator configuration"))?;
+        return Ok(oncl_token::Tokens::new(std::sync::Arc::new(backend), true));
+    }
+    Ok(oncl_token::Tokens::new(
+        std::sync::Arc::new(oncl_token::PcscBackend::new()),
+        true,
+    ))
+}
 impl PrivateKeyArgs {
     pub fn plan(&self) -> Result<Plan, OperationError> {
         if let (Some(config), Some(name)) = (&self.key_config, &self.key_name) {
