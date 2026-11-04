@@ -280,15 +280,17 @@ impl ResultRecord {
 }
 
 impl ResultRecord {
-    /// The exact byte length of the artifact this result states, where the contract has one:
-    /// extraction `bytes_written` and the timestamp token length (`bytes_out` of a stamp is
-    /// documented as the token length). Signing, JWS and extension `bytes_out` are resource
-    /// scope counters, not artifact sizes (measured: they differ from the artifact), so they
-    /// are never compared.
+    /// The exact byte length of the artifact this result states, where the SERVER ENFORCES it
+    /// (`ArtifactWriter::finish(expected)`, oncl-server artifact.rs:190, fails on a mismatch):
+    /// extraction `bytes_written` (dispatch.rs:1053), the timestamp token length
+    /// (dispatch.rs:1263) and JWS/JWT creation `bytes_out` (dispatch.rs:1326, 1371, 1391).
+    /// CMS/CAdES/XML/PDF signing and extension take the artifact length from the staged output
+    /// (dispatch.rs:1144-1148) and report an SDK counter in `bytes_out` (measured 8250 for a
+    /// 1561-byte CMS), so those are not compared.
     pub fn artifact_len(&self) -> Option<u64> {
         match self {
             Self::Extraction { bytes_written, .. } => Some(*bytes_written),
-            Self::Stamping { bytes_out, .. } => Some(*bytes_out),
+            Self::Stamping { bytes_out, .. } | Self::Jws { bytes_out, .. } => Some(*bytes_out),
             _ => None,
         }
     }

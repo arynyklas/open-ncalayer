@@ -22,11 +22,7 @@ use crate::{
 };
 use std::{
     io::Read,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
@@ -515,7 +511,7 @@ impl ApiClient {
     ) -> Result<Completed, ClientError> {
         (options.control)().map_err(stop_error_before_send)?;
         let may_apply = request.may_apply_key;
-        let complete = Arc::new(AtomicBool::new(false));
+        let complete = Arc::new(std::sync::Mutex::new(upload::Gate::default()));
         let (events, inbox) = mpsc::sync_channel::<Event>(4);
         let (client, control, deadline, flag) = (
             self.clone(),
@@ -533,7 +529,9 @@ impl ApiClient {
             })
             .map_err(|_| ClientError::local(FailureKind::Transport))?;
         let applied = || {
-            if complete.load(Ordering::SeqCst) && may_apply {
+            let mut gate = complete.lock().unwrap_or_else(|e| e.into_inner());
+            gate.abort = true;
+            if gate.complete && may_apply {
                 AppliedState::Unknown
             } else {
                 AppliedState::NotApplied
@@ -574,7 +572,7 @@ impl ApiClient {
         sink: &mut dyn ArtifactSink,
         control: &(dyn Fn() -> Result<(), Stop> + Send + Sync),
         deadline: Instant,
-        flag: &Arc<AtomicBool>,
+        flag: &Arc<std::sync::Mutex<upload::Gate>>,
     ) -> Result<Completed, ClientError> {
         control().map_err(stop_error_before_send)?;
         let remaining = deadline

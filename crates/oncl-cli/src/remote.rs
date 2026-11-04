@@ -91,7 +91,7 @@ impl Failure {
             Some(local) if error.kind == FailureKind::Artifact => Self {
                 code: format!("{:?}", local.code()),
                 applied: applied.combine(local.applied_state()),
-                cancelled: false,
+                cancelled: local.code() == oncl_core::ErrorCode::Cancelled,
             },
             _ => Self {
                 code: error.describe(),

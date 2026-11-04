@@ -29,6 +29,12 @@ pub(super) enum UploadFailure {
     Source,
 }
 
+#[derive(Default)]
+pub(super) struct Gate {
+    pub abort: bool,
+    pub complete: bool,
+}
+
 pub(super) struct Upload<'a> {
     pieces: Vec<Piece>,
     /// Indexes of the pieces whose bytes are document payload (not framing, not secrets).
@@ -39,7 +45,7 @@ pub(super) struct Upload<'a> {
     documents: u64,
     total: Option<u64>,
     complete: bool,
-    shared: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    shared: Option<std::sync::Arc<std::sync::Mutex<Gate>>>,
     failure: Option<UploadFailure>,
 }
 
@@ -193,7 +199,7 @@ impl Read for Upload<'_> {
         loop {
             let counted = self.document_pieces.binary_search(&self.index).is_ok();
             let Some(piece) = self.pieces.get_mut(self.index) else {
-                self.mark_complete();
+                self.mark_complete()?;
                 return Ok(0);
             };
             match piece {
@@ -211,7 +217,7 @@ impl Read for Upload<'_> {
                         self.documents += count as u64;
                     }
                     if self.total == Some(self.handed) {
-                        self.mark_complete();
+                        self.mark_complete()?;
                     }
                     return Ok(count);
                 }
@@ -282,14 +288,26 @@ impl Read for Upload<'_> {
 impl Upload<'_> {
     /// Mirror "the whole body was handed to the transport" to another thread, so a caller
     /// that stops waiting can still apply the exact applied-state rule.
-    pub(super) fn share_complete(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-        self.shared = Some(flag);
+    pub(super) fn share_complete(&mut self, gate: std::sync::Arc<std::sync::Mutex<Gate>>) {
+        self.shared = Some(gate);
     }
-    fn mark_complete(&mut self) {
-        self.complete = true;
-        if let Some(flag) = &self.shared {
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    /// Atomic with the caller's abort: either the last byte is handed over (complete) or the
+    /// caller already stopped (nothing more is handed), never both. A caller that stops and
+    /// reads the gate therefore sees `complete` exactly when the whole body could be on the
+    /// wire; an ambiguous instant resolves to `complete` (the stricter `Unknown` side).
+    fn mark_complete(&mut self) -> io::Result<()> {
+        if let Some(gate) = &self.shared {
+            let mut gate = gate.lock().unwrap_or_else(|e| e.into_inner());
+            if gate.abort {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "request aborted",
+                ));
+            }
+            gate.complete = true;
         }
+        self.complete = true;
+        Ok(())
     }
 }
 

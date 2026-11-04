@@ -2103,3 +2103,57 @@ fn batch_destinations_are_checked_for_publication_before_any_request() {
     assert!(one.join("out1.p7s").exists() && missing.exists());
     assert_eq!(proxy.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+/// Where the server enforces the stated length (JWS/JWT creation: `writer.finish(report.bytes_out)`)
+/// a well-framed artifact of the wrong size must not be published either.
+#[test]
+fn jws_and_jwt_artifacts_of_the_wrong_size_are_never_published() {
+    let pki = Pki::start();
+    let remote = Remote::start(&pki);
+    let proxy = Proxy::start(
+        remote.address,
+        Fault {
+            spot: Spot::TrimArtifact,
+            end: End::Clean,
+        },
+    );
+    let s = Session::via(&remote, proxy.endpoint());
+    let input = s.file("in.bin", br#"{"iss":"x"}"#);
+    let (jws, jwt) = (s.path("a.jws"), s.path("a.jwt"));
+    let cases: Vec<Vec<&str>> = vec![
+        vec![
+            "jws",
+            "sign",
+            "--serialization",
+            "compact",
+            "--input",
+            path(&input),
+            "--output",
+            path(&jws),
+            "--key-name",
+            "ops-key",
+            "--authorize",
+        ],
+        vec![
+            "jwt",
+            "encode",
+            "--input",
+            path(&input),
+            "--output",
+            path(&jwt),
+            "--key-name",
+            "ops-key",
+            "--authorize",
+        ],
+    ];
+    for (args, out) in cases.iter().zip([&jws, &jwt]) {
+        let run = s.run(args);
+        let stderr = text(&run.stderr);
+        assert_eq!(exit(&run), 1, "{stderr}");
+        assert!(
+            stderr.contains("artifact length differs") && stderr.contains("applied=Unknown"),
+            "{stderr}"
+        );
+        assert!(!out.exists());
+    }
+}
