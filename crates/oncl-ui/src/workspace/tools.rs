@@ -1331,13 +1331,13 @@ mod tests {
         // Extract and the destination; a tool that writes nothing ignores it.
         let (spec, destination) = spec_of(&p, EXTRACT, |t| {
             t.set_destination_index(1);
-            t.set_destination_path("\"drive_C:\\out dir\"".into());
+            t.set_destination_path("\"out dir\"".into());
         })
         .unwrap();
         assert_eq!(spec, ToolSpec::Extract);
         assert_eq!(
             destination,
-            Destination::Folder(PathBuf::from("drive_C:\\out dir"))
+            Destination::Folder(PathBuf::from("out dir"))
         );
         let (_, destination) = spec_of(&p, VERIFY, |t| {
             t.set_destination_index(1);

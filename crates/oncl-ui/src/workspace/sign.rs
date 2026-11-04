@@ -1956,12 +1956,12 @@ mod tests {
         );
         let (_, destination) = choose(0, 0, &|s| {
             s.set_destination_index(1);
-            s.set_destination_path("\"drive_C:\\results\"".into());
+            s.set_destination_path("\"results dir\"".into());
         })
         .unwrap();
         assert_eq!(
             destination,
-            Destination::Folder(PathBuf::from("drive_C:\\results"))
+            Destination::Folder(PathBuf::from("results dir"))
         );
     }
 
