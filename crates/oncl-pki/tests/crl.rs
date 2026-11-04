@@ -251,7 +251,7 @@ fn verifies_and_finds_revoked_serial() {
     ));
 
     // `check` end to end: a leaf against the intermediate's CRL, the intermediate against
-    // the root's (how `cms-verify` uses it).
+    // the root's.
     let dir = temp_dir();
     let cache = CrlCache::new(dir.path());
     let http = RouteTransport::new(vec![

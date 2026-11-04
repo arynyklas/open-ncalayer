@@ -4610,6 +4610,7 @@ dependencies = [
  "minisign",
  "oncl-builtin-accessory",
  "oncl-builtins-build",
+ "oncl-core",
  "oncl-desktop",
  "oncl-flows",
  "oncl-ipc",

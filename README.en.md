@@ -16,7 +16,7 @@ P1 provides:
 - attached and detached signatures, co-signing, NCA timestamps (TSP);
 - storage and key selection dialogs (Russian, Kazakh, English);
 - a command-line TLS wizard: `openncalayer tls init|import|status` ([guide, in Russian](docs/user/tls.md));
-- signature checking: `openncalayer cms-verify` — signatures, timestamps, certificate chains up to the NCA roots, validity periods and revocation (OCSP, CRL);
+- signature checking: `oncl verify --profile cms` of the SDK command line ([guide](docs/user/cli.md)) — signatures, timestamps, certificate chains to the roots you pass, validity periods and revocation (OCSP, CRL) under the SDK's strict policy;
 - a self-test page at `https://127.0.0.1:13579/` and a demo page at `https://127.0.0.1:13579/demo/`.
 
 The second phase (P2) adds a browser extension: with it, sites work with OpenNCALayer without a trusted CA (see [Browser extension](#browser-extension)).
@@ -150,7 +150,7 @@ The chain is built from the key certificate up through the CA set by the rules o
 
 Key revocation is checked with OCSP when the key has a chain, is not disabled for another reason (EKU, IIN, BIN, serial number; an expired key is still checked), its certificate is an end entity and its AIA has an OCSP URL: a GET request with a SHA-1 `CertID` and no nonce, a 5 s timeout, at most 2 s of it to connect (as for TSP and CRL requests), 6 s in total per store; a responder that cannot be connected to (its address does not answer) ends the check after 2 s. A response is accepted when its responder (`byName` or `byKey`) has a full chain to an anchor of the same CA set at the current time and has the `OCSPSigning` EKU and `id-pkix-ocsp-nocheck`, the signature verifies, the `CertID` matches and the response is fresh. Only the `revoked` status disables a key. Without a network, on a timeout, a bad response or the `unknown` status the key stays available and the cause is logged (`warn`): offline, OCSP does not block signing.
 
-`openncalayer cms-verify` checks a finished signature (step 4 of [Build and run](#build-and-run)): chains to the embedded CAs or `--chain`, the signer's revocation by OCSP, intermediate CAs by CRL from `cRLDistributionPoints` (cached in `<data dir>/crl/`; a CRL is not downloaded again before its `nextUpdate`). `INDETERMINATE` means that everything checked is valid but no verdict is possible: revocation data is unavailable, or nothing proves when the signature was made.
+Finished signatures are checked by the SDK command line, `oncl verify --profile cms` (step 4 of [Build and run](#build-and-run); guide in [`docs/user/cli.md`](docs/user/cli.md)), which replaced the daemon's own `openncalayer cms-verify`: trust comes only from the roots (`--root`) and intermediates (`--intermediate`) you pass, the report says per check what passed, failed or was unavailable, and the exit code is 0 for `Valid`, 2 for `Invalid` and 3 for `Indeterminate` (revocation data unavailable, `--offline`, no proof of when the signature was made). The NCALayer compatibility policy (`OperationPolicy::ncalayer_compatibility()`) is a choice of the embedding host in the SDK, not a command-line switch; `oncl verify` always judges under the strict policy.
 
 ### Deviations of P1 from the original
 
@@ -169,7 +169,7 @@ Key revocation is checked with OCSP when the key has a chain, is not disabled fo
 - A key unavailable for another reason (EKU, IIN, BIN, serial number) is not checked with OCSP: the dialog shows those reasons. The original puts its «REVOKED» mark on such keys too.
 - The dialog shows the revocation date, in UTC: «revoked DD.MM.YYYY». The original's mark has no date: «REVOKED».
 - The OCSP responder is also found `byKey` (the SHA-1 of its key); the original understands only `byName`. A response's `thisUpdate` may be ahead of the computer's clock by up to 300 s; the original requires `thisUpdate < now` strictly.
-- CRLs are checked only for intermediate CAs and only by `cms-verify` (the original's `basics` has no CRL). Delta CRLs and CRLs with an `issuingDistributionPoint` are refused. `ncagost`, `ncagost18`, `ncarsa` and `ncarsa18` have two CRL mirrors, `crl.root.gov.kz` and `crl1.root.gov.kz` (for `ncagost18` and `ncarsa18` in one string, `… URL=…`); OpenNCALayer tries both. On 2026-10-26 neither mirror served a current CRL for these CAs, and `cms-verify` reported their revocation status as unavailable.
+- CRLs are checked only for intermediate CAs and only by the SDK validation (`oncl verify`; the original's `basics` has no CRL). Delta CRLs and CRLs with an `issuingDistributionPoint` are refused. `ncagost`, `ncagost18`, `ncarsa` and `ncarsa18` have two CRL mirrors, `crl.root.gov.kz` and `crl1.root.gov.kz` (for `ncagost18` and `ncarsa18` in one string, `… URL=…`); OpenNCALayer tries both. On 2026-10-26 neither mirror served a current CRL for these CAs, and the check reported their revocation status as unavailable.
 - Certificate policies and `nameConstraints` are not checked in the chain (NCA certificates have no `nameConstraints`).
 
 ### Deviations of P4 from the original
@@ -465,7 +465,7 @@ openncalayer run        # start the server with the icon; plain `openncalayer` d
 1. Issue the certificate in the wizard or with `tls init`, and trust the CA with the wizard's button or as the printed instructions say. Per-OS details are in [`docs/user/tls.md`](docs/user/tls.md).
 2. Start `openncalayer run` and open `https://127.0.0.1:13579/`: the page must load without a certificate warning.
 3. At `https://127.0.0.1:13579/demo/` you can sign a text or a file and download the `.p7s`.
-4. To check a signature: `openncalayer cms-verify signature.p7s`; for a detached signature, `openncalayer cms-verify signature.p7s --content <data file>`. It checks the signatures and timestamps, the certificate chains of the signer and of the TSA through the embedded NCA certificates (`--chain <CA file>` replaces them; repeatable, and a PEM file may hold several certificates), validity periods and revocation: the signer by OCSP, intermediate CAs by CRL (cached in `crl/` of the data directory). Only a verified timestamp proves when the signature was made: validity and revocation are judged at its `genTime`, and without one at the current time; `signingTime` is the signer's own claim and is only printed. A revocation after the timestamp does not invalidate the signature: `OK` comes with the line `revocation: revoked … after signing (…)`. The last line is `OK`, `FAIL: <reason>`, `INDETERMINATE: revocation data unavailable` (everything else holds, but no revocation data could be obtained) or `INDETERMINATE: no proof of signing time` (the certificate is expired or revoked now, and the signature would only hold at the claimed `signingTime`). The exit code is 0 only for `OK`. With `--offline` revocation is not checked and the line `not checked: revocation` precedes `OK`.
+4. To check a signature: `oncl verify --profile cms --input signature.p7s --root <NCA root certificate>` (the demo page saves the `.p7s` as DER; `oncl verify` reads DER or BER); for a detached signature add `--detached <data file>`, and `--offline` checks no revocation. It checks the signatures and timestamps, the certificate chains of the signer and of the TSA through the roots you pass, validity periods and revocation, and prints a per-check report; the exit code is 0 only for a `Valid` result. Details: [`docs/user/cli.md`](docs/user/cli.md).
 
 Exit codes of `run`:
 - 2 — TLS is not set up;
@@ -761,7 +761,7 @@ Tests prefixed with `live_` call real NCA services and are skipped by default:
 cargo test --workspace --all-features -- --ignored live_
 ```
 
-They are `live_test_tsa` (the NCA test TSP), `live_ocsp_nca_test_certificate` (the NCA test OCSP responder; needs `cargo xtask fetch-fixtures`), `live_crl_nca_root_gost_2022` (a CRL from the production `crl.root.gov.kz`) and `live_cms_verify_command_without_revocation_services` (`cms-verify` with nonexistent OCSP and CRL hosts; needs only DNS). They depend on outside services, so CI runs them only on a schedule and on demand (`workflow_dispatch`, the `live` job), and a single network failure is worth a rerun. The NCA test RSA OCSP responder answers `malformedRequest` to standard requests (OpenSSL's too), so live OCSP is tested with a GOST certificate.
+They are `live_test_tsa` (the NCA test TSP), `live_ocsp_nca_test_certificate` (the NCA test OCSP responder; needs `cargo xtask fetch-fixtures`) and `live_crl_nca_root_gost_2022` (a CRL from the production `crl.root.gov.kz`). They depend on outside services, so CI runs them only on a schedule and on demand (`workflow_dispatch`, the `live` job), and a single network failure is worth a rerun. The NCA test RSA OCSP responder answers `malformedRequest` to standard requests (OpenSSL's too), so live OCSP is tested with a GOST certificate.
 
 The browser extension:
 

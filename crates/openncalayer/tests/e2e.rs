@@ -16,7 +16,6 @@ use oncl_pki::tsp::{MockTsa, TsaProfile, timestamp_signer, verify_token};
 use oncl_protocol::{AddInfo, DynamicModules, Module, Registry, Reply, SessionId};
 use oncl_testkit::{read, synthetic, synthetic_cert};
 use oncl_tls::{SelftestReports, TlsFiles};
-use openncalayer::cms_verify::{NOT_CHECKED, Options, cms_verify_report_with};
 use openncalayer::{JsonSettings, LiveTls, ServerConfig, build_registry, listen_port_from, serve};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -1157,19 +1156,58 @@ async fn demo_assets_served() {
     assert_eq!(digest, NCALAYER_CLIENT_SHA256);
 }
 
-/// `cms-verify` of `input` against the synthetic GOST 2015 root, offline.
-fn cms_verify_offline(input: &[u8]) -> (String, bool) {
+/// No network at all: revocation sources are unreachable.
+struct Offline;
+impl oncl_pki::http::HttpTransport for Offline {
+    fn send(
+        &self,
+        _: &oncl_pki::http::HttpRequest<'_>,
+    ) -> Result<oncl_pki::http::HttpReply, oncl_pki::http::HttpError> {
+        Err(oncl_pki::http::HttpError::other("offline"))
+    }
+}
+
+struct Unattended;
+impl oncl_pki::resource::OperationControl for Unattended {
+    fn checkpoint(
+        &self,
+        _: oncl_pki::resource::Progress,
+    ) -> Result<(), oncl_pki::resource::ProcessingError> {
+        Ok(())
+    }
+}
+
+/// The SDK's own CMS validation (what `oncl verify --profile cms` runs) of `input` against
+/// the synthetic GOST 2015 root, under the explicit NCALayer compatibility policy and with
+/// no network.
+fn validate_offline(
+    input: &[u8],
+) -> Result<oncl_core::VerificationReport, oncl_core::OperationError> {
+    use oncl_core::{Action, EngineServices, ExecutionGrant, OperationPolicy, ValidationServices};
+    use oncl_pki::resource::ResourceLimits;
+    use oncl_pki::validation::NetworkPolicy;
     let root = cert::parse(&synthetic_cert("root-gost2015")).unwrap();
-    let opts = Options {
-        cas: CaSet::new(vec![root]),
-        online: None,
-        now: OffsetDateTime::now_utc(),
-    };
-    cms_verify_report_with(input, None, &opts)
+    let validation = ValidationServices::new(
+        CaSet::new(vec![root]),
+        Vec::new(),
+        Arc::new(Offline),
+        NetworkPolicy::only_endpoints::<_, &str>([]).unwrap(),
+        Arc::new(OffsetDateTime::now_utc),
+    );
+    let engine = oncl_core::Engine::new(
+        EngineServices::hash_only(ResourceLimits::default()).with_validation(validation),
+    )?;
+    let mut ctx = engine.begin(
+        ExecutionGrant::new([Action::Validate]),
+        OperationPolicy::ncalayer_compatibility(),
+        Arc::new(Unattended),
+    )?;
+    engine.validate_cms(input, None, &mut ctx)
 }
 
 #[tokio::test]
-async fn cms_verify_reports_signers() {
+async fn core_validation_reports_a_signature_made_through_the_service() {
+    use oncl_pki::validation::{CheckStatus, TimeBasis, Verdict};
     let srv = start(vec![storage("user-gost2015-sign"), Step::Key(0)]).await;
     let mut c = connect(&srv).await;
     next_text(&mut c).await;
@@ -1181,36 +1219,22 @@ async fn cms_verify_reports_signers() {
     let reply = json(&next_text(&mut c).await);
     let pem = reply["body"]["result"][0].as_str().unwrap();
 
-    for input in [pem.as_bytes().to_vec(), pem_to_der(pem)] {
-        let (report, ok) = cms_verify_offline(&input);
-        let lines: Vec<&str> = report.lines().collect();
-        assert!(ok, "{report}");
-        assert_eq!(lines.len(), 8, "{report}");
-        assert!(lines[0].starts_with("signer 0: CN="), "{report}");
-        assert!(lines[0].contains(", IIN="), "{report}");
-        assert!(
-            lines[0].contains(", alg=Gost2015_512, signingTime=20"),
-            "{report}"
-        );
-        assert_eq!(lines[1], "timestamp: yes");
-        assert_eq!(lines[2], "chain: OpenNCALayer Synthetic Root GOST 2015");
-        assert!(lines[3].starts_with("validity: ok at 20"), "{report}");
-        assert_eq!(lines[4], "tsa chain: OpenNCALayer Synthetic Root GOST 2015");
-        assert_eq!(lines[5], "revocation: not checked (--offline)");
-        assert_eq!(lines[6], NOT_CHECKED);
-        assert_eq!(lines[7], "OK");
-    }
+    let report = validate_offline(&pem_to_der(pem)).unwrap();
+    assert_eq!(report.signers.len(), 1);
+    let signer = &report.signers[0];
+    assert_eq!(signer.signature, CheckStatus::Passed);
+    assert_eq!(signer.chain, CheckStatus::Passed);
+    assert_eq!(signer.validity, CheckStatus::Passed);
+    assert_eq!(signer.timestamp, CheckStatus::Unavailable, "no TSA revocation offline");
+    assert!(matches!(signer.time_basis, TimeBasis::Current(_)), "{signer:?}");
+    assert_eq!(report.verdict, Verdict::Indeterminate, "{signer:?}");
 
-    let (report, ok) = cms_verify_offline(b"not a CMS");
-    assert!(!ok);
-    assert!(
-        report.lines().last().unwrap().starts_with("FAIL: "),
-        "{report}"
-    );
+    assert!(validate_offline(b"not a CMS").is_err());
 }
 
 #[test]
-fn cms_verify_rejects_a_token_of_another_signature() {
+fn core_validation_rejects_a_token_of_another_signature() {
+    use oncl_pki::validation::{CheckStatus, Verdict};
     // Two GOST signatures of the same content with the same signed attributes differ only
     // in the signature value (random k). Time-stamp the first, then put the second's
     // signature value in its place: every signature still verifies, but the token covers a
@@ -1225,14 +1249,12 @@ fn cms_verify_rejects_a_token_of_another_signature() {
     let second = sign(&key, b"doc", &opts).unwrap();
     let tsa = MockTsa::new(entry("tsa-gost2015"));
     let stamped = timestamp_signer(&first, 0, &TsaProfile::basics_default(), &tsa).unwrap();
-    let (report, ok) = cms_verify_offline(&stamped);
-    assert!(ok, "{report}");
-    assert!(
-        report.ends_with(&format!(
-            "\nrevocation: not checked (--offline)\n{NOT_CHECKED}\nOK\n"
-        )),
-        "{report}"
-    );
+    let report = validate_offline(&stamped).unwrap();
+    // Offline, the TSA's revocation is unknown: the time-stamp proves nothing yet, which is
+    // not a failure of the signature or of the token.
+    assert_eq!(report.signers[0].signature, CheckStatus::Passed);
+    assert_eq!(report.signers[0].timestamp, CheckStatus::Unavailable);
+    assert_eq!(report.verdict, Verdict::Indeterminate, "{:?}", report.signers[0]);
 
     let old = verify(&first, None).unwrap().swap_remove(0).signature;
     let new = verify(&second, None).unwrap().swap_remove(0).signature;
@@ -1253,20 +1275,14 @@ fn cms_verify_rejects_a_token_of_another_signature() {
         "the signature itself verifies"
     );
 
-    let (report, ok) = cms_verify_offline(&forged);
-    assert!(!ok, "{report}");
-    assert!(
-        report.contains("\ntimestamp: yes\n"),
-        "the token is still there: {report}"
-    );
-    assert!(
-        report.contains("\ntsa chain: not checked (time-stamp does not verify)\n"),
-        "{report}"
-    );
+    let report = validate_offline(&forged).unwrap();
+    assert_eq!(report.verdict, Verdict::Invalid, "{:?}", report.signers[0]);
+    assert_eq!(report.signers[0].signature, CheckStatus::Passed);
     assert_eq!(
-        report.lines().last(),
-        Some("FAIL: time-stamp of signer 0 does not cover its signature"),
-        "{report}"
+        report.signers[0].timestamp,
+        CheckStatus::Failed,
+        "the token covers another signature: {:?}",
+        report.signers[0]
     );
 }
 

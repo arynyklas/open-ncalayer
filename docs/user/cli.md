@@ -47,6 +47,8 @@ oncl sign --profile cms --detached --input document.bin --output signature.der \
 
 Trust comes only from the operator: `--root`, `--intermediate`, `--pki-endpoint` (exact origins; literal IPs pin themselves), `--pki-pin 'http://host:port=IP:port'` for DNS origins (no ambient DNS), `--tsa-url` (+ `--tsa-policy OID`, required for XAdES) for evidence acquisition; CAdES/PAdES/XAdES T/LT/LTA are proven, `--as-of <Unix seconds>` for an explicit clock (default: host UTC). Document-carried certificates are never anchors. All configuration reads share one memory budget: at most 1024 certificate files, 64 endpoints/pins and `--configuration-bytes` (default 16 MiB) of encoded certificates, with every duplicate charged.
 
+`oncl verify --profile cms --input <signature.p7s> --root <NCA root>` is the only CMS signature checker of the project: it replaced the daemon's `openncalayer cms-verify` (removed, with its `crl/` cache path and its default embedded NCA CA set). The differences are intentional: there is no default trust set (pass the NCA roots you trust with `--root`), the input is DER or BER (the demo page saves DER; a PEM file must be decoded first), validation is always strict (the NCALayer compatibility policy, `OperationPolicy::ncalayer_compatibility()`, is a choice of an embedding host and has no command-line switch), the report is per check, and an unproven signing time or unavailable revocation data is `Indeterminate` (exit 3).
+
 ## Reports, exits and output
 
 | Exit | Meaning |

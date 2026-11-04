@@ -60,7 +60,7 @@
 <textarea id="result" rows="12" readonly></textarea>
 <button id="save-sig" type="button" disabled>Скачать .p7s</button>
 <button id="save-data" type="button" disabled>Скачать подписанные данные</button>
-<p>Проверка: <code>openncalayer cms-verify signature.p7s</code>, для подписи без вложенных данных — <code>openncalayer cms-verify signature.p7s --content &lt;файл данных&gt;</code>.</p>
+<p>Проверка: <code>oncl verify --profile cms --input signature.p7s --root &lt;корневой сертификат&gt;</code>, для подписи без вложенных данных добавьте <code>--detached &lt;файл данных&gt;</code>.</p>
 
 <script src="vendor/ncalayer-client.js"></script>
 <script>

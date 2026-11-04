@@ -5,7 +5,7 @@ use crate::resource::{ProcessingError, ResourceReservation, ResourceScope};
 use crate::{
     cert::Certificate,
     cms,
-    crl::{self, CrlCache, CrlStatus},
+    crl::{self, CrlStatus},
     http::HttpTransport,
     info::{CertInfo, KeyUsageBits, cert_info},
     ocsp::{self, CertStatus},
@@ -632,17 +632,9 @@ pub fn validate_certificate(
             report.reasons.push(ValidationReason::UntrustedChain);
         }
         Some(path) if ctx.policy != ValidationPolicy::OfflineReport => {
-            let status = check_path_revocation(
-                &path,
-                at,
-                ctx.anchors,
-                ctx.http,
-                ctx.now,
-                None,
-                ValidationPolicy::StrictOnline,
-            );
+            let status = check_path_revocation(&path, at, ctx.http, ctx.now);
             match status {
-                PathRevocation::Good { .. } => report.revocation = CheckStatus::Passed,
+                PathRevocation::Good => report.revocation = CheckStatus::Passed,
                 PathRevocation::After(revoked) => {
                     report.revocation = CheckStatus::Passed;
                     report
@@ -655,7 +647,7 @@ pub fn validate_certificate(
                         .reasons
                         .push(ValidationReason::Revoked { at: revoked.time });
                 }
-                PathRevocation::Unavailable { .. } | PathRevocation::NotChecked => {}
+                PathRevocation::Unavailable => {}
             }
         }
         Some(_) => {}
@@ -710,35 +702,18 @@ pub fn path_time(info: &CertInfo, at: OffsetDateTime) -> OffsetDateTime {
     at.max(info.not_before).min(info.not_after)
 }
 
-/// Shared path revocation mechanism. Raw diagnostics are for local legacy
-/// formatting only; service reports expose sanitized ValidationReason values.
+/// Shared path revocation mechanism: the signer's status by OCSP bound to its issuer's path
+/// (a CRL when OCSP gives none), then every CA certificate between the signer and the anchor
+/// by the CRL of its issuer. Strict: an unknown or unreachable status is `Unavailable`,
+/// never "not revoked"; a revocation after the proven time `at` does not invalidate.
 pub enum PathRevocation {
-    Good {
-        crl: bool,
-    },
+    Good,
     Revoked(PathRevoked),
     After(PathRevoked),
-    Unavailable {
-        why: String,
-        after: Option<PathRevoked>,
-    },
-    NotChecked,
+    Unavailable,
 }
 pub struct PathRevoked {
     pub time: OffsetDateTime,
-    pub source: &'static str,
-    pub ca: Option<String>,
-}
-impl PathRevoked {
-    pub fn after_signing(&self) -> String {
-        format!(
-            "revoked {} after signing ({})",
-            self.time
-                .format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_default(),
-            self.source
-        )
-    }
 }
 fn keep_earliest(earliest: &mut Option<PathRevoked>, revoked: PathRevoked) {
     if earliest.as_ref().is_none_or(|e| revoked.time < e.time) {
@@ -748,40 +723,25 @@ fn keep_earliest(earliest: &mut Option<PathRevoked>, revoked: PathRevoked) {
 pub fn check_path_revocation(
     path: &[Certificate],
     at: OffsetDateTime,
-    cas: &CaSet,
     http: &dyn HttpTransport,
     now: OffsetDateTime,
-    cache: Option<&CrlCache>,
-    policy: ValidationPolicy,
 ) -> PathRevocation {
-    if policy == ValidationPolicy::OfflineReport {
-        return PathRevocation::NotChecked;
-    }
-    let strict = policy == ValidationPolicy::StrictOnline;
     let Some(issuer) = path.get(1) else {
-        return PathRevocation::Unavailable {
-            why: "signer certificate is a trust anchor".into(),
-            after: None,
-        };
+        return PathRevocation::Unavailable;
     };
-    let mut why = None;
+    let mut unavailable = false;
     let mut after = None;
-    let status = if strict {
-        // These candidates are a successfully anchored signer's path, never
-        // arbitrary client CAs. Include them for the delegated responder chain.
-        let trusted = path[1..].to_vec();
-        ocsp::check_issuer_bound(
-            &path[0],
-            issuer,
-            &CaSet::new(trusted),
-            http,
-            now,
-            ocsp::TIMEOUT,
-        )
-    } else {
-        ocsp::check(&path[0], issuer, cas, http, now, ocsp::TIMEOUT)
-    };
-    let status = if strict && !matches!(status, Ok(CertStatus::Good | CertStatus::Revoked { .. })) {
+    // These candidates are a successfully anchored signer's path, never arbitrary client
+    // CAs. Include them for the delegated responder chain.
+    let status = ocsp::check_issuer_bound(
+        &path[0],
+        issuer,
+        &CaSet::new(path[1..].to_vec()),
+        http,
+        now,
+        ocsp::TIMEOUT,
+    );
+    let status = if !matches!(status, Ok(CertStatus::Good | CertStatus::Revoked { .. })) {
         match crl::fetch_status_for(&path[0], issuer, http, ocsp::TIMEOUT, now) {
             Ok(CrlStatus::Good) => Ok(CertStatus::Good),
             Ok(CrlStatus::Revoked { time, reason }) => Ok(CertStatus::Revoked { time, reason }),
@@ -793,56 +753,31 @@ pub fn check_path_revocation(
     match status {
         Ok(CertStatus::Good) => {}
         Ok(CertStatus::Revoked { time, .. }) => {
-            let revoked = PathRevoked {
-                time,
-                source: "ocsp",
-                ca: None,
-            };
+            let revoked = PathRevoked { time };
             if time <= at {
                 return PathRevocation::Revoked(revoked);
             }
             keep_earliest(&mut after, revoked);
         }
-        Ok(CertStatus::Unknown) => {
-            why = Some("OCSP responder does not know the certificate".to_owned())
-        }
-        Err(error) => why = Some(error.to_string()),
+        Ok(CertStatus::Unknown) | Err(_) => unavailable = true,
     }
     for pair in path[1..].windows(2) {
-        let (ca, issuer) = (&pair[0], &pair[1]);
-        let status = match cache {
-            Some(cache) => crl::check(ca, issuer, cache, http, now),
-            None => crl::fetch_status_for(ca, issuer, http, ocsp::TIMEOUT, now),
-        };
-        match status {
+        match crl::fetch_status_for(&pair[0], &pair[1], http, ocsp::TIMEOUT, now) {
             Ok(CrlStatus::Good) => {}
             Ok(CrlStatus::Revoked { time, .. }) => {
-                let revoked = PathRevoked {
-                    time,
-                    source: "crl",
-                    ca: Some(cert_info(ca).subject_cn.unwrap_or_default()),
-                };
+                let revoked = PathRevoked { time };
                 if time <= at {
                     return PathRevocation::Revoked(revoked);
                 }
                 keep_earliest(&mut after, revoked);
             }
-            Err(error) => {
-                why.get_or_insert_with(|| {
-                    format!(
-                        "CRL of CA certificate CN={}: {error}",
-                        cert_info(ca).subject_cn.unwrap_or_default()
-                    )
-                });
-            }
+            Err(_) => unavailable = true,
         }
     }
-    match (why, after) {
-        (Some(why), after) => PathRevocation::Unavailable { why, after },
-        (None, Some(revoked)) => PathRevocation::After(revoked),
-        (None, None) => PathRevocation::Good {
-            crl: path.len() > 2,
-        },
+    match after {
+        _ if unavailable => PathRevocation::Unavailable,
+        Some(revoked) => PathRevocation::After(revoked),
+        None => PathRevocation::Good,
     }
 }
 
@@ -1040,21 +975,11 @@ pub(crate) fn online_path_status(
     at: OffsetDateTime,
     ctx: &ValidationContext<'_>,
 ) -> (CheckStatus, Option<OffsetDateTime>) {
-    match check_path_revocation(
-        path,
-        at,
-        ctx.anchors,
-        ctx.http,
-        ctx.now,
-        None,
-        ValidationPolicy::StrictOnline,
-    ) {
-        PathRevocation::Good { .. } => (CheckStatus::Passed, None),
+    match check_path_revocation(path, at, ctx.http, ctx.now) {
+        PathRevocation::Good => (CheckStatus::Passed, None),
         PathRevocation::After(revoked) => (CheckStatus::Passed, Some(revoked.time)),
         PathRevocation::Revoked(revoked) => (CheckStatus::Failed, Some(revoked.time)),
-        PathRevocation::Unavailable { .. } | PathRevocation::NotChecked => {
-            (CheckStatus::Unavailable, None)
-        }
+        PathRevocation::Unavailable => (CheckStatus::Unavailable, None),
     }
 }
 
