@@ -1726,10 +1726,14 @@ print(json.dumps({'sig':si.find('{%s}SignatureMethod'%DS).get('Algorithm'),
 }
 
 fn pyhanko(pdf: &[u8], leaf_der: &[u8], dir: &std::path::Path) -> serde_json::Value {
-    let python = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../target/p03-oracle-env/Scripts/python.exe"
-    );
+    let python = std::env::var_os("ONCL_PYHANKO_PYTHON")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .expect(
+            "pyHanko oracle unavailable: create a Python environment with `pip install pyhanko \
+             pyhanko-certvalidator cryptography` and set ONCL_PYHANKO_PYTHON to that environment's \
+             python executable",
+        );
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracles/pdf_pyhanko.py");
     std::fs::write(dir.join("o.pdf"), pdf).unwrap();
     std::fs::write(dir.join("leaf.der"), leaf_der).unwrap();

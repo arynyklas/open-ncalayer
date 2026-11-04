@@ -421,6 +421,14 @@ one `artifact` part per **finished** output, and a mandatory last `final` part,
   client is still uploading is a typed `504 DeadlineExceeded` (`NotApplied`) before
   any header.
 
+## Test oracles
+
+The real-socket tests use independent tools. `openssl` and `python` (with `lxml` and
+`cryptography`) are found on `PATH`. The PAdES test needs a Python environment with
+`pyhanko`, `pyhanko-certvalidator` and `cryptography`: set `ONCL_PYHANKO_PYTHON` to that
+environment's python executable. If it is unset or missing that test fails with this
+explanation (it is never skipped).
+
 ## Operator configuration (summary)
 
 `[pki]` adds `anchors`, `intermediates`, address-pinned `endpoints`, an optional
