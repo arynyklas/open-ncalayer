@@ -54,6 +54,10 @@ pub(super) struct State {
     arm_after: Duration,
     idle_limit: Duration,
     cancel_wait: Timer,
+    /// How long a cancel waits for the worker before the page says it is still working.
+    cancel_after: Duration,
+    /// The "still working" notice is on the page: a late answer replaces it.
+    slow_notice: bool,
     documents: Vec<(PathBuf, Item)>,
     /// The engine's frozen copy of the documents, once the worker has it.
     frozen: Vec<Item>,
@@ -74,6 +78,8 @@ impl State {
             arm_after: ARM_AFTER,
             idle_limit: IDLE_LIMIT,
             cancel_wait: Timer::default(),
+            cancel_after: CANCEL_WAIT,
+            slow_notice: false,
             documents: Vec::new(),
             frozen: Vec::new(),
             decision: None,
@@ -687,16 +693,18 @@ pub(super) fn cancel(open: &Rc<Workspace>) {
         open.ui
             .set_status_text(super::Texts::of(open.locale.get()).cancelling.into());
         let op = open.sign.borrow().controller.id();
+        let wait = open.sign.borrow().cancel_after;
         open.sign
             .borrow()
             .cancel_wait
-            .start(TimerMode::SingleShot, CANCEL_WAIT, move || {
+            .start(TimerMode::SingleShot, wait, move || {
                 with_open(|open| {
                     if open.sign.borrow().controller.step() == Step::Running
                         && open.sign.borrow().controller.id() == op
                     {
                         // The worker has not answered: the page is not left waiting silently.
                         end_with(open, t.cancel_slow);
+                        open.sign.borrow_mut().slow_notice = true;
                     }
                 });
             });
@@ -776,7 +784,10 @@ pub(super) fn settled(open: &Rc<Workspace>, result: Result<SignOutput, JobError>
         let mut st = state(open);
         let mine = st.pending_op.take();
         if mine != Some(st.controller.id()) {
-            // The answer of an operation that was left: it changes nothing here.
+            // The answer of an operation that was left: it changes nothing of the operation
+            // but the page must not stay disabled for a job that has ended.
+            drop(st);
+            render(open);
             return;
         }
     }
@@ -815,8 +826,12 @@ pub(super) fn settled(open: &Rc<Workspace>, result: Result<SignOutput, JobError>
         Ok(SignOutput::Signed(outcome)) => signed(open, outcome),
         Err(JobError::Cancelled) => {
             let step = open.sign.borrow().controller.step();
+            let slow = std::mem::take(&mut open.sign.borrow_mut().slow_notice);
             match step {
                 Step::Running => end_with(open, t.cancelled_applied_unknown),
+                // The "still working" notice is on the page: the worker has now stopped, and
+                // whether a key was used is not known to this answer.
+                Step::Result if slow => end_with(open, t.cancelled_applied_unknown),
                 // Escape cancelled the job under the confirmation: the page goes back with
                 // it, nothing is left to confirm.
                 Step::Confirm => {
@@ -833,10 +848,14 @@ pub(super) fn settled(open: &Rc<Workspace>, result: Result<SignOutput, JobError>
             render(open);
         }
     }
+    // Whatever the answer did, the page shows the state of a job that has ended.
+    render(open);
 }
 
 fn signed(open: &Rc<Workspace>, outcome: Outcome) {
     let t = locale(open);
+    // Any real outcome replaces the "still working" notice.
+    let slow = std::mem::take(&mut open.sign.borrow_mut().slow_notice);
     match outcome {
         Outcome::Done(done) => {
             let (files, store) = {
@@ -873,6 +892,8 @@ fn signed(open: &Rc<Workspace>, outcome: Outcome) {
             let step = open.sign.borrow().controller.step();
             match step {
                 Step::Running => end_with(open, t.cancelled_before),
+                // The worker's real answer: it stopped before any key was applied.
+                Step::Result if slow => end_with(open, t.cancelled_before),
                 Step::Confirm => {
                     leave_confirmation(open);
                     render(open);
@@ -1301,6 +1322,10 @@ mod tests {
         assert_ne!(step(&p), Step::Confirm);
         assert!(!ui(&p).get_confirm_enabled());
         until("the worker ends", || !p.ws.ui.get_busy());
+        assert!(
+            !ui(&p).get_busy(),
+            "the page is not left disabled by the ended job"
+        );
         assert_eq!((p.guard.applications(), signatures(&p)), (0, 0));
         assert_eq!(ui(&p).get_result(), "");
         // The page works again from the start.
@@ -1345,6 +1370,7 @@ mod tests {
             }]))),
         );
         assert_eq!(step(&p), Step::Source);
+        assert!(!ui(&p).get_busy(), "a dropped answer still frees the page");
         assert_eq!(
             ui(&p).get_result(),
             "",
@@ -1384,30 +1410,58 @@ mod tests {
         assert_eq!(p.guard.applications(), 1);
     }
 
-    /// A cancel of a running signing is not left waiting for a worker that never answers: after
-    /// the wait the page says it is still working, and a real answer still replaces that text.
+    /// A cancel of a running signing is not left waiting for a worker that never answers: the
+    /// wait (injected short here) ends with a notice, and the worker's real answer, however late,
+    /// replaces it with what the engine reports.
     #[test]
     fn a_cancel_of_a_running_signing_has_an_exit_even_if_the_worker_is_silent() {
-        let p = page();
-        to_confirmation(&p);
-        arm(&p);
-        ui(&p).invoke_confirm();
-        assert_eq!(step(&p), Step::Running);
-        // The worker has not answered yet (its answer waits in the queue): cancel.
-        cancel(&p.ws);
-        assert_eq!(
-            step(&p),
-            Step::Running,
-            "waiting for the worker's real outcome"
-        );
-        // The wait ends with no answer: the page is told, not left waiting.
-        let op = p.ws.sign.borrow().controller.id();
-        end_with(&p.ws, locale(&p.ws).cancel_slow);
-        assert_eq!(step(&p), Step::Result);
-        assert!(ui(&p).get_result().contains("stops at its next checkpoint"));
-        // The real answer arrives later and shows what happened.
-        until("the worker answers", || !p.ws.ui.get_busy());
-        assert_eq!(p.ws.sign.borrow().controller.id(), op);
-        assert!(!ui(&p).get_result().is_empty());
+        for late in [
+            Outcome::NotApplied(JobError::Cancelled),
+            Outcome::Done(vec![Signed {
+                name: "a.txt".into(),
+                output: None,
+                error: Some(oncl_core::ErrorCode::Cancelled),
+                applied: AppliedState::NotApplied,
+            }]),
+        ] {
+            let p = page();
+            p.ws.sign.borrow_mut().cancel_after = Duration::from_millis(30);
+            to_confirmation(&p);
+            arm(&p);
+            ui(&p).invoke_confirm();
+            assert_eq!(step(&p), Step::Running);
+            // Hold the worker's real answer back: a silent worker.
+            let held = std::mem::take(
+                &mut *crate::workspace::DELIVERIES
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            cancel(&p.ws);
+            assert_eq!(step(&p), Step::Running, "waiting for the worker's outcome");
+            std::thread::sleep(Duration::from_millis(60));
+            slint::platform::update_timers_and_animations();
+            assert_eq!(step(&p), Step::Result, "the wait ended: not left waiting");
+            let notice = ui(&p).get_result();
+            assert!(notice.contains("stops at its next checkpoint"), "{notice}");
+            // The late answer (the engine's own, replaced by the one under test) is shown.
+            let id = p.ws.sign.borrow().controller.id();
+            p.ws.sign.borrow_mut().pending_op = Some(id);
+            settled(&p.ws, Ok(SignOutput::Signed(late)));
+            let text = ui(&p).get_result();
+            assert!(!text.contains("stops at its next checkpoint"), "{text}");
+            assert!(
+                text.contains("key") || text.contains("Not signed"),
+                "{text}"
+            );
+            // The worker's own answer arrives at last: dropped as already shown, and the page is
+            // not left disabled by the ended job.
+            crate::workspace::DELIVERIES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(held);
+            until("the real worker ends", || !p.ws.ui.get_busy());
+            assert!(!ui(&p).get_busy(), "the page is not left disabled");
+            assert_eq!(ui(&p).get_result(), text, "the shown outcome stays");
+        }
     }
 }

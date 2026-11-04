@@ -649,8 +649,6 @@ mod tests {
             .collect()
     }
 
-    /// A two-document packet is signed once the user confirmed what the engine froze: both
-    /// signature files exist and the key was applied once per document.
     fn store_name(n: u8) -> String {
         format!("oncl-{n:032x}")
     }
@@ -746,6 +744,8 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
+    /// A two-document packet is signed once the user confirmed what the engine froze: both
+    /// signature files exist and the key was applied once per document.
     #[test]
     fn a_confirmed_two_item_packet_is_signed_document_by_document() {
         let w = world();

@@ -379,7 +379,7 @@ type Delivery = Box<dyn FnOnce() + Send>;
 
 /// Deliveries by the thread they are for: tests run in parallel, each with its own page.
 #[cfg(test)]
-static DELIVERIES: std::sync::Mutex<Vec<(std::thread::ThreadId, Delivery)>> =
+pub(crate) static DELIVERIES: std::sync::Mutex<Vec<(std::thread::ThreadId, Delivery)>> =
     std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
