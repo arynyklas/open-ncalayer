@@ -29,8 +29,26 @@ fn io_error(error: io::Error) -> OperationError {
 pub enum Input {
     File(File, u64),
     Stdin(io::Stdin),
+    /// Preserves item order for a source that failed to open; reads fail locally.
+    Unreadable(UnreadableSource),
+}
+pub struct UnreadableSource(io::ErrorKind);
+impl Read for UnreadableSource {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::new(self.0, "source could not be opened"))
+    }
 }
 impl Input {
+    pub fn open_lenient(path: &std::path::Path) -> Self {
+        match path
+            .to_str()
+            .ok_or(io::ErrorKind::InvalidInput)
+            .and_then(|p| Self::open(p).map_err(|_| io::ErrorKind::NotFound))
+        {
+            Ok(input) => input,
+            Err(kind) => Self::Unreadable(UnreadableSource(kind)),
+        }
+    }
     pub fn open(path: &str) -> Result<Self, OperationError> {
         if path == "-" {
             Ok(Self::Stdin(io::stdin()))
@@ -44,6 +62,7 @@ impl Input {
         match self {
             Self::File(file, len) => Source::seekable(file, Some(*len)),
             Self::Stdin(input) => Source::sequential(input, None),
+            Self::Unreadable(input) => Source::sequential(input, None),
         }
     }
 }
@@ -159,6 +178,13 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         Command::Timestamp {
             command: crate::families::TimestampCommand::Verify { .. },
         } => Action::VerifyStamp,
+        Command::Batch { command } => {
+            if command.args().key.is_some() {
+                Action::Sign
+            } else {
+                Action::Verify
+            }
+        }
         Command::Plugin { command } => {
             if command.args().key.is_some() {
                 Action::Sign
@@ -200,6 +226,8 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         )?)
     } else if let Command::Plugin { command } = &cli.command {
         command.key_selector()?
+    } else if let Command::Batch { command } = &cli.command {
+        command.key_selector()?
     } else {
         None
     };
@@ -220,7 +248,7 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
     });
     let store = if matches!(
         cli.command,
-        Command::Sign(..) | Command::Verify { .. } | Command::Extend(..)
+        Command::Sign(..) | Command::Verify { .. } | Command::Extend(..) | Command::Batch { .. }
     ) {
         Some(TemporaryStore::new(
             cli.temporary_directory.as_deref().unwrap_or(Path::new(".")),
@@ -251,7 +279,16 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         OperationPolicy::strict_online()
     };
     policy.allow_prehashed = action == Action::SignDigest;
-    let mut grant = ExecutionGrant::new([action])
+    let grant_actions: Vec<Action> = if matches!(cli.command, Command::Batch { .. }) {
+        let mut actions = vec![Action::Hash, Action::Verify, Action::Extract];
+        if action == Action::Sign {
+            actions.push(Action::Sign);
+        }
+        actions
+    } else {
+        vec![action]
+    };
+    let mut grant = ExecutionGrant::new(grant_actions)
         .with_keys(selector.iter().map(oncl_core::keys::KeySelector::key_id));
     if let Command::Plugin { command } = &cli.command {
         grant = grant.with_plugins([crate::plugin::permission(
@@ -384,6 +421,9 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         Command::Inspect(args) => crate::public::inspect(&engine, args, cli, &mut ctx),
         Command::Extend(args) => crate::public::extend(&engine, args, cli, &mut ctx),
         Command::Timestamp { command } => crate::public::timestamp(&engine, command, cli, &mut ctx),
+        Command::Batch { command } => {
+            crate::batch::run(&engine, command, cli, selector.as_ref(), &mut ctx)
+        }
         Command::Plugin { command } => crate::plugin::call(
             &engine,
             command,

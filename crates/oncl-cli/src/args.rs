@@ -65,6 +65,10 @@ pub enum Command {
         #[command(subcommand)]
         command: crate::families::TimestampCommand,
     },
+    Batch {
+        #[command(subcommand)]
+        command: crate::batch::BatchCommand,
+    },
     Plugin {
         #[command(subcommand)]
         command: crate::plugin::PluginCommand,
@@ -333,6 +337,7 @@ impl Cli {
                 Err("AliasRequired")
             }
             Command::Plugin { command } => command.preflight(),
+            Command::Batch { command } => command.preflight(),
             Command::Jws { command } => command.preflight(),
             Command::Jwt { command } => command.preflight(),
             _ => Ok(()),
