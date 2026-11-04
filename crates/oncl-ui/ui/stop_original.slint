@@ -23,6 +23,9 @@ export component StopOriginalWindow inherits Window {
     // The buttons are inside the window, whatever the text and the scale.
     out property <bool> actions-reachable: actions.inside(root.width, root.height);
 
+    // How far the outcome text is scrolled (zero or negative), for the tests.
+    out property <length> status-y: status.content-y;
+
     callback stop();
     callback dismiss();
 
@@ -46,7 +49,9 @@ export component StopOriginalWindow inherits Window {
             if root.busy: BusyRow {
                 label: @tr("Please wait…");
             }
-            if !root.message.is-empty: StatusArea {
+            status := StatusArea {
+                // No outcome yet: no room for it.
+                max-height: root.message.is-empty ? 0px : 1000px;
                 message: root.message;
                 error: root.message-is-error;
             }

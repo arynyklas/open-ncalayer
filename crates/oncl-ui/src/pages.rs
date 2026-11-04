@@ -737,6 +737,155 @@ fn actions_stay_reachable_at<C: ComponentHandle>(
     select_language(Locale::En);
 }
 
+#[test]
+fn a_long_unbreakable_host_is_wrapped_to_its_end_not_run_out_of_the_window() {
+    offscreen::install();
+    let host = format!("https://{}.test", "a".repeat(200));
+    // The trusted consent list of a plugin: more lines of text for a long host than for a short
+    // one means every character is laid out inside the window.
+    let height = |host: &str| {
+        let ui = InstallPluginWindow::new().unwrap();
+        ui.set_capabilities(ModelRc::new(VecModel::from(vec![
+            SharedString::from(host);
+            5
+        ])));
+        open(&ui, narrowest(Class::Dialog));
+        ui.get_body_content()
+    };
+    assert!(height(&host) >= height("https://a.test") + 100.0);
+    // The same for the origin of a key request.
+    let header = |origin: &str| {
+        let ui = KeyDialog::new().unwrap();
+        ui.set_origin(origin.into());
+        open(&ui, (520.0, 460.0));
+        ui.get_header_content()
+    };
+    assert!(
+        header(&host) >= header("https://a.test") + 20.0,
+        "{} {}",
+        header(&host),
+        header("https://a.test")
+    );
+}
+
+#[test]
+fn a_status_line_is_read_by_keyboard() {
+    offscreen::install();
+    let ui = StopOriginalWindow::new().unwrap();
+    ui.set_message(long_error().into());
+    ui.set_message_is_error(true);
+    open(&ui, narrowest(Class::Dialog));
+    assert_eq!(ui.get_status_y(), 0.0);
+    // Tab to the strips; PageDown on whichever has the focus: the status line moves at some stop.
+    let mut moved = false;
+    for _ in 0..6 {
+        tap(&ui, Key::Tab);
+        tap(&ui, Key::PageDown);
+        if ui.get_status_y() < 0.0 {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "a long status line cannot be read by keyboard");
+}
+
+#[test]
+fn the_remaining_windows_answer_escape_before_any_tab() {
+    offscreen::install();
+    macro_rules! first_key {
+        ($window:ident, $set:ident) => {{
+            let ui = $window::new().unwrap();
+            open(&ui, (520.0, 400.0));
+            let (n, f) = counter();
+            ui.$set(f);
+            press(&ui, Key::Escape);
+            assert_eq!(n.get(), 1, "{}", stringify!($window));
+        }};
+    }
+    first_key!(ConfirmDialog, on_cancel);
+    first_key!(FileDialog, on_cancel);
+    first_key!(SaveDialog, on_cancel);
+    first_key!(StopOriginalWindow, on_dismiss);
+    let ui = InstallPluginWindow::new().unwrap();
+    open(&ui, (520.0, 400.0));
+    let answers = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = Rc::clone(&answers);
+    ui.on_answer(move |yes| seen.borrow_mut().push(yes));
+    press(&ui, Key::Escape);
+    assert_eq!(*answers.borrow(), [false]);
+}
+
+#[test]
+fn a_storage_is_chosen_by_return_too() {
+    offscreen::install();
+    let ui = StorageDialog::new().unwrap();
+    ui.set_storages(ModelRc::new(VecModel::from(vec![StorageRow {
+        label: "File".into(),
+        supported: true,
+        token: false,
+    }])));
+    open(&ui, (480.0, 520.0));
+    let chosen = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = Rc::clone(&chosen);
+    ui.on_storage_chosen(move |i| seen.borrow_mut().push(i));
+    for _ in 0..10 {
+        tap(&ui, Key::Tab);
+        tap(&ui, Key::Return);
+    }
+    assert!(chosen.borrow().contains(&0));
+}
+
+/// Every `LineEdit` and `ComboBox` of the service windows (not the tools window's pages) says what it is to a screen reader:
+/// the property is on the control itself (or the control is the one inside `TextField` /
+/// `PathField`, which set it). The compiled components do not list their controls, so this reads
+/// the sources.
+#[test]
+fn every_field_and_combo_box_has_an_accessible_label() {
+    let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    for entry in std::fs::read_dir(ui).unwrap() {
+        let path = entry.unwrap().path();
+        // The tools window's pages (workspace, signing, tools, report) are not service windows.
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if [
+            "workspace.slint",
+            "signing.slint",
+            "tools.slint",
+            "report.slint",
+        ]
+        .contains(&name.as_str())
+        {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\r\n", "\n");
+        for kind in ["LineEdit {", "ComboBox {"] {
+            for (at, _) in text.match_indices(kind) {
+                let mut depth = 0;
+                let mut end = at;
+                for (i, c) in text[at..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = at + i;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                assert!(
+                    text[at..end].contains("accessible-label"),
+                    "{}: a {kind} without accessible-label near byte {at}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
 // ---- the windows drawn by Slint's software renderer (not a native smoke) ----
 
 thread_local! {

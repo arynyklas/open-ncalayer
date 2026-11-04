@@ -143,6 +143,8 @@ export component StatusArea inherits Rectangle {
     in property <bool> neutral;
     // How tall it grows before it scrolls.
     in property <length> limit: 96px;
+    // How far the text is scrolled (zero or negative).
+    out property <length> content-y: sv.content-y;
     vertical-stretch: 0;
     min-height: min(body.preferred-height, 60px);
     preferred-height: min(body.preferred-height, root.limit);

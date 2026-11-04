@@ -32,6 +32,8 @@ export component InstallPluginWindow inherits Window {
     // The buttons are inside the window, whatever the text and the scale.
     out property <bool> actions-reachable: actions.inside(root.width, root.height);
     // What the plugin may do (the host's consent text) is in the first screenful.
+    // How tall the text is (its lines counted), for the tests.
+    out property <length> body-content: body.content-height;
     out property <bool> consent-in-view: may-text.absolute-position.y + may-text.height <= body.absolute-position.y + body.visible-height;
 
     callback answer(bool);
@@ -67,9 +69,10 @@ export component InstallPluginWindow inherits Window {
                     wrap: word-wrap;
                 }
 
-                for line in root.capabilities: Text {
+                // Manifest strings (host patterns, URL prefixes): a lookalike host is read to its
+                // end, so these break anywhere.
+                for line in root.capabilities: NameText {
                     text: "• " + line;
-                    wrap: word-wrap;
                 }
 
                 if root.replacing != "": Text {

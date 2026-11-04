@@ -2,7 +2,7 @@
 // a hardware token and its PIN.
 
 import { AboutSlint, Button, CheckBox, ComboBox, HorizontalBox, LineEdit, Palette, VerticalBox } from "std-widgets.slint";
-import { ActionBar, DialogScroll, EscapeScope, StatusArea, Tone } from "common.slint";
+import { ActionBar, DialogScroll, EscapeScope, NameText, StatusArea, Tone } from "common.slint";
 
 // A storage in the list.
 export struct StorageRow {
@@ -64,9 +64,8 @@ export component StorageDialog inherits Window {
     VerticalBox {
         HorizontalLayout {
             spacing: 8px;
-            Text {
+            NameText {
                 text: @tr("Request from: {}", root.origin);
-                wrap: word-wrap;
                 horizontal-stretch: 1;
                 vertical-alignment: center;
             }
@@ -88,7 +87,7 @@ export component StorageDialog inherits Window {
             max-height: 80px;
             Text {
                 text: root.detail;
-                wrap: word-wrap;
+                wrap: char-wrap;
             }
         }
 
@@ -170,6 +169,7 @@ export component StorageDialog inherits Window {
             spacing: 8px;
             LineEdit {
                 text <=> root.path;
+                accessible-label: @tr("Key store file");
                 horizontal-stretch: 1;
             }
 
@@ -191,6 +191,7 @@ export component StorageDialog inherits Window {
                 horizontal-stretch: 1;
                 enabled: root.readers.length > 0;
                 model: root.readers;
+                accessible-label: @tr("Reader");
                 current-index <=> root.reader-index;
             }
 
@@ -221,6 +222,7 @@ export component StorageDialog inherits Window {
 
         password-input := LineEdit {
             text <=> root.password;
+            accessible-label: root.is-token ? @tr("PIN code") : @tr("Password");
             input-type: show-password.checked ? InputType.text : InputType.password;
             accepted => {
                 if (root.can-open) {

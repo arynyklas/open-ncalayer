@@ -2,7 +2,7 @@
 // still running show a spinner and change in place when it ends.
 
 import { Button, Palette, ScrollView, Spinner, VerticalBox } from "std-widgets.slint";
-import { ActionBar, DialogScroll, EscapeScope, StatusArea, Tone } from "common.slint";
+import { ActionBar, DialogScroll, EscapeScope, NameText, StatusArea, Tone } from "common.slint";
 
 // A key in the list.
 export struct KeyItem {
@@ -43,6 +43,9 @@ export component KeyDialog inherits Window {
     // The buttons are inside the window, whatever the text and the scale.
     out property <bool> actions-reachable: actions.inside(root.width, root.height);
 
+    // How tall the header text is (its lines counted), for the tests.
+    out property <length> header-content: header.content-height;
+
     callback sign();
     callback cancel();
 
@@ -59,12 +62,11 @@ export component KeyDialog inherits Window {
             root.cancel();
         }
     VerticalBox {
-        DialogScroll {
+        header := DialogScroll {
             vertical-stretch: 0;
             max-height: 110px;
-            Text {
+            NameText {
                 text: @tr("Request from: {}", root.origin);
-                wrap: word-wrap;
             }
 
             Text {
@@ -74,7 +76,7 @@ export component KeyDialog inherits Window {
 
             if !root.detail.is-empty: Text {
                 text: root.detail;
-                wrap: word-wrap;
+                wrap: char-wrap;
             }
         }
 

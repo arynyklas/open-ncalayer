@@ -48,7 +48,11 @@ const CHROME: u32 = 96;
 /// content scrolls instead of the window leaving the screen. `work` unknown: no clamp.
 pub(crate) fn effective_scale(os: f32, step: UiScale, work: Option<(u32, u32)>) -> f32 {
     let wanted = os * step.factor();
-    let Some((width, height)) = work else {
+    // A monitor that reports nothing, or an absurd size (a virtual display, a broken driver), is
+    // as good as unknown: no clamp.
+    let Some((width, height)) =
+        work.filter(|&(w, h)| (320..=32_768).contains(&w) && (240..=32_768).contains(&h))
+    else {
         return wanted;
     };
     let room = (width as f32 / LARGEST_MINIMUM.0).min(height as f32 / LARGEST_MINIMUM.1);
@@ -227,6 +231,13 @@ mod tests {
             1.5
         );
         assert_eq!(effective_scale(1.0, UiScale::P100, Some((800, 600))), 1.0);
+        // A zero or absurd monitor is unknown, not a reason to shrink to the OS scale.
+        assert_eq!(effective_scale(1.5, UiScale::P200, Some((0, 0))), 3.0);
+        assert_eq!(effective_scale(1.5, UiScale::P200, Some((1920, 0))), 3.0);
+        assert_eq!(
+            effective_scale(1.0, UiScale::P200, Some((u32::MAX, u32::MAX))),
+            2.0
+        );
         // No screen known: the plain product.
         assert_eq!(effective_scale(1.5, UiScale::P200, None), 3.0);
     }
