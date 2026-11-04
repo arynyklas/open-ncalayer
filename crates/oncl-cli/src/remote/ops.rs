@@ -125,6 +125,7 @@ pub fn run(s: &mut Session<'_>) -> Result<i32, Failure> {
             input,
             detached,
             wsse,
+            ..
         } => verify(s, *profile, input, detached.as_deref(), wsse.soap_version),
         Command::Extract { input, output } => extract(s, input, output),
         Command::Sign(args) => sign(s, args),

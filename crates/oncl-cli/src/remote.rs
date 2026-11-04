@@ -243,8 +243,9 @@ pub fn preflight(cli: &Cli) -> Result<(), &'static str> {
     match &cli.command {
         Command::Plugin { .. } => Err(REFUSED),
         Command::Hash { .. } | Command::Extract { .. } => Ok(()),
-        Command::Verify { wsse, .. } => {
-            if wsse_beyond_soap(wsse, false) {
+        Command::Verify { wsse, pem, .. } => {
+            // PEM intake is a local-only convenience: the server's verify route takes DER.
+            if *pem || wsse_beyond_soap(wsse, false) {
                 return Err(REFUSED);
             }
             Ok(())
