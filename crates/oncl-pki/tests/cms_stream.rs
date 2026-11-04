@@ -1326,3 +1326,93 @@ fn publication_finish_rechecks_failure_marked_by_original_control() {
     assert!(outer.finish().is_err());
     assert!(stage.commit(&dir.path().join("must-not-publish")).is_err());
 }
+
+#[test]
+fn last_commit_control_transition_cannot_publish_a_poisoned_stage() {
+    #[derive(Clone, Copy)]
+    enum Phase {
+        Idle,
+        CommitEntry,
+        AfterSync,
+    }
+    struct Control {
+        phase: std::sync::Mutex<Phase>,
+        guard: std::sync::Mutex<Option<oncl_pki::io::OutputPublicationGuard>>,
+    }
+    impl OperationControl for Control {
+        fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+            let mut phase = self.phase.lock().unwrap();
+            match *phase {
+                Phase::Idle => {}
+                Phase::CommitEntry => *phase = Phase::AfterSync,
+                Phase::AfterSync => {
+                    drop(self.guard.lock().unwrap().take());
+                    *phase = Phase::Idle;
+                }
+            }
+            Ok(())
+        }
+    }
+    let control = Arc::new(Control {
+        phase: std::sync::Mutex::new(Phase::Idle),
+        guard: std::sync::Mutex::new(None),
+    });
+    let mut resources = controlled(ResourceLimits::default(), control.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let store = oncl_pki::io::TemporaryStore::new(dir.path()).unwrap();
+    let mut stage = store.stage(&mut resources).unwrap();
+    *control.guard.lock().unwrap() = Some(stage.publication_guard(&resources).unwrap());
+    stage.write_chunk(DATA).unwrap();
+    // The public commit entry and its mandatory post-sync checkpoint form this
+    // semantic schedule; no global operation/crypto checkpoint count is pinned.
+    *control.phase.lock().unwrap() = Phase::CommitEntry;
+    let destination = dir.path().join("must-not-publish");
+    assert!(stage.commit(&destination).is_err());
+    assert!(!destination.exists());
+}
+
+#[test]
+fn final_delivery_control_transition_is_failure_even_after_complete_prefix() {
+    struct Control {
+        armed: AtomicBool,
+        guard: std::sync::Mutex<Option<oncl_pki::io::OutputPublicationGuard>>,
+    }
+    impl OperationControl for Control {
+        fn checkpoint(&self, _: Progress) -> Result<(), ProcessingError> {
+            if self.armed.swap(false, Ordering::SeqCst) {
+                drop(self.guard.lock().unwrap().take());
+            }
+            Ok(())
+        }
+    }
+    struct Writer {
+        bytes: Vec<u8>,
+        control: Arc<Control>,
+    }
+    impl Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.control.armed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let control = Arc::new(Control {
+        armed: AtomicBool::new(false),
+        guard: std::sync::Mutex::new(None),
+    });
+    let mut resources = controlled(ResourceLimits::default(), control.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let store = oncl_pki::io::TemporaryStore::new(dir.path()).unwrap();
+    let mut stage = store.stage(&mut resources).unwrap();
+    *control.guard.lock().unwrap() = Some(stage.publication_guard(&resources).unwrap());
+    stage.write_chunk(DATA).unwrap();
+    let mut writer = Writer {
+        bytes: Vec::new(),
+        control,
+    };
+    assert!(stage.copy_to(&mut writer).is_err());
+    assert_eq!(writer.bytes, DATA);
+}

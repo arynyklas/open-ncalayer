@@ -690,12 +690,14 @@ impl DigestSigner for AuthorizedSigner<'_> {
 }
 
 impl Engine {
-    pub(crate) fn prepare_sign_keys(
+    /// Pure request authority only: no provider, crypto, allocation, or callback.
+    /// Staged producers use this before admitting an OUTPUT capability.
+    pub(crate) fn check_sign_requests(
         &self,
         requests: &[KeyRequest<'_>],
-        ctx: &mut OperationContext,
+        ctx: &OperationContext,
         action: Action,
-    ) -> Result<Vec<usize>, OperationError> {
+    ) -> Result<(), OperationError> {
         if !Arc::ptr_eq(&ctx.owner, &self.identity) {
             return Err(OperationError::InvalidContext);
         }
@@ -713,6 +715,15 @@ impl Engine {
         for request in requests {
             authority(ctx.grant(), &request.selector.id)?;
         }
+        Ok(())
+    }
+    pub(crate) fn prepare_sign_keys(
+        &self,
+        requests: &[KeyRequest<'_>],
+        ctx: &mut OperationContext,
+        action: Action,
+    ) -> Result<Vec<usize>, OperationError> {
+        self.check_sign_requests(requests, ctx, action)?;
         let services = self
             .keys
             .as_ref()

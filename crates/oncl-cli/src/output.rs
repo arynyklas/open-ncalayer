@@ -1,13 +1,13 @@
 use crate::args::Cli;
 use oncl_core::{OperationContext, OperationError};
 use oncl_pki::{
-    io::{StagedArtifact, TemporaryStore},
+    io::{PreparedPublication, StagedArtifact, TemporaryStore},
     resource::{ProcessingError, ResourceReservation},
 };
 use serde::Serialize;
 use std::{
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 struct BoundedReport {
@@ -45,7 +45,7 @@ pub struct PreparedReport {
     destination: ReportDestination,
 }
 enum ReportDestination {
-    File(StagedArtifact, PathBuf),
+    File(PreparedPublication),
     Stdout(BoundedReport),
     Stderr(BoundedReport),
 }
@@ -73,35 +73,28 @@ pub fn prepare<T: Serialize>(
         let store = TemporaryStore::new(parent(path))?;
         let mut staged = store.stage(ctx.resources())?;
         staged.write_chunk(&buffer.bytes)?;
-        ReportDestination::File(staged, path.clone())
+        ReportDestination::File(staged.prepare_commit(path)?)
     } else if artifact && !cli.json {
+        ctx.resources().account_output(buffer.bytes.len() as u64)?;
         ReportDestination::Stderr(buffer)
     } else {
+        ctx.resources().account_output(buffer.bytes.len() as u64)?;
         ReportDestination::Stdout(buffer)
     };
+    ctx.resources().checkpoint()?;
     Ok(PreparedReport { destination })
 }
 impl PreparedReport {
-    pub fn send(self, ctx: &mut OperationContext) -> Result<(), OperationError> {
+    pub fn send(self) -> Result<(), OperationError> {
         match self.destination {
-            ReportDestination::File(stage, destination) => stage.commit(&destination)?,
-            ReportDestination::Stdout(buffer) => {
-                send_buffer(buffer, &mut io::stdout().lock(), ctx)?
-            }
-            ReportDestination::Stderr(buffer) => {
-                send_buffer(buffer, &mut io::stderr().lock(), ctx)?
-            }
+            ReportDestination::File(publication) => publication.commit()?,
+            ReportDestination::Stdout(buffer) => send_buffer(buffer, &mut io::stdout().lock())?,
+            ReportDestination::Stderr(buffer) => send_buffer(buffer, &mut io::stderr().lock())?,
         }
         Ok(())
     }
 }
-fn send_buffer(
-    buffer: BoundedReport,
-    writer: &mut dyn Write,
-    ctx: &mut OperationContext,
-) -> Result<(), OperationError> {
-    ctx.resources().checkpoint()?;
-    ctx.resources().account_output(buffer.bytes.len() as u64)?;
+fn send_buffer(buffer: BoundedReport, writer: &mut dyn Write) -> Result<(), OperationError> {
     writer
         .write_all(&buffer.bytes)
         .map_err(ProcessingError::from)?;
@@ -114,7 +107,7 @@ pub fn report<T: Serialize>(
     human: &str,
     ctx: &mut OperationContext,
 ) -> Result<(), OperationError> {
-    prepare(cli, value, human, false, ctx)?.send(ctx)
+    prepare(cli, value, human, false, ctx)?.send()
 }
 pub fn parent(path: &Path) -> &Path {
     path.parent()
@@ -134,6 +127,43 @@ pub fn deliver(stage: StagedArtifact, destination: &str) -> Result<(), Operation
         stage.copy_to(&mut io::stdout().lock())?;
     } else {
         stage.commit(Path::new(destination))?;
+    }
+    Ok(())
+}
+
+fn after_use(error: OperationError, applied: oncl_core::keys::AppliedState) -> OperationError {
+    let applied = applied.combine(error.applied_state());
+    if applied == oncl_core::keys::AppliedState::NotApplied || applied == error.applied_state() {
+        error
+    } else {
+        OperationError::AfterKeyUse {
+            source: Box::new(error),
+            applied,
+        }
+    }
+}
+/// All report serialization/quota admission precedes document publication.
+/// A later physical report I/O/control failure cannot roll back a complete file.
+pub fn finish_artifact(
+    stage: StagedArtifact,
+    destination: &str,
+    prepared: Result<PreparedReport, OperationError>,
+    applied: oncl_core::keys::AppliedState,
+) -> Result<(), OperationError> {
+    let prepared = prepared.map_err(|error| after_use(error, applied))?;
+    deliver(stage, destination).map_err(|error| after_use(error, applied))?;
+    if let Err(error) = prepared.send() {
+        crate::diagnostic(format_args!(
+            "oncl: report_delivery_failed; document={}; code={:?}; applied={:?}",
+            if destination == "-" {
+                "Delivered"
+            } else {
+                "Published"
+            },
+            error.code(),
+            applied.combine(error.applied_state()),
+        ));
+        return Err(after_use(error, applied));
     }
     Ok(())
 }

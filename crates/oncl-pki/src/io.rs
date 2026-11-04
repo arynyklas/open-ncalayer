@@ -18,7 +18,7 @@
 use crate::resource::{IO_CHUNK_BYTES, ProcessingError, ResourceReservation, ResourceScope};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -251,6 +251,33 @@ pub struct StagedArtifact {
     source: bool,
     output_failure: Option<Arc<AtomicBool>>,
 }
+
+/// A synchronized, closed output and fixed host destination. Preparation never
+/// grants permission to ignore a later cancellation, deadline, or failure latch.
+/// There is no producer, file, Scope, permit, or mutable byte access.
+pub struct PreparedPublication {
+    stage: StagedArtifact,
+    destination: PathBuf,
+    _path: ResourceReservation,
+}
+impl PreparedPublication {
+    pub fn commit(self) -> Result<(), ProcessingError> {
+        self.stage.scope.checkpoint()?;
+        // Control is host code: it may drop another unfinished guard while
+        // returning Ok. No callback may intervene between this gate and publish.
+        check_output_failure(self.stage.output_failure.as_deref())?;
+        if self.stage.failed || self.stage.file.is_none() {
+            return Err(ProcessingError::InvalidInput(
+                "artifact is failed or closed",
+            ));
+        }
+        self.stage
+            .root
+            .publish(&self.stage.name, &self.destination)?;
+        Ok(())
+    }
+}
+
 /// Monotonic publication lifecycle, not a validation or authorization receipt.
 /// Retains the original resource root through a producer's later replay/report
 /// checks. Dropping it unfinished only marks its admitted OUTPUT unpublishable.
@@ -589,6 +616,7 @@ impl StagedArtifact {
                 .ok_or(ProcessingError::InvalidInput("artifact closed"))?,
             bytes,
             &self.scope,
+            self.output_failure.as_deref(),
         );
         if result.is_err() {
             self.failed = true;
@@ -596,6 +624,14 @@ impl StagedArtifact {
         result
     }
     pub fn commit(self, destination: &Path) -> Result<(), ProcessingError> {
+        self.prepare_commit(destination)?.commit()
+    }
+    /// Perform deterministic admission and file synchronization without publishing.
+    /// Final namespace publication still checks the original live control/latch.
+    pub fn prepare_commit(
+        self,
+        destination: &Path,
+    ) -> Result<PreparedPublication, ProcessingError> {
         self.scope.checkpoint()?;
         if self.source {
             return Err(ProcessingError::InvalidInput(
@@ -607,15 +643,29 @@ impl StagedArtifact {
                 "artifact has an incomplete write",
             ));
         }
+        let path_bytes = destination
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            .checked_add(std::mem::size_of::<PathBuf>())
+            .ok_or(ProcessingError::MetadataLimit)?;
+        let path = self.scope.reserve_metadata(path_bytes as u64)?;
+        let destination = destination.to_path_buf();
         self.file
             .as_ref()
             .ok_or(ProcessingError::InvalidInput("artifact closed"))?
             .sync_all()?;
-        self.scope.checkpoint()?;
-        // No fallible SDK work follows publication: reporting failure after this
-        // point would misrepresent an already visible, complete destination.
-        self.root.publish(&self.name, destination)?;
-        Ok(())
+        checkpoint_output(&self.scope, self.output_failure.as_deref())?;
+        if self.failed || self.file.is_none() {
+            return Err(ProcessingError::InvalidInput(
+                "artifact is failed or closed",
+            ));
+        }
+        Ok(PreparedPublication {
+            stage: self,
+            destination,
+            _path: path,
+        })
     }
     /// Explicit streaming delivery. The caller's writer can receive a partial
     /// result on I/O/cancel/deadline failure; use `commit` for atomic publication.
@@ -632,6 +682,7 @@ impl StagedArtifact {
                 "artifact has an incomplete write",
             ));
         }
+        let failure = self.output_failure.clone();
         let capacity = self.scope.available_memory().min(IO_CHUNK_BYTES as u64) as usize;
         if capacity == 0 {
             return Err(ProcessingError::MemoryLimit);
@@ -646,27 +697,27 @@ impl StagedArtifact {
             .file
             .as_mut()
             .ok_or(ProcessingError::InvalidInput("artifact closed"))?;
-        self.scope.checkpoint()?;
+        checkpoint_output(&self.scope, failure.as_deref())?;
         file.seek(SeekFrom::Start(0))?;
         let mut copied = 0u64;
         loop {
-            self.scope.checkpoint()?;
+            checkpoint_output(&self.scope, failure.as_deref())?;
             let n = match file.read(&mut buffer) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 result => result?,
             };
-            self.scope.checkpoint()?;
+            checkpoint_output(&self.scope, failure.as_deref())?;
             if n == 0 {
                 break;
             }
-            write_controlled(output, &buffer[..n], &self.scope)?;
+            write_controlled(output, &buffer[..n], &self.scope, failure.as_deref())?;
             copied = copied
                 .checked_add(n as u64)
                 .ok_or(ProcessingError::OutputLimit)?;
         }
-        self.scope.checkpoint()?;
+        checkpoint_output(&self.scope, failure.as_deref())?;
         output.flush()?;
-        self.scope.checkpoint()?;
+        checkpoint_output(&self.scope, failure.as_deref())?;
         Ok(copied)
     }
 }
@@ -685,19 +736,35 @@ impl Drop for StagedArtifact {
     }
 }
 
+fn check_output_failure(failure: Option<&AtomicBool>) -> Result<(), ProcessingError> {
+    if failure.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        return Err(ProcessingError::InvalidInput(
+            "artifact has an incomplete write",
+        ));
+    }
+    Ok(())
+}
+fn checkpoint_output(
+    scope: &ResourceScope,
+    failure: Option<&AtomicBool>,
+) -> Result<(), ProcessingError> {
+    scope.checkpoint()?;
+    check_output_failure(failure)
+}
 fn write_controlled(
     output: &mut dyn Write,
     mut bytes: &[u8],
     scope: &ResourceScope,
+    failure: Option<&AtomicBool>,
 ) -> Result<(), ProcessingError> {
     while !bytes.is_empty() {
-        scope.checkpoint()?;
+        checkpoint_output(scope, failure)?;
         let request = bytes.len().min(IO_CHUNK_BYTES);
         let n = match output.write(&bytes[..request]) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => result?,
         };
-        scope.checkpoint()?;
+        checkpoint_output(scope, failure)?;
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::WriteZero,

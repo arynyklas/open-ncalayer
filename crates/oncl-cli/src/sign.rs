@@ -59,8 +59,8 @@ pub fn execute(
 ) -> Result<(oncl_pki::io::StagedArtifact, oncl_core::OperationReport), OperationError> {
     let _secret_memory = ctx.resources().reserve_memory(16384)?;
     let secret = secrets::read(
-        args.secret_file.as_deref(),
-        args.secret_interactive,
+        args.key_options.secret_file.as_deref(),
+        args.key_options.secret_interactive,
         args.input == "-" || args.detached_input.as_deref() == Some("-"),
         ctx,
     )?;

@@ -529,7 +529,7 @@ impl Engine {
         output: &mut oncl_pki::io::StagedArtifact,
         ctx: &mut OperationContext,
     ) -> Result<JoseWriteReport, OperationError> {
-        self.output_authority(ctx, Action::Sign)?;
+        self.check_sign_requests(&keys, ctx, Action::Sign)?;
         let output = ProducerOutput::staged(output, &ctx.scope)?;
         self.jose_create(profile, keys, payload, false, output, ctx)
     }
@@ -659,7 +659,7 @@ impl Engine {
         output: &mut oncl_pki::io::StagedArtifact,
         ctx: &mut OperationContext,
     ) -> Result<JoseWriteReport, OperationError> {
-        self.output_authority(ctx, Action::Sign)?;
+        self.check_sign_requests(&keys, ctx, Action::Sign)?;
         let output = ProducerOutput::staged(output, &ctx.scope)?;
         self.jws_add_output(request, keys, input, detached, output, ctx)
     }
@@ -1044,7 +1044,7 @@ impl Engine {
         output: &mut oncl_pki::io::StagedArtifact,
         ctx: &mut OperationContext,
     ) -> Result<JoseWriteReport, OperationError> {
-        self.output_authority(ctx, Action::Sign)?;
+        self.check_sign_requests(std::slice::from_ref(&key), ctx, Action::Sign)?;
         let output = ProducerOutput::staged(output, &ctx.scope)?;
         self.jose_create(
             JoseProfile::new(JwsSerialization::Compact, false),

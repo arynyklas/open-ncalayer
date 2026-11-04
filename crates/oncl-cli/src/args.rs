@@ -20,6 +20,9 @@ pub struct Cli {
     pub intermediate: Vec<PathBuf>,
     #[arg(long, global = true)]
     pub pki_endpoint: Vec<String>,
+    /// Aggregate encoded host certificate bytes, including duplicate roots.
+    #[arg(long, global = true, default_value_t = 16_777_216)]
+    pub configuration_bytes: u64,
     #[arg(long, global = true)]
     pub as_of: Option<i64>,
     #[arg(long, global = true)]
@@ -59,6 +62,14 @@ pub enum Command {
     Timestamp {
         #[command(subcommand)]
         command: crate::families::TimestampCommand,
+    },
+    Jws {
+        #[command(subcommand)]
+        command: crate::jose_args::JwsCommand,
+    },
+    Jwt {
+        #[command(subcommand)]
+        command: crate::jose_args::JwtCommand,
     },
 }
 #[derive(Clone, Copy, ValueEnum)]
@@ -120,13 +131,7 @@ impl VerifyProfile {
     }
 }
 #[derive(Args)]
-pub struct SignArgs {
-    #[arg(long, value_enum)]
-    pub profile: SignProfile,
-    #[arg(long)]
-    pub input: String,
-    #[arg(long)]
-    pub output: String,
+pub struct PrivateKeyArgs {
     #[arg(long)]
     pub key: PathBuf,
     #[arg(long)]
@@ -135,9 +140,20 @@ pub struct SignArgs {
     pub secret_file: Option<PathBuf>,
     #[arg(long, conflicts_with = "secret_file")]
     pub secret_interactive: bool,
-    /// Authorize only this explicit operation, source, profile, key and destination.
+    /// Authorize only this operation's exact source, key, profile and destination.
     #[arg(long)]
     pub authorize: bool,
+}
+#[derive(Args)]
+pub struct SignArgs {
+    #[arg(long, value_enum)]
+    pub profile: SignProfile,
+    #[arg(long)]
+    pub input: String,
+    #[arg(long)]
+    pub output: String,
+    #[command(flatten)]
+    pub key_options: PrivateKeyArgs,
     #[arg(long)]
     pub add: bool,
     #[arg(long)]
@@ -174,9 +190,23 @@ pub enum SignProfile {
     CadesLta,
 }
 impl Cli {
+    pub fn private_key(&self) -> Option<&PrivateKeyArgs> {
+        match &self.command {
+            Command::Sign(args) => Some(&args.key_options),
+            Command::Jws { command } => command.key(),
+            Command::Jwt { command } => command.key(),
+            _ => None,
+        }
+    }
     pub fn preflight(&self) -> Result<(), &'static str> {
         if self.timeout_seconds == 0 {
             return Err("InvalidTimeout");
+        }
+        if self.root.len().saturating_add(self.intermediate.len()) > 1024
+            || self.pki_endpoint.len() > 64
+            || self.configuration_bytes > 16_777_216
+        {
+            return Err("ConfigurationLimit");
         }
         if self
             .report
@@ -192,6 +222,8 @@ impl Cli {
             Command::Timestamp {
                 command: crate::families::TimestampCommand::Acquire { output, .. },
             } => Some(output.as_str()),
+            Command::Jws { command } => command.output(),
+            Command::Jwt { command } => command.output(),
             _ => None,
         };
         if let Some(output) = output {
@@ -210,7 +242,7 @@ impl Cli {
             }
         }
         if let Command::Sign(args) = &self.command {
-            if !args.authorize {
+            if !args.key_options.authorize {
                 return Err("AuthorityRequired");
             }
             let cms = matches!(
@@ -229,7 +261,8 @@ impl Cli {
                     | SignProfile::XadesLt
                     | SignProfile::XadesLta
             );
-            if (args.add && !cms && !xml)
+            if (cms && args.add && args.detached)
+                || (args.add && !cms && !xml)
                 || (args.detached && !cms)
                 || (args.detached_input.is_some() && (!cms || !args.add))
                 || (!xml
@@ -239,7 +272,7 @@ impl Cli {
             {
                 return Err("InvalidCombination");
             }
-            if args.secret_interactive
+            if args.key_options.secret_interactive
                 && (args.input == "-" || args.detached_input.as_deref() == Some("-"))
             {
                 return Err("SecretRequiresSeparateInput");
@@ -269,6 +302,8 @@ impl Cli {
             {
                 Err("AliasRequired")
             }
+            Command::Jws { command } => command.preflight(),
+            Command::Jwt { command } => command.preflight(),
             _ => Ok(()),
         }
     }

@@ -47,26 +47,58 @@ impl Input {
         }
     }
 }
-fn validation(cli: &Cli, control: &Control) -> Result<ValidationServices, OperationError> {
+fn validation(
+    cli: &Cli,
+    control: &Control,
+    budget: &Arc<oncl_pki::resource::SharedBudget>,
+) -> Result<
+    (
+        ValidationServices,
+        oncl_pki::resource::ConfigurationReservation,
+    ),
+    OperationError,
+> {
+    // Every duplicate is charged: encoded bytes directly, and a conservative 16x
+    // parse/retained certificate metadata estimate, before the file is read.
+    let mut reservation = budget.reserve_configuration(0, 0)?;
+    let mut encoded_total = 0u64;
     fn certificates(
         paths: &[std::path::PathBuf],
         control: &Control,
+        limit: u64,
+        encoded_total: &mut u64,
+        reservation: &mut oncl_pki::resource::ConfigurationReservation,
     ) -> Result<Vec<oncl_pki::cert::Certificate>, OperationError> {
         let mut certificates = Vec::new();
         for path in paths {
             control.check()?;
             let mut file = File::open(path).map_err(io_error)?;
-            if file.metadata().map_err(io_error)?.len() > 1024 * 1024 {
-                return Err(ProcessingError::MetadataLimit.into());
-            }
+            let length = file.metadata().map_err(io_error)?.len();
+            let next = encoded_total
+                .checked_add(length)
+                .filter(|total| *total <= limit && length <= 1024 * 1024)
+                .ok_or(ProcessingError::MetadataLimit)?;
+            reservation.grow(
+                length,
+                length
+                    .checked_mul(16)
+                    .ok_or(ProcessingError::MetadataLimit)?,
+            )?;
+            *encoded_total = next;
             let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(length as usize)
+                .map_err(|_| ProcessingError::MemoryLimit)?;
             let read = Read::by_ref(&mut file)
-                .take(1024 * 1024 + 1)
+                .take(length + 1)
                 .read_to_end(&mut bytes);
             control.check()?;
             read.map_err(io_error)?;
-            if bytes.len() > 1024 * 1024 {
-                return Err(ProcessingError::MetadataLimit.into());
+            if bytes.len() as u64 != length {
+                return Err(ProcessingError::InvalidInput(
+                    "host certificate changed during intake",
+                )
+                .into());
             }
             certificates.push(
                 oncl_pki::cert::parse(&bytes)
@@ -85,14 +117,31 @@ fn validation(cli: &Cli, control: &Control) -> Result<ValidationServices, Operat
         };
     let network = NetworkPolicy::only_endpoints(cli.pki_endpoint.iter().map(String::as_str))
         .map_err(|_| ProcessingError::InvalidInput("invalid host PKI endpoint"))?;
-    Ok(ValidationServices::new(
-        CaSet::new(certificates(&cli.root, control)?),
-        certificates(&cli.intermediate, control)?,
-        Arc::new(oncl_pki::http::UreqTransport::with_proxy(
-            oncl_pki::http::ProxySetting::None,
-        )),
-        network,
-        clock,
+    let roots = certificates(
+        &cli.root,
+        control,
+        cli.configuration_bytes,
+        &mut encoded_total,
+        &mut reservation,
+    )?;
+    let intermediates = certificates(
+        &cli.intermediate,
+        control,
+        cli.configuration_bytes,
+        &mut encoded_total,
+        &mut reservation,
+    )?;
+    Ok((
+        ValidationServices::new(
+            CaSet::new(roots),
+            intermediates,
+            Arc::new(oncl_pki::http::UreqTransport::with_proxy(
+                oncl_pki::http::ProxySetting::None,
+            )),
+            network,
+            clock,
+        ),
+        reservation,
     ))
 }
 pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
@@ -110,19 +159,34 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         Command::Timestamp {
             command: crate::families::TimestampCommand::Verify { .. },
         } => Action::VerifyStamp,
+        Command::Jws { command } => command.action(),
+        Command::Jwt { command } => command.action(),
     };
-    let validation = if matches!(
-        cli.command,
-        Command::Verify { .. }
-            | Command::Sign(..)
-            | Command::Extend(..)
-            | Command::Timestamp { .. }
+    let mut limits = ResourceLimits {
+        operation_timeout: control.remaining()?,
+        ..ResourceLimits::default()
+    };
+    if let Some(output) = cli.output_limit {
+        limits.output_bytes = output;
+    }
+    // ONE application budget exists before host configuration is read; the
+    // retained configuration reservation lives until Engine/context drop.
+    let budget = Arc::new(oncl_pki::resource::SharedBudget::new(limits.clone())?);
+    let (validation, _configuration) = if matches!(
+        action,
+        Action::Verify
+            | Action::Sign
+            | Action::SignDigest
+            | Action::Extend
+            | Action::Stamp
+            | Action::VerifyStamp
     ) {
-        Some(validation(cli, &control)?)
+        let (services, reservation) = validation(cli, &control, &budget)?;
+        (Some(services), Some(reservation))
     } else {
-        None
+        (None, None)
     };
-    let selector = if let Command::Sign(args) = &cli.command {
+    let selector = if let Some(args) = cli.private_key() {
         Some(oncl_core::keys::KeySelector::file(
             &args.key,
             args.alias.clone(),
@@ -147,14 +211,7 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
     } else {
         None
     };
-    let mut limits = ResourceLimits {
-        operation_timeout: control.remaining()?,
-        ..ResourceLimits::default()
-    };
-    if let Some(output) = cli.output_limit {
-        limits.output_bytes = output;
-    }
-    let mut services = EngineServices::hash_only(limits);
+    let mut services = EngineServices::hash_only(limits).with_shared_budget(budget);
     if let Some(validation) = validation {
         services = services.with_validation(validation);
     }
@@ -246,7 +303,7 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
                     &mut ctx,
                 )?;
                 output::deliver(stage, &args.output)?;
-                prepared.send(&mut ctx)
+                prepared.send()
             })();
             complete.map_err(|error| OperationError::AfterKeyUse {
                 source: Box::new(error),
@@ -293,11 +350,17 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
                 &mut ctx,
             )?;
             output::deliver(stage, destination)?;
-            prepared.send(&mut ctx)?;
+            prepared.send()?;
             Ok(0)
         }
         Command::Inspect(args) => crate::public::inspect(&engine, args, cli, &mut ctx),
         Command::Extend(args) => crate::public::extend(&engine, args, cli, &mut ctx),
         Command::Timestamp { command } => crate::public::timestamp(&engine, command, cli, &mut ctx),
+        Command::Jws { command } => {
+            crate::jose::jws(&engine, command, cli, selector.as_ref(), &mut ctx)
+        }
+        Command::Jwt { command } => {
+            crate::jose::jwt(&engine, command, cli, selector.as_ref(), &mut ctx)
+        }
     }
 }

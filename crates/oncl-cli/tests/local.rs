@@ -251,6 +251,8 @@ fn incompatible_signing_flags_are_not_silently_ignored() {
         vec!["--profile", "raw", "--add"],
         vec!["--profile", "raw", "--detached"],
         vec!["--profile", "cms", "--target-id", "document"],
+        vec!["--profile", "cms", "--add", "--detached"],
+        vec!["--profile", "cades-b", "--add", "--detached"],
     ] {
         let mut args = vec![
             "sign",
@@ -282,5 +284,163 @@ fn closed_stderr_does_not_replace_usage_exit_with_a_panic() {
     drop(child.stderr.take());
     let result = child.wait_with_output().unwrap();
     assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+}
+
+#[test]
+fn aggregate_document_and_report_quota_is_admitted_before_publication() {
+    let encoded = cms_fixture(true);
+    let temp = tempfile::tempdir().unwrap();
+    for mode in ["human", "json", "file"] {
+        let baseline = temp.path().join(format!("{mode}-baseline"));
+        let report_path = temp.path().join(format!("{mode}-baseline-report"));
+        let mut args = vec![
+            "extract",
+            "--input",
+            "-",
+            "--output",
+            baseline.to_str().unwrap(),
+        ];
+        if mode == "json" {
+            args.push("--json");
+        }
+        if mode == "file" {
+            args.extend(["--report", report_path.to_str().unwrap()]);
+        }
+        let result = run(&args, &encoded);
+        assert_eq!(result.status.code(), Some(0), "{result:?}");
+        assert_eq!(std::fs::read(&baseline).unwrap(), b"abc");
+        let report = if mode == "file" {
+            std::fs::read(&report_path).unwrap()
+        } else if mode == "json" {
+            result.stdout
+        } else {
+            result.stderr
+        };
+        let exact = 3 + report.len();
+        for cap in [exact, exact - 1] {
+            let output = temp.path().join(format!("{mode}-{cap}"));
+            let report_output = temp.path().join(format!("{mode}-{cap}-report"));
+            let cap_string = cap.to_string();
+            let mut args = vec![
+                "extract",
+                "--input",
+                "-",
+                "--output",
+                output.to_str().unwrap(),
+                "--output-limit",
+                &cap_string,
+            ];
+            if mode == "json" {
+                args.push("--json");
+            }
+            if mode == "file" {
+                args.extend(["--report", report_output.to_str().unwrap()]);
+            }
+            let result = run(&args, &encoded);
+            assert_eq!(
+                result.status.code(),
+                Some(if cap == exact { 0 } else { 1 }),
+                "mode={mode},cap={cap}: {result:?}"
+            );
+            if cap == exact {
+                assert_eq!(std::fs::read(output).unwrap(), b"abc");
+                if mode == "file" {
+                    assert_eq!(std::fs::read(report_output).unwrap(), report);
+                }
+            } else {
+                assert!(
+                    !output.exists(),
+                    "known report quota failure published the document"
+                );
+                assert!(!report_output.exists());
+                assert!(String::from_utf8_lossy(&result.stderr).contains("OutputLimit"));
+            }
+        }
+    }
+}
+
+#[test]
+fn duplicate_host_roots_obey_aggregate_encoded_admission_before_document_io() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root.cer");
+    let certificate = oncl_testkit::synthetic_cert("root-rsa");
+    std::fs::write(&root, &certificate).unwrap();
+    let encoded = cms_fixture(true);
+    for copies in [1, 2] {
+        let exact = certificate.len() * copies;
+        for limit in [exact, exact - 1] {
+            let limit = limit.to_string();
+            let mut args = vec![
+                "verify",
+                "--profile",
+                "cms",
+                "--input",
+                "-",
+                "--offline",
+                "--json",
+                "--configuration-bytes",
+                &limit,
+            ];
+            for _ in 0..copies {
+                args.extend(["--root", root.to_str().unwrap()]);
+            }
+            let result = run(&args, &encoded);
+            assert_eq!(
+                result.status.code(),
+                Some(if limit == exact.to_string() { 3 } else { 1 }),
+                "copies={copies}: {result:?}"
+            );
+            if limit != exact.to_string() {
+                assert!(String::from_utf8_lossy(&result.stderr).contains("MetadataLimit"));
+                assert!(result.stdout.is_empty());
+            }
+        }
+        let insufficient = (exact - 1).to_string();
+        let mut args = vec![
+            "verify",
+            "--profile",
+            "cms",
+            "--input",
+            "missing-document",
+            "--offline",
+            "--configuration-bytes",
+            &insufficient,
+        ];
+        for _ in 0..copies {
+            args.extend(["--root", root.to_str().unwrap()]);
+        }
+        let result = run(&args, b"");
+        assert_eq!(result.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("MetadataLimit"),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn excessive_configuration_item_count_precedes_provider_and_file_io() {
+    let mut args = vec![
+        "sign",
+        "--profile",
+        "cms",
+        "--input",
+        "missing-document",
+        "--output",
+        "-",
+        "--key",
+        "missing-key",
+        "--authorize",
+    ];
+    for _ in 0..1025 {
+        args.extend(["--root", "missing-ca"]);
+    }
+    let result = run(&args, b"");
+    assert_eq!(result.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("ConfigurationLimit"),
+        "{result:?}"
+    );
     assert!(result.stdout.is_empty());
 }

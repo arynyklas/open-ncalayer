@@ -107,7 +107,7 @@ impl Serialize for Signers<'_> {
         sequence.end()
     }
 }
-struct Signer<'a>(&'a oncl_pki::validation::SignerValidation);
+pub(crate) struct Signer<'a>(pub(crate) &'a oncl_pki::validation::SignerValidation);
 impl Serialize for Signer<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let s = self.0;

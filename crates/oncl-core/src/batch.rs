@@ -1474,6 +1474,7 @@ impl Engine {
                     std::mem::replace(&mut ctx.borrowed_replay, item.replay.take());
                 // Restore correlation even when trusted host guard/provider code
                 // panics and the host catches the unwind to reuse this context.
+                let receiver_entered = std::cell::Cell::new(false);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if let Some(error) = item.error.take() {
                         Err(error)
@@ -1487,7 +1488,10 @@ impl Engine {
                         if let Some(output) = output {
                             let receiver =
                                 on_output.as_deref_mut().expect("owned output preflighted");
-                            receiver(index, item.id, &report, output).map_err(|error| {
+                            receiver_entered.set(true);
+                            let delivery = receiver(index, item.id, &report, output);
+                            receiver_entered.set(false);
+                            delivery.map_err(|error| {
                                 let applied = match &report {
                                     BatchReport::Sign(report) | BatchReport::Extend(report) => {
                                         report.applied
@@ -1514,7 +1518,13 @@ impl Engine {
                 ctx.borrowed_replay = previous_replay;
                 let result = match result {
                     Ok(result) => result,
-                    Err(payload) => std::panic::resume_unwind(payload),
+                    Err(payload) => {
+                        if receiver_entered.get() {
+                            ctx.private_use_stopped
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        }
+                        std::panic::resume_unwind(payload)
+                    }
                 };
                 match result {
                     Ok(report) => {

@@ -4150,7 +4150,9 @@ dependencies = [
 name = "oncl-cli"
 version = "0.1.0-alpha.6"
 dependencies = [
+ "base64",
  "clap",
+ "der 0.8.2",
  "libc",
  "oncl-core",
  "oncl-pdf",

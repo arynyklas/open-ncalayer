@@ -3941,3 +3941,111 @@ fn owned_batch_output_is_committed_before_item_finished_cancellation() {
         .verify(oncl_pki::key::SigAlg::RsaSha256, b"first", &signature)
         .unwrap();
 }
+
+#[test]
+fn receiver_unwind_stops_same_context_private_reuse_without_rolling_back_publication() {
+    use oncl_core::{
+        SignRequest,
+        batch::BatchOutput,
+        keys::{KeyRequest, KeyUseEvent},
+    };
+    use std::sync::atomic::Ordering;
+    for publish in [false, true] {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = oncl_pki::io::TemporaryStore::new(scratch.path()).unwrap();
+        let guard = Arc::new(fixture::Guard::default());
+        let engine = fixture::engine(
+            store.clone(),
+            guard.clone(),
+            Arc::new(fixture::Provider::default()),
+            ResourceLimits::default(),
+        );
+        let key = fixture::selector("user-rsa-sign");
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Sign, Action::Hash]).with_keys([key.key_id()]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control),
+            )
+            .unwrap();
+        let stage = store.stage(ctx.resources()).unwrap();
+        let mut original = &b"actually signed"[..];
+        let plan = engine
+            .capture_batch(
+                [BatchItem::new(
+                    "one",
+                    BatchOperation::Sign {
+                        request: SignRequest::raw_message(KeyRequest::new(
+                            &key,
+                            Some(fixture::PASSWORD),
+                        )),
+                        input: Source::sequential(&mut original, None),
+                        output: BatchOutput::OwnedStaged(stage),
+                    },
+                )],
+                &mut ctx,
+            )
+            .unwrap();
+        let approval = plan.authorize(&ctx).unwrap();
+        let destination = scratch.path().join("published.raw");
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.run_batch_with_outputs(
+                plan,
+                approval,
+                &mut ctx,
+                |_| {},
+                |_, _, _, output| {
+                    if publish {
+                        output.commit(&destination)?;
+                    }
+                    panic!("trusted receiver unwind");
+                },
+            )
+        }));
+        assert!(panic.is_err());
+        assert_eq!(guard.applied.load(Ordering::SeqCst), 1);
+        assert_eq!(destination.exists(), publish);
+        if publish {
+            fixture::raw("user-rsa-sign")
+                .key
+                .public_key()
+                .verify(
+                    oncl_pki::key::SigAlg::RsaSha256,
+                    b"actually signed",
+                    &std::fs::read(&destination).unwrap(),
+                )
+                .unwrap();
+        }
+        assert!(
+            KeyUseEvent::new(&ctx, key.key_id(), Action::Sign)
+                .batch_item()
+                .is_none()
+        );
+        let mut next = &b"must not be signed"[..];
+        let mut bytes = Vec::new();
+        let error = engine
+            .sign(
+                SignRequest::raw_message(KeyRequest::new(&key, Some(fixture::PASSWORD))),
+                Source::sequential(&mut next, None),
+                &mut bytes,
+                &mut ctx,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), oncl_core::ErrorCode::PermissionDenied);
+        assert_eq!(guard.applied.load(Ordering::SeqCst), 1);
+        assert!(bytes.is_empty());
+        let all_temp = ctx
+            .resources()
+            .reserve_temp(ResourceLimits::default().temp_bytes)
+            .unwrap();
+        drop(all_temp);
+        drop(ctx);
+        engine
+            .begin(
+                ExecutionGrant::new([Action::Hash]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control),
+            )
+            .unwrap();
+    }
+}

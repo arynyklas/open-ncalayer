@@ -76,7 +76,7 @@ pub fn extend(
         ctx,
     )?;
     output::deliver(stage, &args.output)?;
-    prepared.send(ctx)?;
+    prepared.send()?;
     Ok(0)
 }
 pub fn tsa(url: &str, algorithm: oncl_pki::key::HashAlg, timeout: Duration) -> TsaSpec {
@@ -144,7 +144,7 @@ pub fn timestamp(
                 ctx,
             )?;
             output::deliver(stage, destination)?;
-            prepared.send(ctx)?;
+            prepared.send()?;
             Ok(0)
         }
         TimestampCommand::Verify {

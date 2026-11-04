@@ -166,6 +166,23 @@ impl SharedBudget {
         })
     }
 
+    /// Admit retained host configuration without occupying an operation slot or
+    /// creating a Scope/deadline. Metadata also counts as live RAM exactly once.
+    /// The configuration owner must retain this reservation with its data.
+    pub fn reserve_configuration(
+        self: &Arc<Self>,
+        direct_memory: u64,
+        metadata: u64,
+    ) -> Result<ConfigurationReservation, ProcessingError> {
+        let mut reservation = ConfigurationReservation {
+            budget: self.clone(),
+            direct_memory: 0,
+            metadata: 0,
+        };
+        reservation.grow(direct_memory, metadata)?;
+        Ok(reservation)
+    }
+
     /// Admit once, before intake. Clones of the returned root lease do not admit again.
     pub fn begin(
         self: &Arc<Self>,
@@ -196,6 +213,70 @@ impl SharedBudget {
                 usage: Mutex::new(Usage::default()),
             }),
         })
+    }
+}
+
+/// Global host-configuration memory/metadata ownership, not operation authority.
+/// No input/output credits, active slot, Scope, deadline, or detachable data are
+/// exposed. Failed growth changes neither owner nor aggregate counters.
+pub struct ConfigurationReservation {
+    budget: Arc<SharedBudget>,
+    direct_memory: u64,
+    metadata: u64,
+}
+impl ConfigurationReservation {
+    pub fn grow(&mut self, direct_memory: u64, metadata: u64) -> Result<(), ProcessingError> {
+        let next_direct = self
+            .direct_memory
+            .checked_add(direct_memory)
+            .ok_or(ProcessingError::MemoryLimit)?;
+        let next_metadata = self
+            .metadata
+            .checked_add(metadata)
+            .ok_or(ProcessingError::MetadataLimit)?;
+        let memory = direct_memory
+            .checked_add(metadata)
+            .ok_or(ProcessingError::MemoryLimit)?;
+        let mut usage = lock(&self.budget.usage);
+        let global_memory = usage
+            .memory
+            .checked_add(memory)
+            .ok_or(ProcessingError::MemoryLimit)?;
+        let global_metadata = usage
+            .metadata
+            .checked_add(metadata)
+            .ok_or(ProcessingError::MetadataLimit)?;
+        if global_metadata > self.budget.limits.metadata_bytes {
+            return Err(ProcessingError::MetadataLimit);
+        }
+        if global_memory > self.budget.limits.memory_bytes {
+            return Err(ProcessingError::MemoryLimit);
+        }
+        usage.memory = global_memory;
+        usage.metadata = global_metadata;
+        self.direct_memory = next_direct;
+        self.metadata = next_metadata;
+        Ok(())
+    }
+}
+impl std::fmt::Debug for ConfigurationReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigurationReservation")
+            .field("direct_memory", &self.direct_memory)
+            .field("metadata", &self.metadata)
+            .finish_non_exhaustive()
+    }
+}
+impl Drop for ConfigurationReservation {
+    fn drop(&mut self) {
+        let mut usage = lock(&self.budget.usage);
+        if let Some(memory) = self.direct_memory.checked_add(self.metadata)
+            && let Some(global_memory) = usage.memory.checked_sub(memory)
+            && let Some(global_metadata) = usage.metadata.checked_sub(self.metadata)
+        {
+            usage.memory = global_memory;
+            usage.metadata = global_metadata;
+        }
     }
 }
 
