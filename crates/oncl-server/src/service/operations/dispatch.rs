@@ -983,7 +983,41 @@ fn strongest(
         _ => NotApplied,
     })
 }
+/// Runs one item and reports only its closed kind/outcome/applied-state to the
+/// optional telemetry of the current request (no ids, names, sizes or messages).
 pub(super) fn run(
+    operation: Operation,
+    item_id: &str,
+    env: &mut Env<'_>,
+    ctx: &mut OperationContext,
+    output: Option<ArtifactSink<'_>>,
+) -> Result<
+    (
+        OperationResult,
+        ResourceReservation,
+        Option<super::artifact::FinishedArtifact>,
+    ),
+    OperationError,
+> {
+    use crate::telemetry::{ItemResult, Observer, operation_kind};
+    let observer = Observer::worker();
+    if !observer.enabled() {
+        return run_item(operation, item_id, env, ctx, output);
+    }
+    let (kind, family) = operation_kind(&operation);
+    let timer = observer.item_start();
+    let outcome = run_item(operation, item_id, env, ctx, output);
+    let result = match &outcome {
+        Ok((result, ..)) => ItemResult::Ok(applied_of(result)),
+        Err(error) => {
+            let failure = crate::service::operation_failure(error);
+            ItemResult::Failed(failure.code, failure.applied)
+        }
+    };
+    observer.item_end(timer, kind, family, result);
+    outcome
+}
+fn run_item(
     operation: Operation,
     item_id: &str,
     env: &mut Env<'_>,
