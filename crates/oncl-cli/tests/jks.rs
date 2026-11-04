@@ -38,7 +38,7 @@ fn jks(w: &World, alias: &str) -> PathBuf {
         w.dir.path().join("leaf.der"),
         w.dir.path().join("root.der"),
     );
-    std::fs::write(&pkcs8, w.pki.rsa.key.to_pkcs8_der().unwrap().to_vec()).unwrap();
+    std::fs::write(&pkcs8, w.pki.rsa.key.to_pkcs8_der().unwrap()).unwrap();
     std::fs::write(&leaf, w.pki.rsa.cert.to_der().unwrap()).unwrap();
     std::fs::write(&root, w.pki.root.cert.to_der().unwrap()).unwrap();
     let out = w.dir.path().join("signer.jks");
