@@ -153,7 +153,12 @@ impl<'a> PdfSignatureOutput<'a> {
         let position = file.stream_position()?;
         let result = (|| {
             file.seek(SeekFrom::Start(offset))?;
-            write_controlled(file, bytes, &self.stage.scope)
+            write_controlled(
+                file,
+                bytes,
+                &self.stage.scope,
+                self.stage.output_failure.as_deref(),
+            )
         })();
         let restored = file.seek(SeekFrom::Start(position));
         if let Err(e) = restored {

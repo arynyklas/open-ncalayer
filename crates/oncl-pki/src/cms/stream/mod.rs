@@ -18,7 +18,7 @@ pub use sign::{
 
 use crate::cms::CmsError;
 use crate::digest::{DigestValue, HashState};
-use crate::io::{Region, Source};
+use crate::io::{OutputTransaction, Region, Source, StagedArtifact};
 use crate::key::SigAlg;
 use crate::resource::{ProcessingError, ResourceScope};
 use der::asn1::ObjectIdentifier;
@@ -71,13 +71,49 @@ pub fn extract(
     output: &mut dyn Write,
     scope: &mut ResourceScope,
 ) -> Result<ExtractedContent, StreamError> {
-    let parsed = parse(input, scope, false, Some(output))?;
+    let parsed = parse(input, scope, false, Some(ContentOutput::Writer(output)))?;
     if parsed.inspection.detached {
         return Err(CmsError::NoEncapsulatedData.into());
     }
     Ok(ExtractedContent {
         bytes_written: parsed.inspection.content_len,
     })
+}
+
+/// Structural extraction into an empty same-operation output. Failure after
+/// stage admission poisons that stage, including cancellation later cleared by
+/// the host. This does not assert signature validity.
+pub fn extract_staged(
+    input: Source<'_>,
+    output: &mut StagedArtifact,
+    scope: &mut ResourceScope,
+) -> Result<ExtractedContent, StreamError> {
+    let mut transaction = OutputTransaction::new(output, scope)?;
+    let parsed = parse(
+        input,
+        scope,
+        false,
+        Some(ContentOutput::Transaction(&mut transaction)),
+    )?;
+    if parsed.inspection.detached {
+        return Err(CmsError::NoEncapsulatedData.into());
+    }
+    let bytes_written = parsed.inspection.content_len;
+    transaction.finish()?;
+    Ok(ExtractedContent { bytes_written })
+}
+
+pub(super) enum ContentOutput<'a, 'stage> {
+    Writer(&'a mut dyn Write),
+    Transaction(&'a mut OutputTransaction<'stage>),
+}
+impl ContentOutput<'_, '_> {
+    fn write(&mut self, bytes: &[u8], scope: &ResourceScope) -> Result<(), StreamError> {
+        match self {
+            Self::Writer(writer) => sign::Output::Writer(*writer).write(bytes, scope),
+            Self::Transaction(transaction) => transaction.write_chunk(bytes).map_err(Into::into),
+        }
+    }
 }
 
 pub(super) const ALGORITHMS: [SigAlg; 4] = [
@@ -168,7 +204,7 @@ fn read_content(
     reader: &mut Reader<'_, '_>,
     header: reader::Header,
     digests: &mut Digests,
-    output: &mut Option<&mut dyn Write>,
+    output: &mut Option<ContentOutput<'_, '_>>,
     length: &mut u64,
 ) -> Result<(), StreamError> {
     match header.tag {
@@ -181,27 +217,8 @@ fn read_content(
                 .ok_or_else(|| malformed("content length overflows u64"))?;
             reader.payload(len, true, |bytes, scope| {
                 digests.update(bytes);
-                if let Some(sink) = output.as_deref_mut() {
-                    scope.account_output(bytes.len() as u64)?;
-                    let mut remaining = bytes;
-                    while !remaining.is_empty() {
-                        scope.checkpoint()?;
-                        let count = match sink.write(remaining) {
-                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                                continue;
-                            }
-                            result => result.map_err(ProcessingError::from)?,
-                        };
-                        if count == 0 || count > remaining.len() {
-                            return Err(ProcessingError::Io(std::io::Error::new(
-                                std::io::ErrorKind::WriteZero,
-                                "CMS content sink made no progress",
-                            ))
-                            .into());
-                        }
-                        remaining = &remaining[count..];
-                        scope.checkpoint()?;
-                    }
+                if let Some(sink) = output.as_mut() {
+                    sink.write(bytes, scope)?;
                 }
                 Ok(())
             })?;
@@ -222,7 +239,7 @@ pub(super) fn parse(
     input: Source<'_>,
     scope: &mut ResourceScope,
     hashing: bool,
-    output: Option<&mut dyn Write>,
+    output: Option<ContentOutput<'_, '_>>,
 ) -> Result<Parsed, StreamError> {
     parse_with(input, scope, hashing, output, &[], false)
 }
@@ -230,7 +247,7 @@ pub(super) fn parse_with(
     input: Source<'_>,
     scope: &mut ResourceScope,
     hashing: bool,
-    mut output: Option<&mut dyn Write>,
+    mut output: Option<ContentOutput<'_, '_>>,
     extra: &[SigAlg],
     replay: bool,
 ) -> Result<Parsed, StreamError> {

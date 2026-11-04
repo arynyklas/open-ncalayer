@@ -4181,6 +4181,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "oncl-cli"
+version = "0.1.0-alpha.6"
+dependencies = [
+ "base64",
+ "clap",
+ "der 0.8.2",
+ "libc",
+ "oncl-core",
+ "oncl-pdf",
+ "oncl-pdk",
+ "oncl-pki",
+ "oncl-plugin",
+ "oncl-testkit",
+ "oncl-token",
+ "oncl-xml",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "wat",
+ "windows-sys 0.61.2",
+ "x509-cert",
+ "zeroize",
+]
+
+[[package]]
 name = "oncl-core"
 version = "0.1.0-alpha.6"
 dependencies = [

@@ -1499,3 +1499,123 @@ fn many_host_roots_keep_original_operation_deadline() {
         .unwrap_err();
     assert_eq!(error.code(), oncl_core::ErrorCode::DeadlineExceeded);
 }
+
+#[test]
+fn staged_jose_output_charged_once_and_late_failure_retains_applied() {
+    let key = selector("user-rsa-sign");
+    let p = profile(JwsSerialization::Compact, false);
+    let guard = Arc::new(Guard::default());
+    let original = engine(guard.clone(), ResourceLimits::default(), true, true);
+    let expected = create(&original, &[&key], p, DATA);
+    let dir = tempfile::tempdir().unwrap();
+    let store = oncl_pki::io::TemporaryStore::new(dir.path()).unwrap();
+    for cap in [expected.len() as u64, expected.len() as u64 - 1] {
+        let engine = engine(
+            guard.clone(),
+            ResourceLimits {
+                output_bytes: cap,
+                ..ResourceLimits::default()
+            },
+            true,
+            true,
+        );
+        let mut ctx = begin(&engine, &[&key], &[Action::Sign]);
+        let mut stage = store.stage(ctx.resources()).unwrap();
+        let result = engine.jws_create_staged(
+            p,
+            vec![KeyRequest::new(&key, Some("J01 synthetic"))],
+            DATA,
+            &mut stage,
+            &mut ctx,
+        );
+        if cap == expected.len() as u64 {
+            assert_eq!(result.unwrap().bytes_out, cap);
+            assert_eq!(ctx.resources().progress().bytes_out, cap);
+            let mut bytes = Vec::new();
+            stage.copy_to(&mut bytes).unwrap();
+            assert_eq!(bytes, expected);
+        } else {
+            assert_eq!(result.unwrap_err().applied_state(), AppliedState::Applied);
+            assert!(stage.commit(&dir.path().join("failed")).is_err());
+        }
+    }
+}
+
+#[test]
+fn staged_jose_key_grant_denial_does_not_admit_payload_or_poison_output() {
+    use oncl_core::{
+        OperationContext, OperationError,
+        keys::{KeyLease, KeyProvider, KeySources},
+    };
+    use std::sync::atomic::AtomicUsize;
+    struct Provider(AtomicUsize);
+    impl KeyProvider for Provider {
+        fn open(
+            &self,
+            request: &KeyRequest<'_>,
+            ctx: &mut OperationContext,
+        ) -> Result<KeyLease, OperationError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            KeySources::new().open(request, ctx)
+        }
+    }
+    let key = selector("user-rsa-sign");
+    let p = profile(JwsSerialization::Compact, false);
+    let creator = engine(
+        Arc::new(Guard::default()),
+        ResourceLimits::default(),
+        true,
+        true,
+    );
+    let wire = create(&creator, &[&key], p, b"abc");
+    for family in ["create", "add", "jwt"] {
+        let provider = Arc::new(Provider(AtomicUsize::new(0)));
+        let guard = Arc::new(Guard::default());
+        let engine = Engine::new(
+            EngineServices::hash_only(ResourceLimits::default())
+                .with_keys(provider.clone(), guard.clone())
+                .with_validation(validation(true, true)),
+        )
+        .unwrap();
+        let mut ctx = begin(&engine, &[], &[Action::Sign]);
+        let directory = tempfile::tempdir().unwrap();
+        let store = oncl_pki::io::TemporaryStore::new(directory.path()).unwrap();
+        let mut stage = store.stage(ctx.resources()).unwrap();
+        let result = match family {
+            "create" => engine.jws_create_staged(
+                p,
+                vec![KeyRequest::new(&key, Some("J01 synthetic"))],
+                b"abc",
+                &mut stage,
+                &mut ctx,
+            ),
+            "add" => engine.jws_add_staged(
+                JwsVerifyRequest::new(p),
+                vec![KeyRequest::new(&key, Some("J01 synthetic"))],
+                &wire,
+                None,
+                &mut stage,
+                &mut ctx,
+            ),
+            _ => engine.jwt_encode_staged(
+                KeyRequest::new(&key, Some("J01 synthetic")),
+                br#"{"exp":2000000000}"#,
+                &mut stage,
+                &mut ctx,
+            ),
+        };
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), oncl_core::ErrorCode::PermissionDenied);
+        assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            ctx.resources().progress().bytes_in,
+            0,
+            "{family} admitted denied input"
+        );
+        stage.write_chunk(b"still usable").unwrap();
+        let destination = directory.path().join("independent-output");
+        stage.commit(&destination).unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"still usable");
+    }
+}

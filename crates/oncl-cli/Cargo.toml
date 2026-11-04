@@ -1,0 +1,55 @@
+[package]
+name = "oncl-cli"
+description = "Standalone local OpenNCALayer SDK command line"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "oncl"
+path = "src/main.rs"
+
+[features]
+# Software tokens read from `ONCL_TOKEN_EMULATOR=<config.toml>`: tests only, never released.
+token-emulator = ["oncl-token/emulator"]
+
+[[test]]
+name = "token"
+required-features = ["token-emulator"]
+
+[dependencies]
+oncl-core = { workspace = true, features = ["xml", "pdf", "jose", "plugins", "tokens"] }
+oncl-pki.workspace = true
+oncl-xml.workspace = true
+oncl-pdf.workspace = true
+oncl-token.workspace = true
+oncl-plugin = { workspace = true, default-features = false }
+oncl-pdk.workspace = true
+clap.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+zeroize.workspace = true
+time.workspace = true
+der.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+oncl-testkit.workspace = true
+oncl-pki = { workspace = true, features = ["testing"] }
+base64.workspace = true
+wat.workspace = true
+x509-cert.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# Tests only: a ConPTY pseudoconsole is the real terminal of the no-echo process tests
+# (same crate and version as the runtime dependency above).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading"] }

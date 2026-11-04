@@ -386,7 +386,7 @@ fn real_signatures_pin_source_at_guard_and_reuse_only_context_lease() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut source, None),
-                        output: &mut first_out,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut first_out),
                     },
                 ),
                 BatchItem::new(
@@ -397,7 +397,7 @@ fn real_signatures_pin_source_at_guard_and_reuse_only_context_lease() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut second, None),
-                        output: &mut second_out,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut second_out),
                     },
                 ),
             ],
@@ -455,7 +455,7 @@ fn real_signatures_pin_source_at_guard_and_reuse_only_context_lease() {
                         Some(fixture::PASSWORD),
                     )),
                     input: Source::sequential(&mut third, None),
-                    output: &mut out,
+                    output: oncl_core::batch::BatchOutput::Writer(&mut out),
                 },
             )],
             &mut independent,
@@ -509,7 +509,7 @@ fn postuse_guard_failures_keep_applied_and_stop_new_private_use() {
                                 Some(fixture::PASSWORD),
                             )),
                             input: Source::sequential(&mut one, None),
-                            output: &mut out1,
+                            output: oncl_core::batch::BatchOutput::Writer(&mut out1),
                         },
                     ),
                     BatchItem::new(
@@ -520,7 +520,7 @@ fn postuse_guard_failures_keep_applied_and_stop_new_private_use() {
                                 Some(fixture::PASSWORD),
                             )),
                             input: Source::sequential(&mut two, None),
-                            output: &mut out2,
+                            output: oncl_core::batch::BatchOutput::Writer(&mut out2),
                         },
                     ),
                 ],
@@ -586,7 +586,7 @@ fn guard_failure_is_terminal_even_with_element_local_error_code() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut one, None),
-                        output: &mut out1,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut out1),
                     },
                 ),
                 BatchItem::new(
@@ -597,7 +597,7 @@ fn guard_failure_is_terminal_even_with_element_local_error_code() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut two, None),
-                        output: &mut out2,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut out2),
                     },
                 ),
             ],
@@ -679,7 +679,7 @@ fn changed_source_requires_new_authority() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut original, None),
-                        output: &mut original_out,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut original_out),
                     },
                 )],
                 &mut ctx,
@@ -717,7 +717,7 @@ fn changed_source_requires_new_authority() {
                     BatchOperation::Sign {
                         request,
                         input: Source::sequential(&mut changed, None),
-                        output: &mut changed_out,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut changed_out),
                     },
                 )],
                 &mut ctx,
@@ -953,7 +953,7 @@ fn shared_output_quota_preserves_first_signature_and_stops_third_private_use() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut one, None),
-                        output: &mut out1,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut out1),
                     },
                 ),
                 BatchItem::new(
@@ -964,7 +964,7 @@ fn shared_output_quota_preserves_first_signature_and_stops_third_private_use() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut two, None),
-                        output: &mut out2,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut out2),
                     },
                 ),
                 BatchItem::new(
@@ -975,7 +975,7 @@ fn shared_output_quota_preserves_first_signature_and_stops_third_private_use() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut three, None),
-                        output: &mut out3,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut out3),
                     },
                 ),
             ],
@@ -1108,7 +1108,7 @@ fn audit_ordinals_cover_multi_key_items_gaps_and_reset_for_nonbatch_calls() {
                             true,
                         ),
                         input: Source::sequential(&mut sign1, None),
-                        output: &mut cms,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut cms),
                     },
                 ),
                 BatchItem::new(
@@ -1126,7 +1126,7 @@ fn audit_ordinals_cover_multi_key_items_gaps_and_reset_for_nonbatch_calls() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut sign2, None),
-                        output: &mut raw,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut raw),
                     },
                 ),
             ],
@@ -1233,7 +1233,7 @@ fn audit_ordinal_is_restored_when_guard_panics_and_host_reuses_context() {
                         Some(fixture::PASSWORD),
                     )),
                     input: Source::sequential(&mut input, None),
-                    output: &mut output,
+                    output: oncl_core::batch::BatchOutput::Writer(&mut output),
                 },
             )],
             &mut ctx,
@@ -1342,7 +1342,7 @@ fn nested_detached_add_source_is_frozen_through_approval_and_guard() {
                         Some(Source::sequential(&mut detached, None)),
                     ),
                     input: Source::sequential(&mut container, None),
-                    output: &mut output,
+                    output: oncl_core::batch::BatchOutput::Writer(&mut output),
                 },
             )],
             &mut ctx,
@@ -1427,7 +1427,7 @@ fn feature_gated_jose_batch_uses_real_operations_and_original_input_quota() {
                         profile,
                         keys: vec![KeyRequest::new(&key, Some(fixture::PASSWORD))],
                         payload: b"confirmed jose",
-                        output: &mut output,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut output),
                     }),
                 ),
                 BatchItem::new(
@@ -1581,7 +1581,7 @@ fn foreign_already_counted_source_is_rejected_before_key_provider() {
             BatchOperation::Sign {
                 request: SignRequest::raw_message(KeyRequest::new(&key, Some(fixture::PASSWORD))),
                 input: reader.source(),
-                output: &mut output,
+                output: oncl_core::batch::BatchOutput::Writer(&mut output),
             },
         )],
         &mut legitimate,
@@ -1657,7 +1657,7 @@ fn confirmed_key_file_replacement_does_not_replace_pinned_certificate_or_key() {
                         Some(fixture::PASSWORD),
                     )),
                     input: Source::sequential(&mut input, None),
-                    output: &mut output,
+                    output: oncl_core::batch::BatchOutput::Writer(&mut output),
                 },
             )],
             &mut ctx,
@@ -1744,7 +1744,7 @@ fn cancel_after_first_item() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut first, None),
-                        output: &mut out1,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut out1),
                     },
                 ),
                 BatchItem::new(
@@ -1755,7 +1755,7 @@ fn cancel_after_first_item() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut second, None),
-                        output: &mut out2,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut out2),
                     },
                 ),
             ],
@@ -1870,7 +1870,7 @@ fn one_failure_keeps_known_results() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut first, None),
-                        output: &mut out1,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut out1),
                     },
                 ),
                 BatchItem::new(
@@ -1889,7 +1889,7 @@ fn one_failure_keeps_known_results() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut bad, None),
-                        output: &mut bad_out,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut bad_out),
                     },
                 ),
                 BatchItem::new(
@@ -1900,7 +1900,7 @@ fn one_failure_keeps_known_results() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut last, None),
-                        output: &mut out2,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut out2),
                     },
                 ),
             ],
@@ -1994,7 +1994,7 @@ fn unavailable_authorized_key_is_a_known_local_item_failure() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut first, None),
-                        output: &mut first_out,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut first_out),
                     },
                 ),
                 BatchItem::new(
@@ -2002,7 +2002,7 @@ fn unavailable_authorized_key_is_a_known_local_item_failure() {
                     BatchOperation::Sign {
                         request: SignRequest::raw_message(KeyRequest::new(&missing, None)),
                         input: Source::sequential(&mut unavailable, None),
-                        output: &mut missing_out,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut missing_out),
                     },
                 ),
                 BatchItem::new(
@@ -2013,7 +2013,7 @@ fn unavailable_authorized_key_is_a_known_local_item_failure() {
                             Some(fixture::PASSWORD),
                         )),
                         input: Source::sequential(&mut last, None),
-                        output: &mut last_out,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut last_out),
                     },
                 ),
             ],
@@ -2169,7 +2169,7 @@ fn successful_private_output_followed_by_batch_finalization_cancel_remains_appli
                                 Some(fixture::PASSWORD),
                             )),
                             input: Source::sequential(&mut actual, None),
-                            output: &mut output,
+                            output: oncl_core::batch::BatchOutput::Writer(&mut output),
                         },
                     ),
                     BatchItem::new(
@@ -2180,7 +2180,7 @@ fn successful_private_output_followed_by_batch_finalization_cancel_remains_appli
                                 Some(fixture::PASSWORD),
                             )),
                             input: Source::sequential(&mut later, None),
-                            output: &mut later_output,
+                            output: oncl_core::batch::BatchOutput::Writer(&mut later_output),
                         },
                     ),
                 ],
@@ -2431,7 +2431,7 @@ fn jose_rebound_scope_is_rejected_before_private_dispatch() {
                     profile: JoseProfile::new(JwsSerialization::Compact, false),
                     keys: vec![KeyRequest::new(&key, Some(fixture::PASSWORD))],
                     payload: b"bound",
-                    output: &mut output,
+                    output: oncl_core::batch::BatchOutput::Writer(&mut output),
                 }),
             )],
             &mut ctx,
@@ -2594,7 +2594,7 @@ fn pades_batch_sign_and_keyless_extension_keep_the_pdf_profile() {
                         limits,
                     ),
                     input: Source::sequential(&mut original, None),
-                    output: &mut signed,
+                    output: oncl_core::batch::BatchOutput::Writer(&mut signed),
                 },
             )],
             &mut ctx,
@@ -2642,7 +2642,7 @@ fn pades_batch_sign_and_keyless_extension_keep_the_pdf_profile() {
                 BatchOperation::Extend {
                     request: request.with_evidence_limits(limits),
                     input: Source::sequential(&mut source, None),
-                    output: &mut extended,
+                    output: oncl_core::batch::BatchOutput::Writer(&mut extended),
                 },
             )],
             &mut ctx,
@@ -2725,7 +2725,7 @@ mod xml_batch {
                                         baseline_profile,
                                     ),
                                     input: Source::sequential(&mut baseline_input, None),
-                                    output: &mut baseline_output,
+                                    output: oncl_core::batch::BatchOutput::Writer(&mut baseline_output),
                                 },
                             )],
                             &mut baseline_context,
@@ -2764,7 +2764,7 @@ mod xml_batch {
                                         profile,
                                     ),
                                     input: Source::sequential(&mut input, None),
-                                    output: &mut output,
+                                    output: oncl_core::batch::BatchOutput::Writer(&mut output),
                                 },
                             )],
                             &mut context,
@@ -2965,7 +2965,7 @@ mod xml_batch {
                                 profile,
                             ),
                             input: Source::sequential(&mut input, None),
-                            output: &mut output,
+                            output: oncl_core::batch::BatchOutput::Writer(&mut output),
                         },
                     )],
                     &mut ctx,
@@ -3095,7 +3095,7 @@ mod xml_batch {
                     BatchOperation::Sign {
                         request,
                         input: Source::sequential(&mut input, None),
-                        output: &mut output,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut output),
                     },
                 )],
                 &mut ctx,
@@ -3198,7 +3198,7 @@ mod xml_batch {
                             },
                         ),
                         input: Source::sequential(&mut input, None),
-                        output: &mut extended,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut extended),
                     },
                 )],
                 &mut ctx,
@@ -3251,7 +3251,7 @@ mod xml_batch {
                             p,
                         ),
                         input: Source::sequential(&mut input, None),
-                        output: &mut output,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut output),
                     },
                 )],
                 &mut ctx,
@@ -3441,7 +3441,7 @@ mod xml_batch {
                             spec,
                         ),
                         input: Source::sequential(&mut input, None),
-                        output: &mut output,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut output),
                     },
                 )],
                 &mut ctx,
@@ -3498,7 +3498,7 @@ mod xml_batch {
                             },
                         ),
                         input: Source::sequential(&mut input, None),
-                        output: &mut output,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut output),
                     },
                 )],
                 &mut ctx,
@@ -3717,7 +3717,7 @@ mod xml_batch {
                             p,
                         ),
                         input: Source::sequential(&mut input, None),
-                        output: &mut output,
+                        output: oncl_core::batch::BatchOutput::Writer(&mut output),
                     },
                 )],
                 &mut ctx,
@@ -3747,7 +3747,7 @@ mod xml_batch {
                     BatchOperation::Sign {
                         request,
                         input,
-                        output,
+                        output: oncl_core::batch::BatchOutput::Writer(output),
                     },
                 )],
                 &mut ctx,
@@ -4137,5 +4137,271 @@ mod xml_batch {
                 "inadmissible spec added allocations: {observations:?}"
             );
         }
+    }
+}
+
+#[test]
+fn staged_batch_private_output_has_one_accounting_owner() {
+    use oncl_core::{
+        SignRequest,
+        batch::{BatchOutcome, BatchOutput},
+        keys::KeyRequest,
+    };
+    use std::sync::atomic::Ordering;
+    let scratch = tempfile::tempdir().unwrap();
+    let store = oncl_pki::io::TemporaryStore::new(scratch.path()).unwrap();
+    let guard = Arc::new(fixture::Guard::default());
+    let provider = Arc::new(fixture::Provider::default());
+    let engine = fixture::engine(
+        store.clone(),
+        guard.clone(),
+        provider,
+        ResourceLimits {
+            output_bytes: 256,
+            ..ResourceLimits::default()
+        },
+    );
+    let key = fixture::selector("user-rsa-sign");
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Sign]).with_keys([key.key_id()]),
+            OperationPolicy::strict_online(),
+            Arc::new(Control),
+        )
+        .unwrap();
+    let mut stage = store.stage(ctx.resources()).unwrap();
+    let mut input = &b"abc"[..];
+    let plan = engine
+        .capture_batch(
+            [BatchItem::new(
+                "raw",
+                BatchOperation::Sign {
+                    request: SignRequest::raw_message(KeyRequest::new(
+                        &key,
+                        Some(fixture::PASSWORD),
+                    )),
+                    input: Source::sequential(&mut input, Some(3)),
+                    output: BatchOutput::Staged(&mut stage),
+                },
+            )],
+            &mut ctx,
+        )
+        .unwrap();
+    let approval = plan.authorize(&ctx).unwrap();
+    let summary = engine.run_batch(plan, approval, &mut ctx, |_| {}).unwrap();
+    assert!(matches!(
+        summary.results()[0].outcome(),
+        BatchOutcome::Completed(_)
+    ));
+    assert_eq!(guard.applied.load(Ordering::SeqCst), 1);
+    assert_eq!(ctx.resources().progress().bytes_in, 3);
+    assert_eq!(ctx.resources().progress().bytes_out, 256);
+    let mut signature = Vec::new();
+    stage.copy_to(&mut signature).unwrap();
+    let cert = fixture::issued("user-rsa-sign").cert;
+    oncl_pki::key::PublicKey::from_spki(cert.tbs_certificate().subject_public_key_info())
+        .unwrap()
+        .verify(oncl_pki::key::SigAlg::RsaSha256, b"abc", &signature)
+        .unwrap();
+}
+
+#[test]
+fn owned_batch_output_is_committed_before_item_finished_cancellation() {
+    use oncl_core::{
+        SignRequest,
+        batch::{BatchEvent, BatchOutcome, BatchOutput},
+        keys::KeyRequest,
+    };
+    use std::sync::atomic::Ordering;
+    let scratch = tempfile::tempdir().unwrap();
+    let store = oncl_pki::io::TemporaryStore::new(scratch.path()).unwrap();
+    let guard = Arc::new(fixture::Guard::default());
+    let engine = fixture::engine(
+        store.clone(),
+        guard.clone(),
+        Arc::new(fixture::Provider::default()),
+        ResourceLimits::default(),
+    );
+    let key = fixture::selector("user-rsa-sign");
+    let control = Arc::new(Cancel::default());
+    let mut ctx = engine
+        .begin(
+            ExecutionGrant::new([Action::Sign]).with_keys([key.key_id()]),
+            OperationPolicy::strict_online(),
+            control.clone(),
+        )
+        .unwrap();
+    let first_stage = store.stage(ctx.resources()).unwrap();
+    let later_stage = store.stage(ctx.resources()).unwrap();
+    let mut first = &b"first"[..];
+    let mut later = &b"later"[..];
+    let plan = engine
+        .capture_batch(
+            [
+                BatchItem::new(
+                    "first",
+                    BatchOperation::Sign {
+                        request: SignRequest::raw_message(KeyRequest::new(
+                            &key,
+                            Some(fixture::PASSWORD),
+                        )),
+                        input: Source::sequential(&mut first, None),
+                        output: BatchOutput::OwnedStaged(first_stage),
+                    },
+                ),
+                BatchItem::new(
+                    "later",
+                    BatchOperation::Sign {
+                        request: SignRequest::raw_message(KeyRequest::new(
+                            &key,
+                            Some(fixture::PASSWORD),
+                        )),
+                        input: Source::sequential(&mut later, None),
+                        output: BatchOutput::OwnedStaged(later_stage),
+                    },
+                ),
+            ],
+            &mut ctx,
+        )
+        .unwrap();
+    let approval = plan.authorize(&ctx).unwrap();
+    let destination = scratch.path().join("first.raw");
+    let mut delivered = 0;
+    let summary=engine.run_batch_with_outputs(plan,approval,&mut ctx,|event| {
+        if let BatchEvent::ItemFinished { completed, .. } = event && completed == 1 {
+            assert!(destination.exists());
+            control.0.store(true, Ordering::SeqCst);
+        }
+    },|index,id,report,output| {
+        assert_eq!((index,id),(0,"first"));
+        assert!(matches!(report,oncl_core::batch::BatchReport::Sign(r) if r.applied==oncl_core::keys::AppliedState::Applied));
+        delivered+=1;
+        output.commit(&destination)
+    }).unwrap();
+    assert_eq!(
+        (
+            delivered,
+            summary.completed,
+            guard.applied.load(Ordering::SeqCst)
+        ),
+        (1, 1, 1)
+    );
+    assert!(matches!(
+        summary.results()[1].outcome(),
+        BatchOutcome::NotRun
+    ));
+    let signature = std::fs::read(destination).unwrap();
+    fixture::raw("user-rsa-sign")
+        .key
+        .public_key()
+        .verify(oncl_pki::key::SigAlg::RsaSha256, b"first", &signature)
+        .unwrap();
+}
+
+#[test]
+fn receiver_unwind_stops_same_context_private_reuse_without_rolling_back_publication() {
+    use oncl_core::{
+        SignRequest,
+        batch::BatchOutput,
+        keys::{KeyRequest, KeyUseEvent},
+    };
+    use std::sync::atomic::Ordering;
+    for publish in [false, true] {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = oncl_pki::io::TemporaryStore::new(scratch.path()).unwrap();
+        let guard = Arc::new(fixture::Guard::default());
+        let engine = fixture::engine(
+            store.clone(),
+            guard.clone(),
+            Arc::new(fixture::Provider::default()),
+            ResourceLimits::default(),
+        );
+        let key = fixture::selector("user-rsa-sign");
+        let mut ctx = engine
+            .begin(
+                ExecutionGrant::new([Action::Sign, Action::Hash]).with_keys([key.key_id()]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control),
+            )
+            .unwrap();
+        let stage = store.stage(ctx.resources()).unwrap();
+        let mut original = &b"actually signed"[..];
+        let plan = engine
+            .capture_batch(
+                [BatchItem::new(
+                    "one",
+                    BatchOperation::Sign {
+                        request: SignRequest::raw_message(KeyRequest::new(
+                            &key,
+                            Some(fixture::PASSWORD),
+                        )),
+                        input: Source::sequential(&mut original, None),
+                        output: BatchOutput::OwnedStaged(stage),
+                    },
+                )],
+                &mut ctx,
+            )
+            .unwrap();
+        let approval = plan.authorize(&ctx).unwrap();
+        let destination = scratch.path().join("published.raw");
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.run_batch_with_outputs(
+                plan,
+                approval,
+                &mut ctx,
+                |_| {},
+                |_, _, _, output| {
+                    if publish {
+                        output.commit(&destination)?;
+                    }
+                    panic!("trusted receiver unwind");
+                },
+            )
+        }));
+        assert!(panic.is_err());
+        assert_eq!(guard.applied.load(Ordering::SeqCst), 1);
+        assert_eq!(destination.exists(), publish);
+        if publish {
+            fixture::raw("user-rsa-sign")
+                .key
+                .public_key()
+                .verify(
+                    oncl_pki::key::SigAlg::RsaSha256,
+                    b"actually signed",
+                    &std::fs::read(&destination).unwrap(),
+                )
+                .unwrap();
+        }
+        assert!(
+            KeyUseEvent::new(&ctx, key.key_id(), Action::Sign)
+                .batch_item()
+                .is_none()
+        );
+        let mut next = &b"must not be signed"[..];
+        let mut bytes = Vec::new();
+        let error = engine
+            .sign(
+                SignRequest::raw_message(KeyRequest::new(&key, Some(fixture::PASSWORD))),
+                Source::sequential(&mut next, None),
+                &mut bytes,
+                &mut ctx,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), oncl_core::ErrorCode::PermissionDenied);
+        assert_eq!(guard.applied.load(Ordering::SeqCst), 1);
+        assert!(bytes.is_empty());
+        let all_temp = ctx
+            .resources()
+            .reserve_temp(ResourceLimits::default().temp_bytes)
+            .unwrap();
+        drop(all_temp);
+        drop(ctx);
+        engine
+            .begin(
+                ExecutionGrant::new([Action::Hash]),
+                OperationPolicy::strict_online(),
+                Arc::new(Control),
+            )
+            .unwrap();
     }
 }

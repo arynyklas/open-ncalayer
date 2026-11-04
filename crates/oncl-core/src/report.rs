@@ -476,4 +476,28 @@ impl Engine {
             bytes_written: report.bytes_written,
         })
     }
+    /// Structural extraction with one staged output accounting owner. Engine and
+    /// grant refusals leave the unadmitted artifact untouched; execution failures
+    /// after same-operation OUTPUT admission make it unpublishable.
+    pub fn extract_staged(
+        &self,
+        input: oncl_pki::io::Source<'_>,
+        output: &mut oncl_pki::io::StagedArtifact,
+        ctx: &mut OperationContext,
+    ) -> Result<ExtractionReport, OperationError> {
+        if !Arc::ptr_eq(&ctx.owner, &self.identity) {
+            return Err(OperationError::InvalidContext);
+        }
+        if !ctx.grant.allows(Action::Extract) {
+            return Err(OperationError::PermissionDenied);
+        }
+        let report = oncl_pki::cms::stream::extract_staged(input, output, &mut ctx.scope)
+            .map_err(stream_error)?;
+        // The PKI transaction performed the final checkpoint before releasing
+        // its failure guard; no fallible work is permitted after that gate.
+        Ok(ExtractionReport {
+            id: ctx.id,
+            bytes_written: report.bytes_written,
+        })
+    }
 }

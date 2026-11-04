@@ -1,7 +1,7 @@
 //! `cargo xtask fetch-fixtures`: downloads NCANode test fixtures from a pinned
 //! commit, verifies their sha256, extracts the PKCS#12 test keys embedded in
 //! `WithTestData.groovy` and the Kalkan-signed XML documents embedded in
-//! `XmlServiceTest.groovy`. Nothing here is committed: files land in
+//! `XmlServiceTest.groovy` and `WsseServiceTest.groovy`. Nothing here is committed: files land in
 //! `target/fixtures/ncanode/`.
 
 use std::fs;
@@ -30,16 +30,17 @@ struct GroovyKey {
     sha256: &'static str,
 }
 
-/// XML document stored as a triple-quoted constant in `XmlServiceTest.groovy`, written
-/// without the surrounding whitespace.
+/// XML document stored as a triple-quoted constant in a NCANode Groovy test, written
+/// without the surrounding whitespace plus `newline` (a single trailing `\n` when set).
 struct GroovyXml {
+    source: &'static str,
+    newline: bool,
     constant: &'static str,
     file: &'static str,
     sha256: &'static str,
 }
 
 const GROOVY_FILE: &str = "WithTestData.groovy";
-const GROOVY_XML_FILE: &str = "XmlServiceTest.groovy";
 
 const REMOTE_FILES: &[RemoteFile] = &[
     RemoteFile {
@@ -91,6 +92,12 @@ const REMOTE_FILES: &[RemoteFile] = &[
         path: "src/test/groovy/kz/ncanode/unit/service/XmlServiceTest.groovy",
         sha256: "b17ec71014bb95eb05a51eab44cd33668020156edec011d055f995744a0c4371",
     },
+    // Source of `wsse-ncanode.xml`, which embeds a certificate issued by an NCA test CA
+    // and therefore must never be committed.
+    RemoteFile {
+        path: "src/test/groovy/kz/ncanode/unit/service/WsseServiceTest.groovy",
+        sha256: "f8bf7b5982c6777938c91b2904fb573913e788656c30527a7d91715c359a3d59",
+    },
 ];
 
 /// The test keys. Despite its name, `KEY_INDIVIDUAL_VALID_SIGN_2004` is an RSA-2048 key
@@ -116,14 +123,26 @@ const GROOVY_KEYS: &[GroovyKey] = &[
 /// Enveloped XMLDSig documents signed by Kalkan in the original NCALayer shape.
 const GROOVY_XMLS: &[GroovyXml] = &[
     GroovyXml {
+        source: "XmlServiceTest.groovy",
+        newline: false,
         constant: "XML_SIGNED_VALID_STRING",
         file: "xmldsig-signed-rsa.xml",
         sha256: "8cabfb4e7984b3a4a87119facc3086c9a9a9e36cf3bee6cf4f6d365e313a8c87",
     },
     GroovyXml {
+        source: "XmlServiceTest.groovy",
+        newline: false,
         constant: "XML_SIGNED_VALID_STRING_TWO_SIGNERS",
         file: "xmldsig-signed-rsa-gost2015.xml",
         sha256: "654213a73594eec41009278895b0cd564f72d08796aad977f27ae774e3a73a43",
+    },
+    // WSSE SOAP envelope: the trimmed constant followed by one newline.
+    GroovyXml {
+        source: "WsseServiceTest.groovy",
+        newline: true,
+        constant: "XML_SIGNED_STRING",
+        file: "wsse-ncanode.xml",
+        sha256: "477b2ee1b6752f1150059683843d2cfb99785e4382ddea2fe4825c9cd5e13a84",
     },
 ];
 
@@ -171,18 +190,21 @@ pub fn fetch_fixtures() -> anyhow::Result<()> {
         println!("extracted   {}", key.file);
     }
 
-    let groovy_xml_path = dir.join(GROOVY_XML_FILE);
-    let groovy_xml = fs::read_to_string(&groovy_xml_path)
-        .with_context(|| format!("cannot read {}", groovy_xml_path.display()))?;
     for xml in GROOVY_XMLS {
         let dest = dir.join(xml.file);
         if is_current(&dest, xml.sha256)? {
             println!("up to date  {}", xml.file);
             continue;
         }
-        let text = groovy_triple_quoted(&groovy_xml, xml.constant)
-            .with_context(|| format!("constant {} not found in {GROOVY_XML_FILE}", xml.constant))?;
-        let text = text.trim();
+        let source_path = dir.join(xml.source);
+        let source = fs::read_to_string(&source_path)
+            .with_context(|| format!("cannot read {}", source_path.display()))?;
+        let text = groovy_triple_quoted(&source, xml.constant)
+            .with_context(|| format!("constant {} not found in {}", xml.constant, xml.source))?;
+        let mut text = text.trim().to_owned();
+        if xml.newline {
+            text.push('\n');
+        }
         verify_sha256(text.as_bytes(), xml.sha256).with_context(|| xml.constant)?;
         write(&dest, text.as_bytes())?;
         println!("extracted   {}", xml.file);

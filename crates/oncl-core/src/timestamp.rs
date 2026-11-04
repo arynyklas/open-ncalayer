@@ -1,4 +1,5 @@
 //! Standalone streaming timestamps with explicit host-approved TSA requests.
+use crate::output::ProducerOutput;
 use crate::{Action, Engine, OperationContext, OperationError, OperationId};
 use oncl_pki::{
     digest::hash_source,
@@ -107,6 +108,26 @@ impl Engine {
         output: &mut dyn Write,
         ctx: &mut OperationContext,
     ) -> Result<TimestampReport, OperationError> {
+        self.stamp_output(request, input, ProducerOutput::Writer(output), ctx)
+    }
+    pub fn stamp_staged(
+        &self,
+        request: &StampRequest,
+        input: Source<'_>,
+        output: &mut oncl_pki::io::StagedArtifact,
+        ctx: &mut OperationContext,
+    ) -> Result<TimestampReport, OperationError> {
+        self.output_authority(ctx, Action::Stamp)?;
+        let output = ProducerOutput::staged(output, &ctx.scope)?;
+        self.stamp_output(request, input, output, ctx)
+    }
+    fn stamp_output(
+        &self,
+        request: &StampRequest,
+        input: Source<'_>,
+        mut output: ProducerOutput<'_>,
+        ctx: &mut OperationContext,
+    ) -> Result<TimestampReport, OperationError> {
         let services = self.validation_context(ctx, Action::Stamp)?;
         // Verify request choices before consuming a possibly huge document.
         if request.spec.hash == HashAlg::Sha1
@@ -141,10 +162,10 @@ impl Engine {
         }
         for chunk in facts.token().chunks(oncl_pki::resource::IO_CHUNK_BYTES) {
             ctx.scope.checkpoint()?;
-            ctx.scope.account_output(chunk.len() as u64)?;
-            output.write_all(chunk).map_err(ProcessingError::from)?;
+            output.write(chunk, &ctx.scope)?;
             ctx.scope.checkpoint()?;
         }
+        output.finish(&ctx.scope)?;
         Ok(TimestampReport {
             id: ctx.id,
             facts,

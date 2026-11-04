@@ -1,4 +1,4 @@
-Fixture wsse-ncanode.xml is extracted without changes (apart from a trailing newline) from NCANode WsseServiceTest.groovy at commit 0adab29a7d30c181d70e8cc6b4f243122f50c3b8.
+Fixture wsse-ncanode.xml is NOT committed (it embeds a certificate issued by an NCA test CA): `cargo xtask fetch-fixtures` fetches WsseServiceTest.groovy and extracts the XML_SIGNED_STRING constant (trimmed, plus one trailing newline) to target/fixtures/ncanode/wsse-ncanode.xml, sha256-pinned, from NCANode at commit 0adab29a7d30c181d70e8cc6b4f243122f50c3b8.
 Source: https://github.com/ncanode-kz/NCANode/blob/0adab29a7d30c181d70e8cc6b4f243122f50c3b8/src/test/groovy/kz/ncanode/unit/service/WsseServiceTest.groovy
 The companion wsse-legacy-rsa-sha1.xml reuses that public SOAP body as a bounded verification-only fixture; its certificate and RSA-SHA1 signature are independently generated from this repository's public synthetic user-rsa-sign test key. No production key material is included.
 

@@ -21,6 +21,7 @@
 //! admission and memory/metadata reservations; only borrowed views escape.
 //! Caller-owned input/output storage and explicit caller copies are not sandboxed.
 //! No 10-GiB document/RSS claim is made by this bounded token API.
+use crate::output::ProducerOutput;
 use crate::{Action, Engine, OperationContext, OperationError, keys::KeyRequest};
 use base64::{
     Engine as _,
@@ -511,6 +512,25 @@ impl Engine {
         output: &mut dyn Write,
         ctx: &mut OperationContext,
     ) -> Result<JoseWriteReport, OperationError> {
+        self.jose_create(
+            profile,
+            keys,
+            payload,
+            false,
+            ProducerOutput::Writer(output),
+            ctx,
+        )
+    }
+    pub fn jws_create_staged(
+        &self,
+        profile: JoseProfile,
+        keys: Vec<KeyRequest<'_>>,
+        payload: &[u8],
+        output: &mut oncl_pki::io::StagedArtifact,
+        ctx: &mut OperationContext,
+    ) -> Result<JoseWriteReport, OperationError> {
+        self.check_sign_requests(&keys, ctx, Action::Sign)?;
+        let output = ProducerOutput::staged(output, &ctx.scope)?;
         self.jose_create(profile, keys, payload, false, output, ctx)
     }
     fn jose_create(
@@ -519,10 +539,13 @@ impl Engine {
         keys: Vec<KeyRequest<'_>>,
         payload: &[u8],
         jwt: bool,
-        output: &mut dyn Write,
+        mut output: ProducerOutput<'_>,
         ctx: &mut OperationContext,
     ) -> Result<JoseWriteReport, OperationError> {
         self.jose_authority(ctx, Action::Sign)?;
+        if jwt && payload.len() > MAX_CLAIMS_BYTES {
+            return Err(invalid("JWT claims exceed profile"));
+        }
         if payload.len() > MAX_PAYLOAD_BYTES {
             return Err(invalid("JWS payload exceeds profile"));
         }
@@ -537,7 +560,9 @@ impl Engine {
         let mut applied = AppliedState::NotApplied;
         let result = (|| {
             self.jose_signatures(&keys, &encoded, jwt, &mut signatures, &mut applied, ctx)?;
-            emit(profile, &encoded, signatures, output, &ctx.scope)
+            let length = emit(profile, &encoded, signatures, &mut output, &ctx.scope)?;
+            output.finish(&ctx.scope)?;
+            Ok(length)
         })();
         let bytes_out = after_use(result, applied)?;
         Ok(JoseWriteReport {
@@ -616,6 +641,37 @@ impl Engine {
         output: &mut dyn Write,
         ctx: &mut OperationContext,
     ) -> Result<JoseWriteReport, OperationError> {
+        self.jws_add_output(
+            request,
+            keys,
+            input,
+            detached,
+            ProducerOutput::Writer(output),
+            ctx,
+        )
+    }
+    pub fn jws_add_staged(
+        &self,
+        request: JwsVerifyRequest<'_>,
+        keys: Vec<KeyRequest<'_>>,
+        input: &[u8],
+        detached: Option<&[u8]>,
+        output: &mut oncl_pki::io::StagedArtifact,
+        ctx: &mut OperationContext,
+    ) -> Result<JoseWriteReport, OperationError> {
+        self.check_sign_requests(&keys, ctx, Action::Sign)?;
+        let output = ProducerOutput::staged(output, &ctx.scope)?;
+        self.jws_add_output(request, keys, input, detached, output, ctx)
+    }
+    fn jws_add_output(
+        &self,
+        request: JwsVerifyRequest<'_>,
+        keys: Vec<KeyRequest<'_>>,
+        input: &[u8],
+        detached: Option<&[u8]>,
+        mut output: ProducerOutput<'_>,
+        ctx: &mut OperationContext,
+    ) -> Result<JoseWriteReport, OperationError> {
         self.jose_authority(ctx, Action::Sign)?;
         let parsed = parse(input, request.profile, detached, MAX_PAYLOAD_BYTES, ctx)?;
         let mut report = self.jose_verify_parsed(request, parsed, ctx)?;
@@ -644,13 +700,15 @@ impl Engine {
                 &mut applied,
                 ctx,
             )?;
-            emit(
+            let length = emit(
                 profile,
                 &report.parsed.encoded_payload,
                 report.parsed.signatures,
-                output,
+                &mut output,
                 &ctx.scope,
-            )
+            )?;
+            output.finish(&ctx.scope)?;
+            Ok(length)
         })();
         let bytes_out = after_use(result, applied)?;
         Ok(JoseWriteReport {
@@ -808,7 +866,7 @@ fn emit(
     profile: JoseProfile,
     payload: &str,
     mut signatures: Vec<WireSignature>,
-    output: &mut dyn Write,
+    output: &mut ProducerOutput<'_>,
     scope: &ResourceScope,
 ) -> Result<u64, OperationError> {
     let bytes = match profile.serialization {
@@ -841,8 +899,7 @@ fn emit(
         return Err(invalid("JWS output exceeds profile"));
     }
     scope.account_container(bytes.len() as u64)?;
-    scope.account_output(bytes.len() as u64)?;
-    output.write_all(&bytes).map_err(ProcessingError::Io)?;
+    output.write(&bytes, scope)?;
     scope.checkpoint()?;
     Ok(bytes.len() as u64)
 }
@@ -971,6 +1028,24 @@ impl Engine {
         if claims.len() > MAX_CLAIMS_BYTES {
             return Err(invalid("JWT claims exceed profile"));
         }
+        self.jose_create(
+            JoseProfile::new(JwsSerialization::Compact, false),
+            vec![key],
+            claims,
+            true,
+            ProducerOutput::Writer(output),
+            ctx,
+        )
+    }
+    pub fn jwt_encode_staged(
+        &self,
+        key: KeyRequest<'_>,
+        claims: &[u8],
+        output: &mut oncl_pki::io::StagedArtifact,
+        ctx: &mut OperationContext,
+    ) -> Result<JoseWriteReport, OperationError> {
+        self.check_sign_requests(std::slice::from_ref(&key), ctx, Action::Sign)?;
+        let output = ProducerOutput::staged(output, &ctx.scope)?;
         self.jose_create(
             JoseProfile::new(JwsSerialization::Compact, false),
             vec![key],

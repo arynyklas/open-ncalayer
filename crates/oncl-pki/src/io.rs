@@ -18,7 +18,7 @@
 use crate::resource::{IO_CHUNK_BYTES, ProcessingError, ResourceReservation, ResourceScope};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -251,7 +251,181 @@ pub struct StagedArtifact {
     source: bool,
     output_failure: Option<Arc<AtomicBool>>,
 }
+
+/// A synchronized, closed output and fixed host destination. Preparation never
+/// grants permission to ignore a later cancellation, deadline, or failure latch.
+/// There is no producer, file, Scope, permit, or mutable byte access.
+pub struct PreparedPublication {
+    stage: StagedArtifact,
+    destination: PathBuf,
+    _path: ResourceReservation,
+}
+impl PreparedPublication {
+    pub fn commit(self) -> Result<(), ProcessingError> {
+        self.stage.scope.checkpoint()?;
+        // Control is host code: it may drop another unfinished guard while
+        // returning Ok. No callback may intervene between this gate and publish.
+        check_output_failure(self.stage.output_failure.as_deref())?;
+        if self.stage.failed || self.stage.file.is_none() {
+            return Err(ProcessingError::InvalidInput(
+                "artifact is failed or closed",
+            ));
+        }
+        self.stage
+            .root
+            .publish(&self.stage.name, &self.destination)?;
+        Ok(())
+    }
+}
+
+/// Monotonic publication lifecycle, not a validation or authorization receipt.
+/// Retains the original resource root through a producer's later replay/report
+/// checks. Dropping it unfinished only marks its admitted OUTPUT unpublishable.
+pub struct OutputPublicationGuard {
+    original: ResourceScope,
+    failure: Arc<AtomicBool>,
+    finished: bool,
+    _metadata: Option<ResourceReservation>,
+}
+impl OutputPublicationGuard {
+    fn check(&self) -> Result<(), ProcessingError> {
+        if self.failure.load(Ordering::SeqCst) {
+            return Err(ProcessingError::InvalidInput(
+                "output publication was aborted",
+            ));
+        }
+        self.original.checkpoint()?;
+        if self.failure.load(Ordering::SeqCst) {
+            return Err(ProcessingError::InvalidInput(
+                "output publication was aborted",
+            ));
+        }
+        Ok(())
+    }
+    pub fn finish(mut self) -> Result<(), ProcessingError> {
+        self.check()?;
+        self.finished = true;
+        Ok(())
+    }
+}
+impl Drop for OutputPublicationGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.failure.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Closed producer-owned output transaction. Every write reserves and charges
+/// output and temporary storage; unfinished or failed execution is unpublishable.
+/// It never exposes a file, an unchecked writer, or a separately owned permit.
+pub struct OutputTransaction<'a> {
+    stage: &'a mut StagedArtifact,
+    original: ResourceScope,
+    finished: bool,
+}
+impl<'a> OutputTransaction<'a> {
+    pub fn new(
+        stage: &'a mut StagedArtifact,
+        scope: &ResourceScope,
+    ) -> Result<Self, ProcessingError> {
+        // A foreign or SOURCE artifact is not admitted and must remain untouched.
+        if stage.source || !stage.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "output transaction requires same-operation OUTPUT",
+            ));
+        }
+        stage.attach_output_failure();
+        let transaction = Self {
+            stage,
+            original: scope.retain(),
+            finished: false,
+        };
+        transaction.check_live()?;
+        if !transaction.stage.is_empty() {
+            return Err(ProcessingError::InvalidInput(
+                "output transaction requires empty OUTPUT",
+            ));
+        }
+        Ok(transaction)
+    }
+    fn check_live(&self) -> Result<(), ProcessingError> {
+        if self.stage.is_failed() || self.stage.file.is_none() {
+            return Err(ProcessingError::InvalidInput(
+                "output transaction is failed or closed",
+            ));
+        }
+        self.original.checkpoint()?;
+        self.stage.scope.checkpoint()?;
+        if self.stage.is_failed() || self.stage.file.is_none() {
+            return Err(ProcessingError::InvalidInput(
+                "output transaction is failed or closed",
+            ));
+        }
+        Ok(())
+    }
+    pub fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), ProcessingError> {
+        let result = self
+            .check_live()
+            .and_then(|()| self.stage.write_chunk(bytes));
+        if result.is_err() {
+            self.stage.fail_sign_output();
+        }
+        result
+    }
+    pub fn len(&self) -> u64 {
+        self.stage.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.stage.is_empty()
+    }
+    pub fn finish(mut self) -> Result<(), ProcessingError> {
+        self.check_live()?;
+        self.finished = true;
+        Ok(())
+    }
+}
+impl Drop for OutputTransaction<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.stage.fail_sign_output();
+        }
+    }
+}
+
 impl StagedArtifact {
+    /// Admit an empty live same-operation OUTPUT before producer execution.
+    /// Foreign/SOURCE refusals leave the artifact untouched. Every later own
+    /// execution failure, including initial cancellation, is sticky.
+    pub fn publication_guard(
+        &mut self,
+        scope: &ResourceScope,
+    ) -> Result<OutputPublicationGuard, ProcessingError> {
+        if self.source || !self.scope.same_operation(scope) {
+            return Err(ProcessingError::InvalidInput(
+                "publication requires same-operation OUTPUT",
+            ));
+        }
+        let failure = self.attach_output_failure();
+        let mut guard = OutputPublicationGuard {
+            original: scope.retain(),
+            failure,
+            finished: false,
+            _metadata: None,
+        };
+        if self.file.is_none() || !self.is_empty() || self.is_failed() {
+            return Err(ProcessingError::InvalidInput(
+                "publication requires empty live OUTPUT",
+            ));
+        }
+        guard.check()?;
+        self.scope.checkpoint()?;
+        guard._metadata = Some(scope.reserve_metadata(
+            (std::mem::size_of::<OutputPublicationGuard>() + std::mem::size_of::<AtomicBool>())
+                as u64,
+        )?);
+        Ok(guard)
+    }
     fn attach_output_failure(&mut self) -> Arc<AtomicBool> {
         let failed = self.failed;
         self.output_failure
@@ -442,6 +616,7 @@ impl StagedArtifact {
                 .ok_or(ProcessingError::InvalidInput("artifact closed"))?,
             bytes,
             &self.scope,
+            self.output_failure.as_deref(),
         );
         if result.is_err() {
             self.failed = true;
@@ -449,6 +624,14 @@ impl StagedArtifact {
         result
     }
     pub fn commit(self, destination: &Path) -> Result<(), ProcessingError> {
+        self.prepare_commit(destination)?.commit()
+    }
+    /// Perform deterministic admission and file synchronization without publishing.
+    /// Final namespace publication still checks the original live control/latch.
+    pub fn prepare_commit(
+        self,
+        destination: &Path,
+    ) -> Result<PreparedPublication, ProcessingError> {
         self.scope.checkpoint()?;
         if self.source {
             return Err(ProcessingError::InvalidInput(
@@ -460,15 +643,29 @@ impl StagedArtifact {
                 "artifact has an incomplete write",
             ));
         }
+        let path_bytes = destination
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            .checked_add(std::mem::size_of::<PathBuf>())
+            .ok_or(ProcessingError::MetadataLimit)?;
+        let path = self.scope.reserve_metadata(path_bytes as u64)?;
+        let destination = destination.to_path_buf();
         self.file
             .as_ref()
             .ok_or(ProcessingError::InvalidInput("artifact closed"))?
             .sync_all()?;
-        self.scope.checkpoint()?;
-        // No fallible SDK work follows publication: reporting failure after this
-        // point would misrepresent an already visible, complete destination.
-        self.root.publish(&self.name, destination)?;
-        Ok(())
+        checkpoint_output(&self.scope, self.output_failure.as_deref())?;
+        if self.failed || self.file.is_none() {
+            return Err(ProcessingError::InvalidInput(
+                "artifact is failed or closed",
+            ));
+        }
+        Ok(PreparedPublication {
+            stage: self,
+            destination,
+            _path: path,
+        })
     }
     /// Explicit streaming delivery. The caller's writer can receive a partial
     /// result on I/O/cancel/deadline failure; use `commit` for atomic publication.
@@ -485,6 +682,7 @@ impl StagedArtifact {
                 "artifact has an incomplete write",
             ));
         }
+        let failure = self.output_failure.clone();
         let capacity = self.scope.available_memory().min(IO_CHUNK_BYTES as u64) as usize;
         if capacity == 0 {
             return Err(ProcessingError::MemoryLimit);
@@ -499,27 +697,27 @@ impl StagedArtifact {
             .file
             .as_mut()
             .ok_or(ProcessingError::InvalidInput("artifact closed"))?;
-        self.scope.checkpoint()?;
+        checkpoint_output(&self.scope, failure.as_deref())?;
         file.seek(SeekFrom::Start(0))?;
         let mut copied = 0u64;
         loop {
-            self.scope.checkpoint()?;
+            checkpoint_output(&self.scope, failure.as_deref())?;
             let n = match file.read(&mut buffer) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 result => result?,
             };
-            self.scope.checkpoint()?;
+            checkpoint_output(&self.scope, failure.as_deref())?;
             if n == 0 {
                 break;
             }
-            write_controlled(output, &buffer[..n], &self.scope)?;
+            write_controlled(output, &buffer[..n], &self.scope, failure.as_deref())?;
             copied = copied
                 .checked_add(n as u64)
                 .ok_or(ProcessingError::OutputLimit)?;
         }
-        self.scope.checkpoint()?;
+        checkpoint_output(&self.scope, failure.as_deref())?;
         output.flush()?;
-        self.scope.checkpoint()?;
+        checkpoint_output(&self.scope, failure.as_deref())?;
         Ok(copied)
     }
 }
@@ -538,19 +736,35 @@ impl Drop for StagedArtifact {
     }
 }
 
+fn check_output_failure(failure: Option<&AtomicBool>) -> Result<(), ProcessingError> {
+    if failure.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        return Err(ProcessingError::InvalidInput(
+            "artifact has an incomplete write",
+        ));
+    }
+    Ok(())
+}
+fn checkpoint_output(
+    scope: &ResourceScope,
+    failure: Option<&AtomicBool>,
+) -> Result<(), ProcessingError> {
+    scope.checkpoint()?;
+    check_output_failure(failure)
+}
 fn write_controlled(
     output: &mut dyn Write,
     mut bytes: &[u8],
     scope: &ResourceScope,
+    failure: Option<&AtomicBool>,
 ) -> Result<(), ProcessingError> {
     while !bytes.is_empty() {
-        scope.checkpoint()?;
+        checkpoint_output(scope, failure)?;
         let request = bytes.len().min(IO_CHUNK_BYTES);
         let n = match output.write(&bytes[..request]) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => result?,
         };
-        scope.checkpoint()?;
+        checkpoint_output(scope, failure)?;
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::WriteZero,
