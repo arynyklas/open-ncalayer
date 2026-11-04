@@ -1335,10 +1335,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(spec, ToolSpec::Extract);
-        assert_eq!(
-            destination,
-            Destination::Folder(PathBuf::from("out dir"))
-        );
+        assert_eq!(destination, Destination::Folder(PathBuf::from("out dir")));
         let (_, destination) = spec_of(&p, VERIFY, |t| {
             t.set_destination_index(1);
             t.set_destination_path("ignored".into());
