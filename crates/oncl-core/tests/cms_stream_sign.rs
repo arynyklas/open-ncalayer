@@ -3509,7 +3509,7 @@ fn wsse_fixround_fresh_core_and_b01_reject_comment_framing_and_generation_failur
                         profile,
                     ),
                     input: Source::sequential(&mut batch_input, None),
-                    output: &mut output,
+                    output: oncl_core::batch::BatchOutput::Writer(&mut output),
                 },
             )],
             &mut context,

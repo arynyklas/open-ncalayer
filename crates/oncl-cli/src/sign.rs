@@ -105,6 +105,17 @@ pub fn execute(
             SignRequest::raw_digest(key(), digest)
         }
         P::Xml => SignRequest::xml(key(), xml()),
+        P::Wsse => SignRequest::wsse(
+            key(),
+            oncl_xml::wsse::SourceWsseSignProfile {
+                mode: if args.add {
+                    oncl_xml::XmlSignMode::Add
+                } else {
+                    oncl_xml::XmlSignMode::Create
+                },
+                ..Default::default()
+            },
+        ),
         P::XadesB => SignRequest::xades(key(), xml(), L::B),
         P::XadesT => SignRequest::xades(key(), xml(), L::T),
         P::XadesLt => SignRequest::xades(key(), xml(), L::Lt),

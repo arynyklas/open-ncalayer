@@ -92,6 +92,7 @@ pub enum VerifyProfile {
     Cms,
     Xml,
     XmlKalkan,
+    Wsse,
     Pdf,
     CadesB,
     CadesT,
@@ -114,6 +115,7 @@ impl VerifyProfile {
             Self::Cms => R::cms(),
             Self::Xml => R::xml(),
             Self::XmlKalkan => R::xml_kalkan(),
+            Self::Wsse => R::wsse(oncl_xml::wsse::WsseVerifyProfile::default()),
             Self::Pdf => R::pdf(),
             Self::CadesB => R::cades(L::B, evidence_limits()),
             Self::CadesT => R::cades(L::T, evidence_limits()),
@@ -175,6 +177,7 @@ pub enum SignProfile {
     DigestGost2004,
     DigestGost2015_512,
     Xml,
+    Wsse,
     XadesB,
     XadesT,
     XadesLt,
@@ -256,6 +259,7 @@ impl Cli {
             let xml = matches!(
                 args.profile,
                 SignProfile::Xml
+                    | SignProfile::Wsse
                     | SignProfile::XadesB
                     | SignProfile::XadesT
                     | SignProfile::XadesLt
