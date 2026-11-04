@@ -264,7 +264,12 @@ fn wsse_sign_verify_options_soap12_role_headers_token_and_timestamp() {
             // Wrong host SOAP version never validates a SOAP 1.2 document.
             let mut wrong = vec!["verify", "--profile", "wsse", "--input", path(&output)];
             wrong.extend(trust(&w));
-            assert_ne!(run(&wrong, b"").status.code(), Some(0));
+            let refused = run(&wrong, b"");
+            assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&refused.stderr).trim(),
+                "oncl: InvalidInput; applied=NotApplied"
+            );
         }
     }
 }

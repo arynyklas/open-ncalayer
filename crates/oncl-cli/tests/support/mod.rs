@@ -49,7 +49,20 @@ pub fn run(args: &[&str], input: &[u8]) -> Output {
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(input);
     }
-    child.wait_with_output().unwrap()
+    let output = child.wait_with_output().unwrap();
+    assert_no_secret(&output);
+    output
+}
+/// No process output of any test may ever contain the synthetic password.
+pub fn assert_no_secret(output: &Output) {
+    for (name, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+        assert!(
+            !bytes
+                .windows(PASSWORD.len())
+                .any(|w| w == PASSWORD.as_bytes()),
+            "{name} contains the secret"
+        );
+    }
 }
 fn fixture(name: &str) -> KeyEntry {
     let f = oncl_testkit::synthetic(name);
@@ -129,13 +142,50 @@ pub fn pki(origin: &str) -> Pki {
         responder,
     }
 }
+/// Holds loopback OCSP requests whose body contains `pattern` until released.
+#[derive(Default)]
+pub struct Gate {
+    state: std::sync::Mutex<(Option<Vec<u8>>, bool)>,
+    cv: std::sync::Condvar,
+}
+impl Gate {
+    fn wait(&self, body: &[u8]) {
+        let mut state = self.state.lock().unwrap();
+        let held = |s: &(Option<Vec<u8>>, bool)| {
+            !s.1 && s
+                .0
+                .as_ref()
+                .is_some_and(|p| body.windows(p.len()).any(|w| w == p))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while held(&state) && std::time::Instant::now() < deadline {
+            state = self
+                .cv
+                .wait_timeout(state, Duration::from_millis(50))
+                .unwrap()
+                .0;
+        }
+    }
+}
 pub struct Server {
+    pub gate: Arc<Gate>,
     stop: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
     pub origin: String,
 }
+impl Server {
+    /// From now on, requests whose body contains `pattern` wait for `release`.
+    pub fn hold(&self, pattern: &[u8]) {
+        *self.gate.state.lock().unwrap() = (Some(pattern.to_vec()), false);
+    }
+    pub fn release(&self) {
+        self.gate.state.lock().unwrap().1 = true;
+        self.gate.cv.notify_all();
+    }
+}
 impl Drop for Server {
     fn drop(&mut self) {
+        self.release();
         self.stop.store(true, Ordering::SeqCst);
         if let Some(join) = self.join.take() {
             join.join().unwrap();
@@ -147,6 +197,8 @@ pub fn start(responder: KeyEntry, tsa: KeyEntry, listener: TcpListener, origin: 
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = stop.clone();
     let base = origin.clone();
+    let gate = Arc::new(Gate::default());
+    let shared_gate = gate.clone();
     let join = thread::spawn(move || {
         let ocsp = Arc::new(MockOcsp::new(responder).with_now(now()));
         let tsa = Arc::new(MockTsa::new(tsa).with_gen_time(now()));
@@ -157,8 +209,9 @@ pub fn start(responder: KeyEntry, tsa: KeyEntry, listener: TcpListener, origin: 
                     // One thread per connection: an idle pre-connect must never
                     // block the next request from the same client.
                     let (base, ocsp, tsa) = (base.clone(), ocsp.clone(), tsa.clone());
+                    let gate = shared_gate.clone();
                     handlers.push(thread::spawn(move || {
-                        let _ = serve(&mut stream, &base, &ocsp, &tsa);
+                        let _ = serve(&mut stream, &base, &ocsp, &tsa, &gate);
                     }));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -172,6 +225,7 @@ pub fn start(responder: KeyEntry, tsa: KeyEntry, listener: TcpListener, origin: 
         }
     });
     Server {
+        gate,
         stop,
         join: Some(join),
         origin,
@@ -182,6 +236,7 @@ fn serve(
     origin: &str,
     ocsp: &MockOcsp,
     tsa: &MockTsa,
+    gate: &Gate,
 ) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -223,6 +278,32 @@ fn serve(
         request.extend_from_slice(&chunk[..n]);
     }
     let body = request[end..].to_vec();
+    // A GET carries the DER request base64-encoded (percent-escaped) in its path.
+    let probe = if method == "GET" {
+        use base64::Engine as _;
+        let segment = path.rsplit('/').next().unwrap_or("");
+        let bytes = segment.as_bytes();
+        let mut unescaped = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%'
+                && i + 2 < bytes.len()
+                && let Ok(v) = u8::from_str_radix(&segment[i + 1..i + 3], 16)
+            {
+                unescaped.push(v);
+                i += 3;
+                continue;
+            }
+            unescaped.push(bytes[i]);
+            i += 1;
+        }
+        base64::engine::general_purpose::STANDARD
+            .decode(&unescaped)
+            .unwrap_or_default()
+    } else {
+        body.clone()
+    };
+    gate.wait(&probe);
     let url = format!("{origin}{path}");
     let reply = if path == "/tsa" {
         tsa.send(&HttpRequest::post(

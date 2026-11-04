@@ -129,6 +129,10 @@ impl BatchCommand {
         if !self.has_key() && (args.secret_file.is_some() || args.secret_interactive) {
             return Err("InvalidCombination");
         }
+        // The manifest and an interactive secret may not both claim the terminal/stdin.
+        if args.manifest.as_os_str() == "-" && args.secret_interactive {
+            return Err("SecretRequiresSeparateInput");
+        }
         Ok(())
     }
     pub fn key_plan(&self) -> Result<Option<crate::keysrc::Plan>, OperationError> {
@@ -198,6 +202,14 @@ struct Row {
     verdict: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     published: Option<bool>,
+    /// Hash items: algorithm and lowercase hex digest of the exact captured bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digest: Option<Digest>,
+}
+#[derive(Serialize)]
+struct Digest {
+    algorithm: &'static str,
+    hex: String,
 }
 #[derive(Serialize)]
 struct Report {
@@ -269,6 +281,12 @@ pub fn run(
         });
     }
     let secret_text = secret.as_ref().map(|s| s.as_str());
+    // A cancellation or deadline latches in the original control and scope, so
+    // the terminal report of already-completed work cannot rely on a fresh
+    // checkpoint. Its bounded memory is reserved here, before any private use.
+    let _terminal_report = ctx
+        .resources()
+        .reserve_memory(output::TERMINAL_REPORT_BYTES)?;
     let mut items = Vec::new();
     for ((item, (input, detached)), stage) in manifest
         .items
@@ -356,10 +374,23 @@ pub fn run(
     let mut worst = 0;
     let mut rows = Vec::new();
     for (index, result) in summary.results().iter().enumerate() {
+        let mut digest = None;
         let (status, code, verdict) = match result.outcome() {
             BatchOutcome::Completed(report) => {
                 let verdict = match report {
                     BatchReport::Verify(report) => Some(verdict_rank(report.verdict)),
+                    BatchReport::Hash(report) => {
+                        digest = Some(Digest {
+                            algorithm: match report.digest.algorithm() {
+                                HashAlg::Sha256 => "sha256",
+                                HashAlg::Gost34311 => "gost2004",
+                                HashAlg::Streebog512 => "gost2015-512",
+                                _ => "other",
+                            },
+                            hex: crate::reports::Hex(report.digest.as_bytes()).to_string(),
+                        });
+                        None
+                    }
                     _ => None,
                 };
                 if let Some((_, rank)) = verdict {
@@ -377,6 +408,7 @@ pub fn run(
             applied: format!("{:?}", result.applied_state()),
             verdict,
             published: destinations[index].as_ref().map(|_| published[index]),
+            digest,
         });
     }
     let stop = summary.stop.as_ref().map(|stop| match stop {
@@ -405,8 +437,30 @@ pub fn run(
         stop,
         items: rows,
     };
-    let human = format!("{}/{} items completed", summary.completed, summary.total);
-    output::report(cli, &report, &human, ctx)?;
+    let mut human = format!("{}/{} items completed", summary.completed, summary.total);
+    for row in &report.items {
+        human.push_str(&format!("\n{}: {}", row.id, row.status));
+        if row.status == "Failed" {
+            human.push_str(&format!(" ({})", row.code));
+        }
+        if let Some(verdict) = row.verdict {
+            human.push_str(&format!(" {verdict}"));
+        }
+        if let Some(digest) = &row.digest {
+            human.push_str(&format!(" {} {}", digest.algorithm, digest.hex));
+        }
+        if row.applied != "NotApplied" {
+            human.push_str(&format!(" applied={}", row.applied));
+        }
+        if row.published == Some(true) {
+            human.push_str(" published");
+        }
+    }
+    if ctx.resources().checkpoint().is_err() {
+        output::terminal(cli, &report, &human)?;
+    } else {
+        output::report(cli, &report, &human, ctx)?;
+    }
     Ok(if cancelled {
         130
     } else if incomplete {

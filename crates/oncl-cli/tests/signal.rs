@@ -1,4 +1,5 @@
-//! Real owned-child signal cancellation. Isolated in its own test binary so no
+//! Real owned-child signal cancellation of a streaming `hash` (batch cancellation
+//! with later items NotRun is `batch_signal.rs`). Isolated in its own test binary so no
 //! other process in the suite can share its console event delivery.
 use std::{
     io::Write,
@@ -7,7 +8,7 @@ use std::{
 
 #[cfg(windows)]
 #[test]
-fn real_ctrl_break_reaches_the_owned_child_as_exit_130_and_later_items_do_not_run() {
+fn real_ctrl_break_reaches_the_owned_hash_child_as_exit_130_with_no_stdout() {
     use std::os::windows::process::CommandExt;
     // The blocking read is cooperative: after the signal latches, closing the
     // pipe lets the original control observe cancellation. No forced termination.

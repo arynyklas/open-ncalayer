@@ -41,6 +41,53 @@ impl Write for BoundedReport {
         Ok(())
     }
 }
+/// Memory reserved up front for [`terminal`].
+pub const TERMINAL_REPORT_BYTES: u64 = 512 * 1024;
+struct Capped(Vec<u8>);
+impl Write for Capped {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.0.len().saturating_add(bytes.len()) > TERMINAL_REPORT_BYTES as usize {
+            return Err(io::Error::other("terminal report capacity"));
+        }
+        self.0.try_reserve(bytes.len()).map_err(io::Error::other)?;
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+/// The report of work that already happened, after the operation's control
+/// or deadline has stopped it. Every scope operation is gated by that sticky
+/// stop, so this path touches none: serialization is capped inside the memory
+/// reserved before the work started, a `--report` file is created no-clobber
+/// directly (not staged, so a crash mid-write can leave a partial report) and
+/// synchronized, and nothing here can change the exit decision.
+pub fn terminal<T: Serialize>(cli: &Cli, value: &T, human: &str) -> Result<(), OperationError> {
+    let mut buffer = Capped(Vec::new());
+    if cli.json || cli.report.is_some() {
+        serde_json::to_writer(&mut buffer, value).map_err(|_| ProcessingError::MetadataLimit)?;
+    } else {
+        buffer
+            .write_all(human.as_bytes())
+            .map_err(ProcessingError::from)?;
+    }
+    buffer.write_all(b"\n").map_err(ProcessingError::from)?;
+    if let Some(path) = &cli.report {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(ProcessingError::from)?;
+        file.write_all(&buffer.0).map_err(ProcessingError::from)?;
+        file.sync_all().map_err(ProcessingError::from)?;
+    } else {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(&buffer.0).map_err(ProcessingError::from)?;
+        stdout.flush().map_err(ProcessingError::from)?;
+    }
+    Ok(())
+}
 pub struct PreparedReport {
     destination: ReportDestination,
 }

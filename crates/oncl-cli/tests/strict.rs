@@ -215,6 +215,9 @@ fn absent_token_reader_fails_closed_without_output_or_private_use() {
         !text.contains("private_use") && !text.contains(PASSWORD),
         "{text}"
     );
+    // Every token-open failure (no service, no such reader, no card) is the
+    // same typed refusal; success needs a real key entry.
+    assert_eq!(text.trim(), "oncl: InvalidInput; applied=NotApplied");
     // A file key and a token are mutually exclusive, and one is mandatory.
     let mut both = args.clone();
     both.extend(["--key", path(&w.rsa_key)]);
@@ -223,7 +226,7 @@ fn absent_token_reader_fails_closed_without_output_or_private_use() {
 
 #[test]
 fn dns_origin_needs_an_operator_pin_and_never_resolves_ambiently() {
-    let w = world_host(Some("pki.synthetic.test"));
+    let w = world_host(Some("localhost"));
     let document = w.dir.path().join("document.bin");
     std::fs::write(&document, b"abc").unwrap();
     let port = w.origin.rsplit(':').next().unwrap();
@@ -239,7 +242,11 @@ fn dns_origin_needs_an_operator_pin_and_never_resolves_ambiently() {
         "no pin must fail closed: {result:?}"
     );
     assert!(!unpinned.exists());
-    assert!(!String::from_utf8_lossy(&result.stderr).contains("private_use"));
+    // `localhost` resolves ambiently to the very loopback server, so refusal
+    // (with no private use) can only come from the missing operator pin.
+    let text = String::from_utf8_lossy(&result.stderr);
+    assert!(!text.contains("private_use"), "{text}");
+    assert_eq!(text.trim(), "oncl: ValidationRequired; applied=NotApplied");
     let signed = run(
         &sign_args(&w, &w.rsa_key, &document, &pinned, &["--pki-pin", &pin]),
         b"",
