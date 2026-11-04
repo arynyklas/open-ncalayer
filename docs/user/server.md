@@ -279,24 +279,31 @@ connect_timeout_ms = 1000            # <= export_timeout_ms
 queue_size = 2048                    # queued, not yet exported spans (16 .. 65 536)
 batch_size = 512                     # <= queue_size
 shutdown_timeout_ms = 5000           # bound of the final flush (100 .. 60 000)
-# headers = { authorization = "Bearer <collector credential>" }   # at most 8, operator secret
+# headers = { authorization = "Bearer <collector credential>" }   # at most 8, operator secret; https or loopback only
+# ca_file = "/private/oncl-operator/collector-ca.pem"             # https only: the collector's CA (PEM)
 ```
 
 An enabled configuration is validated at startup (`http`/`https` URL without user
 info, query or fragment; at least one of `metrics`/`traces`; header names are tokens,
-never `host`/`content-*`/`connection`/…, values are printable ASCII). An invalid one
-refuses to start the service. Unknown keys are rejected.
+never `host`/`content-*`/`connection`/…, values are printable ASCII). **`headers`
+(a collector credential) are refused unless the endpoint is `https` or its host is
+loopback (`localhost`, `127.0.0.0/8`, `::1`)**, so a credential never crosses the
+network in cleartext. `ca_file` requires `https`. An invalid configuration refuses to
+start the service, with a generic error that never echoes header values. Unknown
+keys are rejected.
 
 ### Transport and boundedness
 
 * **OTLP/HTTP with protobuf bodies**, one POST per export, no gRPC, no compression, no
   redirects, no environment proxy. The client is the workspace `ureq` (rustls with
-  ring; `https` verifies the collector against the built-in web PKI roots, the
-  operator PKI trust set above is not used for it). `OTEL_*` and proxy environment
-  variables are not configuration: the endpoint and timeout come from this table and
-  any header the environment would add is dropped by the transport. The collector
-  endpoint is operator-trusted egress and is **not** subject to the
-  `[[pki.endpoints]]` pinning.
+  ring). `https` verifies the collector against the built-in web PKI roots, or, with
+  `ca_file`, only against the PEM CA certificates (at most 8, 1 MiB) in that file;
+  the operator PKI trust set above is not used for it. `OTEL_*` and proxy environment
+  variables are not configuration: the endpoint and timeout come from this table, any
+  header the environment would add is dropped by the transport, and compression
+  requests (`OTEL_EXPORTER_OTLP_*COMPRESSION`) are ignored (payloads stay plain
+  protobuf). The collector endpoint is operator-trusted egress and is **not** subject
+  to the `[[pki.endpoints]]` pinning.
 * **Two named threads, no more:** `oncl-otlp-traces` (span worker) and
   `OpenTelemetry.Metrics.PeriodicReader` (metric reader), one per enabled signal. A
   short-lived `oncl-otlp-shutdown` thread exists only during shutdown. No operation
@@ -367,5 +374,8 @@ gauges `oncl.requests.in_flight`, `oncl.executor.running`, `oncl.executor.queued
   trust boundary and protect `headers`.
 * Drops under a slow or down collector are expected and counted; telemetry is not a
   delivery guarantee and is never an audit record.
-* TLS to the collector uses the built-in web roots only; a private collector CA is not
-  configurable, use a loopback/plain collector or a local forwarding agent.
+* TLS to the collector verifies the certificate always (never skipped). The default
+  trust is the built-in web roots; `ca_file` replaces it with the operator's own CA.
+  Revocation checking and client certificates (mTLS) are not supported.
+* An incoming `traceparent`/`tracestate` header is ignored: every request starts its
+  own trace, so a client can neither join, force nor suppress sampling of a trace.

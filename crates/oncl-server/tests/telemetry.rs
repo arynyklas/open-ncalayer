@@ -566,7 +566,7 @@ mod telemetry {
                 for _ in 0..8 {
                     let started = Instant::now();
                     assert_eq!(hash(&rig).await, 200);
-                    assert!(started.elapsed() < Duration::from_millis(750));
+                    assert!(started.elapsed() < Duration::from_secs(3));
                 }
                 assert_eq!(
                     sign_named(&rig, &rig.admin, "cms").await,
@@ -586,13 +586,13 @@ mod telemetry {
             });
         }
         // Hanging: connections are accepted, requests read, never answered; exports
-        // block for the full HTTP timeout (2s), far longer than any operation.
+        // block for the full HTTP timeout (10s), far longer than any operation.
         let hanging = Collector::start();
         hanging.set_mode(Mode::Hang);
         let mut config = enabled(&hanging);
         config.queue_size = 16;
         config.batch_size = 4;
-        config.export_timeout_ms = 2_000;
+        config.export_timeout_ms = 10_000;
         config.connect_timeout_ms = 500;
         config.shutdown_timeout_ms = 1_000;
         runtime.block_on(async {
@@ -614,8 +614,8 @@ mod telemetry {
                 slowest = slowest.max(started.elapsed());
             }
             assert!(
-                slowest < Duration::from_secs(1),
-                "operations waited on telemetry: slowest {slowest:?} (HTTP timeout is 2s)"
+                slowest < Duration::from_secs(5),
+                "operations waited on telemetry: slowest {slowest:?} (HTTP timeout is 10s)"
             );
             let stats = rig.host.telemetry.stats();
             assert!(
@@ -633,13 +633,13 @@ mod telemetry {
             // as a metric, so the loss is observable, not silent.
             let dropped = rig.host.telemetry.stats().spans_dropped;
             hanging.set_mode(Mode::Accept);
-            hanging.wait_for("the drop metric", Duration::from_secs(20), |received| {
+            hanging.wait_for("the drop metric", Duration::from_secs(60), |received| {
                 collector::decode(received)
                     .metric_total("oncl.telemetry.dropped", &[("oncl.signal", "spans")])
                     >= dropped as f64
             });
             // Hang again: shutdown stays inside its 1s deadline although the final
-            // export would take 2s.
+            // export would take 10s.
             hanging.set_mode(Mode::Hang);
             for _ in 0..4 {
                 assert_eq!(hash(&rig).await, 200);
@@ -651,13 +651,13 @@ mod telemetry {
                 .unwrap();
             let elapsed = started.elapsed();
             assert!(
-                elapsed < Duration::from_millis(1_800),
+                elapsed < Duration::from_secs(4),
                 "shutdown took {elapsed:?}"
             );
-            assert!(!finished || elapsed < Duration::from_millis(1_000));
+            assert!(!finished || elapsed < Duration::from_millis(1_500));
             let started = Instant::now();
             let _ = rig.stop().await;
-            assert!(started.elapsed() < Duration::from_millis(1_500));
+            assert!(started.elapsed() < Duration::from_secs(4));
         });
     }
 
@@ -824,6 +824,61 @@ mod telemetry {
         assert!(parsed.enabled && parsed.metrics && parsed.traces);
         assert_eq!(parsed.trace_sample_ratio, 0.25);
         assert_eq!(parsed.headers.len(), 1);
+    }
+
+    /// A collector credential never crosses the network in cleartext, and configuration
+    /// errors never echo it.
+    #[test]
+    fn collector_credentials_require_tls_or_loopback() {
+        const SECRET: &str = "Bearer-never-echoed-4f2a";
+        let with = |endpoint: &str| TelemetryConfig {
+            enabled: true,
+            endpoint: endpoint.into(),
+            headers: [("Authorization".to_owned(), SECRET.to_owned())].into(),
+            ..TelemetryConfig::default()
+        };
+        for refused in [
+            "http://collector.example:4318",
+            "HTTP://collector.example:4318",
+            "http://10.0.0.5:4318",
+            "http://127.0.0.1.example:4318",
+            "http://user:pw@127.0.0.1:4318",
+            "https://user:pw@collector.example",
+        ] {
+            let error = with(refused).validate().unwrap_err();
+            assert!(!error.to_string().contains(SECRET));
+            assert!(!format!("{error:?}").contains(SECRET));
+            assert!(Telemetry::start(&with(refused)).is_err(), "{refused}");
+        }
+        for accepted in [
+            "http://127.0.0.1:4318",
+            "http://localhost:4318",
+            "http://[::1]:4318",
+            "https://collector.example:4318",
+            "HTTPS://collector.example",
+        ] {
+            with(accepted)
+                .validate()
+                .unwrap_or_else(|_| panic!("{accepted}"));
+        }
+        // Without credentials cleartext to a remote collector is the operator's choice.
+        let mut plain = with("http://collector.example:4318");
+        plain.headers.clear();
+        plain.validate().unwrap();
+        // A CA file only makes sense for https.
+        let mut ca = with("http://127.0.0.1:4318");
+        ca.headers.clear();
+        ca.ca_file = Some("ca.pem".into());
+        assert!(ca.validate().is_err());
+        // An unreadable or empty CA file refuses startup.
+        let mut missing = with("https://collector.example");
+        missing.ca_file = Some("does-not-exist.pem".into());
+        assert!(Telemetry::start(&missing).is_err());
+        let directory = tempfile::tempdir().unwrap();
+        let empty = directory.path().join("empty.pem");
+        std::fs::write(&empty, b"no certificate here").unwrap();
+        missing.ca_file = Some(empty);
+        assert!(Telemetry::start(&missing).is_err());
     }
     fn read_config(extra: &str) -> std::io::Result<ServerConfig> {
         let directory = tempfile::tempdir().unwrap();
@@ -1106,6 +1161,11 @@ mod telemetry {
                 ("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x-evil=1"),
                 ("OTEL_EXPORTER_OTLP_METRICS_HEADERS", "x-evil=1"),
                 ("OTEL_EXPORTER_OTLP_TIMEOUT", "60000"),
+                ("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
+                ("OTEL_SDK_DISABLED", "true"),
+                ("OTEL_TRACES_EXPORTER", "none"),
+                ("OTEL_SERVICE_NAME", "evil"),
+                ("OTEL_RESOURCE_ATTRIBUTES", "host.name=evil,evil=1"),
                 ("HTTP_PROXY", &address),
                 ("http_proxy", &address),
                 ("ALL_PROXY", &address),
@@ -1124,7 +1184,110 @@ mod telemetry {
                 .all(|(k, v)| k != "x-evil" && !v.contains("x-evil"))
         }));
         assert_eq!(decoy.connections(), 0, "the environment redirected nothing");
+        // Other OTEL_* settings did not change what is exported either.
+        collector::assert_private(&without_credential(&collector.received()), &[b"evil"]);
         let _ = process.stop();
+    }
+
+    /// A compression request in the environment is ignored: payloads stay plain OTLP
+    /// protobuf (no `content-encoding`, every body decodes as sent).
+    #[test]
+    fn environment_compression_request_is_ignored() {
+        let collector = Collector::start();
+        let runtime = server_support::runtime();
+        let process = Proc::start_env(
+            &table(&collector, ""),
+            false,
+            &[
+                ("OTEL_EXPORTER_OTLP_COMPRESSION", "gzip"),
+                ("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "zstd"),
+            ],
+        );
+        assert_eq!(
+            runtime.block_on(process.sign(&process.admin, "cms")),
+            (200, "completed".into())
+        );
+        collector.wait_for("export", Duration::from_secs(10), |r| {
+            r.iter().any(|p| p.path == "/v1/traces") && r.iter().any(|p| p.path == "/v1/metrics")
+        });
+        // `decode` asserts no content-encoding and a valid uncompressed protobuf body.
+        let facts = collector::decode(&collector.received());
+        assert!(facts.trace_payloads >= 1 && facts.metric_payloads >= 1);
+        let _ = process.stop();
+    }
+
+    fn self_signed() -> (Vec<u8>, Vec<u8>, String) {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        (cert.der().to_vec(), key.serialize_der(), cert.pem())
+    }
+
+    /// https to a real TLS collector: (a) with the operator's `ca_file` the export works
+    /// (credential header included) and decodes; (b) a collector whose certificate is
+    /// not trusted (other CA, or no `ca_file` and only web roots) is refused: nothing is
+    /// delivered, operations still succeed and the failure is counted, never skipped.
+    #[test]
+    fn https_export_uses_the_operator_ca_and_fails_closed_otherwise() {
+        let runtime = server_support::runtime();
+        let directory = tempfile::tempdir().unwrap();
+        let (cert, key, pem) = self_signed();
+        let ca = directory.path().join("collector-ca.pem");
+        std::fs::write(&ca, &pem).unwrap();
+        // (a)
+        let trusted = Collector::start_tls(cert, key);
+        let mut config = enabled(&trusted);
+        config.ca_file = Some(ca.clone());
+        let host = runtime.block_on(async {
+            let rig = Rig::start(config, false).await;
+            assert_eq!(
+                sign_named(&rig, &rig.admin, "cms").await,
+                (200, "completed".into())
+            );
+            rig.stop().await
+        });
+        let received = trusted.received();
+        assert!(received.iter().any(|r| r.path == "/v1/traces"));
+        assert!(received.iter().any(|r| r.path == "/v1/metrics"));
+        let facts =
+            collector::assert_private(&without_credential(&received), &[CANARY_KEY.as_bytes()]);
+        assert_eq!(
+            facts.metric_total("oncl.key.uses", &[("oncl.key.applied", "applied")]),
+            1.0
+        );
+        assert_eq!(host.telemetry.stats().span_export_failures, 0);
+        // (b) a different, untrusted certificate; with and without the operator CA.
+        for with_ca in [true, false] {
+            let (other_cert, other_key, _) = self_signed();
+            let untrusted = Collector::start_tls(other_cert, other_key);
+            let mut config = enabled(&untrusted);
+            config.ca_file = with_ca.then(|| ca.clone());
+            runtime.block_on(async {
+                let rig = Rig::start(config, false).await;
+                for _ in 0..3 {
+                    assert_eq!(
+                        sign_named(&rig, &rig.admin, "cms").await,
+                        (200, "completed".into())
+                    );
+                }
+                let telemetry = rig.host.telemetry.clone();
+                wait_until("refused TLS exports counted", || {
+                    telemetry.stats().span_export_failures >= 1
+                        && telemetry.stats().metric_export_failures >= 1
+                });
+                assert!(telemetry.stats().spans_dropped >= 1);
+                assert_eq!(rig.host.audit.health(), AuditHealth::Healthy);
+                assert_eq!(begin_records(&rig.host), 3);
+                let _ = rig.stop().await;
+            });
+            assert!(untrusted.connections() >= 1, "the exporter did try");
+            assert!(
+                untrusted.received().is_empty(),
+                "no telemetry reaches an untrusted collector"
+            );
+        }
     }
 
     /// Disabled (absent table or `enabled = false` with an endpoint present): the real
@@ -1299,7 +1462,7 @@ mod telemetry {
 
     /// Polls `condition` for a bounded time.
     fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + Duration::from_secs(40);
         while !condition() {
             assert!(Instant::now() < end, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(25));

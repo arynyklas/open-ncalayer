@@ -92,20 +92,30 @@ pub(super) struct UreqClient {
     allowed: BTreeSet<String>,
 }
 impl UreqClient {
+    /// `roots`: the operator's explicit CA certificates (replacing, never extending, the
+    /// built-in web roots), or `None` for the web roots. Certificate verification is
+    /// never disabled.
     pub(super) fn new(
         authority: String,
         header_names: impl IntoIterator<Item = String>,
         connect_timeout: Duration,
         timeout: Duration,
+        roots: Option<Arc<Vec<ureq::tls::Certificate<'static>>>>,
     ) -> Self {
-        let agent = ureq::Agent::config_builder()
+        let mut config = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             .timeout_connect(Some(connect_timeout))
             .http_status_as_error(false)
             .max_redirects(0)
-            .proxy(None)
-            .build()
-            .into();
+            .proxy(None);
+        if let Some(roots) = roots {
+            config = config.tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::Specific(roots))
+                    .build(),
+            );
+        }
+        let agent = config.build().into();
         let mut allowed: BTreeSet<String> = header_names
             .into_iter()
             .map(|name| name.to_ascii_lowercase())

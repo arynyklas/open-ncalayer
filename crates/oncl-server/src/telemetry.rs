@@ -91,6 +91,8 @@ pub struct TelemetryConfig {
     pub batch_size: usize,
     /// Bound of the final flush at shutdown.
     pub shutdown_timeout_ms: u64,
+    /// `https` only: PEM file of the collector's CA, replacing the built-in web roots.
+    pub ca_file: Option<std::path::PathBuf>,
 }
 impl Default for TelemetryConfig {
     fn default() -> Self {
@@ -108,6 +110,7 @@ impl Default for TelemetryConfig {
             queue_size: 2_048,
             batch_size: 512,
             shutdown_timeout_ms: 5_000,
+            ca_file: None,
         }
     }
 }
@@ -123,6 +126,7 @@ impl TelemetryConfig {
                 && s.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
         };
+        let secure = self.endpoint().is_ok_and(|e| e.2);
         if self.endpoint().is_err()
             || !token(&self.service_name)
             || !(self.metrics || self.traces)
@@ -135,6 +139,11 @@ impl TelemetryConfig {
             || self.batch_size == 0
             || self.batch_size > self.queue_size
             || !(100..=60_000).contains(&self.shutdown_timeout_ms)
+            // A collector credential must never cross the network in cleartext.
+            || (!self.headers.is_empty() && !secure && !self.loopback())
+            || self.ca_file.as_ref().is_some_and(|p| {
+                !secure || p.as_os_str().len() > 4_096
+            })
             || self.headers.len() > 8
             || self.headers.iter().any(|(name, value)| {
                 !token(name)
@@ -179,6 +188,40 @@ impl TelemetryConfig {
             uri.path().trim_end_matches('/').to_owned(),
             secure,
         ))
+    }
+    /// Whether the endpoint host is `localhost` or a loopback address.
+    fn loopback(&self) -> bool {
+        let Ok(uri) = self.endpoint.parse::<http::Uri>() else {
+            return false;
+        };
+        let host = uri.host().unwrap_or_default().trim_matches(['[', ']']);
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    }
+    /// The operator's explicit collector CA (PEM, at most 1 MiB and 8 certificates).
+    /// It replaces the built-in web roots; verification is never disabled.
+    fn roots(&self) -> io::Result<Option<Arc<Vec<ureq::tls::Certificate<'static>>>>> {
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
+        use std::io::Read;
+        let Some(path) = &self.ca_file else {
+            return Ok(None);
+        };
+        let file = std::fs::File::open(path)?;
+        let mut pem = Vec::new();
+        file.take(1_048_577).read_to_end(&mut pem)?;
+        if pem.len() > 1_048_576 {
+            return Err(invalid());
+        }
+        let certificates = CertificateDer::pem_slice_iter(&pem)
+            .map(|c| c.map(|c| ureq::tls::Certificate::from_der(c.as_ref()).to_owned()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| invalid())?;
+        if certificates.is_empty() || certificates.len() > 8 {
+            return Err(invalid());
+        }
+        Ok(Some(Arc::new(certificates)))
     }
 }
 
@@ -352,6 +395,9 @@ impl Shared {
         })
     }
 }
+/// A handle dropped without `serve` (embedders, tests) still flushes, but never waits
+/// longer than `shutdown_timeout_ms` in total: that bound is the same one `serve` uses,
+/// and it is a no-op after an explicit `shutdown`.
 impl Drop for Shared {
     fn drop(&mut self) {
         self.shutdown();
@@ -381,6 +427,7 @@ impl Telemetry {
             if secure { "https" } else { "http" }
         );
         let timeout = Duration::from_millis(config.export_timeout_ms);
+        let roots = config.roots()?;
         let interval = Duration::from_millis(config.export_interval_ms);
         let client = |names: &BTreeMap<String, String>| {
             UreqClient::new(
@@ -388,6 +435,7 @@ impl Telemetry {
                 names.keys().cloned(),
                 Duration::from_millis(config.connect_timeout_ms),
                 timeout,
+                roots.clone(),
             )
         };
         let resource = Resource::builder_empty()

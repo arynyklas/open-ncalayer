@@ -47,12 +47,31 @@ pub struct Collector {
     pub address: SocketAddr,
     state: Arc<State>,
     accept: Option<std::thread::JoinHandle<()>>,
+    secure: bool,
 }
 impl Collector {
     pub fn start() -> Self {
         Self::bind("127.0.0.1:0".parse().unwrap())
     }
+    /// A collector speaking TLS with the given certificate chain and key (DER).
+    pub fn start_tls(cert: Vec<u8>, key: Vec<u8>) -> Self {
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![rustls::pki_types::CertificateDer::from(cert)],
+            rustls::pki_types::PrivateKeyDer::try_from(key).unwrap(),
+        )
+        .unwrap();
+        Self::bind_with("127.0.0.1:0".parse().unwrap(), Some(Arc::new(config)))
+    }
     pub fn bind(address: SocketAddr) -> Self {
+        Self::bind_with(address, None)
+    }
+    fn bind_with(address: SocketAddr, tls: Option<Arc<rustls::ServerConfig>>) -> Self {
         let listener = TcpListener::bind(address).unwrap();
         let address = listener.local_addr().unwrap();
         let state = Arc::new(State {
@@ -61,6 +80,7 @@ impl Collector {
             received: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
         });
+        let secure = tls.is_some();
         let shared = state.clone();
         let accept = std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -70,17 +90,37 @@ impl Collector {
                 let Ok(stream) = stream else { continue };
                 shared.connections.fetch_add(1, Ordering::SeqCst);
                 let shared = shared.clone();
-                std::thread::spawn(move || serve(stream, shared));
+                let tls = tls.clone();
+                std::thread::spawn(move || {
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(100)))
+                        .unwrap();
+                    match tls {
+                        None => serve(stream, shared),
+                        Some(config) => serve(
+                            rustls::StreamOwned::new(
+                                rustls::ServerConnection::new(config).unwrap(),
+                                stream,
+                            ),
+                            shared,
+                        ),
+                    }
+                });
             }
         });
         Self {
+            secure,
             address,
             state,
             accept: Some(accept),
         }
     }
     pub fn url(&self) -> String {
-        format!("http://{}", self.address)
+        if self.secure {
+            format!("https://localhost:{}", self.address.port())
+        } else {
+            format!("http://{}", self.address)
+        }
     }
     pub fn set_mode(&self, mode: Mode) {
         *self.state.mode.lock().unwrap() = mode;
@@ -124,10 +164,7 @@ impl Drop for Collector {
         }
     }
 }
-fn serve(mut stream: TcpStream, state: Arc<State>) {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .unwrap();
+fn serve<S: Read + Write>(mut stream: S, state: Arc<State>) {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
