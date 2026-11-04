@@ -2,6 +2,7 @@
 // a hardware token and its PIN.
 
 import { AboutSlint, Button, CheckBox, ComboBox, HorizontalBox, LineEdit, Palette, VerticalBox } from "std-widgets.slint";
+import { EscapeScope, Tone } from "common.slint";
 
 // A storage in the list.
 export struct StorageRow {
@@ -53,6 +54,10 @@ export component StorageDialog inherits Window {
     private property <bool> is-token: root.selected >= 0 && root.selected < root.storages.length && root.storages[root.selected].token;
     private property <bool> can-open: root.selected >= 0 && (root.is-token ? root.reader-index >= 0 && root.reader-index < root.readers.length : !root.path.is-empty);
 
+    EscapeScope {
+        escape => {
+            root.cancel();
+        }
     VerticalBox {
         HorizontalLayout {
             spacing: 8px;
@@ -77,7 +82,7 @@ export component StorageDialog inherits Window {
 
         if !root.detail.is-empty: Text {
             text: root.detail;
-            wrap: word-wrap;
+            wrap: char-wrap;
         }
 
         Text {
@@ -88,6 +93,8 @@ export component StorageDialog inherits Window {
             for row[i] in root.storages: Rectangle {
                 height: 28px;
                 border-radius: 4px;
+                border-width: row-focus.has-focus ? 2px : 0px;
+                border-color: Palette.accent-background;
                 background: i == root.selected ? Palette.selection-background : transparent;
                 accessible-role: list-item;
                 accessible-label: row.label;
@@ -102,6 +109,20 @@ export component StorageDialog inherits Window {
                         root.storage-chosen(i);
                     }
                 }
+                // The keyboard reaches the row (Tab) and chooses it (Enter or Space); a row
+                // that is not supported is skipped.
+                row-focus := FocusScope {
+                    enabled: row.supported;
+                    key-pressed(event) => {
+                        if event.text == Key.Return || event.text == " " {
+                            root.selected = i;
+                            root.storage-chosen(i);
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+
                 TouchArea {
                     enabled: row.supported;
                     mouse-cursor: row.supported ? pointer : default;
@@ -118,14 +139,14 @@ export component StorageDialog inherits Window {
                     Text {
                         text: row.label;
                         vertical-alignment: center;
-                        color: !row.supported ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                        color: !row.supported ? Tone.quiet() : i == root.selected ? Palette.selection-foreground : Palette.foreground;
                     }
 
                     if !row.supported: Text {
                         text: @tr("not supported yet");
                         vertical-alignment: center;
                         font-italic: true;
-                        color: #888888;
+                        color: Tone.quiet();
                     }
                     Rectangle {
                         horizontal-stretch: 1;
@@ -177,14 +198,14 @@ export component StorageDialog inherits Window {
 
         if root.is-token && !root.reader-note.is-empty: Text {
             text: root.reader-note;
-            wrap: word-wrap;
+            wrap: char-wrap;
         }
 
         if root.is-token: Text {
             text: @tr("Token support is experimental: checked on an emulator only");
             wrap: word-wrap;
             font-italic: true;
-            color: #888888;
+            color: Tone.quiet();
         }
 
         Text {
@@ -207,8 +228,8 @@ export component StorageDialog inherits Window {
 
         if !root.error.is-empty: Text {
             text: root.error;
-            wrap: word-wrap;
-            color: #c42b1c;
+            wrap: char-wrap;
+            color: Tone.error();
         }
 
         HorizontalLayout {
@@ -230,6 +251,8 @@ export component StorageDialog inherits Window {
                 }
             }
         }
+    }
+
     }
 
     about := PopupWindow {

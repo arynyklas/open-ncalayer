@@ -1400,11 +1400,13 @@ impl Dialog for ReaderDialog {
 /// Wires Cancel, the window's close button and the window's destruction to a cancelled
 /// outcome, then shows `ui` on top with the focus in it.
 fn show<C: Dialog, T: 'static>(ui: &C, pending: Rc<Pending<C, T>>) -> Result<(), PlatformError> {
-    wire_dismissal(ui, &pending);
     ui.show().inspect_err(|_| {
         pending.cancel();
     })?;
     foreground::take(ui);
+    // After the scale has taken the window's event filter: the dismissal's filter goes on
+    // handing the scale its events.
+    wire_dismissal(ui, &pending);
     Ok(())
 }
 
@@ -1425,7 +1427,13 @@ fn wire_dismissal<C: Dialog, T: 'static>(ui: &C, pending: &Rc<Pending<C, T>>) {
     // restart) sends no close request; without this the asking thread would wait forever.
     ui.window().on_winit_window_event({
         let pending = pending.clone();
-        move |_, event| on_window_event(&pending, event)
+        move |window, event| {
+            // A dialog on a monitor of another scale keeps the chosen step.
+            match crate::scale::on_event(window, event) {
+                EventResult::PreventDefault => EventResult::PreventDefault,
+                EventResult::Propagate => on_window_event(&pending, event),
+            }
+        }
     });
 }
 

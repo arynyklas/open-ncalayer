@@ -3,12 +3,14 @@
 // «Установить» (enabled a moment after the window appears) or «Отмена». The texts are composed
 // in Rust.
 
-import { Button, VerticalBox } from "std-widgets.slint";
+import { Button } from "std-widgets.slint";
+import { ActionBar, DialogScroll, EscapeScope, Metrics, NameText, Subheading, Tone } from "common.slint";
 
 export component InstallPluginWindow inherits Window {
     title: @tr("Plugin installation");
     always-on-top: true;
-    min-width: 460px;
+    min-width: Metrics.dialog-min-width;
+    min-height: Metrics.min-height;
     max-width: 640px;
     forward-focus: cancel-button;
 
@@ -27,64 +29,72 @@ export component InstallPluginWindow inherits Window {
     in property <string> warning;
     // «Установить» works: set a moment after the window appears.
     in-out property <bool> can-install: false;
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
 
     callback answer(bool);
 
-    VerticalBox {
-        if root.asker != "": Text {
-            text: root.asker;
-            wrap: word-wrap;
+    EscapeScope {
+        escape => {
+            root.answer(false);
         }
+        VerticalLayout {
+            padding: Metrics.pad;
+            spacing: Metrics.gap;
+            DialogScroll {
+                if root.asker != "": NameText {
+                    text: root.asker;
+                }
 
-        Text {
-            text: root.plugin;
-            font-weight: 700;
-            wrap: word-wrap;
-        }
+                Subheading {
+                    text: root.plugin;
+                    wrap: char-wrap;
+                }
 
-        if root.replacing != "": Text {
-            text: root.replacing;
-            wrap: word-wrap;
-        }
+                if root.replacing != "": Text {
+                    text: root.replacing;
+                    wrap: char-wrap;
+                }
 
-        if root.replaces != "": Text {
-            text: root.replaces;
-            wrap: word-wrap;
-        }
+                if root.replaces != "": Text {
+                    text: root.replaces;
+                    wrap: char-wrap;
+                }
 
-        Text {
-            text: root.may;
-            wrap: word-wrap;
-        }
+                Text {
+                    text: root.may;
+                    wrap: char-wrap;
+                }
 
-        for line in root.capabilities: Text {
-            text: "• " + line;
-            wrap: word-wrap;
-        }
+                for line in root.capabilities: Text {
+                    text: "• " + line;
+                    wrap: char-wrap;
+                }
 
-        if root.warning != "": Text {
-            text: root.warning;
-            wrap: word-wrap;
-            color: #c42b1c;
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: end;
-            Button {
-                text: @tr("Install");
-                enabled: root.can-install;
-                clicked => {
-                    root.answer(true);
+                if root.warning != "": Text {
+                    text: root.warning;
+                    wrap: char-wrap;
+                    font-weight: 700;
+                    color: Tone.error();
                 }
             }
 
-            // The default: Enter alone does not install.
-            cancel-button := Button {
-                text: @tr("Cancel");
-                primary: true;
-                clicked => {
-                    root.answer(false);
+            actions := ActionBar {
+                Button {
+                    text: @tr("Install");
+                    enabled: root.can-install;
+                    clicked => {
+                        root.answer(true);
+                    }
+                }
+
+                // The default: Enter alone does not install.
+                cancel-button := Button {
+                    text: @tr("Cancel");
+                    primary: true;
+                    clicked => {
+                        root.answer(false);
+                    }
                 }
             }
         }

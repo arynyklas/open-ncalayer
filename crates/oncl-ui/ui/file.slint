@@ -1,11 +1,14 @@
 // The file chooser's own window: who asks, and the system file dialog on top of it.
 
-import { Button, VerticalBox } from "std-widgets.slint";
+import { Button } from "std-widgets.slint";
+import { ActionBar, DialogScroll, EscapeScope, Metrics, NameText, Subheading } from "common.slint";
 
 export component FileDialog inherits Window {
     title: "OpenNCALayer";
     always-on-top: true;
-    min-width: 420px;
+    min-width: Metrics.dialog-min-width;
+    min-height: Metrics.min-height;
+    forward-focus: browse-button;
 
     // The requesting page's origin.
     in property <string> origin;
@@ -15,41 +18,47 @@ export component FileDialog inherits Window {
     in property <string> heading;
     // The translated line naming who asks; empty without a source.
     out property <string> source-line: root.source == "" ? "" : @tr("Plugin: {}", root.source);
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
 
     callback browse();
     callback cancel();
 
-    VerticalBox {
-        Text {
-            text: @tr("Request from: {}", root.origin);
-            wrap: word-wrap;
+    EscapeScope {
+        escape => {
+            root.cancel();
         }
+        VerticalLayout {
+            padding: Metrics.pad;
+            spacing: Metrics.gap;
+            DialogScroll {
+                NameText {
+                    text: @tr("Request from: {}", root.origin);
+                }
 
-        if root.source != "": Text {
-            text: root.source-line;
-            wrap: word-wrap;
-        }
+                if root.source != "": NameText {
+                    text: root.source-line;
+                }
 
-        Text {
-            text: root.heading;
-            font-weight: 700;
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: end;
-            Button {
-                text: @tr("Browse…");
-                primary: true;
-                clicked => {
-                    root.browse();
+                Subheading {
+                    text: root.heading;
                 }
             }
 
-            Button {
-                text: @tr("Cancel");
-                clicked => {
-                    root.cancel();
+            actions := ActionBar {
+                browse-button := Button {
+                    text: @tr("Browse…");
+                    primary: true;
+                    clicked => {
+                        root.browse();
+                    }
+                }
+
+                Button {
+                    text: @tr("Cancel");
+                    clicked => {
+                        root.cancel();
+                    }
                 }
             }
         }

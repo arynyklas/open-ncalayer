@@ -6,6 +6,7 @@
 
 import { Button, CheckBox, ComboBox, LineEdit, Palette, StandardListView } from "std-widgets.slint";
 import { ReportRow, ReportView } from "report.slint";
+import { ErrorText, FieldLabel, Heading } from "common.slint";
 
 export global ToolState {
     in property <string> title;
@@ -62,20 +63,6 @@ export global ToolState {
     callback run();
 }
 
-component Heading inherits Text {
-    font-size: 22px;
-    font-weight: 700;
-}
-
-component Label inherits Text {
-    font-weight: 600;
-}
-
-component ErrorText inherits Text {
-    color: Palette.color-scheme == ColorScheme.dark ? #ff8a80 : #c62828;
-    wrap: word-wrap;
-}
-
 export component ToolPage inherits VerticalLayout {
     // Set by the window: an operation runs, and the error of the page's last action.
     in property <bool> busy;
@@ -90,7 +77,7 @@ export component ToolPage inherits VerticalLayout {
         wrap: word-wrap;
     }
 
-    if ToolState.formats.length > 0: Label {
+    if ToolState.formats.length > 0: FieldLabel {
         text: ToolState.format-label;
     }
     if ToolState.formats.length > 0: HorizontalLayout {
@@ -117,7 +104,7 @@ export component ToolPage inherits VerticalLayout {
         }
     }
 
-    Label {
+    FieldLabel {
         text: ToolState.first-label;
     }
 
@@ -143,7 +130,7 @@ export component ToolPage inherits VerticalLayout {
         }
     }
 
-    if ToolState.show-second: Label {
+    if ToolState.show-second: FieldLabel {
         text: ToolState.second-label;
     }
     if ToolState.show-second: HorizontalLayout {
@@ -194,7 +181,7 @@ export component ToolPage inherits VerticalLayout {
         accessible-label: @tr("Documents");
     }
 
-    if ToolState.show-destination: Label {
+    if ToolState.show-destination: FieldLabel {
         text: @tr("Where the results are written");
     }
     if ToolState.show-destination: HorizontalLayout {
@@ -224,7 +211,7 @@ export component ToolPage inherits VerticalLayout {
 
     if ToolState.show-evidence: VerticalLayout {
         spacing: 4px;
-        Label {
+        FieldLabel {
             text: @tr("Evidence: certificates of the chain (files, separated by ;)");
         }
 
@@ -234,7 +221,7 @@ export component ToolPage inherits VerticalLayout {
             accessible-label: @tr("Evidence: certificates of the chain (files, separated by ;)");
         }
 
-        Label {
+        FieldLabel {
             text: @tr("Evidence: OCSP responses (files, separated by ;)");
         }
 
@@ -244,7 +231,7 @@ export component ToolPage inherits VerticalLayout {
             accessible-label: @tr("Evidence: OCSP responses (files, separated by ;)");
         }
 
-        Label {
+        FieldLabel {
             text: @tr("Evidence: CRLs (files, separated by ;)");
         }
 
@@ -273,7 +260,7 @@ export component ToolPage inherits VerticalLayout {
             checked <=> ToolState.flag2;
             accessible-label: ToolState.flag2-label;
         }
-        if ToolState.show-opt1: Label {
+        if ToolState.show-opt1: FieldLabel {
             text: ToolState.opt1-label;
         }
         if ToolState.show-opt1: LineEdit {
@@ -281,7 +268,7 @@ export component ToolPage inherits VerticalLayout {
             text <=> ToolState.opt1;
             accessible-label: ToolState.opt1-label;
         }
-        if ToolState.show-opt2: Label {
+        if ToolState.show-opt2: FieldLabel {
             text: ToolState.opt2-label;
         }
         if ToolState.show-opt2: LineEdit {

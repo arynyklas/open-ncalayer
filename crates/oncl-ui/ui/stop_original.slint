@@ -2,11 +2,15 @@
 // shows how stopping it and starting wss went. The question and the outcome are composed in
 // Rust.
 
-import { Button, VerticalBox } from "std-widgets.slint";
+import { Button } from "std-widgets.slint";
+import { ActionBar, BusyRow, DialogScroll, EscapeScope, Metrics, StatusArea } from "common.slint";
 
 export component StopOriginalWindow inherits Window {
     title: @tr("Stop the original NCALayer");
-    min-width: 460px;
+    min-width: Metrics.dialog-min-width;
+    min-height: Metrics.min-height;
+    // Ending another program is never the default: Enter alone leaves the window.
+    forward-focus: dismiss-button;
 
     in property <string> question;
     // The outcome, and whether it failed.
@@ -16,45 +20,53 @@ export component StopOriginalWindow inherits Window {
     in property <bool> busy;
     // Stopped: only «Закрыть» is left.
     in property <bool> done;
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
 
     callback stop();
     callback dismiss();
 
-    VerticalBox {
-        Text {
-            text: root.question;
-            wrap: word-wrap;
+    EscapeScope {
+        escape => {
+            // Stopping runs: its outcome must be seen.
+            if !root.busy {
+                root.dismiss();
+            }
         }
-
-        if !root.message.is-empty: Text {
-            text: root.message;
-            wrap: word-wrap;
-            color: root.message-is-error ? #c42b1c : #2e7d32;
-        }
-
-        // A taller window grows here, not in the controls.
-        Rectangle {
-            vertical-stretch: 1;
-        }
-
-        HorizontalLayout {
-            vertical-stretch: 0;
-            spacing: 8px;
-            alignment: end;
-            if !root.done: Button {
-                text: @tr("Stop");
-                primary: true;
-                enabled: !root.busy;
-                clicked => {
-                    root.stop();
+        VerticalLayout {
+            padding: Metrics.pad;
+            spacing: Metrics.gap;
+            DialogScroll {
+                Text {
+                    text: root.question;
+                    wrap: char-wrap;
                 }
             }
 
-            Button {
-                text: root.done ? @tr("Close") : @tr("Cancel");
-                enabled: !root.busy;
-                clicked => {
-                    root.dismiss();
+            if root.busy: BusyRow {
+                label: @tr("Please wait…");
+            }
+            if !root.message.is-empty: StatusArea {
+                message: root.message;
+                error: root.message-is-error;
+            }
+            actions := ActionBar {
+                if !root.done: Button {
+                    text: @tr("Stop");
+                    enabled: !root.busy;
+                    clicked => {
+                        root.stop();
+                    }
+                }
+
+                // The default, as in every question that cannot be undone.
+                dismiss-button := Button {
+                    text: root.done ? @tr("Close") : @tr("Cancel");
+                    primary: true;
+                    enabled: !root.busy;
+                    clicked => {
+                        root.dismiss();
+                    }
                 }
             }
         }

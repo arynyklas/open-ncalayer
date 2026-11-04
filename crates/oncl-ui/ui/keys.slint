@@ -2,6 +2,7 @@
 // still running show a spinner and change in place when it ends.
 
 import { Button, ListView, Palette, Spinner, VerticalBox } from "std-widgets.slint";
+import { EscapeScope, Tone } from "common.slint";
 
 // A key in the list.
 export struct KeyItem {
@@ -48,6 +49,10 @@ export component KeyDialog inherits Window {
     // Whether the button may be pressed: the selected key is enabled and the dialog is armed.
     out property <bool> can-sign: root.armed && root.selected >= 0 && root.keys[root.selected].enabled;
 
+    EscapeScope {
+        escape => {
+            root.cancel();
+        }
     VerticalBox {
         Text {
             text: @tr("Request from: {}", root.origin);
@@ -61,12 +66,12 @@ export component KeyDialog inherits Window {
 
         if !root.detail.is-empty: Text {
             text: root.detail;
-            wrap: word-wrap;
+            wrap: char-wrap;
         }
 
         Text {
             text: root.has-usable ? @tr("Choose a key") : @tr("No suitable key found");
-            color: root.has-usable ? Palette.foreground : #c42b1c;
+            color: root.has-usable ? Palette.foreground : Tone.error();
         }
 
         ListView {
@@ -74,6 +79,8 @@ export component KeyDialog inherits Window {
             min-height: 160px;
             for row[i] in root.keys: Rectangle {
                 border-radius: 4px;
+                border-width: row-focus.has-focus ? 2px : 0px;
+                border-color: Palette.accent-background;
                 background: i == root.selected ? Palette.selection-background : transparent;
                 accessible-role: list-item;
                 accessible-label: row.title;
@@ -85,6 +92,18 @@ export component KeyDialog inherits Window {
                 accessible-action-default => {
                     root.selected = i;
                 }
+                // The keyboard reaches the row (Tab) and selects it (Enter or Space); only the
+                // button signs.
+                row-focus := FocusScope {
+                    key-pressed(event) => {
+                        if event.text == Key.Return || event.text == " " {
+                            root.selected = i;
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+
                 TouchArea {
                     clicked => {
                         root.selected = i;
@@ -101,13 +120,13 @@ export component KeyDialog inherits Window {
                     Text {
                         text: row.title;
                         font-weight: 700;
-                        color: !row.enabled && !row.pending ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                        color: !row.enabled && !row.pending ? Tone.quiet() : i == root.selected ? Palette.selection-foreground : Palette.foreground;
                     }
 
                     Text {
                         text: row.details;
-                        wrap: word-wrap;
-                        color: !row.enabled && !row.pending ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                        wrap: char-wrap;
+                        color: !row.enabled && !row.pending ? Tone.quiet() : i == root.selected ? Palette.selection-foreground : Palette.foreground;
                     }
 
                     if row.pending: HorizontalLayout {
@@ -131,14 +150,14 @@ export component KeyDialog inherits Window {
                             text: @tr("Checking the certificate status…");
                             vertical-alignment: center;
                             font-italic: true;
-                            color: i == root.selected ? Palette.selection-foreground : #888888;
+                            color: i == root.selected ? Palette.selection-foreground : Tone.quiet();
                         }
                     }
 
                     if !row.revoked.is-empty: Text {
                         text: row.revoked;
                         font-weight: 700;
-                        color: #c42b1c;
+                        color: Tone.error();
                     }
                 }
             }
@@ -146,14 +165,14 @@ export component KeyDialog inherits Window {
 
         if root.selected >= 0 && !root.keys[root.selected].enabled && !root.keys[root.selected].note.is-empty: Text {
             text: root.keys[root.selected].note;
-            wrap: word-wrap;
-            color: #c42b1c;
+            wrap: char-wrap;
+            color: Tone.error();
         }
 
         if !root.error.is-empty: Text {
             text: root.error;
-            wrap: word-wrap;
-            color: #c42b1c;
+            wrap: char-wrap;
+            color: Tone.error();
         }
 
         HorizontalLayout {
@@ -175,5 +194,6 @@ export component KeyDialog inherits Window {
                 }
             }
         }
+    }
     }
 }

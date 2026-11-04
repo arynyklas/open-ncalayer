@@ -1,12 +1,15 @@
 // The About window: the program, its licence and Slint's (AboutSlint); the bundles and
 // modules pages see; the third-party licences.
 
-import { AboutSlint, Button, StandardListView, TabWidget, TextEdit, VerticalBox } from "std-widgets.slint";
+import { AboutSlint, Button, StandardListView, TabWidget, TextEdit } from "std-widgets.slint";
+import { ActionBar, DialogScroll, EscapeScope, Hint, LinkButton, Metrics, NameText, Subheading } from "common.slint";
 
 export component AboutWindow inherits Window {
     title: @tr("About OpenNCALayer");
-    min-width: 640px;
-    min-height: 480px;
+    min-width: Metrics.wide-min-width;
+    min-height: Metrics.wide-min-height;
+    preferred-width: 640px;
+    preferred-height: 480px;
 
     // 0: the program, 1: the modules, 2: the third-party licences.
     in-out property <int> tab;
@@ -23,127 +26,135 @@ export component AboutWindow inherits Window {
     // The chosen crate's licence and texts.
     in property <string> crate-license;
     in property <string> crate-texts;
+    // The button is inside the window, whatever the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
 
     callback crate-chosen(int);
     callback open-repository();
     callback dismiss();
 
-    VerticalBox {
-        TabWidget {
-            current-index <=> root.tab;
-            Tab {
-                title: "OpenNCALayer";
-                VerticalBox {
-                    Text {
-                        text: "OpenNCALayer";
-                        font-size: 20px;
-                        font-weight: 700;
-                    }
+    // Escape works from the first moment: the focus starts here, and Tab goes on from it.
+    forward-focus: keys;
+    keys := EscapeScope {
+        escape => {
+            root.dismiss();
+        }
+        VerticalLayout {
+            padding: Metrics.pad;
+            spacing: Metrics.gap;
+            TabWidget {
+                current-index <=> root.tab;
+                Tab {
+                    title: "OpenNCALayer";
+                    VerticalLayout {
+                        DialogScroll {
+                            Text {
+                                text: "OpenNCALayer";
+                                font-size: 20px;
+                                font-weight: 700;
+                            }
 
-                    Text {
-                        text: @tr("Version {} (commit {})", root.version, root.commit);
-                    }
+                            Text {
+                                text: @tr("Version {} (commit {})", root.version, root.commit);
+                                wrap: word-wrap;
+                            }
 
-                    Text {
-                        text: "Copyright 2026 Aryn Yklas";
-                    }
+                            Text {
+                                text: "Copyright 2026 Aryn Yklas";
+                            }
 
-                    Text {
-                        text: @tr("Licensed under the Apache License, Version 2.0.");
-                        wrap: word-wrap;
-                    }
+                            Text {
+                                text: @tr("Licensed under the Apache License, Version 2.0.");
+                                wrap: word-wrap;
+                            }
 
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Text {
-                            text: root.repository;
-                            vertical-alignment: center;
-                            color: #1a73e8;
-                            TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => {
-                                    root.open-repository();
+                            // The keyboard reaches it (Tab, then Enter or Space), not the mouse only.
+                            HorizontalLayout {
+                                alignment: start;
+                                LinkButton {
+                                    text: root.repository;
+                                    clicked => {
+                                        root.open-repository();
+                                    }
                                 }
+                            }
+
+                            AboutSlint { }
+                        }
+                    }
+                }
+
+                Tab {
+                    title: @tr("Modules");
+                    VerticalLayout {
+                        DialogScroll {
+                            Subheading {
+                                text: @tr("Bundles (getBundles)");
+                            }
+
+                            StandardListView {
+                                min-height: 120px;
+                                model: root.bundles;
+                                accessible-label: @tr("Bundles (getBundles)");
+                            }
+
+                            Subheading {
+                                text: @tr("Modules of the daemon");
+                            }
+
+                            StandardListView {
+                                min-height: 120px;
+                                model: root.modules;
+                                accessible-label: @tr("Modules of the daemon");
+                            }
+
+                            Hint {
+                                text: @tr("Plugins are installed, turned off and removed in the Plugins window of the tray menu.");
+                            }
+                        }
+                    }
+                }
+
+                Tab {
+                    title: @tr("Third-party licences");
+                    HorizontalLayout {
+                        spacing: Metrics.gap;
+                        padding: Metrics.gap;
+                        StandardListView {
+                            width: 200px;
+                            model: root.crates;
+                            current-item <=> root.selected-crate;
+                            accessible-label: @tr("Third-party licences");
+                            current-item-changed(i) => {
+                                root.crate-chosen(i);
                             }
                         }
 
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-                    }
+                        VerticalLayout {
+                            spacing: Metrics.gap;
+                            Text {
+                                text: root.crate-license;
+                                wrap: char-wrap;
+                            }
 
-                    AboutSlint { }
-                }
-            }
-
-            Tab {
-                title: @tr("Modules");
-                VerticalBox {
-                    Text {
-                        text: @tr("Bundles (getBundles)");
-                        font-weight: 700;
-                    }
-
-                    StandardListView {
-                        vertical-stretch: 2;
-                        model: root.bundles;
-                    }
-
-                    Text {
-                        text: @tr("Modules of the daemon");
-                        font-weight: 700;
-                    }
-
-                    StandardListView {
-                        vertical-stretch: 1;
-                        model: root.modules;
-                    }
-
-                    Text {
-                        text: @tr("Plugins are installed, turned off and removed in the Plugins window of the tray menu.");
-                        wrap: word-wrap;
-                        color: #888888;
-                    }
-                }
-            }
-
-            Tab {
-                title: @tr("Third-party licences");
-                HorizontalLayout {
-                    spacing: 8px;
-                    padding: 8px;
-                    StandardListView {
-                        width: 220px;
-                        model: root.crates;
-                        current-item <=> root.selected-crate;
-                        current-item-changed(i) => {
-                            root.crate-chosen(i);
-                        }
-                    }
-
-                    VerticalLayout {
-                        spacing: 8px;
-                        Text {
-                            text: root.crate-license;
-                            wrap: word-wrap;
-                        }
-
-                        TextEdit {
-                            read-only: true;
-                            wrap: word-wrap;
-                            text: root.crate-texts;
+                            TextEdit {
+                                read-only: true;
+                                wrap: word-wrap;
+                                text: root.crate-texts;
+                                accessible-label: @tr("Third-party licences");
+                            }
                         }
                     }
                 }
             }
-        }
 
-        HorizontalLayout {
-            alignment: end;
-            Button {
-                text: @tr("Close");
-                clicked => {
-                    root.dismiss();
+            actions := ActionBar {
+                Button {
+                    text: @tr("Close");
+                    primary: true;
+                    clicked => {
+                        root.dismiss();
+                    }
                 }
             }
         }

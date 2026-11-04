@@ -1,0 +1,306 @@
+// What every service window shares, so that the settings, plugins, certificate wizard, About,
+// stop/install questions and the request dialogs look and behave alike: the sizes, the tones of
+// text, a heading, a field with its label, the message line, the busy row, a link that the
+// keyboard reaches, the scrolling body with the action bar that never scrolls away, and
+// Escape. The std widgets draw the focus of their controls and follow the system's palette;
+// nothing here loads a theme.
+
+import { Button, LineEdit, Palette, ScrollView, Spinner } from "std-widgets.slint";
+
+// Sizes in logical pixels. The windows grow with the scale setting as a whole (the scale
+// factor of the window), so none of them is scaled here.
+export global Metrics {
+    out property <length> gap: 8px;
+    out property <length> pad: 12px;
+    // The narrowest a request dialog (a question, a password, a choice) can be.
+    out property <length> dialog-min-width: 420px;
+    // The narrowest a form (settings, certificate request, installation) can be.
+    out property <length> form-min-width: 480px;
+    // The narrowest a window with tabs or lists (plugins, the wizard, About) can be.
+    out property <length> wide-min-width: 560px;
+    // The lowest any of them can be: the body scrolls, the actions stay.
+    out property <length> min-height: 260px;
+    // The lowest a window with tabs or lists can be.
+    out property <length> wide-min-height: 340px;
+    // The height a window asks for at most: a long body scrolls instead of growing out of the
+    // screen.
+    out property <length> max-preferred-height: 560px;
+}
+
+// The colours of the states of text, in light and dark. A state is never told by colour alone:
+// the texts name it.
+export global Tone {
+    public pure function error() -> color {
+        return Palette.color-scheme == ColorScheme.dark ? #ff8a80 : #c62828;
+    }
+    public pure function success() -> color {
+        return Palette.color-scheme == ColorScheme.dark ? #81c784 : #2e7d32;
+    }
+    public pure function warning() -> color {
+        return Palette.color-scheme == ColorScheme.dark ? #ffb74d : #8a4b00;
+    }
+    public pure function link() -> color {
+        return Palette.color-scheme == ColorScheme.dark ? #8ab4f8 : #1a56c4;
+    }
+    public pure function quiet() -> color {
+        return Palette.foreground.with-alpha(0.75);
+    }
+}
+
+// A window's title line.
+export component Heading inherits Text {
+    font-size: 20px;
+    font-weight: 700;
+    wrap: word-wrap;
+}
+
+// A section's or a block's title.
+export component Subheading inherits Text {
+    font-weight: 700;
+    wrap: char-wrap;
+}
+
+// Text that is not ours and may have no place to break a line: an origin, a path, a file name,
+// an error with one in it, a plugin's own words. It breaks anywhere rather than make the
+// window scroll sideways or leave it; the texts of the program itself break at words.
+export component NameText inherits Text {
+    wrap: char-wrap;
+}
+
+// A label above a field.
+export component FieldLabel inherits Text {
+    font-weight: 600;
+    wrap: word-wrap;
+}
+
+// An explanation under a control, quieter than the text around it but readable.
+export component Hint inherits Text {
+    color: Tone.quiet();
+    wrap: word-wrap;
+}
+
+// The error of a page's last action, next to the fields it concerns.
+export component ErrorText inherits Text {
+    color: Tone.error();
+    wrap: char-wrap;
+}
+
+// The outcome of the last action. `error` tells the state apart without colour: an error is
+// bold.
+export component StatusText inherits Text {
+    in property <bool> error;
+    // A question or a note, not an outcome: the text's own colour.
+    in property <bool> neutral;
+    wrap: char-wrap;
+    font-weight: root.error ? 700 : 400;
+    color: root.neutral ? Palette.foreground : root.error ? Tone.error() : Tone.success();
+}
+
+// The outcome line of a window, under its body: as tall as the text needs up to a few lines,
+// then it scrolls, so that a long error can neither push the actions out of the window nor
+// run over the controls above it. The text is named for a screen reader whole.
+export component StatusArea inherits ScrollView {
+    in property <string> message;
+    in property <bool> error;
+    in property <bool> neutral;
+    // How tall it grows before it scrolls.
+    in property <length> limit: 96px;
+    vertical-stretch: 0;
+    min-height: min(body.preferred-height, 60px);
+    preferred-height: min(body.preferred-height, root.limit);
+    accessible-role: text;
+    accessible-label: root.message;
+    body := VerticalLayout {
+        StatusText {
+            text: root.message;
+            error: root.error;
+            neutral: root.neutral;
+        }
+    }
+}
+
+// What runs while the window waits: its buttons are disabled meanwhile, and this says why.
+export component BusyRow inherits HorizontalLayout {
+    in property <string> label;
+    spacing: Metrics.gap;
+    alignment: start;
+    accessible-role: text;
+    accessible-label: root.label;
+    Spinner {
+        indeterminate: true;
+        width: 20px;
+        height: 20px;
+    }
+
+    Text {
+        text: root.label;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+}
+
+// A line of text edited under its label; its text is named for a screen reader and Enter
+// only reports `accepted`.
+export component TextField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> placeholder;
+    // Dots instead of the text.
+    in property <bool> secret;
+    in property <bool> field-enabled: true;
+    in-out property <string> text;
+    callback accepted();
+    forward-focus: edit;
+    spacing: 4px;
+    FieldLabel {
+        text: root.label;
+    }
+
+    edit := LineEdit {
+        text <=> root.text;
+        enabled: root.field-enabled;
+        placeholder-text: root.placeholder;
+        input-type: root.secret ? InputType.password : InputType.text;
+        accessible-label: root.label;
+        accepted => {
+            root.accepted();
+        }
+    }
+}
+
+// A path under its label with the button that opens the system's chooser.
+export component PathField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> placeholder;
+    in property <bool> field-enabled: true;
+    in-out property <string> text;
+    callback browse();
+    forward-focus: edit;
+    spacing: 4px;
+    FieldLabel {
+        text: root.label;
+    }
+
+    HorizontalLayout {
+        spacing: Metrics.gap;
+        edit := LineEdit {
+            horizontal-stretch: 1;
+            text <=> root.text;
+            enabled: root.field-enabled;
+            placeholder-text: root.placeholder;
+            accessible-label: root.label;
+        }
+
+        Button {
+            text: @tr("Browse…");
+            enabled: root.field-enabled;
+            accessible-description: root.label;
+            clicked => {
+                root.browse();
+            }
+        }
+    }
+}
+
+// A link that the keyboard reaches: Tab, then Enter or Space; its focus is drawn.
+export component LinkButton inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+    forward-focus: scope;
+    border-width: scope.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    border-radius: 3px;
+    min-height: label.preferred-height + 4px;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => {
+        root.clicked();
+    }
+    scope := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+        TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                scope.focus();
+                root.clicked();
+            }
+        }
+
+        label := Text {
+            text: root.text;
+            color: Tone.link();
+            wrap: word-wrap;
+            vertical-alignment: center;
+        }
+
+        // The underline that tells a link without colour.
+        Rectangle {
+            y: parent.height - 2px;
+            height: 1px;
+            background: Tone.link();
+        }
+    }
+}
+
+// The body of a window: it scrolls when it does not fit, so that the actions under it never
+// leave the window, and it asks for no more height than a screen can give.
+export component DialogScroll inherits ScrollView {
+    vertical-stretch: 1;
+    min-height: 0px;
+    preferred-height: min(content.preferred-height, Metrics.max-preferred-height);
+    content := VerticalLayout {
+        spacing: Metrics.gap;
+        alignment: start;
+        @children
+    }
+}
+
+// The buttons of a window, right-aligned under its body and outside its scrolling. `inside`
+// tells whether the whole bar is within a window of `width` × `height`.
+export component ActionBar inherits Rectangle {
+    vertical-stretch: 0;
+    min-height: row.min-height;
+    min-width: row.min-width;
+    preferred-height: row.preferred-height;
+    public pure function inside(width: length, height: length) -> bool {
+        return self.absolute-position.x >= 0px && self.absolute-position.y >= 0px && self.absolute-position.x + self.width <= width && self.absolute-position.y + self.height <= height && row.min-width <= self.width;
+    }
+    row := HorizontalLayout {
+        spacing: Metrics.gap;
+        alignment: end;
+        @children
+    }
+}
+
+// The button that opens and closes a block that is out of the way until asked for (the rare
+// options); the block is `if <this>.open: …` beside it. The button is on the Tab ring and says
+// whether the block is open without relying on the arrow.
+export component Disclosure inherits Button {
+    in property <string> title;
+    in-out property <bool> open;
+    text: (root.open ? "▾ " : "▸ ") + root.title;
+    accessible-label: root.title;
+    accessible-expandable: true;
+    accessible-expanded: root.open;
+    clicked => {
+        root.open = !root.open;
+    }
+}
+
+// Escape: the window's own way out, from wherever the focus is (a field, a list and a combo
+// box's open list keep their Escape for themselves). It reports and does nothing else.
+export component EscapeScope inherits FocusScope {
+    callback escape();
+    key-pressed(event) => {
+        if event.text == Key.Escape {
+            root.escape();
+            return accept;
+        }
+        reject
+    }
+}

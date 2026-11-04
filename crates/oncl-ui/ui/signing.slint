@@ -5,6 +5,7 @@
 
 import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, StandardListView, TextEdit } from "std-widgets.slint";
 import { ReportRow, ReportView } from "report.slint";
+import { ErrorText, FieldLabel, Heading } from "common.slint";
 
 export global SigningState {
     // 0: documents and key store, 1: password and certificate, 2: confirmation, 3: running,
@@ -87,20 +88,6 @@ export global SigningState {
     callback browse-folder();
 }
 
-component Heading inherits Text {
-    font-size: 22px;
-    font-weight: 700;
-}
-
-component Label inherits Text {
-    font-weight: 600;
-}
-
-component ErrorText inherits Text {
-    color: Palette.color-scheme == ColorScheme.dark ? #ff8a80 : #c62828;
-    wrap: word-wrap;
-}
-
 export component SigningPage inherits VerticalLayout {
     spacing: 8px;
     Heading {
@@ -123,7 +110,7 @@ export component SigningPage inherits VerticalLayout {
 
     if SigningState.step == 0: VerticalLayout {
         spacing: 8px;
-        Label {
+        FieldLabel {
             text: @tr("Documents to sign");
         }
 
@@ -184,7 +171,7 @@ export component SigningPage inherits VerticalLayout {
             accessible-label: @tr("Documents to sign");
         }
 
-        Label {
+        FieldLabel {
             text: @tr("Format of the signature");
         }
 
@@ -204,7 +191,7 @@ export component SigningPage inherits VerticalLayout {
             }
         }
 
-        Label {
+        FieldLabel {
             text: @tr("Where the results are written");
         }
 
@@ -250,7 +237,7 @@ export component SigningPage inherits VerticalLayout {
             }
             if SigningState.format-index == 1: VerticalLayout {
                 spacing: 4px;
-                Label {
+                FieldLabel {
                     text: @tr("Element to sign (XML ID)");
                 }
 
@@ -259,7 +246,7 @@ export component SigningPage inherits VerticalLayout {
                     accessible-label: @tr("Element to sign (XML ID)");
                 }
 
-                Label {
+                FieldLabel {
                     text: @tr("Element that gets the signature (XML ID)");
                 }
 
@@ -268,7 +255,7 @@ export component SigningPage inherits VerticalLayout {
                     accessible-label: @tr("Element that gets the signature (XML ID)");
                 }
 
-                Label {
+                FieldLabel {
                     text: @tr("Identity of the signature (XML ID)");
                 }
 
@@ -280,7 +267,7 @@ export component SigningPage inherits VerticalLayout {
         }
             if (SigningState.format-index == 0 || SigningState.format-index == 3) && SigningState.level-index >= 3: VerticalLayout {
                 spacing: 4px;
-                Label {
+                FieldLabel {
                     text: @tr("Evidence: certificates of the chain (files, separated by ;)");
                 }
 
@@ -289,7 +276,7 @@ export component SigningPage inherits VerticalLayout {
                     accessible-label: @tr("Evidence: certificates of the chain (files, separated by ;)");
                 }
 
-                Label {
+                FieldLabel {
                     text: @tr("Evidence: OCSP responses (files, separated by ;)");
                 }
 
@@ -298,7 +285,7 @@ export component SigningPage inherits VerticalLayout {
                     accessible-label: @tr("Evidence: OCSP responses (files, separated by ;)");
                 }
 
-                Label {
+                FieldLabel {
                     text: @tr("Evidence: CRLs (files, separated by ;)");
                 }
 
@@ -308,7 +295,7 @@ export component SigningPage inherits VerticalLayout {
                 }
             }
 
-        Label {
+        FieldLabel {
             text: @tr("Key store (PKCS#12, JKS)");
         }
 
@@ -372,7 +359,7 @@ export component SigningPage inherits VerticalLayout {
     }
     if SigningState.step == 1: VerticalLayout {
         spacing: 8px;
-        Label {
+        FieldLabel {
             text: @tr("Password of the key store");
         }
 
@@ -413,7 +400,7 @@ export component SigningPage inherits VerticalLayout {
 
         if SigningState.certs.length > 0: VerticalLayout {
             spacing: 8px;
-            Label {
+            FieldLabel {
                 text: @tr("Choose the certificate");
             }
 
@@ -461,7 +448,7 @@ export component SigningPage inherits VerticalLayout {
     }
     if SigningState.step == 2: VerticalLayout {
         spacing: 8px;
-        Label {
+        FieldLabel {
             text: @tr("Certificate");
         }
 
@@ -480,7 +467,7 @@ export component SigningPage inherits VerticalLayout {
             wrap: word-wrap;
         }
 
-        Label {
+        FieldLabel {
             text: @tr("Documents (names are as given, not checked)");
         }
 

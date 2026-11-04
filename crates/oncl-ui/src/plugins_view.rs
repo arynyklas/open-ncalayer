@@ -1001,6 +1001,7 @@ mod tests {
             about: AboutInfo::default(),
             tls: crate::tls_wizard::fakes::services(dir.path(), Vec::new(), None),
             plugins: Box::new(fake),
+            scale: oncl_desktop::UiScale::default(),
             on_saved: Box::new(|_: &oncl_desktop::Settings| {}),
         });
         open(&crate::windows::desktop().unwrap());

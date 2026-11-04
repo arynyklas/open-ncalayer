@@ -1,13 +1,15 @@
 // The certificate request dialog of generateCsr: storage, folder for the new key files and,
 // without a password from the page, the key file password.
 
-import { Button, CheckBox, LineEdit, Palette, VerticalBox } from "std-widgets.slint";
+import { Button, CheckBox, Palette } from "std-widgets.slint";
 import { StorageRow } from "storage.slint";
+import { ActionBar, DialogScroll, EscapeScope, FieldLabel, Hint, Metrics, NameText, PathField, StatusArea, Subheading, TextField, Tone } from "common.slint";
 
 export component CsrDialog inherits Window {
     title: "OpenNCALayer";
     always-on-top: true;
-    min-width: 480px;
+    min-width: Metrics.form-min-width;
+    min-height: Metrics.min-height;
 
     // The requesting page's origin.
     in property <string> origin;
@@ -21,6 +23,8 @@ export component CsrDialog inherits Window {
     in-out property <string> confirmation;
     // Why the answer was refused.
     in-out property <string> error;
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
 
     callback browse();
     callback confirm();
@@ -28,140 +32,143 @@ export component CsrDialog inherits Window {
 
     private property <bool> can-confirm: root.selected >= 0 && !root.path.is-empty && (!root.ask-password || !root.password.is-empty);
 
-    VerticalBox {
-        Text {
-            text: @tr("Request from: {}", root.origin);
-            wrap: word-wrap;
+    // Escape works from the first moment: the focus starts here, and Tab goes on from it.
+    forward-focus: keys;
+    keys := EscapeScope {
+        escape => {
+            root.cancel();
         }
-
-        Text {
-            text: @tr("Certificate request");
-            font-weight: 700;
-        }
-
-        Text {
-            text: @tr("Key storage");
-        }
-
         VerticalLayout {
-            for row[i] in root.storages: Rectangle {
-                height: 28px;
-                border-radius: 4px;
-                background: i == root.selected ? Palette.selection-background : transparent;
-                accessible-role: list-item;
-                accessible-label: row.label;
-                accessible-enabled: row.supported;
-                accessible-item-selectable: row.supported;
-                accessible-item-selected: i == root.selected;
-                accessible-item-index: i;
-                accessible-item-count: root.storages.length;
-                accessible-action-default => {
-                    if (row.supported) {
-                        root.selected = i;
+            padding: Metrics.pad;
+            spacing: Metrics.gap;
+            DialogScroll {
+                NameText {
+                    text: @tr("Request from: {}", root.origin);
+                }
+
+                Subheading {
+                    text: @tr("Certificate request");
+                }
+
+                FieldLabel {
+                    text: @tr("Key storage");
+                }
+
+                VerticalLayout {
+                    for row[i] in root.storages: Rectangle {
+                        height: 28px;
+                        border-radius: 4px;
+                        border-width: row-focus.has-focus ? 2px : 0px;
+                        border-color: Palette.accent-background;
+                        background: i == root.selected ? Palette.selection-background : transparent;
+                        accessible-role: list-item;
+                        accessible-label: row.label;
+                        accessible-enabled: row.supported;
+                        accessible-item-selectable: row.supported;
+                        accessible-item-selected: i == root.selected;
+                        accessible-item-index: i;
+                        accessible-item-count: root.storages.length;
+                        accessible-action-default => {
+                            if (row.supported) {
+                                root.selected = i;
+                            }
+                        }
+                        // The keyboard reaches the row (Tab) and chooses it (Enter or Space); a
+                        // row that is not supported is skipped.
+                        row-focus := FocusScope {
+                            enabled: row.supported;
+                            key-pressed(event) => {
+                                if event.text == Key.Return || event.text == " " {
+                                    root.selected = i;
+                                    return accept;
+                                }
+                                reject
+                            }
+                        }
+
+                        TouchArea {
+                            enabled: row.supported;
+                            mouse-cursor: row.supported ? pointer : default;
+                            clicked => {
+                                root.selected = i;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            Text {
+                                text: row.label;
+                                vertical-alignment: center;
+                                color: !row.supported ? Tone.quiet() : i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+
+                            if !row.supported: Text {
+                                text: @tr("not supported yet");
+                                vertical-alignment: center;
+                                font-italic: true;
+                                color: Tone.quiet();
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                        }
                     }
                 }
-                TouchArea {
-                    enabled: row.supported;
-                    mouse-cursor: row.supported ? pointer : default;
+
+                PathField {
+                    label: @tr("Key storage folder");
+                    text <=> root.path;
+                    browse => {
+                        root.browse();
+                    }
+                }
+
+                if root.ask-password: VerticalLayout {
+                    spacing: Metrics.gap;
+                    TextField {
+                        label: @tr("Password");
+                        secret: !show-password.checked;
+                        text <=> root.password;
+                    }
+
+                    TextField {
+                        label: @tr("Confirm password");
+                        secret: !show-password.checked;
+                        text <=> root.confirmation;
+                        accepted => {
+                            if (root.can-confirm) {
+                                root.confirm();
+                            }
+                        }
+                    }
+
+                    show-password := CheckBox {
+                        text: @tr("Show password");
+                    }
+                }
+            }
+
+            if !root.error.is-empty: StatusArea {
+                message: root.error;
+                error: true;
+            }
+            actions := ActionBar {
+                Button {
+                    text: @tr("Confirm");
+                    primary: true;
+                    enabled: root.can-confirm;
                     clicked => {
-                        root.selected = i;
-                    }
-                }
-
-                HorizontalLayout {
-                    padding-left: 8px;
-                    padding-right: 8px;
-                    spacing: 8px;
-                    Text {
-                        text: row.label;
-                        vertical-alignment: center;
-                        color: !row.supported ? #888888 : i == root.selected ? Palette.selection-foreground : Palette.foreground;
-                    }
-
-                    if !row.supported: Text {
-                        text: @tr("not supported yet");
-                        vertical-alignment: center;
-                        font-italic: true;
-                        color: #888888;
-                    }
-                    Rectangle {
-                        horizontal-stretch: 1;
-                    }
-                }
-            }
-        }
-
-        Text {
-            text: @tr("Key storage folder");
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            LineEdit {
-                text <=> root.path;
-                horizontal-stretch: 1;
-            }
-
-            Button {
-                text: @tr("Browse…");
-                clicked => {
-                    root.browse();
-                }
-            }
-        }
-
-        if root.ask-password: VerticalLayout {
-            spacing: 8px;
-            Text {
-                text: @tr("Password");
-            }
-
-            LineEdit {
-                text <=> root.password;
-                input-type: show-password.checked ? InputType.text : InputType.password;
-            }
-
-            Text {
-                text: @tr("Confirm password");
-            }
-
-            LineEdit {
-                text <=> root.confirmation;
-                input-type: show-password.checked ? InputType.text : InputType.password;
-                accepted => {
-                    if (root.can-confirm) {
                         root.confirm();
                     }
                 }
-            }
 
-            show-password := CheckBox {
-                text: @tr("Show password");
-            }
-        }
-
-        if !root.error.is-empty: Text {
-            text: root.error;
-            wrap: word-wrap;
-            color: #c42b1c;
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: end;
-            Button {
-                text: @tr("Confirm");
-                primary: true;
-                enabled: root.can-confirm;
-                clicked => {
-                    root.confirm();
-                }
-            }
-
-            Button {
-                text: @tr("Cancel");
-                clicked => {
-                    root.cancel();
+                Button {
+                    text: @tr("Cancel");
+                    clicked => {
+                        root.cancel();
+                    }
                 }
             }
         }

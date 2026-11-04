@@ -1,13 +1,14 @@
 // The reader dialog of the legacy Applet's `browseKeyStore`: a reader holding a token of one
 // storage.
 
-import { Button, StandardListView, VerticalBox } from "std-widgets.slint";
+import { Button, StandardListView } from "std-widgets.slint";
+import { ActionBar, DialogScroll, EscapeScope, Hint, Metrics, NameText, StatusText, Subheading } from "common.slint";
 
 export component ReaderDialog inherits Window {
     title: "OpenNCALayer";
     always-on-top: true;
-    min-width: 420px;
-    min-height: 300px;
+    min-width: Metrics.dialog-min-width;
+    min-height: Metrics.min-height;
 
     // The requesting page's origin.
     in property <string> origin;
@@ -21,6 +22,8 @@ export component ReaderDialog inherits Window {
     in property <string> reader-note;
     // The readers are being searched for: «Refresh» waits.
     in property <bool> scanning;
+    // The buttons are inside the window, whatever the text and the scale.
+    out property <bool> actions-reachable: actions.inside(root.width, root.height);
 
     callback choose();
     callback cancel();
@@ -28,67 +31,73 @@ export component ReaderDialog inherits Window {
 
     private property <bool> can-choose: root.reader-index >= 0 && root.reader-index < root.readers.length;
 
-    VerticalBox {
-        Text {
-            text: @tr("Request from: {}", root.origin);
-            wrap: word-wrap;
+    // Escape works from the first moment: the focus starts here, and Tab goes on from it.
+    forward-focus: keys;
+    keys := EscapeScope {
+        escape => {
+            root.cancel();
         }
+        VerticalLayout {
+            padding: Metrics.pad;
+            spacing: Metrics.gap;
+            DialogScroll {
+                NameText {
+                    text: @tr("Request from: {}", root.origin);
+                }
 
-        Text {
-            text: @tr("Key storage selection");
-            font-weight: 700;
-        }
+                Subheading {
+                    text: @tr("Key storage selection");
+                }
 
-        Text {
-            text: @tr("Storage type: {}", root.storage);
-            wrap: word-wrap;
-        }
+                NameText {
+                    text: @tr("Storage type: {}", root.storage);
+                }
 
-        StandardListView {
-            vertical-stretch: 1;
-            model: root.readers;
-            current-item <=> root.reader-index;
-        }
+                StandardListView {
+                    min-height: 120px;
+                    model: root.readers;
+                    current-item <=> root.reader-index;
+                    accessible-label: @tr("Key storage selection");
+                }
 
-        if !root.reader-note.is-empty: Text {
-            text: root.reader-note;
-            wrap: word-wrap;
-        }
+                if !root.reader-note.is-empty: Text {
+                    text: root.reader-note;
+                    wrap: char-wrap;
+                }
 
-        Text {
-            text: @tr("Token support is experimental: checked on an emulator only");
-            wrap: word-wrap;
-            font-italic: true;
-            color: #888888;
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            Button {
-                text: @tr("Refresh");
-                enabled: !root.scanning;
-                clicked => {
-                    root.refresh();
+                Hint {
+                    text: @tr("Token support is experimental: checked on an emulator only");
+                    font-italic: true;
                 }
             }
 
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-
-            Button {
-                text: @tr("Choose");
-                primary: true;
-                enabled: root.can-choose;
-                clicked => {
-                    root.choose();
+            actions := ActionBar {
+                Button {
+                    text: @tr("Refresh");
+                    enabled: !root.scanning;
+                    clicked => {
+                        root.refresh();
+                    }
                 }
-            }
 
-            Button {
-                text: @tr("Cancel");
-                clicked => {
-                    root.cancel();
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                Button {
+                    text: @tr("Choose");
+                    primary: true;
+                    enabled: root.can-choose;
+                    clicked => {
+                        root.choose();
+                    }
+                }
+
+                Button {
+                    text: @tr("Cancel");
+                    clicked => {
+                        root.cancel();
+                    }
                 }
             }
         }
