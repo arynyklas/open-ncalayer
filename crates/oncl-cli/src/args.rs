@@ -26,6 +26,9 @@ pub struct Cli {
     /// TSA endpoint (POST) used when CAdES T/LT/LTA evidence is acquired.
     #[arg(long, global = true)]
     pub tsa_url: Option<String>,
+    /// Dotted TSA policy OID requested and required of every token (needed for XAdES T/LT/LTA).
+    #[arg(long, global = true)]
+    pub tsa_policy: Option<String>,
     /// Aggregate encoded host certificate bytes, including duplicate roots.
     #[arg(long, global = true, default_value_t = 16_777_216)]
     pub configuration_bytes: u64,
@@ -64,7 +67,7 @@ pub enum Command {
         #[arg(long)]
         output: String,
     },
-    Sign(SignArgs),
+    Sign(Box<SignArgs>),
     Inspect(crate::families::InspectArgs),
     Extend(crate::families::ExtendArgs),
     Timestamp {
@@ -239,8 +242,10 @@ pub struct SignArgs {
     pub signature_id: Option<String>,
     #[command(flatten)]
     pub wsse: crate::wsse::WsseOptions,
+    #[command(flatten)]
+    pub legacy: crate::legacy::LegacyOptions,
 }
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SignProfile {
     Cms,
     Raw,
@@ -280,6 +285,13 @@ impl Cli {
             pin.split_once('=')
                 .is_none_or(|(_, address)| address.parse::<std::net::SocketAddr>().is_err())
         }) {
+            return Err("InvalidCombination");
+        }
+        if self
+            .tsa_policy
+            .as_deref()
+            .is_some_and(|policy| policy.parse::<der::asn1::ObjectIdentifier>().is_err())
+        {
             return Err("InvalidCombination");
         }
         if self.root.len().saturating_add(self.intermediate.len()) > 1024
@@ -355,6 +367,7 @@ impl Cli {
             {
                 return Err("InvalidCombination");
             }
+            args.legacy.preflight(args, self.tsa_url.is_some())?;
             if args.wsse.any() && !matches!(args.profile, SignProfile::Wsse) {
                 return Err("InvalidCombination");
             }

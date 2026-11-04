@@ -52,6 +52,7 @@ pub fn action(args: &SignArgs) -> Action {
 }
 pub fn execute(
     engine: &Engine,
+    cli: &crate::args::Cli,
     args: &SignArgs,
     selector: &KeySelector,
     store: &TemporaryStore,
@@ -88,7 +89,50 @@ pub fn execute(
         evidence_limits: Some(evidence_limits()),
         ..oncl_xml::XmlSignProfile::default()
     };
+    let mut legacy_chain = if args.legacy.legacy && !args.legacy.legacy_chain.is_empty() {
+        Some(crate::legacy::chain(&args.legacy.legacy_chain, ctx)?)
+    } else {
+        None
+    };
+    // Host-configured TSA, identical to the Engine's CAdES configuration: the
+    // facade refuses any other TSA.
+    let legacy_tsa = cli
+        .tsa_url
+        .as_deref()
+        .map(|url| {
+            crate::public::tsa(
+                url,
+                oncl_pki::key::HashAlg::Sha256,
+                std::time::Duration::from_secs(cli.timeout_seconds),
+                cli.tsa_policy.as_deref(),
+            )
+        })
+        .transpose()?;
+    let mut legacy_xades = |level| oncl_xml::xades::XadesSpec {
+        level,
+        tsa: if level == oncl_xml::xades::XadesLevel::B {
+            None
+        } else {
+            legacy_tsa.clone()
+        },
+        chain: legacy_chain
+            .as_mut()
+            .map(|chain| std::mem::take(&mut chain.certificates))
+            .unwrap_or_default(),
+        signature_method: args.legacy.xades_signature_method(),
+        digest_method: args.legacy.xades_digest_method(),
+    };
     let request = match args.profile {
+        P::Xml if args.legacy.legacy => SignRequest::xml_legacy(key(), args.legacy.xml_spec(args)),
+        P::XadesB if args.legacy.legacy => {
+            SignRequest::xades_legacy(key(), legacy_xades(oncl_xml::xades::XadesLevel::B))
+        }
+        P::XadesT if args.legacy.legacy => {
+            SignRequest::xades_legacy(key(), legacy_xades(oncl_xml::xades::XadesLevel::T))
+        }
+        P::XadesLt if args.legacy.legacy => {
+            SignRequest::xades_legacy(key(), legacy_xades(oncl_xml::xades::XadesLevel::Lt))
+        }
         P::Cms if args.add => {
             SignRequest::cms_add(vec![key()], detached.as_mut().map(Input::source))
         }

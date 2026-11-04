@@ -25,6 +25,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 zeroize.workspace = true
 time.workspace = true
+der.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -32,7 +33,6 @@ oncl-testkit.workspace = true
 oncl-pki = { workspace = true, features = ["testing"] }
 base64.workspace = true
 wat.workspace = true
-der.workspace = true
 x509-cert.workspace = true
 
 [target.'cfg(windows)'.dependencies]

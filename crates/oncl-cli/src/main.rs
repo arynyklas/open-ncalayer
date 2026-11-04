@@ -5,6 +5,7 @@ mod control;
 mod families;
 mod jose;
 mod jose_args;
+mod legacy;
 mod local;
 mod output;
 mod plugin;

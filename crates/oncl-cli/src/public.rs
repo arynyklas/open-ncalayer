@@ -79,19 +79,29 @@ pub fn extend(
     prepared.send()?;
     Ok(0)
 }
-pub fn tsa(url: &str, algorithm: oncl_pki::key::HashAlg, timeout: Duration) -> TsaSpec {
-    TsaSpec {
+/// Operator-requested TSA policy OID (dotted). XAdES evidence requires one.
+pub fn policy(text: &str) -> Result<der::asn1::ObjectIdentifier, OperationError> {
+    text.parse()
+        .map_err(|_| ProcessingError::InvalidInput("invalid host TSA policy").into())
+}
+pub fn tsa(
+    url: &str,
+    algorithm: oncl_pki::key::HashAlg,
+    timeout: Duration,
+    policy_oid: Option<&str>,
+) -> Result<TsaSpec, OperationError> {
+    Ok(TsaSpec {
         url: url.to_owned(),
         method: oncl_pki::http::PkiMethod::Post { content_type: None },
         hash: algorithm,
-        policy: None,
+        policy: policy_oid.map(policy).transpose()?,
         nonce: oncl_pki::http::NonceSpec::Random(16),
         cert_req: true,
         retries: 0,
         timeout,
         check_skew: Some(Duration::from_secs(300)),
         require_tsa_eku: true,
-    }
+    })
 }
 pub fn timestamp(
     engine: &Engine,
@@ -121,7 +131,8 @@ pub fn timestamp(
                 url,
                 algorithm.sdk(),
                 Duration::from_secs(cli.timeout_seconds),
-            ));
+                cli.tsa_policy.as_deref(),
+            )?);
             let mut source = Input::open(input)?;
             let store = output::store(cli, destination)?;
             let mut stage = store.stage(ctx.resources())?;

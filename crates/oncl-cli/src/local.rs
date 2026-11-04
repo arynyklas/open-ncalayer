@@ -294,7 +294,8 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
                 url,
                 oncl_pki::key::HashAlg::Sha256,
                 std::time::Duration::from_secs(cli.timeout_seconds),
-            ),
+                cli.tsa_policy.as_deref(),
+            )?,
         ));
     }
     if let Some(registry) = plugin_registry {
@@ -382,6 +383,7 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
             let output_store = TemporaryStore::new(parent)?;
             let (stage, result) = crate::sign::execute(
                 &engine,
+                cli,
                 args,
                 selector.as_ref().ok_or(OperationError::InvalidKeySource)?,
                 &output_store,
