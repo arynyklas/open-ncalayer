@@ -109,3 +109,40 @@ fn an_engine_without_a_gate_is_not_held_back() {
         .unwrap();
     drop(ctx);
 }
+
+#[test]
+fn a_worker_that_outlives_its_context_keeps_the_operation_running() {
+    // A native call still running when the context is dropped (cancelled, abandoned) holds
+    // the operation's lease; an installer must not replace the program under it.
+    let gate = Arc::new(ActivityGate::new());
+    let engine = engine(&gate);
+    let ctx = engine
+        .begin(grant(), OperationPolicy::strict_online(), Arc::new(Control))
+        .unwrap();
+    let worker_lease = ctx.lease();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let worker = std::thread::spawn(move || {
+        let _native = worker_lease;
+        released.recv().unwrap();
+    });
+    drop(ctx);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !gate.idle(Duration::ZERO, later()),
+        "the worker is still running"
+    );
+    assert!(
+        gate.maintenance(Duration::ZERO, Instant::now, || false)
+            .is_none(),
+        "a maintainer cannot hold the program under a native worker"
+    );
+    release.send(()).unwrap();
+    worker.join().unwrap();
+    assert!(gate.idle(QUIET, later()), "the worker returned");
+    // And a maintainer that is abandoned still lets go.
+    let hold = gate
+        .maintenance(Duration::ZERO, Instant::now, || false)
+        .unwrap();
+    drop(hold);
+    assert!(!gate.is_held());
+}

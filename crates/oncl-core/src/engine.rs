@@ -109,7 +109,6 @@ pub struct OperationAdmission {
     owner: Arc<()>,
     scope: oncl_pki::resource::ResourceScope,
     original_scope: oncl_pki::resource::ResourceScope,
-    activity: Option<crate::activity::ActivityLease>,
 }
 impl OperationAdmission {
     pub fn id(&self) -> OperationId {
@@ -185,6 +184,11 @@ impl Engine {
             .as_ref()
             .map(crate::activity::ActivityGate::begin);
         let scope = self.budget.begin(self.limits.clone(), control)?;
+        // Counted until the LAST owner of the operation lets go: the context, but also a
+        // native worker that outlives it, a pending response or an artifact.
+        if let Some(activity) = activity {
+            scope.lease().attach_guard(Box::new(activity));
+        }
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
@@ -194,7 +198,6 @@ impl Engine {
             owner: self.identity.clone(),
             original_scope: scope.shared_view(),
             scope,
-            activity,
         })
     }
     /// Consume the original intake state only after host authorization. Scope
@@ -228,7 +231,6 @@ impl Engine {
             grant,
             policy,
             scope: admission.scope,
-            _activity: admission.activity,
             leases: Vec::new(),
             private_use_stopped: std::sync::atomic::AtomicBool::new(false),
             batch_item: None,

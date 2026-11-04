@@ -253,7 +253,18 @@ fn wrapper(args: &[OsString]) -> ExitCode {
         poll: millis("ONCL_HARNESS_POLL_MS", 50),
         setup_timeout: millis("ONCL_HARNESS_SETUP_TIMEOUT_MS", 120_000),
         temp_root: PathBuf::from(var("ONCL_HARNESS_TEMP").expect("temp")),
-        elevated: var("ONCL_HARNESS_ELEVATED").is_some(),
+        // The real predicate unless the test pretends: `ONCL_HARNESS_ELEVATED` says elevated,
+        // `ONCL_HARNESS_REAL_ELEVATION` asks the real token of this process.
+        elevation: if var("ONCL_HARNESS_REAL_ELEVATION").is_some() {
+            oncl_winget_setup::is_elevated
+        } else if var("ONCL_HARNESS_ELEVATED").is_some() {
+            || Ok(true)
+        } else {
+            || Ok(false)
+        },
+        before_setup_check: var("ONCL_HARNESS_START_PROGRAM_BEFORE_CHECK")
+            .is_some()
+            .then_some(start_program_meanwhile as fn()),
     };
     let report = oncl_winget_setup::run(&config);
     eprintln!("{}", report.message);
@@ -376,4 +387,18 @@ fn install(setup: &Path, root: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A program of the installation that starts while the entry prepares Setup: the fake
+/// desktop, running as the installed program, given time to serve its endpoint.
+fn start_program_meanwhile() {
+    let root = PathBuf::from(var("ONCL_HARNESS_ROOT").expect("root"));
+    let program = root.join("current").join("openncalayer.exe");
+    let _ = std::process::Command::new(program)
+        .args(["run", "--allow-no-wss"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    std::thread::sleep(Duration::from_millis(1500));
 }

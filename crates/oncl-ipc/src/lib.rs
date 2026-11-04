@@ -11,6 +11,7 @@
 //!   still on while the program is replaced.
 //! - `process` (Windows only) helps the relay start the daemon detached from the browser.
 
+mod datadir;
 mod endpoint;
 mod frame;
 pub mod ids;
@@ -22,5 +23,6 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
+pub use datadir::{DATA_DIR_VAR, data_dir_from};
 pub use endpoint::{Endpoint, IpcListener, IpcStream, bind, connect, endpoint};
 pub use frame::{MAX_FRAME, NM_OUT_LIMIT, read_frame, read_nm_frame, write_frame, write_nm_frame};

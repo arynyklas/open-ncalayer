@@ -843,3 +843,55 @@ fn the_shipped_installer_says_what_it_is_missing_and_never_installs_without_a_pa
     let message = String::from_utf8_lossy(&output.stderr);
     assert!(message.contains("payload"), "{message}");
 }
+
+// ----------------------------------------------------------- elevation and a late program
+
+#[test]
+fn elevation_is_asked_of_the_real_token() {
+    // The predicate the shipped installer uses, on this process's real token: not elevated
+    // means the entry goes on, elevated means it refuses before it writes anything.
+    let mut fx = Fixture::new();
+    // An oracle that does not share code with the predicate: Windows' own report of this
+    // process's integrity level (High, S-1-16-12288, is an elevated token).
+    let groups = Command::new("whoami").arg("/groups").output().unwrap();
+    let elevated = String::from_utf8_lossy(&groups.stdout).contains("S-1-16-12288");
+    assert_eq!(oncl_winget_setup::is_elevated().unwrap(), elevated);
+    let (code, message) =
+        fx.run_entry("0.2.0", 0, &[("REAL_ELEVATION", "1"), ("SETUP", "install")]);
+    let expected = if elevated {
+        Exit::Elevated
+    } else {
+        Exit::Success
+    };
+    assert_eq!(code, expected as u8, "{message}");
+    if elevated {
+        assert_eq!(fx.setups_started(), 0);
+    }
+}
+
+#[test]
+fn a_program_that_starts_while_the_installer_prepares_is_asked_not_stopped() {
+    let mut fx = Fixture::new();
+    fx.install_before("0.1.0");
+    fx.entry_image("0.2.0");
+    // Nothing runs when the entry first looks; the program starts while it prepares Setup.
+    let (code, message) = fx.run_entry(
+        "0.2.0",
+        20_000,
+        &[
+            ("START_PROGRAM_BEFORE_CHECK", "1"),
+            ("FORCE_STOP", "1"),
+            ("SETUP", "install"),
+        ],
+    );
+    assert_eq!(code, Exit::Success as u8, "{message}");
+    // It was held (asked) before Setup, so it is started again after the replacement; had
+    // it been left for Setup's force-stop it would be gone.
+    assert!(message.contains("running again"), "{message}");
+    let started = fx
+        .log_lines()
+        .iter()
+        .filter(|l| l.ends_with("program started: run --allow-no-wss"))
+        .count();
+    assert_eq!(started, 2, "{:?}", fx.log_lines());
+}

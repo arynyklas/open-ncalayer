@@ -73,8 +73,12 @@ pub struct Config {
     pub setup_timeout: Duration,
     /// Where the private copy of the payload is made.
     pub temp_root: PathBuf,
-    /// Whether this process runs with an elevated token.
-    pub elevated: bool,
+    /// Whether this process runs with an elevated token (`production` sets
+    /// [`crate::is_elevated`]); asked before anything is read or written.
+    pub elevation: fn() -> std::io::Result<bool>,
+    /// Run right before the last look for a program that started meanwhile; `None` in
+    /// production. Tests use it to start one.
+    pub before_setup_check: Option<fn()>,
 }
 
 /// Replaces the installation with the entry's payload, if it is safe to, and proves it.
@@ -141,12 +145,23 @@ mod windows {
         // a test reads this process's output through open after this process is done.
         let _ = oncl_ipc::process::prepare_detached_spawn();
         // Before anything is read or written: the installation is the user's own.
-        if config.elevated {
-            return Report::new(
-                Exit::Elevated,
-                "this installer must not run elevated: it installs for the signed-in user, \
-                 never for an administrator's profile; nothing was changed",
-            );
+        match (config.elevation)() {
+            Ok(false) => {}
+            Ok(true) => {
+                return Report::new(
+                    Exit::Elevated,
+                    "this installer must not run elevated: it installs for the signed-in user, \
+                     never for an administrator's profile; nothing was changed",
+                );
+            }
+            Err(e) => {
+                return Report::new(
+                    Exit::Failed,
+                    format!(
+                        "it cannot be told whether this installer is elevated ({e}); nothing was changed"
+                    ),
+                );
+            }
         }
         let image = match std::fs::read(&config.image) {
             Ok(image) => image,
@@ -192,13 +207,35 @@ mod windows {
                 );
             }
         };
-        if let Some(lease) = &mut lease
-            && let Err(e) = lease.confirm()
-        {
-            return Report::new(
-                Exit::Unreachable,
-                format!("the running program no longer holds still ({e}); Setup was not started"),
-            );
+        if let Some(hook) = config.before_setup_check {
+            hook();
+        }
+        match &mut lease {
+            Some(lease) => {
+                if let Err(e) = lease.confirm() {
+                    return Report::new(
+                        Exit::Unreachable,
+                        format!(
+                            "the running program no longer holds still ({e}); Setup was not started"
+                        ),
+                    );
+                }
+            }
+            // Nothing ran when it was looked at first. Setup ends whatever runs under the
+            // installation, so look once more right before it starts: a program that
+            // started meanwhile is asked like any other (this is the same single look, not
+            // a retry loop). What remains is the instant between this look and Setup's own
+            // stop of the processes, which only Setup could close.
+            None => match hold(config) {
+                Ok(found) => lease = found,
+                Err(mut report) => {
+                    report.message = format!(
+                        "OpenNCALayer started while the installer was preparing: {}",
+                        report.message
+                    );
+                    return report;
+                }
+            },
         }
 
         let end = match install::run_setup(&copy, &embedded.sha256, config.setup_timeout) {
@@ -364,23 +401,15 @@ mod windows {
             poll: POLL,
             setup_timeout: SETUP_TIMEOUT,
             temp_root: std::env::temp_dir(),
-            elevated: is_elevated()?,
+            elevation: is_elevated,
+            before_setup_check: None,
         })
     }
 
-    /// The data directory of the program, as the program finds it
-    /// (`openncalayer::Paths::detect`): `ONCL_DATA_DIR`, else `%APPDATA%\OpenNCALayer`.
+    /// The data directory of the program, by the rule the program itself uses
+    /// ([`oncl_ipc::data_dir_from`], which `openncalayer::Paths::detect` calls too).
     pub fn data_dir() -> io::Result<PathBuf> {
-        let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
-        let dir = match set("ONCL_DATA_DIR") {
-            Some(dir) => PathBuf::from(dir),
-            None => {
-                let app_data = set("APPDATA")
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is not set"))?;
-                Path::new(&app_data).join("OpenNCALayer")
-            }
-        };
-        std::path::absolute(dir)
+        std::path::absolute(oncl_ipc::data_dir_from(|name| std::env::var_os(name))?)
     }
 
     /// `%LOCALAPPDATA%` of the user, asked of the system as Velopack's `Setup.exe` asks it,
@@ -408,8 +437,8 @@ mod windows {
         result
     }
 
-    /// Whether this process runs with an elevated token.
-    fn is_elevated() -> io::Result<bool> {
+    /// Whether this process runs with an elevated token (`TokenElevation` of its token).
+    pub fn is_elevated() -> io::Result<bool> {
         let mut token: HANDLE = std::ptr::null_mut();
         // SAFETY: plain call; the handle is closed below.
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == FALSE {
@@ -438,9 +467,8 @@ mod windows {
     }
 }
 
-/// The data directory of the program as the program finds it: `ONCL_DATA_DIR`, else
-/// `%APPDATA%\OpenNCALayer`, made absolute. It must stay the rule of
-/// `openncalayer::Paths::detect`; a test of the daemon compares the two.
+/// The data directory of the program as the program finds it: the one rule
+/// [`oncl_ipc::data_dir_from`], which `openncalayer::Paths::detect` calls too, made absolute.
 ///
 /// # Errors
 ///
@@ -448,4 +476,15 @@ mod windows {
 #[cfg(windows)]
 pub fn data_dir() -> std::io::Result<PathBuf> {
     windows::data_dir()
+}
+
+/// Whether this process runs with an elevated token: what `production` asks, and what
+/// [`run`] refuses on.
+///
+/// # Errors
+///
+/// The process token cannot be read.
+#[cfg(windows)]
+pub fn is_elevated() -> std::io::Result<bool> {
+    windows::is_elevated()
 }

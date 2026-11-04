@@ -59,6 +59,11 @@ velopack.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# The installer entry finds the data directory by the daemon's rule: one test compares them.
+oncl-winget-setup.workspace = true
+# `TestKey`: the throw-away Apps & Features key of the maintenance end-to-end tests.
+oncl-registry = { workspace = true, features = ["testing"] }
+semver.workspace = true
 # The SDK's CMS validation, which replaced the daemon's own checker, in the end-to-end tests.
 oncl-core.workspace = true
 # An AuthorityInfoAccess extension for the loopback PKI of the Core validation tests.
@@ -91,3 +96,11 @@ required-features = ["e2e-prompter", "token-emulator"]
 [build-dependencies]
 # The built-in modules' WebAssembly, built (or taken from `ONCL_BUILTINS_DIR`) and embedded.
 oncl-builtins-build.workspace = true
+
+[[test]]
+name = "maintenance_e2e"
+required-features = ["e2e-prompter"]
+
+[target.'cfg(windows)'.dev-dependencies]
+# Ending the processes the maintenance end-to-end tests start.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }

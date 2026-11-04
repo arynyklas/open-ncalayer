@@ -36,4 +36,4 @@ mod run;
 
 pub use run::{Config, Exit, Report, run};
 #[cfg(windows)]
-pub use run::{data_dir, production};
+pub use run::{data_dir, is_elevated, production};

@@ -177,3 +177,18 @@ mod tests {
         assert_eq!(updater.releases.load(Ordering::SeqCst), 1);
     }
 }
+
+#[cfg(all(test, windows))]
+mod data_dir_tests {
+    /// What the installer entry computes is what the daemon's own `Paths::detect` computes:
+    /// the management endpoint of one is the endpoint the other serves.
+    #[test]
+    fn the_installer_finds_the_data_directory_the_daemon_uses() {
+        let daemon = crate::Paths::detect().unwrap().data;
+        assert_eq!(oncl_winget_setup::data_dir().unwrap(), daemon);
+        assert_eq!(
+            oncl_ipc::maintenance::endpoint(&oncl_winget_setup::data_dir().unwrap()).unwrap(),
+            oncl_ipc::maintenance::endpoint(&daemon).unwrap()
+        );
+    }
+}
