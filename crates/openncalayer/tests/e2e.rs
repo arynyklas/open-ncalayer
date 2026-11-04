@@ -1225,8 +1225,15 @@ async fn core_validation_reports_a_signature_made_through_the_service() {
     assert_eq!(signer.signature, CheckStatus::Passed);
     assert_eq!(signer.chain, CheckStatus::Passed);
     assert_eq!(signer.validity, CheckStatus::Passed);
-    assert_eq!(signer.timestamp, CheckStatus::Unavailable, "no TSA revocation offline");
-    assert!(matches!(signer.time_basis, TimeBasis::Current(_)), "{signer:?}");
+    assert_eq!(
+        signer.timestamp,
+        CheckStatus::Unavailable,
+        "no TSA revocation offline"
+    );
+    assert!(
+        matches!(signer.time_basis, TimeBasis::Current(_)),
+        "{signer:?}"
+    );
     assert_eq!(report.verdict, Verdict::Indeterminate, "{signer:?}");
 
     assert!(validate_offline(b"not a CMS").is_err());
@@ -1254,7 +1261,12 @@ fn core_validation_rejects_a_token_of_another_signature() {
     // not a failure of the signature or of the token.
     assert_eq!(report.signers[0].signature, CheckStatus::Passed);
     assert_eq!(report.signers[0].timestamp, CheckStatus::Unavailable);
-    assert_eq!(report.verdict, Verdict::Indeterminate, "{:?}", report.signers[0]);
+    assert_eq!(
+        report.verdict,
+        Verdict::Indeterminate,
+        "{:?}",
+        report.signers[0]
+    );
 
     let old = verify(&first, None).unwrap().swap_remove(0).signature;
     let new = verify(&second, None).unwrap().swap_remove(0).signature;
