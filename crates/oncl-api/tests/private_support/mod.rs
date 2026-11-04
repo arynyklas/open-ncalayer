@@ -168,11 +168,17 @@ impl Pki {
     }
     /// A loopback PKI whose intermediate CRL lists `revoked` unrelated serials (big evidence).
     pub fn start_with_revoked(revoked: usize) -> Self {
+        Self::start_aged(revoked, Duration::ZERO)
+    }
+    /// A PKI whose creation time is `age` in the past, as one that has been up for a
+    /// long test would be (CRL/OCSP issuance is anchored to creation; the TSA is live).
+    pub fn start_aged(revoked: usize, age: Duration) -> Self {
+        let age = time::Duration::try_from(age).unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let origin = format!("http://{address}");
-        let now = time::OffsetDateTime::now_utc();
+        let now = time::OffsetDateTime::now_utc() - age;
         let inter = with_status_locations(
             &raw("inter-gost2015.key"),
             &raw("root-gost2015.key"),
@@ -180,15 +186,16 @@ impl Pki {
             "root",
         );
         let ocsp = Arc::new(MockOcsp::new(raw("ocsp-gost2015")).with_now(now));
-        let tsa = Arc::new(
-            oncl_pki::tsp::MockTsa::new(with_status_locations(
-                &raw("tsa-gost2015"),
-                &raw("root-gost2015.key"),
-                &origin,
-                "root",
-            ))
-            .with_gen_time(now),
-        );
+        // TSA on the live clock, NOT frozen at creation: the server enforces
+        // |genTime - real clock| <= skew_ms (300 s). A TSA stopped at Pki creation
+        // fails every later timestamp (ClockSkew, after key use) once the Pki is
+        // older than that, which long sweeps exceed.
+        let tsa = Arc::new(oncl_pki::tsp::MockTsa::new(with_status_locations(
+            &raw("tsa-gost2015"),
+            &raw("root-gost2015.key"),
+            &origin,
+            "root",
+        )));
         let root = Arc::new(
             MockCrl::new(raw("root-gost2015.key"))
                 .with_this_update(now - time::Duration::MINUTE)
@@ -715,12 +722,11 @@ enum Unreadable {
     Gone,
     /// The service marked it for deletion (`FileDispositionInfo`) while another
     /// handle is still open. Windows answers every new open of such a file with
-    /// ERROR_ACCESS_DENIED (5) while `Path::exists`/`metadata` (attribute-only
-    /// opens) still succeed. Such a file is NOT scanned: its content cannot be
-    /// opened by the watcher. Limitation: a file created, filled and marked
-    /// delete-pending between two polls is never seen at all. The guarantee is
-    /// therefore "no needle in any file the watcher could open"; delete-pending
-    /// files are counted, not hidden.
+    /// ERROR_ACCESS_DENIED (5). Such a file is listed, counted and skipped: its
+    /// content cannot be opened by the watcher. Limitation: a file created, filled
+    /// and marked delete-pending between two polls is never listed at all. The
+    /// guarantee is therefore "no needle in any file the watcher could open".
+    /// `SpoolWatch::finish` requires every such path to be gone.
     DeletePending,
     /// Present and not delete-pending: a real failure once the deadline passes.
     Present(String),
@@ -750,80 +756,46 @@ fn read_shared(file: &Path) -> std::io::Result<Vec<u8>> {
 
 #[cfg(windows)]
 fn classify_unreadable(file: &Path) -> Unreadable {
-    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use std::os::windows::ffi::OsStrExt;
     #[repr(C)]
     #[derive(Default)]
-    struct StandardInfo {
-        allocation_size: i64,
-        end_of_file: i64,
-        number_of_links: u32,
-        delete_pending: u8,
-        directory: u8,
+    struct FileAttributeData {
+        attributes: u32,
+        times: [u64; 3],
+        size_high: u32,
+        size_low: u32,
     }
     unsafe extern "system" {
-        fn GetFileInformationByHandleEx(
-            handle: *mut core::ffi::c_void,
-            class: i32,
-            info: *mut StandardInfo,
-            size: u32,
-        ) -> i32;
+        fn GetFileAttributesExW(name: *const u16, level: i32, info: *mut FileAttributeData) -> i32;
     }
-    // Windows refuses EVERY new open of a delete-pending file (even attribute-only)
-    // with ERROR_ACCESS_DENIED, while `metadata` (directory-entry lookup) still works.
-    // READ_CONTROL is implicitly granted to the file's owner, so a READ_CONTROL open
-    // that succeeds proves the denial is NOT delete-pending; one that is denied while
-    // the entry still exists is the delete-pending signature.
-    const READ_CONTROL: u32 = 0x0002_0000;
-    let probe = std::fs::OpenOptions::new()
-        .access_mode(READ_CONTROL)
-        .share_mode(0x1 | 0x2 | 0x4)
-        .open(file);
-    match probe {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Unreadable::Gone,
-        Err(error) if error.raw_os_error() == Some(5) => {
-            // Delete-pending only if the entry still resolves AND a fresh read-open
-            // after the probe is still denied with os error 5; otherwise it is not
-            // hidden: gone, or readable again (retried by the caller).
-            if std::fs::metadata(file).is_err() {
-                Unreadable::Gone
-            } else {
-                match open_shared(file) {
-                    Err(second) if second.raw_os_error() == Some(5) => Unreadable::DeletePending,
-                    Err(second) if second.kind() == std::io::ErrorKind::NotFound => {
-                        Unreadable::Gone
-                    }
-                    Err(second) => Unreadable::Present(format!("re-open failed: {second}")),
-                    Ok(_) => Unreadable::Present("became readable after the probe".into()),
-                }
+    // Measured discriminator: for a delete-pending file GetFileAttributesExW fails
+    // with ERROR_ACCESS_DENIED (5), while for a file whose DACL denies us read it
+    // SUCCEEDS (it needs no access to the file's data or DACL). `metadata`,
+    // FindFirstFile and attribute-only opens cannot tell the two apart.
+    let wide: Vec<u16> = file.as_os_str().encode_wide().chain([0]).collect();
+    let mut info = FileAttributeData::default();
+    // SAFETY: NUL-terminated path and a correctly sized WIN32_FILE_ATTRIBUTE_DATA
+    // (level 0 = GetFileExInfoStandard) live for the call.
+    let ok = unsafe { GetFileAttributesExW(wide.as_ptr(), 0, &mut info) };
+    if ok != 0 {
+        return Unreadable::Present(format!(
+            "attributes readable (not delete-pending), attributes={:#x}",
+            info.attributes
+        ));
+    }
+    let attribute_error = std::io::Error::last_os_error();
+    match attribute_error.raw_os_error() {
+        Some(2) | Some(3) => Unreadable::Gone,
+        Some(5) => {
+            // Confirm with a fresh read-open: still denied with 5 means delete-pending.
+            match open_shared(file) {
+                Err(second) if second.raw_os_error() == Some(5) => Unreadable::DeletePending,
+                Err(second) if second.kind() == std::io::ErrorKind::NotFound => Unreadable::Gone,
+                Err(second) => Unreadable::Present(format!("re-open failed: {second}")),
+                Ok(_) => Unreadable::Present("became readable after the probe".into()),
             }
         }
-        Err(error) => Unreadable::Present(format!("probe failed: {error}")),
-        Ok(handle) => {
-            let mut info = StandardInfo::default();
-            // SAFETY: valid owned handle and a correctly sized FILE_STANDARD_INFO
-            // (class 1 = FileStandardInfo) for the duration of the call.
-            let ok = unsafe {
-                GetFileInformationByHandleEx(
-                    handle.as_raw_handle().cast(),
-                    1,
-                    &mut info,
-                    std::mem::size_of::<StandardInfo>() as u32,
-                )
-            };
-            if ok != 0 && info.delete_pending != 0 {
-                Unreadable::DeletePending
-            } else if ok == 0 {
-                Unreadable::Present(format!(
-                    "readable security descriptor, standard-info query failed: {}",
-                    std::io::Error::last_os_error()
-                ))
-            } else {
-                Unreadable::Present(format!(
-                    "open for READ_CONTROL succeeds, not delete-pending, links={}, size={}",
-                    info.number_of_links, info.end_of_file
-                ))
-            }
-        }
+        _ => Unreadable::Present(format!("attribute query failed: {attribute_error}")),
     }
 }
 #[cfg(not(windows))]
@@ -840,8 +812,9 @@ pub struct SpoolWatch {
     stop: Arc<AtomicBool>,
     hit: Arc<AtomicBool>,
     pub scanned: Arc<AtomicUsize>,
-    /// Files that were delete-pending (unopenable, hence NOT scanned) when seen.
-    pub delete_pending: Arc<AtomicUsize>,
+    /// Distinct scratch paths seen delete-pending (unopenable, hence NOT scanned).
+    delete_pending: Arc<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>>,
+    deadline: Duration,
     failure: Arc<std::sync::Mutex<Option<String>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -854,10 +827,22 @@ impl SpoolWatch {
         Self::start_with(root, needles, false)
     }
     fn start_with(root: PathBuf, needles: Vec<Vec<u8>>, scanning: bool) -> Self {
+        Self::start_full(root, needles, scanning, UNREADABLE_DEADLINE)
+    }
+    /// Like `start`, but fails an unreadable-while-present file after `deadline`.
+    pub fn start_with_deadline(root: PathBuf, needles: Vec<Vec<u8>>, deadline: Duration) -> Self {
+        Self::start_full(root, needles, true, deadline)
+    }
+    fn start_full(
+        root: PathBuf,
+        needles: Vec<Vec<u8>>,
+        scanning: bool,
+        deadline: Duration,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let hit = Arc::new(AtomicBool::new(false));
         let scanned = Arc::new(AtomicUsize::new(0));
-        let delete_pending = Arc::new(AtomicUsize::new(0));
+        let delete_pending = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
         let failure = Arc::new(std::sync::Mutex::new(None::<String>));
         let (s, h, scanned_thread, pending_thread, failure_thread) = (
             stop.clone(),
@@ -884,11 +869,11 @@ impl SpoolWatch {
                             Err(error) => match classify_unreadable(&file) {
                                 Unreadable::Gone => break Ok(None),
                                 Unreadable::DeletePending => {
-                                    pending_thread.fetch_add(1, Ordering::SeqCst);
+                                    pending_thread.lock().unwrap().insert(file.clone());
                                     break Ok(None);
                                 }
                                 Unreadable::Present(detail) => {
-                                    if started.elapsed() >= UNREADABLE_DEADLINE {
+                                    if started.elapsed() >= deadline {
                                         let relative = file
                                             .strip_prefix(&root)
                                             .unwrap_or(&file)
@@ -929,6 +914,7 @@ impl SpoolWatch {
             hit,
             scanned,
             delete_pending,
+            deadline,
             failure,
             thread: Some(thread),
         }
@@ -937,17 +923,41 @@ impl SpoolWatch {
     pub fn seen(&self) -> bool {
         self.hit.load(Ordering::SeqCst)
     }
-    /// True if a needle was ever seen. Panics if any scan hit a read error.
+    /// Number of DISTINCT scratch paths seen delete-pending (listed, counted, skipped).
+    pub fn delete_pending_count(&self) -> usize {
+        self.delete_pending.lock().unwrap().len()
+    }
+    /// True if a needle was ever seen. Panics if any scan hit a read error, or if a
+    /// path seen delete-pending still exists after a generous bound (a delete-pending
+    /// file must disappear once the last handle closes).
     pub fn finish(mut self) -> bool {
         self.stop.store(true, Ordering::SeqCst);
         self.thread.take().unwrap().join().unwrap();
         if let Some(error) = self.failure.lock().unwrap().take() {
             panic!("spool watcher read error: {error}");
         }
-        let pending = self.delete_pending.load(Ordering::SeqCst);
-        if pending > 0 {
+        let pending: Vec<PathBuf> = self
+            .delete_pending
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        let started = std::time::Instant::now();
+        for path in &pending {
+            while path.exists() {
+                assert!(
+                    started.elapsed() < self.deadline,
+                    "delete-pending scratch file never disappeared: {}",
+                    path.display()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if !pending.is_empty() {
             eprintln!(
-                "spool watcher: {pending} delete-pending scratch file(s) were unopenable and therefore NOT scanned"
+                "spool watcher: {} distinct delete-pending scratch path(s) were listed, counted and NOT scanned; all are gone",
+                pending.len()
             );
         }
         self.hit.load(Ordering::SeqCst)

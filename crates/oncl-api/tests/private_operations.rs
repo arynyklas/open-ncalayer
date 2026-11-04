@@ -1976,6 +1976,20 @@ async fn missing_rights_refuse_before_a_secret_byte_is_read() {
     service.stop().await;
 }
 
+/// The stub TSA must follow the live clock: the server rejects a token whose genTime is
+/// more than `skew_ms` (300 s) from its real clock, so a TSA frozen at Pki creation made
+/// every timestamp of a long test fail (ClockSkew, after key use). A PKI that is already
+/// 10 minutes old stands in for such a test deterministically.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stub_tsa_follows_the_live_clock_when_the_pki_is_older_than_the_skew_window() {
+    let pki = Pki::start_aged(0, std::time::Duration::from_secs(600));
+    let p12 = container(&pki.leaf("user-rsa-sign"), PASSWORD);
+    let service = Running::start_with(inline_service_config(&pki)).await;
+    let (_, parts) = sign_inline(&service, &p12, "cades_t", "", b"timestamped late").await;
+    assert_eq!(final_event(&parts)["status"], "completed");
+    service.stop().await;
+}
+
 /// Root cause of `spool watcher read error: Access is denied. (os error 5)`: a file the
 /// service marked for deletion (FileDispositionInfo) while another handle is open is
 /// unopenable (ERROR_ACCESS_DENIED) yet still "exists" to attribute-only probes.
@@ -2024,17 +2038,127 @@ async fn watcher_classifies_a_delete_pending_file_instead_of_failing() {
     assert_eq!(std::fs::read(&path).unwrap_err().raw_os_error(), Some(5));
     let watch = SpoolWatch::start(dir.path().to_path_buf(), vec![b"PLANTED-NEEDLE".to_vec()]);
     wait_for("the watcher to classify the delete-pending file", || {
-        watch
-            .delete_pending
-            .load(std::sync::atomic::Ordering::SeqCst)
-            > 0
+        watch.delete_pending_count() > 0
     })
     .await;
+    // Last handle closes: the delete-pending path must now disappear (finish requires it).
+    drop(holder);
     assert!(
         !watch.finish(),
         "no needle in any file the watcher could open (a delete-pending file is not scanned)"
     );
+}
+
+#[cfg(windows)]
+fn delete_pending_file(dir: &std::path::Path, name: &str) -> (std::path::PathBuf, std::fs::File) {
+    use std::io::Write;
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    #[repr(C)]
+    struct Disposition {
+        delete_file: u8,
+    }
+    unsafe extern "system" {
+        fn SetFileInformationByHandle(
+            handle: *mut core::ffi::c_void,
+            class: i32,
+            info: *const Disposition,
+            size: u32,
+        ) -> i32;
+    }
+    let path = dir.join(name);
+    let mut holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .access_mode(0x1F01FF)
+        .share_mode(0x7)
+        .open(&path)
+        .unwrap();
+    holder.write_all(b"xx PLANTED-NEEDLE xx").unwrap();
+    // SAFETY: valid handle opened with DELETE access; class 4 = FileDispositionInfo.
+    let marked = unsafe {
+        SetFileInformationByHandle(
+            holder.as_raw_handle().cast(),
+            4,
+            &Disposition { delete_file: 1 },
+            1,
+        )
+    };
+    assert_eq!(marked, 1);
+    (path, holder)
+}
+
+/// A delete-pending path that never disappears is a failure, not a skip.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_pending_file_that_never_disappears_fails_the_watcher() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, holder) = delete_pending_file(dir.path(), "stuck.bin");
+    let watch = SpoolWatch::start_with_deadline(
+        dir.path().to_path_buf(),
+        vec![b"PLANTED-NEEDLE".to_vec()],
+        std::time::Duration::from_millis(400),
+    );
+    wait_for("the watcher to classify the delete-pending file", || {
+        watch.delete_pending_count() > 0
+    })
+    .await;
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| watch.finish()));
+    let message = *caught
+        .expect_err("a stuck delete-pending file must fail")
+        .downcast::<String>()
+        .unwrap();
+    assert!(message.contains("never disappeared"), "{message}");
+    assert!(message.contains("stuck.bin"), "{message}");
+    assert!(path.exists());
     drop(holder);
+}
+
+/// Real ACL denial (the owner's DACL denies read): NOT delete-pending, so the watcher
+/// must FAIL with the exact OS error, path and attempts instead of classifying it.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watcher_fails_on_an_acl_denied_file_instead_of_classifying_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("acl-denied.bin");
+    std::fs::write(&path, b"xx PLANTED-NEEDLE xx").unwrap();
+    let user = std::env::var("USERNAME").unwrap();
+    let icacls = |args: &[&str]| {
+        let out = std::process::Command::new("icacls")
+            .arg(&path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "icacls {args:?}: {out:?}");
+    };
+    icacls(&["/inheritance:r"]);
+    icacls(&["/deny", &format!("{user}:(R,RD,REA,RA)")]);
+    assert_eq!(
+        std::fs::read(&path).unwrap_err().raw_os_error(),
+        Some(5),
+        "precondition: the DACL really denies reading"
+    );
+    let watch = SpoolWatch::start_with_deadline(
+        dir.path().to_path_buf(),
+        vec![b"PLANTED-NEEDLE".to_vec()],
+        std::time::Duration::from_millis(400),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(
+        watch.delete_pending_count(),
+        0,
+        "an ACL denial is not delete-pending"
+    );
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| watch.finish()));
+    icacls(&["/remove:d", &user]);
+    icacls(&["/grant", &format!("{user}:F")]);
+    let message = *caught
+        .expect_err("an ACL-denied file must fail the watcher")
+        .downcast::<String>()
+        .unwrap();
+    assert!(message.contains("raw os error Some(5)"), "{message}");
+    assert!(message.contains("acl-denied.bin"), "{message}");
+    assert!(message.contains("attempts"), "{message}");
 }
 
 /// Mutation proof for the positive control: the same planted needle, but a watcher
