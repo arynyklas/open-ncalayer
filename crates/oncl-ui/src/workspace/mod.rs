@@ -161,6 +161,37 @@ fn create(services: DesktopEngineServices) -> Result<(), PlatformError> {
     Ok(())
 }
 
+/// A workspace on the test thread's offscreen platform, wired exactly as [`create`] wires it
+/// (the same callbacks, the same state), without showing a window.
+#[cfg(test)]
+fn test_workspace(services: DesktopEngineServices) -> Rc<Workspace> {
+    thread_local! {
+        static OFFSCREEN: crate::offscreen::Last = crate::offscreen::install();
+    }
+    OFFSCREEN.with(|_| ());
+    let ui = WorkspaceWindow::new().unwrap();
+    ui.on_start_hash(|| with_open(start_hash));
+    ui.on_start_inspect(|| with_open(start_inspect));
+    ui.on_browse(|| with_open(browse));
+    ui.on_cancel(|| with_open(cancel));
+    sign::connect(&ui);
+    let settings_path = services.settings_path.clone();
+    let workspace = Rc::new(Workspace {
+        ui,
+        services,
+        controller: RefCell::new(Controller::default()),
+        poll: Timer::default(),
+        locale: Cell::new(Locale::En),
+        inspect_kind: Cell::new(0),
+        sign: RefCell::new(sign::State::new(
+            oncl_desktop::Remembered::load(&settings_path).unwrap_or_default(),
+        )),
+    });
+    OPEN.set(Some(Rc::clone(&workspace)));
+    sign::render(&workspace);
+    workspace
+}
+
 /// Runs `f` with the open window, if any (the callbacks hold no strong reference to it).
 fn with_open(f: impl FnOnce(&Rc<Workspace>)) {
     if let Some(open) = current() {
@@ -183,6 +214,10 @@ fn close() {
 }
 
 fn cancel(open: &Rc<Workspace>) {
+    if open.ui.get_section() == SECTION_SIGN {
+        // Escape and the status line's Cancel mean what the page's Cancel means at its step.
+        return sign::cancel(open);
+    }
     if open.controller.borrow_mut().cancel() {
         open.ui
             .set_status_text(Texts::of(open.locale.get()).cancelling.into());
@@ -289,7 +324,6 @@ fn start(
     let t = Texts::of(open.locale.get());
     ui.set_error_text("".into());
     ui.set_busy(true);
-    ui.global::<crate::ui::SigningState>().set_busy(true);
     ui.set_status_kind(1);
     ui.set_progress(-1.0);
     ui.set_status_text(
@@ -300,13 +334,20 @@ fn start(
         }
         .into(),
     );
+    if job == Job::Sign {
+        sign::render(open);
+    }
     open.poll
         .start(TimerMode::Repeated, POLL, || with_open(show_progress));
     let (id, control) = (started.id, started.control);
     let services = open.services.clone();
+    #[cfg(test)]
+    let ui_thread = std::thread::current().id();
     let spawned = std::thread::Builder::new()
         .name("workspace".into())
         .spawn(move || {
+            #[cfg(test)]
+            WORKER_FOR.with(|c| c.set(Some(ui_thread)));
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 work(&services, &control)
             }))
@@ -317,14 +358,66 @@ fn start(
                 );
                 Err(JobError::Worker)
             });
-            if let Err(e) = slint::invoke_from_event_loop(move || settle(id, result)) {
-                tracing::warn!(error = %e, "an action's result is lost");
-            }
+            deliver(move || settle(id, result));
         });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "cannot start a worker thread");
         settle(id, Err(JobError::Worker));
     }
+}
+
+/// Hands `f` from a worker to the event loop. Tests have no loop: they pump the queue.
+#[cfg(not(test))]
+pub(crate) fn deliver(f: impl FnOnce() + Send + 'static) {
+    if let Err(e) = slint::invoke_from_event_loop(f) {
+        tracing::warn!(error = %e, "a worker's answer is lost");
+    }
+}
+
+#[cfg(test)]
+type Delivery = Box<dyn FnOnce() + Send>;
+
+/// Deliveries by the thread they are for: tests run in parallel, each with its own page.
+#[cfg(test)]
+static DELIVERIES: std::sync::Mutex<Vec<(std::thread::ThreadId, Delivery)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+thread_local! {
+    /// On a worker: the thread whose page it works for.
+    static WORKER_FOR: Cell<Option<std::thread::ThreadId>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn deliver(f: impl FnOnce() + Send + 'static) {
+    let target = WORKER_FOR
+        .with(Cell::get)
+        .expect("deliver is called by a worker");
+    DELIVERIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((target, Box::new(f)));
+}
+
+/// Runs what the workers delivered, on this thread, in order; how many ran.
+#[cfg(test)]
+pub(crate) fn pump() -> usize {
+    let me = std::thread::current().id();
+    let mine: Vec<Delivery> = {
+        let mut all = DELIVERIES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mine, rest) = std::mem::take(&mut *all)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(t, _)| *t == me);
+        *all = rest;
+        mine.into_iter().map(|(_, f)| f).collect()
+    };
+    let n = mine.len();
+    for f in mine {
+        f();
+    }
+    n
 }
 
 /// The progress of the running action into the window.
@@ -367,7 +460,6 @@ fn settle(id: u64, result: Result<Output, JobError>) {
     open.poll.stop();
     let ui = &open.ui;
     ui.set_busy(false);
-    ui.global::<crate::ui::SigningState>().set_busy(false);
     let t = Texts::of(open.locale.get());
     match settled {
         Settled::Done(_, Output::Hash(out, index)) => {

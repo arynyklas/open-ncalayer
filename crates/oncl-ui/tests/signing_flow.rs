@@ -17,7 +17,7 @@ fn doc(name: &str, fill: u8) -> Item {
 fn candidate(alias: &str, fill: u8, unsuitable: Option<Unsuitable>) -> Candidate {
     Candidate {
         alias: alias.to_owned(),
-        sha256: [fill; 32],
+        sha256: Some([fill; 32]),
         subject: format!("Subject {alias}"),
         unsuitable,
     }
@@ -95,7 +95,7 @@ fn enter_and_doubleclick_do_not_sign() {
     let approved = c.take_approved().expect("explicit confirmation");
     assert_eq!(approved.consent.caller(), "https://site.example");
     assert_eq!(approved.consent.action(), ActionKind::Sign);
-    assert_eq!(approved.consent.certificate(), &[8; 32]);
+    assert_eq!(approved.consent.certificate(), Some(&[8; 32]));
     assert_eq!(approved.consent.alias(), "good");
     assert!(approved.consent.covers(&frozen));
     assert_eq!(c.step(), Step::Running);

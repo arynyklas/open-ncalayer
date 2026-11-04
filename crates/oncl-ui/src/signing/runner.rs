@@ -62,6 +62,9 @@ struct Grant {
 pub struct ConsentGuard {
     grant: Mutex<Option<Grant>>,
     applications: std::sync::atomic::AtomicUsize,
+    /// Holds the spool's owner lock for the life of the engine: another process sharing the
+    /// directory sees it and leaves the spool alone.
+    _spool_lock: Option<File>,
 }
 
 impl ConsentGuard {
@@ -124,7 +127,17 @@ pub fn desktop_engine(
     spool: &Path,
     clock: Arc<dyn Fn() -> OffsetDateTime + Send + Sync>,
 ) -> Result<(Engine, Arc<ConsentGuard>), OperationError> {
-    let guard = Arc::new(ConsentGuard::default());
+    std::fs::create_dir_all(spool).map_err(oncl_pki::resource::ProcessingError::from)?;
+    // Only the process that holds the spool's owner lock may clean it: a live spool of another
+    // process on the same data directory is never touched.
+    let spool_lock = claim_spool(spool);
+    if spool_lock.is_some() {
+        remove_stale_spool(spool);
+    }
+    let guard = Arc::new(ConsentGuard {
+        _spool_lock: spool_lock,
+        ..ConsentGuard::default()
+    });
     let mut anchors = CaSet::nca_production().certs().to_vec();
     anchors.extend(extra.anchors);
     let origins = NCA_ORIGINS
@@ -133,8 +146,7 @@ pub fn desktop_engine(
         .chain(extra.origins);
     let network = NetworkPolicy::only_endpoints(origins)
         .map_err(|_| oncl_pki::resource::ProcessingError::InvalidInput("PKI endpoint"))?;
-    std::fs::create_dir_all(spool).map_err(oncl_pki::resource::ProcessingError::from)?;
-    remove_stale_spool(spool);
+
     let store = TemporaryStore::new(spool)?;
     let services = EngineServices::hash_only(limits)
         .with_keys(Arc::new(KeySources::new()), guard.clone())
@@ -149,15 +161,33 @@ pub fn desktop_engine(
     Ok((Engine::new(services)?, guard))
 }
 
+/// The spool's owner lock: `None` if another process holds it.
+fn claim_spool(spool: &Path) -> Option<File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(spool.join(".owner"))
+        .ok()?;
+    file.try_lock().ok().map(|()| file)
+}
+
+/// Whether `name` is one of the temporary store's own names: `oncl-` and 32 hex digits.
+fn is_store_name(name: &str) -> bool {
+    name.strip_prefix("oncl-")
+        .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// Frozen copies and staged outputs of a run that died stay in the spool this program owns:
-/// they are removed at start (no operation is running yet).
+/// they are removed at start by the process that holds the owner lock, and nothing else in
+/// the directory is.
 fn remove_stale_spool(spool: &Path) {
     let Ok(entries) = std::fs::read_dir(spool) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if name.to_string_lossy().starts_with("oncl-") {
+        if is_store_name(&name.to_string_lossy()) {
             let path = entry.path();
             let removed = if path.is_dir() {
                 std::fs::remove_dir_all(&path)
@@ -243,7 +273,7 @@ pub(crate) fn open_key_store(
             };
             Ok(Candidate {
                 alias: entry.alias.clone(),
-                sha256: sha256_of(&der),
+                sha256: Some(sha256_of(&der)),
                 subject: info.subject_cn.unwrap_or_default(),
                 unsuitable,
             })
@@ -320,10 +350,16 @@ fn sign_inner(
     // the engine signs with this copy only, so a file swapped later is never used.
     let bytes = read_key_store(key_store)?;
     let selector = KeySelector::inline(bytes.to_vec(), Some(alias.to_owned()));
-    let entry_certificate = certificate_of(&bytes, password, alias)?;
     let key_id = selector.key_id();
     let grant = ExecutionGrant::new([Action::Sign]).with_keys([key_id.clone()]);
     let mut ctx = engine.begin(grant, OperationPolicy::strict_online(), control.clone())?;
+    // The copy, the selector's copy and the decrypted key are charged to the operation's
+    // budget for as long as the operation lives.
+    let _store_memory = ctx
+        .resources()
+        .reserve_memory(bytes.len() as u64 * 4)
+        .map_err(OperationError::from)?;
+    let entry_certificate = certificate_of(&bytes, password, alias)?;
     let mut files = Vec::with_capacity(documents.len());
     let mut stages = Vec::with_capacity(documents.len());
     let mut destinations = Vec::with_capacity(documents.len());
@@ -401,7 +437,7 @@ fn sign_inner(
         return Ok(Outcome::DocumentsChanged(captured));
     }
     // The certificate shown is the certificate of the bytes the engine will use.
-    if approved.consent.certificate() != &entry_certificate {
+    if approved.consent.certificate() != Some(&entry_certificate) {
         return Ok(Outcome::NotApplied(JobError::StoreChanged));
     }
     let approval = plan
@@ -450,15 +486,21 @@ pub(crate) struct Frozen {
     pub(crate) outputs: Vec<PathBuf>,
 }
 
+/// The key store file, read once into zeroizing memory. The limit caps what is READ (a file
+/// swapped in after a size check cannot exceed it), on the opened file, not on its name.
 fn read_key_store(path: &Path) -> Result<Zeroizing<Vec<u8>>, JobError> {
-    let meta = std::fs::metadata(path)?;
-    if !meta.is_file() {
+    use std::io::Read;
+    let file = File::open(path)?;
+    if !file.metadata()?.is_file() {
         return Err(JobError::NotRegular);
     }
-    if meta.len() > oncl_pki::keystore::MAX_KEY_FILE {
+    let limit = oncl_pki::keystore::MAX_KEY_FILE;
+    let mut bytes = Zeroizing::new(Vec::new());
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
         return Err(JobError::Operation(ErrorCode::ContainerLimit));
     }
-    Ok(Zeroizing::new(std::fs::read(path)?))
+    Ok(bytes)
 }
 
 /// SHA-256 of the certificate stored under `alias` in the key store `bytes`, opened with
@@ -488,15 +530,28 @@ fn preflight_destination(destination: &Path, parent: &Path) -> Result<(), JobErr
     if std::fs::symlink_metadata(destination).is_ok() {
         return Err(JobError::DestinationExists);
     }
-    let id = std::process::id();
-    let a = parent.join(format!(".oncl-probe-{id}-a"));
-    let b = parent.join(format!(".oncl-probe-{id}-b"));
-    let _ = std::fs::remove_file(&a);
-    let _ = std::fs::remove_file(&b);
-    std::fs::write(&a, b"")?;
+    // Names no one else uses (process, a counter, the clock); the first is created exclusively
+    // (never through a link someone planted), and only what this call created is removed.
+    static PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = format!(
+        "{}-{}-{}",
+        std::process::id(),
+        PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    );
+    let a = parent.join(format!(".oncl-probe-{unique}-a"));
+    let b = parent.join(format!(".oncl-probe-{unique}-b"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&a)?;
     let linked = std::fs::hard_link(&a, &b);
     let _ = std::fs::remove_file(&a);
-    let _ = std::fs::remove_file(&b);
+    if linked.is_ok() {
+        let _ = std::fs::remove_file(&b);
+    }
     linked.map_err(|_| JobError::NoLinks)
 }
 
@@ -511,139 +566,12 @@ fn operation_of(e: oncl_core::batch::BatchError) -> OperationError {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use der::asn1::{ObjectIdentifier, OctetString};
-    use oncl_pki::keygen::{self, KeySpec};
-    use oncl_pki::ocsp::MockOcsp;
-    use oncl_pki::pkcs12::{self, KeyEntry};
+    use oncl_pki::pkcs12;
     use oncl_pki::testing::{TestCertSpec, issue_cert};
-    use x509_cert::ext::Extension;
 
     use super::*;
     use crate::signing::controller::{ActionKind, Controller, Effect, Event};
-
-    const NOW: i64 = 1_793_620_800;
-    const ORIGIN: &str = "http://127.0.0.1:9";
-    const PASSWORD: &str = "synthetic loopback password";
-
-    fn now() -> OffsetDateTime {
-        OffsetDateTime::from_unix_timestamp(NOW).unwrap()
-    }
-
-    fn fixture(name: &str) -> KeyEntry {
-        let f = oncl_testkit::synthetic(name);
-        pkcs12::load(&oncl_testkit::read(f.path), &f.password)
-            .unwrap()
-            .remove(0)
-    }
-
-    fn short_tlv(tag: u8, body: &[u8]) -> Vec<u8> {
-        let mut out = vec![tag, u8::try_from(body.len()).unwrap()];
-        out.extend_from_slice(body);
-        out
-    }
-
-    fn aia(url: &str) -> Extension {
-        let mut access = vec![6, 8, 43, 6, 1, 5, 5, 7, 48, 1];
-        access.extend(short_tlv(0x86, url.as_bytes()));
-        Extension {
-            extn_id: ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.1.1"),
-            critical: false,
-            extn_value: OctetString::new(short_tlv(0x30, &short_tlv(0x30, &access))).unwrap(),
-        }
-    }
-
-    fn strip(spec: &mut TestCertSpec) {
-        spec.extensions.retain(|e| {
-            !matches!(
-                e.extn_id.to_string().as_str(),
-                "2.5.29.14" | "2.5.29.35" | "1.3.6.1.5.5.7.1.1" | "2.5.29.31"
-            )
-        });
-    }
-
-    /// A synthetic root, an OCSP responder and a signing key under it, all made here.
-    struct World {
-        dir: tempfile::TempDir,
-        root_entry: KeyEntry,
-        leaf: KeyEntry,
-        root: oncl_pki::cert::Certificate,
-        ocsp: Arc<MockOcsp>,
-        store: PathBuf,
-    }
-
-    fn world() -> World {
-        let mut root = fixture("user-rsa-sign");
-        root.key = keygen::generate(KeySpec::RsaSha256(2048)).unwrap();
-        let mut spec = TestCertSpec::from_cert(
-            &oncl_pki::cert::parse(&oncl_testkit::synthetic_cert("root-rsa")).unwrap(),
-        );
-        strip(&mut spec);
-        spec.public_key = root.key.public_key().to_spki();
-        spec.serial = vec![0x71, 4, 1];
-        root.cert = issue_cert(&root, spec.clone());
-        root.cert = issue_cert(&root, spec);
-        let mut responder = fixture("user-rsa-sign");
-        responder.key = keygen::generate(KeySpec::RsaSha256(2048)).unwrap();
-        let mut spec = TestCertSpec::from_cert(&fixture("ocsp-gost2015").cert);
-        strip(&mut spec);
-        spec.public_key = responder.key.public_key().to_spki();
-        spec.serial = vec![0x71, 4, 3];
-        responder.cert = issue_cert(&root, spec);
-        let mut leaf = fixture("user-rsa-sign");
-        let mut spec = TestCertSpec::from_cert(&leaf.cert);
-        strip(&mut spec);
-        spec.serial = vec![0x71, 4, 10];
-        spec.extensions.push(aia(&format!("{ORIGIN}/ocsp")));
-        leaf.cert = issue_cert(&root, spec);
-        let dir = tempfile::tempdir().unwrap();
-        let bytes = pkcs12::write(
-            &[pkcs12::WriteEntry {
-                alias: leaf.alias.clone(),
-                pkcs8_der: leaf.key.to_pkcs8_der().unwrap().to_vec(),
-                cert_der: Some(leaf.cert.to_der().unwrap()),
-            }],
-            &[],
-            PASSWORD,
-            &pkcs12::WriteOptions::default(),
-            &mut |b| b.fill(0x5a),
-        )
-        .unwrap();
-        let store = dir.path().join("key.p12");
-        std::fs::write(&store, bytes).unwrap();
-        World {
-            dir,
-            root_entry: root.clone(),
-            leaf,
-            root: root.cert,
-            ocsp: Arc::new(MockOcsp::new(responder).with_now(now())),
-            store,
-        }
-    }
-
-    fn engine(w: &World) -> (Engine, Arc<ConsentGuard>) {
-        desktop_engine(
-            ResourceLimits::default(),
-            w.ocsp.clone(),
-            ExtraTrust {
-                anchors: vec![w.root.clone()],
-                origins: vec![ORIGIN.to_owned()],
-            },
-            &w.dir.path().join("spool"),
-            Arc::new(now),
-        )
-        .unwrap()
-    }
-
-    fn documents(w: &World, names: &[&str]) -> Vec<PathBuf> {
-        names
-            .iter()
-            .map(|n| {
-                let p = w.dir.path().join(n);
-                std::fs::write(&p, format!("the document {n}")).unwrap();
-                p
-            })
-            .collect()
-    }
+    use crate::signing::testing::*;
 
     /// The page's side: a controller driven to the confirmation for `shown`, then confirmed
     /// against what the engine froze, or not confirmed at all (`confirm == false`).
@@ -723,6 +651,101 @@ mod tests {
 
     /// A two-document packet is signed once the user confirmed what the engine froze: both
     /// signature files exist and the key was applied once per document.
+    fn store_name(n: u8) -> String {
+        format!("oncl-{n:032x}")
+    }
+
+    /// Only the temporary store's own names are removed from the spool; anything else stays.
+    /// And not while another process (the lock holder) is using the spool.
+    #[test]
+    fn the_spool_cleanup_removes_only_store_entries_and_not_under_another_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        let mine = [store_name(1), store_name(2)];
+        let keep = [
+            "notes.txt",
+            "oncl-short",
+            "oncl-zz00000000000000000000000000000000",
+            "other",
+        ];
+        std::fs::create_dir(spool.join(&mine[0])).unwrap();
+        std::fs::write(spool.join(&mine[0]).join("frozen"), b"x").unwrap();
+        std::fs::write(spool.join(&mine[1]), b"x").unwrap();
+        for k in keep {
+            std::fs::write(spool.join(k), b"x").unwrap();
+        }
+        // Another owner is alive: its spool is not touched.
+        let other = claim_spool(&spool).expect("the first claim");
+        let (_engine, guard) = desktop_engine(
+            ResourceLimits::default(),
+            Arc::new(oncl_pki::http::UreqTransport::with_proxy(
+                oncl_pki::http::ProxySetting::None,
+            )),
+            ExtraTrust::default(),
+            &spool,
+            Arc::new(now),
+        )
+        .unwrap();
+        assert!(
+            mine.iter().all(|n| spool.join(n).exists()),
+            "live spool kept"
+        );
+        drop((_engine, guard));
+        drop(other);
+        // No owner: the next start cleans its own names and nothing else.
+        let (_engine, _guard) = desktop_engine(
+            ResourceLimits::default(),
+            Arc::new(oncl_pki::http::UreqTransport::with_proxy(
+                oncl_pki::http::ProxySetting::None,
+            )),
+            ExtraTrust::default(),
+            &spool,
+            Arc::new(now),
+        )
+        .unwrap();
+        assert!(
+            mine.iter().all(|n| !spool.join(n).exists()),
+            "stale copies removed"
+        );
+        for k in keep {
+            assert!(spool.join(k).exists(), "{k} must stay");
+        }
+    }
+
+    /// The key store limit caps what is read from the opened file.
+    #[test]
+    fn the_key_store_read_is_capped_and_zeroizing() {
+        let w = world();
+        let big = w.dir.path().join("big.p12");
+        let file = File::create(&big).unwrap();
+        file.set_len(oncl_pki::keystore::MAX_KEY_FILE + 1).unwrap();
+        assert_eq!(
+            read_key_store(&big).err(),
+            Some(JobError::Operation(ErrorCode::ContainerLimit))
+        );
+        assert!(read_key_store(&w.store).is_ok());
+        assert!(matches!(
+            read_key_store(w.dir.path()).err(),
+            Some(JobError::NotRegular | JobError::Io(_))
+        ));
+    }
+
+    /// The probe leaves nothing behind, in a folder that can link and in one that cannot.
+    #[test]
+    fn the_destination_probe_leaves_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        preflight_destination(&dir.path().join("x.p7s"), dir.path()).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        let taken = dir.path().join("y.p7s");
+        std::fs::write(&taken, b"x").unwrap();
+        assert_eq!(
+            preflight_destination(&taken, dir.path()),
+            Err(JobError::DestinationExists)
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
     #[test]
     fn a_confirmed_two_item_packet_is_signed_document_by_document() {
         let w = world();

@@ -29,6 +29,10 @@ export global SigningState {
     in property <string> confirm-label;
     // The documents are frozen by the engine: until then the action cannot be confirmed.
     in property <bool> frozen-ready;
+    // The confirmation may be pressed: it is the step, the documents are frozen and the page has
+    // been quiet. Set by the host from the controller, never from a running job: the job that
+    // freezes the documents waits for this very button.
+    in property <bool> confirm-enabled;
     in property <string> favorite-label;
     in property <string> result;
     in property <string> error;
@@ -338,7 +342,7 @@ export component SigningPage inherits VerticalLayout {
             Button {
                 text: SigningState.confirm-label;
                 primary: true;
-                enabled: SigningState.frozen-ready && !SigningState.busy;
+                enabled: SigningState.confirm-enabled;
                 clicked => {
                     SigningState.confirm();
                 }

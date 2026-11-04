@@ -50,6 +50,10 @@ pub(super) struct State {
     frozen_at: Option<Instant>,
     outputs: Vec<PathBuf>,
     tick: Timer,
+    /// The quiet time before the confirmation works, and how long it may sit idle.
+    arm_after: Duration,
+    idle_limit: Duration,
+    cancel_wait: Timer,
     documents: Vec<(PathBuf, Item)>,
     /// The engine's frozen copy of the documents, once the worker has it.
     frozen: Vec<Item>,
@@ -67,6 +71,9 @@ impl State {
             frozen_at: None,
             outputs: Vec::new(),
             tick: Timer::default(),
+            arm_after: ARM_AFTER,
+            idle_limit: IDLE_LIMIT,
+            cancel_wait: Timer::default(),
             documents: Vec::new(),
             frozen: Vec::new(),
             decision: None,
@@ -121,8 +128,10 @@ fn short(sha: &[u8; 32]) -> String {
     sha.iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
-fn full(sha: &[u8; 32]) -> String {
-    sha.iter().map(|b| format!("{b:02x}")).collect()
+fn full(sha: Option<&[u8; 32]>) -> String {
+    sha.map_or_else(String::new, |sha| {
+        sha.iter().map(|b| format!("{b:02x}")).collect()
+    })
 }
 
 fn size_text(l: Locale, bytes: u64) -> String {
@@ -175,7 +184,7 @@ pub(super) fn render(open: &Rc<Workspace>) {
             .collect::<Vec<_>>(),
     )));
     ui.set_certs(list(c.candidates().iter().map(|cand| {
-        let star = if st.remembered.is_favorite(&full(&cand.sha256)) {
+        let star = if st.remembered.is_favorite(&full(cand.sha256.as_ref())) {
             "★ "
         } else {
             ""
@@ -196,7 +205,11 @@ pub(super) fn render(open: &Rc<Workspace>) {
             short(&i.sha256)
         )
     })));
-    ui.set_frozen_ready(c.armed());
+    ui.set_frozen_ready(c.frozen_ready());
+    // From the step, never from a running job: the job that froze the documents waits for
+    // the very button this enables.
+    ui.set_confirm_enabled(c.step() == Step::Confirm && c.armed());
+    ui.set_busy(open.ui.get_busy() && c.step() != Step::Confirm);
     ui.set_outputs(
         t.outputs
             .replace(
@@ -221,7 +234,7 @@ pub(super) fn render(open: &Rc<Workspace>) {
             t.cert_line
                 .replace("{0}", &cand.subject)
                 .replace("{1}", &cand.alias)
-                .replace("{2}", &full(&cand.sha256))
+                .replace("{2}", &full(cand.sha256.as_ref()))
                 .into(),
         );
     }
@@ -233,7 +246,7 @@ pub(super) fn render(open: &Rc<Workspace>) {
     let favorite = c
         .candidates()
         .get(usize::try_from(ui.get_cert_index()).unwrap_or(usize::MAX))
-        .is_some_and(|cand| st.remembered.is_favorite(&full(&cand.sha256)));
+        .is_some_and(|cand| st.remembered.is_favorite(&full(cand.sha256.as_ref())));
     ui.set_favorite_label(if favorite { t.unfavorite } else { t.favorite }.into());
 }
 
@@ -484,13 +497,9 @@ fn run_signing(
         control,
         move |frozen| {
             let (shown, outputs) = (frozen.items.clone(), frozen.outputs.clone());
-            if slint::invoke_from_event_loop(move || {
+            super::deliver(move || {
                 with_open(|open| frozen_arrived(open, op, shown, outputs));
-            })
-            .is_err()
-            {
-                return Decision::Abort;
-            }
+            });
             loop {
                 match rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(decision) => return decision,
@@ -563,11 +572,11 @@ fn tick(open: &Rc<Workspace>) {
             return;
         }
         let elapsed = at.elapsed();
-        let armed_now = elapsed >= ARM_AFTER && !st.controller.armed() && {
+        let armed_now = elapsed >= st.arm_after && !st.controller.armed() && {
             st.controller.dispatch(Event::Arm);
             true
         };
-        (elapsed >= IDLE_LIMIT, armed_now)
+        (elapsed >= st.idle_limit, armed_now)
     };
     if expired {
         leave_confirmation(open);
@@ -605,7 +614,7 @@ fn toggle_favorite(open: &Rc<Workspace>) {
             return;
         };
         st.remembered
-            .toggle_favorite(&full(&cand.sha256), &cand.subject);
+            .toggle_favorite(&full(cand.sha256.as_ref()), &cand.subject);
         if let Err(e) = st.remembered.save(&open.services.settings_path) {
             tracing::warn!(error = %e, "cannot save the favourite certificates");
         }
@@ -660,13 +669,37 @@ fn back(open: &Rc<Workspace>) {
 }
 
 /// Leaves the operation: nothing of it stays, and the next one unlocks again.
-fn cancel(open: &Rc<Workspace>) {
+/// How long a cancel of a running signing waits for the worker before the page says it is
+/// still working.
+const CANCEL_WAIT: Duration = Duration::from_secs(10);
+
+/// Cancel, Escape and the status line's Cancel, at every step: Source, Unlock, Confirm and
+/// Result leave the operation (the waiting worker is told to abort, the next operation starts
+/// clean); Running asks the worker to stop at its next checkpoint and, if it has not answered
+/// within [`CANCEL_WAIT`], says so on the page. Its answer, when it comes, still shows what
+/// really happened.
+pub(super) fn cancel(open: &Rc<Workspace>) {
     if open.sign.borrow().controller.step() == Step::Running {
         // The key may be applied already: stay on the page until the worker says how far it
         // got, and show that.
         open.controller.borrow_mut().cancel();
+        let t = locale(open);
         open.ui
             .set_status_text(super::Texts::of(open.locale.get()).cancelling.into());
+        let op = open.sign.borrow().controller.id();
+        open.sign
+            .borrow()
+            .cancel_wait
+            .start(TimerMode::SingleShot, CANCEL_WAIT, move || {
+                with_open(|open| {
+                    if open.sign.borrow().controller.step() == Step::Running
+                        && open.sign.borrow().controller.id() == op
+                    {
+                        // The worker has not answered: the page is not left waiting silently.
+                        end_with(open, t.cancel_slow);
+                    }
+                });
+            });
         return;
     }
     leave_confirmation(open);
@@ -761,7 +794,7 @@ pub(super) fn settled(open: &Rc<Workspace>, result: Result<SignOutput, JobError>
             {
                 let mut st = state(open);
                 // The favourites first: marked certificates are the ones used most.
-                let marked = |c: &Candidate| st.remembered.is_favorite(&full(&c.sha256));
+                let marked = |c: &Candidate| st.remembered.is_favorite(&full(c.sha256.as_ref()));
                 candidates.sort_by_key(|c| !marked(c));
                 st.controller.dispatch(Event::Unlocked(candidates));
             }
@@ -837,9 +870,14 @@ fn signed(open: &Rc<Workspace>, outcome: Outcome) {
             end_with(open, t.changed_no_key);
         }
         Outcome::NotApplied(JobError::Cancelled) => {
-            let running = open.sign.borrow().controller.step() == Step::Running;
-            if running {
-                end_with(open, t.cancelled_before);
+            let step = open.sign.borrow().controller.step();
+            match step {
+                Step::Running => end_with(open, t.cancelled_before),
+                Step::Confirm => {
+                    leave_confirmation(open);
+                    render(open);
+                }
+                _ => {}
             }
         }
         Outcome::NotApplied(e) => {
@@ -940,6 +978,7 @@ struct SignTexts {
     /// `{0}` the files.
     outputs: &'static str,
     cancelled_before: &'static str,
+    cancel_slow: &'static str,
     cancelled_applied_unknown: &'static str,
     no_key_used: &'static str,
     signed_line: &'static str,
@@ -1001,6 +1040,7 @@ static RU: SignTexts = SignTexts {
     outputs: "Файлы подписи будут записаны:\n{0}",
     waiting: "Документы зафиксированы. Ключ не применяется, пока вы не подтвердите.",
     signing: "Идёт подпись. Отмена остановит остальные документы, уже применённый ключ вернуть нельзя.",
+    cancel_slow: "Отмена запрошена, но подпись ещё не остановилась: она остановится на ближайшей проверке. Часть документов могла быть подписана, проверьте файлы .p7s.",
     cancelled_before: "Отменено до применения ключа. Ключ не применялся.",
     cancelled_applied_unknown: "Отменено. Часть документов могла быть подписана: проверьте файлы .p7s.",
     no_key_used: "Ключ не применялся.",
@@ -1053,6 +1093,7 @@ static KK: SignTexts = SignTexts {
     outputs: "Қолтаңба файлдары жазылады:\n{0}",
     waiting: "Құжаттар бекітілді. Растағанша кілт қолданылмайды.",
     signing: "Қол қойылуда. Бас тарту қалған құжаттарды тоқтатады; қолданылған кілтті қайтаруға болмайды.",
+    cancel_slow: "Тоқтату сұралды, бірақ қол қою әлі тоқтамады: ол келесі тексеруде тоқтайды. Кейбір құжаттарға қол қойылған болуы мүмкін: .p7s файлдарын тексеріңіз.",
     cancelled_before: "Кілт қолданылмай тұрып тоқтатылды. Кілт қолданылмады.",
     cancelled_applied_unknown: "Тоқтатылды. Кейбір құжаттарға қол қойылған болуы мүмкін: .p7s файлдарын тексеріңіз.",
     no_key_used: "Кілт қолданылмады.",
@@ -1105,6 +1146,7 @@ static EN: SignTexts = SignTexts {
     outputs: "The signature files will be written to:\n{0}",
     waiting: "The documents are frozen. The key is not used until you confirm.",
     signing: "Signing. Cancel stops the remaining documents; a key already applied cannot be taken back.",
+    cancel_slow: "Cancel was requested but the signing has not stopped yet: it stops at its next checkpoint. Some documents may be signed: check the .p7s files.",
     cancelled_before: "Cancelled before the key was applied. No key was used.",
     cancelled_applied_unknown: "Cancelled. Some documents may be signed: check the .p7s files.",
     no_key_used: "No key was used.",
@@ -1120,3 +1162,252 @@ static EN: SignTexts = SignTexts {
     code_io: "the signature file could not be written; it may have appeared meanwhile (existing files are never replaced)",
     code_other: "it could not be done",
 };
+
+/// The page as the user meets it: the real Slint page, its real wiring, a real engine over a
+/// synthetic authority, and the workers' answers pumped on this thread. These are the tests
+/// that catch a button that can never be pressed.
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use oncl_token::Tokens;
+
+    use super::*;
+    use crate::signing::testing::*;
+    use crate::workspace::{pump, test_workspace};
+
+    struct Page {
+        w: World,
+        ws: Rc<Workspace>,
+        paths: Vec<PathBuf>,
+        guard: Arc<crate::signing::runner::ConsentGuard>,
+    }
+
+    fn page() -> Page {
+        let w = world();
+        let (engine, guard) = engine(&w);
+        let paths = documents(&w, &["a.txt"]);
+        let services = DesktopEngineServices {
+            engine: Arc::new(engine),
+            guard: Arc::clone(&guard),
+            tokens: Tokens::disabled(),
+            clock: Arc::new(now),
+            settings_path: w.dir.path().join("settings.json"),
+        };
+        let ws = test_workspace(services);
+        ws.sign.borrow_mut().arm_after = Duration::from_millis(40);
+        Page {
+            w,
+            ws,
+            paths,
+            guard,
+        }
+    }
+
+    fn until(what: &str, mut ready: impl FnMut() -> bool) {
+        let start = Instant::now();
+        loop {
+            pump();
+            if ready() {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "timed out: {what}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn step(p: &Page) -> Step {
+        p.ws.sign.borrow().controller.step()
+    }
+
+    fn ui(p: &Page) -> crate::ui::SigningState<'_> {
+        p.ws.ui.global::<SigningState>()
+    }
+
+    /// Drives the page to the confirmation of one document, by the page's own callbacks.
+    fn to_confirmation(p: &Page) {
+        let s = ui(p);
+        s.set_doc_path(p.paths[0].display().to_string().into());
+        s.invoke_add_doc();
+        until("the document is frozen", || {
+            !p.ws.ui.get_busy() && !p.ws.sign.borrow().documents.is_empty()
+        });
+        s.set_store_path(p.w.store.display().to_string().into());
+        s.invoke_to_unlock();
+        assert_eq!(step(p), Step::Unlock);
+        s.set_password(PASSWORD.into());
+        s.invoke_unlock();
+        until("the certificates are listed", || {
+            !p.ws.ui.get_busy() && !p.ws.sign.borrow().controller.candidates().is_empty()
+        });
+        s.invoke_cert_chosen(0);
+        until("the documents are frozen for the confirmation", || {
+            p.ws.sign.borrow().controller.frozen_ready()
+        });
+    }
+
+    fn arm(p: &Page) {
+        std::thread::sleep(Duration::from_millis(80));
+        tick(&p.ws);
+    }
+
+    fn signatures(p: &Page) -> usize {
+        usize::from(p.paths[0].with_extension("txt.p7s").exists())
+    }
+
+    /// THE regression: the job that froze the documents waits for the confirmation, so the page
+    /// must not count it as busy. The button is enabled exactly at the confirmation, armed, and
+    /// pressing it reaches the engine and signs.
+    #[test]
+    fn the_confirm_button_can_be_pressed_and_reaches_the_engine() {
+        let p = page();
+        to_confirmation(&p);
+        assert_eq!(step(&p), Step::Confirm);
+        assert!(p.ws.ui.get_busy(), "the worker is waiting for the user");
+        assert!(
+            !ui(&p).get_busy(),
+            "but the page is not busy: it waits for Confirm"
+        );
+        assert!(!ui(&p).get_confirm_enabled(), "not before the quiet moment");
+        ui(&p).invoke_confirm();
+        assert_eq!(
+            step(&p),
+            Step::Confirm,
+            "a click before arming does nothing"
+        );
+        assert_eq!((p.guard.applications(), signatures(&p)), (0, 0));
+        arm(&p);
+        assert!(ui(&p).get_confirm_enabled(), "armed at the confirmation");
+        ui(&p).invoke_confirm();
+        assert_eq!(step(&p), Step::Running);
+        assert!(!ui(&p).get_confirm_enabled(), "not while running");
+        until("the signing ends", || step(&p) == Step::Result);
+        assert_eq!((p.guard.applications(), signatures(&p)), (1, 1));
+        assert!(!ui(&p).get_confirm_enabled(), "not at the result");
+    }
+
+    /// Escape (the window's cancel) in the confirmation leaves a consistent page: nothing to
+    /// confirm, the worker told to stop, no key used, and no dead "signing" state.
+    #[test]
+    fn escape_in_the_confirmation_leaves_a_consistent_page() {
+        let p = page();
+        to_confirmation(&p);
+        arm(&p);
+        p.ws.ui.set_section(1);
+        p.ws.ui.invoke_cancel();
+        assert_ne!(step(&p), Step::Confirm);
+        assert!(!ui(&p).get_confirm_enabled());
+        until("the worker ends", || !p.ws.ui.get_busy());
+        assert_eq!((p.guard.applications(), signatures(&p)), (0, 0));
+        assert_eq!(ui(&p).get_result(), "");
+        // The page works again from the start.
+        assert_eq!(step(&p), Step::Source);
+    }
+
+    /// An abandoned confirmation ends by itself: the worker is told to let the frozen copies go.
+    #[test]
+    fn an_idle_confirmation_ends_by_itself() {
+        let p = page();
+        p.ws.sign.borrow_mut().idle_limit = Duration::from_millis(120);
+        to_confirmation(&p);
+        arm(&p);
+        std::thread::sleep(Duration::from_millis(150));
+        tick(&p.ws);
+        assert_ne!(step(&p), Step::Confirm);
+        assert!(!ui(&p).get_confirm_enabled());
+        until("the worker ends", || !p.ws.ui.get_busy());
+        assert_eq!((p.guard.applications(), signatures(&p)), (0, 0));
+        assert!(!ui(&p).get_error().is_empty(), "the page says why");
+    }
+
+    /// The answer of an operation that was left changes nothing of the next one.
+    #[test]
+    fn a_late_answer_of_a_left_operation_is_dropped() {
+        let p = page();
+        to_confirmation(&p);
+        arm(&p);
+        let old = p.ws.sign.borrow().controller.id();
+        ui(&p).invoke_finish();
+        assert_ne!(p.ws.sign.borrow().controller.id(), old);
+        until("the old worker ends", || !p.ws.ui.get_busy());
+        // A late "signed" of the left operation (the worker's answer, as it would arrive):
+        p.ws.sign.borrow_mut().pending_op = Some(old);
+        settled(
+            &p.ws,
+            Ok(SignOutput::Signed(Outcome::Done(vec![Signed {
+                name: "a.txt".into(),
+                output: None,
+                error: None,
+                applied: AppliedState::Applied,
+            }]))),
+        );
+        assert_eq!(step(&p), Step::Source);
+        assert_eq!(
+            ui(&p).get_result(),
+            "",
+            "the late answer did not write a result"
+        );
+        assert!(p.ws.sign.borrow().documents.is_empty());
+        assert_eq!((p.guard.applications(), signatures(&p)), (0, 0));
+    }
+
+    /// Cancel at every step reaches a consistent state without a worker that never answers.
+    #[test]
+    fn cancel_at_every_step_is_consistent() {
+        let p = page();
+        // Source
+        ui(&p).invoke_cancel();
+        assert_eq!(step(&p), Step::Source);
+        // Unlock
+        let s = ui(&p);
+        s.set_doc_path(p.paths[0].display().to_string().into());
+        s.invoke_add_doc();
+        until("frozen", || {
+            !p.ws.ui.get_busy() && !p.ws.sign.borrow().documents.is_empty()
+        });
+        s.set_store_path(p.w.store.display().to_string().into());
+        s.invoke_to_unlock();
+        assert_eq!(step(&p), Step::Unlock);
+        s.invoke_cancel();
+        assert_eq!(step(&p), Step::Source);
+        assert!(p.ws.sign.borrow().documents.is_empty());
+        // Result
+        to_confirmation(&p);
+        arm(&p);
+        s.invoke_confirm();
+        until("done", || step(&p) == Step::Result);
+        s.invoke_cancel();
+        assert_eq!(step(&p), Step::Source);
+        assert_eq!(p.guard.applications(), 1);
+    }
+
+    /// A cancel of a running signing is not left waiting for a worker that never answers: after
+    /// the wait the page says it is still working, and a real answer still replaces that text.
+    #[test]
+    fn a_cancel_of_a_running_signing_has_an_exit_even_if_the_worker_is_silent() {
+        let p = page();
+        to_confirmation(&p);
+        arm(&p);
+        ui(&p).invoke_confirm();
+        assert_eq!(step(&p), Step::Running);
+        // The worker has not answered yet (its answer waits in the queue): cancel.
+        cancel(&p.ws);
+        assert_eq!(
+            step(&p),
+            Step::Running,
+            "waiting for the worker's real outcome"
+        );
+        // The wait ends with no answer: the page is told, not left waiting.
+        let op = p.ws.sign.borrow().controller.id();
+        end_with(&p.ws, locale(&p.ws).cancel_slow);
+        assert_eq!(step(&p), Step::Result);
+        assert!(ui(&p).get_result().contains("stops at its next checkpoint"));
+        // The real answer arrives later and shows what happened.
+        until("the worker answers", || !p.ws.ui.get_busy());
+        assert_eq!(p.ws.sign.borrow().controller.id(), op);
+        assert!(!ui(&p).get_result().is_empty());
+    }
+}

@@ -56,7 +56,9 @@ pub enum Unsuitable {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
     pub alias: String,
-    pub sha256: [u8; 32],
+    /// SHA-256 of the certificate's DER; `None` where the host's dialog has no certificate
+    /// bytes (a site request's key list): then nothing is bound to it.
+    pub sha256: Option<[u8; 32]>,
     pub subject: String,
     pub unsuitable: Option<Unsuitable>,
 }
@@ -67,7 +69,7 @@ pub struct Candidate {
 pub struct UserConsent {
     caller: String,
     action: ActionKind,
-    certificate: [u8; 32],
+    certificate: Option<[u8; 32]>,
     alias: String,
     items: Vec<Item>,
 }
@@ -79,8 +81,9 @@ impl UserConsent {
     pub fn action(&self) -> ActionKind {
         self.action
     }
-    pub fn certificate(&self) -> &[u8; 32] {
-        &self.certificate
+    /// The certificate's SHA-256, when the host had the certificate (the manual signing).
+    pub fn certificate(&self) -> Option<&[u8; 32]> {
+        self.certificate.as_ref()
     }
     pub fn alias(&self) -> &str {
         &self.alias

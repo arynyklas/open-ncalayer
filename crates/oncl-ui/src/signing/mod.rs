@@ -8,3 +8,6 @@ pub use controller::{
     ActionKind, Approved, Candidate, Controller, Effect, Event, Item, Refusal, Step, Unsuitable,
     UserConsent,
 };
+
+#[cfg(test)]
+pub(crate) mod testing;

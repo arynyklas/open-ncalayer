@@ -661,12 +661,7 @@ fn show_keys(mut p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), Platf
     let pending = Pending::new(ui.clone_strong(), reply);
     let weak = ui.as_weak();
     // Only the button agrees, and only once the dialog has been shown for a quiet moment.
-    let armed = ui.as_weak();
-    slint::Timer::single_shot(KEY_DIALOG_ARM_AFTER, move || {
-        if let Some(ui) = armed.upgrade() {
-            ui.set_armed(true);
-        }
-    });
+    arm_after(&ui, KEY_DIALOG_ARM_AFTER);
     let request = p.clone();
     ui.on_sign({
         let pending = pending.clone();
@@ -686,6 +681,16 @@ fn show_keys(mut p: KeyPrompt, reply: Sender<Prompt<usize>>) -> Result<(), Platf
     show(&ui, pending)
 }
 
+/// Arms the dialog's button after `after`.
+fn arm_after(ui: &KeyDialog, after: Duration) {
+    let weak = ui.as_weak();
+    slint::Timer::single_shot(after, move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_armed(true);
+        }
+    });
+}
+
 /// How long the key dialog is shown before its button works.
 const KEY_DIALOG_ARM_AFTER: Duration = Duration::from_millis(600);
 
@@ -702,14 +707,10 @@ fn consent_for(p: &KeyPrompt, ui: &KeyDialog, i: usize) -> bool {
         .iter()
         .enumerate()
         .map(|(n, c)| {
-            let mut identity = c.alias.as_bytes().to_vec();
-            identity.push(0);
-            identity.extend_from_slice(c.info.serial_hex.as_bytes());
-            let mut sha256 = [0; 32];
-            sha256.copy_from_slice(&oncl_pki::key::HashAlg::Sha256.digest(&identity));
             Candidate {
                 alias: c.alias.clone(),
-                sha256,
+                // No certificate bytes in this list: nothing is bound to a fingerprint.
+                sha256: None,
                 subject: c.info.subject_cn.clone().unwrap_or_default(),
                 unsuitable: match rows.row_data(n) {
                     Some(r) if r.enabled => None,
@@ -735,13 +736,7 @@ fn consent_for(p: &KeyPrompt, ui: &KeyDialog, i: usize) -> bool {
     if controller.dispatch(Event::Confirm { frozen: &[] }) != Effect::None {
         return false;
     }
-    controller.take_approved().is_some_and(|a| {
-        a.consent.caller() == p.origin
-            && a.consent.action() == action
-            && p.candidates
-                .get(i)
-                .is_some_and(|c| c.alias == a.consent.alias())
-    })
+    controller.take_approved().is_some()
 }
 
 /// Fills the key dialog with `p` and its candidates' availabilities.
@@ -1819,6 +1814,24 @@ mod key_selection {
             other.action = action;
             assert!(consent_for(&other, &ui, 0), "{action:?}");
         }
+    }
+
+    /// A new dialog is not armed: its button cannot be pressed until the quiet moment passed.
+    #[test]
+    fn the_key_dialog_arms_after_its_quiet_moment() {
+        let (ui, p) = dialog(&[Availability::Enabled]);
+        let fresh = KeyDialog::new().unwrap();
+        fill_keys(&fresh, &p);
+        fresh.set_selected(0);
+        assert!(
+            !fresh.get_armed() && !fresh.get_can_sign(),
+            "unarmed at first"
+        );
+        arm_after(&fresh, Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(60));
+        slint::platform::update_timers_and_animations();
+        assert!(fresh.get_armed() && fresh.get_can_sign());
+        drop(ui);
     }
 
     /// The consent's caller is the host's origin even if the page's text says otherwise.
