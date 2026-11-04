@@ -159,6 +159,13 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         Command::Timestamp {
             command: crate::families::TimestampCommand::Verify { .. },
         } => Action::VerifyStamp,
+        Command::Plugin { command } => {
+            if command.args().key.is_some() {
+                Action::Sign
+            } else {
+                Action::Hash
+            }
+        }
         Command::Jws { command } => command.action(),
         Command::Jwt { command } => command.action(),
     };
@@ -191,9 +198,19 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
             &args.key,
             args.alias.clone(),
         )?)
+    } else if let Command::Plugin { command } = &cli.command {
+        command.key_selector()?
     } else {
         None
     };
+    let (plugin_registry, _plugin_configuration, plugin_id) =
+        if let Command::Plugin { command } = &cli.command {
+            let (registry, reservation, id) =
+                crate::plugin::registry(command, selector.as_ref(), &budget)?;
+            (Some(registry), Some(reservation), id)
+        } else {
+            (None, None, String::new())
+        };
     let authority = selector.as_ref().map(|key| {
         Arc::new(crate::sign::Authority {
             key: key.key_id(),
@@ -224,6 +241,9 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
     if let Some(store) = &store {
         services = services.with_temporary_store(store.clone());
     }
+    if let Some(registry) = plugin_registry {
+        services = services.with_plugins(registry);
+    }
     let engine = Engine::new(services)?;
     let mut policy = if cli.offline {
         OperationPolicy::offline_report()
@@ -233,6 +253,13 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
     policy.allow_prehashed = action == Action::SignDigest;
     let mut grant = ExecutionGrant::new([action])
         .with_keys(selector.iter().map(oncl_core::keys::KeySelector::key_id));
+    if let Command::Plugin { command } = &cli.command {
+        grant = grant.with_plugins([crate::plugin::permission(
+            command.args(),
+            &plugin_id,
+            selector.as_ref(),
+        )?]);
+    }
     if let Command::Inspect(args) = &cli.command {
         grant = grant.with_metadata_aliases(args.alias.iter().cloned());
     }
@@ -357,6 +384,14 @@ pub fn run(cli: &Cli, control: Arc<Control>) -> Result<i32, OperationError> {
         Command::Inspect(args) => crate::public::inspect(&engine, args, cli, &mut ctx),
         Command::Extend(args) => crate::public::extend(&engine, args, cli, &mut ctx),
         Command::Timestamp { command } => crate::public::timestamp(&engine, command, cli, &mut ctx),
+        Command::Plugin { command } => crate::plugin::call(
+            &engine,
+            command,
+            &plugin_id,
+            selector.as_ref(),
+            cli,
+            &mut ctx,
+        ),
         Command::Jws { command } => {
             crate::jose::jws(&engine, command, cli, selector.as_ref(), &mut ctx)
         }

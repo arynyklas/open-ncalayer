@@ -17,6 +17,8 @@ oncl-core = { workspace = true, features = ["xml", "pdf", "jose", "plugins", "to
 oncl-pki.workspace = true
 oncl-xml.workspace = true
 oncl-pdf.workspace = true
+oncl-plugin = { workspace = true, default-features = false }
+oncl-pdk.workspace = true
 clap.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -28,6 +30,7 @@ tempfile.workspace = true
 oncl-testkit.workspace = true
 oncl-pki = { workspace = true, features = ["testing"] }
 base64.workspace = true
+wat.workspace = true
 der.workspace = true
 x509-cert.workspace = true
 

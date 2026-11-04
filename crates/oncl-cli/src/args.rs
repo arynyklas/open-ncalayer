@@ -65,6 +65,10 @@ pub enum Command {
         #[command(subcommand)]
         command: crate::families::TimestampCommand,
     },
+    Plugin {
+        #[command(subcommand)]
+        command: crate::plugin::PluginCommand,
+    },
     Jws {
         #[command(subcommand)]
         command: crate::jose_args::JwsCommand,
@@ -229,6 +233,7 @@ impl Cli {
             Command::Timestamp {
                 command: crate::families::TimestampCommand::Acquire { output, .. },
             } => Some(output.as_str()),
+            Command::Plugin { command } => Some(command.args().output.as_str()),
             Command::Jws { command } => command.output(),
             Command::Jwt { command } => command.output(),
             _ => None,
@@ -327,6 +332,7 @@ impl Cli {
             {
                 Err("AliasRequired")
             }
+            Command::Plugin { command } => command.preflight(),
             Command::Jws { command } => command.preflight(),
             Command::Jwt { command } => command.preflight(),
             _ => Ok(()),

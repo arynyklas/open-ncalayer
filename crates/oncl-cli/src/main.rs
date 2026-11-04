@@ -6,6 +6,7 @@ mod jose;
 mod jose_args;
 mod local;
 mod output;
+mod plugin;
 mod public;
 mod reports;
 mod secrets;
