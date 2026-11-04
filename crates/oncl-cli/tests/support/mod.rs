@@ -40,6 +40,12 @@ pub fn run(args: &[&str], input: &[u8]) -> Output {
     run_env(args, input, &[])
 }
 pub fn run_env(args: &[&str], input: &[u8], env: &[(&str, &str)]) -> Output {
+    // argv must never carry a secret value.
+    for argument in args {
+        for secret in SECRETS {
+            assert!(!argument.contains(secret), "argv carries a secret value");
+        }
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_oncl"))
         .args(args)
         .envs(env.iter().copied())

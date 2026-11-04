@@ -382,7 +382,9 @@ fn key_configuration_is_an_owner_only_regular_file_with_an_exact_size_cap() {
     // devices are not creatable by this unprivileged Windows test user; the
     // regular-file check (`is_file`) covers them on every platform.
     let out4 = w.dir.path().join("out4.der");
-    let dir_cfg = w.dir.path().join("cfg-private");
+    // A directory INSIDE the private directory: only the regular-file check refuses it.
+    let dir_cfg = w.dir.path().join("cfg-private").join("keys.d");
+    std::fs::create_dir_all(&dir_cfg).unwrap();
     let refused = run(&sign(&w, &dir_cfg, "rsa-main", &document, &out4), b"");
     assert_eq!(refused.status.code(), Some(1), "{refused:?}");
     assert!(!out4.exists());

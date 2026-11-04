@@ -82,6 +82,7 @@ fn mixed_batch_signs_verifies_and_retains_completed_outputs_when_a_later_item_is
         "a local bad source does not stop healthy later items: {report}"
     );
     assert_eq!(result.status.code(), Some(4), "{result:?}");
+    assert_eq!(report["code"], "Partial");
     // Completed outputs are kept; the failed item published nothing.
     assert!(sig_a.exists() && sig_b.exists() && !w.dir.path().join("bad.der").exists());
     for (signature, document) in [(&sig_a, &a), (&sig_b, &b)] {
@@ -266,7 +267,9 @@ fn batch_exit_is_the_worst_of_valid_indeterminate_invalid_and_incomplete_outrank
         (result.status.code(), report)
     };
     // Strict online: Valid 0; one Invalid makes 2.
-    assert_eq!(exit(vec![hash.clone(), good.clone()], &[]).0, Some(0));
+    let (code, report) = exit(vec![hash.clone(), good.clone()], &[]);
+    assert_eq!(code, Some(0));
+    assert_eq!(report["code"], "Completed");
     assert_eq!(exit(vec![good.clone(), bad.clone()], &[]).0, Some(2));
     // Offline: every verification is Indeterminate (3); Invalid still outranks it.
     let (code, report) = exit(vec![good.clone(), hash.clone()], &["--offline"]);

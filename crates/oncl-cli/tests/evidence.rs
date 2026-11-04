@@ -395,10 +395,13 @@ fn pdf_fixture() -> PathBuf {
     oncl_testkit::workspace_root().join("crates/oncl-pdf/tests/fixtures/external-multipage.pdf")
 }
 fn pyhanko(w: &World, pdf: &Path) -> (bool, serde_json::Value, String) {
-    let python = "org-87/open-ncalayer/.worktrees/feat-platform-pdf/target/p03-oracle-env/Scripts/python.exe";
+    // Set ONCL_PYHANKO_PYTHON to a Python with pyHanko; the default is the
+    // documented p03 oracle environment of the sibling PDF worktree.
+    let python = std::env::var("ONCL_PYHANKO_PYTHON").unwrap_or_else(|_| "org-87/open-ncalayer/.worktrees/feat-platform-pdf/target/p03-oracle-env/Scripts/python.exe".into());
+    let python = python.as_str();
     assert!(
         Path::new(python).exists(),
-        "the pyHanko oracle environment is required"
+        "pyHanko oracle interpreter not found at {python}: set ONCL_PYHANKO_PYTHON"
     );
     let script = w.dir.path().join("pyhanko_oracle.py");
     std::fs::write(&script, include_str!("support/pyhanko_oracle.py")).unwrap();
@@ -563,4 +566,156 @@ fn pades_lt_and_lta_sign_and_keyless_extend_verify_with_pyhanko_dss_and_doctimes
     let refused = run(&ext, b"");
     assert_ne!(refused.status.code(), Some(0), "{refused:?}");
     assert!(!out.exists());
+}
+fn big_file(w: &World, name: &str, len: usize) -> PathBuf {
+    let p = w.dir.path().join(name);
+    std::fs::write(&p, vec![0x30u8; len]).unwrap();
+    p
+}
+/// Evidence admission happens before any document or key I/O: the input and key
+/// are deliberately missing in every case.
+fn lt_args<'a>(profile: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut a = vec![
+        "sign",
+        "--profile",
+        profile,
+        "--input",
+        "missing-document",
+        "--output",
+        "-",
+        "--key",
+        "missing-key",
+        "--authorize",
+    ];
+    a.extend(extra);
+    a
+}
+fn stderr_of(r: &std::process::Output) -> String {
+    String::from_utf8_lossy(&r.stderr).into_owned()
+}
+#[test]
+fn evidence_bounds_and_ordering_are_enforced_before_document_and_key_io() {
+    let w = world();
+    let root = w.dir.path().join("root.der");
+    std::fs::write(&root, w.pki.root.cert.to_der().unwrap()).unwrap();
+    let cert = path(&root);
+    // Per-file cap: 256 KiB accepted (fails later on the missing input), +1 refused first.
+    let ok = big_file(&w, "ok.ocsp", 262_144);
+    let over = big_file(&w, "over.ocsp", 262_145);
+    let r = run(
+        &lt_args(
+            "cades-lt",
+            &["--evidence-certificate", cert, "--evidence-ocsp", path(&ok)],
+        ),
+        b"",
+    );
+    assert!(
+        !stderr_of(&r).contains("MetadataLimit"),
+        "{}",
+        stderr_of(&r)
+    );
+    let r = run(
+        &lt_args(
+            "cades-lt",
+            &[
+                "--evidence-certificate",
+                cert,
+                "--evidence-ocsp",
+                path(&over),
+            ],
+        ),
+        b"",
+    );
+    assert_eq!(r.status.code(), Some(1));
+    assert!(stderr_of(&r).contains("MetadataLimit"), "{}", stderr_of(&r));
+    // Total cap: 32 x 256 KiB = 8 MiB exactly is admitted, one more byte is not.
+    let mut exact = vec!["--evidence-certificate", cert];
+    let files: Vec<PathBuf> = (0..31).map(|_| ok.clone()).collect();
+    for f in &files {
+        exact.extend(["--evidence-ocsp", path(f)]);
+    }
+    // 1 root cert (~900 B) + 31 x 262144 + 262144 - 1 stays under 8 MiB; add the 32nd full file to cross it.
+    let mut under = exact.clone();
+    let almost = big_file(&w, "almost.ocsp", 262_144 - 2_048);
+    under.extend(["--evidence-ocsp", path(&almost)]);
+    let r = run(&lt_args("cades-lt", &under), b"");
+    assert!(
+        !stderr_of(&r).contains("MetadataLimit"),
+        "N: {}",
+        stderr_of(&r)
+    );
+    let mut crossing = exact.clone();
+    crossing.extend(["--evidence-ocsp", path(&ok)]);
+    let r = run(&lt_args("cades-lt", &crossing), b"");
+    assert!(
+        stderr_of(&r).contains("MetadataLimit"),
+        "N+1: {}",
+        stderr_of(&r)
+    );
+    // Item cap: 64 admitted, 65 refused by preflight.
+    let mut many = vec!["--evidence-certificate", cert];
+    let small = big_file(&w, "tiny.ocsp", 8);
+    for _ in 0..64 {
+        many.extend(["--evidence-ocsp", path(&small)]);
+    }
+    let r = run(&lt_args("cades-lt", &many), b"");
+    assert!(
+        !stderr_of(&r).contains("ConfigurationLimit"),
+        "{}",
+        stderr_of(&r)
+    );
+    many.extend(["--evidence-ocsp", path(&small)]);
+    let r = run(&lt_args("cades-lt", &many), b"");
+    assert!(
+        stderr_of(&r).contains("ConfigurationLimit"),
+        "{}",
+        stderr_of(&r)
+    );
+    // EvidenceMaterialRequired for every LT/LTA profile, with a missing input (pre-I/O).
+    for profile in ["cades-lt", "cades-lta", "pades-lt", "pades-lta"] {
+        let r = run(&lt_args(profile, &[]), b"");
+        assert_eq!(r.status.code(), Some(1), "{profile}");
+        assert!(
+            stderr_of(&r).contains("EvidenceMaterialRequired"),
+            "{profile}: {}",
+            stderr_of(&r)
+        );
+    }
+    // Evidence options are InvalidCombination outside CAdES/PAdES sign and extend.
+    for args in [
+        lt_args("xml", &["--evidence-crl", "x.crl"]),
+        lt_args("wsse", &["--evidence-crl", "x.crl"]),
+        vec![
+            "jws",
+            "sign",
+            "--serialization",
+            "compact",
+            "--input",
+            "m",
+            "--output",
+            "-",
+            "--key",
+            "k",
+            "--authorize",
+            "--evidence-crl",
+            "x.crl",
+        ],
+        vec![
+            "verify",
+            "--profile",
+            "cms",
+            "--input",
+            "m",
+            "--evidence-crl",
+            "x.crl",
+        ],
+    ] {
+        let r = run(&args, b"");
+        assert_eq!(r.status.code(), Some(1), "{args:?}");
+        assert!(
+            stderr_of(&r).contains("InvalidCombination"),
+            "{args:?}: {}",
+            stderr_of(&r)
+        );
+    }
 }

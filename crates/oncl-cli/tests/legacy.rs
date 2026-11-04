@@ -738,6 +738,11 @@ fn a_tsa_token_with_another_policy_than_requested_is_rejected() {
     // with the truthful private-use state and nothing is published.
     assert!(text.contains("private_use"), "{text}");
     assert!(text.contains("applied=Applied"), "{text}");
+    assert!(
+        text.trim_end()
+            .ends_with("oncl: ValidationRequired; applied=Applied"),
+        "{text}"
+    );
 }
 #[test]
 fn gost_xml_is_structurally_checked_not_independently_verified_and_legacy_gost_is_refused() {
@@ -788,4 +793,60 @@ fn gost_xml_is_structurally_checked_not_independently_verified_and_legacy_gost_i
         "{text}"
     );
     assert!(!out.exists());
+}
+#[test]
+fn the_oracle_rejects_a_signature_without_references() {
+    let w = world();
+    let Some(_) = python() else {
+        panic!("python with lxml+cryptography is required");
+    };
+    let file = w.dir.path().join("empty.xml");
+    std::fs::write(
+        &file,
+        b"<r><ds:Signature xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm=\"http://www.w3.org/TR/2001/REC-xml-c14n-20010315\"/><ds:SignatureMethod Algorithm=\"http://www.w3.org/2001/04/xmldsig-more#rsa-sha256\"/></ds:SignedInfo><ds:SignatureValue>AAAA</ds:SignatureValue></ds:Signature></r>",
+    )
+    .unwrap();
+    let script = w.dir.path().join("o.py");
+    std::fs::write(&script, include_str!("support/xmldsig_oracle.py")).unwrap();
+    let leaf = w.dir.path().join("leaf.der");
+    std::fs::write(&leaf, w.pki.rsa.cert.to_der().unwrap()).unwrap();
+    let r = Command::new(python().unwrap())
+        .args([path(&script), path(&file), path(&leaf)])
+        .output()
+        .unwrap();
+    assert!(!r.status.success());
+    assert!(String::from_utf8_lossy(&r.stderr).contains("no Reference"));
+}
+
+#[test]
+fn legacy_base64_line_break_option_changes_the_signature_layout() {
+    let w = world();
+    for (flag, wrapped) in [("on", true), ("off", false)] {
+        let (signed, out) = sign(
+            &w,
+            "xml",
+            b"<r><p Id=\"d1\">x</p></r>",
+            &format!("b64-{flag}"),
+            &[
+                "--legacy",
+                "--legacy-line-breaks",
+                "--legacy-base64-line-breaks",
+                flag,
+            ],
+        );
+        assert_eq!(signed.status.code(), Some(0));
+        let text = std::fs::read_to_string(&out).unwrap().replace("\r\n", "\n");
+        let start = text.find("<ds:SignatureValue>").unwrap() + "<ds:SignatureValue>".len();
+        let value = &text[start..text[start..].find("</ds:SignatureValue>").unwrap() + start];
+        let lines: Vec<&str> = value.split('\n').collect();
+        if wrapped {
+            assert!(lines.len() > 1, "{value}");
+            assert!(
+                lines[..lines.len() - 1].iter().all(|l| l.len() == 76),
+                "{value}"
+            );
+        } else {
+            assert_eq!(lines.len(), 1, "{value}");
+        }
+    }
 }

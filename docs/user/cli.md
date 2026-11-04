@@ -45,7 +45,7 @@ oncl sign --profile cms --detached --input document.bin --output signature.der \
 
 ## Trust, network and time
 
-Trust comes only from the operator: `--root`, `--intermediate`, `--pki-endpoint` (exact origins; literal IPs pin themselves), `--pki-pin 'http://host:port=IP:port'` for DNS origins (no ambient DNS), `--tsa-url` (+ `--tsa-policy OID` for XAdES/PAdES evidence) for evidence acquisition; only CAdES-T, PAdES-T and XAdES T/LT/LTA are proven, `--as-of <Unix seconds>` for an explicit clock (default: host UTC). Document-carried certificates are never anchors. All configuration reads share one memory budget: at most 1024 certificate files, 64 endpoints/pins and `--configuration-bytes` (default 16 MiB) of encoded certificates, with every duplicate charged.
+Trust comes only from the operator: `--root`, `--intermediate`, `--pki-endpoint` (exact origins; literal IPs pin themselves), `--pki-pin 'http://host:port=IP:port'` for DNS origins (no ambient DNS), `--tsa-url` (+ `--tsa-policy OID`, required for XAdES) for evidence acquisition; CAdES/PAdES/XAdES T/LT/LTA are proven, `--as-of <Unix seconds>` for an explicit clock (default: host UTC). Document-carried certificates are never anchors. All configuration reads share one memory budget: at most 1024 certificate files, 64 endpoints/pins and `--configuration-bytes` (default 16 MiB) of encoded certificates, with every duplicate charged.
 
 ## Reports, exits and output
 
@@ -93,6 +93,8 @@ The name is the authorized key id (`named:NAME`); the container path/reader neve
 `--token-reader` (real PC/SC) and named token entries are exercised in tests against the repository's software tokens: build with `--features token-emulator` and set `ONCL_TOKEN_EMULATOR=<oncl-token emulator config.toml>`. The variable exists only in that feature (never in releases); an unreadable file is a refusal, never a fallback. No physical token was used.
 
 ## Cancellation, deadline and terminal reports
+
+A non-stop partial batch whose report cannot be delivered (closed stdout, unwritable `--report`) exits **1** (execution failure); only a cancellation or deadline stop keeps 130/4 over a report failure.
 
 A batch stopped by Ctrl-C/Ctrl-Break or `--timeout-seconds` still emits its terminal report (per-item `Completed|Failed|NotRun`, `applied`, `published`, hash `digest`) from memory reserved before the first private use; exit 130 for cancellation, **4** for a deadline. A `--report` file written after a stop is created no-clobber directly, not staged. The interrupted item is `Failed` with code `Cancelled`/`DeadlineExceeded`. Batch exit priority: 130 > 4 > 2 > 3 > 0. A Ctrl-C at the interactive secret prompt is `Cancelled` (130).
 
